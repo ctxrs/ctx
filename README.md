@@ -7,7 +7,7 @@ ctx is an agent workbench for real codebases. It lets you run coding-agent tasks
 ## Install
 
 ```bash
-curl -fsSl https://ctx.rs/install | sh
+curl -fsSL ctx.rs/install | sh
 ```
 
 ## Docs
