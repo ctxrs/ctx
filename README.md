@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="assets/readme/header.png" alt="ctx is an Agentic Development Environment (ADE)" />
+  <picture>
+    <source srcset="assets/readme/header.webp" type="image/webp" />
+    <img src="assets/readme/header.png" alt="ctx is an Agentic Development Environment (ADE)" />
+  </picture>
 </p>
 
 **Any coding agent. Sandboxed workspaces. Unified transcripts and review.**
