@@ -1,7 +1,8 @@
-# ctx
+<p align="center">
+  <img src="assets/readme/header.png" alt="ctx is an Agentic Development Environment (ADE)" />
+</p>
 
-**ctx is an Agentic Development Environment (ADE)**  
-Any coding agent. Sandboxed workspaces. Unified transcripts and review.
+**Any coding agent. Sandboxed workspaces. Unified transcripts and review.**
 
 ctx gives teams one interface for the real Claude Code, Codex, Cursor, and more. Run locally or on a devbox or VPS you control. For normal local workflows, you do not need a ctx account. Bring your own providers, models, and credentials.
 
