@@ -1,0 +1,52 @@
+---
+title: "Add a Workspace"
+description: "Open your repository in ctx and prepare it for tasks"
+---
+
+## Overview
+
+A workspace is the repository root ctx operates on, whether that repository lives on your local machine or on a remote host you control.
+
+This is your main unit for settings, tasks, sessions, and review.
+
+## Local workspace flow
+
+1. Open the workspace list in the app.
+2. Add your repository root.
+3. Open the workspace.
+4. Verify settings before starting a real task.
+
+## Remote workspace flow
+
+Use this when the repository lives on your own VPS, devbox, or remote machine.
+
+1. Start the workspace wizard and choose a remote workspace.
+2. Enter the remote host in `user@host` form.
+3. Verify the SSH connection.
+4. If prompted, enter a one-time SSH password so ctx can install SSH key auth. The password is not stored.
+5. Select the remote repository root and finish setup.
+
+Before you start, make sure the repo already exists on that machine and your SSH account has access to it.
+
+## Configure baseline before real work
+
+- Provider/harness authentication
+- Model defaults
+- Execution mode (host/container)
+- Network egress policy
+- Worktree bootstrap setup if each task needs repeatable setup
+- Merge queue settings only if you plan to run parallel tasks and land changes through the queue
+
+## Workspace sanity checks
+
+- Workspace path is correct.
+- You can create a task in this workspace.
+- Session runs can start.
+- Diff review works after a test edit.
+- For remote workspaces, reconnecting to the same host reopens the expected workspace cleanly.
+
+## Related pages
+
+- [Connect a Provider](/getting-started/connect-provider)
+- [Run Your First Task](/getting-started/first-task)
+- [Permissions and Safety](/settings/permissions-and-safety)

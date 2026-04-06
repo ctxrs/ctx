@@ -1,0 +1,27 @@
+---
+title: "Updating the App"
+description: "Update ctx safely and verify post-update health"
+---
+
+## Update process
+
+1. Run the official install/update command:
+
+```bash
+curl -fsSL ctx.rs/install | sh
+```
+
+2. Relaunch app.
+3. Confirm Settings and workspace load correctly.
+4. Verify harness authentication still works.
+5. Run one small task to validate end-to-end behavior.
+
+## Post-update checks
+
+- provider connection status
+- worktree bootstrap config still present
+- container/network policy still as expected
+
+## Rollout tip for teams
+
+Roll updates to a small group first, then broaden after one day of successful task runs.

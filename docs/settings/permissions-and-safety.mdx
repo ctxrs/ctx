@@ -1,0 +1,40 @@
+---
+title: "Permissions and Safety"
+description: "Set execution environment and network policy safely"
+---
+
+## Overview
+
+For most teams, safety comes from clear runtime defaults and strict review discipline.
+
+## Core controls
+
+- `Container & Network` settings
+- Worktree isolation
+- Diff review before finalization
+
+## Recommended baseline
+
+- Use containerized execution by default.
+- Use least-privilege network policy.
+- Keep allowlists explicit and minimal.
+
+## When to loosen restrictions
+
+Loosen restrictions only when task requirements are blocked by current policy.
+
+Typical cases:
+
+- required package install hosts are blocked
+- external API hostname is missing from allowlist
+- host mode is needed for one-off local debugging
+
+## Review safety rule
+
+Even with strict settings, do not skip diff review.
+
+## Related pages
+
+- [Containerization](/containerization)
+- [Network Egress Policy](/network-egress-policy)
+- [Review and Apply Changes](/workbench/review-and-apply-changes)

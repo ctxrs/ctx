@@ -1,0 +1,82 @@
+---
+title: "Basic Coding Agent Terminology"
+description: "Understand the difference between models, harnesses, providers, and routers"
+---
+
+Due to confusing naming and marketing campaigns, there is an overwhelming amount of "term overloading" in the AI coding ecosystem!
+
+For example the term "codex" could refer to:
+
+- A variant of an OpenAI LLM (such as gpt-5.3-codex)
+- A CLI agent harness
+- A cloud product for running remote agents
+- A desktop app
+- A legacy product that was retired by OpenAI
+
+There are many other examples, but let's cover the basic terms needed to understand how to set up a single AI coding agent.
+
+- **model**
+- **harness**
+- **provider**
+- **router**
+
+**Models: Large Language Models (LLMs)**
+
+In the AI coding agent ecosystem, when people say "models", they generally mean "large language models". Since the frontier-level models are generally very large and expensive to run, you need to access these models via a network request.
+
+Examples of models include OpenAI's gpt-5.3-codex and Anthropic's opus-4.6. Outside of the most popular frontier models, there are hundreds more models available, each with different size and performance characteristics.
+
+**Harnesses: The Scaffolding Loop Around the Model**
+
+A harness, or an agent harness, is a program that goes through a simple loop:
+
+1. Accept a message from a user as input
+2. Send the message to the LLM
+3. Interpret the response as a thought, tool call, or reply.
+4. Repeat.
+
+Examples of agent harnesses include Claude Code, Codex, but there are dozens more. You can even make your own agent harness in just a couple hundred lines of code!
+
+Confusingly, the harnesses often have names that are very similar to the model names!
+
+- Gemini CLI (Harness) \<--\> Gemini 3 (Model)
+- Codex CLI (Harness) \<--\> GPT-5.3 Codex (Model)
+- Claude Code (Harness) \<--\> Claude Opus 4.6 (Model)
+
+Even more confusingly, you can actually use other companies' models inside their competitors' harnesses!
+
+- Use Gemini CLI (Harness) with GPT-5.3-Codex (Model)
+- Use Claude Code (Harness) with Gemini 3 (Model)
+- Use Codex CLI (Harness) with Claude Opus 4.6 (Model)
+
+These configurations are not enabled by default for obvious reasons, but the point is that a harness is just a CLI program that uses any LLM resource via network access.
+
+**Providers (Inference Providers): Who Pays the Datacenter Bills**
+
+Unless you're serving a model yourself locally (such as with llama.cpp), your models are being served from a datacenter. You are granted access to them via authentication method (OAuth or API key).
+
+If you are an individual developer, you will likely want to use one or more monthly coding. subscriptions from the providers such as Anthropic or OpenAI. This is because it's generally significantly cheaper per token than API access.
+
+**Routers: A Single Endpoint with Many Providers**
+
+If you are using API access for your providers, you could benefit from a routing service. A routing service can ensure uptime (fallbacks to secondary providers for the same models), easier access to a broad range of models and providers, and tools for token usage measurement.
+
+Services like **OpenRouter** (commercial) and **LLMRouter** (self-hosted) are common options. If you work in a large team or enterprise, you may benefit from a self-hosted router in your VPC so that you don't need to distribute API keys to all of your developers.
+
+## Putting it All Together
+
+When you start using ctx, our Agentic Development Environment (ADE), you will need to start by selecting a harness to use. We have many to choose from, including the most popular ones: Claude Code, Codex, and Cursor CLI.
+
+Each harness needs an authentication method: you can authenticate with your coding subscription plan (via OAuth) or via direct API access (via API Key). The coding subscription plan is usually tied to just one harness (for example, Anthropic disallows using the Claude subscription with other agent harnesses besides Claude Code), whereas API access allows you to use any provider.
+
+Some API users will configure a single router endpoint (for example a self-hosted LLMRouter instance) and use it for all of the agent harnesses. They can switch between Codex and Claude Code, both of which are sending requests through their router URL.
+
+From there, you can toggle the selection of which model and effort level you want to use (for example switch between Opus and Sonnet models or switch between Medium and High reasoning effort levels).
+
+## Learning More: Agent Harness Docs and Source Code
+
+Fortunately, most agent harnesses like Claude Code and Codex have thorough documentation of their capabilities. While you won't be using their TUI (terminal user interface) mode inside of ctx, the information is still helpful to check out.
+
+When you use an agent harness like Claude Code inside ctx, everything should work the same way as it does in TUI mode. For example, Claude Code will use skills normally inside ctx, just like in the TUI.
+
+Additionally, many of the agent harnesses are open source (key exceptions: Claude Code and Cursor). So you can simply clone the agent harness source code from GitHub and check out how it's built. You can even ask your agent to answer questions for you about different behaviors.

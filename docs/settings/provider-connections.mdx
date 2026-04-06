@@ -1,0 +1,46 @@
+---
+title: "Provider Connections"
+description: "Set up harness authentication and verify provider readiness"
+---
+
+## Overview
+
+Use `Settings > Harness Authentication` as the source of truth for provider setup.
+
+Stable provider setup is required before you rely on agent runs.
+
+Depending on the provider, setup may open a browser sign-in or ask for API credentials. Start with one provider that you trust for day-to-day work, then add more later.
+
+## Setup steps
+
+1. Open `Settings`.
+2. Select `Harness Authentication`.
+3. Connect the first harness/provider you plan to use.
+4. Complete the required sign-in or credential flow.
+5. Return to workbench and verify harness/model selection.
+
+## Readiness checklist
+
+- authentication is active
+- it appears in harness selection
+- model selection loads
+- test prompts run successfully
+
+## Operating guidance
+
+- Keep at least one stable "default" harness configured.
+- Add additional harnesses after baseline stability.
+- Re-check auth after environment changes or updates.
+- Avoid debugging multiple provider problems at once during first-run setup.
+
+## Failure recovery
+
+- If auth expires, reconnect from `Harness Authentication`.
+- If models do not load, verify provider/harness selection and reconnect.
+- Validate with a small test prompt before resuming real tasks.
+
+## Related pages
+
+- [Connect a Provider](/getting-started/connect-provider)
+- [Models and Defaults](/settings/models-and-defaults)
+- [Run Your First Task](/getting-started/first-task)

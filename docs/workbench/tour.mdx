@@ -1,0 +1,45 @@
+---
+title: "Workbench Tour"
+description: "Understand the main GUI surfaces used during daily work"
+---
+
+The workbench is optimized around one loop:
+
+1. pick task
+2. run session
+3. review diff
+4. iterate or finalize
+
+## Main areas
+
+- `Task list`: active and archived tasks.
+- `Session thread`: agent and user messages.
+- `Composer`: harness/model/mode controls and prompt input.
+- `Diff review`: file-level change review and apply/reject flow.
+- `Artifacts`: screenshots, reports, and other outputs attached to the task when needed.
+
+## Typical daily flow
+
+1. Open an existing task or create a new one.
+2. Set harness/model/effort for the next run.
+3. Send a scoped prompt.
+4. Watch output and status.
+5. Open diff review before you accept changes.
+
+## What to pay attention to first
+
+- If the task scope looks wrong, fix that before you send another message.
+- If the session output starts drifting, tighten the next prompt instead of letting the run sprawl.
+- If the diff is larger than you can reason about quickly, split the work into smaller tasks.
+
+## Fast habits that prevent rework
+
+- Keep each task scoped.
+- Ask for explicit validation and summary.
+- Review diff on every run that edits code.
+
+## Related pages
+
+- [Tasks](/workbench/tasks)
+- [Sessions and Messages](/workbench/sessions)
+- [Artifacts Overview](/artifacts-overview)

@@ -1,0 +1,44 @@
+---
+title: "ADE vs CLI"
+description: "When to use ctx instead of running a coding agent directly in your terminal"
+---
+
+## Overview
+
+An **Agentic Development Environment (ADE)** (like ctx) is a desktop app for orchestrating many coding agents.
+
+The coding agents themselves are CLI-based programs. Claude Code, Codex, Cursor CLI, and many more agents can be run directly in your terminal, and we use those programs inside of ctx, the ADE, as well!
+
+## ctx's Agents are the Genuine CLI Agents
+
+**ctx Uses Real Agent Harnesses; Not a Custom Internal Harness**
+
+When you select "Claude Code" or "Codex" in the ctx workbench, you are using that real CLI agent under the hood. This is very important for a few reasons:
+
+1. Harnesses like Claude Code work exactly the same inside and outside of ctx - no surprises.
+2. ctx inherits reliability and capability improvements from the underlying agent harnesses.
+3. The flagship models are trained via Reinforcement Learning (RL) using those very harnesses. So if you change the harness, the performance worsens - even with the same model!
+
+**Difference vs Cursor, Other Coding Apps**
+
+In Cursor, the desktop app, you can use many models like Anthropic's Claude models or OpenAI's GPT models. However, no matter which model you select, it's always orchestrated via Cursor's proprietary agent harness. 
+
+This is nice for Cursor's internal developers because it simplifies their workflows and edge cases, but there's no way to run the genuine agent harnesses like Claude Code unless you install the Claude Code IDE extension or run Claude Code in the integrated terminal. At this point, you aren't using Cursor's AI capabilities.
+
+With that being said, Cursor does have some great capabilities! Lots of people love the Cursor agent harness and the Composer family of models. The good news is you can use that genuine harness + model combination in ctx too! Just like Claude Code, you can use the real Cursor agent inside ctx.
+
+## UX Comparison: CLI vs ADE
+
+The CLI excels when you want something to be done quickly! No workspaces to set up, no configurations - just execute a command. We include an integrated terminal inside our desktop app for this very purpose.
+
+However, as professional developers and hobbyists begin to spend hours and hours with these coding agents, we approach the limits of UX that the terminal is able to offer. Common pain points include scroll history, flashing text, color limitations, accessibility issues, mouse support, and more.
+
+The Claude Code team even went so far as to build their UI in React and render it into the terminal! While very technically impressive, it is clear that the terminal lacks the rich GUI capabilities that would rival a modern IDE.
+
+By building a user interface in a desktop app, we can more easily surface configuration and setup options, diff reviews, better conversation UX, and even viewing agent-generated artifacts like screenshots and screen recordings. 
+
+## Multithreading: Tmux + Worktrees vs ADE
+
+When we started building ctx, we used tmux to multiplex multiple terminals at once, with each terminal representing a single agent thread, and each agent thread in a single worktree. This works suprisingly well! Tmux sessions are persistent so you can disconnect from them and rejoin them. We did a lot of development on remote machines (large concurrent cargo builds), so tmux was a great fit for keeping those sessions alive.
+
+But ultimately we hit the same terminal bottlenecks. It's hard to scale beyond a handful of concurrent sessions, even with careful naming, organization, and code merging techniques. Once we were able to see our different sessions in the left nav with status indicators and auto-generated titles, it became significantly less effortful to start up new tasks, even for trivial things like research or quick experiments.

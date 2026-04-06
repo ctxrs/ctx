@@ -1,0 +1,92 @@
+---
+title: "ctx is an Agentic Development Environment (ADE)"
+sidebarTitle: "Overview"
+description: "Any coding agent. Containerized workspaces. Unified transcripts and review."
+mode: "wide"
+---
+
+<div className="not-prose ctx-home-title-block">
+  <div className="ctx-home-title-heading" role="heading" aria-level={1}>
+    <span className="ctx-home-title-wordmark">ctx</span>
+    <span>is an Agentic Development Environment (ADE)</span>
+  </div>
+  <p className="ctx-home-title-tagline">Any coding agent. Containerized workspaces. Unified transcripts and review.</p>
+</div>
+
+ctx is an Agentic Development Environment (ADE) for teams using multiple coding agents. It gives
+engineers one interface for the real Claude Code, Codex, Cursor, and more. It gives security and platform
+teams one controlled runtime with containerized disk and network isolation, one review surface,
+and durable transcripts.
+
+Use ctx on your own machine or against a remote devbox or VPS you control. For normal local
+workflows, you do not need a ctx account, and you can bring your own providers, models, and
+credentials.
+
+<div className="ctx-clean-frame">
+  <Frame>
+    <video
+      src="/videos/ctx-homepage-demo.mp4"
+      poster="/videos/ctx-homepage-demo-poster.png"
+      aria-label="A short demo of ctx showing the workbench, task thread, and agent workflow."
+      autoPlay
+      controls
+      loop
+      muted
+      playsInline
+      preload="metadata"
+    >
+      Your browser does not support the homepage demo video.
+    </video>
+  </Frame>
+</div>
+
+## What ctx helps you do
+
+- Use Claude Code, Codex, Cursor, and other coding agents in one interface.
+- Run agents in isolated containers with explicit disk and network controls.
+- Let agents work with bounded autonomy instead of constant approval prompts.
+- Keep tasks, sessions, diffs, transcripts, and artifacts in one review surface.
+- Run work locally or on remote machines you control.
+- Keep parallel tasks isolated in separate worktrees and land them cleanly with the agent merge queue.
+
+## Why standardize on the environment
+
+- Engineers can use the agents they prefer without fragmenting the workflow.
+- Security and platform teams can rely on one runtime model and one set of safety controls.
+- Review, provenance, and task history stay in one place instead of being scattered across tools.
+- You can change harnesses and models over time without rebuilding team workflows around each one.
+
+## Get started
+
+Use one small, low-risk task to validate the whole loop end to end: install, connect a provider,
+open a workspace, run a task, and review the diff before you finalize changes.
+
+<CardGroup cols={2}>
+  <Card title="Install and launch" icon="download" href="/getting-started/install-and-launch">
+    Get ctx running and confirm the app is healthy on first launch.
+  </Card>
+  <Card title="Connect a provider" icon="plug" href="/getting-started/connect-provider">
+    Connect one harness or provider before you try real task work.
+  </Card>
+  <Card title="Add a workspace" icon="folder-open" href="/getting-started/add-workspace">
+    Open a local repo or connect to a remote host you already control.
+  </Card>
+  <Card title="Run your first task" icon="rocket" href="/getting-started/first-task">
+    Validate the full loop: prompt, run, review, revise, finalize.
+  </Card>
+</CardGroup>
+
+## Good first tasks
+
+- update one label or validation message
+- fix one obvious bug in a narrow area
+- make one small UI, docs, or config change
+
+## Learn more
+
+- [Workbench tour](/workbench/tour)
+- [Containerization](/containerization)
+- [Agent Merge Queue Overview](/agent-merge-queue-overview)
+- [What is a worktree?](/what-is-a-worktree)
+- [ADE vs CLI](/ade-vs-cli)
+- [ADE vs IDE](/ade-vs-ide)

@@ -1,0 +1,46 @@
+---
+title: "Connect a Provider"
+description: "Connect harnesses/providers and verify they are ready in ctx"
+---
+
+## Overview
+
+Provider access is configured from workspace settings. Most users should connect one provider first, run a small task successfully, and add more providers later.
+
+## Connect flow
+
+1. Open your workspace.
+2. Go to **Settings**.
+3. Open **Harness Authentication**.
+4. Connect the harness or provider you plan to use first.
+5. Finish the required auth flow.
+6. Return to the workbench.
+7. Open the composer harness and model selector and verify availability.
+
+Depending on the provider, the auth flow may open a browser sign-in or ask for API credentials. Use whichever method your provider supports in your setup.
+
+## Readiness checklist
+
+- Harness shows as available.
+- Authentication is active.
+- Model list loads.
+- Simple test prompt completes.
+
+## If authentication breaks
+
+- Re-open **Harness Authentication** and reconnect.
+- Confirm your local environment still has required auth context.
+- Re-run a small test prompt before starting real work.
+
+## Practical guidance
+
+- Keep one stable default harness configured.
+- Add additional providers only after baseline flow is stable.
+- Re-verify provider status after updates.
+- If you are evaluating ctx for the first time, avoid switching harnesses mid-setup.
+
+## Related pages
+
+- [Provider Connections](/settings/provider-connections)
+- [Models and Defaults](/settings/models-and-defaults)
+- [Run Your First Task](/getting-started/first-task)

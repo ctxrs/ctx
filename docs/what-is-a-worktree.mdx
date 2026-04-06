@@ -1,0 +1,45 @@
+---
+title: "What Is a Worktree?"
+description: "Why session-level isolation is core to reliable agent workflows"
+---
+
+## Overview
+
+A **worktree** is a dedicated checkout where one task/session makes changes.
+
+In ctx, this gives you a clean boundary for review: each task has an isolated change set instead of many edits mixed together.
+
+## Why this matters
+
+- Parallel sessions do not overwrite each other.
+- Diff review is easier because changes stay task-scoped.
+- Discarding a bad attempt is safer and clearer.
+- Setup behavior can stay consistent across sessions.
+
+## Worktree vs session vs branch
+
+- **Worktree**: filesystem checkout where edits happen.
+- **Session**: the conversation/execution context using that checkout.
+- **Branch**: VCS reference the worktree may track.
+
+For normal use, think in this order: task -> session -> worktree.
+
+## Typical flow
+
+1. Create a task.
+2. Start a session in the task.
+3. Agent runs in that session's worktree.
+4. Review the worktree diff in the UI.
+5. Revise or finalize.
+
+## Practical guidance
+
+- Keep one clear outcome per task.
+- Avoid combining unrelated changes in a single task.
+- Treat diff review as the acceptance gate.
+
+## Related pages
+
+- [Why Worktrees](/worktrees-runtime/why-worktrees)
+- [How Worktrees Work](/worktrees-runtime/how-worktrees-work)
+- [Run Your First Task](/getting-started/first-task)

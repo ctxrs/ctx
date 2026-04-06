@@ -1,0 +1,58 @@
+---
+title: "Tasks"
+description: "Use tasks as the core unit of planning and review"
+---
+
+## Overview
+
+A task should represent one outcome that can be reviewed in one scope.
+
+Tasks are your main planning and review boundary in ctx.
+
+## Writing strong task titles
+
+Good titles are specific and reviewable:
+
+- `Fix OAuth callback redirect loop`
+- `Add empty-state for archived projects`
+- `Refactor provider selector rendering`
+
+## First message checklist
+
+Include in your first prompt:
+
+- expected behavior
+- constraints
+- validation requirements
+
+This keeps sessions aligned and reduces scope drift.
+
+## Simple task template
+
+```text
+Goal: <one concrete outcome>
+Constraints: <what must not change>
+Validation: <tests or checks to run>
+Output: summarize changed files and rationale
+```
+
+## When to split a task
+
+Split when:
+
+- the change spans unrelated areas
+- review becomes too large to reason about
+- different risk levels need separate review decisions
+
+## Lifecycle hygiene
+
+- keep active task list focused
+- archive completed tasks
+- avoid reviving old tasks for unrelated work
+
+## Related pages
+
+- [Run Your First Task](/getting-started/first-task)
+- [Sessions and Messages](/workbench/sessions)
+- [Review and Apply Changes](/workbench/review-and-apply-changes)
+- [Tips for Success with Agents](/quick-tips-for-success-with-agents)

@@ -1,0 +1,76 @@
+---
+title: "Agent Merge Queue Overview"
+description: "How ctx lands agent-driven changes onto a shared target branch with verification"
+---
+
+## Overview
+
+The **Agent Merge Queue** is how ctx safely lands agent-produced changes onto one target branch (usually `main`).
+
+When you run multiple tasks in parallel, each task can look good by itself but still conflict once combined. The merge queue catches that by replaying queued changes in order against the latest target branch.
+
+## Why this matters in agent workflows
+
+With agent-driven development, it is normal to have many concurrent worktrees.
+
+Without a queue, you may:
+
+- review each task in isolation,
+- merge manually,
+- and only then discover conflicts or broken checks after combining everything.
+
+The merge queue shifts that risk earlier.
+
+## How it works in ctx
+
+1. Configure merge queue settings for the workspace (during setup or later in **Settings** -> **Merge Queue**).
+2. Set a target branch (for example `main`).
+3. Optionally set a verification command (for example lint/build/tests).
+4. Submit a task's changes to the queue.
+5. ctx applies that queued change on top of the latest target branch and runs verification.
+6. If it passes, ctx advances the target branch; if not, the entry is not merged and is sent back for revision (typically by your primary agent), then resubmitted.
+
+Today, a common flow is to ask your primary agent to submit the current task/worktree to the merge queue when review is complete.
+
+## What you can configure
+
+## Target branch
+
+The branch every queue entry is validated against and merged into.
+
+## Verification command (optional)
+
+A command to run for each queued entry before it is accepted.
+
+Use something fast and reliable so the queue stays useful in day-to-day work.
+
+## Push on success (optional)
+
+If enabled, ctx pushes successful queue results to a remote/branch you choose.
+
+## Typical outcomes
+
+## Passed
+
+Entry applied cleanly and verification succeeded.
+
+## Conflict
+
+Entry could not be applied cleanly on top of current target branch.
+
+## Failed
+
+Entry applied but verification command failed (or queue run hit another execution failure).
+
+## Practical defaults
+
+- **Target branch**: `main`
+- **Verification command**: one stable local quality gate (lint/build/unit tests)
+- **Push on success**: off until your team decides the exact remote/branch policy
+
+## Related pages
+
+- [What Is a Worktree?](/what-is-a-worktree)
+- [How Worktrees Work](/worktrees-runtime/how-worktrees-work)
+- [Containerization](/containerization)
+- [Networking](/network-egress-policy)

@@ -1,0 +1,32 @@
+---
+title: "ADE vs IDE"
+description: "How ctx differs from a traditional IDE and when you may want both"
+---
+
+## Overview
+
+An **Agentic Development Environment (ADE)** (like ctx) is a feature-rich desktop app for managing coding agents. This is similar in nature to how an **Integrated Development Environment (IDE)** (like VS Code) is a feature-rich desktop app for managing source code.
+
+In an IDE, the core domain objects are related to source code primitives: directories, files, lines, symbols, LSP tooling, etc. This enables powerful features like code highlighting, refactoring tools, merge conflict tools, and more.
+
+In an ADE, the core domain objects are related to coding agent primitives: harnesses, tasks, sessions, transcripts, worktrees, execution environment, network egress policies, etc. This enables powerful features like agent sandboxing, concurrent agent tasks, and review workflows.
+
+## When to Use an ADE vs IDE
+
+**Human-Led, Single-Threaded, and Userspace Work: IDE Wins**
+
+Obviously, an IDE is better for writing code yourself. It has all the advanced tools and features that professional developers have enjoyed for decades.
+
+An IDE can also be better if you only need a single coding agent at a time and you don't need advanced sandboxing capabilities. If you are fine with your agent running in your userspace and have no need for a second, concurrent agent to work on another task, then you will likely have the best experience using an IDE along with an agent in your shell or editor extension.
+
+**Agent-Led, Multi-Threaded, and Sandboxed Work: ADE Wins**
+
+The ADE starts to be preferred when you want to run two or more agents concurrently. They can work in separate dedicated worktrees without clobbering each other's work. This mirrors how multiple human developers require their own separate workspaces and then resolve merge conflicts later using VCS.
+
+Also, because it becomes harder to keep a close eye on multiple agents, you will want stronger sandboxing guarantees. In an ADE like ctx, you can achieve this with containerization and a network egress policy. This allows your agent to work independently, without constant oversight, but without any ability to access disallowed resources. 
+
+**Using Both: Encouraged When Needed**
+
+You are encouraged to use both an ADE and an IDE whenever you need to! Just because your agents are doing all of their work in an ADE, doesn't mean you can't open up their changes in an IDE for closer inspection when needed.
+
+An ADE has tools like a diff viewer which are nice, but perhaps you want to "click to definition" on a symbol mentioned in the diff pane. An IDE is still the classically correct tool for this type of manual inspection.
