@@ -1,0 +1,23 @@
+name: Docs improvement
+description: Suggest a docs improvement
+title: "[Docs]: "
+labels:
+  - documentation
+body:
+  - type: input
+    id: page
+    attributes:
+      label: Affected page or file
+      placeholder: docs/getting-started/install-and-launch.mdx
+    validations:
+      required: true
+  - type: textarea
+    id: issue
+    attributes:
+      label: What should change?
+    validations:
+      required: true
+  - type: textarea
+    id: rationale
+    attributes:
+      label: Why this matters

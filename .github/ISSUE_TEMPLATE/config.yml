@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security issue
+    url: https://ctx.rs/legal/security
+    about: Please do not file vulnerabilities publicly. Use security@ctx.rs.
+  - name: ctx.rs docs
+    url: https://ctx.rs
+    about: Read the rendered documentation before filing docs or onboarding issues.
