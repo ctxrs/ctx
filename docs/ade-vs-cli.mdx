@@ -39,6 +39,6 @@ By building a user interface in a desktop app, we can more easily surface config
 
 ## Multithreading: Tmux + Worktrees vs ADE
 
-When we started building ctx, we used tmux to multiplex multiple terminals at once, with each terminal representing a single agent thread, and each agent thread in a single worktree. This works suprisingly well! Tmux sessions are persistent so you can disconnect from them and rejoin them. We did a lot of development on remote machines (large concurrent cargo builds), so tmux was a great fit for keeping those sessions alive.
+When we started building ctx, we used tmux to multiplex multiple terminals at once, with each terminal representing a single agent thread, and each agent thread in a single worktree. This works surprisingly well! Tmux sessions are persistent so you can disconnect from them and rejoin them. We did a lot of development on remote machines (large concurrent cargo builds), so tmux was a great fit for keeping those sessions alive.
 
 But ultimately we hit the same terminal bottlenecks. It's hard to scale beyond a handful of concurrent sessions, even with careful naming, organization, and code merging techniques. Once we were able to see our different sessions in the left nav with status indicators and auto-generated titles, it became significantly less effortful to start up new tasks, even for trivial things like research or quick experiments.
