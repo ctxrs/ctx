@@ -58,6 +58,26 @@ There is no host-mounted sandbox mode in the intended product model.
 - Different results across runs: keep the sandbox environment and setup steps explicit.
 - Network surprises: pair sandbox usage with a clear egress policy.
 
+## Troubleshooting sandbox startup on Apple Silicon
+
+On Apple Silicon machines, a sandbox session may fail to start with an error like:
+
+```text
+linux sandbox ctx-mcp runtime is unavailable for aarch64
+Details: start_failed
+```
+
+This means ctx tried to start the session in the Linux sandbox path, but the required `ctx-mcp` runtime for the guest architecture was not available.
+
+Use these checks before retrying:
+
+1. Confirm whether the workspace was created with `Sandbox` or `Host` execution.
+2. If you need to keep working immediately, create a new local workspace and choose `Host` under `Agent Sandbox Isolation`.
+3. If you intended to use `Sandbox`, restart ctx and retry after harness/runtime downloads have completed.
+4. If the error persists, include the exact error text, macOS version, ctx version, and whether the machine is `aarch64` when reporting the issue.
+
+If a sandbox workspace also previously failed during container startup, check for AVF readiness errors in the logs. A related failure may mention `containerd` readiness or a restored AVF guest state. In that case, a clean cold boot of the sandbox runtime may be required before retrying.
+
 ## Related pages
 
 - [Network Egress Policy](/network-egress-policy)

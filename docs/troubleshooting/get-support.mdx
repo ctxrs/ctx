@@ -27,3 +27,21 @@ Report issues at:
 - task/session context (without sensitive code)
 - screenshots of relevant UI state
 - whether issue reproduces after app restart
+
+## Runtime startup details
+
+For sandbox or runtime startup failures, include the execution mode and architecture. These details are especially useful for errors such as:
+
+```text
+linux sandbox ctx-mcp runtime is unavailable for aarch64
+Details: start_failed
+```
+
+When reporting this class of issue, include:
+
+- whether the workspace was configured as `Host` or `Sandbox`
+- whether the machine is Apple Silicon / `aarch64`
+- whether provider or harness downloads were skipped
+- the most recent startup error from the ctx logs
+
+If you need an immediate workaround while a sandbox-specific issue is being investigated, create a separate workspace in `Host` mode and keep the original sandbox workspace for debugging.
