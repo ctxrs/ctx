@@ -1,0 +1,27 @@
+exports_files([
+    "MODULE.bazel",
+])
+
+filegroup(
+    name = "ci_script_sources",
+    srcs = glob(
+        [
+            "scripts/ci/**",
+        ],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "repo_script_sources",
+    srcs = glob(
+        [
+            "scripts/*.sh",
+            "scripts/lib/**",
+            "scripts/tests/**",
+        ],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)

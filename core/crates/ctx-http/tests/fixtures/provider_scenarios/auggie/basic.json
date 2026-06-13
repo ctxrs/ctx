@@ -1,0 +1,12 @@
+{
+  "turns": [
+    {
+      "thought": "Hm (auggie)",
+      "tools": [
+        {"tool_name": "exec_command", "input": {"cmd": "echo auggie"}, "output": "auggie"}
+      ],
+      "deltas": ["Ho", "la"],
+      "final": "Hola from auggie"
+    }
+  ]
+}

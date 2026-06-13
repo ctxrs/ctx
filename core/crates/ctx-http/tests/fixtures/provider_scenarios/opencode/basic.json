@@ -1,0 +1,12 @@
+{
+  "turns": [
+    {
+      "thought": "Hm (opencode)",
+      "tools": [
+        {"tool_name": "exec_command", "input": {"cmd": "echo opencode"}, "output": "opencode"}
+      ],
+      "deltas": ["Ho", "la"],
+      "final": "Hola from opencode"
+    }
+  ]
+}

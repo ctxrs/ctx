@@ -1,0 +1,28 @@
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+CTX_AVF_LINUX_GUEST_AGENT_DEPS = [
+    "@crates//:anyhow",
+    "@crates//:libc",
+    "@crates//:portable-pty",
+    "@crates//:serde",
+    "@crates//:serde_json",
+    "@crates//:shell-words",
+]
+
+rust_binary(
+    name = "ctx-avf-linux-guest-agent",
+    crate_root = "src/main.rs",
+    edition = "2021",
+    srcs = glob(["src/**/*.rs"]),
+    deps = CTX_AVF_LINUX_GUEST_AGENT_DEPS,
+)
+
+rust_test(
+    name = "unit_tests",
+    crate_root = "src/main.rs",
+    edition = "2021",
+    srcs = glob(["src/**/*.rs"]),
+    deps = CTX_AVF_LINUX_GUEST_AGENT_DEPS,
+)

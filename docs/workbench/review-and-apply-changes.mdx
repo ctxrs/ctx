@@ -1,0 +1,45 @@
+---
+title: "Review and Apply Changes"
+description: "Use diff review as your quality gate"
+---
+
+Diff review is where you turn agent output into trusted changes.
+
+## Review checklist
+
+- Are changed files in scope?
+- Are there unrelated edits?
+- Do summaries match the actual diff?
+- Were requested validations run?
+
+## When to request revision
+
+Request another pass if you see:
+
+- scope creep
+- missing tests/validation
+- risky edits without explanation
+
+## Before applying changes
+
+- Confirm the task objective is fully met.
+- Confirm no hidden side effects in touched files.
+- Confirm risky changes are explained well enough to trust.
+
+## A clean review outcome looks like
+
+- changed files are easy to connect back to the task
+- validation is present and believable
+- summaries match the actual edits
+- you can explain why you are comfortable finalizing
+
+## Decision rule
+
+Do not finalize based on chat output alone. Finalize only after diff review is clean.
+
+## Related pages
+
+- [Tasks](/workbench/tasks)
+- [Sessions and Messages](/workbench/sessions)
+- [Run Your First Task](/getting-started/first-task)
+- [Artifacts Overview](/artifacts-overview)

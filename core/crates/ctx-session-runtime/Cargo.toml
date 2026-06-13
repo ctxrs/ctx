@@ -1,0 +1,17 @@
+[package]
+name = "ctx-session-runtime"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+ctx-core = { path = "../ctx-core" }
+ctx-session-tools = { path = "../ctx-session-tools" }
+ctx-store = { path = "../ctx-store" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true

@@ -1,0 +1,49 @@
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("//tools/bazel:rust_deps.generated.bzl", "RUST_BAZEL_DEPS")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["src/provider_matrix.json"])
+
+_CTX_PROVIDER_ACCOUNTS_DEPS = RUST_BAZEL_DEPS["ctx-provider-accounts"]
+
+rust_library(
+    name = "lib",
+    crate_name = "ctx_provider_accounts",
+    crate_root = "src/lib.rs",
+    compile_data = ["src/provider_matrix.json"],
+    edition = "2021",
+    srcs = glob(["src/**/*.rs"]),
+    deps = _CTX_PROVIDER_ACCOUNTS_DEPS.deps,
+)
+
+rust_test(
+    name = "unit_tests",
+    crate = ":lib",
+    deps = _CTX_PROVIDER_ACCOUNTS_DEPS.dev_deps,
+)
+
+sh_binary(
+    name = "goose-provider-stage-archive",
+    srcs = ["//tools/bazel:provider_managed_install_archive.sh"],
+    args = [
+        "goose",
+    ],
+    data = [
+        "src/provider_matrix.json",
+        "//core:package.json",
+    ],
+)
+
+sh_binary(
+    name = "openhands-provider-stage-archive",
+    srcs = ["//tools/bazel:provider_managed_install_archive.sh"],
+    args = [
+        "openhands",
+    ],
+    data = [
+        "src/provider_matrix.json",
+        "//core:package.json",
+    ],
+)

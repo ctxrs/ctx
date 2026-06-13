@@ -1,0 +1,130 @@
+load("@aspect_rules_js//js:defs.bzl", "js_library")
+load(":web_e2e_test.bzl", "web_e2e_test")
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "e2e_sources",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "playwright-report/**",
+            "test-results/**",
+        ],
+    ),
+)
+
+js_library(
+    name = "utils_sources",
+    srcs = glob(["utils/**/*"]),
+)
+
+web_e2e_test(
+    name = "workbench_unarchive_visible",
+    config = "playwright.premerge.config.ts",
+    runtime_profile = "workbench-lite",
+    specs = ["e2e/workbench-unarchive-visible.spec.ts"],
+)
+
+web_e2e_test(
+    name = "workbench_worktree_path",
+    config = "playwright.premerge.config.ts",
+    runtime_profile = "agent-full",
+    specs = ["e2e/workbench-worktree-path.spec.ts"],
+)
+
+web_e2e_test(
+    name = "golden",
+    config = "playwright.premerge.config.ts",
+    runtime_profile = "agent-full",
+    specs = ["e2e/golden.spec.ts"],
+)
+
+web_e2e_test(
+    name = "pretext_wrap_rules",
+    config = "playwright.pretext-parity.config.ts",
+    runtime_profile = "agent-full",
+    specs = ["e2e/workbench-pretext-wrap-rules.spec.ts"],
+    timeout = "eternal",
+)
+
+web_e2e_test(
+    name = "pretext_parity_corpus",
+    config = "playwright.pretext-parity.config.ts",
+    runtime_profile = "agent-full",
+    specs = ["e2e/workbench-pretext-parity-corpus.spec.ts"],
+    timeout = "eternal",
+)
+
+web_e2e_test(
+    name = "pretext_wrap_rule_fuzz",
+    config = "playwright.pretext-parity.config.ts",
+    runtime_profile = "agent-full",
+    specs = ["e2e/workbench-pretext-wrap-rule-fuzz.spec.ts"],
+    timeout = "eternal",
+)
+
+web_e2e_test(
+    name = "pretext_parity_fuzz",
+    config = "playwright.pretext-parity.config.ts",
+    runtime_profile = "agent-full",
+    specs = ["e2e/workbench-pretext-parity-fuzz.spec.ts"],
+    timeout = "eternal",
+)
+
+web_e2e_test(
+    name = "premerge_required",
+    config = "playwright.premerge.config.ts",
+    linux_browser = "chromium",
+    runtime_profile = "agent-full",
+    suite = "premerge_required",
+    timeout = "eternal",
+)
+
+web_e2e_test(
+    name = "quarantine",
+    config = "playwright.premerge.config.ts",
+    runtime_profile = "agent-full",
+    suite = "quarantine",
+    timeout = "eternal",
+)
+
+web_e2e_test(
+    name = "release_required",
+    config = "playwright.release.config.ts",
+    runtime_profile = "web-artifact",
+    suite = "release_required",
+    timeout = "eternal",
+)
+
+web_e2e_test(
+    name = "cross_platform",
+    config = "playwright.cross-platform.config.ts",
+    runtime_profile = "agent-full",
+    suite = "cross_platform",
+    timeout = "eternal",
+)
+
+web_e2e_test(
+    name = "visual",
+    config = "playwright.visual.config.ts",
+    runtime_profile = "agent-full",
+    suite = "visual",
+    timeout = "eternal",
+)
+
+web_e2e_test(
+    name = "soak",
+    config = "playwright.soak.config.ts",
+    runtime_profile = "agent-full",
+    suite = "soak",
+    timeout = "eternal",
+)
+
+web_e2e_test(
+    name = "load",
+    config = "playwright.load.config.ts",
+    runtime_profile = "agent-full",
+    suite = "load",
+    timeout = "eternal",
+)

@@ -1,0 +1,11 @@
+# Quarantined specs are explicitly excluded from premerge_required.
+# Keep entries sorted and include a short reason + date.
+#
+# Format:
+# e2e/<spec-file>.spec.ts  # YYYY-MM-DD reason
+e2e/desktop-webview-recovery-ui.spec.ts  # 2026-05-04 ctx-main #811/#812: desktop bridge assertions fail under Bazel Linux E2E with daemon overlay
+e2e/runtime-harness-installs.spec.ts  # 2026-05-04 ctx-main #811/#812: setup wizard remains on container step under Bazel Linux E2E
+e2e/second-message.spec.ts  # 2026-05-04 ctx-main #811/#812: fake-provider second turn stalls under Bazel Linux E2E
+e2e/workbench-context-window-meter.spec.ts  # 2026-05-04 ctx-main #811/#812: fake-provider slow-diff timing exceeds checkin budget under Bazel Linux E2E
+e2e/workbench-first-message-header.spec.ts  # 2026-05-04 ctx-main #811/#812: websocket URL assertion misses captured URLs under Bazel Linux E2E
+e2e/workbench-inline-code-overlap-webkit.spec.ts  # 2026-05-04 Linux checkin runs Chromium; WebKit-specific layout coverage needs a dedicated non-checkin lane

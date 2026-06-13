@@ -1,0 +1,1 @@
+DELETE FROM session_active_snapshot_heads;

@@ -1,0 +1,23 @@
+[package]
+name = "ctx-http-auth"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+ctx-core = { path = "../ctx-core" }
+ctx-fs = { path = "../ctx-fs" }
+fs2 = "0.4"
+hex = "0.4"
+http = "1"
+libc = "0.2"
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+url = "2"
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

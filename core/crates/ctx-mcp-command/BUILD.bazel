@@ -1,0 +1,38 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("//tools/bazel:rust_deps.generated.bzl", "RUST_BAZEL_DEPS")
+
+package(default_visibility = ["//visibility:public"])
+
+_CTX_MCP_COMMAND_DEPS = RUST_BAZEL_DEPS["ctx-mcp-command"]
+
+rust_library(
+    name = "lib",
+    crate_name = "ctx_mcp_command",
+    crate_root = "src/lib.rs",
+    edition = "2021",
+    srcs = glob(["src/**/*.rs"]),
+    deps = _CTX_MCP_COMMAND_DEPS.deps,
+)
+
+rust_library(
+    name = "lib_test_support",
+    crate_name = "ctx_mcp_command",
+    crate_root = "src/lib.rs",
+    edition = "2021",
+    srcs = glob(["src/**/*.rs"]),
+    deps = [
+        dep
+        for dep in _CTX_MCP_COMMAND_DEPS.deps
+        if dep != "//core/crates/ctx-bundled-assets:lib"
+    ] + [
+        "//core/crates/ctx-bundled-assets:lib_test_support",
+    ],
+)
+
+rust_test(
+    name = "unit_tests",
+    crate = ":lib_test_support",
+    deps = [
+        "@crates//:tempfile",
+    ],
+)

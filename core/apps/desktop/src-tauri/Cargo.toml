@@ -1,0 +1,152 @@
+[package]
+name = "ctx-desktop"
+version = "0.66.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+build = "build.rs"
+default-run = "ctx"
+
+[[bin]]
+name = "ctx"
+path = "src/main.rs"
+
+[[bin]]
+name = "ctx-avf-linux-helper"
+path = "src/avf_linux_helper.rs"
+
+[build-dependencies]
+base64 = "0.22"
+tauri-build = { version = "2.5.3", features = [] }
+sha2 = "0.10"
+ureq = "2"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+ctx-fs = { path = "../../../crates/ctx-fs" }
+ctx-desktop-ipc = { path = "../../../crates/ctx-desktop-ipc" }
+ctx-sandbox-contract = { path = "../../../crates/ctx-sandbox-contract" }
+directories = "5"
+flate2 = "1"
+hex = "0.4"
+libc = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "multipart", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
+tauri = { version = "2.9.5", features = ["image-png"] }
+tauri-plugin-automation = "0.1.1"
+tauri-plugin-deep-link = "2.4.5"
+tauri-plugin-dialog = "2.4.2"
+tauri-plugin-os = "2.3.2"
+tauri-plugin-shell = "2.3.2"
+tauri-plugin-single-instance = { version = "2.3.6", features = ["deep-link"] }
+tauri-plugin-stt = { version = "0.1", optional = true }
+tauri-plugin-updater = "2.10.0"
+tokio = { version = "1", features = ["sync", "rt", "macros"] }
+portable-pty = "0.9.0"
+url = "2"
+urlencoding = "2"
+uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+notify-rust = "4.16.0"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+notify-rust = "4.16.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6.2"
+dispatch2 = "0.3.1"
+objc2 = "0.6.3"
+objc2-app-kit = { version = "0.3.2", features = [
+    "NSApplication",
+    "NSButton",
+    "NSButtonCell",
+    "NSControl",
+    "NSImage",
+    "NSMenu",
+    "NSMenuItem",
+    "NSLayoutConstraint",
+    "NSResponder",
+    "NSTitlebarAccessoryViewController",
+    "NSView",
+    "NSViewController",
+    "NSWindow",
+] }
+objc2-core-foundation = "0.3.2"
+objc2-foundation = { version = "0.3.2", features = ["NSArray", "NSDictionary", "NSError", "NSObject", "NSString", "NSURL"] }
+objc2-user-notifications = { version = "0.3.2", features = [
+    "std",
+    "block2",
+    "UNNotification",
+    "UNNotificationContent",
+    "UNNotificationRequest",
+    "UNNotificationResponse",
+    "UNNotificationSettings",
+    "UNNotificationTrigger",
+    "UNUserNotificationCenter",
+    "UNNotificationSound",
+] }
+objc2-virtualization = { version = "0.3.2", default-features = false, features = [
+    "block2",
+    "dispatch2",
+    "std",
+    "VZBootLoader",
+    "VZDirectoryShare",
+    "VZDirectorySharingDeviceConfiguration",
+    "VZDiskImageStorageDeviceAttachment",
+    "VZFileSerialPortAttachment",
+    "VZGenericMachineIdentifier",
+    "VZGenericPlatformConfiguration",
+    "VZLinuxBootLoader",
+    "VZMACAddress",
+    "VZMemoryBalloonDevice",
+    "VZMemoryBalloonDeviceConfiguration",
+    "VZNATNetworkDeviceAttachment",
+    "VZNetworkDeviceAttachment",
+    "VZNetworkDeviceConfiguration",
+    "VZPlatformConfiguration",
+    "VZSerialPortAttachment",
+    "VZSerialPortConfiguration",
+    "VZSharedDirectory",
+    "VZSingleDirectoryShare",
+    "VZSocketDeviceConfiguration",
+    "VZStorageDeviceAttachment",
+    "VZStorageDeviceConfiguration",
+    "VZSocketDevice",
+    "VZVirtioBlockDeviceConfiguration",
+    "VZVirtioConsoleDeviceSerialPortConfiguration",
+    "VZVirtioFileSystemDeviceConfiguration",
+    "VZVirtioNetworkDeviceConfiguration",
+    "VZVirtioSocketConnection",
+    "VZVirtioSocketDevice",
+    "VZVirtioSocketDeviceConfiguration",
+    "VZVirtioTraditionalMemoryBalloonDevice",
+    "VZVirtioTraditionalMemoryBalloonDeviceConfiguration",
+    "VZVirtualMachine",
+    "VZVirtualMachineConfiguration",
+] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+automation = []
+stt = ["tauri-plugin-stt"]
+
+[patch.crates-io]
+tauri = { path = "third_party/tauri" }
+tauri-runtime = { path = "third_party/tauri-runtime" }
+tauri-runtime-wry = { path = "third_party/tauri-runtime-wry" }
+tauri-plugin-automation = { path = "third_party/tauri-plugin-automation" }
+tauri-plugin-updater = { path = "third_party/tauri-plugin-updater" }
+
+[dev-dependencies]
+blake2 = "0.10"
+ed25519-dalek = "2"
+rand_core = { version = "0.6", features = ["getrandom"] }
+serde_yaml = "0.9"
+
+[workspace]

@@ -1,0 +1,21 @@
+[package]
+name = "ctx-session-artifacts"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+ctx-core = { path = "../ctx-core" }
+ctx-store = { path = "../ctx-store" }
+hex = "0.4"
+mime_guess = "2"
+sha2 = "0.10"
+serde.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile = "3"

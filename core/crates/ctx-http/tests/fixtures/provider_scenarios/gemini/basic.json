@@ -1,0 +1,12 @@
+{
+  "turns": [
+    {
+      "thought": "Hm (gemini)",
+      "tools": [
+        {"tool_name": "exec_command", "input": {"cmd": "echo gemini"}, "output": "gemini"}
+      ],
+      "deltas": ["Ho", "la"],
+      "final": "Hola from gemini"
+    }
+  ]
+}

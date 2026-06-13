@@ -1,0 +1,2 @@
+ALTER TABLE sessions
+ADD COLUMN title TEXT NOT NULL DEFAULT 'New Task';

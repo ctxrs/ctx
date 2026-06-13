@@ -1,0 +1,32 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("//tools/bazel:rust_deps.generated.bzl", "RUST_BAZEL_DEPS")
+
+package(default_visibility = ["//visibility:public"])
+
+_CTX_HTTP_TEST_SUPPORT_DEPS = RUST_BAZEL_DEPS["ctx-http-test-support"]
+_CTX_HTTP_TEST_SUPPORT_WITH_DAEMON_TEST_SUPPORT_DEPS = [
+    dep
+    for dep in _CTX_HTTP_TEST_SUPPORT_DEPS.deps
+    if dep not in [
+        "//core/crates/ctx-daemon:lib",
+        "//core/crates/ctx-http:lib",
+    ]
+] + [
+    "//core/crates/ctx-daemon:lib_test_support",
+    "//core/crates/ctx-http:lib_test_support",
+]
+
+rust_library(
+    name = "lib",
+    crate_name = "ctx_http_test_support",
+    crate_root = "src/lib.rs",
+    edition = "2021",
+    srcs = glob(["src/**/*.rs"]),
+    deps = _CTX_HTTP_TEST_SUPPORT_WITH_DAEMON_TEST_SUPPORT_DEPS,
+)
+
+rust_test(
+    name = "unit_tests",
+    crate = ":lib",
+    deps = _CTX_HTTP_TEST_SUPPORT_DEPS.dev_deps,
+)

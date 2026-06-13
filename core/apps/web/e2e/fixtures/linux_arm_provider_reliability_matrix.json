@@ -1,0 +1,72 @@
+{
+  "version": 1,
+  "name": "linux-arm-provider-install-reliability",
+  "updated_at": "2026-04-11",
+  "expected_environment": "sandbox",
+  "expected_network_mode": "llm_only",
+  "critical_providers": [
+    {
+      "provider_id": "codex",
+      "openrouter_model_override": "openrouter/free"
+    }
+  ],
+  "full_nightly_providers": [
+    {
+      "provider_id": "codex",
+      "openrouter_model_override": "google/gemma-4-26b-a4b-it:free"
+    },
+    {
+      "provider_id": "opencode",
+      "openrouter_model_override": "google/gemma-4-26b-a4b-it:free"
+    },
+    {
+      "provider_id": "goose",
+      "openrouter_model_override": "google/gemma-4-26b-a4b-it:free"
+    },
+    {
+      "provider_id": "droid",
+      "openrouter_model_override": "google/gemma-4-26b-a4b-it:free"
+    }
+  ],
+  "deferred_providers": [
+    {
+      "provider_id": "qwen",
+      "reason": "provider matrix does not currently ship linux-aarch64 managed archive target"
+    },
+    {
+      "provider_id": "mistral",
+      "reason": "provider matrix does not currently ship linux-aarch64 managed archive target"
+    },
+    {
+      "provider_id": "kimi",
+      "reason": "provider matrix does not currently ship linux-aarch64 managed archive target"
+    },
+    {
+      "provider_id": "openhands",
+      "reason": "provider matrix now uses a python managed install with a provider-scoped Python 3.12 runtime instead of a linux-aarch64 managed archive target"
+    },
+    {
+      "provider_id": "claude-crp",
+      "reason": "requires anthropic_messages endpoint-shape lane rather than OpenRouter OpenAI-compatible lane"
+    },
+    {
+      "provider_id": "amp",
+      "reason": "requires dedicated partner-auth validation lane"
+    },
+    {
+      "provider_id": "cagent",
+      "reason": "non-chat command-agent flow is out of scope for first-turn chat smoke"
+    },
+    {
+      "provider_id": "pi",
+      "reason": "provider-specific model override/timeout path deferred to follow-up hardening"
+    }
+  ],
+  "unsupported_providers": [
+    "junie",
+    "codebuff",
+    "charm",
+    "aider",
+    "kilo"
+  ]
+}

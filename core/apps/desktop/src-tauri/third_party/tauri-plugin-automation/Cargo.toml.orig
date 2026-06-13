@@ -1,0 +1,18 @@
+[package]
+name = "tauri-plugin-automation"
+version = "0.1.1"
+edition.workspace = true
+rust-version.workspace = true
+description = "Tauri plugin for automation via WebDriver"
+license = "Apache-2.0 OR MIT"
+links = "tauri-plugin-automation"
+
+[dependencies]
+libloading = "0.8"
+tauri = { version = "2" }
+serde_json = "1.0"
+tokio = { version = "1", features = ["sync"] }
+tracing = "0.1"
+
+[build-dependencies]
+tauri-plugin = "2"

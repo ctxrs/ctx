@@ -1,0 +1,12 @@
+{
+  "turns": [
+    {
+      "thought": "Hm (cursor)",
+      "tools": [
+        {"tool_name": "exec_command", "input": {"cmd": "echo cursor"}, "output": "cursor"}
+      ],
+      "deltas": ["Ho", "la"],
+      "final": "Hola from cursor"
+    }
+  ]
+}

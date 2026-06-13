@@ -1,0 +1,9 @@
+DROP INDEX IF EXISTS workspace_artifact_index_workspace_id_idx;
+DROP TABLE IF EXISTS workspace_artifact_index;
+
+DROP INDEX IF EXISTS workspace_subagent_invocation_index_workspace_id_idx;
+DROP TABLE IF EXISTS workspace_subagent_invocation_index;
+
+DROP INDEX IF EXISTS workspace_merge_queue_entry_index_workspace_id_idx;
+DROP INDEX IF EXISTS workspace_merge_queue_entry_index_status_created_at_idx;
+DROP TABLE IF EXISTS workspace_merge_queue_entry_index;

@@ -1,0 +1,2 @@
+ALTER TABLE messages ADD COLUMN run_id TEXT;
+ALTER TABLE messages ADD COLUMN turn_id TEXT;

@@ -1,0 +1,83 @@
+{
+  "events": [
+    {
+      "channel": "control",
+      "event": {
+        "session_id": "fixture-session",
+        "turn_id": "turn_crp_3",
+        "type": "turn.started"
+      }
+    },
+    {
+      "channel": "control",
+      "event": {
+        "input": {
+          "preview": {
+            "diff_stats": {
+              "added": 1,
+              "files": 1,
+              "removed": 1
+            },
+            "paths": [
+              "README.md"
+            ]
+          }
+        },
+        "input_preview": {
+          "diff_stats": {
+            "added": 1,
+            "files": 1,
+            "removed": 1
+          },
+          "paths": [
+            "README.md"
+          ]
+        },
+        "session_id": "fixture-session",
+        "tool_call_id": "patch_1",
+        "tool_label": "Edited",
+        "tool_name": "apply_patch",
+        "turn_id": "turn_crp_3",
+        "type": "tool.started"
+      }
+    },
+    {
+      "channel": "control",
+      "event": {
+        "input_preview": {
+          "diff_stats": {
+            "added": 1,
+            "files": 1,
+            "removed": 1
+          },
+          "paths": [
+            "README.md"
+          ]
+        },
+        "output": {
+          "changes": [
+            {
+              "diff": "@@ -1 +1 @@\n-old\n+new\n",
+              "kind": {
+                "move_path": null,
+                "type": "update"
+              },
+              "path": "README.md"
+            }
+          ]
+        },
+        "session_id": "fixture-session",
+        "status": "success",
+        "tool_call_id": "patch_1",
+        "tool_label": "Edited",
+        "tool_name": "apply_patch",
+        "turn_id": "turn_crp_3",
+        "type": "tool.completed"
+      }
+    }
+  ],
+  "aliases": {
+    "turn_app_3": "turn_crp_3"
+  },
+  "latest_token_usage": null
+}

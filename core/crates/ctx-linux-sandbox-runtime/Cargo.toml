@@ -1,0 +1,14 @@
+[package]
+name = "ctx-linux-sandbox-runtime"
+version = "0.34.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+ctx-core = { path = "../ctx-core" }
+ctx-harness-setup = { path = "../ctx-harness-setup" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true

@@ -1,0 +1,56 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+rust_library(
+    name = "lib",
+    crate_name = "ctx_workspace_container",
+    crate_root = "src/lib.rs",
+    edition = "2021",
+    srcs = glob(["src/**/*.rs"]),
+    deps = [
+        "//core/crates/ctx-core:lib",
+        "//core/crates/ctx-fs:lib",
+        "//core/crates/ctx-harness-setup:lib",
+        "//core/crates/ctx-sandbox-container-runtime:lib",
+        "//core/crates/ctx-sandbox-contract:lib",
+        "@crates//:anyhow",
+        "@crates//:chrono",
+        "@crates//:libc",
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:tempfile",
+        "@crates//:tokio",
+        "@crates//:tracing",
+        "@crates//:url",
+    ],
+)
+
+rust_library(
+    name = "lib_test_support",
+    crate_name = "ctx_workspace_container",
+    crate_root = "src/lib.rs",
+    edition = "2021",
+    srcs = glob(["src/**/*.rs"]),
+    deps = [
+        "//core/crates/ctx-core:lib",
+        "//core/crates/ctx-fs:lib",
+        "//core/crates/ctx-harness-setup:lib",
+        "//core/crates/ctx-sandbox-container-runtime:lib_test_support",
+        "//core/crates/ctx-sandbox-contract:lib",
+        "@crates//:anyhow",
+        "@crates//:chrono",
+        "@crates//:libc",
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:tempfile",
+        "@crates//:tokio",
+        "@crates//:tracing",
+        "@crates//:url",
+    ],
+)
+
+rust_test(
+    name = "unit_tests",
+    crate = ":lib",
+)

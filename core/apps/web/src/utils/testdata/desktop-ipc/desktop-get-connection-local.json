@@ -1,0 +1,9 @@
+{
+  "method": "desktopGetConnection",
+  "command": "desktop_get_connection",
+  "response": {
+    "kind": "local",
+    "base_url": "http://127.0.0.1:4399",
+    "token": "desktop-token"
+  }
+}

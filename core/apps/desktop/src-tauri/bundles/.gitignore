@@ -1,0 +1,10 @@
+# Bundles are generated during `desktop:prep:release` and can be large.
+# Keep the repo clean by ignoring generated providers/runtimes and build scratch.
+/.build/
+/providers/
+/runtimes/
+/images/
+/daemons/*
+!/daemons/placeholder.txt
+/runtime_state.json
+/runtime_manifest.effective.json

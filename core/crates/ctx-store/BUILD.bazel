@@ -1,0 +1,107 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+MIGRATIONS = glob(["migrations/**/*.sql"])
+
+rust_library(
+    name = "lib",
+    crate_name = "ctx_store",
+    crate_root = "src/lib.rs",
+    compile_data = MIGRATIONS,
+    edition = "2021",
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "core/crates/ctx-store",
+    },
+    srcs = glob(["src/**/*.rs"]),
+    deps = [
+        "//core/crates/ctx-core:lib",
+        "//core/crates/ctx-fs:lib",
+        "@crates//:anyhow",
+        "@crates//:chrono",
+        "@crates//:futures",
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:sqlx",
+        "@crates//:tokio",
+        "@crates//:tracing",
+        "@crates//:uuid",
+    ],
+    proc_macro_deps = [
+        "@crates//:async-trait",
+    ],
+)
+
+rust_library(
+    name = "lib_fault_injection",
+    crate_name = "ctx_store",
+    crate_root = "src/lib.rs",
+    crate_features = ["fault_injection"],
+    compile_data = MIGRATIONS,
+    edition = "2021",
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "core/crates/ctx-store",
+    },
+    srcs = glob(["src/**/*.rs"]),
+    deps = [
+        "//core/crates/ctx-core:lib",
+        "//core/crates/ctx-fs:lib",
+        "@crates//:anyhow",
+        "@crates//:chrono",
+        "@crates//:futures",
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:sqlx",
+        "@crates//:tokio",
+        "@crates//:tracing",
+        "@crates//:uuid",
+    ],
+    proc_macro_deps = [
+        "@crates//:async-trait",
+    ],
+)
+
+rust_test(
+    name = "unit_tests",
+    crate = ":lib",
+    args = ["--test-threads=1"],
+    compile_data = MIGRATIONS,
+    timeout = "long",
+    deps = [
+        "@crates//:tempfile",
+    ],
+)
+
+rust_test(
+    name = "unit_tests_fault_injection",
+    crate = ":lib_fault_injection",
+    compile_data = MIGRATIONS,
+    deps = [
+        "@crates//:tempfile",
+    ],
+)
+
+rust_test(
+    name = "sqlite_hardening",
+    crate_name = "sqlite_hardening",
+    crate_root = "tests/sqlite_hardening.rs",
+    args = ["--test-threads=1"],
+    compile_data = MIGRATIONS,
+    data = MIGRATIONS,
+    edition = "2021",
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "core/crates/ctx-store",
+    },
+    srcs = ["tests/sqlite_hardening.rs"],
+    timeout = "long",
+    deps = [
+        ":lib",
+        "//core/crates/ctx-core:lib",
+        "@crates//:anyhow",
+        "@crates//:chrono",
+        "@crates//:serde_json",
+        "@crates//:sqlx",
+        "@crates//:tempfile",
+        "@crates//:tokio",
+    ],
+)

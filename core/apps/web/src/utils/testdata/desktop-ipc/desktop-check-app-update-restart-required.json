@@ -1,0 +1,26 @@
+{
+  "method": "desktopCheckAppUpdate",
+  "command": "desktop_check_app_update",
+  "call": {
+    "channel": "stable"
+  },
+  "args": {
+    "req": {
+      "channel": "stable"
+    }
+  },
+  "response": {
+    "configured": true,
+    "available": true,
+    "restart_required": true,
+    "phase": "restart_required",
+    "staged": true,
+    "current_version": "1.0.0",
+    "latest_version": "1.2.3",
+    "target": "macos-arm64",
+    "endpoint": "https://api.ctx.rs/functions/v1/releases/stable/latest-tauri.json",
+    "message": "Restart required.",
+    "last_attempt_id": "attempt-1",
+    "last_error": null
+  }
+}

@@ -1,0 +1,40 @@
+load("@rules_rust//rust:defs.bzl", "rust_binary")
+
+package(default_visibility = ["//visibility:public"])
+
+CTX_AVF_LINUX_HELPER_RUSTC_ENV = {
+    "CARGO_PKG_VERSION": "0.47.0",
+}
+
+rust_binary(
+    name = "ctx-avf-linux-helper",
+    crate_name = "ctx_avf_linux_helper",
+    crate_root = "avf_linux_helper.rs",
+    edition = "2021",
+    srcs = [
+        "avf_linux_exec_protocol.rs",
+        "avf_linux_helper.rs",
+    ] + glob(
+        ["avf_linux_helper/**/*.rs"],
+        exclude = ["avf_linux_helper/tests.rs"],
+    ),
+    rustc_env = CTX_AVF_LINUX_HELPER_RUSTC_ENV,
+    target_compatible_with = ["@platforms//os:osx"],
+    deps = [
+        "//core/crates/ctx-sandbox-contract:lib",
+        "@crates//:anyhow",
+        "@crates//:base64",
+        "@crates//:block2",
+        "@crates//:dispatch2",
+        "@crates//:flate2",
+        "@crates//:hex",
+        "@crates//:libc",
+        "@crates//:objc2",
+        "@crates//:objc2-foundation",
+        "@crates//:objc2-virtualization",
+        "@crates//:portable-pty",
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:sha2",
+    ],
+)

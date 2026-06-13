@@ -1,0 +1,122 @@
+[package]
+name = "ctx-daemon"
+version = "0.65.32"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+base64 = "0.22"
+bzip2 = "0.5"
+bytes = "1"
+chacha20poly1305 = { version = "0.10", features = ["std"] }
+chrono.workspace = true
+ctx-avf-linux-runtime = { path = "../ctx-avf-linux-runtime" }
+ctx-core = { path = "../ctx-core" }
+ctx-events = { path = "../ctx-events" }
+ctx-execution-runtime = { path = "../ctx-execution-runtime" }
+ctx-fs = { path = "../ctx-fs" }
+ctx-harness-runtime = { path = "../ctx-harness-runtime" }
+ctx-harness-setup = { path = "../ctx-harness-setup" }
+ctx-harness-sources = { path = "../ctx-harness-sources" }
+ctx-http-auth = { path = "../ctx-http-auth" }
+ctx-linux-sandbox-runtime = { path = "../ctx-linux-sandbox-runtime" }
+ctx-managed-installs = { path = "../ctx-managed-installs" }
+ctx-mcp-auth = { path = "../ctx-mcp-auth" }
+ctx-mcp-command = { path = "../ctx-mcp-command" }
+ctx-mobile-access-service = { path = "../ctx-mobile-access-service" }
+ctx-merge-queue = { path = "../ctx-merge-queue" }
+ctx-observability = { path = "../ctx-observability" }
+ctx-org-policy = { path = "../ctx-org-policy" }
+ctx-provider-accounts = { path = "../ctx-provider-accounts" }
+ctx-provider-auth-import = { path = "../ctx-provider-auth-import" }
+ctx-provider-install = { path = "../ctx-provider-install" }
+ctx-provider-matrix = { path = "../ctx-provider-matrix" }
+ctx-provider-runtime = { path = "../ctx-provider-runtime" }
+ctx-providers = { path = "../ctx-providers" }
+ctx-resource-utilization = { path = "../ctx-resource-utilization" }
+ctx-repo-onboarding-service = { path = "../ctx-repo-onboarding-service" }
+ctx-route-contracts = { path = "../ctx-route-contracts" }
+ctx-run-archive-service = { path = "../ctx-run-archive-service" }
+ctx-run-scheduler = { path = "../ctx-run-scheduler" }
+ctx-runtime-assets = { path = "../ctx-runtime-assets" }
+ctx-sandbox-container-runtime = { path = "../ctx-sandbox-container-runtime" }
+ctx-sandbox-contract = { path = "../ctx-sandbox-contract" }
+ctx-sandbox-materialization = { path = "../ctx-sandbox-materialization" }
+ctx-session-artifacts = { path = "../ctx-session-artifacts" }
+ctx-session-message-service = { path = "../ctx-session-message-service" }
+ctx-session-runtime = { path = "../ctx-session-runtime" }
+ctx-session-service = { path = "../ctx-session-service" }
+ctx-session-title-service = { path = "../ctx-session-title-service" }
+ctx-session-vcs-service = { path = "../ctx-session-vcs-service" }
+ctx-session-tools = { path = "../ctx-session-tools" }
+ctx-settings-model = { path = "../ctx-settings-model" }
+ctx-settings-service = { path = "../ctx-settings-service" }
+ctx-subagent-service = { path = "../ctx-subagent-service" }
+ctx-storage-admission = { path = "../ctx-storage-admission" }
+ctx-store = { path = "../ctx-store" }
+ctx-task-service = { path = "../ctx-task-service" }
+ctx-transport-runtime = { path = "../ctx-transport-runtime" }
+ctx-update-service = { path = "../ctx-update-service" }
+ctx-workspace-active-snapshot = { path = "../ctx-workspace-active-snapshot" }
+ctx-workspace-attachments = { path = "../ctx-workspace-attachments" }
+ctx-workspace-config = { path = "../ctx-workspace-config" }
+ctx-workspace-container = { path = "../ctx-workspace-container" }
+ctx-workspace-runtime = { path = "../ctx-workspace-runtime" }
+ctx-workspace-stream-service = { path = "../ctx-workspace-stream-service" }
+ctx-worktree-bootstrap-service = { path = "../ctx-worktree-bootstrap-service" }
+ctx-worktree-data-plane = { path = "../ctx-worktree-data-plane" }
+ctx-worktree-vcs-service = { path = "../ctx-worktree-vcs-service" }
+directories.workspace = true
+flate2 = "1"
+futures.workspace = true
+hex = "0.4"
+hkdf = "0.12"
+http = "1"
+libc = "0.2"
+mime_guess = "2"
+notify.workspace = true
+opentelemetry = { version = "0.23", features = ["trace", "metrics"] }
+opentelemetry-otlp = { version = "0.16", features = ["http-proto", "reqwest-client", "reqwest-rustls", "metrics"] }
+opentelemetry_sdk = { version = "0.23", features = ["trace", "metrics", "rt-tokio"] }
+portable-pty = "0.9"
+rand_core = "0.6"
+rcgen.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+similar = "2"
+sqlx.workspace = true
+sysinfo.workspace = true
+tar = "0.4"
+tempfile = "3"
+tokio.workspace = true
+tokio-stream.workspace = true
+tokio-util.workspace = true
+toml = "0.8"
+toml_edit = "0.22"
+tracing.workspace = true
+tracing-appender = "0.2"
+tracing-subscriber.workspace = true
+url = "2"
+uuid.workspace = true
+which = "7"
+zip = "2"
+zstd = "0.13"
+
+[dev-dependencies]
+ctx-avf-linux-runtime = { path = "../ctx-avf-linux-runtime", features = ["test-support"] }
+ctx-bundled-assets = { path = "../ctx-bundled-assets", features = ["test-support"] }
+ctx-workspace-runtime = { path = "../ctx-workspace-runtime", features = ["test-support"] }
+blake2 = "0.10"
+ed25519-dalek = "2"
+fs2 = "0.4"
+jsonwebtoken = "9"
+
+[features]
+test-support = []
+fault_injection = ["ctx-store/fault_injection"]
+daemon-heap-prof = ["ctx-resource-utilization/daemon-heap-prof"]

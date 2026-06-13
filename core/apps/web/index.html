@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ctx</title>
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
+    <link rel="icon" href="/favicon.ico" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <link rel="preload" href="/fonts/VT323-Regular.ttf" as="font" type="font/ttf" crossorigin />
+    <style>
+      :root {
+        color-scheme: dark;
+        background: #1e1e1e;
+      }
+      :root[data-theme="light"] {
+        color-scheme: light;
+        background: #ffffff;
+      }
+      html,
+      body {
+        background: inherit;
+      }
+    </style>
+    <script>
+      (() => {
+        try {
+          const stored = window.localStorage.getItem("ctx.theme.mode");
+          const mode =
+            stored === "dark" || stored === "light" || stored === "system" ? stored : "system";
+          const prefersDark =
+            typeof window.matchMedia === "function" &&
+            window.matchMedia("(prefers-color-scheme: dark)").matches;
+          const variant = mode === "system" ? (prefersDark ? "dark" : "light") : mode;
+          document.documentElement.setAttribute("data-theme", variant);
+        } catch {
+          document.documentElement.setAttribute("data-theme", "dark");
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

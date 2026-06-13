@@ -1,0 +1,84 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Repo temp outputs
+tmp/
+.tmp/
+.artifacts/
+hn-demo-output/
+bazel-*
+
+# Editors
+.idea/
+*.swp
+*.swo
+
+# Rust
+target/
+**/target/
+target
+core/target
+core/apps/native/target
+**/*.rs.bk
+
+# Node / frontend builds
+node_modules/
+dist/
+**/dist/
+.vite/
+vite.config.ts.timestamp-*.mjs
+.turbo/
+.turbo
+**/.turbo/
+**/.turbo
+.turbo-cache/
+**/.turbo-cache/
+coverage/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Playwright
+playwright-report/
+test-results/
+/core/apps/desktop/automation/artifacts/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+/user.bazelrc
+
+# ctx temp/scratch directories (repo-scoped)
+**/.ctx/ctx-pack/tmp/
+**/.ctx/tmp/
+**/.ctx/docker-target/
+**/.ctx/attachments/
+**/.ctx/merge-queue/
+
+# Local git worktrees (agent/dev tooling)
+.worktrees/
+
+# Local databases (when using --data-dir inside the repo)
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+
+**/__pycache__/
+
+# Harness junk
+.kiro/
+
+# Generated VM content pack for site
+site/public/vm-assets/content-pack.json
+
+# Xcode
+*.xcodeproj/
+*.xcworkspace/
+*.xcuserstate
+*.xcuserdata/
+DerivedData/

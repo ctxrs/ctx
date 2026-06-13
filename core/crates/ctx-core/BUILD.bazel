@@ -1,0 +1,32 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("//tools/bazel:rust_deps.generated.bzl", "RUST_BAZEL_DEPS")
+
+package(default_visibility = ["//visibility:public"])
+
+_CTX_CORE_DEPS = RUST_BAZEL_DEPS["ctx-core"]
+
+rust_library(
+    name = "lib",
+    crate_name = "ctx_core",
+    crate_root = "src/lib.rs",
+    edition = "2021",
+    srcs = glob(["src/**/*.rs"]),
+    deps = _CTX_CORE_DEPS.deps,
+)
+
+rust_test(
+    name = "unit_tests",
+    crate = ":lib",
+)
+
+rust_test(
+    name = "workspace_payload_corpus",
+    crate_root = "tests/workspace_payload_corpus.rs",
+    edition = "2021",
+    srcs = ["tests/workspace_payload_corpus.rs"],
+    data = glob(["tests/corpus/workspace_payloads/**"]),
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "core/crates/ctx-core",
+    },
+    deps = [":lib"] + _CTX_CORE_DEPS.deps,
+)

@@ -1,0 +1,12 @@
+{
+  "turns": [
+    {
+      "thought": "Hm (openhands)",
+      "tools": [
+        {"tool_name": "exec_command", "input": {"cmd": "echo openhands"}, "output": "openhands"}
+      ],
+      "deltas": ["Ho", "la"],
+      "final": "Hola from openhands"
+    }
+  ]
+}

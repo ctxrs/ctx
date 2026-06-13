@@ -1,0 +1,9 @@
+# Release-only correctness suite for shipped non-auth flows.
+e2e/daemon-availability-update-banner.spec.ts
+e2e/updater-desktop-mismatch-confirmation.spec.ts
+e2e/updater-desktop-ui-contract.spec.ts
+e2e/updater-diagnostics-failure-safety.spec.ts
+e2e/updater-global-semantics.spec.ts
+e2e/updater-workbench-auto-apply.spec.ts
+e2e/workbench-archived-pagination.spec.ts
+e2e/workbench-archived-reload.spec.ts

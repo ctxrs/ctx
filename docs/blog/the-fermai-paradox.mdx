@@ -1,0 +1,146 @@
+---
+title: "The FermAI Paradox: Agents Need Their IDE Moment"
+description: "*Coding agents already feel powerful, yet their professional impact still lags. The missing piece is the environment around them.*"
+---
+
+<p style={{ marginTop: "-0.9rem", marginBottom: "1rem" }}>
+  Luca King · March 12, 2026
+</p>
+
+<div
+  style={{
+    height: "1px",
+    marginTop: "1.25rem",
+    marginBottom: "2rem",
+    background: "rgba(148, 163, 184, 0.28)",
+  }}
+/>
+
+Before modern IDEs, text editors were enough to edit source files. They were not enough to make software development professional.
+
+So over time, the industry built the rest of the stack around them: IDEs, language servers, debuggers, test runners, code review, CI, deployment pipelines. None of that existed because developers were incapable of typing. It existed because once software became important enough, plain text editing was no longer a sufficient operating environment.
+
+Coding agents are at the same stage now.
+
+The underlying capability is already startlingly good. But most of the industry is still trying to use that capability through raw terminals, tmux panes, and IDE panels that were designed for a human author sitting in a single checkout. The power is here. The professional interface is not.
+
+> **The FermAI Paradox**: coding agents feel shockingly capable in isolation, yet their impact on large-scale professional software projects still feels smaller than it should.
+
+If you spend time with power users, the paradox stops looking mysterious. They have already lived through a clear progression: first copying code out of chat windows, then accepting autocomplete, then using agents inside the IDE, and now steering raw CLI harnesses directly. At each step, the models got closer to the work, but the tooling around them lagged behind.
+
+## The capability threshold has already been crossed
+
+Today's best coding agents can read large codebases, plan multi-step changes, write and refactor code, run commands, add tests, iterate against failures, and review diffs. They are not magical. They still need steering. They still mis-scope work, overreach, and emit bad solutions when asked vague things. But that is no longer the same thing as being unuseful.
+
+When agent output looks bad, the failure is often not "AI cannot code." It is that the work was underspecified, underreviewed, or run in an environment that gives the agent too little context and the human too little control.
+
+That is why the most advanced users have already moved beyond the "write some code in my editor sidebar" phase. They want multiple agents. They want multiple worktrees. They want the agent to actually run the commands, write the tests, and keep going until the result is good. They want autonomy.
+
+And that is exactly where today's tooling starts to break down.
+
+## The bottleneck moved
+
+The bottleneck in serious software work is no longer generating code. It is managing agent work.
+
+Once the agent can actually do the work, the hard questions become:
+
+- How do I supervise several agents at once?
+- How do I isolate them so they do not collide?
+- How do I review their changes quickly and confidently?
+- How do I know what they actually did, what they ran, and why they made a decision?
+- How do I give them real autonomy without giving them unbounded access to my machine or network?
+- How do I let teams use different harnesses and models without creating a security and compliance mess?
+
+These are not model questions. They are environment questions.
+
+And that is why the impact of coding agents still looks muted inside large, brownfield, production codebases. The raw capability has outpaced the professional environment required to manage it.
+
+## Why the terminal is not enough
+
+Raw terminal workflows deserve credit. They are where much of the frontier energy has been.
+
+A terminal plus tmux plus git worktrees gets surprisingly far. It is the first moment where many developers realize that a coding agent is not just a fancy autocomplete engine. It is a worker.
+
+But the terminal is still the wrong long-term interface for supervising a fleet of workers.
+
+When several agents are running in parallel, the terminal gives you almost no professional scaffolding. Isolation is mostly manual. Setup and cleanup are manual. Review is clumsy. Sessions disappear into local tool state. Watching multiple worktrees in tiny panes is not serious review.
+
+The terminal is excellent at raw power. It is bad at management.
+
+## Why the IDE is not enough either
+
+The traditional IDE solves a different problem.
+
+It was built around a human directly editing source code inside one primary workspace. That is why it is so good at symbol navigation, refactors, breakpoints, hover information, and inline editing ergonomics. Those are excellent abstractions for human-driven development.
+
+They are not the right abstractions for agent-driven development.
+
+Once the agent is doing most of the typing, the center of gravity moves away from the editor and toward orchestration, supervision, review, verification, and provenance. A single-threaded panel attached to one checkout is too narrow for that. Even when an IDE adds "multiple agents," the workspace model still fights the workflow.
+
+The problem is not that IDEs are bad. It is that they were built for the wrong primary operator.
+
+## What a professional agent environment actually needs
+
+If coding agents are going to become a normal part of professional software engineering, they need more than a chat box and a run button. They need a real environment around them.
+
+**First-class supervision.** Tasks, sessions, worktrees, status, diffs, artifacts, and verification cannot be scattered across terminals, local state directories, and GitHub tabs. They need one place.
+
+**First-class review.** In an agent-led workflow, review is the new edit. The quality gate is not "the agent said it is done." The quality gate is the diff, the validation, and the evidence.
+
+**Durable provenance.** If an agent wrote the code, teams should be able to see the transcript, the decisions, the verification steps, and the connection between the resulting change and the session that produced it. "It was in somebody's local tool history until compaction deleted it" is not a professional answer.
+
+**Bounded autonomy.** Command-by-command permission popups are not a good long-term operating model for agents. The better model is to let them run freely inside explicit boundaries: isolated worktrees, containers, and granular network rules, with review, attribution, and verification at the end.
+
+**Harness and model freedom.** The right standardization point for a team is not one blessed agent. It is one blessed environment: one review surface, one transcript model, one security model, one attribution model, one operational story, regardless of which harness or model actually did the work.
+
+## This changes quality, not just speed
+
+The most interesting thing about agent-led development is not just that it is faster.
+
+It is that it changes what becomes economically reasonable to ask for.
+
+Before agents, many developers treated rigor as a tax. More tests meant more time. More review meant more waiting. More verification meant more toil. Even when we knew those things were good, we often underinvested because the cost was too visible.
+
+Agents change that tradeoff.
+
+In my own work, the biggest surprise has not been raw throughput. It has been how much easier it is to demand more rigor than I historically tolerated from myself. The important part is not just that more code comes out. It is that I can ask for more tests, more verification, more review, and more ambitious architecture at each step than I would have asked for in a purely manual workflow.
+
+I can ask an agent to write a broad test matrix instead of putting it off. I can ask a second agent to review a change and catch bugs I would have missed. I can push into designs that I would have avoided before because the implementation and follow-through cost felt too high.
+
+That does not happen automatically. It only happens when the environment makes it cheap to run the loop: plan, execute, verify, review, revise.
+
+If you only bolt an agent onto an existing editor and call it done, you miss most of the compounding effect.
+
+## The enterprise story is about control planes, not blessed agents
+
+This becomes even more obvious inside larger organizations.
+
+Most companies do not actually want to standardize forever on one agent stack. And most developers do not even have broad experience across the agent ecosystem yet, because the switching cost is still too high. Different harnesses already have meaningfully different strengths, workflows, and capabilities. Right now the lock-in often starts at the harness layer and sometimes extends down into the model family and endpoint too. What teams really want is a stable control plane around that changing execution layer.
+
+That is why "pick one agent and standardize on it" is the wrong answer.
+
+The layer that should be standardized is the environment around the agents.
+
+That is where the trust story lives. That is where the operational story lives. That is where the professional UX lives.
+
+## We need an ADE
+
+This is why I think coding agents need their IDE moment: an Agentic Development Environment (ADE).
+
+An ADE is not interesting because it adds more AI. It is interesting because it gives AI coding work the same thing the IDE once gave text editing: a professional operating environment.
+
+That means first-class task and worktree management. Diff-first review. Artifact capture for things like UI screenshots. Durable transcripts and attribution. Verification loops. Bounded autonomy inside containers and network policy. Vendor-neutral harness and model choice. A control plane for many agents, not just one.
+
+## So we built ctx
+
+ctx is our attempt to build that environment.
+
+It is a local-first, vendor-neutral ADE for coding agents. You can bring your own harnesses, your own models, and your own endpoints. The point is not to replace the agents. The point is to give them a professional place to work and give humans a professional place to supervise them, whether those agents are running locally or on a remote dev box you already control.
+
+We think that is the missing layer.
+
+The capability wave is already here. What is still missing is the interface, the review loop, the trust model, and the control plane that let teams use that capability professionally.
+
+That is the gap we are trying to close.
+
+If that resonates, ctx is now in public beta for Mac and Linux. You can try it, break it, and tell us what is missing. Feel free to [open issues](https://github.com/ctxrs/ctx/issues), [email us directly](mailto:contact@ctx.rs), or [join our Discord](https://discord.gg/mFHNEES7).

@@ -1,0 +1,12 @@
+ALTER TABLE worktrees ADD COLUMN bootstrap_status TEXT;
+ALTER TABLE worktrees ADD COLUMN bootstrap_started_at TEXT;
+ALTER TABLE worktrees ADD COLUMN bootstrap_finished_at TEXT;
+ALTER TABLE worktrees ADD COLUMN bootstrap_exit_code INTEGER;
+ALTER TABLE worktrees ADD COLUMN bootstrap_timeout_sec INTEGER;
+ALTER TABLE worktrees ADD COLUMN bootstrap_error TEXT;
+ALTER TABLE worktrees ADD COLUMN bootstrap_log_path TEXT;
+ALTER TABLE worktrees ADD COLUMN bootstrap_log_truncated INTEGER;
+ALTER TABLE worktrees ADD COLUMN bootstrap_config_path TEXT;
+ALTER TABLE worktrees ADD COLUMN bootstrap_config_key TEXT;
+ALTER TABLE worktrees ADD COLUMN bootstrap_command TEXT;
+ALTER TABLE worktrees ADD COLUMN bootstrap_script_path TEXT;

@@ -1,0 +1,12 @@
+/target/
+/Cargo.lock
+/bin/context*
+/bin/context-mcp*
+/bin/ctx*
+/bin/ctx-mcp*
+/bin/libvosk*
+/bin/*.dll
+/bin/*.dylib
+/bin/vosk*.dll
+/web/dist/
+/gen/

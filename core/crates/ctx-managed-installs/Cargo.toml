@@ -1,0 +1,38 @@
+[package]
+name = "ctx-managed-installs"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+ctx-bundled-assets = { path = "../ctx-bundled-assets" }
+ctx-core = { path = "../ctx-core" }
+ctx-harness-runtime = { path = "../ctx-harness-runtime" }
+ctx-provider-install = { path = "../ctx-provider-install" }
+ctx-provider-matrix = { path = "../ctx-provider-matrix" }
+ctx-providers = { path = "../ctx-providers" }
+futures = "0.3"
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+tokio.workspace = true
+toml = "0.8"
+toml_edit = "0.22"
+tracing.workspace = true
+bzip2 = "0.5"
+flate2 = "1"
+hex = "0.4"
+semver = "1"
+tar = "0.4"
+tempfile = "3"
+url = "2"
+uuid.workspace = true
+which = "7"
+zip = "2"
+
+[dev-dependencies]
+tempfile = "3"

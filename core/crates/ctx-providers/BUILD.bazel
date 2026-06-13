@@ -1,0 +1,73 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+rust_library(
+    name = "lib",
+    crate_name = "ctx_providers",
+    crate_root = "src/lib.rs",
+    edition = "2021",
+    srcs = glob(["src/**/*.rs"]),
+    deps = [
+        "//core/crates/ctx-core:lib",
+        "//core/crates/ctx-crp-protocol:lib",
+        "//core/crates/ctx-sandbox-contract:lib",
+        "@crates//:anyhow",
+        "@crates//:base64",
+        "@crates//:chrono",
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:sha2",
+        "@crates//:shlex",
+        "@crates//:tokio",
+        "@crates//:tracing",
+        "@crates//:uuid",
+    ],
+    proc_macro_deps = [
+        "@crates//:async-trait",
+    ],
+)
+
+rust_library(
+    name = "lib_fuzz_tests",
+    crate_name = "ctx_providers",
+    crate_root = "src/lib.rs",
+    crate_features = ["fuzz_tests"],
+    edition = "2021",
+    srcs = glob(["src/**/*.rs"]),
+    deps = [
+        "//core/crates/ctx-core:lib",
+        "//core/crates/ctx-crp-protocol:lib",
+        "//core/crates/ctx-sandbox-contract:lib",
+        "@crates//:anyhow",
+        "@crates//:base64",
+        "@crates//:chrono",
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:sha2",
+        "@crates//:shlex",
+        "@crates//:tokio",
+        "@crates//:tracing",
+        "@crates//:uuid",
+    ],
+    proc_macro_deps = [
+        "@crates//:async-trait",
+    ],
+)
+
+rust_test(
+    name = "unit_tests",
+    crate = ":lib",
+    deps = [
+        "@crates//:tempfile",
+    ],
+)
+
+rust_test(
+    name = "unit_tests_fuzz",
+    crate = ":lib_fuzz_tests",
+    deps = [
+        "@crates//:rand",
+        "@crates//:tempfile",
+    ],
+)

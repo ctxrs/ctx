@@ -1,0 +1,65 @@
+---
+title: "Containerization"
+description: "Choose between host and sandbox execution"
+---
+
+## Overview
+
+ctx exposes two execution modes for agent work:
+
+- `Host`
+- `Sandbox`
+
+`Host` is the low-isolation option for direct local execution.
+
+`Sandbox` is the isolated option for autonomous agent work.
+
+If you are unsure which mode to start with, use `Sandbox` first and move to `Host` only when you intentionally need direct access to your local machine.
+
+## Execution modes
+
+## Host
+
+Choose `Host` when:
+
+- you want direct access to your local environment
+- you are intentionally prioritizing speed and convenience over isolation
+- you do not need sandbox-enforced network or filesystem boundaries
+
+## Sandbox
+
+Choose `Sandbox` when:
+
+- you want isolated execution for agent work
+- you want more reproducible runtime behavior across tasks
+- you want explicit sandbox-level policy such as network controls
+- you want workspace changes to stay reviewable and easier to reason about
+
+## Important boundary rule
+
+There is no host-mounted sandbox mode in the intended product model.
+
+- If you want direct host files and minimal ceremony, use `Host`.
+- If you want isolation for autonomous agents, use `Sandbox`.
+
+## Practical default
+
+- Default to `Sandbox` for normal agent work.
+- Use `Host` only when you intentionally want the escape hatch.
+
+## Quick decision rule
+
+- Choose `Sandbox` when you want stronger isolation, cleaner repeatability, or explicit network policy.
+- Choose `Host` when you are debugging locally and you knowingly want the agent to use your existing machine setup directly.
+
+## Common pitfalls
+
+- Missing dependencies inside the sandbox: move setup into bootstrap or environment configuration instead of assuming the host already has everything installed.
+- Different results across runs: keep the sandbox environment and setup steps explicit.
+- Network surprises: pair sandbox usage with a clear egress policy.
+
+## Related pages
+
+- [Network Egress Policy](/network-egress-policy)
+- [Permissions and Safety](/settings/permissions-and-safety)
+- [How Worktrees Work](/worktrees-runtime/how-worktrees-work)

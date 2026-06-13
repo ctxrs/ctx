@@ -1,0 +1,26 @@
+{
+  "turns": [
+    {
+      "events": [
+        {"kind": "thought", "content": "Investigating interleaved assistant/tool boundaries"},
+        {"kind": "delta", "content": "The source patch is copied over."},
+        {
+          "kind": "tool",
+          "tool_name": "exec_command",
+          "input": {"cmd": "echo tool-1"},
+          "output": "tool-1"
+        },
+        {"kind": "delta", "content": " The Rust test runs are queued behind another Cargo lock."},
+        {
+          "kind": "tool",
+          "tool_name": "exec_command",
+          "input": {"cmd": "echo tool-2"},
+          "output": "tool-2"
+        },
+        {"kind": "delta", "content": " I am using that wait time to trace the tool subtitle path."},
+        {"kind": "final", "content": "The source patch is copied over. The Rust test runs are queued behind another Cargo lock. I am using that wait time to trace the tool subtitle path."}
+      ],
+      "final": "The source patch is copied over. The Rust test runs are queued behind another Cargo lock. I am using that wait time to trace the tool subtitle path."
+    }
+  ]
+}

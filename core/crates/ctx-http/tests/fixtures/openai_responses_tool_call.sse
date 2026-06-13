@@ -1,0 +1,8 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp-1"}}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call-1","name":"lookup_weather","arguments":"{\"city\":\"Boston\"}"}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp-1","output":[]}}

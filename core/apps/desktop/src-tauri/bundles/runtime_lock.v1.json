@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "policy": {
+    "provider_matrix": "bundled_only",
+    "desktop_launch": "canonical_only"
+  },
+  "required": {
+    "provider_ids": [
+      "acp-crp-bridge",
+      "codex",
+      "gemini",
+      "cursor",
+      "pi",
+      "droid",
+      "goose",
+      "openhands",
+      "qwen"
+    ],
+    "runtime_ids": [
+      "node",
+      "python"
+    ],
+    "image_ids": [
+      "ctx-harness"
+    ]
+  }
+}

@@ -1,0 +1,31 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("//tools/bazel:rust_deps.generated.bzl", "RUST_BAZEL_DEPS")
+
+package(default_visibility = ["//visibility:public"])
+
+_CTX_BUNDLED_ASSETS_DEPS = RUST_BAZEL_DEPS["ctx-bundled-assets"]
+
+rust_library(
+    name = "lib",
+    crate_name = "ctx_bundled_assets",
+    crate_root = "src/lib.rs",
+    edition = "2021",
+    srcs = glob(["src/**/*.rs"]),
+    deps = _CTX_BUNDLED_ASSETS_DEPS.deps,
+)
+
+rust_library(
+    name = "lib_test_support",
+    crate_name = "ctx_bundled_assets",
+    crate_root = "src/lib.rs",
+    crate_features = ["test-support"],
+    edition = "2021",
+    srcs = glob(["src/**/*.rs"]),
+    deps = _CTX_BUNDLED_ASSETS_DEPS.deps,
+)
+
+rust_test(
+    name = "unit_tests",
+    crate = ":lib",
+    deps = _CTX_BUNDLED_ASSETS_DEPS.dev_deps,
+)

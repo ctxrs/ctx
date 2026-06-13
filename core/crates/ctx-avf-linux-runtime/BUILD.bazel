@@ -1,0 +1,94 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+CTX_AVF_LINUX_RUNTIME_TEST_DEPS = [
+    "@crates//:flate2",
+    "@crates//:tar",
+    "@crates//:tempfile",
+]
+
+rust_library(
+    name = "lib",
+    crate_name = "ctx_avf_linux_runtime",
+    crate_root = "src/lib.rs",
+    edition = "2021",
+    srcs = glob(["src/**/*.rs"]),
+    deps = [
+        "//core/crates/ctx-bundled-assets:lib",
+        "//core/crates/ctx-core:lib",
+        "//core/crates/ctx-harness-setup:lib",
+        "//core/crates/ctx-runtime-assets:lib",
+        "//core/crates/ctx-sandbox-container-runtime:lib",
+        "//core/crates/ctx-sandbox-contract:lib",
+        "@crates//:anyhow",
+        "@crates//:futures",
+        "@crates//:hex",
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:sha2",
+        "@crates//:tokio",
+        "@crates//:tracing",
+        "@crates//:url",
+        "@crates//:uuid",
+    ],
+)
+
+rust_library(
+    name = "lib_test_support",
+    crate_name = "ctx_avf_linux_runtime",
+    crate_root = "src/lib.rs",
+    crate_features = ["test-support"],
+    edition = "2021",
+    srcs = glob(["src/**/*.rs"]),
+    deps = [
+        "//core/crates/ctx-bundled-assets:lib_test_support",
+        "//core/crates/ctx-core:lib",
+        "//core/crates/ctx-harness-setup:lib",
+        "//core/crates/ctx-runtime-assets:lib",
+        "//core/crates/ctx-sandbox-container-runtime:lib_test_support",
+        "//core/crates/ctx-sandbox-contract:lib",
+        "@crates//:anyhow",
+        "@crates//:futures",
+        "@crates//:hex",
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:sha2",
+        "@crates//:tokio",
+        "@crates//:tracing",
+        "@crates//:url",
+        "@crates//:uuid",
+    ],
+)
+
+rust_test(
+    name = "unit_tests",
+    crate = ":lib_test_support",
+    args = [
+        "--skip=avf_linux_vm::tests::",
+    ],
+    deps = CTX_AVF_LINUX_RUNTIME_TEST_DEPS,
+)
+
+rust_test(
+    name = "unit_tests_avf_linux_vm",
+    crate = ":lib_test_support",
+    args = [
+        "avf_linux_vm::tests::",
+        "--test-threads=1",
+    ],
+    deps = CTX_AVF_LINUX_RUNTIME_TEST_DEPS,
+    timeout = "long",
+)
+
+rust_test(
+    name = "helper_path_test_support",
+    crate_name = "helper_path_test_support",
+    crate_root = "tests/helper_path_test_support.rs",
+    edition = "2021",
+    srcs = ["tests/helper_path_test_support.rs"],
+    deps = [
+        ":lib_test_support",
+        "@crates//:tempfile",
+    ],
+)

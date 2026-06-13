@@ -1,0 +1,8 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp-2"}}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","id":"msg-1","content":[{"type":"output_text","text":"It is 72F and sunny."}]}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp-2","output":[]}}

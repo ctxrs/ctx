@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "typeRoots": ["./node_modules/@types"],
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "strict": true,
+    "baseUrl": ".",
+    "paths": {
+      "@ctx/design": ["../../packages/ctx-design/src/index.ts"],
+      "@ctx/session-supervisor-core": ["../../packages/session-supervisor-core/src/index.ts"],
+      "@ctx/session-thread-layout": ["../../packages/session-thread-layout/src/index.ts"],
+      "@ctx/types": ["../../packages/ctx-types/src/index.ts"],
+      "@pretext-virtualizer/core": ["../../packages/pretext-virtualizer-core/src/index.ts"],
+      "@pretext-virtualizer/interface": ["../../packages/pretext-virtualizer-interface/src/index.ts"]
+    }
+  },
+  "include": ["src", "vitest.setup.ts"]
+}

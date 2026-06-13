@@ -1,0 +1,16 @@
+[package]
+name = "ctx-merge-queue"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+ctx-core = { path = "../ctx-core" }
+ctx-fs = { path = "../ctx-fs" }
+ctx-store = { path = "../ctx-store" }
+ctx-workspace-config = { path = "../ctx-workspace-config" }
+tokio.workspace = true
+tracing.workspace = true

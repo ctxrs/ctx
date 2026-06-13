@@ -1,0 +1,4 @@
+{"type":"bind_turn","app_turn_id":"turn_app_3","crp_turn_id":"turn_crp_3"}
+{"type":"notification","method":"turn/started","params":{"threadId":"thr_fixture","turn":{"id":"turn_app_3","items":[],"status":"inProgress","error":null}}}
+{"type":"notification","method":"item/started","params":{"threadId":"thr_fixture","turnId":"turn_app_3","item":{"type":"fileChange","id":"patch_1","changes":[{"path":"README.md","kind":{"move_path":null,"type":"update"},"diff":"@@ -1 +1 @@\n-old\n+new\n"}],"status":"inProgress"}}}
+{"type":"notification","method":"item/completed","params":{"threadId":"thr_fixture","turnId":"turn_app_3","item":{"type":"fileChange","id":"patch_1","changes":[{"path":"README.md","kind":{"move_path":null,"type":"update"},"diff":"@@ -1 +1 @@\n-old\n+new\n"}],"status":"completed"}}}

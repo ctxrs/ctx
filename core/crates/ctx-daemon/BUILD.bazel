@@ -1,0 +1,348 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("//tools/bazel:rust_deps.generated.bzl", "RUST_BAZEL_DEPS")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+CTX_DAEMON_RUSTC_ENV = {
+    "CARGO_MANIFEST_DIR": "core/crates/ctx-daemon",
+    "CARGO_PKG_VERSION": "0.65.32",
+}
+
+filegroup(
+    name = "daemon_test_fixture_data",
+    srcs = [
+        "src/daemon/workspace_runtime/tests/avf_fixtures/sandbox_cli_shim.sh",
+    ],
+)
+
+CTX_DAEMON_COMPILE_DATA = [
+    "//core/apps/desktop/src-tauri/config:updater_pubkey.txt",
+    "//core/packages:web-session-worker/bin/auth.mjs",
+    "//core/packages:web-session-worker/bin/worker.mjs",
+    "//core/packages:web-session-worker/package.json",
+    ":daemon_test_fixture_data",
+]
+
+CTX_DAEMON_TEST_ARGS = []
+CTX_DAEMON_UNIT_TEST_SERIAL_ARGS = CTX_DAEMON_TEST_ARGS + [
+    "--test-threads=1",
+]
+CTX_DAEMON_DAEMON_UNIT_TEST_ARGS = CTX_DAEMON_UNIT_TEST_SERIAL_ARGS + [
+    "daemon::",
+    "--skip=daemon::execution_effective::",
+    "--skip=daemon::merge_queue::",
+    "--skip=daemon::scheduler::",
+    "--skip=daemon::storage_guard::",
+    "--skip=daemon::workspace_runtime::",
+    "--skip=daemon::workspaces::vcs_hooks::",
+]
+CTX_DAEMON_EXECUTION_EFFECTIVE_UNIT_TEST_ARGS = CTX_DAEMON_UNIT_TEST_SERIAL_ARGS + [
+    "daemon::execution_effective::",
+]
+CTX_DAEMON_MERGE_QUEUE_UNIT_TEST_ARGS = CTX_DAEMON_TEST_ARGS + [
+    "daemon::merge_queue::",
+    "--skip=daemon::merge_queue::tests::resume::enabled_workspace_queued_rows_resume_only_after_open",
+]
+CTX_DAEMON_MERGE_QUEUE_ENABLED_WORKSPACE_RESUME_AFTER_OPEN_TEST_ARGS = CTX_DAEMON_TEST_ARGS + [
+    "--exact",
+    "daemon::merge_queue::tests::resume::enabled_workspace_queued_rows_resume_only_after_open",
+]
+CTX_DAEMON_SCHEDULER_UNIT_TEST_ARGS = CTX_DAEMON_TEST_ARGS + [
+    "daemon::scheduler::",
+]
+CTX_DAEMON_STORAGE_GUARD_UNIT_TEST_ARGS = CTX_DAEMON_UNIT_TEST_SERIAL_ARGS + [
+    "daemon::storage_guard::",
+]
+CTX_DAEMON_VCS_HOOKS_UNIT_TEST_ARGS = CTX_DAEMON_UNIT_TEST_SERIAL_ARGS + [
+    "daemon::workspaces::vcs_hooks::",
+]
+CTX_DAEMON_WORKSPACE_RUNTIME_UNIT_TEST_ARGS = CTX_DAEMON_UNIT_TEST_SERIAL_ARGS + [
+    "daemon::workspace_runtime::",
+    "--skip=daemon::workspace_runtime::reclaim_unit_tests::idle_runtime_reclaim_stops_machine_even_with_running_ctx_harness_container",
+    "--skip=daemon::workspace_runtime::tests::runtime_prepare::prepare_reuses_running_workspace_container_without_front_loading_image_readiness",
+    "--skip=daemon::workspace_runtime::tests::runtime_prepare::prepare_starts_cached_workspace_container_when_sandbox_cli_reports_it_stopped",
+    "--skip=daemon::workspace_runtime::tests::reclaim::maybe_reclaim_sandbox_machine_stops_idle_machine",
+    "--skip=daemon::workspace_runtime::tests::reclaim::maybe_reclaim_sandbox_machine_stops_idle_runtime_with_running_workspace_containers",
+    "--skip=daemon::workspace_runtime::tests::avf_workspace::container_status::container_status_reports_running_avf_workspace_container",
+    "--skip=daemon::workspace_runtime::tests::avf_workspace::workspace_container::ensure_workspace_container_starts_avf_workspace_vm",
+    "--skip=daemon::workspace_runtime::tests::avf_workspace::workspace_container::ensure_workspace_container_for_worktree_keeps_avf_workspace_container_ready",
+    "--skip=daemon::workspace_runtime::tests::machine_recovery::materialization::ensure_sandbox_machine_materialized_defers_reconfiguration_when_machine_state_is_unknown_and_engine_unreachable",
+    "--skip=daemon::workspace_runtime::tests::machine_recovery::materialization::ensure_sandbox_machine_materialized_defers_reconfiguration_when_machine_is_running_but_engine_unreachable",
+    "--skip=daemon::workspace_runtime::tests::machine_recovery::materialization::ensure_sandbox_machine_materialized_recreates_machine_for_memory_profile_change_when_engine_is_down",
+]
+CTX_DAEMON_WORKSPACE_RUNTIME_RECLAIM_IDLE_RUNTIME_WITH_PARKED_CONTAINERS_TEST_ARGS = CTX_DAEMON_TEST_ARGS + [
+    "--exact",
+    "daemon::workspace_runtime::reclaim_unit_tests::idle_runtime_reclaim_stops_machine_even_with_running_ctx_harness_container",
+]
+CTX_DAEMON_WORKSPACE_RUNTIME_REUSES_RUNNING_CONTAINER_TEST_ARGS = CTX_DAEMON_TEST_ARGS + [
+    "--exact",
+    "daemon::workspace_runtime::tests::runtime_prepare::prepare_reuses_running_workspace_container_without_front_loading_image_readiness",
+]
+CTX_DAEMON_WORKSPACE_RUNTIME_PREPARE_STARTS_CACHED_CONTAINER_TEST_ARGS = CTX_DAEMON_TEST_ARGS + [
+    "--exact",
+    "daemon::workspace_runtime::tests::runtime_prepare::prepare_starts_cached_workspace_container_when_sandbox_cli_reports_it_stopped",
+]
+CTX_DAEMON_WORKSPACE_RUNTIME_RECLAIM_IDLE_MACHINE_TEST_ARGS = CTX_DAEMON_TEST_ARGS + [
+    "--exact",
+    "daemon::workspace_runtime::tests::reclaim::maybe_reclaim_sandbox_machine_stops_idle_machine",
+]
+CTX_DAEMON_WORKSPACE_RUNTIME_RECLAIM_IDLE_RUNTIME_WITH_CONTAINERS_TEST_ARGS = CTX_DAEMON_TEST_ARGS + [
+    "--exact",
+    "daemon::workspace_runtime::tests::reclaim::maybe_reclaim_sandbox_machine_stops_idle_runtime_with_running_workspace_containers",
+]
+CTX_DAEMON_WORKSPACE_RUNTIME_RECLAIM_CTX_HARNESS_CONTAINER_TEST_ARGS = CTX_DAEMON_TEST_ARGS + [
+    "--exact",
+    "daemon::workspace_runtime::reclaim_unit_tests::idle_runtime_reclaim_stops_machine_even_with_running_ctx_harness_container",
+]
+CTX_DAEMON_WORKSPACE_RUNTIME_CONTAINER_STATUS_AVF_TEST_ARGS = CTX_DAEMON_TEST_ARGS + [
+    "--exact",
+    "daemon::workspace_runtime::tests::avf_workspace::container_status::container_status_reports_running_avf_workspace_container",
+]
+CTX_DAEMON_WORKSPACE_RUNTIME_STARTS_AVF_WORKSPACE_VM_TEST_ARGS = CTX_DAEMON_TEST_ARGS + [
+    "--exact",
+    "daemon::workspace_runtime::tests::avf_workspace::workspace_container::ensure_workspace_container_starts_avf_workspace_vm",
+]
+CTX_DAEMON_WORKSPACE_RUNTIME_KEEPS_AVF_WORKSPACE_CONTAINER_READY_TEST_ARGS = CTX_DAEMON_TEST_ARGS + [
+    "--exact",
+    "daemon::workspace_runtime::tests::avf_workspace::workspace_container::ensure_workspace_container_for_worktree_keeps_avf_workspace_container_ready",
+]
+CTX_DAEMON_WORKSPACE_RUNTIME_UNKNOWN_MACHINE_STATE_ENGINE_UNREACHABLE_TEST_ARGS = CTX_DAEMON_TEST_ARGS + [
+    "--exact",
+    "daemon::workspace_runtime::tests::machine_recovery::materialization::ensure_sandbox_machine_materialized_defers_reconfiguration_when_machine_state_is_unknown_and_engine_unreachable",
+]
+CTX_DAEMON_WORKSPACE_RUNTIME_RUNNING_UNREACHABLE_MACHINE_RECONFIGURATION_TEST_ARGS = CTX_DAEMON_TEST_ARGS + [
+    "--exact",
+    "daemon::workspace_runtime::tests::machine_recovery::materialization::ensure_sandbox_machine_materialized_defers_reconfiguration_when_machine_is_running_but_engine_unreachable",
+]
+CTX_DAEMON_WORKSPACE_RUNTIME_RECREATES_MACHINE_FOR_MEMORY_PROFILE_CHANGE_TEST_ARGS = CTX_DAEMON_TEST_ARGS + [
+    "--exact",
+    "daemon::workspace_runtime::tests::machine_recovery::materialization::ensure_sandbox_machine_materialized_recreates_machine_for_memory_profile_change_when_engine_is_down",
+]
+
+_CTX_DAEMON_DEPS = RUST_BAZEL_DEPS["ctx-daemon"]
+_CTX_DAEMON_TEST_SUPPORT_REPLACED_DEPS = [
+    "//core/crates/ctx-avf-linux-runtime:lib",
+    "//core/crates/ctx-execution-runtime:lib",
+    "//core/crates/ctx-harness-runtime:lib",
+    "//core/crates/ctx-observability:lib",
+    "//core/crates/ctx-sandbox-container-runtime:lib",
+    "//core/crates/ctx-sandbox-materialization:lib",
+    "//core/crates/ctx-workspace-container:lib",
+    "//core/crates/ctx-workspace-runtime:lib",
+]
+_CTX_DAEMON_TEST_SUPPORT_DEPS = [
+    dep
+    for dep in _CTX_DAEMON_DEPS.deps
+    if dep not in _CTX_DAEMON_TEST_SUPPORT_REPLACED_DEPS
+] + [
+    "//core/crates/ctx-avf-linux-runtime:lib_test_support",
+    "//core/crates/ctx-bundled-assets:lib_test_support",
+    "//core/crates/ctx-execution-runtime:lib_test_support",
+    "//core/crates/ctx-harness-runtime:lib_test_support",
+    "//core/crates/ctx-observability:lib_test_support",
+    "//core/crates/ctx-sandbox-container-runtime:lib_test_support",
+    "//core/crates/ctx-sandbox-materialization:lib_test_support",
+    "//core/crates/ctx-workspace-container:lib_test_support",
+    "//core/crates/ctx-workspace-runtime:lib_test_support",
+    "@crates//:blake2",
+    "@crates//:ed25519-dalek",
+    "@crates//:fs2",
+    "@crates//:jsonwebtoken",
+]
+
+rust_library(
+    name = "lib",
+    crate_name = "ctx_daemon",
+    crate_root = "src/lib.rs",
+    edition = "2021",
+    srcs = glob(["src/**/*.rs"]),
+    compile_data = CTX_DAEMON_COMPILE_DATA,
+    rustc_env = CTX_DAEMON_RUSTC_ENV,
+    deps = _CTX_DAEMON_DEPS.deps,
+    proc_macro_deps = _CTX_DAEMON_DEPS.proc_macro_deps,
+)
+
+rust_library(
+    name = "lib_test_support",
+    crate_name = "ctx_daemon",
+    crate_root = "src/lib.rs",
+    crate_features = ["test-support"],
+    edition = "2021",
+    srcs = glob(["src/**/*.rs"]),
+    compile_data = CTX_DAEMON_COMPILE_DATA,
+    rustc_env = CTX_DAEMON_RUSTC_ENV,
+    deps = _CTX_DAEMON_TEST_SUPPORT_DEPS,
+    proc_macro_deps = _CTX_DAEMON_DEPS.proc_macro_deps + _CTX_DAEMON_DEPS.dev_proc_macro_deps,
+)
+
+rust_test(
+    name = "unit_tests_daemon",
+    crate = ":lib_test_support",
+    args = CTX_DAEMON_DAEMON_UNIT_TEST_ARGS,
+    data = CTX_DAEMON_COMPILE_DATA,
+    timeout = "long",
+)
+
+rust_test(
+    name = "unit_tests_execution_effective",
+    crate = ":lib_test_support",
+    args = CTX_DAEMON_EXECUTION_EFFECTIVE_UNIT_TEST_ARGS,
+    data = CTX_DAEMON_COMPILE_DATA,
+)
+
+rust_test(
+    name = "unit_tests_merge_queue",
+    crate = ":lib_test_support",
+    args = CTX_DAEMON_MERGE_QUEUE_UNIT_TEST_ARGS,
+    data = CTX_DAEMON_COMPILE_DATA,
+)
+
+rust_test(
+    name = "unit_tests_merge_queue_enabled_workspace_resume_after_open",
+    crate = ":lib_test_support",
+    args = CTX_DAEMON_MERGE_QUEUE_ENABLED_WORKSPACE_RESUME_AFTER_OPEN_TEST_ARGS,
+    data = CTX_DAEMON_COMPILE_DATA,
+    tags = ["exclusive"],
+    timeout = "long",
+)
+
+rust_test(
+    name = "unit_tests_scheduler",
+    crate = ":lib_test_support",
+    args = CTX_DAEMON_SCHEDULER_UNIT_TEST_ARGS,
+    data = CTX_DAEMON_COMPILE_DATA,
+)
+
+rust_test(
+    name = "unit_tests_storage_guard",
+    crate = ":lib_test_support",
+    args = CTX_DAEMON_STORAGE_GUARD_UNIT_TEST_ARGS,
+    data = CTX_DAEMON_COMPILE_DATA,
+    timeout = "long",
+)
+
+rust_test(
+    name = "unit_tests_vcs_hooks",
+    crate = ":lib_test_support",
+    args = CTX_DAEMON_VCS_HOOKS_UNIT_TEST_ARGS,
+    data = CTX_DAEMON_COMPILE_DATA,
+    timeout = "long",
+)
+
+rust_test(
+    name = "unit_tests_workspace_runtime",
+    crate = ":lib_test_support",
+    args = CTX_DAEMON_WORKSPACE_RUNTIME_UNIT_TEST_ARGS,
+    data = CTX_DAEMON_COMPILE_DATA,
+    timeout = "long",
+)
+
+rust_test(
+    name = "unit_tests_workspace_runtime_reclaim_idle_runtime_with_parked_containers",
+    crate = ":lib_test_support",
+    args = CTX_DAEMON_WORKSPACE_RUNTIME_RECLAIM_IDLE_RUNTIME_WITH_PARKED_CONTAINERS_TEST_ARGS,
+    data = CTX_DAEMON_COMPILE_DATA,
+    tags = ["exclusive"],
+    timeout = "long",
+)
+
+rust_test(
+    name = "unit_tests_workspace_runtime_reuses_running_container",
+    crate = ":lib_test_support",
+    args = CTX_DAEMON_WORKSPACE_RUNTIME_REUSES_RUNNING_CONTAINER_TEST_ARGS,
+    data = CTX_DAEMON_COMPILE_DATA,
+    tags = ["exclusive"],
+    timeout = "long",
+)
+
+rust_test(
+    name = "unit_tests_workspace_runtime_prepare_starts_cached_container",
+    crate = ":lib_test_support",
+    args = CTX_DAEMON_WORKSPACE_RUNTIME_PREPARE_STARTS_CACHED_CONTAINER_TEST_ARGS,
+    data = CTX_DAEMON_COMPILE_DATA,
+    tags = ["exclusive"],
+    timeout = "long",
+)
+
+rust_test(
+    name = "unit_tests_workspace_runtime_reclaim_idle_machine",
+    crate = ":lib_test_support",
+    args = CTX_DAEMON_WORKSPACE_RUNTIME_RECLAIM_IDLE_MACHINE_TEST_ARGS,
+    data = CTX_DAEMON_COMPILE_DATA,
+    tags = ["exclusive"],
+    timeout = "long",
+)
+
+rust_test(
+    name = "unit_tests_workspace_runtime_reclaim_idle_runtime_with_containers",
+    crate = ":lib_test_support",
+    args = CTX_DAEMON_WORKSPACE_RUNTIME_RECLAIM_IDLE_RUNTIME_WITH_CONTAINERS_TEST_ARGS,
+    data = CTX_DAEMON_COMPILE_DATA,
+    tags = ["exclusive"],
+    timeout = "long",
+)
+
+rust_test(
+    name = "unit_tests_workspace_runtime_reclaim_ctx_harness_container",
+    crate = ":lib_test_support",
+    args = CTX_DAEMON_WORKSPACE_RUNTIME_RECLAIM_CTX_HARNESS_CONTAINER_TEST_ARGS,
+    data = CTX_DAEMON_COMPILE_DATA,
+    tags = ["exclusive"],
+    timeout = "long",
+)
+
+rust_test(
+    name = "unit_tests_workspace_runtime_container_status_avf",
+    crate = ":lib_test_support",
+    args = CTX_DAEMON_WORKSPACE_RUNTIME_CONTAINER_STATUS_AVF_TEST_ARGS,
+    data = CTX_DAEMON_COMPILE_DATA,
+    tags = ["exclusive"],
+    timeout = "long",
+)
+
+rust_test(
+    name = "unit_tests_workspace_runtime_starts_avf_workspace_vm",
+    crate = ":lib_test_support",
+    args = CTX_DAEMON_WORKSPACE_RUNTIME_STARTS_AVF_WORKSPACE_VM_TEST_ARGS,
+    data = CTX_DAEMON_COMPILE_DATA,
+    tags = ["exclusive"],
+    timeout = "long",
+)
+
+rust_test(
+    name = "unit_tests_workspace_runtime_keeps_avf_workspace_container_ready",
+    crate = ":lib_test_support",
+    args = CTX_DAEMON_WORKSPACE_RUNTIME_KEEPS_AVF_WORKSPACE_CONTAINER_READY_TEST_ARGS,
+    data = CTX_DAEMON_COMPILE_DATA,
+    tags = ["exclusive"],
+    timeout = "long",
+)
+
+rust_test(
+    name = "unit_tests_workspace_runtime_unknown_machine_state_engine_unreachable",
+    crate = ":lib_test_support",
+    args = CTX_DAEMON_WORKSPACE_RUNTIME_UNKNOWN_MACHINE_STATE_ENGINE_UNREACHABLE_TEST_ARGS,
+    data = CTX_DAEMON_COMPILE_DATA,
+    tags = ["exclusive"],
+    timeout = "long",
+)
+
+rust_test(
+    name = "unit_tests_workspace_runtime_running_unreachable_machine_reconfiguration",
+    crate = ":lib_test_support",
+    args = CTX_DAEMON_WORKSPACE_RUNTIME_RUNNING_UNREACHABLE_MACHINE_RECONFIGURATION_TEST_ARGS,
+    data = CTX_DAEMON_COMPILE_DATA,
+    tags = ["exclusive"],
+    timeout = "long",
+)
+
+rust_test(
+    name = "unit_tests_workspace_runtime_recreates_machine_for_memory_profile_change",
+    crate = ":lib_test_support",
+    args = CTX_DAEMON_WORKSPACE_RUNTIME_RECREATES_MACHINE_FOR_MEMORY_PROFILE_CHANGE_TEST_ARGS,
+    data = CTX_DAEMON_COMPILE_DATA,
+    tags = ["exclusive"],
+    timeout = "long",
+)

@@ -1,0 +1,42 @@
+---
+title: "Why Worktrees"
+description: "Why worktree isolation is core to reliable agent workflows"
+---
+
+## Overview
+
+Worktrees are the foundation for reliable multi-task and multi-agent workflows in ctx.
+
+Without worktree isolation, many sessions share one checkout and changes blend together. That lowers review quality and increases rework.
+
+## What goes wrong without worktrees
+
+- It becomes hard to tell which task introduced which edits.
+- Context switching between tasks is noisy and error-prone.
+- Reverting one bad attempt can affect unrelated work.
+- Validation results become harder to trust per task.
+
+## What improves with worktrees
+
+- Each task has an isolated change set.
+- Diffs map directly to one task outcome.
+- Parallel execution is safer.
+- Cleanup is simple: revise or discard by task.
+
+## When a single worktree is enough
+
+If you are running one small task at a time, a single worktree flow can be fine.
+
+As soon as you run parallel tasks or longer sessions, dedicated worktrees become the safer default.
+
+## Recommended baseline
+
+- Use isolated worktrees for normal task execution.
+- Keep task scope narrow so each worktree diff stays reviewable.
+- Use bootstrap settings so new worktrees start with consistent setup.
+
+## Related pages
+
+- [What Is a Worktree?](/what-is-a-worktree)
+- [How Worktrees Work](/worktrees-runtime/how-worktrees-work)
+- [Containerization](/containerization)

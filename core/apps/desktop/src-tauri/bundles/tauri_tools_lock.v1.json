@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-03-29T20:55:00.000Z",
+  "entries": [
+    {
+      "id": "apprun-arm64",
+      "owner": "tauri-apps",
+      "repo": "binary-releases",
+      "tag": "apprun-old",
+      "asset": "AppRun-aarch64",
+      "cache_filename": "AppRun-aarch64",
+      "sha256": "072f17c0895a85c490282fe5395c5007e5fc75da727e553b3b8fb680feb11578",
+      "size_bytes": 35360,
+      "platforms": [
+        "linux-arm64"
+      ]
+    },
+    {
+      "id": "apprun-x64",
+      "owner": "tauri-apps",
+      "repo": "binary-releases",
+      "tag": "apprun-old",
+      "asset": "AppRun-x86_64",
+      "cache_filename": "AppRun-x86_64",
+      "sha256": "f30140a43a0a59e46db21bdefdf749b9e9f2c6946e92afabbacf98b8ae73fb4f",
+      "size_bytes": 31552,
+      "platforms": [
+        "linux-x64"
+      ]
+    },
+    {
+      "id": "linuxdeploy-arm64",
+      "owner": "tauri-apps",
+      "repo": "binary-releases",
+      "tag": "linuxdeploy",
+      "asset": "linuxdeploy-aarch64.AppImage",
+      "cache_filename": "linuxdeploy-aarch64.AppImage",
+      "sha256": "b12b5cc57bd0921e1f98d73f58aa364503bc1a27f54b7a69fd2870bce7fa2f55",
+      "size_bytes": 10350976,
+      "platforms": [
+        "linux-arm64"
+      ]
+    },
+    {
+      "id": "linuxdeploy-plugin-appimage-arm64",
+      "owner": "linuxdeploy",
+      "repo": "linuxdeploy-plugin-appimage",
+      "tag": "continuous",
+      "asset": "linuxdeploy-plugin-appimage-aarch64.AppImage",
+      "cache_filename": "linuxdeploy-plugin-appimage-aarch64.AppImage",
+      "sha256": "0c4cb285e31820321b0c44fa2a474eb26ec56945df4c447279751b18f2a8b8a5",
+      "size_bytes": 15981064,
+      "platforms": [
+        "linux-arm64"
+      ]
+    },
+    {
+      "id": "linuxdeploy-x64",
+      "owner": "tauri-apps",
+      "repo": "binary-releases",
+      "tag": "linuxdeploy",
+      "asset": "linuxdeploy-x86_64.AppImage",
+      "cache_filename": "linuxdeploy-x86_64.AppImage",
+      "sha256": "e762bea85c8eb0d4b3508d46e5c1f037f717d0f9303ae3b4aafc8b04991fa1ef",
+      "size_bytes": 13264064,
+      "platforms": [
+        "linux-x64"
+      ]
+    },
+    {
+      "id": "linuxdeploy-plugin-appimage-x64",
+      "owner": "linuxdeploy",
+      "repo": "linuxdeploy-plugin-appimage",
+      "tag": "continuous",
+      "asset": "linuxdeploy-plugin-appimage-x86_64.AppImage",
+      "cache_filename": "linuxdeploy-plugin-appimage-x86_64.AppImage",
+      "sha256": "04f6bf8d550e5d05570f975407aabfec1b7cff2261f68e6284cc7de9ede18bd8",
+      "size_bytes": 16488952,
+      "platforms": [
+        "linux-x64"
+      ]
+    }
+  ]
+}

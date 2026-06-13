@@ -1,0 +1,845 @@
+load("@npm//:defs.bzl", "npm_link_all_packages")
+load("@npm//core/apps/web:eslint/package_json.bzl", eslint_bin = "bin")
+load("@npm//core/apps/web:typescript/package_json.bzl", tsc_bin = "bin")
+load("@npm//core/apps/web:vite/package_json.bzl", vite_bin = "bin")
+load("@npm//core/apps/web:vitest/package_json.bzl", vitest_bin = "bin")
+load("@aspect_rules_js//js:defs.bzl", "js_run_binary", "js_test")
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+
+package(default_visibility = ["//visibility:public"])
+
+npm_link_all_packages()
+
+exports_files([
+    "scripts/run-e2e-bazel-runtime.mjs",
+    "scripts/run-e2e-bazel-runtime.sh",
+])
+
+WEB_SOURCES = glob(
+    [
+        "src/**/*",
+        "scripts/**/*",
+        "eslint/**/*",
+        "e2e/**/*",
+        "public/**/*",
+        "*.json",
+        "*.html",
+        "*.ts",
+        "*.tsx",
+        "*.mjs",
+        "*.cjs",
+    ],
+    allow_empty = True,
+)
+
+WEB_CHECK_SOURCES = glob(
+    [
+        "src/**/*",
+        "eslint/**/*",
+        "e2e/utils/**/*",
+        "public/**/*",
+        "*.json",
+        "*.html",
+        "*.ts",
+        "*.tsx",
+        "*.mjs",
+        "*.cjs",
+    ],
+    exclude = [
+        "playwright*.ts",
+    ],
+    allow_empty = True,
+)
+
+WEB_SMOKE_SOURCES = [
+    "package.json",
+    "tsconfig.json",
+    "vite.config.ts",
+    "vitest.setup.ts",
+    "src/pages/sessionThread/transcriptLayoutPlanner.appSmoke.test.ts",
+    "src/pages/sessionThread/transcriptLayoutPlanner.ts",
+    "src/pages/sessionThread/pretextVirtualizerRowLayout.ts",
+]
+
+WEB_PRETEXT_APP_SOURCES = [
+    "package.json",
+    "tsconfig.json",
+    "vite.config.ts",
+    "vitest.setup.ts",
+] + glob([
+    "scripts/pretext-parity-probe-shared.*",
+    "src/api/**/*",
+    "src/components/ExternalLink.tsx",
+    "src/components/MessageAttachmentImage.tsx",
+    "src/generated/desktop-ipc.ts",
+    "src/pages/SessionPage.thread.ts",
+    "src/pages/SessionPage.types.ts",
+    "src/pages/SessionThreadMessageList.pretextVirtualizer*",
+    "src/pages/sessionThread/**/*",
+    "src/pages/sessionThreadProjection*",
+    "src/pages/sessionView/SessionPage.helpers.ts",
+    "src/pages/sessionView/SessionPage.markdown*",
+    "src/pages/sessionView/SessionPage.types.ts",
+    "src/pages/sessionMessageListDebug.ts",
+    "src/pages/sessionMessageListControllerUtils.ts",
+    "src/pages/sessionMessageListItemIdentity.ts",
+    "src/pages/useSessionMessageListDiagnostics.ts",
+    "src/pages/usePretextVirtualizerSessionController*",
+    "src/pages/workbenchThreadViewModelWarmCache.ts",
+    "src/pages/workbenchViewModel/authDerivations.ts",
+    "src/state/pretextVirtualizerViewportState.ts",
+    "src/state/diagnosticsChannel.ts",
+    "src/state/scopeIdentity.ts",
+    "src/state/uiStateStore.ts",
+    "src/testdata/pretext*",
+    "src/utils/analytics/**/*",
+    "src/utils/clipboard.ts",
+    "src/utils/codeTokenLinks.ts",
+    "src/utils/desktop.ts",
+    "src/utils/desktopConnection.ts",
+    "src/utils/desktopCore.ts",
+    "src/utils/desktopShell.ts",
+    "src/utils/imageMime.ts",
+    "src/utils/inlineCodeFragments*",
+    "src/utils/modelEffort.ts",
+    "src/utils/pretextPerfDiagnostics.ts",
+    "src/utils/randomUuid.ts",
+    "src/utils/runtime.ts",
+    "src/utils/useRelativeNowMs.ts",
+], allow_empty = True)
+
+COMMON_DATA = WEB_SOURCES + [
+    "//core:package.json",
+    "//core:pnpm-lock.yaml",
+    "//core:pnpm-workspace.yaml",
+    "//core/apps/web/e2e:e2e_sources",
+    "//core:desktop_bundle_files",
+    "//core/scripts:sources",
+    "//core/packages:sources",
+]
+
+HERMETIC_WEB_CHECK_DATA = WEB_CHECK_SOURCES + [
+    "//core/packages/ctx-types:pkg",
+    ":node_modules/@chenglou/pretext",
+    ":node_modules/@ctx/design",
+    ":node_modules/@ctx/session-supervisor-core",
+    ":node_modules/@ctx/session-thread-layout",
+    ":node_modules/@ctx/types",
+    ":node_modules/@eslint/js",
+    ":node_modules/@monaco-editor/react",
+    ":node_modules/@pretext-virtualizer/core",
+    ":node_modules/@pretext-virtualizer/interface",
+    ":node_modules/@radix-ui/react-dropdown-menu",
+    ":node_modules/@radix-ui/react-select",
+    ":node_modules/@radix-ui/react-switch",
+    ":node_modules/@supabase/supabase-js",
+    ":node_modules/@tauri-apps/api",
+    ":node_modules/@tauri-apps/plugin-barcode-scanner",
+    ":node_modules/@tauri-apps/plugin-os",
+    ":node_modules/@testing-library/jest-dom",
+    ":node_modules/@testing-library/react",
+    ":node_modules/@types/qrcode.react",
+    ":node_modules/@types/react",
+    ":node_modules/@types/react-dom",
+    ":node_modules/@types/react-syntax-highlighter",
+    ":node_modules/@virtuoso.dev/message-list",
+    ":node_modules/@vitejs/plugin-react",
+    ":node_modules/@xterm/addon-fit",
+    ":node_modules/@xterm/addon-web-links",
+    ":node_modules/@xterm/xterm",
+    ":node_modules/autoprefixer",
+    ":node_modules/chrome-tabs",
+    ":node_modules/clsx",
+    ":node_modules/eslint",
+    ":node_modules/eslint-plugin-react-hooks",
+    ":node_modules/globals",
+    ":node_modules/jsdom",
+    ":node_modules/linebreak",
+    ":node_modules/lucide-react",
+    ":node_modules/mdast-util-to-markdown",
+    ":node_modules/monaco-editor",
+    ":node_modules/pixelmatch",
+    ":node_modules/playwright",
+    ":node_modules/pngjs",
+    ":node_modules/postcss",
+    ":node_modules/posthog-js",
+    ":node_modules/qrcode.react",
+    ":node_modules/react",
+    ":node_modules/react-dom",
+    ":node_modules/react-markdown",
+    ":node_modules/react-router-dom",
+    ":node_modules/react-syntax-highlighter",
+    ":node_modules/react-virtuoso",
+    ":node_modules/remark-frontmatter",
+    ":node_modules/remark-gfm",
+    ":node_modules/remark-mdx",
+    ":node_modules/remark-parse",
+    ":node_modules/tailwind-merge",
+    ":node_modules/tailwindcss",
+    ":node_modules/tauri-plugin-stt-api",
+    ":node_modules/typescript",
+    ":node_modules/typescript-eslint",
+    ":node_modules/unified",
+    ":node_modules/unist-util-visit",
+    ":node_modules/vite",
+    ":node_modules/vite-plugin-mkcert",
+    ":node_modules/vitest",
+    "//core/apps/web/e2e:utils_sources",
+]
+
+HERMETIC_WEB_SMOKE_DATA = WEB_SMOKE_SOURCES + [
+    "//core/packages/ctx-types:pkg",
+    ":node_modules/@chenglou/pretext",
+    ":node_modules/@ctx/session-supervisor-core",
+    ":node_modules/@ctx/session-thread-layout",
+    ":node_modules/@ctx/types",
+    ":node_modules/@pretext-virtualizer/core",
+    ":node_modules/@pretext-virtualizer/interface",
+    ":node_modules/@tauri-apps/api",
+    ":node_modules/@tauri-apps/plugin-os",
+    ":node_modules/@testing-library/jest-dom",
+    ":node_modules/@vitejs/plugin-react",
+    ":node_modules/autoprefixer",
+    ":node_modules/jsdom",
+    ":node_modules/linebreak",
+    ":node_modules/mdast-util-to-markdown",
+    ":node_modules/postcss",
+    ":node_modules/posthog-js",
+    ":node_modules/react",
+    ":node_modules/react-dom",
+    ":node_modules/remark-frontmatter",
+    ":node_modules/remark-gfm",
+    ":node_modules/remark-mdx",
+    ":node_modules/remark-parse",
+    ":node_modules/tailwindcss",
+    ":node_modules/unified",
+    ":node_modules/unist-util-visit",
+    ":node_modules/vite",
+    ":node_modules/vite-plugin-mkcert",
+    ":node_modules/vitest",
+]
+
+HERMETIC_WEB_PRETEXT_APP_DATA = WEB_PRETEXT_APP_SOURCES + [
+    "//core/packages/ctx-types:pkg",
+    ":node_modules/@chenglou/pretext",
+    ":node_modules/@ctx/session-thread-layout",
+    ":node_modules/@ctx/types",
+    ":node_modules/@pretext-virtualizer/core",
+    ":node_modules/@pretext-virtualizer/interface",
+    ":node_modules/@tauri-apps/api",
+    ":node_modules/@tauri-apps/plugin-os",
+    ":node_modules/@testing-library/jest-dom",
+    ":node_modules/@testing-library/react",
+    ":node_modules/@vitejs/plugin-react",
+    ":node_modules/jsdom",
+    ":node_modules/linebreak",
+    ":node_modules/lucide-react",
+    ":node_modules/postcss",
+    ":node_modules/posthog-js",
+    ":node_modules/react",
+    ":node_modules/react-dom",
+    ":node_modules/react-markdown",
+    ":node_modules/react-syntax-highlighter",
+    ":node_modules/remark-frontmatter",
+    ":node_modules/remark-gfm",
+    ":node_modules/remark-mdx",
+    ":node_modules/remark-parse",
+    ":node_modules/tailwindcss",
+    ":node_modules/unified",
+    ":node_modules/unist-util-visit",
+    ":node_modules/vite",
+    ":node_modules/vite-plugin-mkcert",
+    ":node_modules/vitest",
+]
+
+ANY_ENFORCE_DATA = WEB_SOURCES + [
+    "//:MODULE.bazel",
+    "//core:package.json",
+]
+
+PLAYWRIGHT_RUNTIME_SCRIPT_TEST_DATA = [
+    "scripts/generate-playwright-browser-lock.mjs",
+    "scripts/generate-playwright-browser-lock.test.mjs",
+    "scripts/run-e2e-bazel-runtime.mjs",
+    "scripts/run-e2e-bazel-runtime.test.mjs",
+    "scripts/run-node-test-suite.mjs",
+]
+
+NON_PRETEXT_EXCLUDES = [
+    "src/pages/SessionThreadMessageList.pretextVirtualizer.test.tsx",
+    "src/pages/usePretextVirtualizerSessionController.test.tsx",
+    "src/pages/sessionThread/pretext*.test.ts",
+    "src/pages/sessionThread/sessionMarkdown*.test.ts",
+    "src/pages/sessionThread/sessionThreadMeasurementContract.test.ts",
+    "src/pages/sessionThread/sessionPlainTextMeasurement.test.ts",
+    "src/pages/sessionThread/sessionTextMeasurement.test.ts",
+    "src/pages/sessionThread/transcript*.test.ts",
+    "src/pages/sessionView/SessionPage.markdown.test.tsx",
+    "src/testdata/pretext*.test.ts",
+    "src/utils/inlineCodeFragments.test.ts",
+]
+
+NON_PRETEXT_VITEST_ARGS = [
+    "run",
+    "--silent",
+    "--reporter=dot",
+    "--minWorkers=1",
+    "--maxWorkers=2",
+    "--testTimeout=60000",
+]
+
+NON_PRETEXT_FOUNDATION_API_TESTS = glob([
+    "src/api/*.test.ts",
+    "src/api/*.test.tsx",
+    "src/api/**/*.test.ts",
+    "src/api/**/*.test.tsx",
+], exclude = NON_PRETEXT_EXCLUDES, allow_empty = True)
+
+NON_PRETEXT_FOUNDATION_SUPPORT_TESTS = glob([
+    "src/eslint/*.test.ts",
+    "src/eslint/*.test.tsx",
+    "src/eslint/**/*.test.ts",
+    "src/eslint/**/*.test.tsx",
+    "src/lib/*.test.ts",
+    "src/lib/*.test.tsx",
+    "src/lib/**/*.test.ts",
+    "src/lib/**/*.test.tsx",
+    "src/testing/*.test.ts",
+    "src/testing/*.test.tsx",
+    "src/testing/**/*.test.ts",
+    "src/testing/**/*.test.tsx",
+    "src/workbench/*.test.ts",
+    "src/workbench/*.test.tsx",
+    "src/workbench/**/*.test.ts",
+    "src/workbench/**/*.test.tsx",
+], exclude = NON_PRETEXT_EXCLUDES, allow_empty = True)
+
+NON_PRETEXT_FOUNDATION_UTILS_ANALYTICS_TESTS = glob([
+    "src/utils/analytics/*.test.ts",
+    "src/utils/analytics/*.test.tsx",
+    "src/utils/analytics/**/*.test.ts",
+    "src/utils/analytics/**/*.test.tsx",
+], exclude = NON_PRETEXT_EXCLUDES, allow_empty = True)
+
+NON_PRETEXT_FOUNDATION_UTILS_SHARED_TESTS = glob([
+    "src/utils/*.test.ts",
+    "src/utils/*.test.tsx",
+    "src/utils/**/*.test.ts",
+    "src/utils/**/*.test.tsx",
+], exclude = NON_PRETEXT_EXCLUDES + [
+    "src/utils/analytics/*.test.ts",
+    "src/utils/analytics/*.test.tsx",
+    "src/utils/analytics/**/*.test.ts",
+    "src/utils/analytics/**/*.test.tsx",
+], allow_empty = True)
+
+NON_PRETEXT_FOUNDATION_STATE_TESTS = glob([
+    "src/state/*.test.ts",
+    "src/state/*.test.tsx",
+    "src/state/**/*.test.ts",
+    "src/state/**/*.test.tsx",
+    "src/testdata/*.test.ts",
+    "src/testdata/*.test.tsx",
+    "src/testdata/**/*.test.ts",
+    "src/testdata/**/*.test.tsx",
+], exclude = NON_PRETEXT_EXCLUDES, allow_empty = True)
+
+NON_PRETEXT_SETTINGS_SETUP_TESTS = glob([
+    "src/pages/settings/*.test.ts",
+    "src/pages/settings/*.test.tsx",
+    "src/pages/settings/**/*.test.ts",
+    "src/pages/settings/**/*.test.tsx",
+    "src/pages/workspaceSetup/*.test.ts",
+    "src/pages/workspaceSetup/*.test.tsx",
+    "src/pages/workspaceSetup/**/*.test.ts",
+    "src/pages/workspaceSetup/**/*.test.tsx",
+    "src/pages/diagnostics/*.test.ts",
+    "src/pages/diagnostics/*.test.tsx",
+    "src/pages/diagnostics/**/*.test.ts",
+    "src/pages/diagnostics/**/*.test.tsx",
+    "src/pages/launcher/*.test.ts",
+    "src/pages/launcher/*.test.tsx",
+    "src/pages/launcher/**/*.test.ts",
+    "src/pages/launcher/**/*.test.tsx",
+    "src/pages/workspaceBootstrapGate.test.ts",
+    "src/pages/WorkspaceSetupPage.test.tsx",
+], exclude = NON_PRETEXT_EXCLUDES, allow_empty = True)
+
+NON_PRETEXT_WORKBENCH_SHELL_TESTS = glob([
+    "src/pages/workbenchShell/*.test.ts",
+    "src/pages/workbenchShell/*.test.tsx",
+    "src/pages/workbenchShell/**/*.test.ts",
+    "src/pages/workbenchShell/**/*.test.tsx",
+], exclude = NON_PRETEXT_EXCLUDES + [
+    "src/pages/settings/*.test.ts",
+    "src/pages/settings/*.test.tsx",
+    "src/pages/settings/**/*.test.ts",
+    "src/pages/settings/**/*.test.tsx",
+    "src/pages/workspaceSetup/*.test.ts",
+    "src/pages/workspaceSetup/*.test.tsx",
+    "src/pages/workspaceSetup/**/*.test.ts",
+    "src/pages/workspaceSetup/**/*.test.tsx",
+    "src/pages/diagnostics/*.test.ts",
+    "src/pages/diagnostics/*.test.tsx",
+    "src/pages/diagnostics/**/*.test.ts",
+    "src/pages/diagnostics/**/*.test.tsx",
+    "src/pages/launcher/*.test.ts",
+    "src/pages/launcher/*.test.tsx",
+    "src/pages/launcher/**/*.test.ts",
+    "src/pages/launcher/**/*.test.tsx",
+    "src/pages/workspaceBootstrapGate.test.ts",
+    "src/pages/WorkspaceSetupPage.test.tsx",
+], allow_empty = True)
+
+NON_PRETEXT_WORKBENCH_SURFACE_SESSION_CORE_TESTS = glob([
+    "src/pages/SessionPage*.test.ts",
+    "src/pages/SessionPage*.test.tsx",
+    "src/pages/session*.test.ts",
+    "src/pages/session*.test.tsx",
+    "src/pages/useSession*.test.ts",
+    "src/pages/useSession*.test.tsx",
+    "src/pages/sessionView/*.test.ts",
+    "src/pages/sessionView/*.test.tsx",
+    "src/pages/sessionView/**/*.test.ts",
+    "src/pages/sessionView/**/*.test.tsx",
+], exclude = NON_PRETEXT_EXCLUDES, allow_empty = True)
+
+NON_PRETEXT_WORKBENCH_SURFACE_SESSION_THREAD_TESTS = glob([
+    "src/pages/sessionThread/*.test.ts",
+    "src/pages/sessionThread/*.test.tsx",
+    "src/pages/sessionThread/**/*.test.ts",
+    "src/pages/sessionThread/**/*.test.tsx",
+], exclude = NON_PRETEXT_EXCLUDES, allow_empty = True)
+
+NON_PRETEXT_WORKBENCH_SURFACE_APP_TESTS = glob([
+    "*.test.ts",
+    "*.test.tsx",
+    "src/components/*.test.ts",
+    "src/components/*.test.tsx",
+    "src/components/**/*.test.ts",
+    "src/components/**/*.test.tsx",
+    "src/pages/*.test.ts",
+    "src/pages/*.test.tsx",
+    "src/pages/**/*.test.ts",
+    "src/pages/**/*.test.tsx",
+    "src/App.test.tsx",
+], exclude = NON_PRETEXT_EXCLUDES + [
+    "src/pages/settings/*.test.ts",
+    "src/pages/settings/*.test.tsx",
+    "src/pages/settings/**/*.test.ts",
+    "src/pages/settings/**/*.test.tsx",
+    "src/pages/workspaceSetup/*.test.ts",
+    "src/pages/workspaceSetup/*.test.tsx",
+    "src/pages/workspaceSetup/**/*.test.ts",
+    "src/pages/workspaceSetup/**/*.test.tsx",
+    "src/pages/diagnostics/*.test.ts",
+    "src/pages/diagnostics/*.test.tsx",
+    "src/pages/diagnostics/**/*.test.ts",
+    "src/pages/diagnostics/**/*.test.tsx",
+    "src/pages/SessionPage*.test.ts",
+    "src/pages/SessionPage*.test.tsx",
+    "src/pages/session*.test.ts",
+    "src/pages/session*.test.tsx",
+    "src/pages/useSession*.test.ts",
+    "src/pages/useSession*.test.tsx",
+    "src/pages/sessionView/*.test.ts",
+    "src/pages/sessionView/*.test.tsx",
+    "src/pages/sessionView/**/*.test.ts",
+    "src/pages/sessionView/**/*.test.tsx",
+    "src/pages/sessionThread/*.test.ts",
+    "src/pages/sessionThread/*.test.tsx",
+    "src/pages/sessionThread/**/*.test.ts",
+    "src/pages/sessionThread/**/*.test.tsx",
+    "src/pages/workbenchShell/*.test.ts",
+    "src/pages/workbenchShell/*.test.tsx",
+    "src/pages/workbenchShell/**/*.test.ts",
+    "src/pages/workbenchShell/**/*.test.tsx",
+    "src/pages/launcher/*.test.ts",
+    "src/pages/launcher/*.test.tsx",
+    "src/pages/launcher/**/*.test.ts",
+    "src/pages/launcher/**/*.test.tsx",
+    "src/pages/workspaceBootstrapGate.test.ts",
+    "src/pages/WorkspaceSetupPage.test.tsx",
+], allow_empty = True)
+
+NON_PRETEXT_MISC_ARGS = NON_PRETEXT_VITEST_ARGS + [
+    "--passWithNoTests",
+    "--exclude",
+    "*.test.ts",
+    "--exclude",
+    "*.test.tsx",
+    "--exclude",
+    "src/api/*.test.ts",
+    "--exclude",
+    "src/api/*.test.tsx",
+    "--exclude",
+    "src/api/**/*.test.ts",
+    "--exclude",
+    "src/api/**/*.test.tsx",
+    "--exclude",
+    "src/components/*.test.ts",
+    "--exclude",
+    "src/components/*.test.tsx",
+    "--exclude",
+    "src/components/**/*.test.ts",
+    "--exclude",
+    "src/components/**/*.test.tsx",
+    "--exclude",
+    "src/eslint/*.test.ts",
+    "--exclude",
+    "src/eslint/*.test.tsx",
+    "--exclude",
+    "src/eslint/**/*.test.ts",
+    "--exclude",
+    "src/eslint/**/*.test.tsx",
+    "--exclude",
+    "src/lib/*.test.ts",
+    "--exclude",
+    "src/lib/*.test.tsx",
+    "--exclude",
+    "src/lib/**/*.test.ts",
+    "--exclude",
+    "src/lib/**/*.test.tsx",
+    "--exclude",
+    "src/pages/*.test.ts",
+    "--exclude",
+    "src/pages/*.test.tsx",
+    "--exclude",
+    "src/pages/**/*.test.ts",
+    "--exclude",
+    "src/pages/**/*.test.tsx",
+    "--exclude",
+    "src/state/*.test.ts",
+    "--exclude",
+    "src/state/*.test.tsx",
+    "--exclude",
+    "src/state/**/*.test.ts",
+    "--exclude",
+    "src/state/**/*.test.tsx",
+    "--exclude",
+    "src/testdata/*.test.ts",
+    "--exclude",
+    "src/testdata/*.test.tsx",
+    "--exclude",
+    "src/testdata/**/*.test.ts",
+    "--exclude",
+    "src/testdata/**/*.test.tsx",
+    "--exclude",
+    "src/testing/*.test.ts",
+    "--exclude",
+    "src/testing/*.test.tsx",
+    "--exclude",
+    "src/testing/**/*.test.ts",
+    "--exclude",
+    "src/testing/**/*.test.tsx",
+    "--exclude",
+    "src/utils/*.test.ts",
+    "--exclude",
+    "src/utils/*.test.tsx",
+    "--exclude",
+    "src/utils/**/*.test.ts",
+    "--exclude",
+    "src/utils/**/*.test.tsx",
+    "--exclude",
+    "src/workbench/*.test.ts",
+    "--exclude",
+    "src/workbench/*.test.tsx",
+    "--exclude",
+    "src/workbench/**/*.test.ts",
+    "--exclude",
+    "src/workbench/**/*.test.tsx",
+    "--exclude",
+    "src/App.test.tsx",
+    "--exclude",
+    "src/pages/SessionThreadMessageList.pretextVirtualizer.test.tsx",
+    "--exclude",
+    "src/pages/usePretextVirtualizerSessionController.test.tsx",
+    "--exclude",
+    "src/pages/sessionThread/pretext*.test.ts",
+    "--exclude",
+    "src/pages/sessionThread/sessionMarkdown*.test.ts",
+    "--exclude",
+    "src/pages/sessionThread/sessionThreadMeasurementContract.test.ts",
+    "--exclude",
+    "src/pages/sessionThread/sessionPlainTextMeasurement.test.ts",
+    "--exclude",
+    "src/pages/sessionThread/sessionTextMeasurement.test.ts",
+    "--exclude",
+    "src/pages/sessionThread/transcript*.test.ts",
+    "--exclude",
+    "src/pages/sessionView/SessionPage.markdown.test.tsx",
+    "--exclude",
+    "src/testdata/pretext*.test.ts",
+    "--exclude",
+    "scripts/pretext-parity-probe-shared.test.ts",
+    "--exclude",
+    "src/utils/inlineCodeFragments.test.ts",
+]
+
+filegroup(
+    name = "desktop_ipc_generated_typescript",
+    srcs = ["src/generated/desktop-ipc.ts"],
+)
+
+filegroup(
+    name = "e2e_runtime_data",
+    srcs = COMMON_DATA,
+)
+
+vite_bin.vite_binary(
+    name = "vite_bin",
+    data = HERMETIC_WEB_CHECK_DATA,
+    chdir = package_name(),
+)
+
+js_run_binary(
+    name = "build",
+    tool = ":vite_bin",
+    args = ["build"],
+    chdir = package_name(),
+    out_dirs = ["dist"],
+    srcs = HERMETIC_WEB_CHECK_DATA,
+)
+
+sh_binary(
+    name = "dist_sync",
+    srcs = ["dist_sync_tool.sh"],
+    data = COMMON_DATA,
+)
+
+eslint_bin.eslint_test(
+    name = "lint",
+    args = [
+        "src",
+        "--max-warnings=0",
+    ],
+    data = HERMETIC_WEB_CHECK_DATA,
+    chdir = package_name(),
+)
+
+tsc_bin.tsc_test(
+    name = "typecheck",
+    args = [
+        "--noEmit",
+        "--incremental",
+        "false",
+    ],
+    data = HERMETIC_WEB_CHECK_DATA,
+    chdir = package_name(),
+)
+
+sh_binary(
+    name = "any_enforce",
+    srcs = ["any_enforce_tool.sh"],
+    data = ANY_ENFORCE_DATA,
+)
+
+js_test(
+    name = "playwright_runtime_script_tests",
+    args = [
+        "scripts/generate-playwright-browser-lock.test.mjs",
+        "scripts/run-e2e-bazel-runtime.test.mjs",
+    ],
+    entry_point = "scripts/run-node-test-suite.mjs",
+    data = PLAYWRIGHT_RUNTIME_SCRIPT_TEST_DATA,
+    chdir = package_name(),
+)
+
+vitest_bin.vitest_test(
+    name = "unit_smoke",
+    args = [
+        "run",
+        "--silent",
+        "--reporter=dot",
+        "--minWorkers=1",
+        "--maxWorkers=2",
+        "--testTimeout=60000",
+        "src/pages/sessionThread/transcriptLayoutPlanner.appSmoke.test.ts",
+    ],
+    data = HERMETIC_WEB_SMOKE_DATA,
+    chdir = package_name(),
+)
+
+vitest_bin.vitest_test(
+    name = "unit_tests",
+    args = [
+        "run",
+        "--silent",
+        "--reporter=dot",
+        "--minWorkers=1",
+        "--maxWorkers=2",
+        "--testTimeout=60000",
+    ],
+    data = HERMETIC_WEB_CHECK_DATA,
+    chdir = package_name(),
+)
+
+vitest_bin.vitest_test(
+    name = "unit_tests_non_pretext_foundation_shared_api",
+    args = NON_PRETEXT_VITEST_ARGS + NON_PRETEXT_FOUNDATION_API_TESTS,
+    data = HERMETIC_WEB_CHECK_DATA,
+    chdir = package_name(),
+    timeout = "long",
+)
+
+vitest_bin.vitest_test(
+    name = "unit_tests_non_pretext_foundation_shared_support",
+    args = NON_PRETEXT_VITEST_ARGS + NON_PRETEXT_FOUNDATION_SUPPORT_TESTS,
+    data = HERMETIC_WEB_CHECK_DATA,
+    chdir = package_name(),
+    timeout = "long",
+)
+
+vitest_bin.vitest_test(
+    name = "unit_tests_non_pretext_foundation_shared_utils_analytics",
+    args = NON_PRETEXT_VITEST_ARGS + NON_PRETEXT_FOUNDATION_UTILS_ANALYTICS_TESTS,
+    data = HERMETIC_WEB_CHECK_DATA,
+    chdir = package_name(),
+    timeout = "long",
+)
+
+vitest_bin.vitest_test(
+    name = "unit_tests_non_pretext_foundation_shared_utils",
+    args = NON_PRETEXT_VITEST_ARGS + NON_PRETEXT_FOUNDATION_UTILS_SHARED_TESTS,
+    data = HERMETIC_WEB_CHECK_DATA,
+    chdir = package_name(),
+    timeout = "long",
+)
+
+test_suite(
+    name = "unit_tests_non_pretext_foundation_shared",
+    tests = [
+        ":unit_tests_non_pretext_foundation_shared_api",
+        ":unit_tests_non_pretext_foundation_shared_support",
+        ":unit_tests_non_pretext_foundation_shared_utils",
+        ":unit_tests_non_pretext_foundation_shared_utils_analytics",
+    ],
+)
+
+vitest_bin.vitest_test(
+    name = "unit_tests_non_pretext_foundation_state",
+    args = NON_PRETEXT_VITEST_ARGS + NON_PRETEXT_FOUNDATION_STATE_TESTS,
+    data = HERMETIC_WEB_CHECK_DATA,
+    chdir = package_name(),
+)
+
+test_suite(
+    name = "unit_tests_non_pretext_foundation",
+    tests = [
+        ":unit_tests_non_pretext_foundation_shared",
+        ":unit_tests_non_pretext_foundation_state",
+    ],
+)
+
+vitest_bin.vitest_test(
+    name = "unit_tests_non_pretext_settings_setup",
+    args = NON_PRETEXT_VITEST_ARGS + NON_PRETEXT_SETTINGS_SETUP_TESTS,
+    data = HERMETIC_WEB_CHECK_DATA,
+    chdir = package_name(),
+)
+
+vitest_bin.vitest_test(
+    name = "unit_tests_non_pretext_workbench_surface_app",
+    args = NON_PRETEXT_VITEST_ARGS + NON_PRETEXT_WORKBENCH_SURFACE_APP_TESTS,
+    data = HERMETIC_WEB_CHECK_DATA,
+    chdir = package_name(),
+)
+
+vitest_bin.vitest_test(
+    name = "unit_tests_non_pretext_workbench_surface_session_core",
+    args = NON_PRETEXT_VITEST_ARGS + NON_PRETEXT_WORKBENCH_SURFACE_SESSION_CORE_TESTS,
+    data = HERMETIC_WEB_CHECK_DATA,
+    chdir = package_name(),
+)
+
+vitest_bin.vitest_test(
+    name = "unit_tests_non_pretext_workbench_surface_session_thread",
+    args = NON_PRETEXT_VITEST_ARGS + NON_PRETEXT_WORKBENCH_SURFACE_SESSION_THREAD_TESTS,
+    data = HERMETIC_WEB_CHECK_DATA,
+    chdir = package_name(),
+)
+
+test_suite(
+    name = "unit_tests_non_pretext_workbench_surface_session",
+    tests = [
+        ":unit_tests_non_pretext_workbench_surface_session_core",
+        ":unit_tests_non_pretext_workbench_surface_session_thread",
+    ],
+)
+
+test_suite(
+    name = "unit_tests_non_pretext_workbench_surface",
+    tests = [
+        ":unit_tests_non_pretext_workbench_surface_app",
+        ":unit_tests_non_pretext_workbench_surface_session",
+    ],
+)
+
+vitest_bin.vitest_test(
+    name = "unit_tests_non_pretext_workbench_shell",
+    args = NON_PRETEXT_VITEST_ARGS + NON_PRETEXT_WORKBENCH_SHELL_TESTS,
+    data = HERMETIC_WEB_CHECK_DATA,
+    chdir = package_name(),
+)
+
+test_suite(
+    name = "unit_tests_non_pretext_workbench",
+    tests = [
+        ":unit_tests_non_pretext_workbench_shell",
+        ":unit_tests_non_pretext_workbench_surface",
+    ],
+)
+
+vitest_bin.vitest_test(
+    name = "unit_tests_non_pretext_misc",
+    args = NON_PRETEXT_MISC_ARGS,
+    data = HERMETIC_WEB_CHECK_DATA,
+    chdir = package_name(),
+)
+
+test_suite(
+    name = "unit_tests_non_pretext",
+    tests = [
+        ":unit_tests_non_pretext_foundation",
+        ":unit_tests_non_pretext_misc",
+        ":unit_tests_non_pretext_settings_setup",
+        ":unit_tests_non_pretext_workbench",
+    ],
+)
+
+vitest_bin.vitest_test(
+    name = "pretext_measurement_unit_tests",
+    args = [
+        "run",
+        "--silent",
+        "--reporter=dot",
+        "--minWorkers=1",
+        "--maxWorkers=2",
+        "--testTimeout=60000",
+        "src/pages/sessionThread/transcriptLayoutPlanner.appSmoke.test.ts",
+        "scripts/pretext-parity-probe-shared.test.ts",
+        "src/testdata/pretextWrapRuleFuzz.test.ts",
+        "src/pages/SessionThreadMessageList.pretextVirtualizer.test.tsx",
+        "src/pages/usePretextVirtualizerSessionController.test.tsx",
+        "src/pages/sessionThread/pretextFollowBottom.test.ts",
+        "src/pages/sessionThread/pretextSessionRuntimeCache.test.ts",
+        "src/pages/sessionThread/pretextVirtualizerListInternals.test.ts",
+        "src/pages/sessionThread/pretextVirtualizerProjectionController.test.ts",
+        "src/pages/sessionView/SessionPage.markdown.test.tsx",
+        "src/utils/inlineCodeFragments.test.ts",
+    ],
+    data = HERMETIC_WEB_PRETEXT_APP_DATA,
+    chdir = package_name(),
+)
+
+vitest_bin.vitest_test(
+    name = "desktop_ipc_corpus",
+    args = [
+        "run",
+        "--silent",
+        "--reporter=dot",
+        "src/utils/desktop.corpus.test.ts",
+    ],
+    data = HERMETIC_WEB_CHECK_DATA,
+    chdir = package_name(),
+)

@@ -1,0 +1,30 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+rust_library(
+    name = "lib",
+    crate_name = "ctx_worktree_data_plane",
+    crate_root = "src/lib.rs",
+    edition = "2021",
+    proc_macro_deps = [
+        "@crates//:async-trait",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    deps = [
+        "//core/crates/ctx-core:lib",
+        "//core/crates/ctx-sandbox-contract:lib",
+        "//core/crates/ctx-store:lib",
+        "@crates//:anyhow",
+    ],
+)
+
+rust_test(
+    name = "unit_tests",
+    crate = ":lib",
+    deps = [
+        "@crates//:chrono",
+        "@crates//:serde_json",
+        "@crates//:uuid",
+    ],
+)

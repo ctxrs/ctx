@@ -1,0 +1,23 @@
+[package]
+name = "ctx-workspace-attachments"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+ctx-avf-linux-runtime = { path = "../ctx-avf-linux-runtime" }
+ctx-core = { path = "../ctx-core" }
+ctx-execution-runtime = { path = "../ctx-execution-runtime" }
+ctx-harness-runtime = { path = "../ctx-harness-runtime" }
+ctx-sandbox-contract = { path = "../ctx-sandbox-contract" }
+ctx-store = { path = "../ctx-store" }
+ctx-workspace-container = { path = "../ctx-workspace-container" }
+ctx-worktree-data-plane = { path = "../ctx-worktree-data-plane" }
+serde.workspace = true
+tempfile = "3"
+tokio.workspace = true
+toml = "0.8"
+tracing.workspace = true

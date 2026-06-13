@@ -1,0 +1,16 @@
+{
+  "name": "@ctx/web-session-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "ctx-web-session-worker": "bin/worker.mjs"
+  },
+  "dependencies": {
+    "node-pre-gyp": "^0.17.0",
+    "playwright": "^1.49.1",
+    "ws": "^8.16.0",
+    "wrtc": "npm:@koush/wrtc@0.5.3"
+  },
+  "license": "GPL-3.0-or-later"
+}

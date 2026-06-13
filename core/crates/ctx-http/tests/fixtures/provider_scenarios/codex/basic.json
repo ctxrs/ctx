@@ -1,0 +1,12 @@
+{
+  "turns": [
+    {
+      "thought": "Hm (codex)",
+      "tools": [
+        {"tool_name": "exec_command", "input": {"cmd": "echo codex"}, "output": "codex"}
+      ],
+      "deltas": ["Ho", "la"],
+      "final": "Hola from codex"
+    }
+  ]
+}

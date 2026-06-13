@@ -1,0 +1,32 @@
+{
+  "name": "ctx-monorepo",
+  "private": true,
+  "license": "GPL-3.0-or-later",
+  "packageManager": "pnpm@9.15.1",
+  "scripts": {
+    "web:dev": "pnpm -C apps/web dev",
+    "web:build": "pnpm -C apps/web build",
+    "web:test": "pnpm -C apps/web test",
+    "web:typecheck": "pnpm -C apps/web typecheck",
+    "desktop:dev": "pnpm -C apps/desktop dev",
+    "desktop:build": "pnpm -C apps/desktop build"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [],
+    "overrides": {
+      "react": "19.1.0",
+      "react-dom": "19.1.0",
+      "@types/react": "19.1.0",
+      "@types/react-dom": "19.1.0"
+    }
+  },
+  "devDependencies": {
+    "@bazel/bazelisk": "1.28.1",
+    "@supabase/supabase-js": "2.49.1",
+    "pixelmatch": "^7.1.0",
+    "playwright-core": "^1.57.0",
+    "pngjs": "^7.0.0",
+    "typescript": "^5.6.3",
+    "ws": "^8.16.0"
+  }
+}

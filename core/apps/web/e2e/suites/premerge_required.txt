@@ -1,0 +1,19 @@
+# Deterministic, required pre-merge E2E suite.
+e2e/golden.spec.ts
+e2e/diagnostics-bundle-schema.spec.ts
+e2e/launcher-wizard-smoke.spec.ts
+e2e/terminal-reconnect.spec.ts
+e2e/workbench-index.spec.ts
+e2e/workbench-providers-bootstrap.spec.ts
+e2e/workbench-active-session-overlap.spec.ts
+e2e/workbench-spinner-stale-cache.spec.ts
+e2e/workbench-task-overlap.spec.ts
+e2e/workbench-unarchive-visible.spec.ts
+e2e/workbench-failed-start-ui.spec.ts
+e2e/workbench-new-task-drag-drop-image.spec.ts
+e2e/workbench-composer-paste-image.spec.ts
+e2e/workbench-worktree-path.spec.ts
+e2e/workbench-bootstrap-auth-recovery.spec.ts
+e2e/workspace-setup-bootstrap-failure.spec.ts
+e2e/ws-missed-events-recovery.spec.ts
+e2e/ws-stream-recovery-nogap.spec.ts

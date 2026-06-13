@@ -1,0 +1,15 @@
+.ctx
+core/node_modules
+core/apps/web/node_modules
+core/apps/desktop/node_modules
+core/packages/ctx-design/node_modules
+core/packages/ctx-types/node_modules
+core/packages/pretext-virtualizer-core/node_modules
+core/packages/pretext-virtualizer-interface/node_modules
+core/packages/session-supervisor-core/node_modules
+core/packages/session-thread-layout/node_modules
+core/packages/web-session-worker/node_modules
+install-site/node_modules
+node_modules
+tmp
+.tmp

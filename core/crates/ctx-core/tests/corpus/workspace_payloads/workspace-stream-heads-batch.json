@@ -1,0 +1,21 @@
+{
+  "type": "heads_batch",
+  "rev": 79,
+  "snapshot_rev": 42,
+  "deltas": [
+    {
+      "session_id": "44444444-4444-4444-8444-444444444444",
+      "last_event_seq": 100,
+      "state_rev": 9,
+      "message": {
+        "id": "66666666-6666-4666-8666-666666666666",
+        "session_id": "44444444-4444-4444-8444-444444444444",
+        "task_id": "22222222-2222-4222-8222-222222222222",
+        "role": "assistant",
+        "content": "Critical mutation lane is ready.",
+        "delivery": "immediate",
+        "created_at": "2026-03-09T12:35:12Z"
+      }
+    }
+  ]
+}

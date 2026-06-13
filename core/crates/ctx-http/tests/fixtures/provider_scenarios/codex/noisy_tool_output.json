@@ -1,0 +1,26 @@
+{
+  "turns": [
+    {
+      "events": [
+        {
+          "kind": "thought",
+          "content": "Investigating noisy command output handling"
+        },
+        {
+          "kind": "tool",
+          "tool_name": "exec_command",
+          "input": {
+            "cmd": "python - <<'PY'\nfor i in range(512):\n    print(f'noisy-line-{i:04d}-0123456789abcdef0123456789abcdef0123456789abcdef')\nPY"
+          },
+          "output_chunk": "noisy-line-0123456789abcdef0123456789abcdef0123456789abcdef\\n",
+          "output_repeat": 2048
+        },
+        {
+          "kind": "final",
+          "content": "Noisy command completed with bounded output handling."
+        }
+      ],
+      "final": "Noisy command completed with bounded output handling."
+    }
+  ]
+}

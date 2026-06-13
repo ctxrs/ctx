@@ -1,0 +1,64 @@
+---
+title: "Run Your First Task"
+description: "Complete your first end-to-end task in the GUI"
+---
+
+## Overview
+
+Use this first task to validate your full loop: prompt -> run -> diff review -> revise/finalize.
+
+## Recommended first task type
+
+Pick a small, low-risk change:
+
+- update a UI label
+- improve one validation message
+- fix one obvious bug in a narrow file scope
+
+## Step-by-step
+
+1. Open a workspace.
+2. Create a task with one clear objective.
+3. Choose harness/model in composer.
+4. Send a focused first prompt with acceptance criteria.
+5. Let the session run to completion.
+6. Review the diff carefully.
+7. If behavior matters more than code shape, ask for an artifact such as a screenshot or short report.
+8. Request revision or finalize.
+
+## First prompt template
+
+```text
+Goal: <one concrete outcome>
+Constraints: <what must not change>
+Validation: <tests or checks to run>
+Output: summarize the changed files and why
+```
+
+Example:
+
+```text
+Goal: fix login form validation for empty email.
+Constraints: keep the current UI copy and styling.
+Validation: run the related tests.
+Output: summarize the changed files and rationale.
+```
+
+## Helpful composer controls
+
+- Use `@` to reference files and directories.
+- Use `/` to trigger harness-supported slash commands.
+
+## What success looks like
+
+- Diff matches task scope.
+- No unrelated file churn.
+- Requested validation is addressed.
+- You can decide confidently in review.
+
+## Related pages
+
+- [Tasks](/workbench/tasks)
+- [Sessions and Messages](/workbench/sessions)
+- [Review and Apply Changes](/workbench/review-and-apply-changes)
+- [Tips for Success with Agents](/quick-tips-for-success-with-agents)

@@ -1,0 +1,489 @@
+{
+  "workspace": {
+    "id": "ws-fixture-telemetry",
+    "name": "Fixture Workspace",
+    "root_path": "/tmp/ctx-loadtest",
+    "created_at": "2025-01-01T00:00:00Z"
+  },
+  "health": {
+    "version": "0.0.0-fixture",
+    "pid": 0,
+    "data_root": "/tmp/ctx-loadtest-data",
+    "daemon_url": "http://127.0.0.1:5173",
+    "auth_required": false
+  },
+  "providers": [
+    {
+      "provider_id": "fake",
+      "installed": true,
+      "health": "ok",
+      "diagnostics": []
+    }
+  ],
+  "active_snapshot": {
+    "workspace_id": "ws-fixture-telemetry",
+    "snapshot_rev": 1,
+    "archived_rev": 0,
+    "active": {
+      "total_count": 2,
+      "tasks": [
+        {
+          "task": {
+            "id": "task-a",
+            "workspace_id": "ws-fixture-telemetry",
+            "title": "fixture task A",
+            "description": null,
+            "status": "running",
+            "primary_session_id": "session-a",
+            "primary_worktree_id": "wt-fixture-a",
+            "created_at": "2025-01-01T00:00:00Z",
+            "updated_at": "2025-01-01T00:00:05Z",
+            "archived_at": null,
+            "assistant_seen_at": null,
+            "last_activity_at": "2025-01-01T00:00:05Z",
+            "last_assistant_message_at": null,
+            "has_active_session": true
+          },
+          "primary_session": {
+            "session": {
+              "id": "session-a",
+              "task_id": "task-a",
+              "workspace_id": "ws-fixture-telemetry",
+              "worktree_id": "wt-fixture-a",
+              "provider_id": "fake",
+              "model_id": "fake-model",
+              "title": "Fixture session A",
+              "agent_role": "assistant",
+              "status": "active",
+              "created_at": "2025-01-01T00:00:00Z",
+              "updated_at": "2025-01-01T00:00:05Z"
+            },
+            "last_message_at": "2025-01-01T00:00:00Z",
+            "last_message_preview": "Load test prompt A",
+            "last_event_seq": 1,
+            "state_rev": 1,
+            "activity": { "is_working": true, "last_turn_status": "running" },
+            "unread": false
+          },
+          "primary_session_head": {
+            "session": {
+              "id": "session-a",
+              "task_id": "task-a",
+              "workspace_id": "ws-fixture-telemetry",
+              "worktree_id": "wt-fixture-a",
+              "provider_id": "fake",
+              "model_id": "fake-model",
+              "title": "Fixture session A",
+              "agent_role": "assistant",
+              "status": "active",
+              "created_at": "2025-01-01T00:00:00Z",
+              "updated_at": "2025-01-01T00:00:05Z"
+            },
+            "turns": [
+              {
+                "turn_id": "turn-a1",
+                "session_id": "session-a",
+                "user_message_id": "msg-a-user",
+                "status": "running",
+                "start_seq": 1,
+                "end_seq": null,
+                "started_at": "2025-01-01T00:00:00Z",
+                "updated_at": "2025-01-01T00:00:01Z",
+                "assistant_partial": null,
+                "thought_partial": null,
+                "tool_total": 0,
+                "tool_pending": 0,
+                "tool_running": 0,
+                "tool_completed": 0,
+                "tool_failed": 0
+              }
+            ],
+            "messages": [
+              {
+                "id": "msg-a-user",
+                "session_id": "session-a",
+                "task_id": "task-a",
+                "turn_id": "turn-a1",
+                "role": "user",
+                "content": "Load test prompt A",
+                "delivery": "immediate",
+                "created_at": "2025-01-01T00:00:00Z"
+              }
+            ],
+            "events": [],
+            "last_event_seq": 1,
+            "state_rev": 1,
+            "has_more_turns": false
+          },
+          "sessions": [
+            {
+              "session": {
+                "id": "session-a",
+                "task_id": "task-a",
+                "workspace_id": "ws-fixture-telemetry",
+                "worktree_id": "wt-fixture-a",
+                "provider_id": "fake",
+                "model_id": "fake-model",
+                "title": "Fixture session A",
+                "agent_role": "assistant",
+                "status": "active",
+                "created_at": "2025-01-01T00:00:00Z",
+                "updated_at": "2025-01-01T00:00:05Z"
+              },
+              "last_message_at": "2025-01-01T00:00:00Z",
+              "last_message_preview": "Load test prompt A",
+              "last_event_seq": 1,
+              "state_rev": 1,
+              "activity": { "is_working": true, "last_turn_status": "running" },
+              "unread": false
+            }
+          ],
+          "sort_at": "2025-01-01T00:00:10Z"
+        },
+        {
+          "task": {
+            "id": "task-b",
+            "workspace_id": "ws-fixture-telemetry",
+            "title": "fixture task B",
+            "description": null,
+            "status": "completed",
+            "primary_session_id": "session-b",
+            "primary_worktree_id": "wt-fixture-b",
+            "created_at": "2025-01-01T00:01:00Z",
+            "updated_at": "2025-01-01T00:01:05Z",
+            "archived_at": null,
+            "assistant_seen_at": null,
+            "last_activity_at": "2025-01-01T00:01:05Z",
+            "last_assistant_message_at": "2025-01-01T00:01:02Z",
+            "has_active_session": false
+          },
+          "primary_session": {
+            "session": {
+              "id": "session-b",
+              "task_id": "task-b",
+              "workspace_id": "ws-fixture-telemetry",
+              "worktree_id": "wt-fixture-b",
+              "provider_id": "fake",
+              "model_id": "fake-model",
+              "title": "Fixture session B",
+              "agent_role": "assistant",
+              "status": "completed",
+              "created_at": "2025-01-01T00:01:00Z",
+              "updated_at": "2025-01-01T00:01:05Z"
+            },
+            "last_message_at": "2025-01-01T00:01:02Z",
+            "last_message_preview": "Load test reply B",
+            "last_event_seq": 2,
+            "state_rev": 1,
+            "activity": { "is_working": false, "last_turn_status": "completed" },
+            "unread": false
+          },
+          "primary_session_head": {
+            "session": {
+              "id": "session-b",
+              "task_id": "task-b",
+              "workspace_id": "ws-fixture-telemetry",
+              "worktree_id": "wt-fixture-b",
+              "provider_id": "fake",
+              "model_id": "fake-model",
+              "title": "Fixture session B",
+              "agent_role": "assistant",
+              "status": "completed",
+              "created_at": "2025-01-01T00:01:00Z",
+              "updated_at": "2025-01-01T00:01:05Z"
+            },
+            "turns": [
+              {
+                "turn_id": "turn-b1",
+                "session_id": "session-b",
+                "user_message_id": "msg-b-user",
+                "status": "completed",
+                "start_seq": 1,
+                "end_seq": 2,
+                "started_at": "2025-01-01T00:01:00Z",
+                "updated_at": "2025-01-01T00:01:02Z",
+                "assistant_partial": null,
+                "thought_partial": null,
+                "tool_total": 0,
+                "tool_pending": 0,
+                "tool_running": 0,
+                "tool_completed": 0,
+                "tool_failed": 0
+              }
+            ],
+            "messages": [
+              {
+                "id": "msg-b-user",
+                "session_id": "session-b",
+                "task_id": "task-b",
+                "turn_id": "turn-b1",
+                "role": "user",
+                "content": "Load test prompt B",
+                "delivery": "immediate",
+                "created_at": "2025-01-01T00:01:00Z"
+              },
+              {
+                "id": "msg-b-assistant",
+                "session_id": "session-b",
+                "task_id": "task-b",
+                "turn_id": "turn-b1",
+                "role": "assistant",
+                "content": "Load test reply B",
+                "delivery": "immediate",
+                "created_at": "2025-01-01T00:01:02Z"
+              }
+            ],
+            "events": [],
+            "last_event_seq": 2,
+            "state_rev": 1,
+            "has_more_turns": false
+          },
+          "sessions": [
+            {
+              "session": {
+                "id": "session-b",
+                "task_id": "task-b",
+                "workspace_id": "ws-fixture-telemetry",
+                "worktree_id": "wt-fixture-b",
+                "provider_id": "fake",
+                "model_id": "fake-model",
+                "title": "Fixture session B",
+                "agent_role": "assistant",
+                "status": "completed",
+                "created_at": "2025-01-01T00:01:00Z",
+                "updated_at": "2025-01-01T00:01:05Z"
+              },
+              "last_message_at": "2025-01-01T00:01:02Z",
+              "last_message_preview": "Load test reply B",
+              "last_event_seq": 2,
+              "state_rev": 1,
+              "activity": { "is_working": false, "last_turn_status": "completed" },
+              "unread": false
+            }
+          ],
+          "sort_at": "2025-01-01T00:01:10Z"
+        }
+      ]
+    }
+  },
+  "session_snapshots": {
+    "session-a": {
+      "summary": {
+        "session": {
+          "id": "session-a",
+          "task_id": "task-a",
+          "workspace_id": "ws-fixture-telemetry",
+          "worktree_id": "wt-fixture-a",
+          "provider_id": "fake",
+          "model_id": "fake-model",
+          "title": "Fixture session A",
+          "agent_role": "assistant",
+          "status": "active",
+          "created_at": "2025-01-01T00:00:00Z",
+          "updated_at": "2025-01-01T00:00:05Z"
+        },
+        "last_message_at": "2025-01-01T00:00:02Z",
+        "last_message_preview": "Load test reply A",
+        "last_event_seq": 2,
+        "state_rev": 1,
+        "activity": { "is_working": false, "last_turn_status": "completed" },
+        "unread": false
+      },
+      "head": {
+        "session": {
+          "id": "session-a",
+          "task_id": "task-a",
+          "workspace_id": "ws-fixture-telemetry",
+          "worktree_id": "wt-fixture-a",
+          "provider_id": "fake",
+          "model_id": "fake-model",
+          "title": "Fixture session A",
+          "agent_role": "assistant",
+          "status": "active",
+          "created_at": "2025-01-01T00:00:00Z",
+          "updated_at": "2025-01-01T00:00:05Z"
+        },
+        "turns": [
+          {
+            "turn_id": "turn-a1",
+            "session_id": "session-a",
+            "user_message_id": "msg-a-user",
+            "status": "completed",
+            "start_seq": 1,
+            "end_seq": 2,
+            "started_at": "2025-01-01T00:00:00Z",
+            "updated_at": "2025-01-01T00:00:02Z",
+            "assistant_partial": null,
+            "thought_partial": null,
+            "tool_total": 0,
+            "tool_pending": 0,
+            "tool_running": 0,
+            "tool_completed": 0,
+            "tool_failed": 0
+          }
+        ],
+        "messages": [
+          {
+            "id": "msg-a-user",
+            "session_id": "session-a",
+            "task_id": "task-a",
+            "turn_id": "turn-a1",
+            "role": "user",
+            "content": "Load test prompt A",
+            "delivery": "immediate",
+            "created_at": "2025-01-01T00:00:00Z"
+          },
+          {
+            "id": "msg-a-assistant",
+            "session_id": "session-a",
+            "task_id": "task-a",
+            "turn_id": "turn-a1",
+            "role": "assistant",
+            "content": "Load test reply A",
+            "delivery": "immediate",
+            "created_at": "2025-01-01T00:00:02Z"
+          }
+        ],
+        "events": [],
+        "last_event_seq": 2,
+        "state_rev": 1,
+        "has_more_turns": false
+      },
+      "state": { "artifacts": [], "git_status": null }
+    },
+    "session-b": {
+      "summary": {
+        "session": {
+          "id": "session-b",
+          "task_id": "task-b",
+          "workspace_id": "ws-fixture-telemetry",
+          "worktree_id": "wt-fixture-b",
+          "provider_id": "fake",
+          "model_id": "fake-model",
+          "title": "Fixture session B",
+          "agent_role": "assistant",
+          "status": "completed",
+          "created_at": "2025-01-01T00:01:00Z",
+          "updated_at": "2025-01-01T00:01:05Z"
+        },
+        "last_message_at": "2025-01-01T00:01:02Z",
+        "last_message_preview": "Load test reply B",
+        "last_event_seq": 2,
+        "state_rev": 1,
+        "activity": { "is_working": false, "last_turn_status": "completed" },
+        "unread": false
+      },
+      "head": {
+        "session": {
+          "id": "session-b",
+          "task_id": "task-b",
+          "workspace_id": "ws-fixture-telemetry",
+          "worktree_id": "wt-fixture-b",
+          "provider_id": "fake",
+          "model_id": "fake-model",
+          "title": "Fixture session B",
+          "agent_role": "assistant",
+          "status": "completed",
+          "created_at": "2025-01-01T00:01:00Z",
+          "updated_at": "2025-01-01T00:01:05Z"
+        },
+        "turns": [
+          {
+            "turn_id": "turn-b1",
+            "session_id": "session-b",
+            "user_message_id": "msg-b-user",
+            "status": "completed",
+            "start_seq": 1,
+            "end_seq": 2,
+            "started_at": "2025-01-01T00:01:00Z",
+            "updated_at": "2025-01-01T00:01:02Z",
+            "assistant_partial": null,
+            "thought_partial": null,
+            "tool_total": 0,
+            "tool_pending": 0,
+            "tool_running": 0,
+            "tool_completed": 0,
+            "tool_failed": 0
+          }
+        ],
+        "messages": [
+          {
+            "id": "msg-b-user",
+            "session_id": "session-b",
+            "task_id": "task-b",
+            "turn_id": "turn-b1",
+            "role": "user",
+            "content": "Load test prompt B",
+            "delivery": "immediate",
+            "created_at": "2025-01-01T00:01:00Z"
+          },
+          {
+            "id": "msg-b-assistant",
+            "session_id": "session-b",
+            "task_id": "task-b",
+            "turn_id": "turn-b1",
+            "role": "assistant",
+            "content": "Load test reply B",
+            "delivery": "immediate",
+            "created_at": "2025-01-01T00:01:02Z"
+          }
+        ],
+        "events": [],
+        "last_event_seq": 2,
+        "state_rev": 1,
+        "has_more_turns": false
+      },
+      "state": { "artifacts": [], "git_status": null }
+    }
+  },
+  "stream": [
+    {
+      "delay_ms": 0,
+      "event": {
+        "type": "ready",
+        "workspace_id": "ws-fixture-telemetry",
+        "snapshot_rev": 1,
+        "archived_rev": 0
+      }
+    },
+    {
+      "delay_ms": 400,
+      "event": {
+        "type": "session_head_delta",
+        "workspace_id": "ws-fixture-telemetry",
+        "snapshot_rev": 1,
+        "delta": {
+          "session_id": "session-a",
+          "last_event_seq": 2,
+          "turn": {
+            "turn_id": "turn-a1",
+            "session_id": "session-a",
+            "user_message_id": "msg-a-user",
+            "status": "completed",
+            "start_seq": 1,
+            "end_seq": 2,
+            "started_at": "2025-01-01T00:00:00Z",
+            "updated_at": "2025-01-01T00:00:02Z",
+            "assistant_partial": null,
+            "thought_partial": null,
+            "tool_total": 0,
+            "tool_pending": 0,
+            "tool_running": 0,
+            "tool_completed": 0,
+            "tool_failed": 0
+          },
+          "message": {
+            "id": "msg-a-assistant",
+            "session_id": "session-a",
+            "task_id": "task-a",
+            "turn_id": "turn-a1",
+            "role": "assistant",
+            "content": "Load test reply A",
+            "delivery": "immediate",
+            "created_at": "2025-01-01T00:00:02Z"
+          }
+        }
+      }
+    }
+  ]
+}

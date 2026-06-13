@@ -1,0 +1,32 @@
+[package]
+name = "ctx-avf-linux-runtime"
+version = "0.34.0"
+edition.workspace = true
+license.workspace = true
+
+[features]
+test-support = []
+
+[dependencies]
+anyhow.workspace = true
+ctx-bundled-assets = { path = "../ctx-bundled-assets" }
+ctx-core = { path = "../ctx-core" }
+ctx-harness-setup = { path = "../ctx-harness-setup" }
+ctx-runtime-assets = { path = "../ctx-runtime-assets" }
+ctx-sandbox-container-runtime = { path = "../ctx-sandbox-container-runtime" }
+ctx-sandbox-contract = { path = "../ctx-sandbox-contract" }
+futures.workspace = true
+hex = "0.4"
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+tokio.workspace = true
+tracing.workspace = true
+url = "2"
+uuid.workspace = true
+
+[dev-dependencies]
+ctx-bundled-assets = { path = "../ctx-bundled-assets", features = ["test-support"] }
+flate2 = "1"
+tar = "0.4"
+tempfile = "3"

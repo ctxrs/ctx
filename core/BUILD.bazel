@@ -1,0 +1,60 @@
+load("@npm//:defs.bzl", "npm_link_all_packages")
+
+npm_link_all_packages()
+
+exports_files([
+    "Cargo.Bazel.Cargo.lock",
+    "Cargo.Bazel.lock",
+    "Cargo.lock",
+    "Cargo.toml",
+    "package.json",
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
+])
+
+filegroup(
+    name = "desktop_automation_files",
+    srcs = glob(["apps/desktop/automation/**"]),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "desktop_script_files",
+    srcs = glob(["apps/desktop/scripts/**"]),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "desktop_bundle_files",
+    srcs = glob(["apps/desktop/src-tauri/bundles/**"]),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "desktop_release_metadata_files",
+    srcs = [
+        "apps/desktop/package.json",
+        "apps/desktop/src-tauri/Cargo.toml",
+        "apps/desktop/src-tauri/tauri.conf.json",
+        "//core/crates/ctx-http:Cargo.toml",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "provider_matrix_sources",
+    srcs = ["//core/crates/ctx-provider-accounts:src/provider_matrix.json"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "web_client_api_sources",
+    srcs = glob(["apps/web/src/**"], allow_empty = True),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "ctx_http_auth_sources",
+    srcs = glob(["crates/ctx-http/src/api/auth/**"], allow_empty = True),
+    visibility = ["//visibility:public"],
+)

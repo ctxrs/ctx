@@ -1,0 +1,48 @@
+---
+title: "How Worktrees Work"
+description: "What worktree behavior looks like in day-to-day GUI usage"
+---
+
+## Overview
+
+From a user perspective, worktrees are the execution roots behind sessions.
+
+You do not need to manage low-level details manually. The important part is understanding what you are reviewing and where it came from.
+
+## Day-to-day lifecycle
+
+1. Create a task and start a session.
+2. ctx runs agent edits in that session's worktree.
+3. The diff panel reflects only that worktree's edits.
+4. You request revisions or finalize.
+5. You move to the next task with its own isolated worktree.
+
+## What you see in the UI
+
+- Worktree context attached to the active session.
+- Diff and summary tied to that same worktree.
+- Worktree/bootstrap settings in workspace settings.
+
+## Bootstrap setup for new worktrees
+
+Use `Settings > Worktree Bootstrap` to run setup automatically for each new worktree.
+
+Typical fields:
+
+- Setup command
+- Timeout
+- Whether session start waits for bootstrap completion
+
+This keeps dependencies and generated files consistent across task runs.
+
+## Common issues and fixes
+
+- Bootstrap takes too long: reduce setup scope or increase timeout.
+- Task diff contains unexpected files: tighten task scope and bootstrap scripts.
+- Session output looks stale: confirm you are reviewing the intended task/session.
+
+## Related pages
+
+- [What Is a Worktree?](/what-is-a-worktree)
+- [Why Worktrees](/worktrees-runtime/why-worktrees)
+- [Review and Apply Changes](/workbench/review-and-apply-changes)

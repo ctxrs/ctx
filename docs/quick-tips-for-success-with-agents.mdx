@@ -1,0 +1,36 @@
+---
+title: "Tips for Success with Agents"
+sidebarTitle: "Tips for Success"
+description: "Habits that improve quality and reduce rework in agent-led workflows"
+---
+
+## Keep one outcome per task
+
+Small, reviewable tasks are easier to steer and much easier to trust. Split unrelated work into separate tasks instead of piling everything into one run.
+
+## Start with constraints, not just goals
+
+Tell the agent:
+
+- what to change
+- what must stay unchanged
+- how to validate
+- how to summarize the result
+
+This cuts down on scope drift quickly.
+
+## Treat runs as collaboration, not one-shot prompts
+
+Start narrow, inspect what came back, and then tighten the next message. Short iterative loops are usually faster than one giant “do everything” prompt.
+
+## Ask for artifacts when behavior matters
+
+If a task changes a UI, a workflow, or a generated output, ask for a screenshot, recording, or short report so you can review behavior before you inspect code in depth.
+
+## Keep one stable setup while you learn the tool
+
+During first-run onboarding, stick with one provider and one model until the full loop is working. Add more providers, stronger policies, or more automation after the baseline is stable.
+
+## Diff review is the acceptance gate
+
+Do not finalize a task because the chat summary sounds good. Finalize only after the diff matches the scope, validation is addressed, and the result looks trustworthy.

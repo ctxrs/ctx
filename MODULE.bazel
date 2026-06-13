@@ -1,0 +1,576 @@
+module(
+    name = "ctx_monorepo",
+    version = "0.0.0",
+)
+
+bazel_dep(name = "rules_rust", version = "0.69.0")
+bazel_dep(name = "rules_shell", version = "0.7.1")
+bazel_dep(name = "platforms", version = "1.0.0")
+bazel_dep(name = "rules_cc", version = "0.2.17")
+bazel_dep(name = "toolchains_llvm", version = "1.7.0")
+bazel_dep(name = "rules_nodejs", version = "6.7.4")
+bazel_dep(name = "aspect_rules_js", version = "3.0.3")
+
+cc_configure = use_extension("@rules_cc//cc:extensions.bzl", "cc_configure_extension")
+use_repo(cc_configure, "local_config_cc", "local_config_cc_toolchains")
+register_toolchains("@local_config_cc_toolchains//:all")
+
+# Keep the LLVM C/C++ toolchain unregistered so the Linux GNU pilot stays opt-in.
+llvm = use_extension("@toolchains_llvm//toolchain/extensions:llvm.bzl", "llvm")
+llvm.toolchain(
+    name = "ctx_llvm_toolchain",
+    distribution = "LLVM-20.1.4-Linux-X64.tar.xz",
+    exec_arch = "amd64",
+    exec_os = "linux",
+    llvm_version = "20.1.4",
+)
+use_repo(llvm, "ctx_llvm_toolchain")
+
+node = use_extension("@rules_nodejs//nodejs:extensions.bzl", "node")
+node.toolchain(node_version = "22.22.2")
+use_repo(node, "nodejs_toolchains")
+
+pnpm = use_extension("@aspect_rules_js//npm:extensions.bzl", "pnpm")
+pnpm.pnpm(pnpm_version_from = "//core:package.json")
+use_repo(pnpm, "pnpm")
+
+npm = use_extension("@aspect_rules_js//npm:extensions.bzl", "npm")
+npm.npm_translate_lock(
+    name = "npm",
+    bins = {
+        "eslint": [
+            "eslint=./bin/eslint.js",
+        ],
+        "typescript": [
+            "tsc=./bin/tsc",
+            "tsserver=./bin/tsserver",
+        ],
+        "vite": [
+            "vite=./bin/vite.js",
+        ],
+        "vitest": [
+            "vitest=./vitest.mjs",
+        ],
+    },
+    pnpm_lock = "//core:pnpm-lock.yaml",
+    run_lifecycle_hooks = False,
+)
+use_repo(npm, "npm")
+
+playwright_browser_runtime = use_repo_rule(
+    "//tools/bazel:playwright_browser_runtime_repo.bzl",
+    "playwright_browser_runtime_repository",
+)
+playwright_browser_runtime(
+    name = "playwright_browser_runtime_mac15_arm64",
+    platforms = ["mac15-arm64"],
+)
+playwright_browser_runtime(
+    name = "playwright_browser_runtime_ubuntu24_04_x64",
+    platforms = ["ubuntu24.04-x64"],
+)
+
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+rust.toolchain(
+    edition = "2021",
+    versions = ["1.91.1"],
+)
+use_repo(rust, "rust_toolchains")
+
+register_toolchains("@rust_toolchains//:all")
+
+crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+crate.spec(
+    package = "anyhow",
+    version = "1",
+)
+crate.spec(
+    features = ["unstable"],
+    package = "agent-client-protocol",
+    version = "0.7",
+)
+crate.spec(
+    features = ["unstable"],
+    package = "agent-client-protocol",
+    version = "0.9",
+)
+crate.spec(
+    package = "assert-json-diff",
+    version = "2",
+)
+crate.spec(
+    package = "async-trait",
+    version = "0.1",
+)
+crate.spec(
+    package = "atty",
+    version = "0.2",
+)
+crate.spec(
+    features = [
+        "ws",
+        "macros",
+        "multipart",
+    ],
+    package = "axum",
+    version = "0.7",
+)
+crate.spec(
+    package = "base64",
+    version = "0.22",
+)
+crate.spec(
+    package = "blake2",
+    version = "0.10",
+)
+crate.spec(
+    package = "block2",
+    version = "0.6.2",
+)
+crate.spec(
+    package = "bzip2",
+    version = "0.5",
+)
+crate.spec(
+    package = "bytes",
+    version = "1",
+)
+crate.spec(
+    features = ["std"],
+    package = "chacha20poly1305",
+    version = "0.10",
+)
+crate.spec(
+    features = [
+        "derive",
+        "env",
+    ],
+    package = "clap",
+    version = "4",
+)
+crate.spec(
+    features = ["serde"],
+    package = "chrono",
+    version = "0.4",
+)
+crate.spec(
+    package = "directories",
+    version = "5",
+)
+crate.spec(
+    package = "ed25519-dalek",
+    version = "2",
+)
+crate.spec(
+    package = "dispatch2",
+    version = "0.3.1",
+)
+crate.spec(
+    package = "ed25519-dalek",
+    version = "2",
+)
+crate.spec(
+    package = "flate2",
+    version = "1",
+)
+crate.spec(
+    package = "fs2",
+    version = "0.4",
+)
+crate.spec(
+    package = "futures",
+    version = "0.3",
+)
+crate.spec(
+    package = "futures-util",
+    version = "0.3",
+)
+crate.spec(
+    package = "hex",
+    version = "0.4",
+)
+crate.spec(
+    package = "hmac",
+    version = "0.12",
+)
+crate.spec(
+    package = "hkdf",
+    version = "0.12",
+)
+crate.spec(
+    package = "http",
+    version = "1",
+)
+crate.spec(
+    package = "http-body",
+    version = "1",
+)
+crate.spec(
+    package = "http-body-util",
+    version = "0.1",
+)
+crate.spec(
+    package = "httparse",
+    version = "1.9",
+)
+crate.spec(
+    features = ["full"],
+    package = "hyper",
+    version = "1",
+)
+crate.spec(
+    features = [
+        "tokio",
+        "server",
+    ],
+    package = "hyper-util",
+    version = "0.1",
+)
+crate.spec(
+    package = "jsonwebtoken",
+    version = "9",
+)
+crate.spec(
+    package = "libc",
+    version = "0.2",
+)
+crate.spec(
+    package = "minisign-verify",
+    version = "0.2",
+)
+crate.spec(
+    features = ["proposed"],
+    package = "lsp-types",
+    version = "0.97",
+)
+crate.spec(
+    package = "mime_guess",
+    version = "2",
+)
+crate.spec(
+    package = "minisign-verify",
+    version = "0.2",
+)
+crate.spec(
+    package = "html2md",
+    version = "0.2",
+)
+crate.spec(
+    package = "notify",
+    version = "7.0.0",
+)
+crate.spec(
+    package = "objc2",
+    version = "0.6.3",
+)
+crate.spec(
+    features = [
+        "NSArray",
+        "NSError",
+        "NSString",
+        "NSURL",
+    ],
+    package = "objc2-foundation",
+    version = "0.3.2",
+)
+crate.spec(
+    default_features = False,
+    features = [
+        "block2",
+        "dispatch2",
+        "std",
+        "VZBootLoader",
+        "VZDirectoryShare",
+        "VZDirectorySharingDeviceConfiguration",
+        "VZDiskImageStorageDeviceAttachment",
+        "VZFileSerialPortAttachment",
+        "VZGenericMachineIdentifier",
+        "VZGenericPlatformConfiguration",
+        "VZLinuxBootLoader",
+        "VZMACAddress",
+        "VZMemoryBalloonDevice",
+        "VZMemoryBalloonDeviceConfiguration",
+        "VZNATNetworkDeviceAttachment",
+        "VZNetworkDeviceAttachment",
+        "VZNetworkDeviceConfiguration",
+        "VZPlatformConfiguration",
+        "VZSerialPortAttachment",
+        "VZSerialPortConfiguration",
+        "VZSharedDirectory",
+        "VZSingleDirectoryShare",
+        "VZSocketDeviceConfiguration",
+        "VZStorageDeviceAttachment",
+        "VZStorageDeviceConfiguration",
+        "VZSocketDevice",
+        "VZVirtioBlockDeviceConfiguration",
+        "VZVirtioConsoleDeviceSerialPortConfiguration",
+        "VZVirtioFileSystemDeviceConfiguration",
+        "VZVirtioNetworkDeviceConfiguration",
+        "VZVirtioSocketConnection",
+        "VZVirtioSocketDevice",
+        "VZVirtioSocketDeviceConfiguration",
+        "VZVirtioTraditionalMemoryBalloonDevice",
+        "VZVirtioTraditionalMemoryBalloonDeviceConfiguration",
+        "VZVirtualMachine",
+        "VZVirtualMachineConfiguration",
+    ],
+    package = "objc2-virtualization",
+    version = "0.3.2",
+)
+crate.spec(
+    features = [
+        "trace",
+        "metrics",
+    ],
+    package = "opentelemetry",
+    version = "0.23",
+)
+crate.spec(
+    features = [
+        "http-proto",
+        "reqwest-client",
+        "reqwest-rustls",
+        "metrics",
+    ],
+    package = "opentelemetry-otlp",
+    version = "0.16",
+)
+crate.spec(
+    features = [
+        "trace",
+        "metrics",
+        "rt-tokio",
+    ],
+    package = "opentelemetry_sdk",
+    version = "0.23",
+)
+crate.spec(
+    package = "portable-pty",
+    version = "0.9",
+)
+crate.spec(
+    package = "pretty_assertions",
+    version = "1",
+)
+crate.spec(
+    package = "rand",
+    version = "0.8",
+)
+crate.spec(
+    package = "rand_core",
+    version = "0.6",
+)
+crate.spec(
+    default_features = False,
+    features = [
+        "json",
+        "stream",
+        "rustls-tls",
+        "gzip",
+        "brotli",
+        "deflate",
+        "multipart",
+    ],
+    package = "reqwest",
+    version = "0.12",
+)
+crate.spec(
+    features = [
+        "tokio-comp",
+        "connection-manager",
+    ],
+    package = "redis",
+    version = "0.25",
+)
+crate.spec(
+    package = "rcgen",
+    version = "0.13.2",
+)
+crate.spec(
+    package = "regex",
+    version = "1",
+)
+crate.spec(
+    package = "ring",
+    version = "0.17",
+)
+crate.spec(
+    package = "rustls",
+    version = "0.23",
+)
+crate.spec(
+    package = "semver",
+    version = "1",
+)
+crate.spec(
+    features = ["derive"],
+    package = "serde",
+    version = "1",
+)
+crate.spec(
+    package = "serde_json",
+    version = "1",
+)
+crate.spec(
+    package = "sha2",
+    version = "0.10",
+)
+crate.spec(
+    package = "shlex",
+    version = "1.3",
+)
+crate.spec(
+    package = "shell-words",
+    version = "1",
+)
+crate.spec(
+    package = "similar",
+    version = "2",
+)
+crate.spec(
+    default_features = False,
+    features = [
+        "runtime-tokio",
+        "sqlite",
+        "chrono",
+        "uuid",
+        "migrate",
+        "macros",
+        "postgres",
+    ],
+    package = "sqlx",
+    version = "0.8",
+)
+crate.spec(
+    package = "sysinfo",
+    version = "0.30",
+)
+crate.spec(
+    package = "subtle",
+    version = "2",
+)
+crate.spec(
+    package = "tempfile",
+    version = "3",
+)
+crate.spec(
+    package = "tar",
+    version = "0.4",
+)
+crate.spec(
+    package = "thiserror",
+    version = "1",
+)
+crate.spec(
+    features = ["full"],
+    package = "tokio",
+    version = "1",
+)
+crate.spec(
+    package = "tokio-stream",
+    version = "0.1",
+)
+crate.spec(
+    features = ["rustls-tls-webpki-roots"],
+    package = "tokio-tungstenite",
+    version = "0.26",
+)
+crate.spec(
+    features = ["compat"],
+    package = "tokio-util",
+    version = "0.7",
+)
+crate.spec(
+    package = "toml",
+    version = "0.8",
+)
+crate.spec(
+    package = "toml_edit",
+    version = "0.22",
+)
+crate.spec(
+    features = ["util"],
+    package = "tower",
+    version = "0.5",
+)
+crate.spec(
+    features = [
+        "cors",
+        "fs",
+    ],
+    package = "tower-http",
+    version = "0.6",
+)
+crate.spec(
+    package = "tracing",
+    version = "0.1",
+)
+crate.spec(
+    package = "tracing-appender",
+    version = "0.2",
+)
+crate.spec(
+    features = [
+        "env-filter",
+        "fmt",
+    ],
+    package = "tracing-subscriber",
+    version = "0.3",
+)
+crate.spec(
+    features = [
+        "no-serde-warnings",
+        "serde-json-impl",
+    ],
+    package = "ts-rs",
+    version = "10.1.0",
+)
+crate.spec(
+    package = "url",
+    version = "2",
+)
+crate.spec(
+    package = "urlencoding",
+    version = "2",
+)
+crate.spec(
+    features = [
+        "v4",
+        "serde",
+    ],
+    package = "uuid",
+    version = "1",
+)
+crate.spec(
+    package = "which",
+    version = "7",
+)
+crate.spec(
+    features = ["static_secrets"],
+    package = "x25519-dalek",
+    version = "2",
+)
+crate.spec(
+    package = "zip",
+    version = "2",
+)
+crate.spec(
+    package = "zstd",
+    version = "0.13",
+)
+crate.from_specs(
+    name = "crates",
+    cargo_lockfile = "//core:Cargo.Bazel.Cargo.lock",
+    lockfile = "//core:Cargo.Bazel.lock",
+    supported_platform_triples = [
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-gnu",
+        "x86_64-unknown-nixos-gnu",
+        "x86_64-pc-windows-msvc",
+        "wasm32-unknown-unknown",
+        "wasm32-wasip1",
+    ],
+)
+use_repo(crate, "crates")

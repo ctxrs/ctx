@@ -1,0 +1,12 @@
+{
+  "turns": [
+    {
+      "thought": "Hm (mistral)",
+      "tools": [
+        {"tool_name": "exec_command", "input": {"cmd": "echo mistral"}, "output": "mistral"}
+      ],
+      "deltas": ["Ho", "la"],
+      "final": "Hola from mistral"
+    }
+  ]
+}

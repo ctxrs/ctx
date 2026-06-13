@@ -1,0 +1,6 @@
+{"type":"bind_turn","app_turn_id":"turn_app_1","crp_turn_id":"turn_crp_1"}
+{"type":"notification","method":"turn/started","params":{"threadId":"thr_fixture","turn":{"id":"turn_app_1","items":[],"status":"inProgress","error":null}}}
+{"type":"notification","method":"item/agentMessage/delta","params":{"threadId":"thr_fixture","turnId":"turn_app_1","itemId":"msg_1","delta":"Hi"}}
+{"type":"notification","method":"item/completed","params":{"threadId":"thr_fixture","turnId":"turn_app_1","item":{"type":"agentMessage","id":"msg_1","text":"Hi","phase":null}}}
+{"type":"notification","method":"thread/tokenUsage/updated","params":{"threadId":"thr_fixture","turnId":"turn_app_1","tokenUsage":{"total":{"totalTokens":420000,"inputTokens":300000,"cachedInputTokens":10000,"outputTokens":80000,"reasoningOutputTokens":40000},"last":{"totalTokens":120,"inputTokens":70,"cachedInputTokens":0,"outputTokens":40,"reasoningOutputTokens":10},"modelContextWindow":200000}}}
+{"type":"notification","method":"turn/completed","params":{"threadId":"thr_fixture","turn":{"id":"turn_app_1","items":[],"status":"completed","error":null}}}

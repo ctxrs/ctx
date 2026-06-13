@@ -1,0 +1,2 @@
+ALTER TABLE session_events
+ADD COLUMN transient INTEGER NOT NULL DEFAULT 0;

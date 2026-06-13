@@ -1,0 +1,137 @@
+[package]
+name = "ctx-http"
+version = "0.66.0"
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+chrono.workspace = true
+clap.workspace = true
+ctx-avf-linux-runtime = { path = "../ctx-avf-linux-runtime" }
+ctx-core = { path = "../ctx-core" }
+ctx-daemon = { path = "../ctx-daemon" }
+ctx-events = { path = "../ctx-events" }
+ctx-execution-runtime = { path = "../ctx-execution-runtime" }
+ctx-fs = { path = "../ctx-fs" }
+ctx-bundled-assets = { path = "../ctx-bundled-assets" }
+ctx-harness-sources = { path = "../ctx-harness-sources" }
+ctx-harness-setup = { path = "../ctx-harness-setup" }
+ctx-harness-runtime = { path = "../ctx-harness-runtime" }
+ctx-managed-installs = { path = "../ctx-managed-installs" }
+ctx-linux-sandbox-runtime = { path = "../ctx-linux-sandbox-runtime" }
+ctx-http-auth = { path = "../ctx-http-auth" }
+ctx-mcp-auth = { path = "../ctx-mcp-auth" }
+ctx-mcp-command = { path = "../ctx-mcp-command" }
+ctx-mobile-access-service = { path = "../ctx-mobile-access-service" }
+ctx-observability = { path = "../ctx-observability" }
+ctx-transport-runtime = { path = "../ctx-transport-runtime" }
+ctx-sandbox-container-runtime = { path = "../ctx-sandbox-container-runtime" }
+ctx-runtime-assets = { path = "../ctx-runtime-assets" }
+ctx-provider-accounts = { path = "../ctx-provider-accounts" }
+ctx-provider-matrix = { path = "../ctx-provider-matrix" }
+ctx-provider-auth-import = { path = "../ctx-provider-auth-import" }
+ctx-provider-install = { path = "../ctx-provider-install" }
+ctx-provider-runtime = { path = "../ctx-provider-runtime" }
+ctx-providers = { path = "../ctx-providers" }
+ctx-repo-onboarding-service = { path = "../ctx-repo-onboarding-service" }
+ctx-resource-utilization = { path = "../ctx-resource-utilization" }
+ctx-route-contracts = { path = "../ctx-route-contracts" }
+ctx-sandbox-contract = { path = "../ctx-sandbox-contract" }
+ctx-sandbox-materialization = { path = "../ctx-sandbox-materialization" }
+ctx-session-artifacts = { path = "../ctx-session-artifacts" }
+ctx-subagent-service = { path = "../ctx-subagent-service" }
+ctx-session-tools = { path = "../ctx-session-tools" }
+ctx-storage-admission = { path = "../ctx-storage-admission" }
+ctx-settings-model = { path = "../ctx-settings-model" }
+ctx-settings-service = { path = "../ctx-settings-service" }
+ctx-worktree-data-plane = { path = "../ctx-worktree-data-plane" }
+ctx-workspace-attachments = { path = "../ctx-workspace-attachments" }
+ctx-workspace-runtime = { path = "../ctx-workspace-runtime" }
+ctx-workspace-config = { path = "../ctx-workspace-config" }
+ctx-workspace-container = { path = "../ctx-workspace-container" }
+ctx-workspace-stream-service = { path = "../ctx-workspace-stream-service" }
+ctx-workspace-active-snapshot = { path = "../ctx-workspace-active-snapshot" }
+ctx-store = { path = "../ctx-store" }
+ctx-update-service = { path = "../ctx-update-service" }
+directories.workspace = true
+futures.workspace = true
+http = "1"
+http-body = "1"
+httparse = "1.9"
+reqwest.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-appender = "0.2"
+tracing-subscriber.workspace = true
+tikv-jemalloc-ctl = { version = "0.6.1", optional = true, features = ["profiling", "stats"] }
+tikv-jemallocator = { version = "0.6.1", optional = true, features = ["profiling"] }
+opentelemetry = { version = "0.23", features = ["trace", "metrics"] }
+opentelemetry_sdk = { version = "0.23", features = ["trace", "metrics", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.16", features = ["http-proto", "reqwest-client", "reqwest-rustls", "metrics"] }
+toml = "0.8"
+uuid.workspace = true
+sysinfo.workspace = true
+tower-http = { version = "0.6", features = ["cors", "fs"] }
+tower = { version = "0.5", features = ["util"] }
+flate2 = "1"
+zstd = "0.13"
+tar = "0.4"
+bzip2 = "0.5"
+zip = "2"
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+bytes = "1"
+libc = "0.2"
+mime_guess = "2"
+chacha20poly1305 = { version = "0.10", features = ["std"] }
+hkdf = "0.12"
+rand_core = "0.6"
+url = "2"
+similar = "2"
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+which = "7"
+portable-pty = "0.9"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+tempfile = "3"
+notify.workspace = true
+toml_edit = "0.22"
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["tokio", "server"] }
+http-body-util = "0.1"
+
+[dev-dependencies]
+ctx-avf-linux-runtime = { path = "../ctx-avf-linux-runtime", features = ["test-support"] }
+ctx-bundled-assets = { path = "../ctx-bundled-assets", features = ["test-support"] }
+ctx-daemon = { path = "../ctx-daemon", features = ["test-support"] }
+ctx-session-title-service = { path = "../ctx-session-title-service" }
+ctx-workspace-runtime = { path = "../ctx-workspace-runtime", features = ["test-support"] }
+blake2 = "0.10"
+ed25519-dalek = "2"
+fs2 = "0.4"
+tempfile = "3"
+reqwest.workspace = true
+sqlx.workspace = true
+
+[features]
+fault_injection = ["ctx-store/fault_injection", "ctx-daemon/fault_injection"]
+property_tests = []
+daemon-heap-prof = [
+    "ctx-resource-utilization/daemon-heap-prof",
+    "dep:tikv-jemalloc-ctl",
+    "dep:tikv-jemallocator",
+]
+
+[[bin]]
+name = "ctx"
+path = "src/main.rs"

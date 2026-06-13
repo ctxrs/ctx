@@ -1,0 +1,12 @@
+{
+  "turns": [
+    {
+      "thought": "Hm (kimi)",
+      "tools": [
+        {"tool_name": "exec_command", "input": {"cmd": "echo kimi"}, "output": "kimi"}
+      ],
+      "deltas": ["Ho", "la"],
+      "final": "Hola from kimi"
+    }
+  ]
+}

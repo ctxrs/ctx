@@ -1,0 +1,4 @@
+# Public local-build example.
+#
+# Keep this file free of service credentials. Add local Bazel flags here only
+# when they are required for your own machine.

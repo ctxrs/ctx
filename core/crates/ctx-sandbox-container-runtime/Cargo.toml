@@ -1,0 +1,23 @@
+[package]
+name = "ctx-sandbox-container-runtime"
+version = "0.34.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+ctx-bundled-assets = { path = "../ctx-bundled-assets" }
+ctx-core = { path = "../ctx-core" }
+ctx-harness-setup = { path = "../ctx-harness-setup" }
+ctx-linux-sandbox-runtime = { path = "../ctx-linux-sandbox-runtime" }
+ctx-runtime-assets = { path = "../ctx-runtime-assets" }
+ctx-sandbox-contract = { path = "../ctx-sandbox-contract" }
+flate2 = "1"
+hex = "0.4"
+serde_json = { workspace = true }
+sha2 = "0.10"
+tar = "0.4"
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

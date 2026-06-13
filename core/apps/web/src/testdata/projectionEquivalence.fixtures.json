@@ -1,0 +1,62 @@
+{
+  "activeProjectionEquivalence": {
+    "userContent": "Prove projection equivalence.",
+    "assistantContent": "Projection equivalence holds.",
+    "toolCallId": "tool-projection",
+    "toolTitle": "rg projection",
+    "toolKind": "search",
+    "toolInput": {
+      "query": "projection equivalence"
+    },
+    "toolOutput": "matched projection fixture",
+    "streamAssistantChunk": "Projection equivalence",
+    "orderSeqs": {
+      "user": 1,
+      "tool": 2,
+      "assistant": 3
+    },
+    "replayExpectations": [
+      {
+        "afterSeq": 2,
+        "expectedSeqs": [
+          3
+        ],
+        "expectGap": false
+      },
+      {
+        "afterSeq": 4,
+        "expectedSeqs": [],
+        "expectGap": false
+      }
+    ],
+    "expected": {
+      "headLastEventSeq": 4,
+      "summaryLastEventSeq": 4,
+      "persistedEventTypes": [
+        "user_message",
+        "tool_call",
+        "tool_result"
+      ],
+      "stableEventTypes": [
+        "user_message",
+        "tool_call",
+        "tool_result",
+        "assistant_complete"
+      ],
+      "renderItemKinds": [
+        "tool",
+        "assistant",
+        "turn_status"
+      ]
+    }
+  },
+  "sessionGapSeedRehydrate": {
+    "userContent": "Resume after a session gap.",
+    "assistantContent": "Seeded response after gap.",
+    "afterSeq": 1,
+    "expected": {
+      "headLastEventSeq": 2005,
+      "reason": "replay_buffer_overflow"
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "turns": [
+    {
+      "thought": "Hm (claude)",
+      "tools": [
+        {"tool_name": "exec_command", "input": {"cmd": "echo claude"}, "output": "claude"}
+      ],
+      "deltas": ["Ho", "la"],
+      "final": "Hola from claude"
+    }
+  ]
+}

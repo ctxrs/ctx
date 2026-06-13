@@ -1,0 +1,14 @@
+{
+  "turns": [
+    {
+      "deltas": ["Con", "text"],
+      "final": "Context window for claude-crp",
+      "context_window": {
+        "context_tokens_estimate": 50000,
+        "context_window_tokens": 200000,
+        "remaining_tokens_estimate": 150000,
+        "remaining_fraction": 0.75
+      }
+    }
+  ]
+}

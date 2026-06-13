@@ -1,0 +1,32 @@
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+CTX_EGRESS_PROXY_DEPS = [
+    "@crates//:anyhow",
+    "@crates//:clap",
+    "@crates//:httparse",
+    "@crates//:libc",
+    "@crates//:serde",
+    "@crates//:serde_json",
+    "@crates//:tokio",
+    "@crates//:tracing",
+    "@crates//:tracing-subscriber",
+    "@crates//:url",
+]
+
+rust_binary(
+    name = "ctx-egress-proxy",
+    crate_root = "src/main.rs",
+    edition = "2021",
+    srcs = ["src/main.rs"],
+    deps = CTX_EGRESS_PROXY_DEPS,
+)
+
+rust_test(
+    name = "unit_tests",
+    crate_root = "src/main.rs",
+    edition = "2021",
+    srcs = ["src/main.rs"],
+    deps = CTX_EGRESS_PROXY_DEPS,
+)

@@ -1,0 +1,113 @@
+[workspace]
+members = [
+  "crates/ctx-docs-mirror",
+  "crates/ctx-crp-protocol",
+  "crates/ctx-core",
+  "crates/ctx-observability",
+  "crates/ctx-update-service",
+  "crates/ctx-mobile-access-service",
+  "crates/ctx-org-policy",
+  "crates/ctx-client",
+  "crates/ctx-avf-linux-runtime",
+  "crates/ctx-desktop-ipc",
+  "crates/ctx-store",
+  "crates/ctx-fs",
+  "crates/ctx-events",
+  "crates/ctx-providers",
+  "crates/codex-crp",
+  "crates/ctx-http-auth",
+  "crates/ctx-mcp-auth",
+  "crates/ctx-mcp",
+  "crates/ctx-http-test-support",
+  "crates/ctx-provider-accounts",
+  "crates/ctx-provider-matrix",
+  "crates/ctx-provider-auth-import",
+  "crates/ctx-harness-sources",
+  "crates/ctx-harness-setup",
+  "crates/ctx-harness-runtime",
+  "crates/ctx-bundled-assets",
+  "crates/ctx-linux-sandbox-runtime",
+  "crates/ctx-sandbox-container-runtime",
+  "crates/ctx-runtime-assets",
+  "crates/ctx-resource-utilization",
+  "crates/ctx-repo-onboarding-service",
+  "crates/ctx-route-contracts",
+  "crates/ctx-run-scheduler",
+  "crates/ctx-run-archive-service",
+  "crates/ctx-sandbox-contract",
+  "crates/ctx-sandbox-materialization",
+  "crates/ctx-session-artifacts",
+  "crates/ctx-session-message-service",
+  "crates/ctx-session-runtime",
+  "crates/ctx-session-service",
+  "crates/ctx-session-title-service",
+  "crates/ctx-session-vcs-service",
+  "crates/ctx-subagent-service",
+  "crates/ctx-task-service",
+  "crates/ctx-daemon",
+  "crates/ctx-session-tools",
+  "crates/ctx-storage-admission",
+  "crates/ctx-settings-model",
+  "crates/ctx-settings-service",
+  "crates/ctx-worktree-data-plane",
+  "crates/ctx-execution-runtime",
+  "crates/ctx-workspace-runtime",
+  "crates/ctx-workspace-config",
+  "crates/ctx-workspace-attachments",
+  "crates/ctx-workspace-container",
+  "crates/ctx-workspace-active-snapshot",
+  "crates/ctx-workspace-stream-service",
+  "crates/ctx-worktree-bootstrap-service",
+  "crates/ctx-worktree-vcs-service",
+  "crates/ctx-merge-queue",
+  "crates/ctx-mcp-command",
+  "crates/ctx-transport-runtime",
+  "crates/ctx-managed-installs",
+  "crates/ctx-provider-install",
+  "crates/ctx-provider-runtime",
+  "crates/ctx-http",
+  "crates/ctx-egress-proxy",
+  "crates/ctx-avf-linux-guest-agent",
+]
+exclude = ["apps/desktop/src-tauri"]
+resolver = "2"
+
+[workspace.lints]
+
+[workspace.package]
+edition = "2021"
+license = "GPL-3.0-or-later"
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+axum = { version = "0.7", features = ["ws", "macros", "multipart"] }
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+directories = "5"
+futures = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "gzip", "brotli", "deflate", "multipart"] }
+rcgen = "0.13.2"
+rustls = "0.23"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "chrono", "uuid", "migrate", "macros"] }
+thiserror = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+tokio-util = "0.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+sum-tree = { version = "0.2.0", package = "zed-sum-tree" }
+notify = "7.0.0"
+raw-window-handle = "0.6.2"
+ropey = { version = "=2.0.0-beta.1", features = ["metric_lines_lf", "metric_utf16"] }
+rust-i18n = "3"
+schemars = "1"
+serde_repr = "0.1"
+smallvec = "1"
+smol = "2"
+log = "0.4"
+uuid = { version = "1", features = ["v4", "serde"] }
+sysinfo = "0.30"

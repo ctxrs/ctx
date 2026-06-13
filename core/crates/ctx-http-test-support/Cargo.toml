@@ -1,0 +1,18 @@
+[package]
+name = "ctx-http-test-support"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+ctx-core = { path = "../ctx-core" }
+ctx-daemon = { path = "../ctx-daemon", features = ["test-support"] }
+ctx-http = { path = "../ctx-http" }
+ctx-providers = { path = "../ctx-providers" }
+ctx-store = { path = "../ctx-store" }
+reqwest.workspace = true
+serde_json.workspace = true
+tempfile = "3"
+tokio.workspace = true

@@ -1,0 +1,85 @@
+{
+  "events": [
+    {
+      "channel": "control",
+      "event": {
+        "session_id": "fixture-session",
+        "turn_id": "turn_crp_1",
+        "type": "turn.started"
+      }
+    },
+    {
+      "channel": "data",
+      "event": {
+        "delta": "Hi",
+        "message_id": "msg_1",
+        "session_id": "fixture-session",
+        "turn_id": "turn_crp_1",
+        "type": "message.delta"
+      }
+    },
+    {
+      "channel": "control",
+      "event": {
+        "content": "Hi",
+        "message_id": "msg_1",
+        "session_id": "fixture-session",
+        "turn_id": "turn_crp_1",
+        "type": "message.final"
+      }
+    },
+    {
+      "channel": "control",
+      "event": {
+        "context_window": {
+          "context_tokens_estimate": 120,
+          "context_window_tokens": 200000,
+          "remaining_fraction": 0.9994,
+          "remaining_tokens_estimate": 199880,
+          "total_input_tokens": 70,
+          "total_output_tokens": 50
+        },
+        "session_id": "fixture-session",
+        "turn_id": "turn_crp_1",
+        "type": "turn.context_window.updated"
+      }
+    },
+    {
+      "channel": "control",
+      "event": {
+        "context_window": {
+          "context_tokens_estimate": 120,
+          "context_window_tokens": 200000,
+          "remaining_fraction": 0.9994,
+          "remaining_tokens_estimate": 199880,
+          "total_input_tokens": 70,
+          "total_output_tokens": 50
+        },
+        "session_id": "fixture-session",
+        "status": "success",
+        "turn_id": "turn_crp_1",
+        "type": "turn.completed"
+      }
+    }
+  ],
+  "aliases": {
+    "turn_app_1": "turn_crp_1"
+  },
+  "latest_token_usage": {
+    "last": {
+      "cachedInputTokens": 0,
+      "inputTokens": 70,
+      "outputTokens": 40,
+      "reasoningOutputTokens": 10,
+      "totalTokens": 120
+    },
+    "modelContextWindow": 200000,
+    "total": {
+      "cachedInputTokens": 10000,
+      "inputTokens": 300000,
+      "outputTokens": 80000,
+      "reasoningOutputTokens": 40000,
+      "totalTokens": 420000
+    }
+  }
+}

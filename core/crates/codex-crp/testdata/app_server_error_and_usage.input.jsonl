@@ -1,0 +1,3 @@
+{"type":"bind_turn","app_turn_id":"turn_app_3","crp_turn_id":"turn_crp_3"}
+{"type":"notification","method":"thread/tokenUsage/updated","params":{"threadId":"thr_fixture","turnId":"turn_app_3","tokenUsage":{"total":{"totalTokens":9000,"inputTokens":8000,"cachedInputTokens":0,"outputTokens":500,"reasoningOutputTokens":500},"last":{"totalTokens":9000,"inputTokens":8000,"cachedInputTokens":0,"outputTokens":500,"reasoningOutputTokens":500},"modelContextWindow":10000}}}
+{"type":"notification","method":"turn/completed","params":{"threadId":"thr_fixture","turn":{"id":"turn_app_3","items":[],"status":"failed","error":{"message":"quota exceeded","codexErrorInfo":{"type":"UsageLimitExceeded"},"additionalDetails":"retry later"}}}}

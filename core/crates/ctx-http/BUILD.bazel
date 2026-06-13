@@ -1,0 +1,929 @@
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_doc_test", "rust_library")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load(
+    ":ctx_http_bazel_tests.bzl",
+    "declare_ctx_http_filtered_unit_test",
+    "declare_ctx_http_integration_tests",
+    "declare_ctx_http_rust_unit_test",
+    "declare_ctx_http_unit_test_harness",
+)
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+CTX_HTTP_RUSTC_ENV = {
+    "CARGO_MANIFEST_DIR": "core/crates/ctx-http",
+        "CARGO_PKG_VERSION": "0.66.0",
+}
+
+CTX_HTTP_RUNTIME_COMPILE_DATA = [
+    "//core/apps/desktop/src-tauri/config:updater_pubkey.txt",
+    "//core/packages:web-session-worker/bin/auth.mjs",
+    "//core/packages:web-session-worker/bin/worker.mjs",
+    "//core/packages:web-session-worker/package.json",
+]
+
+CTX_HTTP_COMPILE_DATA = CTX_HTTP_RUNTIME_COMPILE_DATA + [
+    "//core/apps/web:src/testdata/projectionEquivalence.fixtures.json",
+]
+
+CTX_HTTP_TEST_COMMON_SRCS = glob(["tests/common/**/*.rs"])
+CTX_HTTP_TEST_CORPUS_DATA = glob(["tests/corpus/**"])
+CTX_HTTP_TEST_FIXTURE_DATA = glob(["tests/fixtures/**"])
+CTX_HTTP_INTEGRATION_TEST_DATA = CTX_HTTP_COMPILE_DATA + CTX_HTTP_TEST_CORPUS_DATA + CTX_HTTP_TEST_FIXTURE_DATA
+CTX_HTTP_INTEGRATION_BINARY_DATA = {
+    "noisy_output_backpressure": ["//core/crates/ctx-mcp:ctx-mcp"],
+    "provider_scenarios_offline": ["//core/crates/ctx-mcp:ctx-mcp"],
+    "session_model_api": ["//core/crates/ctx-mcp:ctx-mcp"],
+    "title_generation_local": [":llama_server_mock"],
+}
+CTX_HTTP_INTEGRATION_BINARY_RUSTC_ENV = {
+    "noisy_output_backpressure": {
+        "CARGO_BIN_EXE_ctx-mcp": "$(rootpath //core/crates/ctx-mcp:ctx-mcp)",
+    },
+    "provider_scenarios_offline": {
+        "CARGO_BIN_EXE_ctx-mcp": "$(rootpath //core/crates/ctx-mcp:ctx-mcp)",
+    },
+    "session_model_api": {
+        "CARGO_BIN_EXE_ctx-mcp": "$(rootpath //core/crates/ctx-mcp:ctx-mcp)",
+    },
+    "title_generation_local": {
+        "CARGO_BIN_EXE_llama_server_mock": "$(rootpath :llama_server_mock)",
+    },
+}
+
+CTX_HTTP_TEST_ARGS = []
+CTX_HTTP_TIMING_SENSITIVE_TEST_TAGS = ["exclusive"]
+CTX_HTTP_TIMING_SENSITIVE_EXACT_TEST_TAGS = CTX_HTTP_TIMING_SENSITIVE_TEST_TAGS
+CTX_HTTP_INTEGRATION_TEST_ARGS = CTX_HTTP_TEST_ARGS + [
+    "--test-threads=1",
+]
+CTX_HTTP_UNIT_TEST_SERIAL_ARGS = CTX_HTTP_TEST_ARGS + [
+    "--test-threads=1",
+]
+CTX_HTTP_API_UNIT_TEST_ARGS = CTX_HTTP_UNIT_TEST_SERIAL_ARGS + [
+    "api::",
+    "--skip=api::tasks::cleanup_lifecycle_tests::",
+    "--skip=api::tasks::lifecycle_tests::",
+    "--skip=api::tasks::storage_admission_http_tests::",
+    "--skip=api::workspaces::tests::",
+]
+CTX_HTTP_API_CLEANUP_LIFECYCLE_TEST_ARGS = CTX_HTTP_UNIT_TEST_SERIAL_ARGS + [
+    "api::tasks::cleanup_lifecycle_tests::",
+]
+CTX_HTTP_API_TASK_LIFECYCLE_TEST_ARGS = CTX_HTTP_UNIT_TEST_SERIAL_ARGS + [
+    "api::tasks::lifecycle_tests::",
+]
+CTX_HTTP_API_STORAGE_ADMISSION_TEST_ARGS = CTX_HTTP_UNIT_TEST_SERIAL_ARGS + [
+    "api::tasks::storage_admission_http_tests::",
+]
+CTX_HTTP_API_WORKSPACES_TEST_ARGS = CTX_HTTP_UNIT_TEST_SERIAL_ARGS + [
+    "api::workspaces::tests::",
+]
+CTX_HTTP_LIB_UNIT_TEST_ARGS = CTX_HTTP_UNIT_TEST_SERIAL_ARGS + [
+    "lib_tests::",
+    "--skip=lib_tests::daemon_smoke::golden_path::daemon_golden_path_with_fake_provider",
+    "--skip=lib_tests::daemon_smoke::streaming::daemon_http_and_ws_streaming",
+    "--skip=lib_tests::execution_launch::startup_prewarm::execution_launch_startup_prewarm_kind_supported",
+    "--skip=lib_tests::mobile_secure_routes::",
+    "--skip=lib_tests::provider_routes::",
+    "--skip=lib_tests::run_archive_routes::",
+    "--skip=lib_tests::session_artifacts::",
+    "--skip=lib_tests::session_head_ctx_ui_sized_http::",
+    "--skip=lib_tests::session_head_large_http::",
+    "--skip=lib_tests::telemetry_export_boundaries::",
+    "--skip=lib_tests::update_boundaries::",
+    "--skip=lib_tests::web_session_routes::",
+    "--skip=lib_tests::workspace_active_routes::",
+]
+CTX_HTTP_LIB_MOBILE_SECURE_ROUTES_TEST_ARGS = CTX_HTTP_UNIT_TEST_SERIAL_ARGS + [
+    "lib_tests::mobile_secure_routes::",
+]
+CTX_HTTP_LIB_PROVIDER_ROUTES_TEST_ARGS = CTX_HTTP_UNIT_TEST_SERIAL_ARGS + [
+    "lib_tests::provider_routes::",
+]
+CTX_HTTP_LIB_RUN_ARCHIVE_ROUTES_TEST_ARGS = CTX_HTTP_UNIT_TEST_SERIAL_ARGS + [
+    "lib_tests::run_archive_routes::",
+]
+CTX_HTTP_LIB_SESSION_ARTIFACTS_TEST_ARGS = CTX_HTTP_UNIT_TEST_SERIAL_ARGS + [
+    "lib_tests::session_artifacts::",
+]
+CTX_HTTP_LIB_SESSION_HEAD_CTX_UI_SIZED_TEST_ARGS = CTX_HTTP_TEST_ARGS + [
+    "lib_tests::session_head_ctx_ui_sized_http::",
+]
+CTX_HTTP_LIB_SESSION_HEAD_LARGE_TEST_ARGS = CTX_HTTP_TEST_ARGS + [
+    "lib_tests::session_head_large_http::",
+]
+CTX_HTTP_LIB_TELEMETRY_EXPORT_TEST_ARGS = CTX_HTTP_UNIT_TEST_SERIAL_ARGS + [
+    "lib_tests::telemetry_export_boundaries::",
+]
+CTX_HTTP_LIB_UPDATE_BOUNDARIES_TEST_ARGS = CTX_HTTP_UNIT_TEST_SERIAL_ARGS + [
+    "lib_tests::update_boundaries::",
+]
+CTX_HTTP_LIB_WEB_SESSION_ROUTES_TEST_ARGS = CTX_HTTP_UNIT_TEST_SERIAL_ARGS + [
+    "lib_tests::web_session_routes::",
+]
+CTX_HTTP_LIB_WORKSPACE_ACTIVE_ROUTES_TEST_ARGS = CTX_HTTP_UNIT_TEST_SERIAL_ARGS + [
+    "lib_tests::workspace_active_routes::",
+]
+CTX_HTTP_MERGE_QUEUE_UNIT_TEST_ARGS = CTX_HTTP_TEST_ARGS + [
+    "daemon::merge_queue::",
+    "--skip=daemon::merge_queue::tests::resume::enabled_workspace_queued_rows_resume_only_after_open",
+]
+CTX_HTTP_MERGE_QUEUE_ENABLED_WORKSPACE_RESUME_AFTER_OPEN_TEST_ARGS = CTX_HTTP_TEST_ARGS + [
+    "--exact",
+    "daemon::merge_queue::tests::resume::enabled_workspace_queued_rows_resume_only_after_open",
+]
+CTX_HTTP_VCS_HOOKS_UNIT_TEST_ARGS = CTX_HTTP_UNIT_TEST_SERIAL_ARGS + [
+    "vcs_hooks::",
+]
+CTX_HTTP_STORAGE_GUARD_UNIT_TEST_ARGS = CTX_HTTP_UNIT_TEST_SERIAL_ARGS + [
+    "storage_guard::",
+]
+CTX_HTTP_DAEMON_UNIT_TEST_ARGS = CTX_HTTP_UNIT_TEST_SERIAL_ARGS + [
+    "daemon::",
+    "--skip=daemon::execution_effective::",
+    "--skip=daemon::merge_queue::",
+    "--skip=daemon::scheduler::",
+    "--skip=daemon::storage_guard::",
+    "--skip=daemon::workspace_runtime::",
+    "--skip=daemon::workspaces::vcs_hooks::",
+]
+CTX_HTTP_EXECUTION_EFFECTIVE_UNIT_TEST_ARGS = CTX_HTTP_UNIT_TEST_SERIAL_ARGS + [
+    "daemon::execution_effective::",
+]
+CTX_HTTP_DAEMON_GOLDEN_PATH_TEST_ARGS = CTX_HTTP_TEST_ARGS + [
+    "--exact",
+    "lib_tests::daemon_smoke::golden_path::daemon_golden_path_with_fake_provider",
+]
+CTX_HTTP_DAEMON_HTTP_AND_WS_STREAMING_TEST_ARGS = CTX_HTTP_TEST_ARGS + [
+    "--exact",
+    "lib_tests::daemon_smoke::streaming::daemon_http_and_ws_streaming",
+]
+CTX_HTTP_LIB_STARTUP_PREWARM_KIND_SUPPORTED_TEST_ARGS = CTX_HTTP_TEST_ARGS + [
+    "--exact",
+    "lib_tests::execution_launch::startup_prewarm::execution_launch_startup_prewarm_kind_supported",
+]
+CTX_HTTP_WORKSPACE_RUNTIME_UNIT_TEST_ARGS = CTX_HTTP_UNIT_TEST_SERIAL_ARGS + [
+    "daemon::workspace_runtime::",
+    "--skip=daemon::workspace_runtime::reclaim_unit_tests::idle_runtime_reclaim_stops_machine_even_with_running_ctx_harness_container",
+    "--skip=daemon::workspace_runtime::tests::runtime_prepare::prepare_reuses_running_workspace_container_without_front_loading_image_readiness",
+    "--skip=daemon::workspace_runtime::tests::runtime_prepare::prepare_starts_cached_workspace_container_when_sandbox_cli_reports_it_stopped",
+    "--skip=daemon::workspace_runtime::tests::reclaim::maybe_reclaim_sandbox_machine_stops_idle_machine",
+    "--skip=daemon::workspace_runtime::tests::reclaim::maybe_reclaim_sandbox_machine_stops_idle_runtime_with_running_workspace_containers",
+    "--skip=daemon::workspace_runtime::reclaim_unit_tests::idle_runtime_reclaim_stops_machine_even_with_running_ctx_harness_container",
+    "--skip=daemon::workspace_runtime::tests::avf_workspace::container_status::container_status_reports_running_avf_workspace_container",
+    "--skip=daemon::workspace_runtime::tests::avf_workspace::workspace_container::ensure_workspace_container_starts_avf_workspace_vm",
+    "--skip=daemon::workspace_runtime::tests::avf_workspace::workspace_container::ensure_workspace_container_for_worktree_keeps_avf_workspace_container_ready",
+    "--skip=daemon::workspace_runtime::tests::machine_recovery::materialization::ensure_sandbox_machine_materialized_defers_reconfiguration_when_machine_state_is_unknown_and_engine_unreachable",
+    "--skip=daemon::workspace_runtime::tests::machine_recovery::materialization::ensure_sandbox_machine_materialized_defers_reconfiguration_when_machine_is_running_but_engine_unreachable",
+    "--skip=daemon::workspace_runtime::tests::machine_recovery::materialization::ensure_sandbox_machine_materialized_recreates_machine_for_memory_profile_change_when_engine_is_down",
+]
+CTX_HTTP_WORKSPACE_RUNTIME_RECLAIM_IDLE_RUNTIME_WITH_PARKED_CONTAINERS_TEST_ARGS = CTX_HTTP_TEST_ARGS + [
+    "--exact",
+    "daemon::workspace_runtime::reclaim_unit_tests::idle_runtime_reclaim_stops_machine_even_with_running_ctx_harness_container",
+]
+CTX_HTTP_WORKSPACE_RUNTIME_REUSES_RUNNING_CONTAINER_TEST_ARGS = CTX_HTTP_TEST_ARGS + [
+    "--exact",
+    "daemon::workspace_runtime::tests::runtime_prepare::prepare_reuses_running_workspace_container_without_front_loading_image_readiness",
+]
+CTX_HTTP_WORKSPACE_RUNTIME_PREPARE_STARTS_CACHED_CONTAINER_TEST_ARGS = CTX_HTTP_TEST_ARGS + [
+    "--exact",
+    "daemon::workspace_runtime::tests::runtime_prepare::prepare_starts_cached_workspace_container_when_sandbox_cli_reports_it_stopped",
+]
+CTX_HTTP_WORKSPACE_RUNTIME_RECLAIM_IDLE_MACHINE_TEST_ARGS = CTX_HTTP_TEST_ARGS + [
+    "--exact",
+    "daemon::workspace_runtime::tests::reclaim::maybe_reclaim_sandbox_machine_stops_idle_machine",
+]
+CTX_HTTP_WORKSPACE_RUNTIME_RECLAIM_IDLE_RUNTIME_WITH_CONTAINERS_TEST_ARGS = CTX_HTTP_TEST_ARGS + [
+    "--exact",
+    "daemon::workspace_runtime::tests::reclaim::maybe_reclaim_sandbox_machine_stops_idle_runtime_with_running_workspace_containers",
+]
+CTX_HTTP_WORKSPACE_RUNTIME_RECLAIM_CTX_HARNESS_CONTAINER_TEST_ARGS = CTX_HTTP_TEST_ARGS + [
+    "--exact",
+    "daemon::workspace_runtime::reclaim_unit_tests::idle_runtime_reclaim_stops_machine_even_with_running_ctx_harness_container",
+]
+CTX_HTTP_WORKSPACE_RUNTIME_CONTAINER_STATUS_AVF_TEST_ARGS = CTX_HTTP_TEST_ARGS + [
+    "--exact",
+    "daemon::workspace_runtime::tests::avf_workspace::container_status::container_status_reports_running_avf_workspace_container",
+]
+CTX_HTTP_WORKSPACE_RUNTIME_STARTS_AVF_WORKSPACE_VM_TEST_ARGS = CTX_HTTP_TEST_ARGS + [
+    "--exact",
+    "daemon::workspace_runtime::tests::avf_workspace::workspace_container::ensure_workspace_container_starts_avf_workspace_vm",
+]
+CTX_HTTP_WORKSPACE_RUNTIME_KEEPS_AVF_WORKSPACE_CONTAINER_READY_TEST_ARGS = CTX_HTTP_TEST_ARGS + [
+    "--exact",
+    "daemon::workspace_runtime::tests::avf_workspace::workspace_container::ensure_workspace_container_for_worktree_keeps_avf_workspace_container_ready",
+]
+CTX_HTTP_WORKSPACE_RUNTIME_UNKNOWN_MACHINE_STATE_ENGINE_UNREACHABLE_TEST_ARGS = CTX_HTTP_TEST_ARGS + [
+    "--exact",
+    "daemon::workspace_runtime::tests::machine_recovery::materialization::ensure_sandbox_machine_materialized_defers_reconfiguration_when_machine_state_is_unknown_and_engine_unreachable",
+]
+CTX_HTTP_WORKSPACE_RUNTIME_RUNNING_UNREACHABLE_MACHINE_RECONFIGURATION_TEST_ARGS = CTX_HTTP_TEST_ARGS + [
+    "--exact",
+    "daemon::workspace_runtime::tests::machine_recovery::materialization::ensure_sandbox_machine_materialized_defers_reconfiguration_when_machine_is_running_but_engine_unreachable",
+]
+CTX_HTTP_WORKSPACE_RUNTIME_RECREATES_MACHINE_FOR_MEMORY_PROFILE_CHANGE_TEST_ARGS = CTX_HTTP_TEST_ARGS + [
+    "--exact",
+    "daemon::workspace_runtime::tests::machine_recovery::materialization::ensure_sandbox_machine_materialized_recreates_machine_for_memory_profile_change_when_engine_is_down",
+]
+
+CTX_HTTP_SHARED_INTERNAL_DEPS = [
+    "//core/crates/ctx-core:lib",
+    "//core/crates/ctx-daemon:lib",
+    "//core/crates/ctx-events:lib",
+    "//core/crates/ctx-execution-runtime:lib",
+    "//core/crates/ctx-fs:lib",
+    "//core/crates/ctx-harness-runtime:lib",
+    "//core/crates/ctx-harness-setup:lib",
+    "//core/crates/ctx-harness-sources:lib",
+    "//core/crates/ctx-managed-installs:lib",
+    "//core/crates/ctx-linux-sandbox-runtime:lib",
+    "//core/crates/ctx-http-auth:lib",
+    "//core/crates/ctx-mcp-auth:lib",
+    "//core/crates/ctx-mcp-command:lib",
+    "//core/crates/ctx-mobile-access-service:lib",
+    "//core/crates/ctx-observability:lib",
+    "//core/crates/ctx-provider-accounts:lib",
+    "//core/crates/ctx-provider-auth-import:lib",
+    "//core/crates/ctx-provider-install:lib",
+    "//core/crates/ctx-provider-runtime:lib",
+    "//core/crates/ctx-provider-matrix:lib",
+    "//core/crates/ctx-providers:lib",
+    "//core/crates/ctx-resource-utilization:lib",
+    "//core/crates/ctx-route-contracts:lib",
+    "//core/crates/ctx-runtime-assets:lib",
+    "//core/crates/ctx-sandbox-container-runtime:lib",
+    "//core/crates/ctx-sandbox-contract:lib",
+    "//core/crates/ctx-sandbox-materialization:lib",
+    "//core/crates/ctx-session-artifacts:lib",
+    "//core/crates/ctx-subagent-service:lib",
+    "//core/crates/ctx-session-tools:lib",
+    "//core/crates/ctx-settings-model:lib",
+    "//core/crates/ctx-settings-service:lib",
+    "//core/crates/ctx-storage-admission:lib",
+    "//core/crates/ctx-store:lib",
+    "//core/crates/ctx-transport-runtime:lib",
+    "//core/crates/ctx-update-service:lib",
+    "//core/crates/ctx-workspace-active-snapshot:lib",
+    "//core/crates/ctx-workspace-attachments:lib",
+    "//core/crates/ctx-workspace-config:lib",
+    "//core/crates/ctx-workspace-container:lib",
+    "//core/crates/ctx-workspace-stream-service:lib",
+    "//core/crates/ctx-worktree-data-plane:lib",
+]
+
+CTX_HTTP_SHARED_INTERNAL_TEST_SUPPORT_DEPS = [
+    "//core/crates/ctx-core:lib",
+    "//core/crates/ctx-daemon:lib_test_support",
+    "//core/crates/ctx-events:lib",
+    "//core/crates/ctx-execution-runtime:lib_test_support",
+    "//core/crates/ctx-fs:lib",
+    "//core/crates/ctx-harness-runtime:lib_test_support",
+    "//core/crates/ctx-harness-setup:lib",
+    "//core/crates/ctx-harness-sources:lib",
+    "//core/crates/ctx-managed-installs:lib",
+    "//core/crates/ctx-linux-sandbox-runtime:lib",
+    "//core/crates/ctx-http-auth:lib",
+    "//core/crates/ctx-mcp-auth:lib",
+    "//core/crates/ctx-mcp-command:lib",
+    "//core/crates/ctx-mobile-access-service:lib",
+    "//core/crates/ctx-observability:lib_test_support",
+    "//core/crates/ctx-provider-accounts:lib",
+    "//core/crates/ctx-provider-auth-import:lib",
+    "//core/crates/ctx-provider-install:lib",
+    "//core/crates/ctx-provider-runtime:lib",
+    "//core/crates/ctx-provider-matrix:lib",
+    "//core/crates/ctx-providers:lib",
+    "//core/crates/ctx-resource-utilization:lib",
+    "//core/crates/ctx-route-contracts:lib",
+    "//core/crates/ctx-runtime-assets:lib",
+    "//core/crates/ctx-sandbox-container-runtime:lib_test_support",
+    "//core/crates/ctx-sandbox-contract:lib",
+    "//core/crates/ctx-sandbox-materialization:lib_test_support",
+    "//core/crates/ctx-session-artifacts:lib",
+    "//core/crates/ctx-subagent-service:lib",
+    "//core/crates/ctx-session-title-service:lib",
+    "//core/crates/ctx-session-tools:lib",
+    "//core/crates/ctx-settings-model:lib",
+    "//core/crates/ctx-settings-service:lib",
+    "//core/crates/ctx-storage-admission:lib",
+    "//core/crates/ctx-store:lib",
+    "//core/crates/ctx-transport-runtime:lib",
+    "//core/crates/ctx-update-service:lib",
+    "//core/crates/ctx-workspace-active-snapshot:lib",
+    "//core/crates/ctx-workspace-attachments:lib",
+    "//core/crates/ctx-workspace-config:lib",
+    "//core/crates/ctx-workspace-container:lib_test_support",
+    "//core/crates/ctx-workspace-stream-service:lib",
+    "//core/crates/ctx-worktree-data-plane:lib",
+]
+
+CTX_HTTP_SHARED_EXTERNAL_DEPS = [
+    "@crates//:anyhow",
+    "@crates//:atty",
+    "@crates//:axum",
+    "@crates//:base64",
+    "@crates//:bzip2",
+    "@crates//:bytes",
+    "@crates//:chacha20poly1305",
+    "@crates//:chrono",
+    "@crates//:clap",
+    "@crates//:directories",
+    "@crates//:flate2",
+    "@crates//:fs2",
+    "@crates//:futures",
+    "@crates//:hex",
+    "@crates//:hkdf",
+    "@crates//:http",
+    "@crates//:http-body",
+    "@crates//:http-body-util",
+    "@crates//:httparse",
+    "@crates//:hyper",
+    "@crates//:hyper-util",
+    "@crates//:libc",
+    "@crates//:minisign-verify",
+    "@crates//:mime_guess",
+    "@crates//:notify",
+    "@crates//:opentelemetry",
+    "@crates//:opentelemetry-otlp",
+    "@crates//:opentelemetry_sdk",
+    "@crates//:portable-pty",
+    "@crates//:rand_core",
+    "@crates//:rcgen",
+    "@crates//:reqwest",
+    "@crates//:rustls",
+    "@crates//:semver",
+    "@crates//:serde",
+    "@crates//:serde_json",
+    "@crates//:sha2",
+    "@crates//:similar",
+    "@crates//:sysinfo",
+    "@crates//:tar",
+    "@crates//:tempfile",
+    "@crates//:tokio",
+    "@crates//:tokio-stream",
+    "@crates//:tokio-tungstenite",
+    "@crates//:tokio-util",
+    "@crates//:toml",
+    "@crates//:toml_edit",
+    "@crates//:tower",
+    "@crates//:tower-http",
+    "@crates//:tracing",
+    "@crates//:tracing-appender",
+    "@crates//:tracing-subscriber",
+    "@crates//:url",
+    "@crates//:urlencoding",
+    "@crates//:uuid",
+    "@crates//:which",
+    "@crates//:x25519-dalek",
+    "@crates//:zip",
+    "@crates//:zstd",
+]
+
+CTX_HTTP_LIB_DEPS = [
+    "//core/crates/ctx-avf-linux-runtime:lib",
+    "//core/crates/ctx-bundled-assets:lib",
+    "//core/crates/ctx-workspace-runtime:lib",
+] + CTX_HTTP_SHARED_INTERNAL_DEPS + CTX_HTTP_SHARED_EXTERNAL_DEPS
+
+CTX_HTTP_LIB_TEST_SUPPORT_DEPS = [
+    "//core/crates/ctx-avf-linux-runtime:lib_test_support",
+    "//core/crates/ctx-bundled-assets:lib_test_support",
+    "//core/crates/ctx-workspace-runtime:lib_test_support",
+    "@crates//:sqlx",
+] + CTX_HTTP_SHARED_INTERNAL_TEST_SUPPORT_DEPS + CTX_HTTP_SHARED_EXTERNAL_DEPS
+
+CTX_HTTP_DIRECT_TEST_DEPS = [
+    "//core/crates/ctx-avf-linux-runtime:lib_test_support",
+    "//core/crates/ctx-bundled-assets:lib_test_support",
+    "//core/crates/ctx-core:lib",
+    "//core/crates/ctx-daemon:lib_test_support",
+    "//core/crates/ctx-fs:lib",
+    "//core/crates/ctx-harness-sources:lib",
+    "//core/crates/ctx-managed-installs:lib",
+    "//core/crates/ctx-provider-accounts:lib",
+    "//core/crates/ctx-provider-install:lib",
+    "//core/crates/ctx-provider-matrix:lib",
+    "//core/crates/ctx-provider-runtime:lib",
+    "//core/crates/ctx-providers:lib",
+    "//core/crates/ctx-resource-utilization:lib",
+    "//core/crates/ctx-route-contracts:lib",
+    "//core/crates/ctx-session-title-service:lib",
+    "//core/crates/ctx-store:lib",
+    "//core/crates/ctx-transport-runtime:lib",
+    "//core/crates/ctx-update-service:lib",
+    "//core/crates/ctx-workspace-attachments:lib",
+    "//core/crates/ctx-workspace-container:lib_test_support",
+    "//core/crates/ctx-workspace-config:lib",
+    "//core/crates/ctx-workspace-runtime:lib_test_support",
+    "//core/crates/ctx-workspace-stream-service:lib",
+    "@crates//:anyhow",
+    "@crates//:axum",
+    "@crates//:base64",
+    "@crates//:blake2",
+    "@crates//:bytes",
+    "@crates//:chrono",
+    "@crates//:ed25519-dalek",
+    "@crates//:flate2",
+    "@crates//:fs2",
+    "@crates//:futures",
+    "@crates//:hex",
+    "@crates//:rand_core",
+    "@crates//:reqwest",
+    "@crates//:rustls",
+    "@crates//:serde",
+    "@crates//:serde_json",
+    "@crates//:sha2",
+    "@crates//:tar",
+    "@crates//:tempfile",
+    "@crates//:tokio",
+    "@crates//:tokio-tungstenite",
+    "@crates//:tower",
+    "@crates//:tracing-subscriber",
+    "@crates//:url",
+    "@crates//:uuid",
+    "@crates//:which",
+]
+
+CTX_HTTP_INTEGRATION_DIRECT_TEST_DEPS = CTX_HTTP_DIRECT_TEST_DEPS
+
+CTX_HTTP_TEST_PROC_MACRO_DEPS = [
+    "@crates//:async-trait",
+]
+
+rust_library(
+    name = "lib",
+    crate_name = "ctx_http",
+    crate_root = "src/lib.rs",
+    edition = "2021",
+    srcs = glob(
+        ["src/**/*.rs"],
+        exclude = ["src/main.rs"],
+    ),
+    compile_data = CTX_HTTP_RUNTIME_COMPILE_DATA,
+    rustc_env = CTX_HTTP_RUSTC_ENV,
+    deps = CTX_HTTP_LIB_DEPS,
+    proc_macro_deps = CTX_HTTP_TEST_PROC_MACRO_DEPS,
+)
+
+rust_library(
+    name = "lib_test_support",
+    crate_name = "ctx_http",
+    crate_root = "src/lib.rs",
+    edition = "2021",
+    srcs = glob(
+        ["src/**/*.rs"],
+        exclude = ["src/main.rs"],
+    ),
+    compile_data = CTX_HTTP_COMPILE_DATA,
+    rustc_env = CTX_HTTP_RUSTC_ENV,
+    deps = CTX_HTTP_LIB_TEST_SUPPORT_DEPS,
+    proc_macro_deps = CTX_HTTP_TEST_PROC_MACRO_DEPS,
+)
+
+rust_binary(
+    name = "ctx",
+    crate_root = "src/main.rs",
+    edition = "2021",
+    srcs = [
+        "src/cli.rs",
+        "src/logging/conditional_writer.rs",
+        "src/logging/heap_profiler.rs",
+        "src/logging.rs",
+        "src/main.rs",
+    ],
+    rustc_env = CTX_HTTP_RUSTC_ENV,
+    deps = [
+        ":lib",
+        "//core/crates/ctx-core:lib",
+        "//core/crates/ctx-daemon:lib",
+        "//core/crates/ctx-observability:lib",
+        "//core/crates/ctx-repo-onboarding-service:lib",
+        "//core/crates/ctx-resource-utilization:lib",
+        "//core/crates/ctx-update-service:lib",
+        "@crates//:anyhow",
+        "@crates//:chrono",
+        "@crates//:clap",
+        "@crates//:rustls",
+        "@crates//:tokio",
+        "@crates//:tracing",
+        "@crates//:tracing-appender",
+        "@crates//:tracing-subscriber",
+    ],
+)
+
+rust_binary(
+    name = "llama_server_mock",
+    crate_root = "src/bin/llama_server_mock.rs",
+    edition = "2021",
+    srcs = ["src/bin/llama_server_mock.rs"],
+    deps = [
+        "@crates//:axum",
+        "@crates//:serde_json",
+        "@crates//:tokio",
+    ],
+)
+
+# Existing exact unit shards below keep the rust_test-shaped call syntax, but
+# route through filtered sh_test wrappers so the Rust harness compiles once.
+rust_test = declare_ctx_http_filtered_unit_test
+
+declare_ctx_http_unit_test_harness(
+    compile_data = CTX_HTTP_COMPILE_DATA,
+    data = CTX_HTTP_COMPILE_DATA,
+    deps = CTX_HTTP_DIRECT_TEST_DEPS,
+    proc_macro_deps = CTX_HTTP_TEST_PROC_MACRO_DEPS,
+)
+
+declare_ctx_http_rust_unit_test(
+    name = "unit_tests_api",
+    args = CTX_HTTP_API_UNIT_TEST_ARGS,
+    compile_data = CTX_HTTP_COMPILE_DATA,
+    data = CTX_HTTP_COMPILE_DATA,
+    deps = CTX_HTTP_DIRECT_TEST_DEPS,
+    proc_macro_deps = CTX_HTTP_TEST_PROC_MACRO_DEPS,
+    timeout = "long",
+)
+
+declare_ctx_http_rust_unit_test(
+    name = "unit_tests_api_cleanup_lifecycle",
+    args = CTX_HTTP_API_CLEANUP_LIFECYCLE_TEST_ARGS,
+    compile_data = CTX_HTTP_COMPILE_DATA,
+    data = CTX_HTTP_COMPILE_DATA,
+    deps = CTX_HTTP_DIRECT_TEST_DEPS,
+    proc_macro_deps = CTX_HTTP_TEST_PROC_MACRO_DEPS,
+    timeout = "long",
+)
+
+declare_ctx_http_rust_unit_test(
+    name = "unit_tests_api_task_lifecycle",
+    args = CTX_HTTP_API_TASK_LIFECYCLE_TEST_ARGS,
+    compile_data = CTX_HTTP_COMPILE_DATA,
+    data = CTX_HTTP_COMPILE_DATA,
+    deps = CTX_HTTP_DIRECT_TEST_DEPS,
+    proc_macro_deps = CTX_HTTP_TEST_PROC_MACRO_DEPS,
+    timeout = "long",
+)
+
+declare_ctx_http_rust_unit_test(
+    name = "unit_tests_api_storage_admission",
+    args = CTX_HTTP_API_STORAGE_ADMISSION_TEST_ARGS,
+    compile_data = CTX_HTTP_COMPILE_DATA,
+    data = CTX_HTTP_COMPILE_DATA,
+    deps = CTX_HTTP_DIRECT_TEST_DEPS,
+    proc_macro_deps = CTX_HTTP_TEST_PROC_MACRO_DEPS,
+    tags = CTX_HTTP_TIMING_SENSITIVE_EXACT_TEST_TAGS,
+    timeout = "long",
+)
+
+declare_ctx_http_rust_unit_test(
+    name = "unit_tests_api_workspaces",
+    args = CTX_HTTP_API_WORKSPACES_TEST_ARGS,
+    compile_data = CTX_HTTP_COMPILE_DATA,
+    data = CTX_HTTP_COMPILE_DATA,
+    deps = CTX_HTTP_DIRECT_TEST_DEPS,
+    proc_macro_deps = CTX_HTTP_TEST_PROC_MACRO_DEPS,
+    timeout = "long",
+)
+
+declare_ctx_http_rust_unit_test(
+    name = "unit_tests_lib",
+    args = CTX_HTTP_LIB_UNIT_TEST_ARGS,
+    compile_data = CTX_HTTP_COMPILE_DATA,
+    data = CTX_HTTP_COMPILE_DATA,
+    deps = CTX_HTTP_DIRECT_TEST_DEPS,
+    proc_macro_deps = CTX_HTTP_TEST_PROC_MACRO_DEPS,
+)
+
+declare_ctx_http_rust_unit_test(
+    name = "unit_tests_lib_mobile_secure_routes",
+    args = CTX_HTTP_LIB_MOBILE_SECURE_ROUTES_TEST_ARGS,
+    compile_data = CTX_HTTP_COMPILE_DATA,
+    data = CTX_HTTP_COMPILE_DATA,
+    deps = CTX_HTTP_DIRECT_TEST_DEPS,
+    proc_macro_deps = CTX_HTTP_TEST_PROC_MACRO_DEPS,
+    timeout = "long",
+)
+
+declare_ctx_http_rust_unit_test(
+    name = "unit_tests_lib_provider_routes",
+    args = CTX_HTTP_LIB_PROVIDER_ROUTES_TEST_ARGS,
+    compile_data = CTX_HTTP_COMPILE_DATA,
+    data = CTX_HTTP_COMPILE_DATA,
+    deps = CTX_HTTP_DIRECT_TEST_DEPS,
+    proc_macro_deps = CTX_HTTP_TEST_PROC_MACRO_DEPS,
+    timeout = "long",
+)
+
+declare_ctx_http_rust_unit_test(
+    name = "unit_tests_lib_run_archive_routes",
+    args = CTX_HTTP_LIB_RUN_ARCHIVE_ROUTES_TEST_ARGS,
+    compile_data = CTX_HTTP_COMPILE_DATA,
+    data = CTX_HTTP_COMPILE_DATA,
+    deps = CTX_HTTP_DIRECT_TEST_DEPS,
+    proc_macro_deps = CTX_HTTP_TEST_PROC_MACRO_DEPS,
+    timeout = "long",
+)
+
+declare_ctx_http_rust_unit_test(
+    name = "unit_tests_lib_session_artifacts",
+    args = CTX_HTTP_LIB_SESSION_ARTIFACTS_TEST_ARGS,
+    compile_data = CTX_HTTP_COMPILE_DATA,
+    data = CTX_HTTP_COMPILE_DATA,
+    deps = CTX_HTTP_DIRECT_TEST_DEPS,
+    proc_macro_deps = CTX_HTTP_TEST_PROC_MACRO_DEPS,
+    timeout = "long",
+)
+
+declare_ctx_http_rust_unit_test(
+    name = "unit_tests_lib_session_head_ctx_ui_sized",
+    args = CTX_HTTP_LIB_SESSION_HEAD_CTX_UI_SIZED_TEST_ARGS,
+    compile_data = CTX_HTTP_COMPILE_DATA,
+    data = CTX_HTTP_COMPILE_DATA,
+    deps = CTX_HTTP_DIRECT_TEST_DEPS,
+    proc_macro_deps = CTX_HTTP_TEST_PROC_MACRO_DEPS,
+    timeout = "long",
+)
+
+declare_ctx_http_rust_unit_test(
+    name = "unit_tests_lib_session_head_large",
+    args = CTX_HTTP_LIB_SESSION_HEAD_LARGE_TEST_ARGS,
+    compile_data = CTX_HTTP_COMPILE_DATA,
+    data = CTX_HTTP_COMPILE_DATA,
+    deps = CTX_HTTP_DIRECT_TEST_DEPS,
+    proc_macro_deps = CTX_HTTP_TEST_PROC_MACRO_DEPS,
+    timeout = "long",
+)
+
+declare_ctx_http_rust_unit_test(
+    name = "unit_tests_lib_telemetry_export",
+    args = CTX_HTTP_LIB_TELEMETRY_EXPORT_TEST_ARGS,
+    compile_data = CTX_HTTP_COMPILE_DATA,
+    data = CTX_HTTP_COMPILE_DATA,
+    deps = CTX_HTTP_DIRECT_TEST_DEPS,
+    proc_macro_deps = CTX_HTTP_TEST_PROC_MACRO_DEPS,
+    timeout = "long",
+)
+
+declare_ctx_http_rust_unit_test(
+    name = "unit_tests_lib_update_boundaries",
+    args = CTX_HTTP_LIB_UPDATE_BOUNDARIES_TEST_ARGS,
+    compile_data = CTX_HTTP_COMPILE_DATA,
+    data = CTX_HTTP_COMPILE_DATA,
+    deps = CTX_HTTP_DIRECT_TEST_DEPS,
+    proc_macro_deps = CTX_HTTP_TEST_PROC_MACRO_DEPS,
+    timeout = "long",
+)
+
+declare_ctx_http_rust_unit_test(
+    name = "unit_tests_lib_web_session_routes",
+    args = CTX_HTTP_LIB_WEB_SESSION_ROUTES_TEST_ARGS,
+    compile_data = CTX_HTTP_COMPILE_DATA,
+    data = CTX_HTTP_COMPILE_DATA,
+    deps = CTX_HTTP_DIRECT_TEST_DEPS,
+    proc_macro_deps = CTX_HTTP_TEST_PROC_MACRO_DEPS,
+    timeout = "long",
+)
+
+declare_ctx_http_rust_unit_test(
+    name = "unit_tests_lib_workspace_active_routes",
+    args = CTX_HTTP_LIB_WORKSPACE_ACTIVE_ROUTES_TEST_ARGS,
+    compile_data = CTX_HTTP_COMPILE_DATA,
+    data = CTX_HTTP_COMPILE_DATA,
+    deps = CTX_HTTP_DIRECT_TEST_DEPS,
+    proc_macro_deps = CTX_HTTP_TEST_PROC_MACRO_DEPS,
+    timeout = "long",
+)
+
+rust_test(
+    name = "unit_tests_lib_execution_launch_startup_prewarm_kind_supported",
+    crate = ":lib_test_support",
+    args = CTX_HTTP_LIB_STARTUP_PREWARM_KIND_SUPPORTED_TEST_ARGS,
+    compile_data = CTX_HTTP_COMPILE_DATA,
+    data = CTX_HTTP_COMPILE_DATA,
+    deps = CTX_HTTP_DIRECT_TEST_DEPS,
+    proc_macro_deps = CTX_HTTP_TEST_PROC_MACRO_DEPS,
+    timeout = "long",
+)
+
+rust_test(
+    name = "unit_tests_daemon_golden_path_with_fake_provider",
+    crate = ":lib_test_support",
+    args = CTX_HTTP_DAEMON_GOLDEN_PATH_TEST_ARGS,
+    compile_data = CTX_HTTP_COMPILE_DATA,
+    data = CTX_HTTP_COMPILE_DATA,
+    deps = CTX_HTTP_DIRECT_TEST_DEPS,
+    proc_macro_deps = CTX_HTTP_TEST_PROC_MACRO_DEPS,
+    tags = CTX_HTTP_TIMING_SENSITIVE_EXACT_TEST_TAGS,
+    timeout = "long",
+)
+
+rust_test(
+    name = "unit_tests_daemon_http_and_ws_streaming",
+    crate = ":lib_test_support",
+    args = CTX_HTTP_DAEMON_HTTP_AND_WS_STREAMING_TEST_ARGS,
+    compile_data = CTX_HTTP_COMPILE_DATA,
+    data = CTX_HTTP_COMPILE_DATA,
+    deps = CTX_HTTP_DIRECT_TEST_DEPS,
+    proc_macro_deps = CTX_HTTP_TEST_PROC_MACRO_DEPS,
+    tags = CTX_HTTP_TIMING_SENSITIVE_EXACT_TEST_TAGS,
+    timeout = "long",
+)
+
+rust_test(
+    name = "unit_tests_merge_queue_enabled_workspace_resume_after_open",
+    crate = ":lib_test_support",
+    args = CTX_HTTP_MERGE_QUEUE_ENABLED_WORKSPACE_RESUME_AFTER_OPEN_TEST_ARGS,
+    compile_data = CTX_HTTP_COMPILE_DATA,
+    data = CTX_HTTP_COMPILE_DATA,
+    deps = CTX_HTTP_DIRECT_TEST_DEPS,
+    proc_macro_deps = CTX_HTTP_TEST_PROC_MACRO_DEPS,
+    tags = CTX_HTTP_TIMING_SENSITIVE_EXACT_TEST_TAGS,
+    timeout = "long",
+)
+
+test_suite(
+    name = "unit-tests-api",
+    tests = [
+        ":unit_tests_api",
+        ":unit_tests_api_cleanup_lifecycle",
+        ":unit_tests_api_task_lifecycle",
+        ":unit_tests_api_storage_admission",
+        ":unit_tests_api_workspaces",
+    ],
+)
+
+test_suite(
+    name = "unit-tests-lib",
+    tests = [
+        ":unit_tests_lib",
+        ":unit_tests_lib_mobile_secure_routes",
+        ":unit_tests_lib_provider_routes",
+        ":unit_tests_lib_run_archive_routes",
+        ":unit_tests_lib_session_artifacts",
+        ":unit_tests_lib_telemetry_export",
+        ":unit_tests_lib_update_boundaries",
+        ":unit_tests_lib_web_session_routes",
+        ":unit_tests_lib_workspace_active_routes",
+        ":unit_tests_lib_execution_launch_startup_prewarm_kind_supported",
+    ],
+)
+
+test_suite(
+    name = "unit-tests-lib-session-head-large",
+    tests = [
+        ":unit_tests_lib_session_head_ctx_ui_sized",
+        ":unit_tests_lib_session_head_large",
+    ],
+)
+
+test_suite(
+    name = "unit-tests-workspace-runtime",
+    tests = [
+        "//core/crates/ctx-daemon:unit_tests_workspace_runtime",
+        "//core/crates/ctx-daemon:unit_tests_workspace_runtime_reclaim_idle_runtime_with_parked_containers",
+        "//core/crates/ctx-daemon:unit_tests_workspace_runtime_reuses_running_container",
+        "//core/crates/ctx-daemon:unit_tests_workspace_runtime_prepare_starts_cached_container",
+        "//core/crates/ctx-daemon:unit_tests_workspace_runtime_reclaim_idle_machine",
+        "//core/crates/ctx-daemon:unit_tests_workspace_runtime_reclaim_idle_runtime_with_containers",
+        "//core/crates/ctx-daemon:unit_tests_workspace_runtime_reclaim_ctx_harness_container",
+        "//core/crates/ctx-daemon:unit_tests_workspace_runtime_container_status_avf",
+        "//core/crates/ctx-daemon:unit_tests_workspace_runtime_starts_avf_workspace_vm",
+        "//core/crates/ctx-daemon:unit_tests_workspace_runtime_keeps_avf_workspace_container_ready",
+        "//core/crates/ctx-daemon:unit_tests_workspace_runtime_unknown_machine_state_engine_unreachable",
+        "//core/crates/ctx-daemon:unit_tests_workspace_runtime_running_unreachable_machine_reconfiguration",
+        "//core/crates/ctx-daemon:unit_tests_workspace_runtime_recreates_machine_for_memory_profile_change",
+    ],
+)
+
+test_suite(
+    name = "unit-tests-daemon-and-scheduler",
+    tests = [
+        "//core/crates/ctx-daemon:unit_tests_daemon",
+        "//core/crates/ctx-daemon:unit_tests_execution_effective",
+        "//core/crates/ctx-daemon:unit_tests_scheduler",
+        "//core/crates/ctx-daemon:unit_tests_storage_guard",
+        ":unit_tests_daemon_golden_path_with_fake_provider",
+        ":unit_tests_daemon_http_and_ws_streaming",
+    ],
+)
+
+test_suite(
+    name = "unit-tests-storage-admission",
+    tests = [
+        "//core/crates/ctx-storage-admission:unit_tests",
+    ],
+)
+
+test_suite(
+    name = "unit-tests-org-policy",
+    tests = [
+        "//core/crates/ctx-org-policy:unit_tests",
+    ],
+)
+
+test_suite(
+    name = "unit-tests-provider-and-settings",
+    tests = [
+        "//core/crates/ctx-managed-installs:unit_tests",
+        "//core/crates/ctx-provider-matrix:unit_tests",
+        "//core/crates/ctx-provider-runtime:unit_tests",
+        "//core/crates/ctx-settings-model:unit_tests",
+        "//core/crates/ctx-settings-service:unit_tests",
+    ],
+)
+
+test_suite(
+    name = "unit-tests-merge-queue",
+    tests = [
+        "//core/crates/ctx-daemon:unit_tests_merge_queue",
+        "//core/crates/ctx-daemon:unit_tests_merge_queue_enabled_workspace_resume_after_open",
+        "//core/crates/ctx-daemon:unit_tests_vcs_hooks",
+    ],
+)
+
+test_suite(
+    name = "unit_tests",
+    tests = [
+        ":unit-tests-api",
+        ":unit-tests-daemon-and-scheduler",
+        ":unit-tests-lib",
+        ":unit-tests-lib-session-head-large",
+        ":unit-tests-merge-queue",
+        ":unit-tests-org-policy",
+        ":unit-tests-provider-and-settings",
+        ":unit-tests-storage-admission",
+        ":unit-tests-workspace-runtime",
+    ],
+)
+
+sh_test(
+    name = "bin_tests_root_help",
+    srcs = ["tests/bin_smoke.sh"],
+    args = ["$(location :ctx)", "root-help"],
+    data = [":ctx"],
+    timeout = "long",
+)
+
+sh_test(
+    name = "bin_tests_serve_help",
+    srcs = ["tests/bin_smoke.sh"],
+    args = ["$(location :ctx)", "serve-help"],
+    data = [":ctx"],
+    timeout = "long",
+)
+
+sh_test(
+    name = "bin_tests_init_help",
+    srcs = ["tests/bin_smoke.sh"],
+    args = ["$(location :ctx)", "init-help"],
+    data = [":ctx"],
+    timeout = "long",
+)
+
+sh_test(
+    name = "bin_tests_self_update_help",
+    srcs = ["tests/bin_smoke.sh"],
+    args = ["$(location :ctx)", "self-update-help"],
+    data = [":ctx"],
+    timeout = "long",
+)
+
+test_suite(
+    name = "bin_tests",
+    tests = [
+        ":bin_tests_init_help",
+        ":bin_tests_root_help",
+        ":bin_tests_self_update_help",
+        ":bin_tests_serve_help",
+    ],
+)
+
+rust_doc_test(
+    name = "doc_tests",
+    crate = ":lib_test_support",
+    timeout = "long",
+)
+
+test_suite(
+    name = "base",
+    tests = [
+        ":unit_tests",
+        ":bin_tests",
+        ":doc_tests",
+    ],
+)
+
+declare_ctx_http_integration_tests(
+    binary_data = CTX_HTTP_INTEGRATION_BINARY_DATA,
+    binary_rustc_env = CTX_HTTP_INTEGRATION_BINARY_RUSTC_ENV,
+    common_srcs = CTX_HTTP_TEST_COMMON_SRCS,
+    compile_data = CTX_HTTP_COMPILE_DATA,
+    data = CTX_HTTP_INTEGRATION_TEST_DATA,
+    deps = [":lib_test_support"] + CTX_HTTP_INTEGRATION_DIRECT_TEST_DEPS,
+    proc_macro_deps = CTX_HTTP_TEST_PROC_MACRO_DEPS,
+    rustc_env = CTX_HTTP_RUSTC_ENV,
+    test_args = CTX_HTTP_INTEGRATION_TEST_ARGS,
+)

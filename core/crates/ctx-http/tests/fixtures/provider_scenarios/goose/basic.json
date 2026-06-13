@@ -1,0 +1,12 @@
+{
+  "turns": [
+    {
+      "thought": "Hm (goose)",
+      "tools": [
+        {"tool_name": "exec_command", "input": {"cmd": "echo goose"}, "output": "goose"}
+      ],
+      "deltas": ["Ho", "la"],
+      "final": "Hola from goose"
+    }
+  ]
+}

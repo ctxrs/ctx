@@ -1,0 +1,1049 @@
+{
+  "version": 3,
+  "providers": [
+    {
+      "id": "acp-crp-bridge",
+      "kind": "dependency",
+      "display_name": "ACP CRP Bridge",
+      "tier": "tier2",
+      "command": {
+        "command": "acp-crp-bridge",
+        "args": []
+      },
+      "managed_install": {
+        "kind": "archive",
+        "version": "0.1.4",
+        "args": [],
+        "targets": {
+          "darwin-aarch64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/acp-crp-bridge/0.1.3/macos/aarch64/sha256/bbca9ee0e11797312b172c180f866c8c6b2fa0ce6ed21464a085b01ed40f36b4/acp-crp-bridge-0.1.3-macos-aarch64.tar.gz",
+            "archive": "tar_gz",
+            "bin_path": "acp-crp-bridge",
+            "sha256": "bbca9ee0e11797312b172c180f866c8c6b2fa0ce6ed21464a085b01ed40f36b4"
+          },
+          "darwin-x86_64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/acp-crp-bridge/0.1.3/macos/x86_64/sha256/641397a91b1a518c717ab41880328c49b0b5b7917d24b70f36280b5b1eef76b6/acp-crp-bridge-0.1.3-macos-x86_64.tar.gz",
+            "archive": "tar_gz",
+            "bin_path": "acp-crp-bridge",
+            "sha256": "641397a91b1a518c717ab41880328c49b0b5b7917d24b70f36280b5b1eef76b6"
+          },
+          "linux-aarch64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/acp-crp-bridge/0.1.4/linux/aarch64/sha256/86c3c443eb6e011e861ecdd84b1ffa982ec0bf55654d9a05300992bbd109e582/acp-crp-bridge-0.1.4-linux-aarch64.tar.gz",
+            "archive": "tar_gz",
+            "bin_path": "acp-crp-bridge",
+            "sha256": "86c3c443eb6e011e861ecdd84b1ffa982ec0bf55654d9a05300992bbd109e582"
+          },
+          "linux-x86_64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/acp-crp-bridge/0.1.4/linux/x86_64/sha256/fe33ff82c30538db947b85d1e081c1a9c1e8052a951c44ecd65c39531449bbc6/acp-crp-bridge-0.1.4-linux-x86_64.tar.gz",
+            "archive": "tar_gz",
+            "bin_path": "acp-crp-bridge",
+            "sha256": "fe33ff82c30538db947b85d1e081c1a9c1e8052a951c44ecd65c39531449bbc6"
+          },
+          "macos-aarch64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/acp-crp-bridge/0.1.3/macos/aarch64/sha256/bbca9ee0e11797312b172c180f866c8c6b2fa0ce6ed21464a085b01ed40f36b4/acp-crp-bridge-0.1.3-macos-aarch64.tar.gz",
+            "archive": "tar_gz",
+            "bin_path": "acp-crp-bridge",
+            "sha256": "bbca9ee0e11797312b172c180f866c8c6b2fa0ce6ed21464a085b01ed40f36b4"
+          },
+          "macos-x86_64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/acp-crp-bridge/0.1.3/macos/x86_64/sha256/641397a91b1a518c717ab41880328c49b0b5b7917d24b70f36280b5b1eef76b6/acp-crp-bridge-0.1.3-macos-x86_64.tar.gz",
+            "archive": "tar_gz",
+            "bin_path": "acp-crp-bridge",
+            "sha256": "641397a91b1a518c717ab41880328c49b0b5b7917d24b70f36280b5b1eef76b6"
+          }
+        }
+      },
+      "version_probe": {
+        "kind": "command",
+        "args": [
+          "--version"
+        ]
+      },
+      "releases": [
+        {
+          "version": "0.1.4",
+          "status": "supported",
+          "context_min": "0.1.1",
+          "notes": "Allow requested CRP session models when ACP agents do not advertise session models."
+        }
+      ]
+    },
+    {
+      "id": "amp",
+      "display_name": "Amp",
+      "tier": "tier2",
+      "command": {
+        "command": "amp-acp",
+        "args": []
+      },
+      "managed_install": {
+        "kind": "archive",
+        "version": "0.1.4",
+        "args": [],
+        "targets": {
+          "darwin-aarch64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/amp/0.1.3/macos/aarch64/sha256/075d82723226eeb71bffb9ff325d11e778b4887c11fdeafb187ef3ed6110f345/amp-0.1.3-macos-aarch64.tar.gz",
+            "archive": "tar_gz",
+            "bin_path": "dist/bin/amp-acp.js",
+            "sha256": "075d82723226eeb71bffb9ff325d11e778b4887c11fdeafb187ef3ed6110f345"
+          },
+          "darwin-x86_64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/amp/0.1.3/macos/x86_64/sha256/075d82723226eeb71bffb9ff325d11e778b4887c11fdeafb187ef3ed6110f345/amp-0.1.3-macos-x86_64.tar.gz",
+            "archive": "tar_gz",
+            "bin_path": "dist/bin/amp-acp.js",
+            "sha256": "075d82723226eeb71bffb9ff325d11e778b4887c11fdeafb187ef3ed6110f345"
+          },
+          "linux-aarch64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/amp/0.1.3/linux/aarch64/sha256/98be3292664435f8b057d9bef24e270e8ffb6c46a4e5eec7bfc0a8b7819c3dac/amp-0.1.3-linux-aarch64.tar.gz",
+            "archive": "tar_gz",
+            "bin_path": "dist/bin/amp-acp.js",
+            "sha256": "98be3292664435f8b057d9bef24e270e8ffb6c46a4e5eec7bfc0a8b7819c3dac"
+          },
+          "linux-x86_64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/amp/0.1.3/linux/x86_64/sha256/98be3292664435f8b057d9bef24e270e8ffb6c46a4e5eec7bfc0a8b7819c3dac/amp-0.1.3-linux-x86_64.tar.gz",
+            "archive": "tar_gz",
+            "bin_path": "dist/bin/amp-acp.js",
+            "sha256": "98be3292664435f8b057d9bef24e270e8ffb6c46a4e5eec7bfc0a8b7819c3dac"
+          },
+          "macos-aarch64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/amp/0.1.3/macos/aarch64/sha256/075d82723226eeb71bffb9ff325d11e778b4887c11fdeafb187ef3ed6110f345/amp-0.1.3-macos-aarch64.tar.gz",
+            "archive": "tar_gz",
+            "bin_path": "dist/bin/amp-acp.js",
+            "sha256": "075d82723226eeb71bffb9ff325d11e778b4887c11fdeafb187ef3ed6110f345"
+          },
+          "macos-x86_64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/amp/0.1.3/macos/x86_64/sha256/075d82723226eeb71bffb9ff325d11e778b4887c11fdeafb187ef3ed6110f345/amp-0.1.3-macos-x86_64.tar.gz",
+            "archive": "tar_gz",
+            "bin_path": "dist/bin/amp-acp.js",
+            "sha256": "075d82723226eeb71bffb9ff325d11e778b4887c11fdeafb187ef3ed6110f345"
+          }
+        }
+      },
+      "version_probe": {
+        "kind": "command",
+        "args": [
+          "--version"
+        ]
+      },
+      "releases": [
+        {
+          "version": "0.1.4",
+          "status": "supported",
+          "context_min": "0.1.0",
+          "notes": "Pinned workspace adapter source (harness-adapters/amp-acp/package.json)",
+          "upstream_version": "0.1.0-20260423202803-gfcf58c2"
+        }
+      ]
+    },
+    {
+      "id": "auggie",
+      "display_name": "Auggie",
+      "tier": "tier2",
+      "command": {
+        "command": "auggie",
+        "args": [
+          "--acp"
+        ]
+      },
+      "managed_install": {
+        "kind": "npm",
+        "package": "@augmentcode/auggie",
+        "version": "0.24.0",
+        "entrypoint": "node_modules/@augmentcode/auggie/augment.mjs",
+        "args": [
+          "--acp"
+        ]
+      },
+      "version_probe": {
+        "kind": "node_package",
+        "package": "@augmentcode/auggie"
+      },
+      "releases": [
+        {
+          "version": "0.24.0",
+          "status": "supported",
+          "context_min": "0.1.0",
+          "notes": "Pinned Auggie CLI ACP bundle release"
+        }
+      ]
+    },
+    {
+      "id": "claude-cli",
+      "kind": "dependency",
+      "display_name": "Claude CLI",
+      "tier": "tier2",
+      "command": {
+        "command": "claude",
+        "args": []
+      },
+      "managed_install": {
+        "kind": "npm",
+        "package": "@anthropic-ai/claude-code",
+        "version": "2.1.119",
+        "entrypoint": "node_modules/@anthropic-ai/claude-code/cli-wrapper.cjs",
+        "args": []
+      },
+      "version_probe": {
+        "kind": "node_package",
+        "package": "@anthropic-ai/claude-code"
+      },
+      "releases": [
+        {
+          "version": "2.1.119",
+          "status": "supported",
+          "context_min": "0.1.0",
+          "notes": "Pinned Anthropic Claude Code CLI bundle release"
+        }
+      ]
+    },
+    {
+      "id": "claude-crp",
+      "display_name": "Claude",
+      "tier": "tier2",
+      "command": {
+        "command": "claude-crp",
+        "args": []
+      },
+      "managed_install": {
+        "kind": "archive",
+        "version": "1.0.0",
+        "args": [],
+        "targets": {
+          "darwin-aarch64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/claude-crp/1.0.0/macos/aarch64/sha256/7fc3515f23d907f04562ca9352eef454d43a9d7f8d3a03f68e11fc7fd8001c0f/claude-crp-1.0.0-macos-aarch64.tar.gz",
+            "archive": "tar_gz",
+            "bin_path": "bin/claude-crp",
+            "sha256": "7fc3515f23d907f04562ca9352eef454d43a9d7f8d3a03f68e11fc7fd8001c0f"
+          },
+          "darwin-x86_64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/claude-crp/1.0.0/macos/x86_64/sha256/7fc3515f23d907f04562ca9352eef454d43a9d7f8d3a03f68e11fc7fd8001c0f/claude-crp-1.0.0-macos-x86_64.tar.gz",
+            "archive": "tar_gz",
+            "bin_path": "bin/claude-crp",
+            "sha256": "7fc3515f23d907f04562ca9352eef454d43a9d7f8d3a03f68e11fc7fd8001c0f"
+          },
+          "linux-aarch64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/claude-crp/1.0.0/linux/aarch64/sha256/16140d8d97a25ea05fda5a5667fc03e89cd1e7ba58860ad521b514933e89f35a/claude-crp-1.0.0-linux-aarch64.tar.gz",
+            "archive": "tar_gz",
+            "bin_path": "bin/claude-crp",
+            "sha256": "16140d8d97a25ea05fda5a5667fc03e89cd1e7ba58860ad521b514933e89f35a"
+          },
+          "linux-x86_64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/claude-crp/1.0.0/linux/x86_64/sha256/4f5d46d685904c701921cb13847175e33aedd42eddab8a0d31c3dff0f367ad63/claude-crp-1.0.0-linux-x86_64.tar.gz",
+            "archive": "tar_gz",
+            "bin_path": "bin/claude-crp",
+            "sha256": "4f5d46d685904c701921cb13847175e33aedd42eddab8a0d31c3dff0f367ad63"
+          },
+          "macos-aarch64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/claude-crp/1.0.0/macos/aarch64/sha256/7fc3515f23d907f04562ca9352eef454d43a9d7f8d3a03f68e11fc7fd8001c0f/claude-crp-1.0.0-macos-aarch64.tar.gz",
+            "archive": "tar_gz",
+            "bin_path": "bin/claude-crp",
+            "sha256": "7fc3515f23d907f04562ca9352eef454d43a9d7f8d3a03f68e11fc7fd8001c0f"
+          },
+          "macos-x86_64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/claude-crp/1.0.0/macos/x86_64/sha256/7fc3515f23d907f04562ca9352eef454d43a9d7f8d3a03f68e11fc7fd8001c0f/claude-crp-1.0.0-macos-x86_64.tar.gz",
+            "archive": "tar_gz",
+            "bin_path": "bin/claude-crp",
+            "sha256": "7fc3515f23d907f04562ca9352eef454d43a9d7f8d3a03f68e11fc7fd8001c0f"
+          }
+        }
+      },
+      "provider_dependencies": [
+        {
+          "id": "claude-cli",
+          "role": "readiness",
+          "target": "host"
+        }
+      ],
+      "version_probe": {
+        "kind": "command",
+        "args": [
+          "--version"
+        ]
+      },
+      "releases": [
+        {
+          "version": "1.0.0",
+          "status": "supported",
+          "context_min": "0.1.0",
+          "notes": "Repo-owned CRP wrapper over Claude SDK 0.2.119; wrapper version is independent semver",
+          "upstream_version": "0.2.119"
+        }
+      ]
+    },
+    {
+      "id": "cline",
+      "display_name": "Cline",
+      "tier": "tier2",
+      "command": {
+        "command": "cline",
+        "args": [
+          "--acp"
+        ]
+      },
+      "managed_install": {
+        "kind": "npm",
+        "package": "cline",
+        "version": "2.16.0",
+        "entrypoint": "node_modules/cline/dist/cli.mjs",
+        "args": [
+          "--acp"
+        ]
+      },
+      "version_probe": {
+        "kind": "node_package",
+        "package": "cline"
+      },
+      "releases": [
+        {
+          "version": "2.16.0",
+          "status": "supported",
+          "context_min": "0.1.0",
+          "notes": "Pinned Cline CLI ACP bundle release"
+        }
+      ]
+    },
+    {
+      "id": "codex-cli",
+      "kind": "dependency",
+      "display_name": "Codex CLI",
+      "tier": "tier2",
+      "command": {
+        "command": "codex-crp",
+        "args": []
+      },
+      "managed_install": {
+        "kind": "archive",
+        "version": "rust-v0.125.0",
+        "args": [],
+        "targets": {
+          "darwin-aarch64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/codex-cli/rust-v0.125.0/macos/aarch64/sha256/6a926dc0cb9639d349b62beda1907c53cb1349709e7dc9cfc53268f438cb749f/codex-aarch64-apple-darwin.tar.gz",
+            "sha256": "6a926dc0cb9639d349b62beda1907c53cb1349709e7dc9cfc53268f438cb749f",
+            "archive": "tar_gz",
+            "bin_path": "codex-aarch64-apple-darwin"
+          },
+          "darwin-x86_64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/codex-cli/rust-v0.125.0/macos/x86_64/sha256/b46019584d15814c235696bea75bff0d378e6d14997a268846b675501fb5c089/codex-x86_64-apple-darwin.tar.gz",
+            "sha256": "b46019584d15814c235696bea75bff0d378e6d14997a268846b675501fb5c089",
+            "archive": "tar_gz",
+            "bin_path": "codex-x86_64-apple-darwin"
+          },
+          "linux-aarch64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/codex-cli/rust-v0.125.0/linux/aarch64/sha256/2d076527fd7578656f1b8790650adc9344a7429980b3998941156ab6a06156e6/codex-aarch64-unknown-linux-gnu.tar.gz",
+            "sha256": "2d076527fd7578656f1b8790650adc9344a7429980b3998941156ab6a06156e6",
+            "archive": "tar_gz",
+            "bin_path": "codex-aarch64-unknown-linux-gnu"
+          },
+          "linux-x86_64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/codex-cli/rust-v0.125.0/linux/x86_64/sha256/522bc0b9b8ab31f3a8f1fc4878abd4e83b116a6c1bcfc7717d2fe036f54cd4be/codex-x86_64-unknown-linux-gnu.tar.gz",
+            "sha256": "522bc0b9b8ab31f3a8f1fc4878abd4e83b116a6c1bcfc7717d2fe036f54cd4be",
+            "archive": "tar_gz",
+            "bin_path": "codex-x86_64-unknown-linux-gnu"
+          }
+        }
+      },
+      "version_probe": {
+        "kind": "command",
+        "args": [
+          "--version"
+        ]
+      },
+      "releases": [
+        {
+          "version": "rust-v0.125.0",
+          "status": "supported",
+          "context_min": "0.1.0",
+          "notes": "Pinned stock Codex CLI release",
+          "upstream_version": "0.125.0"
+        }
+      ]
+    },
+    {
+      "id": "codex",
+      "display_name": "Codex",
+      "tier": "tier2",
+      "command": {
+        "command": "codex-crp",
+        "args": []
+      },
+      "managed_install": {
+        "kind": "archive",
+        "version": "1.0.0",
+        "args": [],
+        "targets": {
+          "darwin-aarch64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/codex-crp/1.0.0/darwin/aarch64/sha256/268edc0a73fe03804727df8dbbf8a123590bd52c0e854d535d820e3cba5cbce5/codex-crp-1.0.0-aarch64-apple-darwin.tar.gz",
+            "archive": "tar_gz",
+            "bin_path": "codex-crp",
+            "sha256": "268edc0a73fe03804727df8dbbf8a123590bd52c0e854d535d820e3cba5cbce5"
+          },
+          "darwin-x86_64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/codex-crp/1.0.0/darwin/x86_64/sha256/61f9c537df04919eda9e0d8a2edf1925ae220066dea3f7e615bc69bdf6c3b541/codex-crp-1.0.0-x86_64-apple-darwin.tar.gz",
+            "archive": "tar_gz",
+            "bin_path": "codex-crp",
+            "sha256": "61f9c537df04919eda9e0d8a2edf1925ae220066dea3f7e615bc69bdf6c3b541"
+          },
+          "linux-aarch64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/codex-crp/1.0.0/linux/aarch64/sha256/28b52f9d3f0178c445852e03fda372502ef155d8dfee2d9e6d3a571a868d9819/codex-crp-1.0.0-aarch64-unknown-linux-gnu.tar.gz",
+            "archive": "tar_gz",
+            "bin_path": "codex-crp",
+            "sha256": "28b52f9d3f0178c445852e03fda372502ef155d8dfee2d9e6d3a571a868d9819"
+          },
+          "linux-x86_64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/codex-crp/1.0.0/linux/x86_64/sha256/f814fc4c691f0ea0231d11cd286b4d34e39fc0b11a22238e399fdad1a0710b1e/codex-crp-1.0.0-x86_64-unknown-linux-gnu.tar.gz",
+            "archive": "tar_gz",
+            "bin_path": "codex-crp",
+            "sha256": "f814fc4c691f0ea0231d11cd286b4d34e39fc0b11a22238e399fdad1a0710b1e"
+          },
+          "macos-aarch64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/codex-crp/1.0.0/darwin/aarch64/sha256/268edc0a73fe03804727df8dbbf8a123590bd52c0e854d535d820e3cba5cbce5/codex-crp-1.0.0-aarch64-apple-darwin.tar.gz",
+            "archive": "tar_gz",
+            "bin_path": "codex-crp",
+            "sha256": "268edc0a73fe03804727df8dbbf8a123590bd52c0e854d535d820e3cba5cbce5"
+          },
+          "macos-x86_64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/codex-crp/1.0.0/darwin/x86_64/sha256/61f9c537df04919eda9e0d8a2edf1925ae220066dea3f7e615bc69bdf6c3b541/codex-crp-1.0.0-x86_64-apple-darwin.tar.gz",
+            "archive": "tar_gz",
+            "bin_path": "codex-crp",
+            "sha256": "61f9c537df04919eda9e0d8a2edf1925ae220066dea3f7e615bc69bdf6c3b541"
+          }
+        }
+      },
+      "provider_dependencies": [
+        {
+          "id": "codex-cli",
+          "role": "prerequisite",
+          "target": "same_as_provider"
+        }
+      ],
+      "version_probe": {
+        "kind": "command",
+        "args": [
+          "--version"
+        ]
+      },
+      "releases": [
+        {
+          "version": "1.0.0",
+          "upstream_version": "0.125.0",
+          "provenance": {
+            "upstream_repo": "openai/codex",
+            "ctx_repo": "ctxorgrs/codex-crp",
+            "upstream_release_tag": "rust-v0.125.0",
+            "upstream_commit_sha": "637f7dd6d737f3961e6bf32fbb3861c4953269c5",
+            "ctx_release_tag": "v1.0.0"
+          },
+          "status": "supported",
+          "context_min": "0.1.0",
+          "notes": "Repo-owned CRP wrapper over stock Codex rust-v0.125.0; wrapper version is independent semver"
+        },
+        {
+          "version": "0.0.0-ctx.2",
+          "status": "supported",
+          "context_min": "0.1.0",
+          "notes": "Linux x86_64 only"
+        },
+        {
+          "version": "0.0.0-ctx.1",
+          "status": "supported",
+          "context_min": "0.1.0",
+          "notes": "Linux x86_64 only"
+        },
+        {
+          "version": "0.0.0",
+          "status": "blocked",
+          "context_min": "0.1.0",
+          "notes": "Local codex development build (not supported for managed installs)"
+        }
+      ]
+    },
+    {
+      "id": "copilot",
+      "display_name": "Copilot",
+      "tier": "tier2",
+      "command": {
+        "command": "copilot",
+        "args": []
+      },
+      "managed_install": {
+        "kind": "npm",
+        "package": "@github/copilot",
+        "version": "1.0.35",
+        "entrypoint": "node_modules/@github/copilot/npm-loader.js",
+        "args": [
+          "--acp",
+          "--stdio"
+        ]
+      },
+      "version_probe": {
+        "kind": "node_package",
+        "package": "@github/copilot"
+      },
+      "releases": [
+        {
+          "version": "1.0.35",
+          "status": "supported",
+          "context_min": "0.1.0",
+          "notes": "Pinned GitHub Copilot CLI ACP bundle release"
+        }
+      ]
+    },
+    {
+      "id": "cursor",
+      "display_name": "Cursor",
+      "tier": "tier2",
+      "command": {
+        "command": "cursor-agent-acp",
+        "args": []
+      },
+      "managed_install": {
+        "kind": "npm",
+        "package": "@blowmage/cursor-agent-acp",
+        "version": "0.7.1",
+        "entrypoint": "node_modules/@blowmage/cursor-agent-acp/dist/bin/cursor-agent-acp.js",
+        "args": []
+      },
+      "version_probe": {
+        "kind": "node_package",
+        "package": "@blowmage/cursor-agent-acp"
+      },
+      "releases": [
+        {
+          "version": "0.7.1",
+          "status": "supported",
+          "context_min": "0.1.0",
+          "notes": "Third-party ACP adapter for Cursor CLI"
+        }
+      ]
+    },
+    {
+      "id": "droid",
+      "display_name": "Droid",
+      "tier": "tier2",
+      "command": {
+        "command": "droid-acp",
+        "args": []
+      },
+      "managed_install": {
+        "kind": "archive",
+        "version": "0.1.1",
+        "args": [],
+        "targets": {
+          "darwin-aarch64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/droid/0.1.1/macos/aarch64/sha256/09eee75164aba6356a58074bae3f55eeabadae2fbe09eacfc72f58c5b1b4cd50/droid-0.1.1-macos-aarch64.tar.gz",
+            "archive": "tar_gz",
+            "bin_path": "droid-acp",
+            "sha256": "09eee75164aba6356a58074bae3f55eeabadae2fbe09eacfc72f58c5b1b4cd50"
+          },
+          "darwin-x86_64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/droid/0.1.1/macos/x86_64/sha256/041619090310dca34fca667691de4de61c8a77adb632c0200f292a7042856dc8/droid-0.1.1-macos-x86_64.tar.gz",
+            "archive": "tar_gz",
+            "bin_path": "droid-acp",
+            "sha256": "041619090310dca34fca667691de4de61c8a77adb632c0200f292a7042856dc8"
+          },
+          "linux-aarch64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/droid/0.1.1/linux/aarch64/sha256/77353a3e598033eae9642c415e5a681330b0917b31c3ec8b297e066f0415b2ac/droid-0.1.1-linux-aarch64.tar.gz",
+            "archive": "tar_gz",
+            "bin_path": "droid-acp",
+            "sha256": "77353a3e598033eae9642c415e5a681330b0917b31c3ec8b297e066f0415b2ac"
+          },
+          "linux-x86_64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/droid/0.1.1/linux/x86_64/sha256/fdb359f550b04633c4c3aa68a63efc1b08f52ecfc66f1dbc41091c01e82f0716/droid-0.1.1-linux-x86_64.tar.gz",
+            "archive": "tar_gz",
+            "bin_path": "droid-acp",
+            "sha256": "fdb359f550b04633c4c3aa68a63efc1b08f52ecfc66f1dbc41091c01e82f0716"
+          },
+          "macos-aarch64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/droid/0.1.1/macos/aarch64/sha256/09eee75164aba6356a58074bae3f55eeabadae2fbe09eacfc72f58c5b1b4cd50/droid-0.1.1-macos-aarch64.tar.gz",
+            "archive": "tar_gz",
+            "bin_path": "droid-acp",
+            "sha256": "09eee75164aba6356a58074bae3f55eeabadae2fbe09eacfc72f58c5b1b4cd50"
+          },
+          "macos-x86_64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/droid/0.1.1/macos/x86_64/sha256/041619090310dca34fca667691de4de61c8a77adb632c0200f292a7042856dc8/droid-0.1.1-macos-x86_64.tar.gz",
+            "archive": "tar_gz",
+            "bin_path": "droid-acp",
+            "sha256": "041619090310dca34fca667691de4de61c8a77adb632c0200f292a7042856dc8"
+          }
+        }
+      },
+      "dependencies": [
+        {
+          "id": "droid-cli",
+          "install": {
+            "kind": "archive",
+            "version": "0.69.0",
+            "targets": {
+              "darwin-aarch64": {
+                "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/droid-cli/0.69.0/macos/aarch64/sha256/9a68b512a691992dca1c179300e09ca69cfa54da008f1146d56f59f5a5c220c3/droid",
+                "archive": "none",
+                "bin_path": "droid",
+                "sha256": "9a68b512a691992dca1c179300e09ca69cfa54da008f1146d56f59f5a5c220c3",
+                "size_bytes": 97296992
+              },
+              "darwin-x86_64": {
+                "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/droid-cli/0.69.0/macos/x86_64/sha256/9ec7b1377dc4a7e5d9faf681a4d5b053254579daf498750d950308148980c397/droid",
+                "archive": "none",
+                "bin_path": "droid",
+                "sha256": "9ec7b1377dc4a7e5d9faf681a4d5b053254579daf498750d950308148980c397",
+                "size_bytes": 103169392
+              },
+              "linux-aarch64": {
+                "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/droid-cli/0.69.0/linux/aarch64/sha256/d485609bc89fa2aae1be21b5dcd530ca5c6e404f22b4f6b292b0e7b93281d15c/droid",
+                "archive": "none",
+                "bin_path": "droid",
+                "sha256": "d485609bc89fa2aae1be21b5dcd530ca5c6e404f22b4f6b292b0e7b93281d15c",
+                "size_bytes": 138027480
+              },
+              "linux-x86_64": {
+                "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/droid-cli/0.69.0/linux/x86_64/sha256/b5f4709f9b48b4484f8199655d1e45c74271a56f72423a1ddf1fa5b0e97762e6/droid",
+                "archive": "none",
+                "bin_path": "droid",
+                "sha256": "b5f4709f9b48b4484f8199655d1e45c74271a56f72423a1ddf1fa5b0e97762e6",
+                "size_bytes": 141440762
+              },
+              "macos-aarch64": {
+                "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/droid-cli/0.69.0/macos/aarch64/sha256/9a68b512a691992dca1c179300e09ca69cfa54da008f1146d56f59f5a5c220c3/droid",
+                "archive": "none",
+                "bin_path": "droid",
+                "sha256": "9a68b512a691992dca1c179300e09ca69cfa54da008f1146d56f59f5a5c220c3",
+                "size_bytes": 97296992
+              },
+              "macos-x86_64": {
+                "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/droid-cli/0.69.0/macos/x86_64/sha256/9ec7b1377dc4a7e5d9faf681a4d5b053254579daf498750d950308148980c397/droid",
+                "archive": "none",
+                "bin_path": "droid",
+                "sha256": "9ec7b1377dc4a7e5d9faf681a4d5b053254579daf498750d950308148980c397",
+                "size_bytes": 103169392
+              }
+            }
+          }
+        },
+        {
+          "id": "droid-rg",
+          "install": {
+            "kind": "archive",
+            "version": "0.0.0-factory",
+            "targets": {
+              "darwin-aarch64": {
+                "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/droid-rg/0.0.0-factory/macos/aarch64/sha256/273e8c650a42beec1284910e1825b61a3e7af7c0ce1fcec137fe1d6cc71defb7/rg",
+                "archive": "none",
+                "bin_path": "rg",
+                "sha256": "273e8c650a42beec1284910e1825b61a3e7af7c0ce1fcec137fe1d6cc71defb7",
+                "size_bytes": 3564432
+              },
+              "darwin-x86_64": {
+                "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/droid-rg/0.0.0-factory/macos/x86_64/sha256/6e4a0fc9e03efeca6aa0e1543babb2b433738594679f771d5a471f187e70eea6/rg",
+                "archive": "none",
+                "bin_path": "rg",
+                "sha256": "6e4a0fc9e03efeca6aa0e1543babb2b433738594679f771d5a471f187e70eea6",
+                "size_bytes": 4319840
+              },
+              "linux-aarch64": {
+                "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/droid-rg/0.0.0-factory/linux/aarch64/sha256/26ce6cceb17ac710ee7253c49ea825c618d4f9e49a135d52b4edce336c40f620/rg",
+                "archive": "none",
+                "bin_path": "rg",
+                "sha256": "26ce6cceb17ac710ee7253c49ea825c618d4f9e49a135d52b4edce336c40f620",
+                "size_bytes": 4105928
+              },
+              "linux-x86_64": {
+                "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/droid-rg/0.0.0-factory/linux/x86_64/sha256/be2476c976342b9216611b4a84c1bc2ec6488ec5c791ea019a132727644ef19c/rg",
+                "archive": "none",
+                "bin_path": "rg",
+                "sha256": "be2476c976342b9216611b4a84c1bc2ec6488ec5c791ea019a132727644ef19c",
+                "size_bytes": 5287640
+              },
+              "macos-aarch64": {
+                "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/droid-rg/0.0.0-factory/macos/aarch64/sha256/273e8c650a42beec1284910e1825b61a3e7af7c0ce1fcec137fe1d6cc71defb7/rg",
+                "archive": "none",
+                "bin_path": "rg",
+                "sha256": "273e8c650a42beec1284910e1825b61a3e7af7c0ce1fcec137fe1d6cc71defb7",
+                "size_bytes": 3564432
+              },
+              "macos-x86_64": {
+                "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/droid-rg/0.0.0-factory/macos/x86_64/sha256/6e4a0fc9e03efeca6aa0e1543babb2b433738594679f771d5a471f187e70eea6/rg",
+                "archive": "none",
+                "bin_path": "rg",
+                "sha256": "6e4a0fc9e03efeca6aa0e1543babb2b433738594679f771d5a471f187e70eea6",
+                "size_bytes": 4319840
+              }
+            }
+          }
+        }
+      ],
+      "version_probe": {
+        "kind": "command",
+        "args": [
+          "--version"
+        ]
+      },
+      "releases": [
+        {
+          "version": "0.1.1",
+          "status": "supported",
+          "context_min": "0.1.0",
+          "notes": "Pinned workspace adapter source (harness-adapters/droid-acp/Cargo.toml)"
+        }
+      ]
+    },
+    {
+      "id": "gemini",
+      "display_name": "Gemini",
+      "tier": "tier2",
+      "managed_install": {
+        "kind": "npm",
+        "package": "@google/gemini-cli",
+        "version": "0.39.0",
+        "entrypoint": "node_modules/@google/gemini-cli/bundle/gemini.js",
+        "args": [
+          "--experimental-acp"
+        ]
+      },
+      "version_probe": {
+        "kind": "node_package",
+        "package": "@google/gemini-cli"
+      },
+      "releases": [
+        {
+          "version": "0.39.0",
+          "status": "supported",
+          "context_min": "0.1.0",
+          "notes": "Pinned Gemini CLI ACP bundle release (bundle-only in ctx runtime)"
+        }
+      ]
+    },
+    {
+      "id": "goose",
+      "display_name": "Goose",
+      "tier": "tier2",
+      "command": {
+        "command": "goose",
+        "args": [
+          "acp"
+        ]
+      },
+      "managed_install": {
+        "kind": "archive",
+        "version": "1.32.0",
+        "args": [
+          "acp"
+        ],
+        "targets": {
+          "darwin-aarch64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/goose/1.32.0/macos/aarch64/sha256/917ac8ab1ae9a1d63b3b2785ccc42c171f6ef97c1ca4447afbe7694e7a9a6f00/goose-aarch64-apple-darwin.tar.bz2",
+            "archive": "tar_bz2",
+            "bin_path": "goose",
+            "sha256": "917ac8ab1ae9a1d63b3b2785ccc42c171f6ef97c1ca4447afbe7694e7a9a6f00"
+          },
+          "darwin-x86_64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/goose/1.32.0/macos/x86_64/sha256/35a863bc74ea933d005e9bac63fdb170f501ad3560eeec8854e40761584e9643/goose-x86_64-apple-darwin.tar.bz2",
+            "archive": "tar_bz2",
+            "bin_path": "goose",
+            "sha256": "35a863bc74ea933d005e9bac63fdb170f501ad3560eeec8854e40761584e9643"
+          },
+          "linux-aarch64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/goose/1.32.0/linux/aarch64/sha256/c024e5494d7ae9e8050b0ef22bd0e927a3d91d1929fadd7b7df033a244deaf96/goose-aarch64-unknown-linux-gnu.tar.bz2",
+            "archive": "tar_bz2",
+            "bin_path": "goose",
+            "sha256": "c024e5494d7ae9e8050b0ef22bd0e927a3d91d1929fadd7b7df033a244deaf96"
+          },
+          "linux-x86_64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/goose/1.32.0/linux/x86_64/sha256/20f09c7017ed772b3b234f732c4d2a62b659f3a673b00676051bd10f818c06a9/goose-x86_64-unknown-linux-gnu.tar.bz2",
+            "archive": "tar_bz2",
+            "bin_path": "goose",
+            "sha256": "20f09c7017ed772b3b234f732c4d2a62b659f3a673b00676051bd10f818c06a9"
+          },
+          "macos-aarch64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/goose/1.32.0/macos/aarch64/sha256/917ac8ab1ae9a1d63b3b2785ccc42c171f6ef97c1ca4447afbe7694e7a9a6f00/goose-aarch64-apple-darwin.tar.bz2",
+            "archive": "tar_bz2",
+            "bin_path": "goose",
+            "sha256": "917ac8ab1ae9a1d63b3b2785ccc42c171f6ef97c1ca4447afbe7694e7a9a6f00"
+          },
+          "macos-x86_64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/goose/1.32.0/macos/x86_64/sha256/35a863bc74ea933d005e9bac63fdb170f501ad3560eeec8854e40761584e9643/goose-x86_64-apple-darwin.tar.bz2",
+            "archive": "tar_bz2",
+            "bin_path": "goose",
+            "sha256": "35a863bc74ea933d005e9bac63fdb170f501ad3560eeec8854e40761584e9643"
+          }
+        }
+      },
+      "version_probe": {
+        "kind": "command",
+        "args": [
+          "--version"
+        ]
+      },
+      "releases": [
+        {
+          "version": "1.32.0",
+          "status": "supported",
+          "context_min": "0.1.0",
+          "notes": "Pinned upstream Goose CLI ACP release",
+          "upstream_version": "1.32.0"
+        }
+      ]
+    },
+    {
+      "id": "kimi",
+      "display_name": "Kimi",
+      "tier": "tier2",
+      "command": {
+        "command": "kimi",
+        "args": [
+          "acp"
+        ]
+      },
+      "managed_install": {
+        "kind": "python",
+        "package": "kimi-cli",
+        "version": "1.38.0",
+        "entrypoint": "kimi",
+        "args": [
+          "acp"
+        ],
+        "python_version": "3.12.13",
+        "python_build_tag": "20260303"
+      },
+      "version_probe": {
+        "kind": "command",
+        "args": [
+          "--version"
+        ]
+      },
+      "releases": [
+        {
+          "version": "1.38.0",
+          "status": "supported",
+          "context_min": "0.1.0",
+          "notes": "Pinned Kimi CLI ACP bundle release"
+        }
+      ]
+    },
+    {
+      "id": "mistral",
+      "display_name": "Mistral",
+      "tier": "tier2",
+      "command": {
+        "command": "vibe-acp",
+        "args": []
+      },
+      "managed_install": {
+        "kind": "python",
+        "package": "mistral-vibe",
+        "version": "2.8.1",
+        "entrypoint": "vibe-acp",
+        "args": [],
+        "python_version": "3.12.13",
+        "python_build_tag": "20260303"
+      },
+      "version_probe": {
+        "kind": "command",
+        "args": [
+          "--version"
+        ]
+      },
+      "releases": [
+        {
+          "version": "2.8.1",
+          "status": "supported",
+          "context_min": "0.1.0",
+          "notes": "Pinned Mistral Vibe ACP bundle release"
+        }
+      ]
+    },
+    {
+      "id": "opencode",
+      "display_name": "OpenCode",
+      "tier": "tier2",
+      "command": {
+        "command": "opencode",
+        "args": [
+          "acp"
+        ]
+      },
+      "managed_install": {
+        "kind": "archive",
+        "version": "1.14.22",
+        "args": [
+          "acp"
+        ],
+        "targets": {
+          "darwin-aarch64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/opencode/1.14.22/macos/aarch64/sha256/cdea83be4d9e12f0fb4b2168b122f01a3d0243593caf4ec81041c5e6d717f8fa/opencode-darwin-arm64.zip",
+            "sha256": "cdea83be4d9e12f0fb4b2168b122f01a3d0243593caf4ec81041c5e6d717f8fa",
+            "archive": "zip",
+            "bin_path": "opencode"
+          },
+          "darwin-x86_64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/opencode/1.14.22/macos/x86_64/sha256/8d5ff5f3864e8c255771eeaf1d4df35c54154972dcbbe93b4baaaa6b3223e3d7/opencode-darwin-x64.zip",
+            "sha256": "8d5ff5f3864e8c255771eeaf1d4df35c54154972dcbbe93b4baaaa6b3223e3d7",
+            "archive": "zip",
+            "bin_path": "opencode"
+          },
+          "linux-aarch64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/opencode/1.14.22/linux/aarch64/sha256/b8bb3cf495348bd41233ed39f3b9d09be7560924705b9c0ea245bbef1d4597c2/opencode-linux-arm64.tar.gz",
+            "sha256": "b8bb3cf495348bd41233ed39f3b9d09be7560924705b9c0ea245bbef1d4597c2",
+            "archive": "tar_gz",
+            "bin_path": "opencode"
+          },
+          "linux-x86_64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/opencode/1.14.22/linux/x86_64/sha256/6081823232a6bb28cfae908c51b9caf2e62481fe3d4ea9ad072d053b80234650/opencode-linux-x64-baseline.tar.gz",
+            "sha256": "6081823232a6bb28cfae908c51b9caf2e62481fe3d4ea9ad072d053b80234650",
+            "archive": "tar_gz",
+            "bin_path": "opencode"
+          }
+        }
+      },
+      "version_probe": {
+        "kind": "command",
+        "args": [
+          "--version"
+        ]
+      },
+      "releases": [
+        {
+          "version": "1.14.22",
+          "status": "supported",
+          "context_min": "0.1.0",
+          "notes": "Pinned OpenCode CLI ACP bundle release",
+          "upstream_version": "1.14.22"
+        }
+      ]
+    },
+    {
+      "id": "openhands",
+      "display_name": "OpenHands",
+      "tier": "tier2",
+      "command": {
+        "command": "openhands",
+        "args": [
+          "acp"
+        ]
+      },
+      "managed_install": {
+        "kind": "python",
+        "package": "openhands",
+        "version": "1.14.0",
+        "entrypoint": "openhands",
+        "args": [
+          "acp"
+        ],
+        "python_version": "3.12.13",
+        "python_build_tag": "20260303"
+      },
+      "version_probe": {
+        "kind": "command",
+        "args": [
+          "--version"
+        ]
+      },
+      "releases": [
+        {
+          "version": "1.14.0",
+          "status": "supported",
+          "context_min": "0.1.0",
+          "notes": "Pinned upstream OpenHands ACP CLI release"
+        }
+      ]
+    },
+    {
+      "id": "pi",
+      "display_name": "Pi",
+      "tier": "tier2",
+      "command": {
+        "command": "pi-acp",
+        "args": []
+      },
+      "managed_install": {
+        "kind": "archive",
+        "version": "0.1.3",
+        "args": [],
+        "targets": {
+          "darwin-aarch64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/pi/0.1.2/macos/aarch64/sha256/964310282deefd70fba8470aaf6a5855857772cfafbd9be1c8c5bf7f66e1e2db/pi-0.1.2-macos-aarch64.tar.gz",
+            "archive": "tar_gz",
+            "bin_path": "dist/bin/pi-acp.js",
+            "sha256": "964310282deefd70fba8470aaf6a5855857772cfafbd9be1c8c5bf7f66e1e2db"
+          },
+          "darwin-x86_64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/pi/0.1.2/macos/x86_64/sha256/964310282deefd70fba8470aaf6a5855857772cfafbd9be1c8c5bf7f66e1e2db/pi-0.1.2-macos-x86_64.tar.gz",
+            "archive": "tar_gz",
+            "bin_path": "dist/bin/pi-acp.js",
+            "sha256": "964310282deefd70fba8470aaf6a5855857772cfafbd9be1c8c5bf7f66e1e2db"
+          },
+          "linux-aarch64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/pi/0.1.2/linux/aarch64/sha256/1eaae84dce80a18d57e71e0fd6a9777227a8baf1a32ea6343142cab2e5cfb7c8/pi-0.1.2-linux-aarch64.tar.gz",
+            "archive": "tar_gz",
+            "bin_path": "dist/bin/pi-acp.js",
+            "sha256": "1eaae84dce80a18d57e71e0fd6a9777227a8baf1a32ea6343142cab2e5cfb7c8"
+          },
+          "linux-x86_64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/pi/0.1.2/linux/x86_64/sha256/52e0774ba802cfd3f0bd87ff480f3218a2add713856c1d6441d5b8938d633076/pi-0.1.2-linux-x86_64.tar.gz",
+            "archive": "tar_gz",
+            "bin_path": "dist/bin/pi-acp.js",
+            "sha256": "52e0774ba802cfd3f0bd87ff480f3218a2add713856c1d6441d5b8938d633076"
+          },
+          "macos-aarch64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/pi/0.1.2/macos/aarch64/sha256/964310282deefd70fba8470aaf6a5855857772cfafbd9be1c8c5bf7f66e1e2db/pi-0.1.2-macos-aarch64.tar.gz",
+            "archive": "tar_gz",
+            "bin_path": "dist/bin/pi-acp.js",
+            "sha256": "964310282deefd70fba8470aaf6a5855857772cfafbd9be1c8c5bf7f66e1e2db"
+          },
+          "macos-x86_64": {
+            "url": "https://api.ctx.rs/storage/v1/object/public/releases/providers/pi/0.1.2/macos/x86_64/sha256/964310282deefd70fba8470aaf6a5855857772cfafbd9be1c8c5bf7f66e1e2db/pi-0.1.2-macos-x86_64.tar.gz",
+            "archive": "tar_gz",
+            "bin_path": "dist/bin/pi-acp.js",
+            "sha256": "964310282deefd70fba8470aaf6a5855857772cfafbd9be1c8c5bf7f66e1e2db"
+          }
+        }
+      },
+      "version_probe": {
+        "kind": "command",
+        "args": [
+          "--version"
+        ]
+      },
+      "releases": [
+        {
+          "version": "0.1.3",
+          "status": "supported",
+          "context_min": "0.1.0",
+          "notes": "Pinned workspace adapter source (harness-adapters/pi-acp/package.json)",
+          "upstream_version": "0.70.0"
+        }
+      ]
+    },
+    {
+      "id": "qwen",
+      "display_name": "Qwen",
+      "tier": "tier2",
+      "command": {
+        "command": "qwen",
+        "args": [
+          "--experimental-acp"
+        ]
+      },
+      "managed_install": {
+        "kind": "npm",
+        "package": "@qwen-code/qwen-code",
+        "version": "0.15.1",
+        "entrypoint": "node_modules/@qwen-code/qwen-code/cli.js",
+        "args": [
+          "--experimental-acp"
+        ]
+      },
+      "version_probe": {
+        "kind": "node_package",
+        "package": "@qwen-code/qwen-code"
+      },
+      "releases": [
+        {
+          "version": "0.15.1",
+          "status": "supported",
+          "context_min": "0.1.0",
+          "notes": "Pinned Qwen Code CLI ACP bundle release"
+        }
+      ]
+    }
+  ]
+}

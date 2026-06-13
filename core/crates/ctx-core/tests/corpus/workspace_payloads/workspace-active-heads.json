@@ -1,0 +1,52 @@
+{
+  "workspace_id": "11111111-1111-4111-8111-111111111111",
+  "snapshot_rev": 42,
+  "heads": [
+    {
+      "session": {
+        "id": "44444444-4444-4444-8444-444444444444",
+        "task_id": "22222222-2222-4222-8222-222222222222",
+        "workspace_id": "11111111-1111-4111-8111-111111111111",
+        "worktree_id": "33333333-3333-4333-8333-333333333333",
+        "execution_environment": "host",
+        "provider_id": "codex",
+        "model_id": "gpt-5.4",
+        "title": "Stream D",
+        "agent_role": "implementation",
+        "status": "active",
+        "created_at": "2026-03-09T12:34:56Z",
+        "updated_at": "2026-03-09T12:35:10Z"
+      },
+      "messages": [
+        {
+          "id": "55555555-5555-4555-8555-555555555555",
+          "session_id": "44444444-4444-4444-8444-444444444444",
+          "task_id": "22222222-2222-4222-8222-222222222222",
+          "role": "user",
+          "content": "Please harden stream D.",
+          "delivery": "immediate",
+          "created_at": "2026-03-09T12:34:56Z"
+        }
+      ],
+      "last_event_seq": 99,
+      "state_rev": 8,
+      "activity": {
+        "is_working": true,
+        "last_turn_status": "running"
+      },
+      "has_more_turns": false,
+      "has_more_history": false,
+      "head_window": {
+        "turn_limit": 20,
+        "message_limit": 100,
+        "event_limit": 200,
+        "byte_limit": 65536,
+        "turn_count": 1,
+        "message_count": 1,
+        "event_count": 0,
+        "bytes": 128,
+        "truncated": false
+      }
+    }
+  ]
+}

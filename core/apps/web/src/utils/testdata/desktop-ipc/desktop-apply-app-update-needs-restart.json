@@ -1,0 +1,22 @@
+{
+  "method": "desktopApplyAppUpdate",
+  "command": "desktop_apply_app_update",
+  "call": {
+    "channel": "stable",
+    "download_id": "download-42"
+  },
+  "args": {
+    "req": {
+      "confirm": true,
+      "channel": "stable",
+      "download_id": "download-42"
+    }
+  },
+  "response": {
+    "applied": true,
+    "needs_restart": true,
+    "up_to_date": false,
+    "latest_version": "1.2.3",
+    "message": "Restart requested."
+  }
+}

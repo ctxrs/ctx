@@ -1,0 +1,12 @@
+{
+  "turns": [
+    {
+      "thought": "Hm (continue)",
+      "tools": [
+        {"tool_name": "exec_command", "input": {"cmd": "echo continue"}, "output": "continue"}
+      ],
+      "deltas": ["Ho", "la"],
+      "final": "Hola from continue"
+    }
+  ]
+}

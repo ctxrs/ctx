@@ -1,0 +1,42 @@
+---
+title: "Install and Launch"
+description: "Install ctx, open the app, and verify first-run health"
+---
+
+## Before you install
+
+Have these ready:
+
+- a machine with the repository you want to use
+- at least one provider account or API key you plan to connect
+- container support on that machine if you want to start with sandboxed runs
+
+Install ctx with the official installer:
+
+```bash
+curl -fsSL ctx.rs/install | sh
+```
+
+## First launch
+
+1. Open the ctx app.
+2. Open **Settings** and confirm the app loads without daemon or connection errors.
+3. Go to **Harness Authentication** and connect one provider.
+4. Return to the workbench and add a workspace.
+5. Run one small task to confirm the full loop works.
+
+## Healthy first run signals
+
+- Settings opens and saves normally.
+- You can add/open a workspace.
+- You can create a task.
+- You can start a session with a connected harness.
+- Diff review opens after an agent edits files.
+
+## Common early issues
+
+- App does not launch cleanly: rerun the installer, then relaunch ctx.
+- Provider setup does not complete: reconnect the provider from **Harness Authentication** and rerun a small test prompt.
+- Sandbox is not ready yet: validate the rest of your setup first, then return to sandbox configuration once the machine is ready.
+
+If you are still blocked, use [Troubleshooting](/troubleshooting/get-support).

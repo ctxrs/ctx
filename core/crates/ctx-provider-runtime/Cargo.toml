@@ -1,0 +1,30 @@
+[package]
+name = "ctx-provider-runtime"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+ctx-core = { path = "../ctx-core" }
+ctx-harness-sources = { path = "../ctx-harness-sources" }
+ctx-managed-installs = { path = "../ctx-managed-installs" }
+ctx-provider-accounts = { path = "../ctx-provider-accounts" }
+ctx-provider-install = { path = "../ctx-provider-install" }
+ctx-provider-matrix = { path = "../ctx-provider-matrix" }
+ctx-providers = { path = "../ctx-providers" }
+directories.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sysinfo.workspace = true
+tokio.workspace = true
+toml = "0.8"
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+fs2 = "0.4"
+tempfile = "3"

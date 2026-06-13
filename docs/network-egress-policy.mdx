@@ -1,0 +1,46 @@
+---
+title: "Network Egress Policy"
+description: "Configure outbound network access for containerized runs"
+---
+
+## Overview
+
+Network egress policy controls outbound access for agent runs.
+
+Use it to keep agents effective while limiting unnecessary external access.
+
+## Where to configure
+
+`Settings > Container & Network`
+
+## Policy options
+
+## LLM providers only
+
+Allows outbound access only to model/provider endpoints required for agent operation.
+
+## Allowlist
+
+Allows outbound access to explicitly permitted hosts.
+
+## Full access
+
+Allows unrestricted outbound access. Use only when required by task constraints.
+
+## Recommended rollout
+
+1. Start with `LLM providers only`.
+2. Move to `Allowlist` for known required domains.
+3. Use `Full access` only for exceptional cases.
+
+## Troubleshooting
+
+- Package installs fail: add required registries/hosts to allowlist.
+- External API calls fail: verify hostname and policy mode.
+- Unexpected outbound behavior: tighten from Full access to Allowlist.
+
+## Related pages
+
+- [Containerization](/containerization)
+- [Permissions and Safety](/settings/permissions-and-safety)
+- [Run Your First Task](/getting-started/first-task)

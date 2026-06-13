@@ -1,0 +1,20 @@
+[package]
+name = "ctx-docs-mirror"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+chrono = { workspace = true }
+flate2 = "1"
+regex = "1"
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+url = "2"
+toml = "0.8"
+tempfile = "3"
+html2md = "0.2"

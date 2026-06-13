@@ -1,0 +1,42 @@
+{
+  "channel": "stable",
+  "latest_version": "1.2.3",
+  "min_supported_version": "1.0.0",
+  "published_at": "2026-03-01T00:00:00Z",
+  "platforms": {
+    "linux-x64": {
+      "appimage": {
+        "url_path": "/releases/stable/linux-x64/ctx.AppImage",
+        "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "daemon": {
+        "url_path": "/releases/stable/linux-x64/ctx",
+        "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+      }
+    },
+    "macos-arm64": {
+      "desktop": {
+        "url_path": "/releases/stable/macos-arm64/ctx.tar.gz",
+        "sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+      },
+      "dmg": {
+        "url_path": "/releases/stable/macos-arm64/ctx.dmg",
+        "sha256": "4444444444444444444444444444444444444444444444444444444444444444"
+      },
+      "daemon": {
+        "url_path": "/releases/stable/macos-arm64/ctx",
+        "sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+      }
+    },
+    "windows-x64": {
+      "nsis": {
+        "url_path": "/releases/stable/windows-x64/ctx-setup.exe",
+        "sha256": "6666666666666666666666666666666666666666666666666666666666666666"
+      },
+      "daemon": {
+        "url_path": "/releases/stable/windows-x64/ctx.exe",
+        "sha256": "7777777777777777777777777777777777777777777777777777777777777777"
+      }
+    }
+  }
+}

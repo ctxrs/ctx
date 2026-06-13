@@ -1,0 +1,21 @@
+mod artifacts;
+mod file_completions;
+mod message_commands;
+mod read_models;
+mod subagents;
+mod title_model_mode;
+mod vcs;
+
+pub use artifacts::SessionArtifactsHandle;
+pub(in crate::daemon) use artifacts::{SessionArtifactEffects, SessionArtifactsFuture};
+pub use file_completions::SessionFileCompletionsHandle;
+pub(in crate::daemon) use file_completions::SessionFileCompletionsHandleParts;
+pub use message_commands::SessionMessageCommandHandle;
+pub(in crate::daemon) use message_commands::SessionMessageSchedulerSpawner;
+pub use read_models::SessionReadModelsHandle;
+pub(in crate::daemon) use subagents::SessionSubagentMcpReadFuture;
+pub use subagents::{SessionSubagentMcpReadHandle, SessionSubagentReadHandle};
+pub use title_model_mode::SessionTitleModelModeHandle;
+pub(in crate::daemon) use title_model_mode::SessionTitleModelModeHandleParts;
+pub use vcs::SessionVcsHandle;
+pub(in crate::daemon) use vcs::{SessionVcsEffects, SessionVcsEffectsParts, SessionVcsFuture};

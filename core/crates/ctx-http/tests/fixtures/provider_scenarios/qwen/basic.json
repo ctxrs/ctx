@@ -1,0 +1,12 @@
+{
+  "turns": [
+    {
+      "thought": "Hm (qwen)",
+      "tools": [
+        {"tool_name": "exec_command", "input": {"cmd": "echo qwen"}, "output": "qwen"}
+      ],
+      "deltas": ["Ho", "la"],
+      "final": "Hola from qwen"
+    }
+  ]
+}

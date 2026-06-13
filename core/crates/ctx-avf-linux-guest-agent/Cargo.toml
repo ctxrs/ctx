@@ -1,0 +1,13 @@
+[package]
+name = "ctx-avf-linux-guest-agent"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+libc = "0.2"
+portable-pty = "0.9"
+serde.workspace = true
+serde_json.workspace = true
+shell-words = "1.1.1"

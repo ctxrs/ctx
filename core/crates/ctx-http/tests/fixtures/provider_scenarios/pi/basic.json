@@ -1,0 +1,12 @@
+{
+  "turns": [
+    {
+      "thought": "Hm (pi)",
+      "tools": [
+        {"tool_name": "exec_command", "input": {"cmd": "echo pi"}, "output": "pi"}
+      ],
+      "deltas": ["Ho", "la"],
+      "final": "Hola from pi"
+    }
+  ]
+}

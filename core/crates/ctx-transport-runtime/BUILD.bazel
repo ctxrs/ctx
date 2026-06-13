@@ -1,0 +1,53 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+rust_library(
+    name = "lib",
+    crate_name = "ctx_transport_runtime",
+    crate_root = "src/lib.rs",
+    edition = "2021",
+    srcs = glob(["src/**/*.rs"]),
+    compile_data = [
+        "//core/packages:web-session-worker/bin/auth.mjs",
+        "//core/packages:web-session-worker/bin/worker.mjs",
+        "//core/packages:web-session-worker/package.json",
+    ],
+    deps = [
+        "//core/crates/ctx-core:lib",
+        "//core/crates/ctx-route-contracts:lib",
+        "//core/crates/ctx-sandbox-container-runtime:lib",
+        "//core/crates/ctx-workspace-container:lib",
+        "@crates//:anyhow",
+        "@crates//:base64",
+        "@crates//:chacha20poly1305",
+        "@crates//:chrono",
+        "@crates//:futures",
+        "@crates//:hkdf",
+        "@crates//:http",
+        "@crates//:jsonwebtoken",
+        "@crates//:portable-pty",
+        "@crates//:rand_core",
+        "@crates//:reqwest",
+        "@crates//:rustls",
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:sha2",
+        "@crates//:tokio",
+        "@crates//:tokio-tungstenite",
+        "@crates//:tracing",
+        "@crates//:url",
+        "@crates//:urlencoding",
+        "@crates//:uuid",
+        "@crates//:which",
+        "@crates//:x25519-dalek",
+    ],
+)
+
+rust_test(
+    name = "unit_tests",
+    crate = ":lib",
+    deps = [
+        "@crates//:tempfile",
+    ],
+)

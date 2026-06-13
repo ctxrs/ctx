@@ -1,0 +1,17 @@
+[package]
+name = "ctx-worktree-data-plane"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+ctx-core = { path = "../ctx-core" }
+ctx-sandbox-contract = { path = "../ctx-sandbox-contract" }
+ctx-store = { path = "../ctx-store" }
+
+[dev-dependencies]
+chrono.workspace = true
+serde_json.workspace = true
+uuid.workspace = true

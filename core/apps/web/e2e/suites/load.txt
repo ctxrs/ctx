@@ -1,0 +1,15 @@
+# Throughput/churn/load-behavior oriented web suite (non pre-merge).
+e2e/workbench-background-updates.spec.ts
+e2e/workbench-foreground-freshness-pressure.spec.ts
+e2e/workbench-instant-switch.spec.ts
+e2e/workbench-no-extra-requests.spec.ts
+e2e/workbench-pretext-perf-diagnostics.spec.ts
+e2e/workbench-remote-daemon-stream-load.spec.ts
+e2e/workbench-spinner-replay.spec.ts
+e2e/workbench-stream-delta-throughput.spec.ts
+e2e/workbench-stream-delta-replay-throughput.spec.ts
+e2e/workbench-streaming-overlay-contention.spec.ts
+e2e/workbench-stream-no-resubscribe-live.spec.ts
+e2e/workbench-stream-ordering.spec.ts
+e2e/workbench-switch-ready-final-freshness-pressure.spec.ts
+e2e/workbench-task-switching.spec.ts

@@ -1,0 +1,54 @@
+{
+  "events": [
+    {
+      "channel": "control",
+      "event": {
+        "context_window": {
+          "context_tokens_estimate": 9000,
+          "context_window_tokens": 10000,
+          "remaining_fraction": 0.1,
+          "remaining_tokens_estimate": 1000,
+          "total_input_tokens": 8000,
+          "total_output_tokens": 1000
+        },
+        "session_id": "fixture-session",
+        "turn_id": "turn_crp_3",
+        "type": "turn.context_window.updated"
+      }
+    },
+    {
+      "channel": "control",
+      "event": {
+        "error": {
+          "details": "{\"type\":\"UsageLimitExceeded\"}\nretry later",
+          "kind": "app_server_error",
+          "message": "quota exceeded"
+        },
+        "session_id": "fixture-session",
+        "status": "error",
+        "turn_id": "turn_crp_3",
+        "type": "turn.completed"
+      }
+    }
+  ],
+  "aliases": {
+    "turn_app_3": "turn_crp_3"
+  },
+  "latest_token_usage": {
+    "last": {
+      "cachedInputTokens": 0,
+      "inputTokens": 8000,
+      "outputTokens": 500,
+      "reasoningOutputTokens": 500,
+      "totalTokens": 9000
+    },
+    "modelContextWindow": 10000,
+    "total": {
+      "cachedInputTokens": 0,
+      "inputTokens": 8000,
+      "outputTokens": 500,
+      "reasoningOutputTokens": 500,
+      "totalTokens": 9000
+    }
+  }
+}

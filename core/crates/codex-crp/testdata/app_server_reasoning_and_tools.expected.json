@@ -1,0 +1,141 @@
+{
+  "events": [
+    {
+      "channel": "control",
+      "event": {
+        "session_id": "fixture-session",
+        "turn_id": "turn_crp_2",
+        "type": "turn.started"
+      }
+    },
+    {
+      "channel": "control",
+      "event": {
+        "item_id": "reason_1",
+        "session_id": "fixture-session",
+        "summary_index": 0,
+        "text": "Planning",
+        "turn_id": "turn_crp_2",
+        "type": "reasoning.summary"
+      }
+    },
+    {
+      "channel": "data",
+      "event": {
+        "chunk": "Inspecting repository",
+        "item_id": "reason_1",
+        "session_id": "fixture-session",
+        "summary_index": 0,
+        "turn_id": "turn_crp_2",
+        "type": "reasoning.trace"
+      }
+    },
+    {
+      "channel": "control",
+      "event": {
+        "input": {
+          "command": "git status",
+          "command_actions": [],
+          "cwd": "/tmp"
+        },
+        "input_preview": {
+          "command": "git status",
+          "command_actions": [],
+          "cwd": "/tmp"
+        },
+        "session_id": "fixture-session",
+        "tool_call_id": "cmd_1",
+        "tool_label": "Running",
+        "tool_name": "exec",
+        "turn_id": "turn_crp_2",
+        "type": "tool.started"
+      }
+    },
+    {
+      "channel": "data",
+      "event": {
+        "chunk": "On branch main",
+        "session_id": "fixture-session",
+        "tool_call_id": "cmd_1",
+        "turn_id": "turn_crp_2",
+        "type": "tool.output_delta"
+      }
+    },
+    {
+      "channel": "control",
+      "event": {
+        "input_preview": {
+          "command": "git status",
+          "command_actions": [],
+          "cwd": "/tmp"
+        },
+        "output": {
+          "aggregated_output": "On branch main",
+          "duration_ms": 12,
+          "exit_code": 0
+        },
+        "session_id": "fixture-session",
+        "status": "success",
+        "tool_call_id": "cmd_1",
+        "tool_label": "Ran",
+        "tool_name": "exec",
+        "turn_id": "turn_crp_2",
+        "type": "tool.completed"
+      }
+    },
+    {
+      "channel": "control",
+      "event": {
+        "input": {
+          "arguments": {
+            "path": "README.md"
+          },
+          "server": "ctx",
+          "tool": "read_file"
+        },
+        "input_preview": {
+          "server": "ctx",
+          "tool": "read_file"
+        },
+        "session_id": "fixture-session",
+        "tool_call_id": "mcp_1",
+        "tool_label": "MCP",
+        "tool_name": "mcp.ctx.read_file",
+        "turn_id": "turn_crp_2",
+        "type": "tool.started"
+      }
+    },
+    {
+      "channel": "control",
+      "event": {
+        "input_preview": {
+          "server": "ctx",
+          "tool": "read_file"
+        },
+        "output": {
+          "duration_ms": 8,
+          "result": {
+            "content": [
+              {
+                "text": "ok",
+                "type": "text"
+              }
+            ],
+            "structuredContent": null
+          }
+        },
+        "session_id": "fixture-session",
+        "status": "success",
+        "tool_call_id": "mcp_1",
+        "tool_label": "MCP",
+        "tool_name": "mcp.ctx.read_file",
+        "turn_id": "turn_crp_2",
+        "type": "tool.completed"
+      }
+    }
+  ],
+  "aliases": {
+    "turn_app_2": "turn_crp_2"
+  },
+  "latest_token_usage": null
+}

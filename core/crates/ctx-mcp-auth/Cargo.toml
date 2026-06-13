@@ -1,0 +1,12 @@
+[package]
+name = "ctx-mcp-auth"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ctx-core = { path = "../ctx-core" }
+hex = "0.4"
+sha2 = "0.10"
+tokio.workspace = true
+uuid.workspace = true

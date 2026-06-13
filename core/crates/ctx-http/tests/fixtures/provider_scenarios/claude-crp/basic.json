@@ -1,0 +1,12 @@
+{
+  "turns": [
+    {
+      "thought": "Hm (claude-crp)",
+      "tools": [
+        {"tool_name": "exec_command", "input": {"cmd": "echo claude-crp"}, "output": "claude-crp"}
+      ],
+      "deltas": ["Ho", "la"],
+      "final": "Hola from claude-crp"
+    }
+  ]
+}

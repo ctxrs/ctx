@@ -1,0 +1,12 @@
+{
+  "turns": [
+    {
+      "thought": "Hm (droid)",
+      "tools": [
+        {"tool_name": "exec_command", "input": {"cmd": "echo droid"}, "output": "droid"}
+      ],
+      "deltas": ["Ho", "la"],
+      "final": "Hola from droid"
+    }
+  ]
+}

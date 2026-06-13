@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>CFBundleDisplayName</key>
+    <string>ctx</string>
+    <key>CFBundleName</key>
+    <string>ctx</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+      <dict>
+        <key>CFBundleURLName</key>
+        <string>ctx</string>
+        <key>CFBundleURLSchemes</key>
+        <array>
+          <string>ctx</string>
+        </array>
+      </dict>
+    </array>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>ctx needs microphone access for dictation.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>ctx uses speech recognition to transcribe dictation.</string>
+  </dict>
+</plist>

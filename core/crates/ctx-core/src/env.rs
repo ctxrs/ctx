@@ -1,0 +1,5 @@
+pub const DAEMON_AUTH_ENV_VARS: &[&str] = &[
+    "CTX_AUTH_TOKEN",
+    "CTX_MCP_TOKEN",
+    "CTX_LOCAL_DAEMON_SHUTDOWN_TOKEN",
+];

@@ -1,0 +1,5 @@
+[build]
+# Keep plain cargo invocations isolated to this workspace.
+# Many repo scripts still override CARGO_TARGET_DIR explicitly for worktree-aware caches,
+# but direct `cargo test` / `cargo check` should not inherit a shared global target dir.
+target-dir = "target"

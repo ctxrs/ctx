@@ -1,0 +1,27 @@
+{
+  "method": "desktopGetLastAppUpdateAttempt",
+  "command": "desktop_get_last_app_update_attempt",
+  "response": {
+    "attempt_id": "attempt-1",
+    "channel": "stable",
+    "current_version": "1.0.0",
+    "target_version": "1.2.3",
+    "started_at_ms": 1741478400000,
+    "finished_at_ms": 1741478401200,
+    "result": "succeeded",
+    "stages": [
+      {
+        "stage": "download",
+        "started_at_ms": 1741478400000,
+        "finished_at_ms": 1741478400600,
+        "result": "succeeded"
+      },
+      {
+        "stage": "install",
+        "started_at_ms": 1741478400600,
+        "finished_at_ms": 1741478401200,
+        "result": "succeeded"
+      }
+    ]
+  }
+}

@@ -1,0 +1,1327 @@
+{
+  "version": 2,
+  "policy": {
+    "provider_matrix": "bundled_only",
+    "desktop_launch": "canonical_only"
+  },
+  "profiles": {
+    "parity": {
+      "allowed_source_types": [
+        "ci",
+        "vendor"
+      ]
+    },
+    "override": {
+      "allowed_source_types": [
+        "ci",
+        "vendor",
+        "local"
+      ]
+    },
+    "source-all": {
+      "allowed_source_types": [
+        "local"
+      ]
+    }
+  },
+  "required": {
+    "targets": {
+      "provider": [],
+      "runtime": [
+        "macos/aarch64"
+      ],
+      "image": [
+        "linux/aarch64",
+        "linux/x86_64"
+      ],
+      "machine_cache": []
+    },
+    "provider_ids": [],
+    "runtime_ids": [
+      "avf-linux-guest"
+    ],
+    "image_ids": [
+      "ctx-harness"
+    ],
+    "machine_cache_ids": []
+  },
+  "components": [
+    {
+      "kind": "provider",
+      "id": "acp-crp-bridge",
+      "os": "macos",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/acp-crp-bridge/macos/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "acp-crp-bridge",
+      "os": "linux",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/acp-crp-bridge/linux/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "acp-crp-bridge",
+      "os": "linux",
+      "arch": "x86_64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/acp-crp-bridge/linux/x86_64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "amp",
+      "os": "macos",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/amp/macos/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "amp",
+      "os": "linux",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/amp/linux/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "amp",
+      "os": "linux",
+      "arch": "x86_64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/amp/linux/x86_64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "auggie",
+      "os": "macos",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/auggie/macos/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "auggie",
+      "os": "linux",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/auggie/linux/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "auggie",
+      "os": "linux",
+      "arch": "x86_64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/auggie/linux/x86_64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "cagent",
+      "os": "macos",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/cagent/macos/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "cagent",
+      "os": "linux",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/cagent/linux/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "cagent",
+      "os": "linux",
+      "arch": "x86_64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/cagent/linux/x86_64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "claude-cli",
+      "os": "macos",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/claude-cli/macos/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "claude-cli",
+      "os": "linux",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/claude-cli/linux/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "claude-cli",
+      "os": "linux",
+      "arch": "x86_64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/claude-cli/linux/x86_64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "claude-crp",
+      "os": "macos",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/claude-crp/macos/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "claude-crp",
+      "os": "linux",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/claude-crp/linux/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "claude-crp",
+      "os": "linux",
+      "arch": "x86_64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/claude-crp/linux/x86_64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "cline",
+      "os": "macos",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/cline/macos/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "cline",
+      "os": "linux",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/cline/linux/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "cline",
+      "os": "linux",
+      "arch": "x86_64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/cline/linux/x86_64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "codex",
+      "os": "macos",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/codex-crp/macos/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "codex",
+      "os": "linux",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/codex-crp/linux/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "codex",
+      "os": "linux",
+      "arch": "x86_64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/codex-crp/linux/x86_64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "copilot",
+      "os": "macos",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/copilot/macos/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "copilot",
+      "os": "linux",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/copilot/linux/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "copilot",
+      "os": "linux",
+      "arch": "x86_64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/copilot/linux/x86_64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "cursor",
+      "os": "macos",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/cursor/macos/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "cursor",
+      "os": "linux",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/cursor/linux/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "cursor",
+      "os": "linux",
+      "arch": "x86_64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/cursor/linux/x86_64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "droid",
+      "os": "macos",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/droid/macos/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "droid",
+      "os": "linux",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/droid/linux/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "droid",
+      "os": "linux",
+      "arch": "x86_64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/droid/linux/x86_64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "gemini",
+      "os": "macos",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/gemini/macos/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "gemini",
+      "os": "linux",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/gemini/linux/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "gemini",
+      "os": "linux",
+      "arch": "x86_64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/gemini/linux/x86_64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "goose",
+      "os": "macos",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/goose/macos/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "goose",
+      "os": "linux",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/goose/linux/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "goose",
+      "os": "linux",
+      "arch": "x86_64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/goose/linux/x86_64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "kimi",
+      "os": "macos",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/kimi/macos/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "kimi",
+      "os": "linux",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/kimi/linux/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "kimi",
+      "os": "linux",
+      "arch": "x86_64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/kimi/linux/x86_64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "mistral",
+      "os": "macos",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/mistral/macos/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "mistral",
+      "os": "linux",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/mistral/linux/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "mistral",
+      "os": "linux",
+      "arch": "x86_64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/mistral/linux/x86_64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "opencode",
+      "os": "macos",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/opencode/macos/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "opencode",
+      "os": "linux",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/opencode/linux/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "opencode",
+      "os": "linux",
+      "arch": "x86_64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/opencode/linux/x86_64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "openhands",
+      "os": "macos",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/openhands/macos/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "openhands",
+      "os": "linux",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/openhands/linux/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "openhands",
+      "os": "linux",
+      "arch": "x86_64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/openhands/linux/x86_64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "pi",
+      "os": "macos",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/pi/macos/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "pi",
+      "os": "linux",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/pi/linux/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "pi",
+      "os": "linux",
+      "arch": "x86_64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/pi/linux/x86_64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "qwen",
+      "os": "macos",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/qwen/macos/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "qwen",
+      "os": "linux",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/qwen/linux/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "provider",
+      "id": "qwen",
+      "os": "linux",
+      "arch": "x86_64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "locked://providers/qwen/linux/x86_64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "runtime",
+      "id": "node",
+      "os": "macos",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "vendor",
+          "uri": "locked://runtimes/node/macos/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "runtime",
+      "id": "node",
+      "os": "linux",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "vendor",
+          "uri": "locked://runtimes/node/linux/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "runtime",
+      "id": "node",
+      "os": "linux",
+      "arch": "x86_64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "vendor",
+          "uri": "locked://runtimes/node/linux/x86_64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "runtime",
+      "id": "python",
+      "os": "macos",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "vendor",
+          "uri": "locked://runtimes/python/macos/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "runtime",
+      "id": "python",
+      "os": "linux",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "vendor",
+          "uri": "locked://runtimes/python/linux/aarch64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "runtime",
+      "id": "python",
+      "os": "linux",
+      "arch": "x86_64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "vendor",
+          "uri": "locked://runtimes/python/linux/x86_64",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    {
+      "kind": "runtime",
+      "id": "avf-linux-guest",
+      "os": "macos",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "ubuntu-noble-arm64-313b9a54b702",
+      "bin": "rootfs.raw",
+      "helpers": {
+        "kernel": {
+          "uri": "https://api.ctx.rs/storage/v1/object/public/releases/runtimes/avf-linux-guest/ubuntu-noble-arm64-313b9a54b702/macos/aarch64/sha256-bcbef77faa333bd932252db5ff32177c111b0b95cc55e37af50745509433bd3a/kernel",
+          "sha256": "bcbef77faa333bd932252db5ff32177c111b0b95cc55e37af50745509433bd3a"
+        },
+        "initrd": {
+          "uri": "https://api.ctx.rs/storage/v1/object/public/releases/runtimes/avf-linux-guest/ubuntu-noble-arm64-313b9a54b702/macos/aarch64/sha256-b7c4eed8e19caf883a5bc923429c0d7c84d7194ad988315c515ce8820046ba09/initrd",
+          "sha256": "b7c4eed8e19caf883a5bc923429c0d7c84d7194ad988315c515ce8820046ba09"
+        },
+        "guest-agent": {
+          "uri": "https://api.ctx.rs/storage/v1/object/public/releases/runtimes/avf-linux-guest/ubuntu-noble-arm64-313b9a54b702/macos/aarch64/sha256-24f48853edb646b73dd26a4e39ad74ad3596693958b16fbff47d002890ee8014/guest-agent",
+          "sha256": "24f48853edb646b73dd26a4e39ad74ad3596693958b16fbff47d002890ee8014"
+        },
+        "egress-proxy": {
+          "uri": "https://api.ctx.rs/storage/v1/object/public/releases/runtimes/avf-linux-guest/ubuntu-noble-arm64-313b9a54b702/macos/aarch64/sha256-664c6b9e9ec4579d5efacb6abca11d11e52b71d56e39051de1c37bafcd213780/egress-proxy",
+          "sha256": "664c6b9e9ec4579d5efacb6abca11d11e52b71d56e39051de1c37bafcd213780"
+        },
+        "container-stack": {
+          "uri": "https://api.ctx.rs/storage/v1/object/public/releases/runtimes/avf-linux-guest/ubuntu-noble-arm64-313b9a54b702/macos/aarch64/sha256-438482444594fecb449e088bd0e6d4095e2d50f7dfea4add70afc3ff4e22d5a1/container-stack.tar.gz",
+          "sha256": "438482444594fecb449e088bd0e6d4095e2d50f7dfea4add70afc3ff4e22d5a1"
+        }
+      },
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "https://api.ctx.rs/storage/v1/object/public/releases/runtimes/avf-linux-guest/ubuntu-noble-arm64-313b9a54b702/macos/aarch64/sha256-1a94ef05e038a61a8fc33aae60d735b6d39f8579bb305fb195da9ef69cd52e54/rootfs.raw.zst",
+          "sha256": "1a94ef05e038a61a8fc33aae60d735b6d39f8579bb305fb195da9ef69cd52e54"
+        }
+      ]
+    },
+    {
+      "kind": "image",
+      "id": "ctx-harness",
+      "os": "linux",
+      "arch": "aarch64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "https://api.ctx.rs/storage/v1/object/public/releases/images/ctx-harness/ubuntu-24.04/linux/aarch64/sha256-4eecb0d8cc9ea1d908a1e70dac11697eaaff0f7cb85e740962e672bc5c415643/ctx-harness-linux-aarch64.tar",
+          "sha256": "4eecb0d8cc9ea1d908a1e70dac11697eaaff0f7cb85e740962e672bc5c415643"
+        }
+      ]
+    },
+    {
+      "kind": "image",
+      "id": "ctx-harness",
+      "os": "linux",
+      "arch": "x86_64",
+      "variant": "default",
+      "version": "locked",
+      "sources": [
+        {
+          "source_type": "local",
+          "build": "desktop:prep"
+        },
+        {
+          "source_type": "ci",
+          "uri": "https://api.ctx.rs/storage/v1/object/public/releases/images/ctx-harness/ubuntu-24.04/linux/x86_64/sha256-349d8760a9b307c80e1414be2e1d58360c04b05792a5f7e37abbac277a9fc064/ctx-harness-linux-x86_64.tar",
+          "sha256": "349d8760a9b307c80e1414be2e1d58360c04b05792a5f7e37abbac277a9fc064"
+        }
+      ]
+    }
+  ]
+}

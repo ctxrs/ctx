@@ -1,0 +1,44 @@
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+CODEX_CRP_RUSTC_ENV = {
+    "CARGO_MANIFEST_DIR": "core/crates/codex-crp",
+    "CARGO_PKG_VERSION": "1.0.1",
+}
+
+CODEX_CRP_DEPS = [
+    "//core/crates/ctx-crp-protocol:lib",
+    "@crates//:anyhow",
+    "@crates//:base64",
+    "@crates//:clap",
+    "@crates//:directories",
+    "@crates//:fs2",
+    "@crates//:serde",
+    "@crates//:serde_json",
+    "@crates//:tokio",
+    "@crates//:tracing",
+    "@crates//:tracing-subscriber",
+]
+
+rust_binary(
+    name = "codex-crp",
+    crate_root = "src/main.rs",
+    edition = "2021",
+    srcs = glob(["src/**/*.rs"]),
+    rustc_env = CODEX_CRP_RUSTC_ENV,
+    deps = CODEX_CRP_DEPS,
+)
+
+rust_test(
+    name = "unit_tests",
+    crate_root = "src/main.rs",
+    data = glob(["testdata/**"]),
+    edition = "2021",
+    srcs = glob(["src/**/*.rs"]),
+    rustc_env = CODEX_CRP_RUSTC_ENV,
+    deps = CODEX_CRP_DEPS + [
+        "@crates//:pretty_assertions",
+        "@crates//:tempfile",
+    ],
+)

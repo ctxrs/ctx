@@ -1,0 +1,19 @@
+[package]
+name = "ctx-settings-service"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+ctx-core = { path = "../ctx-core" }
+ctx-provider-install = { path = "../ctx-provider-install" }
+ctx-settings-model = { path = "../ctx-settings-model" }
+ctx-store = { path = "../ctx-store" }
+ctx-workspace-config = { path = "../ctx-workspace-config" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

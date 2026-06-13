@@ -1,0 +1,12 @@
+{
+  "turns": [
+    {
+      "thought": "Hm (amp)",
+      "tools": [
+        {"tool_name": "exec_command", "input": {"cmd": "echo amp"}, "output": "amp"}
+      ],
+      "deltas": ["Ho", "la"],
+      "final": "Hola from amp"
+    }
+  ]
+}

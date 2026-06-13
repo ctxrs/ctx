@@ -1,0 +1,84 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+rust_library(
+    name = "lib",
+    crate_name = "ctx_workspace_runtime",
+    crate_root = "src/lib.rs",
+    edition = "2021",
+    srcs = glob(["src/**/*.rs"]),
+    deps = [
+        "//core/crates/ctx-avf-linux-runtime:lib",
+        "//core/crates/ctx-core:lib",
+        "//core/crates/ctx-execution-runtime:lib",
+        "//core/crates/ctx-harness-runtime:lib",
+        "//core/crates/ctx-harness-setup:lib",
+        "//core/crates/ctx-linux-sandbox-runtime:lib",
+        "//core/crates/ctx-sandbox-container-runtime:lib",
+        "//core/crates/ctx-sandbox-contract:lib",
+        "//core/crates/ctx-sandbox-materialization:lib",
+        "//core/crates/ctx-store:lib",
+        "//core/crates/ctx-workspace-container:lib",
+        "//core/crates/ctx-worktree-data-plane:lib",
+        "@crates//:anyhow",
+        "@crates//:chrono",
+        "@crates//:serde_json",
+        "@crates//:tokio",
+        "@crates//:tracing",
+        "@crates//:url",
+    ],
+)
+
+rust_library(
+    name = "lib_test_support",
+    crate_name = "ctx_workspace_runtime",
+    crate_root = "src/lib.rs",
+    crate_features = ["test-support"],
+    edition = "2021",
+    srcs = glob(["src/**/*.rs"]),
+    deps = [
+        "//core/crates/ctx-avf-linux-runtime:lib_test_support",
+        "//core/crates/ctx-core:lib",
+        "//core/crates/ctx-execution-runtime:lib_test_support",
+        "//core/crates/ctx-harness-runtime:lib_test_support",
+        "//core/crates/ctx-harness-setup:lib",
+        "//core/crates/ctx-linux-sandbox-runtime:lib",
+        "//core/crates/ctx-sandbox-container-runtime:lib_test_support",
+        "//core/crates/ctx-sandbox-contract:lib",
+        "//core/crates/ctx-sandbox-materialization:lib_test_support",
+        "//core/crates/ctx-store:lib",
+        "//core/crates/ctx-workspace-container:lib_test_support",
+        "//core/crates/ctx-worktree-data-plane:lib",
+        "@crates//:anyhow",
+        "@crates//:chrono",
+        "@crates//:serde_json",
+        "@crates//:tokio",
+        "@crates//:tracing",
+        "@crates//:url",
+    ],
+)
+
+rust_test(
+    name = "unit_tests",
+    crate = ":lib",
+    deps = [
+        "@crates//:tempfile",
+    ],
+)
+
+rust_test(
+    name = "workspace_runtime_crash_recovery",
+    crate_name = "workspace_runtime_crash_recovery",
+    crate_root = "tests/workspace_runtime_crash_recovery.rs",
+    edition = "2021",
+    srcs = ["tests/workspace_runtime_crash_recovery.rs"],
+    deps = [
+        ":lib",
+        "//core/crates/ctx-core:lib",
+        "//core/crates/ctx-execution-runtime:lib",
+        "@crates//:chrono",
+        "@crates//:tempfile",
+        "@crates//:tokio",
+    ],
+)

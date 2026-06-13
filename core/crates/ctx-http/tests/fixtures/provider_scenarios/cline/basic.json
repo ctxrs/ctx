@@ -1,0 +1,12 @@
+{
+  "turns": [
+    {
+      "thought": "Hm (cline)",
+      "tools": [
+        {"tool_name": "exec_command", "input": {"cmd": "echo cline"}, "output": "cline"}
+      ],
+      "deltas": ["Ho", "la"],
+      "final": "Hola from cline"
+    }
+  ]
+}

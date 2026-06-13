@@ -1,0 +1,44 @@
+# Security
+
+Do not disclose security-sensitive ctx issues in a public issue or discussion thread.
+
+If you believe you found a security issue in ctx, report it to [security@ctx.rs](mailto:security@ctx.rs).
+
+## What to include
+
+Please include:
+
+- a clear description of the issue
+- affected product area, page, or workflow
+- reproduction steps
+- impact assessment if you have one
+- screenshots, logs, or proof-of-concept details if they help us reproduce safely
+- your preferred contact information for follow-up
+
+## Please do
+
+- report issues in good faith
+- give us a reasonable chance to investigate and respond before public disclosure
+- keep testing limited to accounts, repositories, and systems you own or are authorized to test
+
+## Please do not
+
+- access, exfiltrate, or modify data that does not belong to you
+- use social engineering, phishing, spam, or physical attacks
+- run destructive, high-volume, or denial-of-service style testing
+- publicly disclose sensitive details before we have had a reasonable chance to investigate
+
+## What to expect from us
+
+We will make a reasonable effort to:
+
+- acknowledge your report
+- investigate credible reports
+- follow up if we need more information
+- address validated issues according to severity, risk, and product stage
+
+We do not currently offer a bug bounty program.
+
+## Support and non-security issues
+
+For general product support, email [support@ctx.rs](mailto:support@ctx.rs) or open an issue in this repository.

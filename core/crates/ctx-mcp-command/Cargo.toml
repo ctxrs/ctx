@@ -1,0 +1,18 @@
+[package]
+name = "ctx-mcp-command"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+ctx-bundled-assets = { path = "../ctx-bundled-assets" }
+ctx-core = { path = "../ctx-core" }
+ctx-harness-runtime = { path = "../ctx-harness-runtime" }
+ctx-provider-runtime = { path = "../ctx-provider-runtime" }
+hex = "0.4"
+sha2 = "0.10"
+
+[dev-dependencies]
+ctx-bundled-assets = { path = "../ctx-bundled-assets", features = ["test-support"] }
+tempfile = "3"

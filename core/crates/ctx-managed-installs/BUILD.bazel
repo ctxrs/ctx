@@ -1,0 +1,50 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["src/lib.rs"])
+
+rust_library(
+    name = "lib",
+    crate_name = "ctx_managed_installs",
+    crate_root = "src/lib.rs",
+    edition = "2021",
+    srcs = glob(["src/**/*.rs"]),
+    deps = [
+        "//core/crates/ctx-bundled-assets:lib",
+        "//core/crates/ctx-core:lib",
+        "//core/crates/ctx-harness-runtime:lib",
+        "//core/crates/ctx-provider-install:lib",
+        "//core/crates/ctx-provider-matrix:lib",
+        "//core/crates/ctx-providers:lib",
+        "@crates//:anyhow",
+        "@crates//:bzip2",
+        "@crates//:chrono",
+        "@crates//:flate2",
+        "@crates//:futures",
+        "@crates//:hex",
+        "@crates//:reqwest",
+        "@crates//:semver",
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:sha2",
+        "@crates//:tar",
+        "@crates//:tempfile",
+        "@crates//:tokio",
+        "@crates//:toml",
+        "@crates//:toml_edit",
+        "@crates//:tracing",
+        "@crates//:url",
+        "@crates//:uuid",
+        "@crates//:which",
+        "@crates//:zip",
+    ],
+    proc_macro_deps = [
+        "@crates//:async-trait",
+    ],
+)
+
+rust_test(
+    name = "unit_tests",
+    crate = ":lib",
+)

@@ -1,0 +1,2 @@
+DROP INDEX IF EXISTS idx_workspace_active_task_summaries_workspace_id_sort_at;
+DROP TABLE IF EXISTS workspace_active_task_summaries;

@@ -1,0 +1,37 @@
+[package]
+name = "ctx-transport-runtime"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+base64 = "0.22"
+chacha20poly1305 = "0.10"
+chrono.workspace = true
+ctx-core = { path = "../ctx-core" }
+ctx-route-contracts = { path = "../ctx-route-contracts" }
+ctx-sandbox-container-runtime = { path = "../ctx-sandbox-container-runtime" }
+ctx-workspace-container = { path = "../ctx-workspace-container" }
+futures.workspace = true
+hkdf = "0.12"
+http = "1"
+jsonwebtoken = "9"
+portable-pty = "0.9"
+rand_core = "0.6"
+reqwest.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+tokio.workspace = true
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+tracing.workspace = true
+url = "2"
+urlencoding = "2"
+uuid.workspace = true
+which = "7"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+
+[dev-dependencies]
+tempfile = "3"

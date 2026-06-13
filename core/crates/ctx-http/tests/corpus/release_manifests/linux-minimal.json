@@ -1,0 +1,17 @@
+{
+  "channel": "nightly",
+  "latest_version": "1.2.4-nightly.1",
+  "published_at": "2026-03-08T05:00:00Z",
+  "platforms": {
+    "linux-x64": {
+      "appimage": {
+        "url_path": "/releases/nightly/linux-x64/ctx.AppImage",
+        "sha256": "8888888888888888888888888888888888888888888888888888888888888888"
+      },
+      "daemon": {
+        "url_path": "/releases/nightly/linux-x64/ctx",
+        "sha256": "9999999999999999999999999999999999999999999999999999999999999999"
+      }
+    }
+  }
+}

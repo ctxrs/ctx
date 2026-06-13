@@ -1,0 +1,112 @@
+use tokio::sync::broadcast;
+
+use super::{
+    AuthHandle, BlobHandle, DaemonShutdownHandle, DemoSeedTranscriptHandle, DiagnosticsHandle,
+    DictationHandle, ExecutionLaunchHandle, HealthHandle, LinuxSandboxRuntimeHandle, LogsHandle,
+    MergeQueueApiHandle, MobileRuntimeHandle, MobileSecureProxyHandle, MobileStoreHandle,
+    OrgPolicyHandle, ProviderAccountsHandle, ProviderAdminHandle, ProviderAuthImportHandle,
+    ProviderBootstrapHandle, ProviderHarnessConfigHandle, ProviderInstallHandle,
+    ProviderOptionsHandle, ProviderStatusHandle, ProviderUsageHandle, ProviderWorkspaceAuthHandle,
+    RepoOnboardingHandle, RequestBaseHandle, ResourceUtilizationHandle, RunArchiveHandle,
+    SessionArtifactsHandle, SessionControlHandle, SessionFileCompletionsHandle,
+    SessionMessageCommandHandle, SessionReadModelsHandle, SessionSubagentMcpControlHandle,
+    SessionSubagentMcpReadHandle, SessionSubagentReadHandle, SessionTitleModelModeHandle,
+    SessionVcsHandle, SettingsHandle, TaskCreationHandle, TaskLifecycleHandle, TaskListingHandle,
+    TaskReadStateHandle, TaskSessionAdmissionHandle, TaskSessionListingHandle, TaskTitleHandle,
+    TelemetryHandle, TerminalRouteHandle, TitleGenerationLocalHandle, UpdateActivityHandle,
+    UpdateDrainHandle, UpdateReleaseHandle, WebSessionRouteHandle, WorkspaceActiveHandle,
+    WorkspaceAttachmentsHandle, WorkspaceDeletionHandle, WorkspaceExecutionConfigHandle,
+    WorkspaceFileCompletionsHandle, WorkspaceHarnessContainerHandle,
+    WorkspaceMergeQueueConfigHandle, WorkspaceOrgPolicyHandle, WorkspacePrimaryBranchHandle,
+    WorkspacePromptBootstrapConfigHandle, WorkspaceProviderModelPreferenceHandle,
+    WorkspaceRegistryHandle, WorkspaceStreamHandle, WorkspaceVcsStreamHandle,
+    WorkspaceWorktreeHandle,
+};
+
+#[derive(Clone)]
+pub struct DaemonShutdownSignal {
+    shutdown_tx: broadcast::Sender<()>,
+}
+
+impl DaemonShutdownSignal {
+    pub(in crate::daemon) fn new(shutdown_tx: broadcast::Sender<()>) -> Self {
+        Self { shutdown_tx }
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<()> {
+        self.shutdown_tx.subscribe()
+    }
+}
+
+#[derive(Clone)]
+pub struct DaemonRouteHandles {
+    pub auth: AuthHandle,
+    pub health: HealthHandle,
+    pub diagnostics: DiagnosticsHandle,
+    pub blob: BlobHandle,
+    pub request_base: RequestBaseHandle,
+    pub repo_onboarding: RepoOnboardingHandle,
+    pub logs: LogsHandle,
+    pub org_policy: OrgPolicyHandle,
+    pub workspace_org_policy: WorkspaceOrgPolicyHandle,
+    pub workspace_prompt_bootstrap_config: WorkspacePromptBootstrapConfigHandle,
+    pub workspace_execution_config: WorkspaceExecutionConfigHandle,
+    pub workspace_file_completions: WorkspaceFileCompletionsHandle,
+    pub workspace_harness_container: WorkspaceHarnessContainerHandle,
+    pub workspace_provider_model_preferences: WorkspaceProviderModelPreferenceHandle,
+    pub workspace_worktree: WorkspaceWorktreeHandle,
+    pub workspace_registry: WorkspaceRegistryHandle,
+    pub workspace_merge_queue_config: WorkspaceMergeQueueConfigHandle,
+    pub merge_queue_api: MergeQueueApiHandle,
+    pub workspace_attachments: WorkspaceAttachmentsHandle,
+    pub workspace_primary_branch: WorkspacePrimaryBranchHandle,
+    pub dictation: DictationHandle,
+    pub update_release: UpdateReleaseHandle,
+    pub update_activity: UpdateActivityHandle,
+    pub settings: SettingsHandle,
+    pub mobile_store: MobileStoreHandle,
+    pub mobile_runtime: MobileRuntimeHandle,
+    pub mobile_secure_proxy: MobileSecureProxyHandle,
+    pub resource_utilization: ResourceUtilizationHandle,
+    pub run_archive: RunArchiveHandle,
+    pub session_artifacts: SessionArtifactsHandle,
+    pub session_control: SessionControlHandle,
+    pub session_file_completions: SessionFileCompletionsHandle,
+    pub session_message_command: SessionMessageCommandHandle,
+    pub session_read_models: SessionReadModelsHandle,
+    pub session_subagent_mcp_read: SessionSubagentMcpReadHandle,
+    pub session_subagent_mcp_control: SessionSubagentMcpControlHandle,
+    pub session_subagent_read: SessionSubagentReadHandle,
+    pub session_title_model_mode: SessionTitleModelModeHandle,
+    pub session_vcs: SessionVcsHandle,
+    pub demo_seed_transcript: DemoSeedTranscriptHandle,
+    pub title_generation_local: TitleGenerationLocalHandle,
+    pub task_creation: TaskCreationHandle,
+    pub task_lifecycle: TaskLifecycleHandle,
+    pub task_listing: TaskListingHandle,
+    pub task_read_state: TaskReadStateHandle,
+    pub task_session_admission: TaskSessionAdmissionHandle,
+    pub task_session_listing: TaskSessionListingHandle,
+    pub task_title: TaskTitleHandle,
+    pub workspace_deletion: WorkspaceDeletionHandle,
+    pub workspace_active: WorkspaceActiveHandle,
+    pub workspace_stream: WorkspaceStreamHandle,
+    pub workspace_vcs_stream: WorkspaceVcsStreamHandle,
+    pub provider_accounts: ProviderAccountsHandle,
+    pub provider_auth_import: ProviderAuthImportHandle,
+    pub provider_status: ProviderStatusHandle,
+    pub provider_admin: ProviderAdminHandle,
+    pub provider_install: ProviderInstallHandle,
+    pub provider_usage: ProviderUsageHandle,
+    pub provider_harness_config: ProviderHarnessConfigHandle,
+    pub provider_bootstrap: ProviderBootstrapHandle,
+    pub provider_options: ProviderOptionsHandle,
+    pub provider_workspace_auth: ProviderWorkspaceAuthHandle,
+    pub telemetry: TelemetryHandle,
+    pub terminal_route: TerminalRouteHandle,
+    pub web_session_route: WebSessionRouteHandle,
+    pub execution_launch: ExecutionLaunchHandle,
+    pub linux_sandbox_runtime: LinuxSandboxRuntimeHandle,
+    pub update_drain: UpdateDrainHandle,
+    pub daemon_shutdown: DaemonShutdownHandle,
+}

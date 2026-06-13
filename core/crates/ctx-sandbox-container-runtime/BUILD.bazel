@@ -1,0 +1,57 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+rust_library(
+    name = "lib",
+    crate_name = "ctx_sandbox_container_runtime",
+    crate_root = "src/lib.rs",
+    edition = "2021",
+    srcs = glob(["src/**/*.rs"]),
+    deps = [
+        "//core/crates/ctx-bundled-assets:lib",
+        "//core/crates/ctx-core:lib",
+        "//core/crates/ctx-harness-setup:lib",
+        "//core/crates/ctx-linux-sandbox-runtime:lib",
+        "//core/crates/ctx-runtime-assets:lib",
+        "//core/crates/ctx-sandbox-contract:lib",
+        "@crates//:anyhow",
+        "@crates//:flate2",
+        "@crates//:hex",
+        "@crates//:serde_json",
+        "@crates//:sha2",
+        "@crates//:tar",
+        "@crates//:tokio",
+    ],
+)
+
+rust_library(
+    name = "lib_test_support",
+    crate_name = "ctx_sandbox_container_runtime",
+    crate_root = "src/lib.rs",
+    edition = "2021",
+    srcs = glob(["src/**/*.rs"]),
+    deps = [
+        "//core/crates/ctx-bundled-assets:lib_test_support",
+        "//core/crates/ctx-core:lib",
+        "//core/crates/ctx-harness-setup:lib",
+        "//core/crates/ctx-linux-sandbox-runtime:lib",
+        "//core/crates/ctx-runtime-assets:lib",
+        "//core/crates/ctx-sandbox-contract:lib",
+        "@crates//:anyhow",
+        "@crates//:flate2",
+        "@crates//:hex",
+        "@crates//:serde_json",
+        "@crates//:sha2",
+        "@crates//:tar",
+        "@crates//:tokio",
+    ],
+)
+
+rust_test(
+    name = "unit_tests",
+    crate = ":lib",
+    deps = [
+        "@crates//:tempfile",
+    ],
+)

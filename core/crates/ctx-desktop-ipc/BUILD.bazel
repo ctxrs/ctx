@@ -1,0 +1,65 @@
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+package(default_visibility = ["//visibility:public"])
+
+CTX_DESKTOP_IPC_RUSTC_ENV = {
+    "CARGO_MANIFEST_DIR": "core/crates/ctx-desktop-ipc",
+}
+
+rust_library(
+    name = "lib",
+    crate_name = "ctx_desktop_ipc",
+    crate_root = "src/lib.rs",
+    edition = "2021",
+    srcs = glob(
+        ["src/**/*.rs"],
+        exclude = ["src/bin/**/*.rs"],
+    ),
+    deps = [
+        "//core/crates/ctx-client:lib",
+        "@crates//:anyhow",
+        "@crates//:serde",
+        "@crates//:serde_json",
+        "@crates//:ts-rs",
+    ],
+)
+
+rust_binary(
+    name = "generate_typescript",
+    crate_root = "src/bin/generate_typescript.rs",
+    edition = "2021",
+    srcs = ["src/bin/generate_typescript.rs"],
+    rustc_env = CTX_DESKTOP_IPC_RUSTC_ENV,
+    deps = [
+        ":lib",
+        "@crates//:anyhow",
+    ],
+)
+
+sh_binary(
+    name = "typescript_check",
+    srcs = ["check_typescript_bindings.sh"],
+    args = [
+        "$(location :generate_typescript)",
+        "$(location //core/apps/web:desktop_ipc_generated_typescript)",
+    ],
+    data = [
+        ":generate_typescript",
+        "//core/apps/web:desktop_ipc_generated_typescript",
+    ],
+)
+
+sh_test(
+    name = "typescript_check_test",
+    srcs = ["check_typescript_bindings.sh"],
+    args = [
+        "$(location :generate_typescript)",
+        "$(location //core/apps/web:desktop_ipc_generated_typescript)",
+    ],
+    data = [
+        ":generate_typescript",
+        "//core/apps/web:desktop_ipc_generated_typescript",
+    ],
+)

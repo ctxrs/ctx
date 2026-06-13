@@ -1,0 +1,23 @@
+[package]
+name = "ctx-resource-utilization"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+ctx-core = { path = "../ctx-core" }
+ctx-providers = { path = "../ctx-providers" }
+ctx-settings-model = { path = "../ctx-settings-model" }
+libc = "0.2"
+serde.workspace = true
+serde_json.workspace = true
+sysinfo.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tikv-jemalloc-ctl = { version = "0.6.1", optional = true, features = ["profiling", "stats"] }
+uuid.workspace = true
+
+[features]
+daemon-heap-prof = ["dep:tikv-jemalloc-ctl"]

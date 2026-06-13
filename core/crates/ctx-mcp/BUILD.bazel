@@ -1,0 +1,83 @@
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+CTX_MCP_RUSTC_ENV = {
+    "CARGO_MANIFEST_DIR": "core/crates/ctx-mcp",
+    "CARGO_PKG_VERSION": "0.1.0",
+}
+
+CTX_MCP_DEPS = [
+    "//core/crates/ctx-client:lib",
+    "//core/crates/ctx-core:lib",
+    "@crates//:anyhow",
+    "@crates//:clap",
+    "@crates//:reqwest",
+    "@crates//:serde_json",
+    "@crates//:tokio",
+    "@crates//:tracing",
+    "@crates//:tracing-subscriber",
+    "@crates//:urlencoding",
+    "@crates//:uuid",
+]
+
+rust_binary(
+    name = "ctx-mcp",
+    crate_root = "src/main.rs",
+    edition = "2021",
+    srcs = glob(["src/**/*.rs"]),
+    rustc_env = CTX_MCP_RUSTC_ENV,
+    deps = CTX_MCP_DEPS,
+)
+
+CTX_MCP_TEST_RUSTC_ENV = {
+    "CARGO_BIN_EXE_ctx-mcp": "$(rootpath :ctx-mcp)",
+}
+
+CTX_MCP_TEST_DEPS = [
+    "@crates//:axum",
+    "@crates//:serde_json",
+    "@crates//:tempfile",
+    "@crates//:tokio",
+    "@crates//:tower",
+]
+
+rust_test(
+    name = "mcp_contracts",
+    crate_root = "tests/mcp_contracts.rs",
+    edition = "2021",
+    srcs = ["tests/mcp_contracts.rs"],
+    args = ["--test-threads=1"],
+    data = [":ctx-mcp"],
+    rustc_env = CTX_MCP_TEST_RUSTC_ENV,
+    deps = CTX_MCP_TEST_DEPS,
+)
+
+rust_test(
+    name = "subagent_tools",
+    crate_root = "tests/subagent_tools.rs",
+    edition = "2021",
+    srcs = ["tests/subagent_tools.rs"] + glob(["tests/subagent_tools/**/*.rs"]),
+    args = ["--test-threads=1"],
+    data = [":ctx-mcp"],
+    rustc_env = CTX_MCP_TEST_RUSTC_ENV,
+    deps = CTX_MCP_TEST_DEPS + [
+        "//core/crates/ctx-core:lib",
+        "//core/crates/ctx-http-test-support:lib",
+        "@crates//:reqwest",
+        "@crates//:uuid",
+    ],
+)
+
+rust_test(
+    name = "fuzz_tests",
+    crate_root = "src/main.rs",
+    crate_features = ["fuzz_tests"],
+    edition = "2021",
+    srcs = glob(["src/**/*.rs"]),
+    rustc_env = CTX_MCP_RUSTC_ENV,
+    deps = CTX_MCP_DEPS + [
+        "@crates//:axum",
+        "@crates//:rand",
+    ],
+)
