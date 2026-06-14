@@ -49,7 +49,7 @@ export const SECTIONS: Array<{
   { id: "harness_subscriptions", label: "Harness Subscriptions", group: "main", navHidden: true },
   { id: "models_routing", label: "Models & Routing", group: "main", navHidden: true },
   { id: "container_network", label: "Sandbox & Networking", group: "main" },
-  { id: "worktree_bootstrap", label: "Worktree Bootstrap", group: "main" },
+  { id: "worktree_bootstrap", label: "Worktree Lifecycle", group: "main" },
   { id: "agent_system_prompt", label: "Agent System Prompt", group: "main" },
   { id: "workspace_attachments", label: "Workspace Attachments", group: "main" },
   { id: "merge_queue", label: "Merge Queue", group: "main" },

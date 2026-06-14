@@ -143,6 +143,10 @@ struct WorkspaceWorktreeBootstrapConfig {
     timeout_sec: Option<u64>,
     #[serde(default)]
     wait_for_completion: Option<bool>,
+    #[serde(default)]
+    cleanup_command: Option<String>,
+    #[serde(default)]
+    cleanup_timeout_sec: Option<u64>,
 }
 
 async fn load_workspace_settings_doc(store: &Store) -> Result<WorkspaceRuntimeSettingsDoc> {

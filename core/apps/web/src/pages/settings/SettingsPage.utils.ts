@@ -10,11 +10,15 @@ export type WorktreeBootstrapConfigLike = {
   setup_command?: string | null;
   timeout_sec?: number | null;
   wait_for_completion?: boolean | null;
+  cleanup_command?: string | null;
+  cleanup_timeout_sec?: number | null;
 };
 export type WorktreeBootstrapFormState = {
   setup_command: string;
   timeout_sec: string;
   wait_for_completion: boolean;
+  cleanup_command: string;
+  cleanup_timeout_sec: string;
 };
 
 export function isContainerizedEnvironment(environment?: WorkspaceExecutionEnvironment | null): boolean {
@@ -40,15 +44,23 @@ export function worktreeBootstrapFormFromConfig(
   cfg: WorktreeBootstrapConfigLike | null | undefined,
 ): WorktreeBootstrapFormState {
   const setupCommand = typeof cfg?.setup_command === "string" ? cfg.setup_command : "";
+  const cleanupCommand = typeof cfg?.cleanup_command === "string" ? cfg.cleanup_command : "";
   const timeoutRaw = cfg?.timeout_sec;
   const timeoutSec =
     typeof timeoutRaw === "number" && Number.isFinite(timeoutRaw) && timeoutRaw > 0
       ? String(Math.round(timeoutRaw))
       : "";
+  const cleanupTimeoutRaw = cfg?.cleanup_timeout_sec;
+  const cleanupTimeoutSec =
+    typeof cleanupTimeoutRaw === "number" && Number.isFinite(cleanupTimeoutRaw) && cleanupTimeoutRaw > 0
+      ? String(Math.round(cleanupTimeoutRaw))
+      : "";
   return {
     setup_command: setupCommand,
     timeout_sec: timeoutSec,
     wait_for_completion: readBoolish(cfg?.wait_for_completion) ?? false,
+    cleanup_command: cleanupCommand,
+    cleanup_timeout_sec: cleanupTimeoutSec,
   };
 }
 

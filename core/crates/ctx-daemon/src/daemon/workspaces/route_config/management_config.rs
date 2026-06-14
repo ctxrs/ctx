@@ -36,6 +36,8 @@ pub(in crate::daemon::workspaces) fn worktree_bootstrap_config_route_response(
         setup_command: cfg.as_ref().and_then(|value| value.setup_command.clone()),
         timeout_sec: cfg.as_ref().and_then(|value| value.timeout_sec),
         wait_for_completion: cfg.as_ref().and_then(|value| value.wait_for_completion),
+        cleanup_command: cfg.as_ref().and_then(|value| value.cleanup_command.clone()),
+        cleanup_timeout_sec: cfg.as_ref().and_then(|value| value.cleanup_timeout_sec),
     }
 }
 
@@ -71,6 +73,11 @@ pub(in crate::daemon::workspaces) fn worktree_bootstrap_config_update(
             .filter(|value| !value.is_empty()),
         timeout_sec: request.timeout_sec,
         wait_for_completion: request.wait_for_completion,
+        cleanup_command: request
+            .cleanup_command
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        cleanup_timeout_sec: request.cleanup_timeout_sec,
     }
 }
 
@@ -149,11 +156,15 @@ mod tests {
             setup_command: Some("   ".to_string()),
             timeout_sec: Some(30),
             wait_for_completion: Some(true),
+            cleanup_command: Some("   ".to_string()),
+            cleanup_timeout_sec: Some(45),
         };
         let update = worktree_bootstrap_config_update(update);
 
         assert_eq!(update.setup_command, None);
         assert_eq!(update.timeout_sec, Some(30));
         assert_eq!(update.wait_for_completion, Some(true));
+        assert_eq!(update.cleanup_command, None);
+        assert_eq!(update.cleanup_timeout_sec, Some(45));
     }
 }

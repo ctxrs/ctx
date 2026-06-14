@@ -1180,6 +1180,8 @@ async fn prompt_bootstrap_config_routes_preserve_malformed_runtime_settings_stat
                 setup_command: Some("true".to_string()),
                 timeout_sec: Some(30),
                 wait_for_completion: Some(true),
+                cleanup_command: None,
+                cleanup_timeout_sec: None,
             },
         )
         .await

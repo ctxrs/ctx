@@ -27,7 +27,9 @@ export function WorktreeBootstrapSection({ workspaceId, active }: WorktreeBootst
 
   const bootstrapDisabled = !workspaceId || worktreeBootstrapLoading || worktreeBootstrapSaving;
   const hasSetupCommand = worktreeBootstrapForm.setup_command.trim().length > 0;
+  const hasCleanupCommand = worktreeBootstrapForm.cleanup_command.trim().length > 0;
   const bootstrapDerivedControlsDisabled = bootstrapDisabled || !hasSetupCommand;
+  const cleanupDerivedControlsDisabled = bootstrapDisabled || !hasCleanupCommand;
   const bootstrapAutosaveStatusLabel = promptAutosaveStatusLabel(worktreeBootstrapAutosaveState);
   const bootstrapAutosaveActive = worktreeBootstrapAutosaveState !== "idle";
 
@@ -123,6 +125,53 @@ export function WorktreeBootstrapSection({ workspaceId, active }: WorktreeBootst
               />
             </div>
           </div>
+          <div className="settings-row settings-row-stack">
+            <div className="settings-row-inline-head">
+              <div className="settings-row-left">
+                <div className="settings-row-title">Cleanup command</div>
+                <div className="settings-row-desc">
+                  Shell command to run before an archived worktree is removed.
+                </div>
+              </div>
+            </div>
+            <div className="settings-row-field">
+              <TextInput
+                className="settings-control settings-control-block wb-mono"
+                value={worktreeBootstrapForm.cleanup_command}
+                onChange={(e) =>
+                  setWorktreeBootstrapForm((prev) => ({
+                    ...prev,
+                    cleanup_command: e.target.value,
+                    cleanup_timeout_sec: e.target.value.trim().length > 0 ? prev.cleanup_timeout_sec : "",
+                  }))}
+                disabled={bootstrapDisabled}
+                placeholder="./cleanup-worktree.sh"
+                aria-label="Worktree cleanup command"
+              />
+            </div>
+          </div>
+          <Row
+            title="Cleanup timeout (seconds)"
+            description="Timeout for the worktree cleanup command."
+            control={
+              <TextInput
+                className="settings-control"
+                type="number"
+                min={1}
+                step={1}
+                value={worktreeBootstrapForm.cleanup_timeout_sec}
+                onChange={(e) =>
+                  setWorktreeBootstrapForm((prev) => ({
+                    ...prev,
+                    cleanup_timeout_sec: e.target.value,
+                  }))}
+                disabled={cleanupDerivedControlsDisabled}
+                placeholder="60"
+                inputMode="numeric"
+                aria-label="Worktree cleanup timeout seconds"
+              />
+            }
+          />
         </div>
       </div>
       {worktreeBootstrapError ? <div className="settings-banner settings-banner-error">{worktreeBootstrapError}</div> : null}

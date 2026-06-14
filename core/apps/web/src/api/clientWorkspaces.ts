@@ -339,12 +339,16 @@ export type UpdateWorktreeBootstrapConfigRequest = {
   setup_command?: string | null;
   timeout_sec?: number | null;
   wait_for_completion?: boolean | null;
+  cleanup_command?: string | null;
+  cleanup_timeout_sec?: number | null;
 };
 
 export type WorkspaceWorktreeBootstrapConfig = {
   setup_command?: string | null;
   timeout_sec?: number | null;
   wait_for_completion?: boolean | null;
+  cleanup_command?: string | null;
+  cleanup_timeout_sec?: number | null;
 };
 
 export const getWorkspaceWorktreeBootstrapConfig = (workspaceId: string) =>

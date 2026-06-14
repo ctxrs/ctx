@@ -34,7 +34,9 @@ async fn worktree_bootstrap_config_endpoint_supports_get_post_and_blank_clear() 
         Some(serde_json::json!({
             "setup_command": "  ./scripts/bootstrap.sh  ",
             "timeout_sec": 45,
-            "wait_for_completion": true
+            "wait_for_completion": true,
+            "cleanup_command": "  ./scripts/cleanup.sh  ",
+            "cleanup_timeout_sec": 30
         })),
     )
     .await;
@@ -65,6 +67,16 @@ async fn worktree_bootstrap_config_endpoint_supports_get_post_and_blank_clear() 
             .get("wait_for_completion")
             .and_then(Value::as_bool),
         Some(true)
+    );
+    assert_eq!(
+        configured.get("cleanup_command").and_then(Value::as_str),
+        Some("./scripts/cleanup.sh")
+    );
+    assert_eq!(
+        configured
+            .get("cleanup_timeout_sec")
+            .and_then(Value::as_u64),
+        Some(30)
     );
 
     let (clear_status, clear_body): (StatusCode, Value) = common::json_request(

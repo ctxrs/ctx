@@ -56,6 +56,8 @@ export function useWorktreeBootstrapController({
       worktreeBootstrapForm.setup_command.trim() !== worktreeBootstrapInitialForm.setup_command.trim()
       || worktreeBootstrapForm.timeout_sec.trim() !== worktreeBootstrapInitialForm.timeout_sec.trim()
       || worktreeBootstrapForm.wait_for_completion !== worktreeBootstrapInitialForm.wait_for_completion
+      || worktreeBootstrapForm.cleanup_command.trim() !== worktreeBootstrapInitialForm.cleanup_command.trim()
+      || worktreeBootstrapForm.cleanup_timeout_sec.trim() !== worktreeBootstrapInitialForm.cleanup_timeout_sec.trim()
     );
   }, [worktreeBootstrapForm, worktreeBootstrapInitialForm]);
 
@@ -84,21 +86,37 @@ export function useWorktreeBootstrapController({
     if (!workspaceId || worktreeBootstrapSaving) return false;
 
     const setupCommand = worktreeBootstrapForm.setup_command.trim();
+    const cleanupCommand = worktreeBootstrapForm.cleanup_command.trim();
     const timeoutRaw = worktreeBootstrapForm.timeout_sec.trim();
+    const cleanupTimeoutRaw = worktreeBootstrapForm.cleanup_timeout_sec.trim();
     const hasCommand = setupCommand.length > 0;
+    const hasCleanupCommand = cleanupCommand.length > 0;
+
+    const parseTimeout = (raw: string, label: string): number | null | undefined => {
+      if (raw.length === 0) return null;
+      if (!/^\d+$/.test(raw)) {
+        setWorktreeBootstrapError(`${label} timeout must be a whole number of seconds.`);
+        return undefined;
+      }
+      const parsed = Number(raw);
+      if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+        setWorktreeBootstrapError(`${label} timeout must be greater than 0.`);
+        return undefined;
+      }
+      return parsed;
+    };
 
     let timeoutSec: number | null = null;
-    if (hasCommand && timeoutRaw.length > 0) {
-      if (!/^\d+$/.test(timeoutRaw)) {
-        setWorktreeBootstrapError("Timeout must be a whole number of seconds.");
-        return false;
-      }
-      const parsed = Number(timeoutRaw);
-      if (!Number.isSafeInteger(parsed) || parsed <= 0) {
-        setWorktreeBootstrapError("Timeout must be greater than 0.");
-        return false;
-      }
+    if (hasCommand) {
+      const parsed = parseTimeout(timeoutRaw, "Setup");
+      if (parsed === undefined) return false;
       timeoutSec = parsed;
+    }
+    let cleanupTimeoutSec: number | null = null;
+    if (hasCleanupCommand) {
+      const parsed = parseTimeout(cleanupTimeoutRaw, "Cleanup");
+      if (parsed === undefined) return false;
+      cleanupTimeoutSec = parsed;
     }
 
     setWorktreeBootstrapSaving(true);
@@ -108,6 +126,8 @@ export function useWorktreeBootstrapController({
         setup_command: hasCommand ? setupCommand : null,
         timeout_sec: hasCommand ? timeoutSec : null,
         wait_for_completion: hasCommand ? worktreeBootstrapForm.wait_for_completion : null,
+        cleanup_command: hasCleanupCommand ? cleanupCommand : null,
+        cleanup_timeout_sec: hasCleanupCommand ? cleanupTimeoutSec : null,
       });
       await refreshWorktreeBootstrapConfig();
       return true;

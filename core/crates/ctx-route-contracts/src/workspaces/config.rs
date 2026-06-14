@@ -54,6 +54,10 @@ pub struct UpdateWorktreeBootstrapConfigRequest {
     pub timeout_sec: Option<u64>,
     #[serde(default)]
     pub wait_for_completion: Option<bool>,
+    #[serde(default)]
+    pub cleanup_command: Option<String>,
+    #[serde(default)]
+    pub cleanup_timeout_sec: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Eq, PartialEq)]
@@ -64,6 +68,10 @@ pub struct WorkspaceWorktreeBootstrapConfigRouteResponse {
     pub timeout_sec: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wait_for_completion: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cleanup_command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cleanup_timeout_sec: Option<u64>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]

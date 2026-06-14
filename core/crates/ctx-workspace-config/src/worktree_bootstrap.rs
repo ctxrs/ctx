@@ -5,6 +5,8 @@ pub struct WorktreeBootstrapConfig {
     pub setup_command: Option<String>,
     pub timeout_sec: Option<u64>,
     pub wait_for_completion: Option<bool>,
+    pub cleanup_command: Option<String>,
+    pub cleanup_timeout_sec: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -12,6 +14,8 @@ pub struct WorktreeBootstrapConfigUpdate {
     pub setup_command: Option<String>,
     pub timeout_sec: Option<u64>,
     pub wait_for_completion: Option<bool>,
+    pub cleanup_command: Option<String>,
+    pub cleanup_timeout_sec: Option<u64>,
 }
 
 pub async fn load_worktree_bootstrap_config(
@@ -26,6 +30,12 @@ pub async fn load_worktree_bootstrap_config(
             .filter(|value| !value.is_empty()),
         timeout_sec: b.timeout_sec,
         wait_for_completion: b.wait_for_completion,
+        cleanup_command: b
+            .cleanup_command
+            .as_ref()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        cleanup_timeout_sec: b.cleanup_timeout_sec,
     });
     Ok(bootstrap)
 }
@@ -39,10 +49,17 @@ pub async fn update_worktree_bootstrap_config(
         .as_ref()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty());
+    let cleanup_command = update
+        .cleanup_command
+        .as_ref()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
     mutate_workspace_settings_doc(store, "worktree_bootstrap", move |cfg| {
         if setup_command.is_none()
             && update.timeout_sec.is_none()
             && update.wait_for_completion.is_none()
+            && cleanup_command.is_none()
+            && update.cleanup_timeout_sec.is_none()
         {
             cfg.worktree_bootstrap = None;
         } else {
@@ -50,6 +67,8 @@ pub async fn update_worktree_bootstrap_config(
                 setup_command,
                 timeout_sec: update.timeout_sec,
                 wait_for_completion: update.wait_for_completion,
+                cleanup_command,
+                cleanup_timeout_sec: update.cleanup_timeout_sec,
             });
         }
         Ok(())

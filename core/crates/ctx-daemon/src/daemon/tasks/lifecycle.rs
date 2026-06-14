@@ -1,3 +1,4 @@
+use anyhow::Context;
 use ctx_core::ids::TaskId;
 use ctx_core::models::{Task, TaskDeltaKind, Workspace};
 use ctx_store::Store;
@@ -73,8 +74,15 @@ impl TaskLifecycleHandle {
         let task = lifecycle::archive_task_record(&store, task_id).await?;
         let service_cleanup_targets =
             lifecycle::collect_archive_cleanup_targets(&store, task_id, &plan.worktrees).await;
-        let cleanup_targets =
+        let mut cleanup_targets =
             daemon_cleanup_targets(self.workspace(), &workspace, &service_cleanup_targets);
+        let cleanup_command_errors = run_archive_worktree_cleanup_commands(
+            self.workspace(),
+            &workspace,
+            task_id,
+            &mut cleanup_targets,
+        )
+        .await;
         let errors = self
             .workspace()
             .cleanup_task_worktrees(
@@ -84,7 +92,7 @@ impl TaskLifecycleHandle {
                 BranchCleanupErrorMode::Report,
             )
             .await;
-        let cleanup_failed = !errors.is_empty();
+        let cleanup_failed = !cleanup_command_errors.is_empty() || !errors.is_empty();
         if cleanup_failed {
             tracing::warn!(
                 task_id = %task_id.0,
@@ -311,4 +319,37 @@ fn daemon_cleanup_targets(
             destroy_worktree_on_cleanup: target.destroy_worktree_on_cleanup,
         })
         .collect()
+}
+
+async fn run_archive_worktree_cleanup_commands(
+    workspace_runtime: &TaskWorktreeHost,
+    workspace: &Workspace,
+    task_id: TaskId,
+    targets: &mut [TaskWorktreeCleanupTarget],
+) -> Vec<anyhow::Error> {
+    let mut errors = Vec::new();
+    for target in targets {
+        if !target.destroy_worktree_on_cleanup || target.managed_root.is_none() {
+            continue;
+        }
+        if let Err(error) = workspace_runtime
+            .run_worktree_cleanup(workspace, task_id, &target.worktree)
+            .await
+            .with_context(|| {
+                format!(
+                    "running archive cleanup command for worktree {}",
+                    target.worktree.id.0
+                )
+            })
+        {
+            tracing::warn!(
+                task_id = %task_id.0,
+                worktree_id = %target.worktree.id.0,
+                "archive cleanup command failed before worktree removal: {error:#}"
+            );
+            target.destroy_worktree_on_cleanup = false;
+            errors.push(error);
+        }
+    }
+    errors
 }

@@ -462,6 +462,8 @@ impl TestDaemon {
                 setup_command: Some(setup_command),
                 timeout_sec: None,
                 wait_for_completion: Some(true),
+                cleanup_command: None,
+                cleanup_timeout_sec: None,
             },
         )
         .await

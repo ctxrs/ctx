@@ -465,7 +465,7 @@ pub mod telemetry {
         Incident,
     }
 
-    #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
     #[serde(rename_all = "snake_case")]
     pub enum TelemetryDelivery {
         Remote,

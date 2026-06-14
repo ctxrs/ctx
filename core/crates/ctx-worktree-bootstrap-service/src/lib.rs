@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::Utc;
-use ctx_core::ids::{WorkspaceId, WorktreeId};
+use ctx_core::ids::{TaskId, WorkspaceId, WorktreeId};
 use ctx_core::models::{Workspace, Worktree, WorktreeBootstrapStatus};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
@@ -26,6 +26,18 @@ pub struct BootstrapConfigInput {
     pub setup_command: Option<String>,
     pub timeout_sec: Option<u64>,
     pub wait_for_completion: Option<bool>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CleanupConfig {
+    pub timeout: Duration,
+    pub command: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CleanupConfigInput {
+    pub cleanup_command: Option<String>,
+    pub cleanup_timeout_sec: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -351,6 +363,26 @@ pub fn normalize_bootstrap_config(input: BootstrapConfigInput) -> Option<Bootstr
     })
 }
 
+pub fn normalize_cleanup_config(input: CleanupConfigInput) -> Option<CleanupConfig> {
+    let command = input
+        .cleanup_command
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)?;
+    let timeout_sec = input.cleanup_timeout_sec.unwrap_or(DEFAULT_TIMEOUT_SEC);
+    let timeout_sec = if timeout_sec == 0 {
+        DEFAULT_TIMEOUT_SEC
+    } else {
+        timeout_sec
+    };
+
+    Some(CleanupConfig {
+        timeout: Duration::from_secs(timeout_sec),
+        command,
+    })
+}
+
 pub async fn run_bootstrap_command(
     mut cmd: Command,
     timeout: Duration,
@@ -441,6 +473,17 @@ pub fn bootstrap_command_env(
     ])
 }
 
+pub fn cleanup_command_env(
+    worktree: &Worktree,
+    task_id: TaskId,
+    live_workspace_root: &Path,
+    live_worktree_root: &Path,
+) -> HashMap<String, String> {
+    let mut env = bootstrap_command_env(worktree, live_workspace_root, live_worktree_root);
+    env.insert("CTX_TASK_ID".to_string(), task_id.0.to_string());
+    env
+}
+
 fn append_output(log: &mut String, output: &str, label: &str) {
     let trimmed = output.trim_end_matches('\n');
     if trimmed.is_empty() {
@@ -497,9 +540,10 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        bootstrap_command_env, bootstrap_log_path, build_bootstrap_steps,
-        normalize_bootstrap_config, prepare_bootstrap_log_for_storage, run_bootstrap_command,
-        shell_bootstrap_command, truncate_log, BootstrapCommandRuntime, BootstrapConfigInput,
+        bootstrap_command_env, bootstrap_log_path, build_bootstrap_steps, cleanup_command_env,
+        normalize_bootstrap_config, normalize_cleanup_config, prepare_bootstrap_log_for_storage,
+        run_bootstrap_command, shell_bootstrap_command, truncate_log, BootstrapCommandRuntime,
+        BootstrapConfigInput, CleanupConfigInput,
     };
 
     #[test]
@@ -546,6 +590,27 @@ mod tests {
 
         assert_eq!(config.timeout.as_secs(), 120);
         assert!(config.wait_for_completion);
+    }
+
+    #[test]
+    fn normalize_cleanup_config_ignores_blank_commands() {
+        assert!(normalize_cleanup_config(CleanupConfigInput {
+            cleanup_command: Some("   ".to_string()),
+            cleanup_timeout_sec: Some(5),
+        })
+        .is_none());
+    }
+
+    #[test]
+    fn normalize_cleanup_config_defaults_zero_timeout() {
+        let config = normalize_cleanup_config(CleanupConfigInput {
+            cleanup_command: Some("  ./cleanup.sh  ".to_string()),
+            cleanup_timeout_sec: Some(0),
+        })
+        .expect("config");
+
+        assert_eq!(config.command, "./cleanup.sh");
+        assert_eq!(config.timeout.as_secs(), super::DEFAULT_TIMEOUT_SEC);
     }
 
     #[test]
@@ -662,5 +727,18 @@ mod tests {
             env.get("CTX_BASE_COMMIT_SHA").map(String::as_str),
             Some("base-rev")
         );
+
+        let cleanup_env = cleanup_command_env(
+            &worktree,
+            ctx_core::ids::TaskId::new(),
+            Path::new("/live/workspace"),
+            Path::new("/live/worktree"),
+        );
+
+        assert_eq!(
+            cleanup_env.get("CTX_WORKTREE_ROOT").map(String::as_str),
+            Some("/live/worktree")
+        );
+        assert!(cleanup_env.get("CTX_TASK_ID").is_some());
     }
 }

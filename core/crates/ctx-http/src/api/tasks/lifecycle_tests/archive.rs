@@ -130,3 +130,118 @@ async fn archive_task_reports_cleanup_failure_when_branch_reclaim_fails() {
         "archive should report failure if the ctx branch could not be reclaimed"
     );
 }
+
+#[tokio::test]
+async fn archive_task_runs_cleanup_command_before_reclaiming_managed_worktree() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let ManagedTaskFixture {
+        state,
+        workspace,
+        task,
+        worktree,
+        managed_root,
+        ..
+    } = create_managed_task_fixture(temp.path()).await;
+    let state = state.daemon();
+    let marker = temp.path().join("cleanup-marker.txt");
+    seed_cleanup_command(
+        state,
+        workspace.id,
+        format!(
+            "printf '%s|%s|%s\\n' \"$CTX_TASK_ID\" \"$CTX_WORKTREE_ID\" \"$CTX_WORKTREE_ROOT\" > {}",
+            shell_quote_path(&marker)
+        ),
+    )
+    .await;
+
+    let tasks = task_api_lifecycle_state(state);
+    let Json(response) = archive_task(tasks, Path(task.id.0.to_string()))
+        .await
+        .expect("archive task");
+
+    assert!(
+        !response.cleanup_failed,
+        "successful cleanup command should not fail archive cleanup"
+    );
+    assert!(
+        tokio::fs::metadata(&managed_root).await.is_err(),
+        "successful cleanup command should allow managed worktree reclaim"
+    );
+    let marker_contents =
+        std::fs::read_to_string(&marker).expect("cleanup command should write marker");
+    assert!(
+        marker_contents.contains(&task.id.0.to_string()),
+        "cleanup command should receive CTX_TASK_ID"
+    );
+    assert!(
+        marker_contents.contains(&worktree.id.0.to_string()),
+        "cleanup command should receive CTX_WORKTREE_ID"
+    );
+    assert!(
+        marker_contents.contains(&managed_root.to_string_lossy().to_string()),
+        "cleanup command should run with the managed worktree root"
+    );
+}
+
+#[tokio::test]
+async fn archive_task_preserves_managed_worktree_when_cleanup_command_fails() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let ManagedTaskFixture {
+        state,
+        workspace,
+        task,
+        worktree,
+        managed_root,
+        ..
+    } = create_managed_task_fixture(temp.path()).await;
+    let state = state.daemon();
+    seed_cleanup_command(state, workspace.id, "exit 7".to_string()).await;
+
+    let tasks = task_api_lifecycle_state(state);
+    let Json(response) = archive_task(tasks, Path(task.id.0.to_string()))
+        .await
+        .expect("archive task");
+    let snapshot = task_lifecycle_snapshot(state, workspace.id, task.id, worktree.id).await;
+
+    assert!(
+        response.cleanup_failed,
+        "failing cleanup command should report archive cleanup failure"
+    );
+    assert!(
+        response.task.archived_at.is_some(),
+        "task should still be archived after cleanup command failure"
+    );
+    assert!(
+        tokio::fs::metadata(&managed_root).await.is_ok(),
+        "failing cleanup command should preserve the managed worktree root"
+    );
+    assert!(
+        snapshot.worktree.is_some(),
+        "failing cleanup command should preserve the worktree row"
+    );
+}
+
+async fn seed_cleanup_command(
+    state: &ctx_daemon::test_support::TestDaemon,
+    workspace_id: WorkspaceId,
+    cleanup_command: String,
+) {
+    let store = state
+        .store_for_workspace(workspace_id)
+        .await
+        .expect("workspace store");
+    ctx_workspace_config::update_worktree_bootstrap_config(
+        &store,
+        ctx_workspace_config::WorktreeBootstrapConfigUpdate {
+            cleanup_command: Some(cleanup_command),
+            cleanup_timeout_sec: Some(5),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("seed cleanup command");
+}
+
+fn shell_quote_path(path: &StdPath) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
+}

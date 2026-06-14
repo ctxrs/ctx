@@ -230,6 +230,8 @@ describe("worktreeBootstrapFormFromConfig", () => {
       setup_command: "",
       timeout_sec: "",
       wait_for_completion: false,
+      cleanup_command: "",
+      cleanup_timeout_sec: "",
     });
   });
 
@@ -239,11 +241,15 @@ describe("worktreeBootstrapFormFromConfig", () => {
         setup_command: "pnpm install",
         timeout_sec: 120,
         wait_for_completion: true,
+        cleanup_command: "./cleanup.sh",
+        cleanup_timeout_sec: 45,
       }),
     ).toEqual({
       setup_command: "pnpm install",
       timeout_sec: "120",
       wait_for_completion: true,
+      cleanup_command: "./cleanup.sh",
+      cleanup_timeout_sec: "45",
     });
   });
 });

@@ -335,18 +335,24 @@ fn workspace_config_route_dtos_preserve_wire_shape() {
             "setup_command": "pnpm install",
             "timeout_sec": 30,
             "wait_for_completion": true,
+            "cleanup_command": "./cleanup.sh",
+            "cleanup_timeout_sec": 45,
             "unknown": "ignored"
         }))
         .expect("bootstrap request");
     assert_eq!(bootstrap.setup_command.as_deref(), Some("pnpm install"));
     assert_eq!(bootstrap.timeout_sec, Some(30));
     assert_eq!(bootstrap.wait_for_completion, Some(true));
+    assert_eq!(bootstrap.cleanup_command.as_deref(), Some("./cleanup.sh"));
+    assert_eq!(bootstrap.cleanup_timeout_sec, Some(45));
 
     assert_same_json(
         WorkspaceWorktreeBootstrapConfigRouteResponse {
             setup_command: None,
             timeout_sec: None,
             wait_for_completion: None,
+            cleanup_command: None,
+            cleanup_timeout_sec: None,
         },
         serde_json::json!({}),
     );

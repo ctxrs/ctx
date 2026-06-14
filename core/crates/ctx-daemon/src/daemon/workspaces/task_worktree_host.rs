@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Context;
+use anyhow::{bail, Context};
 use async_trait::async_trait;
 use chrono::Utc;
 use ctx_core::ids::{TaskId, WorkspaceId, WorktreeId};
@@ -16,10 +16,11 @@ use ctx_store::{Store, WorktreeBootstrapResultUpdate};
 use ctx_workspace_active_snapshot::WorkspaceActiveSnapshotHub;
 use ctx_workspace_runtime::HarnessRuntimeManager;
 use ctx_worktree_bootstrap_service::{
-    bootstrap_command_env, normalize_bootstrap_config, prepare_bootstrap_log_for_storage,
-    run_bootstrap_command, shell_bootstrap_command, write_bootstrap_log, BootstrapCommandResult,
+    bootstrap_command_env, cleanup_command_env, normalize_bootstrap_config,
+    normalize_cleanup_config, prepare_bootstrap_log_for_storage, run_bootstrap_command,
+    shell_bootstrap_command, write_bootstrap_log, BootstrapCommandResult,
     BootstrapCommandRuntime, BootstrapConfig, BootstrapConfigInput, BootstrapReport, BootstrapStep,
-    WorktreeBootstrapHost,
+    CleanupConfigInput, WorktreeBootstrapHost,
 };
 use ctx_worktree_data_plane::{
     apply_data_plane_to_execution_settings, resolve_worktree_data_plane_with_host,
@@ -298,6 +299,119 @@ impl TaskWorktreeHost {
         )
         .await
     }
+
+    pub(in crate::daemon) async fn run_worktree_cleanup(
+        &self,
+        workspace: &Workspace,
+        task_id: TaskId,
+        worktree: &Worktree,
+    ) -> anyhow::Result<bool> {
+        let store = self.workspace_store(workspace.id).await?;
+        let Some(cfg) = ctx_workspace_config::load_worktree_bootstrap_config(&store).await? else {
+            return Ok(false);
+        };
+        let Some(cleanup) = normalize_cleanup_config(CleanupConfigInput {
+            cleanup_command: cfg.cleanup_command,
+            cleanup_timeout_sec: cfg.cleanup_timeout_sec,
+        }) else {
+            return Ok(false);
+        };
+
+        let result = self
+            .execute_lifecycle_shell_command(
+                workspace,
+                worktree,
+                &cleanup.command,
+                cleanup.timeout,
+                Some(task_id),
+            )
+            .await?;
+        if result.timed_out {
+            bail!(
+                "worktree cleanup timed out after {}s",
+                cleanup.timeout.as_secs()
+            );
+        }
+        match result.exit_code {
+            Some(0) => Ok(true),
+            Some(code) => bail!("worktree cleanup exited with code {code}"),
+            None => bail!("worktree cleanup terminated before reporting an exit code"),
+        }
+    }
+
+    async fn execute_lifecycle_shell_command(
+        &self,
+        workspace: &Workspace,
+        worktree: &Worktree,
+        command: &str,
+        timeout: Duration,
+        cleanup_task_id: Option<TaskId>,
+    ) -> anyhow::Result<BootstrapCommandResult> {
+        let data_plane = resolve_worktree_data_plane_with_host(self, worktree).await?;
+        let settings = self.effective_execution_settings(workspace.id).await?;
+        let settings = apply_data_plane_to_execution_settings(&settings, &data_plane)?;
+        let env = if let Some(task_id) = cleanup_task_id {
+            cleanup_command_env(
+                worktree,
+                task_id,
+                &data_plane.live_workspace_root,
+                &data_plane.live_worktree_root,
+            )
+        } else {
+            bootstrap_command_env(
+                worktree,
+                &data_plane.live_workspace_root,
+                &data_plane.live_worktree_root,
+            )
+        };
+
+        if matches!(settings.mode, ExecutionMode::Sandbox) {
+            self.harness
+                .ensure_workspace_container_for_worktree(
+                    workspace,
+                    worktree,
+                    &settings,
+                    &self.daemon_url,
+                )
+                .await?;
+            let cmd = match settings.container.runtime {
+                ContainerRuntimeKind::NativeContainer => {
+                    let container_name =
+                        ctx_workspace_container::workspace_container_name(workspace.id);
+                    let mut cmd = ctx_harness_runtime::sandbox_container_command(&self.data_root)?;
+                    cmd.arg("exec")
+                        .arg("--workdir")
+                        .arg(&data_plane.live_worktree_root);
+                    for (key, value) in &env {
+                        cmd.arg("--env").arg(format!("{key}={value}"));
+                    }
+                    cmd.arg(container_name).arg("sh").arg("-lc").arg(command);
+                    cmd
+                }
+                ContainerRuntimeKind::SharedVmContainer => {
+                    ctx_avf_linux_runtime::build_guest_exec_command(
+                        &self.data_root,
+                        workspace.id,
+                        worktree.id,
+                        &data_plane.live_worktree_root,
+                        "sh",
+                        &["-lc".to_string(), command.to_string()],
+                        &env,
+                        None,
+                        false,
+                    )?
+                }
+            };
+            return run_bootstrap_command(cmd, timeout, BootstrapCommandRuntime::Container).await;
+        }
+
+        let mut cmd = shell_bootstrap_command(command);
+        cmd.current_dir(&data_plane.live_worktree_root);
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
+        run_bootstrap_command(cmd, timeout, BootstrapCommandRuntime::Host).await
+    }
 }
 
 #[async_trait]
@@ -339,67 +453,8 @@ impl WorktreeBootstrapHost for TaskWorktreeHost {
         step: &BootstrapStep,
         timeout: Duration,
     ) -> anyhow::Result<BootstrapCommandResult> {
-        let data_plane = resolve_worktree_data_plane_with_host(self, worktree).await?;
-        let settings = self.effective_execution_settings(workspace.id).await?;
-        let settings = apply_data_plane_to_execution_settings(&settings, &data_plane)?;
-        if matches!(settings.mode, ExecutionMode::Sandbox) {
-            self.harness
-                .ensure_workspace_container_for_worktree(
-                    workspace,
-                    worktree,
-                    &settings,
-                    &self.daemon_url,
-                )
-                .await?;
-            let env = bootstrap_command_env(
-                worktree,
-                &data_plane.live_workspace_root,
-                &data_plane.live_worktree_root,
-            );
-            let cmd = match settings.container.runtime {
-                ContainerRuntimeKind::NativeContainer => {
-                    let container_name =
-                        ctx_workspace_container::workspace_container_name(workspace.id);
-                    let mut cmd = ctx_harness_runtime::sandbox_container_command(&self.data_root)?;
-                    cmd.arg("exec")
-                        .arg("--workdir")
-                        .arg(&data_plane.live_worktree_root);
-                    for (key, value) in &env {
-                        cmd.arg("--env").arg(format!("{key}={value}"));
-                    }
-                    cmd.arg(container_name)
-                        .arg("sh")
-                        .arg("-lc")
-                        .arg(&step.command);
-                    cmd
-                }
-                ContainerRuntimeKind::SharedVmContainer => {
-                    ctx_avf_linux_runtime::build_guest_exec_command(
-                        &self.data_root,
-                        workspace.id,
-                        worktree.id,
-                        &data_plane.live_worktree_root,
-                        "sh",
-                        &["-lc".to_string(), step.command.clone()],
-                        &env,
-                        None,
-                        false,
-                    )?
-                }
-            };
-            return run_bootstrap_command(cmd, timeout, BootstrapCommandRuntime::Container).await;
-        }
-
-        let mut cmd = shell_bootstrap_command(&step.command);
-        cmd.current_dir(&data_plane.live_worktree_root);
-        for (key, value) in bootstrap_command_env(
-            worktree,
-            &data_plane.live_workspace_root,
-            &data_plane.live_worktree_root,
-        ) {
-            cmd.env(key, value);
-        }
-        run_bootstrap_command(cmd, timeout, BootstrapCommandRuntime::Host).await
+        self.execute_lifecycle_shell_command(workspace, worktree, &step.command, timeout, None)
+            .await
     }
 
     async fn persist_bootstrap_report(
