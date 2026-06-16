@@ -1,0 +1,125 @@
+---
+title: "ctx is open source now"
+description: "*Why we are opening up the ADE layer: Pi, closed stacks, and the need for hackable agent workflows.*"
+---
+
+<p style={{ marginTop: "-0.9rem", marginBottom: "1rem" }}>
+  Luca King · June 16, 2026
+</p>
+
+<div
+  style={{
+    height: "1px",
+    marginTop: "1.25rem",
+    marginBottom: "2rem",
+    background: "rgba(148, 163, 184, 0.28)",
+  }}
+/>
+
+ctx is now open source under GPL-3.0.
+
+That is a change in direction. The original plan was to build ctx as a closed-source desktop app: free for individual developers, with team and enterprise products around the control plane.
+
+After building the product, using it ourselves, and getting it into the hands of early users, I no longer think the ADE layer should be closed.
+
+The environment around coding agents is becoming too important.
+
+The app where agents run, the place where transcripts are stored, the way worktrees are created, the way diffs are reviewed, the way artifacts are captured, the way branches land, and the way credentials and network access are controlled are not minor product details. They are becoming the operating layer for agentic software development.
+
+That layer should be hackable.
+
+## Why open source now
+
+A few things pushed us here.
+
+First, we fell hard for [Pi](https://pi.dev/).
+
+In late 2025, we were forking Codex to add or change capabilities. That worked, but every meaningful change required deep surgery. The harness was powerful, but it was not shaped around extension. You could make it yours, but only by becoming responsible for the internals.
+
+Pi made the opposite model feel obvious. It is a minimal agent harness built around extension points, skills, prompts, themes, packages, and reloadable workflow customization. The message is simple: adapt the harness to your workflow, not the other way around.
+
+That changed what we wanted ctx to become.
+
+The same idea should exist one layer up. If the ADE is where agent sessions run, transcripts accumulate, diffs are reviewed, artifacts are captured, and branches land, then the ADE should also be something you can inspect, extend, and bend around your workflow.
+
+Second, the agent ecosystem is moving toward closed, vertically integrated stacks.
+
+SpaceX [announcing it will acquire Cursor](https://techcrunch.com/2026/06/16/spacex-to-acquire-cursor-for-60b-in-stock-days-after-blockbuster-ipo/) and the [Fable/Mythos shutdown](https://www.anthropic.com/news/fable-mythos-access) both point at the same thing: the agent tooling layer is now strategic infrastructure.
+
+This makes open source more important than ever.
+
+If your workflow depends on one closed model, one closed harness, or one closed application, an external decision can remove an important part of your development environment overnight.
+
+That made us more serious about supporting the open agent ecosystem.
+
+Third, we realized there is no one perfect ADE.
+
+Our first users did not all want the same thing. Some wanted a cleaner desktop workbench around the agents they already use. Some wanted stricter containers. Some wanted remote devboxes. Some wanted transcript and provenance tooling. Some wanted a local merge queue. Some wanted a more programmable way to wire agents together. Some wanted to stay close to terminal workflows. Some wanted the terminal to disappear.
+
+The ADE needs to support those different ways of working.
+
+That is the point. The ADE should not force every user through one blessed workflow. It should expose primitives that people can compose.
+
+## What ctx is today
+
+ctx is an Agentic Development Environment: a local-first desktop workbench for coding agents.
+
+It is not trying to replace Claude Code, Codex, Cursor, or other harnesses. It is trying to give them a better place to work.
+
+The core ideas are practical:
+
+- Use Claude Code, Codex, Cursor, and other coding agents in a desktop workbench instead of flickering terminal panes
+- Keep each task in its own worktree, with the transcript, artifacts, diff, and review state attached to the work that produced it
+- Let agents run in containers with explicit disk and network boundaries
+- Store sessions durably instead of scattering them across provider-specific state files
+- Review the patch, the transcript, the commands, and the artifacts together
+- Land parallel agent branches through a local merge queue instead of juggling rebases by hand
+- Bring your own providers, models, endpoints, and credentials
+
+That is useful now. But the more important question is what ctx should become.
+
+## The roadmap: make ctx hackable
+
+Right now, ctx is a fairly involved Rust daemon with a desktop UI around it.
+
+That has real advantages. The runtime path is fast. The daemon owns sessions, transcripts, artifacts, diffs, workspace state, provider setup, containers, and merge queue state. It gives ctx a durable local core instead of a pile of scripts glued to a UI.
+
+But there is a problem: customization still means cloning the repo, changing code, rebuilding, and understanding too much of the internal architecture.
+
+That is not good enough.
+
+The direction from here is to move toward a Pi-like model for the ADE layer: extension points, plugins, hot-reloadable workflow pieces, and user-owned customization.
+
+Some of that probably belongs in TypeScript, especially at the adapter, workflow, UI, and policy edges. The core runtime should stay Rust where Rust is the right tool: storage, process supervision, worktree management, container boundaries, streaming, and merge queue behavior. But the parts users want to customize should not all require recompiling the daemon.
+
+In practice, that means work like:
+
+- better harness adapter primitives
+- plugin-ready workflow hooks
+- hot-reloadable commands, panels, and review flows
+- transcript export and analysis APIs
+- easier ways to add provider and model integrations
+- better documentation around the daemon, CRP runtime boundary, and local storage model
+- Windows support
+
+The goal is to make ctx easier to change without rebuilding the whole app.
+
+## What we want help with
+
+I want ctx to become the open workbench for serious agentic development: something you can hack on, extend, and make your own.
+
+A real ADE: local-first, harness-agnostic, inspectable, scriptable, and built around the messy parts of agent work that do not fit in a terminal pane or an editor sidebar.
+
+That includes the personal workflow: running several tasks, supervising agents, reviewing diffs, collecting screenshots, keeping transcripts, and landing branches.
+
+It also points toward the team workflow: provenance, review attestations, policy, safer autonomy, and a control plane that lets teams use coding agents without pretending a final diff is the whole story.
+
+The repo is public now:
+
+https://github.com/ctxrs/ctx
+
+If you try to hack on it, I want to hear where it fights you.
+
+What would you want to change? What would you want to plug in? What should be a config file, a TypeScript extension, a local script, a UI panel, a daemon API, or a first-class Rust primitive?
+
+That feedback will shape what ctx becomes from here.
