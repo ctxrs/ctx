@@ -1,4 +1,12 @@
-import type { Diagnostics, ResourceUtilization, TelemetrySummaryResponse } from "@ctx/types";
+import type {
+  Diagnostics,
+  PluginCommandExecutionRequest,
+  PluginCommandExecutionResponse,
+  PluginExtensionRegistry,
+  PluginInventoryItem,
+  ResourceUtilization,
+  TelemetrySummaryResponse,
+} from "@ctx/types";
 import { apiAny } from "./clientBase";
 
 export type Health = {
@@ -291,6 +299,33 @@ export const updateSettings = (settings: UpdateSettingsRequest) =>
   apiAny<PublicSettings>("/api/settings", {
     method: "POST",
     body: JSON.stringify(settings),
+  });
+
+export type PluginInventoryResponse = {
+  revision: number;
+  roots: string[];
+  plugins: PluginInventoryItem[];
+};
+
+export type PluginExtensionRegistryResponse = {
+  registry: PluginExtensionRegistry;
+};
+
+export const getPlugins = () =>
+  apiAny<PluginInventoryResponse>("/api/plugins");
+
+export const getPluginExtensions = () =>
+  apiAny<PluginExtensionRegistryResponse>("/api/plugins/extensions");
+
+export const reloadPlugins = () =>
+  apiAny<PluginInventoryResponse>("/api/plugins/reload", {
+    method: "POST",
+  });
+
+export const executePluginCommand = (request: PluginCommandExecutionRequest) =>
+  apiAny<PluginCommandExecutionResponse>("/api/plugins/commands/execute", {
+    method: "POST",
+    body: JSON.stringify(request),
   });
 
 export const getTitleGenerationLocalStatus = () =>

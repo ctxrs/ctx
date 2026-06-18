@@ -1,0 +1,224 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.ctx.rs/transcripts/v1.schema.json",
+  "title": "TranscriptRecord",
+  "description": "Tagged transcript record for ctx messages, event envelopes, tool calls, and artifacts.",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record_type", "message"],
+      "properties": {
+        "record_type": {
+          "const": "message"
+        },
+        "message": {
+          "$ref": "#/$defs/Message"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record_type", "event"],
+      "properties": {
+        "record_type": {
+          "const": "event"
+        },
+        "event": {
+          "$ref": "../events/v1.schema.json#/$defs/EventEnvelope"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record_type", "tool_call"],
+      "properties": {
+        "record_type": {
+          "const": "tool_call"
+        },
+        "tool_call": {
+          "$ref": "../events/v1.schema.json#/$defs/ToolCall"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record_type", "artifact"],
+      "properties": {
+        "record_type": {
+          "const": "artifact"
+        },
+        "artifact": {
+          "$ref": "#/$defs/Artifact"
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "NullableString": {
+      "type": ["string", "null"]
+    },
+    "Timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "MessageRole": {
+      "type": "string",
+      "enum": ["user", "assistant", "system"]
+    },
+    "MessageDelivery": {
+      "type": "string",
+      "enum": ["immediate", "queued"]
+    },
+    "MessageAttachment": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "mime_type", "data_base64"],
+          "properties": {
+            "kind": {
+              "const": "image"
+            },
+            "mime_type": {
+              "type": "string"
+            },
+            "data_base64": {
+              "type": "string"
+            },
+            "name": {
+              "$ref": "#/$defs/NullableString"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "blob_id", "mime_type"],
+          "properties": {
+            "kind": {
+              "const": "image_ref"
+            },
+            "blob_id": {
+              "type": "string"
+            },
+            "mime_type": {
+              "type": "string"
+            },
+            "name": {
+              "$ref": "#/$defs/NullableString"
+            }
+          }
+        }
+      ]
+    },
+    "Message": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "session_id", "task_id", "role", "content", "delivery", "created_at"],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "run_id": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "turn_sequence": {
+          "type": ["integer", "null"]
+        },
+        "order_seq": {
+          "type": ["integer", "null"]
+        },
+        "role": {
+          "$ref": "#/$defs/MessageRole"
+        },
+        "content": {
+          "type": "string"
+        },
+        "attachments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MessageAttachment"
+          },
+          "default": []
+        },
+        "delivery": {
+          "$ref": "#/$defs/MessageDelivery"
+        },
+        "delivered_at": {
+          "$ref": "#/$defs/NullableString",
+          "format": "date-time"
+        },
+        "created_at": {
+          "$ref": "#/$defs/Timestamp"
+        }
+      }
+    },
+    "Artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "session_id",
+        "task_id",
+        "workspace_id",
+        "worktree_id",
+        "mime_type",
+        "bytes",
+        "created_at"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "workspace_id": {
+          "type": "string"
+        },
+        "worktree_id": {
+          "type": "string"
+        },
+        "name": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "absolute_path": {
+          "description": "Local absolute path when retained. Shareable exports SHOULD omit this field or set it to null unless the user explicitly preserves host-local provenance.",
+          "$ref": "#/$defs/NullableString"
+        },
+        "relative_path": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "mime_type": {
+          "type": "string"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "created_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "missing": {
+          "type": ["boolean", "null"]
+        }
+      }
+    }
+  }
+}

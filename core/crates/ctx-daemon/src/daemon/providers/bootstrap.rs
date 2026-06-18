@@ -87,6 +87,7 @@ async fn workspace_providers_bootstrap(
     handle: &ProviderBootstrapHandle,
     ws_id: WorkspaceId,
 ) -> Result<ProvidersBootstrapResponse, ProvidersBootstrapError> {
+    handle.sync_plugin_provider_adapters().await;
     load_bootstrap_workspace(handle, ws_id).await?;
     let install_target = handle
         .install_target_for_workspace(ws_id)

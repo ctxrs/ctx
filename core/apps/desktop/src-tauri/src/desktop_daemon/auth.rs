@@ -152,10 +152,7 @@ fn read_remote_daemon_auth(
                 "remote daemon auth file is missing at {auth_path}; the remote daemon is not ready or was started outside managed ctx bootstrap. Reconnect with remote start enabled so ctx can start the managed daemon."
             ));
         }
-        return Err(anyhow!(
-            "ssh read failed: {}",
-            stderr
-        ));
+        return Err(anyhow!("ssh read failed: {}", stderr));
     }
 
     parse_daemon_auth(&output.stdout, Path::new(&auth_path))

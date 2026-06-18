@@ -18,6 +18,7 @@ async fn startup_provider_status_refresh_runs_in_background() {
     spawn_startup_provider_status_refresh(ProviderStatusHandle::new(
         temp.path().to_path_buf(),
         Arc::clone(&state.providers),
+        Arc::clone(&state.plugins),
         state.telemetry.ops_events.clone(),
     ));
 

@@ -29,6 +29,7 @@ pub use management::{
 };
 pub use responses::{
     WorkspaceActiveHeadBatchRouteResponse, WorkspaceActiveSnapshotRouteResponse,
+    WorkspaceAgentWorkRouteQuery, WorkspaceAgentWorkRouteResponse,
     WorkspaceAttachmentRouteResponse, WorkspaceHarnessContainerMountModeRouteValue,
     WorkspaceHarnessContainerNetworkModeRouteValue, WorkspaceHarnessContainerStatusRouteResponse,
     WorkspaceRouteResponse, WorktreeRouteResponse,

@@ -5,6 +5,13 @@ pub(super) fn core_routes() -> axum::Router<RouteState> {
         .route("/api/health", get(health))
         .route("/api/mcp/context", get(get_mcp_context))
         .route("/api/settings", get(get_settings).post(update_settings))
+        .route("/api/plugins", get(list_plugins))
+        .route("/api/plugins/extensions", get(list_plugin_extensions))
+        .route("/api/plugins/reload", post(reload_plugins))
+        .route(
+            "/api/plugins/commands/execute",
+            post(execute_plugin_command),
+        )
         .route("/api/orgs/daemon_enrollments", get(list_daemon_enrollments))
         .route(
             "/api/orgs/:org_id/daemon_enrollment",

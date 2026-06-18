@@ -282,6 +282,27 @@
   white-space: nowrap;
 }
 
+.wb-task-agent-work {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  margin-top: 2px;
+  overflow: hidden;
+}
+
+.wb-task-agent-work-chip {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 92px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10.5px;
+  line-height: 14px;
+  color: var(--text-muted);
+}
+
 .wb-task-row {
   width: 100%;
   max-width: 100%;
@@ -2878,6 +2899,20 @@
   color: var(--muted);
   font-size: 13px;
   line-height: 1.25;
+}
+
+.wb-single-track-agent-work {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.wb-single-track-agent-work-chip {
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--muted);
+  white-space: nowrap;
 }
 
 .wb-worktree-chip {

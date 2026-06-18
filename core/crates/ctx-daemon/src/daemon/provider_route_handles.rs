@@ -11,7 +11,10 @@ use ctx_provider_runtime::ProviderRuntime;
 use ctx_store::Store;
 use tokio::sync::broadcast;
 
-use super::{state::ProtectedWorkspaceStoreLookup, ProviderWorkspaceLaunchRuntime};
+use super::{
+    plugins::PluginInventoryRuntime, state::ProtectedWorkspaceStoreLookup,
+    ProviderWorkspaceLaunchRuntime,
+};
 
 #[derive(Clone)]
 pub struct ProviderAccountsHandle {
@@ -55,6 +58,7 @@ pub struct ProviderBootstrapHandle {
     data_root: PathBuf,
     workspace_stores: ProtectedWorkspaceStoreLookup,
     providers: Arc<ProviderRuntime>,
+    plugins: Arc<PluginInventoryRuntime>,
     ops_events: OpsEvents,
 }
 
@@ -63,12 +67,14 @@ impl ProviderBootstrapHandle {
         data_root: PathBuf,
         workspace_stores: ProtectedWorkspaceStoreLookup,
         providers: Arc<ProviderRuntime>,
+        plugins: Arc<PluginInventoryRuntime>,
         ops_events: OpsEvents,
     ) -> Self {
         Self {
             data_root,
             workspace_stores,
             providers,
+            plugins,
             ops_events,
         }
     }
@@ -79,6 +85,10 @@ impl ProviderBootstrapHandle {
 
     pub(in crate::daemon) fn providers(&self) -> &ProviderRuntime {
         self.providers.as_ref()
+    }
+
+    pub(in crate::daemon) async fn sync_plugin_provider_adapters(&self) {
+        self.plugins.sync_provider_adapters(self.providers()).await;
     }
 
     pub(in crate::daemon) fn ops_events(&self) -> &OpsEvents {
@@ -152,6 +162,7 @@ impl ProviderWorkspaceAuthHandle {
 pub struct ProviderStatusHandle {
     data_root: PathBuf,
     providers: Arc<ProviderRuntime>,
+    plugins: Arc<PluginInventoryRuntime>,
     ops_events: OpsEvents,
 }
 
@@ -159,11 +170,13 @@ impl ProviderStatusHandle {
     pub(in crate::daemon) fn new(
         data_root: PathBuf,
         providers: Arc<ProviderRuntime>,
+        plugins: Arc<PluginInventoryRuntime>,
         ops_events: OpsEvents,
     ) -> Self {
         Self {
             data_root,
             providers,
+            plugins,
             ops_events,
         }
     }
@@ -174,6 +187,10 @@ impl ProviderStatusHandle {
 
     pub(in crate::daemon) fn providers(&self) -> &ProviderRuntime {
         self.providers.as_ref()
+    }
+
+    pub(in crate::daemon) async fn sync_plugin_provider_adapters(&self) {
+        self.plugins.sync_provider_adapters(self.providers()).await;
     }
 
     pub(in crate::daemon) fn ops_events(&self) -> &OpsEvents {
@@ -185,6 +202,7 @@ impl ProviderStatusHandle {
 pub struct ProviderAdminHandle {
     data_root: PathBuf,
     providers: Arc<ProviderRuntime>,
+    plugins: Arc<PluginInventoryRuntime>,
     ops_events: OpsEvents,
 }
 
@@ -192,11 +210,13 @@ impl ProviderAdminHandle {
     pub(in crate::daemon) fn new(
         data_root: PathBuf,
         providers: Arc<ProviderRuntime>,
+        plugins: Arc<PluginInventoryRuntime>,
         ops_events: OpsEvents,
     ) -> Self {
         Self {
             data_root,
             providers,
+            plugins,
             ops_events,
         }
     }
@@ -207,6 +227,10 @@ impl ProviderAdminHandle {
 
     pub(in crate::daemon) fn providers(&self) -> &ProviderRuntime {
         self.providers.as_ref()
+    }
+
+    pub(in crate::daemon) async fn sync_plugin_provider_adapters(&self) {
+        self.plugins.sync_provider_adapters(self.providers()).await;
     }
 
     pub(in crate::daemon) fn ops_events(&self) -> &OpsEvents {

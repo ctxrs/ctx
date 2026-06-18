@@ -1,6 +1,34 @@
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
 exports_files([
     "MODULE.bazel",
 ])
+
+filegroup(
+    name = "buildkite_sources",
+    srcs = glob([
+        ".buildkite/**",
+    ]),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "github_metadata_sources",
+    srcs = glob(
+        [".github/**"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)
+
+sh_test(
+    name = "buildkite_config_test",
+    srcs = [".buildkite/validate-pipeline.sh"],
+    data = [
+        ":buildkite_sources",
+        ":github_metadata_sources",
+    ],
+)
 
 filegroup(
     name = "ci_script_sources",
@@ -23,5 +51,53 @@ filegroup(
         ],
         allow_empty = True,
     ),
+    visibility = ["//visibility:public"],
+)
+
+test_suite(
+    name = "presubmit",
+    tests = [
+        ":buildkite_config_test",
+        "//core:presubmit",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+test_suite(
+    name = "all-rust",
+    tests = ["//core:all-rust"],
+    visibility = ["//visibility:public"],
+)
+
+test_suite(
+    name = "all-web",
+    tests = ["//core:all-web"],
+    visibility = ["//visibility:public"],
+)
+
+test_suite(
+    name = "schemas",
+    tests = ["//core:schemas"],
+    visibility = ["//visibility:public"],
+)
+
+test_suite(
+    name = "e2e-premerge",
+    tests = ["//core:e2e-premerge"],
+    visibility = ["//visibility:public"],
+)
+
+test_suite(
+    name = "release",
+    tests = [
+        ":presubmit",
+        "//core:release",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "release-artifacts",
+    srcs = ["//core:release-artifacts"],
     visibility = ["//visibility:public"],
 )

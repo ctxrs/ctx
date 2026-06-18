@@ -51,6 +51,17 @@ pub(super) async fn create_session_for_loaded_task_inner(
     })
     .await?
     {
+        if let Err(error) = handles
+            .admission
+            .record_session_created_agent_work(&store, &task, &existing)
+            .await
+        {
+            tracing::warn!(
+                task_id = %task.id.0,
+                session_id = %existing.id.0,
+                "failed to repair existing session in agent work graph: {error:#}"
+            );
+        }
         return Ok(existing);
     }
 
@@ -85,6 +96,18 @@ pub(super) async fn create_session_for_loaded_task_inner(
         requested_relationship: requested_relationship.as_deref(),
     })
     .await?;
+
+    if let Err(error) = handles
+        .admission
+        .record_session_created_agent_work(&store, &task, &session)
+        .await
+    {
+        tracing::warn!(
+            task_id = %task.id.0,
+            session_id = %session.id.0,
+            "failed to record session creation in agent work graph: {error:#}"
+        );
+    }
 
     seed_initial_prompt(
         handles,

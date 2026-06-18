@@ -52,6 +52,8 @@ pub(super) struct CrpAgentConfig {
     pub(super) provider_id: String,
     pub(super) command: String,
     pub(super) args: Vec<String>,
+    pub(super) spawn_cwd: Option<PathBuf>,
+    pub(super) env: HashMap<String, String>,
 }
 
 pub(super) struct CrpProcess {
@@ -83,13 +85,18 @@ impl CrpProcess {
         workdir: &PathBuf,
         env: &HashMap<String, String>,
     ) -> Result<Arc<Self>> {
-        let prepared = prepare_crp_spawn_env(env, &agent.provider_id);
+        let mut merged_env = env.clone();
+        for (key, value) in &agent.env {
+            merged_env.insert(key.clone(), value.clone());
+        }
+        let prepared = prepare_crp_spawn_env(&merged_env, &agent.provider_id);
+        let spawn_cwd = agent.spawn_cwd.as_ref().unwrap_or(workdir);
         let mut cmd = if let Some(spec) = container_exec_spec(&prepared.env) {
             let (container_command, container_args) =
                 rewrite_container_command_for_linux(&agent.command, &agent.args, &prepared.env)?;
             build_container_exec_command(
                 &spec,
-                workdir,
+                spawn_cwd,
                 &prepared.env,
                 &container_command,
                 &container_args,
@@ -97,7 +104,7 @@ impl CrpProcess {
         } else {
             let mut cmd = Command::new(&agent.command);
             cmd.args(&agent.args);
-            cmd.current_dir(workdir);
+            cmd.current_dir(spawn_cwd);
             cmd
         };
         cmd.stdin(std::process::Stdio::piped());

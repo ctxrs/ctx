@@ -1,0 +1,70 @@
+---
+title: "Agent Development Concepts"
+description: "Core terms you will see while using ctx"
+---
+
+## Workspace
+
+A repository root you open in ctx.
+
+## Task
+
+The human objective and unit of delegated agent work. A task should describe one
+objective, and it may involve multiple sessions, runs, change sets, and pull
+requests.
+
+## Agent Session
+
+A durable conversation and execution context where an agent works on a task.
+
+## Run
+
+One bounded execution attempt inside an agent session, such as an initial pass,
+follow-up revision, or validation pass.
+
+## Worktree
+
+An isolated checkout used by a session so concurrent work does not collide.
+
+## Change Set
+
+A reviewable group of file changes produced by agent work.
+
+## Contribution
+
+An explicit many-to-many edge that links sessions, runs, change sets, artifacts,
+checks, tasks, and pull requests.
+
+## Pull Request
+
+The source-control review object used to land changes. Tasks and pull requests
+are many-to-many: one task can produce several pull requests, and one pull
+request can advance several tasks.
+
+## Artifact
+
+A file produced during a run (for example screenshot, log, or report) to aid review.
+
+## Check
+
+A validation signal, such as a test, linter, build, scan, or CI job result.
+
+## Gate
+
+A policy decision over a change set, pull request, ref, or merge candidate.
+Checks provide evidence; gates apply policy or review requirements. A local
+agent session finishing is not a gate by itself.
+
+## Runtime mode
+
+Where code executes: host or containerized environment.
+
+## Network policy
+
+Outbound access policy used for containerized runs.
+
+## Related pages
+
+- [Agent Work Model](/agent-work-model)
+- [Agent Work Implementation Plan](/agent-work-implementation-plan)
+- [Tasks](/workbench/tasks)

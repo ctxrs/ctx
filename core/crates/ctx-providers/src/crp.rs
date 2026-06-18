@@ -74,11 +74,15 @@ impl Tier1CrpAdapter {
         args: Vec<String>,
         supports_session_status: bool,
         auth_session_open_mode: AuthSessionOpenMode,
+        spawn_cwd: Option<PathBuf>,
+        env: HashMap<String, String>,
     ) -> Self {
         let agent = CrpAgentConfig {
             provider_id: id.to_string(),
             command: command.to_string(),
             args: args.clone(),
+            spawn_cwd,
+            env,
         };
         Self {
             id: id.to_string(),
@@ -92,11 +96,45 @@ impl Tier1CrpAdapter {
     }
 
     pub fn from_raw(id: &str, command: String, args: Vec<String>) -> Self {
-        Self::new(id, &command, args, true, AuthSessionOpenMode::Standard)
+        Self::new(
+            id,
+            &command,
+            args,
+            true,
+            AuthSessionOpenMode::Standard,
+            None,
+            HashMap::new(),
+        )
     }
 
     pub fn from_provider_runtime(id: &str, command: String, args: Vec<String>) -> Self {
-        Self::new(id, &command, args, false, AuthSessionOpenMode::Standard)
+        Self::new(
+            id,
+            &command,
+            args,
+            false,
+            AuthSessionOpenMode::Standard,
+            None,
+            HashMap::new(),
+        )
+    }
+
+    pub fn from_provider_runtime_with_spawn_options(
+        id: &str,
+        command: String,
+        args: Vec<String>,
+        spawn_cwd: Option<PathBuf>,
+        env: HashMap<String, String>,
+    ) -> Self {
+        Self::new(
+            id,
+            &command,
+            args,
+            false,
+            AuthSessionOpenMode::Standard,
+            spawn_cwd,
+            env,
+        )
     }
 
     pub fn from_provider_runtime_acp_bridge(id: &str, command: String, args: Vec<String>) -> Self {
@@ -106,6 +144,8 @@ impl Tier1CrpAdapter {
             args,
             false,
             AuthSessionOpenMode::OmitMcpThenDrain,
+            None,
+            HashMap::new(),
         )
     }
 
@@ -121,6 +161,8 @@ impl Tier1CrpAdapter {
             args,
             supports_session_status,
             AuthSessionOpenMode::Standard,
+            None,
+            HashMap::new(),
         )
     }
 

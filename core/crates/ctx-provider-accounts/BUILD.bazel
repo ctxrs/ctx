@@ -1,4 +1,3 @@
-load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
 load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 load("//tools/bazel:rust_deps.generated.bzl", "RUST_BAZEL_DEPS")
 
@@ -22,28 +21,4 @@ rust_test(
     name = "unit_tests",
     crate = ":lib",
     deps = _CTX_PROVIDER_ACCOUNTS_DEPS.dev_deps,
-)
-
-sh_binary(
-    name = "goose-provider-stage-archive",
-    srcs = ["//tools/bazel:provider_managed_install_archive.sh"],
-    args = [
-        "goose",
-    ],
-    data = [
-        "src/provider_matrix.json",
-        "//core:package.json",
-    ],
-)
-
-sh_binary(
-    name = "openhands-provider-stage-archive",
-    srcs = ["//tools/bazel:provider_managed_install_archive.sh"],
-    args = [
-        "openhands",
-    ],
-    data = [
-        "src/provider_matrix.json",
-        "//core:package.json",
-    ],
 )

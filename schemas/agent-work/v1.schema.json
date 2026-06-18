@@ -1,0 +1,747 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.ctx.rs/agent-work/v1.schema.json",
+  "title": "AgentWork",
+  "description": "Workspace-level ctx agent work aggregate.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["change_sets", "contributions"],
+  "properties": {
+    "change_sets": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ChangeSet"
+      }
+    },
+    "contributions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Contribution"
+      }
+    }
+  },
+  "$defs": {
+    "JsonValue": true,
+    "NullableString": {
+      "type": ["string", "null"]
+    },
+    "Timestamp": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "RecordSource": {
+      "type": "string",
+      "enum": [
+        "unknown",
+        "worktree",
+        "session",
+        "merge_queue",
+        "pull_request",
+        "manual",
+        "external"
+      ]
+    },
+    "RecordOrigin": {
+      "type": "string",
+      "enum": ["unknown", "user", "agent", "system", "imported"]
+    },
+    "RecordFidelity": {
+      "type": "string",
+      "enum": ["unknown", "declared", "summary", "diff", "commit", "exact"]
+    },
+    "RecordTrust": {
+      "type": "string",
+      "enum": ["unknown", "low", "medium", "high", "verified"]
+    },
+    "Sha256DigestValue": {
+      "type": "string"
+    },
+    "AgentWorkSourceRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record_id", "payload_hash", "record_hash", "created_at"],
+      "properties": {
+        "schema_version": {
+          "type": "integer",
+          "const": 1,
+          "default": 1
+        },
+        "record_id": {
+          "type": "string"
+        },
+        "previous_hash": {
+          "oneOf": [{"$ref": "#/$defs/Sha256DigestValue"}, {"type": "null"}]
+        },
+        "payload_hash": {
+          "$ref": "#/$defs/Sha256DigestValue"
+        },
+        "record_hash": {
+          "$ref": "#/$defs/Sha256DigestValue"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "GitFingerprint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "patch_sha256",
+        "status_sha256",
+        "untracked_sha256",
+        "changed_paths_sha256",
+        "dirty"
+      ],
+      "properties": {
+        "repo_root": {
+          "description": "Local repository root when retained. Shareable exports SHOULD omit this field unless the user explicitly preserves host-local provenance.",
+          "$ref": "#/$defs/NullableString"
+        },
+        "head_sha": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "branch": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "patch_sha256": {
+          "$ref": "#/$defs/Sha256DigestValue"
+        },
+        "status_sha256": {
+          "$ref": "#/$defs/Sha256DigestValue"
+        },
+        "untracked_sha256": {
+          "$ref": "#/$defs/Sha256DigestValue"
+        },
+        "changed_paths_sha256": {
+          "$ref": "#/$defs/Sha256DigestValue"
+        },
+        "dirty": {
+          "type": "boolean"
+        }
+      }
+    },
+    "PullRequestRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "owner", "repo", "number"],
+      "properties": {
+        "provider": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "repo": {
+          "type": "string"
+        },
+        "number": {
+          "type": "integer"
+        },
+        "id": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "url": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "title": {
+          "$ref": "#/$defs/NullableString"
+        }
+      }
+    },
+    "PullRequestLinkKind": {
+      "type": "string",
+      "enum": ["source", "target", "result", "related"]
+    },
+    "PullRequestLink": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pull_request"],
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/PullRequestLinkKind",
+          "default": "related"
+        },
+        "pull_request": {
+          "$ref": "#/$defs/PullRequestRef"
+        },
+        "url": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "title": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "state": {
+          "$ref": "#/$defs/NullableString"
+        }
+      }
+    },
+    "ContributionRole": {
+      "type": "string",
+      "enum": ["authored", "validated", "reviewed", "context", "result", "related"]
+    },
+    "ContributionEndpoint": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "account_id"],
+          "properties": {
+            "kind": {
+              "const": "account"
+            },
+            "account_id": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "workspace_id"],
+          "properties": {
+            "kind": {
+              "const": "workspace"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "anyOf": [
+            {
+              "required": ["task_id"],
+              "properties": {
+                "task_id": {
+                  "type": "string"
+                }
+              }
+            },
+            {
+              "required": ["id"],
+              "properties": {
+                "id": {
+                  "type": "string"
+                }
+              }
+            }
+          ],
+          "properties": {
+            "kind": {
+              "const": "task"
+            },
+            "task_id": {
+              "$ref": "#/$defs/NullableString"
+            },
+            "id": {
+              "$ref": "#/$defs/NullableString"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "anyOf": [
+            {
+              "required": ["session_id"],
+              "properties": {
+                "session_id": {
+                  "type": "string"
+                }
+              }
+            },
+            {
+              "required": ["id"],
+              "properties": {
+                "id": {
+                  "type": "string"
+                }
+              }
+            }
+          ],
+          "properties": {
+            "kind": {
+              "const": "session"
+            },
+            "session_id": {
+              "$ref": "#/$defs/NullableString"
+            },
+            "provider": {
+              "$ref": "#/$defs/NullableString"
+            },
+            "id": {
+              "$ref": "#/$defs/NullableString"
+            },
+            "turn_id": {
+              "$ref": "#/$defs/NullableString"
+            },
+            "run_id": {
+              "$ref": "#/$defs/NullableString"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "anyOf": [
+            {
+              "required": ["run_id"],
+              "properties": {
+                "run_id": {
+                  "type": "string"
+                }
+              }
+            },
+            {
+              "required": ["id"],
+              "properties": {
+                "id": {
+                  "type": "string"
+                }
+              }
+            }
+          ],
+          "properties": {
+            "kind": {
+              "const": "run"
+            },
+            "run_id": {
+              "$ref": "#/$defs/NullableString"
+            },
+            "id": {
+              "$ref": "#/$defs/NullableString"
+            },
+            "session_id": {
+              "$ref": "#/$defs/NullableString"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": {
+            "kind": {
+              "const": "agent"
+            },
+            "session_id": {
+              "$ref": "#/$defs/NullableString"
+            },
+            "run_id": {
+              "$ref": "#/$defs/NullableString"
+            },
+            "label": {
+              "$ref": "#/$defs/NullableString"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": {
+            "kind": {
+              "const": "system"
+            },
+            "label": {
+              "$ref": "#/$defs/NullableString"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "anyOf": [
+            {
+              "required": ["worktree_id"],
+              "properties": {
+                "worktree_id": {
+                  "type": "string"
+                }
+              }
+            },
+            {
+              "required": ["id"],
+              "properties": {
+                "id": {
+                  "type": "string"
+                }
+              }
+            }
+          ],
+          "properties": {
+            "kind": {
+              "const": "worktree"
+            },
+            "worktree_id": {
+              "$ref": "#/$defs/NullableString"
+            },
+            "id": {
+              "$ref": "#/$defs/NullableString"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "anyOf": [{"required": ["change_set_id"]}, {"required": ["id"]}],
+          "properties": {
+            "kind": {
+              "enum": ["change_set", "change-set"]
+            },
+            "change_set_id": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "pull_request"],
+          "properties": {
+            "kind": {
+              "enum": ["pull_request", "pull-request"]
+            },
+            "pull_request": {
+              "$ref": "#/$defs/PullRequestRef"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "anyOf": [
+            {
+              "required": ["artifact_id"],
+              "properties": {
+                "artifact_id": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            {
+              "required": ["id"],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            {
+              "required": ["digest"],
+              "properties": {
+                "digest": {
+                  "type": "string"
+                }
+              }
+            },
+            {
+              "required": ["relative_path"],
+              "properties": {
+                "relative_path": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          ],
+          "properties": {
+            "kind": {
+              "const": "artifact"
+            },
+            "artifact_id": {
+              "$ref": "#/$defs/NullableString"
+            },
+            "id": {
+              "$ref": "#/$defs/NullableString"
+            },
+            "digest": {
+              "$ref": "#/$defs/NullableString"
+            },
+            "relative_path": {
+              "description": "Path relative to the captured workspace or artifact root.",
+              "$ref": "#/$defs/NullableString"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "anyOf": [{"required": ["check_id"]}, {"required": ["id"]}],
+          "properties": {
+            "kind": {
+              "const": "check"
+            },
+            "check_id": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "id"],
+          "properties": {
+            "kind": {
+              "const": "evidence"
+            },
+            "id": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "id"],
+          "properties": {
+            "kind": {
+              "enum": ["review_attestation", "review-attestation"]
+            },
+            "id": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "sha"],
+          "properties": {
+            "kind": {
+              "const": "commit"
+            },
+            "sha": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "name"],
+          "properties": {
+            "kind": {
+              "const": "branch"
+            },
+            "name": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "path"],
+          "properties": {
+            "kind": {
+              "const": "file"
+            },
+            "path": {
+              "description": "Workspace-relative path. Shareable exports should omit host-local roots and must not use absolute paths.",
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^(?!/)(?![A-Za-z]:[\\\\/])(?!\\\\\\\\).+"
+            },
+            "worktree_id": {
+              "$ref": "#/$defs/NullableString"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "source"],
+          "anyOf": [{"required": ["identifier"]}, {"required": ["url"]}],
+          "properties": {
+            "kind": {
+              "const": "external"
+            },
+            "source": {
+              "type": "string",
+              "minLength": 1
+            },
+            "identifier": {
+              "$ref": "#/$defs/NullableString"
+            },
+            "url": {
+              "$ref": "#/$defs/NullableString"
+            }
+          }
+        }
+      ]
+    },
+    "ChangeSet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "workspace_id"],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "workspace_id": {
+          "type": "string"
+        },
+        "source_worktree_id": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "source": {
+          "$ref": "#/$defs/RecordSource",
+          "default": "unknown"
+        },
+        "origin": {
+          "$ref": "#/$defs/RecordOrigin",
+          "default": "unknown"
+        },
+        "fidelity": {
+          "$ref": "#/$defs/RecordFidelity",
+          "default": "unknown"
+        },
+        "trust": {
+          "$ref": "#/$defs/RecordTrust",
+          "default": "unknown"
+        },
+        "title": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "summary": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "description": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "fingerprint": {
+          "oneOf": [{"$ref": "#/$defs/GitFingerprint"}, {"type": "null"}]
+        },
+        "base_revision": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "head_revision": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "target_branch": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "pull_requests": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PullRequestLink"
+          },
+          "default": []
+        },
+        "source_records": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AgentWorkSourceRecord"
+          },
+          "default": []
+        },
+        "issuer": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "created_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "updated_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "schema_version": {
+          "type": "integer",
+          "const": 1,
+          "default": 1
+        }
+      }
+    },
+    "Contribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "workspace_id", "subject", "target"],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "workspace_id": {
+          "type": "string"
+        },
+        "change_set_id": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "subject": {
+          "$ref": "#/$defs/ContributionEndpoint"
+        },
+        "target": {
+          "$ref": "#/$defs/ContributionEndpoint"
+        },
+        "role": {
+          "$ref": "#/$defs/ContributionRole",
+          "default": "related"
+        },
+        "source": {
+          "$ref": "#/$defs/RecordSource",
+          "default": "unknown"
+        },
+        "origin": {
+          "$ref": "#/$defs/RecordOrigin",
+          "default": "unknown"
+        },
+        "fidelity": {
+          "$ref": "#/$defs/RecordFidelity",
+          "default": "unknown"
+        },
+        "trust": {
+          "$ref": "#/$defs/RecordTrust",
+          "default": "unknown"
+        },
+        "summary": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "fingerprint": {
+          "oneOf": [{"$ref": "#/$defs/GitFingerprint"}, {"type": "null"}]
+        },
+        "issuer": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "metadata_json": {
+          "$ref": "#/$defs/JsonValue"
+        },
+        "source_records": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AgentWorkSourceRecord"
+          },
+          "default": []
+        },
+        "created_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "updated_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "schema_version": {
+          "type": "integer",
+          "const": 1,
+          "default": 1
+        }
+      }
+    }
+  }
+}

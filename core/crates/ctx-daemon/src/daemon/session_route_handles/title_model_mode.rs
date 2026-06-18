@@ -18,6 +18,7 @@ use ctx_store::Store;
 use ctx_workspace_active_snapshot::WorkspaceActiveSnapshotHub;
 use ctx_workspace_runtime::HarnessRuntimeManager;
 
+use crate::daemon::plugins::PluginInventoryRuntime;
 use crate::daemon::state::{ProtectedWorkspaceStoreLookup, SessionStoreLookup};
 
 pub(in crate::daemon) struct SessionTitleModelModeHandleParts {
@@ -28,6 +29,7 @@ pub(in crate::daemon) struct SessionTitleModelModeHandleParts {
         Arc<SessionRuntime<crate::daemon::scheduler::SchedulerCommand>>,
     pub(in crate::daemon) active_snapshot: Arc<WorkspaceActiveSnapshotHub>,
     pub(in crate::daemon) provider_runtime: Arc<ProviderRuntime>,
+    pub(in crate::daemon) plugins: Arc<PluginInventoryRuntime>,
     pub(in crate::daemon) ops_events: OpsEvents,
     pub(in crate::daemon) data_root: PathBuf,
     pub(in crate::daemon) daemon_url: String,
@@ -43,6 +45,7 @@ pub struct SessionTitleModelModeHandle {
     session_runtime: Arc<SessionRuntime<crate::daemon::scheduler::SchedulerCommand>>,
     active_snapshot: Arc<WorkspaceActiveSnapshotHub>,
     provider_runtime: Arc<ProviderRuntime>,
+    plugins: Arc<PluginInventoryRuntime>,
     ops_events: OpsEvents,
     data_root: PathBuf,
     daemon_url: String,
@@ -59,6 +62,7 @@ impl SessionTitleModelModeHandle {
             session_runtime: parts.session_runtime,
             active_snapshot: parts.active_snapshot,
             provider_runtime: parts.provider_runtime,
+            plugins: parts.plugins,
             ops_events: parts.ops_events,
             data_root: parts.data_root,
             daemon_url: parts.daemon_url,
@@ -77,6 +81,10 @@ impl SessionTitleModelModeHandle {
 
     pub(in crate::daemon) fn providers(&self) -> &ProviderRuntime {
         self.provider_runtime.as_ref()
+    }
+
+    pub(in crate::daemon) async fn sync_plugin_provider_adapters(&self) {
+        self.plugins.sync_provider_adapters(self.providers()).await;
     }
 
     pub(in crate::daemon) fn ops_events(&self) -> &OpsEvents {

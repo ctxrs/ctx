@@ -1,6 +1,8 @@
 import type {
   AttachmentMode,
   AttachmentUpdatePolicy,
+  ChangeSet,
+  Contribution,
   ExecutionEnvironment,
   MergeQueueEntry,
   Session,
@@ -80,6 +82,26 @@ const classifyWorkspaceCreateFailure = (
 
 export const getWorkspace = (id: string) =>
   apiAny<Workspace>(`/api/workspaces/${id}`);
+
+export type WorkspaceAgentWorkResponse = {
+  change_sets: ChangeSet[];
+  contributions: Contribution[];
+};
+
+export type WorkspaceAgentWorkQuery = {
+  change_set_id?: string | null;
+  endpoint_json?: string | null;
+  limit?: number | null;
+};
+
+export const getWorkspaceAgentWork = (workspaceId: string, query?: WorkspaceAgentWorkQuery) => {
+  const search = new URLSearchParams();
+  if (query?.change_set_id) search.set("change_set_id", query.change_set_id);
+  if (query?.endpoint_json) search.set("endpoint_json", query.endpoint_json);
+  if (typeof query?.limit === "number") search.set("limit", String(query.limit));
+  const suffix = search.size > 0 ? `?${search.toString()}` : "";
+  return apiAny<WorkspaceAgentWorkResponse>(`/api/workspaces/${workspaceId}/agent_work${suffix}`);
+};
 
 export const deleteWorkspace = (workspaceId: string) =>
   apiAny<void>(`/api/workspaces/${workspaceId}`, {

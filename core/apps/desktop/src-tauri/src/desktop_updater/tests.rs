@@ -4,7 +4,15 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+fn remote_bootstrap_env_lock() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("remote bootstrap env lock poisoned")
+}
 
 fn temp_path(label: &str) -> PathBuf {
     let mut path = std::env::temp_dir();
@@ -261,6 +269,7 @@ impl Drop for EnvVarGuard {
 
 #[test]
 fn remote_bootstrap_insecure_loopback_override_defaults_to_automation_builds() {
+    let _env_lock = remote_bootstrap_env_lock();
     let _guard = EnvVarGuard::unset(support::REMOTE_BOOTSTRAP_INSECURE_LOOPBACK_UPDATER_ENV);
     assert_eq!(
         support::remote_bootstrap_insecure_loopback_override_enabled(),
@@ -270,6 +279,7 @@ fn remote_bootstrap_insecure_loopback_override_defaults_to_automation_builds() {
 
 #[test]
 fn remote_bootstrap_insecure_loopback_override_honors_explicit_env_in_debug_builds() {
+    let _env_lock = remote_bootstrap_env_lock();
     let _guard = EnvVarGuard::set(support::REMOTE_BOOTSTRAP_INSECURE_LOOPBACK_UPDATER_ENV, "1");
     assert_eq!(
         support::remote_bootstrap_insecure_loopback_override_enabled(),
@@ -279,6 +289,7 @@ fn remote_bootstrap_insecure_loopback_override_honors_explicit_env_in_debug_buil
 
 #[test]
 fn remote_bootstrap_insecure_loopback_override_ignores_env_for_release_like_builds() {
+    let _env_lock = remote_bootstrap_env_lock();
     let _guard = EnvVarGuard::set(support::REMOTE_BOOTSTRAP_INSECURE_LOOPBACK_UPDATER_ENV, "1");
     assert!(!support::remote_bootstrap_insecure_loopback_override_enabled_for_build(false, false));
     assert!(support::remote_bootstrap_insecure_loopback_override_enabled_for_build(false, true));
@@ -287,6 +298,7 @@ fn remote_bootstrap_insecure_loopback_override_ignores_env_for_release_like_buil
 
 #[test]
 fn remote_bootstrap_freshness_check_bypasses_loopback_release_fixture_before_native_updater() {
+    let _env_lock = remote_bootstrap_env_lock();
     let _override_guard =
         EnvVarGuard::set(support::REMOTE_BOOTSTRAP_INSECURE_LOOPBACK_UPDATER_ENV, "1");
     let _endpoint_guard = EnvVarGuard::set(

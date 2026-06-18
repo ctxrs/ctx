@@ -13,19 +13,22 @@ use super::common::{
 };
 use crate::daemon::workspaces::{WorkspaceHarnessContainerError, WorkspaceHydrationError};
 use crate::test_support::TestDaemon;
-use ctx_core::ids::{WorkspaceId, WorktreeId};
+use ctx_core::ids::{ChangeSetId, ContributionId, WorkspaceId, WorktreeId};
 use ctx_core::models::{
-    AttachmentMode, AttachmentUpdatePolicy, MergeQueueEntryStatus, VcsKind, Workspace,
-    WorkspaceActiveHeadBatch, WorkspaceActiveSnapshot, WorkspaceAttachment,
-    WorkspaceAttachmentKind, WorkspaceAttachmentStatus, Worktree, WorktreeBootstrapStatus,
+    AttachmentMode, AttachmentUpdatePolicy, ChangeSet, Contribution, ContributionEndpoint,
+    ContributionRole, MergeQueueEntryStatus, RecordFidelity, RecordOrigin, RecordSource,
+    RecordTrust, VcsKind, Workspace, WorkspaceActiveHeadBatch, WorkspaceActiveSnapshot,
+    WorkspaceAttachment, WorkspaceAttachmentKind, WorkspaceAttachmentStatus, Worktree,
+    WorktreeBootstrapStatus,
 };
 use ctx_route_contracts::workspaces::{
     SyncWorkspaceAttachmentsRouteRequest, UpdateAgentSystemPromptConfigRouteRequest,
     UpdateWorkspaceMergeQueueConfigRequest, UpdateWorkspacePrimaryBranchRequest,
     UpdateWorktreeBootstrapConfigRequest, WorkspaceActiveHeadBatchRouteResponse,
-    WorkspaceActiveSnapshotRouteResponse, WorkspaceAttachmentRouteResponse,
-    WorkspaceFileCompletionsRouteQuery, WorkspacePromptConfigRouteParams, WorkspaceRouteErrorKind,
-    WorkspaceRouteParams, WorkspaceRouteResponse, WorktreeRouteParams, WorktreeRouteResponse,
+    WorkspaceActiveSnapshotRouteResponse, WorkspaceAgentWorkRouteQuery,
+    WorkspaceAttachmentRouteResponse, WorkspaceFileCompletionsRouteQuery,
+    WorkspacePromptConfigRouteParams, WorkspaceRouteErrorKind, WorkspaceRouteParams,
+    WorkspaceRouteResponse, WorktreeRouteParams, WorktreeRouteResponse,
 };
 use ctx_store::WorktreeBootstrapResultUpdate;
 
@@ -136,6 +139,372 @@ async fn create_route_contract_worktree(
         .await
         .expect("load worktree")
         .expect("worktree exists")
+}
+
+#[tokio::test]
+async fn agent_work_route_lists_workspace_graph_records() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let daemon =
+        TestDaemon::new_for_test(temp.path().to_path_buf(), "http://127.0.0.1:0".to_string())
+            .await
+            .expect("test daemon");
+    let workspace = create_route_contract_workspace_with_store(&daemon, "agent-work").await;
+    let store = daemon
+        .store_for_workspace(workspace.id)
+        .await
+        .expect("workspace store");
+    let change_set_id = ChangeSetId::new();
+    let contribution_id = ContributionId::new();
+    store
+        .upsert_change_set(&ChangeSet {
+            id: change_set_id.clone(),
+            workspace_id: workspace.id,
+            source_worktree_id: None,
+            source: RecordSource::Worktree,
+            origin: RecordOrigin::Agent,
+            fidelity: RecordFidelity::Diff,
+            trust: RecordTrust::High,
+            title: Some("Expose agent work graph".to_string()),
+            summary: None,
+            description: None,
+            fingerprint: None,
+            base_revision: Some("base".to_string()),
+            head_revision: Some("head".to_string()),
+            target_branch: Some("main".to_string()),
+            pull_requests: Vec::new(),
+            source_records: Vec::new(),
+            issuer: None,
+            created_at: None,
+            updated_at: None,
+            schema_version: 1,
+        })
+        .await
+        .expect("upsert change set");
+    store
+        .upsert_contribution(&Contribution {
+            id: contribution_id.clone(),
+            workspace_id: workspace.id,
+            change_set_id: Some(change_set_id.clone()),
+            subject: ContributionEndpoint::System {
+                label: Some("route-test".to_string()),
+            },
+            target: ContributionEndpoint::ChangeSet {
+                change_set_id: change_set_id.clone(),
+            },
+            role: ContributionRole::Related,
+            source: RecordSource::Manual,
+            origin: RecordOrigin::User,
+            fidelity: RecordFidelity::Declared,
+            trust: RecordTrust::Medium,
+            summary: Some("Route contract exposes graph records".to_string()),
+            fingerprint: None,
+            issuer: None,
+            metadata_json: None,
+            source_records: Vec::new(),
+            created_at: None,
+            updated_at: None,
+            schema_version: 1,
+        })
+        .await
+        .expect("upsert contribution");
+
+    let response = daemon
+        .route_handles()
+        .workspace_agent_work
+        .list_workspace_agent_work_for_route(
+            WorkspaceRouteParams::new(workspace.id.0.to_string()),
+            WorkspaceAgentWorkRouteQuery::default(),
+        )
+        .await
+        .expect("list agent work");
+
+    let value = serde_json::to_value(response).expect("serialize response");
+    let change_set_id = change_set_id.0.to_string();
+    let contribution_id = contribution_id.0.to_string();
+    assert_eq!(
+        value
+            .pointer("/change_sets/0/id")
+            .and_then(serde_json::Value::as_str),
+        Some(change_set_id.as_str())
+    );
+    assert_eq!(
+        value
+            .pointer("/contributions/0/id")
+            .and_then(serde_json::Value::as_str),
+        Some(contribution_id.as_str())
+    );
+
+    let endpoint_json = serde_json::to_string(&ContributionEndpoint::System {
+        label: Some("route-test".to_string()),
+    })
+    .expect("serialize endpoint");
+    let endpoint_filtered = daemon
+        .route_handles()
+        .workspace_agent_work
+        .list_workspace_agent_work_for_route(
+            WorkspaceRouteParams::new(workspace.id.0.to_string()),
+            WorkspaceAgentWorkRouteQuery {
+                endpoint_json: Some(endpoint_json),
+                ..WorkspaceAgentWorkRouteQuery::default()
+            },
+        )
+        .await
+        .expect("list endpoint-filtered agent work");
+    assert_eq!(endpoint_filtered.contributions.len(), 1);
+    assert_eq!(endpoint_filtered.change_sets.len(), 1);
+    assert_eq!(
+        endpoint_filtered.contributions[0].id.0.as_str(),
+        contribution_id.as_str()
+    );
+
+    let declared_only_contribution_id = ContributionId::new();
+    store
+        .upsert_contribution(&Contribution {
+            id: declared_only_contribution_id.clone(),
+            workspace_id: workspace.id,
+            change_set_id: Some(ChangeSetId(change_set_id.clone())),
+            subject: ContributionEndpoint::System {
+                label: Some("declared-only".to_string()),
+            },
+            target: ContributionEndpoint::System {
+                label: Some("qa".to_string()),
+            },
+            role: ContributionRole::Context,
+            source: RecordSource::Manual,
+            origin: RecordOrigin::User,
+            fidelity: RecordFidelity::Declared,
+            trust: RecordTrust::Medium,
+            summary: Some("Linked by change_set_id only".to_string()),
+            fingerprint: None,
+            issuer: None,
+            metadata_json: None,
+            source_records: Vec::new(),
+            created_at: None,
+            updated_at: None,
+            schema_version: 1,
+        })
+        .await
+        .expect("upsert declared-only contribution");
+    let endpoint_only_contribution_id = ContributionId::new();
+    store
+        .upsert_contribution(&Contribution {
+            id: endpoint_only_contribution_id.clone(),
+            workspace_id: workspace.id,
+            change_set_id: None,
+            subject: ContributionEndpoint::System {
+                label: Some("endpoint-only".to_string()),
+            },
+            target: ContributionEndpoint::ChangeSet {
+                change_set_id: ChangeSetId(change_set_id.clone()),
+            },
+            role: ContributionRole::Result,
+            source: RecordSource::Manual,
+            origin: RecordOrigin::User,
+            fidelity: RecordFidelity::Declared,
+            trust: RecordTrust::Medium,
+            summary: Some("Linked by endpoint only".to_string()),
+            fingerprint: None,
+            issuer: None,
+            metadata_json: None,
+            source_records: Vec::new(),
+            created_at: None,
+            updated_at: None,
+            schema_version: 1,
+        })
+        .await
+        .expect("upsert endpoint-only contribution");
+
+    let change_set_endpoint_json = serde_json::to_string(&ContributionEndpoint::ChangeSet {
+        change_set_id: ChangeSetId(change_set_id.clone()),
+    })
+    .expect("serialize change set endpoint");
+    let change_set_endpoint_filtered = daemon
+        .route_handles()
+        .workspace_agent_work
+        .list_workspace_agent_work_for_route(
+            WorkspaceRouteParams::new(workspace.id.0.to_string()),
+            WorkspaceAgentWorkRouteQuery {
+                endpoint_json: Some(change_set_endpoint_json),
+                ..WorkspaceAgentWorkRouteQuery::default()
+            },
+        )
+        .await
+        .expect("list change-set endpoint-filtered agent work");
+    assert_eq!(change_set_endpoint_filtered.change_sets.len(), 1);
+    assert_eq!(change_set_endpoint_filtered.contributions.len(), 3);
+    assert!(change_set_endpoint_filtered
+        .contributions
+        .iter()
+        .any(|contribution| contribution.id.0.as_str() == contribution_id.as_str()));
+    assert!(change_set_endpoint_filtered
+        .contributions
+        .iter()
+        .any(|contribution| contribution.id == declared_only_contribution_id));
+    assert!(change_set_endpoint_filtered
+        .contributions
+        .iter()
+        .any(|contribution| contribution.id == endpoint_only_contribution_id));
+
+    let change_set_filtered = daemon
+        .route_handles()
+        .workspace_agent_work
+        .list_workspace_agent_work_for_route(
+            WorkspaceRouteParams::new(workspace.id.0.to_string()),
+            WorkspaceAgentWorkRouteQuery {
+                change_set_id: Some(change_set_id.clone()),
+                ..WorkspaceAgentWorkRouteQuery::default()
+            },
+        )
+        .await
+        .expect("list change-set-filtered agent work");
+    assert_eq!(change_set_filtered.change_sets.len(), 1);
+    assert_eq!(change_set_filtered.contributions.len(), 3);
+
+    let foreign_workspace_id = WorkspaceId::new();
+    let foreign_change_set_id = ChangeSetId::new();
+    let foreign_contribution_id = ContributionId::new();
+    let now = Utc::now();
+    let foreign_change_set = ChangeSet {
+        id: foreign_change_set_id.clone(),
+        workspace_id: foreign_workspace_id,
+        source_worktree_id: None,
+        source: RecordSource::Manual,
+        origin: RecordOrigin::Imported,
+        fidelity: RecordFidelity::Declared,
+        trust: RecordTrust::Low,
+        title: Some("Foreign workspace graph".to_string()),
+        summary: None,
+        description: None,
+        fingerprint: None,
+        base_revision: None,
+        head_revision: None,
+        target_branch: None,
+        pull_requests: Vec::new(),
+        source_records: Vec::new(),
+        issuer: None,
+        created_at: Some(now),
+        updated_at: Some(now),
+        schema_version: 1,
+    };
+    let foreign_contribution = Contribution {
+        id: foreign_contribution_id.clone(),
+        workspace_id: foreign_workspace_id,
+        change_set_id: Some(foreign_change_set_id.clone()),
+        subject: ContributionEndpoint::System {
+            label: Some("foreign".to_string()),
+        },
+        target: ContributionEndpoint::ChangeSet {
+            change_set_id: foreign_change_set_id.clone(),
+        },
+        role: ContributionRole::Related,
+        source: RecordSource::Manual,
+        origin: RecordOrigin::Imported,
+        fidelity: RecordFidelity::Declared,
+        trust: RecordTrust::Low,
+        summary: Some("Should not be visible through another workspace route".to_string()),
+        fingerprint: None,
+        issuer: None,
+        metadata_json: None,
+        source_records: Vec::new(),
+        created_at: Some(now),
+        updated_at: Some(now),
+        schema_version: 1,
+    };
+    let mut connection = store
+        .pool()
+        .acquire()
+        .await
+        .expect("acquire store connection");
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *connection)
+        .await
+        .expect("disable foreign keys for corrupt-row fixture");
+    sqlx::query(
+        r#"INSERT INTO change_sets (
+             id, workspace_id, source_worktree_id, base_revision, head_revision,
+             target_branch, record_json, created_at, updated_at
+           )
+           VALUES (?, ?, NULL, NULL, NULL, NULL, ?, ?, ?)"#,
+    )
+    .bind(foreign_change_set_id.0.to_string())
+    .bind(foreign_workspace_id.0.to_string())
+    .bind(serde_json::to_string(&foreign_change_set).expect("serialize foreign change set"))
+    .bind(now.to_rfc3339())
+    .bind(now.to_rfc3339())
+    .execute(&mut *connection)
+    .await
+    .expect("insert corrupt foreign change set fixture");
+    sqlx::query(
+        r#"INSERT INTO contributions (
+             id, workspace_id, change_set_id, subject_kind, subject_id, target_kind, target_id,
+             record_json, created_at, updated_at
+           )
+           VALUES (?, ?, ?, 'system', 'foreign', 'change_set', ?, ?, ?, ?)"#,
+    )
+    .bind(foreign_contribution_id.0.to_string())
+    .bind(foreign_workspace_id.0.to_string())
+    .bind(foreign_change_set_id.0.to_string())
+    .bind(foreign_change_set_id.0.to_string())
+    .bind(serde_json::to_string(&foreign_contribution).expect("serialize foreign contribution"))
+    .bind(now.to_rfc3339())
+    .bind(now.to_rfc3339())
+    .execute(&mut *connection)
+    .await
+    .expect("insert corrupt foreign contribution fixture");
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&mut *connection)
+        .await
+        .expect("restore foreign keys after corrupt-row fixture");
+
+    let foreign_change_set_id_string = foreign_change_set_id.0.to_string();
+    let foreign_change_set_filtered = daemon
+        .route_handles()
+        .workspace_agent_work
+        .list_workspace_agent_work_for_route(
+            WorkspaceRouteParams::new(workspace.id.0.to_string()),
+            WorkspaceAgentWorkRouteQuery {
+                change_set_id: Some(foreign_change_set_id_string.clone()),
+                ..WorkspaceAgentWorkRouteQuery::default()
+            },
+        )
+        .await
+        .expect("list foreign change-set-filtered agent work");
+    assert!(foreign_change_set_filtered.change_sets.is_empty());
+    assert!(foreign_change_set_filtered.contributions.is_empty());
+
+    let foreign_endpoint_json = serde_json::to_string(&ContributionEndpoint::ChangeSet {
+        change_set_id: ChangeSetId(foreign_change_set_id_string),
+    })
+    .expect("serialize foreign endpoint");
+    let foreign_endpoint_filtered = daemon
+        .route_handles()
+        .workspace_agent_work
+        .list_workspace_agent_work_for_route(
+            WorkspaceRouteParams::new(workspace.id.0.to_string()),
+            WorkspaceAgentWorkRouteQuery {
+                endpoint_json: Some(foreign_endpoint_json),
+                ..WorkspaceAgentWorkRouteQuery::default()
+            },
+        )
+        .await
+        .expect("list foreign endpoint-filtered agent work");
+    assert!(foreign_endpoint_filtered.change_sets.is_empty());
+    assert!(foreign_endpoint_filtered.contributions.is_empty());
+
+    let limited = daemon
+        .route_handles()
+        .workspace_agent_work
+        .list_workspace_agent_work_for_route(
+            WorkspaceRouteParams::new(workspace.id.0.to_string()),
+            WorkspaceAgentWorkRouteQuery {
+                limit: Some(0),
+                ..WorkspaceAgentWorkRouteQuery::default()
+            },
+        )
+        .await
+        .expect("list limited agent work");
+    assert!(limited.change_sets.is_empty());
+    assert!(limited.contributions.is_empty());
 }
 
 #[tokio::test]

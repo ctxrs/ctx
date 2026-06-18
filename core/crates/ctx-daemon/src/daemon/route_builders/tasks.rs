@@ -92,6 +92,7 @@ impl task_deps::TaskRouteDeps {
         ProviderStatusHandle::new(
             self.data_root.clone(),
             Arc::clone(&self.providers),
+            Arc::clone(&self.plugins),
             self.ops_events.clone(),
         )
     }

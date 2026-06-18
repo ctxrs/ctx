@@ -104,12 +104,36 @@ esac
     helper
 }
 
+fn write_python_helper(helper: &Path, script: &str, label: &str) {
+    std::fs::write(
+        helper,
+        r#"#!/bin/sh
+unset PYTHONHOME PYTHONPATH
+exec python3 -E "$0.py" "$@"
+"#,
+    )
+    .unwrap_or_else(|error| panic!("write {label} helper wrapper: {error}"));
+    let mut script_path = helper.to_path_buf().into_os_string();
+    script_path.push(".py");
+    std::fs::write(PathBuf::from(script_path), script)
+        .unwrap_or_else(|error| panic!("write {label} helper script: {error}"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(helper)
+            .unwrap_or_else(|error| panic!("{label} helper metadata: {error}"))
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(helper, perms)
+            .unwrap_or_else(|error| panic!("chmod {label} helper: {error}"));
+    }
+}
+
 fn write_lifecycle_helper(dir: &Path) -> PathBuf {
     let helper = dir.join("ctx-avf-linux-helper");
-    std::fs::write(
+    write_python_helper(
         &helper,
-        r#"#!/usr/bin/env python3
-import json
+        r#"import json
 import os
 import pathlib
 import sys
@@ -210,17 +234,8 @@ else:
     print(f"unsupported command: {cmd}", file=sys.stderr)
     sys.exit(1)
 "#,
-    )
-    .expect("write lifecycle helper");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&helper)
-            .expect("lifecycle helper metadata")
-            .permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&helper, perms).expect("chmod lifecycle helper");
-    }
+        "lifecycle",
+    );
     helper
 }
 
@@ -331,8 +346,7 @@ fn write_stateful_lifecycle_helper(dir: &Path) -> (PathBuf, PathBuf) {
     let helper = dir.join("ctx-avf-linux-helper");
     let log_path = dir.join("shared-vm-lifecycle.log");
     let log_path_literal = log_path.display().to_string().replace('\\', "\\\\");
-    let script = r#"#!/usr/bin/env python3
-import json
+    let script = r#"import json
 import os
 import pathlib
 import sys
@@ -550,16 +564,7 @@ else:
     sys.exit(1)
 "#
     .replace("__LOG_PATH__", &log_path_literal);
-    std::fs::write(&helper, script).expect("write stateful lifecycle helper");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&helper)
-            .expect("stateful lifecycle helper metadata")
-            .permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&helper, perms).expect("chmod stateful lifecycle helper");
-    }
+    write_python_helper(&helper, &script, "stateful lifecycle");
     (helper, log_path)
 }
 
@@ -590,11 +595,8 @@ fn write_guest_exec_helper(dir: &Path) -> (PathBuf, PathBuf) {
     let helper = dir.join("ctx-avf-linux-helper");
     let capture_file = dir.join("guest-exec-capture.json");
     let capture_path = capture_file.display().to_string().replace('\\', "\\\\");
-    std::fs::write(
-        &helper,
-        format!(
-            r#"#!/usr/bin/env python3
-import json
+    let script = format!(
+        r#"import json
 import pathlib
 import shutil
 import sys
@@ -798,18 +800,8 @@ else:
     print(f"unsupported command: {{cmd}}", file=sys.stderr)
     sys.exit(1)
 "#,
-        ),
-    )
-    .expect("write guest exec helper");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&helper)
-            .expect("guest exec helper metadata")
-            .permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&helper, perms).expect("chmod guest exec helper");
-    }
+    );
+    write_python_helper(&helper, &script, "guest exec");
     (helper, capture_file)
 }
 

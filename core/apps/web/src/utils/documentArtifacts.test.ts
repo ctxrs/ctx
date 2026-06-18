@@ -77,6 +77,30 @@ describe("documentArtifacts", () => {
     ).toBe("text");
   });
 
+  it("detects document formats from relative paths when absolute paths are omitted", () => {
+    expect(
+      getArtifactDocumentFormat(
+        makeArtifact({
+          name: "artifact",
+          mime_type: "application/octet-stream",
+          absolute_path: null,
+          relative_path: "docs/post.mdx",
+        }),
+      ),
+    ).toBe("mdx");
+
+    expect(
+      getArtifactDocumentFormat(
+        makeArtifact({
+          name: "artifact",
+          mime_type: "application/octet-stream",
+          absolute_path: undefined,
+          relative_path: "logs/server.log",
+        }),
+      ),
+    ).toBe("text");
+  });
+
   it("normalizes mdx into safe markdown", () => {
     const normalized = normalizeMdxDocumentContent(sampleMdx);
 

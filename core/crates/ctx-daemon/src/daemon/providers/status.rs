@@ -13,6 +13,7 @@ impl ProviderStatusHandle {
         &self,
         query: ProviderStatusRouteQuery,
     ) -> Result<Vec<ProviderStatus>, ProviderStatusListRouteError> {
+        self.sync_plugin_provider_adapters().await;
         let target = parse_provider_install_target(query.target())
             .map_err(|_| ProviderStatusListRouteError)?;
         Ok(status_service::providers_statuses_response(self, target, false).await)
@@ -23,6 +24,7 @@ impl ProviderStatusHandle {
         provider_id: &str,
         query: ProviderStatusRouteQuery,
     ) -> Result<ProviderStatus, ProviderStatusRouteError> {
+        self.sync_plugin_provider_adapters().await;
         let target = parse_provider_install_target(query.target())
             .map_err(ProviderStatusRouteError::bad_request)?;
         status_service::provider_status_response(self, provider_id, target)

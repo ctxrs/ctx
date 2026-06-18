@@ -139,6 +139,81 @@ describe("TaskRow rename draft", () => {
     expect(onFocusTask).toHaveBeenCalledWith("task-1", "session-1");
   });
 
+  it("renders compact agent work summary chips when graph evidence exists", () => {
+    render(
+      <TaskRow
+        taskId="task-1"
+        title="Initial title"
+        archived={false}
+        archivePending={false}
+        archivePendingAction={null}
+        statusKind="idle"
+        selected={false}
+        hovered={false}
+        isRenaming={false}
+        ageIso={new Date().toISOString()}
+        providerCount={0}
+        harnesses={[]}
+        agentWorkSummary={{
+          taskId: "task-1",
+          changeSetCount: 2,
+          contributionCount: 3,
+          linkedPullRequestCount: 1,
+          latestUpdateTimestamp: null,
+        }}
+        getRenameDraft={(_, fallback) => fallback}
+        setRenameDraft={vi.fn()}
+        onFocusTask={vi.fn()}
+        onOpenMenu={vi.fn()}
+        onToggleArchive={vi.fn().mockResolvedValue(undefined)}
+        onHoverEnter={vi.fn()}
+        onHoverLeave={vi.fn()}
+        onCancelRename={vi.fn()}
+        onCommitRename={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByLabelText("Agent work summary")).toHaveTextContent("2 changes");
+    expect(screen.getByLabelText("Agent work summary")).toHaveTextContent("1 PR");
+  });
+
+  it("falls back to contribution links when there are no change sets yet", () => {
+    render(
+      <TaskRow
+        taskId="task-1"
+        title="Initial title"
+        archived={false}
+        archivePending={false}
+        archivePendingAction={null}
+        statusKind="idle"
+        selected={false}
+        hovered={false}
+        isRenaming={false}
+        ageIso={new Date().toISOString()}
+        providerCount={0}
+        harnesses={[]}
+        agentWorkSummary={{
+          taskId: "task-1",
+          changeSetCount: 0,
+          contributionCount: 1,
+          linkedPullRequestCount: 0,
+          latestUpdateTimestamp: null,
+        }}
+        getRenameDraft={(_, fallback) => fallback}
+        setRenameDraft={vi.fn()}
+        onFocusTask={vi.fn()}
+        onOpenMenu={vi.fn()}
+        onToggleArchive={vi.fn().mockResolvedValue(undefined)}
+        onHoverEnter={vi.fn()}
+        onHoverLeave={vi.fn()}
+        onCancelRename={vi.fn()}
+        onCommitRename={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByLabelText("Agent work summary")).toHaveTextContent("1 link");
+  });
+
   it("suppresses the native context menu for optimistic rows without opening task actions", () => {
     const onOpenMenu = vi.fn();
 

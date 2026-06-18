@@ -16,6 +16,7 @@ rust_library(
 
 rust_test(
     name = "unit_tests",
+    args = ["--test-threads=1"],
     crate = ":lib",
     deps = _CTX_SETTINGS_SERVICE_DEPS.dev_deps,
 )

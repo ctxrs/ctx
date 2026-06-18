@@ -13,6 +13,9 @@ impl workspace_deps::WorkspaceRouteDeps {
             self.telemetry.clone(),
         )
     }
+    pub fn workspace_agent_work(&self) -> WorkspaceAgentWorkHandle {
+        WorkspaceAgentWorkHandle::new(self.workspace_store_lookup())
+    }
     pub fn workspace_deletion(&self) -> WorkspaceDeletionHandle {
         WorkspaceDeletionHandle::new(Arc::new(
             crate::daemon::workspaces::WorkspaceDeletionRuntime::new(

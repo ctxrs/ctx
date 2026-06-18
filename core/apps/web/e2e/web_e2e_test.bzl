@@ -1,6 +1,6 @@
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
-def web_e2e_test(name, config, runtime_profile, suite = "", specs = None, timeout = "long", linux_browser = ""):
+def web_e2e_test(name, config, runtime_profile, suite = "", specs = None, timeout = "long", linux_browser = "", web_dist = ""):
     resolved_specs = specs or []
     args = [
         "--config",
@@ -28,6 +28,7 @@ def web_e2e_test(name, config, runtime_profile, suite = "", specs = None, timeou
         "//core/apps/web:node_modules/postcss",
         "//core/apps/web:node_modules/tailwindcss",
         "//core/crates/ctx-http:ctx",
+        "@rules_nodejs//nodejs:current_node_runtime",
     ]
     playwright_browser_data = select({
         "@platforms//os:linux": [
@@ -52,6 +53,14 @@ def web_e2e_test(name, config, runtime_profile, suite = "", specs = None, timeou
             "$(location //core/crates/ctx-mcp:ctx-mcp)",
         ])
         data.append("//core/crates/ctx-mcp:ctx-mcp")
+    if runtime_profile == "web-artifact":
+        if not web_dist:
+            fail("web-artifact E2E tests must declare web_dist")
+        args.extend([
+            "--web-dist",
+            "$(location %s)" % web_dist,
+        ])
+        data.append(web_dist)
     if suite:
         args.extend(["--suite", suite])
     for spec in resolved_specs:

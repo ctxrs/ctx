@@ -56,13 +56,30 @@ fn route_json_value<T: Serialize>(value: T) -> anyhow::Result<serde_json::Value>
     serde_json::to_value(value).context("serializing health route payload")
 }
 
+fn health_build_identity(package_version: &'static str) -> BuildIdentity {
+    match ctx_update_service::current_build_identity(package_version) {
+        Ok(identity) => identity,
+        Err(error) => {
+            tracing::warn!(
+                "failed to load health build identity; falling back to package version: {error:#}"
+            );
+            BuildIdentity {
+                schema_version: 1,
+                exact_version: package_version.to_string(),
+                build_id: package_version.to_string(),
+                compatibility_token: package_version.to_string(),
+            }
+        }
+    }
+}
+
 impl HealthHandle {
     pub fn health_snapshot(
         &self,
         package_version: &'static str,
         include_sensitive: bool,
     ) -> Result<DaemonHealthSnapshot, HealthSnapshotError> {
-        let identity = ctx_update_service::current_build_identity(package_version)?;
+        let identity = health_build_identity(package_version);
         build_health_snapshot(self, &identity, include_sensitive)
     }
 }
@@ -101,5 +118,41 @@ mod tests {
             serialized["desktop_build_id"].as_str(),
             Some("ctx-http-package-version")
         );
+    }
+
+    #[test]
+    fn health_build_identity_falls_back_when_configured_artifact_is_unavailable() {
+        let _guard = EnvVarGuard::set_missing_build_identity_path();
+
+        let identity = health_build_identity("ctx-http-package-version");
+
+        assert_eq!(identity.exact_version, "ctx-http-package-version");
+        assert_eq!(identity.build_id, "ctx-http-package-version");
+        assert_eq!(identity.compatibility_token, "ctx-http-package-version");
+    }
+
+    struct EnvVarGuard {
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set_missing_build_identity_path() -> Self {
+            let previous = std::env::var_os(ctx_update_service::BUILD_IDENTITY_PATH_ENV);
+            std::env::set_var(
+                ctx_update_service::BUILD_IDENTITY_PATH_ENV,
+                std::env::temp_dir().join("ctx-missing-build-identity-for-health-test.json"),
+            );
+            Self { previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.take() {
+                std::env::set_var(ctx_update_service::BUILD_IDENTITY_PATH_ENV, previous);
+            } else {
+                std::env::remove_var(ctx_update_service::BUILD_IDENTITY_PATH_ENV);
+            }
+        }
     }
 }

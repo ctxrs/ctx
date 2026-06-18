@@ -170,6 +170,7 @@ function Harness({
   providerOptionsById,
   providersByIdProp,
   ensureProviderAuthSummary,
+  resolveInitialPrompt,
 }: {
   prompt?: string;
   onChange: (value: FlowValue) => void;
@@ -182,6 +183,7 @@ function Harness({
     providerId: string,
     opts?: { force?: boolean; trigger?: ProviderAuthSummaryTrigger },
   ) => Promise<ProviderOptions | undefined>;
+  resolveInitialPrompt?: (text: string) => Promise<string>;
 }) {
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [activeTaskIdFromTab, setActiveTaskIdFromTab] = useState<string | null>(null);
@@ -236,6 +238,7 @@ function Harness({
       ?? (async (providerId) => resolvedProviderOptions[providerId]),
     dictationRecording: false,
     stopDictation: async () => prompt,
+    resolveInitialPrompt,
     focusTask: (taskId) => {
       setActiveTaskId(taskId);
       setActiveTaskIdFromTab(taskId);
@@ -404,6 +407,77 @@ describe("useWorkbenchTaskCreation optimistic lifecycle", () => {
       last_turn_status: "running",
     });
     expect(onStartError).toHaveBeenCalledWith(null);
+  });
+
+  it("resolves the initial prompt before optimistic state and task creation", async () => {
+    let current: FlowValue | null = null;
+    mockedCreateTask.mockResolvedValue(makeTask("task-1", "session-1"));
+    mockedCreateSession.mockResolvedValue(makeSession("session-1", "task-1"));
+    const onStartError = vi.fn();
+    const resolveInitialPrompt = vi.fn(async () => "Expanded plugin prompt");
+
+    render(
+      <Harness
+        prompt="/review.tools:review src/index.ts"
+        resolveInitialPrompt={resolveInitialPrompt}
+        onChange={(value) => {
+          current = value;
+        }}
+        onStartError={onStartError}
+      />,
+    );
+
+    await act(async () => {
+      await requireValue(current).startNewTask();
+    });
+
+    await waitFor(() => {
+      expect(requireValue(current).optimisticTasks[0]?.localStatus).toBe("synced");
+    });
+    expect(resolveInitialPrompt).toHaveBeenCalledWith("/review.tools:review src/index.ts");
+    expect(requireValue(current).optimisticTasks[0]?.localPrompt).toBe("Expanded plugin prompt");
+    expect(mockedCreateTask.mock.calls[0]?.[3]?.default_session).toEqual(
+      expect.objectContaining({
+        initial_prompt: "Expanded plugin prompt",
+      }),
+    );
+    expect(setMessagesMock).toHaveBeenCalledWith(
+      "session-1",
+      expect.arrayContaining([
+        expect.objectContaining({
+          content: "Expanded plugin prompt",
+        }),
+      ]),
+      expect.any(Object),
+    );
+  });
+
+  it("does not create an optimistic task when initial prompt resolution fails", async () => {
+    let current: FlowValue | null = null;
+    const onStartError = vi.fn();
+    const resolveInitialPrompt = vi.fn(async () => {
+      throw new Error("plugin command failed");
+    });
+
+    render(
+      <Harness
+        prompt="/review.tools:review src/index.ts"
+        resolveInitialPrompt={resolveInitialPrompt}
+        onChange={(value) => {
+          current = value;
+        }}
+        onStartError={onStartError}
+      />,
+    );
+
+    await act(async () => {
+      await requireValue(current).startNewTask();
+    });
+
+    expect(onStartError).toHaveBeenCalledWith("plugin command failed");
+    expect(requireValue(current).optimisticTasks).toEqual([]);
+    expect(mockedCreateTask).not.toHaveBeenCalled();
+    expect(setSessionMock).not.toHaveBeenCalled();
   });
 
   it("posts the first message separately when the new-task draft includes attachments", async () => {

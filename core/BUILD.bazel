@@ -14,19 +14,25 @@ exports_files([
 
 filegroup(
     name = "desktop_automation_files",
-    srcs = glob(["apps/desktop/automation/**"]),
+    srcs = glob(["apps/desktop/automation/**"], allow_empty = True),
     visibility = ["//visibility:public"],
 )
 
 filegroup(
     name = "desktop_script_files",
-    srcs = glob(["apps/desktop/scripts/**"]),
+    srcs = glob(["apps/desktop/scripts/**"], allow_empty = True),
     visibility = ["//visibility:public"],
 )
 
 filegroup(
     name = "desktop_bundle_files",
-    srcs = glob(["apps/desktop/src-tauri/bundles/**"]),
+    srcs = glob(
+        ["apps/desktop/src-tauri/bundles/**"],
+        exclude = [
+            "apps/desktop/src-tauri/bundles/artifact_identity.json",
+            "apps/desktop/src-tauri/bundles/provider_matrix.json",
+        ],
+    ),
     visibility = ["//visibility:public"],
 )
 
@@ -56,5 +62,213 @@ filegroup(
 filegroup(
     name = "ctx_http_auth_sources",
     srcs = glob(["crates/ctx-http/src/api/auth/**"], allow_empty = True),
+    visibility = ["//visibility:public"],
+)
+
+RUST_UNIT_TESTS = [
+    "//core/crates/codex-crp:unit_tests",
+    "//core/crates/ctx-avf-linux-guest-agent:unit_tests",
+    "//core/crates/ctx-avf-linux-runtime:helper_path_test_support",
+    "//core/crates/ctx-avf-linux-runtime:unit_tests",
+    "//core/crates/ctx-avf-linux-runtime:unit_tests_avf_linux_vm",
+    "//core/crates/ctx-bundled-assets:unit_tests",
+    "//core/crates/ctx-client:unit_tests",
+    "//core/crates/ctx-core:unit_tests",
+    "//core/crates/ctx-core:workspace_payload_corpus",
+    "//core/crates/ctx-crp-protocol:unit_tests",
+    "//core/crates/ctx-daemon:unit_tests_daemon",
+    "//core/crates/ctx-daemon:unit_tests_execution_effective",
+    "//core/crates/ctx-daemon:unit_tests_merge_queue",
+    "//core/crates/ctx-daemon:unit_tests_merge_queue_enabled_workspace_resume_after_open",
+    "//core/crates/ctx-daemon:unit_tests_scheduler",
+    "//core/crates/ctx-daemon:unit_tests_storage_guard",
+    "//core/crates/ctx-daemon:unit_tests_vcs_hooks",
+    "//core/crates/ctx-daemon:unit_tests_workspace_runtime",
+    "//core/crates/ctx-daemon:unit_tests_workspace_runtime_container_status_avf",
+    "//core/crates/ctx-daemon:unit_tests_workspace_runtime_keeps_avf_workspace_container_ready",
+    "//core/crates/ctx-daemon:unit_tests_workspace_runtime_prepare_starts_cached_container",
+    "//core/crates/ctx-daemon:unit_tests_workspace_runtime_reclaim_ctx_harness_container",
+    "//core/crates/ctx-daemon:unit_tests_workspace_runtime_reclaim_idle_machine",
+    "//core/crates/ctx-daemon:unit_tests_workspace_runtime_reclaim_idle_runtime_with_containers",
+    "//core/crates/ctx-daemon:unit_tests_workspace_runtime_reclaim_idle_runtime_with_parked_containers",
+    "//core/crates/ctx-daemon:unit_tests_workspace_runtime_recreates_machine_for_memory_profile_change",
+    "//core/crates/ctx-daemon:unit_tests_workspace_runtime_reuses_running_container",
+    "//core/crates/ctx-daemon:unit_tests_workspace_runtime_running_unreachable_machine_reconfiguration",
+    "//core/crates/ctx-daemon:unit_tests_workspace_runtime_starts_avf_workspace_vm",
+    "//core/crates/ctx-daemon:unit_tests_workspace_runtime_unknown_machine_state_engine_unreachable",
+    "//core/crates/ctx-docs-mirror:unit_tests",
+    "//core/crates/ctx-egress-proxy:unit_tests",
+    "//core/crates/ctx-events:unit_tests",
+    "//core/crates/ctx-execution-runtime:unit_tests",
+    "//core/crates/ctx-fs:jj_worktrees",
+    "//core/crates/ctx-fs:unit_tests",
+    "//core/crates/ctx-harness-runtime:unit_tests",
+    "//core/crates/ctx-harness-setup:unit_tests",
+    "//core/crates/ctx-harness-sources:unit_tests",
+    "//core/crates/ctx-http-auth:unit_tests",
+    "//core/crates/ctx-http-test-support:unit_tests",
+    "//core/crates/ctx-linux-sandbox-runtime:unit_tests",
+    "//core/crates/ctx-managed-installs:unit_tests",
+    "//core/crates/ctx-mcp-auth:unit_tests",
+    "//core/crates/ctx-mcp-command:unit_tests",
+    "//core/crates/ctx-mcp:fuzz_tests",
+    "//core/crates/ctx-mcp:mcp_contracts",
+    "//core/crates/ctx-mcp:subagent_tools",
+    "//core/crates/ctx-merge-queue:unit_tests",
+    "//core/crates/ctx-mobile-access-service:unit_tests",
+    "//core/crates/ctx-observability:unit_tests",
+    "//core/crates/ctx-org-policy:unit_tests",
+    "//core/crates/ctx-provider-accounts:unit_tests",
+    "//core/crates/ctx-provider-auth-import:unit_tests",
+    "//core/crates/ctx-provider-install:unit_tests",
+    "//core/crates/ctx-provider-matrix:unit_tests",
+    "//core/crates/ctx-provider-runtime:unit_tests",
+    "//core/crates/ctx-providers:unit_tests",
+    "//core/crates/ctx-providers:unit_tests_fuzz",
+    "//core/crates/ctx-repo-onboarding-service:unit_tests",
+    "//core/crates/ctx-resource-utilization:unit_tests",
+    "//core/crates/ctx-route-contracts:unit_tests",
+    "//core/crates/ctx-run-archive-service:unit_tests",
+    "//core/crates/ctx-run-scheduler:unit_tests",
+    "//core/crates/ctx-runtime-assets:unit_tests",
+    "//core/crates/ctx-sandbox-container-runtime:unit_tests",
+    "//core/crates/ctx-sandbox-contract:unit_tests",
+    "//core/crates/ctx-sandbox-materialization:unit_tests",
+    "//core/crates/ctx-session-artifacts:unit_tests",
+    "//core/crates/ctx-session-message-service:unit_tests",
+    "//core/crates/ctx-session-runtime:unit_tests",
+    "//core/crates/ctx-session-service:unit_tests",
+    "//core/crates/ctx-session-title-service:unit_tests",
+    "//core/crates/ctx-session-tools:unit_tests",
+    "//core/crates/ctx-session-vcs-service:unit_tests",
+    "//core/crates/ctx-settings-model:unit_tests",
+    "//core/crates/ctx-settings-service:unit_tests",
+    "//core/crates/ctx-storage-admission:unit_tests",
+    "//core/crates/ctx-store:sqlite_hardening",
+    "//core/crates/ctx-store:unit_tests",
+    "//core/crates/ctx-store:unit_tests_fault_injection",
+    "//core/crates/ctx-subagent-service:unit_tests",
+    "//core/crates/ctx-task-service:unit_tests",
+    "//core/crates/ctx-transport-runtime:unit_tests",
+    "//core/crates/ctx-update-service:unit_tests",
+    "//core/crates/ctx-workspace-active-snapshot:unit_tests",
+    "//core/crates/ctx-workspace-attachments:unit_tests",
+    "//core/crates/ctx-workspace-config:unit_tests",
+    "//core/crates/ctx-workspace-container:unit_tests",
+    "//core/crates/ctx-workspace-runtime:unit_tests",
+    "//core/crates/ctx-workspace-runtime:workspace_runtime_crash_recovery",
+    "//core/crates/ctx-workspace-stream-service:unit_tests",
+    "//core/crates/ctx-worktree-bootstrap-service:unit_tests",
+    "//core/crates/ctx-worktree-data-plane:unit_tests",
+    "//core/crates/ctx-worktree-vcs-service:unit_tests",
+]
+
+RUST_HTTP_BASE_TESTS = [
+    "//core/crates/ctx-http:bin_tests",
+    "//core/crates/ctx-http:doc_tests",
+    "//core/crates/ctx-http:unit-tests-api",
+    "//core/crates/ctx-http:unit-tests-daemon-and-scheduler",
+    "//core/crates/ctx-http:unit-tests-lib",
+    "//core/crates/ctx-http:unit-tests-lib-session-head-large",
+    "//core/crates/ctx-http:unit-tests-merge-queue",
+    "//core/crates/ctx-http:unit-tests-provider-and-settings",
+    "//core/crates/ctx-http:unit-tests-storage-admission",
+    "//core/crates/ctx-http:unit-tests-workspace-runtime",
+]
+
+RUST_HTTP_INTEGRATION_TESTS = [
+    "//core/crates/ctx-http:attachments-routing",
+    "//core/crates/ctx-http:provider-auth",
+    "//core/crates/ctx-http:provider-runtime-live",
+    "//core/crates/ctx-http:provider-runtime-simulated",
+    "//core/crates/ctx-http:repo-vcs",
+    "//core/crates/ctx-http:sandbox-runtime-container-e2e",
+    "//core/crates/ctx-http:sandbox-runtime-memory-leak",
+    "//core/crates/ctx-http:sandbox-runtime-resource-governance",
+    "//core/crates/ctx-http:sandbox-runtime-simulated",
+    "//core/crates/ctx-http:scheduler-runtime",
+    "//core/crates/ctx-http:subagents-control",
+    "//core/crates/ctx-http:subagents-local-runtime",
+    "//core/crates/ctx-http:turns-terminal",
+    "//core/crates/ctx-http:updates-release",
+    "//core/crates/ctx-http:workspace-stream",
+]
+
+WEB_TESTS = [
+    "//core/apps/web:desktop_ipc_corpus",
+    "//core/apps/web:lint",
+    "//core/apps/web:playwright_runtime_script_tests",
+    "//core/apps/web:pretext_measurement_unit_tests",
+    "//core/apps/web:typecheck",
+    "//core/apps/web:unit_tests_non_pretext",
+    "//core/packages/session-supervisor-core:unit_tests",
+    "//core/packages/session-thread-layout:unit_tests",
+]
+
+SCHEMA_TESTS = [
+    "//schemas:json_syntax_test",
+    "//core/apps/web:desktop_ipc_corpus",
+    "//core/crates/ctx-desktop-ipc:typescript_check_test",
+    "//core/crates/ctx-provider-matrix:unit_tests",
+    "//core/crates/ctx-route-contracts:unit_tests",
+    "//core/crates/ctx-sandbox-contract:unit_tests",
+]
+
+PRESUBMIT_SCHEMA_TESTS = [
+    "//core/crates/ctx-desktop-ipc:typescript_check_test",
+]
+
+E2E_PREMERGE_TESTS = [
+    "//core/apps/web/e2e:premerge_required",
+]
+
+RELEASE_TESTS = [
+    ":presubmit",
+    "//core/apps/web/e2e:release_required",
+]
+
+test_suite(
+    name = "presubmit",
+    tests = RUST_UNIT_TESTS + RUST_HTTP_BASE_TESTS + WEB_TESTS + PRESUBMIT_SCHEMA_TESTS + E2E_PREMERGE_TESTS,
+    visibility = ["//visibility:public"],
+)
+
+test_suite(
+    name = "all-rust",
+    tests = RUST_UNIT_TESTS + RUST_HTTP_BASE_TESTS + RUST_HTTP_INTEGRATION_TESTS,
+    visibility = ["//visibility:public"],
+)
+
+test_suite(
+    name = "all-web",
+    tests = WEB_TESTS,
+    visibility = ["//visibility:public"],
+)
+
+test_suite(
+    name = "schemas",
+    tests = SCHEMA_TESTS,
+    visibility = ["//visibility:public"],
+)
+
+test_suite(
+    name = "e2e-premerge",
+    tests = E2E_PREMERGE_TESTS,
+    visibility = ["//visibility:public"],
+)
+
+test_suite(
+    name = "release",
+    tests = RELEASE_TESTS,
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "release-artifacts",
+    srcs = [
+        ":desktop_release_metadata_files",
+        "//core/apps/web:build",
+        "//core/crates/ctx-http:ctx",
+    ],
     visibility = ["//visibility:public"],
 )

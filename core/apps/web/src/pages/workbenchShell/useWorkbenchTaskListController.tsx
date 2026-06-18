@@ -41,6 +41,8 @@ import {
   isWorkbenchTaskUnread,
   type WorkbenchTaskLiveInfo,
 } from "./workbenchTaskActivity";
+import { EMPTY_WORKSPACE_AGENT_WORK_GRAPH, type WorkspaceAgentWorkGraph } from "../../state/workspaceAgentWorkStore";
+import { summarizeAgentWorkForTask } from "./agentWorkProjection";
 
 type WorkspaceSnapshotStore = {
   ensureArchivedLoaded: () => void;
@@ -61,6 +63,7 @@ type TaskListControllerArgs = {
   optimisticTasksById: Record<string, OptimisticTaskSummary>;
   taskLiveInfo: WorkbenchTaskLiveInfo;
   providerIdsByTaskFromSessions: Record<string, string[]>;
+  agentWorkGraph?: WorkspaceAgentWorkGraph;
   sessionEntries: SessionSupervisorSnapshot["sessions"];
   isTaskUnread: (taskId: string) => boolean;
   focusTask: (taskId: string, sessionId?: string | null) => void;
@@ -83,6 +86,7 @@ export function useWorkbenchTaskListController({
   optimisticTasksById,
   taskLiveInfo,
   providerIdsByTaskFromSessions,
+  agentWorkGraph = EMPTY_WORKSPACE_AGENT_WORK_GRAPH,
   sessionEntries,
   isTaskUnread,
   focusTask,
@@ -475,6 +479,7 @@ export function useWorkbenchTaskListController({
           ? providerIdsByTaskFromSessions[taskId]
           : summaryProviders;
       const providerCount = new Set(providerIds).size;
+      const agentWorkSummary = summarizeAgentWorkForTask(agentWorkGraph, taskId);
       const harnesses = providerIds
         .map((providerId) => findHarnessCatalogEntry(providerId))
         .filter(Boolean)
@@ -503,6 +508,7 @@ export function useWorkbenchTaskListController({
           ageIso={ageIso}
           providerCount={providerCount}
           harnesses={harnesses}
+          agentWorkSummary={agentWorkSummary}
           getRenameDraft={getRenameDraft}
           setRenameDraft={setRenameDraft}
           onFocusTask={focusTask}
@@ -523,6 +529,7 @@ export function useWorkbenchTaskListController({
       activeTaskId,
       activeSessionId,
       activeTaskSummaries,
+      agentWorkGraph,
       archivePendingById,
       cancelRenameTask,
       commitRenameTask,

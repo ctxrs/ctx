@@ -4,8 +4,11 @@ use std::process::Command;
 use super::*;
 use axum::body::{to_bytes, Body};
 use axum::http::Request;
-use ctx_core::ids::WorktreeId;
-use ctx_core::models::{VcsKind, Workspace, Worktree};
+use ctx_core::ids::{ChangeSetId, ContributionId, WorktreeId};
+use ctx_core::models::{
+    ChangeSet, Contribution, ContributionEndpoint, ContributionRole, RecordFidelity, RecordOrigin,
+    RecordSource, RecordTrust, VcsKind, Workspace, Worktree,
+};
 use serde_json::json;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -91,6 +94,103 @@ async fn workspace_registry_and_harness_status_routes_return_seeded_workspace() 
     let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
     let status: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(status, serde_json::Value::Null);
+
+    daemon.request_shutdown();
+}
+
+#[tokio::test]
+async fn workspace_agent_work_route_returns_seeded_graph_records() {
+    let fixture = crate::test_support::TestDaemonFixture::new("http://127.0.0.1:4310").await;
+    let daemon = fixture.daemon();
+    let workspace_root = fixture.data_root().join("agent-work-route");
+    std::fs::create_dir_all(&workspace_root).expect("create workspace root");
+    let workspace = daemon
+        .seed_workspace_for_test("agent-work-route", &workspace_root, VcsKind::Git)
+        .await
+        .expect("seed workspace");
+    let store = daemon
+        .store_for_workspace(workspace.id)
+        .await
+        .expect("workspace store");
+    let change_set_id = ChangeSetId::new();
+    let contribution_id = ContributionId::new();
+    store
+        .upsert_change_set(&ChangeSet {
+            id: change_set_id.clone(),
+            workspace_id: workspace.id,
+            source_worktree_id: None,
+            source: RecordSource::Worktree,
+            origin: RecordOrigin::Agent,
+            fidelity: RecordFidelity::Diff,
+            trust: RecordTrust::High,
+            title: Some("Expose graph route".to_string()),
+            summary: None,
+            description: None,
+            fingerprint: None,
+            base_revision: Some("base".to_string()),
+            head_revision: Some("head".to_string()),
+            target_branch: Some("main".to_string()),
+            pull_requests: Vec::new(),
+            source_records: Vec::new(),
+            issuer: None,
+            created_at: None,
+            updated_at: None,
+            schema_version: 1,
+        })
+        .await
+        .expect("upsert change set");
+    store
+        .upsert_contribution(&Contribution {
+            id: contribution_id.clone(),
+            workspace_id: workspace.id,
+            change_set_id: Some(change_set_id.clone()),
+            subject: ContributionEndpoint::System {
+                label: Some("http-test".to_string()),
+            },
+            target: ContributionEndpoint::ChangeSet {
+                change_set_id: change_set_id.clone(),
+            },
+            role: ContributionRole::Related,
+            source: RecordSource::Manual,
+            origin: RecordOrigin::User,
+            fidelity: RecordFidelity::Declared,
+            trust: RecordTrust::Medium,
+            summary: Some("HTTP route exposes graph records".to_string()),
+            fingerprint: None,
+            issuer: None,
+            metadata_json: None,
+            source_records: Vec::new(),
+            created_at: None,
+            updated_at: None,
+            schema_version: 1,
+        })
+        .await
+        .expect("upsert contribution");
+
+    let app = fixture.router();
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/api/workspaces/{}/agent_work", workspace.id.0))
+        .body(Body::empty())
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let graph: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let change_set_id = change_set_id.0.to_string();
+    let contribution_id = contribution_id.0.to_string();
+    assert_eq!(
+        graph
+            .pointer("/change_sets/0/id")
+            .and_then(serde_json::Value::as_str),
+        Some(change_set_id.as_str())
+    );
+    assert_eq!(
+        graph
+            .pointer("/contributions/0/id")
+            .and_then(serde_json::Value::as_str),
+        Some(contribution_id.as_str())
+    );
 
     daemon.request_shutdown();
 }

@@ -56,6 +56,7 @@ impl session_deps::SessionRouteDeps {
             session_runtime: Arc::clone(&self.sessions),
             active_snapshot: Arc::clone(&self.active_snapshot),
             provider_runtime: Arc::clone(&self.providers),
+            plugins: Arc::clone(&self.plugins),
             ops_events: self.ops_events.clone(),
             data_root: self.data_root.clone(),
             daemon_url: self.daemon_url.clone(),

@@ -3,6 +3,7 @@ pub mod downloads;
 pub mod health;
 pub mod merge_queue;
 pub mod org_policy;
+pub mod plugins;
 pub mod repo_onboarding;
 pub mod run_archive;
 pub mod sessions;

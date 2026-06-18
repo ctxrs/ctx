@@ -30,6 +30,7 @@ pub(in crate::daemon) async fn get_provider_options_response(
     workspace_id: WorkspaceId,
     provider_id: &str,
 ) -> Result<Value, ProviderOptionsResponseError> {
+    launch.sync_plugin_provider_adapters().await;
     let install_target = launch
         .install_target_for_workspace(workspace_id)
         .await

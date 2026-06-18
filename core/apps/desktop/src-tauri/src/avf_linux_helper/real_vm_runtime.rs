@@ -21,7 +21,7 @@ unsafe extern "C" {
 #[cfg(all(target_os = "macos", unix))]
 use self::guest_control::run_owner_guest_exec_capture;
 pub(super) use self::guest_control::shared_vm_owner_guest_probe_ready;
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos", unix))]
 pub(super) use self::guest_control::{
     is_transient_guest_control_connect_nserror, relay_shared_vm_control_client,
 };

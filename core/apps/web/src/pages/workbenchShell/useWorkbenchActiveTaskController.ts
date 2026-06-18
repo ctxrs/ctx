@@ -31,6 +31,11 @@ import { useWorkbenchConversationMenu } from "./useWorkbenchConversationMenu";
 import { useWorkbenchPanelState } from "./useWorkbenchPanelState";
 import { useWorkbenchWebSessions } from "./useWorkbenchWebSessions";
 import { buildGitPaneModel } from "./worktreeGitPaneModel";
+import {
+  EMPTY_WORKSPACE_AGENT_WORK_GRAPH,
+  type WorkspaceAgentWorkGraph,
+} from "../../state/workspaceAgentWorkStore";
+import { summarizeAgentWorkForTask } from "./agentWorkProjection";
 
 const compareSessionTurnOrder = (left: SessionTurn, right: SessionTurn): number => {
   const leftSeq = Number(left.start_seq ?? Number.NaN);
@@ -82,6 +87,7 @@ type WorkbenchActiveTaskControllerArgs = {
   activeSessionId: string | null;
   optimisticSessionIdSet: Set<string>;
   optimisticStartingTaskRef: MutableRefObject<{ primarySessionId?: string | null } | null>;
+  agentWorkGraph?: WorkspaceAgentWorkGraph;
   workspaceSnapshot: WorkspaceActiveSnapshotState;
   workspaceSnapshotStore: WorkspaceSnapshotStore;
   supervisor: Pick<
@@ -104,6 +110,7 @@ export function useWorkbenchActiveTaskController({
   activeSessionId,
   optimisticSessionIdSet,
   optimisticStartingTaskRef,
+  agentWorkGraph = EMPTY_WORKSPACE_AGENT_WORK_GRAPH,
   workspaceSnapshot,
   workspaceSnapshotStore,
   supervisor,
@@ -116,6 +123,10 @@ export function useWorkbenchActiveTaskController({
   const activeLoadErrors = activeEntry?.loadErrors;
   const activeSessionDiff = activeEntry?.diff ?? "";
   const activeTask = activeTaskSummary?.task ?? null;
+  const activeAgentWorkSummary = useMemo(
+    () => summarizeAgentWorkForTask(agentWorkGraph, activeTaskId),
+    [activeTaskId, agentWorkGraph],
+  );
   const activeTaskIsOptimistic = activeTaskSummary ? isOptimisticTask(activeTaskSummary) : false;
   const activeTaskHasAssistantMessage = Boolean(activeTask?.last_assistant_message_at);
   const activeTaskArchived = Boolean(activeTask?.archived_at);
@@ -532,6 +543,7 @@ export function useWorkbenchActiveTaskController({
 
   return {
     activeTask,
+    activeAgentWorkSummary,
     activeTaskArchived,
     activeTaskIsOptimistic,
     activeTaskHasAssistantMessage,

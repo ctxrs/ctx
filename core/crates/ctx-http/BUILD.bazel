@@ -488,11 +488,15 @@ rust_binary(
     crate_root = "src/main.rs",
     edition = "2021",
     srcs = [
+        "src/agent_work_cli.rs",
         "src/cli.rs",
         "src/logging/conditional_writer.rs",
         "src/logging/heap_profiler.rs",
         "src/logging.rs",
         "src/main.rs",
+    ],
+    compile_data = [
+        "//schemas:json_schemas",
     ],
     rustc_env = CTX_HTTP_RUSTC_ENV,
     deps = [
@@ -891,9 +895,27 @@ sh_test(
     timeout = "long",
 )
 
+sh_test(
+    name = "bin_tests_agent_work_help",
+    srcs = ["tests/bin_smoke.sh"],
+    args = ["$(location :ctx)", "agent-work-help"],
+    data = [":ctx"],
+    timeout = "long",
+)
+
+sh_test(
+    name = "bin_tests_agent_work_schema",
+    srcs = ["tests/bin_smoke.sh"],
+    args = ["$(location :ctx)", "agent-work-schema"],
+    data = [":ctx"],
+    timeout = "long",
+)
+
 test_suite(
     name = "bin_tests",
     tests = [
+        ":bin_tests_agent_work_help",
+        ":bin_tests_agent_work_schema",
         ":bin_tests_init_help",
         ":bin_tests_root_help",
         ":bin_tests_self_update_help",

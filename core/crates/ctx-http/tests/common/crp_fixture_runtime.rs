@@ -11,6 +11,30 @@ pub fn python_binary() -> Option<PathBuf> {
         .ok()
 }
 
+pub fn fixture_runtime_invocation(python: &Path, script_path: &Path) -> (PathBuf, Vec<String>) {
+    #[cfg(unix)]
+    {
+        (
+            PathBuf::from("/usr/bin/env"),
+            vec![
+                "-u".to_string(),
+                "PYTHONHOME".to_string(),
+                "-u".to_string(),
+                "PYTHONPATH".to_string(),
+                python.to_string_lossy().to_string(),
+                script_path.to_string_lossy().to_string(),
+            ],
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        (
+            python.to_path_buf(),
+            vec![script_path.to_string_lossy().to_string()],
+        )
+    }
+}
+
 pub fn write_crp_fixture_runtime(root: &Path) -> PathBuf {
     let script_dir = root
         .join("providers")
@@ -419,10 +443,11 @@ pub fn build_crp_fixture_providers(
 ) -> HashMap<String, Arc<dyn ProviderAdapter>> {
     let mut providers: HashMap<String, Arc<dyn ProviderAdapter>> = HashMap::new();
     for provider_id in provider_ids {
+        let (command, args) = fixture_runtime_invocation(python, script_path);
         let adapter: Arc<Tier1CrpAdapter> = Arc::new(Tier1CrpAdapter::from_raw(
             provider_id,
-            python.to_string_lossy().to_string(),
-            vec![script_path.to_string_lossy().to_string()],
+            command.to_string_lossy().to_string(),
+            args,
         ));
         providers.insert((*provider_id).to_string(), adapter);
     }

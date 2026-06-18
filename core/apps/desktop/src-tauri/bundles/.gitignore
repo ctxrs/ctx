@@ -6,5 +6,7 @@
 /images/
 /daemons/*
 !/daemons/placeholder.txt
+/artifact_identity.json
+/provider_matrix.json
 /runtime_state.json
 /runtime_manifest.effective.json

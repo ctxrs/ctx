@@ -1,0 +1,143 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.ctx.rs/events/v1.schema.json",
+  "title": "EventEnvelope",
+  "description": "ctx session event envelope for agent work streams.",
+  "$ref": "#/$defs/EventEnvelope",
+  "$defs": {
+    "JsonValue": true,
+    "NullableString": {
+      "type": ["string", "null"]
+    },
+    "Timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "SessionEventType": {
+      "type": "string",
+      "enum": [
+        "init",
+        "user_message",
+        "input_queued",
+        "turn_queued",
+        "turn_started",
+        "context_window_update",
+        "turn_finished",
+        "message_queue_added",
+        "message_queue_updated",
+        "message_queue_removed",
+        "message_queue_promoted",
+        "auth_required",
+        "notice",
+        "assistant_chunk",
+        "thought_chunk",
+        "assistant_complete",
+        "assistant_message_inserted",
+        "tool_call",
+        "tool_call_update",
+        "tool_result",
+        "plan",
+        "artifacts_set",
+        "done",
+        "interrupt_requested",
+        "turn_interrupted",
+        "error"
+      ]
+    },
+    "EventEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seq", "id", "session_id", "event_type", "payload_json", "created_at"],
+      "properties": {
+        "seq": {
+          "type": ["integer", "null"]
+        },
+        "id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "run_id": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "event_type": {
+          "$ref": "#/$defs/SessionEventType"
+        },
+        "payload_json": {
+          "$ref": "#/$defs/JsonValue"
+        },
+        "transient": {
+          "type": "boolean"
+        },
+        "created_at": {
+          "$ref": "#/$defs/Timestamp"
+        }
+      }
+    },
+    "ToolCall": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id", "tool_call_id", "turn_id", "order_seq", "created_at", "updated_at"],
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "tool_call_id": {
+          "type": "string"
+        },
+        "turn_id": {
+          "type": "string"
+        },
+        "tool_kind": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "provider_tool_name": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "title": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "subtitle": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "status": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "input_json": {
+          "$ref": "#/$defs/JsonValue"
+        },
+        "output_text": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "order_seq": {
+          "type": "integer"
+        },
+        "first_event_seq": {
+          "type": ["integer", "null"]
+        },
+        "input_truncated": {
+          "type": ["boolean", "null"]
+        },
+        "input_original_bytes": {
+          "type": ["integer", "null"]
+        },
+        "output_truncated": {
+          "type": ["boolean", "null"]
+        },
+        "output_original_bytes": {
+          "type": ["integer", "null"]
+        },
+        "created_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "updated_at": {
+          "$ref": "#/$defs/Timestamp"
+        }
+      }
+    }
+  }
+}

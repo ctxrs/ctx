@@ -17,8 +17,7 @@ const REMOTE_UPDATE_HEALTH_DELAY_MS: u64 = 500;
 const REMOTE_PENDING_UPDATE_RETRY_MS: u64 = 5_000;
 
 type RemoteUpdateKeySet = std::sync::Mutex<std::collections::HashSet<String>>;
-type RemoteUpdateKeySetGuard =
-    std::sync::MutexGuard<'static, std::collections::HashSet<String>>;
+type RemoteUpdateKeySetGuard = std::sync::MutexGuard<'static, std::collections::HashSet<String>>;
 
 fn pending_remote_update_workers() -> &'static RemoteUpdateKeySet {
     static WORKERS: std::sync::OnceLock<RemoteUpdateKeySet> = std::sync::OnceLock::new();
@@ -327,12 +326,7 @@ pub(crate) fn update_current_remote_daemon(
     state: &ConnectionManager,
     requested_channel: Option<&str>,
 ) -> Result<DesktopRemoteDaemonUpdateResp> {
-    update_current_remote_daemon_for_scope(
-        app,
-        state,
-        DEFAULT_CONNECTION_SCOPE,
-        requested_channel,
-    )
+    update_current_remote_daemon_for_scope(app, state, DEFAULT_CONNECTION_SCOPE, requested_channel)
 }
 
 pub(crate) fn update_current_remote_daemon_for_scope(

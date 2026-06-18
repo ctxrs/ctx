@@ -1,4 +1,5 @@
 mod active;
+mod agent_work;
 mod attachments;
 mod common;
 mod harness_container;

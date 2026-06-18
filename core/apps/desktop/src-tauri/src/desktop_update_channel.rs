@@ -80,7 +80,8 @@ mod tests {
     #[test]
     fn preference_wins_over_default() {
         assert_eq!(
-            normalize_desktop_update_channel_with_sources(None, None, Some("canary")).expect("channel"),
+            normalize_desktop_update_channel_with_sources(None, None, Some("canary"))
+                .expect("channel"),
             "canary"
         );
     }
@@ -97,8 +98,12 @@ mod tests {
     #[test]
     fn requested_wins_over_env_and_preference() {
         assert_eq!(
-            normalize_desktop_update_channel_with_sources(Some("preview"), Some("e2e"), Some("canary"))
-                .expect("channel"),
+            normalize_desktop_update_channel_with_sources(
+                Some("preview"),
+                Some("e2e"),
+                Some("canary")
+            )
+            .expect("channel"),
             "preview"
         );
     }

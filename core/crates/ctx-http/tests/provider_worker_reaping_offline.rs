@@ -158,18 +158,20 @@ async fn assert_provider_session_resume_after_idle_reap(provider_id: &str, model
     let _guard_mcp_disabled = EnvGuard::set("CTX_MCP_DISABLED", "1");
 
     let script_path = common::crp_fixture_runtime::write_crp_fixture_runtime(data_dir.path());
+    let (runtime_command, runtime_args) =
+        common::crp_fixture_runtime::fixture_runtime_invocation(&python, &script_path);
     if provider_id == "codex" {
         common::seed_managed_codex_cli_host_runtime_with_args(
             data_dir.path(),
-            &python,
-            vec![script_path.to_string_lossy().to_string()],
+            &runtime_command,
+            runtime_args.clone(),
         )
         .await;
     }
     let adapter: Arc<dyn ProviderAdapter> = Arc::new(Tier1CrpAdapter::from_raw(
         provider_id,
-        python.to_string_lossy().to_string(),
-        vec![script_path.to_string_lossy().to_string()],
+        runtime_command.to_string_lossy().to_string(),
+        runtime_args,
     ));
     let mut providers: HashMap<String, Arc<dyn ProviderAdapter>> = HashMap::new();
     providers.insert(provider_id.to_string(), Arc::clone(&adapter));

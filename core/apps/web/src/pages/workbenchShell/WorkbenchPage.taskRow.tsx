@@ -10,6 +10,7 @@ import { getLoadTestTelemetry } from "../../utils/loadTestTelemetry";
 import { noteVisibleSessionSwitchStarted } from "../../state/visibleSessionSwitchState";
 import { spinnerDelayForNow } from "./WorkbenchPage.utils";
 import type { AnchorRect } from "./WorkbenchPage.types";
+import { formatAgentWorkSummaryChips, type AgentWorkTaskSummary } from "./agentWorkProjection";
 
 type TaskRowProps = {
   taskId: string;
@@ -29,6 +30,7 @@ type TaskRowProps = {
   ageIso: string | null | undefined;
   providerCount: number;
   harnesses: Array<(typeof HARNESS_CATALOG)[number]>;
+  agentWorkSummary?: AgentWorkTaskSummary | null;
   getRenameDraft: (taskId: string, fallback: string) => string;
   setRenameDraft: (taskId: string, nextValue: string) => void;
   onFocusTask: (taskId: string, sessionId?: string | null) => void;
@@ -74,6 +76,7 @@ export const TaskRow = React.memo(function TaskRow({
   ageIso,
   providerCount,
   harnesses,
+  agentWorkSummary,
   getRenameDraft,
   setRenameDraft,
   onFocusTask,
@@ -140,6 +143,7 @@ export const TaskRow = React.memo(function TaskRow({
   const showArchive = archiveEnabled !== false && !onDismiss;
   const showDismiss = typeof onDismiss === "function";
   const resolvedDismissLabel = dismissLabel || "Dismiss";
+  const graphChips = formatAgentWorkSummaryChips(agentWorkSummary);
   const recordSwitchStart = (source: "pointer" | "keyboard") => {
     if (!sessionId || sessionId === activeSessionId) return;
     noteVisibleSessionSwitchStarted(sessionId);
@@ -244,7 +248,16 @@ export const TaskRow = React.memo(function TaskRow({
             aria-label="Rename task"
           />
         ) : (
-          <div className="wb-task-title">{title}</div>
+          <>
+            <div className="wb-task-title">{title}</div>
+            {graphChips.length > 0 ? (
+              <div className="wb-task-agent-work" aria-label="Agent work summary">
+                {graphChips.map((chip) => (
+                  <span key={chip} className="wb-task-agent-work-chip">{chip}</span>
+                ))}
+              </div>
+            ) : null}
+          </>
         )}
       </div>
       <div className="wb-task-meta">

@@ -23,6 +23,7 @@ pub(crate) use head_projection::*;
 pub(crate) use lease::StoreLeaseGuard;
 use session_head_policy::*;
 
+mod agent_work;
 mod artifacts_blobs;
 mod attachments;
 mod conversions;

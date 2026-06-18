@@ -55,6 +55,7 @@ type Params = {
   currentModelId: string;
   interruptSessionId: string;
   resolveSendText: () => Promise<string>;
+  resolveOutboundText?: ((text: string) => Promise<string>) | null;
   setAtBottom: Dispatch<SetStateAction<boolean>>;
   onDraftPersistNow?: (() => void | Promise<void>) | null;
   onSendStarted?: (() => void) | null;
@@ -128,6 +129,7 @@ export function useSessionComposerQueueController(params: Params): Result {
     currentModelId,
     interruptSessionId,
     resolveSendText,
+    resolveOutboundText,
     setAtBottom,
     onDraftPersistNow,
     onSendStarted,
@@ -318,6 +320,9 @@ export function useSessionComposerQueueController(params: Params): Result {
     let text = "";
     try {
       text = (await resolveSendText()).trim();
+      if (resolveOutboundText) {
+        text = (await resolveOutboundText(text)).trim();
+      }
     } catch (error: unknown) {
       setSendErrorState(errorMessage(error));
       setSendBusySafe(false);

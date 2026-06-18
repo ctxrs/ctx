@@ -6,6 +6,8 @@ license.workspace = true
 
 [dependencies]
 chrono.workspace = true
+hex = "0.4"
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "0.10"
 uuid.workspace = true

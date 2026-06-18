@@ -35,6 +35,7 @@ mod mobile_route_handles;
 mod mobile_startup;
 pub mod org_policy;
 mod org_policy_route;
+pub mod plugins;
 mod provider_capability_hosts;
 mod provider_child_reclassifier;
 pub mod provider_guard;
@@ -108,6 +109,7 @@ pub use mcp_auth::{
 };
 pub use merge_queue_route_handles::MergeQueueApiHandle;
 pub use mobile_route_handles::{MobileRuntimeHandle, MobileSecureProxyHandle};
+pub use plugins::{PluginInventoryHandle, PluginInventoryRuntime};
 pub use provider_route_handles::{
     ProviderAccountsHandle, ProviderAdminHandle, ProviderAuthImportHandle, ProviderBootstrapHandle,
     ProviderHarnessConfigHandle, ProviderInstallHandle, ProviderOptionsHandle,
@@ -156,11 +158,11 @@ pub use task_route_handles::{
 #[cfg(test)]
 pub(crate) use workspace_route_handles::WorkspacePrimaryBranchRefreshEffect;
 pub use workspace_route_handles::{
-    WorkspaceAttachmentsHandle, WorkspaceDeletionHandle, WorkspaceExecutionConfigHandle,
-    WorkspaceFileCompletionsHandle, WorkspaceHarnessContainerHandle,
-    WorkspaceMergeQueueConfigHandle, WorkspaceOrgPolicyHandle, WorkspacePrimaryBranchHandle,
-    WorkspacePromptBootstrapConfigHandle, WorkspaceProviderModelPreferenceHandle,
-    WorkspaceRegistryHandle, WorkspaceWorktreeHandle,
+    WorkspaceAgentWorkHandle, WorkspaceAttachmentsHandle, WorkspaceDeletionHandle,
+    WorkspaceExecutionConfigHandle, WorkspaceFileCompletionsHandle,
+    WorkspaceHarnessContainerHandle, WorkspaceMergeQueueConfigHandle, WorkspaceOrgPolicyHandle,
+    WorkspacePrimaryBranchHandle, WorkspacePromptBootstrapConfigHandle,
+    WorkspaceProviderModelPreferenceHandle, WorkspaceRegistryHandle, WorkspaceWorktreeHandle,
 };
 pub use workspace_stream_route_handles::{
     WorkspaceActiveHandle, WorkspaceStreamHandle, WorkspaceVcsStreamHandle,

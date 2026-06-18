@@ -13,6 +13,7 @@ npm_link_all_packages()
 exports_files([
     "scripts/run-e2e-bazel-runtime.mjs",
     "scripts/run-e2e-bazel-runtime.sh",
+    "scripts/start-e2e-server.mjs",
 ])
 
 WEB_SOURCES = glob(
@@ -263,6 +264,8 @@ PLAYWRIGHT_RUNTIME_SCRIPT_TEST_DATA = [
     "scripts/run-e2e-bazel-runtime.mjs",
     "scripts/run-e2e-bazel-runtime.test.mjs",
     "scripts/run-node-test-suite.mjs",
+    "scripts/start-e2e-server.mjs",
+    "scripts/start-e2e-server.test.mjs",
 ]
 
 NON_PRETEXT_EXCLUDES = [
@@ -285,6 +288,15 @@ NON_PRETEXT_VITEST_ARGS = [
     "--reporter=dot",
     "--minWorkers=1",
     "--maxWorkers=2",
+    "--testTimeout=60000",
+]
+
+NON_PRETEXT_STATE_VITEST_ARGS = [
+    "run",
+    "--silent",
+    "--reporter=dot",
+    "--minWorkers=1",
+    "--maxWorkers=1",
     "--testTimeout=60000",
 ]
 
@@ -639,6 +651,7 @@ js_test(
     args = [
         "scripts/generate-playwright-browser-lock.test.mjs",
         "scripts/run-e2e-bazel-runtime.test.mjs",
+        "scripts/start-e2e-server.test.mjs",
     ],
     entry_point = "scripts/run-node-test-suite.mjs",
     data = PLAYWRIGHT_RUNTIME_SCRIPT_TEST_DATA,
@@ -718,7 +731,7 @@ test_suite(
 
 vitest_bin.vitest_test(
     name = "unit_tests_non_pretext_foundation_state",
-    args = NON_PRETEXT_VITEST_ARGS + NON_PRETEXT_FOUNDATION_STATE_TESTS,
+    args = NON_PRETEXT_STATE_VITEST_ARGS + NON_PRETEXT_FOUNDATION_STATE_TESTS,
     data = HERMETIC_WEB_CHECK_DATA,
     chdir = package_name(),
 )

@@ -357,26 +357,24 @@ async fn desktop_connect_ssh_inner(
     .map_err(|e| format!("failed to reach remote daemon: {e:#}"))?;
 
     let connected = match prepared {
-        InitialConnectOutcome::Connected(connected) => {
-            tauri::async_runtime::spawn_blocking({
-                let app = app.clone();
-                let target = target.clone();
-                let channel = channel.clone();
-                let expected_identity = expected_identity.clone();
-                move || {
-                    update_connected_remote_if_needed(
-                        &app,
-                        &target,
-                        connected,
-                        &channel,
-                        &expected_identity,
-                    )
-                }
-            })
-            .await
-            .map_err(|e| format!("failed to update remote daemon: {e}"))?
-            .map_err(|e| format!("failed to update remote daemon: {e:#}"))?
-        }
+        InitialConnectOutcome::Connected(connected) => tauri::async_runtime::spawn_blocking({
+            let app = app.clone();
+            let target = target.clone();
+            let channel = channel.clone();
+            let expected_identity = expected_identity.clone();
+            move || {
+                update_connected_remote_if_needed(
+                    &app,
+                    &target,
+                    connected,
+                    &channel,
+                    &expected_identity,
+                )
+            }
+        })
+        .await
+        .map_err(|e| format!("failed to update remote daemon: {e}"))?
+        .map_err(|e| format!("failed to update remote daemon: {e:#}"))?,
         InitialConnectOutcome::Planned(plan) => {
             desktop_updater::ensure_desktop_app_current_for_remote_bootstrap(&app, &channel)
                 .await?;

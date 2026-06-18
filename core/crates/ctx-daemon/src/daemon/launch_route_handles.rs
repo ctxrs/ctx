@@ -21,6 +21,7 @@ use ctx_update_service::UpdateDrainCoordinator;
 use ctx_workspace_runtime::HarnessRuntimeManager;
 
 use super::{
+    plugins::PluginInventoryRuntime,
     state::ProtectedWorkspaceStoreLookup,
     terminals::{CreateTerminalLaunchRequest, TerminalLaunchHost},
     web_sessions::{WebSessionLaunchError, WebSessionLaunchHost, WebSessionLaunchRequest},
@@ -33,6 +34,7 @@ pub(in crate::daemon) struct ProviderWorkspaceLaunchRuntime {
     auth_token: Option<String>,
     workspace_stores: ProtectedWorkspaceStoreLookup,
     providers: Arc<ProviderRuntime>,
+    plugins: Arc<PluginInventoryRuntime>,
     ops_events: OpsEvents,
     harness: Arc<HarnessRuntimeManager>,
 }
@@ -44,6 +46,7 @@ impl ProviderWorkspaceLaunchRuntime {
         auth_token: Option<String>,
         workspace_stores: ProtectedWorkspaceStoreLookup,
         providers: Arc<ProviderRuntime>,
+        plugins: Arc<PluginInventoryRuntime>,
         ops_events: OpsEvents,
         harness: Arc<HarnessRuntimeManager>,
     ) -> Self {
@@ -53,6 +56,7 @@ impl ProviderWorkspaceLaunchRuntime {
             auth_token,
             workspace_stores,
             providers,
+            plugins,
             ops_events,
             harness,
         }
@@ -72,6 +76,10 @@ impl ProviderWorkspaceLaunchRuntime {
 
     pub(in crate::daemon) fn providers(&self) -> &ProviderRuntime {
         self.providers.as_ref()
+    }
+
+    pub(in crate::daemon) async fn sync_plugin_provider_adapters(&self) {
+        self.plugins.sync_provider_adapters(self.providers()).await;
     }
 
     pub(in crate::daemon) fn ops_events(&self) -> &OpsEvents {

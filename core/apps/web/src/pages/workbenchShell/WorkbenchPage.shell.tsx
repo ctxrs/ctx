@@ -1,9 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   MessageAttachment,
   interruptSession,
 } from "../../api/client";
+import type { WorkspaceActiveSnapshotEvent } from "@ctx/types";
 import { useSessionCacheSnapshot, useSessionSupervisor } from "../../state/sessionSupervisor";
 import { useDaemonConnection } from "../../api/useDaemonConnection";
 import { type DraftHarness, type WorkbenchModeId } from "../../components/WorkbenchComposer";
@@ -12,7 +13,9 @@ import { isDesktopApp } from "../../utils/desktop";
 import { isMobileShellApp } from "../../utils/runtime";
 import { useDictationController } from "../../utils/useDictationController";
 import { NEW_TASK_DRAFT_KEY, useActiveWorkbenchIds, useNewTaskDraft, useWorkbenchShellSnapshot, useWorkbenchStore } from "../../workbench/store";
-import { useWorkspaceActiveSnapshotSnapshot, useWorkspaceActiveSnapshotStore } from "../../state/workspaceActiveSnapshotStore";
+import { useWorkspaceActiveSnapshotEvents, useWorkspaceActiveSnapshotSnapshot, useWorkspaceActiveSnapshotStore } from "../../state/workspaceActiveSnapshotStore";
+import { useWorkspaceAgentWorkGraph, useWorkspaceAgentWorkStore } from "../../state/workspaceAgentWorkStore";
+import { usePluginRegistry } from "../../state/pluginRegistryStore";
 import { useHarnessAuthenticationController } from "../settings/hooks/useHarnessAuthenticationController";
 import { HarnessAuthenticationSectionView } from "../settings/sections/HarnessAuthenticationSection";
 import { useWorkbenchDragDropAttachments } from "./useWorkbenchDragDropAttachments";
@@ -39,6 +42,8 @@ import { useWorkbenchTaskReadActions } from "./useWorkbenchTaskReadActions";
 import { useWorkbenchWorkspaceMetadata } from "./useWorkbenchWorkspaceMetadata";
 import { resolveWorkspaceBootstrapGateState } from "../workspaceBootstrapGate";
 import { getProviderOwnerScopeKeyOrNull } from "../../state/providerScopeAdapters";
+import { projectPluginSlashCommands } from "./pluginCommandProjection";
+import { resolvePluginCommandMessage } from "./pluginCommandInvocation";
 
 export function WorkbenchPageInner({ workspaceId }: { workspaceId: string }) {
   const navigate = useNavigate();
@@ -48,6 +53,10 @@ export function WorkbenchPageInner({ workspaceId }: { workspaceId: string }) {
   const daemonConnection = useDaemonConnection();
   const workspaceSnapshotStore = useWorkspaceActiveSnapshotStore();
   const workspaceSnapshot = useWorkspaceActiveSnapshotSnapshot();
+  const agentWorkStore = useWorkspaceAgentWorkStore();
+  const agentWorkGraph = useWorkspaceAgentWorkGraph();
+  const pluginRegistryState = usePluginRegistry();
+  const agentWorkRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const tasksById = workspaceSnapshot.tasksById;
   const workbenchSnap = useWorkbenchShellSnapshot();
   const mobileShell = isMobileShellApp();
@@ -68,6 +77,41 @@ export function WorkbenchPageInner({ workspaceId }: { workspaceId: string }) {
     const params = new URLSearchParams(window.location.search);
     return params.get("ctxDemoManualHarness") === "1";
   }, []);
+
+  useEffect(
+    () => () => {
+      if (agentWorkRefreshTimerRef.current) {
+        clearTimeout(agentWorkRefreshTimerRef.current);
+        agentWorkRefreshTimerRef.current = null;
+      }
+    },
+    [agentWorkStore],
+  );
+
+  const refreshAgentWorkForWorkspaceEvent = useCallback(
+    (event: WorkspaceActiveSnapshotEvent) => {
+      switch (event.type) {
+        case "active_task_upsert":
+        case "session_summary":
+        case "session_summary_delta":
+        case "session_head_seed":
+          void agentWorkStore.refresh().catch(() => {});
+          if (agentWorkRefreshTimerRef.current) {
+            clearTimeout(agentWorkRefreshTimerRef.current);
+          }
+          agentWorkRefreshTimerRef.current = setTimeout(() => {
+            agentWorkRefreshTimerRef.current = null;
+            void agentWorkStore.refresh().catch(() => {});
+          }, 750);
+          break;
+        default:
+          break;
+      }
+    },
+    [agentWorkStore],
+  );
+
+  useWorkspaceActiveSnapshotEvents(refreshAgentWorkForWorkspaceEvent);
 
   useEffect(() => {
     if (!optimisticFocus) return;
@@ -211,6 +255,15 @@ export function WorkbenchPageInner({ workspaceId }: { workspaceId: string }) {
     setDraftAttachments,
     onError: setStartError,
   });
+  const resolveInitialPluginPrompt = useCallback(
+    (text: string) =>
+      resolvePluginCommandMessage({
+        text,
+        registry: pluginRegistryState.registry,
+        workspaceId,
+      }),
+    [pluginRegistryState.registry, workspaceId],
+  );
 
   const { startBlockedReason, startNewTask } = useWorkbenchTaskCreation({
     workspaceId,
@@ -223,6 +276,7 @@ export function WorkbenchPageInner({ workspaceId }: { workspaceId: string }) {
     ensureProviderAuthSummary,
     dictationRecording,
     stopDictation,
+    resolveInitialPrompt: resolveInitialPluginPrompt,
     focusTask,
     workbenchStore,
     optimisticStartingTaskRef,
@@ -285,6 +339,7 @@ export function WorkbenchPageInner({ workspaceId }: { workspaceId: string }) {
     optimisticTasksById,
     taskLiveInfo,
     providerIdsByTaskFromSessions,
+    agentWorkGraph,
     sessionEntries: sessionSnap.sessions,
     isTaskUnread,
     focusTask,
@@ -305,6 +360,7 @@ export function WorkbenchPageInner({ workspaceId }: { workspaceId: string }) {
     activeSessionId,
     optimisticSessionIdSet,
     optimisticStartingTaskRef,
+    agentWorkGraph,
     workspaceSnapshot,
     workspaceSnapshotStore,
     supervisor,
@@ -418,7 +474,10 @@ export function WorkbenchPageInner({ workspaceId }: { workspaceId: string }) {
   }, [navigate, workspaceId]);
 
   const workspaceTitle = workspace?.name ?? "";
-  const slashCommands = useMemo<SlashCommandDescriptor[]>(() => [], []);
+  const slashCommands = useMemo<SlashCommandDescriptor[]>(
+    () => projectPluginSlashCommands(pluginRegistryState.registry),
+    [pluginRegistryState.registry],
+  );
   const composerHarnessAuthModal = (
     <HarnessAuthenticationSectionView
       controller={composerHarnessAuth}
@@ -556,6 +615,7 @@ export function WorkbenchPageInner({ workspaceId }: { workspaceId: string }) {
               terminalOpen: activeTaskController.terminalOpen,
               artifactsCount: activeTaskController.artifacts.length,
               diffBadgeCount: activeTaskController.diffBadgeCount,
+              agentWorkSummary: activeTaskController.activeAgentWorkSummary,
               onCopyWorktreeLocation: () => void activeTaskController.copyWorktreeLocation(),
               onOpenWorktreeTerminal: () => void activeTaskController.openWorktreeTerminal(),
               onToggleArtifactsPane: () => activeTaskController.toggleArtifactsPane("header_button"),

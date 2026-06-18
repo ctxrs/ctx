@@ -30,7 +30,7 @@ fn local_daemon_health_match_requires_expected_data_root_and_mode_specific_ident
             desktop_exact_version: "1.2.3".to_string(),
             desktop_build_id: "build-a".to_string(),
             desktop_dev_instance_id: "dev-wt-a".to_string(),
-            protocol_compatibility_token: String::new(),
+            protocol_compatibility_token: "dev-wt-a".to_string(),
         },
     };
     assert!(local_daemon_health_matches_expected(
@@ -61,7 +61,7 @@ fn local_daemon_health_match_requires_expected_data_root_and_mode_specific_ident
             desktop_exact_version: "1.2.3".to_string(),
             desktop_build_id: "build-a".to_string(),
             desktop_dev_instance_id: "dev-wt-a".to_string(),
-            protocol_compatibility_token: String::new(),
+            protocol_compatibility_token: "dev-wt-a".to_string(),
         },
     };
     assert!(!local_daemon_health_matches_expected(
@@ -204,9 +204,10 @@ fn daemon_health_reuses_cached_client_for_same_timeout() {
     });
 
     let base_url = format!("http://{}", addr);
+    let timeout = Duration::from_millis(4321);
     for _ in 0..2 {
-        let health = daemon_health_with_timeout(&base_url, Duration::from_secs(5))
-            .expect("daemon health succeeds");
+        let health =
+            daemon_health_with_timeout(&base_url, timeout).expect("daemon health succeeds");
         assert_eq!(health.pid, 1);
     }
 

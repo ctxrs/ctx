@@ -403,6 +403,7 @@ impl SessionAuthRuntimeHost {
         provider_id: &str,
         target: InstallTarget,
     ) -> Arc<dyn ProviderAdapter> {
+        self.provider_launch.sync_plugin_provider_adapters().await;
         ctx_provider_runtime::provider_launch::resolver::ensure_provider_adapter_for_target_with_cfg(
             self.provider_launch.as_ref(),
             cfg,

@@ -445,12 +445,20 @@ async fn session_authenticate_emits_explicit_unsupported_notice() {
 }
 
 fn write_fake_codex_app_server(workdir: &Path, log_path: &Path) -> PathBuf {
-    let script_path = workdir.join("fake-codex.py");
+    let script_path = workdir.join("fake-codex");
+    let python_script_path = workdir.join("fake-codex.py");
     fs::write(
         &script_path,
+        r#"#!/usr/bin/env bash
+unset PYTHONHOME PYTHONPATH
+exec python3 -E "$0.py" "$@"
+"#,
+    )
+    .expect("write fake codex wrapper");
+    fs::write(
+        &python_script_path,
         format!(
-            r#"#!/usr/bin/env python3
-import json
+            r#"import json
 import sys
 from pathlib import Path
 

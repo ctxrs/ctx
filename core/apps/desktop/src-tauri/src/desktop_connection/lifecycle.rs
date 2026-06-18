@@ -19,9 +19,7 @@ fn request_daemon_shutdown_drain(
         .timeout(Duration::from_millis(1800))
         .build()
         .context("building daemon shutdown client")?;
-    let mut request = client
-        .post(url)
-        .bearer_auth(auth_token);
+    let mut request = client.post(url).bearer_auth(auth_token);
     if let Some(token) = local_shutdown_token {
         request = request.header(LOCAL_DAEMON_SHUTDOWN_TOKEN_HEADER, token);
     }
@@ -33,7 +31,10 @@ fn request_daemon_shutdown_drain(
         .send()
         .context("requesting daemon shutdown drain")?;
     if !response.status().is_success() {
-        anyhow::bail!("daemon shutdown drain failed with status {}", response.status());
+        anyhow::bail!(
+            "daemon shutdown drain failed with status {}",
+            response.status()
+        );
     }
     Ok(())
 }

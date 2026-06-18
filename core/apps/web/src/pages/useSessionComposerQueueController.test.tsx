@@ -194,6 +194,56 @@ describe("useSessionComposerQueueController", () => {
     expect(onSendStarted).toHaveBeenCalledTimes(1);
   });
 
+  it("resolves outbound text before creating optimistic and posted messages", async () => {
+    const { result } = renderHook(() =>
+      useSessionComposerQueueController(
+        createHookProps({
+          optimisticQueuedMessages: [],
+          resolveSendText: vi.fn(async () => "/review.tools:review src/index.ts"),
+          resolveOutboundText: vi.fn(async () => "Review src/index.ts carefully"),
+        }),
+      ),
+    );
+
+    await act(async () => {
+      await result.current.sendNow();
+    });
+
+    expect(supervisor.upsertOptimisticThreadMessage).toHaveBeenCalledWith(
+      "session-1",
+      expect.objectContaining({ content: "Review src/index.ts carefully" }),
+    );
+    expect(postMessageMock).toHaveBeenCalledWith(
+      "session-1",
+      "Review src/index.ts carefully",
+      undefined,
+      [],
+      expect.any(Object),
+    );
+  });
+
+  it("does not create an optimistic message when outbound text resolution fails", async () => {
+    const { result } = renderHook(() =>
+      useSessionComposerQueueController(
+        createHookProps({
+          optimisticQueuedMessages: [],
+          resolveSendText: vi.fn(async () => "/review.tools:review src/index.ts"),
+          resolveOutboundText: vi.fn(async () => {
+            throw new Error("plugin command failed");
+          }),
+        }),
+      ),
+    );
+
+    await act(async () => {
+      await result.current.sendNow();
+    });
+
+    expect(result.current.sendError).toBe("plugin command failed");
+    expect(supervisor.upsertOptimisticThreadMessage).not.toHaveBeenCalled();
+    expect(postMessageMock).not.toHaveBeenCalled();
+  });
+
   it("carries the first optimistic thread message across an immediate session-id handoff", async () => {
     const initialProps = createHookProps({
       sessionId: "session-temp",

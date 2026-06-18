@@ -1,6 +1,8 @@
-use ctx_core::ids::{SessionId, TaskId, WorkspaceId, WorktreeId};
+use ctx_core::ids::{ContributionId, SessionId, TaskId, WorkspaceId, WorktreeId};
 use ctx_core::models::{
-    ExecutionEnvironment, Message, Session, Task, VcsKind, Workspace, Worktree,
+    Contribution, ContributionEndpoint, ContributionRole, ExecutionEnvironment, Message,
+    RecordFidelity, RecordOrigin, RecordSource, RecordTrust, Session, Task, VcsKind, Workspace,
+    Worktree,
 };
 use ctx_observability::ops_events::OpsEvent;
 use ctx_observability::perf_telemetry::{PerfMetric, PerfMetricKind};
@@ -106,6 +108,36 @@ impl TaskSessionHandles {
             admission: handle.clone(),
         }
     }
+}
+
+fn task_session_contribution_id(task_id: TaskId, session_id: SessionId) -> ContributionId {
+    ContributionId::from_id(format!(
+        "con_task_session_{}_{}",
+        task_id.0.simple(),
+        session_id.0.simple()
+    ))
+}
+
+fn session_worktree_contribution_id(
+    session_id: SessionId,
+    worktree_id: WorktreeId,
+) -> ContributionId {
+    ContributionId::from_id(format!(
+        "con_session_{}_worktree_{}",
+        session_id.0.simple(),
+        worktree_id.0.simple()
+    ))
+}
+
+fn parent_child_session_contribution_id(
+    parent_session_id: SessionId,
+    child_session_id: SessionId,
+) -> ContributionId {
+    ContributionId::from_id(format!(
+        "con_parent_session_{}_child_{}",
+        parent_session_id.0.simple(),
+        child_session_id.0.simple()
+    ))
 }
 
 impl TaskSessionAdmissionHandle {
@@ -286,6 +318,7 @@ impl TaskSessionAdmissionHandle {
         &self,
         provider_id: &str,
     ) -> bool {
+        self.provider_status().sync_plugin_provider_adapters().await;
         self.providers()
             .can_create_loaded_session_for_provider(provider_id)
             .await
@@ -433,6 +466,158 @@ impl TaskSessionAdmissionHandle {
         if let Err(error) = self.emit_workspace_task_upsert(task.id).await {
             tracing::warn!(task_id = %task.id.0, "workspace active snapshot refresh failed: {error:?}");
         }
+    }
+
+    pub(in crate::daemon) async fn record_session_created_agent_work(
+        &self,
+        store: &Store,
+        task: &Task,
+        session: &Session,
+    ) -> anyhow::Result<()> {
+        if session.workspace_id != task.workspace_id || session.task_id != task.id {
+            anyhow::bail!("session does not belong to the task being linked");
+        }
+        let worktree = store
+            .get_worktree(session.worktree_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("session worktree is missing"))?;
+        if worktree.workspace_id != task.workspace_id {
+            anyhow::bail!("session worktree belongs to a different workspace");
+        }
+        let parent_session_id = if let Some(parent_session_id) = session.parent_session_id {
+            match store.get_session(parent_session_id).await? {
+                Some(parent_session) if parent_session.workspace_id == task.workspace_id => {
+                    Some(parent_session_id)
+                }
+                Some(_) => {
+                    tracing::warn!(
+                        session_id = %session.id.0,
+                        parent_session_id = %parent_session_id.0,
+                        "skipping agent-work parent session link for cross-workspace parent"
+                    );
+                    None
+                }
+                None => {
+                    tracing::warn!(
+                        session_id = %session.id.0,
+                        parent_session_id = %parent_session_id.0,
+                        "skipping agent-work parent session link for unresolved parent"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let session_endpoint = ContributionEndpoint::Session {
+            session_id: Some(session.id),
+            provider: None,
+            id: None,
+            turn_id: None,
+            run_id: None,
+        };
+        let worktree_endpoint = ContributionEndpoint::Worktree {
+            worktree_id: Some(session.worktree_id),
+            id: None,
+        };
+        let session_metadata = serde_json::json!({
+            "event": "session_created",
+            "provider_id": &session.provider_id,
+            "model_id": compose_model_id(&session.model_id, session.reasoning_effort.as_deref()),
+            "reasoning_effort": session.reasoning_effort.as_deref(),
+            "worktree_id": session.worktree_id.0.to_string(),
+            "execution_environment": session.execution_environment.as_str(),
+            "parent_session_id": session.parent_session_id.map(|id| id.0.to_string()),
+            "relationship": session.relationship.as_deref(),
+        });
+        store
+            .upsert_contribution(&Contribution {
+                id: task_session_contribution_id(task.id, session.id),
+                workspace_id: task.workspace_id,
+                change_set_id: None,
+                subject: ContributionEndpoint::Task {
+                    task_id: Some(task.id),
+                    id: None,
+                },
+                target: session_endpoint.clone(),
+                role: ContributionRole::Authored,
+                source: RecordSource::Session,
+                origin: RecordOrigin::System,
+                fidelity: RecordFidelity::Exact,
+                trust: RecordTrust::High,
+                summary: Some("Task created agent session".to_string()),
+                fingerprint: None,
+                issuer: Some("ctx-daemon".to_string()),
+                metadata_json: Some(session_metadata),
+                source_records: Vec::new(),
+                created_at: Some(session.created_at),
+                updated_at: Some(session.updated_at),
+                schema_version: 1,
+            })
+            .await?;
+
+        store
+            .upsert_contribution(&Contribution {
+                id: session_worktree_contribution_id(session.id, session.worktree_id),
+                workspace_id: task.workspace_id,
+                change_set_id: None,
+                subject: session_endpoint.clone(),
+                target: worktree_endpoint,
+                role: ContributionRole::Context,
+                source: RecordSource::Session,
+                origin: RecordOrigin::System,
+                fidelity: RecordFidelity::Exact,
+                trust: RecordTrust::High,
+                summary: Some("Agent session used worktree".to_string()),
+                fingerprint: None,
+                issuer: Some("ctx-daemon".to_string()),
+                metadata_json: Some(serde_json::json!({
+                    "event": "session_created",
+                    "execution_environment": session.execution_environment.as_str(),
+                })),
+                source_records: Vec::new(),
+                created_at: Some(session.created_at),
+                updated_at: Some(session.updated_at),
+                schema_version: 1,
+            })
+            .await?;
+
+        if let Some(parent_session_id) = parent_session_id {
+            store
+                .upsert_contribution(&Contribution {
+                    id: parent_child_session_contribution_id(parent_session_id, session.id),
+                    workspace_id: task.workspace_id,
+                    change_set_id: None,
+                    subject: ContributionEndpoint::Session {
+                        session_id: Some(parent_session_id),
+                        provider: None,
+                        id: None,
+                        turn_id: None,
+                        run_id: None,
+                    },
+                    target: session_endpoint,
+                    role: ContributionRole::Context,
+                    source: RecordSource::Session,
+                    origin: RecordOrigin::System,
+                    fidelity: RecordFidelity::Exact,
+                    trust: RecordTrust::High,
+                    summary: Some("Parent session created child agent session".to_string()),
+                    fingerprint: None,
+                    issuer: Some("ctx-daemon".to_string()),
+                    metadata_json: Some(serde_json::json!({
+                        "event": "session_created",
+                        "relationship": session.relationship.as_deref(),
+                    })),
+                    source_records: Vec::new(),
+                    created_at: Some(session.created_at),
+                    updated_at: Some(session.updated_at),
+                    schema_version: 1,
+                })
+                .await?;
+        }
+
+        Ok(())
     }
 
     pub async fn create_session_for_task(

@@ -1,6 +1,29 @@
 use super::*;
 use std::fs;
 
+fn write_required_bundle_metadata(bundle_dir: &Path) {
+    fs::write(
+        bundle_dir.join("artifact_identity.json"),
+        r#"{
+  "schemaVersion": 1,
+  "exactVersion": "0.0.0-test",
+  "buildId": "test-build",
+  "compatibilityToken": "test-compat"
+}"#,
+    )
+    .expect("write artifact identity");
+    fs::write(
+        bundle_dir.join("provider_matrix.json"),
+        r#"{
+  "version": 1,
+  "providers": [
+    { "id": "test-provider" }
+  ]
+}"#,
+    )
+    .expect("write provider manifest");
+}
+
 #[test]
 fn parse_target_requires_os_arch_pair() {
     assert_eq!(
@@ -137,6 +160,7 @@ fn thin_bundle_runtime_requirement_accepts_managed_runtime_source() {
         fs::remove_dir_all(&temp).expect("clear tempdir");
     }
     fs::create_dir_all(&temp).expect("create tempdir");
+    write_required_bundle_metadata(&temp);
     fs::write(
         temp.join("manifest.json"),
         r#"{
@@ -213,6 +237,14 @@ fn thin_bundle_avf_runtime_requires_helper_metadata() {
         fs::remove_dir_all(&temp).expect("clear tempdir");
     }
     fs::create_dir_all(&temp).expect("create tempdir");
+    write_required_bundle_metadata(&temp);
+    let host_os = if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        "linux"
+    };
     fs::write(
         temp.join("manifest.json"),
         r#"{
@@ -236,7 +268,7 @@ fn thin_bundle_avf_runtime_requires_helper_metadata() {
   "required": {{
     "targets": {{
       "provider": [],
-      "runtime": ["macos/host"],
+      "runtime": ["{os}/host"],
       "image": [],
       "machine_cache": []
     }},
@@ -263,7 +295,7 @@ fn thin_bundle_avf_runtime_requires_helper_metadata() {
     }}
   ]
 }}"#,
-            os = std::env::consts::OS,
+            os = host_os,
             arch = std::env::consts::ARCH,
             sha = "1".repeat(64),
         ),
@@ -311,6 +343,7 @@ fn bundled_avf_runtime_requires_helper_payloads() {
         fs::remove_dir_all(&temp).expect("clear tempdir");
     }
     fs::create_dir_all(&helpers_dir).expect("create helpers dir");
+    write_required_bundle_metadata(&temp);
     fs::write(runtime_root.join("rootfs.raw"), "rootfs").expect("write rootfs");
     fs::write(helpers_dir.join("kernel"), "kernel").expect("write kernel");
     fs::write(helpers_dir.join("initrd"), "initrd").expect("write initrd");
@@ -431,6 +464,7 @@ fn thin_bundle_avf_runtime_entry_rejects_unresolved_managed_runtime_source_witho
         fs::remove_dir_all(&temp).expect("clear tempdir");
     }
     fs::create_dir_all(&temp).expect("create tempdir");
+    write_required_bundle_metadata(&temp);
     fs::write(
         temp.join("manifest.json"),
         format!(

@@ -1,4 +1,5 @@
 import type { Artifact } from "../api/client";
+import { artifactPathBaseName } from "../utils/artifactPaths";
 
 export function formatBytes(bytes: number | null | undefined): string {
   if (!bytes || bytes <= 0) return "0 B";
@@ -15,8 +16,7 @@ export function formatBytes(bytes: number | null | undefined): string {
 export function displayName(artifact: Artifact): string {
   const name = (artifact.name ?? "").trim();
   if (name) return name;
-  const parts = artifact.absolute_path.split(/[\\/]/).filter(Boolean);
-  return parts[parts.length - 1] ?? "artifact";
+  return artifactPathBaseName(artifact) || "artifact";
 }
 
 function sanitizeFileName(name: string): string {
@@ -28,8 +28,7 @@ function sanitizeFileName(name: string): string {
 
 export function artifactFileName(artifact: Artifact): string {
   const name = (artifact.name ?? "").trim();
-  const pathParts = artifact.absolute_path.split(/[\\/]/).filter(Boolean);
-  const pathBase = pathParts[pathParts.length - 1] ?? "";
+  const pathBase = artifactPathBaseName(artifact);
   const pathExt = pathBase.includes(".") ? pathBase.split(".").pop() ?? "" : "";
   if (name && pathExt && !name.includes(".")) {
     return sanitizeFileName(`${name}.${pathExt}`);

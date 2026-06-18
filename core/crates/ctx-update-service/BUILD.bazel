@@ -1,0 +1,38 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+_CTX_UPDATE_SERVICE_DEPS = [
+    "@crates//:anyhow",
+    "@crates//:base64",
+    "@crates//:blake2",
+    "@crates//:chrono",
+    "@crates//:ed25519-dalek",
+    "@crates//:hex",
+    "@crates//:reqwest",
+    "@crates//:semver",
+    "@crates//:serde",
+    "@crates//:serde_json",
+    "@crates//:sha2",
+    "@crates//:tokio",
+]
+
+rust_library(
+    name = "lib",
+    crate_name = "ctx_update_service",
+    crate_root = "src/lib.rs",
+    edition = "2021",
+    srcs = glob(["src/**/*.rs"]),
+    deps = _CTX_UPDATE_SERVICE_DEPS,
+    proc_macro_deps = [
+        "@crates//:async-trait",
+    ],
+)
+
+rust_test(
+    name = "unit_tests",
+    crate = ":lib",
+    deps = [
+        "@crates//:tempfile",
+    ],
+)

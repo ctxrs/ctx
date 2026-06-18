@@ -9,6 +9,7 @@ use ctx_store::Store;
 use ctx_transport_runtime::web_sessions::WebSessionManager;
 use ctx_workspace_active_snapshot::WorkspaceActiveSnapshotHub;
 
+use crate::daemon::plugins::PluginInventoryRuntime;
 use crate::daemon::scheduler::SessionSchedulerWorkerHost;
 use crate::daemon::state::{ProtectedWorkspaceStoreLookup, SessionRuntime};
 
@@ -20,6 +21,7 @@ pub(super) struct TaskRouteDepsParts {
     pub(super) sessions: Arc<SessionRuntime>,
     pub(super) scheduler_worker_host: Arc<SessionSchedulerWorkerHost>,
     pub(super) providers: Arc<ProviderRuntime>,
+    pub(super) plugins: Arc<PluginInventoryRuntime>,
     pub(super) web_sessions: Arc<WebSessionManager>,
     pub(super) telemetry: Telemetry,
     pub(super) ops_events: OpsEvents,
@@ -35,6 +37,7 @@ pub(super) struct TaskRouteDeps {
     pub(super) sessions: Arc<SessionRuntime>,
     pub(super) scheduler_worker_host: Arc<SessionSchedulerWorkerHost>,
     pub(super) providers: Arc<ProviderRuntime>,
+    pub(super) plugins: Arc<PluginInventoryRuntime>,
     pub(super) web_sessions: Arc<WebSessionManager>,
     pub(super) telemetry: Telemetry,
     pub(super) ops_events: OpsEvents,
@@ -51,6 +54,7 @@ impl TaskRouteDeps {
             sessions: parts.sessions,
             scheduler_worker_host: parts.scheduler_worker_host,
             providers: parts.providers,
+            plugins: parts.plugins,
             web_sessions: parts.web_sessions,
             telemetry: parts.telemetry,
             ops_events: parts.ops_events,

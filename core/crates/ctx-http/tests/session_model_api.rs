@@ -380,10 +380,12 @@ async fn live_crp_fixture_authenticate_session_emits_ready_signals_and_stays_liv
 
     let python = common::crp_fixture_runtime::python_binary().expect("python available");
     let script_path = common::crp_fixture_runtime::write_crp_fixture_runtime(workdir.path());
+    let (runtime_command, runtime_args) =
+        common::crp_fixture_runtime::fixture_runtime_invocation(&python, &script_path);
     let adapter = Tier1CrpAdapter::from_raw(
         provider_id,
-        python.to_string_lossy().to_string(),
-        vec![script_path.to_string_lossy().to_string()],
+        runtime_command.to_string_lossy().to_string(),
+        runtime_args,
     );
     let session_key = "fixture-auth-live-session".to_string();
     let Some(ctx_mcp_command) = common::ctx_mcp_command_env_pair() else {
@@ -697,10 +699,12 @@ async fn assert_live_crp_session_model_switch_case(
 
     let python = common::crp_fixture_runtime::python_binary().expect("python available");
     let script_path = common::crp_fixture_runtime::write_crp_fixture_runtime(data_dir.path());
+    let (runtime_command, runtime_args) =
+        common::crp_fixture_runtime::fixture_runtime_invocation(&python, &script_path);
     let adapter: Arc<Tier1CrpAdapter> = Arc::new(Tier1CrpAdapter::from_raw(
         provider_id,
-        python.to_string_lossy().to_string(),
-        vec![script_path.to_string_lossy().to_string()],
+        runtime_command.to_string_lossy().to_string(),
+        runtime_args,
     ));
     let mut providers: HashMap<String, Arc<dyn ProviderAdapter>> = HashMap::new();
     providers.insert(provider_id.to_string(), adapter.clone());

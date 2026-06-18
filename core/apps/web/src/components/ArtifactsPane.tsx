@@ -7,6 +7,7 @@ import {
   getArtifactPreviewKind,
   isPreviewableArtifact,
 } from "../utils/artifacts";
+import { artifactDisplayPath, artifactIdentityKey } from "../utils/artifactPaths";
 import { buildArtifactDocumentPreview } from "../utils/documentArtifacts";
 import { errorMessage } from "../utils/errorMessage";
 import { ArtifactViewer } from "./ArtifactViewer";
@@ -91,7 +92,7 @@ function ArtifactCard({
   const url = resourceUrl.url;
   const mimeLabel = artifact.mime_type || "application/octet-stream";
   const meta = `${mimeLabel} · ${formatBytes(artifact.bytes)}`;
-  const title = artifact.absolute_path || name;
+  const title = artifactDisplayPath(artifact) || name;
   const previewKind = getArtifactPreviewKind(artifact);
   const isVideo = previewKind === "video";
   const isImage = previewKind === "image";
@@ -223,7 +224,8 @@ export function ArtifactsPane({
     if (openArtifactId) {
       return artifacts.find((artifact) => idToString(artifact.id) === openArtifactId) ?? null;
     }
-    return artifacts.find((artifact) => artifact.absolute_path === viewerState.artifact.absolute_path) ?? null;
+    const openArtifactKey = artifactIdentityKey(viewerState.artifact);
+    return artifacts.find((artifact) => artifactIdentityKey(artifact) === openArtifactKey) ?? null;
   }, [artifacts, sessionId, viewerState]);
 
   useEffect(() => {
@@ -235,7 +237,7 @@ export function ArtifactsPane({
   const rows = useMemo(() => {
     return artifacts.map((artifact) => {
       const artifactId = idToString(artifact.id);
-      const key = artifactId || artifact.absolute_path || artifact.name || "artifact";
+      const key = artifactId || artifactIdentityKey(artifact);
       return (
         <ArtifactCard
           key={key}

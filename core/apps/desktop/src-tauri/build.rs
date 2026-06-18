@@ -12,7 +12,8 @@ mod dev_instance_identity {
 }
 
 fn main() {
-    emit_build_identity();
+    let build_identity = emit_build_identity();
+    ensure_desktop_bundle_metadata(&build_identity);
     emit_embedded_updater_pubkey();
     if env::var_os("CARGO_FEATURE_STT").is_some() {
         ensure_vosk_runtime();
@@ -30,7 +31,13 @@ fn main() {
     tauri_build::build()
 }
 
-fn emit_build_identity() {
+struct BuildIdentity {
+    exact_version: String,
+    build_id: String,
+    compatibility_token: String,
+}
+
+fn emit_build_identity() -> BuildIdentity {
     println!("cargo:rerun-if-env-changed=CTX_BUILD_ID");
     println!("cargo:rerun-if-env-changed=CTX_COMPATIBILITY_TOKEN");
     println!("cargo:rerun-if-env-changed=CTX_DEV_INSTANCE_ID");
@@ -54,16 +61,22 @@ fn emit_build_identity() {
     println!("cargo:rustc-env=CTX_COMPATIBILITY_TOKEN={compatibility_token}");
     println!("cargo:rustc-env=CTX_DEV_INSTANCE_ID={compatibility_token}");
 
-    if let Ok(explicit) = env::var("CTX_BUILD_ID") {
-        let trimmed = explicit.trim();
-        if !trimmed.is_empty() {
-            println!("cargo:rustc-env=CTX_BUILD_ID={trimmed}");
-            return;
-        }
-    }
-    let build_id = git_head_build_id(&manifest_dir)
-        .unwrap_or_else(|| env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".to_string()));
+    let build_id = env::var("CTX_BUILD_ID")
+        .ok()
+        .map(|explicit| explicit.trim().to_string())
+        .filter(|trimmed| !trimmed.is_empty())
+        .unwrap_or_else(|| {
+            git_head_build_id(&manifest_dir).unwrap_or_else(|| {
+                env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".to_string())
+            })
+        });
     println!("cargo:rustc-env=CTX_BUILD_ID={build_id}");
+
+    BuildIdentity {
+        exact_version,
+        build_id,
+        compatibility_token,
+    }
 }
 
 fn explicit_env_value(name: &str) -> Option<String> {
@@ -71,6 +84,78 @@ fn explicit_env_value(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn ensure_desktop_bundle_metadata(identity: &BuildIdentity) {
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    let bundles_dir = manifest_dir.join("bundles");
+    fs::create_dir_all(&bundles_dir).unwrap_or_else(|err| {
+        panic!(
+            "failed to create desktop bundle metadata dir '{}': {err}",
+            bundles_dir.display()
+        )
+    });
+
+    let provider_matrix_src = manifest_dir
+        .join("../../..")
+        .join("crates/ctx-provider-accounts/src/provider_matrix.json");
+    println!("cargo:rerun-if-changed={}", provider_matrix_src.display());
+    let provider_matrix_raw = fs::read(&provider_matrix_src).unwrap_or_else(|err| {
+        panic!(
+            "failed to read canonical provider matrix '{}': {err}",
+            provider_matrix_src.display()
+        )
+    });
+    write_if_different(
+        &bundles_dir.join("provider_matrix.json"),
+        &provider_matrix_raw,
+    )
+    .unwrap_or_else(|err| panic!("failed to write bundled provider matrix: {err}"));
+
+    let artifact_identity = format!(
+        concat!(
+            "{{\n",
+            "  \"schemaVersion\": 1,\n",
+            "  \"exactVersion\": \"{}\",\n",
+            "  \"buildId\": \"{}\",\n",
+            "  \"compatibilityToken\": \"{}\"\n",
+            "}}\n"
+        ),
+        json_escape(&identity.exact_version),
+        json_escape(&identity.build_id),
+        json_escape(&identity.compatibility_token)
+    );
+    write_if_different(
+        &bundles_dir.join("artifact_identity.json"),
+        artifact_identity.as_bytes(),
+    )
+    .unwrap_or_else(|err| panic!("failed to write desktop artifact identity: {err}"));
+}
+
+fn write_if_different(path: &Path, contents: &[u8]) -> Result<(), std::io::Error> {
+    if fs::read(path)
+        .map(|existing| existing == contents)
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    fs::write(path, contents)
+}
+
+fn json_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn emit_embedded_updater_pubkey() {

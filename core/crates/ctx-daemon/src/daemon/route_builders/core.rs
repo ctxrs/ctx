@@ -43,6 +43,9 @@ impl RouteBuilder {
     pub fn logs(&self) -> LogsHandle {
         LogsHandle::new(self.state.core.data_root.clone())
     }
+    pub fn plugins(&self) -> PluginInventoryHandle {
+        PluginInventoryHandle::new(Arc::clone(&self.state.plugins))
+    }
     pub fn dictation(&self) -> DictationHandle {
         DictationHandle::new(self.state.global_store().clone())
     }

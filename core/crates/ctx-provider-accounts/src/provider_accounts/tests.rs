@@ -1082,6 +1082,8 @@ async fn codex_env_rejects_symlinked_runtime_home_before_api_key_projection() {
 async fn codex_account_deletion_marker_blocks_active_runtime_auth() {
     let _env_lock = lock_env().await;
     let _guard = EnvGuard::without("CTX_CODEX_HOME");
+    let _seed_guard = EnvGuard::without(CTX_SEED_CODEX_AUTH_FROM_HOST_ENV);
+    let _path_guard = EnvGuard::without(CTX_CODEX_HOST_AUTH_PATH_ENV);
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let registry = CodexAccountRegistry {

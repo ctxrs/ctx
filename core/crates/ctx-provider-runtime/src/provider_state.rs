@@ -29,6 +29,26 @@ impl ProviderRuntime {
         self.adapters.lock().await.insert(provider_id, adapter);
     }
 
+    pub async fn remove_provider_adapter(&self, provider_id: &str) {
+        self.adapters.lock().await.remove(provider_id);
+    }
+
+    pub async fn remove_provider_adapter_if_same(
+        &self,
+        provider_id: &str,
+        expected: &Arc<dyn ProviderAdapter>,
+    ) -> bool {
+        let mut adapters = self.adapters.lock().await;
+        let Some(existing) = adapters.get(provider_id) else {
+            return false;
+        };
+        if !Arc::ptr_eq(existing, expected) {
+            return false;
+        }
+        adapters.remove(provider_id);
+        true
+    }
+
     pub async fn provider_adapter(&self, provider_id: &str) -> Option<Arc<dyn ProviderAdapter>> {
         self.adapters.lock().await.get(provider_id).cloned()
     }
@@ -116,6 +136,10 @@ impl ProviderRuntime {
 
     pub async fn upsert_provider_status(&self, provider_id: String, status: ProviderStatus) {
         self.statuses.lock().await.insert(provider_id, status);
+    }
+
+    pub async fn remove_provider_status(&self, provider_id: &str) {
+        self.statuses.lock().await.remove(provider_id);
     }
 
     pub async fn provider_status(&self, provider_id: &str) -> Option<ProviderStatus> {

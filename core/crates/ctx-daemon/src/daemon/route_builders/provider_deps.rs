@@ -6,6 +6,7 @@ use ctx_provider_runtime::ProviderRuntime;
 use ctx_workspace_runtime::HarnessRuntimeManager;
 use tokio::sync::broadcast;
 
+use crate::daemon::plugins::PluginInventoryRuntime;
 use crate::daemon::state::ProtectedWorkspaceStoreLookup;
 use crate::daemon::{
     ProviderAccountsHandle, ProviderAdminHandle, ProviderAuthImportHandle, ProviderBootstrapHandle,
@@ -20,6 +21,7 @@ pub(super) struct ProviderRouteDeps {
     daemon_url: String,
     workspace_stores: ProtectedWorkspaceStoreLookup,
     providers: Arc<ProviderRuntime>,
+    plugins: Arc<PluginInventoryRuntime>,
     ops_events: OpsEvents,
     shutdown_tx: broadcast::Sender<()>,
     workspace_launch_runtime: Arc<ProviderWorkspaceLaunchRuntime>,
@@ -31,6 +33,7 @@ pub(super) struct ProviderRouteDepsParts {
     pub(super) auth_token: Option<String>,
     pub(super) workspace_stores: ProtectedWorkspaceStoreLookup,
     pub(super) providers: Arc<ProviderRuntime>,
+    pub(super) plugins: Arc<PluginInventoryRuntime>,
     pub(super) ops_events: OpsEvents,
     pub(super) shutdown_tx: broadcast::Sender<()>,
     pub(super) harness: Arc<HarnessRuntimeManager>,
@@ -44,6 +47,7 @@ impl ProviderRouteDeps {
             parts.auth_token,
             parts.workspace_stores.clone(),
             Arc::clone(&parts.providers),
+            Arc::clone(&parts.plugins),
             parts.ops_events.clone(),
             parts.harness,
         ));
@@ -52,6 +56,7 @@ impl ProviderRouteDeps {
             daemon_url: parts.daemon_url,
             workspace_stores: parts.workspace_stores,
             providers: parts.providers,
+            plugins: parts.plugins,
             ops_events: parts.ops_events,
             shutdown_tx: parts.shutdown_tx,
             workspace_launch_runtime,
@@ -71,6 +76,7 @@ impl ProviderRouteDeps {
             self.data_root.clone(),
             self.workspace_stores.clone(),
             Arc::clone(&self.providers),
+            Arc::clone(&self.plugins),
             self.ops_events.clone(),
         )
     }
@@ -91,6 +97,7 @@ impl ProviderRouteDeps {
         ProviderStatusHandle::new(
             self.data_root.clone(),
             Arc::clone(&self.providers),
+            Arc::clone(&self.plugins),
             self.ops_events.clone(),
         )
     }
@@ -99,6 +106,7 @@ impl ProviderRouteDeps {
         ProviderAdminHandle::new(
             self.data_root.clone(),
             Arc::clone(&self.providers),
+            Arc::clone(&self.plugins),
             self.ops_events.clone(),
         )
     }

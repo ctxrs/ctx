@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use tempfile::tempdir;
 
@@ -83,6 +84,52 @@ async fn ensure_provider_adapter_for_target_surfaces_agent_server_config_errors_
             .await
             .is_none(),
         "invalid managed config should not seed provider adapter cache"
+    );
+}
+
+#[tokio::test]
+async fn ensure_provider_adapter_for_container_uses_host_only_plugin_adapter() {
+    let data_root = tempfile::tempdir().expect("tempdir");
+    let host = TestRuntimeHost::new(data_root.path().to_path_buf());
+    let adapter: Arc<dyn ProviderAdapter> = Arc::new(FakeProviderAdapter::new());
+    host.provider_runtime
+        .upsert_provider_adapter("plugin-provider".to_string(), Arc::clone(&adapter))
+        .await;
+    let mut details = HashMap::new();
+    details.insert("plugin_provider".to_string(), "true".to_string());
+    details.insert("plugin_provider_target".to_string(), "host".to_string());
+    host.provider_runtime
+        .upsert_provider_status(
+            "plugin-provider".to_string(),
+            ProviderStatus {
+                provider_id: "plugin-provider".to_string(),
+                installed: true,
+                detected_path: None,
+                version: None,
+                capabilities: None,
+                health: ProviderHealth::Ok,
+                diagnostics: Vec::new(),
+                details,
+                usability: ctx_providers::adapters::ProviderUsability::default(),
+            },
+        )
+        .await;
+
+    let resolved = ensure_provider_adapter_for_target_with_cfg(
+        &host,
+        &installer::AgentServerConfigFile::default(),
+        "plugin-provider",
+        InstallTarget::Container,
+    )
+    .await;
+
+    assert!(Arc::ptr_eq(&resolved, &adapter));
+    assert!(
+        host.provider_runtime
+            .target_provider_adapter("plugin-provider@container")
+            .await
+            .is_none(),
+        "host-only plugin providers should not seed target adapter cache"
     );
 }
 

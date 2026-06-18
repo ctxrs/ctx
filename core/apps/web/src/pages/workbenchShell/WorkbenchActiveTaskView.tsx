@@ -6,6 +6,7 @@ import { SessionsPane } from "../../components/SessionsPane";
 import { WorkbenchSessionSlot } from "./WorkbenchPage.sessionSlot";
 import { WorkbenchSessionHeader } from "./WorkbenchSessionHeader";
 import { WorkbenchSessionLoadIssues, type WorkbenchSessionLoadIssue } from "./WorkbenchSessionLoadIssues";
+import type { AgentWorkTaskSummary } from "./agentWorkProjection";
 import type { GitPaneModel } from "./worktreeGitPaneModel";
 
 type WorktreeChip = ComponentProps<typeof WorkbenchSessionHeader>["worktreeChip"];
@@ -25,6 +26,7 @@ type WorkbenchActiveTaskViewProps = {
   terminalOpen: boolean;
   artifactsCount: number;
   diffBadgeCount: number;
+  agentWorkSummary?: AgentWorkTaskSummary | null;
   onCopyWorktreeLocation: () => void;
   onOpenWorktreeTerminal: () => void;
   onToggleArtifactsPane: () => void;
@@ -74,6 +76,7 @@ export function WorkbenchActiveTaskView({
   terminalOpen,
   artifactsCount,
   diffBadgeCount,
+  agentWorkSummary,
   onCopyWorktreeLocation,
   onOpenWorktreeTerminal,
   onToggleArtifactsPane,
@@ -143,6 +146,7 @@ export function WorkbenchActiveTaskView({
             terminalOpen={terminalOpen}
             artifactsCount={artifactsCount}
             diffBadgeCount={diffBadgeCount}
+            agentWorkSummary={agentWorkSummary}
             onCopyWorktreeLocation={onCopyWorktreeLocation}
             onOpenWorktreeTerminal={onOpenWorktreeTerminal}
             onToggleArtifactsPane={onToggleArtifactsPane}

@@ -12,6 +12,7 @@ use ctx_workspace_active_snapshot::WorkspaceActiveSnapshotHub;
 use ctx_workspace_runtime::HarnessRuntimeManager;
 
 use crate::daemon::git_status::{WorktreeVcsExecutionHost, WorktreeVcsRuntimeHost};
+use crate::daemon::plugins::PluginInventoryRuntime;
 use crate::daemon::scheduler::SessionSchedulerWorkerHost;
 use crate::daemon::state::{
     ProtectedWorkspaceStoreLookup, SessionRuntime, SessionStoreLookup, WeakSessionStoreLookup,
@@ -37,6 +38,7 @@ pub(super) struct SessionRouteDepsParts {
     pub(super) active_snapshot: Arc<WorkspaceActiveSnapshotHub>,
     pub(super) worktree_file_completions_cache: WorktreeFileCompletionsCache,
     pub(super) providers: Arc<ProviderRuntime>,
+    pub(super) plugins: Arc<PluginInventoryRuntime>,
     pub(super) ops_events: OpsEvents,
     pub(super) perf_telemetry: PerfTelemetry,
     pub(super) provider_unknown_events: ProviderUnknownEvents,
@@ -65,6 +67,7 @@ pub(super) struct SessionRouteDeps {
     pub(super) active_snapshot: Arc<WorkspaceActiveSnapshotHub>,
     pub(super) worktree_file_completions_cache: WorktreeFileCompletionsCache,
     pub(super) providers: Arc<ProviderRuntime>,
+    pub(super) plugins: Arc<PluginInventoryRuntime>,
     pub(super) ops_events: OpsEvents,
     pub(super) perf_telemetry: PerfTelemetry,
     pub(super) provider_unknown_events: ProviderUnknownEvents,
@@ -94,6 +97,7 @@ impl SessionRouteDeps {
             active_snapshot: parts.active_snapshot,
             worktree_file_completions_cache: parts.worktree_file_completions_cache,
             providers: parts.providers,
+            plugins: parts.plugins,
             ops_events: parts.ops_events,
             perf_telemetry: parts.perf_telemetry,
             provider_unknown_events: parts.provider_unknown_events,

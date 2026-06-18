@@ -1,0 +1,41 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("//tools/bazel:rust_deps.generated.bzl", "RUST_BAZEL_DEPS")
+
+package(default_visibility = ["//visibility:public"])
+
+_CTX_OBSERVABILITY_DEPS = RUST_BAZEL_DEPS["ctx-observability"]
+_CTX_OBSERVABILITY_TEST_SUPPORT_REPLACED_DEPS = [
+    "//core/crates/ctx-avf-linux-runtime:lib",
+]
+_CTX_OBSERVABILITY_TEST_SUPPORT_DEPS = [
+    dep
+    for dep in _CTX_OBSERVABILITY_DEPS.deps
+    if dep not in _CTX_OBSERVABILITY_TEST_SUPPORT_REPLACED_DEPS
+] + [
+    "//core/crates/ctx-avf-linux-runtime:lib_test_support",
+] + _CTX_OBSERVABILITY_DEPS.dev_deps
+
+rust_library(
+    name = "lib",
+    crate_name = "ctx_observability",
+    crate_root = "src/lib.rs",
+    edition = "2021",
+    srcs = glob(["src/**/*.rs"]),
+    deps = _CTX_OBSERVABILITY_DEPS.deps,
+    proc_macro_deps = _CTX_OBSERVABILITY_DEPS.proc_macro_deps,
+)
+
+rust_library(
+    name = "lib_test_support",
+    crate_name = "ctx_observability",
+    crate_root = "src/lib.rs",
+    edition = "2021",
+    srcs = glob(["src/**/*.rs"]),
+    deps = _CTX_OBSERVABILITY_TEST_SUPPORT_DEPS,
+    proc_macro_deps = _CTX_OBSERVABILITY_DEPS.proc_macro_deps,
+)
+
+rust_test(
+    name = "unit_tests",
+    crate = ":lib_test_support",
+)

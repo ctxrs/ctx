@@ -1,0 +1,182 @@
+---
+title: "Agent Work Model"
+description: "Public vocabulary for tasks, sessions, runs, worktrees, changes, reviews, artifacts, checks, and gates"
+---
+
+ctx models agent work around human review.
+
+The core idea is simple: a person delegates a **task**, an agent works in one or
+more **sessions** and **runs**, ctx keeps the resulting **change sets** and
+**artifacts** reviewable, and the work may eventually connect to one or more
+**pull requests**.
+
+## Core terms
+
+### Task
+
+A task is the human objective and the unit of delegated agent work.
+
+It should describe one objective, not one process step, session, branch, or pull
+request. A task can be small, like fixing a validation message, or larger, like
+preparing a focused refactor. The important boundary is whether a person can
+decide that the objective is complete, even when the review work is split across
+several change sets or pull requests.
+
+A task may have many agent sessions, many change sets, and many pull requests.
+It may also share a pull request with other related tasks when that is the right
+review shape.
+
+### Agent Session
+
+An agent session is a durable conversation and execution context for work on a
+task.
+
+It contains messages, tool activity, runs, artifacts, and links to the worktree
+where code changed. A session is not the same thing as a task: the same task may
+need several sessions, and an imported historical session may later be linked to
+the task it helped complete.
+
+### Run
+
+A run is one bounded execution attempt inside an agent session.
+
+Examples include the first agent pass after a prompt, a follow-up pass after
+review feedback, or a validation-only pass. Runs make it possible to distinguish
+the conversation thread from individual attempts, retries, and verification
+steps.
+
+### Worktree
+
+A worktree is the isolated checkout where an agent session can read, edit, run,
+and validate code.
+
+Worktrees keep concurrent agent work from colliding. They also make review
+cleaner because a task's working diff can be inspected without unrelated local
+edits mixed in.
+
+### Change Set
+
+A change set is a reviewable group of file changes produced by agent work.
+
+It can be the current worktree diff, a committed revision, a patch, or another
+versioned group of edits. Change sets are the bridge between agent activity and
+source control review.
+
+### Contribution
+
+A contribution is an explicit edge that says a session, run, change set,
+artifact, or check helped satisfy a task or pull request.
+
+Treating contribution as an edge keeps the model many-to-many:
+
+- one task can receive contributions from many sessions or runs
+- one session can contribute to more than one task when work is later split
+- one change set can contribute to one or more pull requests
+- one pull request can collect contributions from several tasks
+
+This avoids assuming that every task maps to exactly one session, one branch, or
+one pull request.
+
+### Pull Request
+
+A pull request is the source-control review object used to land changes.
+
+## Task to pull request semantics
+
+Tasks and pull requests are many-to-many. A task may produce several pull
+requests when review is split by risk or ownership. A pull request may close or
+advance several tasks when the changes are naturally reviewed together.
+
+The connection should be represented by contribution edges and change sets, not
+by a hidden one-task-one-PR rule.
+
+## Review evidence
+
+### Artifact
+
+An artifact is a review attachment produced during agent work.
+
+Artifacts include screenshots, recordings, reports, logs, generated files, and
+other evidence that helps a reviewer evaluate the result. Artifacts support
+review, but they do not replace diff review.
+
+### Check
+
+A check is a signal about the work.
+
+Common checks include tests, type checks, linters, formatting commands, preview
+builds, security scans, and CI jobs. A check records what ran, what result it
+produced, and which task, run, change set, or pull request it applies to.
+
+### Gate
+
+A gate is a policy decision over a change set, pull request, ref, or merge
+candidate.
+
+Checks provide evidence. Gates use evidence and policy. For example, "unit tests
+passed" is a check; "all required checks pass before merge" is a gate. Human
+diff review can also be part of a gate. A completed local agent session is not a
+gate by itself.
+
+## Check vs gate
+
+Use checks to record what happened. Use gates to decide whether the change set,
+pull request, ref, or merge candidate can advance.
+
+## Optional transcript archive/data lake
+
+The operational record for active work should stay close to tasks, sessions,
+runs, change sets, artifacts, checks, and pull requests.
+
+Projects may also choose to maintain a transcript archive or data lake for
+longer-term search, audit, metrics, or model-improvement workflows. That
+archive should be treated as an optional downstream projection of the agent-work
+model, not as the source of truth for active review.
+
+## Old-session imports
+
+Older or external sessions can be imported into the model.
+
+An imported session should preserve the original transcript and metadata where
+possible, then link into current tasks, change sets, artifacts, checks, and pull
+requests through explicit contribution edges. Imports should avoid inventing a
+one-to-one task mapping when the historical work crossed boundaries.
+
+## Review shape
+
+The preferred review flow is:
+
+1. Define a task as the human objective.
+2. Run one or more agent sessions in isolated worktrees.
+3. Review the resulting change sets and artifacts.
+4. Record checks as evidence.
+5. Apply gates before merging or promoting a change set or pull request.
+6. Link the final work to pull requests through contribution edges.
+
+## Endpoint identities
+
+ctx distinguishes local app records from imported or provider-native graph
+records without changing the public vocabulary.
+
+Local tasks, sessions, runs, and worktrees keep their ctx IDs and are validated
+against the workspace database. Imported tasks, provider sessions, provider
+runs, and redacted worktree identities can use external string IDs on the same
+endpoint variants. For example, a local session contribution may use
+`session_id`, while an imported Codex transcript can use `provider: "codex"` and
+`id: "thr_..."`.
+
+This keeps the local ctx database coherent for active workspace records while
+letting the same contribution graph represent imported sessions and standalone
+collection records.
+
+File endpoints use `path` for a workspace-relative path. Exporters should omit
+host-local roots, reject absolute paths, and redact path segments when a
+shareable artifact needs less detail.
+
+## Related pages
+
+- [Agent Development Concepts](/agent-development-concepts)
+- [Tasks](/workbench/tasks)
+- [Sessions and Messages](/workbench/sessions)
+- [Review and Apply Changes](/workbench/review-and-apply-changes)
+- [Artifacts Overview](/artifacts-overview)

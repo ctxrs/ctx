@@ -1,0 +1,124 @@
+{
+  "gate_pass_requirements": {
+    "all_cases_must_pass": true,
+    "exact_expected_output_match": true,
+    "canonical_json_repeat_match": true
+  },
+  "cases": [
+    {
+      "case_id": "normal_hold_guest_pressure_then_emergency",
+      "initial_state": {
+        "target_bytes": 8589934592,
+        "floor_bytes": 4294967296,
+        "ceiling_bytes": 17179869184,
+        "pressure_state": "balanced",
+        "cooldown_remaining_ms": 0
+      },
+      "required_invariants": [
+        "target_within_bounds",
+        "stable_inputs_no_oscillation",
+        "non_emergency_guest_pressure_blocks_shrink",
+        "emergency_path_explicit",
+        "trace_replay_deterministic"
+      ],
+      "steps": [
+        {
+          "step_index": 1,
+          "time_since_start_ms": 1000,
+          "time_since_last_step_ms": 1000,
+          "phase": "warm_idle",
+          "host": {
+            "available_bytes": 8589934592,
+            "pressure_state": "normal",
+            "compressor_delta_bytes": 0,
+            "pageout_delta_bytes": 0,
+            "swap_delta_bytes": 0
+          },
+          "guest": {
+            "working_set_bytes": 2147483648,
+            "reclaimable_bytes": 1073741824,
+            "available_bytes": 3221225472,
+            "swap_bytes": 0,
+            "under_pressure": false
+          },
+          "expected": {
+            "step_index": 1,
+            "action": "hold",
+            "target_bytes_before": 8589934592,
+            "target_bytes_after": 8589934592,
+            "pressure_state_before": "balanced",
+            "pressure_state_after": "balanced",
+            "reason_codes": ["stable_band"],
+            "emergency_path": false,
+            "invariants_passed": ["target_within_bounds", "stable_inputs_no_oscillation"]
+          }
+        },
+        {
+          "step_index": 2,
+          "time_since_start_ms": 2000,
+          "time_since_last_step_ms": 1000,
+          "phase": "host_pressure",
+          "host": {
+            "available_bytes": 3221225472,
+            "pressure_state": "elevated",
+            "compressor_delta_bytes": 536870912,
+            "pageout_delta_bytes": 268435456,
+            "swap_delta_bytes": 0
+          },
+          "guest": {
+            "working_set_bytes": 7516192768,
+            "reclaimable_bytes": 536870912,
+            "available_bytes": 1073741824,
+            "swap_bytes": 0,
+            "under_pressure": true
+          },
+          "expected": {
+            "step_index": 2,
+            "action": "hold",
+            "target_bytes_before": 8589934592,
+            "target_bytes_after": 8589934592,
+            "pressure_state_before": "balanced",
+            "pressure_state_after": "guest_protected",
+            "reason_codes": ["guest_pressure_blocks_shrink"],
+            "emergency_path": false,
+            "invariants_passed": [
+              "target_within_bounds",
+              "non_emergency_guest_pressure_blocks_shrink"
+            ]
+          }
+        },
+        {
+          "step_index": 3,
+          "time_since_start_ms": 3000,
+          "time_since_last_step_ms": 1000,
+          "phase": "host_pressure",
+          "host": {
+            "available_bytes": 536870912,
+            "pressure_state": "emergency",
+            "compressor_delta_bytes": 1073741824,
+            "pageout_delta_bytes": 1073741824,
+            "swap_delta_bytes": 536870912
+          },
+          "guest": {
+            "working_set_bytes": 6442450944,
+            "reclaimable_bytes": 536870912,
+            "available_bytes": 1073741824,
+            "swap_bytes": 0,
+            "under_pressure": false
+          },
+          "expected": {
+            "step_index": 3,
+            "action": "emergency_shrink",
+            "target_bytes_before": 8589934592,
+            "target_bytes_after": 6442450944,
+            "pressure_state_before": "guest_protected",
+            "pressure_state_after": "emergency",
+            "reason_codes": ["host_emergency"],
+            "emergency_path": true,
+            "invariants_passed": ["target_within_bounds", "emergency_path_explicit"]
+          }
+        }
+      ]
+    }
+  ]
+}

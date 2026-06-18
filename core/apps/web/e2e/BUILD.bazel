@@ -92,9 +92,11 @@ web_e2e_test(
 web_e2e_test(
     name = "release_required",
     config = "playwright.release.config.ts",
+    linux_browser = "chromium",
     runtime_profile = "web-artifact",
     suite = "release_required",
     timeout = "eternal",
+    web_dist = "//core/apps/web:build",
 )
 
 web_e2e_test(

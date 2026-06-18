@@ -16,8 +16,24 @@ case "$smoke_case" in
     printf '%s\n' "$root_help" | grep -F "ctx daemon and CLI" >/dev/null
     printf '%s\n' "$root_help" | grep -F "serve" >/dev/null
     printf '%s\n' "$root_help" | grep -F "init" >/dev/null
+    printf '%s\n' "$root_help" | grep -F "agent-work" >/dev/null
     printf '%s\n' "$root_help" | grep -F "self-update" >/dev/null
     ;;
+  agent-work-help)
+    agent_work_help="$("$ctx_copy" agent-work --help)"
+    printf '%s\n' "$agent_work_help" | grep -F "schema" >/dev/null
+    ;;
+	  agent-work-schema)
+	    for kind in agent-work change-set contribution events tool-call transcripts plugin-manifest; do
+	      "$ctx_copy" agent-work schema --kind "$kind" > "$tmpdir/$kind.json"
+	      grep -E '^[[:space:]]*\{' "$tmpdir/$kind.json" >/dev/null
+	      grep -E '"\$schema"[[:space:]]*:' "$tmpdir/$kind.json" >/dev/null
+	    done
+	    grep -E '"\$id"[[:space:]]*:[[:space:]]*"https://schemas.ctx.rs/agent-work/v1.schema.json"' "$tmpdir/agent-work.json" >/dev/null
+	    grep -E '"title"[[:space:]]*:[[:space:]]*"ChangeSet"' "$tmpdir/change-set.json" >/dev/null
+	    grep -E '"title"[[:space:]]*:[[:space:]]*"Contribution"' "$tmpdir/contribution.json" >/dev/null
+	    grep -E '"title"[[:space:]]*:[[:space:]]*"TranscriptRecord"' "$tmpdir/transcripts.json" >/dev/null
+	    ;;
   serve-help)
     serve_help="$("$ctx_copy" serve --help)"
     printf '%s\n' "$serve_help" | grep -F -- "--bind" >/dev/null

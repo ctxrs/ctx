@@ -1,0 +1,47 @@
+---
+title: "Public Schemas"
+description: "Versioned JSON schemas for ctx agent work, transcripts, events, tool calls, and plugins"
+---
+
+The public schema surface uses ctx agent-work names. Agent work records are
+exposed as `AgentWork`, `ChangeSet`, `Contribution`, and
+`ContributionEndpoint`; hosted service internals are not part of these schema
+names.
+
+## Schemas
+
+- [`schemas/agent-work/v1.schema.json`](../../../schemas/agent-work/v1.schema.json):
+  `AgentWork`, the workspace aggregate with `change_sets` and `contributions`.
+- [`schemas/agent-work/change-set.v1.schema.json`](../../../schemas/agent-work/change-set.v1.schema.json):
+  `ChangeSet`.
+- [`schemas/agent-work/contribution.v1.schema.json`](../../../schemas/agent-work/contribution.v1.schema.json):
+  `Contribution`.
+- [`schemas/events/v1.schema.json`](../../../schemas/events/v1.schema.json):
+  `EventEnvelope`, matching the session event wire shape.
+- [`schemas/events/tool-call.v1.schema.json`](../../../schemas/events/tool-call.v1.schema.json):
+  `ToolCall`, matching the persisted session turn tool record.
+- [`schemas/transcripts/v1.schema.json`](../../../schemas/transcripts/v1.schema.json):
+  `TranscriptRecord`, a tagged union for messages, event envelopes, tool calls,
+  and artifacts.
+- [`schemas/plugins/plugin-manifest.v1.schema.json`](../../../schemas/plugins/plugin-manifest.v1.schema.json):
+  `PluginManifest`.
+
+## Versioning
+
+These schemas describe public v1 wire shapes. Records that carry
+`schema_version` currently use `1`, matching the Rust model defaults for agent
+work and plugin manifests. `ChangeSet` and `Contribution` may also carry
+`source_records` entries that preserve source record hashes for imported or
+projected agent work.
+
+The schemas include fields that are useful for local provenance, such as
+`repo_root` and artifact `absolute_path`. Shareable exports and hosted sync
+producers should omit or redact host-local paths unless the user explicitly opts
+into preserving them.
+
+## Compatibility
+
+`ContributionEndpoint` uses canonical snake_case kind names such as
+`change_set`, `pull_request`, and `review_attestation`. The schema also accepts
+the kebab-case endpoint aliases that the Rust deserializers accept for imported
+records.

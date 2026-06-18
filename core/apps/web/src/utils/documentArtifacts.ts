@@ -6,6 +6,7 @@ import remarkParse from "remark-parse";
 import { unified } from "unified";
 import { visit } from "unist-util-visit";
 import type { Artifact } from "../api/client";
+import { artifactPathBaseName, artifactPathExtension } from "./artifactPaths";
 
 const MARKDOWN_EXTENSIONS = new Set(["md", "markdown", "mdown", "mkd", "mkdn"]);
 const MDX_EXTENSIONS = new Set(["mdx"]);
@@ -72,12 +73,10 @@ type MdastNode = {
 type MdastRoot = MdastNode;
 
 function artifactPathParts(artifact: Artifact): { baseName: string; extension: string; mime: string } {
-  const raw = artifact.absolute_path || artifact.name || "";
-  const baseName = raw.split(/[\\/]/).filter(Boolean).pop()?.toLowerCase() ?? "";
-  const extension = baseName.includes(".") ? baseName.split(".").pop() ?? "" : "";
+  const baseName = artifactPathBaseName(artifact).toLowerCase();
   return {
     baseName,
-    extension,
+    extension: artifactPathExtension(artifact),
     mime: (artifact.mime_type ?? "").trim().toLowerCase(),
   };
 }

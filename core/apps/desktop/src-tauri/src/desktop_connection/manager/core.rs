@@ -260,10 +260,7 @@ impl ConnectionManager {
                 let Some(ActiveConnection::Local(local)) = state.active.as_ref() else {
                     continue;
                 };
-                if !matches!(
-                    local.ownership,
-                    LocalConnectionOwnership::OwnedChild { .. }
-                ) {
+                if !matches!(local.ownership, LocalConnectionOwnership::OwnedChild { .. }) {
                     continue;
                 }
                 let Some(ActiveConnection::Local(local)) = state.active.take() else {

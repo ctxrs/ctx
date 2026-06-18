@@ -1,0 +1,150 @@
+---
+title: "Agent Work Implementation Plan"
+description: "A phased plan for making agent work records durable, reviewable, and importable"
+---
+
+This plan describes how ctx can evolve the public agent-work model without
+requiring a disruptive rewrite.
+
+The goal is to make the model explicit enough that tasks, sessions, runs,
+worktrees, change sets, contributions, pull requests, artifacts, checks, and
+gates can be reasoned about independently while still feeling like one workflow
+in the product.
+
+## Principles
+
+- Keep the task as the human objective and primary planning unit.
+- Keep agent sessions and runs durable enough to explain how work happened.
+- Keep worktree state and change sets reviewable before anything lands.
+- Model contribution as an explicit many-to-many relationship.
+- Treat pull requests as review and landing objects, not as the only unit of
+  work.
+- Separate checks, which produce evidence, from gates, which make decisions.
+- Make imports preserve history without forcing old work into a false shape.
+
+## Phase 1: Normalize the vocabulary
+
+Define the public terms in documentation, UI copy, API names, and event names.
+
+Expected outcome:
+
+- Task means the human objective and delegated unit of work.
+- Agent session means the durable conversation and execution context.
+- Run means a bounded execution attempt inside a session.
+- Worktree means the isolated checkout where work happens.
+- Change set means a reviewable group of file changes.
+- Contribution means a many-to-many edge between work records and review
+  outcomes.
+- Pull request means the source-control review object.
+- Artifact means review evidence attached to agent work.
+- Check means an observed validation result.
+- Gate means a policy or review decision over a change set, pull request, ref,
+  or merge candidate.
+
+## Phase 2: Persist the core records
+
+Store stable records for tasks, agent sessions, runs, worktrees, change sets,
+artifacts, and checks.
+
+Expected outcome:
+
+- A task can show its sessions, runs, current worktree, change sets, artifacts,
+  and checks.
+- A session can show its runs and the worktree it used.
+- A run can show its prompt boundary, status, tool activity summary, artifacts,
+  and checks.
+- A change set can be reviewed independently of the transcript that produced it.
+- Artifacts and checks can be attached to the task, session, run, change set, or
+  pull request where they are most useful.
+
+## Phase 3: Add contribution edges
+
+Introduce contribution records as first-class links between tasks, sessions,
+runs, change sets, artifacts, checks, and pull requests.
+
+Expected outcome:
+
+- One task can collect work from multiple sessions and change sets.
+- One session can be split across multiple tasks when review discovers separate
+  outcomes.
+- One pull request can contain contributions from multiple tasks.
+- One task can result in multiple pull requests.
+- Review screens can explain why a piece of work is connected to a task or pull
+  request without relying on naming conventions.
+
+## Phase 4: Make pull request links many-to-many
+
+Build pull request behavior on top of contribution edges and change sets.
+
+Expected outcome:
+
+- Creating a pull request from a task links the selected change set through a
+  contribution edge.
+- Adding another task to the same pull request records another contribution
+  edge instead of merging task identity.
+- Splitting a task across several pull requests preserves one task with several
+  pull request links.
+- Closing or merging a pull request can advance linked tasks according to the
+  linked contributions and review outcome, not by assuming the PR fully
+  completes every task.
+
+## Phase 5: Separate checks from gates
+
+Record checks as evidence and evaluate gates as decisions.
+
+Expected outcome:
+
+- Checks record command, CI, scan, preview, or review results with timestamps and
+  status.
+- Gates declare which evidence is required before a transition, such as
+  promoting a change set or merging a pull request.
+- Human review can be represented as a gate requirement alongside automated
+  checks.
+- Failed or missing checks explain why a gate is blocked.
+
+## Phase 6: Import old sessions
+
+Provide an import path for older ctx sessions or sessions from other agent
+tools.
+
+Expected outcome:
+
+- Imported sessions keep their original transcript, timestamps, participants,
+  and available tool metadata.
+- Importers create agent session and run records where boundaries can be
+  inferred.
+- Imported change sets, artifacts, and checks link through contribution edges.
+- Ambiguous imported work can remain unassigned until a person links it to one
+  or more tasks or pull requests.
+- Imports are idempotent so re-running an import updates records without
+  duplicating history.
+
+## Phase 7: Add an optional transcript archive/data lake
+
+Offer a transcript archive or data lake as an optional downstream projection.
+
+Expected outcome:
+
+- Active review continues to use the task, session, run, change set,
+  contribution, pull request, artifact, check, and gate records.
+- The archive supports long-term search, audit, reporting, and analytics.
+- Teams can choose retention, redaction, export, and deletion policies.
+- The archive can be rebuilt from the operational records where policy allows.
+
+## Migration guidance
+
+Existing task and session workflows should continue to work while records become
+more explicit.
+
+For current work, preserve the visible behavior first: tasks remain the list
+users plan from, sessions remain where conversations happen, worktrees remain
+the isolation boundary, and diff review remains the acceptance path. Add new
+records and contribution edges behind those surfaces, then expose them where
+they clarify review and handoff.
+
+## Related pages
+
+- [Agent Work Model](/agent-work-model)
+- [Tasks](/workbench/tasks)
+- [Review and Apply Changes](/workbench/review-and-apply-changes)
+- [What Is a Worktree?](/what-is-a-worktree)

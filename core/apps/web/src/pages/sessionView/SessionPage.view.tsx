@@ -31,6 +31,9 @@ import {
 } from "./SessionPage.viewHelpers";
 import { useSessionComposerQueueController } from "../useSessionComposerQueueController";
 import { composeModelId } from "../../utils/modelEffort";
+import { usePluginRegistry } from "../../state/pluginRegistryStore";
+import { projectPluginSlashCommands } from "../workbenchShell/pluginCommandProjection";
+import { resolvePluginCommandMessage } from "../workbenchShell/pluginCommandInvocation";
 
 export function SessionView({
   sessionId,
@@ -58,6 +61,7 @@ export function SessionView({
   const id = sessionId;
   const supervisor = useSessionSupervisor();
   const workbenchStore = useWorkbenchStore();
+  const pluginRegistryState = usePluginRegistry();
   const showDebug = useMemo(() => {
     try {
       return new URLSearchParams(window.location.search).get("debug") === "1";
@@ -170,6 +174,17 @@ export function SessionView({
   const resolveSendText = useCallback(async () => {
     return (dictationRecording ? await stopDictation({ awaitFinal: true }) : input).trim();
   }, [dictationRecording, input, stopDictation]);
+  const resolveOutboundPluginText = useCallback(
+    (text: string) =>
+      resolvePluginCommandMessage({
+        text,
+        registry: pluginRegistryState.registry,
+        workspaceId: idToString(session?.workspace_id),
+        taskId: idToString(session?.task_id),
+        sessionId: id,
+      }),
+    [id, pluginRegistryState.registry, session?.task_id, session?.workspace_id],
+  );
 
   const transcriptController = useSessionViewTranscriptController({
     sessionId: id,
@@ -201,6 +216,7 @@ export function SessionView({
     currentModelId: composerAnalyticsModelId,
     interruptSessionId: runtimeController.interruptSessionId,
     resolveSendText,
+    resolveOutboundText: resolveOutboundPluginText,
     setAtBottom: transcriptController.setAtBottom,
     onDraftPersistNow,
     onSendStarted: handleComposerSendStarted,
@@ -223,13 +239,15 @@ export function SessionView({
   );
 
   const slashCommands = useMemo<SlashCommandDescriptor[]>(
-    () =>
-      deriveProtocolSlashCommands({
+    () => [
+      ...deriveProtocolSlashCommands({
         providerId: entry?.session?.provider_id,
         commands: entry?.acpCommands,
         slashCommands: entry?.acpSlashCommands,
       }),
-    [entry?.acpCommands, entry?.acpSlashCommands, entry?.session?.provider_id],
+      ...projectPluginSlashCommands(pluginRegistryState.registry),
+    ],
+    [entry?.acpCommands, entry?.acpSlashCommands, entry?.session?.provider_id, pluginRegistryState.registry],
   );
 
   const queueForPanel = useMemo(

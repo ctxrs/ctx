@@ -1,11 +1,11 @@
 use chrono::{DateTime, Utc};
 use ctx_core::ids::{WorkspaceAttachmentId, WorkspaceId, WorktreeId};
 use ctx_core::models::{
-    AttachmentMode, AttachmentUpdatePolicy, VcsKind, Workspace, WorkspaceActiveHeadBatch,
-    WorkspaceActiveSnapshot, WorkspaceAttachment, WorkspaceAttachmentKind,
-    WorkspaceAttachmentStatus, Worktree, WorktreeBootstrapStatus,
+    AttachmentMode, AttachmentUpdatePolicy, ChangeSet, Contribution, VcsKind, Workspace,
+    WorkspaceActiveHeadBatch, WorkspaceActiveSnapshot, WorkspaceAttachment,
+    WorkspaceAttachmentKind, WorkspaceAttachmentStatus, Worktree, WorktreeBootstrapStatus,
 };
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkspaceRouteResponse {
@@ -156,6 +156,31 @@ pub struct WorkspaceHarnessContainerStatusRouteResponse {
     pub network_mode: Option<WorkspaceHarnessContainerNetworkModeRouteValue>,
     pub allowlist: Vec<String>,
     pub egress_guard: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkspaceAgentWorkRouteResponse {
+    pub change_sets: Vec<ChangeSet>,
+    pub contributions: Vec<Contribution>,
+}
+
+impl WorkspaceAgentWorkRouteResponse {
+    pub fn new(change_sets: Vec<ChangeSet>, contributions: Vec<Contribution>) -> Self {
+        Self {
+            change_sets,
+            contributions,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct WorkspaceAgentWorkRouteQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_set_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_json: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Clone)]

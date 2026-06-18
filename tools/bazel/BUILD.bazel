@@ -1,0 +1,5 @@
+exports_files([
+    "rust_deps.generated.bzl",
+    "run_node_task.sh",
+    "run_workspace_task.sh",
+])

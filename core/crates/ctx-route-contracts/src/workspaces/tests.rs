@@ -4,9 +4,10 @@ use serde::Serialize;
 use super::*;
 
 use ctx_core::models::{
-    AttachmentMode, AttachmentUpdatePolicy, VcsKind, Workspace, WorkspaceActiveHeadBatch,
-    WorkspaceActiveSnapshot, WorkspaceAttachment, WorkspaceAttachmentKind,
-    WorkspaceAttachmentStatus, Worktree, WorktreeBootstrapStatus,
+    AttachmentMode, AttachmentUpdatePolicy, ChangeSet, Contribution, ContributionEndpoint,
+    ContributionRole, RecordFidelity, RecordOrigin, RecordSource, RecordTrust, VcsKind, Workspace,
+    WorkspaceActiveHeadBatch, WorkspaceActiveSnapshot, WorkspaceAttachment,
+    WorkspaceAttachmentKind, WorkspaceAttachmentStatus, Worktree, WorktreeBootstrapStatus,
 };
 
 fn assert_same_json<T, U>(left: T, right: U)
@@ -158,6 +159,90 @@ fn harness_container_route_response_preserves_wire_shape() {
             "network_mode": "llm_only",
             "allowlist": [],
             "egress_guard": null,
+        })
+    );
+}
+
+#[test]
+fn workspace_agent_work_route_response_preserves_graph_wire_shape() {
+    let workspace_id = ctx_core::ids::WorkspaceId::new();
+    let task_id = ctx_core::ids::TaskId::new();
+    let change_set_id = ctx_core::ids::ChangeSetId::new();
+    let contribution_id = ctx_core::ids::ContributionId::new();
+    let change_set = ChangeSet {
+        id: change_set_id.clone(),
+        workspace_id,
+        source_worktree_id: None,
+        source: RecordSource::Worktree,
+        origin: RecordOrigin::Agent,
+        fidelity: RecordFidelity::Diff,
+        trust: RecordTrust::High,
+        title: Some("Unify work graph".to_string()),
+        summary: None,
+        description: None,
+        fingerprint: None,
+        base_revision: Some("base".to_string()),
+        head_revision: Some("head".to_string()),
+        target_branch: Some("main".to_string()),
+        pull_requests: Vec::new(),
+        source_records: Vec::new(),
+        issuer: None,
+        created_at: None,
+        updated_at: None,
+        schema_version: 1,
+    };
+    let contribution = Contribution {
+        id: contribution_id,
+        workspace_id,
+        change_set_id: Some(change_set_id.clone()),
+        subject: ContributionEndpoint::Task {
+            task_id: Some(task_id),
+            id: None,
+        },
+        target: ContributionEndpoint::ChangeSet {
+            change_set_id: change_set_id.clone(),
+        },
+        role: ContributionRole::Related,
+        source: RecordSource::Manual,
+        origin: RecordOrigin::User,
+        fidelity: RecordFidelity::Declared,
+        trust: RecordTrust::Medium,
+        summary: Some("Task produced the change set".to_string()),
+        fingerprint: None,
+        issuer: None,
+        metadata_json: None,
+        source_records: Vec::new(),
+        created_at: None,
+        updated_at: None,
+        schema_version: 1,
+    };
+
+    assert_eq!(
+        serde_json::to_value(WorkspaceAgentWorkRouteResponse::new(
+            vec![change_set.clone()],
+            vec![contribution.clone()]
+        ))
+        .unwrap(),
+        serde_json::json!({
+            "change_sets": [serde_json::to_value(change_set).unwrap()],
+            "contributions": [serde_json::to_value(contribution).unwrap()]
+        })
+    );
+}
+
+#[test]
+fn workspace_agent_work_route_query_preserves_wire_shape() {
+    assert_eq!(
+        serde_json::to_value(WorkspaceAgentWorkRouteQuery {
+            change_set_id: Some("chg-1".to_string()),
+            endpoint_json: Some(r#"{"kind":"task","id":"task-1"}"#.to_string()),
+            limit: Some(25),
+        })
+        .unwrap(),
+        serde_json::json!({
+            "change_set_id": "chg-1",
+            "endpoint_json": "{\"kind\":\"task\",\"id\":\"task-1\"}",
+            "limit": 25
         })
     );
 }

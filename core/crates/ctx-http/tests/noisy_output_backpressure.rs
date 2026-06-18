@@ -94,10 +94,12 @@ async fn noisy_tool_output_stays_bounded_end_to_end() {
     let _guard_mcp_disabled = EnvGuard::set("CTX_MCP_DISABLED", "1");
 
     let script_path = common::crp_fixture_runtime::write_crp_fixture_runtime(data_dir.path());
+    let (runtime_command, runtime_args) =
+        common::crp_fixture_runtime::fixture_runtime_invocation(&python, &script_path);
     common::seed_managed_codex_cli_host_runtime_with_args(
         data_dir.path(),
-        &python,
-        vec![script_path.to_string_lossy().to_string()],
+        &runtime_command,
+        runtime_args,
     )
     .await;
     let providers =

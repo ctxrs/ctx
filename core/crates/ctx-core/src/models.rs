@@ -1,6 +1,8 @@
+mod agent_work;
 mod attachments;
 mod merge_queue;
 mod mobile;
+mod plugin;
 mod policy;
 mod run_archive;
 mod runs;
@@ -11,9 +13,11 @@ mod workspace;
 mod workspace_activity;
 mod worktree_vcs;
 
+pub use agent_work::*;
 pub use attachments::*;
 pub use merge_queue::*;
 pub use mobile::*;
+pub use plugin::*;
 pub use policy::*;
 pub use run_archive::*;
 pub use runs::*;

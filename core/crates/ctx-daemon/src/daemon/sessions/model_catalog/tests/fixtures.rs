@@ -34,12 +34,16 @@ pub(super) async fn test_model_catalog_fixture(data_root: &Path, port: u16) -> M
         Arc::new(ctx_merge_queue::MergeQueueRuntime::new()),
     );
     let providers = Arc::new(ctx_provider_runtime::ProviderRuntime::new(HashMap::new()));
+    let plugins = Arc::new(crate::daemon::plugins::PluginInventoryRuntime::new(
+        data_root.to_path_buf(),
+    ));
     let host = crate::daemon::ProviderWorkspaceLaunchRuntime::new(
         data_root.to_path_buf(),
         format!("http://127.0.0.1:{port}"),
         None,
         workspace_stores,
         providers,
+        plugins,
         ctx_observability::ops_events::OpsEvents::new(data_root.to_path_buf()),
         Arc::new(ctx_workspace_runtime::HarnessRuntimeManager::new(
             data_root.to_path_buf(),

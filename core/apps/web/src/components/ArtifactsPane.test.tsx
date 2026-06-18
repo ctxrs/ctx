@@ -251,6 +251,28 @@ describe("ArtifactsPane", () => {
     expect(screen.queryByRole("button", { name: "Close" })).not.toBeInTheDocument();
   });
 
+  it("uses relative paths for titles and preview classification when absolute paths are omitted", () => {
+    render(
+      <ArtifactsPane
+        sessionId="session-1"
+        artifacts={[
+          makeArtifact({
+            name: "artifact",
+            mime_type: "application/octet-stream",
+            absolute_path: null,
+            relative_path: "clips/demo.mp4",
+          }),
+        ]}
+      />,
+    );
+
+    const card = screen.getByTitle("clips/demo.mp4");
+    expect(card).toBeInTheDocument();
+    expect(document.querySelector(".wb-artifact-video")).toBeTruthy();
+    fireEvent.click(card);
+    expect(document.querySelector(".wb-artifact-modal-video")).toBeTruthy();
+  });
+
   it("autoplays previewable video artifacts inline and in the viewer", () => {
     render(
       <ArtifactsPane

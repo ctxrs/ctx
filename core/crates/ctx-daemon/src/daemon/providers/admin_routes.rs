@@ -18,6 +18,7 @@ impl ProviderAdminHandle {
     pub async fn refresh_provider_matrix_for_route(
         &self,
     ) -> Result<ProviderMatrixRefreshRouteResponse, ProviderAdminRouteError> {
+        self.sync_plugin_provider_adapters().await;
         refresh_provider_inventory(self)
             .await
             .map(provider_matrix_refresh_route_response)
@@ -29,6 +30,7 @@ impl ProviderAdminHandle {
         request: ProviderDevRestartRouteRequest,
     ) -> Result<ProviderDevRestartRouteResponse, ProviderAdminRouteError> {
         let plan = dev_restart_route_plan(dev_tools_enabled(), request)?;
+        self.sync_plugin_provider_adapters().await;
         let results = self
             .providers()
             .restart_all_provider_adapters(&plan.reason, plan.mode)

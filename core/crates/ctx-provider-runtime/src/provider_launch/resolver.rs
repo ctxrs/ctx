@@ -155,6 +155,10 @@ pub async fn ensure_provider_adapter_for_target_with_cfg(
     provider_id: &str,
     target: InstallTarget,
 ) -> Arc<dyn ProviderAdapter> {
+    if let Some(adapter) = host_only_plugin_provider_adapter(state, provider_id).await {
+        return adapter;
+    }
+
     if let Some(cache_key) = target_adapter_cache_key(provider_id, target) {
         if let Some(adapter) = state
             .provider_runtime()
@@ -181,6 +185,28 @@ pub async fn ensure_provider_adapter_for_target_with_cfg(
         .upsert_provider_adapter(provider_id.to_string(), adapter.clone())
         .await;
     adapter
+}
+
+async fn host_only_plugin_provider_adapter(
+    state: &impl ProviderRuntimeHost,
+    provider_id: &str,
+) -> Option<Arc<dyn ProviderAdapter>> {
+    let status = state
+        .provider_runtime()
+        .provider_status(provider_id)
+        .await?;
+    if status.details.get("plugin_provider").map(String::as_str) != Some("true") {
+        return None;
+    }
+    if status
+        .details
+        .get("plugin_provider_target")
+        .map(String::as_str)
+        != Some("host")
+    {
+        return None;
+    }
+    state.provider_runtime().provider_adapter(provider_id).await
 }
 
 pub async fn ensure_provider_adapter_for_target(

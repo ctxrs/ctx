@@ -43,7 +43,7 @@ fn write_gzip_file(path: &Path, bytes: &[u8]) {
 
 const CONTROLLER_SAFETY_PREFLIGHT_FIXTURE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../../../.ctx/exec-plans/apple-silicon-container-platform-benchmark-20260326/controller_safety_trace_fixture.json"
+    "/src/avf_linux_helper/fixtures/controller_safety_trace_fixture.json"
 ));
 
 #[derive(Debug, Deserialize)]
@@ -2691,6 +2691,7 @@ fn guest_policy_script_masks_background_rootfs_mutators() {
     }
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn avf_vm_save_restore_timeout_exceeds_default_completion_timeout() {
     assert!(VM_SAVE_RESTORE_COMPLETION_TIMEOUT > VM_LIFECYCLE_COMPLETION_TIMEOUT);
@@ -3659,7 +3660,7 @@ fn shared_vm_relay_turns_truncated_guest_frames_into_explicit_error_frames() {
     guest.join().expect("guest thread");
 }
 
-#[cfg(unix)]
+#[cfg(all(target_os = "macos", unix))]
 #[test]
 fn shared_vm_relay_restores_blocking_mode_for_nonblocking_clients() {
     use std::os::fd::{FromRawFd, IntoRawFd};

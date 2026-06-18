@@ -170,6 +170,39 @@ async function apiPost<T>(request: APIRequestContext, url: string, data: unknown
   return (await resp.json()) as T;
 }
 
+const isTurnAlreadyRunningResponse = (status: number, body: string): boolean =>
+  status === 409 && body.toLowerCase().includes("a turn is already running");
+
+async function postImmediateMessageWithRetry(
+  request: APIRequestContext,
+  sessionId: string,
+  content: string,
+  opts?: { timeoutMs?: number; pollMs?: number },
+): Promise<PostedMessage> {
+  const url = `/api/sessions/${sessionId}/messages`;
+  const timeoutMs = opts?.timeoutMs ?? 15_000;
+  const pollMs = opts?.pollMs ?? 100;
+  const start = Date.now();
+  while (true) {
+    const resp = await request.post(url, {
+      data: {
+        content,
+        delivery: "immediate",
+      },
+    });
+    if (resp.ok()) {
+      return (await resp.json()) as PostedMessage;
+    }
+    const body = await resp.text().catch(() => "");
+    if (isTurnAlreadyRunningResponse(resp.status(), body) && Date.now() - start <= timeoutMs) {
+      await sleep(pollMs);
+      continue;
+    }
+    const suffix = body.trim() ? `: ${body.trim()}` : "";
+    throw new Error(`seed request failed: ${url} (${resp.status()})${suffix}`);
+  }
+}
+
 async function apiGet<T>(request: APIRequestContext, url: string): Promise<T> {
   const resp = await request.get(url);
   if (!resp.ok()) {
@@ -296,10 +329,7 @@ export async function postImmediateMessageAndWaitForCompletion(
   opts?: { timeoutMs?: number; pollMs?: number },
 ): Promise<{ id: string }> {
   const afterSeq = await currentSessionEventSeq(request, sessionId);
-  const savedMessage = await apiPost<PostedMessage>(request, `/api/sessions/${sessionId}/messages`, {
-    content,
-    delivery: "immediate",
-  });
+  const savedMessage = await postImmediateMessageWithRetry(request, sessionId, content, opts);
   if (!savedMessage.id) {
     throw new Error(`seeded message for session ${sessionId} did not include an id`);
   }

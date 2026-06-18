@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { useParams } from "react-router-dom";
 import { WorkbenchStoreProvider } from "../workbench/store";
 import { WorkspaceActiveSnapshotProvider } from "../state/workspaceActiveSnapshotStore";
+import { WorkspaceAgentWorkProvider } from "../state/workspaceAgentWorkStore";
 import { WorkspaceVcsProvider } from "../state/workspaceVcsStore";
 import { WorkbenchPageInner } from "./WorkbenchPage.shell";
 import {
@@ -51,11 +52,13 @@ export default function WorkbenchPage() {
   if (!workspaceId) return null;
   return (
     <WorkspaceActiveSnapshotProvider workspaceId={workspaceId}>
-      <WorkspaceVcsProvider workspaceId={workspaceId}>
-        <WorkbenchStoreProvider workspaceId={workspaceId}>
-          <WorkbenchPageInner workspaceId={workspaceId} />
-        </WorkbenchStoreProvider>
-      </WorkspaceVcsProvider>
+      <WorkspaceAgentWorkProvider workspaceId={workspaceId}>
+        <WorkspaceVcsProvider workspaceId={workspaceId}>
+          <WorkbenchStoreProvider workspaceId={workspaceId}>
+            <WorkbenchPageInner workspaceId={workspaceId} />
+          </WorkbenchStoreProvider>
+        </WorkspaceVcsProvider>
+      </WorkspaceAgentWorkProvider>
     </WorkspaceActiveSnapshotProvider>
   );
 }

@@ -1,0 +1,6 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.ctx.rs/agent-work/contribution.v1.schema.json",
+  "title": "Contribution",
+  "$ref": "./v1.schema.json#/$defs/Contribution"
+}

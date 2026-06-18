@@ -47,6 +47,7 @@ type UseWorkbenchTaskCreationArgs = {
   ) => Promise<ProviderOptions | undefined>;
   dictationRecording: boolean;
   stopDictation: (opts?: { awaitFinal?: boolean }) => Promise<string>;
+  resolveInitialPrompt?: ((text: string) => Promise<string>) | null;
   focusTask: (taskId: string, sessionId?: string | null) => void;
   workbenchStore: Pick<WorkbenchStore, "getNavToken" | "flushDraft">;
   optimisticStartingTaskRef: MutableRefObject<OptimisticTaskSummary | null>;
@@ -73,6 +74,7 @@ export function useWorkbenchTaskCreation({
   ensureProviderAuthSummary,
   dictationRecording,
   stopDictation,
+  resolveInitialPrompt,
   focusTask,
   workbenchStore,
   optimisticStartingTaskRef,
@@ -145,8 +147,8 @@ export function useWorkbenchTaskCreation({
 
   const startNewTask = async () => {
     if (!workspaceId) return;
-    const prompt = (dictationRecording ? await stopDictation({ awaitFinal: true }) : draftPrompt).trim();
-    if (!prompt) return;
+    const initialPrompt = (dictationRecording ? await stopDictation({ awaitFinal: true }) : draftPrompt).trim();
+    if (!initialPrompt) return;
     if (startBusy) return;
     if (startBlockedReason && !startBlockedReason.startsWith("Starting")) {
       onStartError(startBlockedReason);
@@ -154,6 +156,20 @@ export function useWorkbenchTaskCreation({
     }
     setStartBusy(true);
     onStartError(null);
+    let prompt = initialPrompt;
+    try {
+      if (resolveInitialPrompt) {
+        prompt = (await resolveInitialPrompt(initialPrompt)).trim();
+      }
+    } catch (e: unknown) {
+      setStartBusy(false);
+      onStartError(errorMessage(e));
+      return;
+    }
+    if (!prompt) {
+      setStartBusy(false);
+      return;
+    }
 
     const nowIso = new Date().toISOString();
     const title = deriveTaskTitle(prompt);

@@ -1,11 +1,12 @@
 use axum::body::Body;
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{FromRequest, Path, Request, State};
+use axum::extract::{FromRequest, Path, Query, Request, State};
 use axum::http::{header, StatusCode};
 use axum::response::Response;
 use axum::Json;
 
 mod active;
+mod agent_work;
 mod attachments;
 mod harness_container;
 mod management;
@@ -13,6 +14,7 @@ mod registry;
 mod worktrees;
 
 pub(super) use active::{get_workspace_active_heads, get_workspace_active_snapshot};
+pub(super) use agent_work::get_workspace_agent_work;
 pub(super) use attachments::{list_workspace_attachments, sync_workspace_attachments};
 pub(super) use harness_container::{
     ensure_workspace_harness_container, get_workspace_harness_container,
@@ -24,8 +26,8 @@ pub(super) use worktrees::{get_worktree, get_worktree_bootstrap_logs};
 
 use super::errors::ApiErrorResp;
 use ctx_daemon::daemon::{
-    WorkspaceActiveHandle, WorkspaceAttachmentsHandle, WorkspaceDeletionHandle,
-    WorkspaceExecutionConfigHandle, WorkspaceHarnessContainerHandle,
+    WorkspaceActiveHandle, WorkspaceAgentWorkHandle, WorkspaceAttachmentsHandle,
+    WorkspaceDeletionHandle, WorkspaceExecutionConfigHandle, WorkspaceHarnessContainerHandle,
     WorkspaceMergeQueueConfigHandle, WorkspacePrimaryBranchHandle,
     WorkspacePromptBootstrapConfigHandle, WorkspaceProviderModelPreferenceHandle,
     WorkspaceRegistryHandle, WorkspaceWorktreeHandle,
@@ -39,6 +41,7 @@ use ctx_route_contracts::workspaces::{
     UpdateWorkspaceMergeQueueConfigRequest, UpdateWorkspacePrimaryBranchRequest,
     UpdateWorkspaceProviderModelPreferenceRouteRequest, UpdateWorktreeBootstrapConfigRequest,
     WorkspaceActiveHeadBatchRouteResponse, WorkspaceActiveSnapshotRouteResponse,
+    WorkspaceAgentWorkRouteQuery, WorkspaceAgentWorkRouteResponse,
     WorkspaceAttachmentRouteResponse, WorkspaceConfigUpdateResult,
     WorkspaceExecutionConfigRouteSnapshot, WorkspaceHarnessContainerStatusRouteResponse,
     WorkspaceMergeQueueConfigRouteResponse, WorkspacePrimaryBranchSnapshot,

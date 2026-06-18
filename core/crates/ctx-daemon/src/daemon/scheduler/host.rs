@@ -943,6 +943,10 @@ impl ProviderTurnLaunchHost {
         self.launch_runtime.data_root()
     }
 
+    pub(in crate::daemon) async fn sync_plugin_provider_adapters(&self) {
+        self.launch_runtime.sync_plugin_provider_adapters().await;
+    }
+
     pub(in crate::daemon) fn daemon_url(&self) -> &str {
         self.launch_runtime.daemon_url()
     }

@@ -2,6 +2,7 @@ export type Message = {
   id: string;
   session_id: string;
   task_id: string;
+  run_id?: string | null;
   turn_id?: string | null;
   turn_sequence?: number | null;
   order_seq?: number | null;
@@ -9,6 +10,7 @@ export type Message = {
   content: string;
   attachments?: MessageAttachment[];
   delivery: "immediate" | "queued";
+  delivered_at?: string | null;
   created_at: string;
 };
 
@@ -19,7 +21,8 @@ export type Artifact = {
   workspace_id: string;
   worktree_id: string;
   name?: string | null;
-  absolute_path: string;
+  absolute_path?: string | null;
+  relative_path?: string | null;
   mime_type: string;
   bytes: number;
   created_at: string;
@@ -65,7 +68,8 @@ export type SessionEventType =
   | "artifacts_set"
   | "done"
   | "interrupt_requested"
-  | "turn_interrupted";
+  | "turn_interrupted"
+  | "error";
 
 export type TurnLifecycleEventPayload = {
   message_id?: string;
@@ -83,7 +87,7 @@ export type MessageQueueEventPayload = {
 };
 
 export type SessionEvent = {
-  seq: number;
+  seq: number | null;
   id: string;
   session_id: string;
   run_id?: string | null;
@@ -178,3 +182,25 @@ export type SessionTurnToolSummary = {
   created_at: string;
   updated_at: string;
 };
+
+export type EventEnvelope = SessionEvent;
+
+export type ToolCallRecord = SessionTurnTool;
+
+export type TranscriptRecord =
+  | {
+      record_type: "message";
+      message: Message;
+    }
+  | {
+      record_type: "event";
+      event: EventEnvelope;
+    }
+  | {
+      record_type: "tool_call";
+      tool_call: ToolCallRecord;
+    }
+  | {
+      record_type: "artifact";
+      artifact: Artifact;
+    };

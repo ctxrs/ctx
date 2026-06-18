@@ -283,6 +283,7 @@ impl SessionTitleModelModeHandle {
         provider_id: &str,
         install_target: InstallTarget,
     ) -> anyhow::Result<Arc<dyn ProviderAdapter>> {
+        self.sync_plugin_provider_adapters().await;
         ctx_provider_runtime::provider_launch::resolver::ensure_provider_adapter_for_target(
             self,
             provider_id,

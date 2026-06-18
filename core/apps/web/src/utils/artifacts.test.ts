@@ -40,6 +40,30 @@ describe("artifact preview classification", () => {
     ).toBe("markdown");
   });
 
+  it("classifies artifacts by relative path when absolute path is omitted", () => {
+    expect(
+      getArtifactPreviewKind(
+        makeArtifact({
+          name: "artifact",
+          mime_type: "application/octet-stream",
+          absolute_path: null,
+          relative_path: "docs/notes.md",
+        }),
+      ),
+    ).toBe("markdown");
+
+    expect(
+      getArtifactPreviewKind(
+        makeArtifact({
+          name: "artifact",
+          mime_type: "application/octet-stream",
+          absolute_path: undefined,
+          relative_path: "clips/demo.mp4",
+        }),
+      ),
+    ).toBe("video");
+  });
+
   it("classifies mdx by extension even when the mime falls back to octet-stream", () => {
     expect(
       getArtifactPreviewKind(

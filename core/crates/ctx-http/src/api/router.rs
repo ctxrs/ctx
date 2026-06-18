@@ -9,8 +9,8 @@ use ctx_daemon::daemon::{
     AuthHandle, BlobHandle, DaemonRouteHandles, DaemonShutdownHandle, DemoSeedTranscriptHandle,
     DiagnosticsHandle, DictationHandle, ExecutionLaunchHandle, HealthHandle,
     LinuxSandboxRuntimeHandle, LogsHandle, MergeQueueApiHandle, MobileRuntimeHandle,
-    MobileSecureProxyHandle, MobileStoreHandle, OrgPolicyHandle, ProviderAccountsHandle,
-    ProviderAdminHandle, ProviderAuthImportHandle, ProviderBootstrapHandle,
+    MobileSecureProxyHandle, MobileStoreHandle, OrgPolicyHandle, PluginInventoryHandle,
+    ProviderAccountsHandle, ProviderAdminHandle, ProviderAuthImportHandle, ProviderBootstrapHandle,
     ProviderHarnessConfigHandle, ProviderInstallHandle, ProviderOptionsHandle,
     ProviderStatusHandle, ProviderUsageHandle, ProviderWorkspaceAuthHandle, RepoOnboardingHandle,
     RequestBaseHandle, ResourceUtilizationHandle, RunArchiveHandle, SessionArtifactsHandle,
@@ -20,12 +20,13 @@ use ctx_daemon::daemon::{
     TaskCreationHandle, TaskLifecycleHandle, TaskListingHandle, TaskReadStateHandle,
     TaskSessionAdmissionHandle, TaskSessionListingHandle, TaskTitleHandle, TelemetryHandle,
     TerminalRouteHandle, TitleGenerationLocalHandle, UpdateActivityHandle, UpdateDrainHandle,
-    UpdateReleaseHandle, WebSessionRouteHandle, WorkspaceActiveHandle, WorkspaceAttachmentsHandle,
-    WorkspaceDeletionHandle, WorkspaceExecutionConfigHandle, WorkspaceFileCompletionsHandle,
-    WorkspaceHarnessContainerHandle, WorkspaceMergeQueueConfigHandle, WorkspaceOrgPolicyHandle,
-    WorkspacePrimaryBranchHandle, WorkspacePromptBootstrapConfigHandle,
-    WorkspaceProviderModelPreferenceHandle, WorkspaceRegistryHandle, WorkspaceStreamHandle,
-    WorkspaceVcsStreamHandle, WorkspaceWorktreeHandle,
+    UpdateReleaseHandle, WebSessionRouteHandle, WorkspaceActiveHandle, WorkspaceAgentWorkHandle,
+    WorkspaceAttachmentsHandle, WorkspaceDeletionHandle, WorkspaceExecutionConfigHandle,
+    WorkspaceFileCompletionsHandle, WorkspaceHarnessContainerHandle,
+    WorkspaceMergeQueueConfigHandle, WorkspaceOrgPolicyHandle, WorkspacePrimaryBranchHandle,
+    WorkspacePromptBootstrapConfigHandle, WorkspaceProviderModelPreferenceHandle,
+    WorkspaceRegistryHandle, WorkspaceStreamHandle, WorkspaceVcsStreamHandle,
+    WorkspaceWorktreeHandle,
 };
 
 use super::auth::auth_middleware;
@@ -95,6 +96,7 @@ pub struct RouteHandles {
     request_base: RequestBaseHandle,
     repo_onboarding: RepoOnboardingHandle,
     logs: LogsHandle,
+    plugins: PluginInventoryHandle,
     org_policy: OrgPolicyHandle,
     workspace_org_policy: WorkspaceOrgPolicyHandle,
     workspace_prompt_bootstrap_config: WorkspacePromptBootstrapConfigHandle,
@@ -104,6 +106,7 @@ pub struct RouteHandles {
     workspace_provider_model_preferences: WorkspaceProviderModelPreferenceHandle,
     workspace_worktree: WorkspaceWorktreeHandle,
     workspace_registry: WorkspaceRegistryHandle,
+    workspace_agent_work: WorkspaceAgentWorkHandle,
     workspace_merge_queue_config: WorkspaceMergeQueueConfigHandle,
     merge_queue_api: MergeQueueApiHandle,
     workspace_attachments: WorkspaceAttachmentsHandle,
@@ -169,6 +172,7 @@ impl RouteHandles {
             request_base,
             repo_onboarding,
             logs,
+            plugins,
             org_policy,
             workspace_org_policy,
             workspace_prompt_bootstrap_config,
@@ -178,6 +182,7 @@ impl RouteHandles {
             workspace_provider_model_preferences,
             workspace_worktree,
             workspace_registry,
+            workspace_agent_work,
             workspace_merge_queue_config,
             merge_queue_api,
             workspace_attachments,
@@ -240,6 +245,7 @@ impl RouteHandles {
             request_base,
             repo_onboarding,
             logs,
+            plugins,
             org_policy,
             workspace_org_policy,
             workspace_prompt_bootstrap_config,
@@ -249,6 +255,7 @@ impl RouteHandles {
             workspace_provider_model_preferences,
             workspace_worktree,
             workspace_registry,
+            workspace_agent_work,
             workspace_merge_queue_config,
             merge_queue_api,
             workspace_attachments,
@@ -319,6 +326,7 @@ impl_route_state_extractors! {
     RequestBaseHandle, request_base;
     RepoOnboardingHandle, repo_onboarding;
     LogsHandle, logs;
+    PluginInventoryHandle, plugins;
     OrgPolicyHandle, org_policy;
     WorkspaceOrgPolicyHandle, workspace_org_policy;
     WorkspacePromptBootstrapConfigHandle, workspace_prompt_bootstrap_config;
@@ -328,6 +336,7 @@ impl_route_state_extractors! {
     WorkspaceProviderModelPreferenceHandle, workspace_provider_model_preferences;
     WorkspaceWorktreeHandle, workspace_worktree;
     WorkspaceRegistryHandle, workspace_registry;
+    WorkspaceAgentWorkHandle, workspace_agent_work;
     WorkspaceMergeQueueConfigHandle, workspace_merge_queue_config;
     MergeQueueApiHandle, merge_queue_api;
     WorkspaceAttachmentsHandle, workspace_attachments;

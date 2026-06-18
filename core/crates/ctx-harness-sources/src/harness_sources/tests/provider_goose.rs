@@ -276,10 +276,15 @@ async fn openhands_endpoint_projects_persistence_backed_llm_contract() {
     );
     let pyhooks_dir =
         runtime_resolution::openhands_endpoint_home(root.path(), &endpoint.id).join("pyhooks");
-    assert_eq!(
-        resolved.env.get("PYTHONPATH"),
-        Some(&pyhooks_dir.to_string_lossy().to_string())
-    );
+    let mut pythonpath_parts = vec![pyhooks_dir.as_os_str().to_os_string()];
+    if let Some(existing) = std::env::var_os("PYTHONPATH") {
+        pythonpath_parts.extend(std::env::split_paths(&existing).map(|path| path.into_os_string()));
+    }
+    let expected_pythonpath = std::env::join_paths(pythonpath_parts)
+        .expect("join expected PYTHONPATH")
+        .to_string_lossy()
+        .to_string();
+    assert_eq!(resolved.env.get("PYTHONPATH"), Some(&expected_pythonpath));
     let agent_settings: serde_json::Value = serde_json::from_str(
         &tokio::fs::read_to_string(
             runtime_resolution::openhands_endpoint_home(root.path(), &endpoint.id)

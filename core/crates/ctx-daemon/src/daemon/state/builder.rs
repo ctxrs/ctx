@@ -80,6 +80,9 @@ impl DaemonState {
             worktree_vcs_enabled,
             runtime_parts.workspace_active_snapshot,
         );
+        let plugins = Arc::new(crate::daemon::plugins::PluginInventoryRuntime::new(
+            data_root.clone(),
+        ));
         let providers = build_provider_runtime(providers);
         let telemetry = build_telemetry_runtime(
             runtime_parts.telemetry,
@@ -132,6 +135,7 @@ impl DaemonState {
             auth_token.clone(),
             workspace_stores.clone(),
             Arc::clone(&providers),
+            Arc::clone(&plugins),
             telemetry.ops_events.clone(),
             Arc::clone(&execution.harness),
         ));
@@ -172,6 +176,7 @@ impl DaemonState {
                 shutdown_tx: runtime_parts.shutdown_tx,
                 update_drain,
             },
+            plugins,
             sessions,
             workspaces,
             providers,

@@ -1,0 +1,15 @@
+load("@aspect_rules_js//js:defs.bzl", "js_test")
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "json_schemas",
+    srcs = glob(["**/*.json"]),
+)
+
+js_test(
+    name = "json_syntax_test",
+    entry_point = "validate-json-schemas.mjs",
+    data = [":json_schemas"],
+    args = ["$(locations :json_schemas)"],
+)

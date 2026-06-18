@@ -1,0 +1,66 @@
+env:
+  CI: "true"
+  CARGO_TERM_COLOR: "always"
+
+steps:
+  - label: "source: contracts"
+    key: "source-contracts"
+    command:
+      - ".buildkite/validate-pipeline.sh"
+      - ".buildkite/run-bazel.sh test //:buildkite_config_test //:schemas"
+    artifact_paths:
+      - "bazel-testlogs/**/*"
+    timeout_in_minutes: 20
+
+  - label: "build graph: no-build analysis"
+    key: "build-graph-analysis"
+    depends_on: "source-contracts"
+    command:
+      - ".buildkite/run-bazel.sh build --nobuild //:presubmit //:all-rust //:all-web //:e2e-premerge //:release //:release-artifacts"
+    artifact_paths:
+      - "bazel-testlogs/**/*"
+    timeout_in_minutes: 30
+
+  - wait: ~
+
+  - label: "rust: all-rust"
+    key: "rust-all"
+    command: ".buildkite/run-bazel.sh test //:all-rust"
+    artifact_paths:
+      - "bazel-testlogs/**/*"
+    timeout_in_minutes: 120
+
+  - label: "web: all-web"
+    key: "web-all"
+    command: ".buildkite/run-bazel.sh test //:all-web"
+    artifact_paths:
+      - "bazel-testlogs/**/*"
+    timeout_in_minutes: 90
+
+  - wait: ~
+
+  - label: "browser: premerge e2e"
+    key: "browser-premerge-e2e"
+    command: ".buildkite/run-bazel.sh test //:e2e-premerge"
+    artifact_paths:
+      - "bazel-testlogs/**/*"
+    timeout_in_minutes: 90
+
+  - wait: ~
+
+  - label: "release: proof"
+    key: "release-proof"
+    command: ".buildkite/run-bazel.sh test //:release"
+    artifact_paths:
+      - "bazel-testlogs/**/*"
+    timeout_in_minutes: 150
+
+  - label: "artifact: release"
+    key: "release-artifacts"
+    depends_on: "release-proof"
+    command: ".buildkite/run-bazel.sh build //:release-artifacts"
+    artifact_paths:
+      - "bazel-bin/core/apps/web/dist/**/*"
+      - "bazel-bin/core/crates/ctx-http/ctx"
+      - "bazel-testlogs/**/*"
+    timeout_in_minutes: 60

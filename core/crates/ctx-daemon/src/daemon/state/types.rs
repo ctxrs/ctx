@@ -97,6 +97,7 @@ pub struct ExecutionRuntime {
 
 pub struct DaemonState {
     pub(crate) core: CoreState,
+    pub(crate) plugins: Arc<crate::daemon::plugins::PluginInventoryRuntime>,
     pub(crate) sessions: Arc<SessionRuntime>,
     pub(crate) workspaces: WorkspaceRuntime,
     pub(crate) providers: Arc<ProviderRuntime>,

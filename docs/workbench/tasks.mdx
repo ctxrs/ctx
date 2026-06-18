@@ -5,9 +5,36 @@ description: "Use tasks as the core unit of planning and review"
 
 ## Overview
 
-A task should represent one outcome that can be reviewed in one scope.
+A task should represent one human objective.
 
-Tasks are your main planning and review boundary in ctx.
+Tasks are your main planning and review boundary in ctx. A task is the human
+objective and the unit of delegated agent work; sessions, runs, worktrees,
+change sets, artifacts, checks, and pull requests hang off that objective
+instead of replacing it. Gates belong to the change set, pull request, ref, or
+merge candidate being evaluated, not to a local agent session.
+
+## How tasks relate to agent work
+
+A task may need one or more agent sessions. Each session may contain several
+runs, such as an initial pass, a revision pass, and a validation pass. Those runs
+work in isolated worktrees and produce reviewable change sets.
+
+Use the task to answer "what outcome are we trying to achieve?" Use the session
+and run history to answer "how did the agent attempt it?" Use the change set,
+artifacts, and checks to answer "what evidence do we have?" Use gates to answer
+"can this change set or pull request advance?"
+
+## Tasks and pull requests
+
+Tasks and pull requests are many-to-many.
+
+One task can produce multiple pull requests when review should be split by risk,
+ownership, or release timing. One pull request can advance multiple tasks when
+the final changes are best reviewed together.
+
+The connection should be explicit: the relevant sessions, runs, change sets,
+artifacts, and checks contribute to the task or pull request. Avoid relying on a
+hidden one-task-one-PR assumption when planning review.
 
 ## Writing strong task titles
 
@@ -49,10 +76,13 @@ Split when:
 - keep active task list focused
 - archive completed tasks
 - avoid reviving old tasks for unrelated work
+- split or link tasks and pull requests when review boundaries change
 
 ## Related pages
 
 - [Run Your First Task](/getting-started/first-task)
+- [Agent Work Model](/agent-work-model)
+- [Agent Work Implementation Plan](/agent-work-implementation-plan)
 - [Sessions and Messages](/workbench/sessions)
 - [Review and Apply Changes](/workbench/review-and-apply-changes)
 - [Tips for Success with Agents](/quick-tips-for-success-with-agents)

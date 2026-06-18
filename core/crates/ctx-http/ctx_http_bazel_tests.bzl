@@ -155,6 +155,9 @@ CTX_HTTP_INTEGRATION_SOURCE_DEPS = {
         "//core/crates/ctx-settings-model:lib",
         "//core/crates/ctx-settings-service:lib",
     ],
+    "workspace_execution_config_http": [
+        "//core/crates/ctx-settings-model:lib",
+    ],
     "workspace_runtime_crash_recovery": [
         "//core/crates/ctx-settings-model:lib",
     ],

@@ -1,4 +1,5 @@
 import { Check, Copy, Ellipsis, GitBranch, Image, Terminal } from "lucide-react";
+import { formatAgentWorkSummaryChips, type AgentWorkTaskSummary } from "./agentWorkProjection";
 
 type WorktreeChip = {
   worktreeLabel: string;
@@ -17,6 +18,7 @@ type WorkbenchSessionHeaderProps = {
   terminalOpen: boolean;
   artifactsCount: number;
   diffBadgeCount: number;
+  agentWorkSummary?: AgentWorkTaskSummary | null;
   onCopyWorktreeLocation: () => void;
   onOpenWorktreeTerminal: () => void;
   onToggleArtifactsPane: () => void;
@@ -36,6 +38,7 @@ export function WorkbenchSessionHeader({
   terminalOpen,
   artifactsCount,
   diffBadgeCount,
+  agentWorkSummary,
   onCopyWorktreeLocation,
   onOpenWorktreeTerminal,
   onToggleArtifactsPane,
@@ -44,6 +47,8 @@ export function WorkbenchSessionHeader({
   onOpenConvoMenu,
   showAuxiliaryActions = true,
 }: WorkbenchSessionHeaderProps) {
+  const graphChips = formatAgentWorkSummaryChips(agentWorkSummary);
+
   return (
     <div className="wb-single-track-header" aria-busy={busy ? "true" : undefined}>
       <div className="wb-single-track-row">
@@ -86,6 +91,18 @@ export function WorkbenchSessionHeader({
               )}
             </>
           )}
+          {graphChips.length > 0 ? (
+            <>
+              <span className="wb-single-track-dot" aria-hidden="true">
+                ·
+              </span>
+              <span className="wb-single-track-agent-work" aria-label="Agent work summary">
+                {graphChips.map((chip) => (
+                  <span key={chip} className="wb-single-track-agent-work-chip">{chip}</span>
+                ))}
+              </span>
+            </>
+          ) : null}
         </div>
         <div className="wb-icon-row">
           {showAuxiliaryActions ? (

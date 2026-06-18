@@ -4,11 +4,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ctx_core::ids::{
-    ConnectionProfileId, MessageId, RunId, SessionId, TaskId, TurnId, WorkspaceId, WorktreeId,
+    AgentWorkSourceRecordId, ChangeSetId, ConnectionProfileId, ContributionId, MessageId, RunId,
+    SessionId, TaskId, TurnId, WorkspaceId, WorktreeId,
 };
 use ctx_core::models::{
-    ExecutionEnvironment, Message, MessageDelivery, MessageRole, SessionEventType, SessionTurn,
-    SessionTurnStatus, SessionTurnTool, VcsKind,
+    AgentWorkSourceRecord, ArchiveVisibility, ChangeSet, Contribution, ContributionEndpoint,
+    ContributionRole, ContributionSubject, ContributionTarget, ExecutionEnvironment, Message,
+    MessageDelivery, MessageRole, PullRequestRef, RecordFidelity, RecordOrigin, RecordSource,
+    RecordTrust, RunArchiveState, RunRecord, RunStatus, SessionEventType, SessionTurn,
+    SessionTurnStatus, SessionTurnTool, Sha256DigestValue, VcsKind,
 };
 use sqlx::{Row, SqlitePool};
 use tokio::sync::Barrier;
@@ -81,6 +85,1631 @@ async fn setup_session_fixture() -> SessionFixture {
         worktree_id: worktree.id,
         session_id: session.id,
     }
+}
+
+fn task_endpoint(task_id: TaskId) -> ContributionEndpoint {
+    ContributionEndpoint::Task {
+        task_id: Some(task_id),
+        id: None,
+    }
+}
+
+fn session_endpoint(
+    session_id: SessionId,
+    turn_id: Option<TurnId>,
+    run_id: Option<RunId>,
+) -> ContributionEndpoint {
+    ContributionEndpoint::Session {
+        session_id: Some(session_id),
+        provider: None,
+        id: None,
+        turn_id,
+        run_id,
+    }
+}
+
+fn run_endpoint(run_id: RunId, session_id: Option<SessionId>) -> ContributionEndpoint {
+    ContributionEndpoint::Run {
+        run_id: Some(run_id),
+        id: None,
+        session_id,
+    }
+}
+
+#[tokio::test]
+async fn agent_work_records_round_trip_many_to_many_links() {
+    let fixture = setup_session_fixture().await;
+    let change_set_id = ChangeSetId::new();
+    let change_set = ChangeSet {
+        id: change_set_id.clone(),
+        workspace_id: fixture.workspace_id,
+        source_worktree_id: Some(fixture.worktree_id),
+        source: RecordSource::Worktree,
+        origin: RecordOrigin::Agent,
+        fidelity: RecordFidelity::Diff,
+        trust: RecordTrust::High,
+        title: Some("Agent work persistence".to_string()),
+        summary: None,
+        description: Some("Persist change set and contribution records".to_string()),
+        fingerprint: None,
+        base_revision: Some("base".to_string()),
+        head_revision: Some("head".to_string()),
+        target_branch: Some("main".to_string()),
+        pull_requests: Vec::new(),
+        source_records: Vec::new(),
+        issuer: None,
+        created_at: None,
+        updated_at: None,
+        schema_version: 1,
+    };
+
+    let stored_change_set = fixture.store.upsert_change_set(&change_set).await.unwrap();
+
+    assert_eq!(stored_change_set.id, change_set_id);
+    assert_eq!(stored_change_set.workspace_id, fixture.workspace_id);
+    assert!(stored_change_set.created_at.is_some());
+    assert!(stored_change_set.updated_at.is_some());
+
+    let pull_request = PullRequestRef {
+        provider: "github".to_string(),
+        owner: "ctxrs".to_string(),
+        repo: "ctx".to_string(),
+        number: 75,
+        id: None,
+        url: None,
+        title: None,
+    };
+    let contribution = Contribution {
+        id: ContributionId::new(),
+        workspace_id: fixture.workspace_id,
+        change_set_id: Some(change_set_id.clone()),
+        subject: task_endpoint(fixture.task_id),
+        target: ContributionTarget::PullRequest {
+            pull_request: pull_request.clone(),
+        },
+        role: ContributionRole::Related,
+        source: RecordSource::Manual,
+        origin: RecordOrigin::User,
+        fidelity: RecordFidelity::Declared,
+        trust: RecordTrust::Medium,
+        summary: Some("Task contributes to PR 75".to_string()),
+        fingerprint: None,
+        issuer: None,
+        metadata_json: None,
+        source_records: Vec::new(),
+        created_at: None,
+        updated_at: None,
+        schema_version: 1,
+    };
+
+    let stored_contribution = fixture
+        .store
+        .upsert_contribution(&contribution)
+        .await
+        .unwrap();
+
+    let fetched_change_set = fixture
+        .store
+        .get_workspace_change_set(fixture.workspace_id, change_set_id.clone())
+        .await
+        .unwrap()
+        .expect("change set should exist");
+    assert_eq!(
+        fetched_change_set.title.as_deref(),
+        Some("Agent work persistence")
+    );
+
+    let fetched_contribution = fixture
+        .store
+        .get_contribution(stored_contribution.id.clone())
+        .await
+        .unwrap()
+        .expect("contribution should exist");
+    assert!(matches!(
+        fetched_contribution.subject,
+        ContributionSubject::Task {
+            task_id: Some(task_id),
+            ..
+        } if task_id == fixture.task_id
+    ));
+    assert!(matches!(
+        fetched_contribution.target,
+        ContributionTarget::PullRequest { pull_request: ref fetched }
+            if fetched.provider == "github"
+                && fetched.owner == pull_request.owner
+                && fetched.repo == pull_request.repo
+                && fetched.number == pull_request.number
+    ));
+
+    let by_workspace = fixture
+        .store
+        .list_workspace_change_sets(fixture.workspace_id)
+        .await
+        .unwrap();
+    assert_eq!(by_workspace.len(), 1);
+    assert_eq!(by_workspace[0].id, change_set_id);
+
+    let contributions_for_change_set = fixture
+        .store
+        .list_contributions_for_change_set(fixture.workspace_id, change_set_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(contributions_for_change_set.len(), 1);
+    assert_eq!(contributions_for_change_set[0].id, stored_contribution.id);
+
+    let foreign_workspace = fixture
+        .store
+        .create_workspace("foreign".into(), "/tmp/foreign".into(), VcsKind::Git)
+        .await
+        .unwrap();
+    let foreign_workspace_id = foreign_workspace.id;
+    let foreign_change_set_id = ChangeSetId::new();
+    fixture
+        .store
+        .upsert_change_set(&ChangeSet {
+            id: foreign_change_set_id.clone(),
+            workspace_id: foreign_workspace_id,
+            source_worktree_id: None,
+            source: RecordSource::Manual,
+            origin: RecordOrigin::Imported,
+            fidelity: RecordFidelity::Declared,
+            trust: RecordTrust::Low,
+            title: Some("foreign workspace".to_string()),
+            summary: None,
+            description: None,
+            fingerprint: None,
+            base_revision: None,
+            head_revision: None,
+            target_branch: None,
+            pull_requests: Vec::new(),
+            source_records: Vec::new(),
+            issuer: None,
+            created_at: None,
+            updated_at: None,
+            schema_version: 1,
+        })
+        .await
+        .unwrap();
+    fixture
+        .store
+        .upsert_contribution(&Contribution {
+            id: ContributionId::new(),
+            workspace_id: foreign_workspace_id,
+            change_set_id: Some(foreign_change_set_id.clone()),
+            subject: ContributionSubject::System {
+                label: Some("foreign".to_string()),
+            },
+            target: ContributionTarget::ChangeSet {
+                change_set_id: foreign_change_set_id.clone(),
+            },
+            role: ContributionRole::Related,
+            source: RecordSource::Manual,
+            origin: RecordOrigin::Imported,
+            fidelity: RecordFidelity::Declared,
+            trust: RecordTrust::Low,
+            summary: None,
+            fingerprint: None,
+            issuer: None,
+            metadata_json: None,
+            source_records: Vec::new(),
+            created_at: None,
+            updated_at: None,
+            schema_version: 1,
+        })
+        .await
+        .unwrap();
+    assert!(fixture
+        .store
+        .get_workspace_change_set(fixture.workspace_id, foreign_change_set_id.clone())
+        .await
+        .unwrap()
+        .is_none());
+    assert!(fixture
+        .store
+        .list_contributions_for_change_set(fixture.workspace_id, foreign_change_set_id)
+        .await
+        .unwrap()
+        .is_empty());
+
+    let contributions_for_task = fixture
+        .store
+        .list_contributions_for_endpoint(fixture.workspace_id, &task_endpoint(fixture.task_id))
+        .await
+        .unwrap();
+    assert_eq!(contributions_for_task.len(), 1);
+    assert_eq!(contributions_for_task[0].id, stored_contribution.id);
+
+    let contributions_for_pr = fixture
+        .store
+        .list_contributions_for_endpoint(
+            fixture.workspace_id,
+            &ContributionEndpoint::PullRequest {
+                pull_request: pull_request.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(contributions_for_pr.len(), 1);
+    assert_eq!(contributions_for_pr[0].id, stored_contribution.id);
+}
+
+#[tokio::test]
+async fn agent_work_records_reconcile_nullable_foreign_keys_on_read() {
+    let fixture = setup_session_fixture().await;
+    let unused_worktree = fixture
+        .store
+        .create_worktree(
+            fixture.workspace_id,
+            "/tmp/unused".into(),
+            "cafebabe".into(),
+            None,
+        )
+        .await
+        .unwrap();
+    let change_set = fixture
+        .store
+        .upsert_change_set(&ChangeSet {
+            id: ChangeSetId::new(),
+            workspace_id: fixture.workspace_id,
+            source_worktree_id: Some(unused_worktree.id),
+            source: RecordSource::Worktree,
+            origin: RecordOrigin::Agent,
+            fidelity: RecordFidelity::Diff,
+            trust: RecordTrust::High,
+            title: Some("Nullable FK".to_string()),
+            summary: None,
+            description: None,
+            fingerprint: None,
+            base_revision: None,
+            head_revision: None,
+            target_branch: None,
+            pull_requests: Vec::new(),
+            source_records: Vec::new(),
+            issuer: None,
+            created_at: None,
+            updated_at: None,
+            schema_version: 1,
+        })
+        .await
+        .unwrap();
+
+    assert!(fixture
+        .store
+        .delete_worktree(unused_worktree.id)
+        .await
+        .unwrap());
+
+    let fetched = fixture
+        .store
+        .get_change_set(change_set.id)
+        .await
+        .unwrap()
+        .expect("change set should remain after source worktree deletion");
+    assert_eq!(fetched.source_worktree_id, None);
+}
+
+#[tokio::test]
+async fn agent_work_rejects_cross_workspace_relational_links() {
+    let fixture = setup_session_fixture().await;
+    let other_workspace = fixture
+        .store
+        .create_workspace("other".into(), "/tmp/other".into(), VcsKind::Git)
+        .await
+        .unwrap();
+    let other_worktree = fixture
+        .store
+        .create_worktree(other_workspace.id, "/tmp/other".into(), "abc".into(), None)
+        .await
+        .unwrap();
+
+    let error = fixture
+        .store
+        .upsert_change_set(&ChangeSet {
+            id: ChangeSetId::new(),
+            workspace_id: fixture.workspace_id,
+            source_worktree_id: Some(other_worktree.id),
+            source: RecordSource::Worktree,
+            origin: RecordOrigin::Agent,
+            fidelity: RecordFidelity::Diff,
+            trust: RecordTrust::High,
+            title: Some("Cross workspace".to_string()),
+            summary: None,
+            description: None,
+            fingerprint: None,
+            base_revision: None,
+            head_revision: None,
+            target_branch: None,
+            pull_requests: Vec::new(),
+            source_records: Vec::new(),
+            issuer: None,
+            created_at: None,
+            updated_at: None,
+            schema_version: 1,
+        })
+        .await
+        .expect_err("cross-workspace source worktree should be rejected");
+    assert!(format!("{error:#}").contains("different workspace"));
+}
+
+#[tokio::test]
+async fn agent_work_rejects_cross_workspace_contribution_endpoints() {
+    let fixture = setup_session_fixture().await;
+    let other_workspace = fixture
+        .store
+        .create_workspace("other".into(), "/tmp/other".into(), VcsKind::Git)
+        .await
+        .unwrap();
+    let other_task = fixture
+        .store
+        .create_task(other_workspace.id, "other task".into(), None)
+        .await
+        .unwrap();
+
+    let cross_workspace = Contribution {
+        id: ContributionId::new(),
+        workspace_id: fixture.workspace_id,
+        change_set_id: None,
+        subject: task_endpoint(other_task.id),
+        target: task_endpoint(fixture.task_id),
+        role: ContributionRole::Related,
+        source: RecordSource::Manual,
+        origin: RecordOrigin::User,
+        fidelity: RecordFidelity::Declared,
+        trust: RecordTrust::Medium,
+        summary: Some("bad link".to_string()),
+        fingerprint: None,
+        issuer: None,
+        metadata_json: None,
+        source_records: Vec::new(),
+        created_at: None,
+        updated_at: None,
+        schema_version: 1,
+    };
+
+    let error = fixture
+        .store
+        .upsert_contribution(&cross_workspace)
+        .await
+        .expect_err("cross-workspace contribution subject should be rejected");
+    assert!(format!("{error:#}").contains("subject task belongs to a different workspace"));
+
+    let missing = Contribution {
+        id: ContributionId::new(),
+        subject: task_endpoint(TaskId::new()),
+        ..cross_workspace
+    };
+    let error = fixture
+        .store
+        .upsert_contribution(&missing)
+        .await
+        .expect_err("missing contribution subject should be rejected");
+    assert!(format!("{error:#}").contains("subject task does not exist"));
+}
+
+#[tokio::test]
+async fn agent_work_accepts_external_graph_endpoint_ids() {
+    let fixture = setup_session_fixture().await;
+    let external_task = ContributionEndpoint::Task {
+        task_id: None,
+        id: Some("task-imported".to_string()),
+    };
+    let external_session = ContributionEndpoint::Session {
+        session_id: None,
+        provider: Some("codex".to_string()),
+        id: Some("thr_imported".to_string()),
+        turn_id: None,
+        run_id: None,
+    };
+    let external_worktree = ContributionEndpoint::Worktree {
+        worktree_id: None,
+        id: Some("wtr_imported".to_string()),
+    };
+
+    let stored = fixture
+        .store
+        .upsert_contribution(&Contribution {
+            id: ContributionId::new(),
+            workspace_id: fixture.workspace_id,
+            change_set_id: None,
+            subject: external_task.clone(),
+            target: external_session.clone(),
+            role: ContributionRole::Context,
+            source: RecordSource::External,
+            origin: RecordOrigin::Imported,
+            fidelity: RecordFidelity::Summary,
+            trust: RecordTrust::Medium,
+            summary: Some("Imported task/session edge".to_string()),
+            fingerprint: None,
+            issuer: Some("ctx-import".to_string()),
+            metadata_json: None,
+            source_records: Vec::new(),
+            created_at: None,
+            updated_at: None,
+            schema_version: 1,
+        })
+        .await
+        .unwrap();
+    fixture
+        .store
+        .upsert_contribution(&Contribution {
+            id: ContributionId::new(),
+            workspace_id: fixture.workspace_id,
+            change_set_id: None,
+            subject: external_session.clone(),
+            target: external_worktree.clone(),
+            role: ContributionRole::Context,
+            source: RecordSource::External,
+            origin: RecordOrigin::Imported,
+            fidelity: RecordFidelity::Summary,
+            trust: RecordTrust::Medium,
+            summary: Some("Imported session/worktree edge".to_string()),
+            fingerprint: None,
+            issuer: Some("ctx-import".to_string()),
+            metadata_json: None,
+            source_records: Vec::new(),
+            created_at: None,
+            updated_at: None,
+            schema_version: 1,
+        })
+        .await
+        .unwrap();
+
+    let by_task = fixture
+        .store
+        .list_contributions_for_endpoint(fixture.workspace_id, &external_task)
+        .await
+        .unwrap();
+    assert_eq!(by_task.len(), 1);
+    assert_eq!(by_task[0].id, stored.id);
+
+    let by_session = fixture
+        .store
+        .list_contributions_for_endpoint(fixture.workspace_id, &external_session)
+        .await
+        .unwrap();
+    assert_eq!(by_session.len(), 2);
+
+    let error = fixture
+        .store
+        .upsert_contribution(&Contribution {
+            id: ContributionId::new(),
+            workspace_id: fixture.workspace_id,
+            change_set_id: None,
+            subject: ContributionEndpoint::Task {
+                task_id: None,
+                id: Some("   ".to_string()),
+            },
+            target: ContributionEndpoint::System {
+                label: Some("bad-import".to_string()),
+            },
+            role: ContributionRole::Related,
+            source: RecordSource::External,
+            origin: RecordOrigin::Imported,
+            fidelity: RecordFidelity::Declared,
+            trust: RecordTrust::Low,
+            summary: None,
+            fingerprint: None,
+            issuer: None,
+            metadata_json: None,
+            source_records: Vec::new(),
+            created_at: None,
+            updated_at: None,
+            schema_version: 1,
+        })
+        .await
+        .expect_err("empty external task id should be rejected");
+    assert!(format!("{error:#}").contains("missing a local id or external id"));
+}
+
+#[tokio::test]
+async fn agent_work_rejects_mismatched_run_session_composite_endpoints() {
+    let fixture = setup_session_fixture().await;
+    let other_session = fixture
+        .store
+        .create_session(
+            fixture.task_id,
+            fixture.workspace_id,
+            fixture.worktree_id,
+            ExecutionEnvironment::Host,
+            "fake".into(),
+            "fake".into(),
+            "reviewer".into(),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let now = Utc::now();
+    let run_for_fixture_session = fixture
+        .store
+        .upsert_run(RunRecord {
+            id: RunId::new(),
+            session_id: fixture.session_id,
+            task_id: fixture.task_id,
+            workspace_id: fixture.workspace_id,
+            worktree_id: fixture.worktree_id,
+            parent_run_id: None,
+            account_id: None,
+            org_id: None,
+            run_grant_id: None,
+            status: RunStatus::Completed,
+            archive_state: RunArchiveState::Active,
+            archive_visibility: ArchiveVisibility::LocalOnly,
+            retention_policy: None,
+            created_at: now,
+            started_at: Some(now),
+            completed_at: Some(now),
+            archived_at: None,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+    let run_for_other_session = fixture
+        .store
+        .upsert_run(RunRecord {
+            id: RunId::new(),
+            session_id: other_session.id,
+            task_id: fixture.task_id,
+            workspace_id: fixture.workspace_id,
+            worktree_id: fixture.worktree_id,
+            parent_run_id: None,
+            account_id: None,
+            org_id: None,
+            run_grant_id: None,
+            status: RunStatus::Completed,
+            archive_state: RunArchiveState::Active,
+            archive_visibility: ArchiveVisibility::LocalOnly,
+            retention_policy: None,
+            created_at: now,
+            started_at: Some(now),
+            completed_at: Some(now),
+            archived_at: None,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+    let second_run_for_fixture_session = fixture
+        .store
+        .upsert_run(RunRecord {
+            id: RunId::new(),
+            session_id: fixture.session_id,
+            task_id: fixture.task_id,
+            workspace_id: fixture.workspace_id,
+            worktree_id: fixture.worktree_id,
+            parent_run_id: None,
+            account_id: None,
+            org_id: None,
+            run_grant_id: None,
+            status: RunStatus::Completed,
+            archive_state: RunArchiveState::Active,
+            archive_visibility: ArchiveVisibility::LocalOnly,
+            retention_policy: None,
+            created_at: now,
+            started_at: Some(now),
+            completed_at: Some(now),
+            archived_at: None,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+
+    let valid = fixture
+        .store
+        .upsert_contribution(&Contribution {
+            id: ContributionId::new(),
+            workspace_id: fixture.workspace_id,
+            change_set_id: None,
+            subject: run_endpoint(run_for_fixture_session.id, Some(fixture.session_id)),
+            target: task_endpoint(fixture.task_id),
+            role: ContributionRole::Related,
+            source: RecordSource::Manual,
+            origin: RecordOrigin::User,
+            fidelity: RecordFidelity::Declared,
+            trust: RecordTrust::Medium,
+            summary: Some("valid run/session edge".to_string()),
+            fingerprint: None,
+            issuer: None,
+            metadata_json: None,
+            source_records: Vec::new(),
+            created_at: None,
+            updated_at: None,
+            schema_version: 1,
+        })
+        .await
+        .unwrap();
+    assert!(valid.created_at.is_some());
+
+    let mismatched = Contribution {
+        id: ContributionId::new(),
+        workspace_id: fixture.workspace_id,
+        change_set_id: None,
+        subject: session_endpoint(fixture.session_id, None, Some(run_for_other_session.id)),
+        target: task_endpoint(fixture.task_id),
+        role: ContributionRole::Related,
+        source: RecordSource::Manual,
+        origin: RecordOrigin::User,
+        fidelity: RecordFidelity::Declared,
+        trust: RecordTrust::Medium,
+        summary: Some("bad run/session edge".to_string()),
+        fingerprint: None,
+        issuer: None,
+        metadata_json: None,
+        source_records: Vec::new(),
+        created_at: None,
+        updated_at: None,
+        schema_version: 1,
+    };
+    let error = fixture
+        .store
+        .upsert_contribution(&mismatched)
+        .await
+        .expect_err("mismatched session endpoint run should be rejected");
+    assert!(format!("{error:#}").contains("points at different sessions"));
+
+    let mismatched_agent = Contribution {
+        id: ContributionId::new(),
+        subject: ContributionSubject::Agent {
+            session_id: Some(fixture.session_id),
+            run_id: Some(run_for_other_session.id),
+            label: Some("agent".to_string()),
+        },
+        ..mismatched
+    };
+    let error = fixture
+        .store
+        .upsert_contribution(&mismatched_agent)
+        .await
+        .expect_err("mismatched agent endpoint run should be rejected");
+    assert!(format!("{error:#}").contains("points at different sessions"));
+
+    let valid_turn_id = TurnId::new();
+    fixture
+        .store
+        .insert_session_turn(make_turn(
+            fixture.session_id,
+            run_for_fixture_session.id,
+            valid_turn_id,
+        ))
+        .await
+        .unwrap();
+    let other_session_turn_id = TurnId::new();
+    fixture
+        .store
+        .insert_session_turn(make_turn(
+            other_session.id,
+            run_for_other_session.id,
+            other_session_turn_id,
+        ))
+        .await
+        .unwrap();
+    let other_run_turn_id = TurnId::new();
+    fixture
+        .store
+        .insert_session_turn(make_turn(
+            fixture.session_id,
+            second_run_for_fixture_session.id,
+            other_run_turn_id,
+        ))
+        .await
+        .unwrap();
+
+    let valid_turn_endpoint = Contribution {
+        id: ContributionId::new(),
+        workspace_id: fixture.workspace_id,
+        change_set_id: None,
+        subject: session_endpoint(
+            fixture.session_id,
+            Some(valid_turn_id),
+            Some(run_for_fixture_session.id),
+        ),
+        target: task_endpoint(fixture.task_id),
+        role: ContributionRole::Related,
+        source: RecordSource::Manual,
+        origin: RecordOrigin::User,
+        fidelity: RecordFidelity::Declared,
+        trust: RecordTrust::Medium,
+        summary: Some("valid session/turn/run edge".to_string()),
+        fingerprint: None,
+        issuer: None,
+        metadata_json: None,
+        source_records: Vec::new(),
+        created_at: None,
+        updated_at: None,
+        schema_version: 1,
+    };
+    fixture
+        .store
+        .upsert_contribution(&valid_turn_endpoint)
+        .await
+        .unwrap();
+
+    let missing_turn = Contribution {
+        id: ContributionId::new(),
+        subject: session_endpoint(
+            fixture.session_id,
+            Some(TurnId::new()),
+            Some(run_for_fixture_session.id),
+        ),
+        ..valid_turn_endpoint.clone()
+    };
+    let error = fixture
+        .store
+        .upsert_contribution(&missing_turn)
+        .await
+        .expect_err("missing session endpoint turn should be rejected");
+    assert!(format!("{error:#}").contains("turn does not exist"));
+
+    let cross_session_turn = Contribution {
+        id: ContributionId::new(),
+        subject: session_endpoint(
+            fixture.session_id,
+            Some(other_session_turn_id),
+            Some(run_for_fixture_session.id),
+        ),
+        ..valid_turn_endpoint.clone()
+    };
+    let error = fixture
+        .store
+        .upsert_contribution(&cross_session_turn)
+        .await
+        .expect_err("cross-session endpoint turn should be rejected");
+    assert!(format!("{error:#}").contains("points at different sessions"));
+
+    let mismatched_turn_run = Contribution {
+        id: ContributionId::new(),
+        subject: session_endpoint(
+            fixture.session_id,
+            Some(other_run_turn_id),
+            Some(run_for_fixture_session.id),
+        ),
+        ..valid_turn_endpoint
+    };
+    let error = fixture
+        .store
+        .upsert_contribution(&mismatched_turn_run)
+        .await
+        .expect_err("mismatched session endpoint turn run should be rejected");
+    assert!(format!("{error:#}").contains("points at different runs"));
+}
+
+#[tokio::test]
+async fn agent_work_endpoint_indexes_use_complete_endpoint_identity() {
+    let fixture = setup_session_fixture().await;
+    let second_worktree = fixture
+        .store
+        .create_worktree(
+            fixture.workspace_id,
+            "/tmp/test-second".into(),
+            "feedface".into(),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let file_a = fixture
+        .store
+        .upsert_contribution(&Contribution {
+            id: ContributionId::new(),
+            workspace_id: fixture.workspace_id,
+            change_set_id: None,
+            subject: ContributionSubject::File {
+                path: "src/lib.rs".to_string(),
+                worktree_id: Some(fixture.worktree_id),
+            },
+            target: ContributionTarget::System {
+                label: Some("file-a".to_string()),
+            },
+            role: ContributionRole::Related,
+            source: RecordSource::Manual,
+            origin: RecordOrigin::User,
+            fidelity: RecordFidelity::Declared,
+            trust: RecordTrust::Medium,
+            summary: None,
+            fingerprint: None,
+            issuer: None,
+            metadata_json: None,
+            source_records: Vec::new(),
+            created_at: None,
+            updated_at: None,
+            schema_version: 1,
+        })
+        .await
+        .unwrap();
+    let file_b = fixture
+        .store
+        .upsert_contribution(&Contribution {
+            id: ContributionId::new(),
+            workspace_id: fixture.workspace_id,
+            change_set_id: None,
+            subject: ContributionSubject::File {
+                path: "src/lib.rs".to_string(),
+                worktree_id: Some(second_worktree.id),
+            },
+            target: ContributionTarget::System {
+                label: Some("file-b".to_string()),
+            },
+            role: ContributionRole::Related,
+            source: RecordSource::Manual,
+            origin: RecordOrigin::User,
+            fidelity: RecordFidelity::Declared,
+            trust: RecordTrust::Medium,
+            summary: None,
+            fingerprint: None,
+            issuer: None,
+            metadata_json: None,
+            source_records: Vec::new(),
+            created_at: None,
+            updated_at: None,
+            schema_version: 1,
+        })
+        .await
+        .unwrap();
+    let file_matches = fixture
+        .store
+        .list_contributions_for_endpoint(
+            fixture.workspace_id,
+            &ContributionEndpoint::File {
+                path: "src/lib.rs".to_string(),
+                worktree_id: Some(fixture.worktree_id),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(file_matches.len(), 1);
+    assert_eq!(file_matches[0].id, file_a.id);
+    assert_ne!(file_matches[0].id, file_b.id);
+    let path_only_matches = fixture
+        .store
+        .list_contributions_for_endpoint(
+            fixture.workspace_id,
+            &ContributionEndpoint::File {
+                path: "src/lib.rs".to_string(),
+                worktree_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(path_only_matches.is_empty());
+
+    let external_a = fixture
+        .store
+        .upsert_contribution(&Contribution {
+            id: ContributionId::new(),
+            workspace_id: fixture.workspace_id,
+            change_set_id: None,
+            subject: ContributionSubject::External {
+                source: "alpha".to_string(),
+                identifier: Some("same-id".to_string()),
+                url: None,
+            },
+            target: ContributionTarget::System {
+                label: Some("external-a".to_string()),
+            },
+            role: ContributionRole::Related,
+            source: RecordSource::External,
+            origin: RecordOrigin::Imported,
+            fidelity: RecordFidelity::Declared,
+            trust: RecordTrust::Medium,
+            summary: None,
+            fingerprint: None,
+            issuer: None,
+            metadata_json: None,
+            source_records: Vec::new(),
+            created_at: None,
+            updated_at: None,
+            schema_version: 1,
+        })
+        .await
+        .unwrap();
+    fixture
+        .store
+        .upsert_contribution(&Contribution {
+            id: ContributionId::new(),
+            workspace_id: fixture.workspace_id,
+            change_set_id: None,
+            subject: ContributionSubject::External {
+                source: "beta".to_string(),
+                identifier: Some("same-id".to_string()),
+                url: None,
+            },
+            target: ContributionTarget::System {
+                label: Some("external-b".to_string()),
+            },
+            role: ContributionRole::Related,
+            source: RecordSource::External,
+            origin: RecordOrigin::Imported,
+            fidelity: RecordFidelity::Declared,
+            trust: RecordTrust::Medium,
+            summary: None,
+            fingerprint: None,
+            issuer: None,
+            metadata_json: None,
+            source_records: Vec::new(),
+            created_at: None,
+            updated_at: None,
+            schema_version: 1,
+        })
+        .await
+        .unwrap();
+    let external_matches = fixture
+        .store
+        .list_contributions_for_endpoint(
+            fixture.workspace_id,
+            &ContributionEndpoint::External {
+                source: "alpha".to_string(),
+                identifier: Some("same-id".to_string()),
+                url: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(external_matches.len(), 1);
+    assert_eq!(external_matches[0].id, external_a.id);
+
+    let external_url_a = fixture
+        .store
+        .upsert_contribution(&Contribution {
+            id: ContributionId::new(),
+            workspace_id: fixture.workspace_id,
+            change_set_id: None,
+            subject: ContributionSubject::External {
+                source: "linear".to_string(),
+                identifier: None,
+                url: Some("https://linear.test/issue/A".to_string()),
+            },
+            target: ContributionTarget::System {
+                label: Some("external-url-a".to_string()),
+            },
+            role: ContributionRole::Related,
+            source: RecordSource::External,
+            origin: RecordOrigin::Imported,
+            fidelity: RecordFidelity::Declared,
+            trust: RecordTrust::Medium,
+            summary: None,
+            fingerprint: None,
+            issuer: None,
+            metadata_json: None,
+            source_records: Vec::new(),
+            created_at: None,
+            updated_at: None,
+            schema_version: 1,
+        })
+        .await
+        .unwrap();
+    fixture
+        .store
+        .upsert_contribution(&Contribution {
+            id: ContributionId::new(),
+            workspace_id: fixture.workspace_id,
+            change_set_id: None,
+            subject: ContributionSubject::External {
+                source: "linear".to_string(),
+                identifier: None,
+                url: Some("https://linear.test/issue/B".to_string()),
+            },
+            target: ContributionTarget::System {
+                label: Some("external-url-b".to_string()),
+            },
+            role: ContributionRole::Related,
+            source: RecordSource::External,
+            origin: RecordOrigin::Imported,
+            fidelity: RecordFidelity::Declared,
+            trust: RecordTrust::Medium,
+            summary: None,
+            fingerprint: None,
+            issuer: None,
+            metadata_json: None,
+            source_records: Vec::new(),
+            created_at: None,
+            updated_at: None,
+            schema_version: 1,
+        })
+        .await
+        .unwrap();
+    let external_url_matches = fixture
+        .store
+        .list_contributions_for_endpoint(
+            fixture.workspace_id,
+            &ContributionEndpoint::External {
+                source: "linear".to_string(),
+                identifier: None,
+                url: Some("https://linear.test/issue/A".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(external_url_matches.len(), 1);
+    assert_eq!(external_url_matches[0].id, external_url_a.id);
+
+    let artifact_path_a = fixture
+        .store
+        .upsert_contribution(&Contribution {
+            id: ContributionId::new(),
+            workspace_id: fixture.workspace_id,
+            change_set_id: None,
+            subject: ContributionSubject::Artifact {
+                artifact_id: None,
+                digest: None,
+                relative_path: Some("reports/a.json".to_string()),
+            },
+            target: ContributionTarget::System {
+                label: Some("artifact-path-a".to_string()),
+            },
+            role: ContributionRole::Related,
+            source: RecordSource::Manual,
+            origin: RecordOrigin::User,
+            fidelity: RecordFidelity::Declared,
+            trust: RecordTrust::Medium,
+            summary: None,
+            fingerprint: None,
+            issuer: None,
+            metadata_json: None,
+            source_records: Vec::new(),
+            created_at: None,
+            updated_at: None,
+            schema_version: 1,
+        })
+        .await
+        .unwrap();
+    fixture
+        .store
+        .upsert_contribution(&Contribution {
+            id: ContributionId::new(),
+            workspace_id: fixture.workspace_id,
+            change_set_id: None,
+            subject: ContributionSubject::Artifact {
+                artifact_id: None,
+                digest: None,
+                relative_path: Some("reports/b.json".to_string()),
+            },
+            target: ContributionTarget::System {
+                label: Some("artifact-path-b".to_string()),
+            },
+            role: ContributionRole::Related,
+            source: RecordSource::Manual,
+            origin: RecordOrigin::User,
+            fidelity: RecordFidelity::Declared,
+            trust: RecordTrust::Medium,
+            summary: None,
+            fingerprint: None,
+            issuer: None,
+            metadata_json: None,
+            source_records: Vec::new(),
+            created_at: None,
+            updated_at: None,
+            schema_version: 1,
+        })
+        .await
+        .unwrap();
+    let artifact_path_matches = fixture
+        .store
+        .list_contributions_for_endpoint(
+            fixture.workspace_id,
+            &ContributionEndpoint::Artifact {
+                artifact_id: None,
+                digest: None,
+                relative_path: Some("reports/a.json".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(artifact_path_matches.len(), 1);
+    assert_eq!(artifact_path_matches[0].id, artifact_path_a.id);
+
+    let pull_request = PullRequestRef {
+        provider: "github".to_string(),
+        owner: "ctxrs".to_string(),
+        repo: "ctx".to_string(),
+        number: 42,
+        id: Some("global-pr-node".to_string()),
+        url: None,
+        title: None,
+    };
+    let pr_contribution = fixture
+        .store
+        .upsert_contribution(&Contribution {
+            id: ContributionId::new(),
+            workspace_id: fixture.workspace_id,
+            change_set_id: None,
+            subject: ContributionSubject::PullRequest {
+                pull_request: pull_request.clone(),
+            },
+            target: ContributionTarget::System {
+                label: Some("pr".to_string()),
+            },
+            role: ContributionRole::Related,
+            source: RecordSource::PullRequest,
+            origin: RecordOrigin::Imported,
+            fidelity: RecordFidelity::Declared,
+            trust: RecordTrust::Medium,
+            summary: None,
+            fingerprint: None,
+            issuer: None,
+            metadata_json: None,
+            source_records: Vec::new(),
+            created_at: None,
+            updated_at: None,
+            schema_version: 1,
+        })
+        .await
+        .unwrap();
+    let pr_matches = fixture
+        .store
+        .list_contributions_for_endpoint(
+            fixture.workspace_id,
+            &ContributionEndpoint::PullRequest {
+                pull_request: PullRequestRef {
+                    id: None,
+                    ..pull_request
+                },
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(pr_matches.len(), 1);
+    assert_eq!(pr_matches[0].id, pr_contribution.id);
+}
+
+#[tokio::test]
+async fn agent_work_upserts_reject_unsupported_schema_versions_and_empty_external_identity() {
+    let fixture = setup_session_fixture().await;
+    let zero_schema_change_set_error = fixture
+        .store
+        .upsert_change_set(&ChangeSet {
+            id: ChangeSetId::new(),
+            workspace_id: fixture.workspace_id,
+            source_worktree_id: Some(fixture.worktree_id),
+            source: RecordSource::Worktree,
+            origin: RecordOrigin::Agent,
+            fidelity: RecordFidelity::Diff,
+            trust: RecordTrust::Medium,
+            title: None,
+            summary: None,
+            description: None,
+            fingerprint: None,
+            base_revision: None,
+            head_revision: None,
+            target_branch: None,
+            pull_requests: Vec::new(),
+            source_records: Vec::new(),
+            issuer: None,
+            created_at: None,
+            updated_at: None,
+            schema_version: 0,
+        })
+        .await
+        .expect_err("explicit schema version 0 should be rejected");
+    assert!(format!("{zero_schema_change_set_error:#}").contains("schema_version 0"));
+
+    let change_set_error = fixture
+        .store
+        .upsert_change_set(&ChangeSet {
+            id: ChangeSetId::new(),
+            workspace_id: fixture.workspace_id,
+            source_worktree_id: Some(fixture.worktree_id),
+            source: RecordSource::Worktree,
+            origin: RecordOrigin::Agent,
+            fidelity: RecordFidelity::Diff,
+            trust: RecordTrust::Medium,
+            title: None,
+            summary: None,
+            description: None,
+            fingerprint: None,
+            base_revision: None,
+            head_revision: None,
+            target_branch: None,
+            pull_requests: Vec::new(),
+            source_records: Vec::new(),
+            issuer: None,
+            created_at: None,
+            updated_at: None,
+            schema_version: 99,
+        })
+        .await
+        .expect_err("unsupported change set schema version should be rejected");
+    assert!(format!("{change_set_error:#}").contains("schema_version 99"));
+
+    let valid_contribution = Contribution {
+        id: ContributionId::new(),
+        workspace_id: fixture.workspace_id,
+        change_set_id: None,
+        subject: ContributionSubject::Task {
+            task_id: Some(fixture.task_id),
+            id: None,
+        },
+        target: ContributionTarget::System {
+            label: Some("schema-version".to_string()),
+        },
+        role: ContributionRole::Related,
+        source: RecordSource::Manual,
+        origin: RecordOrigin::User,
+        fidelity: RecordFidelity::Declared,
+        trust: RecordTrust::Medium,
+        summary: None,
+        fingerprint: None,
+        issuer: None,
+        metadata_json: None,
+        source_records: Vec::new(),
+        created_at: None,
+        updated_at: None,
+        schema_version: 99,
+    };
+    let contribution_error = fixture
+        .store
+        .upsert_contribution(&valid_contribution)
+        .await
+        .expect_err("unsupported contribution schema version should be rejected");
+    assert!(format!("{contribution_error:#}").contains("schema_version 99"));
+
+    let blank_source_error = fixture
+        .store
+        .upsert_contribution(&Contribution {
+            schema_version: 1,
+            subject: ContributionSubject::External {
+                source: " ".to_string(),
+                identifier: Some("ticket-1".to_string()),
+                url: None,
+            },
+            ..valid_contribution.clone()
+        })
+        .await
+        .expect_err("external endpoint should require non-empty source");
+    assert!(format!("{blank_source_error:#}").contains("missing source"));
+
+    let missing_external_id_error = fixture
+        .store
+        .upsert_contribution(&Contribution {
+            schema_version: 1,
+            subject: ContributionSubject::External {
+                source: "linear".to_string(),
+                identifier: None,
+                url: None,
+            },
+            ..valid_contribution.clone()
+        })
+        .await
+        .expect_err("external endpoint should require identifier or url");
+    assert!(format!("{missing_external_id_error:#}").contains("identifier or url"));
+
+    let absolute_file_path_error = fixture
+        .store
+        .upsert_contribution(&Contribution {
+            schema_version: 1,
+            subject: ContributionSubject::File {
+                path: "/home/user/project/src/lib.rs".to_string(),
+                worktree_id: Some(fixture.worktree_id),
+            },
+            ..valid_contribution.clone()
+        })
+        .await
+        .expect_err("file endpoint paths should be workspace-relative");
+    assert!(format!("{absolute_file_path_error:#}").contains("workspace-relative"));
+
+    let empty_file_path_error = fixture
+        .store
+        .upsert_contribution(&Contribution {
+            schema_version: 1,
+            subject: ContributionSubject::File {
+                path: "   ".to_string(),
+                worktree_id: Some(fixture.worktree_id),
+            },
+            ..valid_contribution.clone()
+        })
+        .await
+        .expect_err("file endpoint paths should be non-empty");
+    assert!(format!("{empty_file_path_error:#}").contains("missing path"));
+
+    let missing_artifact_identity_error = fixture
+        .store
+        .upsert_contribution(&Contribution {
+            schema_version: 1,
+            subject: ContributionSubject::Artifact {
+                artifact_id: None,
+                digest: None,
+                relative_path: None,
+            },
+            ..valid_contribution
+        })
+        .await
+        .expect_err("artifact endpoint should require identity");
+    assert!(format!("{missing_artifact_identity_error:#}").contains("artifact_id"));
+}
+
+#[tokio::test]
+async fn agent_work_upserts_reject_cross_workspace_id_collisions() {
+    let fixture = setup_session_fixture().await;
+    let other_workspace = fixture
+        .store
+        .create_workspace("other".into(), "/tmp/other".into(), VcsKind::Git)
+        .await
+        .unwrap();
+    let other_task = fixture
+        .store
+        .create_task(other_workspace.id, "other task".into(), None)
+        .await
+        .unwrap();
+
+    let change_set_id = ChangeSetId::new();
+    fixture
+        .store
+        .upsert_change_set(&ChangeSet {
+            id: change_set_id.clone(),
+            workspace_id: fixture.workspace_id,
+            source_worktree_id: Some(fixture.worktree_id),
+            source: RecordSource::Worktree,
+            origin: RecordOrigin::Agent,
+            fidelity: RecordFidelity::Diff,
+            trust: RecordTrust::Medium,
+            title: Some("original".to_string()),
+            summary: None,
+            description: None,
+            fingerprint: None,
+            base_revision: None,
+            head_revision: None,
+            target_branch: None,
+            pull_requests: Vec::new(),
+            source_records: Vec::new(),
+            issuer: None,
+            created_at: None,
+            updated_at: None,
+            schema_version: 1,
+        })
+        .await
+        .unwrap();
+    let change_set_collision = fixture
+        .store
+        .upsert_change_set(&ChangeSet {
+            id: change_set_id.clone(),
+            workspace_id: other_workspace.id,
+            source_worktree_id: None,
+            source: RecordSource::Manual,
+            origin: RecordOrigin::User,
+            fidelity: RecordFidelity::Declared,
+            trust: RecordTrust::Low,
+            title: Some("collision".to_string()),
+            summary: None,
+            description: None,
+            fingerprint: None,
+            base_revision: None,
+            head_revision: None,
+            target_branch: None,
+            pull_requests: Vec::new(),
+            source_records: Vec::new(),
+            issuer: None,
+            created_at: None,
+            updated_at: None,
+            schema_version: 1,
+        })
+        .await
+        .expect_err("same change set id in another workspace should be rejected");
+    assert!(format!("{change_set_collision:#}").contains("different workspace"));
+    let original_change_set = fixture
+        .store
+        .get_workspace_change_set(fixture.workspace_id, change_set_id.clone())
+        .await
+        .unwrap()
+        .expect("original change set should remain");
+    assert_eq!(original_change_set.title.as_deref(), Some("original"));
+    assert!(fixture
+        .store
+        .get_workspace_change_set(other_workspace.id, change_set_id)
+        .await
+        .unwrap()
+        .is_none());
+
+    let contribution_id = ContributionId::new();
+    fixture
+        .store
+        .upsert_contribution(&Contribution {
+            id: contribution_id.clone(),
+            workspace_id: fixture.workspace_id,
+            change_set_id: None,
+            subject: task_endpoint(fixture.task_id),
+            target: ContributionTarget::System {
+                label: Some("original".to_string()),
+            },
+            role: ContributionRole::Related,
+            source: RecordSource::Manual,
+            origin: RecordOrigin::User,
+            fidelity: RecordFidelity::Declared,
+            trust: RecordTrust::Medium,
+            summary: Some("original".to_string()),
+            fingerprint: None,
+            issuer: None,
+            metadata_json: None,
+            source_records: Vec::new(),
+            created_at: None,
+            updated_at: None,
+            schema_version: 1,
+        })
+        .await
+        .unwrap();
+    let contribution_collision = fixture
+        .store
+        .upsert_contribution(&Contribution {
+            id: contribution_id.clone(),
+            workspace_id: other_workspace.id,
+            change_set_id: None,
+            subject: task_endpoint(other_task.id),
+            target: ContributionTarget::System {
+                label: Some("collision".to_string()),
+            },
+            role: ContributionRole::Related,
+            source: RecordSource::Manual,
+            origin: RecordOrigin::User,
+            fidelity: RecordFidelity::Declared,
+            trust: RecordTrust::Medium,
+            summary: Some("collision".to_string()),
+            fingerprint: None,
+            issuer: None,
+            metadata_json: None,
+            source_records: Vec::new(),
+            created_at: None,
+            updated_at: None,
+            schema_version: 1,
+        })
+        .await
+        .expect_err("same contribution id in another workspace should be rejected");
+    assert!(format!("{contribution_collision:#}").contains("different workspace"));
+    let original_contribution = fixture
+        .store
+        .get_contribution(contribution_id)
+        .await
+        .unwrap()
+        .expect("original contribution should remain");
+    assert_eq!(original_contribution.summary.as_deref(), Some("original"));
+    assert_eq!(original_contribution.workspace_id, fixture.workspace_id);
+}
+
+#[tokio::test]
+async fn agent_work_upserts_validate_source_record_hashes() {
+    let fixture = setup_session_fixture().await;
+    let payload = serde_json::json!({"kind": "fixture", "value": 1});
+    let valid_source_record = AgentWorkSourceRecord::from_payload(
+        1,
+        AgentWorkSourceRecordId::new(),
+        None,
+        &payload,
+        Utc::now(),
+    )
+    .unwrap();
+    let valid_change_set = fixture
+        .store
+        .upsert_change_set(&ChangeSet {
+            id: ChangeSetId::new(),
+            workspace_id: fixture.workspace_id,
+            source_worktree_id: Some(fixture.worktree_id),
+            source: RecordSource::Worktree,
+            origin: RecordOrigin::Agent,
+            fidelity: RecordFidelity::Diff,
+            trust: RecordTrust::Medium,
+            title: None,
+            summary: None,
+            description: None,
+            fingerprint: None,
+            base_revision: None,
+            head_revision: None,
+            target_branch: None,
+            pull_requests: Vec::new(),
+            source_records: vec![valid_source_record.clone()],
+            issuer: None,
+            created_at: None,
+            updated_at: None,
+            schema_version: 1,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        valid_change_set.source_records,
+        vec![valid_source_record.clone()]
+    );
+
+    let mut wrong_version_record = valid_source_record.clone();
+    wrong_version_record.schema_version = 0;
+    let wrong_version_error = fixture
+        .store
+        .upsert_change_set(&ChangeSet {
+            id: ChangeSetId::new(),
+            workspace_id: fixture.workspace_id,
+            source_worktree_id: Some(fixture.worktree_id),
+            source: RecordSource::Worktree,
+            origin: RecordOrigin::Agent,
+            fidelity: RecordFidelity::Diff,
+            trust: RecordTrust::Medium,
+            title: None,
+            summary: None,
+            description: None,
+            fingerprint: None,
+            base_revision: None,
+            head_revision: None,
+            target_branch: None,
+            pull_requests: Vec::new(),
+            source_records: vec![wrong_version_record],
+            issuer: None,
+            created_at: None,
+            updated_at: None,
+            schema_version: 1,
+        })
+        .await
+        .expect_err("source record schema version should be validated");
+    assert!(format!("{wrong_version_error:#}").contains("schema_version 0"));
+
+    let mut bad_hash_record = valid_source_record;
+    bad_hash_record.record_hash = Sha256DigestValue("00".repeat(32));
+    let bad_hash_error = fixture
+        .store
+        .upsert_contribution(&Contribution {
+            id: ContributionId::new(),
+            workspace_id: fixture.workspace_id,
+            change_set_id: None,
+            subject: task_endpoint(fixture.task_id),
+            target: ContributionTarget::System {
+                label: Some("source-record".to_string()),
+            },
+            role: ContributionRole::Related,
+            source: RecordSource::Manual,
+            origin: RecordOrigin::User,
+            fidelity: RecordFidelity::Declared,
+            trust: RecordTrust::Medium,
+            summary: None,
+            fingerprint: None,
+            issuer: None,
+            metadata_json: None,
+            source_records: vec![bad_hash_record],
+            created_at: None,
+            updated_at: None,
+            schema_version: 1,
+        })
+        .await
+        .expect_err("source record hash should be validated");
+    assert!(format!("{bad_hash_error:#}").contains("invalid record_hash"));
+}
+
+#[tokio::test]
+async fn agent_work_upsert_preserves_created_at_when_omitted() {
+    let fixture = setup_session_fixture().await;
+    let change_set_id = ChangeSetId::new();
+    let first = fixture
+        .store
+        .upsert_change_set(&ChangeSet {
+            id: change_set_id,
+            workspace_id: fixture.workspace_id,
+            source_worktree_id: Some(fixture.worktree_id),
+            source: RecordSource::Worktree,
+            origin: RecordOrigin::Agent,
+            fidelity: RecordFidelity::Diff,
+            trust: RecordTrust::Medium,
+            title: Some("First title".to_string()),
+            summary: None,
+            description: None,
+            fingerprint: None,
+            base_revision: None,
+            head_revision: None,
+            target_branch: None,
+            pull_requests: Vec::new(),
+            source_records: Vec::new(),
+            issuer: None,
+            created_at: None,
+            updated_at: None,
+            schema_version: 1,
+        })
+        .await
+        .unwrap();
+
+    let second = fixture
+        .store
+        .upsert_change_set(&ChangeSet {
+            title: Some("Updated title".to_string()),
+            created_at: None,
+            updated_at: None,
+            ..first.clone()
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(second.created_at, first.created_at);
+    assert_eq!(second.title.as_deref(), Some("Updated title"));
 }
 
 #[tokio::test]

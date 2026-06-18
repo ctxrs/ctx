@@ -109,8 +109,10 @@ pub(in crate::daemon) fn current_ctx_version_for_provider_runtime() -> Option<St
     match ctx_update_service::current_build_identity(env!("CARGO_PKG_VERSION")) {
         Ok(identity) => Some(identity.exact_version.clone()),
         Err(err) => {
-            tracing::error!("failed to load ctx build identity for provider runtime: {err:#}");
-            None
+            tracing::warn!(
+                "failed to load ctx build identity for provider runtime; falling back to package version: {err:#}"
+            );
+            Some(env!("CARGO_PKG_VERSION").to_string())
         }
     }
 }
@@ -492,5 +494,45 @@ impl ProviderUsageHost for ProviderUsageHandle {
 
     fn subscribe_shutdown(&self) -> broadcast::Receiver<()> {
         self.shutdown_tx().subscribe()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_runtime_ctx_version_falls_back_when_build_identity_is_unavailable() {
+        let _guard = EnvVarGuard::set_missing_build_identity_path();
+
+        assert_eq!(
+            current_ctx_version_for_provider_runtime().as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+    }
+
+    struct EnvVarGuard {
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set_missing_build_identity_path() -> Self {
+            let previous = std::env::var_os(ctx_update_service::BUILD_IDENTITY_PATH_ENV);
+            std::env::set_var(
+                ctx_update_service::BUILD_IDENTITY_PATH_ENV,
+                std::env::temp_dir().join("ctx-missing-build-identity-for-provider-test.json"),
+            );
+            Self { previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.take() {
+                std::env::set_var(ctx_update_service::BUILD_IDENTITY_PATH_ENV, previous);
+            } else {
+                std::env::remove_var(ctx_update_service::BUILD_IDENTITY_PATH_ENV);
+            }
+        }
     }
 }
