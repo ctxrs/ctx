@@ -24,7 +24,13 @@ import {
   trackTurnStarted,
   trackUnknownEventBurst,
   trackUserMessageSent,
+  trackWorkspaceCreated,
+  trackWorkspaceCreateFailed,
+  trackWorkspaceCreateSubmitted,
+  trackWorkspaceCreateSucceeded,
   trackWorkspaceLaunchCompleted,
+  trackWorkspaceOpened,
+  trackWorkspaceRouteOpenedFromPending,
 } from "./activity";
 
 describe("usage analytics activity helpers", () => {
@@ -279,6 +285,117 @@ describe("usage analytics activity helpers", () => {
         status: "failed",
         failure_kind: "launch_error",
         click_to_launch_ready_ms: 10_000,
+      },
+    );
+  });
+
+  it("includes execution mode on workspace create and opened events when known", () => {
+    trackWorkspaceCreateSubmitted({
+      workspaceKind: "local",
+      source: "wizard",
+      executionMode: "sandbox",
+    });
+    trackWorkspaceCreateSucceeded({
+      workspaceKind: "local",
+      source: "wizard",
+      executionMode: "sandbox",
+    });
+    trackWorkspaceCreated({
+      workspaceKind: "local",
+      executionMode: "sandbox",
+    });
+    trackWorkspaceCreateFailed({
+      workspaceKind: "remote",
+      source: "api",
+      executionMode: "host",
+      failureKind: "request_error",
+    });
+    trackWorkspaceOpened({
+      workspaceKind: "local",
+      executionMode: "sandbox",
+    });
+
+    expect(captureProductEventMock).toHaveBeenCalledWith(
+      "workspace_create_submitted",
+      1,
+      {
+        workspace_kind: "local",
+        source: "wizard",
+        execution_mode: "sandbox",
+      },
+    );
+    expect(captureProductEventMock).toHaveBeenCalledWith(
+      "workspace_create_succeeded",
+      1,
+      {
+        workspace_kind: "local",
+        source: "wizard",
+        execution_mode: "sandbox",
+      },
+    );
+    expect(captureProductEventMock).toHaveBeenCalledWith(
+      "workspace_created",
+      1,
+      {
+        workspace_kind: "local",
+        execution_mode: "sandbox",
+      },
+    );
+    expect(captureProductEventMock).toHaveBeenCalledWith(
+      "workspace_create_failed",
+      1,
+      {
+        workspace_kind: "remote",
+        source: "api",
+        execution_mode: "host",
+        failure_kind: "request_error",
+      },
+    );
+    expect(captureProductEventMock).toHaveBeenCalledWith(
+      "workspace_opened",
+      1,
+      {
+        workspace_kind: "local",
+        execution_mode: "sandbox",
+      },
+    );
+  });
+
+  it("returns pending workspace launch context after recording route open", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-12T12:00:05.000Z"));
+
+    let pending: ReturnType<typeof trackWorkspaceRouteOpenedFromPending> = null;
+    try {
+      trackWorkspaceLaunchCompleted({
+        workspaceId: "workspace-1",
+        workspaceKind: "local",
+        executionMode: "host",
+        source: "wizard",
+        startedAtMs: Date.parse("2026-06-12T12:00:00.000Z"),
+        result: "ready",
+        emitEvent: false,
+      });
+
+      pending = trackWorkspaceRouteOpenedFromPending("workspace-1");
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(pending).toEqual({
+      workspaceKind: "local",
+      executionMode: "host",
+      source: "wizard",
+      clickToWorkspaceRouteMs: 5_000,
+    });
+    expect(captureProductEventMock).toHaveBeenCalledWith(
+      "workspace_route_opened",
+      1,
+      {
+        workspace_kind: "local",
+        execution_mode: "host",
+        source: "wizard",
+        click_to_workspace_route_ms: 5_000,
       },
     );
   });

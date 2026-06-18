@@ -20,9 +20,13 @@ export default function WorkbenchPage() {
     let cancelled = false;
 
     const emitOpened = (workspaceKind: "local" | "remote") => {
-      trackWorkspaceRouteOpenedFromPending(workspaceId);
-      trackWorkspaceOpened(workspaceKind);
-      trackFeatureUsed("workbench_opened", { workspace_kind: workspaceKind });
+      const pendingLaunch = trackWorkspaceRouteOpenedFromPending(workspaceId);
+      const executionMode = pendingLaunch?.executionMode;
+      trackWorkspaceOpened({ workspaceKind, executionMode });
+      trackFeatureUsed("workbench_opened", {
+        workspace_kind: workspaceKind,
+        ...(executionMode ? { execution_mode: executionMode } : {}),
+      });
     };
 
     if (!isDesktopApp()) {

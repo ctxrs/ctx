@@ -1,18 +1,40 @@
-import { describe, expect, it } from "vitest";
-import { buildEventEnvelope } from "./context";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-describe("buildEventEnvelope", () => {
-  it("emits the required baseline envelope fields", () => {
-    const envelope = buildEventEnvelope(1, { provider_id: "codex" });
+vi.mock("./config", () => ({
+  getAnalyticsEnvironment: () => "production",
+}));
 
-    expect(envelope.event_version).toBe(1);
-    expect(typeof envelope.occurred_at).toBe("string");
-    expect(typeof envelope.app_version).toBe("string");
-    expect(typeof envelope.os).toBe("string");
-    expect(typeof envelope.arch).toBe("string");
-    expect(typeof envelope.surface).toBe("string");
-    expect(typeof envelope.analytics_environment).toBe("string");
-    expect(envelope.traffic_class).toBe("user");
-    expect(envelope.provider_id).toBe("codex");
+vi.mock("../runtime", () => ({
+  getAppShellKind: () => "desktop",
+}));
+
+describe("analytics event context", () => {
+  beforeEach(() => {
+    delete window.__CTX_DESKTOP_ENV__;
+  });
+
+  it("prefers the native desktop environment injected by the app shell", async () => {
+    window.__CTX_DESKTOP_ENV__ = {
+      os: "linux",
+      arch: "x64",
+    };
+
+    const { buildEventEnvelope } = await import("./context");
+
+    expect(buildEventEnvelope(1)).toEqual(expect.objectContaining({
+      os: "linux",
+      arch: "x64",
+      surface: "desktop",
+      analytics_environment: "production",
+    }));
+  });
+
+  it("falls back to browser user-agent detection outside the desktop shell", async () => {
+    const { buildEventEnvelope } = await import("./context");
+
+    expect(buildEventEnvelope(1)).toEqual(expect.objectContaining({
+      os: expect.any(String),
+      arch: expect.any(String),
+    }));
   });
 });

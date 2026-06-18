@@ -53,13 +53,18 @@ describe("createWorkspace analytics", () => {
     expect(trackWorkspaceCreateSubmittedMock).toHaveBeenCalledWith({
       workspaceKind: "local",
       source: "unknown",
+      executionMode: undefined,
     });
     expect(trackWorkspaceCreatedMock).toHaveBeenCalledTimes(1);
-    expect(trackWorkspaceCreatedMock).toHaveBeenCalledWith("local");
+    expect(trackWorkspaceCreatedMock).toHaveBeenCalledWith({
+      workspaceKind: "local",
+      executionMode: undefined,
+    });
     expect(trackWorkspaceCreateSucceededMock).toHaveBeenCalledTimes(1);
     expect(trackWorkspaceCreateSucceededMock).toHaveBeenCalledWith({
       workspaceKind: "local",
       source: "unknown",
+      executionMode: undefined,
     });
     expect(trackWorkspaceCreateFailedMock).not.toHaveBeenCalled();
   });
@@ -67,17 +72,22 @@ describe("createWorkspace analytics", () => {
   it("tracks remote workspace creation when workspace kind is provided", async () => {
     apiAnyMock.mockResolvedValue({ id: "ws-2" });
 
-    await createWorkspace("/tmp/repo-b", "Repo B", "remote", "wizard");
+    await createWorkspace("/tmp/repo-b", "Repo B", "remote", "wizard", "sandbox");
 
     expect(trackWorkspaceCreatedMock).toHaveBeenCalledTimes(1);
-    expect(trackWorkspaceCreatedMock).toHaveBeenCalledWith("remote");
+    expect(trackWorkspaceCreatedMock).toHaveBeenCalledWith({
+      workspaceKind: "remote",
+      executionMode: "sandbox",
+    });
     expect(trackWorkspaceCreateSubmittedMock).toHaveBeenCalledWith({
       workspaceKind: "remote",
       source: "wizard",
+      executionMode: "sandbox",
     });
     expect(trackWorkspaceCreateSucceededMock).toHaveBeenCalledWith({
       workspaceKind: "remote",
       source: "wizard",
+      executionMode: "sandbox",
     });
   });
 
@@ -89,10 +99,12 @@ describe("createWorkspace analytics", () => {
     expect(trackWorkspaceCreateSubmittedMock).toHaveBeenCalledWith({
       workspaceKind: "local",
       source: "api",
+      executionMode: undefined,
     });
     expect(trackWorkspaceCreateFailedMock).toHaveBeenCalledWith({
       workspaceKind: "local",
       source: "api",
+      executionMode: undefined,
       failureKind: "request_error",
     });
     expect(trackWorkspaceCreateSucceededMock).not.toHaveBeenCalled();

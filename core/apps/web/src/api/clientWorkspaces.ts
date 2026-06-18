@@ -47,20 +47,23 @@ export const createWorkspace = async (
   name?: string,
   workspaceKind: "local" | "remote" = "local",
   source: "wizard" | "launcher" | "api" | "unknown" = "unknown",
+  executionMode?: "host" | "sandbox",
 ) => {
-  trackWorkspaceCreateSubmitted({ workspaceKind, source });
+  const analyticsProps = { workspaceKind, source, executionMode };
+  trackWorkspaceCreateSubmitted(analyticsProps);
   try {
     const workspace = await apiAny<Workspace>("/api/workspaces", {
       method: "POST",
       body: JSON.stringify({ root_path, name }),
     });
-    trackWorkspaceCreated(workspaceKind);
-    trackWorkspaceCreateSucceeded({ workspaceKind, source });
+    trackWorkspaceCreated({ workspaceKind, executionMode });
+    trackWorkspaceCreateSucceeded(analyticsProps);
     return workspace;
   } catch (error) {
     trackWorkspaceCreateFailed({
       workspaceKind,
       source,
+      executionMode,
       failureKind: classifyWorkspaceCreateFailure(error),
     });
     throw error;

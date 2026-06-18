@@ -296,7 +296,7 @@ export function useWorkspaceSetupCreate({
           "Registering workspace",
           "Registering the workspace with the daemon.",
         );
-        const created = await createWorkspace(rootPath, name, workspaceKind, "wizard");
+        const created = await createWorkspace(rootPath, name, workspaceKind, "wizard", executionMode);
         workspaceId = idToString(created.id);
         createdWorkspaceId = workspaceId;
         shouldCleanupCreatedWorkspace = true;

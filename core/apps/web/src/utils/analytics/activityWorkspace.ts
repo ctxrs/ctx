@@ -1,57 +1,83 @@
 import { capture, PENDING_WORKSPACE_LAUNCH_KEY_PREFIX } from "./activityShared";
 
+type WorkspaceKind = "local" | "remote";
+type WorkspaceSource = "wizard" | "launcher" | "api" | "unknown";
+type WorkspaceExecutionMode = "host" | "sandbox";
+
+type WorkspaceEventProps = {
+  workspaceKind: WorkspaceKind;
+  executionMode?: WorkspaceExecutionMode;
+};
+
+const workspaceEventProperties = (props: WorkspaceEventProps) => ({
+  workspace_kind: props.workspaceKind,
+  ...(props.executionMode ? { execution_mode: props.executionMode } : {}),
+});
+
 export const trackAppOpened = (props?: { downloadId?: string }): void => {
   capture("app_opened", {
     ...(props?.downloadId ? { download_id: props.downloadId } : {}),
   });
 };
 
-export const trackWorkspaceCreated = (workspaceKind: "local" | "remote"): void => {
-  capture("workspace_created", { workspace_kind: workspaceKind });
+export const trackWorkspaceCreated = (props: WorkspaceKind | WorkspaceEventProps): void => {
+  const normalized = typeof props === "string" ? { workspaceKind: props } : props;
+  capture("workspace_created", workspaceEventProperties(normalized));
 };
 
 export const trackWorkspaceCreateSubmitted = (props: {
-  workspaceKind: "local" | "remote";
-  source: "wizard" | "launcher" | "api" | "unknown";
+  workspaceKind: WorkspaceKind;
+  source: WorkspaceSource;
+  executionMode?: WorkspaceExecutionMode;
 }): void => {
   capture("workspace_create_submitted", {
-    workspace_kind: props.workspaceKind,
+    ...workspaceEventProperties(props),
     source: props.source,
   });
 };
 
 export const trackWorkspaceCreateSucceeded = (props: {
-  workspaceKind: "local" | "remote";
-  source: "wizard" | "launcher" | "api" | "unknown";
+  workspaceKind: WorkspaceKind;
+  source: WorkspaceSource;
+  executionMode?: WorkspaceExecutionMode;
 }): void => {
   capture("workspace_create_succeeded", {
-    workspace_kind: props.workspaceKind,
+    ...workspaceEventProperties(props),
     source: props.source,
   });
 };
 
 export const trackWorkspaceCreateFailed = (props: {
-  workspaceKind: "local" | "remote";
-  source: "wizard" | "launcher" | "api" | "unknown";
+  workspaceKind: WorkspaceKind;
+  source: WorkspaceSource;
+  executionMode?: WorkspaceExecutionMode;
   failureKind: "network_error" | "request_error" | "unknown";
 }): void => {
   capture("workspace_create_failed", {
-    workspace_kind: props.workspaceKind,
+    ...workspaceEventProperties(props),
     source: props.source,
     failure_kind: props.failureKind,
   });
 };
 
-export const trackWorkspaceOpened = (workspaceKind: "local" | "remote"): void => {
-  capture("workspace_opened", { workspace_kind: workspaceKind });
+export const trackWorkspaceOpened = (props: WorkspaceKind | WorkspaceEventProps): void => {
+  const normalized = typeof props === "string" ? { workspaceKind: props } : props;
+  capture("workspace_opened", workspaceEventProperties(normalized));
 };
 
 type PendingWorkspaceLaunch = {
   workspace_id: string;
-  workspace_kind: "local" | "remote";
-  execution_mode: "host" | "sandbox";
-  source: "wizard" | "launcher" | "api" | "unknown";
+  workspace_kind: WorkspaceKind;
+  execution_mode: WorkspaceExecutionMode;
+  source: WorkspaceSource;
   started_at_ms: number;
+};
+
+export type PendingWorkspaceRouteAnalytics = {
+  workspaceKind: WorkspaceKind;
+  executionMode: WorkspaceExecutionMode;
+  source: WorkspaceSource;
+  clickToWorkspaceRouteMs: number;
 };
 
 const pendingWorkspaceLaunchKey = (workspaceId: string): string =>
@@ -91,9 +117,9 @@ const clearPendingWorkspaceLaunch = (workspaceId: string): void => {
 
 export const trackWorkspaceLaunchCompleted = (props: {
   workspaceId: string;
-  workspaceKind: "local" | "remote";
-  executionMode: "host" | "sandbox";
-  source: "wizard" | "launcher" | "api" | "unknown";
+  workspaceKind: WorkspaceKind;
+  executionMode: WorkspaceExecutionMode;
+  source: WorkspaceSource;
   startedAtMs: number;
   result: "ready" | "error";
   failureKind?: "launch_error" | "unknown";
@@ -135,16 +161,25 @@ export const trackWorkspaceLaunchCompleted = (props: {
   clearPendingWorkspaceLaunch(props.workspaceId);
 };
 
-export const trackWorkspaceRouteOpenedFromPending = (workspaceId: string): void => {
+export const trackWorkspaceRouteOpenedFromPending = (
+  workspaceId: string,
+): PendingWorkspaceRouteAnalytics | null => {
   const pending = readPendingWorkspaceLaunch(workspaceId);
-  if (!pending) return;
+  if (!pending) return null;
   clearPendingWorkspaceLaunch(workspaceId);
+  const clickToWorkspaceRouteMs = Math.max(0, Date.now() - pending.started_at_ms);
   capture("workspace_route_opened", {
     workspace_kind: pending.workspace_kind,
     execution_mode: pending.execution_mode,
     source: pending.source,
-    click_to_workspace_route_ms: Math.max(0, Date.now() - pending.started_at_ms),
+    click_to_workspace_route_ms: clickToWorkspaceRouteMs,
   });
+  return {
+    workspaceKind: pending.workspace_kind,
+    executionMode: pending.execution_mode,
+    source: pending.source,
+    clickToWorkspaceRouteMs,
+  };
 };
 
 export const trackWizardStarted = (props: {

@@ -74,7 +74,10 @@ describe("WorkbenchPage analytics", () => {
     renderWorkbenchPage();
 
     await waitFor(() => {
-      expect(trackWorkspaceOpenedMock).toHaveBeenCalledWith("local");
+      expect(trackWorkspaceOpenedMock).toHaveBeenCalledWith({
+        workspaceKind: "local",
+        executionMode: undefined,
+      });
     });
     expect(trackWorkspaceRouteOpenedFromPendingMock).toHaveBeenCalledWith("ws-1");
     expect(trackFeatureUsedMock).toHaveBeenCalledWith("workbench_opened", { workspace_kind: "local" });
@@ -87,9 +90,35 @@ describe("WorkbenchPage analytics", () => {
     renderWorkbenchPage();
 
     await waitFor(() => {
-      expect(trackWorkspaceOpenedMock).toHaveBeenCalledWith("remote");
+      expect(trackWorkspaceOpenedMock).toHaveBeenCalledWith({
+        workspaceKind: "remote",
+        executionMode: undefined,
+      });
     });
     expect(trackWorkspaceRouteOpenedFromPendingMock).toHaveBeenCalledWith("ws-1");
     expect(trackFeatureUsedMock).toHaveBeenCalledWith("workbench_opened", { workspace_kind: "remote" });
+  });
+
+  it("carries pending workspace execution mode into opened events", async () => {
+    isDesktopAppMock.mockReturnValue(false);
+    trackWorkspaceRouteOpenedFromPendingMock.mockReturnValue({
+      workspaceKind: "local",
+      executionMode: "sandbox",
+      source: "wizard",
+      clickToWorkspaceRouteMs: 1200,
+    });
+
+    renderWorkbenchPage();
+
+    await waitFor(() => {
+      expect(trackWorkspaceOpenedMock).toHaveBeenCalledWith({
+        workspaceKind: "local",
+        executionMode: "sandbox",
+      });
+    });
+    expect(trackFeatureUsedMock).toHaveBeenCalledWith("workbench_opened", {
+      workspace_kind: "local",
+      execution_mode: "sandbox",
+    });
   });
 });

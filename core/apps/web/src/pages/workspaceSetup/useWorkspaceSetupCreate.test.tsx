@@ -336,6 +336,7 @@ describe("useWorkspaceSetupCreate", () => {
       "remote-sandbox",
       "remote",
       "wizard",
+      "sandbox",
     );
     expect(apiMocks.updateWorkspaceExecutionConfig).toHaveBeenCalledWith("ws-1", {
       environment: "sandbox",
@@ -377,6 +378,7 @@ describe("useWorkspaceSetupCreate", () => {
       "remote-sandbox",
       "remote",
       "wizard",
+      "sandbox",
     );
     expect(
       workspaceBootstrapGateMocks.waitForWorkspaceBootstrapBeforeNavigation,

@@ -6,7 +6,28 @@ declare const __CTX_APP_VERSION__: string;
 
 const UNKNOWN = "unknown";
 
+type DesktopAnalyticsEnv = {
+  os?: unknown;
+  arch?: unknown;
+};
+
+declare global {
+  interface Window {
+    __CTX_DESKTOP_ENV__?: DesktopAnalyticsEnv;
+  }
+}
+
+const readDesktopEnvValue = (key: keyof DesktopAnalyticsEnv): string | null => {
+  if (typeof window === "undefined") return null;
+  const value = window.__CTX_DESKTOP_ENV__?.[key];
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim().toLowerCase();
+  return trimmed.length > 0 ? trimmed : null;
+};
+
 const detectOs = (): string => {
+  const desktopOs = readDesktopEnvValue("os");
+  if (desktopOs) return desktopOs;
   if (typeof navigator === "undefined") return UNKNOWN;
   const ua = navigator.userAgent.toLowerCase();
   if (ua.includes("windows")) return "windows";
@@ -18,6 +39,8 @@ const detectOs = (): string => {
 };
 
 const detectArch = (): string => {
+  const desktopArch = readDesktopEnvValue("arch");
+  if (desktopArch) return desktopArch;
   if (typeof navigator === "undefined") return UNKNOWN;
   const ua = navigator.userAgent.toLowerCase();
   if (ua.includes("arm64") || ua.includes("aarch64")) return "arm64";

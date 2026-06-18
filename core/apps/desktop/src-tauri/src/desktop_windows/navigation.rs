@@ -9,10 +9,37 @@ pub(crate) fn desktop_startup_initialization_script(
         .unwrap_or_default()
         .as_millis();
     format!(
-        "window.__CTX_DESKTOP_STARTUP__ = Object.assign({{}}, window.__CTX_DESKTOP_STARTUP__, {{ windowCreatedAtMs: {window_created_at_ms}, windowLabel: {}, startPath: {} }});",
+        "window.__CTX_DESKTOP_ENV__ = Object.assign({{}}, window.__CTX_DESKTOP_ENV__, {}); window.__CTX_DESKTOP_STARTUP__ = Object.assign({{}}, window.__CTX_DESKTOP_STARTUP__, {{ windowCreatedAtMs: {window_created_at_ms}, windowLabel: {}, startPath: {} }});",
+        desktop_env_js_object_literal(),
         serde_json::to_string(window_label).unwrap_or_else(|_| "\"unknown\"".to_string()),
         serde_json::to_string(start_path).unwrap_or_else(|_| "\"/\"".to_string()),
     )
+}
+
+fn desktop_env_js_object_literal() -> String {
+    let env = serde_json::json!({
+        "os": normalized_desktop_os(std::env::consts::OS),
+        "arch": normalized_desktop_arch(std::env::consts::ARCH),
+    });
+    serde_json::to_string(&env).unwrap_or_else(|_| "{\"os\":\"unknown\",\"arch\":\"unknown\"}".to_string())
+}
+
+fn normalized_desktop_os(value: &str) -> &'static str {
+    match value {
+        "macos" => "macos",
+        "linux" => "linux",
+        "windows" => "windows",
+        _ => "unknown",
+    }
+}
+
+fn normalized_desktop_arch(value: &str) -> &'static str {
+    match value {
+        "aarch64" => "arm64",
+        "x86_64" => "x64",
+        "x86" | "i386" | "i586" | "i686" => "x86",
+        _ => "unknown",
+    }
 }
 
 pub(crate) fn log_window_created(window_label: &str, path: &str) {
@@ -571,8 +598,20 @@ mod tests {
         let script = desktop_startup_initialization_script("main", "/workspaces/ws-1");
         assert!(script.contains("\"main\""));
         assert!(script.contains("\"/workspaces/ws-1\""));
+        assert!(script.contains("__CTX_DESKTOP_ENV__"));
+        assert!(script.contains("\"os\""));
+        assert!(script.contains("\"arch\""));
         assert!(script.contains("windowLabel"));
         assert!(script.contains("startPath"));
+    }
+
+    #[test]
+    fn desktop_env_js_object_literal_normalizes_runtime_platform() {
+        let script = desktop_env_js_object_literal();
+        assert!(script.contains("\"os\""));
+        assert!(script.contains("\"arch\""));
+        assert!(!script.contains("x86_64"));
+        assert!(!script.contains("aarch64"));
     }
 
     #[test]

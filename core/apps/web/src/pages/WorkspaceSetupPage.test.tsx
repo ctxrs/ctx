@@ -1374,6 +1374,7 @@ describe("WorkspaceSetupPage", () => {
         "new-hidden-defaults",
         "remote",
         "wizard",
+        "host",
       );
       expect(upsertLauncherRecent).toHaveBeenCalledWith(expect.objectContaining({
         kind: "ssh",
@@ -1467,6 +1468,7 @@ describe("WorkspaceSetupPage", () => {
         "latest-visible-target",
         "remote",
         "wizard",
+        "host",
       );
       expect(upsertLauncherRecent).toHaveBeenCalledWith(expect.objectContaining({
         kind: "ssh",
@@ -2731,7 +2733,7 @@ describe("WorkspaceSetupPage", () => {
     fireEvent.click(screen.getByTestId("wizard-create"));
 
     await waitFor(() => {
-      expect(createWorkspace).toHaveBeenCalledWith("/tmp/new-repo-web", "new-repo-web", "local", "wizard");
+      expect(createWorkspace).toHaveBeenCalledWith("/tmp/new-repo-web", "new-repo-web", "local", "wizard", "host");
       expect(desktopConnectLocal).not.toHaveBeenCalled();
       expect(upsertLauncherRecent).toHaveBeenCalledWith(expect.objectContaining({
         kind: "local",
@@ -2782,7 +2784,7 @@ describe("WorkspaceSetupPage", () => {
     fireEvent.click(screen.getByTestId("wizard-create"));
 
     await waitFor(() => {
-      expect(createWorkspace).toHaveBeenCalledWith("/private/tmp/new-repo", "new-repo", "local", "wizard");
+      expect(createWorkspace).toHaveBeenCalledWith("/private/tmp/new-repo", "new-repo", "local", "wizard", "host");
       expect(upsertLauncherRecent).toHaveBeenCalledWith(expect.objectContaining({
         kind: "local",
         root_path: "/private/tmp/new-repo",
