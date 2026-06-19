@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
+use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -990,8 +991,17 @@ async fn run_process_plugin_command(
     })?;
 
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(&payload_json).await?;
-        stdin.write_all(b"\n").await?;
+        match stdin.write_all(&payload_json).await {
+            Ok(()) => {
+                if let Err(error) = stdin.write_all(b"\n").await {
+                    if error.kind() != ErrorKind::BrokenPipe {
+                        return Err(error.into());
+                    }
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::BrokenPipe => {}
+            Err(error) => return Err(error.into()),
+        }
     }
 
     let stdout = child
@@ -1217,10 +1227,33 @@ fn scan_plugin_roots(roots: &[PathBuf]) -> PluginInventorySnapshot {
             .cmp(&right.id)
             .then_with(|| left.path.cmp(&right.path))
     });
+    mark_duplicate_plugin_ids(&mut plugins);
     PluginInventorySnapshot {
         revision: 0,
         roots: roots.to_vec(),
         plugins,
+    }
+}
+
+fn mark_duplicate_plugin_ids(plugins: &mut [PluginInventoryItem]) {
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for plugin in plugins.iter() {
+        *counts.entry(plugin.id.clone()).or_default() += 1;
+    }
+
+    for plugin in plugins.iter_mut() {
+        if counts.get(&plugin.id).copied().unwrap_or_default() <= 1 {
+            continue;
+        }
+        plugin.status = PluginLoadStatus::Error;
+        plugin.diagnostics.push(PluginDiagnostic {
+            severity: PluginDiagnosticSeverity::Error,
+            message: format!(
+                "Duplicate plugin id '{}' found. Plugin ids must be unique across all plugin roots.",
+                plugin.id
+            ),
+            code: Some("duplicate_plugin_id".to_string()),
+        });
     }
 }
 
@@ -1420,6 +1453,55 @@ mod tests {
         assert_eq!(plugin.status, PluginLoadStatus::Loaded);
         assert!(plugin.revision.is_some());
         assert!(plugin.manifest.is_some());
+    }
+
+    #[tokio::test]
+    async fn duplicate_plugin_ids_are_load_errors_and_not_registered() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        for dir_name in ["first", "second"] {
+            let plugin_dir = temp.path().join(dir_name);
+            std::fs::create_dir_all(&plugin_dir).expect("plugin dir");
+            std::fs::write(
+                plugin_dir.join("ctx-plugin.json"),
+                serde_json::to_vec_pretty(&json!({
+                    "id": "example.tools",
+                    "name": format!("Example Tools {dir_name}"),
+                    "version": "0.1.0",
+                    "entrypoints": [
+                        {
+                            "id": "main",
+                            "command": "node"
+                        }
+                    ],
+                    "contributes": {
+                        "commands": [
+                            {
+                                "id": "example.hello",
+                                "title": "Hello",
+                                "entrypoint": "main"
+                            }
+                        ]
+                    }
+                }))
+                .unwrap(),
+            )
+            .expect("write manifest");
+        }
+        let runtime = PluginInventoryRuntime::new_with_roots(vec![temp.path().to_path_buf()]);
+
+        let response = runtime.reload().await.expect("reload plugins");
+        let registry = runtime.extension_registry().await.registry;
+
+        assert_eq!(response.plugins.len(), 2);
+        assert!(response
+            .plugins
+            .iter()
+            .all(|plugin| plugin.status == PluginLoadStatus::Error));
+        assert!(response.plugins.iter().all(|plugin| plugin
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code.as_deref() == Some("duplicate_plugin_id"))));
+        assert!(registry.commands.is_empty());
     }
 
     #[tokio::test]
@@ -2222,11 +2304,9 @@ mod tests {
         assert_eq!(response.stdout.len(), PLUGIN_COMMAND_OUTPUT_LIMIT_BYTES);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn execute_command_resolves_relative_entrypoint_command_from_plugin_root() {
-        #[cfg(unix)]
-        use std::os::unix::fs::PermissionsExt;
-
         let temp = tempfile::tempdir().expect("tempdir");
         let plugin_dir = temp.path().join("example");
         let bin_dir = plugin_dir.join("bin");
@@ -2234,19 +2314,7 @@ mod tests {
         std::fs::create_dir_all(&bin_dir).expect("bin dir");
         std::fs::create_dir_all(&work_dir).expect("work dir");
         let tool_path = bin_dir.join("tool");
-        std::fs::write(
-            &tool_path,
-            "#!/bin/sh\nprintf '{\"message\":\"root-relative command\"}'\n",
-        )
-        .expect("write tool");
-        #[cfg(unix)]
-        {
-            let mut permissions = std::fs::metadata(&tool_path)
-                .expect("tool metadata")
-                .permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(&tool_path, permissions).expect("chmod tool");
-        }
+        std::os::unix::fs::symlink(test_shell_command(), &tool_path).expect("symlink shell");
         std::fs::write(
             plugin_dir.join("ctx-plugin.json"),
             serde_json::to_vec_pretty(&json!({
@@ -2257,6 +2325,7 @@ mod tests {
                     {
                         "id": "main",
                         "command": "bin/tool",
+                        "args": ["-c", "printf '{\"message\":\"root-relative command\"}'"],
                         "cwd": "work"
                     }
                 ],
@@ -2288,7 +2357,8 @@ mod tests {
 
         assert_eq!(
             response.status,
-            ctx_route_contracts::plugins::PluginCommandExecutionStatus::Completed
+            ctx_route_contracts::plugins::PluginCommandExecutionStatus::Completed,
+            "response: {response:?}"
         );
         assert_eq!(response.message.as_deref(), Some("root-relative command"));
     }
