@@ -40,6 +40,22 @@ Out of scope for required local conformance:
 - hosted/team deployment semantics;
 - ACP v2 RFD behavior unless explicitly adopted in a later contract update.
 
+## Harness Starter Implications
+
+Future harness-starter examples and packages must conform through ACP v1. They
+may provide local helpers for shell, files, edits, sandboxing, transcripts,
+artifacts, and Work capture, but those helpers are implementation details behind
+the ACP provider boundary.
+
+Harness fixtures should prove:
+
+- the provider can be launched as a local subprocess over JSON-RPC stdio;
+- prompt turns, streaming, tool calls, cancellation, errors, and process death
+  satisfy the same matrix as any other ACP provider;
+- optional ctx helpers produce the same Work records as equivalent ACP output;
+- disabling ctx helpers does not require a different protocol or provider
+  registration shape.
+
 ## Matrix
 
 | Area | Required local fixture behavior |

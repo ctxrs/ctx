@@ -13,6 +13,7 @@ This directory contains selected ctx documentation for GitHub browsing.
 - [ACP Provider Plugin Contract](acp-provider-plugin-contract.mdx)
 - [ACP v1 Conformance Target](acp-v1-conformance-target.mdx)
 - [Plugin Contribution Contract](plugin-contribution-contract.mdx)
+- [Harness Starter Boundaries](examples/harness-starter-boundaries.md)
 - [What Is a Worktree?](what-is-a-worktree.mdx)
 - [Containerization](containerization.mdx)
 
@@ -22,6 +23,7 @@ This directory contains selected ctx documentation for GitHub browsing.
 - `workbench/`: core day-to-day GUI surfaces
 - `settings/`: provider, safety, and update configuration
 - `worktrees-runtime/`: worktree concepts and runtime behavior
+- `examples/`: design examples and local implementation boundary sketches
 - `troubleshooting/`: help and support content
 - `legal/`: privacy, security, and terms pages
 - `blog/`: selected long-form writing

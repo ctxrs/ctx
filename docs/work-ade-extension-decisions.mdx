@@ -107,8 +107,8 @@ The current branch provides the local plugin substrate: manifest validation,
 inventory, contribution registry, process command execution, provider adapter
 registration, explicit reload, and auto-reload checks.
 
-That is not yet a full Pi-like ADE extension system. The next API layer should
-add:
+That is not yet a full user-owned ADE extension system. The next API layer
+should add:
 
 - typed TypeScript SDK;
 - plugin dev/watch mode;
@@ -134,10 +134,85 @@ preferred public shape is: custom harnesses speak ACP, plugins package/register
 them with ctx, and ctx Work events capture their transcripts, tool calls,
 artifacts, checks, and contributions.
 
-The harness starter kit should take inspiration from Pi's modular, reloadable
-ethos, while staying deliberately unopinionated: developers should be able to use
-ctx primitives for shell/file/edit/artifact/transcript/work capture individually,
-or compose them into a full coding-agent harness.
+The harness starter kit should take inspiration from modular, reloadable,
+user-owned coding-agent designs while staying deliberately unopinionated:
+developers should be able to use ctx primitives for
+shell/file/edit/artifact/transcript/work capture individually, or compose them
+into a full coding-agent harness.
+
+## Harness Starter Strategy
+
+The harness starter is a future implementation convenience, not a protocol. Its
+public shape is an ACP-speaking coding-agent harness that can be packaged as a
+ctx plugin provider contribution.
+
+The starter should help developers build a modular local coding agent while
+keeping ownership of the agent loop, prompts, model routing, tools, memory, and
+release process. ctx may provide optional local primitives, but a harness must
+remain valid when it uses only ACP plus its own implementation choices.
+
+Design goals:
+
+- expose a narrow ACP adapter boundary for initialization, prompt turns,
+  streaming content, tool calls, slash commands, sessions, auth, terminals, and
+  cancellation;
+- keep agent-loop policy outside ctx-owned code;
+- make local primitives individually adoptable, so a harness can use ctx shell
+  without ctx edit capture, or ctx transcript capture without ctx sandbox;
+- preserve Work as the durable capture substrate, not as a required in-process
+  agent API;
+- package local development through plugins, so discovery, diagnostics, reload,
+  and provider ownership follow the same rules as other ACP providers.
+
+Non-goals:
+
+- no competing `ctx agent` protocol;
+- no hosted/team/enterprise harness surface in this public slice;
+- no trademark or product positioning around other coding-agent projects;
+- no assumption that ctx owns provider slash commands or agent internals;
+- no direct Work store writes from harness code.
+
+Potential local primitive boundaries:
+
+| Boundary | Future package/module shape | Responsibility |
+| --- | --- | --- |
+| ACP adapter | `@ctx/harness-acp` | JSON-RPC stdio transport, ACP request/response typing, stream framing, diagnostics |
+| Agent loop interfaces | `@ctx/harness-core` | turn lifecycle interfaces, cancellation tokens, event normalization, policy-free composition |
+| Shell | `@ctx/harness-shell` | optional execution requests through ctx-approved shell/sandbox surfaces |
+| Files | `@ctx/harness-files` | optional workspace file read/list/write mediation and provenance |
+| Edits | `@ctx/harness-edits` | optional patch application and diff/change-set capture helpers |
+| Sandbox | `@ctx/harness-sandbox` | optional sandbox descriptors, materialization hooks, and permission prompts |
+| Transcript | `@ctx/harness-transcript` | optional message/chunk/tool-call event builders for Work capture |
+| Artifacts | `@ctx/harness-artifacts` | optional artifact attachment metadata and redaction defaults |
+| Work capture | `@ctx/harness-work-capture` | optional import/capture client that submits approved Work event payloads |
+| Plugin packaging | `@ctx/harness-plugin` | manifest helpers for registering the ACP provider contribution |
+
+These names are design hooks, not committed package names. Implementation may
+start as repo-local modules or examples, but the boundaries should remain
+separable so the starter does not distort the ADE, plugin, or provider runtime
+architecture.
+
+Example layout:
+
+```text
+examples/harness-starter/
+  agent/
+    loop.ts
+    policy.ts
+    tools.ts
+  acp/
+    server.ts
+    sessions.ts
+  ctx/
+    plugin.ts
+    work-capture.ts
+    shell.ts
+    artifacts.ts
+  plugin.json
+```
+
+See [Harness Starter Boundaries](./examples/harness-starter-boundaries.md) for a
+more concrete example.
 
 ## Local Data Rules
 

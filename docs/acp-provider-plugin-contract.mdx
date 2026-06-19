@@ -64,6 +64,63 @@ Example shape:
 }
 ```
 
+## Harness Starter Boundary
+
+A ctx-provided harness starter may help an author build and package an ACP
+provider, but it must not become a second provider protocol.
+
+The architectural boundary is:
+
+```text
+agent loop and tools
+  -> harness ACP adapter
+  -> ACP JSON-RPC stdio
+  -> ctx provider plugin runtime
+  -> Work capture and ADE projections
+```
+
+The plugin manifest registers the ACP-speaking process. It should not expose
+agent-loop internals to ctx:
+
+```json
+{
+  "id": "example.harness-provider",
+  "name": "Example Harness Provider",
+  "version": "0.1.0",
+  "entrypoints": [
+    {
+      "id": "harness",
+      "kind": "process",
+      "command": "node",
+      "args": ["./dist/acp/server.js"]
+    }
+  ],
+  "contributes": {
+    "providers": [
+      {
+        "id": "example-harness",
+        "name": "Example Harness",
+        "entrypoint": "harness",
+        "capabilities": ["acp.v1"]
+      }
+    ]
+  }
+}
+```
+
+Optional ctx primitives may be used behind that ACP boundary:
+
+- shell and sandbox requests through ctx-approved execution surfaces;
+- file and edit helpers that preserve provenance and change-set capture;
+- transcript and tool-call event builders that map cleanly to Work records;
+- artifact helpers with local redaction defaults;
+- Work capture clients that submit approved event payloads instead of writing
+  directly to the store.
+
+Using those primitives must be opt-in. A third-party ACP provider remains valid
+when it implements its own shell, file, edit, artifact, transcript, or capture
+logic and only speaks ACP to ctx.
+
 ## CRP Boundary
 
 CRP may remain an internal/native runtime compatibility layer.
