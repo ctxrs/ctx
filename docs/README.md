@@ -7,6 +7,7 @@ This directory contains selected ctx documentation for GitHub browsing.
 - [Overview](index.mdx)
 - [Install and Launch](getting-started/install-and-launch.mdx)
 - [Workbench Tour](workbench/tour.mdx)
+- [Work and ADE Extension Decisions](work-ade-extension-decisions.mdx)
 - [What Is a Worktree?](what-is-a-worktree.mdx)
 - [Containerization](containerization.mdx)
 

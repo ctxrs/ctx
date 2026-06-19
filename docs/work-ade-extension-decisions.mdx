@@ -1,0 +1,172 @@
+---
+title: "Work and ADE Extension Decisions"
+description: "Public decisions for ctx Work records, Workbench templates, and local ADE extension surfaces."
+---
+
+# Work and ADE Extension Decisions
+
+This page records the public architecture decisions behind the local Workbench
+composition work in this branch.
+
+The goal is to make ctx a programmable, local-first ADE for coding agents:
+tasks, sessions, runs, change sets, artifacts, checks, and plugin contributions
+should be visible through reusable UI primitives instead of being locked into
+one hard-coded workbench layout.
+
+## Public Scope
+
+This public repo should contain:
+
+- local Work/ADE records and projections;
+- local schema validation and import/export shapes;
+- Workbench UI primitives and built-in templates;
+- local plugin manifest, inventory, command, provider-adapter, and future UI
+  contribution foundations;
+- redaction and provenance fields that make sharing explicit and user-controlled.
+
+The `ctx work` CLI should be public and documented. It is an advanced surface,
+but it is important because it proves the ADE and standalone Work capture use
+the same local records.
+
+This public repo should not contain hosted/team control-plane product surfaces,
+billing, tenant administration, hosted audit dashboards, or organization policy
+product flows. Those can reuse public records from a separate product layer, but
+they should not shape this local-first implementation.
+
+## Naming
+
+Use **Work** as the product noun in UI and CLI copy.
+
+The current v1 schema/API substrate in this branch still uses `agent-work`
+names and paths. Treat those as the current compatibility surface for this
+branch, not as permission to introduce a second competing vocabulary. A future
+rename to `work` should be planned as one compatibility migration across CLI,
+schemas, routes, TypeScript types, Rust types, and docs.
+
+The public product noun is settled as **Work**. The `agent-work` namespace should
+only remain as a compatibility surface until the migration can be done as one
+planned change.
+
+## Workbench Primitives
+
+A Workbench primitive is a typed, reusable surface backed by ctx-owned state and
+actions. Primitives may move between templates without changing task/session
+semantics.
+
+Initial primitives are:
+
+- task list and task cards;
+- active task/session;
+- Work summary and change-set detail;
+- artifacts/review evidence;
+- terminal;
+- empty/new-task composer state;
+- provider/status surfaces.
+
+Near-term product work should pursue ADE extensibility and Work capture in
+parallel. The public wedge is the hackable ADE; Work capture is the substrate
+that makes those extensions durable, replayable, exportable, and useful outside
+the GUI.
+
+Primitives must:
+
+- read from stable Workbench/Work state;
+- expose typed props/actions;
+- preserve existing task/session behavior when moved;
+- degrade to empty or read-only states when context is absent;
+- avoid direct mutation of core Work records outside approved actions.
+
+## Built-In Templates
+
+Built-in templates prove the primitive model:
+
+- **Classic**: the current default workbench behavior.
+- **Kanban**: task lanes plus selected active task/session detail.
+- **Multipane**: resizable split panes that can show active task, empty/new-task,
+  Work detail, and terminal primitives.
+- **Review**: focused task review with Work metrics, PR links, change sets, and
+  active task content.
+
+Template state is a local UI preference per workspace/window:
+
+```text
+WorkbenchTemplateState
+  id: classic | kanban | multipane | review | plugin:<id>/<template>
+  version: number
+  layout: template-owned JSON decoded by ctx
+```
+
+Template state must not change Work records, provider state, or session history.
+
+## Plugin Direction
+
+Use **plugin** for an installable bundle. A plugin may contribute one or more
+extensions.
+
+The current branch provides the local plugin substrate: manifest validation,
+inventory, contribution registry, process command execution, provider adapter
+registration, explicit reload, and auto-reload checks.
+
+That is not yet a full Pi-like ADE extension system. The next API layer should
+add:
+
+- typed TypeScript SDK;
+- plugin dev/watch mode;
+- plugin host lifecycle and diagnostics;
+- permission/capability semantics;
+- Workbench panel/template/renderer contribution APIs;
+- source-labeled command palette actions.
+
+Provider slash commands are provider-owned. Local ctx/plugin commands may be
+bridged while the command palette work is still maturing, but they must remain
+source-labeled and must not shadow provider-owned commands once provider command
+catalogs are available.
+
+Use ACP as the public provider integration protocol. A ctx plugin may
+package/register an ACP-compatible provider, but ctx should not ask agent authors
+to implement a competing public ctx agent protocol. CRP may remain an internal or
+native compatibility layer where it is useful for existing providers and richer
+runtime integration, but it should not be the public extension target.
+
+Design future extension surfaces so they can include optional coding-agent
+harness primitives without making ctx define a competing agent protocol. The
+preferred public shape is: custom harnesses speak ACP, plugins package/register
+them with ctx, and ctx Work events capture their transcripts, tool calls,
+artifacts, checks, and contributions.
+
+The harness starter kit should take inspiration from Pi's modular, reloadable
+ethos, while staying deliberately unopinionated: developers should be able to use
+ctx primitives for shell/file/edit/artifact/transcript/work capture individually,
+or compose them into a full coding-agent harness.
+
+## Local Data Rules
+
+Private Work data should live under the user data root by default, not inside a
+repository:
+
+```text
+~/.ctx/
+  db/workspaces/<workspace-id>/db.sqlite
+  objects/
+  plugins/
+  logs/
+```
+
+Repo-local files are opt-in only. Shareable exports should omit or redact
+host-local roots and raw transcripts unless the user explicitly includes them.
+
+## Remaining Public Work
+
+The next public implementation steps are:
+
+1. Finish the `ctx work` CLI/export/import layer over the same records.
+2. Plan any `agent-work` to `work` namespace migration as one compatibility
+   change, not a piecemeal rename.
+3. Add provider command catalog/execution passthrough so provider commands stay
+   provider-owned.
+4. Move plugin commands into source-labeled command palette/workflow surfaces.
+5. Add declarative Workbench panel, template, and renderer contributions.
+6. Add plugin dev hot reload/watch mode.
+7. Add import/export/redaction tests and examples.
+8. Add a follow-on ACP-compatible coding-agent harness starter kit that uses
+   ctx Work capture, sandbox, shell, file, artifact, and transcript primitives.
