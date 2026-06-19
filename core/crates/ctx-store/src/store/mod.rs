@@ -58,6 +58,7 @@ mod workspace;
 mod worktree_vcs;
 mod worktrees;
 
+pub use agent_work::AgentWorkImportBatchResult;
 pub use kernel::{is_unique_constraint_violation, SessionRetentionPruneStats, Store, StoreStats};
 pub use mobile::{
     MobileAccessConfig, MobileDeviceSeqAdvance, MobileDeviceUpsert, RuntimeSettingsDocument,

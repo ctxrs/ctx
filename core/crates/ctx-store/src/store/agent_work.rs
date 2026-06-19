@@ -1,6 +1,68 @@
 use super::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentWorkImportBatchResult {
+    pub change_sets: usize,
+    pub contributions: usize,
+}
+
 impl Store {
+    pub async fn import_agent_work_records(
+        &self,
+        change_sets: &[ChangeSet],
+        contributions: &[Contribution],
+    ) -> Result<AgentWorkImportBatchResult> {
+        let _write_guard = self.write_gate.lock().await;
+        let mut tx = self.pool.begin().await?;
+        let result = self
+            .import_agent_work_records_in_tx(change_sets, contributions, &mut tx)
+            .await?;
+        tx.commit().await?;
+        Ok(result)
+    }
+
+    pub async fn validate_agent_work_import_records(
+        &self,
+        change_sets: &[ChangeSet],
+        contributions: &[Contribution],
+    ) -> Result<AgentWorkImportBatchResult> {
+        let _write_guard = self.write_gate.lock().await;
+        let mut tx = self.pool.begin().await?;
+        let result = self
+            .import_agent_work_records_in_tx(change_sets, contributions, &mut tx)
+            .await?;
+        tx.rollback().await?;
+        Ok(result)
+    }
+
+    async fn import_agent_work_records_in_tx(
+        &self,
+        change_sets: &[ChangeSet],
+        contributions: &[Contribution],
+        tx: &mut sqlx::Transaction<'_, Sqlite>,
+    ) -> Result<AgentWorkImportBatchResult> {
+        let now = Utc::now();
+
+        for change_set in change_sets {
+            let record = self
+                .prepare_change_set_for_import(change_set, now, tx)
+                .await?;
+            insert_change_set(&record, tx).await?;
+        }
+
+        for contribution in contributions {
+            let record = self
+                .prepare_contribution_for_import(contribution, now, tx)
+                .await?;
+            insert_contribution(&record, tx).await?;
+        }
+
+        Ok(AgentWorkImportBatchResult {
+            change_sets: change_sets.len(),
+            contributions: contributions.len(),
+        })
+    }
+
     pub async fn upsert_change_set(&self, change_set: &ChangeSet) -> Result<ChangeSet> {
         let mut record = change_set.clone();
         validate_agent_work_schema_version(record.schema_version, "change set")?;
@@ -17,39 +79,7 @@ impl Store {
         let updated_at = record.updated_at.unwrap_or(now);
         record.created_at = Some(created_at);
         record.updated_at = Some(updated_at);
-        let record_json =
-            serde_json::to_string(&record).context("serializing change set record")?;
-
-        let result = self
-            .query(
-                r#"INSERT INTO change_sets (
-                    id, workspace_id, source_worktree_id, base_revision, head_revision,
-                    target_branch, record_json, created_at, updated_at
-               )
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(id) DO UPDATE SET
-                    source_worktree_id = excluded.source_worktree_id,
-                    base_revision = excluded.base_revision,
-                    head_revision = excluded.head_revision,
-                    target_branch = excluded.target_branch,
-                    record_json = excluded.record_json,
-                    updated_at = excluded.updated_at
-                 WHERE change_sets.workspace_id = excluded.workspace_id"#,
-            )
-            .bind(record.id.0.to_string())
-            .bind(record.workspace_id.0.to_string())
-            .bind(record.source_worktree_id.map(|id| id.0.to_string()))
-            .bind(record.base_revision.as_deref())
-            .bind(record.head_revision.as_deref())
-            .bind(record.target_branch.as_deref())
-            .bind(record_json)
-            .bind(created_at.to_rfc3339())
-            .bind(updated_at.to_rfc3339())
-            .execute(&self.pool)
-            .await?;
-        if result.rows_affected() == 0 {
-            anyhow::bail!("change set id already exists in a different workspace");
-        }
+        insert_change_set_on_pool(&self.pool, &record).await?;
 
         Ok(record)
     }
@@ -134,43 +164,7 @@ impl Store {
         let updated_at = record.updated_at.unwrap_or(now);
         record.created_at = Some(created_at);
         record.updated_at = Some(updated_at);
-        let (subject_kind, subject_id) = contribution_endpoint_index(&record.subject);
-        let (target_kind, target_id) = contribution_endpoint_index(&record.target);
-        let record_json =
-            serde_json::to_string(&record).context("serializing contribution record")?;
-
-        let result = self
-            .query(
-            r#"INSERT INTO contributions (
-                    id, workspace_id, change_set_id, subject_kind, subject_id, target_kind, target_id,
-                    record_json, created_at, updated_at
-               )
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(id) DO UPDATE SET
-                    change_set_id = excluded.change_set_id,
-                    subject_kind = excluded.subject_kind,
-                    subject_id = excluded.subject_id,
-                    target_kind = excluded.target_kind,
-                    target_id = excluded.target_id,
-                    record_json = excluded.record_json,
-                    updated_at = excluded.updated_at
-                 WHERE contributions.workspace_id = excluded.workspace_id"#,
-            )
-        .bind(record.id.0.to_string())
-        .bind(record.workspace_id.0.to_string())
-        .bind(record.change_set_id.as_ref().map(|id| id.0.to_string()))
-        .bind(subject_kind)
-        .bind(subject_id)
-        .bind(target_kind)
-        .bind(target_id)
-        .bind(record_json)
-        .bind(created_at.to_rfc3339())
-        .bind(updated_at.to_rfc3339())
-        .execute(&self.pool)
-        .await?;
-        if result.rows_affected() == 0 {
-            anyhow::bail!("contribution id already exists in a different workspace");
-        }
+        insert_contribution_on_pool(&self.pool, &record).await?;
 
         Ok(record)
     }
@@ -322,6 +316,89 @@ impl Store {
         self.validate_endpoint_workspace(record.workspace_id, &record.subject, "subject")
             .await?;
         self.validate_endpoint_workspace(record.workspace_id, &record.target, "target")
+            .await?;
+        Ok(())
+    }
+
+    async fn prepare_change_set_for_import(
+        &self,
+        change_set: &ChangeSet,
+        now: DateTime<Utc>,
+        tx: &mut sqlx::Transaction<'_, Sqlite>,
+    ) -> Result<ChangeSet> {
+        let mut record = change_set.clone();
+        validate_agent_work_schema_version(record.schema_version, "change set")?;
+        validate_agent_work_source_records(&record.source_records, "change set")?;
+        self.validate_change_set_workspace_in_tx(&record, tx)
+            .await?;
+
+        let existing =
+            existing_change_set_import_state(record.workspace_id, &record.id, tx).await?;
+        normalize_change_set_import_record(&mut record, existing.as_ref(), now)?;
+        Ok(record)
+    }
+
+    async fn prepare_contribution_for_import(
+        &self,
+        contribution: &Contribution,
+        now: DateTime<Utc>,
+        tx: &mut sqlx::Transaction<'_, Sqlite>,
+    ) -> Result<Contribution> {
+        let mut record = contribution.clone();
+        validate_agent_work_schema_version(record.schema_version, "contribution")?;
+        validate_agent_work_source_records(&record.source_records, "contribution")?;
+        self.validate_contribution_workspace_in_tx(&record, tx)
+            .await?;
+
+        let existing =
+            existing_contribution_import_state(record.workspace_id, &record.id, tx).await?;
+        normalize_contribution_import_record(&mut record, existing.as_ref(), now)?;
+        Ok(record)
+    }
+
+    async fn validate_change_set_workspace_in_tx(
+        &self,
+        record: &ChangeSet,
+        tx: &mut sqlx::Transaction<'_, Sqlite>,
+    ) -> Result<()> {
+        if let Some(worktree_id) = record.source_worktree_id {
+            let workspace_id = sqlx::query_scalar::<_, String>(
+                r#"SELECT workspace_id FROM worktrees WHERE id = ?"#,
+            )
+            .bind(worktree_id.0.to_string())
+            .fetch_optional(&mut **tx)
+            .await?;
+            match workspace_id {
+                Some(workspace_id) if workspace_id == record.workspace_id.0.to_string() => {}
+                Some(_) => {
+                    return Err(anyhow::anyhow!(
+                        "change set source worktree belongs to a different workspace"
+                    ));
+                }
+                None => return Err(anyhow::anyhow!("change set source worktree does not exist")),
+            }
+        }
+        Ok(())
+    }
+
+    async fn validate_contribution_workspace_in_tx(
+        &self,
+        record: &Contribution,
+        tx: &mut sqlx::Transaction<'_, Sqlite>,
+    ) -> Result<()> {
+        if let Some(change_set_id) = record.change_set_id.as_ref() {
+            validate_id_workspace_in_tx(
+                tx,
+                "change_sets",
+                change_set_id.0.to_string(),
+                record.workspace_id,
+                "contribution change set",
+            )
+            .await?;
+        }
+        validate_endpoint_workspace_in_tx(tx, record.workspace_id, &record.subject, "subject")
+            .await?;
+        validate_endpoint_workspace_in_tx(tx, record.workspace_id, &record.target, "target")
             .await?;
         Ok(())
     }
@@ -648,6 +725,632 @@ impl Store {
 
         Ok(())
     }
+}
+
+struct ExistingAgentWorkImportState<T> {
+    record: T,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+async fn existing_change_set_import_state(
+    workspace_id: WorkspaceId,
+    id: &ChangeSetId,
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+) -> Result<Option<ExistingAgentWorkImportState<ChangeSet>>> {
+    let row = sqlx::query(
+        r#"SELECT record_json, created_at, updated_at
+           FROM change_sets
+           WHERE id = ? AND workspace_id = ?"#,
+    )
+    .bind(id.0.to_string())
+    .bind(workspace_id.0.to_string())
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let record_json: String = row.try_get("record_json")?;
+    let record: ChangeSet =
+        serde_json::from_str(&record_json).context("decoding existing change set record")?;
+    Ok(Some(ExistingAgentWorkImportState {
+        record,
+        created_at: parse_dt(&row.try_get::<String, _>("created_at")?)?,
+        updated_at: parse_dt(&row.try_get::<String, _>("updated_at")?)?,
+    }))
+}
+
+async fn existing_contribution_import_state(
+    workspace_id: WorkspaceId,
+    id: &ContributionId,
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+) -> Result<Option<ExistingAgentWorkImportState<Contribution>>> {
+    let row = sqlx::query(
+        r#"SELECT record_json, created_at, updated_at
+           FROM contributions
+           WHERE id = ? AND workspace_id = ?"#,
+    )
+    .bind(id.0.to_string())
+    .bind(workspace_id.0.to_string())
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let record_json: String = row.try_get("record_json")?;
+    let record: Contribution =
+        serde_json::from_str(&record_json).context("decoding existing contribution record")?;
+    Ok(Some(ExistingAgentWorkImportState {
+        record,
+        created_at: parse_dt(&row.try_get::<String, _>("created_at")?)?,
+        updated_at: parse_dt(&row.try_get::<String, _>("updated_at")?)?,
+    }))
+}
+
+fn normalize_change_set_import_record(
+    record: &mut ChangeSet,
+    existing: Option<&ExistingAgentWorkImportState<ChangeSet>>,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let same_payload = existing
+        .map(|existing| change_set_payload_matches(record, &existing.record))
+        .transpose()?
+        .unwrap_or(false);
+    let incoming_has_source_records = !record.source_records.is_empty();
+
+    record.created_at = Some(
+        record
+            .created_at
+            .or_else(|| existing.map(|existing| existing.created_at))
+            .unwrap_or(now),
+    );
+    record.updated_at = Some(match (record.updated_at, existing, same_payload) {
+        (Some(updated_at), _, _) => updated_at,
+        (None, Some(existing), true) => existing.updated_at,
+        (None, _, _) => now,
+    });
+    if !incoming_has_source_records && same_payload {
+        if let Some(existing) = existing {
+            record.source_records = existing.record.source_records.clone();
+        }
+    }
+    Ok(())
+}
+
+fn normalize_contribution_import_record(
+    record: &mut Contribution,
+    existing: Option<&ExistingAgentWorkImportState<Contribution>>,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let same_payload = existing
+        .map(|existing| contribution_payload_matches(record, &existing.record))
+        .transpose()?
+        .unwrap_or(false);
+    let incoming_has_source_records = !record.source_records.is_empty();
+
+    record.created_at = Some(
+        record
+            .created_at
+            .or_else(|| existing.map(|existing| existing.created_at))
+            .unwrap_or(now),
+    );
+    record.updated_at = Some(match (record.updated_at, existing, same_payload) {
+        (Some(updated_at), _, _) => updated_at,
+        (None, Some(existing), true) => existing.updated_at,
+        (None, _, _) => now,
+    });
+    if !incoming_has_source_records && same_payload {
+        if let Some(existing) = existing {
+            record.source_records = existing.record.source_records.clone();
+        }
+    }
+    Ok(())
+}
+
+fn change_set_payload_matches(left: &ChangeSet, right: &ChangeSet) -> Result<bool> {
+    let mut left = left.clone();
+    let mut right = right.clone();
+    clear_change_set_import_metadata(&mut left);
+    clear_change_set_import_metadata(&mut right);
+    Ok(
+        serde_json::to_value(left).context("serializing imported change set")?
+            == serde_json::to_value(right).context("serializing existing change set")?,
+    )
+}
+
+fn contribution_payload_matches(left: &Contribution, right: &Contribution) -> Result<bool> {
+    let mut left = left.clone();
+    let mut right = right.clone();
+    clear_contribution_import_metadata(&mut left);
+    clear_contribution_import_metadata(&mut right);
+    Ok(
+        serde_json::to_value(left).context("serializing imported contribution")?
+            == serde_json::to_value(right).context("serializing existing contribution")?,
+    )
+}
+
+fn clear_change_set_import_metadata(record: &mut ChangeSet) {
+    record.created_at = None;
+    record.updated_at = None;
+    record.source_records.clear();
+}
+
+fn clear_contribution_import_metadata(record: &mut Contribution) {
+    record.created_at = None;
+    record.updated_at = None;
+    record.source_records.clear();
+}
+
+async fn insert_change_set_on_pool(pool: &Pool<Sqlite>, record: &ChangeSet) -> Result<()> {
+    let record_json = serde_json::to_string(record).context("serializing change set record")?;
+    let result = sqlx::query(CHANGE_SET_UPSERT_SQL)
+        .bind(record.id.0.to_string())
+        .bind(record.workspace_id.0.to_string())
+        .bind(record.source_worktree_id.map(|id| id.0.to_string()))
+        .bind(record.base_revision.as_deref())
+        .bind(record.head_revision.as_deref())
+        .bind(record.target_branch.as_deref())
+        .bind(record_json)
+        .bind(
+            record
+                .created_at
+                .context("change set missing created_at")?
+                .to_rfc3339(),
+        )
+        .bind(
+            record
+                .updated_at
+                .context("change set missing updated_at")?
+                .to_rfc3339(),
+        )
+        .execute(pool)
+        .await?;
+    if result.rows_affected() == 0 {
+        anyhow::bail!("change set id already exists in a different workspace");
+    }
+    Ok(())
+}
+
+async fn insert_change_set(
+    record: &ChangeSet,
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+) -> Result<()> {
+    let record_json = serde_json::to_string(record).context("serializing change set record")?;
+    let result = sqlx::query(CHANGE_SET_UPSERT_SQL)
+        .bind(record.id.0.to_string())
+        .bind(record.workspace_id.0.to_string())
+        .bind(record.source_worktree_id.map(|id| id.0.to_string()))
+        .bind(record.base_revision.as_deref())
+        .bind(record.head_revision.as_deref())
+        .bind(record.target_branch.as_deref())
+        .bind(record_json)
+        .bind(
+            record
+                .created_at
+                .context("change set missing created_at")?
+                .to_rfc3339(),
+        )
+        .bind(
+            record
+                .updated_at
+                .context("change set missing updated_at")?
+                .to_rfc3339(),
+        )
+        .execute(&mut **tx)
+        .await?;
+    if result.rows_affected() == 0 {
+        anyhow::bail!("change set id already exists in a different workspace");
+    }
+    Ok(())
+}
+
+async fn insert_contribution_on_pool(pool: &Pool<Sqlite>, record: &Contribution) -> Result<()> {
+    let (subject_kind, subject_id) = contribution_endpoint_index(&record.subject);
+    let (target_kind, target_id) = contribution_endpoint_index(&record.target);
+    let record_json = serde_json::to_string(record).context("serializing contribution record")?;
+    let result = sqlx::query(CONTRIBUTION_UPSERT_SQL)
+        .bind(record.id.0.to_string())
+        .bind(record.workspace_id.0.to_string())
+        .bind(record.change_set_id.as_ref().map(|id| id.0.to_string()))
+        .bind(subject_kind)
+        .bind(subject_id)
+        .bind(target_kind)
+        .bind(target_id)
+        .bind(record_json)
+        .bind(
+            record
+                .created_at
+                .context("contribution missing created_at")?
+                .to_rfc3339(),
+        )
+        .bind(
+            record
+                .updated_at
+                .context("contribution missing updated_at")?
+                .to_rfc3339(),
+        )
+        .execute(pool)
+        .await?;
+    if result.rows_affected() == 0 {
+        anyhow::bail!("contribution id already exists in a different workspace");
+    }
+    Ok(())
+}
+
+async fn insert_contribution(
+    record: &Contribution,
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+) -> Result<()> {
+    let (subject_kind, subject_id) = contribution_endpoint_index(&record.subject);
+    let (target_kind, target_id) = contribution_endpoint_index(&record.target);
+    let record_json = serde_json::to_string(record).context("serializing contribution record")?;
+    let result = sqlx::query(CONTRIBUTION_UPSERT_SQL)
+        .bind(record.id.0.to_string())
+        .bind(record.workspace_id.0.to_string())
+        .bind(record.change_set_id.as_ref().map(|id| id.0.to_string()))
+        .bind(subject_kind)
+        .bind(subject_id)
+        .bind(target_kind)
+        .bind(target_id)
+        .bind(record_json)
+        .bind(
+            record
+                .created_at
+                .context("contribution missing created_at")?
+                .to_rfc3339(),
+        )
+        .bind(
+            record
+                .updated_at
+                .context("contribution missing updated_at")?
+                .to_rfc3339(),
+        )
+        .execute(&mut **tx)
+        .await?;
+    if result.rows_affected() == 0 {
+        anyhow::bail!("contribution id already exists in a different workspace");
+    }
+    Ok(())
+}
+
+const CHANGE_SET_UPSERT_SQL: &str = r#"INSERT INTO change_sets (
+        id, workspace_id, source_worktree_id, base_revision, head_revision,
+        target_branch, record_json, created_at, updated_at
+   )
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+   ON CONFLICT(id) DO UPDATE SET
+        source_worktree_id = excluded.source_worktree_id,
+        base_revision = excluded.base_revision,
+        head_revision = excluded.head_revision,
+        target_branch = excluded.target_branch,
+        record_json = excluded.record_json,
+        updated_at = excluded.updated_at
+     WHERE change_sets.workspace_id = excluded.workspace_id"#;
+
+const CONTRIBUTION_UPSERT_SQL: &str = r#"INSERT INTO contributions (
+        id, workspace_id, change_set_id, subject_kind, subject_id, target_kind, target_id,
+        record_json, created_at, updated_at
+   )
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+   ON CONFLICT(id) DO UPDATE SET
+        change_set_id = excluded.change_set_id,
+        subject_kind = excluded.subject_kind,
+        subject_id = excluded.subject_id,
+        target_kind = excluded.target_kind,
+        target_id = excluded.target_id,
+        record_json = excluded.record_json,
+        updated_at = excluded.updated_at
+     WHERE contributions.workspace_id = excluded.workspace_id"#;
+
+async fn validate_endpoint_workspace_in_tx(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    workspace_id: WorkspaceId,
+    endpoint: &ContributionEndpoint,
+    label: &str,
+) -> Result<()> {
+    match endpoint {
+        ContributionEndpoint::Workspace {
+            workspace_id: endpoint_workspace_id,
+        } if *endpoint_workspace_id != workspace_id => Err(anyhow::anyhow!(
+            "contribution {label} workspace belongs to a different workspace"
+        )),
+        ContributionEndpoint::Workspace { .. }
+        | ContributionEndpoint::Account { .. }
+        | ContributionEndpoint::PullRequest { .. }
+        | ContributionEndpoint::Check { .. }
+        | ContributionEndpoint::Evidence { .. }
+        | ContributionEndpoint::ReviewAttestation { .. }
+        | ContributionEndpoint::Commit { .. }
+        | ContributionEndpoint::Branch { .. }
+        | ContributionEndpoint::System { .. } => Ok(()),
+        ContributionEndpoint::Task {
+            task_id: Some(task_id),
+            ..
+        } => {
+            validate_id_workspace_in_tx(
+                tx,
+                "tasks",
+                task_id.0.to_string(),
+                workspace_id,
+                &format!("contribution {label} task"),
+            )
+            .await
+        }
+        ContributionEndpoint::Task { task_id: None, id } => {
+            validate_external_endpoint_id(id, &format!("contribution {label} task"))
+        }
+        ContributionEndpoint::Session {
+            session_id: Some(session_id),
+            turn_id,
+            run_id,
+            ..
+        } => {
+            validate_id_workspace_in_tx(
+                tx,
+                "sessions",
+                session_id.0.to_string(),
+                workspace_id,
+                &format!("contribution {label} session"),
+            )
+            .await?;
+            if let Some(run_id) = run_id {
+                validate_id_workspace_in_tx(
+                    tx,
+                    "runs",
+                    run_id.0.to_string(),
+                    workspace_id,
+                    &format!("contribution {label} run"),
+                )
+                .await?;
+                validate_run_session_in_tx(
+                    tx,
+                    *run_id,
+                    *session_id,
+                    &format!("contribution {label} run/session"),
+                )
+                .await?;
+            }
+            if let Some(turn_id) = turn_id {
+                validate_turn_session_in_tx(
+                    tx,
+                    *turn_id,
+                    *session_id,
+                    *run_id,
+                    &format!("contribution {label} turn/session"),
+                )
+                .await?;
+            }
+            Ok(())
+        }
+        ContributionEndpoint::Session {
+            session_id: None,
+            id,
+            ..
+        } => validate_external_endpoint_id(id, &format!("contribution {label} session")),
+        ContributionEndpoint::Run {
+            run_id: Some(run_id),
+            session_id,
+            ..
+        } => {
+            validate_id_workspace_in_tx(
+                tx,
+                "runs",
+                run_id.0.to_string(),
+                workspace_id,
+                &format!("contribution {label} run"),
+            )
+            .await?;
+            if let Some(session_id) = session_id {
+                validate_id_workspace_in_tx(
+                    tx,
+                    "sessions",
+                    session_id.0.to_string(),
+                    workspace_id,
+                    &format!("contribution {label} session"),
+                )
+                .await?;
+                validate_run_session_in_tx(
+                    tx,
+                    *run_id,
+                    *session_id,
+                    &format!("contribution {label} run/session"),
+                )
+                .await?;
+            }
+            Ok(())
+        }
+        ContributionEndpoint::Run {
+            run_id: None, id, ..
+        } => validate_external_endpoint_id(id, &format!("contribution {label} run")),
+        ContributionEndpoint::Agent {
+            session_id, run_id, ..
+        } => {
+            if let Some(session_id) = session_id {
+                validate_id_workspace_in_tx(
+                    tx,
+                    "sessions",
+                    session_id.0.to_string(),
+                    workspace_id,
+                    &format!("contribution {label} agent session"),
+                )
+                .await?;
+            }
+            if let Some(run_id) = run_id {
+                validate_id_workspace_in_tx(
+                    tx,
+                    "runs",
+                    run_id.0.to_string(),
+                    workspace_id,
+                    &format!("contribution {label} agent run"),
+                )
+                .await?;
+            }
+            if let (Some(session_id), Some(run_id)) = (session_id, run_id) {
+                validate_run_session_in_tx(
+                    tx,
+                    *run_id,
+                    *session_id,
+                    &format!("contribution {label} agent run/session"),
+                )
+                .await?;
+            }
+            Ok(())
+        }
+        ContributionEndpoint::Worktree {
+            worktree_id: Some(worktree_id),
+            ..
+        } => {
+            validate_id_workspace_in_tx(
+                tx,
+                "worktrees",
+                worktree_id.0.to_string(),
+                workspace_id,
+                &format!("contribution {label} worktree"),
+            )
+            .await
+        }
+        ContributionEndpoint::Worktree {
+            worktree_id: None,
+            id,
+        } => validate_external_endpoint_id(id, &format!("contribution {label} worktree")),
+        ContributionEndpoint::ChangeSet { change_set_id } => {
+            validate_id_workspace_in_tx(
+                tx,
+                "change_sets",
+                change_set_id.0.to_string(),
+                workspace_id,
+                &format!("contribution {label} change set"),
+            )
+            .await
+        }
+        ContributionEndpoint::Artifact {
+            artifact_id: Some(artifact_id),
+            relative_path,
+            ..
+        } => {
+            if let Some(relative_path) = relative_path {
+                validate_relative_endpoint_path(
+                    relative_path,
+                    &format!("contribution {label} artifact"),
+                )?;
+            }
+            validate_id_workspace_in_tx(
+                tx,
+                "artifacts",
+                artifact_id.0.to_string(),
+                workspace_id,
+                &format!("contribution {label} artifact"),
+            )
+            .await
+        }
+        ContributionEndpoint::Artifact {
+            artifact_id: None,
+            digest,
+            relative_path,
+        } => validate_artifact_endpoint_identity(digest, relative_path, label),
+        ContributionEndpoint::External {
+            source,
+            identifier,
+            url,
+        } => validate_external_endpoint_identity(source, identifier, url, label),
+        ContributionEndpoint::File {
+            path,
+            worktree_id: Some(worktree_id),
+            ..
+        } => {
+            validate_file_endpoint_path(path, label)?;
+            validate_id_workspace_in_tx(
+                tx,
+                "worktrees",
+                worktree_id.0.to_string(),
+                workspace_id,
+                &format!("contribution {label} file worktree"),
+            )
+            .await
+        }
+        ContributionEndpoint::File {
+            path,
+            worktree_id: None,
+            ..
+        } => validate_file_endpoint_path(path, label),
+    }
+}
+
+async fn validate_id_workspace_in_tx(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    table: &'static str,
+    id: String,
+    workspace_id: WorkspaceId,
+    label: &str,
+) -> Result<()> {
+    let sql = match table {
+        "artifacts" => "SELECT workspace_id FROM artifacts WHERE id = ?",
+        "change_sets" => "SELECT workspace_id FROM change_sets WHERE id = ?",
+        "runs" => "SELECT workspace_id FROM runs WHERE id = ?",
+        "sessions" => "SELECT workspace_id FROM sessions WHERE id = ?",
+        "tasks" => "SELECT workspace_id FROM tasks WHERE id = ?",
+        "worktrees" => "SELECT workspace_id FROM worktrees WHERE id = ?",
+        _ => unreachable!("unsupported workspace-owned endpoint table"),
+    };
+    let found_workspace_id = sqlx::query_scalar::<_, String>(sql)
+        .bind(id)
+        .fetch_optional(&mut **tx)
+        .await?;
+    match found_workspace_id {
+        Some(found_workspace_id) if found_workspace_id == workspace_id.0.to_string() => Ok(()),
+        Some(_) => Err(anyhow::anyhow!("{label} belongs to a different workspace")),
+        None => Err(anyhow::anyhow!("{label} does not exist")),
+    }
+}
+
+async fn validate_run_session_in_tx(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    run_id: RunId,
+    session_id: SessionId,
+    label: &str,
+) -> Result<()> {
+    let found_session_id =
+        sqlx::query_scalar::<_, String>("SELECT session_id FROM runs WHERE id = ?")
+            .bind(run_id.0.to_string())
+            .fetch_optional(&mut **tx)
+            .await?;
+    match found_session_id {
+        Some(found_session_id) if found_session_id == session_id.0.to_string() => Ok(()),
+        Some(_) => Err(anyhow::anyhow!("{label} points at different sessions")),
+        None => Err(anyhow::anyhow!("{label} run does not exist")),
+    }
+}
+
+async fn validate_turn_session_in_tx(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    turn_id: TurnId,
+    session_id: SessionId,
+    run_id: Option<RunId>,
+    label: &str,
+) -> Result<()> {
+    let row = sqlx::query(r#"SELECT session_id, run_id FROM session_turns WHERE turn_id = ?"#)
+        .bind(turn_id.0.to_string())
+        .fetch_optional(&mut **tx)
+        .await?;
+    let Some(row) = row else {
+        return Err(anyhow::anyhow!("{label} turn does not exist"));
+    };
+
+    let found_session_id: String = row.try_get("session_id")?;
+    if found_session_id != session_id.0.to_string() {
+        return Err(anyhow::anyhow!("{label} points at different sessions"));
+    }
+
+    if let Some(run_id) = run_id {
+        let found_run_id: Option<String> = row.try_get("run_id")?;
+        match found_run_id {
+            Some(found_run_id) if found_run_id == run_id.0.to_string() => {}
+            Some(_) => return Err(anyhow::anyhow!("{label} points at different runs")),
+            None => return Err(anyhow::anyhow!("{label} turn has no run")),
+        }
+    }
+
+    Ok(())
 }
 
 fn decode_change_set_row(row: SqliteRow) -> Result<ChangeSet> {

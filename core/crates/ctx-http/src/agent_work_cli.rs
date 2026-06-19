@@ -441,13 +441,16 @@ async fn import_work_records(args: AgentWorkImportArgs, writer: &mut dyn Write) 
     let context = open_work_store(&args.store).await?;
     validate_import_workspace(context.workspace_id, &bundle)?;
 
-    if !args.dry_run {
-        for change_set in &bundle.change_sets {
-            context.store.upsert_change_set(change_set).await?;
-        }
-        for contribution in &bundle.contributions {
-            context.store.upsert_contribution(contribution).await?;
-        }
+    if args.dry_run {
+        context
+            .store
+            .validate_agent_work_import_records(&bundle.change_sets, &bundle.contributions)
+            .await?;
+    } else {
+        context
+            .store
+            .import_agent_work_records(&bundle.change_sets, &bundle.contributions)
+            .await?;
     }
 
     writeln!(
@@ -1372,6 +1375,7 @@ const WORK_BUNDLE_SCHEMA: &str = r#"{
 mod tests {
     use super::*;
     use clap::Parser;
+    use ctx_core::ids::TaskId;
     use ctx_core::models::{
         ContributionEndpoint, ContributionRole, RecordFidelity, RecordOrigin, RecordSource,
         VcsKind, Workspace,
@@ -1815,6 +1819,127 @@ mod tests {
             .await
             .unwrap()
             .list_workspace_change_sets(workspace.id)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn import_dry_run_validates_relations_without_writing() {
+        let temp = TempDir::new().unwrap();
+        let manager = StoreManager::open(temp.path()).await.unwrap();
+        let workspace = manager
+            .global()
+            .create_workspace(
+                "target".to_string(),
+                "/tmp/target".to_string(),
+                VcsKind::Git,
+            )
+            .await
+            .unwrap();
+        let store = manager.workspace(workspace.id).await.unwrap();
+        let change_set_id = ChangeSetId::new();
+        let change_set = test_change_set(workspace.id, change_set_id.clone());
+        let mut bad_contribution =
+            test_contribution(workspace.id, change_set_id.clone(), ContributionId::new());
+        bad_contribution.subject = ContributionEndpoint::Task {
+            task_id: Some(TaskId::new()),
+            id: None,
+        };
+        let bundle = AgentWorkExport {
+            change_sets: vec![change_set],
+            contributions: vec![bad_contribution],
+        };
+        let path = temp.path().join("dry-run-relations.json");
+        write_json_file(&path, &serde_json::to_value(bundle).unwrap()).unwrap();
+
+        let mut output = Vec::new();
+        let error = run_with_writer(
+            AgentWorkCommand {
+                command: AgentWorkSubcommand::Import(AgentWorkImportArgs {
+                    store: store_args(temp.path(), Some(workspace.id)),
+                    file: path,
+                    dry_run: true,
+                }),
+            },
+            &mut output,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("task does not exist"));
+        assert!(store
+            .get_workspace_change_set(workspace.id, change_set_id)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store
+            .list_workspace_contributions(workspace.id)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn import_rolls_back_change_set_update_when_later_contribution_fails() {
+        let temp = TempDir::new().unwrap();
+        let manager = StoreManager::open(temp.path()).await.unwrap();
+        let workspace = manager
+            .global()
+            .create_workspace(
+                "target".to_string(),
+                "/tmp/target".to_string(),
+                VcsKind::Git,
+            )
+            .await
+            .unwrap();
+        let store = manager.workspace(workspace.id).await.unwrap();
+        let change_set_id = ChangeSetId::new();
+        store
+            .upsert_change_set(&test_change_set(workspace.id, change_set_id.clone()))
+            .await
+            .unwrap();
+
+        let mut replacement = test_change_set(workspace.id, change_set_id.clone());
+        replacement.title = Some("Replacement should roll back".to_string());
+        let mut bad_contribution =
+            test_contribution(workspace.id, change_set_id.clone(), ContributionId::new());
+        bad_contribution.subject = ContributionEndpoint::Task {
+            task_id: Some(TaskId::new()),
+            id: None,
+        };
+        let bundle = AgentWorkExport {
+            change_sets: vec![replacement],
+            contributions: vec![bad_contribution],
+        };
+        let path = temp.path().join("rollback.json");
+        write_json_file(&path, &serde_json::to_value(bundle).unwrap()).unwrap();
+
+        let mut output = Vec::new();
+        let error = run_with_writer(
+            AgentWorkCommand {
+                command: AgentWorkSubcommand::Import(AgentWorkImportArgs {
+                    store: store_args(temp.path(), Some(workspace.id)),
+                    file: path,
+                    dry_run: false,
+                }),
+            },
+            &mut output,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("task does not exist"));
+        let stored = store
+            .get_workspace_change_set(workspace.id, change_set_id)
+            .await
+            .unwrap()
+            .expect("original change set should remain");
+        assert_eq!(stored.title.as_deref(), Some("Test change set"));
+        assert!(store
+            .list_workspace_contributions(workspace.id)
             .await
             .unwrap()
             .is_empty());

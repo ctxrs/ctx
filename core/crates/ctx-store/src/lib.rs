@@ -2,7 +2,10 @@ pub mod manager;
 pub mod store;
 
 pub use manager::{StoreManager, StoreManagerConfig, StoreManagerStats};
-pub use store::{is_unique_constraint_violation, Store, StoreStats, WorktreeBootstrapResultUpdate};
+pub use store::{
+    is_unique_constraint_violation, AgentWorkImportBatchResult, Store, StoreStats,
+    WorktreeBootstrapResultUpdate,
+};
 
 #[cfg(feature = "fault_injection")]
 pub mod fault_injection;

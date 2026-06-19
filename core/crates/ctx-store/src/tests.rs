@@ -94,6 +94,64 @@ fn task_endpoint(task_id: TaskId) -> ContributionEndpoint {
     }
 }
 
+fn import_test_change_set(
+    workspace_id: WorkspaceId,
+    worktree_id: WorktreeId,
+    id: ChangeSetId,
+    title: &str,
+) -> ChangeSet {
+    ChangeSet {
+        id,
+        workspace_id,
+        source_worktree_id: Some(worktree_id),
+        source: RecordSource::Worktree,
+        origin: RecordOrigin::Imported,
+        fidelity: RecordFidelity::Diff,
+        trust: RecordTrust::Medium,
+        title: Some(title.to_string()),
+        summary: None,
+        description: None,
+        fingerprint: None,
+        base_revision: None,
+        head_revision: None,
+        target_branch: None,
+        pull_requests: Vec::new(),
+        source_records: Vec::new(),
+        issuer: None,
+        created_at: None,
+        updated_at: None,
+        schema_version: 1,
+    }
+}
+
+fn import_test_contribution(
+    workspace_id: WorkspaceId,
+    change_set_id: ChangeSetId,
+    id: ContributionId,
+    subject: ContributionEndpoint,
+) -> Contribution {
+    Contribution {
+        id,
+        workspace_id,
+        change_set_id: Some(change_set_id.clone()),
+        subject,
+        target: ContributionEndpoint::ChangeSet { change_set_id },
+        role: ContributionRole::Related,
+        source: RecordSource::Manual,
+        origin: RecordOrigin::Imported,
+        fidelity: RecordFidelity::Declared,
+        trust: RecordTrust::Medium,
+        summary: Some("imported contribution".to_string()),
+        fingerprint: None,
+        issuer: None,
+        metadata_json: None,
+        source_records: Vec::new(),
+        created_at: None,
+        updated_at: None,
+        schema_version: 1,
+    }
+}
+
 fn session_endpoint(
     session_id: SessionId,
     turn_id: Option<TurnId>,
@@ -1739,6 +1797,530 @@ async fn agent_work_upsert_preserves_created_at_when_omitted() {
 
     assert_eq!(second.created_at, first.created_at);
     assert_eq!(second.title.as_deref(), Some("Updated title"));
+}
+
+#[tokio::test]
+async fn import_agent_work_records_imports_batch_atomically() {
+    let fixture = setup_session_fixture().await;
+    let change_set_id = ChangeSetId::new();
+    let contribution_id = ContributionId::new();
+    let change_set = import_test_change_set(
+        fixture.workspace_id,
+        fixture.worktree_id,
+        change_set_id.clone(),
+        "batch",
+    );
+    let contribution = import_test_contribution(
+        fixture.workspace_id,
+        change_set_id.clone(),
+        contribution_id.clone(),
+        task_endpoint(fixture.task_id),
+    );
+
+    let result = fixture
+        .store
+        .import_agent_work_records(&[change_set], &[contribution])
+        .await
+        .unwrap();
+
+    assert_eq!(result.change_sets, 1);
+    assert_eq!(result.contributions, 1);
+    assert!(fixture
+        .store
+        .get_workspace_change_set(fixture.workspace_id, change_set_id)
+        .await
+        .unwrap()
+        .is_some());
+    assert!(fixture
+        .store
+        .get_contribution(contribution_id)
+        .await
+        .unwrap()
+        .is_some());
+}
+
+#[tokio::test]
+async fn validate_agent_work_import_records_rolls_back_successful_batch() {
+    let fixture = setup_session_fixture().await;
+    let change_set_id = ChangeSetId::new();
+    let contribution_id = ContributionId::new();
+    let change_set = import_test_change_set(
+        fixture.workspace_id,
+        fixture.worktree_id,
+        change_set_id.clone(),
+        "dry-run",
+    );
+    let contribution = import_test_contribution(
+        fixture.workspace_id,
+        change_set_id.clone(),
+        contribution_id.clone(),
+        task_endpoint(fixture.task_id),
+    );
+
+    let result = fixture
+        .store
+        .validate_agent_work_import_records(&[change_set], &[contribution])
+        .await
+        .unwrap();
+
+    assert_eq!(result.change_sets, 1);
+    assert_eq!(result.contributions, 1);
+    assert!(fixture
+        .store
+        .get_workspace_change_set(fixture.workspace_id, change_set_id)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(fixture
+        .store
+        .get_contribution(contribution_id)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn import_agent_work_records_rejects_cross_workspace_id_collisions() {
+    let fixture = setup_session_fixture().await;
+    let other_workspace = fixture
+        .store
+        .create_workspace(
+            "other import".into(),
+            "/tmp/other-import".into(),
+            VcsKind::Git,
+        )
+        .await
+        .unwrap();
+    let other_worktree = fixture
+        .store
+        .create_worktree(
+            other_workspace.id,
+            "/tmp/other-import".into(),
+            "feedbeef".into(),
+            None,
+        )
+        .await
+        .unwrap();
+    let other_task = fixture
+        .store
+        .create_task(other_workspace.id, "other task".into(), None)
+        .await
+        .unwrap();
+
+    let change_set_id = ChangeSetId::new();
+    let original_change_set = import_test_change_set(
+        fixture.workspace_id,
+        fixture.worktree_id,
+        change_set_id.clone(),
+        "original import",
+    );
+    fixture
+        .store
+        .import_agent_work_records(&[original_change_set], &[])
+        .await
+        .unwrap();
+
+    let colliding_change_set = import_test_change_set(
+        other_workspace.id,
+        other_worktree.id,
+        change_set_id.clone(),
+        "collision",
+    );
+    let change_set_error = fixture
+        .store
+        .import_agent_work_records(&[colliding_change_set], &[])
+        .await
+        .expect_err("same change set id in another workspace should be rejected");
+    assert!(format!("{change_set_error:#}").contains("different workspace"));
+    let stored_change_set = fixture
+        .store
+        .get_workspace_change_set(fixture.workspace_id, change_set_id.clone())
+        .await
+        .unwrap()
+        .expect("original change set should remain");
+    assert_eq!(stored_change_set.title.as_deref(), Some("original import"));
+    assert!(fixture
+        .store
+        .get_workspace_change_set(other_workspace.id, change_set_id)
+        .await
+        .unwrap()
+        .is_none());
+
+    let contribution_id = ContributionId::new();
+    let contribution_change_set_id = ChangeSetId::new();
+    let contribution_change_set = import_test_change_set(
+        fixture.workspace_id,
+        fixture.worktree_id,
+        contribution_change_set_id.clone(),
+        "original contribution target",
+    );
+    fixture
+        .store
+        .import_agent_work_records(&[contribution_change_set], &[])
+        .await
+        .unwrap();
+    let original_contribution = import_test_contribution(
+        fixture.workspace_id,
+        contribution_change_set_id,
+        contribution_id.clone(),
+        task_endpoint(fixture.task_id),
+    );
+    fixture
+        .store
+        .import_agent_work_records(&[], &[original_contribution])
+        .await
+        .unwrap();
+
+    let other_change_set_id = ChangeSetId::new();
+    let other_change_set = import_test_change_set(
+        other_workspace.id,
+        other_worktree.id,
+        other_change_set_id.clone(),
+        "foreign contribution target",
+    );
+    let colliding_contribution = import_test_contribution(
+        other_workspace.id,
+        other_change_set_id.clone(),
+        contribution_id.clone(),
+        task_endpoint(other_task.id),
+    );
+    let contribution_error = fixture
+        .store
+        .import_agent_work_records(&[other_change_set], &[colliding_contribution])
+        .await
+        .expect_err("same contribution id in another workspace should be rejected");
+    assert!(format!("{contribution_error:#}").contains("different workspace"));
+    let stored_contribution = fixture
+        .store
+        .get_contribution(contribution_id)
+        .await
+        .unwrap()
+        .expect("original contribution should remain");
+    assert_eq!(stored_contribution.workspace_id, fixture.workspace_id);
+    assert!(fixture
+        .store
+        .get_workspace_change_set(other_workspace.id, other_change_set_id)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn import_agent_work_records_is_idempotent_when_timestamps_are_omitted() {
+    let fixture = setup_session_fixture().await;
+    let change_set_id = ChangeSetId::new();
+    let contribution_id = ContributionId::new();
+    let change_set = import_test_change_set(
+        fixture.workspace_id,
+        fixture.worktree_id,
+        change_set_id.clone(),
+        "idempotent",
+    );
+    let contribution = import_test_contribution(
+        fixture.workspace_id,
+        change_set_id.clone(),
+        contribution_id.clone(),
+        task_endpoint(fixture.task_id),
+    );
+
+    fixture
+        .store
+        .import_agent_work_records(
+            std::slice::from_ref(&change_set),
+            std::slice::from_ref(&contribution),
+        )
+        .await
+        .unwrap();
+    let before_change_set = fixture
+        .store
+        .get_workspace_change_set(fixture.workspace_id, change_set_id.clone())
+        .await
+        .unwrap()
+        .expect("change set should be imported");
+    let before_contribution = fixture
+        .store
+        .get_contribution(contribution_id.clone())
+        .await
+        .unwrap()
+        .expect("contribution should be imported");
+
+    fixture
+        .store
+        .import_agent_work_records(&[change_set], &[contribution])
+        .await
+        .unwrap();
+
+    let after_change_set = fixture
+        .store
+        .get_workspace_change_set(fixture.workspace_id, change_set_id)
+        .await
+        .unwrap()
+        .expect("change set should remain imported");
+    let after_contribution = fixture
+        .store
+        .get_contribution(contribution_id)
+        .await
+        .unwrap()
+        .expect("contribution should remain imported");
+    assert_eq!(after_change_set.created_at, before_change_set.created_at);
+    assert_eq!(after_change_set.updated_at, before_change_set.updated_at);
+    assert_eq!(
+        after_contribution.created_at,
+        before_contribution.created_at
+    );
+    assert_eq!(
+        after_contribution.updated_at,
+        before_contribution.updated_at
+    );
+}
+
+#[tokio::test]
+async fn import_agent_work_records_updates_omitted_timestamp_when_payload_changes() {
+    let fixture = setup_session_fixture().await;
+    let change_set_id = ChangeSetId::new();
+    let original = import_test_change_set(
+        fixture.workspace_id,
+        fixture.worktree_id,
+        change_set_id.clone(),
+        "original",
+    );
+    fixture
+        .store
+        .import_agent_work_records(&[original], &[])
+        .await
+        .unwrap();
+    let before = fixture
+        .store
+        .get_workspace_change_set(fixture.workspace_id, change_set_id.clone())
+        .await
+        .unwrap()
+        .expect("change set should be imported");
+
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    let replacement = import_test_change_set(
+        fixture.workspace_id,
+        fixture.worktree_id,
+        change_set_id.clone(),
+        "replacement",
+    );
+    fixture
+        .store
+        .import_agent_work_records(&[replacement], &[])
+        .await
+        .unwrap();
+
+    let after = fixture
+        .store
+        .get_workspace_change_set(fixture.workspace_id, change_set_id)
+        .await
+        .unwrap()
+        .expect("change set should remain imported");
+    assert_eq!(after.created_at, before.created_at);
+    assert!(after.updated_at > before.updated_at);
+    assert_eq!(after.title.as_deref(), Some("replacement"));
+}
+
+#[tokio::test]
+async fn import_agent_work_records_does_not_reuse_provenance_for_changed_payload() {
+    let fixture = setup_session_fixture().await;
+    let change_set_id = ChangeSetId::new();
+    let payload = serde_json::json!({"kind": "fixture", "value": 1});
+    let source_record = AgentWorkSourceRecord::from_payload(
+        1,
+        AgentWorkSourceRecordId::new(),
+        None,
+        &payload,
+        Utc::now(),
+    )
+    .unwrap();
+    let mut original = import_test_change_set(
+        fixture.workspace_id,
+        fixture.worktree_id,
+        change_set_id.clone(),
+        "original",
+    );
+    original.source_records = vec![source_record.clone()];
+    fixture
+        .store
+        .import_agent_work_records(&[original.clone()], &[])
+        .await
+        .unwrap();
+
+    let mut same_without_provenance = original.clone();
+    same_without_provenance.created_at = None;
+    same_without_provenance.updated_at = None;
+    same_without_provenance.source_records.clear();
+    fixture
+        .store
+        .import_agent_work_records(&[same_without_provenance], &[])
+        .await
+        .unwrap();
+    let same = fixture
+        .store
+        .get_workspace_change_set(fixture.workspace_id, change_set_id.clone())
+        .await
+        .unwrap()
+        .expect("change set should remain imported");
+    assert_eq!(same.source_records, vec![source_record]);
+
+    let changed_without_provenance = import_test_change_set(
+        fixture.workspace_id,
+        fixture.worktree_id,
+        change_set_id.clone(),
+        "changed",
+    );
+    fixture
+        .store
+        .import_agent_work_records(&[changed_without_provenance], &[])
+        .await
+        .unwrap();
+    let changed = fixture
+        .store
+        .get_workspace_change_set(fixture.workspace_id, change_set_id)
+        .await
+        .unwrap()
+        .expect("change set should remain imported");
+    assert_eq!(changed.title.as_deref(), Some("changed"));
+    assert!(changed.source_records.is_empty());
+}
+
+#[tokio::test]
+async fn import_agent_work_records_does_not_reuse_contribution_provenance_for_changed_payload() {
+    let fixture = setup_session_fixture().await;
+    let change_set_id = ChangeSetId::new();
+    let change_set = import_test_change_set(
+        fixture.workspace_id,
+        fixture.worktree_id,
+        change_set_id.clone(),
+        "contribution provenance",
+    );
+    fixture
+        .store
+        .import_agent_work_records(&[change_set], &[])
+        .await
+        .unwrap();
+
+    let contribution_id = ContributionId::new();
+    let payload = serde_json::json!({"kind": "fixture", "value": 1});
+    let source_record = AgentWorkSourceRecord::from_payload(
+        1,
+        AgentWorkSourceRecordId::new(),
+        None,
+        &payload,
+        Utc::now(),
+    )
+    .unwrap();
+    let mut original = import_test_contribution(
+        fixture.workspace_id,
+        change_set_id.clone(),
+        contribution_id.clone(),
+        task_endpoint(fixture.task_id),
+    );
+    original.source_records = vec![source_record.clone()];
+    fixture
+        .store
+        .import_agent_work_records(&[], &[original.clone()])
+        .await
+        .unwrap();
+
+    let before = fixture
+        .store
+        .get_contribution(contribution_id.clone())
+        .await
+        .unwrap()
+        .expect("contribution should be imported");
+
+    let mut same_without_provenance = original.clone();
+    same_without_provenance.created_at = None;
+    same_without_provenance.updated_at = None;
+    same_without_provenance.source_records.clear();
+    fixture
+        .store
+        .import_agent_work_records(&[], &[same_without_provenance])
+        .await
+        .unwrap();
+    let same = fixture
+        .store
+        .get_contribution(contribution_id.clone())
+        .await
+        .unwrap()
+        .expect("contribution should remain imported");
+    assert_eq!(same.updated_at, before.updated_at);
+    assert_eq!(same.source_records, vec![source_record]);
+
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    let mut changed_without_provenance = import_test_contribution(
+        fixture.workspace_id,
+        change_set_id,
+        contribution_id.clone(),
+        task_endpoint(fixture.task_id),
+    );
+    changed_without_provenance.summary = Some("changed contribution".to_string());
+    fixture
+        .store
+        .import_agent_work_records(&[], &[changed_without_provenance])
+        .await
+        .unwrap();
+    let changed = fixture
+        .store
+        .get_contribution(contribution_id)
+        .await
+        .unwrap()
+        .expect("contribution should remain imported");
+    assert_eq!(changed.summary.as_deref(), Some("changed contribution"));
+    assert!(changed.updated_at > before.updated_at);
+    assert!(changed.source_records.is_empty());
+}
+
+#[tokio::test]
+async fn import_agent_work_records_rolls_back_prior_updates_on_later_failure() {
+    let fixture = setup_session_fixture().await;
+    let change_set_id = ChangeSetId::new();
+    let original = import_test_change_set(
+        fixture.workspace_id,
+        fixture.worktree_id,
+        change_set_id.clone(),
+        "original",
+    );
+    fixture
+        .store
+        .import_agent_work_records(&[original], &[])
+        .await
+        .unwrap();
+
+    let replacement = import_test_change_set(
+        fixture.workspace_id,
+        fixture.worktree_id,
+        change_set_id.clone(),
+        "replacement",
+    );
+    let bad_contribution = import_test_contribution(
+        fixture.workspace_id,
+        change_set_id.clone(),
+        ContributionId::new(),
+        task_endpoint(TaskId::new()),
+    );
+
+    let err = fixture
+        .store
+        .import_agent_work_records(&[replacement], &[bad_contribution])
+        .await
+        .expect_err("invalid contribution should fail the batch");
+    assert!(format!("{err:#}").contains("task does not exist"));
+
+    let stored = fixture
+        .store
+        .get_workspace_change_set(fixture.workspace_id, change_set_id)
+        .await
+        .unwrap()
+        .expect("original change set should remain");
+    assert_eq!(stored.title.as_deref(), Some("original"));
+    assert!(fixture
+        .store
+        .list_workspace_contributions(fixture.workspace_id)
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
