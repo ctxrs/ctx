@@ -496,8 +496,15 @@ impl Store {
             }
             ContributionEndpoint::Artifact {
                 artifact_id: Some(artifact_id),
+                relative_path,
                 ..
             } => {
+                if let Some(relative_path) = relative_path {
+                    validate_relative_endpoint_path(
+                        relative_path,
+                        &format!("contribution {label} artifact"),
+                    )?;
+                }
                 self.validate_id_workspace(
                     "artifacts",
                     artifact_id.0.to_string(),
@@ -714,7 +721,15 @@ fn validate_artifact_endpoint_identity(
         (None, None) => Err(anyhow::anyhow!(
             "contribution {label} artifact is missing artifact_id, digest, or relative_path"
         )),
-        _ => Ok(()),
+        _ => {
+            if let Some(relative_path) = relative_path {
+                validate_relative_endpoint_path(
+                    relative_path,
+                    &format!("contribution {label} artifact"),
+                )?;
+            }
+            Ok(())
+        }
     }
 }
 
@@ -739,15 +754,33 @@ fn validate_external_endpoint_identity(
 }
 
 fn validate_file_endpoint_path(path: &str, label: &str) -> Result<()> {
+    validate_relative_endpoint_path(path, &format!("contribution {label} file"))
+}
+
+fn validate_relative_endpoint_path(path: &str, label: &str) -> Result<()> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
-        anyhow::bail!("contribution {label} file endpoint is missing path");
+        anyhow::bail!("{label} endpoint is missing path");
     }
     if Path::new(trimmed).is_absolute()
         || trimmed.starts_with("\\\\")
         || looks_like_windows_absolute_path(trimmed)
+        || Path::new(trimmed).components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::CurDir
+                    | std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+        || trimmed
+            .split(['/', '\\'])
+            .any(|component| matches!(component, "." | ".."))
     {
-        anyhow::bail!("contribution {label} file path must be workspace-relative");
+        anyhow::bail!(
+            "{label} path must be workspace-relative and cannot contain traversal components"
+        );
     }
     Ok(())
 }

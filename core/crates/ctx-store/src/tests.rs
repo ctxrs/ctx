@@ -1400,6 +1400,35 @@ async fn agent_work_upserts_reject_unsupported_schema_versions_and_empty_externa
         .expect_err("file endpoint paths should be non-empty");
     assert!(format!("{empty_file_path_error:#}").contains("missing path"));
 
+    let traversal_file_path_error = fixture
+        .store
+        .upsert_contribution(&Contribution {
+            schema_version: 1,
+            subject: ContributionSubject::File {
+                path: "src/../secrets.env".to_string(),
+                worktree_id: Some(fixture.worktree_id),
+            },
+            ..valid_contribution.clone()
+        })
+        .await
+        .expect_err("file endpoint paths should reject traversal");
+    assert!(format!("{traversal_file_path_error:#}").contains("traversal"));
+
+    let traversal_artifact_path_error = fixture
+        .store
+        .upsert_contribution(&Contribution {
+            schema_version: 1,
+            subject: ContributionSubject::Artifact {
+                artifact_id: None,
+                digest: None,
+                relative_path: Some("reports/../raw.log".to_string()),
+            },
+            ..valid_contribution.clone()
+        })
+        .await
+        .expect_err("artifact relative paths should reject traversal");
+    assert!(format!("{traversal_artifact_path_error:#}").contains("traversal"));
+
     let missing_artifact_identity_error = fixture
         .store
         .upsert_contribution(&Contribution {
