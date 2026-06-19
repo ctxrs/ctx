@@ -131,8 +131,8 @@ export function useComposerAutocomplete({
       const full = `/${name}`;
       return name.startsWith(q) || name.includes(q) || full.includes(q);
     });
-    return filtered.slice(0, 10).map((c) => ({
-      key: `slash:${c.name}:${slashCommandSourceKey(c)}`,
+    return filtered.slice(0, 10).map((c, index) => ({
+      key: `slash:${c.name}:${slashCommandSourceKey(c)}:${index}`,
       label: `/${c.name}`,
       insertText: `/${c.name}`,
       description: c.description,

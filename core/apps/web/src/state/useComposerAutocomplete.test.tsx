@@ -81,7 +81,7 @@ describe("useComposerAutocomplete integration", () => {
     vi.restoreAllMocks();
   });
 
-  it("shows source labels for duplicate slash command names and preserves insertion", async () => {
+  it("shows source labels for provider/plugin command collisions and preserves plugin routing tokens", async () => {
     vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb: FrameRequestCallback) => {
       return window.setTimeout(() => cb(performance.now()), 0) as unknown as number;
     });
@@ -103,7 +103,7 @@ describe("useComposerAutocomplete integration", () => {
             },
           },
           {
-            name: "review",
+            name: "review.tools:review",
             description: "Plugin review",
             source: {
               kind: "plugin",
@@ -125,7 +125,8 @@ describe("useComposerAutocomplete integration", () => {
       await new Promise((r) => setTimeout(r, 0));
     });
 
-    expect(screen.getAllByText("/review")).toHaveLength(2);
+    expect(screen.getByText("/review")).toBeInTheDocument();
+    expect(screen.getByText("/review.tools:review")).toBeInTheDocument();
     expect(screen.getByText("Codex")).toBeInTheDocument();
     expect(screen.getByText("Review Tools")).toBeInTheDocument();
 
@@ -140,7 +141,60 @@ describe("useComposerAutocomplete integration", () => {
     });
 
     expect(onSend).not.toHaveBeenCalled();
-    expect(textarea.value).toBe("do /review ");
+    expect(textarea.value).toBe("do /review.tools:review ");
+    vi.restoreAllMocks();
+  });
+
+  it("keeps option keys distinct when duplicate slash descriptors leak through", async () => {
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb: FrameRequestCallback) => {
+      return window.setTimeout(() => cb(performance.now()), 0) as unknown as number;
+    });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    render(
+      <TestHarness
+        initial={"/dup"}
+        onSend={vi.fn()}
+        slashCommands={[
+          {
+            name: "duplicate",
+            description: "First duplicate",
+            source: {
+              kind: "plugin",
+              pluginId: "duplicate.tools",
+              pluginName: "Duplicate Tools",
+              label: "Duplicate Tools",
+            },
+          },
+          {
+            name: "duplicate",
+            description: "Second duplicate",
+            source: {
+              kind: "plugin",
+              pluginId: "duplicate.tools",
+              pluginName: "Duplicate Tools",
+              label: "Duplicate Tools",
+            },
+          },
+        ]}
+      />,
+    );
+
+    const textarea = (await screen.findByDisplayValue("/dup")) as HTMLTextAreaElement;
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+    await act(async () => {
+      fireEvent.click(textarea);
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(screen.getAllByText("/duplicate")).toHaveLength(2);
+    expect(
+      consoleError.mock.calls.some((call) =>
+        call.some((part) => String(part).includes("Encountered two children with the same key")),
+      ),
+    ).toBe(false);
     vi.restoreAllMocks();
   });
 });

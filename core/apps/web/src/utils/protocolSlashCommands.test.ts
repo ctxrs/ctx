@@ -53,7 +53,7 @@ describe("deriveProtocolSlashCommands", () => {
           kind: "provider",
           providerId: "claude-crp",
           protocol: "CRP",
-          label: "Claude",
+          label: "Claude Code",
         },
       },
       {
@@ -62,7 +62,7 @@ describe("deriveProtocolSlashCommands", () => {
           kind: "provider",
           providerId: "claude-crp",
           protocol: "CRP",
-          label: "Claude",
+          label: "Claude Code",
         },
       },
     ]);

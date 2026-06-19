@@ -113,7 +113,7 @@ const readString = (value: unknown): string | undefined => {
 };
 
 const providerSourceLabel = (providerId: string): string => {
-  if (providerId === "claude-crp") return "Claude";
+  if (providerId === "claude-crp") return "Claude Code";
   if (providerId === "codex") return "Codex";
   return providerId;
 };
