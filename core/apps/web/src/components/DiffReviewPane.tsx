@@ -1,5 +1,5 @@
 import { memo, useEffect, useRef, useState } from "react";
-import Editor from "@monaco-editor/react";
+import Editor, { DiffEditor } from "@monaco-editor/react";
 import type * as Monaco from "monaco-editor";
 import type { editor as MonacoEditor } from "monaco-editor";
 import { ChevronDown, ChevronUp } from "lucide-react";
@@ -89,6 +89,7 @@ const DiffReviewPane = memo(function DiffReviewPane({
 }) {
   const [expandedFiles, setExpandedFiles] = useState<Record<string, boolean>>({});
   const [wrapLines, setWrapLines] = useState(true);
+  const [splitView, setSplitView] = useState(false);
   const [files, setFiles] = useState<DiffFile[]>([]);
   const [parsing, setParsing] = useState(false);
   const themeVariant = useThemeVariant();
@@ -156,6 +157,15 @@ const DiffReviewPane = memo(function DiffReviewPane({
               >
                 Wrap lines
               </button>
+              <button
+                type="button"
+                className={`cursor-diff-toggle ${splitView ? "cursor-diff-toggle-active" : ""}`}
+                aria-pressed={splitView}
+                title={splitView ? "Switch to inline diff" : "Switch to side-by-side diff"}
+                onClick={() => setSplitView((prev) => !prev)}
+              >
+                Split
+              </button>
             </div>
             {detail?.error ? <div className="muted">{detail.error}</div> : null}
             {!inventory.listReady ? <div className="muted">Loading changed files...</div> : null}
@@ -213,7 +223,11 @@ const DiffReviewPane = memo(function DiffReviewPane({
                               </div>
                             ) : parsedFile ? (
                               <div className="cursor-diff-editor-shell">
-                                <DecoratedDiffEditor file={parsedFile} wrapLines={wrapLines} monacoTheme={monacoTheme} />
+                                {splitView ? (
+                                  <SplitDiffEditor file={parsedFile} wrapLines={wrapLines} monacoTheme={monacoTheme} />
+                                ) : (
+                                  <DecoratedDiffEditor file={parsedFile} wrapLines={wrapLines} monacoTheme={monacoTheme} />
+                                )}
                               </div>
                             ) : (
                               <div className="muted" style={{ padding: 12 }}>
@@ -253,6 +267,15 @@ const DiffReviewPane = memo(function DiffReviewPane({
               onClick={() => setWrapLines((prev) => !prev)}
             >
               Wrap lines
+            </button>
+            <button
+              type="button"
+              className={`cursor-diff-toggle ${splitView ? "cursor-diff-toggle-active" : ""}`}
+              aria-pressed={splitView}
+              title={splitView ? "Switch to inline diff" : "Switch to side-by-side diff"}
+              onClick={() => setSplitView((prev) => !prev)}
+            >
+              Split
             </button>
           </div>
           <div className="cursor-diff-list">
@@ -313,7 +336,11 @@ const DiffReviewPane = memo(function DiffReviewPane({
                       ) : (
                         <>
                           <div className="cursor-diff-editor-shell">
-                            <DecoratedDiffEditor file={f} wrapLines={wrapLines} monacoTheme={monacoTheme} />
+                            {splitView ? (
+                              <SplitDiffEditor file={f} wrapLines={wrapLines} monacoTheme={monacoTheme} />
+                            ) : (
+                              <DecoratedDiffEditor file={f} wrapLines={wrapLines} monacoTheme={monacoTheme} />
+                            )}
                           </div>
                         </>
                       )}
@@ -464,6 +491,110 @@ function DecoratedDiffEditor({
         };
 
         applyDecorations();
+      }}
+    />
+  );
+}
+
+function estimateSplitDiffHeightPx(file: DiffFile): number {
+  const oldCount = file.oldText ? file.oldText.split("\n").length : 0;
+  const newCount = file.newText ? file.newText.split("\n").length : 0;
+  const visibleLines = Math.max(3, oldCount, newCount);
+  const lineHeight = 22;
+  const paddingTopBottom = 20;
+  const safetyLines = 2;
+  return (visibleLines + safetyLines) * lineHeight + paddingTopBottom;
+}
+
+const LANGUAGE_BY_EXTENSION: Record<string, string> = {
+  ts: "typescript",
+  tsx: "typescript",
+  js: "javascript",
+  jsx: "javascript",
+  mjs: "javascript",
+  cjs: "javascript",
+  json: "json",
+  rs: "rust",
+  py: "python",
+  go: "go",
+  rb: "ruby",
+  java: "java",
+  kt: "kotlin",
+  c: "c",
+  h: "c",
+  cpp: "cpp",
+  cc: "cpp",
+  hpp: "cpp",
+  cs: "csharp",
+  css: "css",
+  scss: "scss",
+  html: "html",
+  xml: "xml",
+  yaml: "yaml",
+  yml: "yaml",
+  toml: "ini",
+  ini: "ini",
+  md: "markdown",
+  sh: "shell",
+  bash: "shell",
+  sql: "sql",
+};
+
+function languageForPath(path: string): string {
+  const base = path.split("/").pop() ?? "";
+  const dot = base.lastIndexOf(".");
+  if (dot < 0) return "plaintext";
+  const ext = base.slice(dot + 1).toLowerCase();
+  return LANGUAGE_BY_EXTENSION[ext] ?? "plaintext";
+}
+
+function SplitDiffEditor({
+  file,
+  wrapLines,
+  monacoTheme,
+}: {
+  file: DiffFile;
+  wrapLines: boolean;
+  monacoTheme: "vs" | "vs-dark";
+}) {
+  const editorHeight = estimateSplitDiffHeightPx(file);
+  const language = languageForPath(file.filePath);
+
+  return (
+    <DiffEditor
+      key={`${file.key}:${wrapLines ? "wrap" : "nowrap"}`}
+      height={`${editorHeight}px`}
+      language={language}
+      original={file.oldText}
+      modified={file.newText}
+      originalModelPath={`inmemory://diff/original/${encodeURIComponent(file.key)}`}
+      modifiedModelPath={`inmemory://diff/modified/${encodeURIComponent(file.key)}`}
+      theme={monacoTheme}
+      options={{
+        readOnly: true,
+        renderSideBySide: true,
+        minimap: { enabled: false },
+        scrollbar: {
+          vertical: "hidden",
+          horizontal: wrapLines ? "hidden" : "auto",
+          handleMouseWheel: false,
+          alwaysConsumeMouseWheel: false,
+        },
+        scrollBeyondLastLine: false,
+        overviewRulerLanes: 0,
+        hideCursorInOverviewRuler: true,
+        glyphMargin: false,
+        folding: false,
+        lineNumbersMinChars: 2,
+        fontSize: 12,
+        lineHeight: 22,
+        renderLineHighlight: "none",
+        renderValidationDecorations: "off",
+        fixedOverflowWidgets: true,
+        padding: { top: 10, bottom: 10 },
+        wordWrap: wrapLines ? "on" : "off",
+        wrappingStrategy: wrapLines ? "advanced" : "simple",
+        wordWrapBreakAfterCharacters: wrapLines ? WRAP_BREAK_AFTER_CHARACTERS : undefined,
       }}
     />
   );

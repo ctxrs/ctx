@@ -13,6 +13,8 @@ export type DiffFile = {
   deletedLines: number;
   renderText: string;
   renderLineKinds: Array<"add" | "del" | "ctx">;
+  oldText: string;
+  newText: string;
 };
 
 type DiffHunk = {
@@ -23,7 +25,16 @@ type DiffHunk = {
 
 type RawDiffFile = Omit<
   DiffFile,
-  "filePath" | "isNew" | "isDeleted" | "isBinary" | "addedLines" | "deletedLines" | "renderText" | "renderLineKinds"
+  | "filePath"
+  | "isNew"
+  | "isDeleted"
+  | "isBinary"
+  | "addedLines"
+  | "deletedLines"
+  | "renderText"
+  | "renderLineKinds"
+  | "oldText"
+  | "newText"
 >;
 
 export function parseUnifiedDiff(diffText: string): DiffFile[] {
@@ -158,6 +169,8 @@ function finalizeFile(raw: RawDiffFile): DiffFile {
   let deletedLines = 0;
   const renderLines: string[] = [];
   const renderLineKinds: Array<"add" | "del" | "ctx"> = [];
+  const oldLines: string[] = [];
+  const newLines: string[] = [];
 
   for (const h of raw.hunks) {
     for (const line of h.lines) {
@@ -168,6 +181,7 @@ function finalizeFile(raw: RawDiffFile): DiffFile {
           addedLines += 1;
           renderLines.push(line.slice(1));
           renderLineKinds.push("add");
+          newLines.push(line.slice(1));
         }
         continue;
       }
@@ -176,12 +190,15 @@ function finalizeFile(raw: RawDiffFile): DiffFile {
           deletedLines += 1;
           renderLines.push(line.slice(1));
           renderLineKinds.push("del");
+          oldLines.push(line.slice(1));
         }
         continue;
       }
       if (prefix === " ") {
         renderLines.push(line.slice(1));
         renderLineKinds.push("ctx");
+        oldLines.push(line.slice(1));
+        newLines.push(line.slice(1));
       }
       // \ No newline at end of file
     }
@@ -197,6 +214,8 @@ function finalizeFile(raw: RawDiffFile): DiffFile {
     deletedLines,
     renderText: renderLines.join("\n"),
     renderLineKinds,
+    oldText: oldLines.join("\n"),
+    newText: newLines.join("\n"),
   };
 }
 
