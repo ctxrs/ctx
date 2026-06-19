@@ -2,7 +2,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use clap::{Args, Subcommand, ValueEnum};
 use ctx_core::ids::{ChangeSetId, ContributionId, WorkspaceId};
 use ctx_core::models::PluginManifest;
@@ -121,7 +121,7 @@ pub(crate) struct AgentWorkImportArgs {
     pub(crate) dry_run: bool,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum AgentWorkSchemaKind {
     WorkBundle,
     AgentWork,
@@ -140,11 +140,14 @@ pub(crate) enum AgentWorkRecordKind {
     Contribution,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum AgentWorkRedactionProfile {
     /// Redact obvious secrets, host paths, and transcript-like payloads.
+    #[serde(alias = "safe-summary")]
     SafeSummary,
     /// Preserve full local records. Use only for trusted local imports/exports.
+    #[serde(alias = "full-local")]
     FullLocal,
 }
 
@@ -154,6 +157,36 @@ struct AgentWorkExport {
     contributions: Vec<Contribution>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AgentWorkExportEnvelope {
+    kind: String,
+    schema_version: i64,
+    agent_work_schema_version: i64,
+    provenance: AgentWorkExportProvenance,
+    redaction: AgentWorkExportRedaction,
+    agent_work: AgentWorkExport,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AgentWorkExportProvenance {
+    source_kind: String,
+    workspace_id: WorkspaceId,
+    exported_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AgentWorkExportRedaction {
+    profile: AgentWorkRedactionProfile,
+    import_safe: bool,
+    #[serde(default)]
+    stats: ctx_core::models::RunArchiveNormalizationStats,
+}
+
+const AGENT_WORK_EXPORT_ENVELOPE_KIND: &str = "ctx.agent_work.export";
+const AGENT_WORK_EXPORT_ENVELOPE_SCHEMA_VERSION: i64 = 1;
+const AGENT_WORK_EXPORT_SOURCE_KIND: &str = "ctx.work.cli";
+const AGENT_WORK_SCHEMA_VERSION: i64 = 1;
+
 impl AgentWorkRecordKind {
     fn includes_change_sets(self) -> bool {
         matches!(self, Self::All | Self::ChangeSet)
@@ -161,6 +194,19 @@ impl AgentWorkRecordKind {
 
     fn includes_contributions(self) -> bool {
         matches!(self, Self::All | Self::Contribution)
+    }
+}
+
+impl AgentWorkRedactionProfile {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SafeSummary => "safe_summary",
+            Self::FullLocal => "full_local",
+        }
+    }
+
+    fn default_import_safe(self) -> bool {
+        matches!(self, Self::FullLocal)
     }
 }
 
@@ -380,12 +426,10 @@ async fn show_work_record(args: AgentWorkShowArgs, writer: &mut dyn Write) -> Re
 async fn export_work_records(args: AgentWorkExportArgs, writer: &mut dyn Write) -> Result<()> {
     let context = open_work_store(&args.store).await?;
     let bundle = load_work_export(&context.store, context.workspace_id).await?;
-    let mut value = serde_json::to_value(&bundle).context("serializing Work export")?;
+    let value = build_agent_work_export_value(&bundle, &context, args.redaction_profile)
+        .context("serializing Work export")?;
     validate_value(AgentWorkSchemaKind::AgentWork, &value)
         .context("generated Work export failed local validation")?;
-    if args.redaction_profile == AgentWorkRedactionProfile::SafeSummary {
-        value = redaction_preview(&value).value;
-    }
 
     let wrote_file = if let Some(output) = args.output {
         write_json_file(&output, &value)?;
@@ -408,10 +452,10 @@ async fn export_work_records(args: AgentWorkExportArgs, writer: &mut dyn Write) 
             DiagnosticSeverity::Info,
             "ctx.work.export.completed",
             &format!(
-                "exported Work records from {} for workspace {} with {:?} redaction",
+                "exported Work records from {} for workspace {} with {} redaction",
                 context.data_root.display(),
                 context.workspace_id.0,
-                args.redaction_profile
+                args.redaction_profile.as_str()
             ),
         )?;
     }
@@ -426,18 +470,16 @@ async fn import_work_records(args: AgentWorkImportArgs, writer: &mut dyn Write) 
             &format!("failed to parse {}", args.file.display()),
         )
     })?;
-    validate_value(AgentWorkSchemaKind::AgentWork, &value).with_context(|| {
+    let bundle = decode_agent_work_import_value(value).with_context(|| {
         durable_diagnostic(
             DiagnosticSeverity::Error,
             "ctx.work.import.invalid_agent_work",
             &format!(
-                "{} is not a valid local AgentWork export",
+                "{} is not a valid import-safe local AgentWork export; use `ctx work export --redaction-profile full-local` for durable imports",
                 args.file.display()
             ),
         )
     })?;
-    let bundle: AgentWorkExport =
-        serde_json::from_value(value).context("decoding local AgentWork export")?;
     let context = open_work_store(&args.store).await?;
     validate_import_workspace(context.workspace_id, &bundle)?;
 
@@ -659,6 +701,98 @@ async fn load_work_export(store: &Store, workspace_id: WorkspaceId) -> Result<Ag
     })
 }
 
+fn build_agent_work_export_value(
+    bundle: &AgentWorkExport,
+    context: &WorkStoreContext,
+    profile: AgentWorkRedactionProfile,
+) -> Result<Value> {
+    let raw_value = serde_json::to_value(bundle).context("serializing raw AgentWork records")?;
+    validate_value(AgentWorkSchemaKind::AgentWork, &raw_value)
+        .context("validating raw AgentWork records")?;
+
+    let (agent_work, stats) = if profile == AgentWorkRedactionProfile::SafeSummary {
+        let preview = redaction_preview(&raw_value);
+        let agent_work =
+            serde_json::from_value(preview.value).context("decoding redacted AgentWork records")?;
+        (agent_work, preview.stats)
+    } else {
+        (
+            bundle.clone(),
+            ctx_core::models::RunArchiveNormalizationStats::default(),
+        )
+    };
+
+    let envelope = AgentWorkExportEnvelope {
+        kind: AGENT_WORK_EXPORT_ENVELOPE_KIND.to_string(),
+        schema_version: AGENT_WORK_EXPORT_ENVELOPE_SCHEMA_VERSION,
+        agent_work_schema_version: AGENT_WORK_SCHEMA_VERSION,
+        provenance: AgentWorkExportProvenance {
+            source_kind: AGENT_WORK_EXPORT_SOURCE_KIND.to_string(),
+            workspace_id: context.workspace_id,
+            exported_at: Utc::now(),
+        },
+        redaction: AgentWorkExportRedaction {
+            profile,
+            import_safe: profile.default_import_safe(),
+            stats,
+        },
+        agent_work,
+    };
+    serde_json::to_value(envelope).context("serializing AgentWork export envelope")
+}
+
+fn decode_agent_work_import_value(value: Value) -> Result<AgentWorkExport> {
+    validate_value(AgentWorkSchemaKind::AgentWork, &value)?;
+    if is_agent_work_export_envelope(&value) {
+        let envelope: AgentWorkExportEnvelope =
+            serde_json::from_value(value).context("decoding AgentWork export envelope")?;
+        validate_import_redaction(&envelope.redaction)?;
+        return Ok(envelope.agent_work);
+    }
+
+    validate_legacy_import_safety(&value)?;
+    serde_json::from_value(value).context("decoding legacy local AgentWork export")
+}
+
+fn validate_import_redaction(redaction: &AgentWorkExportRedaction) -> Result<()> {
+    if redaction.import_safe || redaction.profile == AgentWorkRedactionProfile::FullLocal {
+        return Ok(());
+    }
+    bail!(
+        "AgentWork export uses {} redaction and is not marked import_safe",
+        redaction.profile.as_str()
+    )
+}
+
+fn validate_legacy_import_safety(value: &Value) -> Result<()> {
+    if contains_redaction_marker(value) {
+        bail!(
+            "legacy AgentWork export contains redaction markers; re-export with --redaction-profile full-local or provide an import_safe envelope"
+        );
+    }
+    Ok(())
+}
+
+fn contains_redaction_marker(value: &Value) -> bool {
+    const REDACTION_MARKERS: &[&str] = &[
+        "[redacted:absolute_path]",
+        "[redacted:provider_ref]",
+        "[redacted:pty_stream]",
+        "[redacted:secret]",
+        "[omitted:transcript_body]",
+        "[REDACTED]",
+    ];
+
+    match value {
+        Value::String(value) => REDACTION_MARKERS
+            .iter()
+            .any(|marker| value.contains(marker)),
+        Value::Array(items) => items.iter().any(contains_redaction_marker),
+        Value::Object(object) => object.values().any(contains_redaction_marker),
+        _ => false,
+    }
+}
+
 fn filtered_export_value(bundle: &AgentWorkExport, kind: AgentWorkRecordKind) -> Result<Value> {
     let filtered = AgentWorkExport {
         change_sets: if kind.includes_change_sets() {
@@ -773,6 +907,7 @@ fn infer_schema_kind(value: &Value) -> Result<AgentWorkSchemaKind> {
             "ctx.work.bundle" | "work-bundle" | "work_bundle" => {
                 Ok(AgentWorkSchemaKind::WorkBundle)
             }
+            AGENT_WORK_EXPORT_ENVELOPE_KIND => Ok(AgentWorkSchemaKind::AgentWork),
             other => bail!(
                 "unknown Work schema kind `{other}`; pass `--kind` with one of: {}",
                 AgentWorkSchemaKind::ALL
@@ -784,7 +919,10 @@ fn infer_schema_kind(value: &Value) -> Result<AgentWorkSchemaKind> {
         };
     }
 
-    if object.contains_key("change_sets") || object.contains_key("contributions") {
+    if is_agent_work_export_envelope(value)
+        || object.contains_key("change_sets")
+        || object.contains_key("contributions")
+    {
         return Ok(AgentWorkSchemaKind::AgentWork);
     }
     if object.contains_key("subject") && object.contains_key("target") {
@@ -853,6 +991,13 @@ fn validate_value(kind: AgentWorkSchemaKind, value: &Value) -> Result<()> {
 }
 
 fn validate_agent_work(value: &Value) -> Result<()> {
+    if is_agent_work_export_envelope(value) {
+        return validate_agent_work_export_envelope(value);
+    }
+    validate_agent_work_records(value)
+}
+
+fn validate_agent_work_records(value: &Value) -> Result<()> {
     let object = value
         .as_object()
         .context("agent-work must be a JSON object")?;
@@ -872,6 +1017,88 @@ fn validate_agent_work(value: &Value) -> Result<()> {
         validate_contribution(contribution, &format!("$.contributions[{index}]"))?;
     }
     Ok(())
+}
+
+fn is_agent_work_export_envelope(value: &Value) -> bool {
+    value
+        .as_object()
+        .and_then(|object| object.get("kind"))
+        .and_then(Value::as_str)
+        == Some(AGENT_WORK_EXPORT_ENVELOPE_KIND)
+}
+
+fn agent_work_records_value(value: &Value) -> &Value {
+    if is_agent_work_export_envelope(value) {
+        value.get("agent_work").unwrap_or(value)
+    } else {
+        value
+    }
+}
+
+fn validate_agent_work_export_envelope(value: &Value) -> Result<()> {
+    let object = value
+        .as_object()
+        .context("agent-work export envelope must be a JSON object")?;
+    validate_required_fields(
+        value,
+        "$",
+        &[
+            "kind",
+            "schema_version",
+            "agent_work_schema_version",
+            "provenance",
+            "redaction",
+            "agent_work",
+        ],
+    )?;
+    match object.get("kind").and_then(Value::as_str) {
+        Some(AGENT_WORK_EXPORT_ENVELOPE_KIND) => {}
+        Some(other) => bail!("unknown AgentWork export kind `{other}` at $.kind"),
+        None => bail!("agent-work export envelope requires `kind`"),
+    }
+    validate_schema_version(value, "$")?;
+    match object
+        .get("agent_work_schema_version")
+        .and_then(Value::as_i64)
+    {
+        Some(AGENT_WORK_SCHEMA_VERSION) => {}
+        Some(other) => bail!(
+            "$.agent_work_schema_version must be {} for this local CLI slice, got {other}",
+            AGENT_WORK_SCHEMA_VERSION
+        ),
+        None => bail!("agent-work export envelope requires `agent_work_schema_version`"),
+    }
+
+    let provenance = object
+        .get("provenance")
+        .context("agent-work export envelope requires `provenance`")?;
+    validate_required_fields(
+        provenance,
+        "$.provenance",
+        &["source_kind", "workspace_id", "exported_at"],
+    )?;
+
+    let redaction = object
+        .get("redaction")
+        .context("agent-work export envelope requires `redaction`")?;
+    validate_required_fields(redaction, "$.redaction", &["profile", "import_safe"])?;
+    validate_redaction_profile_value(redaction, "$.redaction.profile")?;
+
+    let agent_work = object
+        .get("agent_work")
+        .context("agent-work export envelope requires `agent_work`")?;
+    validate_agent_work_records(agent_work)
+}
+
+fn validate_redaction_profile_value(value: &Value, path: &str) -> Result<()> {
+    let profile = value
+        .get("profile")
+        .and_then(Value::as_str)
+        .with_context(|| format!("{path} must be a string"))?;
+    match profile {
+        "safe_summary" | "safe-summary" | "full_local" | "full-local" => Ok(()),
+        other => bail!("{path} has unknown redaction profile `{other}`"),
+    }
 }
 
 fn validate_change_set(value: &Value, path: &str) -> Result<()> {
@@ -1117,10 +1344,11 @@ fn write_inspection(path: &PathBuf, value: &Value, writer: &mut dyn Write) -> Re
             }
         }
         Some(AgentWorkSchemaKind::AgentWork) => {
+            let agent_work = agent_work_records_value(value);
             writeln!(
                 writer,
                 "change_sets: {}",
-                value
+                agent_work
                     .get("change_sets")
                     .and_then(Value::as_array)
                     .map_or(0, Vec::len)
@@ -1128,11 +1356,18 @@ fn write_inspection(path: &PathBuf, value: &Value, writer: &mut dyn Write) -> Re
             writeln!(
                 writer,
                 "contributions: {}",
-                value
+                agent_work
                     .get("contributions")
                     .and_then(Value::as_array)
                     .map_or(0, Vec::len)
             )?;
+            if let Some(profile) = value
+                .get("redaction")
+                .and_then(|redaction| redaction.get("profile"))
+                .and_then(Value::as_str)
+            {
+                writeln!(writer, "redaction_profile: {profile}")?;
+            }
         }
         Some(_) | None => {
             if let Some(id) = value.get("id").and_then(Value::as_str) {
@@ -1434,6 +1669,42 @@ mod tests {
         });
 
         validate_value(AgentWorkSchemaKind::AgentWork, &value).unwrap();
+    }
+
+    #[test]
+    fn validate_accepts_agent_work_export_envelope() {
+        let workspace_id = WorkspaceId::new();
+        let value = json!({
+            "kind": AGENT_WORK_EXPORT_ENVELOPE_KIND,
+            "schema_version": 1,
+            "agent_work_schema_version": 1,
+            "provenance": {
+                "source_kind": AGENT_WORK_EXPORT_SOURCE_KIND,
+                "workspace_id": workspace_id.0.to_string(),
+                "exported_at": "2026-01-01T00:00:00Z"
+            },
+            "redaction": {
+                "profile": "full_local",
+                "import_safe": true,
+                "stats": {}
+            },
+            "agent_work": {
+                "change_sets": [
+                    {
+                        "id": "cs-1",
+                        "workspace_id": workspace_id.0.to_string(),
+                        "schema_version": 1
+                    }
+                ],
+                "contributions": []
+            }
+        });
+
+        validate_value(AgentWorkSchemaKind::AgentWork, &value).unwrap();
+        assert_eq!(
+            infer_schema_kind(&value).unwrap(),
+            AgentWorkSchemaKind::AgentWork
+        );
     }
 
     #[test]
@@ -1739,6 +2010,28 @@ mod tests {
         .unwrap();
         let exported = read_json_file(&export_path).unwrap();
         validate_value(AgentWorkSchemaKind::AgentWork, &exported).unwrap();
+        assert_eq!(exported["kind"], AGENT_WORK_EXPORT_ENVELOPE_KIND);
+        assert_eq!(exported["schema_version"], 1);
+        assert_eq!(exported["agent_work_schema_version"], 1);
+        assert_eq!(
+            exported["provenance"]["source_kind"],
+            AGENT_WORK_EXPORT_SOURCE_KIND
+        );
+        assert_eq!(
+            exported["provenance"]["workspace_id"],
+            workspace.id.0.to_string()
+        );
+        assert_eq!(exported["redaction"]["profile"], "full_local");
+        assert_eq!(exported["redaction"]["import_safe"], true);
+        assert!(exported["redaction"]["stats"].is_object());
+        assert_eq!(
+            exported["agent_work"]["change_sets"][0]["id"],
+            change_set_id.0
+        );
+        assert_eq!(
+            exported["agent_work"]["contributions"][0]["id"],
+            contribution_id.0
+        );
 
         let target_dir = TempDir::new().unwrap();
         let target_manager = StoreManager::open(target_dir.path()).await.unwrap();
@@ -1775,6 +2068,184 @@ mod tests {
             .await
             .unwrap()
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn default_safe_summary_export_is_not_import_safe() {
+        let (source_dir, workspace, _, _) = seeded_work_store().await;
+        let export_path = source_dir.path().join("work-export-safe-summary.json");
+        let mut export_output = Vec::new();
+        run_with_writer(
+            AgentWorkCommand {
+                command: AgentWorkSubcommand::Export(AgentWorkExportArgs {
+                    store: store_args(source_dir.path(), Some(workspace.id)),
+                    output: Some(export_path.clone()),
+                    redaction_profile: AgentWorkRedactionProfile::SafeSummary,
+                }),
+            },
+            &mut export_output,
+        )
+        .await
+        .unwrap();
+
+        let exported = read_json_file(&export_path).unwrap();
+        validate_value(AgentWorkSchemaKind::AgentWork, &exported).unwrap();
+        assert_eq!(exported["kind"], AGENT_WORK_EXPORT_ENVELOPE_KIND);
+        assert_eq!(exported["redaction"]["profile"], "safe_summary");
+        assert_eq!(exported["redaction"]["import_safe"], false);
+        assert!(exported["redaction"]["stats"].is_object());
+        assert_eq!(
+            exported["agent_work"]["change_sets"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            exported["agent_work"]["contributions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let target_dir = TempDir::new().unwrap();
+        let target_manager = StoreManager::open(target_dir.path()).await.unwrap();
+        target_manager
+            .global()
+            .upsert_workspace(&workspace)
+            .await
+            .unwrap();
+        let mut import_output = Vec::new();
+        let error = run_with_writer(
+            AgentWorkCommand {
+                command: AgentWorkSubcommand::Import(AgentWorkImportArgs {
+                    store: store_args(target_dir.path(), Some(workspace.id)),
+                    file: export_path,
+                    dry_run: false,
+                }),
+            },
+            &mut import_output,
+        )
+        .await
+        .unwrap_err();
+        let error = format!("{error:#}");
+        assert!(error.contains("not marked import_safe"), "{error}");
+
+        let target_store = target_manager.workspace(workspace.id).await.unwrap();
+        assert!(target_store
+            .list_workspace_change_sets(workspace.id)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(target_store
+            .list_workspace_contributions(workspace.id)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn import_accepts_safe_summary_envelope_when_marked_import_safe() {
+        let (source_dir, workspace, change_set_id, contribution_id) = seeded_work_store().await;
+        let export_path = source_dir.path().join("work-export-import-safe.json");
+        let mut export_output = Vec::new();
+        run_with_writer(
+            AgentWorkCommand {
+                command: AgentWorkSubcommand::Export(AgentWorkExportArgs {
+                    store: store_args(source_dir.path(), Some(workspace.id)),
+                    output: Some(export_path.clone()),
+                    redaction_profile: AgentWorkRedactionProfile::SafeSummary,
+                }),
+            },
+            &mut export_output,
+        )
+        .await
+        .unwrap();
+
+        let mut exported = read_json_file(&export_path).unwrap();
+        exported["redaction"]["import_safe"] = json!(true);
+        write_json_file(&export_path, &exported).unwrap();
+
+        let target_dir = TempDir::new().unwrap();
+        let target_manager = StoreManager::open(target_dir.path()).await.unwrap();
+        target_manager
+            .global()
+            .upsert_workspace(&workspace)
+            .await
+            .unwrap();
+        let mut import_output = Vec::new();
+        run_with_writer(
+            AgentWorkCommand {
+                command: AgentWorkSubcommand::Import(AgentWorkImportArgs {
+                    store: store_args(target_dir.path(), Some(workspace.id)),
+                    file: export_path,
+                    dry_run: false,
+                }),
+            },
+            &mut import_output,
+        )
+        .await
+        .unwrap();
+
+        let target_store = target_manager.workspace(workspace.id).await.unwrap();
+        assert!(target_store
+            .get_workspace_change_set(workspace.id, change_set_id)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(target_store
+            .get_contribution(contribution_id)
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn import_rejects_redacted_legacy_export_without_writing() {
+        let temp = TempDir::new().unwrap();
+        let manager = StoreManager::open(temp.path()).await.unwrap();
+        let workspace = manager
+            .global()
+            .create_workspace(
+                "target".to_string(),
+                "/tmp/target".to_string(),
+                VcsKind::Git,
+            )
+            .await
+            .unwrap();
+        let mut change_set = test_change_set(workspace.id, ChangeSetId::new());
+        change_set.title = Some("safe summary [redacted:secret]".to_string());
+        let bundle = AgentWorkExport {
+            change_sets: vec![change_set],
+            contributions: Vec::new(),
+        };
+        let path = temp.path().join("legacy-redacted.json");
+        write_json_file(&path, &serde_json::to_value(bundle).unwrap()).unwrap();
+
+        let mut output = Vec::new();
+        let error = run_with_writer(
+            AgentWorkCommand {
+                command: AgentWorkSubcommand::Import(AgentWorkImportArgs {
+                    store: store_args(temp.path(), Some(workspace.id)),
+                    file: path,
+                    dry_run: false,
+                }),
+            },
+            &mut output,
+        )
+        .await
+        .unwrap_err();
+        let error = format!("{error:#}");
+        assert!(error.contains("redaction markers"), "{error}");
+        assert!(manager
+            .workspace(workspace.id)
+            .await
+            .unwrap()
+            .list_workspace_change_sets(workspace.id)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
