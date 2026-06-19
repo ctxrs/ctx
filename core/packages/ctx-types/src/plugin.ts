@@ -190,6 +190,12 @@ export type PluginExtensionRegistry = {
   collectors?: PluginContributionRegistration<PluginCollectorContribution>[];
   observers?: PluginContributionRegistration<PluginObserverContribution>[];
   ui_surfaces?: PluginContributionRegistration<PluginUiSurfaceContribution>[];
+  templates?: PluginContributionRegistration<PluginWorkbenchTemplateContribution>[];
+  toolbar_actions?: PluginContributionRegistration<PluginWorkbenchToolbarActionContribution>[];
+  artifact_renderers?: PluginContributionRegistration<PluginArtifactRendererContribution>[];
+  card_renderers?: PluginContributionRegistration<PluginWorkbenchCardRendererContribution>[];
+  detail_sections?: PluginContributionRegistration<PluginWorkbenchSectionContribution>[];
+  review_sections?: PluginContributionRegistration<PluginWorkbenchSectionContribution>[];
 };
 
 export type PluginCommandExecutionRequest = {

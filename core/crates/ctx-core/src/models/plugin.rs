@@ -402,6 +402,20 @@ pub struct PluginExtensionRegistry {
     pub observers: Vec<PluginContributionRegistration<PluginObserverContribution>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ui_surfaces: Vec<PluginContributionRegistration<PluginUiSurfaceContribution>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub templates: Vec<PluginContributionRegistration<PluginWorkbenchTemplateContribution>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub toolbar_actions:
+        Vec<PluginContributionRegistration<PluginWorkbenchToolbarActionContribution>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_renderers: Vec<PluginContributionRegistration<PluginArtifactRendererContribution>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub card_renderers:
+        Vec<PluginContributionRegistration<PluginWorkbenchCardRendererContribution>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub detail_sections: Vec<PluginContributionRegistration<PluginWorkbenchSectionContribution>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub review_sections: Vec<PluginContributionRegistration<PluginWorkbenchSectionContribution>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1224,6 +1238,7 @@ mod tests {
 
     #[test]
     fn plugin_extension_registry_round_trips_registered_contributions() {
+        let manifest = minimal_plugin_manifest();
         let registry = PluginExtensionRegistry {
             revision: 7,
             providers: vec![PluginContributionRegistration {
@@ -1232,7 +1247,7 @@ mod tests {
                 plugin_version: "0.1.0".into(),
                 plugin_path: "/plugins/example/ctx-plugin.json".into(),
                 plugin_revision: Some("abc123".into()),
-                contribution: minimal_plugin_manifest().contributes.providers[0].clone(),
+                contribution: manifest.contributes.providers[0].clone(),
             }],
             commands: vec![PluginContributionRegistration {
                 plugin_id: "example.agent-tools".into(),
@@ -1240,7 +1255,55 @@ mod tests {
                 plugin_version: "0.1.0".into(),
                 plugin_path: "/plugins/example/ctx-plugin.json".into(),
                 plugin_revision: Some("abc123".into()),
-                contribution: minimal_plugin_manifest().contributes.commands[0].clone(),
+                contribution: manifest.contributes.commands[0].clone(),
+            }],
+            templates: vec![PluginContributionRegistration {
+                plugin_id: "example.agent-tools".into(),
+                plugin_name: "Example Agent Tools".into(),
+                plugin_version: "0.1.0".into(),
+                plugin_path: "/plugins/example/ctx-plugin.json".into(),
+                plugin_revision: Some("abc123".into()),
+                contribution: manifest.contributes.templates[0].clone(),
+            }],
+            toolbar_actions: vec![PluginContributionRegistration {
+                plugin_id: "example.agent-tools".into(),
+                plugin_name: "Example Agent Tools".into(),
+                plugin_version: "0.1.0".into(),
+                plugin_path: "/plugins/example/ctx-plugin.json".into(),
+                plugin_revision: Some("abc123".into()),
+                contribution: manifest.contributes.toolbar_actions[0].clone(),
+            }],
+            artifact_renderers: vec![PluginContributionRegistration {
+                plugin_id: "example.agent-tools".into(),
+                plugin_name: "Example Agent Tools".into(),
+                plugin_version: "0.1.0".into(),
+                plugin_path: "/plugins/example/ctx-plugin.json".into(),
+                plugin_revision: Some("abc123".into()),
+                contribution: manifest.contributes.artifact_renderers[0].clone(),
+            }],
+            card_renderers: vec![PluginContributionRegistration {
+                plugin_id: "example.agent-tools".into(),
+                plugin_name: "Example Agent Tools".into(),
+                plugin_version: "0.1.0".into(),
+                plugin_path: "/plugins/example/ctx-plugin.json".into(),
+                plugin_revision: Some("abc123".into()),
+                contribution: manifest.contributes.card_renderers[0].clone(),
+            }],
+            detail_sections: vec![PluginContributionRegistration {
+                plugin_id: "example.agent-tools".into(),
+                plugin_name: "Example Agent Tools".into(),
+                plugin_version: "0.1.0".into(),
+                plugin_path: "/plugins/example/ctx-plugin.json".into(),
+                plugin_revision: Some("abc123".into()),
+                contribution: manifest.contributes.detail_sections[0].clone(),
+            }],
+            review_sections: vec![PluginContributionRegistration {
+                plugin_id: "example.agent-tools".into(),
+                plugin_name: "Example Agent Tools".into(),
+                plugin_version: "0.1.0".into(),
+                plugin_path: "/plugins/example/ctx-plugin.json".into(),
+                plugin_revision: Some("abc123".into()),
+                contribution: manifest.contributes.review_sections[0].clone(),
             }],
             ..PluginExtensionRegistry::default()
         };
@@ -1255,6 +1318,30 @@ mod tests {
         assert_eq!(
             value.pointer("/commands/0/contribution/title"),
             Some(&json!("Say Hello"))
+        );
+        assert_eq!(
+            value.pointer("/templates/0/contribution/template"),
+            Some(&json!("host.example-template"))
+        );
+        assert_eq!(
+            value.pointer("/toolbar_actions/0/contribution/action"),
+            None
+        );
+        assert_eq!(
+            value.pointer("/artifact_renderers/0/contribution/renderer"),
+            Some(&json!("host.text-artifact"))
+        );
+        assert_eq!(
+            value.pointer("/card_renderers/0/contribution/card"),
+            Some(&json!("work.summary"))
+        );
+        assert_eq!(
+            value.pointer("/detail_sections/0/contribution/section"),
+            Some(&json!("work-summary"))
+        );
+        assert_eq!(
+            value.pointer("/review_sections/0/contribution/renderer"),
+            Some(&json!("host.gate-state-section"))
         );
 
         let round_trip: PluginExtensionRegistry = serde_json::from_value(value).unwrap();

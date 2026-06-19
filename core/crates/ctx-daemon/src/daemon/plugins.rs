@@ -122,6 +122,54 @@ impl PluginInventorySnapshot {
                     .cloned()
                     .map(|contribution| register_plugin_contribution(plugin, contribution)),
             );
+            registry.templates.extend(
+                manifest
+                    .contributes
+                    .templates
+                    .iter()
+                    .cloned()
+                    .map(|contribution| register_plugin_contribution(plugin, contribution)),
+            );
+            registry.toolbar_actions.extend(
+                manifest
+                    .contributes
+                    .toolbar_actions
+                    .iter()
+                    .cloned()
+                    .map(|contribution| register_plugin_contribution(plugin, contribution)),
+            );
+            registry.artifact_renderers.extend(
+                manifest
+                    .contributes
+                    .artifact_renderers
+                    .iter()
+                    .cloned()
+                    .map(|contribution| register_plugin_contribution(plugin, contribution)),
+            );
+            registry.card_renderers.extend(
+                manifest
+                    .contributes
+                    .card_renderers
+                    .iter()
+                    .cloned()
+                    .map(|contribution| register_plugin_contribution(plugin, contribution)),
+            );
+            registry.detail_sections.extend(
+                manifest
+                    .contributes
+                    .detail_sections
+                    .iter()
+                    .cloned()
+                    .map(|contribution| register_plugin_contribution(plugin, contribution)),
+            );
+            registry.review_sections.extend(
+                manifest
+                    .contributes
+                    .review_sections
+                    .iter()
+                    .cloned()
+                    .map(|contribution| register_plugin_contribution(plugin, contribution)),
+            );
         }
         registry
     }
@@ -531,6 +579,12 @@ fn is_inventory_finalization_diagnostic(diagnostic: &PluginDiagnostic) -> bool {
                 | "duplicate_runtime_id"
                 | "duplicate_command_id"
                 | "duplicate_ui_surface_id"
+                | "duplicate_template_id"
+                | "duplicate_toolbar_action_id"
+                | "duplicate_artifact_renderer_id"
+                | "duplicate_card_renderer_id"
+                | "duplicate_detail_section_id"
+                | "duplicate_review_section_id"
         )
     )
 }
@@ -1358,6 +1412,12 @@ fn mark_cross_plugin_contribution_collisions(plugins: &mut [PluginInventoryItem]
     let mut runtimes = BTreeMap::<String, Vec<usize>>::new();
     let mut commands = BTreeMap::<String, Vec<usize>>::new();
     let mut ui_surfaces = BTreeMap::<String, Vec<usize>>::new();
+    let mut templates = BTreeMap::<String, Vec<usize>>::new();
+    let mut toolbar_actions = BTreeMap::<String, Vec<usize>>::new();
+    let mut artifact_renderers = BTreeMap::<String, Vec<usize>>::new();
+    let mut card_renderers = BTreeMap::<String, Vec<usize>>::new();
+    let mut detail_sections = BTreeMap::<String, Vec<usize>>::new();
+    let mut review_sections = BTreeMap::<String, Vec<usize>>::new();
 
     for (index, plugin) in plugins.iter().enumerate() {
         if plugin.status != PluginLoadStatus::Loaded {
@@ -1378,6 +1438,24 @@ fn mark_cross_plugin_contribution_collisions(plugins: &mut [PluginInventoryItem]
         for contribution in &manifest.contributes.ui_surfaces {
             collect_contribution_id(&mut ui_surfaces, contribution.id.as_str(), index);
         }
+        for contribution in &manifest.contributes.templates {
+            collect_contribution_id(&mut templates, contribution.id.as_str(), index);
+        }
+        for contribution in &manifest.contributes.toolbar_actions {
+            collect_contribution_id(&mut toolbar_actions, contribution.id.as_str(), index);
+        }
+        for contribution in &manifest.contributes.artifact_renderers {
+            collect_contribution_id(&mut artifact_renderers, contribution.id.as_str(), index);
+        }
+        for contribution in &manifest.contributes.card_renderers {
+            collect_contribution_id(&mut card_renderers, contribution.id.as_str(), index);
+        }
+        for contribution in &manifest.contributes.detail_sections {
+            collect_contribution_id(&mut detail_sections, contribution.id.as_str(), index);
+        }
+        for contribution in &manifest.contributes.review_sections {
+            collect_contribution_id(&mut review_sections, contribution.id.as_str(), index);
+        }
     }
 
     mark_authority_contribution_collisions(plugins, providers, "provider", "duplicate_provider_id");
@@ -1388,6 +1466,37 @@ fn mark_cross_plugin_contribution_collisions(plugins: &mut [PluginInventoryItem]
         ui_surfaces,
         "ui surface",
         "duplicate_ui_surface_id",
+    );
+    mark_advisory_contribution_collisions(plugins, templates, "template", "duplicate_template_id");
+    mark_advisory_contribution_collisions(
+        plugins,
+        toolbar_actions,
+        "toolbar action",
+        "duplicate_toolbar_action_id",
+    );
+    mark_advisory_contribution_collisions(
+        plugins,
+        artifact_renderers,
+        "artifact renderer",
+        "duplicate_artifact_renderer_id",
+    );
+    mark_advisory_contribution_collisions(
+        plugins,
+        card_renderers,
+        "card renderer",
+        "duplicate_card_renderer_id",
+    );
+    mark_advisory_contribution_collisions(
+        plugins,
+        detail_sections,
+        "detail section",
+        "duplicate_detail_section_id",
+    );
+    mark_advisory_contribution_collisions(
+        plugins,
+        review_sections,
+        "review section",
+        "duplicate_review_section_id",
     );
 }
 
@@ -1869,6 +1978,134 @@ mod tests {
                 .map(|registration| registration.plugin_id.as_str())
                 .collect::<Vec<_>>(),
             vec!["example.first", "example.second"]
+        );
+    }
+
+    #[tokio::test]
+    async fn extension_registry_projects_declarative_workbench_buckets() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let plugin_dir = temp.path().join("example");
+        std::fs::create_dir_all(&plugin_dir).expect("plugin dir");
+        std::fs::write(
+            plugin_dir.join("ctx-plugin.json"),
+            serde_json::to_vec_pretty(&json!({
+                "id": "example.tools",
+                "name": "Example Tools",
+                "version": "0.1.0",
+                "entrypoints": [
+                    {
+                        "id": "main",
+                        "command": "node"
+                    }
+                ],
+                "contributes": {
+                    "commands": [
+                        {
+                            "id": "example.tools.say_hello",
+                            "title": "Hello",
+                            "entrypoint": "main"
+                        }
+                    ],
+                    "templates": [
+                        {
+                            "id": "example.tools.template",
+                            "name": "Example Template",
+                            "title": "Template",
+                            "template": "host.example-template",
+                            "contexts": ["workspace"],
+                            "data_sources": ["current Work summary"]
+                        }
+                    ],
+                    "toolbar_actions": [
+                        {
+                            "id": "example.tools.toolbar",
+                            "name": "Example Toolbar",
+                            "title": "Hello",
+                            "command": "example.tools.say_hello",
+                            "icon": "message-circle"
+                        }
+                    ],
+                    "artifact_renderers": [
+                        {
+                            "id": "example.tools.artifact-renderer",
+                            "name": "Example Artifact Renderer",
+                            "artifact_types": ["text/plain"],
+                            "renderer": "host.text-artifact"
+                        }
+                    ],
+                    "card_renderers": [
+                        {
+                            "id": "example.tools.card-renderer",
+                            "name": "Example Card Renderer",
+                            "card": "work.summary",
+                            "renderer": "host.work-summary-card"
+                        }
+                    ],
+                    "detail_sections": [
+                        {
+                            "id": "example.tools.detail-section",
+                            "name": "Example Detail Section",
+                            "section": "work-summary",
+                            "renderer": "host.work-summary-section"
+                        }
+                    ],
+                    "review_sections": [
+                        {
+                            "id": "example.tools.review-section",
+                            "name": "Example Review Section",
+                            "section": "gate-state",
+                            "renderer": "host.gate-state-section"
+                        }
+                    ]
+                }
+            }))
+            .unwrap(),
+        )
+        .expect("write manifest");
+        let runtime = PluginInventoryRuntime::new_with_roots(vec![temp.path().to_path_buf()]);
+
+        let registry = runtime.extension_registry().await.registry;
+
+        assert_eq!(registry.revision, 1);
+        assert_eq!(registry.templates.len(), 1);
+        assert_eq!(registry.toolbar_actions.len(), 1);
+        assert_eq!(registry.artifact_renderers.len(), 1);
+        assert_eq!(registry.card_renderers.len(), 1);
+        assert_eq!(registry.detail_sections.len(), 1);
+        assert_eq!(registry.review_sections.len(), 1);
+        for plugin_id in [
+            registry.templates[0].plugin_id.as_str(),
+            registry.toolbar_actions[0].plugin_id.as_str(),
+            registry.artifact_renderers[0].plugin_id.as_str(),
+            registry.card_renderers[0].plugin_id.as_str(),
+            registry.detail_sections[0].plugin_id.as_str(),
+            registry.review_sections[0].plugin_id.as_str(),
+        ] {
+            assert_eq!(plugin_id, "example.tools");
+        }
+        assert_eq!(
+            registry.templates[0].contribution.template,
+            "host.example-template"
+        );
+        assert_eq!(
+            registry.toolbar_actions[0].contribution.command.as_deref(),
+            Some("example.tools.say_hello")
+        );
+        assert_eq!(
+            registry.artifact_renderers[0].contribution.artifact_types,
+            vec!["text/plain"]
+        );
+        assert_eq!(
+            registry.card_renderers[0].contribution.renderer,
+            "host.work-summary-card"
+        );
+        assert_eq!(
+            registry.detail_sections[0].contribution.section,
+            "work-summary"
+        );
+        assert_eq!(
+            registry.review_sections[0].contribution.renderer,
+            "host.gate-state-section"
         );
     }
 
