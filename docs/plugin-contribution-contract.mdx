@@ -210,9 +210,17 @@ Publishing to npm is not required for the local program. The package should be
 publishable later, but first it must work as a repo-local package with examples
 and tests.
 
-This slice only updates the public manifest/schema/SDK/Rust model/types
-contract. Daemon registry projection, Workbench rendering integration, and CLI
-display for the new buckets are deferred to the next slice.
+The public manifest/schema/SDK/Rust model/types contract is implemented for the
+host-owned declarative buckets above. Daemon registry projection and frontend
+projection now carry those buckets as source-labeled, inert Workbench
+contribution data.
+
+Still deferred:
+
+- arbitrary plugin React/webview/module execution;
+- daemon-connected plugin apply/reload commands that mutate a running daemon;
+- plugin log streaming and dev-process lifecycle management;
+- redaction/export processors as executable manifest fields.
 
 ## Worker Rule
 
