@@ -1982,6 +1982,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn duplicate_declarative_workbench_ids_warn_but_remain_plugin_qualified() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        for (dir_name, plugin_id) in [("root", "example"), ("child", "example.second")] {
+            let plugin_dir = temp.path().join(dir_name);
+            std::fs::create_dir_all(&plugin_dir).expect("plugin dir");
+            std::fs::write(
+                plugin_dir.join("ctx-plugin.json"),
+                serde_json::to_vec_pretty(&json!({
+                    "id": plugin_id,
+                    "name": format!("Example Tools {dir_name}"),
+                    "version": "0.1.0",
+                    "contributes": {
+                        "templates": [
+                            {
+                                "id": "example.second.shared_template",
+                                "name": "Shared Template",
+                                "title": "Shared",
+                                "template": "review-summary",
+                                "contexts": ["review"]
+                            }
+                        ],
+                        "review_sections": [
+                            {
+                                "id": "example.second.shared_review_section",
+                                "name": "Shared Review Section",
+                                "section": "gate-state",
+                                "renderer": "host.gate-state-section"
+                            }
+                        ]
+                    }
+                }))
+                .unwrap(),
+            )
+            .expect("write manifest");
+        }
+        let runtime = PluginInventoryRuntime::new_with_roots(vec![temp.path().to_path_buf()]);
+
+        let response = runtime.reload().await.expect("reload plugins");
+        let registry = runtime.extension_registry().await.registry;
+
+        assert_eq!(response.plugins.len(), 2);
+        assert!(response
+            .plugins
+            .iter()
+            .all(|plugin| plugin.status == PluginLoadStatus::Loaded));
+        assert!(response
+            .plugins
+            .iter()
+            .all(|plugin| plugin
+                .diagnostics
+                .iter()
+                .any(
+                    |diagnostic| diagnostic.code.as_deref() == Some("duplicate_template_id")
+                        && diagnostic.severity == PluginDiagnosticSeverity::Warning
+                )));
+        assert!(response
+            .plugins
+            .iter()
+            .all(|plugin| plugin
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code.as_deref()
+                    == Some("duplicate_review_section_id")
+                    && diagnostic.severity == PluginDiagnosticSeverity::Warning)));
+        assert_eq!(registry.templates.len(), 2);
+        assert_eq!(registry.review_sections.len(), 2);
+        assert_eq!(
+            registry
+                .templates
+                .iter()
+                .map(|registration| registration.plugin_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["example", "example.second"]
+        );
+    }
+
+    #[tokio::test]
     async fn extension_registry_projects_declarative_workbench_buckets() {
         let temp = tempfile::tempdir().expect("tempdir");
         let plugin_dir = temp.path().join("example");
