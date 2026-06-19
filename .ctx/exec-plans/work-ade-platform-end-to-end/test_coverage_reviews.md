@@ -40,3 +40,22 @@ Record adversarial test coverage reviews and gaps.
 - Remaining gap: `ctx work list/show/capture/export/import` intentionally return
   local diagnostics in this slice. Real store-backed list/show, import/export,
   and capture paths still require the next Work CLI/storage slice.
+
+## Work CLI Adversarial Review Fixes
+
+- Closed high-risk coverage gap where transcript-like event records could leak
+  raw assistant/user text through `payload_json`, `content_fragment`, `delta`,
+  `full_content`, or nested message-like keys during `ctx work
+  redaction-preview`.
+- Closed high-risk coverage gap where `ctx work validate --kind
+  plugin-manifest` only checked shallow fields by parsing into the Rust
+  `PluginManifest` model and exercising structural validation in CLI unit
+  tests.
+- Added negative coverage for unknown plugin manifest fields, including command
+  contribution fields that are outside the public v1 manifest schema.
+- Extended Bazel bin smoke coverage to print the `work-bundle` schema and reject
+  bundle object paths containing `..`.
+- Remaining architectural gap: plugin manifest rules still exist in the Rust
+  model, daemon loader, CLI validator, and TypeScript SDK. A later slice should
+  either generate validation from one schema source or add a shared contract
+  parity test across those implementations.

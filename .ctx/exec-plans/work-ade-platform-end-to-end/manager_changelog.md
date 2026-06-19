@@ -45,9 +45,14 @@ Record each local commit or integrated worker handoff here.
   - Adds ACP provider, review panel/command, importer action, deferred
     contribution examples, JSON-safe validation, adversarial tests, and Bazel
     coverage in the web test taxonomy.
-- pending - Add local Work CLI checks.
+- `a703a9d` - Add local Work CLI checks.
   - Renames the public local CLI surface to `ctx work` while keeping
     `ctx agent-work` as a compatibility alias.
   - Adds local schema listing/printing, structural JSON validation, safe
     metadata inspection, redaction preview, durable local diagnostics, and
     explicit not-implemented diagnostics for list/show/capture/export/import.
+- pending - Harden Work CLI validation and redaction.
+  - Addresses adversarial review findings by routing plugin manifest validation
+    through the Rust manifest model, rejecting unknown plugin manifest fields,
+    extending transcript-like event redaction, and adding bundle schema smoke
+    coverage.

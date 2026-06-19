@@ -26,17 +26,34 @@ case "$smoke_case" in
     printf '%s\n' "$agent_work_alias_help" | grep -F "schema" >/dev/null
     ;;
   agent-work-schema)
-    for kind in agent-work change-set contribution events tool-call transcripts plugin-manifest; do
+    for kind in work-bundle agent-work change-set contribution events tool-call transcripts plugin-manifest; do
       "$ctx_copy" work schema --kind "$kind" > "$tmpdir/$kind.json"
       grep -E '^[[:space:]]*\{' "$tmpdir/$kind.json" >/dev/null
       grep -E '"\$schema"[[:space:]]*:' "$tmpdir/$kind.json" >/dev/null
     done
     "$ctx_copy" agent-work schema --kind agent-work > "$tmpdir/agent-work-alias.json"
+    grep -E '"\$id"[[:space:]]*:[[:space:]]*"https://schemas.ctx.rs/work/bundle.v1.schema.json"' "$tmpdir/work-bundle.json" >/dev/null
     grep -E '"\$id"[[:space:]]*:[[:space:]]*"https://schemas.ctx.rs/agent-work/v1.schema.json"' "$tmpdir/agent-work.json" >/dev/null
     grep -E '"\$id"[[:space:]]*:[[:space:]]*"https://schemas.ctx.rs/agent-work/v1.schema.json"' "$tmpdir/agent-work-alias.json" >/dev/null
     grep -E '"title"[[:space:]]*:[[:space:]]*"ChangeSet"' "$tmpdir/change-set.json" >/dev/null
     grep -E '"title"[[:space:]]*:[[:space:]]*"Contribution"' "$tmpdir/contribution.json" >/dev/null
     grep -E '"title"[[:space:]]*:[[:space:]]*"TranscriptRecord"' "$tmpdir/transcripts.json" >/dev/null
+    cat > "$tmpdir/bad-work-bundle.json" <<'JSON'
+{
+  "kind": "ctx.work.bundle",
+  "schema_version": 1,
+  "objects": [
+    {
+      "path": "../secret.json"
+    }
+  ]
+}
+JSON
+    if "$ctx_copy" work validate --kind work-bundle "$tmpdir/bad-work-bundle.json" >"$tmpdir/bad-work-bundle.out" 2>&1; then
+      echo "expected work-bundle traversal validation to fail" >&2
+      exit 1
+    fi
+    grep -E 'traversal|dot-dot' "$tmpdir/bad-work-bundle.out" >/dev/null
     ;;
   serve-help)
     serve_help="$("$ctx_copy" serve --help)"

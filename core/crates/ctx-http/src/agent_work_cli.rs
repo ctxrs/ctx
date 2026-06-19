@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
 use clap::{Args, Subcommand, ValueEnum};
+use ctx_core::models::PluginManifest;
 use serde_json::Value;
 
 #[derive(Debug, Args)]
@@ -363,10 +364,7 @@ fn validate_value(kind: AgentWorkSchemaKind, value: &Value) -> Result<()> {
             ],
         ),
         AgentWorkSchemaKind::Transcripts => validate_required_fields(value, "$", &["record_type"]),
-        AgentWorkSchemaKind::PluginManifest => {
-            validate_required_fields(value, "$", &["id", "name", "version"])?;
-            validate_schema_version(value, "$")
-        }
+        AgentWorkSchemaKind::PluginManifest => validate_plugin_manifest(value),
     }?;
     validate_relative_path_fields(value, "$")
 }
@@ -423,6 +421,123 @@ fn validate_work_bundle(value: &Value) -> Result<()> {
             .and_then(Value::as_str)
             .with_context(|| format!("work-bundle object at $.objects[{index}] requires `path`"))?;
         validate_safe_relative_path(path, &format!("$.objects[{index}].path"))?;
+    }
+    Ok(())
+}
+
+fn validate_plugin_manifest(value: &Value) -> Result<()> {
+    reject_plugin_manifest_unknown_properties(value)?;
+    let manifest: PluginManifest =
+        serde_json::from_value(value.clone()).context("plugin-manifest failed to deserialize")?;
+    manifest
+        .validate()
+        .map_err(|error| anyhow::anyhow!("plugin-manifest failed structural validation: {error:?}"))
+}
+
+fn reject_plugin_manifest_unknown_properties(value: &Value) -> Result<()> {
+    validate_allowed_object_keys(
+        value,
+        "$",
+        &[
+            "schema_version",
+            "id",
+            "name",
+            "version",
+            "description",
+            "entrypoints",
+            "contributes",
+            "compatibility",
+        ],
+    )?;
+
+    if let Some(entrypoints) = value.get("entrypoints").and_then(Value::as_array) {
+        for (index, entrypoint) in entrypoints.iter().enumerate() {
+            validate_allowed_object_keys(
+                entrypoint,
+                &format!("$.entrypoints[{index}]"),
+                &["id", "kind", "command", "args", "cwd", "environment"],
+            )?;
+        }
+    }
+
+    if let Some(contributes) = value.get("contributes") {
+        validate_allowed_object_keys(
+            contributes,
+            "$.contributes",
+            &[
+                "providers",
+                "runtimes",
+                "commands",
+                "collectors",
+                "observers",
+                "ui_surfaces",
+            ],
+        )?;
+        validate_plugin_named_contribution_keys(contributes, "providers", &["capabilities"])?;
+        validate_plugin_named_contribution_keys(contributes, "runtimes", &["capabilities"])?;
+        validate_plugin_command_contribution_keys(contributes)?;
+        validate_plugin_named_contribution_keys(contributes, "collectors", &["events"])?;
+        validate_plugin_named_contribution_keys(contributes, "observers", &["events"])?;
+        validate_plugin_named_contribution_keys(
+            contributes,
+            "ui_surfaces",
+            &["surface", "contexts"],
+        )?;
+    }
+
+    if let Some(compatibility) = value.get("compatibility") {
+        validate_allowed_object_keys(
+            compatibility,
+            "$.compatibility",
+            &["min_ctx_version", "capabilities"],
+        )?;
+    }
+
+    Ok(())
+}
+
+fn validate_plugin_named_contribution_keys(
+    contributes: &Value,
+    field: &str,
+    extra_allowed_keys: &[&str],
+) -> Result<()> {
+    let Some(contributions) = contributes.get(field).and_then(Value::as_array) else {
+        return Ok(());
+    };
+    let mut allowed = vec!["id", "name", "description", "entrypoint"];
+    allowed.extend_from_slice(extra_allowed_keys);
+    for (index, contribution) in contributions.iter().enumerate() {
+        validate_allowed_object_keys(
+            contribution,
+            &format!("$.contributes.{field}[{index}]"),
+            &allowed,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_plugin_command_contribution_keys(contributes: &Value) -> Result<()> {
+    let Some(commands) = contributes.get("commands").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    for (index, command) in commands.iter().enumerate() {
+        validate_allowed_object_keys(
+            command,
+            &format!("$.contributes.commands[{index}]"),
+            &["id", "title", "description", "category", "entrypoint"],
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_allowed_object_keys(value: &Value, path: &str, allowed_keys: &[&str]) -> Result<()> {
+    let object = value
+        .as_object()
+        .with_context(|| format!("{path} must be a JSON object"))?;
+    for key in object.keys() {
+        if !allowed_keys.contains(&key.as_str()) {
+            bail!("{path}.{key} is not part of the plugin-manifest schema");
+        }
     }
     Ok(())
 }
@@ -662,9 +777,28 @@ fn omit_transcript_bodies(
                 || object
                     .get("record_type")
                     .and_then(Value::as_str)
-                    .is_some_and(|record_type| record_type == "message");
-            for key in ["content", "text", "body", "transcript", "payload_json"] {
-                if looks_like_message && object.contains_key(key) {
+                    .is_some_and(|record_type| matches!(record_type, "message" | "event"))
+                || object
+                    .get("event_type")
+                    .and_then(Value::as_str)
+                    .is_some_and(is_transcript_like_event_type);
+            let payload_json_looks_sensitive = object
+                .get("payload_json")
+                .is_some_and(contains_transcript_payload_key);
+            for key in [
+                "content",
+                "content_fragment",
+                "delta",
+                "full_content",
+                "message",
+                "text",
+                "body",
+                "transcript",
+                "payload",
+                "payload_json",
+            ] {
+                if (looks_like_message || payload_json_looks_sensitive) && object.contains_key(key)
+                {
                     object.insert(
                         key.to_string(),
                         Value::String("[omitted:transcript_body]".to_string()),
@@ -683,6 +817,39 @@ fn omit_transcript_bodies(
         }
         _ => {}
     }
+}
+
+fn is_transcript_like_event_type(event_type: &str) -> bool {
+    let normalized = event_type.to_ascii_lowercase();
+    ["assistant", "message", "thought", "transcript", "user"]
+        .iter()
+        .any(|needle| normalized.contains(needle))
+}
+
+fn contains_transcript_payload_key(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => object.iter().any(|(key, child)| {
+            is_transcript_payload_key(key) || contains_transcript_payload_key(child)
+        }),
+        Value::Array(items) => items.iter().any(contains_transcript_payload_key),
+        _ => false,
+    }
+}
+
+fn is_transcript_payload_key(key: &str) -> bool {
+    let normalized = key.to_ascii_lowercase();
+    [
+        "body",
+        "content",
+        "delta",
+        "fragment",
+        "message",
+        "text",
+        "thought",
+        "transcript",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle))
 }
 
 const WORK_BUNDLE_SCHEMA: &str = r#"{
@@ -849,6 +1016,68 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_invalid_plugin_manifest_structure() {
+        let value = json!({
+            "id": "example.invalid",
+            "name": "Invalid",
+            "version": "0.1.0",
+            "entrypoints": [
+                {
+                    "id": "main"
+                }
+            ],
+            "contributes": {
+                "commands": [
+                    {
+                        "id": "example.invalid.open",
+                        "entrypoint": "missing",
+                        "unexpected": true
+                    }
+                ]
+            }
+        });
+
+        let error = validate_value(AgentWorkSchemaKind::PluginManifest, &value)
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("unexpected") || error.contains("plugin-manifest failed"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_plugin_manifest_unknown_entrypoint() {
+        let value = json!({
+            "id": "example.invalid",
+            "name": "Invalid",
+            "version": "0.1.0",
+            "entrypoints": [
+                {
+                    "id": "main",
+                    "command": "node"
+                }
+            ],
+            "contributes": {
+                "commands": [
+                    {
+                        "id": "example.invalid.open",
+                        "title": "Open",
+                        "entrypoint": "missing"
+                    }
+                ]
+            }
+        });
+
+        let error = validate_value(AgentWorkSchemaKind::PluginManifest, &value)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("plugin-manifest failed structural validation"));
+    }
+
+    #[test]
     fn redaction_preview_omits_transcript_bodies_paths_and_secrets() {
         let value = json!({
             "record_type": "message",
@@ -866,6 +1095,51 @@ mod tests {
         assert!(!text.contains("sk-12345678901234567890"));
         assert!(preview.stats.omitted_content_payloads >= 1);
         assert!(preview.stats.redacted_secret_fields >= 1);
+    }
+
+    #[test]
+    fn redaction_preview_omits_transcript_like_event_payloads() {
+        let value = json!({
+            "seq": 1,
+            "id": "event-1",
+            "session_id": "session-1",
+            "event_type": "assistant_chunk",
+            "payload_json": {
+                "content_fragment": "raw assistant text from /home/alice/project",
+                "full_content": "complete raw answer"
+            },
+            "created_at": "2026-01-01T00:00:00Z"
+        });
+
+        let preview = redaction_preview(&value);
+        let text = serde_json::to_string(&preview.value).unwrap();
+
+        assert!(text.contains("[omitted:transcript_body]"));
+        assert!(!text.contains("raw assistant text"));
+        assert!(!text.contains("complete raw answer"));
+        assert!(!text.contains("/home/alice"));
+        assert!(preview.stats.omitted_content_payloads >= 1);
+    }
+
+    #[test]
+    fn redaction_preview_omits_event_record_payload_json_with_content_keys() {
+        let value = json!({
+            "record_type": "event",
+            "payload_json": {
+                "delta": "secret transcript delta",
+                "nested": {
+                    "message": "nested raw message"
+                }
+            }
+        });
+
+        let preview = redaction_preview(&value);
+        let text = serde_json::to_string(&preview.value).unwrap();
+
+        assert!(text.contains("[omitted:transcript_body]"));
+        assert!(!text.contains("secret transcript delta"));
+        assert!(!text.contains("nested raw message"));
+        assert!(preview.stats.omitted_content_payloads >= 1);
     }
 
     #[test]
