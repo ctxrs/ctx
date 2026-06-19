@@ -150,3 +150,24 @@ These baseline results must be rerun after subsequent implementation phases.
 - Manager integration:
   - `git cherry-pick b6ca1d93022338564f1bb8e0cf353f59d5d601ec`
   - Result: passed; integrated as `725edbf`.
+
+## Local Cargo Safety Lock Slice
+
+- Manager validation:
+  - `bash -n core/scripts/dev/cargo-safe.sh core/scripts/dev/check-local.sh`
+  - Result: passed.
+- Manager validation:
+  - `CTX_CARGO_USE_CGROUP=0 CTX_CARGO_LOCK_PATH=/tmp/ctx-cargo-safe-smoke.lock core/scripts/dev/cargo-safe.sh --version`
+  - Result: passed; wrapper waited on the host Cargo lock and invoked Cargo
+    under the low-I/O/nice runner.
+- Reviewer validation:
+  - `bash -n core/scripts/dev/cargo-safe.sh`
+  - harmless `CTX_CARGO_BIN=/bin/true` wrapper smoke checks
+  - Result: passed; reviewer found no blockers.
+- Follow-up manager validation after adding the ionice availability probe:
+  - `bash -n core/scripts/dev/cargo-safe.sh core/scripts/dev/check-local.sh`
+  - `CTX_CARGO_USE_CGROUP=0 CTX_CARGO_LOCK_PATH=/tmp/ctx-cargo-safe-smoke.lock core/scripts/dev/cargo-safe.sh --version`
+  - Result: passed.
+- Manager validation:
+  - `git diff --check`
+  - Result: passed.

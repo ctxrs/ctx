@@ -58,8 +58,11 @@ That does not mean the full platform is done. This document defines what remains
    - require each subagent to run focused validation before handoff;
    - merge or cherry-pick passing changes back into the manager branch;
    - never allow two workers to own the same write set at the same time.
-5. Keep heavy validation serialized and memory-capped. Rust workspace tests must
-   use `core/scripts/dev/cargo-safe.sh` with explicit memory/job/thread limits.
+5. Keep heavy validation serialized and memory-capped. Rust workspace tests and
+   broad local Rust checks must use `core/scripts/dev/cargo-safe.sh` with
+   explicit memory/job/thread limits. Agents must not launch direct concurrent
+   `cargo` commands; `cargo-safe.sh` owns the host-level Cargo lock and low-I/O
+   priority policy.
 6. Every feature slice must have implementation, tests, docs/examples when
    public-facing, and reviewer sign-off before it is considered complete.
 7. Periodically run deep architecture review and deep SDLC review, even if tests
@@ -1006,6 +1009,11 @@ core/scripts/dev/cargo-safe.sh test --manifest-path Cargo.toml --workspace --loc
 .buildkite/run-bazel.sh test //:buildkite_config_test //:schemas
 git diff --check
 ```
+
+Do not replace `cargo-safe.sh` with direct `cargo test` for broad local
+verification. `-j 1` is not sufficient when multiple agents run Cargo at the
+same time; the wrapper serializes Cargo through the host lock and lowers I/O
+priority.
 
 Additional commands must be added as implementation creates them:
 

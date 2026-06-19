@@ -121,6 +121,13 @@ fi
 JOBS="${CTX_CARGO_JOBS:-$(min_int "$CPU_COUNT" "$MAX_JOBS" "$MEMORY_JOBS")}"
 JOBS="$(max_int "$JOBS" 1)"
 TEST_THREADS="${CTX_RUST_TEST_THREADS:-$JOBS}"
+CARGO_BIN="${CTX_CARGO_BIN:-cargo}"
+CARGO_LOCK_ENABLED="${CTX_CARGO_LOCK:-1}"
+CARGO_LOCK_PATH="${CTX_CARGO_LOCK_PATH:-/tmp/ctx-cargo.lock}"
+CARGO_LOW_IO_ENABLED="${CTX_CARGO_LOW_IO:-1}"
+CARGO_NICE_LEVEL="${CTX_CARGO_NICE:-10}"
+CARGO_IONICE_CLASS="${CTX_CARGO_IONICE_CLASS:-2}"
+CARGO_IONICE_LEVEL="${CTX_CARGO_IONICE_LEVEL:-7}"
 
 if [[ "$#" -eq 0 ]]; then
   set -- test --manifest-path Cargo.toml --workspace --locked
@@ -153,6 +160,28 @@ mapfile -d '' CARGO_ARGS < <(with_cargo_jobs_arg "$JOBS" "$@")
 export CARGO_BUILD_JOBS="$JOBS"
 export RUST_TEST_THREADS="$TEST_THREADS"
 
-echo "[ctx-cargo-safe] cargo ${CARGO_ARGS[*]} (test_threads=${TEST_THREADS}, memory_max=${MEMORY_MAX_GIB}G)" >&2
+RUNNER=("$CARGO_BIN" "${CARGO_ARGS[@]}")
+if [[ "$CARGO_LOW_IO_ENABLED" != "0" ]]; then
+  if command -v nice >/dev/null 2>&1; then
+    RUNNER=(nice -n "$CARGO_NICE_LEVEL" "${RUNNER[@]}")
+  fi
+  if command -v ionice >/dev/null 2>&1; then
+    if ionice -c "$CARGO_IONICE_CLASS" -n "$CARGO_IONICE_LEVEL" true >/dev/null 2>&1; then
+      RUNNER=(ionice -c "$CARGO_IONICE_CLASS" -n "$CARGO_IONICE_LEVEL" "${RUNNER[@]}")
+    else
+      echo "[ctx-cargo-safe] warning: ionice is present but unavailable; continuing without ionice" >&2
+    fi
+  fi
+fi
 
-exec cargo "${CARGO_ARGS[@]}"
+echo "[ctx-cargo-safe] ${CARGO_BIN} ${CARGO_ARGS[*]} (test_threads=${TEST_THREADS}, memory_max=${MEMORY_MAX_GIB}G, lock=${CARGO_LOCK_ENABLED}, low_io=${CARGO_LOW_IO_ENABLED})" >&2
+
+if [[ "$CARGO_LOCK_ENABLED" != "0" ]]; then
+  if command -v flock >/dev/null 2>&1; then
+    echo "[ctx-cargo-safe] waiting for host cargo lock: ${CARGO_LOCK_PATH}" >&2
+    exec flock "$CARGO_LOCK_PATH" "${RUNNER[@]}"
+  fi
+  echo "[ctx-cargo-safe] warning: flock not found; running without host cargo lock" >&2
+fi
+
+exec "${RUNNER[@]}"

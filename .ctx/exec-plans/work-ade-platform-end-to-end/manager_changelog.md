@@ -84,3 +84,8 @@ Record each local commit or integrated worker handoff here.
     primitives rather than a new ctx-specific agent protocol.
   - Adds example module boundaries for optional shell/file/edit/sandbox,
     transcript, artifact, and Work capture helpers.
+- pending - Add host-level Cargo safety lock.
+  - Updates `cargo-safe.sh` so local Rust validation serializes through a
+    host-level Cargo lock and runs under low I/O priority by default.
+  - Documents the no-direct-concurrent-Cargo process rule for local development
+    agents.
