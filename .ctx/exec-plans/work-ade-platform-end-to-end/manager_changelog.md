@@ -97,3 +97,12 @@ Record each local commit or integrated worker handoff here.
 - `de4488f` - Harden Workbench plugin template IDs.
   - Removes future-looking action IDs until SDK/schema parity defines actions.
   - Uses delimiter-safe encoding for persisted plugin template IDs.
+- `0fd4576` - Add transactional Work import.
+  - Integrates worker branch `ctx/work-import-txn-v2-20260619`.
+  - Adds store-level transactional import for local Work change sets and
+    contributions, plus dry-run validation that executes the same transaction
+    and rolls it back.
+  - Keeps `ctx work capture` diagnostic-only and keeps hosted/team/enforcement
+    state out of public local import.
+  - Closes reviewer gaps for dry-run relational validation and cross-workspace
+    ID collision coverage.

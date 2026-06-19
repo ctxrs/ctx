@@ -189,3 +189,35 @@ These baseline results must be rerun after subsequent implementation phases.
 - Manager validation:
   - `git diff --check HEAD~2..HEAD`
   - Result: passed.
+
+## Transactional Work Import Slice
+
+- Worker validation:
+  - `CTX_CARGO_MEMORY_MAX_GIB=24 CTX_CARGO_JOBS=1 CTX_RUST_TEST_THREADS=1 scripts/dev/cargo-safe.sh test --manifest-path Cargo.toml --locked -p ctx-store import_agent_work_records`
+  - Result: passed, 7 tests. Covered atomic import, idempotency, provenance
+    handling, rollback on later failure, and cross-workspace ID collision
+    rejection.
+- Worker validation:
+  - `CTX_CARGO_MEMORY_MAX_GIB=24 CTX_CARGO_JOBS=1 CTX_RUST_TEST_THREADS=1 scripts/dev/cargo-safe.sh test --manifest-path Cargo.toml --locked -p ctx-store validate_agent_work_import_records`
+  - Result: passed, 1 test. Covered dry-run validation rollback after a
+    successful batch.
+- Worker validation:
+  - `CTX_CARGO_MEMORY_MAX_GIB=24 CTX_CARGO_JOBS=1 CTX_RUST_TEST_THREADS=1 scripts/dev/cargo-safe.sh test --manifest-path Cargo.toml --locked -p ctx-http --bin ctx import`
+  - Result: passed, 4 tests. Covered import round trip, workspace mismatch,
+    dry-run relational validation, and rollback after a later contribution
+    failure.
+- Worker validation:
+  - `CTX_CARGO_MEMORY_MAX_GIB=24 CTX_CARGO_JOBS=1 CTX_RUST_TEST_THREADS=1 scripts/dev/cargo-safe.sh test --manifest-path Cargo.toml --locked -p ctx-http --bin ctx capture_returns_actionable_not_implemented_diagnostic`
+  - Result: passed, 1 test. Confirms capture remains diagnostic-only.
+- Worker hygiene:
+  - `cargo fmt --manifest-path core/Cargo.toml --all -- --check`
+  - `git diff --check`
+  - Result: passed.
+- Reviewer:
+  - Locke (`019ee1a7-a59e-7f61-9ceb-004013b408f1`) found no blockers and
+    confirmed no hosted/team/sync/capture implementation entered the slice.
+  - Reviewer residual gaps for dry-run relational validation and direct
+    cross-workspace collision coverage were fixed before integration.
+- Manager integration:
+  - `git cherry-pick 68692be`
+  - Result: passed; integrated as `0fd4576`.

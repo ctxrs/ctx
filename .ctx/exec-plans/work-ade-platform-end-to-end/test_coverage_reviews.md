@@ -119,3 +119,17 @@ Record adversarial test coverage reviews and gaps.
 - Remaining gap: this is not wired into persisted template selection or rendered
   plugin panels yet; that should wait for SDK/schema parity and a concrete
   Workbench contribution runtime.
+
+## Transactional Work Import Review
+
+- Added store-level coverage for transactional all-or-none import across change
+  sets and contributions.
+- Added dry-run validation coverage that exercises the same transactional
+  relation checks and rolls them back instead of only validating JSON and
+  workspace IDs.
+- Added cross-workspace ID collision coverage for batch import, including
+  rollback of a valid earlier record when a later contribution collides.
+- Added CLI coverage for import dry-run catching missing relational references
+  without persisting the preceding valid change set.
+- Reviewer found no blockers after the slice was narrowed to local import and
+  confirmed `ctx work capture` remains intentionally diagnostic-only.
