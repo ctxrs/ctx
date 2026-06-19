@@ -702,6 +702,24 @@
   padding: var(--wb-topbar-safe-offset) 10px 0;
 }
 
+.desktop-window-controls-overlay {
+  position: fixed;
+  top: 0;
+  right: 0;
+  z-index: 10000;
+  pointer-events: none;
+}
+
+.desktop-window-controls-overlay .wb-win-controls {
+  height: 32px;
+  pointer-events: auto;
+}
+
+.desktop-window-controls-overlay .wb-win-btn {
+  width: 42px;
+  height: 32px;
+}
+
 .wb-win-controls {
   display: inline-flex;
   align-items: stretch;

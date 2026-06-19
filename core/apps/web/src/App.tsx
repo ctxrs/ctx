@@ -3,6 +3,7 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { appendDesktopLog } from "./api/client";
 import { useDaemonConnection } from "./api/useDaemonConnection";
 import DaemonAvailabilityOverlay from "./components/DaemonAvailabilityOverlay";
+import { DesktopWindowControls } from "./components/DesktopWindowControls";
 import StorageGuardBanner from "./components/StorageGuardBanner";
 import LauncherPage from "./pages/LauncherPage";
 import WorkbenchPage from "./pages/WorkbenchPage";
@@ -206,6 +207,9 @@ export default function App() {
           <DesktopMenuBridge />
           <DesktopWebviewRecoveryBridge />
           <GlobalUpdateNotice />
+          <div className="desktop-window-controls-overlay">
+            <DesktopWindowControls />
+          </div>
           <Routes>
             <Route
               path="/"

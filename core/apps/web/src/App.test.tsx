@@ -53,6 +53,13 @@ const clientSettingsStore = vi.hoisted(() => ({
   subscribeClientSettings: vi.fn(),
   loadClientSettings: vi.fn(),
 }));
+const desktopWindowMock = vi.hoisted(() => ({
+  isMaximized: vi.fn(async () => false),
+  onResized: vi.fn(async () => () => {}),
+  minimize: vi.fn(async () => {}),
+  toggleMaximize: vi.fn(async () => {}),
+  close: vi.fn(async () => {}),
+}));
 
 vi.mock("./api/client", () => ({
   appendDesktopLog: vi.fn(async () => {}),
@@ -184,6 +191,10 @@ vi.mock("./utils/desktop", () => ({
   openExternalLink: vi.fn(async () => true),
 }));
 
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => desktopWindowMock,
+}));
+
 vi.mock("./state/launcherRecentsStore", () => ({
   loadLauncherRecents: vi.fn(async () => []),
 }));
@@ -205,6 +216,8 @@ beforeEach(() => {
   clientSettingsStore.getClientSettingsState.mockImplementation(() => clientSettingsStore.state);
   clientSettingsStore.subscribeClientSettings.mockImplementation(() => () => {});
   clientSettingsStore.loadClientSettings.mockResolvedValue(clientSettingsStore.state);
+  desktopWindowMock.isMaximized.mockResolvedValue(false);
+  desktopWindowMock.onResized.mockResolvedValue(() => {});
   vi.mocked(isDesktopApp).mockReturnValue(false);
   vi.mocked(desktopSetDockRecentLocalWorkspaces).mockResolvedValue();
   vi.mocked(desktopWebviewRecoveryConsumeIncidents).mockResolvedValue([]);
@@ -261,6 +274,20 @@ test("renders app shell", async () => {
   render(<App />);
   // App root route is the launcher.
   expect(await screen.findByText("New Workspace")).toBeInTheDocument();
+});
+
+test("renders desktop window controls globally on Linux desktop", async () => {
+  vi.mocked(isDesktopApp).mockReturnValue(true);
+  Object.defineProperty(window.navigator, "platform", {
+    configurable: true,
+    value: "Linux x86_64",
+  });
+
+  render(<App />);
+
+  expect(await screen.findByRole("button", { name: "Minimize" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Maximize" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Close" })).toBeInTheDocument();
 });
 
 test("redirects /index.html to the launcher route", async () => {
