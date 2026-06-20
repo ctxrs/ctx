@@ -1,5 +1,5 @@
 use axum::extract::DefaultBodyLimit;
-use axum::routing::{delete, get, post, put};
+use axum::routing::{delete, get, post};
 
 use super::*;
 use crate::api::artifacts::MAX_BLOB_MULTIPART_BODY_BYTES;

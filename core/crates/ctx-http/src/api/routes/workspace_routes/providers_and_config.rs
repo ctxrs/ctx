@@ -50,10 +50,6 @@ pub(super) fn workspace_provider_and_config_routes() -> axum::Router<RouteState>
             get(get_merge_queue_config).post(update_merge_queue_config),
         )
         .route(
-            "/api/workspaces/:id/org_policy",
-            get(get_workspace_org_policy).put(upsert_workspace_org_policy),
-        )
-        .route(
             "/api/workspaces/:id/execution_config",
             get(get_execution_config).post(update_execution_config),
         )

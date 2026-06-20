@@ -12,15 +12,6 @@ pub(super) fn core_routes() -> axum::Router<RouteState> {
             "/api/plugins/commands/execute",
             post(execute_plugin_command),
         )
-        .route("/api/orgs/daemon_enrollments", get(list_daemon_enrollments))
-        .route(
-            "/api/orgs/:org_id/daemon_enrollment",
-            put(upsert_daemon_enrollment),
-        )
-        .route(
-            "/api/orgs/:org_id/policy_snapshots",
-            post(cache_org_policy_snapshot),
-        )
         .route("/api/execution/launch/start", post(launch_start))
         .route("/api/execution/launch/status", get(launch_status))
         .route("/api/execution/launch/stream", get(launch_stream_ws))
