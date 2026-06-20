@@ -229,3 +229,19 @@ Record each local commit or integrated worker handoff here.
     review.
   - Leaves push, PR, merge, hosted/team services, production release, and
     remote Buildkite execution out of local scope.
+- `6fc2b2d` - Resolve final review ledger status.
+  - Replaces stale pre-final review ledger headings with the completed
+    final architecture, security, SDLC, coverage, and done-ness review status.
+  - Records reviewer findings that the local validation coverage is credible
+    and hosted/team/prod/remote work remains out of scope.
+- `9480cc0` - Clear stale final ledger marker.
+  - Replaces the stale Cargo safety-lock placeholder with the
+    actual `87cdd71` commit.
+  - Removes remaining stale pre-final wording from review ledger summaries.
+- `f7b773e` - Clarify work capture diagnostic.
+  - Updates `ctx work capture` so the diagnostic reflects the current local
+    store-backed CLI: capture still needs live daemon/session semantics, while
+    `list`, `show`, `export`, and `import` are available as offline local Work
+    record commands.
+  - Validated with `cargo-safe` `fmt --package ctx-http`, the focused
+    `ctx-http --bin ctx agent_work_cli` test filter, and `git diff --check`.
