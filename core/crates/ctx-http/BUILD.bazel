@@ -904,6 +904,14 @@ sh_test(
     timeout = "long",
 )
 
+sh_test(
+    name = "bin_tests_work_cli_flow",
+    srcs = ["tests/bin_smoke.sh"],
+    args = ["$(location :ctx)", "work-cli-flow"],
+    data = [":ctx"],
+    timeout = "long",
+)
+
 test_suite(
     name = "bin_tests",
     tests = [
@@ -914,6 +922,7 @@ test_suite(
         ":bin_tests_self_update_help",
         ":bin_tests_serve_help",
         ":bin_tests_setup_help",
+        ":bin_tests_work_cli_flow",
     ],
 )
 

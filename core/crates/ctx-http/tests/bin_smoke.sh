@@ -62,6 +62,29 @@ JSON
     printf '%s\n' "$setup_help" | grep -F "scratch" >/dev/null
     printf '%s\n' "$setup_help" | grep -F "uninstall" >/dev/null
     ;;
+  work-cli-flow)
+    data_root="$tmpdir/data"
+    repo="$tmpdir/repo"
+    mkdir -p "$repo"
+    git init --quiet "$repo"
+    setup_out="$("$ctx_copy" setup workspace --data-dir "$data_root" --no-shims "$repo")"
+    printf '%s\n' "$setup_out" | grep -F "workspace:" >/dev/null
+    printf '%s\n' "$setup_out" | grep -F "shims: skipped" >/dev/null
+
+    capture_out="$("$ctx_copy" work capture command --data-dir "$data_root" --cwd "$repo" --tool gh --exit-code 0 -- pr view 123 --repo ctxrs/ctx)"
+    printf '%s\n' "$capture_out" | grep -F "captured:" >/dev/null
+
+    link_out="$("$ctx_copy" work link-pr --data-dir "$data_root" --cwd "$repo" https://github.com/ctxrs/ctx/pull/123)"
+    printf '%s\n' "$link_out" | grep -F "change_set:" >/dev/null
+    printf '%s\n' "$link_out" | grep -F "pull_request: ctxrs/ctx/#123" >/dev/null
+
+    recent_out="$("$ctx_copy" work recent --data-dir "$data_root")"
+    printf '%s\n' "$recent_out" | grep -F "recent_change_sets:" >/dev/null
+    printf '%s\n' "$recent_out" | grep -F "recent_contributions:" >/dev/null
+
+    list_out="$("$ctx_copy" work list --data-dir "$data_root" --kind contribution)"
+    printf '%s\n' "$list_out" | grep -F "contributions:" >/dev/null
+    ;;
   serve-help)
     serve_help="$("$ctx_copy" serve --help)"
     printf '%s\n' "$serve_help" | grep -F -- "--bind" >/dev/null

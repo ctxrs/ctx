@@ -10,7 +10,6 @@ use ctx_store::StoreManager;
 use directories::BaseDirs;
 use uuid::Uuid;
 
-const SHIM_MARKER: &str = "ctx-managed work capture shim v1";
 const SHIM_HEADER: &str = "# ctx-managed work capture shim v1";
 const SHIM_DATA_ROOT_PREFIX: &str = "# ctx-data-root: ";
 const SHIM_TOOLS: &[&str] = &["git", "gh"];
@@ -381,7 +380,8 @@ fn shim_script(ctx_exe: &Path, data_root: &Path, tool: &str) -> Result<String> {
         "#!/bin/sh\n\
          {SHIM_HEADER}\n\
          {SHIM_DATA_ROOT_PREFIX}{data_root}\n\
-         CTX_WORK_SHIM_DIR=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n\
+         case \"$0\" in */*) _ctx_script_dir=${{0%/*}} ;; *) _ctx_script_dir=. ;; esac\n\
+         CTX_WORK_SHIM_DIR=$(CDPATH= cd -- \"$_ctx_script_dir\" && pwd)\n\
          export CTX_WORK_SHIM_DIR\n\
          _ctx_status=0\n\
          _ctx_path_without_shim=\"\"\n\
@@ -583,7 +583,7 @@ mod tests {
         fs::create_dir_all(git_path.parent().unwrap()).unwrap();
         fs::write(
             &git_path,
-            format!("#!/bin/sh\n# random file mentioning {SHIM_MARKER}\nexit 0\n"),
+            format!("#!/bin/sh\n# random file mentioning {SHIM_HEADER}\nexit 0\n"),
         )
         .unwrap();
 
@@ -623,6 +623,105 @@ mod tests {
         assert!(!script.contains("-- \"$@\""));
         assert!(script.contains("|| true"));
         assert!(script.contains("exit \"$_ctx_status\""));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_shim_scrubs_path_preserves_status_and_sends_argv_on_stdin() {
+        let bash = Path::new("/usr/bin/bash");
+        if !bash.exists() {
+            eprintln!("skipping executable shim stdin test; /usr/bin/bash is unavailable");
+            return;
+        }
+        let temp = TempDir::new().unwrap();
+        let data_root = temp.path().join("ctx data");
+        let shim_dir = data_root.join("bin");
+        let real_bin = temp.path().join("real-bin");
+        fs::create_dir_all(&shim_dir).unwrap();
+        fs::create_dir_all(&real_bin).unwrap();
+
+        let fake_git_log = temp.path().join("fake-git.log");
+        let fake_ctx_log = temp.path().join("fake-ctx.log");
+        let fake_ctx_stdin = temp.path().join("fake-ctx.stdin");
+        let fake_git = real_bin.join("git");
+        fs::write(
+            &fake_git,
+            "#!/bin/sh\nprintf 'PATH=%s\\n' \"$PATH\" > \"$CTX_FAKE_GIT_LOG\"\nexit 17\n",
+        )
+        .unwrap();
+        make_executable(&fake_git).unwrap();
+        let fake_ctx = temp.path().join("fake ctx");
+        fs::write(
+            &fake_ctx,
+            format!(
+                "#!{}\nprintf 'PATH=%s\\n' \"$PATH\" > \"$CTX_FAKE_CTX_LOG\"\nprintf 'ARGS=%s\\n' \"$*\" >> \"$CTX_FAKE_CTX_LOG\"\n/bin/cat > \"$CTX_FAKE_CTX_STDIN\"\nexit 0\n",
+                bash.display()
+            ),
+        )
+        .unwrap();
+        make_executable(&fake_ctx).unwrap();
+        let shim = shim_dir.join("git");
+        write_owned_shim(&shim, &shim_script(&fake_ctx, &data_root, "git").unwrap()).unwrap();
+        make_executable(&shim).unwrap();
+
+        let path = format!("{}:{}", shim_dir.display(), real_bin.display());
+        let output = Command::new(&shim)
+            .arg("status")
+            .arg("--token")
+            .arg("super-secret")
+            .env("PATH", path)
+            .env("CTX_FAKE_GIT_LOG", &fake_git_log)
+            .env("CTX_FAKE_CTX_LOG", &fake_ctx_log)
+            .env("CTX_FAKE_CTX_STDIN", &fake_ctx_stdin)
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(17));
+        let ctx_log = fs::read_to_string(&fake_ctx_log).unwrap();
+        assert!(ctx_log.contains(&format!("--data-dir {}", data_root.display())));
+        assert!(ctx_log.contains("--tool git"));
+        assert!(ctx_log.contains("--exit-code 17"));
+        assert!(ctx_log.contains("--argv0-stdin"));
+        assert!(!ctx_log.contains("super-secret"));
+        let path_line = ctx_log
+            .lines()
+            .find(|line| line.starts_with("PATH="))
+            .unwrap();
+        assert!(!path_line.contains(&shim_dir.to_string_lossy().to_string()));
+        assert!(path_line.contains(&real_bin.to_string_lossy().to_string()));
+        let captured_argv = fs::read(&fake_ctx_stdin).unwrap();
+        assert_eq!(captured_argv, b"status\0--token\0super-secret");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_shim_reports_missing_real_tool_without_capture() {
+        let temp = TempDir::new().unwrap();
+        let data_root = temp.path().join("ctx");
+        let shim_dir = data_root.join("bin");
+        fs::create_dir_all(&shim_dir).unwrap();
+        let fake_ctx_log = temp.path().join("fake-ctx.log");
+        let fake_ctx = temp.path().join("fake-ctx");
+        fs::write(
+            &fake_ctx,
+            "#!/bin/sh\nprintf 'unexpected capture\\n' > \"$CTX_FAKE_CTX_LOG\"\nexit 0\n",
+        )
+        .unwrap();
+        make_executable(&fake_ctx).unwrap();
+        let shim = shim_dir.join("git");
+        write_owned_shim(&shim, &shim_script(&fake_ctx, &data_root, "git").unwrap()).unwrap();
+        make_executable(&shim).unwrap();
+
+        let output = Command::new(&shim)
+            .env("PATH", &shim_dir)
+            .env("CTX_FAKE_CTX_LOG", &fake_ctx_log)
+            .output()
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(127));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("real git not found"));
+        assert!(!fake_ctx_log.exists());
     }
 
     fn init_git_repo(path: &Path) {

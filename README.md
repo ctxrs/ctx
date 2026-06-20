@@ -60,7 +60,7 @@ ctx work validate work.json
 shims under the ctx data root. `ctx work` covers local schema, validation, list,
 show, import, export, inspect, redaction-preview, best-effort command capture,
 notes, recent context, and explicit PR linking. Shim capture is context, not
-tamper-proof audit; use `ctx work link-pr` when a PR URL or number is known.
+tamper-proof audit; use `ctx work link-pr` when a GitHub PR URL is known.
 
 ## What ctx Helps You Do
 
