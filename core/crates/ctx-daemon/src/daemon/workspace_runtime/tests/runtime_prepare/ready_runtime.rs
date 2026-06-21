@@ -35,8 +35,12 @@ async fn ready_runtime_sandbox_cli_short_circuits_network_cleanup_scripts_for_sh
 #[tokio::test]
 async fn sandbox_mode_errors_when_container_cli_is_unavailable() {
     let _serial = env_var_test_lock().lock().await;
-    let _guard = EnvGuard::set("CTX_TEST_SANDBOX_CLI_AVAILABLE", "0");
     let tmp = tempfile::tempdir().unwrap();
+    let sandbox_cli_path = write_failing_sandbox_cli(tmp.path());
+    let _sandbox_cli_path = EnvGuard::set(
+        CTX_HARNESS_SANDBOX_CLI_PATH_ENV,
+        &sandbox_cli_path.to_string_lossy(),
+    );
     let manager = runtime_manager(&tmp).await;
     let workspace = sample_workspace(&tmp);
     let worktree = sample_worktree(&tmp, workspace.id);
@@ -59,4 +63,35 @@ async fn sandbox_mode_errors_when_container_cli_is_unavailable() {
             || message.contains("container runtime failed"),
         "unexpected error message: {message}"
     );
+}
+
+fn write_failing_sandbox_cli(root: &std::path::Path) -> std::path::PathBuf {
+    let path = root.join(if cfg!(windows) {
+        "failing-sandbox-cli.cmd"
+    } else {
+        "failing-sandbox-cli.sh"
+    });
+
+    #[cfg(windows)]
+    {
+        std::fs::write(
+            &path,
+            "@echo off\r\necho sandbox runtime unavailable 1>&2\r\nexit /b 125\r\n",
+        )
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::write(
+            &path,
+            "#!/bin/sh\necho 'sandbox runtime unavailable' >&2\nexit 125\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    path
 }
