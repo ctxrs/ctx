@@ -33,6 +33,35 @@ require_pkg_config_one_of() {
   exit 1
 }
 
+reject_release_signing_env() {
+  local names=(
+    APPLE_API_ISSUER
+    APPLE_API_KEY
+    APPLE_API_KEY_ID
+    APPLE_CERTIFICATE
+    APPLE_CERTIFICATE_PASSWORD
+    APPLE_SIGNING_IDENTITY
+    CSC_KEY_PASSWORD
+    CSC_LINK
+    CTX_DESKTOP_EMBEDDED_UPDATER_PUBKEY_B64
+    TAURI_KEY_PASSWORD
+    TAURI_PRIVATE_KEY
+    TAURI_SIGNING_PRIVATE_KEY
+    TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+  )
+  local name
+  local present=()
+  for name in "${names[@]}"; do
+    if [[ -n "${!name:-}" ]]; then
+      present+=("${name}")
+    fi
+  done
+  if (( ${#present[@]} > 0 )); then
+    echo "error: desktop release verification package lane refuses signing/notarization/updater env: ${present[*]}" >&2
+    exit 2
+  fi
+}
+
 verify_host_arch() {
   if [[ -z "${EXPECTED_HOST_ARCH}" ]]; then
     return 0
@@ -80,6 +109,7 @@ copy_executable() {
   chmod 0755 "${dest}"
 }
 
+reject_release_signing_env
 verify_host_arch
 require_command cargo
 

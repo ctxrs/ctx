@@ -6,7 +6,7 @@ REPO_ROOT="$(dirname "${SCRIPT_DIR}")"
 CORE_ROOT="${REPO_ROOT}/core"
 TARGET="x86_64-pc-windows-gnu"
 OUT_DIR="${REPO_ROOT}/ctx-cli-windows-x64"
-RUST_TOOLCHAIN="${CTX_WINDOWS_RUST_TOOLCHAIN:-stable}"
+RUST_TOOLCHAIN="${CTX_WINDOWS_RUST_TOOLCHAIN:-1.95.0}"
 
 require_command() {
   local command_name="$1"
@@ -16,47 +16,24 @@ require_command() {
   fi
 }
 
-run_as_root() {
-  if [[ "$(id -u)" == "0" ]]; then
-    "$@"
-    return
-  fi
-  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
-    sudo "$@"
-    return
-  fi
-  echo "error: root privileges are required to install Windows cross-build prerequisites: $*" >&2
-  exit 2
-}
-
-ensure_rustup() {
+verify_rustup() {
   export PATH="${HOME}/.cargo/bin:${PATH}"
-  if command -v rustup >/dev/null 2>&1; then
-    return
-  fi
-  require_command curl
-  echo "info: rustup not found; installing minimal rustup toolchain manager" >&2
-  curl --proto '=https' --tlsv1.2 -fsSf https://sh.rustup.rs \
-    | RUSTUP_INIT_SKIP_PATH_CHECK=yes sh -s -- -y --profile minimal --no-modify-path
-  export PATH="${HOME}/.cargo/bin:${PATH}"
-  require_command rustup
-}
-
-ensure_mingw() {
-  if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
-    return
-  fi
-  if ! command -v apt-get >/dev/null 2>&1; then
-    echo "error: x86_64-w64-mingw32-gcc is missing and apt-get is unavailable" >&2
+  if ! command -v rustup >/dev/null 2>&1; then
+    echo "error: rustup is required on the Windows CLI cross-build runner; install rustup in the runner image instead of bootstrapping it during release verification" >&2
     exit 2
   fi
-  echo "info: installing MinGW prerequisites for Windows CLI cross-build" >&2
-  run_as_root env DEBIAN_FRONTEND=noninteractive apt-get update
-  run_as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64
 }
 
-ensure_rustup
-ensure_mingw
+verify_mingw() {
+  if ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
+    echo "error: x86_64-w64-mingw32-gcc is required on the Windows CLI cross-build runner; install gcc-mingw-w64-x86-64 in the runner image" >&2
+    exit 2
+  fi
+  x86_64-w64-mingw32-gcc -dumpfullversion -dumpversion
+}
+
+verify_rustup
+verify_mingw
 
 rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal --target "${TARGET}"
 export RUSTUP_TOOLCHAIN="${RUST_TOOLCHAIN}"

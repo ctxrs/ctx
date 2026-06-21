@@ -75,10 +75,10 @@ $summary = [ordered]@{
   version_output = [string]$versionOutput
   work_help_checked = $true
   runtime = [ordered]@{
-    os = $osCaption
+    os_family = "windows"
+    os_caption = $osCaption
     architecture = [string]$env:PROCESSOR_ARCHITECTURE
-    hostname = [string]$env:COMPUTERNAME
-    buildkite_agent = [string]$env:BUILDKITE_AGENT_NAME
+    lane = "cli-windows-x64-smoke"
   }
 }
 $summary | ConvertTo-Json -Depth 8 | Set-Content -Path $summaryPath -Encoding UTF8

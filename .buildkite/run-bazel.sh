@@ -27,7 +27,7 @@ bootstrap_node_deps() {
 
 cd "${REPO_ROOT}"
 
-if [[ -n "${BUILDKITE:-}" && -z "${CTX_E2E_AUTH_TOKEN:-}" ]]; then
+if [[ -n "${BUILDKITE:-}" ]]; then
   export CTX_E2E_AUTH_TOKEN="ctx-buildkite-local-e2e-token"
 fi
 
