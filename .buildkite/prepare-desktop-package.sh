@@ -33,7 +33,7 @@ require_pkg_config_one_of() {
   exit 1
 }
 
-reject_release_signing_env() {
+scrub_release_signing_env() {
   local names=(
     APPLE_API_ISSUER
     APPLE_API_KEY
@@ -54,11 +54,11 @@ reject_release_signing_env() {
   for name in "${names[@]}"; do
     if [[ -n "${!name:-}" ]]; then
       present+=("${name}")
+      unset "${name}"
     fi
   done
   if (( ${#present[@]} > 0 )); then
-    echo "error: desktop release verification package lane refuses signing/notarization/updater env: ${present[*]}" >&2
-    exit 2
+    echo "info: scrubbed signing/notarization/updater env for desktop release verification: ${present[*]}" >&2
   fi
 }
 
@@ -109,7 +109,7 @@ copy_executable() {
   chmod 0755 "${dest}"
 }
 
-reject_release_signing_env
+scrub_release_signing_env
 verify_host_arch
 require_command cargo
 
