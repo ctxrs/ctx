@@ -4923,6 +4923,85 @@ mod tests {
         assert!(matches!(agent_work.command, Commands::Work(_)));
     }
 
+    #[test]
+    fn computed_trust_uses_aggregate_evidence_state() {
+        let workspace_id = WorkspaceId::new();
+        let work = test_work_record(workspace_id);
+        let fresh_pass = test_work_evidence(
+            workspace_id,
+            work.work_id.clone(),
+            WorkEvidenceStatus::ObservedPass,
+            WorkEvidenceFreshness::Fresh,
+        );
+        let stale_pass = test_work_evidence(
+            workspace_id,
+            work.work_id.clone(),
+            WorkEvidenceStatus::ObservedPass,
+            WorkEvidenceFreshness::Stale,
+        );
+        let fail = test_work_evidence(
+            workspace_id,
+            work.work_id.clone(),
+            WorkEvidenceStatus::ObservedFail,
+            WorkEvidenceFreshness::Fresh,
+        );
+
+        assert_eq!(
+            computed_work_trust_verdict(&work, &[fresh_pass]),
+            WorkTrustVerdict::Verified
+        );
+        assert_eq!(
+            computed_work_trust_verdict(&work, &[stale_pass]),
+            WorkTrustVerdict::Stale
+        );
+        assert_eq!(
+            computed_work_trust_verdict(&work, &[fail]),
+            WorkTrustVerdict::Failed
+        );
+        assert_eq!(
+            computed_work_trust_verdict(&work, &[]),
+            WorkTrustVerdict::MissingEvidence
+        );
+    }
+
+    #[test]
+    fn summary_freshness_depends_on_material_revision_key() {
+        let workspace_id = WorkspaceId::new();
+        let work_id = WorkRecordId::new();
+        let now = Utc::now();
+        let fresh = WorkSummary {
+            summary_id: WorkSummaryId::new(),
+            work_id: work_id.clone(),
+            workspace_id,
+            kind: WorkSummaryKind::ReportSummary,
+            audience: WorkSummaryAudience::Reviewer,
+            text: "summary".to_string(),
+            structured_json: None,
+            generation_method: WorkSummaryGenerationMethod::Deterministic,
+            provider: None,
+            model: None,
+            template: None,
+            source_material_left_machine: false,
+            freshness: WorkSummaryFreshness::Fresh,
+            source_revision_key: Some("rev-a".to_string()),
+            generated_at: now,
+            created_at: now,
+            updated_at: now,
+            schema_version: AGENT_WORK_SCHEMA_VERSION,
+        };
+        let mut stale = fresh.clone();
+        stale.source_revision_key = Some("rev-b".to_string());
+
+        assert_eq!(
+            aggregate_summary_freshness(&[fresh], "rev-a"),
+            WorkSummaryFreshness::Fresh
+        );
+        assert_eq!(
+            aggregate_summary_freshness(&[stale], "rev-a"),
+            WorkSummaryFreshness::Stale
+        );
+    }
+
     #[tokio::test]
     async fn schema_without_kind_lists_known_schemas() {
         let mut output = Vec::new();
@@ -5618,12 +5697,12 @@ mod tests {
             .await
             .unwrap();
 
-        let resolved = resolve_workspace_id(&manager, None, Some(&nested_b))
+        let resolved = resolve_workspace(&manager, None, Some(&nested_b))
             .await
             .unwrap();
 
-        assert_ne!(resolved, workspace_a.id);
-        assert_eq!(resolved, workspace_b.id);
+        assert_ne!(resolved.id, workspace_a.id);
+        assert_eq!(resolved.id, workspace_b.id);
     }
 
     #[tokio::test]
@@ -6144,6 +6223,69 @@ mod tests {
             created_at: None,
             updated_at: None,
             schema_version: 1,
+        }
+    }
+
+    fn test_work_record(workspace_id: WorkspaceId) -> WorkRecord {
+        let now = Utc::now();
+        WorkRecord {
+            work_id: WorkRecordId::new(),
+            workspace_id,
+            title: Some("Test Work".to_string()),
+            objective: None,
+            lifecycle: WorkLifecycle::Active,
+            primary_repo_root: None,
+            primary_branch: Some("main".to_string()),
+            base_commit: None,
+            head_commit: Some("abc123".to_string()),
+            current_diff_fingerprint: None,
+            trust_verdict: WorkTrustVerdict::UntrustedLocalCapture,
+            summary_freshness: WorkSummaryFreshness::Missing,
+            metadata_json: None,
+            created_at: now,
+            updated_at: now,
+            schema_version: AGENT_WORK_SCHEMA_VERSION,
+        }
+    }
+
+    fn test_work_evidence(
+        workspace_id: WorkspaceId,
+        work_id: WorkRecordId,
+        status: WorkEvidenceStatus,
+        freshness: WorkEvidenceFreshness,
+    ) -> WorkEvidence {
+        let now = Utc::now();
+        WorkEvidence {
+            evidence_id: WorkEvidenceId::new(),
+            work_id,
+            workspace_id,
+            kind: WorkEvidenceKind::Test,
+            status,
+            freshness,
+            claim: Some("Observed test command".to_string()),
+            command: Some("cargo test".to_string()),
+            argv: vec!["cargo".to_string(), "test".to_string()],
+            cwd: None,
+            exit_code: Some(if status == WorkEvidenceStatus::ObservedFail {
+                1
+            } else {
+                0
+            }),
+            repo_root: None,
+            head_sha: None,
+            branch: None,
+            fingerprint: None,
+            current_fingerprint: None,
+            output_ref: None,
+            artifact_ref: None,
+            source: RecordSource::Worktree,
+            fidelity: RecordFidelity::Exact,
+            trust: Default::default(),
+            started_at: now,
+            finished_at: now,
+            created_at: now,
+            updated_at: now,
+            schema_version: AGENT_WORK_SCHEMA_VERSION,
         }
     }
 

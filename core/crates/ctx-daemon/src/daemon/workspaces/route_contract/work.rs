@@ -795,3 +795,52 @@ fn bounded_redacted_text(value: &str, limit: usize) -> String {
     }
     format!("{}\n[truncated]", &redacted[..end])
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use ctx_core::ids::{WorkEventId, WorkRecordId, WorkspaceId};
+    use ctx_core::models::{
+        RecordFidelity, RecordSource, RecordTrust, WorkActorKind, WorkEventType, WorkRedactionClass,
+    };
+
+    #[test]
+    fn route_work_event_omits_payload_json_by_default() {
+        let now = Utc::now();
+        let event = WorkEvent {
+            event_id: WorkEventId::new(),
+            work_id: WorkRecordId::new(),
+            workspace_id: WorkspaceId::new(),
+            sequence: 1,
+            source_kind: Some("session".to_string()),
+            source_id: Some("session-1".to_string()),
+            event_type: WorkEventType::AssistantMessage,
+            event_time: now,
+            actor_kind: WorkActorKind::Agent,
+            provider: Some("provider".to_string()),
+            harness: Some("harness".to_string()),
+            model: Some("model".to_string()),
+            redaction_class: WorkRedactionClass::LocalRedacted,
+            source: RecordSource::Session,
+            fidelity: RecordFidelity::Summary,
+            trust: RecordTrust::Low,
+            payload_json: Some(json!({
+                "content": "sk-test-raw-secret",
+                "absolute_path": "/home/daddy/private/repo/file.rs"
+            })),
+            redacted_text: Some("safe redacted event".to_string()),
+            artifact_ref: Some(json!({"absolute_path": "/home/daddy/private/output.log"})),
+            created_at: now,
+            schema_version: 1,
+        };
+
+        let value = serde_json::to_value(route_work_event(&event)).unwrap();
+        assert!(value.get("payload_json").is_none());
+        assert!(value.get("artifact_ref").is_none());
+        let serialized = serde_json::to_string(&value).unwrap();
+        assert!(!serialized.contains("sk-test-raw-secret"));
+        assert!(!serialized.contains("/home/daddy/private"));
+        assert!(serialized.contains("safe redacted event"));
+    }
+}
