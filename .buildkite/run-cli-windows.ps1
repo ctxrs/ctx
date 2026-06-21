@@ -50,9 +50,12 @@ if ($actualSha -ne $expectedSha) {
   Fail "ctx.exe sha256 $actualSha did not match artifact manifest $expectedSha"
 }
 
-$versionOutput = & $ctxExe.FullName --version
+$rootHelp = & $ctxExe.FullName --help
 if ($LASTEXITCODE -ne 0) {
-  Fail "ctx.exe --version failed with exit code $LASTEXITCODE"
+  Fail "ctx.exe --help failed with exit code $LASTEXITCODE"
+}
+if (-not ($rootHelp -match "Usage")) {
+  Fail "ctx.exe --help did not look like the root CLI help"
 }
 $workHelp = & $ctxExe.FullName work --help
 if ($LASTEXITCODE -ne 0) {
@@ -72,7 +75,7 @@ try {
 $summary = [ordered]@{
   platform = "windows-x64"
   sha256 = $actualSha
-  version_output = [string]$versionOutput
+  root_help_checked = $true
   work_help_checked = $true
   runtime = [ordered]@{
     os_family = "windows"
@@ -87,4 +90,4 @@ if ($LASTEXITCODE -ne 0) {
   Fail "failed to upload $summaryPath"
 }
 
-Write-Output "validated windows-x64 ctx.exe: $versionOutput"
+Write-Output "validated windows-x64 ctx.exe help and Work CLI"
