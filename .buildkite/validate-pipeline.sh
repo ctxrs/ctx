@@ -88,7 +88,6 @@ required_snippets=(
   "key: \"browser-premerge-e2e\""
   "key: \"release-proof\""
   "key: \"release-artifacts\""
-  "queue: \"main-linux\""
   "queue: \"windows-x64\""
   "queue: \"release-linux-managed\""
   "queue: \"ctx-mac-gui-shared-arm64\""
