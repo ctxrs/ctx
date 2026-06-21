@@ -57,6 +57,8 @@ commands below operate on first-class `wrk_` Work Records.
 ctx work schema
 ctx work list
 ctx work show <id>
+ctx work project session <session-id> --json
+ctx work project task <task-id> --json
 ctx work capture command --tool git --exit-code 0 -- git status
 ctx work link-pr https://github.com/owner/repo/pull/123
 ctx work link-commit <sha>
@@ -84,6 +86,13 @@ They are kept so older local records remain inspectable and movable. Use
 `ctx work evidence`, `ctx work summarize`, `ctx work link-pr`, and
 `ctx work link-commit` for first-class Work Record observability.
 
+Use `ctx work project session <session-id>` or `ctx work project task <task-id>`
+to backfill durable ADE session state into Work records. Projection creates or
+reuses a task-scoped Work record, links the task/session/worktree/run/artifact
+identity, and writes redacted Work events for durable session messages, tool
+activity, artifacts, and subagent relations. It does not reconstruct transient
+stream-only updates that were never persisted.
+
 If `--workspace-id` is omitted, ctx first tries to select the registered
 workspace that contains the current working directory. If that is ambiguous, use
 `--workspace-id`. Use `--data-dir` to point at a specific ctx data root; if
@@ -103,8 +112,12 @@ The P0 Work observability surface is local and CLI-first:
   citations, evidence freshness, and no raw transcript payloads.
 - `ctx work report <work-id> --markdown` renders a reviewer-facing summary of
   trust, evidence, linked changes, and the redacted timeline.
+- The desktop Work Inspector at `/workspaces/:id/work/:work_id` opens the same
+  Work record as a tabbed local review surface for overview, transcript,
+  commands, evidence, timeline, changes, artifacts, context, and redacted JSON.
 - `ctx work evidence <work-id> run -- ...` records an observed local command,
-  its exit status, Git fingerprint, and redacted bounded output.
+  its exit status, Git fingerprint, and bounded share-safe stdout/stderr
+  previews. Raw command output is not indexed into Work search docs.
 - `ctx work evidence <work-id> freshness` compares stored evidence fingerprints
   to the current checkout and marks evidence fresh, stale, partial, or unknown.
 - `ctx work summarize` creates deterministic local summaries with citation
@@ -177,11 +190,18 @@ POST /api/workspaces/:id/work/:work_id/evidence
 POST /api/workspaces/:id/work/:work_id/summaries
 ```
 
-Default route responses are redacted and bounded. Raw transcript payloads,
-arbitrary local files, host roots, and provider-backed summaries are not exposed
-by default. The mutation routes record local observed evidence or local/manual
-summaries; provider-backed LLM summary creation is rejected in this public local
-slice.
+Default route responses are redacted and bounded. The typed Work Inspector route
+adds a whitelist projection for transcript items, command previews, artifacts,
+timeline items, context, and a raw-redacted JSON tab:
+
+```text
+GET  /api/workspaces/:id/work/:work_id/inspector
+```
+
+That route does not expose raw `payload_json`, raw transcript bodies, raw
+stdout/stderr, arbitrary local files, host roots, or provider-backed summaries.
+The mutation routes record local observed evidence or local/manual summaries;
+provider-backed LLM summary creation is rejected in this public local slice.
 
 ## Record Shape
 

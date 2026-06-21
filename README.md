@@ -51,6 +51,7 @@ Use the Work CLI for local records:
 ctx setup workspace .
 ctx work schema
 ctx work list
+ctx work project session <session-id> --json
 ctx work link-pr https://github.com/owner/repo/pull/123
 ctx work search "validation"
 ctx work context <work-id> --json
@@ -62,11 +63,13 @@ ctx work validate work.json
 
 `ctx setup` registers user-local workspaces and can install owned `git`/`gh`
 shims under the ctx data root. `ctx work` covers local schema, validation, list,
-show, import, export, inspect, redaction-preview, best-effort command capture,
-notes, redacted search, bounded agent context packs, reviewer reports, evidence
-freshness, deterministic local summaries, explicit PR/commit linking, and recent
-context. Shim capture is context, not tamper-proof audit; use `ctx work link-pr`
-or `ctx work link-commit` when those durable source-control anchors are known.
+show, import, export, inspect, redaction-preview, ADE session/task projection,
+best-effort command capture, notes, redacted search, bounded agent context
+packs, reviewer reports, evidence freshness, deterministic local summaries,
+explicit PR/commit linking, and recent context. Shim capture is context, not
+tamper-proof audit; use `ctx work link-pr` or `ctx work link-commit` when those
+durable source-control anchors are known. Open `/workspaces/:id/work/:work-id`
+in the desktop app for the tabbed Work Inspector.
 
 ## What ctx Helps You Do
 
@@ -86,6 +89,7 @@ or `ctx work link-commit` when those durable source-control anchors are known.
 | Local data root under `CTX_DATA_ROOT` or `~/.ctx` | Works now |
 | `ctx work` schema/list/show/import/export/validate/inspect/redaction-preview | Works now |
 | `ctx work` search/context/report/timeline/evidence/summarize/index rebuild | Works now locally |
+| `ctx work project session/task` ADE backfill into Work records | Works now for durable stored sessions |
 | `ctx setup` workspace/scratch/status/uninstall | Works now |
 | Best-effort `git`/`gh` shim capture and explicit `ctx work link-pr`/`link-commit` | Works now locally |
 | Local plugin manifest validation/list/reload scan | Works now |

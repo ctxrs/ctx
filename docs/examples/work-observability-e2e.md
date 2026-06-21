@@ -38,6 +38,27 @@ ctx work report --data-dir "$CTX_DATA_ROOT" "$WORK_ID" --markdown > work-report.
 ctx work evidence --data-dir "$CTX_DATA_ROOT" "$WORK_ID" freshness --cwd "$PWD" --json
 ```
 
+If the Work came from an ADE session, backfill durable session state before
+opening the Inspector:
+
+```bash
+ctx work project --data-dir "$CTX_DATA_ROOT" session <session-id> --json
+```
+
+Serve the local desktop UI and open the tabbed Work Inspector:
+
+```bash
+CTX_WEB_DIST=/path/to/ctx/core/apps/web/dist \
+  ctx serve --data-dir "$CTX_DATA_ROOT" --bind 127.0.0.1:4401
+
+# In the browser:
+# http://127.0.0.1:4401/workspaces/<workspace-id>/work/$WORK_ID
+```
+
+The Inspector shows overview, transcript, commands, evidence, timeline, changes,
+artifacts, context, and whitelist redacted JSON. Default surfaces omit raw
+transcripts, raw command output, host roots, and raw artifact paths.
+
 If a disposable private remote is available, push a branch and link the draft PR:
 
 ```bash
