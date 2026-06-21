@@ -26,6 +26,13 @@ Capture defaults:
 
 Priority 1:
 
+- Work Inspector
+  - widths: `1400x900`, `1000x900`, `390x844`
+  - themes: `light`, `dark`
+  - states:
+    - long failing overview with sticky header, metrics, tabs, and right rail
+    - no-evidence mobile state with missing evidence and safe transcript labels
+    - unsafe artifact state where unsafe URLs are suppressed and typed cards remain stable
 - Session thread and composer stack
   - widths: `1400x900`, `900x900`
   - themes: `dark`

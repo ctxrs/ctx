@@ -1,17 +1,17 @@
 use ctx_core::ids::{
-    ChangeSetId, ContributionId, WorkEventId, WorkEvidenceId, WorkRecordId, WorkSearchDocId,
-    WorkSummaryClaimId, WorkSummaryId,
+    ArtifactId, ChangeSetId, ContributionId, SessionId, WorkEventId, WorkEvidenceId, WorkRecordId,
+    WorkSearchDocId, WorkSummaryClaimId, WorkSummaryId,
 };
 use ctx_core::models::{
-    ChangeSet, Contribution, RecordFidelity, RecordSource, RecordTrust, WorkActorKind, WorkEvent,
-    WorkEventType, WorkEvidence, WorkEvidenceFreshness, WorkEvidenceStatus, WorkRecord,
-    WorkRecordLink, WorkRedactionClass, WorkSearchDoc, WorkSummary, WorkSummaryClaim,
-    WorkSummaryFreshness, WorkSummaryGenerationMethod, WorkTrustVerdict,
-    WORK_OBSERVABILITY_SCHEMA_VERSION,
+    Artifact, ChangeSet, Contribution, ContributionEndpoint, PullRequestLink, RecordFidelity,
+    RecordSource, RecordTrust, WorkActorKind, WorkEvent, WorkEventType, WorkEvidence,
+    WorkEvidenceFreshness, WorkEvidenceStatus, WorkLinkTargetKind, WorkRecord, WorkRecordLink,
+    WorkRedactionClass, WorkSearchDoc, WorkSummary, WorkSummaryClaim, WorkSummaryFreshness,
+    WorkSummaryGenerationMethod, WorkTrustVerdict, WORK_OBSERVABILITY_SCHEMA_VERSION,
 };
 use ctx_core::redaction::is_sensitive_key;
 use ctx_route_contracts::workspaces::{
-    WorkspaceRouteParams, WorkspaceWorkArtifactRouteItem,
+    WorkspaceRouteParams, WorkspaceWorkArtifactRenderKind, WorkspaceWorkArtifactRouteItem,
     WorkspaceWorkArtifactSummaryRouteResponse, WorkspaceWorkChangeSummaryRouteResponse,
     WorkspaceWorkCommandPreviewRouteResponse, WorkspaceWorkContextRouteQuery,
     WorkspaceWorkContextRouteResponse, WorkspaceWorkDetailRouteResponse,
@@ -38,6 +38,15 @@ const REPORT_TEXT_LIMIT: usize = 16 * 1024;
 const CONTEXT_TEXT_LIMIT: usize = 6 * 1024;
 const EVENT_TEXT_LIMIT: usize = 8 * 1024;
 const COMMAND_OUTPUT_PREVIEW_LIMIT: usize = 4 * 1024;
+const WORK_PROJECTION_SESSION_REFRESH_LIMIT: usize = 128;
+
+#[derive(Debug, Clone)]
+pub struct WorkspaceWorkArtifactRouteTarget {
+    pub session_id: SessionId,
+    pub artifact_id: ArtifactId,
+    pub mime_type: String,
+    pub name: Option<String>,
+}
 
 impl WorkspaceWorkHandle {
     pub async fn list_workspace_work_for_route(
@@ -128,7 +137,9 @@ impl WorkspaceWorkHandle {
             .existing_workspace_store(workspace_id)
             .await
             .map_err(workspace_store_route_error)?;
-        build_report(&store, workspace_id, WorkRecordId::from_id(work_id)).await
+        let work_id = WorkRecordId::from_id(work_id);
+        refresh_session_linked_work_projection(&store, workspace_id, &work_id).await;
+        build_report(&store, workspace_id, work_id).await
     }
 
     pub async fn get_workspace_work_inspector_for_route(
@@ -141,7 +152,46 @@ impl WorkspaceWorkHandle {
             .existing_workspace_store(workspace_id)
             .await
             .map_err(workspace_store_route_error)?;
-        build_inspector(&store, workspace_id, WorkRecordId::from_id(work_id)).await
+        let work_id = WorkRecordId::from_id(work_id);
+        refresh_session_linked_work_projection(&store, workspace_id, &work_id).await;
+        build_inspector(&store, workspace_id, work_id).await
+    }
+
+    pub async fn resolve_workspace_work_artifact_for_route(
+        &self,
+        params: WorkspaceRouteParams,
+        work_id: String,
+        artifact_id: String,
+    ) -> Result<WorkspaceWorkArtifactRouteTarget, WorkspaceRouteError> {
+        let workspace_id = params.parse_workspace_id()?;
+        let artifact_id = uuid::Uuid::parse_str(artifact_id.trim())
+            .map(ArtifactId)
+            .map_err(|_| WorkspaceRouteError::bad_request("invalid artifact id"))?;
+        let store = self
+            .existing_workspace_store(workspace_id)
+            .await
+            .map_err(workspace_store_route_error)?;
+        let work_id = WorkRecordId::from_id(work_id);
+        let raw = load_work_detail(&store, workspace_id, work_id).await?;
+        let artifact = store
+            .get_artifact(artifact_id)
+            .await
+            .map_err(WorkspaceRouteError::internal)?
+            .filter(|artifact| artifact.workspace_id == workspace_id)
+            .ok_or_else(|| WorkspaceRouteError::not_found("artifact not found"))?;
+
+        if !work_artifact_is_linked(&raw, &artifact) {
+            return Err(WorkspaceRouteError::not_found(
+                "artifact not linked to work",
+            ));
+        }
+
+        Ok(WorkspaceWorkArtifactRouteTarget {
+            session_id: artifact.session_id,
+            artifact_id: artifact.id,
+            mime_type: artifact.mime_type,
+            name: artifact.name,
+        })
     }
 
     pub async fn get_workspace_work_context_for_route(
@@ -777,6 +827,221 @@ fn redact_route_serializable<T: serde::Serialize>(value: &T) -> Value {
         .unwrap_or_else(|_| Value::String("[redacted:unserializable]".to_string()))
 }
 
+fn inspector_change_set_value(change_set: &ChangeSet) -> Value {
+    json!({
+        "id": change_set.id,
+        "source": change_set.source,
+        "fidelity": change_set.fidelity,
+        "trust": change_set.trust,
+        "title": change_set.title.as_deref().map(|text| bounded_redacted_text(text, 1_000)),
+        "summary": change_set.summary.as_deref().map(|text| bounded_redacted_text(text, 2_000)),
+        "base_revision": change_set.base_revision.as_deref().map(|text| bounded_redacted_text(text, 200)),
+        "head_revision": change_set.head_revision.as_deref().map(|text| bounded_redacted_text(text, 200)),
+        "target_branch": change_set.target_branch.as_deref().map(|text| bounded_redacted_text(text, 500)),
+        "fingerprint": change_set.fingerprint.as_ref().map(|fingerprint| json!({
+            "head_sha": fingerprint.head_sha,
+            "branch": fingerprint.branch.as_deref().map(|text| bounded_redacted_text(text, 500)),
+            "patch_sha256": fingerprint.patch_sha256,
+            "status_sha256": fingerprint.status_sha256,
+            "untracked_sha256": fingerprint.untracked_sha256,
+            "changed_paths_sha256": fingerprint.changed_paths_sha256,
+            "dirty": fingerprint.dirty,
+        })),
+        "pull_requests": change_set
+            .pull_requests
+            .iter()
+            .map(inspector_pull_request_link_value)
+            .collect::<Vec<_>>(),
+        "created_at": change_set.created_at,
+        "updated_at": change_set.updated_at,
+        "schema_version": change_set.schema_version,
+    })
+}
+
+fn inspector_contribution_value(contribution: &Contribution) -> Value {
+    json!({
+        "id": contribution.id,
+        "change_set_id": contribution.change_set_id,
+        "subject": inspector_contribution_endpoint_value(&contribution.subject),
+        "target": inspector_contribution_endpoint_value(&contribution.target),
+        "role": contribution.role,
+        "source": contribution.source,
+        "fidelity": contribution.fidelity,
+        "trust": contribution.trust,
+        "summary": contribution.summary.as_deref().map(|text| bounded_redacted_text(text, 2_000)),
+        "fingerprint": contribution.fingerprint.as_ref().map(|fingerprint| json!({
+            "head_sha": fingerprint.head_sha,
+            "branch": fingerprint.branch.as_deref().map(|text| bounded_redacted_text(text, 500)),
+            "patch_sha256": fingerprint.patch_sha256,
+            "status_sha256": fingerprint.status_sha256,
+            "untracked_sha256": fingerprint.untracked_sha256,
+            "changed_paths_sha256": fingerprint.changed_paths_sha256,
+            "dirty": fingerprint.dirty,
+        })),
+        "created_at": contribution.created_at,
+        "updated_at": contribution.updated_at,
+        "schema_version": contribution.schema_version,
+    })
+}
+
+fn inspector_contribution_endpoint_value(endpoint: &ContributionEndpoint) -> Value {
+    match endpoint {
+        ContributionEndpoint::Account { account_id } => json!({
+            "kind": "account",
+            "account_id": account_id,
+        }),
+        ContributionEndpoint::Workspace { workspace_id } => json!({
+            "kind": "workspace",
+            "workspace_id": workspace_id,
+        }),
+        ContributionEndpoint::Task { task_id, id } => json!({
+            "kind": "task",
+            "task_id": task_id,
+            "id": id.as_deref().map(|text| bounded_redacted_text(text, 400)),
+        }),
+        ContributionEndpoint::Session {
+            session_id,
+            provider,
+            id,
+            turn_id,
+            run_id,
+        } => json!({
+            "kind": "session",
+            "session_id": session_id,
+            "provider": provider.as_deref().map(|text| bounded_redacted_text(text, 200)),
+            "id": id.as_deref().map(|text| bounded_redacted_text(text, 400)),
+            "turn_id": turn_id,
+            "run_id": run_id,
+        }),
+        ContributionEndpoint::Run {
+            run_id,
+            id,
+            session_id,
+        } => json!({
+            "kind": "run",
+            "run_id": run_id,
+            "id": id.as_deref().map(|text| bounded_redacted_text(text, 400)),
+            "session_id": session_id,
+        }),
+        ContributionEndpoint::Agent {
+            session_id,
+            run_id,
+            label,
+        } => json!({
+            "kind": "agent",
+            "session_id": session_id,
+            "run_id": run_id,
+            "label": label.as_deref().map(|text| bounded_redacted_text(text, 400)),
+        }),
+        ContributionEndpoint::System { label } => json!({
+            "kind": "system",
+            "label": label.as_deref().map(|text| bounded_redacted_text(text, 400)),
+        }),
+        ContributionEndpoint::Worktree { worktree_id, id } => json!({
+            "kind": "worktree",
+            "worktree_id": worktree_id,
+            "id": id.as_deref().map(|text| bounded_redacted_text(text, 400)),
+        }),
+        ContributionEndpoint::ChangeSet { change_set_id } => json!({
+            "kind": "change_set",
+            "change_set_id": change_set_id,
+        }),
+        ContributionEndpoint::PullRequest { pull_request } => json!({
+            "kind": "pull_request",
+            "pull_request": inspector_pull_request_ref_value(
+                &pull_request.provider,
+                &pull_request.owner,
+                &pull_request.repo,
+                pull_request.number,
+                pull_request.id.as_deref(),
+                pull_request.url.as_deref(),
+                pull_request.title.as_deref(),
+                None,
+            ),
+        }),
+        ContributionEndpoint::Artifact {
+            artifact_id,
+            digest,
+            relative_path,
+        } => json!({
+            "kind": "artifact",
+            "artifact_id": artifact_id,
+            "digest": digest.as_deref().map(|text| bounded_redacted_text(text, 200)),
+            "relative_path": relative_path.as_deref().and_then(safe_relative_display_path),
+        }),
+        ContributionEndpoint::Check { check_id } => json!({
+            "kind": "check",
+            "check_id": bounded_redacted_text(check_id, 400),
+        }),
+        ContributionEndpoint::Evidence { id } => json!({
+            "kind": "evidence",
+            "id": bounded_redacted_text(id, 400),
+        }),
+        ContributionEndpoint::ReviewAttestation { id } => json!({
+            "kind": "review_attestation",
+            "id": bounded_redacted_text(id, 400),
+        }),
+        ContributionEndpoint::Commit { sha } => json!({
+            "kind": "commit",
+            "sha": bounded_redacted_text(sha, 200),
+        }),
+        ContributionEndpoint::Branch { name } => json!({
+            "kind": "branch",
+            "name": bounded_redacted_text(name, 500),
+        }),
+        ContributionEndpoint::File { path, worktree_id } => json!({
+            "kind": "file",
+            "path": safe_relative_display_path(path),
+            "worktree_id": worktree_id,
+        }),
+        ContributionEndpoint::External {
+            source,
+            identifier,
+            url,
+        } => json!({
+            "kind": "external",
+            "source": bounded_redacted_text(source, 200),
+            "identifier": identifier.as_deref().map(|text| bounded_redacted_text(text, 400)),
+            "url": url.as_deref().and_then(safe_http_url_text),
+        }),
+    }
+}
+
+fn inspector_pull_request_link_value(link: &PullRequestLink) -> Value {
+    inspector_pull_request_ref_value(
+        &link.pull_request.provider,
+        &link.pull_request.owner,
+        &link.pull_request.repo,
+        link.pull_request.number,
+        link.pull_request.id.as_deref(),
+        link.url.as_deref().or(link.pull_request.url.as_deref()),
+        link.title.as_deref().or(link.pull_request.title.as_deref()),
+        link.state.as_deref(),
+    )
+}
+
+fn inspector_pull_request_ref_value(
+    provider: &str,
+    owner: &str,
+    repo: &str,
+    number: i64,
+    id: Option<&str>,
+    url: Option<&str>,
+    title: Option<&str>,
+    state: Option<&str>,
+) -> Value {
+    json!({
+        "provider": bounded_redacted_text(provider, 100),
+        "owner": bounded_redacted_text(owner, 200),
+        "repo": bounded_redacted_text(repo, 200),
+        "number": number,
+        "id": id.map(|text| bounded_redacted_text(text, 300)),
+        "url": url.and_then(safe_http_url_text),
+        "title": title.map(|text| bounded_redacted_text(text, 1_000)),
+        "state": state.map(|text| bounded_redacted_text(text, 100)),
+    })
+}
+
 async fn refresh_route_work_trust(
     store: &ctx_store::Store,
     workspace_id: ctx_core::ids::WorkspaceId,
@@ -841,7 +1106,7 @@ async fn build_report(
     workspace_id: ctx_core::ids::WorkspaceId,
     work_id: WorkRecordId,
 ) -> Result<WorkspaceWorkReportRouteResponse, WorkspaceRouteError> {
-    let raw = load_work_detail(store, workspace_id, work_id).await?;
+    let raw = load_work_detail(store, workspace_id, work_id.clone()).await?;
     let route_summaries = raw
         .summaries
         .iter()
@@ -913,7 +1178,7 @@ async fn build_inspector(
     workspace_id: ctx_core::ids::WorkspaceId,
     work_id: WorkRecordId,
 ) -> Result<WorkspaceWorkInspectorRouteResponse, WorkspaceRouteError> {
-    let raw = load_work_detail(store, workspace_id, work_id).await?;
+    let raw = load_work_detail(store, workspace_id, work_id.clone()).await?;
     let route_summaries = raw
         .summaries
         .iter()
@@ -930,11 +1195,15 @@ async fn build_inspector(
     let summary_freshness = aggregate_summary_freshness_refs(&route_summaries, &material_key);
     let trust = trust_summary(&raw.work, &raw.evidence);
     let work = route_work_record(&raw.work, Some(trust.verdict), Some(summary_freshness));
-    let links = raw.links.iter().map(route_work_link).collect::<Vec<_>>();
+    let links = raw
+        .links
+        .iter()
+        .map(route_work_link_metadata_only)
+        .collect::<Vec<_>>();
     let evidence = raw
         .evidence
         .iter()
-        .map(route_work_evidence)
+        .map(route_work_inspector_evidence)
         .collect::<Vec<_>>();
     let change_summary = WorkspaceWorkChangeSummaryRouteResponse {
         change_sets: raw.change_sets.len(),
@@ -945,12 +1214,12 @@ async fn build_inspector(
     let change_sets = raw
         .change_sets
         .iter()
-        .map(redact_route_serializable)
+        .map(inspector_change_set_value)
         .collect::<Vec<_>>();
     let contributions = raw
         .contributions
         .iter()
-        .map(redact_route_serializable)
+        .map(inspector_contribution_value)
         .collect::<Vec<_>>();
     let summaries = route_summaries
         .into_iter()
@@ -969,7 +1238,15 @@ async fn build_inspector(
     let timeline = raw.events.iter().map(route_work_event).collect::<Vec<_>>();
     let transcript = inspector_transcript_items(&raw.events);
     let commands = inspector_command_previews(&raw.evidence);
-    let artifacts = inspector_artifacts(&raw.links, &raw.events, &raw.evidence);
+    let artifacts = inspector_artifacts(
+        store,
+        workspace_id,
+        work_id.clone(),
+        &raw.links,
+        &raw.events,
+        &raw.evidence,
+    )
+    .await?;
     let artifact_summary = WorkspaceWorkArtifactSummaryRouteResponse {
         total: artifacts.len(),
         refs: artifacts
@@ -979,9 +1256,19 @@ async fn build_inspector(
                 safe_json_response(
                     json!({
                         "id": artifact.id,
+                        "artifact_id": artifact.artifact_id,
                         "kind": artifact.kind,
                         "label": artifact.label,
-                        "url": artifact.url,
+                        "display_name": artifact.display_name,
+                        "mime_type": artifact.mime_type,
+                        "bytes": artifact.bytes,
+                        "missing": artifact.missing,
+                        "unavailable_reason": artifact.unavailable_reason,
+                        "render_kind": artifact.render_kind,
+                        "download_url": artifact.download_url,
+                        "open_url": artifact.open_url,
+                        "thumbnail_url": artifact.thumbnail_url,
+                        "preview_url": artifact.preview_url,
                     }),
                     vec![
                         "artifact metadata only; local paths and raw refs are omitted".to_string(),
@@ -1129,6 +1416,90 @@ async fn load_work_detail(
     })
 }
 
+async fn refresh_session_linked_work_projection(
+    store: &ctx_store::Store,
+    workspace_id: ctx_core::ids::WorkspaceId,
+    work_id: &WorkRecordId,
+) {
+    let mut pending = match session_link_ids_for_work(store, workspace_id, work_id).await {
+        Ok(session_ids) => session_ids,
+        Err(error) => {
+            warn_projection_link_list_failed(workspace_id, work_id, &error);
+            return;
+        }
+    };
+    let mut visited = Vec::new();
+
+    while let Some(session_id) = pending.pop() {
+        if visited.contains(&session_id) {
+            continue;
+        }
+        if visited.len() >= WORK_PROJECTION_SESSION_REFRESH_LIMIT {
+            tracing::warn!(
+                work_id = %work_id.0,
+                workspace_id = %workspace_id.0,
+                limit = WORK_PROJECTION_SESSION_REFRESH_LIMIT,
+                "stopped ADE session projection refresh after reaching session limit"
+            );
+            break;
+        }
+        visited.push(session_id);
+
+        if let Err(error) = store.project_session_to_work(session_id).await {
+            tracing::warn!(
+                work_id = %work_id.0,
+                workspace_id = %workspace_id.0,
+                session_id = %session_id.0,
+                "failed to refresh ADE session projection before Work route: {error:#}"
+            );
+        }
+
+        let linked = match session_link_ids_for_work(store, workspace_id, work_id).await {
+            Ok(session_ids) => session_ids,
+            Err(error) => {
+                warn_projection_link_list_failed(workspace_id, work_id, &error);
+                break;
+            }
+        };
+        for linked_session_id in linked {
+            if !visited.contains(&linked_session_id) && !pending.contains(&linked_session_id) {
+                pending.push(linked_session_id);
+            }
+        }
+        pending.sort_by_key(|id| id.0);
+    }
+}
+
+async fn session_link_ids_for_work(
+    store: &ctx_store::Store,
+    workspace_id: ctx_core::ids::WorkspaceId,
+    work_id: &WorkRecordId,
+) -> Result<Vec<SessionId>, anyhow::Error> {
+    let mut session_ids = store
+        .list_work_record_links(workspace_id, work_id.clone())
+        .await?
+        .into_iter()
+        .filter(|link| link.target_kind == WorkLinkTargetKind::Session)
+        .filter_map(|link| link.target_id)
+        .filter_map(|id| uuid::Uuid::parse_str(id.trim()).ok().map(SessionId))
+        .collect::<Vec<_>>();
+    session_ids.sort_by_key(|id| id.0);
+    session_ids.dedup();
+    Ok(session_ids)
+}
+
+fn warn_projection_link_list_failed(
+    workspace_id: ctx_core::ids::WorkspaceId,
+    work_id: &WorkRecordId,
+    error: &anyhow::Error,
+) {
+    tracing::warn!(
+        work_id = %work_id.0,
+        workspace_id = %workspace_id.0,
+        "failed to list Work links before ADE session projection refresh: {error:#}"
+    );
+}
+
 async fn load_work_record(
     store: &ctx_store::Store,
     workspace_id: ctx_core::ids::WorkspaceId,
@@ -1242,20 +1613,12 @@ fn inspector_command_previews(
         .iter()
         .filter(|item| item.command.is_some() || !item.argv.is_empty())
         .map(|item| {
-            let stdout_preview = item
-                .output_ref
-                .as_ref()
-                .and_then(|value| safe_output_preview(value, "stdout_redacted"));
-            let stderr_preview = item
-                .output_ref
-                .as_ref()
-                .and_then(|value| safe_output_preview(value, "stderr_redacted"));
-            let output_truncated = item
-                .output_ref
-                .as_ref()
-                .and_then(|value| value.get("truncated"))
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
+            let output_ref = item.output_ref.as_ref();
+            let stdout_preview =
+                output_ref.and_then(|value| safe_output_preview(value, "stdout_redacted"));
+            let stderr_preview =
+                output_ref.and_then(|value| safe_output_preview(value, "stderr_redacted"));
+            let output_truncated = output_ref_bool(output_ref, "truncated");
             WorkspaceWorkCommandPreviewRouteResponse {
                 evidence_id: item.evidence_id.clone(),
                 id: item.evidence_id.0.clone(),
@@ -1279,7 +1642,14 @@ fn inspector_command_previews(
                 stdout_preview,
                 stderr_preview,
                 output_truncated,
-                output_ref: item.output_ref.as_ref().map(redact_route_value),
+                preview_limit_bytes: output_ref_i64(output_ref, "preview_limit_bytes"),
+                stdout_size_bytes: output_ref_i64(output_ref, "stdout_size_bytes"),
+                stderr_size_bytes: output_ref_i64(output_ref, "stderr_size_bytes"),
+                stdout_sha256: output_ref_sha256(output_ref, "stdout_sha256"),
+                stderr_sha256: output_ref_sha256(output_ref, "stderr_sha256"),
+                stdout_truncated: output_ref_bool(output_ref, "stdout_truncated"),
+                stderr_truncated: output_ref_bool(output_ref, "stderr_truncated"),
+                output_ref: None,
                 started_at: Some(item.started_at),
                 finished_at: Some(item.finished_at),
             }
@@ -1287,65 +1657,297 @@ fn inspector_command_previews(
         .collect()
 }
 
-fn inspector_artifacts(
+async fn inspector_artifacts(
+    store: &ctx_store::Store,
+    workspace_id: ctx_core::ids::WorkspaceId,
+    work_id: WorkRecordId,
     links: &[WorkRecordLink],
     events: &[WorkEvent],
     evidence: &[WorkEvidence],
-) -> Vec<WorkspaceWorkArtifactRouteItem> {
+) -> Result<Vec<WorkspaceWorkArtifactRouteItem>, WorkspaceRouteError> {
     let mut artifacts = Vec::new();
     for item in evidence {
-        if let Some(reference) = item.artifact_ref.as_ref().map(redact_route_value) {
-            artifacts.push(WorkspaceWorkArtifactRouteItem {
-                id: item.evidence_id.0.clone(),
-                kind: Some(enum_json_label(&item.kind)),
-                label: item
-                    .claim
-                    .as_deref()
-                    .or(item.command.as_deref())
-                    .map(|text| bounded_redacted_text(text, 300)),
-                url: extract_safe_url(&reference),
-                path: extract_safe_relative_path(&reference),
-                reference: Some(reference),
-                created_at: Some(item.created_at),
-            });
+        if item.artifact_ref.is_some() {
+            artifacts.push(
+                work_artifact_route_item(
+                    store,
+                    workspace_id,
+                    &work_id,
+                    ArtifactRouteSource {
+                        id: item.evidence_id.0.clone(),
+                        source_kind: "evidence",
+                        source_id: Some(item.evidence_id.0.clone()),
+                        kind: Some(enum_json_label(&item.kind)),
+                        label: item
+                            .claim
+                            .as_deref()
+                            .or(item.command.as_deref())
+                            .map(|text| bounded_redacted_text(text, 300)),
+                        artifact_id: item.artifact_ref.as_ref().and_then(extract_artifact_id),
+                        created_at: Some(item.created_at),
+                    },
+                )
+                .await?,
+            );
         }
     }
     for event in events {
-        if let Some(reference) = event.artifact_ref.as_ref().map(redact_route_value) {
-            artifacts.push(WorkspaceWorkArtifactRouteItem {
-                id: event.event_id.0.clone(),
-                kind: Some(enum_json_label(&event.event_type)),
-                label: event
-                    .redacted_text
-                    .as_deref()
-                    .map(|text| bounded_redacted_text(text, 300)),
-                url: extract_safe_url(&reference),
-                path: extract_safe_relative_path(&reference),
-                reference: Some(reference),
-                created_at: Some(event.created_at),
-            });
+        if event.artifact_ref.is_some() {
+            artifacts.push(
+                work_artifact_route_item(
+                    store,
+                    workspace_id,
+                    &work_id,
+                    ArtifactRouteSource {
+                        id: event.event_id.0.clone(),
+                        source_kind: "event",
+                        source_id: Some(event.event_id.0.clone()),
+                        kind: Some(enum_json_label(&event.event_type)),
+                        label: event
+                            .redacted_text
+                            .as_deref()
+                            .map(|text| bounded_redacted_text(text, 300)),
+                        artifact_id: event.artifact_ref.as_ref().and_then(extract_artifact_id),
+                        created_at: Some(event.created_at),
+                    },
+                )
+                .await?,
+            );
         }
     }
     for link in links {
-        if link.target_kind == ctx_core::models::WorkLinkTargetKind::Artifact {
-            let reference = link.target_json.as_ref().map(redact_route_value);
-            artifacts.push(WorkspaceWorkArtifactRouteItem {
-                id: link.link_id.0.clone(),
-                kind: Some("artifact".to_string()),
-                label: link
-                    .target_id
-                    .as_deref()
-                    .map(|text| bounded_redacted_text(text, 300)),
-                url: reference.as_ref().and_then(extract_safe_url),
-                path: reference.as_ref().and_then(extract_safe_relative_path),
-                reference,
-                created_at: Some(link.created_at),
-            });
+        if link.target_kind == WorkLinkTargetKind::Artifact {
+            artifacts.push(
+                work_artifact_route_item(
+                    store,
+                    workspace_id,
+                    &work_id,
+                    ArtifactRouteSource {
+                        id: link.link_id.0.clone(),
+                        source_kind: "link",
+                        source_id: Some(link.link_id.0.clone()),
+                        kind: Some("artifact".to_string()),
+                        label: link
+                            .target_json
+                            .as_ref()
+                            .and_then(|value| value.get("name"))
+                            .and_then(Value::as_str)
+                            .or(link.target_id.as_deref())
+                            .map(|text| bounded_redacted_text(text, 300)),
+                        artifact_id: link.target_id.as_deref().and_then(parse_artifact_id_string),
+                        created_at: Some(link.created_at),
+                    },
+                )
+                .await?,
+            );
         }
     }
     artifacts.sort_by(|left, right| left.id.cmp(&right.id));
     artifacts.dedup_by(|left, right| left.id == right.id);
-    artifacts
+    Ok(artifacts)
+}
+
+struct ArtifactRouteSource {
+    id: String,
+    source_kind: &'static str,
+    source_id: Option<String>,
+    kind: Option<String>,
+    label: Option<String>,
+    artifact_id: Option<ArtifactId>,
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+async fn work_artifact_route_item(
+    store: &ctx_store::Store,
+    workspace_id: ctx_core::ids::WorkspaceId,
+    work_id: &WorkRecordId,
+    source: ArtifactRouteSource,
+) -> Result<WorkspaceWorkArtifactRouteItem, WorkspaceRouteError> {
+    let Some(artifact_id) = source.artifact_id else {
+        return Ok(unavailable_work_artifact_item(
+            source,
+            "artifact reference does not include a session artifact id",
+        ));
+    };
+
+    let Some(artifact) = store
+        .get_artifact(artifact_id)
+        .await
+        .map_err(WorkspaceRouteError::internal)?
+        .filter(|artifact| artifact.workspace_id == workspace_id)
+    else {
+        return Ok(unavailable_work_artifact_item(
+            ArtifactRouteSource {
+                artifact_id: Some(artifact_id),
+                ..source
+            },
+            "artifact metadata unavailable",
+        ));
+    };
+
+    Ok(available_work_artifact_item(
+        workspace_id,
+        work_id,
+        source,
+        artifact,
+    ))
+}
+
+fn available_work_artifact_item(
+    workspace_id: ctx_core::ids::WorkspaceId,
+    work_id: &WorkRecordId,
+    source: ArtifactRouteSource,
+    artifact: Artifact,
+) -> WorkspaceWorkArtifactRouteItem {
+    let render_kind = artifact_render_kind(&artifact.mime_type);
+    let route_url = format!(
+        "/api/workspaces/{}/work/{}/artifacts/{}",
+        workspace_id.0, work_id.0, artifact.id.0
+    );
+    let is_missing = artifact.missing.unwrap_or(false);
+    let usable =
+        !is_missing && !matches!(render_kind, WorkspaceWorkArtifactRenderKind::Unavailable);
+    let thumbnail_url = matches!(render_kind, WorkspaceWorkArtifactRenderKind::RasterImage)
+        .then(|| route_url.clone());
+    let preview_url = matches!(
+        render_kind,
+        WorkspaceWorkArtifactRenderKind::RasterImage | WorkspaceWorkArtifactRenderKind::Text
+    )
+    .then(|| route_url.clone());
+
+    WorkspaceWorkArtifactRouteItem {
+        id: source.id,
+        artifact_id: Some(artifact.id.0.to_string()),
+        source_kind: Some(source.source_kind.to_string()),
+        source_id: source.source_id,
+        kind: source.kind,
+        label: source.label,
+        display_name: artifact
+            .name
+            .as_deref()
+            .map(|text| bounded_redacted_text(text, 300)),
+        mime_type: Some(bounded_redacted_text(&artifact.mime_type, 200)),
+        bytes: Some(artifact.bytes),
+        missing: is_missing,
+        unavailable_reason: is_missing
+            .then(|| "artifact file is missing or unavailable".to_string()),
+        render_kind,
+        download_url: usable.then(|| route_url.clone()),
+        open_url: usable.then(|| route_url.clone()),
+        thumbnail_url: usable.then_some(()).and(thumbnail_url),
+        preview_url: usable.then_some(()).and(preview_url),
+        created_at: Some(artifact.created_at),
+    }
+}
+
+fn unavailable_work_artifact_item(
+    source: ArtifactRouteSource,
+    reason: impl Into<String>,
+) -> WorkspaceWorkArtifactRouteItem {
+    WorkspaceWorkArtifactRouteItem {
+        id: source.id,
+        artifact_id: source.artifact_id.map(|id| id.0.to_string()),
+        source_kind: Some(source.source_kind.to_string()),
+        source_id: source.source_id,
+        kind: source.kind,
+        label: source.label,
+        display_name: None,
+        mime_type: None,
+        bytes: None,
+        missing: true,
+        unavailable_reason: Some(reason.into()),
+        render_kind: WorkspaceWorkArtifactRenderKind::Unavailable,
+        download_url: None,
+        open_url: None,
+        thumbnail_url: None,
+        preview_url: None,
+        created_at: source.created_at,
+    }
+}
+
+fn artifact_render_kind(mime_type: &str) -> WorkspaceWorkArtifactRenderKind {
+    let mime = mime_type
+        .split(';')
+        .next()
+        .unwrap_or(mime_type)
+        .trim()
+        .to_ascii_lowercase();
+    match mime.as_str() {
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp" => {
+            WorkspaceWorkArtifactRenderKind::RasterImage
+        }
+        "text/plain" | "text/markdown" | "application/json" | "text/csv" => {
+            WorkspaceWorkArtifactRenderKind::Text
+        }
+        "text/html" | "image/svg+xml" => WorkspaceWorkArtifactRenderKind::DownloadOnly,
+        _ => WorkspaceWorkArtifactRenderKind::DownloadOnly,
+    }
+}
+
+fn extract_artifact_id(value: &Value) -> Option<ArtifactId> {
+    for key in ["artifact_id", "id"] {
+        if let Some(id) = value
+            .get(key)
+            .and_then(Value::as_str)
+            .and_then(parse_artifact_id_string)
+        {
+            return Some(id);
+        }
+    }
+    None
+}
+
+fn parse_artifact_id_string(value: &str) -> Option<ArtifactId> {
+    uuid::Uuid::parse_str(value.trim()).ok().map(ArtifactId)
+}
+
+fn work_artifact_is_linked(raw: &RawWorkDetail, artifact: &Artifact) -> bool {
+    raw.links.iter().any(|link| match link.target_kind {
+        WorkLinkTargetKind::Artifact => link
+            .target_id
+            .as_deref()
+            .and_then(parse_artifact_id_string)
+            .is_some_and(|id| id == artifact.id),
+        WorkLinkTargetKind::Session => link
+            .target_id
+            .as_deref()
+            .and_then(parse_session_id_string)
+            .is_some_and(|id| id == artifact.session_id),
+        _ => false,
+    }) || raw
+        .evidence
+        .iter()
+        .any(|evidence| artifact_ref_matches(evidence.artifact_ref.as_ref(), artifact))
+        || raw
+            .events
+            .iter()
+            .any(|event| artifact_ref_matches(event.artifact_ref.as_ref(), artifact))
+        || raw.events.iter().any(|event| {
+            event.event_type == WorkEventType::ArtifactCreated
+                && event
+                    .source_id
+                    .as_deref()
+                    .and_then(parse_artifact_id_string)
+                    .is_some_and(|id| id == artifact.id)
+        })
+}
+
+fn artifact_ref_matches(value: Option<&Value>, artifact: &Artifact) -> bool {
+    let Some(value) = value else {
+        return false;
+    };
+    if extract_artifact_id(value) != Some(artifact.id) {
+        return false;
+    }
+    value
+        .get("session_id")
+        .and_then(Value::as_str)
+        .and_then(parse_session_id_string)
+        .is_none_or(|session_id| session_id == artifact.session_id)
+}
+
+fn parse_session_id_string(value: &str) -> Option<SessionId> {
+    uuid::Uuid::parse_str(value.trim()).ok().map(SessionId)
 }
 
 fn inspector_timeline_items(
@@ -1469,9 +2071,19 @@ fn inspector_context_value(
         "artifacts": artifacts.iter().take(16).map(|artifact| {
             json!({
                 "id": artifact.id,
+                "artifact_id": artifact.artifact_id,
                 "kind": artifact.kind,
                 "label": artifact.label,
-                "url": artifact.url,
+                "display_name": artifact.display_name,
+                "mime_type": artifact.mime_type,
+                "bytes": artifact.bytes,
+                "missing": artifact.missing,
+                "unavailable_reason": artifact.unavailable_reason,
+                "render_kind": artifact.render_kind,
+                "download_url": artifact.download_url,
+                "open_url": artifact.open_url,
+                "thumbnail_url": artifact.thumbnail_url,
+                "preview_url": artifact.preview_url,
             })
         }).collect::<Vec<_>>(),
         "duplicate_strong_links": duplicate_strong_links,
@@ -1497,45 +2109,64 @@ fn safe_output_preview(value: &Value, key: &str) -> Option<String> {
         .map(|text| bounded_redacted_text(text, COMMAND_OUTPUT_PREVIEW_LIMIT))
 }
 
-fn enum_json_label<T: serde::Serialize>(value: &T) -> String {
-    serde_json::to_value(value)
-        .ok()
-        .and_then(|value| value.as_str().map(ToOwned::to_owned))
-        .unwrap_or_else(|| "unknown".to_string())
+fn output_ref_i64(value: Option<&Value>, key: &str) -> Option<i64> {
+    let value = value?.get(key)?;
+    value_i64(value)
 }
 
-fn extract_safe_url(value: &Value) -> Option<String> {
-    let object = value.as_object()?;
-    for key in ["url", "download_url", "thumbnail_url", "href"] {
-        if let Some(text) = object.get(key).and_then(Value::as_str) {
-            if let Some(url) = safe_http_url(text) {
-                return Some(url);
-            }
-        }
+fn value_i64(value: &Value) -> Option<i64> {
+    if let Some(number) = value.as_i64() {
+        return Some(number.max(0));
     }
-    None
-}
-
-fn extract_safe_relative_path(value: &Value) -> Option<String> {
-    let object = value.as_object()?;
-    for key in ["relative_path", "display_path", "name"] {
-        if let Some(text) = object.get(key).and_then(Value::as_str) {
-            let text = text.trim();
-            if !text.is_empty()
-                && !text.starts_with('/')
-                && !text.contains('\\')
-                && !text.contains("..")
-            {
-                return Some(bounded_redacted_text(text, 500));
-            }
-        }
+    if let Some(number) = value.as_u64() {
+        return i64::try_from(number).ok();
     }
-    None
+    value
+        .as_str()
+        .and_then(|text| text.trim().parse::<i64>().ok())
+        .map(|number| number.max(0))
+        .or_else(|| {
+            value
+                .as_f64()
+                .filter(|number| number.is_finite() && *number >= 0.0)
+                .map(|number| number as i64)
+        })
 }
 
-fn safe_http_url(value: &str) -> Option<String> {
+fn output_ref_bool(value: Option<&Value>, key: &str) -> bool {
+    value
+        .and_then(|value| value.get(key))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn output_ref_sha256(value: Option<&Value>, key: &str) -> Option<String> {
+    let text = value?.get(key)?.as_str()?.trim();
+    if text.len() == 64 && text.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        Some(text.to_ascii_lowercase())
+    } else {
+        None
+    }
+}
+
+fn safe_relative_display_path(value: &str) -> Option<String> {
     let value = value.trim();
-    if value.chars().any(char::is_control) {
+    if value.is_empty()
+        || value.starts_with('/')
+        || value.contains('\\')
+        || value
+            .split('/')
+            .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+        || value.chars().any(char::is_control)
+    {
+        return None;
+    }
+    Some(bounded_redacted_text(value, 1_000))
+}
+
+fn safe_http_url_text(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() || value.chars().any(char::is_control) {
         return None;
     }
     if value.starts_with("https://") || value.starts_with("http://") {
@@ -1543,6 +2174,13 @@ fn safe_http_url(value: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+fn enum_json_label<T: serde::Serialize>(value: &T) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 fn route_work_record(
@@ -1595,6 +2233,12 @@ fn route_work_link(link: &WorkRecordLink) -> WorkspaceWorkLinkRouteItem {
         updated_at: link.updated_at,
         schema_version: link.schema_version,
     }
+}
+
+fn route_work_link_metadata_only(link: &WorkRecordLink) -> WorkspaceWorkLinkRouteItem {
+    let mut item = route_work_link(link);
+    item.target_json = None;
+    item
 }
 
 fn route_work_event(event: &WorkEvent) -> WorkspaceWorkEventRouteItem {
@@ -1666,6 +2310,13 @@ fn route_work_evidence(evidence: &WorkEvidence) -> WorkspaceWorkEvidenceRouteIte
         updated_at: evidence.updated_at,
         schema_version: evidence.schema_version,
     }
+}
+
+fn route_work_inspector_evidence(evidence: &WorkEvidence) -> WorkspaceWorkEvidenceRouteItem {
+    let mut item = route_work_evidence(evidence);
+    item.output_ref = None;
+    item.artifact_ref = None;
+    item
 }
 
 fn route_work_summary(
@@ -1902,19 +2553,66 @@ fn pull_request_links(links: &[WorkRecordLink]) -> Vec<Value> {
     links
         .iter()
         .filter(|link| link.target_kind == ctx_core::models::WorkLinkTargetKind::PullRequest)
-        .filter_map(|link| {
-            link.target_json
-                .as_ref()
-                .map(redact_route_value)
-                .or_else(|| {
-                    link.target_id.as_deref().map(|target_id| {
-                        json!({
-                            "target_id": bounded_redacted_text(target_id, 400)
-                        })
-                    })
-                })
-        })
+        .filter_map(inspector_pull_request_work_link_value)
         .collect()
+}
+
+fn inspector_pull_request_work_link_value(link: &WorkRecordLink) -> Option<Value> {
+    let target = link.target_json.as_ref()?.as_object()?;
+    let nested = target
+        .get("pull_request")
+        .and_then(Value::as_object)
+        .unwrap_or(target);
+    let provider = nested
+        .get("provider")
+        .and_then(Value::as_str)
+        .or_else(|| target.get("provider").and_then(Value::as_str))
+        .unwrap_or("unknown");
+    let owner = nested
+        .get("owner")
+        .and_then(Value::as_str)
+        .or_else(|| target.get("owner").and_then(Value::as_str))
+        .unwrap_or("unknown");
+    let repo = nested
+        .get("repo")
+        .and_then(Value::as_str)
+        .or_else(|| target.get("repo").and_then(Value::as_str))
+        .unwrap_or("unknown");
+    let number = nested
+        .get("number")
+        .or_else(|| target.get("number"))
+        .and_then(value_i64)
+        .or_else(|| {
+            link.target_id
+                .as_deref()
+                .and_then(|text| text.rsplit('#').next())
+                .and_then(|text| text.parse::<i64>().ok())
+        })
+        .unwrap_or_default();
+    Some(inspector_pull_request_ref_value(
+        provider,
+        owner,
+        repo,
+        number,
+        nested
+            .get("id")
+            .and_then(Value::as_str)
+            .or_else(|| target.get("id").and_then(Value::as_str)),
+        nested
+            .get("url")
+            .and_then(Value::as_str)
+            .or_else(|| target.get("url").and_then(Value::as_str))
+            .or_else(|| nested.get("html_url").and_then(Value::as_str))
+            .or_else(|| target.get("html_url").and_then(Value::as_str)),
+        nested
+            .get("title")
+            .and_then(Value::as_str)
+            .or_else(|| target.get("title").and_then(Value::as_str)),
+        nested
+            .get("state")
+            .and_then(Value::as_str)
+            .or_else(|| target.get("state").and_then(Value::as_str)),
+    ))
 }
 
 fn commit_links(links: &[WorkRecordLink]) -> Vec<String> {

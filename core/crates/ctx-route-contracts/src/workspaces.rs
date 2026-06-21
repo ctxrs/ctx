@@ -32,7 +32,7 @@ pub use responses::{
     WorkspaceAgentWorkRouteQuery, WorkspaceAgentWorkRouteResponse,
     WorkspaceAttachmentRouteResponse, WorkspaceHarnessContainerMountModeRouteValue,
     WorkspaceHarnessContainerNetworkModeRouteValue, WorkspaceHarnessContainerStatusRouteResponse,
-    WorkspaceRouteResponse, WorkspaceWorkArtifactRouteItem,
+    WorkspaceRouteResponse, WorkspaceWorkArtifactRenderKind, WorkspaceWorkArtifactRouteItem,
     WorkspaceWorkArtifactSummaryRouteResponse, WorkspaceWorkChangeSummaryRouteResponse,
     WorkspaceWorkCommandPreviewRouteResponse, WorkspaceWorkContextRouteQuery,
     WorkspaceWorkContextRouteResponse, WorkspaceWorkDetailRouteResponse,

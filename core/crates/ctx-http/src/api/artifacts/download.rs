@@ -6,7 +6,7 @@ use ctx_daemon::daemon::SessionArtifactsHandle;
 use ctx_session_artifacts::route_contract::SessionArtifactDownloadRouteParams;
 
 #[path = "download/response.rs"]
-mod response;
+pub(in crate::api) mod response;
 
 pub(in crate::api) async fn get_session_artifact(
     State(state): State<SessionArtifactsHandle>,

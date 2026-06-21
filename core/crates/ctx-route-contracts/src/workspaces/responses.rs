@@ -408,6 +408,20 @@ pub struct WorkspaceWorkCommandPreviewRouteResponse {
     #[serde(default)]
     pub output_truncated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_limit_bytes: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout_size_bytes: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr_size_bytes: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr_sha256: Option<String>,
+    #[serde(default)]
+    pub stdout_truncated: bool,
+    #[serde(default)]
+    pub stderr_truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_ref: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<DateTime<Utc>>,
@@ -416,18 +430,46 @@ pub struct WorkspaceWorkCommandPreviewRouteResponse {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceWorkArtifactRenderKind {
+    RasterImage,
+    Text,
+    DownloadOnly,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct WorkspaceWorkArtifactRouteItem {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
+    pub display_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "ref")]
-    pub reference: Option<Value>,
+    pub mime_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<i64>,
+    #[serde(default)]
+    pub missing: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
+    pub render_kind: WorkspaceWorkArtifactRenderKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<DateTime<Utc>>,
 }
@@ -595,7 +637,9 @@ pub struct WorkspaceWorkEvidenceRouteItem {
     pub exit_code: Option<i32>,
     pub head_sha: Option<String>,
     pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_ref: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_ref: Option<Value>,
     pub source: RecordSource,
     pub fidelity: RecordFidelity,

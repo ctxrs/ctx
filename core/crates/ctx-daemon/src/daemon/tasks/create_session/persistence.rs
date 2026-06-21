@@ -103,5 +103,14 @@ pub(super) async fn persist_created_session(
             .await;
     }
 
+    if let Err(error) = store.project_session_to_work(session.id).await {
+        tracing::warn!(
+            session_id = %session.id.0,
+            task_id = %task.id.0,
+            workspace_id = %task.workspace_id.0,
+            "failed to project created ADE session into Work records: {error:#}"
+        );
+    }
+
     Ok(session)
 }

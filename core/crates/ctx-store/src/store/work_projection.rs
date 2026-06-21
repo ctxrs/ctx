@@ -1,9 +1,7 @@
 use super::*;
 
-const PROJECTOR_SOURCE_KIND: &str = "ade_session_projector";
-const PROJECTOR_EVENT_BASE_SEQUENCE: i64 = 4_000_000_000_000_000_000;
-const PROJECTOR_EVENT_SEQUENCE_SPAN: u64 = 1_000_000_000_000_000_000;
 const PROJECTOR_TEXT_LIMIT: usize = 8 * 1024;
+const PROJECTOR_SEQUENCE_TIE_SPAN: i64 = 100_000;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WorkProjectionResult {
@@ -178,13 +176,16 @@ impl Store {
             self.upsert_work_record_link(&link).await?;
             result.links += 1;
 
+            let source_kind = "session_artifact";
+            let source_id = artifact.id.0.to_string();
+            let sequence = stable_projector_sequence(artifact.created_at, &source_id);
             self.append_work_event(&WorkEvent {
-                event_id: stable_work_event_id(&format!("artifact:{}", artifact.id.0)),
+                event_id: stable_work_event_id(&work_id, source_kind, &source_id, sequence),
                 work_id: work_id.clone(),
                 workspace_id: session.workspace_id,
-                sequence: stable_projector_sequence(&format!("artifact:{}", artifact.id.0)),
-                source_kind: Some(PROJECTOR_SOURCE_KIND.to_string()),
-                source_id: Some(artifact.id.0.to_string()),
+                sequence,
+                source_kind: Some(source_kind.to_string()),
+                source_id: Some(source_id),
                 event_type: WorkEventType::ArtifactCreated,
                 event_time: artifact.created_at,
                 actor_kind: WorkActorKind::Agent,
@@ -217,16 +218,16 @@ impl Store {
             .list_subagent_invocations_for_session(session.id, None)
             .await?
         {
+            let source_kind = "subagent_invocation";
+            let source_id = invocation.id.clone();
+            let sequence = stable_projector_sequence(invocation.updated_at, &source_id);
             self.append_work_event(&WorkEvent {
-                event_id: stable_work_event_id(&format!("subagent_invocation:{}", invocation.id)),
+                event_id: stable_work_event_id(&work_id, source_kind, &source_id, sequence),
                 work_id: work_id.clone(),
                 workspace_id: session.workspace_id,
-                sequence: stable_projector_sequence(&format!(
-                    "subagent_invocation:{}",
-                    invocation.id
-                )),
-                source_kind: Some(PROJECTOR_SOURCE_KIND.to_string()),
-                source_id: Some(invocation.id.clone()),
+                sequence,
+                source_kind: Some(source_kind.to_string()),
+                source_id: Some(source_id),
                 event_type: WorkEventType::Session,
                 event_time: invocation.updated_at,
                 actor_kind: WorkActorKind::Subagent,
@@ -301,23 +302,31 @@ fn stable_work_link_id(
     ))
 }
 
-fn stable_work_event_id(source_id: &str) -> WorkEventId {
-    WorkEventId::from_id(format!(
-        "wev_ade_{}",
-        source_id
-            .chars()
-            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
-            .collect::<String>()
-    ))
+fn stable_work_event_id(
+    work_id: &WorkRecordId,
+    source_kind: &str,
+    source_id: &str,
+    sequence: i64,
+) -> WorkEventId {
+    let material = format!("{}:{source_kind}:{source_id}:{sequence}", work_id.0);
+    WorkEventId::from_id(format!("wev_ade_{:016x}", stable_u64(&material)))
 }
 
-fn stable_projector_sequence(source_id: &str) -> i64 {
+fn stable_projector_sequence(event_time: DateTime<Utc>, source_id: &str) -> i64 {
+    let hash = stable_u64(source_id);
+    event_time
+        .timestamp_millis()
+        .saturating_mul(PROJECTOR_SEQUENCE_TIE_SPAN)
+        .saturating_add((hash % PROJECTOR_SEQUENCE_TIE_SPAN as u64) as i64)
+}
+
+fn stable_u64(value: &str) -> u64 {
     let mut hash = 0xcbf29ce484222325_u64;
-    for byte in source_id.as_bytes() {
+    for byte in value.as_bytes() {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x100000001b3);
     }
-    PROJECTOR_EVENT_BASE_SEQUENCE + (hash % PROJECTOR_EVENT_SEQUENCE_SPAN) as i64
+    hash
 }
 
 fn projection_link(
@@ -388,15 +397,18 @@ fn session_state_events(
     } else {
         WorkActorKind::Agent
     };
+    let source_kind = "session_state";
+    let source_id = session.id.0.to_string();
+    let sequence = stable_projector_sequence(session.created_at, &source_id);
     vec![WorkEvent {
-        event_id: stable_work_event_id(&format!("session_state:{}", session.id.0)),
+        event_id: stable_work_event_id(work_id, source_kind, &source_id, sequence),
         work_id: work_id.clone(),
         workspace_id: session.workspace_id,
-        sequence: stable_projector_sequence(&format!("session_state:{}", session.id.0)),
-        source_kind: Some(PROJECTOR_SOURCE_KIND.to_string()),
-        source_id: Some(session.id.0.to_string()),
+        sequence,
+        source_kind: Some(source_kind.to_string()),
+        source_id: Some(source_id),
         event_type: WorkEventType::Session,
-        event_time: session.updated_at,
+        event_time: session.created_at,
         actor_kind,
         provider: Some(session.provider_id.clone()),
         harness: Some(session.agent_role.clone()),
@@ -449,13 +461,17 @@ fn projected_session_event(
     };
 
     let redacted_text = event_redacted_text(event);
+    let source_kind = "session_event";
+    let source_id = event.id.0.to_string();
+    let sequence =
+        stable_projector_sequence(event.created_at, &format!("{}:{}", event.seq, event.id.0));
     Some(WorkEvent {
-        event_id: stable_work_event_id(&format!("session_event:{}", event.id.0)),
+        event_id: stable_work_event_id(work_id, source_kind, &source_id, sequence),
         work_id: work_id.clone(),
         workspace_id: session.workspace_id,
-        sequence: event.seq,
-        source_kind: Some("session_event".to_string()),
-        source_id: Some(event.id.0.to_string()),
+        sequence,
+        source_kind: Some(source_kind.to_string()),
+        source_id: Some(source_id),
         event_type,
         event_time: event.created_at,
         actor_kind,
@@ -518,6 +534,7 @@ fn lifecycle_from_task_status(status: &TaskStatus) -> WorkLifecycle {
 
 fn bounded_redacted_text(value: &str, limit: usize) -> String {
     let redacted = redact_local_paths(ctx_core::redaction::redact_sensitive(value));
+    let redacted = ctx_core::models::normalize_archive_text(&redacted).text;
     if redacted.len() <= limit {
         return redacted;
     }

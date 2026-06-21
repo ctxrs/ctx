@@ -794,6 +794,9 @@ async fn capture_command(args: AgentWorkCaptureCommandArgs, writer: &mut dyn Wri
     if let Some(reason) = captured_command_denial_reason(tool, &argv) {
         bail!("refusing to capture {} command: {reason}", tool.as_str());
     }
+    if let Some(reason) = captured_command_allowlist_denial_reason(tool, &argv, exit_code) {
+        bail!("refusing to capture {} command: {reason}", tool.as_str());
+    }
     let cwd = cwd.unwrap_or(std::env::current_dir()?);
     let context = open_work_store_for_path(&store, Some(&cwd)).await?;
     let facts = git_facts(&cwd);
@@ -802,7 +805,14 @@ async fn capture_command(args: AgentWorkCaptureCommandArgs, writer: &mut dyn Wri
     } else {
         None
     };
-    let work = if let Some(pr) = pr.as_ref() {
+    let git_command = git_subcommand(&argv);
+    let work = if tool == AgentWorkCaptureTool::Git && git_command == Some("commit") {
+        if let Some(head_sha) = facts.head_sha.as_deref() {
+            ensure_work_record_for_commit(&context, head_sha, &cwd).await?
+        } else {
+            ensure_ambient_work_record(&context, &cwd).await?
+        }
+    } else if let Some(pr) = pr.as_ref() {
         ensure_work_record_for_pr(&context, pr, &cwd, pr.title.as_deref()).await?
     } else {
         ensure_ambient_work_record(&context, &cwd).await?
@@ -870,6 +880,28 @@ async fn capture_command(args: AgentWorkCaptureCommandArgs, writer: &mut dyn Wri
         contribution.trust,
     )
     .await?;
+    if tool == AgentWorkCaptureTool::Git {
+        if let Some(head_sha) = facts.head_sha.as_deref() {
+            if matches!(git_command, Some("commit" | "push")) {
+                upsert_work_link(
+                    &context,
+                    &work.work_id,
+                    WorkLinkTargetKind::Commit,
+                    Some(head_sha.to_string()),
+                    Some(json!({
+                        "sha": head_sha,
+                        "captured_by": "ctx work capture command",
+                        "git_command": git_command,
+                    })),
+                    WorkLinkRole::Result,
+                    RecordSource::Worktree,
+                    RecordFidelity::Commit,
+                    RecordTrust::Low,
+                )
+                .await?;
+            }
+        }
+    }
     append_capture_work_event(
         &context,
         &work.work_id,
@@ -2183,8 +2215,12 @@ async fn upsert_work_link(
     trust: RecordTrust,
 ) -> Result<WorkRecordLink> {
     let now = Utc::now();
+    let link_id = target_id
+        .as_deref()
+        .map(|target_id| stable_work_record_link_id(work_id, target_kind, target_id, role))
+        .unwrap_or_else(WorkRecordLinkId::new);
     let link = WorkRecordLink {
-        link_id: WorkRecordLinkId::new(),
+        link_id,
         work_id: work_id.clone(),
         workspace_id: context.workspace_id,
         target_kind,
@@ -2199,6 +2235,18 @@ async fn upsert_work_link(
         schema_version: AGENT_WORK_SCHEMA_VERSION,
     };
     context.store.upsert_work_record_link(&link).await
+}
+
+fn stable_work_record_link_id(
+    work_id: &WorkRecordId,
+    target_kind: WorkLinkTargetKind,
+    target_id: &str,
+    role: WorkLinkRole,
+) -> WorkRecordLinkId {
+    let digest = sha2::Sha256::digest(
+        format!("{}:{target_kind:?}:{target_id}:{role:?}", work_id.0).as_bytes(),
+    );
+    WorkRecordLinkId::from_id(format!("wln_{}", &hex::encode(digest)[..32]))
 }
 
 async fn append_capture_work_event(
@@ -2828,7 +2876,9 @@ fn evidence_freshness(
 }
 
 fn redact_work_text(context: &WorkStoreContext, value: &str) -> String {
-    let redacted = ctx_core::redaction::redact_sensitive(value);
+    let redacted =
+        ctx_core::models::normalize_archive_text(&ctx_core::redaction::redact_sensitive(value))
+            .text;
     let root = context.workspace.root_path.as_str();
     if root.is_empty() {
         redacted
@@ -2969,6 +3019,10 @@ fn command_output_preview_ref(context: &WorkStoreContext, stdout: &[u8], stderr:
         "raw_stdout_retained": false,
         "raw_stderr_retained": false,
         "preview_limit_bytes": COMMAND_OUTPUT_PREVIEW_LIMIT,
+        "stdout_size_bytes": stdout.len(),
+        "stderr_size_bytes": stderr.len(),
+        "stdout_sha256": hex::encode(sha2::Sha256::digest(stdout)),
+        "stderr_sha256": hex::encode(sha2::Sha256::digest(stderr)),
         "stdout_redacted": stdout_preview,
         "stderr_redacted": stderr_preview,
         "stdout_preview_bytes": stdout.len().min(COMMAND_OUTPUT_PREVIEW_LIMIT),
@@ -3258,9 +3312,7 @@ fn parse_nul_delimited_argv(bytes: &[u8]) -> Result<Vec<String>> {
 
 fn classify_captured_command(tool: AgentWorkCaptureTool, argv: &[String]) -> String {
     match tool {
-        AgentWorkCaptureTool::Git => argv
-            .iter()
-            .find(|arg| !arg.starts_with('-'))
+        AgentWorkCaptureTool::Git => git_subcommand(argv)
             .map(|arg| format!("git.{arg}"))
             .unwrap_or_else(|| "git.unknown".to_string()),
         AgentWorkCaptureTool::Gh => match argv {
@@ -3270,6 +3322,58 @@ fn classify_captured_command(tool: AgentWorkCaptureTool, argv: &[String]) -> Str
             [] => "gh.unknown".to_string(),
         },
     }
+}
+
+fn captured_command_allowlist_denial_reason(
+    tool: AgentWorkCaptureTool,
+    argv: &[String],
+    exit_code: i32,
+) -> Option<&'static str> {
+    if exit_code != 0 {
+        return Some("only successful allowlisted metadata commands are captured");
+    }
+    match tool {
+        AgentWorkCaptureTool::Git => match git_subcommand(argv) {
+            Some("commit" | "push") => None,
+            _ => Some("git command is not in the metadata capture allowlist"),
+        },
+        AgentWorkCaptureTool::Gh => match argv {
+            [area, action, ..]
+                if area == "pr" && matches!(action.as_str(), "create" | "view" | "status") =>
+            {
+                None
+            }
+            _ => Some("gh command is not in the metadata capture allowlist"),
+        },
+    }
+}
+
+fn git_subcommand(argv: &[String]) -> Option<&str> {
+    let mut index = 0;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if matches!(
+            arg,
+            "-C" | "-c" | "--git-dir" | "--work-tree" | "--namespace" | "--config-env"
+        ) {
+            index += 2;
+            continue;
+        }
+        if arg.starts_with("--git-dir=")
+            || arg.starts_with("--work-tree=")
+            || arg.starts_with("--namespace=")
+            || arg.starts_with("--config-env=")
+        {
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        return Some(arg);
+    }
+    None
 }
 
 fn captured_command_denial_reason(
@@ -3287,11 +3391,7 @@ fn captured_command_denial_reason(
             }
         }
         AgentWorkCaptureTool::Git => {
-            let command = argv
-                .iter()
-                .find(|arg| !arg.starts_with('-'))
-                .map(|arg| arg.as_str())
-                .unwrap_or_default();
+            let command = git_subcommand(argv).unwrap_or_default();
             if matches!(
                 command,
                 "credential" | "credential-cache" | "credential-store"
@@ -6001,6 +6101,104 @@ mod tests {
         assert_eq!(metadata["pull_request"]["number"], 456);
     }
 
+    #[tokio::test]
+    async fn capture_git_commit_links_current_head_deterministically() {
+        let data = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        init_git_repo(repo.path());
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(repo.path())
+            .args(["config", "user.email", "ctx@example.invalid"])
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(repo.path())
+            .args(["config", "user.name", "ctx"])
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(repo.path().join("README.md"), "hello\n").unwrap();
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(repo.path())
+            .args(["add", "README.md"])
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(repo.path())
+            .args(["commit", "--quiet", "-m", "initial"])
+            .status()
+            .unwrap()
+            .success());
+        let head = git_output(repo.path(), &["rev-parse", "HEAD"]).unwrap();
+
+        let manager = StoreManager::open(data.path()).await.unwrap();
+        let workspace = manager
+            .global()
+            .create_workspace(
+                "repo".to_string(),
+                repo.path()
+                    .canonicalize()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string(),
+                VcsKind::Git,
+            )
+            .await
+            .unwrap();
+        let store = manager.workspace(workspace.id).await.unwrap();
+
+        for _ in 0..2 {
+            run_with_writer(
+                AgentWorkCommand {
+                    command: AgentWorkSubcommand::Capture(AgentWorkCaptureArgs {
+                        command: AgentWorkCaptureSubcommand::Command(AgentWorkCaptureCommandArgs {
+                            store: store_args(data.path(), Some(workspace.id)),
+                            tool: AgentWorkCaptureTool::Git,
+                            exit_code: 0,
+                            cwd: Some(repo.path().to_path_buf()),
+                            argv0_stdin: false,
+                            argv: vec![
+                                "commit".to_string(),
+                                "--quiet".to_string(),
+                                "-m".to_string(),
+                                "initial".to_string(),
+                            ],
+                        }),
+                    }),
+                },
+                &mut Vec::new(),
+            )
+            .await
+            .unwrap();
+        }
+
+        let work = store
+            .find_work_record_by_link(workspace.id, WorkLinkTargetKind::Commit, &head)
+            .await
+            .unwrap()
+            .expect("commit Work record");
+        assert_eq!(work.head_commit.as_deref(), Some(head.as_str()));
+        let links = store
+            .list_work_record_links(workspace.id, work.work_id)
+            .await
+            .unwrap();
+        let commit_links = links
+            .iter()
+            .filter(|link| {
+                link.target_kind == WorkLinkTargetKind::Commit
+                    && link.target_id.as_deref() == Some(head.as_str())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(commit_links.len(), 1);
+        assert!(commit_links[0].link_id.0.starts_with("wln_"));
+    }
+
     #[test]
     fn capture_command_denies_auth_and_secret_metadata() {
         let gh_auth = vec!["auth".to_string(), "token".to_string()];
@@ -6045,6 +6243,44 @@ mod tests {
         assert_eq!(
             captured_command_denial_reason(AgentWorkCaptureTool::Gh, &gh_pr_view),
             None
+        );
+    }
+
+    #[test]
+    fn capture_command_requires_successful_allowlisted_metadata_commands() {
+        let gh_pr_view = vec![
+            "pr".to_string(),
+            "view".to_string(),
+            "123".to_string(),
+            "--repo".to_string(),
+            "ctxrs/ctx".to_string(),
+        ];
+        assert_eq!(
+            captured_command_allowlist_denial_reason(AgentWorkCaptureTool::Gh, &gh_pr_view, 0),
+            None
+        );
+        assert_eq!(
+            captured_command_allowlist_denial_reason(AgentWorkCaptureTool::Gh, &gh_pr_view, 1),
+            Some("only successful allowlisted metadata commands are captured")
+        );
+
+        let gh_issue_view = vec!["issue".to_string(), "view".to_string(), "123".to_string()];
+        assert_eq!(
+            captured_command_allowlist_denial_reason(AgentWorkCaptureTool::Gh, &gh_issue_view, 0),
+            Some("gh command is not in the metadata capture allowlist")
+        );
+
+        let git_commit = vec!["-C".to_string(), "/repo".to_string(), "commit".to_string()];
+        assert_eq!(git_subcommand(&git_commit), Some("commit"));
+        assert_eq!(
+            captured_command_allowlist_denial_reason(AgentWorkCaptureTool::Git, &git_commit, 0),
+            None
+        );
+
+        let git_status = vec!["status".to_string(), "--short".to_string()];
+        assert_eq!(
+            captured_command_allowlist_denial_reason(AgentWorkCaptureTool::Git, &git_status, 0),
+            Some("git command is not in the metadata capture allowlist")
         );
     }
 
@@ -6725,7 +6961,7 @@ mod tests {
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\nprintf 'stdout-needle-not-indexed\\nGITHUB_TOKEN=ghp_123456789012345678901234\\n{}\\n{}\\n'\nprintf 'stderr-needle-not-indexed\\nOPENAI_API_KEY=sk-12345678901234567890\\n' >&2\n",
+                "#!/bin/sh\nprintf 'stdout-needle-not-indexed\\nGITHUB_TOKEN=ghp_123456789012345678901234\\n{}\\n{}\\nD:\\\\private\\\\output.log\\n\\\\\\\\buildshare\\\\private\\\\output.log\\n'\nprintf 'stderr-needle-not-indexed\\nOPENAI_API_KEY=sk-12345678901234567890\\n' >&2\n",
                 "A".repeat(COMMAND_OUTPUT_PREVIEW_LIMIT + 256),
                 repo.path().join("private/output.log").display(),
             ),
@@ -6788,6 +7024,10 @@ mod tests {
             output_ref["preview_limit_bytes"],
             COMMAND_OUTPUT_PREVIEW_LIMIT
         );
+        assert!(output_ref["stdout_size_bytes"].as_u64().unwrap() > 0);
+        assert!(output_ref["stderr_size_bytes"].as_u64().unwrap() > 0);
+        assert_eq!(output_ref["stdout_sha256"].as_str().unwrap().len(), 64);
+        assert_eq!(output_ref["stderr_sha256"].as_str().unwrap().len(), 64);
         assert_eq!(output_ref["stdout_truncated"], true);
         assert_eq!(output_ref["truncated"], true);
 
@@ -6797,6 +7037,8 @@ mod tests {
         assert!(!serialized.contains("ghp_123456789012345678901234"));
         assert!(!serialized.contains("sk-12345678901234567890"));
         assert!(!serialized.contains(repo.path().to_string_lossy().as_ref()));
+        assert!(!serialized.contains("D:\\\\private"));
+        assert!(!serialized.contains("\\\\\\\\buildshare"));
         assert!(serialized.len() < COMMAND_OUTPUT_PREVIEW_LIMIT * 3);
 
         let output_hits = store

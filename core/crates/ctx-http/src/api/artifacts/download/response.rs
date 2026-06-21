@@ -9,15 +9,15 @@ use tokio_util::io::ReaderStream;
 
 mod headers;
 
-pub(super) struct SessionArtifactDownloadMetadata<'a> {
-    pub(super) size: u64,
-    pub(super) etag: Option<&'a str>,
-    pub(super) last_modified: Option<&'a str>,
-    pub(super) mime_type: &'a str,
-    pub(super) name: Option<&'a str>,
+pub(in crate::api) struct SessionArtifactDownloadMetadata<'a> {
+    pub(in crate::api) size: u64,
+    pub(in crate::api) etag: Option<&'a str>,
+    pub(in crate::api) last_modified: Option<&'a str>,
+    pub(in crate::api) mime_type: &'a str,
+    pub(in crate::api) name: Option<&'a str>,
 }
 
-pub(super) async fn build_session_artifact_download_response(
+pub(in crate::api) async fn build_session_artifact_download_response(
     request_headers: HeaderMap,
     mut file: File,
     metadata: SessionArtifactDownloadMetadata<'_>,

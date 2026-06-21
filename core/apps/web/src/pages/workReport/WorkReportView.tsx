@@ -1,11 +1,21 @@
 import { useMemo, useState } from "react";
-import type { KeyboardEvent } from "react";
+import type { KeyboardEvent, ReactNode } from "react";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Download,
+  ExternalLink as ExternalLinkIcon,
+  FileText,
+  Image as ImageIcon,
+  RefreshCw,
+} from "lucide-react";
 import type {
   JsonValue,
   WorkspaceWorkEvidence,
   WorkspaceWorkInspector,
   WorkspaceWorkInspectorArtifact,
   WorkspaceWorkInspectorCommand,
+  WorkspaceWorkInspectorTimelineItem,
   WorkspaceWorkInspectorTranscriptItem,
   WorkspaceWorkReport,
   WorkspaceWorkTrustSummary,
@@ -48,12 +58,6 @@ const trustClass = (verdict: string) => `work-report-trust work-report-trust-${v
 const evidenceClass = (item: WorkspaceWorkEvidence) =>
   `work-report-evidence-row work-report-evidence-${item.status} work-report-freshness-${item.freshness}`;
 
-const compactJson = (value: JsonValue | null | undefined, limit = 220) => {
-  if (value == null) return null;
-  const text = typeof value === "string" ? value : JSON.stringify(value);
-  return text.length > limit ? `${text.slice(0, limit)}...` : text;
-};
-
 const prettyJson = (value: JsonValue) => JSON.stringify(value, null, 2);
 
 const asRecord = (value: JsonValue | null | undefined): Record<string, JsonValue> | null => {
@@ -61,12 +65,24 @@ const asRecord = (value: JsonValue | null | undefined): Record<string, JsonValue
   return value;
 };
 
+const asArray = (value: JsonValue | null | undefined): JsonValue[] => (Array.isArray(value) ? value : []);
+
 const pickString = (record: Record<string, JsonValue> | null, keys: string[]) => {
   if (!record) return null;
   for (const key of keys) {
     const value = record[key];
     if (typeof value === "string" && value.trim()) return value;
     if (typeof value === "number") return String(value);
+  }
+  return null;
+};
+
+const pickNumber = (record: Record<string, JsonValue> | null, keys: string[]) => {
+  if (!record) return null;
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "number") return value;
+    if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) return Number(value);
   }
   return null;
 };
@@ -81,21 +97,74 @@ const safeExternalUrl = (value: string | null | undefined) => {
   }
 };
 
-const renderUrl = (value: string | null | undefined, labelText?: string | null) => {
+const safeSameOriginPath = (value: string | null | undefined) => {
   if (!value) return null;
-  const href = safeExternalUrl(value);
-  return href ? <ExternalLink href={href}>{labelText || value}</ExternalLink> : <span>{labelText || value}</span>;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.startsWith("//") || !trimmed.startsWith("/") || trimmed.includes("\\")) return null;
+  return trimmed;
 };
 
-const pullRequestLabel = (value: JsonValue, index: number, fallback?: string | null) => {
-  const outer = asRecord(value);
-  const nested = asRecord(outer?.pull_request) ?? outer;
-  const title = pickString(nested, ["title", "name"]);
-  const url = safeExternalUrl(pickString(nested, ["url", "html_url"]));
-  const state = pickString(nested, ["state"]);
-  const number = pickString(nested, ["number", "pr_number"]);
-  const labelParts = [title || fallback || (number ? `PR #${number}` : `PR ${index + 1}`), state ? label(state) : null].filter(Boolean);
-  return { label: labelParts.join(" · "), url };
+const WORK_ARTIFACT_PATH_PATTERN =
+  /^\/api\/workspaces\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/work\/[^/?#]+\/artifacts\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const safeWorkArtifactPath = (value: string | null | undefined) => {
+  const path = safeSameOriginPath(value);
+  if (!path || !WORK_ARTIFACT_PATH_PATTERN.test(path)) return null;
+  return path;
+};
+
+const safeDisplayPath = (value: string | null | undefined) => {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.startsWith("/") || trimmed.includes("\\") || trimmed.includes("..")) return null;
+  return trimmed;
+};
+
+const safeArtifactUrl = (value: string | null | undefined) => safeSameOriginPath(value) ?? safeExternalUrl(value);
+
+const renderSafeLink = (
+  value: string | null | undefined,
+  labelText: ReactNode,
+  className?: string,
+) => {
+  const href = safeArtifactUrl(value);
+  if (!href) return null;
+  if (safeExternalUrl(href)) {
+    return (
+      <ExternalLink className={className} href={href}>
+        {labelText}
+      </ExternalLink>
+    );
+  }
+  return (
+    <a className={className} data-allow-raw-anchor href={href}>
+      {labelText}
+    </a>
+  );
+};
+
+const formatDate = (value: string | null | undefined) => {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.valueOf())) return value;
+  return date.toLocaleString();
+};
+
+const durationLabel = (started: string | null | undefined, finished: string | null | undefined) => {
+  if (!started || !finished) return null;
+  const start = new Date(started).valueOf();
+  const end = new Date(finished).valueOf();
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return null;
+  const ms = end - start;
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)}s`;
+};
+
+const bytesLabel = (bytes: number | null | undefined) => {
+  if (typeof bytes !== "number" || !Number.isFinite(bytes)) return null;
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 };
 
 const rawTranscriptStatus = (report: WorkspaceWorkInspector) => {
@@ -108,28 +177,20 @@ const rawTranscriptStatus = (report: WorkspaceWorkInspector) => {
   return "Raw transcripts are not available in this inspector response.";
 };
 
-const reportToInspector = (report: WorkspaceWorkReport): WorkspaceWorkInspector => ({
-  ...report,
-  overview: {
-    title: report.work.title,
-    objective: report.work.objective,
-    lifecycle: report.work.lifecycle,
-    primary_branch: report.work.primary_branch,
-    base_commit: report.work.base_commit,
-    head_commit: report.work.head_commit,
-    created_at: report.work.created_at,
-    updated_at: report.work.updated_at,
-  },
-  transcript: report.timeline.map((event): WorkspaceWorkInspectorTranscriptItem => ({
-    event_id: event.event_id,
-    sequence: event.sequence,
-    event_type: event.event_type,
-    actor_kind: event.actor_kind,
-    event_time: event.event_time,
-    redaction_class: event.redaction_class,
-    text_preview: event.redacted_text,
-  })),
-  commands: report.evidence
+const artifactUrlFromRef = (value: JsonValue | null | undefined) => {
+  const record = asRecord(value);
+  return safeWorkArtifactPath(pickString(record, ["download_url", "thumbnail_url"]));
+};
+
+const artifactPathFromRef = (value: JsonValue | null | undefined) =>
+  safeDisplayPath(pickString(asRecord(value), ["display_path", "relative_path", "name"]));
+
+const artifactMimeFromRef = (value: JsonValue | null | undefined) =>
+  pickString(asRecord(value), ["mime_type", "mime"]);
+
+const reportToInspector = (report: WorkspaceWorkReport): WorkspaceWorkInspector => {
+  const evidence = report.evidence.map(({ output_ref: _outputRef, artifact_ref: _artifactRef, ...item }) => item);
+  const commands = report.evidence
     .filter((item) => item.command || item.argv.length > 0)
     .map((item): WorkspaceWorkInspectorCommand => ({
       id: item.evidence_id,
@@ -140,61 +201,174 @@ const reportToInspector = (report: WorkspaceWorkReport): WorkspaceWorkInspector 
       exit_code: item.exit_code,
       status: item.status,
       freshness: item.freshness,
-      stdout_preview: null,
-      stderr_preview: null,
-      output_truncated: false,
+      stdout_preview: pickString(asRecord(item.output_ref), ["stdout_redacted", "stdout_preview"]),
+      stderr_preview: pickString(asRecord(item.output_ref), ["stderr_redacted", "stderr_preview"]),
+      output_truncated: Boolean(asRecord(item.output_ref)?.truncated),
+      preview_limit_bytes: pickNumber(asRecord(item.output_ref), ["preview_limit_bytes"]),
+      stdout_size_bytes: pickNumber(asRecord(item.output_ref), ["stdout_size_bytes"]),
+      stderr_size_bytes: pickNumber(asRecord(item.output_ref), ["stderr_size_bytes"]),
+      stdout_sha256: pickString(asRecord(item.output_ref), ["stdout_sha256"]),
+      stderr_sha256: pickString(asRecord(item.output_ref), ["stderr_sha256"]),
+      stdout_truncated: Boolean(asRecord(item.output_ref)?.stdout_truncated),
+      stderr_truncated: Boolean(asRecord(item.output_ref)?.stderr_truncated),
       started_at: item.started_at,
       finished_at: item.finished_at,
-      output_ref: item.output_ref,
-    })),
-  artifacts: report.evidence
+    }));
+  const artifacts = report.evidence
     .filter((item) => item.artifact_ref)
     .map((item): WorkspaceWorkInspectorArtifact => ({
       id: item.evidence_id,
       kind: item.kind,
       label: item.claim || item.command || item.evidence_id,
-      ref: item.artifact_ref,
+      source_kind: "evidence",
+      source_id: item.evidence_id,
+      display_name: artifactPathFromRef(item.artifact_ref) ?? undefined,
+      mime_type: artifactMimeFromRef(item.artifact_ref),
+      missing: true,
+      unavailable_reason: "artifact metadata requires the Work inspector v2 route",
+      render_kind: "unavailable",
+      download_url: artifactUrlFromRef(item.artifact_ref),
       created_at: item.created_at,
-    })),
-  artifact_summary: {
-    total: report.evidence.filter((item) => item.artifact_ref).length,
-    refs: [],
-  },
-  context: {
-    value: {
-      summaries: report.summaries,
-      summary_claims: report.summary_claims,
-      duplicate_strong_links: report.duplicate_strong_links,
-    },
-    redacted: true,
-    redaction_notes: ["compatibility projection from v1 report"],
-  },
-  safe_json: {
-    value: report as unknown as JsonValue,
-    redacted: true,
-    redaction_notes: ["compatibility projection from v1 report"],
-  },
-  raw_redacted_json: {
-    value: report as unknown as JsonValue,
-    redacted: true,
-    redaction_notes: ["compatibility projection from v1 report"],
-  },
-  timeline_items: report.timeline.map((event) => ({
+    }));
+  const timelineItems = report.timeline.map((event) => ({
     sequence: event.sequence,
     event_time: event.event_time,
     kind: event.event_type,
     title: event.redacted_text || event.event_type,
     detail: event.source_kind,
     source_event_id: event.event_id,
-  })),
-});
+  }));
+  const overview = {
+    title: report.work.title,
+    objective: report.work.objective,
+    lifecycle: report.work.lifecycle,
+    primary_branch: report.work.primary_branch,
+    base_commit: report.work.base_commit,
+    head_commit: report.work.head_commit,
+    created_at: report.work.created_at,
+    updated_at: report.work.updated_at,
+  };
+  const safeValue = {
+    work: report.work,
+    links: report.links.map(({ target_json: _targetJson, ...link }) => link),
+    overview,
+    trust: report.trust,
+    evidence_summary: report.evidence_summary,
+    change_summary: report.change_summary,
+    transcript: report.timeline.map((event) => ({
+      event_id: event.event_id,
+      sequence: event.sequence,
+      event_type: event.event_type,
+      event_time: event.event_time,
+      actor_kind: event.actor_kind,
+      redaction_class: event.redaction_class,
+      text_preview: event.redacted_text,
+    })),
+    commands,
+    artifacts,
+    evidence,
+    summaries: report.summaries,
+    summary_claims: report.summary_claims,
+    timeline: report.timeline,
+    timeline_items: timelineItems,
+    duplicate_strong_links: report.duplicate_strong_links,
+    raw_transcript_available: report.raw_transcript_available,
+    raw_transcript_included: false,
+  } as unknown as JsonValue;
 
-function TrustStrip({ trust }: { trust: WorkspaceWorkTrustSummary }) {
+  return {
+    ...report,
+    overview,
+    transcript: report.timeline.map((event): WorkspaceWorkInspectorTranscriptItem => ({
+      event_id: event.event_id,
+      sequence: event.sequence,
+      event_type: event.event_type,
+      actor_kind: event.actor_kind,
+      event_time: event.event_time,
+      redaction_class: event.redaction_class,
+      text_preview: event.redacted_text,
+    })),
+    commands,
+    artifacts,
+    evidence,
+    change_sets: [],
+    contributions: [],
+    artifact_summary: {
+      total: artifacts.length,
+      refs: [],
+    },
+    context: {
+      value: safeValue,
+      redacted: true,
+      redaction_notes: ["compatibility projection from v1 report"],
+    },
+    safe_json: {
+      value: safeValue,
+      redacted: true,
+      redaction_notes: ["compatibility projection from v1 report"],
+    },
+    raw_redacted_json: {
+      value: safeValue,
+      redacted: true,
+      redaction_notes: ["compatibility projection from v1 report"],
+    },
+    timeline_items: timelineItems,
+  };
+};
+
+function Empty({ children }: { children: string }) {
+  return <p className="work-report-empty">{children}</p>;
+}
+
+function Metric({ label: labelText, value }: { label: string; value: string | number }) {
+  return (
+    <div className="work-report-metric">
+      <span className="work-report-eyebrow">{labelText}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+export function WorkInspectorHeader({
+  report,
+  onRefresh,
+}: {
+  report: WorkspaceWorkInspector;
+  onRefresh?: () => void;
+}) {
+  const title = report.work.title || "Untitled Work";
+  return (
+    <header className="work-report-header">
+      <div>
+        <span className="work-report-eyebrow">Work Inspector</span>
+        <h1>{title}</h1>
+        <div className="work-report-meta">
+          <span>{report.work.work_id}</span>
+          <span>{label(report.work.lifecycle)}</span>
+          <span>{report.work.primary_branch || "branch unknown"}</span>
+          <span>{shortSha(report.work.head_commit)}</span>
+        </div>
+      </div>
+      {onRefresh ? (
+        <button className="work-report-refresh" type="button" onClick={onRefresh}>
+          <RefreshCw aria-hidden="true" size={15} />
+          <span>Refresh</span>
+        </button>
+      ) : null}
+    </header>
+  );
+}
+
+export function TrustBanner({ trust }: { trust: WorkspaceWorkTrustSummary }) {
+  const Icon = trust.verdict === "verified" ? CheckCircle2 : AlertTriangle;
   return (
     <section className={trustClass(trust.verdict)} aria-label="Work trust">
-      <div>
-        <span className="work-report-eyebrow">Trust</span>
-        <strong>{label(trust.verdict)}</strong>
+      <div className="work-report-trust-title">
+        <Icon aria-hidden="true" size={18} />
+        <div>
+          <span className="work-report-eyebrow">Trust</span>
+          <strong>{label(trust.verdict)}</strong>
+        </div>
       </div>
       <p>{trust.reason}</p>
       <div className="work-report-next">{trust.recommended_next_action}</div>
@@ -202,16 +376,83 @@ function TrustStrip({ trust }: { trust: WorkspaceWorkTrustSummary }) {
   );
 }
 
-function Empty({ children }: { children: string }) {
-  return <p className="work-report-empty">{children}</p>;
+export function InspectorMetricStrip({ report }: { report: WorkspaceWorkInspector }) {
+  return (
+    <section className="work-report-summary-grid" aria-label="Evidence summary">
+      <Metric label="Evidence" value={report.evidence_summary.total} />
+      <Metric label="Passing" value={report.evidence_summary.passing} />
+      <Metric label="Failing" value={report.evidence_summary.failing} />
+      <Metric label="Stale" value={report.evidence_summary.stale} />
+      <Metric label="Commands" value={report.commands.length} />
+      <Metric label="Artifacts" value={report.artifact_summary.total || report.artifacts.length} />
+      <Metric label="Changes" value={report.change_summary.change_sets} />
+      <Metric label="Summaries" value={label(report.work.summary_freshness)} />
+    </section>
+  );
 }
 
-function OverviewTab({ report }: { report: WorkspaceWorkInspector }) {
+export function InspectorTabs({
+  selected,
+  onSelect,
+}: {
+  selected: WorkInspectorTab;
+  onSelect: (tab: WorkInspectorTab) => void;
+}) {
+  const moveTabFocus = (nextIndex: number) => {
+    const boundedIndex = (nextIndex + tabs.length) % tabs.length;
+    const nextTab = tabs[boundedIndex];
+    onSelect(nextTab.id);
+    window.requestAnimationFrame(() => {
+      document.getElementById(`work-report-tab-${nextTab.id}`)?.focus();
+    });
+  };
+  const handleTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+      event.preventDefault();
+      moveTabFocus(index + 1);
+    } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+      event.preventDefault();
+      moveTabFocus(index - 1);
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      moveTabFocus(0);
+    } else if (event.key === "End") {
+      event.preventDefault();
+      moveTabFocus(tabs.length - 1);
+    }
+  };
+  return (
+    <nav className="work-report-tabs" role="tablist" aria-label="Work Inspector sections">
+      {tabs.map((tab, index) => (
+        <button
+          aria-controls={`work-report-panel-${tab.id}`}
+          aria-selected={selected === tab.id}
+          id={`work-report-tab-${tab.id}`}
+          key={tab.id}
+          role="tab"
+          tabIndex={selected === tab.id ? 0 : -1}
+          type="button"
+          onKeyDown={(event) => handleTabKeyDown(event, index)}
+          onClick={() => onSelect(tab.id)}
+        >
+          {tab.label}
+        </button>
+      ))}
+    </nav>
+  );
+}
+
+function overviewSummary(report: WorkspaceWorkInspector) {
+  return report.summaries.find((summary) => summary.audience === "reviewer") ?? report.summaries[0] ?? null;
+}
+
+export function OverviewTab({ report }: { report: WorkspaceWorkInspector }) {
   const missingEvidence =
     report.evidence_summary.missing > 0 || report.trust.verdict === "missing_evidence";
+  const summary = overviewSummary(report);
   return (
-    <>
-      <TrustStrip trust={report.trust} />
+    <div className="work-report-tab-stack">
+      <TrustBanner trust={report.trust} />
       {missingEvidence ? (
         <section className="work-report-warning" aria-label="Missing evidence">
           <strong>Evidence is missing</strong>
@@ -228,34 +469,31 @@ function OverviewTab({ report }: { report: WorkspaceWorkInspector }) {
           ))}
         </section>
       ) : null}
-      <section className="work-report-summary-grid" aria-label="Evidence summary">
-        <Metric label="Evidence" value={report.evidence_summary.total} />
-        <Metric label="Passing" value={report.evidence_summary.passing} />
-        <Metric label="Failing" value={report.evidence_summary.failing} />
-        <Metric label="Stale" value={report.evidence_summary.stale} />
-        <Metric label="Missing" value={report.evidence_summary.missing} />
-        <Metric label="Summaries" value={label(report.work.summary_freshness)} />
-        <Metric label="Changes" value={report.change_summary.change_sets} />
-        <Metric label="Commands" value={report.commands.length} />
+      <section className="work-report-panel" aria-label="Objective">
+        <div className="work-report-panel-header">
+          <h2>Objective</h2>
+          <span>{label(report.overview.lifecycle)}</span>
+        </div>
+        <p>{report.overview.objective || report.work.objective || "No objective has been recorded."}</p>
       </section>
+      {summary ? (
+        <section className="work-report-panel" aria-label="Reviewer summary">
+          <div className="work-report-panel-header">
+            <h2>Reviewer summary</h2>
+            <span>{label(summary.freshness)}</span>
+          </div>
+          <p>{summary.text}</p>
+        </section>
+      ) : null}
       <section className="work-report-panel" aria-label="Inspector status">
         <h2>Inspector status</h2>
         <p>{rawTranscriptStatus(report)}</p>
       </section>
-    </>
-  );
-}
-
-function Metric({ label: labelText, value }: { label: string; value: string | number }) {
-  return (
-    <div>
-      <span className="work-report-eyebrow">{labelText}</span>
-      <strong>{value}</strong>
     </div>
   );
 }
 
-function TranscriptTab({ items }: { items: WorkspaceWorkInspectorTranscriptItem[] }) {
+export function TranscriptTab({ items }: { items: WorkspaceWorkInspectorTranscriptItem[] }) {
   return (
     <section className="work-report-panel" aria-label="Transcript">
       <div className="work-report-panel-header">
@@ -269,8 +507,9 @@ function TranscriptTab({ items }: { items: WorkspaceWorkInspectorTranscriptItem[
               <div className="work-report-meta">
                 <span>{label(item.actor_kind)}</span>
                 <span>{label(item.event_type)}</span>
-                {item.event_time ? <time dateTime={item.event_time}>{new Date(item.event_time).toLocaleString()}</time> : null}
+                {item.event_time ? <time dateTime={item.event_time}>{formatDate(item.event_time)}</time> : null}
                 {item.redaction_class ? <span>{label(item.redaction_class)}</span> : null}
+                {item.model ? <span>{item.model}</span> : null}
               </div>
               <p>{item.text_preview || "No redacted text is available."}</p>
             </li>
@@ -283,7 +522,7 @@ function TranscriptTab({ items }: { items: WorkspaceWorkInspectorTranscriptItem[
   );
 }
 
-function CommandsTab({ commands }: { commands: WorkspaceWorkInspectorCommand[] }) {
+export function CommandsTab({ commands }: { commands: WorkspaceWorkInspectorCommand[] }) {
   return (
     <section className="work-report-panel" aria-label="Commands">
       <div className="work-report-panel-header">
@@ -292,21 +531,36 @@ function CommandsTab({ commands }: { commands: WorkspaceWorkInspectorCommand[] }
       </div>
       {commands.length ? (
         <div className="work-report-evidence-list">
-          {commands.map((command, index) => (
-            <article className="work-report-command" key={command.id || index}>
-              <strong>{command.command || command.argv.join(" ") || command.id}</strong>
-              <div className="work-report-meta">
-                {command.status ? <span>{label(command.status)}</span> : null}
-                {command.freshness ? <span>{label(command.freshness)}</span> : null}
-                {typeof command.exit_code === "number" ? <span>exit {command.exit_code}</span> : null}
-                {command.cwd ? <span>{command.cwd}</span> : null}
-                {command.output_truncated ? <span>output truncated</span> : null}
-              </div>
-              {command.stdout_preview ? <p className="work-report-ref">stdout: {command.stdout_preview}</p> : null}
-              {command.stderr_preview ? <p className="work-report-ref">stderr: {command.stderr_preview}</p> : null}
-              {command.output_ref ? <p className="work-report-ref">Output: {compactJson(command.output_ref)}</p> : null}
-            </article>
-          ))}
+          {commands.map((command, index) => {
+            const duration = durationLabel(command.started_at, command.finished_at);
+            return (
+              <article className="work-report-command" key={command.id || index}>
+                <strong>{command.command || command.argv.join(" ") || command.id}</strong>
+                <div className="work-report-meta">
+                  {command.status ? <span>{label(command.status)}</span> : null}
+                  {command.freshness ? <span>{label(command.freshness)}</span> : null}
+                  {typeof command.exit_code === "number" ? <span>exit {command.exit_code}</span> : null}
+                  {duration ? <span>{duration}</span> : null}
+                  {command.cwd ? <span>{command.cwd}</span> : null}
+                  {command.output_truncated ? <span>output truncated</span> : null}
+                  {typeof command.stdout_size_bytes === "number" ? <span>stdout {bytesLabel(command.stdout_size_bytes)}</span> : null}
+                  {typeof command.stderr_size_bytes === "number" ? <span>stderr {bytesLabel(command.stderr_size_bytes)}</span> : null}
+                </div>
+                {command.stdout_preview ? <p className="work-report-output">stdout: {command.stdout_preview}</p> : null}
+                {command.stderr_preview ? <p className="work-report-output">stderr: {command.stderr_preview}</p> : null}
+                {command.stdout_sha256 || command.stderr_sha256 ? (
+                  <p className="work-report-ref">
+                    {command.stdout_sha256 ? `stdout sha256 ${command.stdout_sha256.slice(0, 12)}` : null}
+                    {command.stdout_sha256 && command.stderr_sha256 ? " · " : null}
+                    {command.stderr_sha256 ? `stderr sha256 ${command.stderr_sha256.slice(0, 12)}` : null}
+                  </p>
+                ) : null}
+                {!command.stdout_preview && !command.stderr_preview ? (
+                  <p className="work-report-ref">No redacted output preview is available.</p>
+                ) : null}
+              </article>
+            );
+          })}
         </div>
       ) : (
         <Empty>No commands have been recorded.</Empty>
@@ -315,7 +569,7 @@ function CommandsTab({ commands }: { commands: WorkspaceWorkInspectorCommand[] }
   );
 }
 
-function EvidenceTab({ evidence }: { evidence: WorkspaceWorkEvidence[] }) {
+export function EvidenceTab({ evidence }: { evidence: WorkspaceWorkEvidence[] }) {
   return (
     <section className="work-report-panel work-report-evidence" aria-label="Evidence">
       <div className="work-report-panel-header">
@@ -328,15 +582,14 @@ function EvidenceTab({ evidence }: { evidence: WorkspaceWorkEvidence[] }) {
             <article className={evidenceClass(item)} key={item.evidence_id}>
               <div>
                 <strong>{item.claim || item.command || item.evidence_id}</strong>
-                <p>{item.command || item.argv.join(" ")}</p>
+                {item.command || item.argv.length ? <p>{item.command || item.argv.join(" ")}</p> : null}
                 <div className="work-report-evidence-detail">
                   <span>{label(item.source)}</span>
                   <span>{label(item.fidelity)}</span>
                   <span>{label(item.trust)}</span>
                   {item.head_sha ? <span>{shortSha(item.head_sha)}</span> : null}
+                  {item.branch ? <span>{item.branch}</span> : null}
                 </div>
-                {item.output_ref ? <p className="work-report-ref">Output: {compactJson(item.output_ref)}</p> : null}
-                {item.artifact_ref ? <p className="work-report-ref">Artifact: {compactJson(item.artifact_ref)}</p> : null}
               </div>
               <div className="work-report-evidence-badges">
                 <span>{label(item.kind)}</span>
@@ -353,20 +606,27 @@ function EvidenceTab({ evidence }: { evidence: WorkspaceWorkEvidence[] }) {
   );
 }
 
-function TimelineTab({ report }: { report: WorkspaceWorkInspector }) {
+export function TimelineTab({ items }: { items: WorkspaceWorkInspectorTimelineItem[] }) {
   return (
     <section className="work-report-panel work-report-timeline" aria-label="Timeline">
       <div className="work-report-panel-header">
         <h2>Timeline</h2>
-        <span>{report.timeline.length ? `${report.timeline.length} events` : "none recorded"}</span>
+        <span>{items.length ? `${items.length} events` : "none recorded"}</span>
       </div>
-      {report.timeline.length ? (
+      {items.length ? (
         <ol>
-          {report.timeline.map((event) => (
-            <li key={event.event_id}>
-              <span>{label(event.event_type)}</span>
-              <time dateTime={event.event_time}>{new Date(event.event_time).toLocaleString()}</time>
-              {event.redacted_text ? <p>{event.redacted_text}</p> : null}
+          {items.map((item, index) => (
+            <li key={item.source_event_id || item.source_evidence_id || `${item.sequence}:${index}`}>
+              <span>{label(item.kind)}</span>
+              <time dateTime={item.event_time}>{formatDate(item.event_time)}</time>
+              <div>
+                <p>{item.title}</p>
+                <div className="work-report-evidence-detail">
+                  {item.detail ? <span>{item.detail}</span> : null}
+                  {item.source_event_id ? <span>{item.source_event_id}</span> : null}
+                  {item.source_evidence_id ? <span>{item.source_evidence_id}</span> : null}
+                </div>
+              </div>
             </li>
           ))}
         </ol>
@@ -377,7 +637,40 @@ function TimelineTab({ report }: { report: WorkspaceWorkInspector }) {
   );
 }
 
-function ChangesTab({ report }: { report: WorkspaceWorkInspector }) {
+const pullRequestLabel = (value: JsonValue, index: number, fallback?: string | null) => {
+  const outer = asRecord(value);
+  const nested = asRecord(outer?.pull_request) ?? outer;
+  const title = pickString(nested, ["title", "name"]);
+  const url = safeExternalUrl(pickString(nested, ["url", "html_url"]));
+  const state = pickString(nested, ["state"]);
+  const number = pickString(nested, ["number", "pr_number"]);
+  const labelParts = [title || fallback || (number ? `PR #${number}` : `PR ${index + 1}`), state ? label(state) : null].filter(Boolean);
+  return { label: labelParts.join(" · "), url };
+};
+
+const changedFilesFromValues = (values: JsonValue[]) => {
+  const files = new Map<string, { path: string; additions?: number | null; deletions?: number | null; status?: string | null }>();
+  const visit = (value: JsonValue) => {
+    const record = asRecord(value);
+    if (!record) return;
+    const directPath = safeDisplayPath(pickString(record, ["path", "file", "filename", "display_path", "relative_path"]));
+    if (directPath) {
+      files.set(directPath, {
+        path: directPath,
+        additions: pickNumber(record, ["additions", "added", "lines_added"]),
+        deletions: pickNumber(record, ["deletions", "deleted", "lines_deleted"]),
+        status: pickString(record, ["status", "change_type"]),
+      });
+    }
+    for (const key of ["files", "changed_files", "file_changes", "diffs"]) {
+      for (const child of asArray(record[key])) visit(child);
+    }
+  };
+  values.forEach(visit);
+  return Array.from(files.values()).slice(0, 30);
+};
+
+export function ChangesTab({ report }: { report: WorkspaceWorkInspector }) {
   const pullRequests = [
     ...report.change_summary.pull_requests.map((value, index) => pullRequestLabel(value, index)),
     ...report.links
@@ -392,6 +685,7 @@ function ChangesTab({ report }: { report: WorkspaceWorkInspector }) {
     : report.links
         .filter((link) => link.target_kind === "commit" && link.target_id)
         .map((link) => link.target_id as string);
+  const changedFiles = changedFilesFromValues([...report.change_sets, ...report.contributions]);
   return (
     <section className="work-report-panel" aria-label="Changes">
       <div className="work-report-panel-header">
@@ -413,12 +707,48 @@ function ChangesTab({ report }: { report: WorkspaceWorkInspector }) {
         ))}
         {report.change_summary.contributions > 0 ? <span>{report.change_summary.contributions} contributions</span> : null}
       </div>
-      {report.change_sets.length ? <pre className="work-report-json">{prettyJson(report.change_sets as JsonValue)}</pre> : null}
+      {changedFiles.length ? (
+        <div className="work-report-file-list" aria-label="Changed files">
+          {changedFiles.map((file) => (
+            <div className="work-report-file-row" key={file.path}>
+              <span>{file.path}</span>
+              <div>
+                {file.status ? <span>{label(file.status)}</span> : null}
+                {typeof file.additions === "number" ? <span>+{file.additions}</span> : null}
+                {typeof file.deletions === "number" ? <span>-{file.deletions}</span> : null}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <Empty>No changed-file metadata is available.</Empty>
+      )}
     </section>
   );
 }
 
-function ArtifactsTab({ artifacts }: { artifacts: WorkspaceWorkInspectorArtifact[] }) {
+function artifactKindLabel(artifact: WorkspaceWorkInspectorArtifact) {
+  return artifact.kind ? label(artifact.kind) : artifact.mime_type || "artifact";
+}
+
+function artifactDisplayPath(artifact: WorkspaceWorkInspectorArtifact) {
+  return safeDisplayPath(artifact.display_name);
+}
+
+function artifactPrimaryUrl(artifact: WorkspaceWorkInspectorArtifact) {
+  return safeWorkArtifactPath(artifact.open_url) ?? safeWorkArtifactPath(artifact.download_url);
+}
+
+function artifactThumbUrl(artifact: WorkspaceWorkInspectorArtifact) {
+  if (artifact.render_kind !== "raster_image") return null;
+  const explicit = safeWorkArtifactPath(artifact.thumbnail_url);
+  if (explicit) return explicit;
+  const primary = artifactPrimaryUrl(artifact);
+  if (primary) return primary;
+  return null;
+}
+
+export function ArtifactsTab({ artifacts }: { artifacts: WorkspaceWorkInspectorArtifact[] }) {
   return (
     <section className="work-report-panel" aria-label="Artifacts">
       <div className="work-report-panel-header">
@@ -426,19 +756,61 @@ function ArtifactsTab({ artifacts }: { artifacts: WorkspaceWorkInspectorArtifact
         <span>{artifacts.length ? `${artifacts.length} artifacts` : "none recorded"}</span>
       </div>
       {artifacts.length ? (
-        <div className="work-report-evidence-list">
-          {artifacts.map((artifact, index) => (
-            <article className="work-report-command" key={artifact.id || index}>
-              <strong>{artifact.label || artifact.path || artifact.url || artifact.id}</strong>
-              <div className="work-report-meta">
-                {artifact.kind ? <span>{label(artifact.kind)}</span> : null}
-                {artifact.created_at ? <time dateTime={artifact.created_at}>{new Date(artifact.created_at).toLocaleString()}</time> : null}
-              </div>
-              {artifact.url ? <p>{renderUrl(artifact.url)}</p> : null}
-              {artifact.path ? <p className="work-report-ref">{artifact.path}</p> : null}
-              {artifact.ref ? <p className="work-report-ref">Ref: {compactJson(artifact.ref)}</p> : null}
-            </article>
-          ))}
+        <div className="work-report-artifact-grid">
+          {artifacts.map((artifact, index) => {
+            const url = artifactPrimaryUrl(artifact);
+            const thumb = artifactThumbUrl(artifact);
+            const displayPath = artifactDisplayPath(artifact);
+            const size = bytesLabel(artifact.bytes);
+            return (
+              <article className="work-report-artifact-card" key={artifact.id || index}>
+                <div className="work-report-artifact-preview">
+                  {thumb ? (
+                    <img alt="" src={thumb} />
+                  ) : artifact.mime_type?.startsWith("image/") || artifact.kind === "screenshot" ? (
+                    <ImageIcon aria-hidden="true" size={24} />
+                  ) : (
+                    <FileText aria-hidden="true" size={24} />
+                  )}
+                </div>
+                <div className="work-report-artifact-body">
+                  <strong>{artifact.label || artifact.display_name || artifact.artifact_id || artifact.id}</strong>
+                  <div className="work-report-meta">
+                    <span>{artifactKindLabel(artifact)}</span>
+                    <span>{label(artifact.render_kind)}</span>
+                    {artifact.mime_type ? <span>{artifact.mime_type}</span> : null}
+                    {size ? <span>{size}</span> : null}
+                    {artifact.missing ? <span>missing</span> : null}
+                    {artifact.created_at ? <time dateTime={artifact.created_at}>{formatDate(artifact.created_at)}</time> : null}
+                  </div>
+                  {displayPath ? <p className="work-report-ref">{displayPath}</p> : null}
+                  {artifact.unavailable_reason ? <p>{artifact.unavailable_reason}</p> : null}
+                  <div className="work-report-artifact-actions">
+                    {artifact.preview_url
+                      ? renderSafeLink(
+                          safeWorkArtifactPath(artifact.preview_url),
+                          <>
+                            <FileText aria-hidden="true" size={14} />
+                            Preview
+                          </>,
+                          "work-report-artifact-link",
+                        )
+                      : null}
+                    {url
+                      ? renderSafeLink(
+                          url,
+                          <>
+                            <Download aria-hidden="true" size={14} />
+                            Download
+                          </>,
+                          "work-report-artifact-link",
+                        )
+                      : null}
+                  </div>
+                </div>
+              </article>
+            );
+          })}
         </div>
       ) : (
         <Empty>No artifacts have been recorded.</Empty>
@@ -447,7 +819,7 @@ function ArtifactsTab({ artifacts }: { artifacts: WorkspaceWorkInspectorArtifact
   );
 }
 
-function ContextTab({ report }: { report: WorkspaceWorkInspector }) {
+export function ContextTab({ report }: { report: WorkspaceWorkInspector }) {
   return (
     <section className="work-report-panel work-report-side" aria-label="Context">
       <h2>Context</h2>
@@ -456,7 +828,9 @@ function ContextTab({ report }: { report: WorkspaceWorkInspector }) {
           <article className="work-report-summary" key={summary.summary_id}>
             <div className="work-report-meta">
               <span>{label(summary.kind)}</span>
+              <span>{label(summary.audience)}</span>
               <span>{label(summary.freshness)}</span>
+              <span>{label(summary.generation_method)}</span>
             </div>
             <p>{summary.text}</p>
           </article>
@@ -464,12 +838,30 @@ function ContextTab({ report }: { report: WorkspaceWorkInspector }) {
       ) : (
         <Empty>No summary has been generated yet.</Empty>
       )}
-      <pre className="work-report-json">{prettyJson(report.context.value)}</pre>
+      {report.summary_claims.length ? (
+        <div className="work-report-claim-list" aria-label="Summary claims">
+          {report.summary_claims.map((claim) => (
+            <article className="work-report-claim" key={claim.claim_id}>
+              <strong>{claim.claim_text}</strong>
+              <div className="work-report-meta">
+                <span>{claim.source_kind}</span>
+                <span>{claim.source_id}</span>
+                <span>{label(claim.freshness)}</span>
+                <span>{label(claim.redaction_class)}</span>
+              </div>
+            </article>
+          ))}
+        </div>
+      ) : null}
+      <details className="work-report-details">
+        <summary>Agent handoff JSON preview</summary>
+        <pre className="work-report-json">{prettyJson(report.context.value)}</pre>
+      </details>
     </section>
   );
 }
 
-function RawJsonTab({ report }: { report: WorkspaceWorkInspector }) {
+export function RawRedactedJsonTab({ report }: { report: WorkspaceWorkInspector }) {
   const [expanded, setExpanded] = useState(false);
   return (
     <section className="work-report-panel" aria-label="Raw redacted JSON">
@@ -477,17 +869,82 @@ function RawJsonTab({ report }: { report: WorkspaceWorkInspector }) {
         <h2>Raw redacted JSON</h2>
         <span>safe_json only</span>
       </div>
+      <p className="work-report-raw-note">
+        Collapsed by default. This payload is the redacted route projection, not raw local transcript or command output.
+      </p>
       <button
         aria-expanded={expanded}
         className="work-report-refresh"
         type="button"
         onClick={() => setExpanded((value) => !value)}
       >
-        {expanded ? "Collapse JSON" : "Expand JSON"}
+        <FileText aria-hidden="true" size={15} />
+        <span>{expanded ? "Collapse JSON" : "Expand JSON"}</span>
       </button>
       {expanded ? <pre className="work-report-json">{prettyJson(report.raw_redacted_json.value)}</pre> : null}
     </section>
   );
+}
+
+function WorkInspectorRightRail({ report }: { report: WorkspaceWorkInspector }) {
+  return (
+    <aside className="work-report-right-rail" aria-label="Work Inspector summary">
+      <section className="work-report-panel">
+        <h2>Next action</h2>
+        <p>{report.trust.recommended_next_action}</p>
+      </section>
+      <section className="work-report-panel">
+        <h2>Open risks</h2>
+        {report.trust.open_risks.length ? (
+          <ul className="work-report-rail-list">
+            {report.trust.open_risks.map((risk) => (
+              <li key={risk}>{risk}</li>
+            ))}
+          </ul>
+        ) : (
+          <Empty>No open risks are recorded.</Empty>
+        )}
+      </section>
+      <section className="work-report-panel">
+        <h2>Evidence mix</h2>
+        <div className="work-report-rail-metrics">
+          <Metric label="Passing" value={report.evidence_summary.passing} />
+          <Metric label="Failing" value={report.evidence_summary.failing} />
+          <Metric label="Stale" value={report.evidence_summary.stale} />
+          <Metric label="Missing" value={report.evidence_summary.missing} />
+        </div>
+      </section>
+      <section className="work-report-panel">
+        <h2>Safe sharing</h2>
+        <p>{rawTranscriptStatus(report)}</p>
+      </section>
+    </aside>
+  );
+}
+
+function tabPanel(report: WorkspaceWorkInspector, selected: WorkInspectorTab) {
+  switch (selected) {
+    case "overview":
+      return <OverviewTab report={report} />;
+    case "transcript":
+      return <TranscriptTab items={report.transcript} />;
+    case "commands":
+      return <CommandsTab commands={report.commands} />;
+    case "evidence":
+      return <EvidenceTab evidence={report.evidence} />;
+    case "timeline":
+      return <TimelineTab items={report.timeline_items} />;
+    case "changes":
+      return <ChangesTab report={report} />;
+    case "artifacts":
+      return <ArtifactsTab artifacts={report.artifacts} />;
+    case "context":
+      return <ContextTab report={report} />;
+    case "raw":
+      return <RawRedactedJsonTab report={report} />;
+    default:
+      return null;
+  }
 }
 
 export function WorkInspectorView({
@@ -498,84 +955,24 @@ export function WorkInspectorView({
   onRefresh?: () => void;
 }) {
   const [selectedTab, setSelectedTab] = useState<WorkInspectorTab>("overview");
-  const title = report.work.title || "Untitled Work";
   const selected = useMemo(() => tabs.find((tab) => tab.id === selectedTab) ?? tabs[0], [selectedTab]);
-  const moveTabFocus = (nextIndex: number) => {
-    const boundedIndex = (nextIndex + tabs.length) % tabs.length;
-    const nextTab = tabs[boundedIndex];
-    setSelectedTab(nextTab.id);
-    window.requestAnimationFrame(() => {
-      document.getElementById(`work-report-tab-${nextTab.id}`)?.focus();
-    });
-  };
-  const handleTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
-    if (event.key === "ArrowRight" || event.key === "ArrowDown") {
-      event.preventDefault();
-      moveTabFocus(index + 1);
-    } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
-      event.preventDefault();
-      moveTabFocus(index - 1);
-    } else if (event.key === "Home") {
-      event.preventDefault();
-      moveTabFocus(0);
-    } else if (event.key === "End") {
-      event.preventDefault();
-      moveTabFocus(tabs.length - 1);
-    }
-  };
   return (
     <main className="work-report-page">
-      <header className="work-report-header">
-        <div>
-          <span className="work-report-eyebrow">Work Inspector</span>
-          <h1>{title}</h1>
-          <div className="work-report-meta">
-            <span>{report.work.work_id}</span>
-            <span>{label(report.work.lifecycle)}</span>
-            <span>{report.work.primary_branch || "branch unknown"}</span>
-            <span>{shortSha(report.work.head_commit)}</span>
-          </div>
-        </div>
-        {onRefresh ? (
-          <button className="work-report-refresh" type="button" onClick={onRefresh}>
-            Refresh
-          </button>
-        ) : null}
-      </header>
-
-      <nav className="work-report-tabs" role="tablist" aria-label="Work Inspector sections">
-        {tabs.map((tab, index) => (
-          <button
-            aria-controls={`work-report-panel-${tab.id}`}
-            aria-selected={selected.id === tab.id}
-            id={`work-report-tab-${tab.id}`}
-            key={tab.id}
-            role="tab"
-            tabIndex={selected.id === tab.id ? 0 : -1}
-            type="button"
-            onKeyDown={(event) => handleTabKeyDown(event, index)}
-            onClick={() => setSelectedTab(tab.id)}
+      <WorkInspectorHeader report={report} onRefresh={onRefresh} />
+      <InspectorMetricStrip report={report} />
+      <div className="work-report-content">
+        <section className="work-report-primary" aria-label="Work Inspector detail">
+          <InspectorTabs selected={selected.id} onSelect={setSelectedTab} />
+          <div
+            aria-labelledby={`work-report-tab-${selected.id}`}
+            className="work-report-tab-panel"
+            id={`work-report-panel-${selected.id}`}
+            role="tabpanel"
           >
-            {tab.label}
-          </button>
-        ))}
-      </nav>
-
-      <div
-        aria-labelledby={`work-report-tab-${selected.id}`}
-        className="work-report-tab-panel"
-        id={`work-report-panel-${selected.id}`}
-        role="tabpanel"
-      >
-        {selected.id === "overview" ? <OverviewTab report={report} /> : null}
-        {selected.id === "transcript" ? <TranscriptTab items={report.transcript} /> : null}
-        {selected.id === "commands" ? <CommandsTab commands={report.commands} /> : null}
-        {selected.id === "evidence" ? <EvidenceTab evidence={report.evidence} /> : null}
-        {selected.id === "timeline" ? <TimelineTab report={report} /> : null}
-        {selected.id === "changes" ? <ChangesTab report={report} /> : null}
-        {selected.id === "artifacts" ? <ArtifactsTab artifacts={report.artifacts} /> : null}
-        {selected.id === "context" ? <ContextTab report={report} /> : null}
-        {selected.id === "raw" ? <RawJsonTab report={report} /> : null}
+            {tabPanel(report, selected.id)}
+          </div>
+        </section>
+        <WorkInspectorRightRail report={report} />
       </div>
     </main>
   );

@@ -6420,11 +6420,31 @@ async fn session_work_projection_is_idempotent_and_links_session_state() {
         .list_work_events(fixture.workspace_id, work.work_id.clone(), None)
         .await
         .unwrap();
+    let first_event_ids = first_events
+        .iter()
+        .map(|event| event.event_id.0.clone())
+        .collect::<Vec<_>>();
+    let second_event_ids = second_events
+        .iter()
+        .map(|event| event.event_id.0.clone())
+        .collect::<Vec<_>>();
 
     assert_eq!(first.work_records, 1);
     assert_eq!(second.work_records, 1);
     assert_eq!(second_links.len(), first_links.len());
     assert_eq!(second_events.len(), first_events.len());
+    assert_eq!(second_event_ids, first_event_ids);
+    assert!(second_events
+        .windows(2)
+        .all(|events| events[0].sequence <= events[1].sequence));
+    assert!(second_events
+        .iter()
+        .all(|event| event.event_id.0.starts_with("wev_ade_")));
+    assert!(second_events.iter().any(|event| {
+        event.source_kind.as_deref() == Some("session_event")
+            && event.source_id.as_deref().is_some()
+            && event.sequence > 0
+    }));
     assert!(second_links.iter().any(|link| {
         link.target_kind == WorkLinkTargetKind::Task
             && link.target_id.as_deref() == Some(&fixture.task_id.0.to_string())
@@ -6453,6 +6473,8 @@ async fn session_work_projection_uses_redacted_text_without_raw_payload_leakage(
     let turn_id = TurnId::new();
     let secret = "raw-secret-should-not-persist";
     let local_path = format!("/tmp/{secret}/artifact.txt");
+    let windows_path = format!("D:\\scratch\\{secret}\\artifact.txt");
+    let unc_path = format!("\\\\buildshare\\scratch\\{secret}\\artifact.txt");
     fixture
         .store
         .insert_session_turn(make_turn(fixture.session_id, run_id, turn_id))
@@ -6466,7 +6488,9 @@ async fn session_work_projection_uses_redacted_text_without_raw_payload_leakage(
             Some(turn_id),
             SessionEventType::UserMessage,
             serde_json::json!({
-                "content": format!("OPENAI_API_KEY={secret} path={local_path}")
+                "content": format!(
+                    "OPENAI_API_KEY={secret} path={local_path} windows={windows_path} unc={unc_path}"
+                )
             }),
         )
         .await
@@ -6527,7 +6551,12 @@ async fn session_work_projection_uses_redacted_text_without_raw_payload_leakage(
     assert!(events
         .iter()
         .flat_map(|event| event.redacted_text.as_deref())
-        .all(|text| !text.contains(secret) && !text.contains(&local_path)));
+        .all(|text| {
+            !text.contains(secret)
+                && !text.contains(&local_path)
+                && !text.contains(&windows_path)
+                && !text.contains(&unc_path)
+        }));
 
     let event_rows: Vec<(Option<String>, String)> = sqlx::query_as(
         r#"SELECT payload_json, record_json
@@ -6543,6 +6572,8 @@ async fn session_work_projection_uses_redacted_text_without_raw_payload_leakage(
         assert!(payload_json.is_none());
         assert!(!record_json.contains(secret), "{record_json}");
         assert!(!record_json.contains(&local_path), "{record_json}");
+        assert!(!record_json.contains(&windows_path), "{record_json}");
+        assert!(!record_json.contains(&unc_path), "{record_json}");
     }
 
     let link_rows: Vec<String> = sqlx::query_scalar(
@@ -6558,6 +6589,8 @@ async fn session_work_projection_uses_redacted_text_without_raw_payload_leakage(
     for record_json in link_rows {
         assert!(!record_json.contains(secret), "{record_json}");
         assert!(!record_json.contains(&local_path), "{record_json}");
+        assert!(!record_json.contains(&windows_path), "{record_json}");
+        assert!(!record_json.contains(&unc_path), "{record_json}");
     }
 }
 

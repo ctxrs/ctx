@@ -25,8 +25,9 @@ pub(in crate::api) use management::*;
 pub(super) use registry::{create_workspace, delete_workspace, get_workspace, list_workspaces};
 pub(super) use work::{
     create_workspace_work_evidence, create_workspace_work_summary, get_workspace_work,
-    get_workspace_work_context, get_workspace_work_evidence, get_workspace_work_inspector,
-    get_workspace_work_report, get_workspace_work_timeline, list_workspace_work,
+    get_workspace_work_artifact, get_workspace_work_context, get_workspace_work_evidence,
+    get_workspace_work_inspector, get_workspace_work_report, get_workspace_work_timeline,
+    list_workspace_work,
 };
 pub(super) use worktrees::{get_worktree, get_worktree_bootstrap_logs};
 

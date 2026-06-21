@@ -49,6 +49,10 @@ pub(super) fn workspace_base_routes() -> axum::Router<RouteState> {
             get(get_workspace_work_inspector),
         )
         .route(
+            "/api/workspaces/:id/work/:work_id/artifacts/:artifact_id",
+            get(get_workspace_work_artifact),
+        )
+        .route(
             "/api/workspaces/:id/work/:work_id/report",
             get(get_workspace_work_report),
         )

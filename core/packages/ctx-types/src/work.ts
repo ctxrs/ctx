@@ -256,6 +256,13 @@ export type WorkspaceWorkInspectorCommand = {
   stdout_preview?: string | null;
   stderr_preview?: string | null;
   output_truncated: boolean;
+  preview_limit_bytes?: number | null;
+  stdout_size_bytes?: number | null;
+  stderr_size_bytes?: number | null;
+  stdout_sha256?: string | null;
+  stderr_sha256?: string | null;
+  stdout_truncated?: boolean;
+  stderr_truncated?: boolean;
   started_at?: string | null;
   finished_at?: string | null;
   output_ref?: JsonValue | null;
@@ -263,11 +270,21 @@ export type WorkspaceWorkInspectorCommand = {
 
 export type WorkspaceWorkInspectorArtifact = {
   id: string;
+  artifact_id?: string | null;
+  source_kind?: string | null;
+  source_id?: string | null;
   kind?: string | null;
   label?: string | null;
-  url?: string | null;
-  path?: string | null;
-  ref?: JsonValue | null;
+  display_name?: string | null;
+  mime_type?: string | null;
+  bytes?: number | null;
+  missing: boolean;
+  unavailable_reason?: string | null;
+  render_kind: "raster_image" | "text" | "download_only" | "unavailable";
+  download_url?: string | null;
+  open_url?: string | null;
+  thumbnail_url?: string | null;
+  preview_url?: string | null;
   created_at?: string | null;
 };
 

@@ -5,6 +5,7 @@ mod missing_files;
 mod root_paths;
 mod route_contracts;
 mod spool_isolation;
+mod work_artifact_bridge;
 
 struct SessionArtifactFixture {
     app: axum::Router,
