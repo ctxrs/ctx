@@ -12,7 +12,7 @@ CORE_ROOT="${REPO_ROOT}/core"
 DESKTOP_TAURI_ROOT="${CORE_ROOT}/apps/desktop/src-tauri"
 EXPECTED_HOST_ARCH="${1:-${CTX_EXPECTED_HOST_ARCH:-}}"
 
-export PATH="${HOME}/.cargo/bin:${PATH}"
+export PATH="${HOME}/.buildkite-agent/bin:${HOME}/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"
 
 require_command() {
   local command_name="$1"

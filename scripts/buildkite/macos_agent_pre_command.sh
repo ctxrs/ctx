@@ -8,6 +8,8 @@ set -euo pipefail
 # verification pipeline must not load signing material or publish artifacts, so
 # this hook removes inherited desktop runtime and signing pollution, then exits.
 
+export PATH="${HOME}/.buildkite-agent/bin:${HOME}/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"
+
 scrub_names=(
   APPLE_API_ISSUER
   APPLE_API_KEY
