@@ -38,6 +38,7 @@ scrub_release_signing_env() {
     APPLE_API_ISSUER
     APPLE_API_KEY
     APPLE_API_KEY_ID
+    APPLE_API_KEY_PATH
     APPLE_CERTIFICATE
     APPLE_CERTIFICATE_PASSWORD
     APPLE_SIGNING_IDENTITY
@@ -52,7 +53,7 @@ scrub_release_signing_env() {
   local name
   local present=()
   for name in "${names[@]}"; do
-    if [[ -n "${!name:-}" ]]; then
+    if [[ -n "${!name+x}" ]]; then
       present+=("${name}")
       unset "${name}"
     fi
