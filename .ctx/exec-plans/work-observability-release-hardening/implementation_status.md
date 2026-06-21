@@ -106,7 +106,9 @@ Final broad command results:
 - `cargo fmt --manifest-path core/Cargo.toml --all -- --check`
   - PASS.
 - `git diff --check`
-  - PASS before this status edit.
+  - PASS before the broad-verification status edit. Rerun after the final
+    broad-verification addendum commit `7a5454e` and passed with a clean
+    worktree.
 
 Remaining accepted deferrals after this addendum:
 
@@ -173,10 +175,16 @@ Final specialist re-review verdicts:
 - search/data reviewer `019ee898-86c6-7720-851c-c4bd99d049be`: PASS on `1e075ef`.
 - test/SDLC reviewer `019ee898-8a8c-7bd0-8428-b3f189c09d4e`: code/test coverage PASS; status/artifact bookkeeping is satisfied by this status/artifact note.
 
-Dedicated final done-ness reviewer `019ee8b7-44ed-7182-9025-12d16ddde619`
-(session `28afdbd0-6180-4f83-8c97-f731117ece6d`) returned PASS_READY on
-`ctx/agent-work-semantics-primary@4a830c7`: release-hardening final done
-criteria were satisfied, with only this status-note update remaining.
+Earlier dedicated final done-ness reviewer
+`019ee8b7-44ed-7182-9025-12d16ddde619` returned PASS_READY on
+`ctx/agent-work-semantics-primary@4a830c7` before the final broad-verification
+addendum.
+
+Final broad-addendum done-ness reviewer
+`019ee8f0-a3bf-7a31-a68c-1b0d910f9002` returned PASS on
+`ctx/agent-work-semantics-primary@7a5454e`: no blocker-level issues, the
+worktree was clean, the final broad verification addendum was present, commands
+and deferrals were coherent, and local no-push done criteria were satisfied.
 
 ## Accepted Deferrals
 
