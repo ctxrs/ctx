@@ -92,7 +92,6 @@ required_snippets=(
   "queue: \"release-linux-managed\""
   "queue: \"ctx-mac-gui-shared-arm64\""
   "queue: \"ctx-mac-gui-shared-x64\""
-  "ctx-runner-class: \"release-linux-control\""
   "ctx-runner-class: \"release-linux-x64-proof\""
   "ctx-runner-class: \"release-linux-x64-stage\""
 )
