@@ -1,4 +1,5 @@
-import type { WorkspaceWorkEvidence, WorkspaceWorkReport, WorkspaceWorkTrustSummary } from "@ctx/types";
+import type { JsonValue, WorkspaceWorkEvidence, WorkspaceWorkReport, WorkspaceWorkTrustSummary } from "@ctx/types";
+import { ExternalLink } from "../../components/ExternalLink";
 
 const label = (value: string | null | undefined) =>
   String(value ?? "unknown").replaceAll("_", " ");
@@ -12,6 +13,48 @@ const trustClass = (verdict: string) => `work-report-trust work-report-trust-${v
 
 const evidenceClass = (item: WorkspaceWorkEvidence) =>
   `work-report-evidence-row work-report-evidence-${item.status} work-report-freshness-${item.freshness}`;
+
+const compactJson = (value: JsonValue | null | undefined, limit = 220) => {
+  if (value == null) return null;
+  const text = typeof value === "string" ? value : JSON.stringify(value);
+  return text.length > limit ? `${text.slice(0, limit)}...` : text;
+};
+
+const asRecord = (value: JsonValue | null | undefined): Record<string, JsonValue> | null => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return value;
+};
+
+const pickString = (record: Record<string, JsonValue> | null, keys: string[]) => {
+  if (!record) return null;
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) return value;
+    if (typeof value === "number") return String(value);
+  }
+  return null;
+};
+
+const pullRequestLabel = (value: JsonValue, index: number) => {
+  const outer = asRecord(value);
+  const nested = asRecord(outer?.pull_request) ?? outer;
+  const title = pickString(nested, ["title", "name"]);
+  const url = pickString(nested, ["url", "html_url"]);
+  const state = pickString(nested, ["state"]);
+  const number = pickString(nested, ["number", "pr_number"]);
+  const labelParts = [title || (number ? `PR #${number}` : `PR ${index + 1}`), state ? label(state) : null].filter(Boolean);
+  return { label: labelParts.join(" · "), url };
+};
+
+const rawTranscriptStatus = (report: WorkspaceWorkReport) => {
+  if (report.raw_transcript_included) {
+    return "Raw transcript detail is included in this response; review redaction before sharing.";
+  }
+  if (report.raw_transcript_available) {
+    return "Raw transcripts are available locally but not included by default.";
+  }
+  return "Raw transcripts are not available in this report response.";
+};
 
 function TrustStrip({ trust }: { trust: WorkspaceWorkTrustSummary }) {
   return (
@@ -30,6 +73,15 @@ export function WorkReportView({ report, onRefresh }: { report: WorkspaceWorkRep
   const title = report.work.title || "Untitled Work";
   const hasEvidence = report.evidence.length > 0;
   const hasTimeline = report.timeline.length > 0;
+  const pullRequests = report.change_summary.pull_requests.map(pullRequestLabel);
+  const commits = report.change_summary.commits.length
+    ? report.change_summary.commits
+    : report.links
+        .filter((link) => link.target_kind === "commit" && link.target_id)
+        .map((link) => link.target_id as string);
+  const hasLinkedChange = pullRequests.length > 0 || commits.length > 0 || report.change_summary.change_sets > 0;
+  const missingEvidence =
+    report.evidence_summary.missing > 0 || report.trust.verdict === "missing_evidence";
   return (
     <main className="work-report-page">
       <header className="work-report-header">
@@ -51,6 +103,36 @@ export function WorkReportView({ report, onRefresh }: { report: WorkspaceWorkRep
       </header>
 
       <TrustStrip trust={report.trust} />
+
+      <section className="work-report-linked-change" aria-label="Linked change">
+        <span className="work-report-eyebrow">Linked change</span>
+        {hasLinkedChange ? (
+          <div className="work-report-linked-items">
+            {pullRequests.map((pr, index) =>
+              pr.url ? (
+                <ExternalLink key={`${pr.url}:${index}`} href={pr.url}>
+                  {pr.label}
+                </ExternalLink>
+              ) : (
+                <span key={`${pr.label}:${index}`}>{pr.label}</span>
+              ),
+            )}
+            {commits.map((commit) => (
+              <span key={commit}>commit {shortSha(commit)}</span>
+            ))}
+            {report.change_summary.change_sets > 0 ? <span>{report.change_summary.change_sets} change set</span> : null}
+          </div>
+        ) : (
+          <p>No PR or commit is linked yet.</p>
+        )}
+      </section>
+
+      {missingEvidence ? (
+        <section className="work-report-warning" aria-label="Missing evidence">
+          <strong>Evidence is missing</strong>
+          <p>{report.trust.recommended_next_action}</p>
+        </section>
+      ) : null}
 
       {report.duplicate_strong_links.length > 0 ? (
         <section className="work-report-warning" aria-label="Duplicate Work links">
@@ -81,6 +163,10 @@ export function WorkReportView({ report, onRefresh }: { report: WorkspaceWorkRep
           <strong>{report.evidence_summary.stale}</strong>
         </div>
         <div>
+          <span className="work-report-eyebrow">Missing</span>
+          <strong>{report.evidence_summary.missing}</strong>
+        </div>
+        <div>
           <span className="work-report-eyebrow">Summaries</span>
           <strong>{label(report.work.summary_freshness)}</strong>
         </div>
@@ -103,6 +189,14 @@ export function WorkReportView({ report, onRefresh }: { report: WorkspaceWorkRep
                   <div>
                     <strong>{item.claim || item.command || item.evidence_id}</strong>
                     <p>{item.command || item.argv.join(" ")}</p>
+                    <div className="work-report-evidence-detail">
+                      <span>{label(item.source)}</span>
+                      <span>{label(item.fidelity)}</span>
+                      <span>{label(item.trust)}</span>
+                      {item.head_sha ? <span>{shortSha(item.head_sha)}</span> : null}
+                    </div>
+                    {item.output_ref ? <p className="work-report-ref">Output: {compactJson(item.output_ref)}</p> : null}
+                    {item.artifact_ref ? <p className="work-report-ref">Artifact: {compactJson(item.artifact_ref)}</p> : null}
                   </div>
                   <div className="work-report-evidence-badges">
                     <span>{label(item.kind)}</span>
@@ -132,8 +226,8 @@ export function WorkReportView({ report, onRefresh }: { report: WorkspaceWorkRep
           ) : (
             <p className="work-report-empty">No summary has been generated yet.</p>
           )}
-          <div className="work-report-raw-note">
-            Raw transcripts are not included in this report response.
+          <div className={report.raw_transcript_included ? "work-report-raw-note work-report-raw-warning" : "work-report-raw-note"}>
+            {rawTranscriptStatus(report)}
           </div>
         </aside>
       </div>

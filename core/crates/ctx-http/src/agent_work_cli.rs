@@ -1057,6 +1057,14 @@ async fn show_recent_work(args: AgentWorkRecentArgs, writer: &mut dyn Write) -> 
         .take(args.limit)
         .collect::<Vec<_>>();
     if args.json {
+        let change_sets = change_sets
+            .iter()
+            .map(|item| redact_work_serializable(&context, item))
+            .collect::<Vec<_>>();
+        let contributions = contributions
+            .iter()
+            .map(|item| redact_work_serializable(&context, item))
+            .collect::<Vec<_>>();
         serde_json::to_writer_pretty(
             &mut *writer,
             &json!({
@@ -1203,8 +1211,7 @@ async fn search_work(args: AgentWorkSearchArgs, writer: &mut dyn Write) -> Resul
 async fn show_work_context(args: AgentWorkContextArgs, writer: &mut dyn Write) -> Result<()> {
     let context = open_work_store(&args.store).await?;
     let value = build_work_context_value(
-        &context.store,
-        context.workspace_id,
+        &context,
         WorkRecordId::from_id(args.work_id.clone()),
         args.budget,
     )
@@ -1229,12 +1236,8 @@ async fn show_work_context(args: AgentWorkContextArgs, writer: &mut dyn Write) -
 
 async fn show_work_report(args: AgentWorkReportArgs, writer: &mut dyn Write) -> Result<()> {
     let context = open_work_store(&args.store).await?;
-    let value = build_work_report_value(
-        &context.store,
-        context.workspace_id,
-        WorkRecordId::from_id(args.work_id.clone()),
-    )
-    .await?;
+    let value =
+        build_work_report_value(&context, WorkRecordId::from_id(args.work_id.clone())).await?;
     if args.markdown {
         write_work_report_markdown(&value, writer)?;
     } else if args.json {
@@ -1339,6 +1342,10 @@ async fn list_work_evidence(
         .list_work_evidence(context.workspace_id, WorkRecordId::from_id(work_id.clone()))
         .await?;
     if args.json {
+        let evidence = evidence
+            .iter()
+            .map(|item| redact_work_serializable(&context, item))
+            .collect::<Vec<_>>();
         serde_json::to_writer_pretty(
             &mut *writer,
             &json!({
@@ -1521,6 +1528,10 @@ async fn refresh_work_evidence(
     refresh_work_trust_from_evidence_set(&context.store, context.workspace_id, &work_id, &evidence)
         .await?;
     if args.json {
+        let evidence = evidence
+            .iter()
+            .map(|item| redact_work_serializable(&context, item))
+            .collect::<Vec<_>>();
         serde_json::to_writer_pretty(
             &mut *writer,
             &json!({
@@ -1538,8 +1549,7 @@ async fn refresh_work_evidence(
 async fn summarize_work(args: AgentWorkSummarizeArgs, writer: &mut dyn Write) -> Result<()> {
     let context = open_work_store(&args.store).await?;
     let work_id = WorkRecordId::from_id(args.work_id.clone());
-    let report =
-        build_work_report_value(&context.store, context.workspace_id, work_id.clone()).await?;
+    let report = build_work_report_value(&context, work_id.clone()).await?;
     let text = deterministic_summary_text(&report);
     let now = Utc::now();
     let summary = WorkSummary {
@@ -1668,6 +1678,16 @@ async fn handle_work_index(args: AgentWorkIndexArgs, writer: &mut dyn Write) -> 
             {
                 index_work_record(&context, &work).await?;
                 inserted += 1;
+                for link in context
+                    .store
+                    .list_work_record_links(context.workspace_id, work.work_id.clone())
+                    .await?
+                {
+                    if let Some(pr) = pull_request_ref_from_work_link(&link) {
+                        index_work_pull_request_link(&context, &work.work_id, &pr).await?;
+                        inserted += 1;
+                    }
+                }
                 for event in context
                     .store
                     .list_work_events(context.workspace_id, work.work_id.clone(), Some(5_000))
@@ -1910,6 +1930,7 @@ async fn ensure_work_record_for_pr(
     )
     .await?;
     index_work_record(context, &record).await?;
+    index_work_pull_request_link(context, &record.work_id, pr).await?;
     Ok(record)
 }
 
@@ -2156,12 +2177,11 @@ async fn append_evidence_event_and_index(
 }
 
 async fn build_work_context_value(
-    store: &Store,
-    workspace_id: WorkspaceId,
+    context: &WorkStoreContext,
     work_id: WorkRecordId,
     budget_tokens: usize,
 ) -> Result<Value> {
-    let report = build_work_report_value(store, workspace_id, work_id.clone()).await?;
+    let report = build_work_report_value(context, work_id.clone()).await?;
     let evidence = report
         .get("evidence")
         .and_then(Value::as_array)
@@ -2220,10 +2240,11 @@ async fn build_work_context_value(
 }
 
 async fn build_work_report_value(
-    store: &Store,
-    workspace_id: WorkspaceId,
+    context: &WorkStoreContext,
     work_id: WorkRecordId,
 ) -> Result<Value> {
+    let store = &context.store;
+    let workspace_id = context.workspace_id;
     let work = store
         .get_workspace_work_record(workspace_id, work_id.clone())
         .await?
@@ -2255,6 +2276,7 @@ async fn build_work_report_value(
         &change_sets,
         &contributions,
     );
+    summaries.retain(is_default_local_summary);
     for summary in &mut summaries {
         summary.freshness = effective_summary_freshness(
             summary.freshness,
@@ -2262,6 +2284,11 @@ async fn build_work_report_value(
             &material_revision_key,
         );
     }
+    claims.retain(|claim| {
+        summaries
+            .iter()
+            .any(|summary| summary.summary_id == claim.summary_id)
+    });
     for claim in &mut claims {
         claim.freshness = effective_summary_freshness(
             claim.freshness,
@@ -2274,7 +2301,7 @@ async fn build_work_report_value(
     work.summary_freshness = aggregate_summary_freshness(&summaries, &material_revision_key);
     let evidence_summary = evidence_summary_value(&evidence);
     let trust = trust_report_value(&work, &evidence);
-    Ok(json!({
+    let value = json!({
         "work": work,
         "links": links,
         "trust": trust,
@@ -2289,14 +2316,15 @@ async fn build_work_report_value(
             "commits": commit_links_from_work_links(&links),
         },
         "duplicate_strong_links": duplicate_strong_links,
-        "change_sets": change_sets,
-        "contributions": contributions,
+        "change_sets": change_sets.iter().map(|item| redact_work_serializable(context, item)).collect::<Vec<_>>(),
+        "contributions": contributions.iter().map(|item| redact_work_serializable(context, item)).collect::<Vec<_>>(),
         "summaries": summaries,
         "summary_claims": claims,
         "timeline": events,
         "raw_transcript_available": false,
         "raw_transcript_included": false,
-    }))
+    });
+    Ok(redact_work_value(context, &value))
 }
 
 async fn linked_graph_for_work(
@@ -2361,10 +2389,14 @@ fn evidence_summary_value(evidence: &[WorkEvidence]) -> Value {
 fn trust_report_value(work: &WorkRecord, evidence: &[WorkEvidence]) -> Value {
     let verdict = computed_work_trust_verdict(work, evidence);
     let reason = match verdict {
-        WorkTrustVerdict::Verified => "Fresh evidence is present for this Work record.",
+        WorkTrustVerdict::Verified => {
+            "Fresh verified-provenance evidence is present for this Work record."
+        }
         WorkTrustVerdict::Stale => "Some evidence no longer matches the current Work fingerprint.",
         WorkTrustVerdict::MissingEvidence => "No evidence has been recorded for this Work record.",
-        WorkTrustVerdict::Partial => "Some evidence or source material is incomplete.",
+        WorkTrustVerdict::Partial => {
+            "Some evidence is local, incomplete, imported, or lacks verified provenance."
+        }
         WorkTrustVerdict::UntrustedLocalCapture => {
             "This record includes user-space local capture; treat it as context, not proof."
         }
@@ -2376,7 +2408,9 @@ fn trust_report_value(work: &WorkRecord, evidence: &[WorkEvidence]) -> Value {
         WorkTrustVerdict::MissingEvidence => {
             "Add evidence with `ctx work evidence <work-id> run -- <command>`."
         }
-        WorkTrustVerdict::Partial => "Add missing fingerprints, artifacts, or citations.",
+        WorkTrustVerdict::Partial => {
+            "Add verified provenance, fingerprints, artifacts, or citations."
+        }
         WorkTrustVerdict::UntrustedLocalCapture => "Link a PR/commit and add fresh evidence.",
         WorkTrustVerdict::Failed => "Fix the failing evidence before marking this ready.",
     };
@@ -2433,7 +2467,7 @@ fn write_work_report_markdown(value: &Value, writer: &mut dyn Write) -> Result<(
         .pointer("/work/title")
         .and_then(Value::as_str)
         .unwrap_or("Untitled Work");
-    writeln!(writer, "# {title}")?;
+    writeln!(writer, "# {}", markdown_plain(title))?;
     writeln!(writer)?;
     writeln!(
         writer,
@@ -2454,10 +2488,12 @@ fn write_work_report_markdown(value: &Value, writer: &mut dyn Write) -> Result<(
     writeln!(
         writer,
         "- Next: {}",
-        value
-            .pointer("/trust/recommended_next_action")
-            .and_then(Value::as_str)
-            .unwrap_or("Review linked evidence.")
+        markdown_plain(
+            value
+                .pointer("/trust/recommended_next_action")
+                .and_then(Value::as_str)
+                .unwrap_or("Review linked evidence.")
+        )
     )?;
     writeln!(writer)?;
     writeln!(writer, "## Evidence")?;
@@ -2478,11 +2514,23 @@ fn write_work_report_markdown(value: &Value, writer: &mut dyn Write) -> Result<(
                 item.get("freshness")
                     .and_then(Value::as_str)
                     .unwrap_or("unknown"),
-                item.get("claim").and_then(Value::as_str).unwrap_or("")
+                markdown_plain(item.get("claim").and_then(Value::as_str).unwrap_or(""))
             )?;
         }
     }
     Ok(())
+}
+
+fn markdown_plain(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('`', "\\`")
+        .replace('[', "\\[")
+        .replace(']', "\\]")
+        .replace('(', "\\(")
+        .replace(')', "\\)")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn deterministic_summary_text(report: &Value) -> String {
@@ -2503,6 +2551,11 @@ fn deterministic_summary_text(report: &Value) -> String {
         .and_then(Value::as_str)
         .unwrap_or("Review linked evidence.");
     format!("{title}\n\nTrust verdict: {verdict}. Evidence items: {evidence_total}. Next action: {next}")
+}
+
+fn is_default_local_summary(summary: &WorkSummary) -> bool {
+    summary.generation_method != WorkSummaryGenerationMethod::ProviderLlm
+        && !summary.source_material_left_machine
 }
 
 fn report_revision_key(report: &Value) -> String {
@@ -2564,6 +2617,7 @@ fn computed_work_trust_verdict(work: &WorkRecord, evidence: &[WorkEvidence]) -> 
     } else if evidence.iter().any(|item| {
         item.status == WorkEvidenceStatus::ObservedPass
             && item.freshness == WorkEvidenceFreshness::Fresh
+            && item.trust == RecordTrust::Verified
     }) {
         WorkTrustVerdict::Verified
     } else if evidence
@@ -2674,6 +2728,53 @@ fn redact_work_text(context: &WorkStoreContext, value: &str) -> String {
         redacted
     } else {
         redacted.replace(root, "[redacted:workspace_root]")
+    }
+}
+
+fn redact_work_serializable<T: Serialize>(context: &WorkStoreContext, value: &T) -> Value {
+    serde_json::to_value(value)
+        .map(|value| redact_work_value(context, &value))
+        .unwrap_or_else(|_| Value::String("[redacted:unserializable]".to_string()))
+}
+
+fn redact_work_value(context: &WorkStoreContext, value: &Value) -> Value {
+    match value {
+        Value::String(text) => Value::String(redact_work_text(context, text)),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| redact_work_value(context, item))
+                .collect(),
+        ),
+        Value::Object(object) => {
+            let mut redacted = serde_json::Map::new();
+            for (key, value) in object {
+                let key_lc = key.to_ascii_lowercase();
+                if key_lc == "payload_json" {
+                    continue;
+                }
+                if matches!(
+                    key_lc.as_str(),
+                    "absolute_path"
+                        | "repo_root"
+                        | "root_path"
+                        | "primary_repo_root"
+                        | "fingerprint_json"
+                        | "current_fingerprint_json"
+                ) || key_lc.contains("secret")
+                    || key_lc.contains("token")
+                    || key_lc.contains("password")
+                    || key_lc == "authorization"
+                    || key_lc == "api_key"
+                {
+                    redacted.insert(key.clone(), Value::String("[redacted:local_detail]".into()));
+                } else {
+                    redacted.insert(key.clone(), redact_work_value(context, value));
+                }
+            }
+            Value::Object(redacted)
+        }
+        other => other.clone(),
     }
 }
 
@@ -2808,6 +2909,57 @@ async fn index_work_event(context: &WorkStoreContext, event: &WorkEvent) -> Resu
     Ok(())
 }
 
+async fn index_work_pull_request_link(
+    context: &WorkStoreContext,
+    work_id: &WorkRecordId,
+    pr: &PullRequestRef,
+) -> Result<()> {
+    let now = Utc::now();
+    let target_id = pull_request_target_id(pr);
+    let number = pr.number.to_string();
+    let doc = WorkSearchDoc {
+        doc_id: stable_search_doc_id("work_pull_request", &target_id),
+        workspace_id: context.workspace_id,
+        work_id: work_id.clone(),
+        doc_type: "pull_request".to_string(),
+        source_id: target_id,
+        source_kind: "pull_request".to_string(),
+        event_time: now,
+        repo_root: None,
+        path: None,
+        branch: None,
+        commit_sha: None,
+        pr_owner: Some(pr.owner.clone()),
+        pr_repo: Some(pr.repo.clone()),
+        pr_number: Some(pr.number),
+        agent_provider: Some(pr.provider.clone()),
+        freshness: WorkEvidenceFreshness::Unknown,
+        redaction_class: WorkRedactionClass::LocalRedacted,
+        title: pr
+            .title
+            .as_deref()
+            .map(|title| redact_work_text(context, title))
+            .or_else(|| Some(format!("PR {}/{}#{}", pr.owner, pr.repo, pr.number))),
+        search_text_redacted: redact_work_text(
+            context,
+            &[
+                pr.provider.as_str(),
+                pr.owner.as_str(),
+                pr.repo.as_str(),
+                number.as_str(),
+                pr.title.as_deref().unwrap_or(""),
+                pr.url.as_deref().unwrap_or(""),
+            ]
+            .join("\n"),
+        ),
+        created_at: now,
+        updated_at: now,
+        schema_version: AGENT_WORK_SCHEMA_VERSION,
+    };
+    context.store.upsert_work_search_doc(&doc).await?;
+    Ok(())
+}
+
 async fn index_work_evidence(context: &WorkStoreContext, evidence: &WorkEvidence) -> Result<()> {
     let now = Utc::now();
     let doc = WorkSearchDoc {
@@ -2887,6 +3039,15 @@ async fn index_work_summary(context: &WorkStoreContext, summary: &WorkSummary) -
     };
     context.store.upsert_work_search_doc(&doc).await?;
     Ok(())
+}
+
+fn pull_request_ref_from_work_link(link: &WorkRecordLink) -> Option<PullRequestRef> {
+    if link.target_kind != WorkLinkTargetKind::PullRequest {
+        return None;
+    }
+    link.target_json
+        .as_ref()
+        .and_then(|value| serde_json::from_value::<PullRequestRef>(value.clone()).ok())
 }
 
 fn stable_search_doc_id(kind: &str, source_id: &str) -> WorkSearchDocId {
@@ -3193,7 +3354,7 @@ async fn list_work_records(args: AgentWorkListArgs, writer: &mut dyn Write) -> R
     let bundle = load_work_export(&context.store, context.workspace_id).await?;
 
     if args.json {
-        let value = filtered_export_value(&bundle, args.kind)?;
+        let value = filtered_list_value(&context, &bundle, args.kind);
         serde_json::to_writer_pretty(&mut *writer, &value)?;
         writeln!(writer)?;
     } else {
@@ -3263,6 +3424,7 @@ async fn show_work_record(args: AgentWorkShowArgs, writer: &mut dyn Write) -> Re
     };
 
     if args.json {
+        let value = redact_work_value(&context, &value);
         serde_json::to_writer_pretty(&mut *writer, &value)?;
         writeln!(writer)?;
     } else {
@@ -3711,20 +3873,31 @@ fn contains_redaction_marker(value: &Value) -> bool {
     }
 }
 
-fn filtered_export_value(bundle: &AgentWorkExport, kind: AgentWorkRecordKind) -> Result<Value> {
-    let filtered = AgentWorkExport {
-        change_sets: if kind.includes_change_sets() {
-            bundle.change_sets.clone()
+fn filtered_list_value(
+    context: &WorkStoreContext,
+    bundle: &AgentWorkExport,
+    kind: AgentWorkRecordKind,
+) -> Value {
+    json!({
+        "change_sets": if kind.includes_change_sets() {
+            bundle
+                .change_sets
+                .iter()
+                .map(|item| redact_work_serializable(context, item))
+                .collect::<Vec<_>>()
         } else {
             Vec::new()
         },
-        contributions: if kind.includes_contributions() {
-            bundle.contributions.clone()
+        "contributions": if kind.includes_contributions() {
+            bundle
+                .contributions
+                .iter()
+                .map(|item| redact_work_serializable(context, item))
+                .collect::<Vec<_>>()
         } else {
             Vec::new()
         },
-    };
-    serde_json::to_value(filtered).context("serializing filtered Work records")
+    })
 }
 
 async fn find_work_record_value(
@@ -4935,12 +5108,15 @@ mod tests {
     fn computed_trust_uses_aggregate_evidence_state() {
         let workspace_id = WorkspaceId::new();
         let work = test_work_record(workspace_id);
-        let fresh_pass = test_work_evidence(
+        let mut fresh_pass = test_work_evidence(
             workspace_id,
             work.work_id.clone(),
             WorkEvidenceStatus::ObservedPass,
             WorkEvidenceFreshness::Fresh,
         );
+        let mut verified_pass = fresh_pass.clone();
+        verified_pass.trust = RecordTrust::Verified;
+        fresh_pass.trust = RecordTrust::Medium;
         let stale_pass = test_work_evidence(
             workspace_id,
             work.work_id.clone(),
@@ -4955,8 +5131,12 @@ mod tests {
         );
 
         assert_eq!(
-            computed_work_trust_verdict(&work, &[fresh_pass]),
+            computed_work_trust_verdict(&work, &[verified_pass]),
             WorkTrustVerdict::Verified
+        );
+        assert_eq!(
+            computed_work_trust_verdict(&work, &[fresh_pass]),
+            WorkTrustVerdict::Partial
         );
         assert_eq!(
             computed_work_trust_verdict(&work, &[stale_pass]),
@@ -5008,6 +5188,35 @@ mod tests {
             aggregate_summary_freshness(&[stale], "rev-a"),
             WorkSummaryFreshness::Stale
         );
+    }
+
+    #[test]
+    fn markdown_report_escapes_untrusted_text() {
+        let value = json!({
+            "work": {
+                "title": "<img src=x onerror=alert(1)> [link](javascript:alert(1))",
+                "work_id": "wrk_test",
+            },
+            "trust": {
+                "verdict": "partial",
+                "recommended_next_action": "[rerun](javascript:alert(1))",
+            },
+            "evidence": [{
+                "evidence_id": "wevdc_test",
+                "status": "observed_pass",
+                "freshness": "fresh",
+                "claim": "<script>alert(1)</script> [bad](javascript:alert(1))",
+            }],
+        });
+        let mut output = Vec::new();
+        write_work_report_markdown(&value, &mut output).unwrap();
+        let rendered = String::from_utf8(output).unwrap();
+
+        assert!(!rendered.contains("<img"));
+        assert!(!rendered.contains("<script>"));
+        assert!(!rendered.contains("[bad](javascript:alert(1))"));
+        assert!(rendered.contains("&lt;img"));
+        assert!(rendered.contains("\\[bad\\]\\(javascript:alert\\(1\\)\\)"));
     }
 
     #[tokio::test]
@@ -5736,6 +5945,22 @@ mod tests {
         assert!(list_output.contains(&contribution_id.0));
         assert!(list_output.contains("ctx.work.list.completed"));
 
+        let mut list_json_output = Vec::new();
+        run_with_writer(
+            AgentWorkCommand {
+                command: AgentWorkSubcommand::List(AgentWorkListArgs {
+                    store: source_store.clone(),
+                    kind: AgentWorkRecordKind::All,
+                    json: true,
+                }),
+            },
+            &mut list_json_output,
+        )
+        .await
+        .unwrap();
+        let list_json_text = String::from_utf8(list_json_output).unwrap();
+        assert!(!list_json_text.contains("/tmp/test/private"));
+
         let mut show_output = Vec::new();
         run_with_writer(
             AgentWorkCommand {
@@ -5753,6 +5978,46 @@ mod tests {
         let show_json: Value = serde_json::from_slice(&show_output).unwrap();
         assert_eq!(show_json["id"], contribution_id.0);
         assert_eq!(show_json["workspace_id"], workspace.id.0.to_string());
+        let show_json_text = serde_json::to_string(&show_json).unwrap();
+        assert!(!show_json_text.contains("/tmp/test/private"));
+
+        let manager = StoreManager::open(source_dir.path()).await.unwrap();
+        let store = manager.workspace(workspace.id).await.unwrap();
+        let work = test_work_record(workspace.id);
+        let work_id = work.work_id.clone();
+        store.upsert_work_record(&work).await.unwrap();
+        let mut evidence = test_work_evidence(
+            workspace.id,
+            work_id.clone(),
+            WorkEvidenceStatus::ObservedPass,
+            WorkEvidenceFreshness::Fresh,
+        );
+        evidence.repo_root = Some("/tmp/test/private".to_string());
+        store.upsert_work_evidence(&evidence).await.unwrap();
+
+        let mut evidence_json_output = Vec::new();
+        run_with_writer(
+            AgentWorkCommand {
+                command: AgentWorkSubcommand::Evidence(AgentWorkEvidenceArgs {
+                    store: source_store.clone(),
+                    work_id: work_id.0.clone(),
+                    command: AgentWorkEvidenceSubcommand::List(AgentWorkEvidenceListArgs {
+                        json: true,
+                    }),
+                }),
+            },
+            &mut evidence_json_output,
+        )
+        .await
+        .unwrap();
+        let evidence_json_text = String::from_utf8(evidence_json_output).unwrap();
+        assert!(!evidence_json_text.contains("/tmp/test/private"));
+
+        let context = open_work_store(&source_store).await.unwrap();
+        let report = build_work_report_value(&context, work_id).await.unwrap();
+        let report_text = serde_json::to_string(&report).unwrap();
+        assert!(!report_text.contains("/tmp/test/private"));
+        assert!(!report_text.contains("payload_json"));
 
         let export_path = source_dir.path().join("work-export.json");
         let mut export_output = Vec::new();
@@ -6249,7 +6514,10 @@ mod tests {
             current_diff_fingerprint: None,
             trust_verdict: WorkTrustVerdict::UntrustedLocalCapture,
             summary_freshness: WorkSummaryFreshness::Missing,
-            metadata_json: None,
+            metadata_json: Some(json!({
+                "cwd": "/tmp/test/private",
+                "safe": "kept"
+            })),
             created_at: now,
             updated_at: now,
             schema_version: AGENT_WORK_SCHEMA_VERSION,
@@ -6320,7 +6588,10 @@ mod tests {
             summary: Some("Test contribution".to_string()),
             fingerprint: None,
             issuer: None,
-            metadata_json: None,
+            metadata_json: Some(json!({
+                "cwd": "/tmp/test/private",
+                "safe": "kept"
+            })),
             source_records: Vec::new(),
             created_at: None,
             updated_at: None,

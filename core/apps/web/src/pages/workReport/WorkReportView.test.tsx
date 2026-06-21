@@ -88,7 +88,17 @@ const baseReport = (): WorkspaceWorkReport => ({
   change_summary: {
     change_sets: 1,
     contributions: 2,
-    pull_requests: [],
+    pull_requests: [
+      {
+        provider: "github",
+        owner: "ctxrs",
+        repo: "ctx",
+        number: 123,
+        title: "Review Work report route",
+        url: "https://github.com/ctxrs/ctx/pull/123",
+        state: "draft",
+      },
+    ],
     commits: ["abcdef1234567890"],
   },
   change_sets: [],
@@ -151,10 +161,41 @@ describe("WorkReportView", () => {
 
     expect(screen.getByRole("heading", { name: "Stabilize Work report route" })).toBeInTheDocument();
     expect(screen.getByLabelText("Work trust")).toHaveTextContent("failed");
+    expect(screen.getByLabelText("Linked change")).toHaveTextContent("Review Work report route");
+    expect(screen.getByLabelText("Linked change")).toHaveTextContent("commit abcdef123456");
     expect(screen.getByText("Fix the failing evidence before marking this ready.")).toBeInTheDocument();
     expect(screen.getByText("Observed cargo test exited 101")).toBeInTheDocument();
-    expect(screen.getByText("Raw transcripts are not included in this report response.")).toBeInTheDocument();
+    expect(screen.getAllByText("worktree").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("exact").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("medium").length).toBeGreaterThan(0);
+    expect(screen.getByText("Raw transcripts are not available in this report response.")).toBeInTheDocument();
     expect(screen.queryByText("payload_json")).not.toBeInTheDocument();
     expect(screen.queryByText("/home/daddy")).not.toBeInTheDocument();
+  });
+
+  it("renders first-viewport missing evidence and raw transcript availability states", () => {
+    const report = baseReport();
+    report.evidence_summary = {
+      total: 0,
+      passing: 0,
+      failing: 0,
+      stale: 0,
+      missing: 1,
+    };
+    report.evidence = [];
+    report.trust = {
+      verdict: "missing_evidence",
+      reason: "No evidence has been recorded for this Work record.",
+      recommended_next_action: "Add evidence with ctx work evidence.",
+      open_risks: ["No evidence has been recorded for this Work record."],
+    };
+    report.raw_transcript_available = true;
+
+    render(<WorkReportView report={report} />);
+
+    expect(screen.getByLabelText("Missing evidence")).toHaveTextContent("Evidence is missing");
+    expect(screen.getByLabelText("Evidence summary")).toHaveTextContent("Missing");
+    expect(screen.getByText("Raw transcripts are available locally but not included by default.")).toBeInTheDocument();
+    expect(screen.getAllByText("No evidence has been recorded for this Work record.").length).toBeGreaterThan(0);
   });
 });

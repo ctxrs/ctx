@@ -33,22 +33,37 @@ export default function WorkReportPage() {
   }, [loadReport]);
 
   if (!id || !workId) {
-    return <main className="work-report-page">Missing Work route parameters.</main>;
+    return (
+      <main className="work-report-page" role="alert">
+        Missing Work route parameters.
+      </main>
+    );
   }
   if (loading && !report) {
-    return <main className="work-report-page work-report-loading">Loading Work report...</main>;
+    return (
+      <main className="work-report-page work-report-loading" aria-busy="true" role="status">
+        Loading Work report...
+      </main>
+    );
   }
   if (error && !report) {
     return (
-      <main className="work-report-page work-report-error">
+      <main className="work-report-page work-report-error" role="alert">
         <h1>Work report unavailable</h1>
         <p>{error}</p>
+        <button className="work-report-refresh" type="button" onClick={loadReport}>
+          Retry
+        </button>
         <Link to={`/workspaces/${encodeURIComponent(id)}`}>Back to workspace</Link>
       </main>
     );
   }
   if (!report) {
-    return <main className="work-report-page">No Work report is available.</main>;
+    return (
+      <main className="work-report-page" role="status">
+        No Work report is available.
+      </main>
+    );
   }
   return <WorkReportView report={report} onRefresh={loadReport} />;
 }

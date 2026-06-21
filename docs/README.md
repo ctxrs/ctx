@@ -32,5 +32,7 @@ This directory contains selected ctx documentation for GitHub browsing.
 ## Examples
 
 - [Harness Starter Boundaries](examples/harness-starter-boundaries.md)
+- [Example Work Report](examples/work-report.md)
+- [Work Observability E2E Walkthrough](examples/work-observability-e2e.md)
 
 Full rendered docs: https://ctx.rs

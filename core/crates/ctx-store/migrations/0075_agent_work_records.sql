@@ -39,6 +39,9 @@ CREATE INDEX IF NOT EXISTS idx_contributions_workspace_updated
 CREATE INDEX IF NOT EXISTS idx_contributions_change_set
   ON contributions (change_set_id);
 
+CREATE INDEX IF NOT EXISTS idx_contributions_workspace_change_set
+  ON contributions (workspace_id, change_set_id);
+
 CREATE INDEX IF NOT EXISTS idx_contributions_subject_target
   ON contributions (workspace_id, subject_kind, target_kind);
 

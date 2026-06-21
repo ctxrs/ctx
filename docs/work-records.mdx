@@ -113,6 +113,67 @@ the desktop UI through redacted workspace-scoped routes. Those routes are
 full-daemon-token desktop routes for now; scoped MCP/agent access to Work records
 is intentionally not part of this P0 public slice.
 
+## Agent Usage
+
+Agents should treat `ctx work ... --json` as the stable local contract:
+
+1. Search before starting or resuming a task:
+
+   ```bash
+   ctx work search "sandbox launch failure" --json
+   ctx work search --pr https://github.com/owner/repo/pull/123 --json
+   ctx work search --commit abc123 --json
+   ```
+
+2. Select a `work_id` from the result, then request bounded context:
+
+   ```bash
+   ctx work context <work-id> --budget 12000 --json
+   ```
+
+3. Link durable source-control anchors when they become known:
+
+   ```bash
+   ctx work link-pr https://github.com/owner/repo/pull/123
+   ctx work link-commit <sha>
+   ```
+
+4. Record and refresh evidence instead of claiming validation from memory:
+
+   ```bash
+   ctx work evidence <work-id> run --kind test -- cargo test -p your-crate
+   ctx work evidence <work-id> freshness --json
+   ```
+
+5. Treat stale or missing evidence as a rerun-or-warn condition. Do not present
+   user-space shim capture, manual notes, or imported summaries as proof.
+
+`verified` requires fresh evidence with verified provenance. Fresh local
+worktree evidence is useful, but it can still be only `partial` if provenance is
+not independently verified.
+
+## Desktop/API Route Surface
+
+The desktop app uses daemon-token, local, workspace-scoped routes over the same
+records. They are not a hosted API and are not scoped MCP tools.
+
+```text
+GET  /api/workspaces/:id/work
+GET  /api/workspaces/:id/work/:work_id
+GET  /api/workspaces/:id/work/:work_id/context
+GET  /api/workspaces/:id/work/:work_id/report
+GET  /api/workspaces/:id/work/:work_id/timeline
+GET  /api/workspaces/:id/work/:work_id/evidence
+POST /api/workspaces/:id/work/:work_id/evidence
+POST /api/workspaces/:id/work/:work_id/summaries
+```
+
+Default route responses are redacted and bounded. Raw transcript payloads,
+arbitrary local files, host roots, and provider-backed summaries are not exposed
+by default. The mutation routes record local observed evidence or local/manual
+summaries; provider-backed LLM summary creation is rejected in this public local
+slice.
+
 ## Record Shape
 
 The v1 compatibility schema still uses `agent-work` names for files, API types,

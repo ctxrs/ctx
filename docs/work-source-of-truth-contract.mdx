@@ -26,7 +26,7 @@ The local Work model must support these record families:
 | Worktree | Isolated checkout where work happened | workspace/worktree store |
 | Artifact | Screenshots, logs, traces, reports, generated files | artifact/object store plus Work links |
 | Evidence | Observed local command, artifact, review, CI, or validation result plus freshness | Work evidence store |
-| Summary | Deterministic, manual, or provider-backed summary for context/report use | Work summary store |
+| Summary | Deterministic local or manual summary for context/report use | Work summary store |
 | Summary claim | Cited claim tied to source material and freshness | Work summary claim store |
 | Search doc | Redacted searchable projection for local Work search/context | Work search index |
 | Check | Compatibility term for observed evidence such as tests, lint, builds, scans | Work/check store |
@@ -137,6 +137,11 @@ Diagnostics must include:
 Export defaults should include safe diagnostic codes and summaries, but redact
 host paths, env values, raw stdout/stderr, and secrets unless explicitly
 included.
+
+Provider-backed LLM summaries are not enabled in the public local Work slice.
+If imported provider-derived summaries exist, default context/report surfaces
+must either omit them or label them as provider-derived with recorded provenance
+and source-material handling.
 
 ### Large Transcript And Artifact Indexing
 

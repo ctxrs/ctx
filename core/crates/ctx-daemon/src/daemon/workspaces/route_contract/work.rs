@@ -9,6 +9,7 @@ use ctx_core::models::{
     WorkSummaryFreshness, WorkSummaryGenerationMethod, WorkTrustVerdict,
     WORK_OBSERVABILITY_SCHEMA_VERSION,
 };
+use ctx_core::redaction::is_sensitive_key;
 use ctx_route_contracts::workspaces::{
     WorkspaceRouteParams, WorkspaceWorkChangeSummaryRouteResponse, WorkspaceWorkContextRouteQuery,
     WorkspaceWorkContextRouteResponse, WorkspaceWorkDetailRouteResponse,
@@ -66,6 +67,11 @@ impl WorkspaceWorkHandle {
             .map_err(workspace_store_route_error)?;
         let work_id = WorkRecordId::from_id(work_id);
         let raw = load_work_detail(&store, workspace_id, work_id).await?;
+        let route_summaries = raw
+            .summaries
+            .iter()
+            .filter(|summary| is_default_route_summary(summary))
+            .collect::<Vec<_>>();
         let material_key = material_revision_key(
             &raw.work,
             &raw.links,
@@ -74,20 +80,24 @@ impl WorkspaceWorkHandle {
             &raw.change_sets,
             &raw.contributions,
         );
-        let summary_freshness = aggregate_summary_freshness(&raw.summaries, &material_key);
+        let summary_freshness = aggregate_summary_freshness_refs(&route_summaries, &material_key);
         let trust = computed_trust_verdict(&raw.work, &raw.evidence);
         Ok(WorkspaceWorkDetailRouteResponse {
             work: route_work_record(&raw.work, Some(trust), Some(summary_freshness)),
             links: raw.links.iter().map(route_work_link).collect(),
             evidence: raw.evidence.iter().map(route_work_evidence).collect(),
-            summaries: raw
-                .summaries
-                .iter()
+            summaries: route_summaries
+                .into_iter()
                 .map(|summary| route_work_summary(summary, &material_key, REPORT_TEXT_LIMIT))
                 .collect(),
             summary_claims: raw
                 .summary_claims
                 .iter()
+                .filter(|claim| {
+                    raw.summaries.iter().any(|summary| {
+                        is_default_route_summary(summary) && summary.summary_id == claim.summary_id
+                    })
+                })
                 .map(|claim| route_work_summary_claim(claim, &material_key))
                 .collect(),
             duplicate_strong_links: raw
@@ -477,6 +487,11 @@ fn route_summary_freshness_or(
     }
 }
 
+fn is_default_route_summary(summary: &WorkSummary) -> bool {
+    summary.generation_method != WorkSummaryGenerationMethod::ProviderLlm
+        && !summary.source_material_left_machine
+}
+
 fn validate_summary_create_request(
     request: &WorkspaceWorkSummaryCreateRouteRequest,
 ) -> Result<(), WorkspaceRouteError> {
@@ -719,6 +734,12 @@ fn stable_route_search_doc_id(kind: &str, source_id: &str) -> WorkSearchDocId {
     WorkSearchDocId::from_id(format!("wsd_{}", hex::encode(digest)))
 }
 
+fn redact_route_serializable<T: serde::Serialize>(value: &T) -> Value {
+    serde_json::to_value(value)
+        .map(|value| redact_route_value(&value))
+        .unwrap_or_else(|_| Value::String("[redacted:unserializable]".to_string()))
+}
+
 async fn refresh_route_work_trust(
     store: &ctx_store::Store,
     workspace_id: ctx_core::ids::WorkspaceId,
@@ -784,6 +805,11 @@ async fn build_report(
     work_id: WorkRecordId,
 ) -> Result<WorkspaceWorkReportRouteResponse, WorkspaceRouteError> {
     let raw = load_work_detail(store, workspace_id, work_id).await?;
+    let route_summaries = raw
+        .summaries
+        .iter()
+        .filter(|summary| is_default_route_summary(summary))
+        .collect::<Vec<_>>();
     let material_key = material_revision_key(
         &raw.work,
         &raw.links,
@@ -792,7 +818,7 @@ async fn build_report(
         &raw.change_sets,
         &raw.contributions,
     );
-    let summary_freshness = aggregate_summary_freshness(&raw.summaries, &material_key);
+    let summary_freshness = aggregate_summary_freshness_refs(&route_summaries, &material_key);
     let trust = trust_summary(&raw.work, &raw.evidence);
     Ok(WorkspaceWorkReportRouteResponse {
         change_summary: WorkspaceWorkChangeSummaryRouteResponse {
@@ -806,16 +832,28 @@ async fn build_report(
         trust,
         evidence_summary: evidence_summary(&raw.evidence),
         evidence: raw.evidence.iter().map(route_work_evidence).collect(),
-        change_sets: raw.change_sets,
-        contributions: raw.contributions,
-        summaries: raw
-            .summaries
+        change_sets: raw
+            .change_sets
             .iter()
+            .map(redact_route_serializable)
+            .collect(),
+        contributions: raw
+            .contributions
+            .iter()
+            .map(redact_route_serializable)
+            .collect(),
+        summaries: route_summaries
+            .into_iter()
             .map(|summary| route_work_summary(summary, &material_key, REPORT_TEXT_LIMIT))
             .collect(),
         summary_claims: raw
             .summary_claims
             .iter()
+            .filter(|claim| {
+                raw.summaries.iter().any(|summary| {
+                    is_default_route_summary(summary) && summary.summary_id == claim.summary_id
+                })
+            })
             .map(|claim| route_work_summary_claim(claim, &material_key))
             .collect(),
         timeline: raw.events.iter().map(route_work_event).collect(),
@@ -1150,6 +1188,7 @@ fn computed_trust_verdict(work: &WorkRecord, evidence: &[WorkEvidence]) -> WorkT
     } else if evidence.iter().any(|item| {
         item.status == WorkEvidenceStatus::ObservedPass
             && item.freshness == WorkEvidenceFreshness::Fresh
+            && item.trust == RecordTrust::Verified
     }) {
         WorkTrustVerdict::Verified
     } else if evidence
@@ -1165,10 +1204,14 @@ fn computed_trust_verdict(work: &WorkRecord, evidence: &[WorkEvidence]) -> WorkT
 fn trust_summary(work: &WorkRecord, evidence: &[WorkEvidence]) -> WorkspaceWorkTrustRouteSummary {
     let verdict = computed_trust_verdict(work, evidence);
     let reason = match verdict {
-        WorkTrustVerdict::Verified => "Fresh evidence is present for this Work record.",
+        WorkTrustVerdict::Verified => {
+            "Fresh verified-provenance evidence is present for this Work record."
+        }
         WorkTrustVerdict::Stale => "Some evidence no longer matches the current Work fingerprint.",
         WorkTrustVerdict::MissingEvidence => "No evidence has been recorded for this Work record.",
-        WorkTrustVerdict::Partial => "Some evidence or source material is incomplete.",
+        WorkTrustVerdict::Partial => {
+            "Some evidence is local, incomplete, imported, or lacks verified provenance."
+        }
         WorkTrustVerdict::UntrustedLocalCapture => {
             "This record includes user-space local capture; treat it as context, not proof."
         }
@@ -1181,7 +1224,9 @@ fn trust_summary(work: &WorkRecord, evidence: &[WorkEvidence]) -> WorkspaceWorkT
         WorkTrustVerdict::MissingEvidence => {
             "Add evidence with `ctx work evidence <work-id> run -- <command>`."
         }
-        WorkTrustVerdict::Partial => "Add missing fingerprints, artifacts, or citations.",
+        WorkTrustVerdict::Partial => {
+            "Add verified provenance, fingerprints, artifacts, or citations."
+        }
         WorkTrustVerdict::UntrustedLocalCapture => "Link a PR/commit and add fresh evidence.",
         WorkTrustVerdict::Failed => "Fix the failing evidence before marking this ready.",
     }
@@ -1201,6 +1246,14 @@ fn trust_summary(work: &WorkRecord, evidence: &[WorkEvidence]) -> WorkspaceWorkT
 
 fn aggregate_summary_freshness(
     summaries: &[WorkSummary],
+    material_key: &str,
+) -> WorkSummaryFreshness {
+    let summary_refs = summaries.iter().collect::<Vec<_>>();
+    aggregate_summary_freshness_refs(&summary_refs, material_key)
+}
+
+fn aggregate_summary_freshness_refs(
+    summaries: &[&WorkSummary],
     material_key: &str,
 ) -> WorkSummaryFreshness {
     if summaries.is_empty() {
@@ -1313,6 +1366,8 @@ fn redact_route_value(value: &Value) -> Value {
                         | "current_fingerprint_json"
                 ) {
                     redacted.insert(key.clone(), Value::String("[redacted:local_detail]".into()));
+                } else if is_sensitive_key(key) {
+                    redacted.insert(key.clone(), Value::String("[redacted:secret]".into()));
                 } else if key_lc == "relative_path" || key_lc == "path" || key_lc == "cwd" {
                     redacted.insert(
                         key.clone(),
@@ -1329,7 +1384,7 @@ fn redact_route_value(value: &Value) -> Value {
 }
 
 fn bounded_redacted_text(value: &str, limit: usize) -> String {
-    let redacted = ctx_core::redaction::redact_sensitive(value);
+    let redacted = redact_route_text(value);
     if redacted.len() <= limit {
         return redacted;
     }
@@ -1341,6 +1396,42 @@ fn bounded_redacted_text(value: &str, limit: usize) -> String {
         end = idx;
     }
     format!("{}\n[truncated]", &redacted[..end])
+}
+
+fn redact_route_text(value: &str) -> String {
+    let mut redacted = ctx_core::redaction::redact_sensitive(value);
+    for marker in [
+        "/home/",
+        "/Users/",
+        "/tmp/",
+        "/var/folders/",
+        "/private/var/",
+    ] {
+        redacted = redact_path_segments(redacted, marker);
+    }
+    for marker in ["C:\\Users\\", "C:/Users/"] {
+        redacted = redact_path_segments(redacted, marker);
+    }
+    redacted
+}
+
+fn redact_path_segments(input: String, marker: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut rest = input.as_str();
+    while let Some(start) = rest.find(marker) {
+        output.push_str(&rest[..start]);
+        output.push_str("[redacted:local_path]");
+        let matched = &rest[start..];
+        let end = matched
+            .find(|ch: char| {
+                ch.is_whitespace()
+                    || matches!(ch, '"' | '\'' | ')' | ']' | '}' | '<' | '>' | ',' | ';')
+            })
+            .unwrap_or(matched.len());
+        rest = &matched[end..];
+    }
+    output.push_str(rest);
+    output
 }
 
 #[cfg(test)]
@@ -1405,6 +1496,46 @@ mod tests {
         assert_eq!(
             error.kind(),
             ctx_route_contracts::workspaces::WorkspaceRouteErrorKind::BadRequest
+        );
+    }
+
+    #[test]
+    fn route_graph_redaction_omits_local_paths_and_secret_metadata() {
+        let value = redact_route_serializable(&json!({
+            "fingerprint": {
+                "repo_root": "/home/daddy/private/repo",
+            },
+            "metadata_json": {
+                "token": "sk-test-raw-secret",
+                "safe": "kept",
+            },
+            "description": "uses openai_api_key=sk-test-raw-secret at /home/daddy/private/repo",
+        }));
+        let serialized = serde_json::to_string(&value).unwrap();
+
+        assert!(!serialized.contains("sk-test-raw-secret"));
+        assert!(!serialized.contains("/home/daddy/private"));
+        assert!(serialized.contains("[redacted"));
+    }
+
+    #[test]
+    fn fresh_local_evidence_is_partial_without_verified_provenance() {
+        let workspace_id = WorkspaceId::new();
+        let work_id = WorkRecordId::new();
+        let now = Utc::now();
+        let work = test_route_work_record(workspace_id, work_id.clone(), now);
+        let mut evidence = test_route_evidence(workspace_id, work_id, now);
+
+        evidence.trust = RecordTrust::Medium;
+        assert_eq!(
+            computed_trust_verdict(&work, &[evidence.clone()]),
+            WorkTrustVerdict::Partial
+        );
+
+        evidence.trust = RecordTrust::Verified;
+        assert_eq!(
+            computed_trust_verdict(&work, &[evidence]),
+            WorkTrustVerdict::Verified
         );
     }
 
@@ -1494,6 +1625,41 @@ mod tests {
             redacted_text: Some("source event".to_string()),
             artifact_ref: None,
             created_at: now,
+            schema_version: WORK_OBSERVABILITY_SCHEMA_VERSION,
+        }
+    }
+
+    fn test_route_evidence(
+        workspace_id: WorkspaceId,
+        work_id: WorkRecordId,
+        now: chrono::DateTime<Utc>,
+    ) -> WorkEvidence {
+        WorkEvidence {
+            evidence_id: WorkEvidenceId::new(),
+            work_id,
+            workspace_id,
+            kind: ctx_core::models::WorkEvidenceKind::Test,
+            status: WorkEvidenceStatus::ObservedPass,
+            freshness: WorkEvidenceFreshness::Fresh,
+            claim: Some("Observed test passed".to_string()),
+            command: Some("cargo test".to_string()),
+            argv: vec!["cargo".to_string(), "test".to_string()],
+            cwd: None,
+            exit_code: Some(0),
+            repo_root: None,
+            head_sha: None,
+            branch: None,
+            fingerprint: None,
+            current_fingerprint: None,
+            output_ref: None,
+            artifact_ref: None,
+            source: RecordSource::Worktree,
+            fidelity: RecordFidelity::Exact,
+            trust: RecordTrust::Medium,
+            started_at: now,
+            finished_at: now,
+            created_at: now,
+            updated_at: now,
             schema_version: WORK_OBSERVABILITY_SCHEMA_VERSION,
         }
     }

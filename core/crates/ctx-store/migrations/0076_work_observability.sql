@@ -230,6 +230,15 @@ CREATE INDEX IF NOT EXISTS idx_work_search_docs_workspace_filters
     updated_at DESC
   );
 
+CREATE INDEX IF NOT EXISTS idx_work_search_docs_workspace_pr
+  ON work_search_docs (workspace_id, pr_owner, pr_repo, pr_number, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_work_search_docs_workspace_commit
+  ON work_search_docs (workspace_id, commit_sha, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_work_search_docs_workspace_path
+  ON work_search_docs (workspace_id, path, updated_at DESC);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS work_search_docs_fts USING fts5(
   doc_id UNINDEXED,
   workspace_id UNINDEXED,

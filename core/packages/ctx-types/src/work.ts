@@ -1,4 +1,4 @@
-import type { ChangeSet, Contribution, RecordFidelity, RecordSource, RecordTrust } from "./agentWork";
+import type { RecordFidelity, RecordSource, RecordTrust } from "./agentWork";
 
 export type WorkLifecycle =
   | "active"
@@ -231,8 +231,8 @@ export type WorkspaceWorkReport = {
   evidence_summary: WorkspaceWorkEvidenceSummary;
   evidence: WorkspaceWorkEvidence[];
   change_summary: WorkspaceWorkChangeSummary;
-  change_sets: ChangeSet[];
-  contributions: Contribution[];
+  change_sets: JsonValue[];
+  contributions: JsonValue[];
   summaries: WorkspaceWorkSummary[];
   summary_claims: WorkspaceWorkSummaryClaim[];
   timeline: WorkspaceWorkEvent[];
