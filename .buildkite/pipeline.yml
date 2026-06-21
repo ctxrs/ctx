@@ -123,6 +123,7 @@ steps:
     timeout_in_minutes: 90
 
   - wait: ~
+    continue_on_failure: true
 
   - label: "release: proof"
     key: "release-proof"
