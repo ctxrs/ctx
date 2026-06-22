@@ -19,6 +19,7 @@ uuid.workspace = true
 work-record-core = { path = "../work-record-core" }
 work-record-report = { path = "../work-record-report" }
 work-record-store = { path = "../work-record-store" }
+work-record-vcs = { path = "../work-record-vcs" }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

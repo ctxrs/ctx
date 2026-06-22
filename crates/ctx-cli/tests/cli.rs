@@ -1,9 +1,9 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use serde_json::{json, Value};
-use std::fs;
 #[cfg(unix)]
 use std::time::Duration;
+use std::{fs, path::Path};
 use tempfile::{Builder, TempDir};
 use uuid::Uuid;
 
@@ -17,6 +17,21 @@ fn ctx(temp: &TempDir) -> Command {
     let mut command = Command::cargo_bin("ctx").unwrap();
     command.env("CTX_DATA_ROOT", temp.path());
     command
+}
+
+fn git(cwd: &Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git failed: {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn record(temp: &TempDir, title: &str, body: &str, tags: &[&str]) -> Value {
@@ -33,6 +48,76 @@ fn write_json(temp: &TempDir, name: &str, value: &Value) -> String {
     let path = temp.path().join(name);
     fs::write(&path, serde_json::to_string_pretty(value).unwrap()).unwrap();
     path.to_str().unwrap().to_string()
+}
+
+#[test]
+fn vcs_inspect_json_reports_git_workspace_and_redacts_remote_tokens() {
+    let temp = tempdir();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init"]);
+    git(
+        &repo,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://x-access-token:ghp_secret@github.com/ctxrs/ctx.git",
+        ],
+    );
+
+    let output = ctx(&temp)
+        .current_dir(&repo)
+        .args(["vcs", "inspect", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ghp_secret").not())
+        .get_output()
+        .stdout
+        .clone();
+    let payload: Value = serde_json::from_slice(&output).unwrap();
+    let inspection = &payload["inspection"];
+
+    assert_eq!(payload["schema_version"], 1);
+    assert_eq!(inspection["git"]["available"], true);
+    assert_eq!(
+        inspection["git"]["workspace"]["primary_remote"]["normalized_url"],
+        "https://github.com/ctxrs/ctx"
+    );
+    assert_eq!(
+        inspection["git"]["workspace"]["repo_fingerprint"]["source"],
+        "remote_and_path"
+    );
+    assert!(inspection["jj"]["available"].is_boolean());
+}
+
+#[test]
+fn pr_parse_json_reports_confidence_labeled_link() {
+    let temp = tempdir();
+
+    let output = ctx(&temp)
+        .args([
+            "pr",
+            "parse",
+            "https://gitlab.example.com/platform/team/ctx/-/merge_requests/7/diffs",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let payload: Value = serde_json::from_slice(&output).unwrap();
+    let parsed = &payload["pull_request"];
+
+    assert_eq!(payload["schema_version"], 1);
+    assert_eq!(parsed["provider"], "gitlab");
+    assert_eq!(parsed["owner"], "platform/team");
+    assert_eq!(parsed["repo"], "ctx");
+    assert_eq!(parsed["number"], 7);
+    assert_eq!(parsed["confidence"], "explicit");
+    assert_eq!(parsed["link"]["target_type"], "pull_request");
+    assert_eq!(parsed["link"]["confidence"], "explicit");
 }
 
 #[test]
