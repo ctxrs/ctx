@@ -13,14 +13,22 @@ The fastest way to see it is to run setup. ctx imports the agent history already
 - **Attach agent history to PRs.** Link a pull request to the record that produced it: prompt, commands, evidence, artifacts, and decisions.
 - **Search previous attempts.** Future agents can find old context instead of starting from zero after compaction or a fresh session.
 - **Preserve subagent work.** Manager sessions, implementation subagents, review subagents, and imported provider transcripts stay connected.
-- **Use your existing agents.** ctx works beside Claude Code, Codex, Pi, Cursor, shell scripts, GitHub CLI, and local editors.
+- **Use your existing agents and VCS.** ctx works beside Claude Code, Codex, Pi, Cursor, shell scripts, Git, jj, GitHub CLI, and local editors.
 - **Keep records local first.** Your local records live on your machine in SQLite and blob files. Nothing has to be pushed or synced by default.
 - **Handle multi-repo work.** A single record can touch multiple Git repos, commits, files, and PRs.
 
 ## Install
 
+macOS, Linux, and FreeBSD:
+
 ```bash
 curl -fsSL https://ctx.rs/install | sh
+```
+
+Windows PowerShell:
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://ctx.rs/install.ps1 | iex"
 ```
 
 Set up ctx and open the local dashboard:
@@ -51,38 +59,24 @@ Run setup first:
 ctx setup
 ```
 
-The dashboard opens with imported history and updates as new work is recorded.
+The dashboard opens with imported history and updates as new work is recorded. Keep using your agents and tools normally.
 
-Create a record for a task:
-
-```bash
-ctx record "Fix checkout retry bug" \
-  --body "Investigating the flaky retry path in checkout." \
-  --tag checkout --tag test
-```
-
-Capture evidence:
+Search past work:
 
 ```bash
-ctx run --record <record-id> -- cargo test -p checkout
+ctx search "checkout retry"
 ```
 
-Attach a pull request:
-
-```bash
-ctx attach pr <record-id> https://github.com/acme/app/pull/123
-```
-
-Show the record:
-
-```bash
-ctx show <record-id>
-```
-
-Give future agents context:
+Give a future agent context:
 
 ```bash
 ctx context "checkout retry"
+```
+
+Open the dashboard again:
+
+```bash
+ctx dashboard
 ```
 
 Generate a review report:
@@ -95,6 +89,13 @@ Publish a PR report:
 
 ```bash
 ctx publish pr <record-id>
+```
+
+Manual annotation is optional. Use it when passive capture cannot infer something important:
+
+```bash
+ctx attach pr <record-id> https://github.com/acme/app/pull/123
+ctx attach note <record-id> "The first attempt failed because the fixture was stale."
 ```
 
 ## The Core Model
@@ -123,10 +124,12 @@ The main objects are:
 | `Event` | A normalized timeline item: message, tool call, command output, file change, etc. |
 | `Evidence` | A reviewable result such as a test run, lint command, screenshot, or CI link. |
 | `Artifact` | A large payload such as stdout, transcript, screenshot, report, or diff. |
-| `Repo` | A detected Git repository associated with a record/session/event. |
+| `Repo` | A detected Git or jj repository associated with a record/session/event. |
 | `PR` | A pull request attached to a record. |
 
 ## CLI
+
+Most users should not need to manually record normal work. The main commands are for setup, dashboard access, search, reports, sharing, and occasional repair/annotation.
 
 The main commands are:
 
@@ -229,7 +232,7 @@ ctx record "Refactor auth refresh" \
   --tag auth --tag refactor
 ```
 
-Agents can call this too. A useful agent instruction is:
+Most records should be created by passive capture, imports, hooks, or inferred grouping. Humans and agents can call this when they need an explicit record that ctx cannot infer. A useful agent instruction is:
 
 ```text
 When you begin meaningful work, create or reuse a ctx record. Attach important commands, decisions, and PRs to that record.
@@ -445,22 +448,22 @@ primary session
 
 Roles are not hard-coded. A subagent may review, implement, investigate, or do all three. ctx stores provider labels and optional role hints, but the graph remains flexible.
 
-### `git` and `gh` Capture
+### Git, jj, and GitHub Capture
 
-ctx can capture Git and GitHub CLI activity through optional shims or hooks.
+ctx can capture Git, jj, and GitHub CLI activity through optional shims or hooks.
 
 Useful captured facts include:
 
-- current repo;
-- branch;
-- commits;
+- current repo/workspace;
+- branch, bookmark, or change context;
+- commits and jj changes;
 - changed files;
 - PR URL/number;
 - PR creation/update events;
 - command cwd;
 - command timestamp.
 
-The shims must always pass through to the real command. If ctx capture fails, `git` and `gh` should still work.
+The shims must always pass through to the real command. If ctx capture fails, `git`, `jj`, and `gh` should still work.
 
 ### Provider Imports
 
@@ -476,7 +479,7 @@ ctx uses one local machine-level database.
 ~/.ctx/work-record/work.sqlite
 ```
 
-A Work Record can touch many repos.
+A Work Record can touch many repos and VCS workspaces.
 
 Example:
 
@@ -489,14 +492,15 @@ record: "ship hosted work report"
   pr: ctxrs/ctx-private#456
 ```
 
-ctx associates sessions and events with repos by looking at:
+ctx associates sessions and events with repos/workspaces by looking at:
 
 - session cwd;
-- Git root detection;
+- Git and jj root detection;
 - file paths;
 - `git` commands;
+- `jj` commands;
 - `gh` commands;
-- commits;
+- commits and jj changes;
 - PR URLs;
 - explicit agent/user attachments.
 
@@ -524,7 +528,7 @@ For teams or cloud agents, hosted sync can collect records from many machines. T
 
 ## Storage
 
-ctx stores local data under your home directory:
+ctx stores local data under `~/.ctx` on the machine:
 
 ```text
 ~/.ctx/work-record/
@@ -533,9 +537,11 @@ ctx stores local data under your home directory:
   inbox/
 ```
 
+No repo files are written by default. A MacBook, remote devbox, CI runner, or cloud agent runtime each has its own local `~/.ctx` unless you explicitly export, import, or sync records.
+
 ### SQLite
 
-SQLite is the canonical local store. It tracks records, sessions, runs, events, evidence, repos, PRs, files, summaries, and search indexes.
+SQLite is the canonical local store. It tracks records, sessions, runs, events, evidence, repos/VCS workspaces, PRs, files, summaries, and search indexes.
 
 ### Blobs
 
