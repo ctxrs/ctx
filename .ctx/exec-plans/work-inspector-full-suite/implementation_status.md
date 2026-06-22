@@ -6,8 +6,13 @@ Branch: `ctx/agent-work-semantics-primary`
 
 Base implementation commit: `87575cc Build Work Inspector capture suite`
 
-Status before final status/review commits: validation passed locally; final
-done-ness review pending after this status note is committed.
+Final implementation/hardening commit reviewed: `a6fac71 Harden Work Inspector
+validation and docs`.
+
+Status: validation passed locally. The first dedicated done-ness review on
+`a6fac71` found the substantive implementation complete and failed only this
+status note's stale bookkeeping. This status-only follow-up records that result
+and replaces the stale pending lines.
 
 ## Scope Landed
 
@@ -148,7 +153,12 @@ Final screenshot set:
   commands, artifacts, raw JSON, and missing-record failure state.
 - Fresh dogfood reconstruction review: PASS, 5/5 records reconstructable from
   the Work Inspector plus redacted agent-readable JSON alone.
-- Final done-ness review: pending after this status note is committed.
+- Dedicated final done-ness review on `a6fac71`: substantive PASS; temporary
+  bookkeeping FAIL because this status file still said final review and hygiene
+  were pending. No product, architecture, security, visual, test, dogfood, or
+  deferral blockers were found.
+- Final re-check: pending on the status-only follow-up commit that replaces the
+  stale pending lines.
 
 ## Validation
 
@@ -167,7 +177,7 @@ Passed:
   5 tests passed. The local auth token was supplied from the dogfood data root
   and was not recorded.
 
-Pending final hygiene after this file is added:
+Final hygiene already passed before commit `a6fac71`:
 
 - `cargo fmt --manifest-path core/Cargo.toml --all -- --check`.
 - `git diff --check`.
