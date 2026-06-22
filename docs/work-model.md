@@ -13,11 +13,11 @@ Typical record kinds:
 - `decision`: a choice made during the work
 - `review`: context for a pull request or review pass
 
-`ctx work record` creates records. `ctx work list`, `ctx work show`, and `ctx work search` retrieve them.
+`ctx record` creates records. `ctx list`, `ctx show`, and `ctx search` retrieve them.
 
 ## Evidence
 
-Evidence is command output captured by `ctx work evidence run`. Each evidence item stores:
+Evidence is command output captured by `ctx evidence run`. Each evidence item stores:
 
 - the command string
 - exit code
@@ -30,11 +30,11 @@ This is the current local evidence model. Store file paths, reproduction notes, 
 
 ## Pull requests
 
-`ctx work link-pr <record-id> <url>` attaches a pull request URL to a record. The link stays with the local record and appears in `show`, reports, exports, and context.
+`ctx link-pr <record-id> <url>` attaches a pull request URL to a record. The link stays with the local record and appears in `show`, reports, exports, and context.
 
 ## Context and reports
 
-`ctx work context [query]` renders matching records and evidence as work context. `ctx work report` summarizes recent recorded work in text or JSON.
+`ctx context [query]` renders matching records and evidence as work context. `ctx report` summarizes recent recorded work in text or JSON.
 
 Use these commands before review, handoff, or resuming a paused task. They turn the local record store into a concise packet of what happened.
 
@@ -46,7 +46,7 @@ ctx does not require a special agent runtime. You can use Codex, Claude Code, Cu
 
 ## Storage lifecycle
 
-`ctx workspace setup` creates the local store, `ctx workspace status` prints its paths and initialization state, and `ctx workspace uninstall --yes` removes the local Work Recorder product data.
+`ctx setup` creates the local store, `ctx status` prints its paths and initialization state, and `ctx uninstall --yes` removes the local Work Recorder product data.
 
 ## Boundaries
 

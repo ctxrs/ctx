@@ -34,9 +34,45 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum CommandRoot {
-    #[command(about = "Manage the local Work Recorder workspace")]
+    #[command(about = "Create the local Work Recorder data store")]
+    Setup,
+    #[command(about = "Show local Work Recorder workspace status")]
+    Status,
+    #[command(about = "Remove local Work Recorder product data")]
+    Uninstall {
+        #[arg(long)]
+        yes: bool,
+    },
+    #[command(about = "Print the local SQLite schema")]
+    Schema,
+    #[command(about = "Create a work record")]
+    Record(RecordArgs),
+    #[command(about = "List recent work records")]
+    List(ListArgs),
+    #[command(about = "Show one work record")]
+    Show(IdArgs),
+    #[command(about = "Search work records")]
+    Search(SearchArgs),
+    #[command(about = "Render work context for a query")]
+    Context(ContextArgs),
+    #[command(about = "Summarize recorded work")]
+    Report(ReportArgs),
+    #[command(about = "Capture evidence for work records")]
+    Evidence(EvidenceCommand),
+    #[command(about = "Attach a pull request URL to a work record")]
+    LinkPr(LinkPrArgs),
+    #[command(about = "Export work records and evidence as JSON")]
+    Export(ExportArgs),
+    #[command(about = "Import work records and evidence from JSON")]
+    Import(ImportArgs),
+    #[command(about = "Validate local Work Recorder storage")]
+    Validate,
+    #[command(hide = true, about = "Compatibility alias for setup/status/uninstall")]
     Workspace(WorkspaceCommand),
-    #[command(about = "Record, find, report, and exchange work records")]
+    #[command(
+        hide = true,
+        about = "Compatibility alias for record/search/report commands"
+    )]
     Work(WorkCommand),
 }
 
@@ -212,13 +248,36 @@ fn main() -> Result<()> {
         .context("resolve ctx data root")?;
 
     match cli.command {
+        CommandRoot::Setup => run_workspace_subcommand(WorkspaceSubcommand::Setup, data_root),
+        CommandRoot::Status => run_workspace_subcommand(WorkspaceSubcommand::Status, data_root),
+        CommandRoot::Uninstall { yes } => {
+            run_workspace_subcommand(WorkspaceSubcommand::Uninstall { yes }, data_root)
+        }
+        CommandRoot::Schema => run_work_subcommand(WorkSubcommand::Schema, data_root),
+        CommandRoot::Record(args) => run_work_subcommand(WorkSubcommand::Record(args), data_root),
+        CommandRoot::List(args) => run_work_subcommand(WorkSubcommand::List(args), data_root),
+        CommandRoot::Show(args) => run_work_subcommand(WorkSubcommand::Show(args), data_root),
+        CommandRoot::Search(args) => run_work_subcommand(WorkSubcommand::Search(args), data_root),
+        CommandRoot::Context(args) => run_work_subcommand(WorkSubcommand::Context(args), data_root),
+        CommandRoot::Report(args) => run_work_subcommand(WorkSubcommand::Report(args), data_root),
+        CommandRoot::Evidence(args) => {
+            run_work_subcommand(WorkSubcommand::Evidence(args), data_root)
+        }
+        CommandRoot::LinkPr(args) => run_work_subcommand(WorkSubcommand::LinkPr(args), data_root),
+        CommandRoot::Export(args) => run_work_subcommand(WorkSubcommand::Export(args), data_root),
+        CommandRoot::Import(args) => run_work_subcommand(WorkSubcommand::Import(args), data_root),
+        CommandRoot::Validate => run_work_subcommand(WorkSubcommand::Validate, data_root),
         CommandRoot::Workspace(command) => run_workspace(command, data_root),
         CommandRoot::Work(command) => run_work(command, data_root),
     }
 }
 
 fn run_workspace(command: WorkspaceCommand, data_root: PathBuf) -> Result<()> {
-    match command.command {
+    run_workspace_subcommand(command.command, data_root)
+}
+
+fn run_workspace_subcommand(command: WorkspaceSubcommand, data_root: PathBuf) -> Result<()> {
+    match command {
         WorkspaceSubcommand::Setup => {
             let db_path = database_path(data_root);
             let store = Store::open(&db_path)?;
@@ -247,8 +306,12 @@ fn run_workspace(command: WorkspaceCommand, data_root: PathBuf) -> Result<()> {
 }
 
 fn run_work(command: WorkCommand, data_root: PathBuf) -> Result<()> {
+    run_work_subcommand(command.command, data_root)
+}
+
+fn run_work_subcommand(command: WorkSubcommand, data_root: PathBuf) -> Result<()> {
     let mut store = Store::open(database_path(data_root))?;
-    match command.command {
+    match command {
         WorkSubcommand::Schema => println!("{}", store.schema()?),
         WorkSubcommand::Record(args) => {
             let body = read_body(args.body)?;

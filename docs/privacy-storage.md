@@ -11,8 +11,8 @@ The recorder stores structured metadata in SQLite:
 - record timestamps
 - tags, kinds, and optional workspace paths
 - command evidence metadata
-- command stdout and stderr captured by `ctx work evidence run`
-- pull request URLs attached by `ctx work link-pr`
+- command stdout and stderr captured by `ctx evidence run`
+- pull request URLs attached by `ctx link-pr`
 
 The current implementation stores records and command evidence in the local SQLite database. Export and import use JSON archives.
 

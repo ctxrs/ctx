@@ -1,6 +1,6 @@
 # Work Recorder Productization Implementation Status
 
-Updated: 2026-06-22T18:01:00-05:00
+Updated: 2026-06-22T18:24:00-05:00
 
 Task: `feb64c1c-e58c-40f8-b1e9-1094dca0646e`
 
@@ -22,7 +22,7 @@ Plan provenance:
 
 ## Current State
 
-Status: first public implementation slice integrated and locally validated.
+Status: public foundation slices integrated and locally validated.
 
 The implementation has not yet reached any milestone gate. The first action is
 to map the current codebase against the reviewed plan, then split implementation
@@ -105,8 +105,35 @@ Integrated implementation work:
   - added an initial `.buildkite/pipeline.yml` for sequential Linux-style
     lanes and local artifact collection.
 
-Known remaining gap after this slice: the store still needs versioned
-migrations and normalized tables before the foundation contract gate can pass.
+## Second Integrated Slice
+
+Integrated implementation work:
+
+- Root command CLI:
+  - added root commands for the currently implemented behavior:
+    `setup`, `status`, `uninstall`, `schema`, `record`, `list`, `show`,
+    `search`, `context`, `report`, `evidence run`, `link-pr`, `export`,
+    `import`, and `validate`;
+  - preserved `ctx workspace ...` and `ctx work ...` as hidden compatibility
+    aliases with integration-test coverage.
+- Storage contract:
+  - changed default DB path to `~/.ctx/work-record/work.sqlite`;
+  - added WAL mode, busy timeout, and foreign-key enforcement on store open;
+  - added one-way `PRAGMA user_version` migration foundation;
+  - added normalized foundation schema tables, required indexes, unique
+    constraints, sync/audit tables, and FTS projection tables when FTS5 is
+    supported;
+  - preserved current record/evidence/search/context/import/export APIs by
+    keeping compatibility columns synchronized with normalized metadata.
+- Docs:
+  - updated README and docs to present root commands as primary;
+  - retained explicit hidden compatibility alias notes;
+  - kept dashboard, passive capture, hosted sync, PR publishing, and public
+    installer flow marked as not implemented yet.
+
+Known remaining gap after this slice: capture spool/import, VCS/PR normalized
+write APIs, search/context ranking over FTS projections, dashboard/report UI,
+hosted staging, and Buildkite platform evidence remain unimplemented.
 
 ## Validation
 
@@ -124,6 +151,15 @@ migrations and normalized tables before the foundation contract gate can pass.
 - `TMPDIR=/var/tmp/ctxwr CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=1 ./scripts/release-dry-run.sh`:
   PASS. Wrote local release dry-run manifest, checksum, and timing artifacts
   under `target/ctx-artifacts/release-dry-run/`.
+- `TMPDIR=/var/tmp/ctxwr CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=1 cargo test -p ctx --locked -- --test-threads 1`:
+  PASS after root command CLI integration. 11 CLI integration tests passed,
+  including hidden compatibility aliases.
+- `TMPDIR=/var/tmp/ctxwr CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=1 BAZEL_JOBS=2 ./scripts/check.sh all`:
+  PASS after root command and storage foundation integration. Covered fmt,
+  check, clippy, tests; Bazel lane recorded `skipped` because neither `bazel`
+  nor `bazelisk` is installed.
+- `TMPDIR=/var/tmp/ctxwr CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=1 ./scripts/release-dry-run.sh`:
+  PASS after root command and storage foundation integration.
 
 ## Reviewer Status
 

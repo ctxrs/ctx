@@ -1248,7 +1248,7 @@ pub fn work_record_dir(root: PathBuf) -> PathBuf {
 }
 
 pub fn database_path(root: PathBuf) -> PathBuf {
-    work_record_dir(root).join("work-record.sqlite")
+    work_record_dir(root).join("work.sqlite")
 }
 
 #[cfg(test)]

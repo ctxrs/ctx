@@ -1,6 +1,6 @@
 # Work Recorder Productization Validation Log
 
-Updated: 2026-06-22T18:01:00-05:00
+Updated: 2026-06-22T18:24:00-05:00
 
 ## 2026-06-22 Baseline Public Branch Check
 
@@ -64,6 +64,43 @@ Updated: 2026-06-22T18:01:00-05:00
 
 - Root filesystem has available space; `/tmp` was comparatively full. Use
   `TMPDIR=/var/tmp/ctxwr` or another disk-backed temp root for cargo-heavy work.
+
+## 2026-06-22 Root CLI And Store Foundation Checks
+
+- Command:
+  `TMPDIR=/var/tmp/ctxwr CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=1 cargo test -p ctx --locked -- --test-threads 1`
+- Repo/worktree:
+  `/home/daddy/code/ctx-multi-repo-workspace/worktrees/ctx/work-record-product`
+- Outcome: PASS
+- Coverage:
+  - 11 CLI integration tests passed;
+  - root commands covered;
+  - hidden `ctx workspace ...` and `ctx work ...` compatibility aliases covered.
+
+- Command:
+  `TMPDIR=/var/tmp/ctxwr CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=1 BAZEL_JOBS=2 ./scripts/check.sh all`
+- Repo/worktree:
+  `/home/daddy/code/ctx-multi-repo-workspace/worktrees/ctx/work-record-product`
+- Outcome: PASS
+- Coverage:
+  - `cargo fmt --all -- --check`;
+  - `cargo check --workspace --all-targets --locked`;
+  - `cargo clippy --workspace --all-targets --locked -- -D warnings`;
+  - `cargo test --workspace --all-targets --locked -- --test-threads 1`;
+  - 11 CLI integration tests, 2 core unit tests, 1 report unit test, and 8 store
+    unit tests passed;
+  - Bazel lane recorded `skipped` because neither `bazel` nor `bazelisk` is
+    installed.
+
+- Command:
+  `TMPDIR=/var/tmp/ctxwr CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=1 ./scripts/release-dry-run.sh`
+- Repo/worktree:
+  `/home/daddy/code/ctx-multi-repo-workspace/worktrees/ctx/work-record-product`
+- Outcome: PASS
+- Artifacts:
+  - `target/ctx-artifacts/release-dry-run/manifest.json`;
+  - `target/ctx-artifacts/release-dry-run/checksums.sha256`;
+  - `target/ctx-artifacts/release-dry-run/timings.json`.
 
 Future entries must include:
 

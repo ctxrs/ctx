@@ -21,7 +21,7 @@ fn ctx(temp: &TempDir) -> Command {
 
 fn record(temp: &TempDir, title: &str, body: &str, tags: &[&str]) -> Value {
     let mut command = ctx(temp);
-    command.args(["work", "record", "--title", title, "--body", body, "--json"]);
+    command.args(["record", "--title", title, "--body", body, "--json"]);
     for tag in tags {
         command.args(["--tag", tag]);
     }
@@ -36,35 +36,35 @@ fn write_json(temp: &TempDir, name: &str, value: &Value) -> String {
 }
 
 #[test]
-fn workspace_setup_status_and_validate_work() {
+fn root_setup_status_schema_and_validate_work() {
     let temp = tempdir();
     ctx(&temp)
-        .args(["workspace", "setup"])
+        .args(["setup"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Work Recorder workspace ready"));
 
     ctx(&temp)
-        .args(["workspace", "status"])
+        .args(["status"])
         .assert()
         .success()
         .stdout(predicate::str::contains("initialized: true"));
 
     ctx(&temp)
-        .args(["work", "schema"])
+        .args(["schema"])
         .assert()
         .success()
         .stdout(predicate::str::contains("work_records"));
 
     ctx(&temp)
-        .args(["work", "validate"])
+        .args(["validate"])
         .assert()
         .success()
         .stdout(predicate::str::contains("valid"));
 }
 
 #[test]
-fn record_search_context_report_and_link_pr_work() {
+fn root_record_show_search_context_report_and_link_pr_work() {
     let temp = tempdir();
     let first = record(
         &temp,
@@ -76,14 +76,19 @@ fn record_search_context_report_and_link_pr_work() {
     let id = first["id"].as_str().unwrap();
 
     ctx(&temp)
-        .args(["work", "search", "local", "--json"])
+        .args(["search", "local", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Implement search"));
+
+    ctx(&temp)
+        .args(["show", id, "--json"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Implement search"));
 
     ctx(&temp)
         .args([
-            "work",
             "link-pr",
             id,
             "https://github.com/ctxrs/ctx/pull/42",
@@ -94,14 +99,14 @@ fn record_search_context_report_and_link_pr_work() {
         .stdout(predicate::str::contains("pull/42"));
 
     ctx(&temp)
-        .args(["work", "context", "report"])
+        .args(["context", "report"])
         .assert()
         .success()
         .stdout(predicate::str::contains("# Work Context"))
         .stdout(predicate::str::contains("Write report"));
 
     ctx(&temp)
-        .args(["work", "report", "--format", "json"])
+        .args(["report", "--format", "json"])
         .assert()
         .success()
         .stdout(predicate::str::contains("\"record_count\": 2"));
@@ -114,21 +119,13 @@ fn evidence_run_is_recorded() {
     let id = item["id"].as_str().unwrap();
 
     ctx(&temp)
-        .args([
-            "work",
-            "evidence",
-            "run",
-            "--record",
-            id,
-            "rustc",
-            "--version",
-        ])
+        .args(["evidence", "run", "--record", id, "rustc", "--version"])
         .assert()
         .success()
         .stdout(predicate::str::contains("\"exit_code\": 0"));
 
     ctx(&temp)
-        .args(["work", "context", "Run", "--json"])
+        .args(["context", "Run", "--json"])
         .assert()
         .success()
         .stdout(predicate::str::contains("rustc --version"));
@@ -140,7 +137,6 @@ fn evidence_run_truncates_stdout_to_output_cap() {
 
     let output = ctx(&temp)
         .args([
-            "work",
             "evidence",
             "run",
             "--max-output-bytes",
@@ -167,7 +163,6 @@ fn evidence_timeout_kills_descendant_process_group() {
     let output = ctx(&temp)
         .timeout(Duration::from_secs(5))
         .args([
-            "work",
             "evidence",
             "run",
             "--timeout-seconds",
@@ -198,19 +193,19 @@ fn export_and_import_round_trip() {
 
     let archive = source.path().join("archive.json");
     ctx(&source)
-        .args(["work", "export", "--output", archive.to_str().unwrap()])
+        .args(["export", "--output", archive.to_str().unwrap()])
         .assert()
         .success();
 
     let dest = tempdir();
     ctx(&dest)
-        .args(["work", "import", "--input", archive.to_str().unwrap()])
+        .args(["import", "--input", archive.to_str().unwrap()])
         .assert()
         .success()
         .stdout(predicate::str::contains("imported 1 records"));
 
     ctx(&dest)
-        .args(["work", "list"])
+        .args(["list"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Portable record"));
@@ -230,7 +225,7 @@ fn import_rejects_unsupported_archive_version() {
     );
 
     ctx(&temp)
-        .args(["work", "import", "--input", &archive])
+        .args(["import", "--input", &archive])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -238,7 +233,7 @@ fn import_rejects_unsupported_archive_version() {
         ));
 
     ctx(&temp)
-        .args(["work", "validate"])
+        .args(["validate"])
         .assert()
         .success()
         .stdout(predicate::str::contains("valid"));
@@ -270,13 +265,13 @@ fn failed_import_is_atomic() {
 
     let dest = tempdir();
     ctx(&dest)
-        .args(["work", "import", "--input", &archive])
+        .args(["import", "--input", &archive])
         .assert()
         .failure()
         .stderr(predicate::str::contains("FOREIGN KEY constraint failed"));
 
     ctx(&dest)
-        .args(["work", "show", record_id])
+        .args(["show", record_id])
         .assert()
         .failure()
         .stderr(predicate::str::contains("record not found"));
@@ -298,7 +293,7 @@ fn import_rejects_conflicts_and_overwrites_when_explicit() {
 
     let dest = tempdir();
     ctx(&dest)
-        .args(["work", "import", "--input", &archive])
+        .args(["import", "--input", &archive])
         .assert()
         .success();
 
@@ -314,42 +309,92 @@ fn import_rejects_conflicts_and_overwrites_when_explicit() {
     );
 
     ctx(&dest)
-        .args(["work", "import", "--input", &replacement])
+        .args(["import", "--input", &replacement])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
             "archive conflicts with existing record",
         ));
     ctx(&dest)
-        .args(["work", "list"])
+        .args(["list"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Original"))
         .stdout(predicate::str::contains("Replacement").not());
 
     ctx(&dest)
-        .args(["work", "import", "--input", &replacement, "--overwrite"])
+        .args(["import", "--input", &replacement, "--overwrite"])
         .assert()
         .success();
     ctx(&dest)
-        .args(["work", "list"])
+        .args(["list"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Replacement"));
 }
 
 #[test]
-fn workspace_uninstall_removes_product_data() {
+fn root_uninstall_removes_product_data() {
     let temp = tempdir();
     record(&temp, "Delete me", "body", &[]);
+    ctx(&temp)
+        .args(["uninstall", "--yes"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("removed"));
+    ctx(&temp)
+        .args(["status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("initialized: false"));
+}
+
+#[test]
+fn nested_workspace_and_work_commands_remain_compatibility_aliases() {
+    let temp = tempdir();
+    ctx(&temp)
+        .args(["workspace", "setup"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Work Recorder workspace ready"));
+    ctx(&temp)
+        .args(["workspace", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("initialized: true"));
+
+    let output = ctx(&temp)
+        .args([
+            "work",
+            "record",
+            "--title",
+            "Nested alias",
+            "--body",
+            "compatibility",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let record: Value = serde_json::from_slice(&output).unwrap();
+    let id = record["id"].as_str().unwrap();
+
+    ctx(&temp)
+        .args(["work", "show", id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Nested alias"));
+    ctx(&temp)
+        .args(["work", "validate"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("valid"));
+
     ctx(&temp)
         .args(["workspace", "uninstall", "--yes"])
         .assert()
         .success()
         .stdout(predicate::str::contains("removed"));
-    ctx(&temp)
-        .args(["workspace", "status"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("initialized: false"));
 }

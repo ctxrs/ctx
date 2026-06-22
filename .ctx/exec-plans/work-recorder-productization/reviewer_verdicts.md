@@ -1,6 +1,6 @@
 # Work Recorder Productization Reviewer Verdicts
 
-Updated: 2026-06-22T18:01:00-05:00
+Updated: 2026-06-22T18:24:00-05:00
 
 ## Read-Only Mapper Results
 
@@ -31,6 +31,11 @@ No milestone reviewer verdicts have passed yet.
   worktree; integrated into the manager branch.
 - CI/release worker: complete. Produced resource-safe scripts and initial
   Buildkite config in a child worktree; integrated into the manager branch.
+- Root command CLI worker: complete. Added root commands and hidden
+  compatibility aliases; integrated into the manager branch and validated with
+  focused CLI tests plus full check.
+- Store foundation worker: complete. Added migration/schema/WAL/busy/FTS
+  foundation; integrated into the manager branch and validated with full check.
 
 Required reviewer categories from the plan:
 

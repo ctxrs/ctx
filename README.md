@@ -17,9 +17,8 @@ Implemented in this branch:
 
 - create local Work Records with title, body, tags, kind, optional workspace,
   timestamps, and id;
-- capture command evidence when commands are run through
-  `ctx work evidence run`;
-- link one pull request URL to a record with `ctx work link-pr`;
+- capture command evidence when commands are run through `ctx evidence run`;
+- link one pull request URL to a record with `ctx link-pr`;
 - list, show, search, and render context for local records;
 - generate text or JSON reports from recent records and evidence;
 - export/import ctx JSON archives;
@@ -33,11 +32,11 @@ Not implemented yet:
 - posting or updating pull request comments;
 - hosted sync, hosted sharing, accounts, or team policy;
 - public installer URLs for this branch;
-- root-level commands such as `ctx setup`, `ctx dashboard`, `ctx publish`, or
-  `ctx search`.
+- dashboard and publish commands such as `ctx dashboard` or `ctx publish`.
 
-The implemented CLI is currently nested under `ctx workspace` and `ctx work`.
-Root-level product commands are planned direction, not current command surface.
+The implemented CLI now uses root-level Work Recorder commands. The older
+`ctx workspace ...` and `ctx work ...` forms remain as hidden compatibility
+aliases for the current local behavior.
 
 ## Install Or Run
 
@@ -53,7 +52,7 @@ You can also run commands from source:
 
 ```bash
 cargo run -p ctx -- workspace status
-cargo run -p ctx -- work list
+cargo run -p ctx -- list
 ```
 
 ## Quick Start
@@ -61,14 +60,14 @@ cargo run -p ctx -- work list
 Create the local Work Recorder store:
 
 ```bash
-ctx workspace setup
-ctx workspace status
+ctx setup
+ctx status
 ```
 
 Create a Work Record:
 
 ```bash
-ctx work record \
+ctx record \
   --title "fix checkout retry handling" \
   --body "Investigate flaky checkout retries and make retry behavior deterministic." \
   --tag checkout \
@@ -80,33 +79,33 @@ ctx work record \
 Capture command evidence:
 
 ```bash
-ctx work evidence run --record <record-id> cargo test -p checkout
+ctx evidence run --record <record-id> cargo test -p checkout
 ```
 
 Link a pull request URL locally:
 
 ```bash
-ctx work link-pr <record-id> https://github.com/example/project/pull/42
+ctx link-pr <record-id> https://github.com/example/project/pull/42
 ```
 
 Review and search:
 
 ```bash
-ctx work list
-ctx work show <record-id>
-ctx work search checkout
-ctx work context checkout
-ctx work report
+ctx list
+ctx show <record-id>
+ctx search checkout
+ctx context checkout
+ctx report
 ```
 
 Move records between machines with ctx JSON archives:
 
 ```bash
-ctx work export --output work-records.json
-ctx work import --input work-records.json
+ctx export --output work-records.json
+ctx import --input work-records.json
 ```
 
-`ctx work import` imports ctx archive JSON only. It does not import existing
+`ctx import` imports ctx archive JSON only. It does not import existing
 local agent history from provider transcript directories.
 
 ## Work Record Model
@@ -122,7 +121,7 @@ current implementation stores:
 - optional workspace path;
 - optional pull request URL;
 - created and updated timestamps;
-- command evidence captured by `ctx work evidence run`.
+- command evidence captured by `ctx evidence run`.
 
 The near-term product direction is broader: Work Records should eventually
 connect sessions, subagents, command evidence, tool output, files touched,
@@ -135,22 +134,22 @@ command for them.
 The current command groups are:
 
 ```bash
-ctx workspace setup
-ctx workspace status
-ctx workspace uninstall --yes
+ctx setup
+ctx status
+ctx uninstall --yes
 
-ctx work schema
-ctx work record --title "task title" --body "prompt or note" --kind task
-ctx work list
-ctx work show <record-id>
-ctx work search <query>
-ctx work context [query]
-ctx work report
-ctx work evidence run [--record <record-id>] <command> [args...]
-ctx work link-pr <record-id> <pull-request-url>
-ctx work export [--output work-records.json]
-ctx work import [--input work-records.json] [--overwrite]
-ctx work validate
+ctx schema
+ctx record --title "task title" --body "prompt or note" --kind task
+ctx list
+ctx show <record-id>
+ctx search <query>
+ctx context [query]
+ctx report
+ctx evidence run [--record <record-id>] <command> [args...]
+ctx link-pr <record-id> <pull-request-url>
+ctx export [--output work-records.json]
+ctx import [--input work-records.json] [--overwrite]
+ctx validate
 ```
 
 See [docs/cli-reference.md](docs/cli-reference.md) for the detailed current
@@ -162,7 +161,7 @@ By default, ctx uses machine-local storage under:
 
 ```text
 ~/.ctx/work-record/
-  work-record.sqlite
+  work.sqlite
 ```
 
 Set `CTX_DATA_ROOT` to use a different root. The current implementation stores
