@@ -1,6 +1,6 @@
 # Work Inspector Full Suite Implementation Status
 
-Updated: 2026-06-22T00:34:56-05:00
+Updated: 2026-06-22T04:31:25-05:00
 
 Branch: `ctx/agent-work-semantics-primary`
 
@@ -13,9 +13,10 @@ Status: validation passed locally. The first dedicated done-ness review on
 `a6fac71` found the substantive implementation complete and failed only this
 status note's stale bookkeeping. The first status-only follow-up commit was
 `711c51a Record Work Inspector review status`; the reviewer then failed only the
-remaining "re-check pending" wording. This current status-only commit records
-that second result and intentionally identifies itself as current `HEAD` because
-a Git commit cannot embed its own final hash without changing that hash.
+remaining "re-check pending" wording. That bookkeeping was corrected, then the
+user superseded the earlier PASS after opening the Work Inspector and finding
+parts of it visually sparse. This status now includes the stricter
+product-quality follow-up that started from clean head `a65fcd5`.
 
 ## Scope Landed
 
@@ -166,6 +167,120 @@ Final screenshot set:
 - Current status-only `HEAD`: records the final re-check results above. No code,
   product, architecture, security, visual, test, dogfood, or deferral blockers
   remain in the recorded reviewer feedback.
+
+## Product-Quality Follow-up From `a65fcd5`
+
+The user opened the latest Work Inspector and did not accept the previous PASS
+because parts of the example still looked incomplete. This follow-up treated
+visual usefulness as a release gate rather than a documentation note.
+
+What was sparse before:
+
+- Commands had structural rows, but not enough useful stdout/stderr preview
+  material to show what actually ran.
+- The Changes tab had file/change metadata, but was not enough for a fresh
+  reviewer to reconstruct the work without adjacent scratch-repo spelunking.
+- The Artifacts tab could degrade into metadata-only evidence and did not prove
+  that a real preview rendered in the browser.
+- Child/subagent context was present in data, but needed a visible grouped
+  contribution surface.
+
+What changed in this pass:
+
+- Enriched the rich dogfood Work record with a complete scratch canvas toy run:
+  transcript/timeline, three commands, two share-safe command output previews,
+  seven change items, five safe source snapshots, three evidence items, one
+  screenshot artifact, one child/subagent review, and explicit review notes.
+- Changed Inspector artifact previews to fetch authenticated artifact blobs in
+  the browser and render `blob:` URLs, with Preview/Download buttons instead of
+  capability-token links in the DOM.
+- Added fail-closed source snapshot projection. Backend and UI both require
+  `share_safe: true` and `redaction_class: local_redacted`; the default Changes
+  view shows bounded excerpts only, while the redacted agent-readable JSON keeps
+  the complete safe handoff material.
+- Removed raw command CWD from route responses and UI validation proof, keeping
+  only safe CWD labels such as `project root` or `captured workspace`.
+- Grouped child/subagent events by linked child session/run so the Subagents tab
+  shows a specific child reviewer contribution instead of generic context.
+
+Rich dogfood Inspector:
+
+- Workspace:
+  `a4f13335-4f77-4f3f-9f83-96194fda8937`
+- Work ID:
+  `wrk_ade_task_4211e95ca67143e6a29ac18dea33a5a6`
+- Local Inspector URL:
+  `http://127.0.0.1:4412/workspaces/a4f13335-4f77-4f3f-9f83-96194fda8937/work/wrk_ade_task_4211e95ca67143e6a29ac18dea33a5a6`
+- Redacted Inspector JSON:
+  `scratch/work-inspector-product-quality-rich/reports/rich-inspector.json`
+- Enriched import fixture:
+  `scratch/work-inspector-product-quality-rich/reports/full-local-enriched-import.json`
+
+Latest product-quality screenshots:
+
+- `scratch/work-inspector-product-quality-rich/screenshots/rich-overview-desktop-dark.png`
+- `scratch/work-inspector-product-quality-rich/screenshots/rich-transcript-desktop-dark.png`
+- `scratch/work-inspector-product-quality-rich/screenshots/rich-subagents-desktop-dark.png`
+- `scratch/work-inspector-product-quality-rich/screenshots/rich-commands-desktop-dark.png`
+- `scratch/work-inspector-product-quality-rich/screenshots/rich-evidence-desktop-dark.png`
+- `scratch/work-inspector-product-quality-rich/screenshots/rich-timeline-desktop-dark.png`
+- `scratch/work-inspector-product-quality-rich/screenshots/rich-changes-desktop-dark.png`
+- `scratch/work-inspector-product-quality-rich/screenshots/rich-artifacts-desktop-dark.png`
+- `scratch/work-inspector-product-quality-rich/screenshots/rich-context-desktop-dark.png`
+- `scratch/work-inspector-product-quality-rich/screenshots/rich-agent-handoff-desktop-dark.png`
+- `scratch/work-inspector-product-quality-rich/screenshots/rich-overview-mobile-light.png`
+- `scratch/work-inspector-product-quality-rich/screenshots/rich-commands-mobile-light.png`
+- `scratch/work-inspector-product-quality-rich/screenshots/rich-changes-mobile-light.png`
+- `scratch/work-inspector-product-quality-rich/screenshots/rich-artifacts-mobile-light.png`
+
+Manual screenshot inspection notes:
+
+- Overview now has clear completeness counters for transcript, subagents,
+  commands, changes, evidence, and artifacts; it no longer reads as an empty
+  shell.
+- Commands shows concrete command names, passing statuses, safe workspace
+  labels, durations, and visible stdout previews.
+- Changes shows changed files, linked commit/PR material, source outline,
+  review notes, artifact fingerprint evidence, and bounded implementation
+  excerpts with omitted-line notes.
+- Artifacts renders the actual canvas screenshot preview and keeps action
+  controls separate from the image URL.
+- Subagents shows one grouped child reviewer contribution with event count and a
+  safe contribution preview.
+- Mobile light overview stacks cleanly and preserves the same completeness
+  signal without overlap.
+
+Additional reviewer results for the stricter pass:
+
+- Adversarial visual/product review: PASS. Reviewer inspected actual screenshots
+  and accepted the richer command, Changes, Artifacts, Context, and Subagents
+  surfaces. Remaining comments were polish-level only: repeated card/chip
+  patterns and long mobile Changes content.
+- Fresh reconstruction review: PASS. Reviewer reconstructed the scratch canvas
+  toy from the Inspector and redacted JSON alone. Accepted caveats: raw
+  transcripts remain local, raw CWD stays redacted, and the dummy PR is local
+  dogfood evidence rather than a pushed product PR.
+- Combined security/code re-review: PASS. Reviewer confirmed artifact tokens are
+  not present in the current Inspector DOM or screenshot strings; source
+  snapshots fail closed on explicit safe markers; command CWD is omitted; and
+  child/subagent grouping is acceptable.
+
+Product-quality follow-up validation:
+
+- `pnpm -C core/apps/web test -- WorkReportView.test.tsx browserResourceUrls.test.ts`:
+  PASS, 15 tests.
+- `pnpm -C core/apps/web typecheck`: PASS.
+- `pnpm -C core/apps/web lint`: PASS.
+- `pnpm -C core/apps/web build`: PASS with existing Vite chunk/dynamic-import
+  warnings only.
+- `CTX_CARGO_JOBS=1 CTX_RUST_TEST_THREADS=1 TMPDIR=/var/tmp/ctxwi scripts/dev/cargo-safe.sh test --manifest-path Cargo.toml -p ctx-daemon inspector_source_outline_and_review_notes_are_share_safe --lib --locked`:
+  PASS.
+- `CTX_CARGO_JOBS=1 TMPDIR=/var/tmp/ctxwi scripts/dev/cargo-safe.sh build --manifest-path Cargo.toml -p ctx-http --bin ctx --locked`:
+  PASS.
+- JSON privacy grep against the refreshed rich Inspector JSON found no raw local
+  paths, auth/token markers, raw payload keys, or executable URL markers.
+- Browser DOM probe confirmed artifact previews use `blob:` URLs and no
+  `token=`, `expires_at=`, or `Bearer` material appears in the artifact panel.
 
 ## Validation
 

@@ -5,9 +5,10 @@ use ctx_core::ids::{
 use ctx_core::models::{
     Artifact, ChangeSet, Contribution, ContributionEndpoint, PullRequestLink, RecordFidelity,
     RecordSource, RecordTrust, WorkActorKind, WorkEvent, WorkEventType, WorkEvidence,
-    WorkEvidenceFreshness, WorkEvidenceStatus, WorkLinkTargetKind, WorkRecord, WorkRecordLink,
-    WorkRedactionClass, WorkSearchDoc, WorkSummary, WorkSummaryClaim, WorkSummaryFreshness,
-    WorkSummaryGenerationMethod, WorkTrustVerdict, WORK_OBSERVABILITY_SCHEMA_VERSION,
+    WorkEvidenceFreshness, WorkEvidenceStatus, WorkLinkRole, WorkLinkTargetKind, WorkRecord,
+    WorkRecordLink, WorkRedactionClass, WorkSearchDoc, WorkSummary, WorkSummaryClaim,
+    WorkSummaryFreshness, WorkSummaryGenerationMethod, WorkTrustVerdict,
+    WORK_OBSERVABILITY_SCHEMA_VERSION,
 };
 use ctx_core::redaction::is_sensitive_key;
 use ctx_route_contracts::workspaces::{
@@ -21,15 +22,16 @@ use ctx_route_contracts::workspaces::{
     WorkspaceWorkEvidenceSummaryRouteResponse, WorkspaceWorkInspectorOverviewRouteResponse,
     WorkspaceWorkInspectorRouteResponse, WorkspaceWorkLinkRouteItem, WorkspaceWorkListRouteQuery,
     WorkspaceWorkListRouteResponse, WorkspaceWorkRecordRouteItem, WorkspaceWorkReportRouteResponse,
-    WorkspaceWorkSafeJsonRouteResponse, WorkspaceWorkSummaryClaimCreateRouteRequest,
-    WorkspaceWorkSummaryClaimRouteItem, WorkspaceWorkSummaryCreateRouteRequest,
-    WorkspaceWorkSummaryCreateRouteResponse, WorkspaceWorkSummaryRouteItem,
-    WorkspaceWorkTimelineItemRouteResponse, WorkspaceWorkTimelineRouteQuery,
-    WorkspaceWorkTimelineRouteResponse, WorkspaceWorkTranscriptItemRouteResponse,
-    WorkspaceWorkTrustRouteSummary,
+    WorkspaceWorkSafeJsonRouteResponse, WorkspaceWorkSubagentRouteItem,
+    WorkspaceWorkSummaryClaimCreateRouteRequest, WorkspaceWorkSummaryClaimRouteItem,
+    WorkspaceWorkSummaryCreateRouteRequest, WorkspaceWorkSummaryCreateRouteResponse,
+    WorkspaceWorkSummaryRouteItem, WorkspaceWorkTimelineItemRouteResponse,
+    WorkspaceWorkTimelineRouteQuery, WorkspaceWorkTimelineRouteResponse,
+    WorkspaceWorkTranscriptItemRouteResponse, WorkspaceWorkTrustRouteSummary,
 };
 use serde_json::{json, Map, Value};
 use sha2::Digest;
+use std::collections::HashSet;
 
 use super::super::{workspace_store_route_error, WorkspaceRouteError};
 use crate::daemon::WorkspaceWorkHandle;
@@ -37,7 +39,7 @@ use crate::daemon::WorkspaceWorkHandle;
 const REPORT_TEXT_LIMIT: usize = 16 * 1024;
 const CONTEXT_TEXT_LIMIT: usize = 6 * 1024;
 const EVENT_TEXT_LIMIT: usize = 8 * 1024;
-const COMMAND_OUTPUT_PREVIEW_LIMIT: usize = 4 * 1024;
+const SOURCE_SNAPSHOT_TEXT_LIMIT: usize = 20 * 1024;
 const WORK_PROJECTION_SESSION_REFRESH_LIMIT: usize = 128;
 
 #[derive(Debug, Clone)]
@@ -878,10 +880,260 @@ fn inspector_contribution_value(contribution: &Contribution) -> Value {
             "changed_paths_sha256": fingerprint.changed_paths_sha256,
             "dirty": fingerprint.dirty,
         })),
+        "changed_files": inspector_contribution_changed_files(contribution.metadata_json.as_ref()),
+        "file_summaries": inspector_contribution_file_summaries(contribution.metadata_json.as_ref()),
+        "source_outline": inspector_contribution_source_outline(contribution.metadata_json.as_ref()),
+        "review_notes": inspector_contribution_review_notes(contribution.metadata_json.as_ref()),
+        "source_snapshots": inspector_contribution_source_snapshots(contribution.metadata_json.as_ref()),
         "created_at": contribution.created_at,
         "updated_at": contribution.updated_at,
         "schema_version": contribution.schema_version,
     })
+}
+
+fn inspector_contribution_changed_files(metadata: Option<&Value>) -> Vec<Value> {
+    let Some(metadata) = metadata.and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    ["changed_files", "files", "file_changes"]
+        .iter()
+        .filter_map(|key| metadata.get(*key).and_then(Value::as_array))
+        .flat_map(|items| items.iter())
+        .filter_map(inspector_changed_file_value)
+        .take(30)
+        .collect()
+}
+
+fn inspector_contribution_file_summaries(metadata: Option<&Value>) -> Vec<Value> {
+    let Some(metadata) = metadata.and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    ["file_summaries", "source_outline", "review_notes"]
+        .iter()
+        .filter_map(|key| metadata.get(*key).and_then(Value::as_array))
+        .flat_map(|items| items.iter())
+        .filter_map(inspector_file_summary_value)
+        .take(30)
+        .collect()
+}
+
+fn inspector_file_summary_value(value: &Value) -> Option<Value> {
+    let object = value.as_object()?;
+    let path = ["path", "file", "filename", "relative_path"]
+        .iter()
+        .find_map(|key| object.get(*key).and_then(Value::as_str))
+        .and_then(safe_changed_file_path)?;
+    let summary = ["summary", "purpose", "review_note", "note"]
+        .iter()
+        .find_map(|key| object.get(*key).and_then(Value::as_str))
+        .map(|text| bounded_redacted_text(text, 500))?;
+    Some(json!({
+        "path": path,
+        "summary": summary,
+    }))
+}
+
+fn inspector_contribution_source_outline(metadata: Option<&Value>) -> Vec<Value> {
+    let Some(metadata) = metadata.and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    ["source_outline", "implementation_outline", "review_outline"]
+        .iter()
+        .filter_map(|key| metadata.get(*key).and_then(Value::as_array))
+        .flat_map(|items| items.iter())
+        .filter_map(inspector_source_outline_value)
+        .take(30)
+        .collect()
+}
+
+fn inspector_source_outline_value(value: &Value) -> Option<Value> {
+    let object = value.as_object()?;
+    let title = ["label", "title", "heading", "path"]
+        .iter()
+        .find_map(|key| object.get(*key).and_then(Value::as_str))
+        .map(|text| bounded_redacted_text(text, 200))?;
+    let detail = ["detail", "summary", "review_note", "note"]
+        .iter()
+        .find_map(|key| object.get(*key).and_then(Value::as_str))
+        .map(|text| bounded_redacted_text(text, 800))?;
+    let path = ["path", "file", "relative_path"]
+        .iter()
+        .find_map(|key| object.get(*key).and_then(Value::as_str))
+        .and_then(safe_changed_file_path);
+    let excerpt = ["excerpt", "review_excerpt", "safe_excerpt"]
+        .iter()
+        .find_map(|key| object.get(*key).and_then(Value::as_str))
+        .map(|text| bounded_redacted_text(text, 1_500));
+    Some(json!({
+        "title": title,
+        "detail": detail,
+        "path": path,
+        "excerpt": excerpt,
+    }))
+}
+
+fn inspector_contribution_review_notes(metadata: Option<&Value>) -> Vec<Value> {
+    let Some(metadata) = metadata.and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    ["review_notes", "resume_notes", "implementation_notes"]
+        .iter()
+        .filter_map(|key| metadata.get(*key).and_then(Value::as_array))
+        .flat_map(|items| items.iter())
+        .filter_map(inspector_review_note_value)
+        .take(30)
+        .collect()
+}
+
+fn inspector_contribution_source_snapshots(metadata: Option<&Value>) -> Vec<Value> {
+    let Some(metadata) = metadata.and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    [
+        "source_snapshots",
+        "file_snapshots",
+        "implementation_snapshots",
+    ]
+    .iter()
+    .filter_map(|key| metadata.get(*key).and_then(Value::as_array))
+    .flat_map(|items| items.iter())
+    .filter_map(inspector_source_snapshot_value)
+    .take(12)
+    .collect()
+}
+
+fn inspector_source_snapshot_value(value: &Value) -> Option<Value> {
+    let object = value.as_object()?;
+    if object.get("share_safe").and_then(Value::as_bool) != Some(true)
+        || object.get("redaction_class").and_then(Value::as_str) != Some("local_redacted")
+    {
+        return None;
+    }
+    let path = ["path", "file", "filename", "relative_path"]
+        .iter()
+        .find_map(|key| object.get(*key).and_then(Value::as_str))
+        .and_then(safe_changed_file_path)?;
+    let content = [
+        "content",
+        "text",
+        "body",
+        "safe_content",
+        "redacted_content",
+    ]
+    .iter()
+    .find_map(|key| object.get(*key).and_then(Value::as_str))
+    .map(|text| bounded_redacted_text(text, SOURCE_SNAPSHOT_TEXT_LIMIT))?;
+    if contains_unredacted_secret_marker(&content) {
+        return None;
+    }
+    let language = ["language", "lang", "syntax"]
+        .iter()
+        .find_map(|key| object.get(*key).and_then(Value::as_str))
+        .map(|text| bounded_redacted_text(text, 80));
+    let kind = ["kind", "role", "type"]
+        .iter()
+        .find_map(|key| object.get(*key).and_then(Value::as_str))
+        .map(|text| bounded_redacted_text(text, 80));
+    let sha256 = ["sha256", "content_sha256", "digest"]
+        .iter()
+        .find_map(|key| output_ref_sha256(Some(value), key));
+    let line_count = ["line_count", "lines"]
+        .iter()
+        .find_map(|key| object.get(*key).and_then(value_i64));
+    Some(json!({
+        "share_safe": true,
+        "redaction_class": "local_redacted",
+        "path": path,
+        "language": language,
+        "kind": kind,
+        "line_count": line_count,
+        "sha256": sha256,
+        "content": content,
+    }))
+}
+
+fn contains_unredacted_secret_marker(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower.contains("sk-")
+        || lower.contains("ghp_")
+        || lower.contains("authorization: bearer")
+        || lower.contains("api_key=")
+        || lower.contains("token=")
+        || lower.contains("password=")
+        || lower.contains("secret=")
+}
+
+fn inspector_review_note_value(value: &Value) -> Option<Value> {
+    if let Some(text) = value.as_str() {
+        return Some(json!({
+            "title": "Review note",
+            "detail": bounded_redacted_text(text, 1_000),
+        }));
+    }
+    let object = value.as_object()?;
+    let title = ["title", "label", "kind"]
+        .iter()
+        .find_map(|key| object.get(*key).and_then(Value::as_str))
+        .map(|text| bounded_redacted_text(text, 200))
+        .unwrap_or_else(|| "Review note".to_string());
+    let detail = ["detail", "summary", "note", "text"]
+        .iter()
+        .find_map(|key| object.get(*key).and_then(Value::as_str))
+        .map(|text| bounded_redacted_text(text, 1_000))?;
+    Some(json!({
+        "title": title,
+        "detail": detail,
+    }))
+}
+
+fn inspector_changed_file_value(value: &Value) -> Option<Value> {
+    let object = value.as_object()?;
+    let path = ["path", "file", "filename", "relative_path"]
+        .iter()
+        .find_map(|key| object.get(*key).and_then(Value::as_str))
+        .and_then(safe_changed_file_path)?;
+    let status = ["status", "change_type"].iter().find_map(|key| {
+        object
+            .get(*key)
+            .and_then(Value::as_str)
+            .map(|text| bounded_redacted_text(text, 80))
+    });
+    let additions = ["additions", "added", "lines_added"]
+        .iter()
+        .find_map(|key| object.get(*key).and_then(Value::as_i64));
+    let deletions = ["deletions", "deleted", "lines_deleted"]
+        .iter()
+        .find_map(|key| object.get(*key).and_then(Value::as_i64));
+    Some(json!({
+        "path": path,
+        "status": status,
+        "additions": additions,
+        "deletions": deletions,
+    }))
+}
+
+fn safe_changed_file_path(raw: &str) -> Option<String> {
+    let path = raw.trim().replace('\\', "/");
+    if path.is_empty()
+        || path.len() > 500
+        || path.starts_with('/')
+        || path.starts_with("~/")
+        || path.contains("://")
+        || path.contains(':')
+        || path.contains('\0')
+        || path.contains('\n')
+        || path.contains('\r')
+    {
+        return None;
+    }
+    if path.split('/').any(|part| part == ".." || part.is_empty()) {
+        return None;
+    }
+    let redacted = redact_route_text(&path);
+    if redacted.contains("[redacted") {
+        return None;
+    }
+    Some(bounded_redacted_text(&redacted, 500))
 }
 
 fn inspector_contribution_endpoint_value(endpoint: &ContributionEndpoint) -> Value {
@@ -1122,6 +1374,10 @@ async fn build_report(
     );
     let summary_freshness = aggregate_summary_freshness_refs(&route_summaries, &material_key);
     let trust = trust_summary(&raw.work, &raw.evidence);
+    let mut work = route_work_record(&raw.work, Some(trust.verdict), Some(summary_freshness));
+    if work.head_commit.is_none() {
+        work.head_commit = effective_head_commit(&raw.work, &raw.change_sets, &raw.links);
+    }
     Ok(WorkspaceWorkReportRouteResponse {
         change_summary: WorkspaceWorkChangeSummaryRouteResponse {
             change_sets: raw.change_sets.len(),
@@ -1129,7 +1385,7 @@ async fn build_report(
             pull_requests: pull_request_links(&raw.links),
             commits: commit_links(&raw.links),
         },
-        work: route_work_record(&raw.work, Some(trust.verdict), Some(summary_freshness)),
+        work,
         links: raw.links.iter().map(route_work_link).collect(),
         trust,
         evidence_summary: evidence_summary(&raw.evidence),
@@ -1194,7 +1450,10 @@ async fn build_inspector(
     );
     let summary_freshness = aggregate_summary_freshness_refs(&route_summaries, &material_key);
     let trust = trust_summary(&raw.work, &raw.evidence);
-    let work = route_work_record(&raw.work, Some(trust.verdict), Some(summary_freshness));
+    let mut work = route_work_record(&raw.work, Some(trust.verdict), Some(summary_freshness));
+    if work.head_commit.is_none() {
+        work.head_commit = effective_head_commit(&raw.work, &raw.change_sets, &raw.links);
+    }
     let links = raw
         .links
         .iter()
@@ -1237,7 +1496,7 @@ async fn build_inspector(
         .collect::<Vec<_>>();
     let timeline = raw.events.iter().map(route_work_event).collect::<Vec<_>>();
     let transcript = inspector_transcript_items(&raw.events);
-    let commands = inspector_command_previews(&raw.evidence);
+    let commands = inspector_command_previews(&raw.evidence, raw.work.primary_repo_root.as_deref());
     let artifacts = inspector_artifacts(
         store,
         workspace_id,
@@ -1278,6 +1537,7 @@ async fn build_inspector(
             .collect(),
     };
     let timeline_items = inspector_timeline_items(&raw.events, &raw.evidence);
+    let subagents = inspector_subagents(&raw.links, &raw.events);
     let duplicate_strong_links = raw
         .duplicate_strong_links
         .into_iter()
@@ -1308,6 +1568,7 @@ async fn build_inspector(
             &evidence,
             &commands,
             &artifacts,
+            &subagents,
             &change_summary,
             &duplicate_strong_links,
         ),
@@ -1332,6 +1593,7 @@ async fn build_inspector(
         "summary_claims": &summary_claims,
         "timeline": &timeline,
         "timeline_items": &timeline_items,
+        "subagents": &subagents,
         "duplicate_strong_links": &duplicate_strong_links,
         "raw_transcript_available": raw_transcript_available,
         "raw_transcript_included": false,
@@ -1340,7 +1602,7 @@ async fn build_inspector(
         safe_json_value,
         vec![
             "whitelist projection only".to_string(),
-            "raw payload_json, raw transcript bodies, local artifact paths, and raw command output are excluded"
+            "raw event payloads, raw transcript bodies, local artifact paths, and raw command output are excluded"
                 .to_string(),
         ],
     );
@@ -1366,6 +1628,7 @@ async fn build_inspector(
         summary_claims,
         timeline,
         timeline_items,
+        subagents,
         duplicate_strong_links,
         raw_transcript_available,
         raw_transcript_included: false,
@@ -1598,26 +1861,22 @@ fn inspector_transcript_items(
                 .as_deref()
                 .map(|text| bounded_redacted_text(text, 200)),
             redaction_class: event.redaction_class,
-            text_preview: event
-                .redacted_text
-                .as_deref()
-                .map(|text| bounded_redacted_text(text, EVENT_TEXT_LIMIT)),
+            text_preview: Some(safe_event_preview(event)),
         })
         .collect()
 }
 
 fn inspector_command_previews(
     evidence: &[WorkEvidence],
+    repo_root: Option<&str>,
 ) -> Vec<WorkspaceWorkCommandPreviewRouteResponse> {
     evidence
         .iter()
         .filter(|item| item.command.is_some() || !item.argv.is_empty())
         .map(|item| {
             let output_ref = item.output_ref.as_ref();
-            let stdout_preview =
-                output_ref.and_then(|value| safe_output_preview(value, "stdout_redacted"));
-            let stderr_preview =
-                output_ref.and_then(|value| safe_output_preview(value, "stderr_redacted"));
+            let stdout_preview = output_ref.and_then(|value| safe_output_preview(value, "stdout"));
+            let stderr_preview = output_ref.and_then(|value| safe_output_preview(value, "stderr"));
             let output_truncated = output_ref_bool(output_ref, "truncated");
             WorkspaceWorkCommandPreviewRouteResponse {
                 evidence_id: item.evidence_id.clone(),
@@ -1632,10 +1891,11 @@ fn inspector_command_previews(
                     .take(128)
                     .map(|arg| bounded_redacted_text(arg, 600))
                     .collect(),
-                cwd: item
+                cwd: None,
+                cwd_label: item
                     .cwd
                     .as_deref()
-                    .map(|text| bounded_redacted_text(text, 1_000)),
+                    .and_then(|cwd| safe_command_cwd_label(cwd, repo_root)),
                 exit_code: item.exit_code,
                 status: item.status,
                 freshness: item.freshness,
@@ -1960,11 +2220,7 @@ fn inspector_timeline_items(
             sequence: event.sequence,
             event_time: event.event_time,
             kind: enum_json_label(&event.event_type),
-            title: event
-                .redacted_text
-                .as_deref()
-                .map(|text| bounded_redacted_text(text, 160))
-                .unwrap_or_else(|| enum_json_label(&event.event_type)),
+            title: safe_event_preview(event),
             detail: event
                 .source_kind
                 .as_deref()
@@ -2001,6 +2257,246 @@ fn inspector_timeline_items(
     items
 }
 
+fn inspector_subagents(
+    links: &[WorkRecordLink],
+    events: &[WorkEvent],
+) -> Vec<WorkspaceWorkSubagentRouteItem> {
+    let subagent_events = events
+        .iter()
+        .filter(|event| event.actor_kind == WorkActorKind::Subagent)
+        .collect::<Vec<_>>();
+    let child_links = links
+        .iter()
+        .filter(|link| {
+            link.target_kind == WorkLinkTargetKind::Session && link.role == WorkLinkRole::Child
+        })
+        .collect::<Vec<_>>();
+    let mut items = Vec::new();
+    let mut used_event_ids = HashSet::new();
+
+    for link in &child_links {
+        let metadata = link.target_json.as_ref().and_then(Value::as_object);
+        let raw_child_session_id = link.target_id.as_deref();
+        let raw_run_id = metadata
+            .and_then(|value| value.get("run_id"))
+            .and_then(Value::as_str);
+        let child_events = if child_links.len() == 1 {
+            subagent_events.clone()
+        } else {
+            subagent_events
+                .iter()
+                .copied()
+                .filter(|event| {
+                    subagent_event_matches_child(event, raw_child_session_id, raw_run_id)
+                })
+                .collect::<Vec<_>>()
+        };
+        for event in &child_events {
+            used_event_ids.insert(event.event_id.clone());
+        }
+        let child_session_id = raw_child_session_id.map(|text| bounded_redacted_text(text, 120));
+        let transcript_preview = child_events
+            .iter()
+            .take(6)
+            .map(|event| inspector_transcript_item(event))
+            .collect::<Vec<_>>();
+        let latest_event_time = child_events
+            .iter()
+            .map(|event| event.event_time)
+            .max()
+            .or(Some(link.updated_at));
+        let summary = metadata
+            .and_then(|value| {
+                value
+                    .get("summary")
+                    .or_else(|| value.get("contribution_summary"))
+            })
+            .and_then(Value::as_str)
+            .map(|text| bounded_redacted_text(text, 500))
+            .or_else(|| safe_subagent_contribution_summary(&child_events));
+        items.push(WorkspaceWorkSubagentRouteItem {
+            id: link.link_id.0.clone(),
+            child_session_id,
+            run_id: metadata
+                .and_then(|value| value.get("run_id"))
+                .and_then(Value::as_str)
+                .map(|text| bounded_redacted_text(text, 120)),
+            label: metadata
+                .and_then(|value| value.get("label"))
+                .and_then(Value::as_str)
+                .map(|text| bounded_redacted_text(text, 160)),
+            summary,
+            status: metadata
+                .and_then(|value| value.get("status"))
+                .and_then(Value::as_str)
+                .map(|text| bounded_redacted_text(text, 80)),
+            role: Some("child_session".to_string()),
+            provider: child_events
+                .iter()
+                .find_map(|event| event.provider.as_deref())
+                .or_else(|| {
+                    metadata
+                        .and_then(|value| value.get("provider"))
+                        .and_then(Value::as_str)
+                })
+                .map(|text| bounded_redacted_text(text, 120)),
+            harness: child_events
+                .iter()
+                .find_map(|event| event.harness.as_deref())
+                .or_else(|| {
+                    metadata
+                        .and_then(|value| value.get("harness"))
+                        .and_then(Value::as_str)
+                })
+                .map(|text| bounded_redacted_text(text, 120)),
+            model: child_events
+                .iter()
+                .find_map(|event| event.model.as_deref())
+                .or_else(|| {
+                    metadata
+                        .and_then(|value| value.get("model"))
+                        .and_then(Value::as_str)
+                })
+                .map(|text| bounded_redacted_text(text, 160)),
+            prompt_length: metadata
+                .and_then(|value| value.get("prompt_length"))
+                .and_then(Value::as_i64),
+            event_count: child_events.len(),
+            latest_event_time,
+            transcript_preview,
+        });
+    }
+
+    let fallback_events = if items.is_empty() {
+        subagent_events.clone()
+    } else {
+        subagent_events
+            .iter()
+            .copied()
+            .filter(|event| !used_event_ids.contains(&event.event_id))
+            .collect::<Vec<_>>()
+    };
+
+    if !fallback_events.is_empty() {
+        let latest_event_time = fallback_events.iter().map(|event| event.event_time).max();
+        items.push(WorkspaceWorkSubagentRouteItem {
+            id: "subagent_activity".to_string(),
+            child_session_id: None,
+            run_id: None,
+            label: Some("Subagent activity".to_string()),
+            summary: safe_subagent_contribution_summary(&fallback_events),
+            status: None,
+            role: Some("projected_activity".to_string()),
+            provider: fallback_events
+                .iter()
+                .find_map(|event| event.provider.as_deref())
+                .map(|text| bounded_redacted_text(text, 120)),
+            harness: fallback_events
+                .iter()
+                .find_map(|event| event.harness.as_deref())
+                .map(|text| bounded_redacted_text(text, 120)),
+            model: fallback_events
+                .iter()
+                .find_map(|event| event.model.as_deref())
+                .map(|text| bounded_redacted_text(text, 160)),
+            prompt_length: None,
+            event_count: fallback_events.len(),
+            latest_event_time,
+            transcript_preview: fallback_events
+                .iter()
+                .take(6)
+                .map(|event| inspector_transcript_item(event))
+                .collect(),
+        });
+    }
+
+    items
+}
+
+fn subagent_event_matches_child(
+    event: &WorkEvent,
+    child_session_id: Option<&str>,
+    run_id: Option<&str>,
+) -> bool {
+    if let Some(child_session_id) = child_session_id {
+        if event.source_id.as_deref() == Some(child_session_id) {
+            return true;
+        }
+        if event
+            .payload_json
+            .as_ref()
+            .is_some_and(|payload| payload_contains_string(payload, child_session_id))
+        {
+            return true;
+        }
+    }
+    if let Some(run_id) = run_id {
+        if event.source_id.as_deref() == Some(run_id) {
+            return true;
+        }
+        if event
+            .payload_json
+            .as_ref()
+            .is_some_and(|payload| payload_contains_string(payload, run_id))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn payload_contains_string(value: &Value, needle: &str) -> bool {
+    match value {
+        Value::String(text) => text == needle,
+        Value::Array(items) => items
+            .iter()
+            .any(|item| payload_contains_string(item, needle)),
+        Value::Object(object) => object
+            .values()
+            .any(|item| payload_contains_string(item, needle)),
+        _ => false,
+    }
+}
+
+fn safe_subagent_contribution_summary(events: &[&WorkEvent]) -> Option<String> {
+    events.iter().find_map(|event| {
+        event
+            .payload_json
+            .as_ref()
+            .and_then(|payload| {
+                payload
+                    .get("summary")
+                    .or_else(|| payload.get("contribution_summary"))
+            })
+            .and_then(Value::as_str)
+            .map(|text| bounded_redacted_text(text, 500))
+    })
+}
+
+fn inspector_transcript_item(event: &WorkEvent) -> WorkspaceWorkTranscriptItemRouteResponse {
+    WorkspaceWorkTranscriptItemRouteResponse {
+        event_id: event.event_id.clone(),
+        sequence: event.sequence,
+        event_type: event.event_type,
+        event_time: event.event_time,
+        actor_kind: event.actor_kind,
+        provider: event
+            .provider
+            .as_deref()
+            .map(|text| bounded_redacted_text(text, 200)),
+        harness: event
+            .harness
+            .as_deref()
+            .map(|text| bounded_redacted_text(text, 200)),
+        model: event
+            .model
+            .as_deref()
+            .map(|text| bounded_redacted_text(text, 200)),
+        redaction_class: event.redaction_class,
+        text_preview: Some(safe_event_preview(event)),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn inspector_context_value(
     work: &WorkspaceWorkRecordRouteItem,
@@ -2010,6 +2506,7 @@ fn inspector_context_value(
     evidence: &[WorkspaceWorkEvidenceRouteItem],
     commands: &[WorkspaceWorkCommandPreviewRouteResponse],
     artifacts: &[WorkspaceWorkArtifactRouteItem],
+    subagents: &[WorkspaceWorkSubagentRouteItem],
     change_summary: &WorkspaceWorkChangeSummaryRouteResponse,
     duplicate_strong_links: &[WorkspaceWorkDuplicateStrongLinkRouteItem],
 ) -> Value {
@@ -2086,6 +2583,24 @@ fn inspector_context_value(
                 "preview_url": artifact.preview_url,
             })
         }).collect::<Vec<_>>(),
+        "subagents": subagents.iter().take(16).map(|subagent| {
+            json!({
+                "id": subagent.id,
+                "child_session_id": subagent.child_session_id,
+                "run_id": subagent.run_id,
+                "label": subagent.label,
+                "summary": subagent.summary,
+                "status": subagent.status,
+                "role": subagent.role,
+                "provider": subagent.provider,
+                "harness": subagent.harness,
+                "model": subagent.model,
+                "prompt_length": subagent.prompt_length,
+                "event_count": subagent.event_count,
+                "latest_event_time": subagent.latest_event_time,
+                "transcript_preview": subagent.transcript_preview,
+            })
+        }).collect::<Vec<_>>(),
         "duplicate_strong_links": duplicate_strong_links,
         "raw_transcript_included": false,
     })
@@ -2102,11 +2617,134 @@ fn safe_json_response(
     }
 }
 
-fn safe_output_preview(value: &Value, key: &str) -> Option<String> {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .map(|text| bounded_redacted_text(text, COMMAND_OUTPUT_PREVIEW_LIMIT))
+fn safe_event_preview(event: &WorkEvent) -> String {
+    let text_len = event
+        .redacted_text
+        .as_deref()
+        .map(|text| text.chars().count())
+        .unwrap_or_default();
+    let actor = enum_json_label(&event.actor_kind);
+    let event_type = enum_json_label(&event.event_type);
+    match event.event_type {
+        WorkEventType::UserMessage => {
+            format!("{actor} message captured ({text_len} chars, body omitted)")
+        }
+        WorkEventType::AssistantMessage => {
+            format!("{actor} message captured ({text_len} chars, body omitted)")
+        }
+        WorkEventType::ToolCallStart | WorkEventType::ToolCallEnd => {
+            format!("{actor} tool call captured ({text_len} chars, input omitted)")
+        }
+        WorkEventType::ToolOutput => {
+            format!("{actor} tool output captured ({text_len} chars, output omitted)")
+        }
+        WorkEventType::CommandCapture => {
+            format!("{actor} command capture recorded ({text_len} chars, output omitted)")
+        }
+        WorkEventType::ArtifactCreated => safe_artifact_event_preview(event, text_len),
+        WorkEventType::ChangeSetUpdated => "Change set metadata updated".to_string(),
+        WorkEventType::PullRequestLinked => "Pull request linked".to_string(),
+        WorkEventType::CommitLinked => "Commit linked".to_string(),
+        WorkEventType::Session => event
+            .redacted_text
+            .as_deref()
+            .and_then(safe_session_event_summary)
+            .unwrap_or_else(|| format!("{actor} session event captured")),
+        WorkEventType::Import => "Work data imported".to_string(),
+        WorkEventType::Export => "Work data exported".to_string(),
+        WorkEventType::Note | WorkEventType::Other => {
+            format!("{event_type} event captured ({text_len} chars, body omitted)")
+        }
+        WorkEventType::EvidenceObserved | WorkEventType::SummaryGenerated => {
+            format!("{event_type} event recorded")
+        }
+    }
+}
+
+fn safe_session_event_summary(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.starts_with("Session ") {
+        return Some(bounded_redacted_text(trimmed, 200));
+    }
+    if trimmed.starts_with("Subagent invocation ") {
+        return Some(bounded_redacted_text(trimmed, 200));
+    }
+    None
+}
+
+fn safe_artifact_event_preview(event: &WorkEvent, fallback_len: usize) -> String {
+    let artifact_name = event
+        .redacted_text
+        .as_deref()
+        .and_then(|text| text.strip_prefix("Artifact created: "))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(safe_changed_file_path);
+    match artifact_name {
+        Some(name) => format!("Artifact created: {name}"),
+        None => format!("Artifact created ({fallback_len} chars metadata, local paths omitted)"),
+    }
+}
+
+fn safe_command_cwd_label(cwd: &str, repo_root: Option<&str>) -> Option<String> {
+    let cwd = cwd.trim().replace('\\', "/");
+    if cwd.is_empty() || cwd.contains('\0') || cwd.contains('\n') || cwd.contains('\r') {
+        return None;
+    }
+    let Some(repo_root) = repo_root else {
+        return Some("captured workspace".to_string());
+    };
+    let repo_root = repo_root.trim().trim_end_matches('/').replace('\\', "/");
+    if repo_root.is_empty() {
+        return Some("captured workspace".to_string());
+    }
+    let cwd_trimmed = cwd.trim_end_matches('/');
+    if cwd_trimmed == repo_root {
+        return Some("project root".to_string());
+    }
+    if let Some(relative) = cwd_trimmed.strip_prefix(&format!("{repo_root}/")) {
+        return safe_changed_file_path(relative).map(|path| format!("workspace/{path}"));
+    }
+    Some("captured workspace".to_string())
+}
+
+fn safe_output_preview(value: &Value, stream: &str) -> Option<String> {
+    let redacted_key = format!("{stream}_redacted");
+    if value.get("share_safe").and_then(Value::as_bool) == Some(true)
+        && value.get("redaction_class").and_then(Value::as_str) == Some("local_redacted")
+    {
+        if let Some(preview) = value
+            .get(&redacted_key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
+            return Some(bounded_redacted_text(preview, 2_000));
+        }
+    }
+    let size_key = format!("{stream}_size_bytes");
+    let sha_key = format!("{stream}_sha256");
+    let size = output_ref_i64(Some(value), &size_key)?;
+    if size == 0 {
+        return None;
+    }
+    let sha = output_ref_sha256(Some(value), &sha_key)
+        .map(|value| format!(", sha256 {}", &value[..12]))
+        .unwrap_or_default();
+    Some(format!(
+        "{stream} captured; raw output omitted ({}{})",
+        byte_count_label(size),
+        sha
+    ))
+}
+
+fn byte_count_label(bytes: i64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 fn output_ref_i64(value: Option<&Value>, key: &str) -> Option<i64> {
@@ -2214,6 +2852,34 @@ fn route_work_record(
     }
 }
 
+fn effective_head_commit(
+    work: &WorkRecord,
+    change_sets: &[ChangeSet],
+    links: &[WorkRecordLink],
+) -> Option<String> {
+    work.head_commit
+        .clone()
+        .or_else(|| {
+            change_sets.iter().find_map(|change_set| {
+                change_set
+                    .head_revision
+                    .as_deref()
+                    .or(change_set
+                        .fingerprint
+                        .as_ref()
+                        .and_then(|fingerprint| fingerprint.head_sha.as_deref()))
+                    .map(|text| bounded_redacted_text(text, 200))
+            })
+        })
+        .or_else(|| {
+            links
+                .iter()
+                .find(|link| link.target_kind == WorkLinkTargetKind::Commit)
+                .and_then(|link| link.target_id.as_deref())
+                .map(|text| bounded_redacted_text(text, 200))
+        })
+}
+
 fn route_work_link(link: &WorkRecordLink) -> WorkspaceWorkLinkRouteItem {
     WorkspaceWorkLinkRouteItem {
         link_id: link.link_id.clone(),
@@ -2259,10 +2925,7 @@ fn route_work_event(event: &WorkEvent) -> WorkspaceWorkEventRouteItem {
         source: event.source,
         fidelity: event.fidelity,
         trust: event.trust,
-        redacted_text: event
-            .redacted_text
-            .as_deref()
-            .map(|text| bounded_redacted_text(text, EVENT_TEXT_LIMIT)),
+        redacted_text: Some(safe_event_preview(event)),
         created_at: event.created_at,
         schema_version: event.schema_version,
     }
@@ -2481,22 +3144,32 @@ fn aggregate_summary_freshness_refs(
     if summaries.is_empty() {
         return WorkSummaryFreshness::Missing;
     }
+    let mut saw_fresh = false;
+    let mut saw_locked = false;
     let mut saw_partial = false;
+    let mut saw_stale = false;
     for summary in summaries {
         match effective_summary_freshness(
             summary.freshness,
             summary.source_revision_key.as_deref(),
             material_key,
         ) {
-            WorkSummaryFreshness::Stale => return WorkSummaryFreshness::Stale,
+            WorkSummaryFreshness::Stale => saw_stale = true,
             WorkSummaryFreshness::Missing | WorkSummaryFreshness::Partial => saw_partial = true,
-            WorkSummaryFreshness::Fresh | WorkSummaryFreshness::Locked => {}
+            WorkSummaryFreshness::Fresh => saw_fresh = true,
+            WorkSummaryFreshness::Locked => saw_locked = true,
         }
     }
-    if saw_partial {
-        WorkSummaryFreshness::Partial
-    } else {
+    if saw_fresh {
         WorkSummaryFreshness::Fresh
+    } else if saw_locked {
+        WorkSummaryFreshness::Locked
+    } else if saw_partial {
+        WorkSummaryFreshness::Partial
+    } else if saw_stale {
+        WorkSummaryFreshness::Stale
+    } else {
+        WorkSummaryFreshness::Missing
     }
 }
 
@@ -2544,9 +3217,36 @@ fn material_revision_key(
         "change_sets": change_sets,
         "contributions": contributions,
     });
+    let mut value = value;
+    strip_material_volatile_fields(&mut value);
     let bytes = serde_json::to_vec(&value).unwrap_or_default();
     let digest = sha2::Sha256::digest(&bytes);
     hex::encode(digest)
+}
+
+fn strip_material_volatile_fields(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            for key in [
+                "created_at",
+                "updated_at",
+                "started_at",
+                "finished_at",
+                "generated_at",
+            ] {
+                object.remove(key);
+            }
+            for child in object.values_mut() {
+                strip_material_volatile_fields(child);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                strip_material_volatile_fields(item);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn pull_request_links(links: &[WorkRecordLink]) -> Vec<Value> {
@@ -2772,10 +3472,13 @@ fn redact_path_segments(input: String, marker: &str) -> String {
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
-    use ctx_core::ids::{WorkEventId, WorkRecordId, WorkRecordLinkId, WorkspaceId};
+    use ctx_core::ids::{
+        ChangeSetId, WorkEventId, WorkRecordId, WorkRecordLinkId, WorkSummaryId, WorkspaceId,
+    };
     use ctx_core::models::{
         RecordFidelity, RecordSource, RecordTrust, WorkActorKind, WorkEventType, WorkLifecycle,
-        WorkLinkRole, WorkLinkTargetKind, WorkRedactionClass,
+        WorkLinkRole, WorkLinkTargetKind, WorkRedactionClass, WorkSummaryAudience,
+        WorkSummaryGenerationMethod, WorkSummaryKind,
     };
 
     #[test]
@@ -2814,7 +3517,428 @@ mod tests {
         let serialized = serde_json::to_string(&value).unwrap();
         assert!(!serialized.contains("sk-test-raw-secret"));
         assert!(!serialized.contains("/home/daddy/private"));
-        assert!(serialized.contains("safe redacted event"));
+        assert!(!serialized.contains("safe redacted event"));
+        assert!(serialized.contains("message captured"));
+    }
+
+    #[test]
+    fn inspector_subagents_project_child_links_and_redacted_previews() {
+        let now = Utc::now();
+        let workspace_id = WorkspaceId::new();
+        let work_id = WorkRecordId::new();
+        let child_session_id = "11111111-1111-4111-8111-111111111111";
+        let links = vec![WorkRecordLink {
+            link_id: WorkRecordLinkId::from_id("wln_child_session"),
+            work_id: work_id.clone(),
+            workspace_id,
+            target_kind: WorkLinkTargetKind::Session,
+            target_id: Some(child_session_id.to_string()),
+            target_json: Some(json!({
+                "label": "Visual reviewer",
+                "summary": "Confirmed the share-safe Inspector evidence was enough to review the run.",
+                "status": "completed",
+                "harness": "reviewer",
+                "model": "gpt-reviewer",
+                "prompt_length": 512,
+                "run_id": "run_child_1",
+                "absolute_path": "/home/daddy/private"
+            })),
+            role: WorkLinkRole::Child,
+            source: RecordSource::Session,
+            fidelity: RecordFidelity::Declared,
+            trust: RecordTrust::Medium,
+            created_at: now,
+            updated_at: now,
+            schema_version: WORK_OBSERVABILITY_SCHEMA_VERSION,
+        }];
+        let events = vec![WorkEvent {
+            event_id: WorkEventId::from_id("wev_child_preview"),
+            work_id,
+            workspace_id,
+            sequence: 7,
+            source_kind: Some("session_event".to_string()),
+            source_id: Some("evt-child".to_string()),
+            event_type: WorkEventType::AssistantMessage,
+            event_time: now,
+            actor_kind: WorkActorKind::Subagent,
+            provider: Some("ctx".to_string()),
+            harness: Some("reviewer".to_string()),
+            model: Some("gpt-reviewer".to_string()),
+            redaction_class: WorkRedactionClass::LocalRedacted,
+            source: RecordSource::Session,
+            fidelity: RecordFidelity::Declared,
+            trust: RecordTrust::Low,
+            payload_json: Some(json!({
+                "content": "sk-test-secret /home/daddy/private",
+                "summary": "Confirmed the share-safe Inspector evidence was enough to review the run."
+            })),
+            redacted_text: Some("Reviewed the Inspector from share-safe evidence.".to_string()),
+            artifact_ref: Some(json!({"absolute_path": "/home/daddy/private/artifact.png"})),
+            created_at: now,
+            schema_version: WORK_OBSERVABILITY_SCHEMA_VERSION,
+        }];
+
+        let subagents = inspector_subagents(&links, &events);
+
+        assert_eq!(subagents.len(), 1);
+        assert_eq!(
+            subagents[0].child_session_id.as_deref(),
+            Some(child_session_id)
+        );
+        assert_eq!(subagents[0].label.as_deref(), Some("Visual reviewer"));
+        assert_eq!(
+            subagents[0].summary.as_deref(),
+            Some("Confirmed the share-safe Inspector evidence was enough to review the run.")
+        );
+        assert_eq!(subagents[0].status.as_deref(), Some("completed"));
+        assert_eq!(subagents[0].harness.as_deref(), Some("reviewer"));
+        assert_eq!(subagents[0].model.as_deref(), Some("gpt-reviewer"));
+        assert_eq!(subagents[0].prompt_length, Some(512));
+        assert_eq!(subagents[0].event_count, 1);
+        let serialized = serde_json::to_string(&subagents).unwrap();
+        assert!(!serialized.contains("payload_json"));
+        assert!(!serialized.contains("artifact_ref"));
+        assert!(!serialized.contains("sk-test-secret"));
+        assert!(!serialized.contains("/home/daddy/private"));
+        assert!(!serialized.contains("Reviewed the Inspector from share-safe evidence."));
+        assert!(serialized.contains("message captured"));
+    }
+
+    #[test]
+    fn inspector_subagents_partition_multiple_child_sessions() {
+        let now = Utc::now();
+        let workspace_id = WorkspaceId::new();
+        let work_id = WorkRecordId::new();
+        let child_one = "11111111-1111-4111-8111-111111111111";
+        let child_two = "22222222-2222-4222-8222-222222222222";
+        let links = vec![
+            WorkRecordLink {
+                link_id: WorkRecordLinkId::from_id("wln_child_one"),
+                work_id: work_id.clone(),
+                workspace_id,
+                target_kind: WorkLinkTargetKind::Session,
+                target_id: Some(child_one.to_string()),
+                target_json: Some(json!({
+                    "label": "Visual reviewer",
+                    "run_id": "run_child_one"
+                })),
+                role: WorkLinkRole::Child,
+                source: RecordSource::Session,
+                fidelity: RecordFidelity::Declared,
+                trust: RecordTrust::Medium,
+                created_at: now,
+                updated_at: now,
+                schema_version: WORK_OBSERVABILITY_SCHEMA_VERSION,
+            },
+            WorkRecordLink {
+                link_id: WorkRecordLinkId::from_id("wln_child_two"),
+                work_id: work_id.clone(),
+                workspace_id,
+                target_kind: WorkLinkTargetKind::Session,
+                target_id: Some(child_two.to_string()),
+                target_json: Some(json!({
+                    "label": "Fresh reconstruction reviewer",
+                    "run_id": "run_child_two"
+                })),
+                role: WorkLinkRole::Child,
+                source: RecordSource::Session,
+                fidelity: RecordFidelity::Declared,
+                trust: RecordTrust::Medium,
+                created_at: now,
+                updated_at: now,
+                schema_version: WORK_OBSERVABILITY_SCHEMA_VERSION,
+            },
+        ];
+        let events = vec![
+            WorkEvent {
+                event_id: WorkEventId::from_id("wev_child_one"),
+                work_id: work_id.clone(),
+                workspace_id,
+                sequence: 7,
+                source_kind: Some("session_event".to_string()),
+                source_id: Some(child_one.to_string()),
+                event_type: WorkEventType::AssistantMessage,
+                event_time: now,
+                actor_kind: WorkActorKind::Subagent,
+                provider: Some("ctx".to_string()),
+                harness: Some("reviewer".to_string()),
+                model: Some("gpt-reviewer".to_string()),
+                redaction_class: WorkRedactionClass::LocalRedacted,
+                source: RecordSource::Session,
+                fidelity: RecordFidelity::Declared,
+                trust: RecordTrust::Low,
+                payload_json: Some(json!({"run_id": "run_child_one"})),
+                redacted_text: Some("Visual review passed.".to_string()),
+                artifact_ref: None,
+                created_at: now,
+                schema_version: WORK_OBSERVABILITY_SCHEMA_VERSION,
+            },
+            WorkEvent {
+                event_id: WorkEventId::from_id("wev_child_two"),
+                work_id,
+                workspace_id,
+                sequence: 8,
+                source_kind: Some("session_event".to_string()),
+                source_id: Some("unmatched-event-id".to_string()),
+                event_type: WorkEventType::AssistantMessage,
+                event_time: now,
+                actor_kind: WorkActorKind::Subagent,
+                provider: Some("ctx".to_string()),
+                harness: Some("reviewer".to_string()),
+                model: Some("gpt-reviewer".to_string()),
+                redaction_class: WorkRedactionClass::LocalRedacted,
+                source: RecordSource::Session,
+                fidelity: RecordFidelity::Declared,
+                trust: RecordTrust::Low,
+                payload_json: Some(json!({"session_id": child_two, "run_id": "run_child_two"})),
+                redacted_text: Some("Reconstruction review passed.".to_string()),
+                artifact_ref: None,
+                created_at: now,
+                schema_version: WORK_OBSERVABILITY_SCHEMA_VERSION,
+            },
+        ];
+
+        let subagents = inspector_subagents(&links, &events);
+
+        assert_eq!(subagents.len(), 2);
+        assert_eq!(subagents[0].label.as_deref(), Some("Visual reviewer"));
+        assert_eq!(subagents[0].event_count, 1);
+        assert_eq!(
+            subagents[0].transcript_preview[0].event_id,
+            WorkEventId::from_id("wev_child_one")
+        );
+        assert_eq!(
+            subagents[1].label.as_deref(),
+            Some("Fresh reconstruction reviewer")
+        );
+        assert_eq!(subagents[1].event_count, 1);
+        assert_eq!(
+            subagents[1].transcript_preview[0].event_id,
+            WorkEventId::from_id("wev_child_two")
+        );
+    }
+
+    #[test]
+    fn inspector_changed_files_from_metadata_are_relative_and_share_safe() {
+        let metadata = json!({
+            "changed_files": [
+                {
+                    "path": "src/app.tsx",
+                    "status": "modified",
+                    "additions": 12,
+                    "deletions": 3
+                },
+                {
+                    "path": "/home/daddy/private/secret.ts",
+                    "status": "modified",
+                    "additions": 99
+                },
+                {
+                    "filename": "../escape.ts",
+                    "status": "modified"
+                },
+                {
+                    "relative_path": "docs/overview.md",
+                    "change_type": "added",
+                    "lines_added": 20,
+                    "lines_deleted": 0
+                }
+            ]
+        });
+
+        let files = inspector_contribution_changed_files(Some(&metadata));
+
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0]["path"], "src/app.tsx");
+        assert_eq!(files[0]["status"], "modified");
+        assert_eq!(files[0]["additions"], 12);
+        assert_eq!(files[0]["deletions"], 3);
+        assert_eq!(files[1]["path"], "docs/overview.md");
+        let serialized = serde_json::to_string(&files).unwrap();
+        assert!(!serialized.contains("/home/daddy/private"));
+        assert!(!serialized.contains("escape.ts"));
+    }
+
+    #[test]
+    fn inspector_source_outline_and_review_notes_are_share_safe() {
+        let metadata = json!({
+            "source_outline": [
+                {
+                    "title": "Runtime entrypoint",
+                    "path": "src/app.ts",
+                    "detail": "Creates the local canvas toy and wires controls.",
+                    "excerpt": "export function start() { renderLoop(); }"
+                },
+                {
+                    "title": "Unsafe path",
+                    "path": "/home/daddy/private/app.ts",
+                    "detail": "Should not expose local paths."
+                }
+            ],
+            "review_notes": [
+                "Re-run node scripts/check.js before review.",
+                {
+                    "title": "Resume point",
+                    "detail": "Inspect the generated screenshot artifact from the Work Inspector."
+                }
+            ],
+            "source_snapshots": [
+                {
+                    "share_safe": true,
+                    "redaction_class": "local_redacted",
+                    "path": "src/app.ts",
+                    "language": "typescript",
+                    "line_count": 1,
+                    "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "content": "export const safe = true;"
+                },
+                {
+                    "share_safe": false,
+                    "redaction_class": "local_redacted",
+                    "path": "src/unsafe.ts",
+                    "content": "should not render"
+                },
+                {
+                    "share_safe": true,
+                    "redaction_class": "local_redacted",
+                    "path": "/home/daddy/private/app.ts",
+                    "content": "should not render"
+                },
+                {
+                    "share_safe": true,
+                    "redaction_class": "local_redacted",
+                    "path": "src/secret.ts",
+                    "content": "const token = \"sk-test-secret\"; // /home/daddy/private"
+                }
+            ]
+        });
+
+        let outline = inspector_contribution_source_outline(Some(&metadata));
+        let notes = inspector_contribution_review_notes(Some(&metadata));
+        let snapshots = inspector_contribution_source_snapshots(Some(&metadata));
+
+        assert_eq!(outline.len(), 2);
+        assert_eq!(outline[0]["title"], "Runtime entrypoint");
+        assert_eq!(outline[0]["path"], "src/app.ts");
+        assert_eq!(
+            outline[0]["excerpt"],
+            "export function start() { renderLoop(); }"
+        );
+        assert!(outline[1].get("path").unwrap().is_null());
+        assert_eq!(notes.len(), 2);
+        assert_eq!(
+            notes[0]["detail"],
+            "Re-run node scripts/check.js before review."
+        );
+        assert_eq!(notes[1]["title"], "Resume point");
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0]["share_safe"], true);
+        assert_eq!(snapshots[0]["redaction_class"], "local_redacted");
+        assert_eq!(snapshots[0]["path"], "src/app.ts");
+        assert_eq!(snapshots[0]["language"], "typescript");
+        assert_eq!(snapshots[0]["line_count"], 1);
+        assert_eq!(
+            snapshots[0]["sha256"],
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        );
+        assert_eq!(snapshots[0]["content"], "export const safe = true;");
+        let serialized = serde_json::to_string(&(outline, notes, snapshots)).unwrap();
+        assert!(!serialized.contains("/home/daddy/private"));
+        assert!(!serialized.contains("sk-test-secret"));
+        assert!(!serialized.contains("should not render"));
+    }
+
+    #[test]
+    fn command_previews_use_share_safe_output_and_safe_cwd_labels() {
+        let workspace_id = WorkspaceId::new();
+        let work_id = WorkRecordId::new();
+        let now = Utc::now();
+        let mut evidence = test_route_evidence(workspace_id, work_id, now);
+        evidence.cwd = Some("/home/daddy/project/scripts".to_string());
+        evidence.output_ref = Some(json!({
+            "share_safe": true,
+            "redaction_class": "local_redacted",
+            "stdout_redacted": "running 1 test\ncheck fixture ... ok",
+            "stderr_size_bytes": 128,
+            "stderr_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "raw_path": "/home/daddy/project/target/raw.log"
+        }));
+
+        let commands = inspector_command_previews(&[evidence], Some("/home/daddy/project"));
+
+        assert_eq!(commands.len(), 1);
+        assert!(commands[0].cwd.is_none());
+        assert_eq!(commands[0].cwd_label.as_deref(), Some("workspace/scripts"));
+        assert_eq!(
+            commands[0].stdout_preview.as_deref(),
+            Some("running 1 test\ncheck fixture ... ok")
+        );
+        assert_eq!(
+            commands[0].stderr_preview.as_deref(),
+            Some("stderr captured; raw output omitted (128 B, sha256 aaaaaaaaaaaa)")
+        );
+        assert!(commands[0].output_ref.is_none());
+        let serialized = serde_json::to_string(&commands).unwrap();
+        assert!(!serialized.contains("raw_path"));
+        assert!(!serialized.contains("/home/daddy/project/scripts"));
+        assert!(!serialized.contains("/home/daddy/project/target"));
+    }
+
+    #[test]
+    fn effective_head_commit_falls_back_to_changes_and_commit_links() {
+        let workspace_id = WorkspaceId::new();
+        let work_id = WorkRecordId::new();
+        let now = Utc::now();
+        let mut work = test_route_work_record(workspace_id, work_id.clone(), now);
+        work.head_commit = None;
+        let change_set = ChangeSet {
+            id: ChangeSetId::new(),
+            workspace_id,
+            source_worktree_id: None,
+            source: RecordSource::Worktree,
+            origin: ctx_core::models::RecordOrigin::System,
+            fidelity: RecordFidelity::Commit,
+            trust: RecordTrust::Medium,
+            title: None,
+            summary: None,
+            description: None,
+            fingerprint: None,
+            base_revision: None,
+            head_revision: Some("abc123def456".to_string()),
+            target_branch: None,
+            pull_requests: Vec::new(),
+            source_records: Vec::new(),
+            issuer: None,
+            created_at: Some(now),
+            updated_at: Some(now),
+            schema_version: WORK_OBSERVABILITY_SCHEMA_VERSION,
+        };
+        assert_eq!(
+            effective_head_commit(&work, std::slice::from_ref(&change_set), &[]).as_deref(),
+            Some("abc123def456")
+        );
+
+        let mut link_work = work.clone();
+        link_work.head_commit = None;
+        let link = WorkRecordLink {
+            link_id: WorkRecordLinkId::new(),
+            work_id,
+            workspace_id,
+            target_kind: WorkLinkTargetKind::Commit,
+            target_id: Some("def789abc000".to_string()),
+            target_json: None,
+            role: WorkLinkRole::Result,
+            source: RecordSource::Worktree,
+            fidelity: RecordFidelity::Commit,
+            trust: RecordTrust::Medium,
+            created_at: now,
+            updated_at: now,
+            schema_version: WORK_OBSERVABILITY_SCHEMA_VERSION,
+        };
+        assert_eq!(
+            effective_head_commit(&link_work, &[], &[link]).as_deref(),
+            Some("def789abc000")
+        );
     }
 
     #[test]
@@ -2874,6 +3998,44 @@ mod tests {
     }
 
     #[test]
+    fn current_fresh_summary_wins_over_historical_stale_summaries() {
+        let workspace_id = WorkspaceId::new();
+        let work_id = WorkRecordId::new();
+        let now = Utc::now();
+        let fresh = WorkSummary {
+            summary_id: WorkSummaryId::new(),
+            work_id: work_id.clone(),
+            workspace_id,
+            kind: WorkSummaryKind::ReportSummary,
+            audience: WorkSummaryAudience::Reviewer,
+            text: "summary".to_string(),
+            structured_json: None,
+            generation_method: WorkSummaryGenerationMethod::Deterministic,
+            provider: None,
+            model: None,
+            template: None,
+            source_material_left_machine: false,
+            freshness: WorkSummaryFreshness::Fresh,
+            source_revision_key: Some("rev-a".to_string()),
+            generated_at: now,
+            created_at: now,
+            updated_at: now,
+            schema_version: 1,
+        };
+        let mut historical = fresh.clone();
+        historical.source_revision_key = Some("rev-old".to_string());
+
+        assert_eq!(
+            aggregate_summary_freshness(&[historical.clone()], "rev-a"),
+            WorkSummaryFreshness::Stale
+        );
+        assert_eq!(
+            aggregate_summary_freshness(&[historical, fresh], "rev-a"),
+            WorkSummaryFreshness::Fresh
+        );
+    }
+
+    #[test]
     fn route_evidence_trust_downgrades_client_verified_claims() {
         assert_eq!(
             route_evidence_trust_or(RecordTrust::Verified),
@@ -2926,6 +4088,38 @@ mod tests {
 
         work.updated_at = now + Duration::seconds(30);
         assert_eq!(material_revision_key(&work, &[], &[], &[], &[], &[]), base);
+
+        let mut link = WorkRecordLink {
+            link_id: WorkRecordLinkId::new(),
+            work_id: work_id.clone(),
+            workspace_id,
+            target_kind: WorkLinkTargetKind::Commit,
+            target_id: Some("abc123".to_string()),
+            target_json: None,
+            role: WorkLinkRole::Result,
+            source: RecordSource::Worktree,
+            fidelity: RecordFidelity::Commit,
+            trust: RecordTrust::Medium,
+            created_at: now,
+            updated_at: now,
+            schema_version: WORK_OBSERVABILITY_SCHEMA_VERSION,
+        };
+        let link_base = material_revision_key(&work, &[link.clone()], &[], &[], &[], &[]);
+        link.updated_at = now + Duration::seconds(45);
+        assert_eq!(
+            material_revision_key(&work, &[link], &[], &[], &[], &[]),
+            link_base
+        );
+
+        let mut evidence = test_route_evidence(workspace_id, work_id.clone(), now);
+        let evidence_base = material_revision_key(&work, &[], &[], &[evidence.clone()], &[], &[]);
+        evidence.started_at = now + Duration::seconds(45);
+        evidence.finished_at = now + Duration::seconds(46);
+        evidence.updated_at = now + Duration::seconds(47);
+        assert_eq!(
+            material_revision_key(&work, &[], &[], &[evidence], &[], &[]),
+            evidence_base
+        );
 
         let derived_event = test_route_event(
             workspace_id,

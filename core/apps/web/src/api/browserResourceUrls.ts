@@ -56,6 +56,10 @@ export const browserResourcePathForScope = (scope: BrowserResourceUrlScope): str
       return `/api/sessions/${encodeURIComponent(String(scope.sessionId || ""))}/artifacts/${encodeURIComponent(
         String(scope.artifactId || ""),
       )}`;
+    case "work_artifact":
+      return `/api/workspaces/${encodeURIComponent(String(scope.workspaceId || ""))}/work/${encodeURIComponent(
+        String(scope.workId || ""),
+      )}/artifacts/${encodeURIComponent(String(scope.artifactId || ""))}`;
   }
 };
 
@@ -147,6 +151,18 @@ export const artifactResourceUrl = (sessionId: string, artifactId: string): stri
   browserResourceUrlForScope({
     kind: "session_artifact",
     sessionId: String(sessionId || ""),
+    artifactId: String(artifactId || ""),
+  }).url;
+
+export const workArtifactResourceUrl = (
+  workspaceId: string,
+  workId: string,
+  artifactId: string,
+): string =>
+  browserResourceUrlForScope({
+    kind: "work_artifact",
+    workspaceId: String(workspaceId || ""),
+    workId: String(workId || ""),
     artifactId: String(artifactId || ""),
   }).url;
 

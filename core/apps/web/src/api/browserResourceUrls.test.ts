@@ -84,6 +84,25 @@ describe("browserResourceUrlForScope", () => {
     expect(result.url).not.toContain("raw-daemon-token");
   });
 
+  it("signs work artifact URLs against the daemon base URL", () => {
+    const result = browserResourceUrlForScope({
+      kind: "work_artifact",
+      workspaceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      workId: "wrk_1234567890",
+      artifactId: "11111111-1111-4111-8111-111111111111",
+    }, {
+      connection: connection({ baseUrl: "http://127.0.0.1:4402" }),
+      nowMs: 1_761_600_000_000,
+    });
+
+    expect(result.url).toContain(
+      "http://127.0.0.1:4402/api/workspaces/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/work/wrk_1234567890/artifacts/11111111-1111-4111-8111-111111111111",
+    );
+    expect(result.url).toContain("expires_at=");
+    expect(result.url).toContain("token=");
+    expect(result.url).not.toContain("daemon-secret");
+  });
+
   it("fails explicitly when no browser capability signing token is available", () => {
     expect(() =>
       browserResourceUrlForScope({ kind: "blob", blobId: "blob-1" }, {

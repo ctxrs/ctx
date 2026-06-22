@@ -232,6 +232,36 @@ function inspectorReport(opts: {
         text_preview: longText,
       },
     ],
+    subagents: noEvidence
+      ? []
+      : [
+          {
+            id: "wln_visual_child",
+            child_session_id: "44444444-4444-4444-8444-444444444444",
+            run_id: "run_visual_child",
+            label: "Visual completeness reviewer",
+            status: "completed",
+            role: "child_session",
+            provider: "ctx",
+            harness: "reviewer",
+            model: "gpt-visual",
+            prompt_length: 512,
+            event_count: 3,
+            latest_event_time: "2026-06-21T12:20:00Z",
+            transcript_preview: [
+              {
+                event_id: "msg_visual_child_1",
+                sequence: 20,
+                event_type: "assistant_message",
+                event_time: "2026-06-21T12:20:00Z",
+                actor_kind: "subagent",
+                redaction_class: "local_redacted",
+                text_preview:
+                  "Reviewed the Inspector from the screenshot and confirmed transcript, commands, evidence, changes, and artifacts are legible.",
+              },
+            ],
+          },
+        ],
     commands: noEvidence
       ? []
       : [
@@ -346,6 +376,21 @@ test.describe.serial("visual: work inspector", () => {
     await captureVisual(
       page,
       buildVisualName(["work-inspector", "unsafe-artifacts", "dark", visualViewportLabel("desktop-tight")]),
+      { ready: page.locator(".work-report-page") },
+    );
+  });
+
+  test("subagents tab desktop light", async ({ page }) => {
+    const report = inspectorReport({
+      workId: "wrk_visual_subagents",
+      title: "Child session Work inspector fixture",
+      trust: "verified",
+      longText: true,
+    });
+    await openWorkInspectorVisualPage(page, report, { theme: "light", viewport: "desktop", tab: "Subagents" });
+    await captureVisual(
+      page,
+      buildVisualName(["work-inspector", "subagents", "light", visualViewportLabel("desktop")]),
       { ready: page.locator(".work-report-page") },
     );
   });

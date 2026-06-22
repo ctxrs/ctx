@@ -14,6 +14,11 @@ pub enum BrowserCapabilityAuthScope {
         session_id: String,
         artifact_id: String,
     },
+    WorkArtifact {
+        workspace_id: String,
+        work_id: String,
+        artifact_id: String,
+    },
 }
 
 impl BrowserCapabilityAuthScope {
@@ -24,6 +29,11 @@ impl BrowserCapabilityAuthScope {
                 session_id,
                 artifact_id,
             } => format!("session_artifact:{session_id}:{artifact_id}"),
+            Self::WorkArtifact {
+                workspace_id,
+                work_id,
+                artifact_id,
+            } => format!("work_artifact:{workspace_id}:{work_id}:{artifact_id}"),
         }
     }
 }
@@ -228,6 +238,29 @@ fn browser_capability_scope(path: &str) -> Option<BrowserCapabilityAuthScope> {
         });
     }
 
+    if let Some(remainder) = path.strip_prefix("/api/workspaces/") {
+        let (workspace_id, suffix) = remainder.split_once('/')?;
+        let workspace_id = workspace_id.trim();
+        if workspace_id.is_empty() {
+            return None;
+        }
+        let suffix = suffix.strip_prefix("work/")?;
+        let (work_id, suffix) = suffix.split_once('/')?;
+        let work_id = work_id.trim();
+        if work_id.is_empty() || work_id.contains('/') {
+            return None;
+        }
+        let artifact_id = suffix.strip_prefix("artifacts/")?.trim();
+        if artifact_id.is_empty() || artifact_id.contains('/') {
+            return None;
+        }
+        return Some(BrowserCapabilityAuthScope::WorkArtifact {
+            workspace_id: workspace_id.to_string(),
+            work_id: work_id.to_string(),
+            artifact_id: artifact_id.to_string(),
+        });
+    }
+
     let remainder = path.strip_prefix("/api/sessions/")?;
     let (session_id, suffix) = remainder.split_once('/')?;
     let session_id = session_id.trim();
@@ -398,6 +431,37 @@ mod tests {
         assert!(!browser_capability_query_token_is_valid(
             &Method::POST,
             "/api/blobs/blob-1",
+            Some(&query),
+            "daemon-secret"
+        ));
+    }
+
+    #[test]
+    fn browser_capability_token_accepts_matching_work_artifact_scope() {
+        let expires_at = chrono::Utc::now().timestamp() + 60;
+        let scope = BrowserCapabilityAuthScope::WorkArtifact {
+            workspace_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string(),
+            work_id: "wrk_1234567890".to_string(),
+            artifact_id: "11111111-1111-4111-8111-111111111111".to_string(),
+        };
+        let token = derive_browser_capability_token("daemon-secret", &scope, expires_at);
+        let query = format!("expires_at={expires_at}&token={token}");
+
+        assert!(browser_capability_query_token_is_valid(
+            &Method::GET,
+            "/api/workspaces/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/work/wrk_1234567890/artifacts/11111111-1111-4111-8111-111111111111",
+            Some(&query),
+            "daemon-secret"
+        ));
+        assert!(!browser_capability_query_token_is_valid(
+            &Method::GET,
+            "/api/workspaces/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/work/wrk_1234567890/artifacts/22222222-2222-4222-8222-222222222222",
+            Some(&query),
+            "daemon-secret"
+        ));
+        assert!(!browser_capability_query_token_is_valid(
+            &Method::POST,
+            "/api/workspaces/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/work/wrk_1234567890/artifacts/11111111-1111-4111-8111-111111111111",
             Some(&query),
             "daemon-secret"
         ));

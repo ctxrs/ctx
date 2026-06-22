@@ -2,7 +2,8 @@ import { sha256Hex } from "./sha256";
 
 export type BrowserCapabilityScope =
   | { kind: "blob"; blobId: string }
-  | { kind: "session_artifact"; sessionId: string; artifactId: string };
+  | { kind: "session_artifact"; sessionId: string; artifactId: string }
+  | { kind: "work_artifact"; workspaceId: string; workId: string; artifactId: string };
 
 export const BROWSER_CAPABILITY_TOKEN_TTL_MS = 60 * 60 * 1000;
 export const BROWSER_CAPABILITY_REFRESH_MARGIN_MS = 5 * 60 * 1000;
@@ -16,6 +17,8 @@ export const serializeBrowserCapabilityScope = (
       return `blob:${scope.blobId}`;
     case "session_artifact":
       return `session_artifact:${scope.sessionId}:${scope.artifactId}`;
+    case "work_artifact":
+      return `work_artifact:${scope.workspaceId}:${scope.workId}:${scope.artifactId}`;
   }
 };
 

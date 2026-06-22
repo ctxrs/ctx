@@ -398,6 +398,8 @@ pub struct WorkspaceWorkCommandPreviewRouteResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
     pub status: WorkEvidenceStatus,
     pub freshness: WorkEvidenceFreshness,
@@ -496,6 +498,37 @@ pub struct WorkspaceWorkTimelineItemRouteResponse {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct WorkspaceWorkSubagentRouteItem {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_length: Option<i64>,
+    #[serde(default)]
+    pub event_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_event_time: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transcript_preview: Vec<WorkspaceWorkTranscriptItemRouteResponse>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct WorkspaceWorkInspectorOverviewRouteResponse {
     pub title: Option<String>,
     pub objective: Option<String>,
@@ -529,6 +562,7 @@ pub struct WorkspaceWorkInspectorRouteResponse {
     pub summary_claims: Vec<WorkspaceWorkSummaryClaimRouteItem>,
     pub timeline: Vec<WorkspaceWorkEventRouteItem>,
     pub timeline_items: Vec<WorkspaceWorkTimelineItemRouteResponse>,
+    pub subagents: Vec<WorkspaceWorkSubagentRouteItem>,
     pub duplicate_strong_links: Vec<WorkspaceWorkDuplicateStrongLinkRouteItem>,
     pub raw_transcript_available: bool,
     pub raw_transcript_included: bool,

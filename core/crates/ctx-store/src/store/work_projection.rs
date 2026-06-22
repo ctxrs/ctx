@@ -256,7 +256,7 @@ impl Store {
             result.events += 1;
 
             for child in invocation.children {
-                let link = projection_link(
+                let mut link = projection_link(
                     session.workspace_id,
                     &work_id,
                     WorkLinkTargetKind::Session,
@@ -264,6 +264,15 @@ impl Store {
                     WorkLinkRole::Child,
                     child.updated_at,
                 );
+                link.target_json = Some(serde_json::json!({
+                    "label": child.label.as_deref().map(|text| bounded_redacted_text(text, 300)),
+                    "status": bounded_redacted_text(&child.status, 120),
+                    "harness": child.harness.as_deref().map(|text| bounded_redacted_text(text, 200)),
+                    "model": child.model.as_deref().map(|text| bounded_redacted_text(text, 200)),
+                    "reasoning_effort": child.reasoning_effort.as_deref().map(|text| bounded_redacted_text(text, 120)),
+                    "prompt_length": child.prompt_length,
+                    "run_id": child.run_id.as_ref().map(|run_id| run_id.0.to_string()),
+                }));
                 self.upsert_work_record_link(&link).await?;
                 result.links += 1;
                 if let Some(run_id) = child.run_id {
@@ -392,7 +401,7 @@ fn session_state_events(
     work_id: &WorkRecordId,
     now: DateTime<Utc>,
 ) -> Vec<WorkEvent> {
-    let actor_kind = if session.relationship.as_deref() == Some("sub_agent") {
+    let actor_kind = if is_subagent_relationship(session.relationship.as_deref()) {
         WorkActorKind::Subagent
     } else {
         WorkActorKind::Agent
@@ -452,7 +461,7 @@ fn projected_session_event(
         _ => return None,
     };
 
-    let actor_kind = if session.relationship.as_deref() == Some("sub_agent")
+    let actor_kind = if is_subagent_relationship(session.relationship.as_deref())
         && actor_kind == WorkActorKind::Agent
     {
         WorkActorKind::Subagent
@@ -461,6 +470,11 @@ fn projected_session_event(
     };
 
     let redacted_text = event_redacted_text(event);
+    let payload_json = if actor_kind == WorkActorKind::Subagent {
+        safe_projected_event_metadata(&event.payload_json)
+    } else {
+        None
+    };
     let source_kind = "session_event";
     let source_id = event.id.0.to_string();
     let sequence =
@@ -482,12 +496,16 @@ fn projected_session_event(
         source: RecordSource::Session,
         fidelity: RecordFidelity::Exact,
         trust: RecordTrust::Low,
-        payload_json: None,
+        payload_json,
         redacted_text: Some(redacted_text),
         artifact_ref: None,
         created_at: event.created_at,
         schema_version: WORK_OBSERVABILITY_SCHEMA_VERSION,
     })
+}
+
+fn is_subagent_relationship(value: Option<&str>) -> bool {
+    matches!(value, Some("subagent" | "sub_agent"))
 }
 
 fn event_redacted_text(event: &SessionEvent) -> String {
@@ -496,6 +514,19 @@ fn event_redacted_text(event: &SessionEvent) -> String {
         ctx_core::redaction::redact_json_value(event.payload_json.clone()).to_string()
     });
     bounded_redacted_text(&format!("{event_label}: {text}"), PROJECTOR_TEXT_LIMIT)
+}
+
+fn safe_projected_event_metadata(value: &Value) -> Option<Value> {
+    let mut metadata = serde_json::Map::new();
+    for key in ["summary", "contribution_summary"] {
+        if let Some(text) = value.get(key).and_then(Value::as_str) {
+            metadata.insert(
+                key.to_string(),
+                Value::String(bounded_redacted_text(text, PROJECTOR_TEXT_LIMIT)),
+            );
+        }
+    }
+    (!metadata.is_empty()).then_some(Value::Object(metadata))
 }
 
 fn extract_text(value: &Value) -> Option<String> {

@@ -2769,9 +2769,36 @@ fn material_revision_key_value(
         "change_sets": change_sets,
         "contributions": contributions,
     });
+    let mut value = value;
+    strip_material_volatile_fields(&mut value);
     let bytes = serde_json::to_vec(&value).unwrap_or_default();
     let digest = sha2::Sha256::digest(&bytes);
     hex::encode(digest)
+}
+
+fn strip_material_volatile_fields(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            for key in [
+                "created_at",
+                "updated_at",
+                "started_at",
+                "finished_at",
+                "generated_at",
+            ] {
+                object.remove(key);
+            }
+            for child in object.values_mut() {
+                strip_material_volatile_fields(child);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                strip_material_volatile_fields(item);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn computed_work_trust_verdict(work: &WorkRecord, evidence: &[WorkEvidence]) -> WorkTrustVerdict {
@@ -2810,22 +2837,32 @@ fn aggregate_summary_freshness(
     if summaries.is_empty() {
         return WorkSummaryFreshness::Missing;
     }
+    let mut saw_fresh = false;
+    let mut saw_locked = false;
     let mut saw_partial = false;
+    let mut saw_stale = false;
     for summary in summaries {
         match effective_summary_freshness(
             summary.freshness,
             summary.source_revision_key.as_deref(),
             material_revision_key,
         ) {
-            WorkSummaryFreshness::Stale => return WorkSummaryFreshness::Stale,
+            WorkSummaryFreshness::Stale => saw_stale = true,
             WorkSummaryFreshness::Missing | WorkSummaryFreshness::Partial => saw_partial = true,
-            WorkSummaryFreshness::Fresh | WorkSummaryFreshness::Locked => {}
+            WorkSummaryFreshness::Fresh => saw_fresh = true,
+            WorkSummaryFreshness::Locked => saw_locked = true,
         }
     }
-    if saw_partial {
-        WorkSummaryFreshness::Partial
-    } else {
+    if saw_fresh {
         WorkSummaryFreshness::Fresh
+    } else if saw_locked {
+        WorkSummaryFreshness::Locked
+    } else if saw_partial {
+        WorkSummaryFreshness::Partial
+    } else if saw_stale {
+        WorkSummaryFreshness::Stale
+    } else {
+        WorkSummaryFreshness::Missing
     }
 }
 
@@ -5497,12 +5534,18 @@ mod tests {
         stale.source_revision_key = Some("rev-b".to_string());
 
         assert_eq!(
-            aggregate_summary_freshness(&[fresh], "rev-a"),
+            aggregate_summary_freshness(&[fresh.clone()], "rev-a"),
             WorkSummaryFreshness::Fresh
         );
         assert_eq!(
             aggregate_summary_freshness(&[stale], "rev-a"),
             WorkSummaryFreshness::Stale
+        );
+        let mut historical = fresh.clone();
+        historical.source_revision_key = Some("rev-old".to_string());
+        assert_eq!(
+            aggregate_summary_freshness(&[historical, fresh], "rev-a"),
+            WorkSummaryFreshness::Fresh
         );
     }
 

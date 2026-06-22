@@ -250,6 +250,7 @@ export type WorkspaceWorkInspectorCommand = {
   command?: string | null;
   argv: string[];
   cwd?: string | null;
+  cwd_label?: string | null;
   exit_code?: number | null;
   status: WorkEvidenceStatus;
   freshness: WorkEvidenceFreshness;
@@ -313,6 +314,23 @@ export type WorkspaceWorkInspectorTimelineItem = {
   source_evidence_id?: string | null;
 };
 
+export type WorkspaceWorkInspectorSubagent = {
+  id: string;
+  child_session_id?: string | null;
+  run_id?: string | null;
+  label?: string | null;
+  summary?: string | null;
+  status?: string | null;
+  role?: string | null;
+  provider?: string | null;
+  harness?: string | null;
+  model?: string | null;
+  prompt_length?: number | null;
+  event_count: number;
+  latest_event_time?: string | null;
+  transcript_preview: WorkspaceWorkInspectorTranscriptItem[];
+};
+
 export type WorkspaceWorkArtifactSummary = {
   total: number;
   refs: WorkspaceWorkSafeJson[];
@@ -339,6 +357,7 @@ export type WorkspaceWorkInspector = {
   summary_claims: WorkspaceWorkSummaryClaim[];
   timeline: WorkspaceWorkEvent[];
   timeline_items: WorkspaceWorkInspectorTimelineItem[];
+  subagents: WorkspaceWorkInspectorSubagent[];
   duplicate_strong_links: WorkspaceWorkDuplicateStrongLink[];
   raw_transcript_available: boolean;
   raw_transcript_included: boolean;

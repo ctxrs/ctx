@@ -13,7 +13,8 @@ use ctx_core::models::{
     ContributionEndpoint, ContributionRole, ContributionSubject, ContributionTarget,
     ExecutionEnvironment, Message, MessageDelivery, MessageRole, PullRequestRef, RecordFidelity,
     RecordOrigin, RecordSource, RecordTrust, RunArchiveState, RunRecord, RunStatus,
-    SessionEventType, SessionTurn, SessionTurnStatus, SessionTurnTool, Sha256DigestValue, VcsKind,
+    SessionEventType, SessionTurn, SessionTurnStatus, SessionTurnTool, Sha256DigestValue,
+    SubagentInvocation, SubagentInvocationChild, VcsKind, WorkActorKind, WorkEventType,
     WorkEvidenceFreshness, WorkLifecycle, WorkLinkRole, WorkLinkTargetKind, WorkRecord,
     WorkRecordLink, WorkRedactionClass, WorkSearchDoc, WorkSummaryFreshness, WorkTrustVerdict,
     WORK_OBSERVABILITY_SCHEMA_VERSION,
@@ -6464,6 +6465,192 @@ async fn session_work_projection_is_idempotent_and_links_session_state() {
     assert!(second_events
         .iter()
         .all(|event| event.payload_json.is_none() && event.artifact_ref.is_none()));
+}
+
+#[tokio::test]
+async fn task_work_projection_links_child_session_metadata_and_subagent_events() {
+    let fixture = setup_session_fixture().await;
+    let parent_run_id = RunId::new();
+    let parent_turn_id = TurnId::new();
+    let child_run_id = RunId::new();
+    let child_turn_id = TurnId::new();
+    fixture
+        .store
+        .insert_session_turn(make_turn(fixture.session_id, parent_run_id, parent_turn_id))
+        .await
+        .unwrap();
+    let child = fixture
+        .store
+        .create_session(
+            fixture.task_id,
+            fixture.workspace_id,
+            fixture.worktree_id,
+            ctx_core::models::ExecutionEnvironment::Host,
+            "ctx".into(),
+            "gpt-child".into(),
+            "reviewer".into(),
+            Some(fixture.session_id),
+            Some("subagent".into()),
+            None,
+        )
+        .await
+        .unwrap();
+    fixture
+        .store
+        .insert_session_turn(make_turn(child.id, child_run_id, child_turn_id))
+        .await
+        .unwrap();
+    fixture
+        .store
+        .upsert_subagent_invocation(SubagentInvocation {
+            id: "subagent-invocation-1".to_string(),
+            tool_call_id: "tool-call-1".to_string(),
+            parent_session_id: fixture.session_id,
+            parent_turn_id: Some(parent_turn_id),
+            requested_count: 1,
+            request_json: Some(serde_json::json!({"agents": [{"label": "Inspector reviewer"}]})),
+            status: "completed".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            children: Vec::new(),
+        })
+        .await
+        .unwrap();
+    fixture
+        .store
+        .upsert_subagent_invocation_child(SubagentInvocationChild {
+            invocation_id: "subagent-invocation-1".to_string(),
+            child_session_id: child.id,
+            run_id: Some(child_run_id),
+            position: 0,
+            status: "completed".to_string(),
+            label: Some("Inspector reviewer".to_string()),
+            harness: Some("reviewer".to_string()),
+            model: Some("gpt-child".to_string()),
+            reasoning_effort: Some("medium".to_string()),
+            prompt_length: 287,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+    fixture
+        .store
+        .append_session_event(
+            child.id,
+            Some(child_run_id),
+            Some(child_turn_id),
+            SessionEventType::AssistantMessageInserted,
+            serde_json::json!({
+                "content": "I reviewed the Work Inspector from share-safe evidence and found the commands understandable.",
+                "summary": "Confirmed the child reviewer could understand the Work record from share-safe evidence."
+            }),
+        )
+        .await
+        .unwrap();
+
+    fixture
+        .store
+        .project_task_sessions_to_work(fixture.task_id)
+        .await
+        .unwrap();
+    let work = fixture
+        .store
+        .find_work_record_by_link(
+            fixture.workspace_id,
+            WorkLinkTargetKind::Task,
+            &fixture.task_id.0.to_string(),
+        )
+        .await
+        .unwrap()
+        .expect("projected task work record");
+    let links = fixture
+        .store
+        .list_work_record_links(fixture.workspace_id, work.work_id.clone())
+        .await
+        .unwrap();
+    let child_link = links
+        .iter()
+        .find(|link| {
+            link.target_kind == WorkLinkTargetKind::Session
+                && link.role == WorkLinkRole::Child
+                && link.target_id.as_deref() == Some(&child.id.0.to_string())
+        })
+        .expect("child session link");
+    let metadata = child_link
+        .target_json
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .expect("child link metadata");
+    assert_eq!(
+        metadata.get("label").and_then(serde_json::Value::as_str),
+        Some("Inspector reviewer")
+    );
+    assert_eq!(
+        metadata.get("status").and_then(serde_json::Value::as_str),
+        Some("completed")
+    );
+    assert_eq!(
+        metadata.get("model").and_then(serde_json::Value::as_str),
+        Some("gpt-child")
+    );
+    assert_eq!(
+        metadata
+            .get("prompt_length")
+            .and_then(serde_json::Value::as_i64),
+        Some(287)
+    );
+    let events = fixture
+        .store
+        .list_work_events(fixture.workspace_id, work.work_id.clone(), None)
+        .await
+        .unwrap();
+    assert!(events.iter().any(|event| {
+        event.actor_kind == WorkActorKind::Subagent
+            && event.source_kind.as_deref() == Some("subagent_invocation")
+            && event.redacted_text.as_deref().is_some_and(|text| {
+                text.contains("Subagent invocation subagent-invocation-1 status completed")
+            })
+    }));
+    assert!(events.iter().any(|event| {
+        event.actor_kind == WorkActorKind::Subagent
+            && event.event_type == WorkEventType::AssistantMessage
+            && event
+                .redacted_text
+                .as_deref()
+                .is_some_and(|text| text.contains("commands understandable"))
+    }));
+    let projected_summary_event = events
+        .iter()
+        .find(|event| {
+            event.actor_kind == WorkActorKind::Subagent
+                && event.payload_json.as_ref().is_some_and(|payload| {
+                    payload
+                        .get("summary")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some()
+                })
+        })
+        .expect("subagent summary metadata is projected");
+    assert_eq!(
+        projected_summary_event
+            .payload_json
+            .as_ref()
+            .and_then(|payload| payload.get("summary"))
+            .and_then(serde_json::Value::as_str),
+        Some("Confirmed the child reviewer could understand the Work record from share-safe evidence.")
+    );
+    assert!(!projected_summary_event
+        .payload_json
+        .as_ref()
+        .unwrap()
+        .to_string()
+        .contains("I reviewed the Work Inspector"));
+    assert!(events.iter().all(|event| {
+        event.payload_json.is_none()
+            || event.actor_kind == WorkActorKind::Subagent
+                && event.event_type == WorkEventType::AssistantMessage
+    }));
 }
 
 #[tokio::test]

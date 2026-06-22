@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { KeyboardEvent, ReactNode } from "react";
 import {
   AlertTriangle,
@@ -15,16 +15,23 @@ import type {
   WorkspaceWorkInspector,
   WorkspaceWorkInspectorArtifact,
   WorkspaceWorkInspectorCommand,
+  WorkspaceWorkInspectorSubagent,
   WorkspaceWorkInspectorTimelineItem,
   WorkspaceWorkInspectorTranscriptItem,
   WorkspaceWorkReport,
+  WorkspaceWorkSummary,
+  WorkspaceWorkSummaryClaim,
   WorkspaceWorkTrustSummary,
 } from "@ctx/types";
 import { ExternalLink } from "../../components/ExternalLink";
+import { authToken } from "../../api/clientBase";
+import { getDaemonHttpUrl } from "../../api/daemonConnection";
+import { buildDaemonRequestHeaders } from "../../api/daemonRequestHeaders";
 
 type WorkInspectorTab =
   | "overview"
   | "transcript"
+  | "subagents"
   | "commands"
   | "evidence"
   | "timeline"
@@ -33,17 +40,12 @@ type WorkInspectorTab =
   | "context"
   | "raw";
 
-const tabs: { id: WorkInspectorTab; label: string }[] = [
-  { id: "overview", label: "Overview" },
-  { id: "transcript", label: "Transcript" },
-  { id: "commands", label: "Commands" },
-  { id: "evidence", label: "Evidence" },
-  { id: "timeline", label: "Timeline" },
-  { id: "changes", label: "Changes" },
-  { id: "artifacts", label: "Artifacts" },
-  { id: "context", label: "Context" },
-  { id: "raw", label: "Raw redacted JSON" },
-];
+type WorkInspectorTabDef = {
+  id: WorkInspectorTab;
+  label: string;
+  count?: number;
+  emptyReason?: string;
+};
 
 const label = (value: string | null | undefined) =>
   String(value ?? "unknown").replaceAll("_", " ");
@@ -52,6 +54,14 @@ const shortSha = (value: string | null | undefined) => {
   if (!value) return "unknown";
   return value.length > 12 ? value.slice(0, 12) : value;
 };
+
+const headerBadges = (report: WorkspaceWorkInspector) =>
+  [
+    "Captured work",
+    label(report.work.lifecycle),
+    report.work.primary_branch ? `${report.work.primary_branch} branch` : null,
+    report.work.summary_freshness ? `${label(report.work.summary_freshness)} summary` : null,
+  ].filter(Boolean);
 
 const trustClass = (verdict: string) => `work-report-trust work-report-trust-${verdict}`;
 
@@ -122,6 +132,46 @@ const safeDisplayPath = (value: string | null | undefined) => {
 
 const safeArtifactUrl = (value: string | null | undefined) => safeSameOriginPath(value) ?? safeExternalUrl(value);
 
+const fetchArtifactBlob = async (path: string): Promise<Blob> => {
+  const response = await fetch(getDaemonHttpUrl(path), {
+    headers: buildDaemonRequestHeaders({ token: authToken() }),
+  });
+  if (!response.ok) {
+    throw new Error(`artifact fetch failed (${response.status})`);
+  }
+  return response.blob();
+};
+
+const useArtifactBlobUrl = (path: string | null) => {
+  const [url, setUrl] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    if (!path) {
+      setUrl(null);
+      setFailed(false);
+      return;
+    }
+    let cancelled = false;
+    let objectUrl: string | null = null;
+    setUrl(null);
+    setFailed(false);
+    fetchArtifactBlob(path)
+      .then((blob) => {
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(blob);
+        setUrl(objectUrl);
+      })
+      .catch(() => {
+        if (!cancelled) setFailed(true);
+      });
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL?.(objectUrl);
+    };
+  }, [path]);
+  return { url, failed };
+};
+
 const renderSafeLink = (
   value: string | null | undefined,
   labelText: ReactNode,
@@ -169,12 +219,12 @@ const bytesLabel = (bytes: number | null | undefined) => {
 
 const rawTranscriptStatus = (report: WorkspaceWorkInspector) => {
   if (report.raw_transcript_included) {
-    return "Raw transcript detail is included in this response; review redaction before sharing.";
+    return "Full transcript detail is included in this response; review redaction before sharing.";
   }
   if (report.raw_transcript_available) {
-    return "Raw transcripts are available locally but not included by default.";
+    return "Full transcripts stay local; this view uses share-safe summaries.";
   }
-  return "Raw transcripts are not available in this inspector response.";
+  return "Full transcripts are not available in this inspector response.";
 };
 
 const artifactUrlFromRef = (value: JsonValue | null | undefined) => {
@@ -198,6 +248,7 @@ const reportToInspector = (report: WorkspaceWorkReport): WorkspaceWorkInspector 
       command: item.command,
       argv: item.argv,
       cwd: item.cwd,
+      cwd_label: null,
       exit_code: item.exit_code,
       status: item.status,
       freshness: item.freshness,
@@ -271,6 +322,7 @@ const reportToInspector = (report: WorkspaceWorkReport): WorkspaceWorkInspector 
     summary_claims: report.summary_claims,
     timeline: report.timeline,
     timeline_items: timelineItems,
+    subagents: [],
     duplicate_strong_links: report.duplicate_strong_links,
     raw_transcript_available: report.raw_transcript_available,
     raw_transcript_included: false,
@@ -313,6 +365,7 @@ const reportToInspector = (report: WorkspaceWorkReport): WorkspaceWorkInspector 
       redaction_notes: ["compatibility projection from v1 report"],
     },
     timeline_items: timelineItems,
+    subagents: [],
   };
 };
 
@@ -325,6 +378,26 @@ function Metric({ label: labelText, value }: { label: string; value: string | nu
     <div className="work-report-metric">
       <span className="work-report-eyebrow">{labelText}</span>
       <strong>{value}</strong>
+    </div>
+  );
+}
+
+function SectionSummary({
+  label: labelText,
+  items,
+}: {
+  label: string;
+  items: Array<{ label: string; value: string | number; note?: string }>;
+}) {
+  return (
+    <div className="work-report-section-summary" aria-label={labelText}>
+      {items.map((item) => (
+        <div key={`${item.label}:${item.value}`}>
+          <span className="work-report-eyebrow">{item.label}</span>
+          <strong>{item.value}</strong>
+          {item.note ? <p>{item.note}</p> : null}
+        </div>
+      ))}
     </div>
   );
 }
@@ -343,10 +416,10 @@ export function WorkInspectorHeader({
         <span className="work-report-eyebrow">Work Inspector</span>
         <h1>{title}</h1>
         <div className="work-report-meta">
-          <span>{report.work.work_id}</span>
-          <span>{label(report.work.lifecycle)}</span>
-          <span>{report.work.primary_branch || "branch unknown"}</span>
-          <span>{shortSha(report.work.head_commit)}</span>
+          {headerBadges(report).map((badge) => (
+            <span key={badge}>{badge}</span>
+          ))}
+          {report.work.head_commit ? <span>commit {shortSha(report.work.head_commit)}</span> : null}
         </div>
       </div>
       {onRefresh ? (
@@ -385,16 +458,19 @@ export function InspectorMetricStrip({ report }: { report: WorkspaceWorkInspecto
       <Metric label="Stale" value={report.evidence_summary.stale} />
       <Metric label="Commands" value={report.commands.length} />
       <Metric label="Artifacts" value={report.artifact_summary.total || report.artifacts.length} />
-      <Metric label="Changes" value={report.change_summary.change_sets} />
+      <Metric label="Subagents" value={report.subagents.length} />
+      <Metric label="Changes" value={changeSignalCount(report)} />
       <Metric label="Summaries" value={label(report.work.summary_freshness)} />
     </section>
   );
 }
 
 export function InspectorTabs({
+  tabs,
   selected,
   onSelect,
 }: {
+  tabs: WorkInspectorTabDef[];
   selected: WorkInspectorTab;
   onSelect: (tab: WorkInspectorTab) => void;
 }) {
@@ -427,6 +503,8 @@ export function InspectorTabs({
         <button
           aria-controls={`work-report-panel-${tab.id}`}
           aria-selected={selected === tab.id}
+          aria-label={tab.label}
+          className={tab.emptyReason ? "work-report-tab-sparse" : undefined}
           id={`work-report-tab-${tab.id}`}
           key={tab.id}
           role="tab"
@@ -435,7 +513,10 @@ export function InspectorTabs({
           onKeyDown={(event) => handleTabKeyDown(event, index)}
           onClick={() => onSelect(tab.id)}
         >
-          {tab.label}
+          <span>{tab.label}</span>
+          {typeof tab.count === "number" ? (
+            <span className="work-report-tab-count">{tab.emptyReason ?? tab.count}</span>
+          ) : null}
         </button>
       ))}
     </nav>
@@ -444,6 +525,79 @@ export function InspectorTabs({
 
 function overviewSummary(report: WorkspaceWorkInspector) {
   return report.summaries.find((summary) => summary.audience === "reviewer") ?? report.summaries[0] ?? null;
+}
+
+function completenessRows(report: WorkspaceWorkInspector) {
+  const changes = changeSignalCount(report);
+  const availableArtifacts = usefulArtifactCount(report);
+  return [
+    {
+      label: "Transcript",
+      count: report.transcript.length,
+      ok: report.transcript.length > 1,
+      note: report.transcript.length ? "redacted session context captured" : "not captured",
+    },
+    {
+      label: "Subagents",
+      count: report.subagents.length,
+      ok: report.subagents.length > 0,
+      note: report.subagents.length ? "child session context captured" : "no child sessions recorded",
+    },
+    {
+      label: "Commands",
+      count: report.commands.length,
+      ok: report.commands.length > 0,
+      note: report.commands.length ? "redacted output previews available" : "not captured",
+    },
+    {
+      label: "Changes",
+      count: changes,
+      ok: changes > 0,
+      note: changes ? "commit, PR, or file metadata captured" : "no changed-file metadata",
+    },
+    {
+      label: "Evidence",
+      count: report.evidence.length,
+      ok: report.evidence_summary.passing > 0,
+      note: report.evidence_summary.passing ? "passing evidence present" : "no passing evidence",
+    },
+    {
+      label: "Artifacts",
+      count: availableArtifacts,
+      ok: availableArtifacts > 0,
+      note: availableArtifacts
+        ? "safe artifact previews or downloads available"
+        : report.artifacts.length
+          ? "artifact refs exist but are unavailable"
+          : "not captured",
+    },
+  ];
+}
+
+function changeSignalCount(report: WorkspaceWorkInspector) {
+  return changedFileCount(report) + report.change_summary.commits.length + report.change_summary.pull_requests.length;
+}
+
+function InspectorCompleteness({ report }: { report: WorkspaceWorkInspector }) {
+  return (
+    <section className="work-report-panel" aria-label="Inspector completeness">
+      <div className="work-report-panel-header">
+        <h2>Inspector completeness</h2>
+        <span>share-safe capture</span>
+      </div>
+      <div className="work-report-completeness-grid">
+        {completenessRows(report).map((row) => (
+          <div className={row.ok ? "work-report-completeness-ok" : "work-report-completeness-missing"} key={row.label}>
+            <div>
+              <strong>{row.label}</strong>
+              <span>{row.count}</span>
+            </div>
+            <p>{row.note}</p>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
 }
 
 export function OverviewTab({ report }: { report: WorkspaceWorkInspector }) {
@@ -465,10 +619,11 @@ export function OverviewTab({ report }: { report: WorkspaceWorkInspector }) {
           {report.duplicate_strong_links.map((item) => (
             <p key={`${item.target_kind}:${item.target_id}`}>
               {label(item.target_kind)} {item.target_id} is linked to {item.work_ids.length} Work records.
-            </p>
-          ))}
-        </section>
+          </p>
+        ))}
+      </section>
       ) : null}
+      <InspectorCompleteness report={report} />
       <section className="work-report-panel" aria-label="Objective">
         <div className="work-report-panel-header">
           <h2>Objective</h2>
@@ -493,28 +648,123 @@ export function OverviewTab({ report }: { report: WorkspaceWorkInspector }) {
   );
 }
 
+export function SubagentsTab({ subagents }: { subagents: WorkspaceWorkInspectorSubagent[] }) {
+  const eventCount = subagents.reduce((total, subagent) => total + subagent.event_count, 0);
+  const transcriptPreviewCount = subagents.reduce(
+    (total, subagent) => total + subagent.transcript_preview.length,
+    0,
+  );
+  return (
+    <section className="work-report-panel" aria-label="Subagents">
+      <div className="work-report-panel-header">
+        <h2>Subagents</h2>
+        <span>{subagents.length ? `${subagents.length} child sessions` : "none recorded"}</span>
+      </div>
+      {subagents.length ? (
+        <>
+          <SectionSummary
+            label="Subagent capture summary"
+            items={[
+              { label: "Child sessions", value: subagents.length, note: "parent/child work is linked" },
+              { label: "Subagent events", value: eventCount, note: "redacted contribution trail" },
+              { label: "Preview entries", value: transcriptPreviewCount, note: "safe transcript excerpts" },
+            ]}
+          />
+          <div className="work-report-evidence-list">
+            {subagents.map((subagent) => {
+              const outcome = subagent.transcript_preview.find(
+                (item) => item.event_type === "assistant_message" && item.text_preview,
+              );
+              const contributionSummary = subagent.summary || outcome?.text_preview;
+              return (
+                <article className="work-report-subagent" key={subagent.id}>
+                  <div className="work-report-panel-header">
+                    <div>
+                      <strong>{subagent.label || subagent.child_session_id || "Subagent session"}</strong>
+                      <div className="work-report-meta">
+                        {subagent.status ? <span>{label(subagent.status)}</span> : null}
+                        <span>child reviewer</span>
+                        {subagent.latest_event_time ? (
+                          <time dateTime={subagent.latest_event_time}>{formatDate(subagent.latest_event_time)}</time>
+                        ) : null}
+                      </div>
+                    </div>
+                    <span>{subagent.event_count} events</span>
+                  </div>
+                  {contributionSummary ? (
+                    <div className="work-report-callout">
+                      <span className="work-report-eyebrow">Contribution</span>
+                      <p>{contributionSummary}</p>
+                    </div>
+                  ) : null}
+                  {subagent.transcript_preview.length ? (
+                    <details className="work-report-details work-report-subagent-preview">
+                      <summary>Review event trace</summary>
+                      <ol className="work-report-stack">
+                        {subagent.transcript_preview.map((item, index) => (
+                          <li className="work-report-message" key={item.event_id || index}>
+                            <div className="work-report-meta">
+                              <span>{label(item.actor_kind)}</span>
+                              <span>{label(item.event_type)}</span>
+                              {item.event_time ? <time dateTime={item.event_time}>{formatDate(item.event_time)}</time> : null}
+                            </div>
+                            <p>{shareSafeTranscriptPreview(item)}</p>
+                          </li>
+                        ))}
+                      </ol>
+                    </details>
+                  ) : (
+                    <p className="work-report-ref">
+                      Child session metadata was captured, but no redacted child transcript events are available.
+                    </p>
+                  )}
+                </article>
+              );
+            })}
+          </div>
+        </>
+      ) : (
+        <Empty>No child or subagent sessions are linked to this Work record.</Empty>
+      )}
+    </section>
+  );
+}
+
 export function TranscriptTab({ items }: { items: WorkspaceWorkInspectorTranscriptItem[] }) {
+  const storyItems = transcriptStoryItems(items);
   return (
     <section className="work-report-panel" aria-label="Transcript">
       <div className="work-report-panel-header">
-        <h2>Transcript</h2>
-        <span>{items.length ? `${items.length} entries` : "none recorded"}</span>
+        <h2>Conversation Story</h2>
+        <span>{items.length ? `${items.length} captured events` : "none recorded"}</span>
       </div>
       {items.length ? (
-        <ol className="work-report-stack">
-          {items.map((item, index) => (
-            <li className="work-report-message" key={item.event_id || item.id || index}>
-              <div className="work-report-meta">
-                <span>{label(item.actor_kind)}</span>
-                <span>{label(item.event_type)}</span>
-                {item.event_time ? <time dateTime={item.event_time}>{formatDate(item.event_time)}</time> : null}
-                {item.redaction_class ? <span>{label(item.redaction_class)}</span> : null}
-                {item.model ? <span>{item.model}</span> : null}
-              </div>
-              <p>{item.text_preview || "No redacted text is available."}</p>
-            </li>
-          ))}
-        </ol>
+        <>
+          <div className="work-report-narrative-grid">
+            {storyItems.map((item) => (
+              <article key={item.title}>
+                <span className="work-report-eyebrow">{item.kicker}</span>
+                <strong>{item.title}</strong>
+                <p>{item.body}</p>
+              </article>
+            ))}
+          </div>
+          <details className="work-report-details">
+            <summary>Share-safe event trace</summary>
+            <ol className="work-report-stack">
+              {items.map((item, index) => (
+                <li className="work-report-message" key={item.event_id || item.id || index}>
+                  <div className="work-report-meta">
+                    <span>{label(item.actor_kind)}</span>
+                    <span>{label(item.event_type)}</span>
+                    {item.event_time ? <time dateTime={item.event_time}>{formatDate(item.event_time)}</time> : null}
+                  </div>
+                  <p>{shareSafeTranscriptPreview(item)}</p>
+                </li>
+              ))}
+            </ol>
+          </details>
+        </>
       ) : (
         <Empty>No transcript entries are available.</Empty>
       )}
@@ -523,6 +773,10 @@ export function TranscriptTab({ items }: { items: WorkspaceWorkInspectorTranscri
 }
 
 export function CommandsTab({ commands }: { commands: WorkspaceWorkInspectorCommand[] }) {
+  const passing = commands.filter((command) => command.exit_code === 0).length;
+  const outputPreviewCount = commands.filter(
+    (command) => Boolean(command.stdout_preview) || Boolean(command.stderr_preview),
+  ).length;
   return (
     <section className="work-report-panel" aria-label="Commands">
       <div className="work-report-panel-header">
@@ -530,38 +784,65 @@ export function CommandsTab({ commands }: { commands: WorkspaceWorkInspectorComm
         <span>{commands.length ? `${commands.length} commands` : "none recorded"}</span>
       </div>
       {commands.length ? (
-        <div className="work-report-evidence-list">
-          {commands.map((command, index) => {
-            const duration = durationLabel(command.started_at, command.finished_at);
-            return (
-              <article className="work-report-command" key={command.id || index}>
-                <strong>{command.command || command.argv.join(" ") || command.id}</strong>
-                <div className="work-report-meta">
-                  {command.status ? <span>{label(command.status)}</span> : null}
-                  {command.freshness ? <span>{label(command.freshness)}</span> : null}
-                  {typeof command.exit_code === "number" ? <span>exit {command.exit_code}</span> : null}
-                  {duration ? <span>{duration}</span> : null}
-                  {command.cwd ? <span>{command.cwd}</span> : null}
-                  {command.output_truncated ? <span>output truncated</span> : null}
-                  {typeof command.stdout_size_bytes === "number" ? <span>stdout {bytesLabel(command.stdout_size_bytes)}</span> : null}
-                  {typeof command.stderr_size_bytes === "number" ? <span>stderr {bytesLabel(command.stderr_size_bytes)}</span> : null}
-                </div>
-                {command.stdout_preview ? <p className="work-report-output">stdout: {command.stdout_preview}</p> : null}
-                {command.stderr_preview ? <p className="work-report-output">stderr: {command.stderr_preview}</p> : null}
-                {command.stdout_sha256 || command.stderr_sha256 ? (
-                  <p className="work-report-ref">
-                    {command.stdout_sha256 ? `stdout sha256 ${command.stdout_sha256.slice(0, 12)}` : null}
-                    {command.stdout_sha256 && command.stderr_sha256 ? " · " : null}
-                    {command.stderr_sha256 ? `stderr sha256 ${command.stderr_sha256.slice(0, 12)}` : null}
-                  </p>
-                ) : null}
-                {!command.stdout_preview && !command.stderr_preview ? (
-                  <p className="work-report-ref">No redacted output preview is available.</p>
-                ) : null}
-              </article>
-            );
-          })}
-        </div>
+        <>
+          <SectionSummary
+            label="Command capture summary"
+            items={[
+              { label: "Commands", value: commands.length, note: "captured as evidence" },
+              { label: "Exit 0", value: passing, note: "successful local checks" },
+              { label: "Output previews", value: outputPreviewCount, note: "redacted stdout/stderr snippets" },
+            ]}
+          />
+          <div className="work-report-evidence-list">
+            {commands.map((command, index) => {
+              const duration = durationLabel(command.started_at, command.finished_at);
+              const hasTechnicalProof =
+                typeof command.stdout_size_bytes === "number" ||
+                typeof command.stderr_size_bytes === "number" ||
+                command.stdout_sha256 ||
+                command.stderr_sha256;
+              return (
+                <article className="work-report-command" key={command.id || index}>
+                  <strong>{command.command || command.argv.join(" ") || command.id}</strong>
+                  <div className="work-report-meta">
+                    {command.status ? <span>{command.status === "observed_pass" ? "passed" : label(command.status)}</span> : null}
+                    {command.freshness ? <span>{label(command.freshness)}</span> : null}
+                    {command.cwd_label ? <span>{command.cwd_label}</span> : null}
+                    {typeof command.exit_code === "number" ? <span>exit {command.exit_code}</span> : null}
+                    {duration ? <span>{duration}</span> : null}
+                    {command.output_truncated ? <span>output truncated</span> : null}
+                  </div>
+                  <p className="work-report-output">{commandOutputSummary(command)}</p>
+                  {command.stdout_preview || command.stderr_preview ? (
+                    <div className="work-report-command-previews" aria-label="Redacted command output previews">
+                      {command.stdout_preview ? (
+                        <pre><span>stdout</span>{command.stdout_preview}</pre>
+                      ) : null}
+                      {command.stderr_preview ? (
+                        <pre><span>stderr</span>{command.stderr_preview}</pre>
+                      ) : null}
+                    </div>
+                  ) : null}
+                  {hasTechnicalProof ? (
+                    <details className="work-report-details">
+                      <summary>Validation proof</summary>
+                      <div className="work-report-technical-proof">
+                        {typeof command.stdout_size_bytes === "number" ? (
+                          <span>stdout {bytesLabel(command.stdout_size_bytes)}</span>
+                        ) : null}
+                        {typeof command.stderr_size_bytes === "number" ? (
+                          <span>stderr {bytesLabel(command.stderr_size_bytes)}</span>
+                        ) : null}
+                        {command.stdout_sha256 ? <span>stdout sha256 {command.stdout_sha256.slice(0, 12)}</span> : null}
+                        {command.stderr_sha256 ? <span>stderr sha256 {command.stderr_sha256.slice(0, 12)}</span> : null}
+                      </div>
+                    </details>
+                  ) : null}
+                </article>
+              );
+            })}
+          </div>
+        </>
       ) : (
         <Empty>No commands have been recorded.</Empty>
       )}
@@ -569,7 +850,17 @@ export function CommandsTab({ commands }: { commands: WorkspaceWorkInspectorComm
   );
 }
 
+function commandOutputSummary(command: WorkspaceWorkInspectorCommand) {
+  if (command.stdout_preview || command.stderr_preview) {
+    return "Output was captured and kept share-safe; raw stdout and stderr stay local.";
+  }
+  return "Command completed without stdout or stderr; exit code is the captured signal.";
+}
+
 export function EvidenceTab({ evidence }: { evidence: WorkspaceWorkEvidence[] }) {
+  const passing = evidence.filter((item) => item.status === "observed_pass").length;
+  const fresh = evidence.filter((item) => item.freshness === "fresh").length;
+  const commandBacked = evidence.filter((item) => item.command || item.argv.length).length;
   return (
     <section className="work-report-panel work-report-evidence" aria-label="Evidence">
       <div className="work-report-panel-header">
@@ -577,28 +868,38 @@ export function EvidenceTab({ evidence }: { evidence: WorkspaceWorkEvidence[] })
         <span>{evidence.length ? `${evidence.length} observed` : "none recorded"}</span>
       </div>
       {evidence.length ? (
-        <div className="work-report-evidence-list">
-          {evidence.map((item) => (
-            <article className={evidenceClass(item)} key={item.evidence_id}>
-              <div>
-                <strong>{item.claim || item.command || item.evidence_id}</strong>
-                {item.command || item.argv.length ? <p>{item.command || item.argv.join(" ")}</p> : null}
-                <div className="work-report-evidence-detail">
-                  <span>{label(item.source)}</span>
-                  <span>{label(item.fidelity)}</span>
-                  <span>{label(item.trust)}</span>
-                  {item.head_sha ? <span>{shortSha(item.head_sha)}</span> : null}
-                  {item.branch ? <span>{item.branch}</span> : null}
+        <>
+          <SectionSummary
+            label="Evidence capture summary"
+            items={[
+              { label: "Passing", value: passing, note: "checks observed as green" },
+              { label: "Fresh", value: fresh, note: "matches current capture" },
+              { label: "Command-backed", value: commandBacked, note: "reproducible local commands" },
+            ]}
+          />
+          <div className="work-report-evidence-list">
+            {evidence.map((item) => (
+              <article className={evidenceClass(item)} key={item.evidence_id}>
+                <div>
+                  <strong>{item.claim || item.command || item.evidence_id}</strong>
+                  {item.command || item.argv.length ? <p>{item.command || item.argv.join(" ")}</p> : null}
+                  <div className="work-report-evidence-detail">
+                    <span>{label(item.source)}</span>
+                    <span>{label(item.fidelity)}</span>
+                    <span>{label(item.trust)}</span>
+                    {item.head_sha ? <span>{shortSha(item.head_sha)}</span> : null}
+                    {item.branch ? <span>{item.branch}</span> : null}
+                  </div>
                 </div>
-              </div>
-              <div className="work-report-evidence-badges">
-                <span>{label(item.kind)}</span>
-                <span>{label(item.status)}</span>
-                <span>{label(item.freshness)}</span>
-              </div>
-            </article>
-          ))}
-        </div>
+                <div className="work-report-evidence-badges">
+                  <span>{label(item.kind)}</span>
+                  <span>{label(item.status)}</span>
+                  <span>{label(item.freshness)}</span>
+                </div>
+              </article>
+            ))}
+          </div>
+        </>
       ) : (
         <Empty>No evidence has been recorded for this Work record.</Empty>
       )}
@@ -607,6 +908,7 @@ export function EvidenceTab({ evidence }: { evidence: WorkspaceWorkEvidence[] })
 }
 
 export function TimelineTab({ items }: { items: WorkspaceWorkInspectorTimelineItem[] }) {
+  const milestones = timelineMilestones(items);
   return (
     <section className="work-report-panel work-report-timeline" aria-label="Timeline">
       <div className="work-report-panel-header">
@@ -614,27 +916,167 @@ export function TimelineTab({ items }: { items: WorkspaceWorkInspectorTimelineIt
         <span>{items.length ? `${items.length} events` : "none recorded"}</span>
       </div>
       {items.length ? (
-        <ol>
-          {items.map((item, index) => (
-            <li key={item.source_event_id || item.source_evidence_id || `${item.sequence}:${index}`}>
-              <span>{label(item.kind)}</span>
-              <time dateTime={item.event_time}>{formatDate(item.event_time)}</time>
-              <div>
-                <p>{item.title}</p>
-                <div className="work-report-evidence-detail">
-                  {item.detail ? <span>{item.detail}</span> : null}
-                  {item.source_event_id ? <span>{item.source_event_id}</span> : null}
-                  {item.source_evidence_id ? <span>{item.source_evidence_id}</span> : null}
+        <>
+          <ol className="work-report-milestones">
+            {milestones.map((item) => (
+              <li key={`${item.title}:${item.time}`}>
+                <div>
+                  <span className="work-report-eyebrow">{item.kicker}</span>
+                  <strong>{item.title}</strong>
+                  <p>{item.body}</p>
                 </div>
-              </div>
-            </li>
-          ))}
-        </ol>
+                <time dateTime={item.time}>{formatDate(item.time)}</time>
+              </li>
+            ))}
+          </ol>
+          <details className="work-report-details">
+            <summary>Event trace</summary>
+            <ol>
+              {items.map((item, index) => (
+                <li key={item.source_event_id || item.source_evidence_id || `${item.sequence}:${index}`}>
+                  <span>{label(item.kind)}</span>
+                  <time dateTime={item.event_time}>{formatDate(item.event_time)}</time>
+                  <div>
+                    <p>{shareSafeTimelineTitle(item)}</p>
+                    <div className="work-report-evidence-detail">
+                      {timelineSupportLabel(item) ? <span>{timelineSupportLabel(item)}</span> : null}
+                    </div>
+                  </div>
+                </li>
+              ))}
+            </ol>
+          </details>
+        </>
       ) : (
         <Empty>No timeline events are available.</Empty>
       )}
     </section>
   );
+}
+
+function transcriptStoryItems(items: WorkspaceWorkInspectorTranscriptItem[]) {
+  const humanCount = items.filter((item) => item.actor_kind === "human").length;
+  const agentCount = items.filter((item) => item.actor_kind === "agent").length;
+  const subagentCount = items.filter((item) => item.actor_kind === "subagent").length;
+  const artifact = items.find((item) => item.event_type === "artifact_created");
+  const toolCount = items.filter((item) => item.event_type === "tool_call_start" || item.event_type === "tool_output").length;
+  return [
+    {
+      kicker: "Request",
+      title: humanCount ? "Human objective captured" : "Objective inferred from Work metadata",
+      body: humanCount
+        ? `${humanCount} request events are linked to this work. Full prompt text stays local in the share-safe view.`
+        : "No human prompt text is exposed in this share-safe view.",
+    },
+    {
+      kicker: "Implementation",
+      title: "Agent activity captured",
+      body: `${agentCount} agent events and ${toolCount} tool events are summarized here; command evidence appears in its own tab.`,
+    },
+    {
+      kicker: "Review",
+      title: subagentCount ? "Child reviewer linked" : "No child reviewer linked",
+      body: subagentCount
+        ? `${subagentCount} subagent events are attached, including the reviewer contribution summary.`
+        : "No child or subagent session is linked to this Work record.",
+    },
+    {
+      kicker: "Artifact",
+      title: artifact?.text_preview?.replace(/^Artifact created:\s*/, "") || "No artifact event in transcript",
+      body: artifact
+        ? "The generated artifact is attached and previewable without exposing local paths."
+        : "No artifact event was captured for this transcript.",
+    },
+  ];
+}
+
+function timelineMilestones(items: WorkspaceWorkInspectorTimelineItem[]) {
+  const milestones: Array<{ kicker: string; title: string; body: string; time: string }> = [];
+  const first = items[0];
+  if (first) {
+    milestones.push({
+      kicker: "Started",
+      title: "Work session opened",
+      body: "The Inspector connected task, session, and worktree context into one Work record.",
+      time: first.event_time,
+    });
+  }
+  const artifact = items.find((item) => item.kind === "artifact_created");
+  if (artifact) {
+    milestones.push({
+      kicker: "Artifact",
+      title: shareSafeTimelineTitle(artifact),
+      body: "A previewable artifact was captured for reviewer inspection.",
+      time: artifact.event_time,
+    });
+  }
+  const subagent = items.find((item) => shareSafeTimelineTitle(item).includes("Subagent"));
+  if (subagent) {
+    milestones.push({
+      kicker: "Review",
+      title: "Subagent review attached",
+      body: "A child session contributed review context to the Work record.",
+      time: subagent.event_time,
+    });
+  }
+  for (const evidence of items.filter((item) => item.source_evidence_id && shareSafeTimelineTitle(item).startsWith("Observed"))) {
+    milestones.push({
+      kicker: "Evidence",
+      title: shareSafeTimelineTitle(evidence),
+      body: "The command result is linked as fresh evidence.",
+      time: evidence.event_time,
+    });
+    if (milestones.length >= 6) break;
+  }
+  return milestones.length ? milestones : items.slice(0, 4).map((item) => ({
+    kicker: label(item.kind),
+    title: shareSafeTimelineTitle(item),
+    body: timelineSupportLabel(item) || "Captured Work event",
+    time: item.event_time,
+  }));
+}
+
+function shareSafeTranscriptPreview(item: Pick<WorkspaceWorkInspectorTranscriptItem, "actor_kind" | "event_type" | "text_preview">) {
+  const preview = item.text_preview?.trim();
+  if (!preview) return "Captured event has no share-safe preview.";
+  if (preview.includes("message captured")) {
+    if (item.actor_kind === "human") return "Human request captured. Full text stays local in this share-safe view.";
+    if (item.actor_kind === "subagent") return "Subagent response captured. Full text stays local in this share-safe view.";
+    return "Agent response captured. Full text stays local in this share-safe view.";
+  }
+  if (preview.includes("tool call captured")) {
+    return "Tool call captured. Inputs stay local; command and evidence summaries are shown in their own tabs.";
+  }
+  if (preview.includes("tool output captured")) {
+    return "Tool output captured. Raw output stays local; hashes and safe previews are shown in Commands.";
+  }
+  if (preview.startsWith("Subagent invocation ")) {
+    return "Subagent review completed and is linked to this Work record.";
+  }
+  return preview;
+}
+
+function shareSafeTimelineTitle(item: WorkspaceWorkInspectorTimelineItem) {
+  if (item.title.includes("message captured")) {
+    if (item.kind === "user_message") return "Human request captured.";
+    if (item.kind === "assistant_message") return "Agent response captured.";
+    return "Message captured.";
+  }
+  if (item.title.includes("tool call captured")) return "Tool call captured.";
+  if (item.title.includes("tool output captured")) return "Tool output captured.";
+  if (item.title.startsWith("Subagent invocation ")) return "Subagent review completed.";
+  if (item.title === "evidence_observed event recorded") return "Evidence record indexed.";
+  if (item.title === "summary_generated event recorded") return "Summary refreshed.";
+  return item.title;
+}
+
+function timelineSupportLabel(item: WorkspaceWorkInspectorTimelineItem) {
+  if (item.source_evidence_id) return "Evidence-linked";
+  if (item.detail?.includes("subagent_invocation")) return "Child session";
+  if (item.detail?.includes("session_artifact")) return "Artifact";
+  if (item.detail?.includes("session_state")) return "Session state";
+  if (item.source_event_id) return "Session event";
+  return null;
 }
 
 const pullRequestLabel = (value: JsonValue, index: number, fallback?: string | null) => {
@@ -670,6 +1112,169 @@ const changedFilesFromValues = (values: JsonValue[]) => {
   return Array.from(files.values()).slice(0, 30);
 };
 
+const fileSummariesFromValues = (values: JsonValue[]) => {
+  const summaries = new Map<string, { path: string; summary: string }>();
+  const visit = (value: JsonValue) => {
+    const record = asRecord(value);
+    if (!record) return;
+    const path = safeDisplayPath(pickString(record, ["path", "file", "filename", "display_path", "relative_path"]));
+    const summary = pickString(record, ["summary", "purpose", "review_note", "note"]);
+    if (path && summary) summaries.set(path, { path, summary });
+    for (const key of ["file_summaries", "source_outline", "review_notes"]) {
+      for (const child of asArray(record[key])) visit(child);
+    }
+  };
+  values.forEach(visit);
+  return Array.from(summaries.values()).slice(0, 30);
+};
+
+const reviewNotesFromValues = (values: JsonValue[]) => {
+  const notes = new Map<string, { title: string; detail: string; path?: string | null; excerpt?: string | null }>();
+  const visit = (value: JsonValue) => {
+    const record = asRecord(value);
+    if (!record) return;
+    const title = pickString(record, ["title", "label", "heading", "kind"]) ?? "Review note";
+    const detail = pickString(record, ["detail", "summary", "review_note", "note", "text"]);
+    const path = safeDisplayPath(pickString(record, ["path", "file", "filename", "relative_path"]));
+    const excerpt = pickString(record, ["excerpt", "review_excerpt", "safe_excerpt"]);
+    if (detail) notes.set(`${title}:${path ?? ""}:${detail}`, { title, detail, path, excerpt });
+    for (const key of ["source_outline", "implementation_outline", "review_outline", "review_notes", "resume_notes", "implementation_notes"]) {
+      for (const child of asArray(record[key])) {
+        if (typeof child === "string") {
+          notes.set(`Review note::${child}`, { title: "Review note", detail: child });
+        } else {
+          visit(child);
+        }
+      }
+    }
+  };
+  values.forEach(visit);
+  return Array.from(notes.values()).slice(0, 30);
+};
+
+type SourceSnapshot = {
+  path: string;
+  content: string;
+  language?: string | null;
+  kind?: string | null;
+  lineCount?: number | null;
+  sha256?: string | null;
+};
+
+const SOURCE_SNAPSHOT_EXCERPT_LINES = 10;
+const SOURCE_SNAPSHOT_EXCERPT_CHARS = 1_200;
+
+const sourceSnapshotExcerpt = (content: string) => {
+  const lines = content.split(/\r?\n/);
+  const head = lines.slice(0, SOURCE_SNAPSHOT_EXCERPT_LINES).join("\n");
+  const bounded = head.length > SOURCE_SNAPSHOT_EXCERPT_CHARS
+    ? `${head.slice(0, SOURCE_SNAPSHOT_EXCERPT_CHARS)}\n[excerpt truncated]`
+    : head;
+  const omittedLines = Math.max(0, lines.length - SOURCE_SNAPSHOT_EXCERPT_LINES);
+  const omittedChars = Math.max(0, content.length - bounded.length);
+  return {
+    text: bounded,
+    truncated: omittedLines > 0 || omittedChars > 0,
+    omittedLines,
+  };
+};
+
+const sourceSnapshotsFromValues = (values: JsonValue[]) => {
+  const snapshots = new Map<string, SourceSnapshot>();
+  const visit = (value: JsonValue) => {
+    const record = asRecord(value);
+    if (!record) return;
+    const isExplicitShareSafe =
+      record.share_safe === true && pickString(record, ["redaction_class"]) === "local_redacted";
+    const path = safeDisplayPath(pickString(record, ["path", "file", "filename", "relative_path"]));
+    const content = isExplicitShareSafe
+      ? pickString(record, ["safe_content", "redacted_content", "content"])
+      : null;
+    if (path && content) {
+      snapshots.set(path, {
+        path,
+        content,
+        language: pickString(record, ["language", "lang", "syntax"]),
+        kind: pickString(record, ["kind", "role", "type"]),
+        lineCount: pickNumber(record, ["line_count", "lines"]),
+        sha256: pickString(record, ["sha256", "content_sha256", "digest"]),
+      });
+    }
+    for (const key of ["source_snapshots", "file_snapshots", "implementation_snapshots"]) {
+      for (const child of asArray(record[key])) visit(child);
+    }
+  };
+  values.forEach(visit);
+  return Array.from(snapshots.values()).slice(0, 12);
+};
+
+const changedFileCount = (report: WorkspaceWorkInspector) =>
+  changedFilesFromValues([...report.change_sets, ...report.contributions]).length;
+
+const usefulArtifactCount = (report: WorkspaceWorkInspector) =>
+  report.artifacts.filter((artifact) => !artifact.missing && artifact.render_kind !== "unavailable")
+    .length;
+
+const tabDefsForReport = (report: WorkspaceWorkInspector): WorkInspectorTabDef[] => {
+  const changeCount =
+    changedFileCount(report) +
+    report.change_summary.commits.length +
+    report.change_summary.pull_requests.length;
+  const usefulArtifacts = usefulArtifactCount(report);
+  return [
+    { id: "overview", label: "Overview" },
+    {
+      id: "transcript",
+      label: "Transcript",
+      count: report.transcript.length,
+      emptyReason: report.transcript.length ? undefined : "not captured",
+    },
+    {
+      id: "subagents",
+      label: "Subagents",
+      count: report.subagents.length,
+      emptyReason: report.subagents.length ? undefined : "none",
+    },
+    {
+      id: "commands",
+      label: "Commands",
+      count: report.commands.length,
+      emptyReason: report.commands.length ? undefined : "not captured",
+    },
+    {
+      id: "evidence",
+      label: "Evidence",
+      count: report.evidence.length,
+      emptyReason: report.evidence.length ? undefined : "missing",
+    },
+    {
+      id: "timeline",
+      label: "Timeline",
+      count: report.timeline_items.length,
+      emptyReason: report.timeline_items.length ? undefined : "not captured",
+    },
+    {
+      id: "changes",
+      label: "Changes",
+      count: changeCount,
+      emptyReason: changeCount ? undefined : "no files",
+    },
+    {
+      id: "artifacts",
+      label: "Artifacts",
+      count: usefulArtifacts,
+      emptyReason: usefulArtifacts ? undefined : report.artifacts.length ? "unavailable" : "not captured",
+    },
+    {
+      id: "context",
+      label: "Context",
+      count: report.summaries.length + report.summary_claims.length,
+      emptyReason: report.summaries.length || report.summary_claims.length ? undefined : "no summary",
+    },
+    { id: "raw", label: "Agent handoff" },
+  ];
+};
+
 export function ChangesTab({ report }: { report: WorkspaceWorkInspector }) {
   const pullRequests = [
     ...report.change_summary.pull_requests.map((value, index) => pullRequestLabel(value, index)),
@@ -686,12 +1291,27 @@ export function ChangesTab({ report }: { report: WorkspaceWorkInspector }) {
         .filter((link) => link.target_kind === "commit" && link.target_id)
         .map((link) => link.target_id as string);
   const changedFiles = changedFilesFromValues([...report.change_sets, ...report.contributions]);
+  const fileSummaries = fileSummariesFromValues([...report.change_sets, ...report.contributions]);
+  const reviewNotes = reviewNotesFromValues([...report.change_sets, ...report.contributions]);
+  const sourceSnapshots = sourceSnapshotsFromValues([...report.change_sets, ...report.contributions]);
   return (
     <section className="work-report-panel" aria-label="Changes">
       <div className="work-report-panel-header">
         <h2>Changes</h2>
         <span>{report.change_summary.change_sets} change sets</span>
       </div>
+      <SectionSummary
+        label="Change capture summary"
+        items={[
+          { label: "Files", value: changedFiles.length, note: "safe changed-file metadata" },
+          { label: "Commits", value: commits.length, note: "linked implementation heads" },
+          {
+            label: "Review material",
+            value: fileSummaries.length + reviewNotes.length + sourceSnapshots.length,
+            note: "source outline and safe snapshots",
+          },
+        ]}
+      />
       <div className="work-report-linked-items">
         {pullRequests.map((pr, index) =>
           pr.url ? (
@@ -723,6 +1343,62 @@ export function ChangesTab({ report }: { report: WorkspaceWorkInspector }) {
       ) : (
         <Empty>No changed-file metadata is available.</Empty>
       )}
+      {fileSummaries.length ? (
+        <div className="work-report-source-outline" aria-label="Source outline">
+          <h3>Source outline</h3>
+          {fileSummaries.map((file) => (
+            <article key={file.path}>
+              <strong>{file.path}</strong>
+              <p>{file.summary}</p>
+            </article>
+          ))}
+        </div>
+      ) : null}
+      {reviewNotes.length ? (
+        <div className="work-report-source-outline" aria-label="Review notes">
+          <h3>Review notes</h3>
+          {reviewNotes.map((note, index) => (
+            <article key={`${note.title}:${note.path ?? ""}:${index}`}>
+              <strong>{note.path ? `${note.path}: ${note.title}` : note.title}</strong>
+              <p>{note.detail}</p>
+              {note.excerpt ? <pre className="work-report-review-excerpt">{note.excerpt}</pre> : null}
+            </article>
+          ))}
+        </div>
+      ) : null}
+      {sourceSnapshots.length ? (
+        <div className="work-report-source-outline" aria-label="Implementation snapshot">
+          <h3>Implementation snapshot</h3>
+          <p className="work-report-source-note">
+            Full share-safe source snapshots are available in the agent handoff JSON; the default UI shows bounded excerpts.
+          </p>
+          {sourceSnapshots.map((snapshot) => (
+            <article key={snapshot.path}>
+              <div className="work-report-source-heading">
+                <strong>{snapshot.path}</strong>
+                <span>
+                  {[
+                    snapshot.language,
+                    snapshot.kind,
+                    snapshot.lineCount ? `${snapshot.lineCount} lines` : null,
+                    snapshot.sha256 ? `sha256 ${snapshot.sha256.slice(0, 12)}` : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </span>
+              </div>
+              <pre className="work-report-review-excerpt">{sourceSnapshotExcerpt(snapshot.content).text}</pre>
+              {sourceSnapshotExcerpt(snapshot.content).truncated ? (
+                <p className="work-report-source-note">
+                  {sourceSnapshotExcerpt(snapshot.content).omittedLines > 0
+                    ? `${sourceSnapshotExcerpt(snapshot.content).omittedLines} additional lines are omitted from the default UI.`
+                    : "Additional source content is omitted from the default UI."}
+                </p>
+              ) : null}
+            </article>
+          ))}
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -735,17 +1411,88 @@ function artifactDisplayPath(artifact: WorkspaceWorkInspectorArtifact) {
   return safeDisplayPath(artifact.display_name);
 }
 
-function artifactPrimaryUrl(artifact: WorkspaceWorkInspectorArtifact) {
+function artifactPrimaryPath(artifact: WorkspaceWorkInspectorArtifact) {
   return safeWorkArtifactPath(artifact.open_url) ?? safeWorkArtifactPath(artifact.download_url);
 }
 
-function artifactThumbUrl(artifact: WorkspaceWorkInspectorArtifact) {
+function artifactThumbPath(artifact: WorkspaceWorkInspectorArtifact) {
   if (artifact.render_kind !== "raster_image") return null;
   const explicit = safeWorkArtifactPath(artifact.thumbnail_url);
   if (explicit) return explicit;
-  const primary = artifactPrimaryUrl(artifact);
+  const primary = artifactPrimaryPath(artifact);
   if (primary) return primary;
   return null;
+}
+
+function ArtifactPreview({ artifact }: { artifact: WorkspaceWorkInspectorArtifact }) {
+  const [imageFailed, setImageFailed] = useState(false);
+  const thumb = artifactThumbPath(artifact);
+  const blob = useArtifactBlobUrl(thumb);
+  const isImageLike = artifact.mime_type?.startsWith("image/") || artifact.kind === "screenshot";
+  const labelText = artifact.label || artifact.display_name || "Artifact";
+  if (thumb && blob.url && !imageFailed && !blob.failed) {
+    return (
+      <img
+        alt={`${labelText} preview`}
+        src={blob.url}
+        onError={() => {
+          setImageFailed(true);
+        }}
+      />
+    );
+  }
+  return (
+    <div className="work-report-artifact-preview-fallback">
+      {isImageLike ? <ImageIcon aria-hidden="true" size={24} /> : <FileText aria-hidden="true" size={24} />}
+      {thumb && (imageFailed || blob.failed) ? <span>Preview unavailable</span> : null}
+      {thumb && !blob.url && !blob.failed && !imageFailed ? <span>Loading preview</span> : null}
+    </div>
+  );
+}
+
+function ArtifactActionButton({
+  artifact,
+  action,
+  children,
+}: {
+  artifact: WorkspaceWorkInspectorArtifact;
+  action: "preview" | "download";
+  children: ReactNode;
+}) {
+  const [failed, setFailed] = useState(false);
+  const path = action === "preview"
+    ? safeWorkArtifactPath(artifact.preview_url) ?? artifactPrimaryPath(artifact)
+    : artifactPrimaryPath(artifact);
+  if (!path) return null;
+  const run = async () => {
+    setFailed(false);
+    try {
+      const blob = await fetchArtifactBlob(path);
+      const url = URL.createObjectURL(blob);
+      if (action === "preview") {
+        window.open(url, "_blank", "noopener,noreferrer");
+        window.setTimeout(() => URL.revokeObjectURL?.(url), 60_000);
+      } else {
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = artifact.display_name || artifact.label || artifact.artifact_id || "ctx-work-artifact";
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        URL.revokeObjectURL?.(url);
+      }
+    } catch {
+      setFailed(true);
+    }
+  };
+  return (
+    <>
+      <button className="work-report-artifact-link" type="button" onClick={run}>
+        {children}
+      </button>
+      {failed ? <span className="work-report-artifact-action-error">Artifact unavailable</span> : null}
+    </>
+  );
 }
 
 export function ArtifactsTab({ artifacts }: { artifacts: WorkspaceWorkInspectorArtifact[] }) {
@@ -758,20 +1505,12 @@ export function ArtifactsTab({ artifacts }: { artifacts: WorkspaceWorkInspectorA
       {artifacts.length ? (
         <div className="work-report-artifact-grid">
           {artifacts.map((artifact, index) => {
-            const url = artifactPrimaryUrl(artifact);
-            const thumb = artifactThumbUrl(artifact);
             const displayPath = artifactDisplayPath(artifact);
             const size = bytesLabel(artifact.bytes);
             return (
               <article className="work-report-artifact-card" key={artifact.id || index}>
                 <div className="work-report-artifact-preview">
-                  {thumb ? (
-                    <img alt="" src={thumb} />
-                  ) : artifact.mime_type?.startsWith("image/") || artifact.kind === "screenshot" ? (
-                    <ImageIcon aria-hidden="true" size={24} />
-                  ) : (
-                    <FileText aria-hidden="true" size={24} />
-                  )}
+                  <ArtifactPreview artifact={artifact} />
                 </div>
                 <div className="work-report-artifact-body">
                   <strong>{artifact.label || artifact.display_name || artifact.artifact_id || artifact.id}</strong>
@@ -786,26 +1525,14 @@ export function ArtifactsTab({ artifacts }: { artifacts: WorkspaceWorkInspectorA
                   {displayPath ? <p className="work-report-ref">{displayPath}</p> : null}
                   {artifact.unavailable_reason ? <p>{artifact.unavailable_reason}</p> : null}
                   <div className="work-report-artifact-actions">
-                    {artifact.preview_url
-                      ? renderSafeLink(
-                          safeWorkArtifactPath(artifact.preview_url),
-                          <>
-                            <FileText aria-hidden="true" size={14} />
-                            Preview
-                          </>,
-                          "work-report-artifact-link",
-                        )
-                      : null}
-                    {url
-                      ? renderSafeLink(
-                          url,
-                          <>
-                            <Download aria-hidden="true" size={14} />
-                            Download
-                          </>,
-                          "work-report-artifact-link",
-                        )
-                      : null}
+                    <ArtifactActionButton action="preview" artifact={artifact}>
+                      <FileText aria-hidden="true" size={14} />
+                      Preview
+                    </ArtifactActionButton>
+                    <ArtifactActionButton action="download" artifact={artifact}>
+                      <Download aria-hidden="true" size={14} />
+                      Download
+                    </ArtifactActionButton>
                   </div>
                 </div>
               </article>
@@ -819,42 +1546,136 @@ export function ArtifactsTab({ artifacts }: { artifacts: WorkspaceWorkInspectorA
   );
 }
 
+function orderedSummaries(summaries: WorkspaceWorkSummary[]) {
+  return [...summaries].sort((left, right) => Date.parse(right.generated_at) - Date.parse(left.generated_at));
+}
+
+function currentSummary(summaries: WorkspaceWorkSummary[]) {
+  const ordered = orderedSummaries(summaries);
+  return ordered.find((summary) => summary.freshness === "fresh" || summary.freshness === "locked") ?? ordered[0] ?? null;
+}
+
+function SummaryArticle({
+  summary,
+  current = false,
+}: {
+  summary: WorkspaceWorkSummary;
+  current?: boolean;
+}) {
+  return (
+    <article className={`work-report-summary${current ? " work-report-summary-current" : ""}`}>
+      <div className="work-report-meta">
+        {current ? <span>current summary</span> : null}
+        <span>{label(summary.freshness)}</span>
+      </div>
+      <p>{summary.text}</p>
+    </article>
+  );
+}
+
+function SummaryClaimArticle({ claim }: { claim: WorkspaceWorkSummaryClaim }) {
+  return (
+    <article className="work-report-claim">
+      <strong>{claim.claim_text}</strong>
+      <div className="work-report-meta">
+        <span>{label(claim.freshness)}</span>
+      </div>
+    </article>
+  );
+}
+
 export function ContextTab({ report }: { report: WorkspaceWorkInspector }) {
+  const current = currentSummary(report.summaries);
+  const historicalSummaries = current
+    ? orderedSummaries(report.summaries).filter((summary) => summary.summary_id !== current.summary_id)
+    : [];
+  const currentClaims = current
+    ? report.summary_claims.filter((claim) => claim.summary_id === current.summary_id)
+    : [];
+  const historicalClaims = current
+    ? report.summary_claims.filter((claim) => claim.summary_id !== current.summary_id)
+    : report.summary_claims;
+  const historicalCount = historicalSummaries.length + historicalClaims.length;
+  const fileSummaryCount = report.contributions.reduce<number>(
+    (count, contribution) => count + asArray(asRecord(contribution)?.file_summaries).length,
+    0,
+  );
+  const freshSummaries = report.summaries.filter((summary) =>
+    summary.freshness === "fresh" || summary.freshness === "locked"
+  ).length;
+  const contextCards = [
+    {
+      eyebrow: "What happened",
+      title: report.work.title || "Captured work",
+      body: report.work.objective || report.overview.objective || "A Work record was captured for review.",
+    },
+    {
+      eyebrow: "Validation",
+      title: `${report.evidence_summary.passing} passing, ${report.evidence_summary.failing} failing`,
+      body: `${report.commands.length} commands are linked as evidence; raw command output stays local by default.`,
+    },
+    {
+      eyebrow: "Review material",
+      title: `${usefulArtifactCount(report)} artifacts, ${changeSignalCount(report)} change signals`,
+      body: `${fileSummaryCount} file summaries, ${report.change_summary.commits.length} commits, and ${report.change_summary.pull_requests.length} pull requests are available.`,
+    },
+    {
+      eyebrow: "Collaboration",
+      title: `${report.subagents.length} child sessions`,
+      body: report.subagents.length
+        ? "Child-session contributions are projected into this Work record with redacted transcript previews."
+        : "No child-session contributions were projected for this Work record.",
+    },
+    {
+      eyebrow: "Context freshness",
+      title: `${freshSummaries} fresh summaries`,
+      body: `${historicalCount} historical summary or claim entries are retained behind the collapsed history view.`,
+    },
+    {
+      eyebrow: "Share boundary",
+      title: report.raw_transcript_included ? "raw transcript included" : "share-safe by default",
+      body: rawTranscriptStatus(report),
+    },
+  ];
   return (
     <section className="work-report-panel work-report-side" aria-label="Context">
-      <h2>Context</h2>
-      {report.summaries.length > 0 ? (
-        report.summaries.map((summary) => (
-          <article className="work-report-summary" key={summary.summary_id}>
-            <div className="work-report-meta">
-              <span>{label(summary.kind)}</span>
-              <span>{label(summary.audience)}</span>
-              <span>{label(summary.freshness)}</span>
-              <span>{label(summary.generation_method)}</span>
-            </div>
-            <p>{summary.text}</p>
+      <h2>Reviewer context</h2>
+      <div className="work-report-narrative-grid">
+        {contextCards.map((card) => (
+          <article key={card.eyebrow}>
+            <span className="work-report-eyebrow">{card.eyebrow}</span>
+            <strong>{card.title}</strong>
+            <p>{card.body}</p>
           </article>
-        ))
+        ))}
+      </div>
+      {current ? (
+        <SummaryArticle current summary={current} />
       ) : (
         <Empty>No summary has been generated yet.</Empty>
       )}
-      {report.summary_claims.length ? (
+      {currentClaims.length ? (
         <div className="work-report-claim-list" aria-label="Summary claims">
-          {report.summary_claims.map((claim) => (
-            <article className="work-report-claim" key={claim.claim_id}>
-              <strong>{claim.claim_text}</strong>
-              <div className="work-report-meta">
-                <span>{claim.source_kind}</span>
-                <span>{claim.source_id}</span>
-                <span>{label(claim.freshness)}</span>
-                <span>{label(claim.redaction_class)}</span>
-              </div>
-            </article>
+          {currentClaims.map((claim) => (
+            <SummaryClaimArticle claim={claim} key={claim.claim_id} />
           ))}
         </div>
       ) : null}
+      {historicalCount ? (
+        <details className="work-report-details">
+          <summary>Historical summaries and claims ({historicalCount})</summary>
+          <div className="work-report-history-list">
+            {historicalSummaries.map((summary) => (
+              <SummaryArticle key={summary.summary_id} summary={summary} />
+            ))}
+            {historicalClaims.map((claim) => (
+              <SummaryClaimArticle claim={claim} key={claim.claim_id} />
+            ))}
+          </div>
+        </details>
+      ) : null}
       <details className="work-report-details">
-        <summary>Agent handoff JSON preview</summary>
+        <summary>Handoff projection</summary>
         <pre className="work-report-json">{prettyJson(report.context.value)}</pre>
       </details>
     </section>
@@ -864,24 +1685,49 @@ export function ContextTab({ report }: { report: WorkspaceWorkInspector }) {
 export function RawRedactedJsonTab({ report }: { report: WorkspaceWorkInspector }) {
   const [expanded, setExpanded] = useState(false);
   return (
-    <section className="work-report-panel" aria-label="Raw redacted JSON">
+    <section className="work-report-panel" aria-label="Agent handoff">
       <div className="work-report-panel-header">
-        <h2>Raw redacted JSON</h2>
-        <span>safe_json only</span>
+        <h2>Agent handoff</h2>
+        <span>ready to resume</span>
       </div>
-      <p className="work-report-raw-note">
-        Collapsed by default. This payload is the redacted route projection, not raw local transcript or command output.
-      </p>
-      <button
-        aria-expanded={expanded}
-        className="work-report-refresh"
-        type="button"
-        onClick={() => setExpanded((value) => !value)}
-      >
-        <FileText aria-hidden="true" size={15} />
-        <span>{expanded ? "Collapse JSON" : "Expand JSON"}</span>
-      </button>
-      {expanded ? <pre className="work-report-json">{prettyJson(report.raw_redacted_json.value)}</pre> : null}
+      <div className="work-report-narrative-grid">
+        <article>
+          <span className="work-report-eyebrow">Resume point</span>
+          <strong>{report.work.title || "Captured work"}</strong>
+          <p>{report.work.objective || report.overview.objective || "Use the current Work record as the review handoff."}</p>
+        </article>
+        <article>
+          <span className="work-report-eyebrow">Evidence</span>
+          <strong>{report.evidence_summary.passing} passing checks</strong>
+          <p>
+            {report.commands.length} commands, {usefulArtifactCount(report)} artifacts, and {changeSignalCount(report)} change signals are
+            captured for review.
+          </p>
+        </article>
+        <article>
+          <span className="work-report-eyebrow">Review state</span>
+          <strong>{label(report.trust.verdict)}</strong>
+          <p>{report.trust.recommended_next_action}</p>
+        </article>
+        <article>
+          <span className="work-report-eyebrow">Privacy</span>
+          <strong>Share-safe by default</strong>
+          <p>{rawTranscriptStatus(report)}</p>
+        </article>
+      </div>
+      <details className="work-report-details">
+        <summary>{expanded ? "Hide projection payload" : "Show projection payload"}</summary>
+        <button
+          aria-expanded={expanded}
+          className="work-report-refresh work-report-inline-toggle"
+          type="button"
+          onClick={() => setExpanded((value) => !value)}
+        >
+          <FileText aria-hidden="true" size={15} />
+          <span>{expanded ? "Hide payload" : "Show payload"}</span>
+        </button>
+        {expanded ? <pre className="work-report-json">{prettyJson(report.raw_redacted_json.value)}</pre> : null}
+      </details>
     </section>
   );
 }
@@ -928,6 +1774,8 @@ function tabPanel(report: WorkspaceWorkInspector, selected: WorkInspectorTab) {
       return <OverviewTab report={report} />;
     case "transcript":
       return <TranscriptTab items={report.transcript} />;
+    case "subagents":
+      return <SubagentsTab subagents={report.subagents} />;
     case "commands":
       return <CommandsTab commands={report.commands} />;
     case "evidence":
@@ -955,14 +1803,20 @@ export function WorkInspectorView({
   onRefresh?: () => void;
 }) {
   const [selectedTab, setSelectedTab] = useState<WorkInspectorTab>("overview");
-  const selected = useMemo(() => tabs.find((tab) => tab.id === selectedTab) ?? tabs[0], [selectedTab]);
+  const tabs = useMemo(() => tabDefsForReport(report), [report]);
+  const selected = useMemo(() => tabs.find((tab) => tab.id === selectedTab) ?? tabs[0], [selectedTab, tabs]);
+  useEffect(() => {
+    if (!tabs.some((tab) => tab.id === selectedTab)) {
+      setSelectedTab("overview");
+    }
+  }, [selectedTab, tabs]);
   return (
     <main className="work-report-page">
       <WorkInspectorHeader report={report} onRefresh={onRefresh} />
       <InspectorMetricStrip report={report} />
       <div className="work-report-content">
         <section className="work-report-primary" aria-label="Work Inspector detail">
-          <InspectorTabs selected={selected.id} onSelect={setSelectedTab} />
+          <InspectorTabs tabs={tabs} selected={selected.id} onSelect={setSelectedTab} />
           <div
             aria-labelledby={`work-report-tab-${selected.id}`}
             className="work-report-tab-panel"
