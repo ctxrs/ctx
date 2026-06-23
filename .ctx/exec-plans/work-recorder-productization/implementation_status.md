@@ -142,10 +142,10 @@ Known remaining CI/release blockers:
   `release-linux-managed` with `ctx-runner-class=release-linux-x64-stage`,
   `ctx-mac-gui-shared-arm64`, `ctx-mac-gui-shared-x64`, and `windows-x64`.
 - The Windows lane uses `scripts/ci-windows.ps1` so smoke/release dry-runs do
-  not require Bash on `windows-x64`; it now bootstraps Rust GNU plus LLVM-MinGW
+  not require Bash on `windows-x64`; it now bootstraps Rust GNU plus w64devkit
   under the Buildkite/ctx tool cache so `rustc -vV` reports
   `host: x86_64-pc-windows-gnu` and the GNU linker has the expected CRT
-  libraries.
+  and GCC runtime libraries.
 - FreeBSD native release artifacts are blocked until a native
   `queue=freebsd-x64` Buildkite agent pool exists, or until a separate
   cross-build lane proves the FreeBSD linker/toolchain contract.
@@ -1144,38 +1144,12 @@ None accepted yet.
     `-lgcc` and `-lgcc_eh`, while LLVM-MinGW uses compiler-rt and does not ship
     those GCC compatibility archive names.
 - Repo-owned remediation:
-  - create empty `libgcc.a` and `libgcc_eh.a` compatibility archives with
-    LLVM-MinGW `ar`;
-  - add that compatibility directory to `LIBRARY_PATH` and `RUSTFLAGS` before
-    invoking Cargo.
+  - replace LLVM-MinGW with `w64devkit-x64-2.8.0.7z.exe`, a GCC-based MinGW
+    package that includes `libgcc` and `libgcc_eh`;
+  - wire Windows GNU `CC`, `CXX`, `AR`, and Cargo linker environment to
+    `gcc.exe`, `g++.exe`, and `ar.exe` from the extracted w64devkit `bin`
+    directory.
 - Remaining external evidence gap:
-  - commit and push the libgcc compatibility remediation;
-  - trigger and monitor a fresh public Buildkite run proving Windows smoke and
-    Windows release dry-run.
-
-## 2026-06-23 Buildkite Windows LLVM-MinGW Follow-Up
-
-- Build 49:
-  <https://buildkite.com/luca-king/ctx-public-release-verification/builds/49>
-- Branch/head:
-  `work-record` / `8e7803cd82210b8f5721cd00fabac5f46e43f714`
-- Outcome:
-  - PASS before Windows failure: pipeline contract, fmt, docs, cargo check,
-    clippy, cargo test, examples, and Bazel;
-  - FAIL: Windows smoke proved the retryable download hardening worked and
-    reached Cargo compilation, but linking build scripts through Zig failed
-    because Zig could not find the `msvcrt` dynamic system library for Rust's
-    `x86_64-pc-windows-gnu` target.
-- Repo-owned remediation:
-  - `scripts/ci-windows.ps1` now bootstraps the fixed
-    `llvm-mingw-20260616-msvcrt-x86_64.zip` toolchain from
-    `mstorsjo/llvm-mingw`;
-  - Windows GNU `CC`, `CXX`, `AR`, and Cargo linker environment now point at
-    `x86_64-w64-mingw32-gcc.exe`, `x86_64-w64-mingw32-g++.exe`, and
-    `x86_64-w64-mingw32-ar.exe` from that toolchain;
-  - the external Buildkite tool-cache, Rust GNU host, download hardening, and
-    product smoke/release commands are unchanged.
-- Remaining external evidence gap:
-  - commit and push the LLVM-MinGW remediation;
+  - commit and push the w64devkit remediation;
   - trigger and monitor a fresh public Buildkite run proving Windows smoke and
     Windows release dry-run.

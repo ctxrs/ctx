@@ -1736,20 +1736,6 @@ Future entries must include:
   - rerun focused local syntax/contract/diff checks;
   - trigger and monitor a fresh public Buildkite run for `origin/work-record`.
 
-## 2026-06-23 Build 49 Windows LLVM-MinGW Follow-Up
-
-- Remote Buildkite evidence:
-  - build 49 ran `8e7803cd82210b8f5721cd00fabac5f46e43f714`;
-  - Windows smoke bootstrapped Rust GNU and entered compilation;
-  - FAIL: the Zig linker wrapper could not find Windows GNU import libraries,
-    reporting missing `msvcrt` while linking proc-macro build scripts.
-- Remediation validation planned for the next head:
-  - replace Zig with LLVM-MinGW for the Windows GNU lane;
-  - keep the same Buildkite/ctx tool-cache root and bounded `Download-File`
-    helper;
-  - rerun focused local syntax/contract/docs/diff checks;
-  - trigger and monitor a fresh public Buildkite run for `origin/work-record`.
-
 ## 2026-06-23 Build 51 Windows LLVM-MinGW Libgcc Follow-Up
 
 - Remote Buildkite evidence:
@@ -1759,9 +1745,10 @@ Future entries must include:
     Rust GNU still requested `-lgcc` and `-lgcc_eh`, which LLVM-MinGW does not
     ship because it uses compiler-rt.
 - Remediation validation planned for the next head:
-  - create empty compatibility `libgcc.a` and `libgcc_eh.a` archives with
-    LLVM-MinGW `ar`;
-  - expose them through `LIBRARY_PATH` and `RUSTFLAGS`;
+  - replace LLVM-MinGW with `w64devkit-x64-2.8.0.7z.exe`, a GCC-based MinGW
+    package that includes `libgcc` and `libgcc_eh`;
+  - point Windows GNU `CC`, `CXX`, `AR`, and Cargo linker environment at
+    `gcc.exe`, `g++.exe`, and `ar.exe` from w64devkit;
   - rerun focused local syntax/contract/docs/diff checks;
   - trigger and monitor a fresh public Buildkite run for `origin/work-record`.
 

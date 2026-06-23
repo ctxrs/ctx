@@ -285,23 +285,21 @@ function Ensure-MinGW-GNU-Build-Environment {
   }
 
   $toolCache = Default-Windows-Tool-Cache-Root
-  $mingwVersion = if ($env:CTX_LLVM_MINGW_VERSION) { $env:CTX_LLVM_MINGW_VERSION } else { "20260616" }
-  $mingwRuntime = if ($env:CTX_LLVM_MINGW_RUNTIME) { $env:CTX_LLVM_MINGW_RUNTIME } else { "msvcrt" }
-  $mingwName = "llvm-mingw-$mingwVersion-$mingwRuntime-x86_64"
-  $mingwCache = Join-PathSafe $toolCache "llvm-mingw"
+  $mingwVersion = if ($env:CTX_W64DEVKIT_VERSION) { $env:CTX_W64DEVKIT_VERSION } else { "2.8.0" }
+  $mingwName = "w64devkit-x64-$mingwVersion"
+  $mingwCache = Join-PathSafe $toolCache "w64devkit"
   $mingwRoot = Join-PathSafe $mingwCache $mingwName
   $mingwBin = Join-PathSafe $mingwRoot "bin"
-  $mingwGcc = Join-PathSafe $mingwBin "x86_64-w64-mingw32-gcc.exe"
-  $mingwGxx = Join-PathSafe $mingwBin "x86_64-w64-mingw32-g++.exe"
-  $mingwAr = Join-PathSafe $mingwBin "x86_64-w64-mingw32-ar.exe"
-  $compatLib = Join-PathSafe $mingwCache "compat-libgcc"
-  $archive = Join-PathSafe $mingwCache "$mingwName.zip"
+  $mingwGcc = Join-PathSafe $mingwBin "gcc.exe"
+  $mingwGxx = Join-PathSafe $mingwBin "g++.exe"
+  $mingwAr = Join-PathSafe $mingwBin "ar.exe"
+  $archive = Join-PathSafe $mingwCache "$mingwName.7z.exe"
   New-Item -ItemType Directory -Force -Path $mingwCache | Out-Null
 
   if (-not (Test-Path $mingwGcc)) {
     if (-not (Test-Path $archive)) {
-      $url = "https://github.com/mstorsjo/llvm-mingw/releases/download/$mingwVersion/$mingwName.zip"
-      Write-Host "LLVM-MinGW not found; downloading $url"
+      $url = "https://github.com/skeeto/w64devkit/releases/download/v$mingwVersion/$mingwName.7z.exe"
+      Write-Host "w64devkit not found; downloading $url"
       Download-File -Uri $url -OutFile $archive
     }
     $extractDir = Join-PathSafe $mingwCache "extract-$mingwName"
@@ -309,37 +307,29 @@ function Ensure-MinGW-GNU-Build-Environment {
       Remove-Item -Recurse -Force $extractDir
     }
     New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
-    Expand-Archive -Path $archive -DestinationPath $extractDir -Force
-    $extractedRoot = Join-PathSafe $extractDir $mingwName
-    if (-not (Test-Path (Join-PathSafe $extractedRoot "bin\x86_64-w64-mingw32-gcc.exe"))) {
-      throw "LLVM-MinGW archive did not contain expected x86_64-w64-mingw32-gcc.exe at $extractedRoot"
+    & $archive -y "-o$extractDir"
+    if ($LASTEXITCODE -ne 0) {
+      throw "w64devkit extraction failed with exit code $LASTEXITCODE"
+    }
+    $extractedRoot = Get-ChildItem -Path $extractDir -Directory -Recurse |
+      Where-Object { Test-Path (Join-PathSafe $_.FullName "bin\gcc.exe") } |
+      Select-Object -First 1
+    if (-not $extractedRoot) {
+      throw "w64devkit archive did not contain expected bin\gcc.exe under $extractDir"
     }
     if (Test-Path $mingwRoot) {
       Remove-Item -Recurse -Force $mingwRoot
     }
-    Move-Item -Force $extractedRoot $mingwRoot
+    Move-Item -Force $extractedRoot.FullName $mingwRoot
     Remove-Item -Recurse -Force $extractDir
-  }
-
-  New-Item -ItemType Directory -Force -Path $compatLib | Out-Null
-  foreach ($lib in @("libgcc.a", "libgcc_eh.a")) {
-    $libPath = Join-PathSafe $compatLib $lib
-    if (-not (Test-Path $libPath)) {
-      & $mingwAr rcs $libPath
-      if ($LASTEXITCODE -ne 0) {
-        throw "failed to create LLVM-MinGW compatibility archive: $libPath"
-      }
-    }
   }
 
   $env:CC_x86_64_pc_windows_gnu = $mingwGcc
   $env:CXX_x86_64_pc_windows_gnu = $mingwGxx
   $env:AR_x86_64_pc_windows_gnu = $mingwAr
   $env:CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER = $mingwGcc
-  $env:LIBRARY_PATH = if ($env:LIBRARY_PATH) { "$compatLib;$env:LIBRARY_PATH" } else { $compatLib }
-  $env:RUSTFLAGS = if ($env:RUSTFLAGS) { "$env:RUSTFLAGS -L native=$compatLib" } else { "-L native=$compatLib" }
   $env:PATH = "$mingwBin;$env:PATH"
-  Write-Host "Windows GNU build tools: mingw=$mingwRoot linker=$mingwGcc"
+  Write-Host "Windows GNU build tools: w64devkit=$mingwRoot linker=$mingwGcc"
 }
 
 function Ensure-MSVC-Build-Environment {
