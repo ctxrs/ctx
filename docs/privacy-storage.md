@@ -26,6 +26,18 @@ The current implementation does not store passive provider transcripts,
 dashboard state, or hosted sync state. Local Git/jj/gh shim events are written
 to the JSONL capture inbox and imported only into local storage.
 
+## Capture inbox
+
+`ctx capture import` reads pending JSONL capture envelope files from the local
+Work Recorder inbox. These files may contain prompts, command output, paths, and
+tool metadata before import. Successful imports are renamed to `.done`; failed
+imports are renamed to `.failed` and get an `.error.json` sidecar.
+
+Treat the inbox and imported JSON archives as sensitive local data. This branch
+does not install provider hooks or shell hooks. Inbox files are created by local
+tooling, fixture workflows, or the opt-in Git/jj/gh wrapper shims that
+explicitly write them.
+
 ## What may be sensitive
 
 Work Records can contain:
@@ -60,6 +72,7 @@ Recommended habits:
 - record only evidence that helps explain the work
 - prefer redacted command output when full output contains secrets
 - review exported records before sharing
+- inspect pending or failed capture spool files before sharing logs
 - keep the data directory out of public repos
 - remove old local recorder data on shared machines when it is no longer needed
 

@@ -70,12 +70,20 @@ ctx dashboard export --output ./work-record-dashboard
 ```bash
 ctx evidence run cargo test
 ctx evidence run --record <record-id> cargo test -p checkout
+ctx evidence run --record <record-id> --timeout-seconds 30 --max-output-bytes 32768 cargo test -p checkout
 ```
 
 `evidence run` executes the command and stores its command string, exit code,
 safe stdout/stderr previews, start time, and duration in SQLite. Full
 stdout/stderr content is stored as local-only blob artifacts. Use
 `--record <record-id>` to attach the evidence to a specific record.
+
+- `--max-output-bytes` caps the stored stdout and stderr payloads per stream.
+- `--timeout-seconds` kills the command after the timeout and records exit code
+  `124`.
+
+If `--record` is omitted, ctx creates a small `evidence` Work Record for the
+captured command.
 
 ## Local shims
 
@@ -94,6 +102,42 @@ ctx shim uninstall --dir .ctx-shims
 The wrappers run the real command found later on `PATH`, preserve its exit code,
 and best-effort spool command metadata plus stdout/stderr into the local JSONL
 capture inbox. They do not install repository hooks or start a daemon.
+
+## Capture spool
+
+```bash
+ctx capture import
+ctx capture import --json
+```
+
+`capture import` imports pending JSONL capture envelope files from the local
+Work Recorder inbox. The inbox path is printed by `ctx status`.
+
+- pending files end in `.jsonl`;
+- successfully imported files move to `.jsonl.done`;
+- failed imports move to `.jsonl.failed` and get a `.error.json` sidecar;
+- `ctx status` prints spool counts;
+- `ctx validate` reports failed or still-processing spool files.
+
+This command imports ctx capture envelopes only. It does not scan existing
+agent transcript directories. Local Git/jj/gh wrapper shims are opt-in through
+`ctx shim`; provider-native hooks and shell hooks are not implemented in this
+branch.
+
+## VCS and pull request helpers
+
+```bash
+ctx vcs inspect
+ctx vcs inspect /path/to/repo --json
+ctx pr parse https://github.com/example/project/pull/42
+ctx pr parse https://gitlab.com/example/project/-/merge_requests/42 --json
+```
+
+- `vcs inspect` reports Git workspace metadata, redacted remotes, worktree
+  state, a stable repository fingerprint, and jj workspace metadata when `jj`
+  is installed.
+- `pr parse` parses supported GitHub pull request URLs and GitLab merge request
+  URLs into provider, owner, repo, number, normalized URL, and confidence.
 
 ## Pull requests
 

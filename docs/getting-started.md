@@ -107,6 +107,32 @@ ctx show <record-id>
 ctx search checkout
 ctx context checkout
 ctx report
+ctx dashboard export --output ./work-record-dashboard
+```
+
+`ctx context --json` and `ctx search --json` return structured packets with
+match reasons, citations, and attached evidence. If `CTX_DASHBOARD_URL` is set
+to a share-safe `http://` or `https://` URL, those JSON packets may include
+dashboard links. `ctx dashboard export` writes a static local HTML dashboard
+with no hosted sync, JavaScript, tracking, or remote assets.
+
+## Inspect repository and pull request metadata
+
+Use VCS inspection when a record body or review note needs repository context:
+
+```bash
+ctx vcs inspect --json
+```
+
+The command detects Git metadata, redacts remote URLs, reports worktree state,
+and includes a stable repository fingerprint. If `jj` is installed, it also
+reports the jj workspace root.
+
+Parse a supported pull request URL before linking it:
+
+```bash
+ctx pr parse https://github.com/example/project/pull/42 --json
+ctx link-pr <record-id> https://github.com/example/project/pull/42
 ```
 
 ## Export, import, and validate
@@ -120,6 +146,34 @@ ctx validate
 `ctx import` imports ctx JSON archives, including evidence output payloads
 exported by `ctx export`. It is not a provider-history importer for existing
 local Codex, Claude, Cursor, or other agent sessions.
+
+## Import local capture spool files
+
+The capture importer reads pending JSONL capture envelope files from:
+
+```text
+${CTX_DATA_ROOT:-~/.ctx}/work-record/inbox/
+```
+
+Run:
+
+```bash
+ctx capture import --json
+```
+
+Successful files move to `.done`; failed files move to `.failed` with an
+`.error.json` sidecar. `ctx status` reports pending, temporary, processing,
+done, and failed spool counts. `ctx validate` reports failed or stuck capture
+spool files.
+
+This is local integration plumbing, not a provider-history importer. The branch
+includes opt-in local Git/jj/gh wrapper shims, but does not install Codex,
+Claude, Cursor provider hooks or shell hooks that write the spool
+automatically.
+
+See [../examples/local-record-workflow.sh](../examples/local-record-workflow.sh)
+and [../examples/capture-spool-fixture.sh](../examples/capture-spool-fixture.sh)
+for small local dogfood flows.
 
 ## Remove local product data
 

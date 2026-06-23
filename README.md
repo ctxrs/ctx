@@ -8,8 +8,9 @@ to pull requests or team workflows.
 
 This branch is an early local Work Recorder. It is useful today for explicit
 records, command evidence, pull request links, search, reports, context output,
-JSON export/import, local Git/jj/gh command shims, and local storage validation.
-It is not yet the full passive recorder described in the product direction.
+JSON export/import, local dashboard export, local capture spool import, VCS/PR
+inspection, local Git/jj/gh command shims, and local storage validation. It is
+not yet the full passive recorder described in the product direction.
 
 ## Current Status
 
@@ -22,18 +23,21 @@ Implemented in this branch:
 - link one pull request URL to a record with `ctx link-pr`;
 - list, show, search, and render context for local records;
 - generate text or JSON reports from recent records and evidence;
+- export a static local HTML dashboard;
 - export/import ctx JSON archives;
+- import pending local capture spool JSONL files;
+- inspect Git/jj workspace metadata and parse GitHub/GitLab pull request URLs;
 - validate and remove the local Work Recorder data store.
 
 Not implemented yet:
 
-- a local dashboard;
-- passive provider hooks or shell hooks;
+- passive provider hooks or shell hooks beyond the local Git/jj/gh wrapper
+  shims;
 - importing existing Codex, Claude, Cursor, or other local agent history;
 - posting or updating pull request comments;
 - hosted sync, hosted sharing, accounts, or team policy;
 - public installer URLs for this branch;
-- dashboard and publish commands such as `ctx dashboard` or `ctx publish`.
+- hosted publish commands such as `ctx publish`.
 
 The implemented CLI now uses root-level Work Recorder commands. The older
 `ctx workspace ...` and `ctx work ...` forms remain as hidden compatibility
@@ -106,6 +110,14 @@ ctx show <record-id>
 ctx search checkout
 ctx context checkout
 ctx report
+ctx dashboard export --output ./work-record-dashboard
+```
+
+Inspect local repository metadata or parse a pull request URL:
+
+```bash
+ctx vcs inspect --json
+ctx pr parse https://github.com/example/project/pull/42 --json
 ```
 
 Move records between machines with ctx JSON archives:
@@ -117,6 +129,17 @@ ctx import --input work-records.json
 
 `ctx import` imports ctx archive JSON only. It does not import existing
 local agent history from provider transcript directories.
+
+Import pending local capture spool files:
+
+```bash
+ctx capture import --json
+```
+
+The capture importer reads JSONL envelope files from the local Work Recorder
+inbox. The optional Git/jj/gh wrapper shims can write these envelopes for local
+command-line activity. Provider-native transcript importers and shell hooks are
+not implemented in this branch.
 
 ## Work Record Model
 
@@ -155,10 +178,14 @@ ctx show <record-id>
 ctx search <query>
 ctx context [query]
 ctx report
+ctx dashboard export --output <dir>
 ctx evidence run [--record <record-id>] <command> [args...]
 ctx shim install --dir <dir>
 ctx shim env --dir <dir>
 ctx shim uninstall --dir <dir>
+ctx capture import [--json]
+ctx vcs inspect [path] [--json]
+ctx pr parse <pull-request-url> [--json]
 ctx link-pr <record-id> <pull-request-url>
 ctx export [--output work-records.json]
 ctx import [--input work-records.json] [--overwrite]
@@ -168,6 +195,18 @@ ctx validate
 See [docs/cli-reference.md](docs/cli-reference.md) for the detailed current
 command reference.
 
+Small local dogfood workflows live in [examples/](examples/):
+
+- [examples/local-record-workflow.sh](examples/local-record-workflow.sh) creates
+  a temporary data root, records work, captures command evidence, searches,
+  renders context, exports, and validates storage.
+- [examples/capture-spool-fixture.sh](examples/capture-spool-fixture.sh) writes
+  a fixture capture envelope to the local spool and imports it.
+
+The examples default to temporary data roots under `target/tmp`. Set
+`CTX_BIN` to use an already-built `ctx` binary, `CTX_EXAMPLE_DATA_ROOT` to reuse
+a specific example data root, or `CTX_EXAMPLE_TMPDIR` to move temporary roots.
+
 ## Storage
 
 By default, ctx uses machine-local storage under:
@@ -175,6 +214,8 @@ By default, ctx uses machine-local storage under:
 ```text
 ~/.ctx/work-record/
   work.sqlite
+  blobs/
+  inbox/
 ```
 
 Set `CTX_DATA_ROOT` to use a different root. The current implementation stores
