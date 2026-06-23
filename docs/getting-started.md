@@ -135,7 +135,7 @@ The current candidate keeps provider claims narrow:
 
 - Codex has a `supported-import` path through explicit prompt-history import.
 - Claude Code is `fixture-only`.
-- Pi is `fixture-only`.
+- Pi has a `supported-import` path through explicit session JSONL import.
 
 Useful commands:
 
@@ -146,9 +146,11 @@ ctx capture import-provider --provider codex --input tests/fixtures/provider/cod
 ```
 
 The local-provider scan imports Codex history when the file exists. It reports
-Claude Code and Pi directories as unsupported instead of inventing native
-transcript support. See [provider-support.md](provider-support.md) for the
-taxonomy and current matrix.
+bounded Pi session files when they exist. It reports Claude Code, OpenCode,
+Antigravity, Gemini, Cursor, and other unproven provider surfaces as
+unsupported or fixture-only blockers instead of inventing native transcript
+support. See [provider-support.md](provider-support.md) for the taxonomy and
+current matrix.
 
 ## Link review state
 

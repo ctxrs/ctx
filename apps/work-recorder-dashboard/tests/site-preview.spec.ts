@@ -3,11 +3,11 @@ import path from "node:path";
 
 const artifactDir = path.resolve(process.cwd(), "../../target/ctx-artifacts/dashboard-react");
 
-test("desktop site preview positions Work Recorder honestly", async ({ page }, testInfo) => {
+test("desktop site preview positions ctx work records honestly", async ({ page }, testInfo) => {
   await page.goto("/site-preview.html");
-  await expect(page.getByRole("heading", { name: "ctx Work Recorder" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "ctx records agent work" })).toBeVisible();
   await expect(page.getByText("0.1.0 candidate", { exact: true })).toBeVisible();
-  await expect(page.getByText("This preview covers the public Work Recorder CLI only.")).toBeVisible();
+  await expect(page.getByText("This preview covers the public ctx CLI only.")).toBeVisible();
   await page.getByRole("tab", { name: "Providers" }).click();
   await expect(page.getByRole("heading", { name: "Current 0.1.0 candidate matrix" })).toBeVisible();
   await expect(page.getByText("supported-import").first()).toBeVisible();

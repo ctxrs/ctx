@@ -15,6 +15,8 @@ authenticated `gh` CLI is in scope.
 - Preserve command behavior when optional capture shims are enabled.
 - Keep archives, dashboards, reports, and pull request packets reviewable before
   they leave the machine.
+- Keep redaction framed as heuristic defense for default review output, not as
+  a guarantee that arbitrary raw transcripts or object payloads are safe.
 - Label future inferred relationships as inferred rather than authoritative.
 
 ## Non-Goals
@@ -22,6 +24,8 @@ authenticated `gh` CLI is in scope.
 - Prevent local administrators or malware on the same machine from reading the
   data root.
 - Make arbitrary command output safe to publish without review.
+- Make arbitrary provider transcripts safe to import, sync, or publish without
+  provider-specific tests and review.
 - Guarantee that third-party tools run by the user do not use the network.
 - Enforce centralized team retention, policy, or DLP controls.
 - Import full historical provider transcripts in this branch. The only
@@ -112,11 +116,15 @@ Follow-ups:
 
 ### Provider Transcript Import
 
-Full provider transcript import for Codex, Claude, Cursor, Pi, and other local
-agent histories is not implemented. This branch includes normalized provider
-fixture import for Codex, Claude, and Pi, plus explicit Codex prompt-history
-JSONL import when the user provides an input path. The Codex prompt-history path
-imports prompt rows only and records `fidelity=summary_only`.
+Full provider transcript import for every local agent history is not
+implemented. This branch includes normalized provider fixture import for Codex,
+Claude, Pi, OpenCode, Antigravity, Gemini, and Cursor; explicit Codex
+prompt-history JSONL import when the user provides an input path; and explicit
+Pi session JSONL import. The Codex prompt-history path imports prompt rows only
+and records `fidelity=summary_only`. The Pi session path records
+`fidelity=imported`, preserves message entry ids and parent ids in metadata,
+and does not convert those parent ids into ctx subagent edges or expand raw
+image blocks into artifacts.
 
 Future full-fidelity importers would cross from provider-owned storage into the
 ctx data root.
@@ -133,12 +141,19 @@ Required design gates before implementation:
 - explicit opt-in source selection;
 - dry-run inventory with counts and path roots;
 - provider-specific redaction tests;
+- provider-specific malformed-input and replay/idempotency tests;
 - clear provenance fields for imported records;
+- documented raw-retention behavior for transcript text, command output,
+  images, attachments, and local object payloads;
+- threat-model updates for each new provider source format or hook boundary;
 - no default hosted upload of imported provider data.
 
 The Codex prompt-history importer satisfies only the explicit source-selection
 and provenance gates for prompt logs. It does not satisfy full transcript,
 assistant response, tool-call, command-output, or child-session capture gates.
+The Pi session importer satisfies explicit source-selection and provenance
+gates for bounded session JSONL, but not passive capture or full artifact
+extraction gates.
 
 ### Capture Spool
 
@@ -160,12 +175,17 @@ Controls:
 - stable ids are derived from envelope dedupe keys when ids are omitted;
 - `ctx status`, `ctx doctor`, `ctx validate`, and `ctx repair` expose local
   spool health.
+- default review output redacts known secret-like values, but pending, failed,
+  and malformed spool files are still raw private local data.
 
 Follow-ups:
 
 - harden JSON schema validation and size limits;
 - add corpus-backed redaction tests before broadening capture writers;
 - document atomic write requirements for future spool writers.
+- coordinate provider/release CI so new hook writers prove pass-through,
+  failure fallback, malformed-entry handling, and redaction before the public
+  provider matrix is upgraded.
 
 ### Archive Import and Export
 
@@ -210,6 +230,9 @@ Controls:
 
 - dashboard export writes local files only;
 - docs say to review outputs before sharing;
+- redaction coverage is corpus-backed for current shareable surfaces, but the
+  corpus is heuristic and not a proof that arbitrary future transcript fields
+  are safe;
 - dashboard dogfood manifests use artifact-relative paths and omit raw local
   data-root, repository, home, and browser scratch paths;
 - `CTX_DASHBOARD_URL` is only a link base for share-safe URLs in JSON packets,

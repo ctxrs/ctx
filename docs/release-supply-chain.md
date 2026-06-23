@@ -63,6 +63,12 @@ provider workers add real deterministic commands and redaction assertions.
 No provider may be documented as `supported-live` unless its support-matrix row
 has a real live E2E artifact from the gated lane.
 
+Provider live or import lanes also need security evidence before release docs
+can upgrade public fidelity claims: redaction corpus coverage for newly exposed
+fields, malformed-input handling, raw-retention notes, and matching
+threat-model updates. If those artifacts are absent, release workers should
+leave the provider lane blocked and keep public docs at the narrower status.
+
 ## R2 Staging Layout
 
 The release-candidate metadata lane writes:

@@ -17,6 +17,25 @@ Reference implementations in this branch:
 
 - `work_record_capture::ProviderFixtureJsonlAdapter`
 - `work_record_capture::CodexHistoryJsonlAdapter`
+- `work_record_capture::PiSessionJsonlAdapter`
+
+## Security gates for new provider paths
+
+Provider transcript import and hook capture cross a privacy boundary from
+provider-owned storage into the ctx data root. Before public docs upgrade a
+provider claim, the provider worker must add:
+
+- provider-specific redaction corpus cases for new sensitive fields;
+- malformed-input and replay/idempotency tests for the source format;
+- raw-retention notes for transcripts, command output, images, attachments,
+  and local object payloads;
+- threat-model updates for the new import, hook, or wrapper boundary;
+- release/CI evidence when the claim is `supported-live` or otherwise depends
+  on real provider behavior.
+
+Until those artifacts exist, keep the provider at `fixture-only`,
+`detected-unsupported`, or `blocked`, or describe an explicit narrow import
+path with its missing fidelity dimensions.
 
 ## Required envelope fields
 
@@ -48,3 +67,5 @@ Reference implementations in this branch:
   branch does not yet materialize provider objects into the artifact table.
 - New providers that need a first-class stored provider id may still need the
   capture/store enums extended in their worker branch.
+- Shared sanitization is heuristic and should not be treated as a
+  general-purpose sanitizer for arbitrary provider transcript fields.

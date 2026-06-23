@@ -72,7 +72,7 @@ Provider support in this branch is intentionally conservative:
 
 - Codex has a `supported-import` path through explicit history import.
 - Claude Code is `fixture-only`.
-- Pi is `fixture-only`.
+- Pi has a `supported-import` path through explicit session JSONL import.
 
 If `ctx capture import-local-providers --json` reports a provider as
 `detected-unsupported`, that is not a bug in the docs. It means the branch
@@ -84,6 +84,7 @@ Useful commands:
 ```bash
 ctx capture import-local-providers --json
 ctx capture import-codex-history --input ~/.codex/history.jsonl --json
+ctx capture import-pi-session --input ~/.pi/agent/sessions/<session>.jsonl --json
 ctx capture import-provider --provider codex --input tests/fixtures/provider/codex.jsonl --json
 ```
 

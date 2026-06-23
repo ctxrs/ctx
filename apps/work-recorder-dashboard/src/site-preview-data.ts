@@ -47,7 +47,7 @@ export const heroHighlights: Highlight[] = [
   },
   {
     title: "Honest provider language",
-    body: "Codex has a supported-import path. Claude Code and Pi remain fixture-only in this preview until native history or hook proof lands."
+    body: "Codex and Pi have supported-import paths. Claude Code remains fixture-only in this preview until native history or hook proof lands."
   },
   {
     title: "Not the ADE",
@@ -104,13 +104,13 @@ export const setupFlow: FlowStep[] = [
     step: "02",
     title: "Create the local ctx store",
     body: "Run setup once to create the flat ~/.ctx layout, install ctx-owned Git/jj/gh shims, import supported history, and open the dashboard when the session is interactive.",
-    command: "ctx setup\nctx status\nctx setup --no-open\nctx setup --no-shell-update\nctx setup --service"
+    command: "ctx setup\nctx status\nctx setup --no-open\nctx setup --no-import\nctx setup --no-shell-update\nctx setup --service"
   },
   {
     step: "03",
     title: "Bring in work the recorder can prove",
-    body: "Import pending shim spool files, Codex prompt history, or normalized provider fixtures. Do not claim native capture where the provider format or hook is still unproven.",
-    command: "ctx capture import\nctx capture import-local-providers --json\nctx capture import-provider --provider codex --input tests/fixtures/provider/codex.jsonl --json"
+    body: "Import pending shim spool files, Codex prompt history, explicit Pi sessions, or normalized provider fixtures. Do not claim native capture where the provider format or hook is still unproven.",
+    command: "ctx capture import\nctx capture import-local-providers --json\nctx capture import-codex-history --input ~/.codex/history.jsonl --json\nctx capture import-pi-session --input ~/.pi/agent/sessions/<session>.jsonl --json\nctx capture import-provider --provider codex --input tests/fixtures/provider/codex.jsonl --json"
   },
   {
     step: "04",
@@ -170,10 +170,10 @@ export const providerMatrix: ProviderEntry[] = [
   },
   {
     provider: "Pi",
-    status: "fixture-only",
-    path: "Normalized provider fixture JSONL",
-    fidelity: "imported fixture data",
-    notes: "Fixture imports are proven, but native transcript or history import is not yet claimed publicly."
+    status: "supported-import",
+    path: "Explicit Pi session JSONL import or import-local-providers",
+    fidelity: "imported session data",
+    notes: "Imports bounded session JSONL. Parent ids remain metadata, raw images are not artifacts, and live passive capture is not implemented."
   }
 ];
 
@@ -185,7 +185,7 @@ export const providerNotes: string[] = [
 export const privacyChecklist: ChecklistEntry[] = [
   {
     label: "Storage",
-    value: "SQLite for structured metadata plus local-only objects for full stdout and stderr payloads."
+    value: "Flat ~/.ctx data root with work.sqlite, objects/, spool/, shims/, config.toml, and logs/."
   },
   {
     label: "Default review posture",

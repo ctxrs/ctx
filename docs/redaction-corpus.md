@@ -5,6 +5,11 @@ share-safe output tests. It does not claim a general-purpose redaction engine
 for every raw command, archive, internal database, report, or dashboard path.
 The fixture lives at `tests/fixtures/redaction/redaction-corpus.jsonl`.
 
+The corpus is heuristic evidence. Passing the corpus means the current
+shareable surfaces handle the listed synthetic patterns; it does not prove that
+arbitrary provider transcripts, binary attachments, local object payloads,
+archives, or future hosted sync packets are safe to publish.
+
 ## Purpose
 
 Use the corpus to keep security review concrete:
@@ -55,3 +60,10 @@ markdown. Before adding provider transcript import, broader capture hooks, more
 publishing targets, or hosted sync, add automated tests that prove each new
 shareable output surface is covered by the corpus. Raw archives and internal
 storage remain private data and are not treated as share-safe outputs.
+
+Provider workers should extend the corpus before upgrading fidelity claims when
+the provider introduces new sensitive shapes such as tool-call payloads,
+assistant messages, image metadata, command transcripts, model usage records,
+workspace paths, credentials in provider config, or provider-specific session
+ids. Release workers should keep provider live lanes blocked until those tests
+and the matching threat-model updates exist.

@@ -19,7 +19,28 @@ Default review surfaces are share-safe by design:
 private review workflows where sharing raw command output is acceptable. That
 flag should not be treated as the default review path.
 
+Redaction is heuristic. It covers known secret-like patterns, credential URLs,
+and local paths used by the current tests, but it is not a general-purpose
+sanitizer for arbitrary terminal output, provider transcripts, archives, local
+SQLite rows, or object payloads. Treat all raw records, raw archives,
+`objects/`, and `spool/` entries as private even when the default review views
+look clean.
+
 ## Local data
+
+By default, ctx stores local data directly under `~/.ctx`, or under the root
+named by `CTX_DATA_ROOT`/`--data-root`. That root is the ctx root itself; ctx
+does not append an extra product directory. The canonical local layout is:
+
+```text
+~/.ctx/
+  work.sqlite
+  objects/
+  spool/
+  shims/
+  config.toml
+  logs/
+```
 
 The recorder stores structured metadata in SQLite:
 
@@ -34,11 +55,13 @@ The recorder stores structured metadata in SQLite:
 - provider import summary data for the sources this branch can prove
 
 The current implementation stores records and command evidence metadata in the
-local SQLite database. Full command stdout and stderr are stored as
-content-addressed local-only object files under the ctx data root,
-with SQLite rows pointing at those artifacts. Export and import use JSON
-archives that include the object payloads needed to preserve recorded evidence on
-another machine.
+local SQLite database at `work.sqlite`. Full command stdout and stderr are
+stored as content-addressed local-only object files under `objects/`, with
+SQLite rows pointing at those artifacts. Export and import use JSON archives
+that include the object payloads needed to preserve recorded evidence on
+another machine. Shims live under `shims/`, capture envelopes queue in
+`spool/`, configuration lives in `config.toml`, and diagnostics belong in
+`logs/`.
 
 The current implementation does not store passive provider transcripts,
 dashboard state, or hosted sync state. Explicit provider fixture imports and
@@ -50,6 +73,15 @@ Hosted accounts, hosted sync, team policy, hosted dashboards, organization
 analytics, hosted retention, and hosted publish workflows are not in launch
 scope for this branch. See [hosted-sync-roadmap.md](hosted-sync-roadmap.md) for
 the future direction without turning it into a shipped claim.
+
+`ctx setup` does not install a persistent service by default. Local recording
+works through commands and shims without a daemon; `ctx setup --service` and
+`ctx service install` are explicit opt-ins.
+
+Provider transcript import or hook expansion must be treated as a privacy
+boundary change. Before public docs claim a broader provider path, the matching
+worker needs provider-specific redaction tests, malformed-input tests, raw
+retention notes, and threat-model updates for the new source format.
 
 ## Capture spool
 
@@ -63,6 +95,11 @@ Treat the spool and imported JSON archives as sensitive local data. This branch
 does not install provider-native hooks. Spool files are created by local
 tooling, fixture workflows, or the Git/jj/gh wrapper shims installed by
 `ctx setup` after their directory is active on `PATH`.
+
+Do not treat pending or failed spool entries as share-safe just because the
+eventual review output is redacted. A failed entry can still contain raw command
+output, paths, prompts, provider metadata, or partial JSONL that was never
+normalized.
 
 ## What may be sensitive
 

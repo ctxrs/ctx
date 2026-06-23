@@ -11,6 +11,14 @@ provider-native hooks for Codex, Claude, Pi, OpenCode, Antigravity, Gemini, or
 Cursor, or long-tail providers. The first shipped passive capture surface is
 the local Git/jj/gh wrapper shim path installed by `ctx setup`.
 
+Provider status is also a security and privacy claim. Do not upgrade a provider
+from `fixture-only`, `detected-unsupported`, or `blocked` until the provider
+worker lands code/tests for the exact fidelity being claimed and release CI can
+produce the corresponding evidence. Unsupported fields must stay explicit:
+assistant messages, tool calls, tool output, command output, files, artifacts,
+costs, token usage, parent/child edges, and passive live capture are all
+separate fidelity dimensions.
+
 Authoritative machine-readable metadata lives in
 `docs/provider-support-matrix.json`. The shared provider adapter and normalized
 envelope contract is described in `docs/provider-adapter-api.md` and backed by
@@ -104,6 +112,12 @@ whether the historical rows become aliases or remain separate contracts.
 The command is intentionally conservative. It imports only the sources this
 branch can prove safely and refuses to upgrade unsupported providers into
 invented capture claims.
+
+No provider may be documented as broader than `fixture-only` or
+`supported-import` unless the new source format or hook path has redaction
+corpus coverage, malformed-input tests, raw-retention notes, and threat-model
+coverage. Coordinate those changes with the provider and release workers rather
+than fixing a docs mismatch by upgrading the public claim.
 
 ## Broader provider work not yet claimed here
 

@@ -56,6 +56,7 @@ doc_search_inverse() {
 
 public_docs=(
   README.md
+  SECURITY.md
   docs
   apps/work-recorder-dashboard/README.md
   apps/work-recorder-dashboard/src/site-preview-data.ts
@@ -65,6 +66,7 @@ public_docs=(
 
 public_name_docs=(
   README.md
+  SECURITY.md
   docs/getting-started.md
   docs/cli-reference.md
   docs/work-model.md
@@ -88,6 +90,12 @@ doc_search "ctx dashboard export" README.md docs examples >/dev/null
 doc_search "ctx publish pr-comment" README.md docs >/dev/null
 doc_search "Hosted Option A" SECURITY.md README.md docs >/dev/null
 doc_search "redaction-corpus.jsonl" docs tests >/dev/null
+doc_search "not a general-purpose sanitizer|not claim a general-purpose redaction engine" SECURITY.md docs/redaction-corpus.md docs/privacy-storage.md docs/threat-model.md docs/provider-adapter-api.md >/dev/null
+doc_search "Redaction is heuristic|heuristic redaction|heuristic evidence" SECURITY.md docs/redaction-corpus.md docs/privacy-storage.md docs/threat-model.md docs/provider-adapter-api.md >/dev/null
+doc_search "provider-specific redaction tests|redaction corpus coverage" SECURITY.md docs/threat-model.md docs/provider-support.md docs/provider-adapter-api.md docs/release-supply-chain.md >/dev/null
+doc_search "malformed-input" SECURITY.md docs/threat-model.md docs/provider-adapter-api.md docs/release-supply-chain.md >/dev/null
+doc_search "raw-retention|raw retention" docs/threat-model.md docs/provider-support.md docs/provider-adapter-api.md docs/release-supply-chain.md >/dev/null
+doc_search "explicit opt-in|opt-in" SECURITY.md docs/privacy-storage.md docs/threat-model.md >/dev/null
 doc_search "cargo audit|cargo deny" docs/dependency-license-audit.md >/dev/null
 doc_search "does not install|Not implemented yet|not yet" README.md docs >/dev/null
 doc_search "0.1.0" README.md docs >/dev/null
