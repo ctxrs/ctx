@@ -4,6 +4,11 @@
 //! GitLab PR/MR parsing is recognized through `work-record-vcs`, but publishing
 //! returns [`PublishError::GitlabUnsupported`] until a GitLab client is designed.
 
+use std::{
+    ffi::OsString,
+    process::{Command, Stdio},
+};
+
 use work_record_core::{redact_share_safe_markers, Evidence, PullRequestProvider, WorkRecord};
 use work_record_vcs::{parse_pull_request_url, VcsError};
 
@@ -291,6 +296,10 @@ pub enum GitHubClientError {
     NotFound,
     #[error("rate limited")]
     RateLimited,
+    #[error("PR comment body must contain exactly one ctx marker-bounded section")]
+    InvalidMarkedComment,
+    #[error("invalid GitHub client configuration: {0}")]
+    Config(String),
     #[error("transport error: {0}")]
     Transport(String),
     #[error("GitHub API error {status}: {message}")]
@@ -304,6 +313,8 @@ impl From<GitHubClientError> for PublishError {
             GitHubClientError::Forbidden => PublishError::PermissionDenied,
             GitHubClientError::NotFound => PublishError::PullRequestNotFound,
             GitHubClientError::RateLimited => PublishError::RateLimited,
+            GitHubClientError::InvalidMarkedComment => PublishError::InvalidMarkedComment,
+            GitHubClientError::Config(message) => PublishError::Client(message),
             GitHubClientError::Transport(message) => PublishError::Client(message),
             GitHubClientError::Api { status, message } => match status {
                 401 => PublishError::AuthRequired,
@@ -313,6 +324,359 @@ impl From<GitHubClientError> for PublishError {
                 _ => PublishError::Client(format!("GitHub API error {status}: {message}")),
             },
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GhCommandOutput {
+    pub stdout: String,
+    pub stderr: String,
+}
+
+pub trait GhCommandRunner {
+    fn run_gh(
+        &mut self,
+        args: &[OsString],
+    ) -> std::result::Result<GhCommandOutput, GitHubClientError>;
+}
+
+#[derive(Debug, Clone)]
+pub struct StdGhCommandRunner {
+    program: OsString,
+}
+
+impl Default for StdGhCommandRunner {
+    fn default() -> Self {
+        Self {
+            program: OsString::from("gh"),
+        }
+    }
+}
+
+impl StdGhCommandRunner {
+    pub fn new(program: impl Into<OsString>) -> Self {
+        Self {
+            program: program.into(),
+        }
+    }
+}
+
+impl GhCommandRunner for StdGhCommandRunner {
+    fn run_gh(
+        &mut self,
+        args: &[OsString],
+    ) -> std::result::Result<GhCommandOutput, GitHubClientError> {
+        let output = Command::new(&self.program)
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|err| {
+                GitHubClientError::Transport(format!(
+                    "failed to execute {}: {err}",
+                    self.program.to_string_lossy()
+                ))
+            })?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        if output.status.success() {
+            Ok(GhCommandOutput { stdout, stderr })
+        } else {
+            Err(map_gh_stderr_to_error(
+                output.status.code().unwrap_or_default(),
+                &stderr,
+            ))
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GhCliClientOptions {
+    pub expected_author: Option<String>,
+}
+
+impl Default for GhCliClientOptions {
+    fn default() -> Self {
+        Self {
+            expected_author: None,
+        }
+    }
+}
+
+pub struct GhCliGitHubPrCommentClient<R = StdGhCommandRunner> {
+    runner: R,
+    expected_author: Option<String>,
+    authenticated_author: Option<String>,
+}
+
+impl GhCliGitHubPrCommentClient<StdGhCommandRunner> {
+    pub fn new() -> Self {
+        Self::with_runner(StdGhCommandRunner::default())
+    }
+}
+
+impl Default for GhCliGitHubPrCommentClient<StdGhCommandRunner> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<R> GhCliGitHubPrCommentClient<R> {
+    pub fn with_runner(runner: R) -> Self {
+        Self {
+            runner,
+            expected_author: None,
+            authenticated_author: None,
+        }
+    }
+
+    pub fn with_runner_and_options(
+        runner: R,
+        options: GhCliClientOptions,
+    ) -> std::result::Result<Self, GitHubClientError> {
+        let expected_author = options
+            .expected_author
+            .map(normalize_expected_author)
+            .transpose()?;
+        Ok(Self {
+            runner,
+            expected_author,
+            authenticated_author: None,
+        })
+    }
+
+    pub fn into_runner(self) -> R {
+        self.runner
+    }
+}
+
+impl<R: GhCommandRunner> GitHubPrCommentClient for GhCliGitHubPrCommentClient<R> {
+    fn list_comments(
+        &mut self,
+        target: &PullRequestTarget,
+    ) -> std::result::Result<Vec<PullRequestComment>, GitHubClientError> {
+        let author = self.ctx_author_login()?;
+        let endpoint = format!(
+            "/repos/{}/{}/issues/{}/comments",
+            target.owner, target.repo, target.number
+        );
+        let output = self.runner.run_gh(&[
+            OsString::from("api"),
+            OsString::from("--paginate"),
+            OsString::from(endpoint),
+            OsString::from("--jq"),
+            OsString::from(COMMENT_JQ_TSV),
+        ])?;
+        let comments = parse_gh_comment_tsv_list(&output.stdout)?;
+
+        comments
+            .into_iter()
+            .map(|comment| map_api_comment(comment, &author))
+            .collect()
+    }
+
+    fn create_comment(
+        &mut self,
+        target: &PullRequestTarget,
+        body: &str,
+    ) -> std::result::Result<PullRequestComment, GitHubClientError> {
+        validate_publish_body(body)?;
+        let author = self.ctx_author_login()?;
+        let endpoint = format!(
+            "/repos/{}/{}/issues/{}/comments",
+            target.owner, target.repo, target.number
+        );
+        let output = self.runner.run_gh(&[
+            OsString::from("api"),
+            OsString::from("--method"),
+            OsString::from("POST"),
+            OsString::from(endpoint),
+            OsString::from("--field"),
+            OsString::from(format!("body={body}")),
+            OsString::from("--jq"),
+            OsString::from(COMMENT_JQ_TSV_SINGLE),
+        ])?;
+        map_api_comment(
+            parse_gh_comment_tsv_line(output.stdout.trim_end())?,
+            &author,
+        )
+    }
+
+    fn update_comment(
+        &mut self,
+        target: &PullRequestTarget,
+        comment_id: u64,
+        body: &str,
+    ) -> std::result::Result<PullRequestComment, GitHubClientError> {
+        validate_publish_body(body)?;
+        let author = self.ctx_author_login()?;
+        let endpoint = format!(
+            "/repos/{}/{}/issues/comments/{comment_id}",
+            target.owner, target.repo
+        );
+        let output = self.runner.run_gh(&[
+            OsString::from("api"),
+            OsString::from("--method"),
+            OsString::from("PATCH"),
+            OsString::from(endpoint),
+            OsString::from("--field"),
+            OsString::from(format!("body={body}")),
+            OsString::from("--jq"),
+            OsString::from(COMMENT_JQ_TSV_SINGLE),
+        ])?;
+        map_api_comment(
+            parse_gh_comment_tsv_line(output.stdout.trim_end())?,
+            &author,
+        )
+    }
+}
+
+impl<R: GhCommandRunner> GhCliGitHubPrCommentClient<R> {
+    fn ctx_author_login(&mut self) -> std::result::Result<String, GitHubClientError> {
+        if let Some(author) = &self.expected_author {
+            return Ok(author.clone());
+        }
+        if let Some(author) = &self.authenticated_author {
+            return Ok(author.clone());
+        }
+
+        let output = self.runner.run_gh(&[
+            OsString::from("api"),
+            OsString::from("user"),
+            OsString::from("--jq"),
+            OsString::from(".login"),
+        ])?;
+        let author = normalize_expected_author(output.stdout.trim().to_owned())?;
+        self.authenticated_author = Some(author.clone());
+        Ok(author)
+    }
+}
+
+const COMMENT_JQ_TSV: &str = r#".[] | [.id, (.body // ""), (.user.login // "")] | @tsv"#;
+const COMMENT_JQ_TSV_SINGLE: &str = r#"[.id, (.body // ""), (.user.login // "")] | @tsv"#;
+
+#[derive(Debug)]
+struct ApiComment {
+    id: u64,
+    body: String,
+    login: String,
+}
+
+fn normalize_expected_author(author: String) -> std::result::Result<String, GitHubClientError> {
+    let author = author.trim().trim_start_matches('@').to_owned();
+    if author.is_empty() || author.chars().any(char::is_whitespace) {
+        return Err(GitHubClientError::Config(
+            "expected GitHub author must be a non-empty login".into(),
+        ));
+    }
+    Ok(author)
+}
+
+fn validate_publish_body(body: &str) -> std::result::Result<(), GitHubClientError> {
+    if has_single_comment_marker_section(body) {
+        Ok(())
+    } else {
+        Err(GitHubClientError::InvalidMarkedComment)
+    }
+}
+
+fn parse_gh_comment_tsv_list(
+    stdout: &str,
+) -> std::result::Result<Vec<ApiComment>, GitHubClientError> {
+    stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(parse_gh_comment_tsv_line)
+        .collect()
+}
+
+fn parse_gh_comment_tsv_line(line: &str) -> std::result::Result<ApiComment, GitHubClientError> {
+    let fields = line.split('\t').collect::<Vec<_>>();
+    if fields.len() != 3 {
+        return Err(GitHubClientError::Transport(
+            "failed to parse gh API response: expected id/body/login TSV fields".into(),
+        ));
+    }
+    let id = fields[0].parse::<u64>().map_err(|err| {
+        GitHubClientError::Transport(format!("failed to parse gh API comment id: {err}"))
+    })?;
+    Ok(ApiComment {
+        id,
+        body: unescape_jq_tsv_field(fields[1])?,
+        login: unescape_jq_tsv_field(fields[2])?,
+    })
+}
+
+fn unescape_jq_tsv_field(value: &str) -> std::result::Result<String, GitHubClientError> {
+    let mut out = String::new();
+    let mut chars = value.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+
+        match chars.next() {
+            Some('t') => out.push('\t'),
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('\\') => out.push('\\'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => {
+                return Err(GitHubClientError::Transport(
+                    "failed to parse gh API response: dangling TSV escape".into(),
+                ));
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn map_api_comment(
+    comment: ApiComment,
+    ctx_author: &str,
+) -> std::result::Result<PullRequestComment, GitHubClientError> {
+    let body = comment.body;
+    let owned_by_ctx = comment.login.eq_ignore_ascii_case(ctx_author);
+    if owned_by_ctx
+        && (body.contains(COMMENT_MARKER_START) || body.contains(COMMENT_MARKER_END))
+        && !has_single_comment_marker_section(&body)
+    {
+        return Err(GitHubClientError::InvalidMarkedComment);
+    }
+    Ok(PullRequestComment {
+        id: comment.id,
+        body,
+        owned_by_ctx,
+    })
+}
+
+fn map_gh_stderr_to_error(_status_code: i32, stderr: &str) -> GitHubClientError {
+    let lower = stderr.to_ascii_lowercase();
+    if lower.contains("http 401")
+        || lower.contains("bad credentials")
+        || lower.contains("authentication required")
+        || lower.contains("not logged into")
+    {
+        GitHubClientError::Unauthorized
+    } else if lower.contains("rate limit")
+        || lower.contains("secondary rate limit")
+        || lower.contains("http 429")
+    {
+        GitHubClientError::RateLimited
+    } else if lower.contains("http 403")
+        || lower.contains("resource not accessible")
+        || lower.contains("permission")
+        || lower.contains("forbidden")
+    {
+        GitHubClientError::Forbidden
+    } else if lower.contains("http 404") || lower.contains("not found") {
+        GitHubClientError::NotFound
+    } else {
+        GitHubClientError::Transport(stderr.trim().to_owned())
     }
 }
 
@@ -770,6 +1134,213 @@ mod tests {
         assert!(client.calls.is_empty());
     }
 
+    #[test]
+    fn gh_cli_client_derives_owned_comments_from_authenticated_user() {
+        let target =
+            PullRequestTarget::github_from_url("https://github.com/ctxrs/ctx/pull/1").unwrap();
+        let mut client = GhCliGitHubPrCommentClient::with_runner(MockGhRunner {
+            calls: Vec::new(),
+            responses: vec![
+                Ok(GhCommandOutput {
+                    stdout: "ctx-bot\n".into(),
+                    stderr: String::new(),
+                }),
+                Ok(GhCommandOutput {
+                    stdout: "1\t<!-- ctx-work-record:finished-product:start -->\\nold\\n<!-- ctx-work-record:finished-product:end -->\\n\tctx-bot\n2\t<!-- ctx-work-record:finished-product:start -->\\nother\\n<!-- ctx-work-record:finished-product:end -->\\n\tsomeone-else\n".into(),
+                    stderr: String::new(),
+                }),
+            ],
+        });
+
+        let comments = client.list_comments(&target).unwrap();
+        let runner = client.into_runner();
+
+        assert_eq!(comments.len(), 2);
+        assert!(comments[0].owned_by_ctx);
+        assert!(!comments[1].owned_by_ctx);
+        assert_eq!(
+            runner.calls,
+            vec![
+                vec!["api", "user", "--jq", ".login"],
+                vec![
+                    "api",
+                    "--paginate",
+                    "/repos/ctxrs/ctx/issues/1/comments",
+                    "--jq",
+                    COMMENT_JQ_TSV,
+                ],
+            ]
+        );
+    }
+
+    #[test]
+    fn gh_cli_client_uses_expected_author_without_auth_lookup() {
+        let target =
+            PullRequestTarget::github_from_url("https://github.com/ctxrs/ctx/pull/1").unwrap();
+        let mut client = GhCliGitHubPrCommentClient::with_runner_and_options(
+            MockGhRunner {
+                calls: Vec::new(),
+                responses: vec![Ok(GhCommandOutput {
+                    stdout: "3\tplain\tctx-bot\n".into(),
+                    stderr: String::new(),
+                })],
+            },
+            GhCliClientOptions {
+                expected_author: Some("@ctx-bot".into()),
+            },
+        )
+        .unwrap();
+
+        let comments = client.list_comments(&target).unwrap();
+        let runner = client.into_runner();
+
+        assert_eq!(comments[0].owned_by_ctx, true);
+        assert_eq!(
+            runner.calls,
+            vec![vec![
+                "api",
+                "--paginate",
+                "/repos/ctxrs/ctx/issues/1/comments",
+                "--jq",
+                COMMENT_JQ_TSV,
+            ]]
+        );
+    }
+
+    #[test]
+    fn gh_cli_client_rejects_unmarked_or_ambiguous_outgoing_bodies() {
+        let target =
+            PullRequestTarget::github_from_url("https://github.com/ctxrs/ctx/pull/1").unwrap();
+        let mut client = GhCliGitHubPrCommentClient::with_runner_and_options(
+            MockGhRunner {
+                calls: Vec::new(),
+                responses: Vec::new(),
+            },
+            GhCliClientOptions {
+                expected_author: Some("ctx-bot".into()),
+            },
+        )
+        .unwrap();
+
+        let error = client.create_comment(&target, "plain body").unwrap_err();
+        assert!(matches!(error, GitHubClientError::InvalidMarkedComment));
+
+        let ambiguous = format!(
+            "{COMMENT_MARKER_START}\none\n{COMMENT_MARKER_END}\n{COMMENT_MARKER_START}\ntwo\n{COMMENT_MARKER_END}\n"
+        );
+        let error = client.update_comment(&target, 7, &ambiguous).unwrap_err();
+        assert!(matches!(error, GitHubClientError::InvalidMarkedComment));
+        assert!(client.into_runner().calls.is_empty());
+    }
+
+    #[test]
+    fn gh_cli_client_rejects_ambiguous_owned_remote_comments() {
+        let target =
+            PullRequestTarget::github_from_url("https://github.com/ctxrs/ctx/pull/1").unwrap();
+        let mut client = GhCliGitHubPrCommentClient::with_runner_and_options(
+            MockGhRunner {
+                calls: Vec::new(),
+                responses: vec![Ok(GhCommandOutput {
+                    stdout: "4\t<!-- ctx-work-record:finished-product:start -->\\nold\\n<!-- ctx-work-record:finished-product:end -->\\n<!-- ctx-work-record:finished-product:start -->\\nold2\\n<!-- ctx-work-record:finished-product:end -->\\n\tctx-bot\n".into(),
+                    stderr: String::new(),
+                })],
+            },
+            GhCliClientOptions {
+                expected_author: Some("ctx-bot".into()),
+            },
+        )
+        .unwrap();
+
+        let error = client.list_comments(&target).unwrap_err();
+
+        assert!(matches!(error, GitHubClientError::InvalidMarkedComment));
+    }
+
+    #[test]
+    fn gh_cli_client_create_and_update_map_returned_comment() {
+        let target =
+            PullRequestTarget::github_from_url("https://github.com/ctxrs/ctx/pull/1").unwrap();
+        let body = format!("{COMMENT_MARKER_START}\nnew\n{COMMENT_MARKER_END}\n");
+        let mut client = GhCliGitHubPrCommentClient::with_runner_and_options(
+            MockGhRunner {
+                calls: Vec::new(),
+                responses: vec![
+                    Ok(GhCommandOutput {
+                        stdout: "9\t<!-- ctx-work-record:finished-product:start -->\\nnew\\n<!-- ctx-work-record:finished-product:end -->\\n\tctx-bot\n".into(),
+                        stderr: String::new(),
+                    }),
+                    Ok(GhCommandOutput {
+                        stdout: "9\t<!-- ctx-work-record:finished-product:start -->\\nnew\\n<!-- ctx-work-record:finished-product:end -->\\n\tctx-bot\n".into(),
+                        stderr: String::new(),
+                    }),
+                ],
+            },
+            GhCliClientOptions {
+                expected_author: Some("ctx-bot".into()),
+            },
+        )
+        .unwrap();
+
+        let created = client.create_comment(&target, &body).unwrap();
+        let updated = client.update_comment(&target, 9, &body).unwrap();
+        let runner = client.into_runner();
+
+        assert_eq!(created.id, 9);
+        assert!(created.owned_by_ctx);
+        assert_eq!(updated.id, 9);
+        assert_eq!(
+            runner.calls,
+            vec![
+                vec![
+                    "api",
+                    "--method",
+                    "POST",
+                    "/repos/ctxrs/ctx/issues/1/comments",
+                    "--field",
+                    &format!("body={body}"),
+                    "--jq",
+                    COMMENT_JQ_TSV_SINGLE,
+                ],
+                vec![
+                    "api",
+                    "--method",
+                    "PATCH",
+                    "/repos/ctxrs/ctx/issues/comments/9",
+                    "--field",
+                    &format!("body={body}"),
+                    "--jq",
+                    COMMENT_JQ_TSV_SINGLE,
+                ],
+            ]
+        );
+    }
+
+    #[test]
+    fn gh_cli_error_mapping_exposes_clear_publish_errors() {
+        assert!(matches!(
+            PublishError::from(map_gh_stderr_to_error(1, "gh: Bad credentials (HTTP 401)")),
+            PublishError::AuthRequired
+        ));
+        assert!(matches!(
+            PublishError::from(map_gh_stderr_to_error(
+                1,
+                "gh: Resource not accessible by integration (HTTP 403)"
+            )),
+            PublishError::PermissionDenied
+        ));
+        assert!(matches!(
+            PublishError::from(map_gh_stderr_to_error(1, "gh: Not Found (HTTP 404)")),
+            PublishError::PullRequestNotFound
+        ));
+        assert!(matches!(
+            PublishError::from(map_gh_stderr_to_error(
+                1,
+                "API rate limit exceeded for user"
+            )),
+            PublishError::RateLimited
+        ));
+    }
+
     fn record(title: &str, body: &str, tags: Vec<&str>, timestamp: i64) -> WorkRecord {
         let mut record = WorkRecord::new(
             title,
@@ -807,6 +1378,25 @@ mod tests {
         comments: Vec<PullRequestComment>,
         calls: Vec<&'static str>,
         fail_list: Option<GitHubClientError>,
+    }
+
+    struct MockGhRunner {
+        calls: Vec<Vec<String>>,
+        responses: Vec<std::result::Result<GhCommandOutput, GitHubClientError>>,
+    }
+
+    impl GhCommandRunner for MockGhRunner {
+        fn run_gh(
+            &mut self,
+            args: &[OsString],
+        ) -> std::result::Result<GhCommandOutput, GitHubClientError> {
+            self.calls.push(
+                args.iter()
+                    .map(|arg| arg.to_string_lossy().into_owned())
+                    .collect(),
+            );
+            self.responses.remove(0)
+        }
     }
 
     impl GitHubPrCommentClient for MockClient {
