@@ -183,7 +183,7 @@ fn render_record(out: &mut String, record: &WorkRecord) {
     out.push_str("</span>");
     if let Some(workspace) = &record.workspace {
         out.push_str("<span>");
-        push_escaped(out, workspace);
+        push_escaped(out, &safe_workspace_label(workspace));
         out.push_str("</span>");
     }
     out.push_str("</div>");
@@ -225,7 +225,7 @@ fn render_record(out: &mut String, record: &WorkRecord) {
 
 fn render_evidence(out: &mut String, evidence: &Evidence) {
     out.push_str("<article class=\"evidence\"><div><code>");
-    push_escaped(out, &evidence.command);
+    push_escaped(out, &redact_secret_markers(&evidence.command));
     out.push_str("</code></div><div class=\"meta\"><span class=\"");
     out.push_str(if evidence.exit_code == 0 {
         "status-ok"
@@ -259,6 +259,49 @@ fn evidence_preview(evidence: &Evidence) -> Option<&str> {
 
 fn is_http_url(value: &str) -> bool {
     value.starts_with("https://") || value.starts_with("http://")
+}
+
+fn safe_workspace_label(value: &str) -> String {
+    let trimmed = value.trim_end_matches('/');
+    let name = trimmed
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|segment| !segment.is_empty())
+        .unwrap_or("local workspace");
+    format!("workspace: {name}")
+}
+
+fn redact_secret_markers(text: &str) -> String {
+    text.split_whitespace()
+        .map(redact_secret_word)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn redact_secret_word(word: &str) -> String {
+    let lower = word.to_ascii_lowercase();
+    if !(lower.starts_with("sk-")
+        || lower.starts_with("ghp_")
+        || lower.contains("api_key=")
+        || lower.contains("token=")
+        || lower.contains("authorization:"))
+    {
+        return word.to_owned();
+    }
+
+    let prefix = word
+        .chars()
+        .take_while(|ch| matches!(ch, '"' | '\'' | '(' | '[' | '{'))
+        .collect::<String>();
+    let suffix = word
+        .chars()
+        .rev()
+        .take_while(|ch| matches!(ch, '"' | '\'' | ')' | ']' | '}' | ';' | ','))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    format!("{prefix}[redacted]{suffix}")
 }
 
 fn push_escaped(out: &mut String, value: &str) {
@@ -323,9 +366,9 @@ mod tests {
         record.pr_url = Some("javascript:alert(1)".into());
         let evidence = Evidence::new(
             Some(record.id),
-            "cargo test <unsafe>",
+            "cargo test <unsafe> token=secret",
             1,
-            "stdout <ok>".into(),
+            "stdout <ok> [redacted]".into(),
             String::new(),
             Utc::now(),
             25,
@@ -337,7 +380,10 @@ mod tests {
         assert!(html.contains("ctx dashboard export"));
         assert!(html.contains("Ship &lt;dashboard&gt;"));
         assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
-        assert!(html.contains("cargo test &lt;unsafe&gt;"));
+        assert!(html.contains("workspace: work"));
+        assert!(!html.contains("/tmp/work"));
+        assert!(html.contains("cargo test &lt;unsafe&gt; [redacted]"));
+        assert!(!html.contains("token=secret"));
         assert!(!html.contains("<script>alert(1)</script>"));
         assert!(!html.contains("href=\"javascript:alert(1)\""));
     }

@@ -1,6 +1,6 @@
 # Work Recorder Productization Validation Log
 
-Updated: 2026-06-22T19:17:18-05:00
+Updated: 2026-06-22T19:40:55-05:00
 
 ## 2026-06-22 Baseline Public Branch Check
 
@@ -200,6 +200,69 @@ Future entries must include:
 - outcome;
 - failure mode if any;
 - whether the command was local, Buildkite, or staging.
+
+## 2026-06-22 Dashboard Export And Visual Checks
+
+- Command:
+  `TMPDIR=/var/tmp/ctxwr CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=1 cargo test -p work-record-report --lib -- --test-threads 1`
+- Repo/worktree:
+  `/home/daddy/code/ctx-multi-repo-workspace/worktrees/ctx/work-record-product`
+- Branch/head:
+  `work-record` / uncommitted dashboard redaction hardening on `a5b63b9`
+- Outcome: PASS
+- Coverage:
+  - 2 report unit tests passed.
+  - Dashboard HTML test asserts escaped content, safe workspace labels, no raw
+    absolute workspace path, and no raw token-like command fragment.
+
+- Command:
+  `TMPDIR=/var/tmp/ctxwr CARGO_BUILD_JOBS=2 cargo build -p ctx --bin ctx`
+- Repo/worktree:
+  `/home/daddy/code/ctx-multi-repo-workspace/worktrees/ctx/work-record-product`
+- Branch/head:
+  `work-record` / uncommitted dashboard redaction hardening on `a5b63b9`
+- Outcome: PASS
+
+- Commands:
+  `target/debug/ctx setup`,
+  `target/debug/ctx record`,
+  `target/debug/ctx evidence run`,
+  `target/debug/ctx link-pr`,
+  `target/debug/ctx capture write-fixture`,
+  `target/debug/ctx capture import --json`,
+  `target/debug/ctx dashboard export --output /var/tmp/ctxwr-dashboard`
+- Repo/worktree:
+  `/home/daddy/code/ctx-multi-repo-workspace/worktrees/ctx/work-record-product`
+- Data root:
+  `/var/tmp/ctxwr-dashboard-data`
+- Outcome: PASS
+- Artifacts:
+  - `/var/tmp/ctxwr-dashboard/index.html`
+  - `/var/tmp/ctxwr-dashboard/dashboard.png`
+  - `/var/tmp/ctxwr-dashboard/dashboard-mobile.png`
+- Notes:
+  - Headless Chrome required `/var/tmp` profile/cache/temp flags on this host.
+  - Manual screenshot inspection found the desktop and mobile reports populated
+    and responsive after redaction hardening.
+
+- Command:
+  `TMPDIR=/var/tmp/ctxwr CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=1 BAZEL_JOBS=2 ./scripts/check.sh all && git diff --check`
+- Repo/worktree:
+  `/home/daddy/code/ctx-multi-repo-workspace/worktrees/ctx/work-record-product`
+- Branch/head:
+  `work-record` / uncommitted dashboard redaction hardening on `a5b63b9`
+- Outcome: PASS
+- Coverage:
+  - `cargo fmt --all -- --check`;
+  - `cargo check --workspace --all-targets --locked`;
+  - `cargo clippy --workspace --all-targets --locked -- -D warnings`;
+  - `cargo test --workspace --all-targets --locked -- --test-threads 1`;
+  - 21 CLI integration tests, 3 capture unit tests, 4 core unit tests, 2 report
+    unit tests, 2 search unit tests, 9 store unit tests, and 7 VCS unit tests
+    passed;
+  - `git diff --check` passed;
+  - Bazel lane recorded `skipped` because neither `bazel` nor `bazelisk` is
+    installed.
 
 ## 2026-06-22 Capture Spool Integration Checks
 

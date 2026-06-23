@@ -1,6 +1,6 @@
 # Work Recorder Productization Reviewer Verdicts
 
-Updated: 2026-06-22T19:29:23-05:00
+Updated: 2026-06-22T19:40:55-05:00
 
 ## Read-Only Mapper Results
 
@@ -47,6 +47,10 @@ No milestone reviewer verdicts have passed yet.
   packets, `AgentContextPacket` builder, token-budget truncation, share-safe
   dashboard links, CLI wiring, and tests; integrated into the manager branch and
   validated with focused search/CLI tests plus full check.
+- Dashboard export worker: complete. Added `ctx dashboard export` and static
+  local HTML report generation; integrated into the manager branch and validated
+  with focused report tests, dogfood export, desktop/mobile screenshots, and a
+  full capped local check.
 
 ## Milestone Review Results
 
@@ -97,6 +101,16 @@ No milestone reviewer verdicts have passed yet.
   - Resolution status:
     - both-stream archive round-trip test added locally and validated;
     - binary archive payload support remains future work for non-text artifacts.
+- Manager visual review on uncommitted dashboard hardening over `a5b63b9`: PASS.
+  - Reviewed:
+    - `/var/tmp/ctxwr-dashboard/dashboard.png`
+    - `/var/tmp/ctxwr-dashboard/dashboard-mobile.png`
+  - Initial screenshot exposed raw absolute workspace path and token-like command
+    text. The dashboard was hardened to render safe workspace labels and redacted
+    command fragments before this PASS.
+  - Remaining requirement:
+    - a separate adversarial UI/product/security review must run after the
+      docs/shims/hosted tracks are integrated.
 
 Required reviewer categories from the plan:
 

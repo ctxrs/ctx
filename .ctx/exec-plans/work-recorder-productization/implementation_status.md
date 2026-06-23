@@ -1,6 +1,6 @@
 # Work Recorder Productization Implementation Status
 
-Updated: 2026-06-22T19:32:06-05:00
+Updated: 2026-06-22T19:40:55-05:00
 
 Task: `feb64c1c-e58c-40f8-b1e9-1094dca0646e`
 
@@ -243,6 +243,28 @@ Integrated implementation work:
 - Added tests for agent packet shape, why-matched/citations/evidence, token
   budget truncation, dashboard URL safety, and secret-like snippet redaction.
 
+## Dashboard Export Integration
+
+Integrated implementation work:
+
+- Added local static dashboard export via `ctx dashboard export --output <dir>`.
+- Dashboard output is share-safe by default: no JavaScript, no remote assets,
+  bounded evidence previews, escaped HTML, redacted secret-like command
+  fragments, and safe workspace labels instead of raw absolute workspace paths.
+- Dashboard cards include local record counts, recent records, Work Record
+  states, linked PR/repository cues, evidence command previews, captured output
+  previews, capture/search context cues, and privacy framing.
+- Export writes `index.html` plus static assets under the chosen output
+  directory; it does not publish or sync anything.
+- Manager visual review generated and inspected screenshots:
+  - `/var/tmp/ctxwr-dashboard/dashboard.png` at 1280x900.
+  - `/var/tmp/ctxwr-dashboard/dashboard-mobile.png` at 390x844.
+- Visual review notes: desktop is populated with metrics, recent Work Records,
+  PR link, evidence preview, capture/search context, and privacy text; mobile
+  stacks cleanly with the same safe content. The first screenshot pass exposed
+  raw workspace paths and token-like command fragments, which were fixed before
+  committing this slice.
+
 ## Validation
 
 - `./scripts/check.sh` in the public `work-record-product` worktree: PASS at
@@ -324,6 +346,23 @@ Integrated implementation work:
 - `TMPDIR=/var/tmp/ctxwr CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=1 ./scripts/release-dry-run.sh`:
   PASS on integrated local product head after foundation, capture, VCS, and
   search merges.
+- `TMPDIR=/var/tmp/ctxwr CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=1 cargo test -p work-record-report --lib -- --test-threads 1`:
+  PASS after dashboard redaction hardening.
+- `TMPDIR=/var/tmp/ctxwr CARGO_BUILD_JOBS=2 cargo build -p ctx --bin ctx`:
+  PASS before dashboard dogfood export.
+- Dashboard dogfood commands:
+  `target/debug/ctx setup`, `target/debug/ctx record`,
+  `target/debug/ctx evidence run`, `target/debug/ctx link-pr`,
+  `target/debug/ctx capture write-fixture`, `target/debug/ctx capture import --json`,
+  and `target/debug/ctx dashboard export --output /var/tmp/ctxwr-dashboard`:
+  PASS. Generated `file:///var/tmp/ctxwr-dashboard/index.html`.
+- Chrome headless screenshots using `/var/tmp` profile/cache/temp:
+  PASS. Generated `/var/tmp/ctxwr-dashboard/dashboard.png` and
+  `/var/tmp/ctxwr-dashboard/dashboard-mobile.png`.
+- `TMPDIR=/var/tmp/ctxwr CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=1 BAZEL_JOBS=2 ./scripts/check.sh all && git diff --check`:
+  PASS after dashboard export hardening. Covered fmt, check, clippy, workspace
+  tests, and `git diff --check`; Bazel lane recorded `skipped` because neither
+  `bazel` nor `bazelisk` is installed.
 
 ## Reviewer Status
 
@@ -350,6 +389,10 @@ Architecture/data model reviewer returned PASS on head `6c33fb1`. Follow-up
 concerns were limited to future binary artifact support and an optional
 both-stream archive round-trip test; the test has been added locally and is
 awaiting commit.
+
+Dashboard visual self-review returned PASS for the current local dashboard slice
+after redaction hardening. A separate adversarial UI/security review is still
+required after docs/shims and any hosted/report refinements are integrated.
 
 ## Blockers
 

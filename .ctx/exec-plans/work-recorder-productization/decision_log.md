@@ -1,6 +1,6 @@
 # Work Recorder Productization Decision Log
 
-Updated: 2026-06-22T19:17:18-05:00
+Updated: 2026-06-22T19:40:55-05:00
 
 ## Decisions
 
@@ -42,6 +42,9 @@ Updated: 2026-06-22T19:17:18-05:00
   stdout/stderr content can survive export/import. This is explicit portability
   behavior, not a default report/share surface; exported archives must be
   reviewed before leaving the machine.
+- Local dashboard export is static-by-default: no JavaScript, no remote assets,
+  no publish/sync side effect, safe workspace labels instead of absolute local
+  paths, and redacted command/evidence previews in default HTML.
 
 ## Pending Decisions
 

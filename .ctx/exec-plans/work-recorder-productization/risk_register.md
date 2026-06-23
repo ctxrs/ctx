@@ -1,6 +1,6 @@
 # Work Recorder Productization Risk Register
 
-Updated: 2026-06-22T19:21:30-05:00
+Updated: 2026-06-22T19:40:55-05:00
 
 | Risk | Impact | Current Mitigation |
 | --- | --- | --- |
@@ -15,6 +15,7 @@ Updated: 2026-06-22T19:21:30-05:00
 | `/tmp` pressure and concurrent broad Cargo checks can freeze this host. | Local verification instability and interrupted agent work. | Use `TMPDIR=/var/tmp/ctxwr`, low `CARGO_BUILD_JOBS`, low `RUST_TEST_THREADS`, and avoid overlapping broad Cargo commands across agents. |
 | Bazel is not installed in this environment. | Local `scripts/check.sh all` cannot prove Bazel lanes yet. | The script records the Bazel lane as skipped; Buildkite or local Bazel/Bazelisk installation must satisfy the retained Bazel requirement later. |
 | Archive artifact payloads are string-only. | Future binary screenshots/reports cannot be faithfully exported through the current JSON artifact payload field. | Current foundation scope uses text stdout/stderr artifacts only; non-text artifact export should use an explicit encoded/binary-safe payload design before binary artifacts are added. |
+| Chrome/headless screenshot capture can fail if it uses the default `/tmp` profile/cache. | Visual review can fail for environment reasons unrelated to dashboard rendering. | Use `/var/tmp` for `TMPDIR`, `--user-data-dir`, and `--disk-cache-dir` when capturing local dashboard screenshots on this host. |
 
 ## Accepted Risks
 
