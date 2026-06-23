@@ -1,6 +1,6 @@
 # Work Recorder Productization Implementation Status
 
-Updated: 2026-06-22T22:00:05-05:00
+Updated: 2026-06-22T22:11:53-05:00
 
 Task: `feb64c1c-e58c-40f8-b1e9-1094dca0646e`
 
@@ -825,3 +825,27 @@ None accepted yet.
 - Remaining external evidence gap:
   - commit and push the Bazelisk bootstrap remediation;
   - trigger and observe a fresh public Buildkite build proving the Bazel lane.
+
+## 2026-06-22 Buildkite Bazel Cargo Environment Remediation
+
+- Build 33:
+  - URL: `https://buildkite.com/luca-king/ctx-public-release-verification/builds/33`;
+  - got through Bazelisk bootstrap, then failed inside `//:cargo_tests` because
+    `cargo` was missing from the Bazel test environment;
+  - Bazel test setup also reported `zip: command not found` while creating
+    `test.outputs/outputs.zip`.
+- Repo-owned remediation:
+  - `scripts/check.sh` now runs `ctx_ensure_rust_toolchain` before invoking
+    required/optional Bazel checks;
+  - the Bazel invocation forwards sanitized Rust/Cargo environment values into
+    tests: `PATH`, `CARGO_HOME`, `RUSTUP_HOME`, `CARGO_BUILD_JOBS`,
+    `RUST_TEST_THREADS`, and `TMPDIR`;
+  - the Bazel invocation passes `--nozip_undeclared_test_outputs`;
+  - `scripts/bazel-test.sh` prepends `${CARGO_HOME}/bin` to `PATH`, exports
+    `CARGO_HOME`/`RUSTUP_HOME`, fails clearly if `cargo` is still unavailable,
+    and writes timing artifacts under `CTX_ARTIFACT_DIR` or `TEST_TMPDIR`
+    instead of `TEST_UNDECLARED_OUTPUTS_DIR`.
+- Remaining external evidence gap:
+  - commit and push the remediation;
+  - trigger and observe a fresh public Buildkite build proving the Bazel lane on
+    the Linux runner.

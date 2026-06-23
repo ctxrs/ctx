@@ -1,6 +1,6 @@
 # Work Recorder Productization Validation Log
 
-Updated: 2026-06-22T22:00:05-05:00
+Updated: 2026-06-22T22:11:53-05:00
 
 ## 2026-06-22 Baseline Public Branch Check
 
@@ -1323,3 +1323,69 @@ Future entries must include:
 - Branch/head:
   `work-record` / uncommitted sccache wrapper changes on `3f1b534`
 - Outcome: PASS.
+
+## 2026-06-22 Bazel Cargo Environment Check
+
+- Remote Buildkite evidence:
+  - build `https://buildkite.com/luca-king/ctx-public-release-verification/builds/33`
+    got through Bazelisk bootstrap;
+  - `//:cargo_tests` failed with `cargo: command not found`;
+  - Bazel test setup then reported `zip: command not found` while creating
+    `test.outputs/outputs.zip`.
+
+- Command:
+  `bash -n scripts/check.sh scripts/ci-common.sh scripts/bazel-test.sh scripts/check-docs.sh scripts/check-buildkite-pipeline.sh scripts/release-dry-run.sh`
+- Repo/worktree:
+  `/home/daddy/code/ctx-multi-repo-workspace/worktrees/ctx/work-record-product`
+- Branch/head:
+  `work-record` / uncommitted Bazel cargo-environment changes on `75b1556`
+- Outcome: PASS.
+
+- Command:
+  `./scripts/check-docs.sh`
+- Repo/worktree:
+  `/home/daddy/code/ctx-multi-repo-workspace/worktrees/ctx/work-record-product`
+- Branch/head:
+  `work-record` / uncommitted Bazel cargo-environment changes on `75b1556`
+- Outcome: PASS.
+
+- Command:
+  `./scripts/check-buildkite-pipeline.sh`
+- Repo/worktree:
+  `/home/daddy/code/ctx-multi-repo-workspace/worktrees/ctx/work-record-product`
+- Branch/head:
+  `work-record` / uncommitted Bazel cargo-environment changes on `75b1556`
+- Outcome: PASS.
+
+- Command:
+  `git diff --check`
+- Repo/worktree:
+  `/home/daddy/code/ctx-multi-repo-workspace/worktrees/ctx/work-record-product`
+- Branch/head:
+  `work-record` / uncommitted Bazel cargo-environment changes on `75b1556`
+- Outcome: PASS.
+
+- Command:
+  `TMPDIR=/var/tmp/ctxwr CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=1 BAZEL_JOBS=2 CTX_REQUIRE_BAZEL=1 ./scripts/check.sh bazel`
+- Repo/worktree:
+  `/home/daddy/code/ctx-multi-repo-workspace/worktrees/ctx/work-record-product`
+- Branch/head:
+  `work-record` / uncommitted Bazel cargo-environment changes on `75b1556`
+- Outcome: PASS.
+- Coverage:
+  - `//:cargo_tests` executed and passed inside Bazel's processwrapper sandbox;
+  - Cargo was found through the forwarded `PATH`/`CARGO_HOME` environment;
+  - Bazel ran with `--nozip_undeclared_test_outputs`;
+  - resource caps were forwarded with `BAZEL_JOBS=2`,
+    `CARGO_BUILD_JOBS=2`, and `RUST_TEST_THREADS=1`.
+
+- Command:
+  `TMPDIR=/var/tmp/ctxwr CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 BAZEL_JOBS=1 ./scripts/check.sh bazel`
+- Repo/worktree:
+  `/home/daddy/code/ctx-multi-repo-workspace/worktrees/ctx/work-record-product`
+- Branch/head:
+  `work-record` / uncommitted Bazel cargo-environment changes on `75b1556`
+- Outcome: PASS.
+- Coverage:
+  - optional local Bazel mode still records a skip when `CTX_REQUIRE_BAZEL` is
+    unset.

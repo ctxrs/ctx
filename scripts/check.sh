@@ -120,14 +120,18 @@ run_bazel() {
   "${bazel_cmd}" \
     --output_user_root="${BAZEL_OUTPUT_USER_ROOT}" \
     test \
+    --nozip_undeclared_test_outputs \
     --jobs="${BAZEL_JOBS}" \
-    --local_cpu_resources="${BAZEL_LOCAL_CPU_RESOURCES}" \
-    --local_ram_resources="${BAZEL_LOCAL_RAM_RESOURCES}" \
+    --local_resources="cpu=${BAZEL_LOCAL_CPU_RESOURCES}" \
+    --local_resources="memory=${BAZEL_LOCAL_RAM_RESOURCES}" \
     --test_env=CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS}" \
     --test_env=RUST_TEST_THREADS="${RUST_TEST_THREADS}" \
     --test_env=CTX_CARGO_JOBS="${CARGO_BUILD_JOBS}" \
     --test_env=CTX_TEST_THREADS="${RUST_TEST_THREADS}" \
     --test_env=TMPDIR="${TMPDIR}" \
+    --test_env=PATH="${PATH}" \
+    --test_env=CARGO_HOME="${CARGO_HOME}" \
+    --test_env=RUSTUP_HOME="${RUSTUP_HOME}" \
     //...
 }
 
@@ -157,14 +161,17 @@ run_mode() {
     bazel)
       if [[ ! -f BUILD.bazel && ! -f MODULE.bazel && ! -f WORKSPACE && ! -f WORKSPACE.bazel ]]; then
         ctx_record_skip "bazel-test" "no Bazel workspace files found"
-      elif ! bazel_cmd="$(ctx_find_bazel)"; then
-        if [[ "${CTX_REQUIRE_BAZEL:-0}" == "1" ]]; then
-          printf 'bazel/bazelisk is required because Bazel workspace files exist\n' >&2
-          return 1
-        fi
-        ctx_record_skip "bazel-test" "bazel/bazelisk is not installed"
       else
-        ctx_run_timed "bazel-test" run_bazel "${bazel_cmd}"
+        ctx_ensure_rust_toolchain
+        if ! bazel_cmd="$(ctx_find_bazel)"; then
+          if [[ "${CTX_REQUIRE_BAZEL:-0}" == "1" ]]; then
+            printf 'bazel/bazelisk is required because Bazel workspace files exist\n' >&2
+            return 1
+          fi
+          ctx_record_skip "bazel-test" "bazel/bazelisk is not installed"
+        else
+          ctx_run_timed "bazel-test" run_bazel "${bazel_cmd}"
+        fi
       fi
       ;;
     platform-smoke)

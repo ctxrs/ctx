@@ -25,6 +25,16 @@ find_repo_root() {
 
 find_repo_root
 
+cargo_home="${CARGO_HOME:-${HOME}/.cargo}"
+rustup_home="${RUSTUP_HOME:-${HOME}/.rustup}"
+export CARGO_HOME="${cargo_home}"
+export RUSTUP_HOME="${rustup_home}"
+export PATH="${CARGO_HOME}/bin:${PATH}"
+if ! command -v cargo >/dev/null 2>&1; then
+  printf 'cargo is required for //:cargo_tests but was not found on PATH=%s\n' "${PATH}" >&2
+  exit 127
+fi
+
 positive_int() {
   [[ "${1:-}" =~ ^[0-9]+$ ]] && (( "$1" > 0 ))
 }
@@ -148,8 +158,10 @@ if [[ "${CTX_USE_SCCACHE:-0}" != "1" && "${RUSTC_WRAPPER:-}" == *sccache* ]]; th
 fi
 mkdir -p "${TMPDIR}" "${CARGO_TARGET_DIR:-target}"
 
-if [[ -n "${TEST_UNDECLARED_OUTPUTS_DIR:-}" ]]; then
-  artifact_dir="${TEST_UNDECLARED_OUTPUTS_DIR}"
+if [[ -n "${CTX_ARTIFACT_DIR:-}" ]]; then
+  artifact_dir="${CTX_ARTIFACT_DIR}"
+elif [[ -n "${TEST_TMPDIR:-}" ]]; then
+  artifact_dir="${TEST_TMPDIR}/ctx-artifacts"
 else
   artifact_dir="${CTX_ARTIFACT_DIR:-target/ctx-artifacts/bazel-test}"
 fi

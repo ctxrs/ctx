@@ -1,6 +1,6 @@
 # Work Recorder Productization Risk Register
 
-Updated: 2026-06-22T22:00:05-05:00
+Updated: 2026-06-22T22:11:53-05:00
 
 | Risk | Impact | Current Mitigation |
 | --- | --- | --- |
@@ -14,7 +14,7 @@ Updated: 2026-06-22T22:00:05-05:00
 | Buildkite/release platform matrix requires live runner proof. | Repo-owned config can be locally validated, but the release gate still needs real Buildkite green evidence. | Public pipeline now has a local contract check, native dry-run lanes for known Linux/macOS/Windows queues, and explicit blocker evidence for FreeBSD. |
 | No FreeBSD x86_64 Buildkite queue is documented. | Native FreeBSD release artifact proof cannot pass yet. | Public pipeline emits a FreeBSD blocker artifact with missing runner label, attempted native command, proposed `queue=freebsd-x64` pool, and artifact status. |
 | `/tmp` pressure and concurrent broad Cargo checks can freeze this host. | Local verification instability and interrupted agent work. | Use `TMPDIR=/var/tmp/ctxwr`, low `CARGO_BUILD_JOBS`, low `RUST_TEST_THREADS`, and avoid overlapping broad Cargo commands across agents. |
-| Bazel is not installed in this environment. | Local `scripts/check.sh all` cannot prove Bazel lanes unless explicitly requested. | The script records the Bazel lane as skipped locally; the Buildkite Bazel lane sets `CTX_REQUIRE_BAZEL=1`, which now bootstraps pinned Bazelisk under `target/tool-cache` before running resource-capped Bazel tests. |
+| Bazel is not installed in this environment. | Local `scripts/check.sh all` cannot prove Bazel lanes unless explicitly requested. | The script records the Bazel lane as skipped locally; the Buildkite Bazel lane sets `CTX_REQUIRE_BAZEL=1`, bootstraps pinned Bazelisk under `target/tool-cache`, bootstraps Rust before invoking Bazel, and forwards Cargo/Rust paths into `//:cargo_tests`. |
 | Archive artifact payloads are string-only. | Future binary screenshots/reports cannot be faithfully exported through the current JSON artifact payload field. | Current foundation scope uses text stdout/stderr artifacts only; non-text artifact export should use an explicit encoded/binary-safe payload design before binary artifacts are added. |
 | Chrome/headless screenshot capture can fail if it uses the default `/tmp` profile/cache. | Visual review can fail for environment reasons unrelated to dashboard rendering. | Use `/var/tmp` for `TMPDIR`, `--user-data-dir`, and `--disk-cache-dir` when capturing local dashboard screenshots on this host. |
 | Local Git/jj/gh wrapper shims can capture sensitive command output. | Accidental local retention of secrets, source, paths, or private PR data. | Shims are opt-in, local-only, capped per stream, imported explicitly, documented as sensitive, and not connected to hosted sync in this branch. |
@@ -26,4 +26,5 @@ Updated: 2026-06-22T22:00:05-05:00
 
 - Local Bazel proof is accepted as skipped in normal optional mode. CI-facing
   scripts require Bazel with `CTX_REQUIRE_BAZEL=1`, which bootstraps Bazelisk
-  into repo-owned `target/tool-cache` paths when Bazel/Bazelisk is absent.
+  into repo-owned `target/tool-cache` paths when Bazel/Bazelisk is absent and
+  carries the repo-owned Rust toolchain environment into the Bazel test sandbox.
