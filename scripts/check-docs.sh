@@ -6,12 +6,17 @@ cd "${repo_root}"
 
 required_paths=(
   README.md
+  SECURITY.md
   docs/getting-started.md
   docs/cli-reference.md
   docs/work-model.md
   docs/privacy-storage.md
+  docs/threat-model.md
+  docs/redaction-corpus.md
+  docs/dependency-license-audit.md
   examples/local-record-workflow.sh
   examples/capture-spool-fixture.sh
+  tests/fixtures/redaction/redaction-corpus.jsonl
 )
 
 for path in "${required_paths[@]}"; do
@@ -42,6 +47,9 @@ doc_search "ctx capture import" README.md docs examples >/dev/null
 doc_search "ctx vcs inspect" README.md docs examples >/dev/null
 doc_search "ctx pr parse" README.md docs examples >/dev/null
 doc_search "ctx dashboard export" README.md docs examples >/dev/null
+doc_search "Hosted Option A" SECURITY.md README.md docs >/dev/null
+doc_search "redaction-corpus.jsonl" docs tests >/dev/null
+doc_search "cargo audit|cargo deny" docs/dependency-license-audit.md >/dev/null
 doc_search "does not install|Not implemented yet|not yet" README.md docs >/dev/null
 
 if doc_search "does not ship a local dashboard|does not include a dashboard|local dashboard;" docs README.md >/dev/null; then

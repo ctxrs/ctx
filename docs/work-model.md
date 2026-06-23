@@ -98,3 +98,7 @@ history, publish pull request comments, or sync hosted team data.
 Hosted team sync, shared policy enforcement, centralized dashboards, and
 organization-level analytics are separate product concerns and are not part of
 the current local-first implementation.
+
+The launch threat model is documented in [threat-model.md](threat-model.md).
+Hosted Option A requires a separate threat model before it can be documented as
+implemented.

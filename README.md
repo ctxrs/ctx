@@ -37,7 +37,8 @@ Not implemented yet:
   shims;
 - importing existing Codex, Claude, Cursor, or other local agent history;
 - posting or updating pull request comments;
-- hosted sync, hosted sharing, accounts, or team policy;
+- hosted sync, hosted sharing, accounts, team policy, hosted dashboards,
+  organization analytics, or hosted retention controls;
 - public installer URLs for this branch;
 - hosted publish commands such as `ctx publish`.
 
@@ -231,6 +232,10 @@ No account is required. No hosted sync runs in this branch. Exported JSON files
 should be reviewed before they leave your machine because records and command
 output can contain source code, prompts, paths, secrets, or customer data.
 
+For the launch security boundary, see [SECURITY.md](SECURITY.md) and the
+[Work Recorder threat model](docs/threat-model.md). Hosted/team Option A is not
+part of this branch's launch scope.
+
 ## Product Direction
 
 The Work Recorder direction remains local-first:
@@ -248,6 +253,12 @@ The Work Recorder direction remains local-first:
 
 These are product constraints for upcoming work, not claims that all of the
 behavior exists today.
+
+Dependency and license audit decisions for the source-build launch branch are
+tracked in
+[docs/dependency-license-audit.md](docs/dependency-license-audit.md). Public
+installer or updater documentation should not be added until that gate is
+complete.
 
 ## Build From Source
 

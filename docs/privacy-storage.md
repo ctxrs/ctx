@@ -26,6 +26,10 @@ The current implementation does not store passive provider transcripts,
 dashboard state, or hosted sync state. Local Git/jj/gh shim events are written
 to the JSONL capture inbox and imported only into local storage.
 
+Hosted accounts, hosted sync, team policy, hosted dashboards, organization
+analytics, hosted retention, and hosted publish workflows are not in launch
+scope for this branch.
+
 ## Capture inbox
 
 `ctx capture import` reads pending JSONL capture envelope files from the local
@@ -50,6 +54,10 @@ Work Records can contain:
 - private repository and pull request links
 
 Treat the ctx data directory like source code. Do not publish it unless the record has been reviewed for sensitive content.
+
+The redaction corpus fixture in [redaction-corpus.md](redaction-corpus.md)
+documents synthetic examples that future redaction tests should cover. It is
+not a guarantee that every current output path is automatically redacted.
 
 ## Network behavior
 
@@ -79,3 +87,6 @@ Recommended habits:
 ## Portability
 
 SQLite plus JSON export keeps records inspectable and portable. A record should be useful even if the agent provider, model, or terminal session that produced the work is gone.
+
+See [threat-model.md](threat-model.md) for the launch security boundary and
+remaining code-security follow-ups.

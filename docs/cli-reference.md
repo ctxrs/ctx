@@ -179,5 +179,5 @@ retry.
 ## Not yet implemented
 
 This branch does not include hosted sync, passive provider hooks beyond the
-local Git/jj/gh wrapper shims, public installer flow, or pull request comment
-publisher.
+local Git/jj/gh wrapper shims, public installer flow, hosted/team Option A, or
+pull request comment publisher.
