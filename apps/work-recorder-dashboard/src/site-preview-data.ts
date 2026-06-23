@@ -51,7 +51,7 @@ export const heroHighlights: Highlight[] = [
   },
   {
     title: "Not the ADE",
-    body: "This preview is for the Work Recorder product only. It does not claim the container runtime, workbench, or ADE cutover."
+    body: "This preview is for ctx local work records only. It does not claim the container runtime, workbench, or ADE cutover."
   }
 ];
 
@@ -74,7 +74,7 @@ export const docsMap: DocEntry[] = [
   {
     path: "docs/privacy-storage.md",
     title: "Privacy defaults",
-    body: "SQLite and blob storage, share-safe review surfaces, raw transcript opt-ins, and local-only data handling."
+    body: "SQLite and object storage, share-safe review surfaces, raw transcript opt-ins, and local-only data handling."
   },
   {
     path: "docs/release-install.md",
@@ -102,9 +102,9 @@ export const setupFlow: FlowStep[] = [
   },
   {
     step: "02",
-    title: "Create the local recorder store",
-    body: "Run setup once to create the SQLite store and ctx-owned Git/jj/gh shims. Use shell-rc wiring only if you want persistent activation.",
-    command: "ctx setup\nctx status\nctx setup --shell-rc ~/.zshrc"
+    title: "Create the local ctx store",
+    body: "Run setup once to create the flat ~/.ctx layout, install ctx-owned Git/jj/gh shims, import supported history, and open the dashboard when the session is interactive.",
+    command: "ctx setup\nctx status\nctx setup --no-open\nctx setup --no-shell-update\nctx setup --service"
   },
   {
     step: "03",
@@ -116,7 +116,7 @@ export const setupFlow: FlowStep[] = [
     step: "04",
     title: "Record, search, and report",
     body: "The durable loop is record plus evidence, then share-safe search, context, report, and dashboard review output.",
-    command: "ctx record --title \"trace checkout retries\" --body \"Investigate flaky retry handling.\" --kind task --tag checkout --json\nctx evidence run --record <record-id> cargo test -p checkout\nctx search checkout\nctx context checkout\nctx report\nctx dashboard export --output ./work-record-dashboard"
+    command: "ctx record --title \"trace checkout retries\" --body \"Investigate flaky retry handling.\" --kind task --tag checkout --json\nctx evidence run --record <record-id> cargo test -p checkout\nctx search checkout\nctx context checkout\nctx report\nctx dashboard\nctx dashboard export --output ./ctx-dashboard"
   },
   {
     step: "05",
@@ -185,7 +185,7 @@ export const providerNotes: string[] = [
 export const privacyChecklist: ChecklistEntry[] = [
   {
     label: "Storage",
-    value: "SQLite for structured metadata plus local-only blob files for full stdout and stderr payloads."
+    value: "SQLite for structured metadata plus local-only objects for full stdout and stderr payloads."
   },
   {
     label: "Default review posture",
@@ -202,7 +202,7 @@ export const privacyChecklist: ChecklistEntry[] = [
 ];
 
 export const privacyNotes: string[] = [
-  "Treat the capture inbox, exported JSON archives, and local data root as sensitive private data.",
+  "Treat the capture spool, exported JSON archives, and local data root as sensitive private data.",
   "ctx stores what you explicitly record around your tools. It does not make provider network traffic or package-manager traffic private by itself.",
   "The future hosted roadmap keeps redacted summaries as the default sync shape and reserves raw transcript sync for an explicit opt-in."
 ];
@@ -235,7 +235,7 @@ export const installCommands = {
 export const boundaryCards: Highlight[] = [
   {
     title: "What this preview is",
-    body: "A public local-first Work Recorder preview: records, evidence, search, context, reports, dashboard export, provider import, and local GitHub PR comment publishing."
+    body: "A public local-first ctx preview: work records, evidence, search, context, reports, dashboard, provider import, and local GitHub PR comment publishing."
   },
   {
     title: "What it is not",
@@ -255,13 +255,13 @@ export const troubleshootingSteps: FlowStep[] = [
   {
     step: "A",
     title: "Check setup and shim activation",
-    body: "Use status first. If the shim directory is inactive on PATH, wrapper capture cannot land in the inbox.",
-    command: "ctx status\nctx shim env --dir ~/.ctx/work-record/shims"
+    body: "Use status first. If the shim directory is inactive on PATH, wrapper capture cannot land in the spool.",
+    command: "ctx status\nctx shim env --dir ~/.ctx/shims"
   },
   {
     step: "B",
     title: "Inspect capture health",
-    body: "Doctor surfaces stuck or failed inbox files. Repair retries failed files after you inspect the cause.",
+    body: "Doctor surfaces stuck or failed spool files. Repair retries failed files after you inspect the cause.",
     command: "ctx doctor\nctx repair --json\nctx validate"
   },
   {

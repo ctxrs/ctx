@@ -54,6 +54,33 @@ doc_search_inverse() {
   fi
 }
 
+public_docs=(
+  README.md
+  docs
+  apps/work-recorder-dashboard/README.md
+  apps/work-recorder-dashboard/src/site-preview-data.ts
+  apps/work-recorder-dashboard/src/site-preview.tsx
+  apps/work-recorder-dashboard/site-preview.html
+)
+
+public_name_docs=(
+  README.md
+  docs/getting-started.md
+  docs/cli-reference.md
+  docs/work-model.md
+  docs/privacy-storage.md
+  docs/hosted-sync-roadmap.md
+  docs/troubleshooting.md
+  docs/redaction-corpus.md
+  docs/dependency-license-audit.md
+  docs/provider-adapter-api.md
+  docs/threat-model.md
+  apps/work-recorder-dashboard/README.md
+  apps/work-recorder-dashboard/src/site-preview-data.ts
+  apps/work-recorder-dashboard/src/site-preview.tsx
+  apps/work-recorder-dashboard/site-preview.html
+)
+
 doc_search "ctx capture import" README.md docs examples >/dev/null
 doc_search "ctx vcs inspect" README.md docs examples >/dev/null
 doc_search "ctx pr parse" README.md docs examples >/dev/null
@@ -78,6 +105,33 @@ doc_search "jj e2e blocker status" docs/release-supply-chain.md release/completi
 doc_search "R2 upload plan" docs/release-supply-chain.md docs/release-r2-layout.md release/completion-certificate-template.md >/dev/null
 doc_search "CTX_LIVE_PROVIDER_E2E=1" docs/release-supply-chain.md >/dev/null
 doc_search "freebsd-x64" docs/freebsd-release-worker.md docs/release-supply-chain.md >/dev/null
+doc_search "work records|records agent work" README.md docs apps/work-recorder-dashboard/src/site-preview-data.ts apps/work-recorder-dashboard/src/site-preview.tsx >/dev/null
+doc_search "~/.ctx/" README.md docs/getting-started.md docs/threat-model.md >/dev/null
+doc_search "objects/" README.md docs/threat-model.md >/dev/null
+doc_search "spool/" README.md docs/getting-started.md docs/threat-model.md >/dev/null
+doc_search "shims/" README.md docs/getting-started.md docs/threat-model.md >/dev/null
+doc_search "config.toml" README.md docs/threat-model.md >/dev/null
+doc_search "logs/" README.md docs/threat-model.md >/dev/null
+doc_search "ctx dashboard.*--no-open|headless" README.md docs apps/work-recorder-dashboard/src/site-preview-data.ts apps/work-recorder-dashboard/src/site-preview.tsx >/dev/null
+doc_search "ctx service install|ctx setup --service" README.md docs apps/work-recorder-dashboard/src/site-preview-data.ts >/dev/null
+doc_search "ctx uninstall --delete-data" README.md docs >/dev/null
+
+if doc_search "~/.ctx/work-record|work-record/(shims|inbox)|work-record\\\\(shims|inbox)|\\bblobs/|\\binbox\\b|blob files|blob artifacts" "${public_docs[@]}" >/dev/null; then
+  printf 'public docs contain stale Work Recorder layout wording\n' >&2
+  exit 1
+fi
+
+if doc_search "Work Recorder" "${public_docs[@]}" \
+  | doc_search_inverse "work-recorder-dashboard|work-recorder-dogfood|work-recorder-completion|work-recorder-finished-product|ctx-work-recorder-releases|work-record-core|work-record-capture|work-record-store|Work Recorder Completion Certificate" >/dev/null; then
+  printf 'public docs contain Work Recorder as product branding; use ctx/work records wording\n' >&2
+  exit 1
+fi
+
+if doc_search "work-record" "${public_name_docs[@]}" \
+  | doc_search_inverse "assets/readme/work-record-banner.png" >/dev/null; then
+  printf 'public docs contain avoidable work-record naming; use ctx/work records wording\n' >&2
+  exit 1
+fi
 
 if doc_search "does not ship a local dashboard|does not include a dashboard|local dashboard;" docs README.md >/dev/null; then
   printf 'dashboard appears to be documented as missing\n' >&2

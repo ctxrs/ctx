@@ -1,10 +1,10 @@
 # Work Model
 
-ctx is organized around Work Records. A record is the durable history for one coding-agent task.
+ctx is organized around work records. A record is the durable history for one coding-agent task.
 
 ## Record
 
-A Work Record has an id, title, body, kind, tags, optional workspace path, optional pull request URL, and timestamps. It should be small enough to review as one unit and complete enough that another engineer can understand the work without reading terminal scrollback.
+A work record has an id, title, body, kind, tags, optional workspace path, optional pull request URL, and timestamps. It should be small enough to review as one unit and complete enough that another engineer can understand the work without reading terminal scrollback.
 
 Typical record kinds:
 
@@ -23,7 +23,7 @@ local Git/jj/gh shim capture. Each evidence item stores:
 - the command string
 - exit code
 - safe stdout and stderr previews in SQLite
-- full stdout and stderr as local-only blob artifacts
+- full stdout and stderr as local-only object artifacts
 - start time
 - duration
 - optional record id
@@ -35,21 +35,21 @@ This is the current local evidence model. Store file paths, reproduction notes, 
 `ctx shim install --dir <path>` creates local wrapper scripts for `git`, `jj`,
 and `gh`. The wrappers run the real command found later on `PATH`, preserve its
 exit code, and spool command metadata plus stdout/stderr to the JSONL capture
-inbox. `ctx capture import` imports those pending envelopes into the local
+spool. `ctx capture import` imports those pending envelopes into the local
 record store. `ctx shim uninstall --dir <path>` removes only ctx-marked wrapper
 scripts.
 
 ## Capture spool
 
-The capture spool is a local JSONL inbox for integrations that already know how
+The capture spool is a local JSONL queue for integrations that already know how
 to emit ctx capture envelopes. `ctx capture import` turns pending envelopes into
-records and evidence in the local store. Normal Work Recorder commands also
+records and evidence in the local store. Normal ctx work records commands also
 import pending envelopes before serving results, so wrapper captures become
 visible without a daemon.
 
 The importer is intentionally narrower than passive history import:
 
-- it imports files already written to the Work Recorder inbox;
+- it imports files already written to the ctx spool;
 - it uses stable ids derived from envelope dedupe keys when ids are omitted;
 - it moves successful files to `.done`;
 - it moves failed files to `.failed` and writes an error sidecar.
@@ -102,7 +102,15 @@ URLs before a URL is attached with `ctx link-pr`.
 
 ## Storage lifecycle
 
-`ctx setup` creates the local store, `ctx status` prints its paths and initialization state, and `ctx uninstall --yes` removes the local Work Recorder product data.
+`ctx setup` creates or updates the local ctx root, installs shims, imports known
+supported provider history, and opens the dashboard when appropriate. `ctx
+status` prints the database path, shim status, dashboard URL/running status,
+and spool pending count. `ctx dashboard` starts or reuses the localhost
+dashboard server; in headless sessions or with `--no-open`, it prints the URL
+and command instead of opening a browser. `ctx uninstall` removes shims, shell
+integration, and any optional service while keeping recorded data; `ctx
+uninstall --delete-data` deletes the local store, objects, spool, logs, and
+config after confirmation.
 
 ## Boundaries
 

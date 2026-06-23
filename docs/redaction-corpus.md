@@ -9,7 +9,7 @@ The fixture lives at `tests/fixtures/redaction/redaction-corpus.jsonl`.
 
 Use the corpus to keep security review concrete:
 
-- define examples of secrets and sensitive local data that Work Recorder may
+- define examples of secrets and sensitive local data that ctx may
   encounter;
 - separate input examples from expected redacted output;
 - make current and future redaction tests deterministic;

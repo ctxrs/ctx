@@ -1,6 +1,6 @@
 # Provider Adapter API
 
-Provider workers should use the shared Work Recorder provider path instead of
+Provider workers should use the shared ctx provider path instead of
 writing directly to store tables.
 
 ## Common flow
@@ -25,7 +25,7 @@ Reference implementations in this branch:
 - `source.trust`: whether the data came from a provider-native export, wrapper,
   fixture, or synthetic path.
 - `source.raw_retention`: whether raw local data is retained by path reference,
-  metadata only, local blob, or not at all.
+  metadata only, local object, or not at all.
 - `source.redaction_boundary`: where raw content must be sanitized before
   leaving the local product.
 - `source.cursor`: checkpoint stream/value for incremental import.
@@ -45,6 +45,6 @@ Reference implementations in this branch:
 ## Current limits
 
 - Artifact descriptors can travel in the normalized envelope metadata, but this
-  branch does not yet materialize provider blobs into the artifact table.
+  branch does not yet materialize provider objects into the artifact table.
 - New providers that need a first-class stored provider id may still need the
   capture/store enums extended in their worker branch.

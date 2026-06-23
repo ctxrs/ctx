@@ -1,7 +1,7 @@
 # Hosted Sync Roadmap
 
 Hosted sync is future product direction, not shipped scope for this public
-Work Recorder `0.1.0` candidate.
+ctx `0.1.0` candidate.
 
 The public branch today is useful without any hosted account:
 
@@ -31,7 +31,7 @@ This preview does not claim:
 - centralized policy enforcement;
 - hosted PR publishing or comment fan-out;
 - production retention controls or legal hold;
-- a public Work Recorder API contract.
+- a public hosted work records API contract.
 
 Those items need their own implementation proof, threat model, and release
 approval before they can move from roadmap language into public product claims.
@@ -44,5 +44,5 @@ When referencing future hosted direction in docs or previews:
 - keep local recording as the primary path;
 - say raw transcript sync is opt-in, not default;
 - avoid suggesting that the current branch requires a hosted account;
-- do not blur the boundary between this Work Recorder preview and the separate
+- do not blur the boundary between this ctx preview and the separate
   ctx ADE or hosted team programs.

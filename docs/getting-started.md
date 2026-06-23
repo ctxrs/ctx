@@ -1,10 +1,10 @@
 # Getting Started
 
-ctx creates local Work Records for coding-agent tasks. A record keeps the
+ctx creates local work records for coding-agent tasks. A record keeps the
 prompt or note, command evidence, pull request links, tags, workspace context,
 and reportable history for one unit of work.
 
-This page documents the public local-first Work Recorder `0.1.0` candidate. It
+This page documents the public local-first ctx `0.1.0` candidate. It
 is not the ctx ADE and does not claim a hosted account, hosted sync, or passive
 provider-native capture beyond the proven surfaces called out below.
 
@@ -38,15 +38,23 @@ ctx status
 ```
 
 `ctx setup` installs Git/jj/gh wrapper shims under
-`${CTX_DATA_ROOT:-~/.ctx}/work-record/shims` and prints the `PATH` export needed
-to activate them. To have ctx add a marker-bounded block to a shell rc file:
+`${CTX_DATA_ROOT:-~/.ctx}/shims`, creates or updates the local layout, imports
+known supported provider history, and opens the dashboard when an interactive
+desktop/browser session is available. When shell startup files can be updated
+safely, setup adds a marker-bounded block for future shells.
 
 ```bash
-ctx setup --shell-rc ~/.zshrc
+ctx setup --no-open
+ctx setup --no-import
+ctx setup --no-shell-update
+ctx setup --service
+ctx setup --dry-run
 ```
 
-The shell rc change is backed up and can be removed with
-`ctx shim deactivate-shell --dir ~/.ctx/work-record/shims --shell-rc ~/.zshrc`.
+Use `--no-open` for headless sessions, SSH, CI, or any run where setup should
+print the dashboard URL and command instead of opening a browser. `--service`
+opts into the optional background service; no launchd/systemd/Windows service
+is installed by default.
 
 ## Create a work record
 
@@ -89,7 +97,7 @@ ctx evidence run --record <record-id> cargo test -p checkout
 
 The command is executed normally. ctx stores the command string, exit code,
 safe stdout/stderr previews, start time, and duration in SQLite, with full
-stdout/stderr saved as local-only blob artifacts.
+stdout/stderr saved as local-only object artifacts.
 
 ## Capture local Git/jj/gh commands
 
@@ -103,7 +111,7 @@ eval "$(ctx shim env --dir .ctx-shims)"
 
 Commands such as `git status`, `jj log`, and `gh pr view` run through the real
 tool found later on `PATH`, then best-effort spool command metadata into the
-local capture inbox. Import pending shim captures when you want them in the
+local capture spool. Import pending shim captures when you want them in the
 record store:
 
 ```bash
@@ -171,7 +179,8 @@ ctx show <record-id>
 ctx search checkout
 ctx context checkout
 ctx report
-ctx dashboard export --output ./work-record-dashboard
+ctx dashboard
+ctx dashboard export --output ./ctx-dashboard
 ```
 
 `ctx context --json` and `ctx search --json` return structured packets with
@@ -181,6 +190,9 @@ JSON packets may include dashboard links. `ctx dashboard export` writes a local
 React/Vite dashboard with bundled local assets and no hosted sync, tracking, or
 remote assets. Default review output from `ctx list`, `ctx show`, `ctx search`,
 and `ctx report` redacts secret-like values, credential URLs, and local paths.
+`ctx dashboard` starts or reuses a localhost server and live-updates while it is
+open as new work is recorded. In headless sessions or with `--no-open`, it
+prints the URL and command instead of opening a browser.
 
 ## Inspect repository and pull request metadata
 
@@ -204,8 +216,8 @@ ctx link-pr <record-id> https://github.com/example/project/pull/42
 ## Export, import, and validate
 
 ```bash
-ctx export --output work-records.json
-ctx import --input work-records.json
+ctx export --output ctx-records.json
+ctx import --input ctx-records.json
 ctx validate
 ```
 
@@ -218,7 +230,7 @@ the explicit Codex/Pi provider-history commands below.
 The capture importer reads pending JSONL capture envelope files from:
 
 ```text
-${CTX_DATA_ROOT:-~/.ctx}/work-record/inbox/
+${CTX_DATA_ROOT:-~/.ctx}/spool/
 ```
 
 Run:
@@ -230,7 +242,7 @@ ctx repair
 ```
 
 Successful files move to `.done`; failed files move to `.failed` with an
-`.error.json` sidecar. Normal Work Recorder commands import pending capture
+`.error.json` sidecar. Normal ctx work records commands import pending capture
 files before serving results. `ctx status` reports pending, temporary,
 processing, done, and failed spool counts. `ctx validate --json` returns a
 stable `valid` boolean, findings list, and spool counts for automation.
@@ -245,7 +257,7 @@ Claude, Cursor, and Pi provider-native hooks are not installed.
 Provider fixture imports fail closed on malformed JSONL or provider mismatches
 during CLI preflight, before any provider summary record is created. Rows that
 pass CLI preflight but fail during the lower typed capture import are reported
-in the failed count and can leave the provisional local summary Work Record
+in the failed count and can leave the provisional local summary work record
 that links the attempted import.
 
 To import local provider history explicitly:
@@ -288,9 +300,11 @@ For privacy defaults and local triage, continue with:
 ctx uninstall --yes
 ```
 
-Only run uninstall when you intend to remove the local Work Recorder data store.
-If setup wrote a shell rc activation block, pass the same file to remove it:
+`ctx uninstall` removes shims, the managed shell rc block, and the optional
+service if it was installed. It keeps recorded data by default. Delete local
+records, object payloads, spool files, logs, and config only with an explicit
+data deletion request:
 
 ```bash
-ctx uninstall --yes --shell-rc ~/.zshrc
+ctx uninstall --delete-data --yes
 ```

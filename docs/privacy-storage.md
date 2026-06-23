@@ -1,6 +1,6 @@
 # Privacy and Storage
 
-ctx is local-first. Work Records start on the machine where the CLI is
+ctx is local-first. Work records start on the machine where the CLI is
 running, and the public `0.1.0` candidate keeps that boundary explicit.
 
 ## Privacy defaults
@@ -35,38 +35,38 @@ The recorder stores structured metadata in SQLite:
 
 The current implementation stores records and command evidence metadata in the
 local SQLite database. Full command stdout and stderr are stored as
-content-addressed local-only blob files under the Work Recorder data directory,
+content-addressed local-only object files under the ctx data root,
 with SQLite rows pointing at those artifacts. Export and import use JSON
-archives that include the blob payloads needed to preserve recorded evidence on
+archives that include the object payloads needed to preserve recorded evidence on
 another machine.
 
 The current implementation does not store passive provider transcripts,
 dashboard state, or hosted sync state. Explicit provider fixture imports and
 the explicit local Codex prompt-history JSONL import are stored only when the
 user runs those commands. Local Git/jj/gh shim events are written to the JSONL
-capture inbox and imported only into local storage.
+capture spool and imported only into local storage.
 
 Hosted accounts, hosted sync, team policy, hosted dashboards, organization
 analytics, hosted retention, and hosted publish workflows are not in launch
 scope for this branch. See [hosted-sync-roadmap.md](hosted-sync-roadmap.md) for
 the future direction without turning it into a shipped claim.
 
-## Capture inbox
+## Capture spool
 
 `ctx capture import` reads pending JSONL capture envelope files from fixtures
-or opt-in shims in the local Work Recorder inbox. These files may contain
+or opt-in shims in the local ctx spool. These files may contain
 prompts, command output, paths, and tool metadata before import. Successful
 imports are renamed to `.done`; failed imports are renamed to `.failed` and get
 an `.error.json` sidecar.
 
-Treat the inbox and imported JSON archives as sensitive local data. This branch
-does not install provider-native hooks. Inbox files are created by local
+Treat the spool and imported JSON archives as sensitive local data. This branch
+does not install provider-native hooks. Spool files are created by local
 tooling, fixture workflows, or the Git/jj/gh wrapper shims installed by
 `ctx setup` after their directory is active on `PATH`.
 
 ## What may be sensitive
 
-Work Records can contain:
+Work records can contain:
 
 - source code pasted into record bodies or command output
 - proprietary prompts

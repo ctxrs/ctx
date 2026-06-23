@@ -1,4 +1,4 @@
-# Work Recorder Dashboard Dogfood
+# ctx Dashboard Dogfood
 
 Use the dashboard review dogfood script to produce a local, deterministic set of
 finished-product artifacts for visual review. The script writes only under the

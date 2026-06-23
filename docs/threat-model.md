@@ -1,6 +1,6 @@
-# Work Recorder Threat Model
+# ctx Local Recording Threat Model
 
-This document covers the local Work Recorder launch branch. It describes the
+This document covers the local ctx recording launch branch. It describes the
 implemented local CLI and the near-term integration points that influence the
 security design. Hosted Option A, hosted sync, hosted accounts, team policy,
 organization dashboards, remote retention, and hosted publish commands are out
@@ -9,8 +9,8 @@ authenticated `gh` CLI is in scope.
 
 ## Security Goals
 
-- Keep Work Recorder useful without a hosted account.
-- Avoid silent network upload of Work Recorder data.
+- Keep ctx useful without a hosted account.
+- Avoid silent network upload of recorded work.
 - Make capture explicit or locally inspectable.
 - Preserve command behavior when optional capture shims are enabled.
 - Keep archives, dashboards, reports, and pull request packets reviewable before
@@ -32,12 +32,12 @@ authenticated `gh` CLI is in scope.
 
 ## Assets
 
-- Work Record metadata: ids, titles, bodies, kinds, tags, workspace paths, pull
+- Work record metadata: ids, titles, bodies, kinds, tags, workspace paths, pull
   request URLs, and timestamps.
 - Command evidence: command strings, exit codes, timestamps, durations, stdout
-  and stderr previews, and full stdout/stderr blob payloads.
+  and stderr previews, and full stdout/stderr object payloads.
 - Capture spool: pending, processing, done, failed, and error sidecar files in
-  the local inbox.
+  the local spool.
 - Archives: JSON exports that may contain record metadata and evidence payloads.
 - Dashboard and reports: generated local review artifacts.
 - Shim directory: opt-in wrapper scripts for Git, jj, and GitHub CLI.
@@ -48,10 +48,12 @@ authenticated `gh` CLI is in scope.
 
 ### Data Root
 
-The data root is local storage, normally under `~/.ctx/work-record/` or under
-`CTX_DATA_ROOT` when set. SQLite metadata, blob payloads, and inbox files are
-trusted only as local user data. File permissions and disk encryption are
-delegated to the operating system and user environment.
+The data root is local storage, normally `~/.ctx` or the root named by
+`CTX_DATA_ROOT`/`--data-root`. ctx does not append an extra product directory.
+Canonical local layout is `work.sqlite`, `objects/`, `spool/`, `shims/`,
+`config.toml`, and `logs/` under that root. SQLite metadata, object payloads,
+and spool files are trusted only as local user data. File permissions and disk
+encryption are delegated to the operating system and user environment.
 
 Risks:
 
@@ -67,7 +69,9 @@ Controls:
 - explicit export/import commands;
 - retention guidance in privacy docs;
 - failed spool files are retained for inspection instead of discarded;
-- `ctx uninstall --yes` removes the local Work Recorder product data store.
+- `ctx uninstall` removes shims, shell integration, and any optional service
+  while keeping recorded data. `ctx uninstall --delete-data` deletes the local
+  store, objects, spool, logs, and config after explicit confirmation or force.
 
 Follow-ups:
 
@@ -138,8 +142,8 @@ assistant response, tool-call, command-output, or child-session capture gates.
 
 ### Capture Spool
 
-The capture spool is a local JSONL inbox. Current writers are fixtures and the
-opt-in Git/jj/gh shims. Normal Work Recorder commands import pending files
+The capture spool is a local JSONL queue. Current writers are fixtures and the
+opt-in Git/jj/gh shims. Normal ctx work records commands import pending files
 before serving results.
 
 Risks:

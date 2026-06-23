@@ -70,7 +70,8 @@ The default staging prefix is
 `ctx/records/release-candidate/v0.1.0/<git-commit>` in the
 `ctx-release-artifacts` bucket. The public installer base URL must be
 provided by `CTX_RELEASE_PUBLIC_BASE_URL` before an installer smoke can target
-real R2 objects.
+real R2 objects. Do not copy internal branch or crate names into public
+installer URLs.
 
 ## Checksums
 

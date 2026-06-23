@@ -1,6 +1,6 @@
 # Dependency and License Audit Decisions
 
-This branch keeps dependency and license review explicit because Work Recorder
+This branch keeps dependency and license review explicit because ctx
 handles sensitive local records and command output.
 
 ## Current Decision
@@ -11,7 +11,7 @@ For the local launch branch:
 - third-party Rust dependencies are managed through Cargo and pinned by
   `Cargo.lock`;
 - no public installer or auto-updater is documented as live;
-- no hosted service dependency is required for local Work Recorder commands;
+- no hosted service dependency is required for local ctx commands;
 - a formal vulnerability/license gate is required before public installer URLs,
   hosted sync, or update commands are documented as shipped.
 

@@ -72,10 +72,10 @@ function App() {
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2 text-sm font-medium text-muted-foreground">
               <FolderKanban className="size-4" aria-hidden />
-              <span>Local Work Recorder preview</span>
+              <span>Local ctx preview</span>
               <span className="rounded-sm border border-border px-1.5 py-0.5 text-xs">0.1.0 candidate</span>
             </div>
-            <h1 className="mt-1 text-2xl font-semibold tracking-normal sm:text-3xl">ctx Work Recorder</h1>
+            <h1 className="mt-1 text-2xl font-semibold tracking-normal sm:text-3xl">ctx records agent work</h1>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <StatusPill tone="ok" icon={<ShieldCheck className="size-3.5" />}>
@@ -104,13 +104,13 @@ function App() {
         <section className="docs-hero">
           <div className="grid gap-6 xl:grid-cols-[minmax(0,2.2fr)_minmax(320px,1fr)] xl:items-start">
             <div className="min-w-0">
-              <div className="docs-kicker">Work Recorder Release Candidate</div>
+              <div className="docs-kicker">ctx Release Candidate</div>
               <h2 className="docs-headline">
                 Record what agents do so the work can be attached to PRs, searched later, and shared with teammates.
               </h2>
               <p className="docs-lead">
-                This preview covers the public Work Recorder CLI only. It documents the current local-first product
-                honestly: records, evidence, import, search, report, dashboard export, and PR comment publishing
+                This preview covers the public ctx CLI only. It documents the current local-first product
+                honestly: work records, evidence, import, search, report, dashboard, and PR comment publishing
                 through the local <code>gh</code> CLI. It is not the ctx ADE, does not publish or repoint{" "}
                 <code>ctx.rs</code>, and does not claim hosted sync or passive provider hooks beyond the proven
                 surfaces below.
@@ -155,7 +155,7 @@ function App() {
           onValueChange={(value) => setActiveTab(value as PreviewTab)}
           className="mt-6 space-y-4"
         >
-          <Tabs.List className="tab-list" aria-label="Work Recorder docs preview views">
+          <Tabs.List className="tab-list" aria-label="ctx docs preview views">
             <Tab value="overview" icon={<BadgeInfo className="size-4" />} label="Overview" />
             <Tab value="flow" icon={<Workflow className="size-4" />} label="Flow" />
             <Tab value="providers" icon={<Boxes className="size-4" />} label="Providers" />
@@ -170,7 +170,7 @@ function App() {
                 <SectionHeader icon={<FileText className="size-4" />} title="What ctx records" />
                 <div className="docs-copy space-y-4">
                   <p>
-                    A Work Record is the durable history for one unit of agent-assisted work. In this candidate, ctx can
+                    A work record is the durable history for one unit of agent-assisted work. In this candidate, ctx can
                     store the record body, tags, timestamps, optional workspace, linked pull request URL, command
                     evidence, share-safe previews, provider import summaries, and repository context that helps a
                     reviewer understand what changed.
@@ -193,7 +193,7 @@ function App() {
                     the container runtime, provider connection UI, or a production hosted team surface.
                   </p>
                   <div className="docs-callout">
-                    The public Work Recorder story is a local CLI and review packet. Anything broader should stay clearly
+                    The public ctx story is a local CLI and review packet. Anything broader should stay clearly
                     labeled as future work until the separate program signs off.
                   </div>
                 </div>
@@ -233,8 +233,8 @@ function App() {
                 <div className="docs-copy space-y-4">
                   <p>
                     The intended user experience stays passive after setup. ctx installs reversible Git/jj/gh wrappers
-                    under the local data root, then imports the capture inbox into the store when you run recorder
-                    commands or <code>ctx capture import</code>.
+                    under the local data root, then imports the capture spool into the store when you run ctx commands or{" "}
+                    <code>ctx capture import</code>.
                   </p>
                   <ul className="docs-bullet-list">
                     <li>No repository hooks are installed.</li>

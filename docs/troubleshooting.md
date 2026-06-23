@@ -1,6 +1,6 @@
 # Troubleshooting
 
-Use this page when the local Work Recorder flow looks incomplete or when a
+Use this page when the local ctx recording flow looks incomplete or when a
 provider claim does not match what the branch can actually prove.
 
 ## First checks
@@ -19,7 +19,7 @@ Use them to confirm:
 - the SQLite store is initialized;
 - the shim directory exists;
 - the shim directory is active on `PATH` when you expect passive capture;
-- the capture inbox does not have stuck or failed files.
+- the capture spool does not have stuck or failed files.
 
 ## Shim activation problems
 
@@ -27,7 +27,7 @@ If Git, jj, or gh activity is not showing up after capture import, check the
 shim path first:
 
 ```bash
-ctx shim env --dir ~/.ctx/work-record/shims
+ctx shim env --dir ~/.ctx/shims
 ctx status
 ```
 
@@ -37,20 +37,20 @@ Common causes:
 - a custom shell rc block was removed or overwritten;
 - commands are running in a shell that never sourced the activation block.
 
-To reapply the persistent activation block:
+To reapply setup without changing shell startup files:
 
 ```bash
-ctx setup --shell-rc ~/.zshrc
+ctx setup --no-shell-update
 ```
 
 To remove and reinstall the local shims:
 
 ```bash
-ctx shim uninstall --dir ~/.ctx/work-record/shims
+ctx shim uninstall --dir ~/.ctx/shims
 ctx setup
 ```
 
-## Capture inbox failures
+## Capture spool failures
 
 If `ctx doctor` reports failed or stuck capture files:
 
@@ -63,7 +63,7 @@ ctx validate
 Successful repair moves the retried content into the normal store. Failed files
 remain available for inspection with their `.error.json` sidecars.
 
-Remember that the inbox is sensitive local data. Review it like source code
+Remember that the spool is sensitive local data. Review it like source code
 before attaching logs or archives elsewhere.
 
 ## Provider import triage

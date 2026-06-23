@@ -1,9 +1,9 @@
-# Work Recorder Dashboard
+# ctx Dashboard
 
 Local React/Vite shell used for two local preview surfaces:
 
 - the static dashboard exported by `ctx dashboard export`;
-- a docs/site preview at `site-preview.html` for Work Recorder positioning and
+- a docs/site preview at `site-preview.html` for ctx positioning and
   release-copy review.
 
 - React renders a static, local-only SPA from `#ctx-dashboard-data`.
@@ -29,7 +29,7 @@ After `npm run build`, preview outputs are written to `dist/`:
 Refresh story:
 
 ```bash
-ctx dashboard export --output ./work-record-dashboard
+ctx dashboard export --output ./ctx-dashboard
 ```
 
 The dashboard is a static export. Re-run the export command after new

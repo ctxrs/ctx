@@ -1,13 +1,12 @@
 <p align="center">
-  <img src="assets/readme/work-record-banner.png" alt="ctx Work Recorder" />
+  <img src="assets/readme/work-record-banner.png" alt="ctx records agent work" />
 </p>
 
-ctx is being productized around **Work Records**: durable, local records of
-agent-assisted work that can be searched, reviewed, exported, and attached to
-pull requests through local CLI workflows.
+ctx records agent work as durable local **work records** that can be searched,
+reviewed, exported, and attached to pull requests through local CLI workflows.
 
-This branch is the public local-first Work Recorder `0.1.0` candidate preview.
-It focuses on a source-build local product: Work Records, command evidence,
+This branch is the public local-first ctx `0.1.0` candidate preview. It
+focuses on a source-build local product: work records, command evidence,
 pull request links, search, reports, agent-readable context output, JSON
 export/import, a static React/Vite dashboard, capture spool import, provider
 fixture import, gated Codex prompt-history import, explicit Pi session import,
@@ -27,7 +26,7 @@ container runtime, hosted team product, `ctx.rs` cutover, or production
 
 Implemented in this branch:
 
-- create local Work Records with title, body, tags, kind, optional workspace,
+- create local work records with title, body, tags, kind, optional workspace,
   timestamps, and id;
 - capture command evidence when commands are run through `ctx evidence run`;
 - install local reversible Git/jj/gh wrapper shims that spool command evidence;
@@ -47,8 +46,9 @@ Implemented in this branch:
   provides an explicit input path;
 - automatically import pending capture spool files before normal work views;
 - inspect Git/jj workspace metadata and parse GitHub/GitLab pull request URLs;
-- validate, repair failed capture imports, and remove the local Work Recorder
-  data store.
+- validate and repair failed capture imports;
+- uninstall shims, shell integration, and any optional service while keeping
+  recorded data unless deletion is explicitly requested.
 
 Explicit launch boundaries:
 
@@ -63,7 +63,7 @@ Explicit launch boundaries:
 - hosted publish/sync commands are not shipped; `ctx publish pr-comment` is
   local CLI-driven GitHub PR comment publishing through `gh`, not hosted sync.
 
-The implemented CLI now uses root-level Work Recorder commands. The older
+The implemented CLI now uses root-level ctx work records commands. The older
 `ctx workspace ...` and `ctx work ...` forms remain as hidden compatibility
 aliases for the current local behavior.
 
@@ -86,14 +86,26 @@ cargo run -p ctx -- list
 
 ## Quick Start
 
-Create the local Work Recorder store:
+Create the local ctx store:
 
 ```bash
 ctx setup
 ctx status
 ```
 
-Create a Work Record:
+By default, `ctx setup` creates or updates `~/.ctx`, installs Git/jj/gh capture
+shims under `~/.ctx/shims`, enables future shells with a managed shell rc block
+when that is safe, imports known supported provider history, and starts or
+opens the local dashboard when the session looks interactive. It should ask
+only on real ambiguity or failure. Use `--no-open`, `--no-import`,
+`--no-shell-update`, `--service`, `--yes`, or `--dry-run` to constrain that
+first-run behavior.
+
+No persistent service is installed by default. Recording works through local
+commands and shims without a daemon. `ctx setup --service` opts into the
+background service path.
+
+Create a work record:
 
 ```bash
 ctx record \
@@ -142,8 +154,14 @@ ctx show <record-id>
 ctx search checkout
 ctx context checkout
 ctx report
-ctx dashboard export --output ./work-record-dashboard
+ctx dashboard
 ```
+
+`ctx dashboard` starts or reuses a small localhost server and opens the
+dashboard when the environment supports it. In SSH, CI, other headless
+sessions, or with `--no-open`, it prints the URL and command instead of opening
+a browser. For a static review artifact, use `ctx dashboard export --output
+./ctx-dashboard`.
 
 Preview a pull request comment locally before publishing through `gh`:
 
@@ -161,8 +179,8 @@ ctx pr parse https://github.com/example/project/pull/42 --json
 Move records between machines with ctx JSON archives:
 
 ```bash
-ctx export --output work-records.json
-ctx import --input work-records.json
+ctx export --output ctx-records.json
+ctx import --input ctx-records.json
 ```
 
 `ctx import` imports ctx archive JSON only. It does not import existing
@@ -176,7 +194,7 @@ ctx capture import-provider --provider codex --input tests/fixtures/provider/cod
 
 Provider fixture import currently supports `codex`, `claude`, `pi`,
 `opencode`, `antigravity`, `gemini`, and `cursor` fixture JSONL. It creates a
-summary Work Record and provider event, message, and tool-call fixture views
+summary work record and provider event, message, and tool-call fixture views
 for new imported sessions/events so the content appears in search, context,
 report, and dashboard output.
 
@@ -207,8 +225,8 @@ Import pending local capture spool files:
 ctx capture import --json
 ```
 
-The capture importer reads JSONL envelope files from the local Work Recorder
-inbox. The optional Git/jj/gh wrapper shims can write these envelopes for local
+The capture importer reads JSONL envelope files from the local ctx spool. The
+optional Git/jj/gh wrapper shims can write these envelopes for local
 command-line activity. Provider-native shell hooks are not implemented in this
 branch. The provider-history paths are explicit local Codex prompt-history JSONL
 import and explicit Pi session JSONL import, with the limitations described
@@ -233,9 +251,9 @@ Use these docs together when reviewing the `0.1.0` candidate wording and scope:
 - [docs/troubleshooting.md](docs/troubleshooting.md): status, doctor, repair,
   validate, shim activation, and provider import triage.
 
-## Work Record Model
+## Work Records Model
 
-A Work Record is the durable history for one unit of agent-assisted work. The
+A work record is the durable history for one unit of agent-assisted work. The
 current implementation stores and reports:
 
 - id;
@@ -268,7 +286,11 @@ The current command groups are:
 ```bash
 ctx setup
 ctx status [--json]
-ctx uninstall --yes
+ctx dashboard [--no-open]
+ctx uninstall [--delete-data] [--yes]
+ctx service install
+ctx service status
+ctx service uninstall
 
 ctx schema
 ctx record --title "task title" --body "prompt or note" --kind task
@@ -277,6 +299,7 @@ ctx show <record-id>
 ctx search <query>
 ctx context [query]
 ctx report
+ctx dashboard [--no-open]
 ctx dashboard export --output <dir>
 ctx evidence run [--record <record-id>] <command> [args...]
 ctx shim install --dir <dir>
@@ -291,8 +314,8 @@ ctx vcs inspect [path] [--json]
 ctx pr parse <pull-request-url> [--json]
 ctx link-pr <record-id> <pull-request-url> [--json]
 ctx publish pr-comment <record-id> --dry-run [--json]
-ctx export [--output work-records.json]
-ctx import [--input work-records.json] [--overwrite]
+ctx export [--output ctx-records.json]
+ctx import [--input ctx-records.json] [--overwrite]
 ctx validate [--json]
 ctx doctor [--privacy]
 ctx repair [--json]
@@ -318,17 +341,21 @@ a specific example data root, or `CTX_EXAMPLE_TMPDIR` to move temporary roots.
 By default, ctx uses machine-local storage under:
 
 ```text
-~/.ctx/work-record/
+~/.ctx/
   work.sqlite
-  blobs/
-  inbox/
+  objects/
+  spool/
+  shims/
+  config.toml
+  logs/
 ```
 
-Set `CTX_DATA_ROOT` to use a different root. The implementation stores records,
+Set `CTX_DATA_ROOT` or `--data-root` to use a different ctx root; ctx does not
+append an extra product directory. The implementation stores records,
 provider fixture summaries and rich capture rows, imported command evidence,
 VCS/PR metadata, and report/search projections in SQLite. Full evidence payloads
-are stored in local blob files, and pending capture envelopes from fixtures or
-ctx-owned shims live in a JSONL inbox. Broad provider-history directory
+are stored in local object files, and pending capture envelopes from fixtures or
+ctx-owned shims live in the durable spool. Broad provider-history directory
 scanners and native provider hooks remain explicit follow-on work; the shipped
 provider-history paths are the explicit Codex and Pi import commands documented
 above.
@@ -338,14 +365,14 @@ should be reviewed before they leave your machine because records and command
 output can contain source code, prompts, paths, secrets, or customer data.
 
 For the launch security boundary, see [SECURITY.md](SECURITY.md) and the
-[Work Recorder threat model](docs/threat-model.md). Hosted/team Option A is not
+[ctx local recording threat model](docs/threat-model.md). Hosted/team Option A is not
 part of this branch's launch scope.
 
 ## Product Direction
 
-The Work Recorder direction remains local-first:
+The ctx recording direction remains local-first:
 
-- Work Records should be valuable without adopting a special agent runtime.
+- work records should be valuable without adopting a special agent runtime.
 - Local recording should not require a hosted account.
 - Passive capture should be conservative and should not break the wrapped tool
   if capture fails.
