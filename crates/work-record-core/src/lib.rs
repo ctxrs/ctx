@@ -1617,6 +1617,7 @@ fn local_path_regexes() -> &'static [Regex] {
         .get_or_init(|| {
             [
                 r#"(^|[\s"'(=\[])(/(?:home|Users|tmp|var/tmp|private/tmp|Volumes|mnt|workspace|workspaces|repo|repos|code)(?:/[^\s,;"'<>)\]]*)?)"#,
+                r#"(^|[\s"'(=\[])(/(?:[A-Za-z0-9._-]+/)+[^\s,;"'<>)\]]*)"#,
                 r#"(?i)(^|[\s"'(=\[])(?:[A-Z]:\\|\\\\)[^\s,;"'<>)\]]+"#,
             ]
             .into_iter()
@@ -1711,14 +1712,16 @@ mod tests {
     #[test]
     fn share_safe_redaction_hides_local_paths() {
         let redacted = redact_share_safe_markers(
-            "cwd=/home/daddy/code/project tmp=/tmp/work token=ghp_1234567890abcdef",
+            "cwd=/home/daddy/code/project tmp=/tmp/work ci=/var/lib/buildkite-agent/builds/project token=ghp_1234567890abcdef",
         );
 
         assert!(redacted.contains("cwd=[REDACTED_PATH]"));
         assert!(redacted.contains("tmp=[REDACTED_PATH]"));
+        assert!(redacted.contains("ci=[REDACTED_PATH]"));
         assert!(redacted.contains("token=[REDACTED_SECRET]"));
         assert!(!redacted.contains("/home/daddy/code/project"));
         assert!(!redacted.contains("/tmp/work"));
+        assert!(!redacted.contains("/var/lib/buildkite-agent/builds/project"));
         assert!(!redacted.contains("ghp_123456"));
     }
 
