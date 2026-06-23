@@ -3,6 +3,7 @@ members = [
     "crates/ctx-cli",
     "crates/work-record-capture",
     "crates/work-record-core",
+    "crates/work-record-publish",
     "crates/work-record-report",
     "crates/work-record-search",
     "crates/work-record-store",
