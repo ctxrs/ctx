@@ -1268,6 +1268,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "work-record-publish"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "thiserror",
+ "uuid",
+ "work-record-core",
+ "work-record-vcs",
+]
+
+[[package]]
 name = "work-record-report"
 version = "0.1.0"
 dependencies = [
