@@ -893,13 +893,13 @@ fn safe_artifact_preview(
 
 fn share_safe_relative_path(value: &str) -> String {
     let redacted = redact_share_safe_markers(value);
-    if redacted.contains("[local-path]") {
+    if redacted.contains("[REDACTED_PATH]") {
         value
             .rsplit(['/', '\\'])
             .next()
             .filter(|segment| !segment.is_empty())
-            .map(|segment| format!("[local-path]/{segment}"))
-            .unwrap_or_else(|| "[local-path]".to_owned())
+            .map(|segment| format!("[REDACTED_PATH]/{segment}"))
+            .unwrap_or_else(|| "[REDACTED_PATH]".to_owned())
     } else {
         redacted
     }
@@ -1017,18 +1017,18 @@ mod tests {
 
         assert!(html.contains("Local Work Recorder"));
         assert!(html.contains("ctx dashboard export"));
-        assert!(html.contains("Ship &lt;dashboard&gt; token=[redacted]"));
+        assert!(html.contains("Ship &lt;dashboard&gt; token=[REDACTED_SECRET]"));
         assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
         assert!(html.contains("workspace: work"));
         assert!(!html.contains("/tmp/work"));
         assert!(!html.contains("hunter2"));
         assert!(!html.contains("ghp_123456"));
         assert!(!html.contains("secret=shhh"));
-        assert!(html.contains("password=[redacted]"));
-        assert!(html.contains("[local-path]"));
-        assert!(html.contains("cargo test &lt;unsafe&gt; token=[redacted]"));
+        assert!(html.contains("password=[REDACTED_SECRET]"));
+        assert!(html.contains("[REDACTED_PATH]"));
+        assert!(html.contains("cargo test &lt;unsafe&gt; token=[REDACTED_SECRET]"));
         assert!(!html.contains("token=secret"));
-        assert!(html.contains("password=[redacted]"));
+        assert!(html.contains("password=[REDACTED_SECRET]"));
         assert!(!html.contains("hunter2"));
         assert!(!html.contains("<script>alert(1)</script>"));
         assert!(!html.contains("href=\"javascript:alert(1)\""));
@@ -1063,9 +1063,9 @@ mod tests {
 
         let markdown = context_markdown(&context);
 
-        assert!(markdown.contains("password=[redacted]"));
-        assert!(markdown.contains("token=[redacted]"));
-        assert!(markdown.contains("[local-path]"));
+        assert!(markdown.contains("password=[REDACTED_SECRET]"));
+        assert!(markdown.contains("token=[REDACTED_SECRET]"));
+        assert!(markdown.contains("[REDACTED_PATH]"));
         assert!(!markdown.contains("hunter2"));
         assert!(!markdown.contains("ghp_123456"));
         assert!(!markdown.contains("/home/daddy/code/project"));
@@ -1103,9 +1103,9 @@ mod tests {
         assert!(!html.contains("No artifacts"));
         assert!(html.contains("raw artifact content withheld"));
         assert!(html.contains("raw event payload withheld"));
-        assert!(html.contains("cargo test -p work-record-report token=[redacted]"));
-        assert!(html.contains("password=[redacted]"));
-        assert!(html.contains("[local-path]/lib.rs"));
+        assert!(html.contains("cargo test -p work-record-report token=[REDACTED_SECRET]"));
+        assert!(html.contains("password=[REDACTED_SECRET]"));
+        assert!(html.contains("[REDACTED_PATH]/lib.rs"));
         assert!(!html.contains("ghp_123456"));
         assert!(!html.contains("hunter2"));
         assert!(!html.contains("/home/daddy/code/private"));
@@ -1122,7 +1122,7 @@ mod tests {
 
         assert!(markdown.contains("# Work Recorder Evidence Report"));
         assert!(markdown.contains("Share-safe: yes"));
-        assert!(markdown.contains("cargo test -p work-record-report token=[redacted]"));
+        assert!(markdown.contains("cargo test -p work-record-report token=[REDACTED_SECRET]"));
         assert!(json.contains("\"share_safe\": true"));
         assert!(json.contains("\"raw_transcripts_withheld\": 1"));
         assert!(!markdown.contains("ghp_123456"));

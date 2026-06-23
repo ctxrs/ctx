@@ -983,8 +983,8 @@ mod tests {
             200,
         );
 
-        assert!(snippet.contains("token=[redacted]"));
-        assert!(snippet.contains("password=[redacted]"));
+        assert!(snippet.contains("token=[REDACTED_SECRET]"));
+        assert!(snippet.contains("password=[REDACTED_SECRET]"));
         assert!(!snippet.contains("ghp_123456"));
         assert!(!snippet.contains("hunter2"));
     }
@@ -1290,7 +1290,7 @@ mod tests {
         )
         .unwrap();
         let secret_snippet = &secret_packet.results[0].snippet;
-        assert!(secret_snippet.contains("[redacted]"));
+        assert!(secret_snippet.contains("[REDACTED_SECRET]"));
         assert!(!secret_snippet.contains("hunter2"));
         assert!(!secret_snippet.contains("ghp_123456"));
     }
@@ -1338,7 +1338,7 @@ mod tests {
         assert_eq!(truncation.reason.as_deref(), Some("token_budget"));
         assert!(truncation.omitted_results > 0);
         let serialized = serde_json::to_string(&packet).unwrap();
-        assert!(serialized.contains("[redacted]"));
+        assert!(serialized.contains("[REDACTED_SECRET]"));
         assert!(!serialized.contains("hunter2"));
     }
 }

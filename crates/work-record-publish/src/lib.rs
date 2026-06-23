@@ -465,9 +465,9 @@ mod tests {
         let rendered = render_pr_comment(&[record], &[evidence], &RenderOptions::default());
 
         assert!(!rendered.raw_transcript_included);
-        assert!(rendered.markdown.contains("token=[redacted]"));
-        assert!(rendered.markdown.contains("password=[redacted]"));
-        assert!(rendered.markdown.contains("[local-path]"));
+        assert!(rendered.markdown.contains("token=[REDACTED_SECRET]"));
+        assert!(rendered.markdown.contains("password=[REDACTED_SECRET]"));
+        assert!(rendered.markdown.contains("[REDACTED_PATH]"));
         assert!(rendered.markdown.contains("Transcript redacted by default"));
         assert!(!rendered.markdown.contains("hunter2"));
         assert!(!rendered.markdown.contains("secret=shhh"));
@@ -495,7 +495,7 @@ mod tests {
 
         assert!(rendered.raw_transcript_included);
         assert!(rendered.markdown.contains("Transcript mode: raw opt-in"));
-        assert!(rendered.markdown.contains("password=[redacted]"));
+        assert!(rendered.markdown.contains("password=[REDACTED_SECRET]"));
         assert!(rendered.markdown.contains("raw stdout password=hunter2"));
     }
 
