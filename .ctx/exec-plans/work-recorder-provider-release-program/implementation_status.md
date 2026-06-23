@@ -1,6 +1,6 @@
 # Work Recorder Provider Release Implementation Status
 
-Last updated: 2026-06-23T20:36:30Z.
+Last updated: 2026-06-23T20:39:30Z.
 
 ## Current Integration Branch
 
@@ -43,9 +43,9 @@ ADE desktop release, `ade.ctx.rs` migration, production hosted launch, and
 
 - Controlling plan copied into this repo for provenance.
 - Initial public and private worktrees created.
-- Implementation agents launched for all initial streams except dashboard/CLI
-  polish, which is waiting for child-agent capacity after stale prior agents
-  consumed the session limit.
+- Implementation agents launched for the initial provider/release/docs/hosted
+  streams. Dashboard/CLI polish was launched through the alternate worker-agent
+  path after stale prior ctx-MCP children consumed the ctx-MCP session limit.
 - Workers were instructed to avoid broad concurrent Cargo and use focused,
   resource-safe validation.
 
@@ -56,7 +56,6 @@ file records program start only.
 
 ## Open Coordination Items
 
-- Launch the dashboard/CLI polish worker when child-agent capacity frees up.
 - Merge the provider architecture branch before integrating provider-specific
   work, unless a provider worker produces an intentionally isolated patch.
 - Keep provider support claims aligned with the support taxonomy in
