@@ -334,3 +334,21 @@ steps:
     timeout_in_minutes: 5
     artifact_paths:
       - "artifacts/buildkite/release-blockers/freebsd-x64/**/*"
+
+  - label: ":clipboard: completion certificate"
+    key: "release-completion-certificate"
+    depends_on:
+      - "release-dry-run-linux-x64"
+      - "release-dry-run-macos-arm64"
+      - "release-dry-run-macos-x64"
+      - "release-dry-run-windows-x64"
+      - "freebsd-x64-blocker"
+    command: "CTX_ARTIFACT_DIR=artifacts/buildkite/completion-certificate ./scripts/release-completion-certificate.sh"
+    agents:
+      queue: "release-linux-managed"
+      ctx-runner-class: "release-linux-x64-stage"
+      os: "linux"
+      arch: "x86_64"
+    timeout_in_minutes: 5
+    artifact_paths:
+      - "artifacts/buildkite/completion-certificate/**/*"

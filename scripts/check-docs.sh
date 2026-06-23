@@ -10,15 +10,19 @@ required_paths=(
   docs/cli-reference.md
   docs/work-model.md
   docs/privacy-storage.md
+  docs/release-install.md
+  docs/release-supply-chain.md
   examples/local-record-workflow.sh
   examples/capture-spool-fixture.sh
+  release/install/ctx-release-metadata.env.template
+  release/completion-certificate-template.md
 )
 
 for path in "${required_paths[@]}"; do
   test -f "${path}"
 done
 
-for script in examples/*.sh scripts/check-docs.sh; do
+for script in examples/*.sh scripts/check-docs.sh scripts/install.sh scripts/release-*.sh; do
   bash -n "${script}"
 done
 
@@ -43,6 +47,10 @@ doc_search "ctx vcs inspect" README.md docs examples >/dev/null
 doc_search "ctx pr parse" README.md docs examples >/dev/null
 doc_search "ctx dashboard export" README.md docs examples >/dev/null
 doc_search "does not install|Not implemented yet|not yet" README.md docs >/dev/null
+doc_search "curl -fsSLO" docs/release-install.md >/dev/null
+doc_search "SHA-256" docs/release-install.md docs/release-supply-chain.md >/dev/null
+doc_search "SBOM" docs/release-supply-chain.md >/dev/null
+doc_search "notarization" docs/release-supply-chain.md >/dev/null
 
 if doc_search "does not ship a local dashboard|does not include a dashboard|local dashboard;" docs README.md >/dev/null; then
   printf 'dashboard appears to be documented as missing\n' >&2

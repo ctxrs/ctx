@@ -88,11 +88,17 @@ validate_yaml_if_possible() {
 validate_contract() {
   local pipeline=".buildkite/pipeline.yml"
   local release_script="scripts/release-dry-run.sh"
+  local certificate_script="scripts/release-completion-certificate.sh"
+  local install_script="scripts/install.sh"
+  local install_ps1="scripts/install.ps1"
   local windows_script="scripts/ci-windows.ps1"
   local blocker_script="scripts/release-platform-blocker.sh"
 
   test -f "${pipeline}" || fail_contract "pipeline file exists"
   test -f "${release_script}" || fail_contract "release dry-run script exists"
+  test -f "${certificate_script}" || fail_contract "completion certificate script exists"
+  test -f "${install_script}" || fail_contract "Bash installer exists"
+  test -f "${install_ps1}" || fail_contract "PowerShell installer exists"
   test -f "${windows_script}" || fail_contract "Windows PowerShell CI script exists"
   if [[ -f scripts/ci-windows-bash.cmd ]]; then
     fail_contract "Windows Bash wrapper has been removed"
@@ -118,6 +124,7 @@ validate_contract() {
   require_text "macOS x64 release dry-run step" "${pipeline}" 'key: "release-dry-run-macos-x64"'
   require_text "Windows x64 release dry-run step" "${pipeline}" 'key: "release-dry-run-windows-x64"'
   require_text "FreeBSD documented blocker step" "${pipeline}" 'key: "freebsd-x64-blocker"'
+  require_text "completion certificate step" "${pipeline}" 'key: "release-completion-certificate"'
 
   require_text "Linux verification queue" "${pipeline}" 'queue: "release-linux-managed"'
   require_text "Linux verification runner class" "${pipeline}" 'ctx-runner-class: "release-linux-x64-stage"'
@@ -138,6 +145,7 @@ validate_contract() {
   require_text "platform smoke command wired" "${pipeline}" './scripts/check.sh platform-smoke'
   require_text "Windows platform smoke command wired" "${pipeline}" 'scripts\\ci-windows.ps1 platform-smoke'
   require_text "Windows release dry-run command wired" "${pipeline}" 'scripts\\ci-windows.ps1 release-dry-run'
+  require_text "completion certificate command wired" "${pipeline}" './scripts/release-completion-certificate.sh'
   require_text "Linux host triple guard" "${pipeline}" 'CTX_EXPECT_HOST_TRIPLE: "x86_64-unknown-linux-gnu"'
   require_text "macOS arm64 host triple guard" "${pipeline}" 'CTX_EXPECT_HOST_TRIPLE: "aarch64-apple-darwin"'
   require_text "macOS x64 host triple guard" "${pipeline}" 'CTX_EXPECT_HOST_TRIPLE: "x86_64-apple-darwin"'
@@ -148,6 +156,25 @@ validate_contract() {
   require_text "release script is dry-run only" "${release_script}" '"dry_run": true'
   require_text "release script does not publish" "${release_script}" '"upload": false'
   require_text "release script enforces host triple" "${release_script}" 'ctx_require_host_triple "${CTX_EXPECT_HOST_TRIPLE:-}"'
+  require_text "release script emits install metadata" "${release_script}" 'ctx-release-metadata.env'
+  require_text "release script emits pinned installer checksum" "${release_script}" 'CTX_RELEASE_SHA256_${platform_key}=${checksum}'
+  require_text "Bash installer requires metadata" "${install_script}" '--metadata is required'
+  require_text "Bash installer refuses curl pipe ambiguity" "${install_script}" 'curl -fsSLO'
+  require_text "Bash installer refuses insecure metadata URL" "${install_script}" 'refusing insecure metadata URL'
+  require_text "Bash installer verifies SHA-256 before install" "${install_script}" 'checksum mismatch'
+  require_text "Bash installer rejects placeholder checksums" "${install_script}" 'checksum for ${platform} is a placeholder'
+  require_text "PowerShell installer requires metadata" "${install_ps1}" '[Parameter(Mandatory = $true)]'
+  require_text "PowerShell installer refuses insecure metadata URL" "${install_ps1}" 'refusing insecure metadata URL'
+  require_text "PowerShell installer verifies SHA-256 before install" "${install_ps1}" 'checksum mismatch'
+  require_text "PowerShell installer rejects placeholder checksums" "${install_ps1}" 'checksum for windows-x64 is a placeholder'
+  require_text "install metadata template exists" "release/install/ctx-release-metadata.env.template" 'CTX_RELEASE_SCHEMA_VERSION=1'
+  require_text "install docs avoid pipe launch" "docs/release-install.md" 'Do not document or publish a `curl ... | sh` command.'
+  require_text "supply chain docs cover SBOM" "docs/release-supply-chain.md" 'SBOM publication is a release blocker'
+  require_text "supply chain docs cover provenance" "docs/release-supply-chain.md" 'Build provenance is a release blocker'
+  require_text "supply chain docs cover notarization" "docs/release-supply-chain.md" 'notarization'
+  require_text "completion certificate is non-publishing" "${certificate_script}" '"publishing": false'
+  require_text "completion certificate records external blockers" "${certificate_script}" 'external_release_blockers'
+  require_text "completion certificate template exists" "release/completion-certificate-template.md" 'Work Recorder Completion Certificate'
   require_text "host triple parser is pipe-safe" "scripts/ci-common.sh" 'rustc_info="$(rustc -vV)"'
   require_text "rustup bootstrap avoids pipefail SIGPIPE" "scripts/ci-common.sh" '-o "${rustup_installer}"'
   require_text "Windows script bootstraps Rust" "${windows_script}" 'Ensure-Rust-Toolchain'

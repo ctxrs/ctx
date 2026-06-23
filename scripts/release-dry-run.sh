@@ -37,13 +37,14 @@ build_host_release() {
 
 write_manifest() {
   local out_dir="$1"
-  local version platform target_triple expected_host_triple host_triple commit branch suffix source_bin artifact artifact_rel checksum bytes manifest checksum_file generated_at
+  local version platform platform_key target_triple expected_host_triple host_triple commit branch suffix source_bin artifact artifact_rel checksum bytes manifest checksum_file metadata_file generated_at
 
   version="$(awk -F '"' '/^version[[:space:]]*=/ { print $2; exit }' crates/ctx-cli/Cargo.toml)"
   host_triple="$(ctx_detect_host_triple)"
   expected_host_triple="${CTX_EXPECT_HOST_TRIPLE:-}"
   target_triple="${CTX_RELEASE_TARGET_TRIPLE:-${host_triple}}"
   platform="${CTX_RELEASE_PLATFORM:-host-${host_triple}}"
+  platform_key="${platform//-/_}"
   commit="$(git rev-parse HEAD)"
   branch="$(git branch --show-current)"
   suffix="$(ctx_host_exe_suffix)"
@@ -64,8 +65,17 @@ write_manifest() {
   generated_at="$(date +%s)"
   manifest="${out_dir}/manifest.json"
   checksum_file="${out_dir}/checksums.sha256"
+  metadata_file="${out_dir}/ctx-release-metadata.env"
 
   printf '%s  %s\n' "${checksum}" "${artifact}" > "${checksum_file}"
+  cat > "${metadata_file}" <<EOF
+CTX_RELEASE_SCHEMA_VERSION=1
+CTX_RELEASE_VERSION=${version}
+CTX_RELEASE_CHANNEL=dry-run
+CTX_RELEASE_BASE_URL=https://github.com/ctxrs/ctx/releases/download/v${version}
+CTX_RELEASE_ARTIFACT_${platform_key}=${artifact}
+CTX_RELEASE_SHA256_${platform_key}=${checksum}
+EOF
 
   cat > "${manifest}" <<EOF
 {
@@ -93,6 +103,7 @@ EOF
 
   printf 'release dry-run manifest: %s\n' "${manifest}"
   printf 'release dry-run checksums: %s\n' "${checksum_file}"
+  printf 'release dry-run install metadata: %s\n' "${metadata_file}"
 }
 
 cd "${CTX_REPO_ROOT}"
