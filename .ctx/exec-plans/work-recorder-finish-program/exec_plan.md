@@ -507,3 +507,10 @@ Do not report final completion until all are true:
   in progress: keep copying/checksumming the real Windows file path, but write
   a safe forward-slash repo-relative artifact path into `manifest.json`, and add
   pipeline-contract assertions for that behavior.
+- 2026-06-23T19:24Z: Buildkite #72 passed all 25 prerequisite lanes, including
+  Windows release dry-run with normalized downloaded artifact paths and a
+  relative manifest path, then failed only in the completion certificate because
+  Linux parsing did not strip CRLF from Windows-generated
+  `ctx-release-metadata.env` and `checksums.sha256`. Fix in progress: strip a
+  trailing carriage return before metadata/checksum comparison and make the
+  completion-certificate self-test generate CRLF Windows release evidence.

@@ -453,9 +453,11 @@ write_release_evidence_self_test_fixture() {
   local artifact
   local artifact_path
   local checksum bytes
+  local line_end=$'\n'
 
   if [[ "${platform}" == "windows-x64" ]]; then
     suffix=".exe"
+    line_end=$'\r\n'
   fi
   artifact="ctx-0.0.0-smoke-${target}${suffix}"
   artifact_path="artifacts/buildkite/release-dry-run/${platform}/${artifact}"
@@ -464,7 +466,7 @@ write_release_evidence_self_test_fixture() {
   chmod 0755 "${root}/${artifact_path}" 2>/dev/null || true
   checksum="$(sha256_file "${root}/${artifact_path}")"
   bytes="$(wc -c < "${root}/${artifact_path}" | tr -d '[:space:]')"
-  printf '%s  %s\n' "${checksum}" "${artifact}" > "${dir}/checksums.sha256"
+  printf '%s  %s%s' "${checksum}" "${artifact}" "${line_end}" > "${dir}/checksums.sha256"
   cat > "${dir}/manifest.json" <<EOF
 {
   "schema_version": 1,
@@ -489,14 +491,14 @@ write_release_evidence_self_test_fixture() {
   ]
 }
 EOF
-  cat > "${dir}/ctx-release-metadata.env" <<EOF
-CTX_RELEASE_SCHEMA_VERSION=1
-CTX_RELEASE_CHANNEL=dry-run
-CTX_RELEASE_VERSION=0.0.0-smoke
-CTX_RELEASE_BASE_URL=https://example.invalid/ctx
-CTX_RELEASE_ARTIFACT_${platform_key}=${artifact}
-CTX_RELEASE_SHA256_${platform_key}=${checksum}
-EOF
+  {
+    printf 'CTX_RELEASE_SCHEMA_VERSION=1%s' "${line_end}"
+    printf 'CTX_RELEASE_CHANNEL=dry-run%s' "${line_end}"
+    printf 'CTX_RELEASE_VERSION=0.0.0-smoke%s' "${line_end}"
+    printf 'CTX_RELEASE_BASE_URL=https://example.invalid/ctx%s' "${line_end}"
+    printf 'CTX_RELEASE_ARTIFACT_%s=%s%s' "${platform_key}" "${artifact}" "${line_end}"
+    printf 'CTX_RELEASE_SHA256_%s=%s%s' "${platform_key}" "${checksum}" "${line_end}"
+  } > "${dir}/ctx-release-metadata.env"
 }
 
 run_completion_certificate_prerequisites() {

@@ -137,7 +137,16 @@ env_value() {
   local full_path="${completion_evidence_root}/${path}"
 
   require_file "${path}"
-  awk -F= -v key="${key}" '$1 == key { print substr($0, length(key) + 2); found = 1; exit } END { if (!found) exit 1 }' "${full_path}" 2>/dev/null || true
+  awk -F= -v key="${key}" '
+    $1 == key {
+      value = substr($0, length(key) + 2)
+      sub(/\r$/, "", value)
+      print value
+      found = 1
+      exit
+    }
+    END { if (!found) exit 1 }
+  ' "${full_path}" 2>/dev/null || true
 }
 
 require_manifest_value() {
@@ -237,7 +246,20 @@ validate_release_dry_run() {
   fi
 
   require_file "${checksum_file}"
-  checksum_entry="$(awk -v name="${artifact_name}" '$2 == name { print $1; found = 1; exit } END { if (!found) exit 1 }' "${completion_evidence_root}/${checksum_file}" 2>/dev/null || true)"
+  checksum_entry="$(awk -v name="${artifact_name}" '
+    {
+      checksum = $1
+      artifact = $2
+      sub(/\r$/, "", checksum)
+      sub(/\r$/, "", artifact)
+      if (artifact == name) {
+        print checksum
+        found = 1
+        exit
+      }
+    }
+    END { if (!found) exit 1 }
+  ' "${completion_evidence_root}/${checksum_file}" 2>/dev/null || true)"
   if [[ "${checksum_entry}" != "${artifact_checksum}" ]]; then
     fail_certificate "${platform} checksums.sha256 must match manifest checksum for ${artifact_name}"
   fi
