@@ -1074,3 +1074,39 @@ None accepted yet.
   - commit and push the GNU toolchain remediation;
   - trigger and monitor a fresh public Buildkite run proving Windows smoke and
     Windows release dry-run.
+
+## 2026-06-23 Buildkite Windows Zig Download Follow-Up
+
+- Build 48:
+  <https://buildkite.com/luca-king/ctx-public-release-verification/builds/48>
+- Branch/head:
+  `work-record` / `893439e3c923de926738ead2d5c21d86484fa105`
+- Outcome at remediation time:
+  - PASS: Linux and macOS smoke/release lanes completed, along with the
+    pipeline contract, fmt, docs, cargo check, clippy, cargo test, examples,
+    Bazel, and FreeBSD blocker artifact;
+  - IN PROGRESS: Windows smoke reached the intended `x86_64-pc-windows-gnu`
+    Rust bootstrap and began downloading Zig, proving the lane was no longer
+    blocked by the missing MSVC `link.exe`;
+  - RISK: the Windows log stayed silent at the `Invoke-WebRequest` Zig download
+    line for multiple polling intervals, leaving no bounded retry/timeout or
+    completion evidence.
+- Repo-owned remediation:
+  - `scripts/ci-windows.ps1` now disables PowerShell progress rendering and
+    routes rustup, Zig, and optional Visual Studio Build Tools downloads through
+    a `Download-File` helper;
+  - the helper prefers `curl.exe` with redirects, retries, connect timeout, and
+    a bounded max runtime, writes through a temporary `.download` file, verifies
+    non-empty output, and logs downloaded byte counts;
+  - the GNU/Zig toolchain and external Buildkite tool-cache strategy are
+    unchanged.
+- Local validation before pushing:
+  - `./scripts/check-buildkite-pipeline.sh`: PASS;
+  - `bash -n scripts/check.sh scripts/ci-common.sh scripts/release-dry-run.sh scripts/check-buildkite-pipeline.sh scripts/buildkite/macos_agent_pre_command.sh`:
+    PASS;
+  - PowerShell execution remains validated by the next Windows Buildkite lane
+    because `pwsh`/`powershell` are unavailable on this Linux host.
+- Remaining external evidence gap:
+  - commit and push the download hardening;
+  - trigger and monitor a fresh public Buildkite run proving Windows smoke and
+    Windows release dry-run.

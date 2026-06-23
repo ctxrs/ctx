@@ -1694,6 +1694,27 @@ Future entries must include:
   - rerun focused local syntax/contract/docs/diff checks;
   - trigger and monitor a fresh public Buildkite run for `origin/work-record`.
 
+## 2026-06-23 Build 48 Windows Download Hardening Follow-Up
+
+- Remote Buildkite evidence:
+  - build 48 ran `893439e3c923de926738ead2d5c21d86484fa105`;
+  - PASS before Windows completion: Linux and macOS smoke/release lanes, the
+    core Linux verification lanes, and the FreeBSD blocker artifact completed;
+  - Windows smoke reached `x86_64-pc-windows-gnu` Rust installation and began
+    downloading Zig, proving the runner had moved past the previous MSVC
+    `link.exe` blocker;
+  - the job log remained silent at the `Invoke-WebRequest` Zig download line
+    for multiple polls, so the next remediation is to make Windows downloads
+    retryable, bounded, and observable.
+- Remediation validation planned for the next head:
+  - `scripts/ci-windows.ps1` uses a shared `Download-File` helper for rustup,
+    Zig, and optional Visual Studio Build Tools downloads;
+  - the helper prefers `curl.exe --fail --location --retry ... --max-time ...`,
+    writes through a temporary file, validates non-empty output, and logs byte
+    counts;
+  - rerun focused local syntax/contract/diff checks;
+  - trigger and monitor a fresh public Buildkite run for `origin/work-record`.
+
 - Command:
   `./scripts/check-buildkite-pipeline.sh`
 - Repo/worktree:

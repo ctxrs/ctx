@@ -5,6 +5,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
 Set-StrictMode -Version Latest
 
 function Join-PathSafe {
@@ -79,6 +80,40 @@ function Require-Command {
     throw "$Name is required but was not found on PATH=$env:PATH"
   }
   return $cmd.Source
+}
+
+function Download-File {
+  param(
+    [string]$Uri,
+    [string]$OutFile
+  )
+
+  $tmp = "$OutFile.download"
+  if (Test-Path $tmp) {
+    Remove-Item -Force $tmp
+  }
+
+  $curl = Get-Command "curl.exe" -ErrorAction SilentlyContinue
+  if ($curl) {
+    Write-Host "Downloading $Uri with curl.exe"
+    & $curl.Source --fail --location --show-error --retry 5 --retry-delay 5 --connect-timeout 30 --max-time 900 --output $tmp $Uri
+    if ($LASTEXITCODE -ne 0) {
+      throw "curl.exe download failed with exit code $LASTEXITCODE for $Uri"
+    }
+  } else {
+    Write-Host "Downloading $Uri with Invoke-WebRequest"
+    Invoke-WebRequest -UseBasicParsing -Uri $Uri -OutFile $tmp
+  }
+
+  if (-not (Test-Path $tmp)) {
+    throw "download did not produce expected file: $tmp"
+  }
+  $bytes = (Get-Item $tmp).Length
+  if ($bytes -le 0) {
+    throw "download produced an empty file: $tmp"
+  }
+  Move-Item -Force $tmp $OutFile
+  Write-Host "Downloaded $Uri to $OutFile ($bytes bytes)"
 }
 
 function Rust-Tools-Available {
@@ -213,7 +248,7 @@ function Install-Visual-Studio-Build-Tools {
   if (-not (Test-Path $installer)) {
     $url = "https://aka.ms/vs/17/release/vs_BuildTools.exe"
     Write-Host "Visual Studio Build Tools not found; downloading installer from $url"
-    Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $installer
+    Download-File -Uri $url -OutFile $installer
   }
 
   $installArgs = @(
@@ -261,7 +296,7 @@ function Ensure-Zig-GNU-Build-Environment {
     if (-not (Test-Path $archive)) {
       $url = "https://ziglang.org/download/$zigVersion/zig-x86_64-windows-$zigVersion.zip"
       Write-Host "Zig not found; downloading $url"
-      Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $archive
+      Download-File -Uri $url -OutFile $archive
     }
     $extractDir = Join-PathSafe $zigCache "extract-$zigVersion"
     if (Test-Path $extractDir) {
@@ -351,7 +386,7 @@ function Ensure-Rust-Toolchain {
     if (-not (Test-Path $installer)) {
       $url = "https://win.rustup.rs/x86_64"
       Write-Host "cargo/rustup not found; downloading rustup-init from $url"
-      Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $installer
+      Download-File -Uri $url -OutFile $installer
     }
     $installArgs = @("-y", "--profile", "minimal", "--default-toolchain", "stable", "--component", "rustfmt", "--component", "clippy")
     if (-not [string]::IsNullOrWhiteSpace($expectedHost)) {
