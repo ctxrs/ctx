@@ -1172,3 +1172,43 @@ None accepted yet.
   - commit and push the extraction discovery remediation;
   - trigger and monitor a fresh public Buildkite run proving Windows smoke and
     Windows release dry-run.
+
+## 2026-06-23 Buildkite Windows 7zr Extraction Follow-Up
+
+- Build 55:
+  <https://buildkite.com/luca-king/ctx-public-release-verification/builds/55>
+- Branch/head:
+  `work-record` / `0c2f2232d8f187e1a1005b5725fbceefae946b1f`
+- Outcome:
+  - Windows smoke still failed during w64devkit extraction/discovery; the
+    self-extracting archive path exited successfully but did not produce a
+    discoverable `bin\gcc.exe`.
+- Repo-owned remediation:
+  - download the official `7zr.exe` console extractor into the same tool cache;
+  - use `7zr.exe x` to extract the w64devkit self-extracting archive explicitly
+    before compiler discovery.
+- Remaining external evidence gap:
+  - commit and push the 7zr extraction remediation;
+  - trigger and monitor a fresh public Buildkite run proving Windows smoke and
+    Windows release dry-run.
+
+## 2026-06-23 Buildkite Windows w64devkit 7zr Follow-Up
+
+- Build 55:
+  <https://buildkite.com/luca-king/ctx-public-release-verification/builds/55>
+- Branch/head:
+  `work-record` / `0c2f2232d8f187e1a1005b5725fbceefae946b1f`
+- Outcome:
+  - Windows smoke reused the cached `w64devkit-x64-2.8.0.7z.exe`;
+  - FAIL: executing the self-extracting archive still produced no detectable
+    `bin\gcc.exe` under the extraction directory, so the issue is extraction,
+    not only compiler discovery.
+- Repo-owned remediation:
+  - download the standalone `7zr.exe` extractor into the same Buildkite/ctx
+    tool cache;
+  - extract `w64devkit-x64-2.8.0.7z.exe` with `7zr x ... -y` before compiler
+    discovery.
+- Remaining external evidence gap:
+  - commit and push the 7zr extraction remediation;
+  - trigger and monitor a fresh public Buildkite run proving Windows smoke and
+    Windows release dry-run.

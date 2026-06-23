@@ -1765,6 +1765,19 @@ Future entries must include:
   - rerun focused local syntax/contract/docs/diff checks;
   - trigger and monitor a fresh public Buildkite run for `origin/work-record`.
 
+## 2026-06-23 Build 55 Windows w64devkit 7zr Follow-Up
+
+- Remote Buildkite evidence:
+  - build 55 ran `0c2f2232d8f187e1a1005b5725fbceefae946b1f`;
+  - Windows smoke reused the cached `w64devkit-x64-2.8.0.7z.exe`;
+  - FAIL: executing the self-extracting archive did not produce a detectable
+    `bin\gcc.exe`, so the extraction mechanism needs to be explicit.
+- Remediation validation planned for the next head:
+  - download standalone `7zr.exe` into the Buildkite/ctx tool cache;
+  - extract w64devkit with `7zr x ... -y` before compiler discovery;
+  - rerun focused local syntax/contract/docs/diff checks;
+  - trigger and monitor a fresh public Buildkite run for `origin/work-record`.
+
 - Command:
   `./scripts/check-buildkite-pipeline.sh`
 - Repo/worktree:

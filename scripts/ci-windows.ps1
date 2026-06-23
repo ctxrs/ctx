@@ -294,6 +294,7 @@ function Ensure-MinGW-GNU-Build-Environment {
   $mingwGxx = Join-PathSafe $mingwBin "g++.exe"
   $mingwAr = Join-PathSafe $mingwBin "ar.exe"
   $archive = Join-PathSafe $mingwCache "$mingwName.7z.exe"
+  $sevenZip = Join-PathSafe $mingwCache "7zr.exe"
   New-Item -ItemType Directory -Force -Path $mingwCache | Out-Null
 
   if (-not (Test-Path $mingwGcc)) {
@@ -302,12 +303,17 @@ function Ensure-MinGW-GNU-Build-Environment {
       Write-Host "w64devkit not found; downloading $url"
       Download-File -Uri $url -OutFile $archive
     }
+    if (-not (Test-Path $sevenZip)) {
+      $url = "https://www.7-zip.org/a/7zr.exe"
+      Write-Host "7zr extractor not found; downloading $url"
+      Download-File -Uri $url -OutFile $sevenZip
+    }
     $extractDir = Join-PathSafe $mingwCache "extract-$mingwName"
     if (Test-Path $extractDir) {
       Remove-Item -Recurse -Force $extractDir
     }
     New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
-    & $archive -y "-o$extractDir"
+    & $sevenZip x $archive "-o$extractDir" -y
     if ($LASTEXITCODE -ne 0) {
       throw "w64devkit extraction failed with exit code $LASTEXITCODE"
     }

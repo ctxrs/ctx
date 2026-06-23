@@ -155,6 +155,7 @@ validate_contract() {
   require_text "Windows script discovers Visual Studio tools" "${windows_script}" 'vswhere.exe'
   require_text "Windows script bootstraps MinGW GNU tools" "${windows_script}" 'Ensure-MinGW-GNU-Build-Environment'
   require_text "Windows script downloads w64devkit" "${windows_script}" 'skeeto/w64devkit/releases/download'
+  require_text "Windows script extracts w64devkit with 7zr" "${windows_script}" 'www.7-zip.org/a/7zr.exe'
   require_text "Windows script uses MinGW linker" "${windows_script}" 'CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER'
   require_text "Windows script uses external Buildkite tool cache" "${windows_script}" 'BUILDKITE_AGENT_HOME'
   require_text "Windows script can bootstrap Visual Studio Build Tools" "${windows_script}" 'Install-Visual-Studio-Build-Tools'
