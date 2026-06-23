@@ -1,30 +1,19 @@
 [package]
-name = "ctx"
+name = "work-record-capture"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
-[[bin]]
-name = "ctx"
-path = "src/main.rs"
-
 [dependencies]
-anyhow.workspace = true
 chrono.workspace = true
-clap.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 uuid.workspace = true
-work-record-capture = { path = "../work-record-capture" }
 work-record-core = { path = "../work-record-core" }
-work-record-report = { path = "../work-record-report" }
 work-record-store = { path = "../work-record-store" }
 
-[target.'cfg(unix)'.dependencies]
-libc.workspace = true
-
 [dev-dependencies]
-assert_cmd.workspace = true
-predicates.workspace = true
 tempfile.workspace = true

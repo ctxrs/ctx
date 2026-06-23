@@ -51,7 +51,10 @@ fn root_setup_status_schema_and_validate_work() {
         .stdout(predicate::str::contains("initialized: true"))
         .stdout(predicate::str::contains("blob_dir:"))
         .stdout(predicate::str::contains("inbox_dir:"))
-        .stdout(predicate::str::contains("device_path:"));
+        .stdout(predicate::str::contains("device_path:"))
+        .stdout(predicate::str::contains("spool_pending: 0"))
+        .stdout(predicate::str::contains("spool_processing: 0"))
+        .stdout(predicate::str::contains("spool_failed: 0"));
 
     ctx(&temp)
         .args(["schema"])
@@ -64,6 +67,80 @@ fn root_setup_status_schema_and_validate_work() {
         .assert()
         .success()
         .stdout(predicate::str::contains("valid"));
+}
+
+#[test]
+fn capture_write_fixture_is_quiet_and_imports_from_spool() {
+    let temp = tempdir();
+    ctx(&temp)
+        .args([
+            "capture",
+            "write-fixture",
+            "--title",
+            "Spooled fixture",
+            "--body",
+            "captured from spool",
+            "--dedupe-key",
+            "quiet-fixture",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::is_empty());
+
+    let inbox = temp.path().join("work-record").join("inbox");
+    let pending = fs::read_dir(&inbox)
+        .unwrap()
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".jsonl")
+        })
+        .count();
+    assert_eq!(pending, 1);
+
+    ctx(&temp)
+        .args(["status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("spool_pending: 1"));
+
+    ctx(&temp)
+        .args(["capture", "import", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"schema_version\": 1"))
+        .stdout(predicate::str::contains("\"import\""))
+        .stdout(predicate::str::contains("\"imported_records\": 1"));
+
+    ctx(&temp)
+        .args(["list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Spooled fixture"));
+}
+
+#[test]
+fn validate_reports_failed_and_processing_capture_spool_files() {
+    let temp = tempdir();
+    let inbox = temp.path().join("work-record").join("inbox");
+    fs::create_dir_all(&inbox).unwrap();
+    fs::write(inbox.join("capture-one.jsonl.failed"), "{}\n").unwrap();
+    fs::write(inbox.join("capture-two.jsonl.processing"), "{}\n").unwrap();
+
+    ctx(&temp)
+        .args(["validate"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "1 failed capture spool file(s) need retry or inspection",
+        ))
+        .stdout(predicate::str::contains(
+            "1 capture spool file(s) are still marked processing",
+        ));
 }
 
 #[test]

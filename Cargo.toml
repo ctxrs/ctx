@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/ctx-cli",
+    "crates/work-record-capture",
     "crates/work-record-core",
     "crates/work-record-report",
     "crates/work-record-store",

@@ -11,6 +11,9 @@ use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use uuid::Uuid;
+use work_record_capture::{
+    import_spool, inbox_dir as capture_inbox_dir, spool_counts, write_fixture, FixtureOptions,
+};
 use work_record_core::{
     blob_dir, database_path, default_data_root, device_path, inbox_dir, work_record_dir,
     AgentContextPacket, Evidence, WorkRecord, WorkRecordArchive,
@@ -60,6 +63,8 @@ enum CommandRoot {
     Report(ReportArgs),
     #[command(about = "Capture evidence for work records")]
     Evidence(EvidenceCommand),
+    #[command(about = "Import passive capture spool events")]
+    Capture(CaptureCommand),
     #[command(about = "Attach a pull request URL to a work record")]
     LinkPr(LinkPrArgs),
     #[command(about = "Export work records and evidence as JSON")]
@@ -218,6 +223,42 @@ struct EvidenceRunArgs {
 }
 
 #[derive(Debug, Args)]
+struct CaptureCommand {
+    #[command(subcommand)]
+    command: CaptureSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum CaptureSubcommand {
+    #[command(hide = true, about = "Write one capture fixture to the JSONL spool")]
+    WriteFixture(CaptureWriteFixtureArgs),
+    #[command(about = "Import pending capture spool files")]
+    Import(CaptureImportArgs),
+}
+
+#[derive(Debug, Args)]
+struct CaptureWriteFixtureArgs {
+    #[arg(long, default_value = "Fixture capture")]
+    title: String,
+    #[arg(long, default_value = "fixture body")]
+    body: String,
+    #[arg(long = "tag")]
+    tags: Vec<String>,
+    #[arg(long)]
+    dedupe_key: Option<String>,
+    #[arg(long)]
+    machine_id: Option<String>,
+    #[arg(long)]
+    cwd: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct CaptureImportArgs {
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
 struct LinkPrArgs {
     id: Uuid,
     pr_url: String,
@@ -264,6 +305,7 @@ fn main() -> Result<()> {
         CommandRoot::Evidence(args) => {
             run_work_subcommand(WorkSubcommand::Evidence(args), data_root)
         }
+        CommandRoot::Capture(args) => run_capture(args, data_root),
         CommandRoot::LinkPr(args) => run_work_subcommand(WorkSubcommand::LinkPr(args), data_root),
         CommandRoot::Export(args) => run_work_subcommand(WorkSubcommand::Export(args), data_root),
         CommandRoot::Import(args) => run_work_subcommand(WorkSubcommand::Import(args), data_root),
@@ -287,6 +329,8 @@ fn run_workspace_subcommand(command: WorkspaceSubcommand, data_root: PathBuf) ->
         }
         WorkspaceSubcommand::Status => {
             let db_path = database_path(data_root.clone());
+            let capture_inbox = capture_inbox_dir(&data_root);
+            let counts = spool_counts(&capture_inbox)?;
             println!("data_root: {}", data_root.display());
             println!(
                 "work_record_dir: {}",
@@ -297,6 +341,11 @@ fn run_workspace_subcommand(command: WorkspaceSubcommand, data_root: PathBuf) ->
             println!("device_path: {}", device_path(data_root.clone()).display());
             println!("database: {}", db_path.display());
             println!("initialized: {}", db_path.exists());
+            println!("spool_pending: {}", counts.pending);
+            println!("spool_tmp: {}", counts.tmp);
+            println!("spool_processing: {}", counts.processing);
+            println!("spool_done: {}", counts.done);
+            println!("spool_failed: {}", counts.failed);
         }
         WorkspaceSubcommand::Uninstall { yes } => {
             if !yes {
@@ -317,7 +366,7 @@ fn run_work(command: WorkCommand, data_root: PathBuf) -> Result<()> {
 }
 
 fn run_work_subcommand(command: WorkSubcommand, data_root: PathBuf) -> Result<()> {
-    let mut store = Store::open(database_path(data_root))?;
+    let mut store = Store::open(database_path(data_root.clone()))?;
     match command {
         WorkSubcommand::Schema => println!("{}", store.schema()?),
         WorkSubcommand::Record(args) => {
@@ -392,13 +441,67 @@ fn run_work_subcommand(command: WorkSubcommand, data_root: PathBuf) -> Result<()
             println!("imported {record_count} records and {evidence_count} evidence items");
         }
         WorkSubcommand::Validate => {
-            let findings = store.validate()?;
+            let mut findings = store.validate()?;
+            let counts = spool_counts(capture_inbox_dir(&data_root))?;
+            if counts.failed > 0 {
+                findings.push(format!(
+                    "{} failed capture spool file(s) need retry or inspection",
+                    counts.failed
+                ));
+            }
+            if counts.processing > 0 {
+                findings.push(format!(
+                    "{} capture spool file(s) are still marked processing",
+                    counts.processing
+                ));
+            }
             if findings.is_empty() {
                 println!("valid");
             } else {
                 for finding in findings {
                     println!("{finding}");
                 }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn run_capture(command: CaptureCommand, data_root: PathBuf) -> Result<()> {
+    match command.command {
+        CaptureSubcommand::WriteFixture(args) => {
+            write_fixture(
+                capture_inbox_dir(&data_root),
+                FixtureOptions {
+                    title: args.title,
+                    body: args.body,
+                    tags: args.tags,
+                    dedupe_key: args.dedupe_key,
+                    machine_id: args.machine_id,
+                    cwd: args.cwd,
+                    ..FixtureOptions::default()
+                },
+            )?;
+        }
+        CaptureSubcommand::Import(args) => {
+            let mut store = Store::open(database_path(data_root.clone()))?;
+            let summary = import_spool(capture_inbox_dir(&data_root), &mut store)?;
+            if args.json {
+                print_json(serde_json::json!({
+                    "schema_version": 1,
+                    "import": summary,
+                }))?;
+            } else {
+                println!(
+                    "imported {} records and {} evidence items from {} spool files",
+                    summary.imported_records, summary.imported_evidence, summary.processed_files
+                );
+            }
+            if summary.failed_files > 0 {
+                return Err(anyhow!(
+                    "failed to import {} capture spool file(s)",
+                    summary.failed_files
+                ));
             }
         }
     }
