@@ -139,6 +139,98 @@ Updated: 2026-06-22T20:02:05-05:00
   `work-record` / `6d73e2c`
 - Outcome: PASS
 
+## 2026-06-22 Review Blocker Remediation Checks
+
+- Command:
+  `cargo fmt --all`
+- Repo/worktree:
+  `/home/daddy/code/ctx-multi-repo-workspace/worktrees/ctx/work-record-product`
+- Branch/head:
+  `work-record` / uncommitted changes on `de1c718`
+- Outcome: PASS
+
+- Command:
+  `TMPDIR=/var/tmp/ctxwr CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=1 cargo test -p work-record-core -p work-record-report -p work-record-search -p ctx -- --test-threads=1`
+- Repo/worktree:
+  `/home/daddy/code/ctx-multi-repo-workspace/worktrees/ctx/work-record-product`
+- Branch/head:
+  `work-record` / uncommitted changes on `de1c718`
+- Outcome: PASS
+- Coverage:
+  - 28 CLI integration tests passed;
+  - 6 core unit tests passed;
+  - 3 report unit tests passed;
+  - 2 search unit tests passed.
+
+- Command:
+  `./scripts/check-buildkite-pipeline.sh`
+- Repo/worktree:
+  `/home/daddy/code/ctx-multi-repo-workspace/worktrees/ctx/work-record-product`
+- Branch/head:
+  `work-record` / uncommitted changes on `de1c718`
+- Outcome: PASS
+- Coverage:
+  - Buildkite agent dry-run parser accepted the updated pipeline;
+  - confirmed required Bazel CI behavior;
+  - confirmed macOS arm64, macOS x64, and Windows x64 platform-smoke lanes.
+
+- Command:
+  `TMPDIR=/var/tmp/ctxwr CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=1 ./scripts/check.sh platform-smoke`
+- Repo/worktree:
+  `/home/daddy/code/ctx-multi-repo-workspace/worktrees/ctx/work-record-product`
+- Branch/head:
+  `work-record` / uncommitted changes on `de1c718`
+- Outcome: PASS
+- Coverage:
+  - built `ctx`;
+  - ran setup, record, search JSON, context JSON, dashboard export, and validate
+    against an isolated `CTX_DATA_ROOT`.
+
+- Command:
+  `TMPDIR=/var/tmp/ctxwr CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=1 BAZEL_JOBS=2 ./scripts/check.sh all`
+- Repo/worktree:
+  `/home/daddy/code/ctx-multi-repo-workspace/worktrees/ctx/work-record-product`
+- Branch/head:
+  `work-record` / uncommitted changes on `de1c718`
+- Outcome: PASS
+- Coverage:
+  - fmt, docs, cargo check, clippy, workspace tests, examples, and local Bazel
+    lane handling passed;
+  - 28 CLI integration tests, 4 capture unit tests, 6 core unit tests, 3 report
+    unit tests, 2 search unit tests, 10 store unit tests, and 7 VCS unit tests
+    passed;
+  - Bazel lane recorded `skipped` locally because neither `bazel` nor
+    `bazelisk` is installed. The Buildkite Bazel lane now sets
+    `CTX_REQUIRE_BAZEL=1`.
+
+- Command:
+  `./scripts/check-docs.sh`
+- Repo/worktree:
+  `/home/daddy/code/ctx-multi-repo-workspace/worktrees/ctx/work-record-product`
+- Branch/head:
+  `work-record` / uncommitted changes on `de1c718`
+- Outcome: PASS
+
+- Command:
+  `TMPDIR=/var/tmp/ctxwr CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=1 ./scripts/release-dry-run.sh`
+- Repo/worktree:
+  `/home/daddy/code/ctx-multi-repo-workspace/worktrees/ctx/work-record-product`
+- Branch/head:
+  `work-record` / uncommitted changes on `de1c718`
+- Outcome: PASS
+- Artifacts:
+  - `target/ctx-artifacts/release-dry-run/manifest.json`;
+  - `target/ctx-artifacts/release-dry-run/checksums.sha256`;
+  - `target/ctx-artifacts/release-dry-run/timings.json`.
+
+- Command:
+  `git diff --check`
+- Repo/worktree:
+  `/home/daddy/code/ctx-multi-repo-workspace/worktrees/ctx/work-record-product`
+- Branch/head:
+  `work-record` / uncommitted changes on `de1c718`
+- Outcome: PASS
+
 ## 2026-06-22 Local Product Review Blocker Checks
 
 - Command:

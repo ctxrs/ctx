@@ -545,3 +545,44 @@ None accepted yet.
     path exists.
   - Local Bazel remains skipped because neither `bazel` nor `bazelisk` is
     installed on this host.
+
+## 2026-06-22 Review Blocker Remediation Pass
+
+- Owner: manager continuation after adversarial local product/security and
+  CI/release reviews.
+- Commit state: uncommitted changes on top of `de1c718`.
+- Local product/security fixes:
+  - Added shared share-safe text redaction for secrets and common local absolute
+    paths.
+  - Applied share-safe rendering to dashboard record title/body/tags/tag
+    summaries, PR links, evidence commands/previews, and Markdown context.
+  - Withheld unsafe PR URLs from dashboard/context links instead of rendering
+    credential-bearing or non-HTTPS links.
+  - Made JSON search/context ranking consider evidence stdout/stderr-only
+    matches, not only record fields and evidence commands.
+  - Added CLI/unit regressions for dashboard record-field redaction, Markdown
+    context redaction, share-safe local path redaction, and evidence-output-only
+    search/context results.
+- CI/release fixes:
+  - `scripts/check.sh bazel` still skips locally when Bazel is missing, but now
+    fails when `CTX_REQUIRE_BAZEL=1`.
+  - The Buildkite Bazel lane sets `CTX_REQUIRE_BAZEL=1`, so release lanes cannot
+    pass through an unproven Bazel skip on CI.
+  - Added native macOS arm64, macOS x64, and Windows x64 platform-smoke lanes
+    before host-native release dry-runs.
+  - Added `scripts/check.sh platform-smoke`, including host-triple enforcement,
+    binary build, setup, record, search, context, dashboard export, and validate.
+- Local validation on this uncommitted pass:
+  - `cargo fmt --all`: PASS.
+  - `TMPDIR=/var/tmp/ctxwr CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=1 cargo test -p work-record-core -p work-record-report -p work-record-search -p ctx -- --test-threads=1`: PASS.
+  - `./scripts/check-buildkite-pipeline.sh`: PASS.
+  - `TMPDIR=/var/tmp/ctxwr CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=1 ./scripts/check.sh platform-smoke`: PASS.
+  - `TMPDIR=/var/tmp/ctxwr CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=1 BAZEL_JOBS=2 ./scripts/check.sh all`: PASS.
+  - `./scripts/check-docs.sh`: PASS.
+  - `TMPDIR=/var/tmp/ctxwr CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=1 ./scripts/release-dry-run.sh`: PASS.
+  - `git diff --check`: PASS.
+- Remaining external evidence gap:
+  - Live Buildkite green URLs still need to be generated from the pushed branch.
+  - Native FreeBSD remains blocked until a runner/pool or cross-build lane is
+    available.
+  - Hosted/private staging remains a separate active workstream.

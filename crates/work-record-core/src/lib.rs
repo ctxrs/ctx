@@ -1401,6 +1401,18 @@ pub fn redact_preview(text: &str, max_chars: usize) -> String {
     redact_secret_markers(&preview)
 }
 
+pub fn redact_share_safe_preview(text: &str, max_chars: usize) -> String {
+    let mut preview = String::new();
+    for ch in text.chars().take(max_chars) {
+        preview.push(ch);
+    }
+    redact_share_safe_markers(&preview)
+}
+
+pub fn redact_share_safe_markers(text: &str) -> String {
+    redact_local_paths(&redact_secret_markers(text))
+}
+
 pub fn redact_secret_markers(text: &str) -> String {
     let mut value = text.to_owned();
     for regex in standalone_secret_regexes() {
@@ -1408,6 +1420,14 @@ pub fn redact_secret_markers(text: &str) -> String {
     }
     if let Some(regex) = secret_assignment_regex() {
         value = regex.replace_all(&value, "$1[redacted]").into_owned();
+    }
+    value
+}
+
+fn redact_local_paths(text: &str) -> String {
+    let mut value = text.to_owned();
+    for regex in local_path_regexes() {
+        value = regex.replace_all(&value, "$1[local-path]").into_owned();
     }
     value
 }
@@ -1433,6 +1453,21 @@ fn standalone_secret_regexes() -> &'static [Regex] {
                 r"\bgh[pousr]_[A-Za-z0-9_]{16,}\b",
                 r"\bAKIA[0-9A-Z]{16}\b",
                 r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{12,}\b",
+            ]
+            .into_iter()
+            .filter_map(|pattern| Regex::new(pattern).ok())
+            .collect()
+        })
+        .as_slice()
+}
+
+fn local_path_regexes() -> &'static [Regex] {
+    static REGEXES: OnceLock<Vec<Regex>> = OnceLock::new();
+    REGEXES
+        .get_or_init(|| {
+            [
+                r#"(^|[\s"'(=\[])(/(?:home|Users|tmp|var/tmp|private/tmp|Volumes|mnt|workspace|workspaces|repo|repos|code)(?:/[^\s,;"'<>)\]]*)?)"#,
+                r#"(?i)(^|[\s"'(=\[])(?:[A-Z]:\\|\\\\)[^\s,;"'<>)\]]+"#,
             ]
             .into_iter()
             .filter_map(|pattern| Regex::new(pattern).ok())
@@ -1521,6 +1556,20 @@ mod tests {
         assert!(!redacted.contains("shhh"));
         assert!(!redacted.contains("AKIA1234567890ABCDEF"));
         assert!(!redacted.contains("sk-abcdefghijklmnop"));
+    }
+
+    #[test]
+    fn share_safe_redaction_hides_local_paths() {
+        let redacted = redact_share_safe_markers(
+            "cwd=/home/daddy/code/project tmp=/tmp/work token=ghp_1234567890abcdef",
+        );
+
+        assert!(redacted.contains("cwd=[local-path]"));
+        assert!(redacted.contains("tmp=[local-path]"));
+        assert!(redacted.contains("token=[redacted]"));
+        assert!(!redacted.contains("/home/daddy/code/project"));
+        assert!(!redacted.contains("/tmp/work"));
+        assert!(!redacted.contains("ghp_123456"));
     }
 
     #[test]

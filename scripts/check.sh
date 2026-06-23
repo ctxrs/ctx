@@ -7,13 +7,14 @@ source "${script_dir}/ci-common.sh"
 
 usage() {
   cat <<'USAGE'
-usage: scripts/check.sh [all|fmt|docs|check|clippy|test|examples|bazel]...
+usage: scripts/check.sh [all|fmt|docs|check|clippy|test|examples|bazel|platform-smoke]...
 
 Runs resource-capped local checks sequentially. Defaults to "all".
 Environment overrides:
   CARGO_BUILD_JOBS     Cargo build parallelism, default min(cpu, memory_gb / 3)
   RUST_TEST_THREADS    Rust test threads, default CARGO_BUILD_JOBS
   BAZEL_JOBS           Bazel job count, default CARGO_BUILD_JOBS
+  CTX_REQUIRE_BAZEL    If 1, fail when Bazel files exist but bazel/bazelisk is missing
   CTX_ARTIFACT_DIR     Timing artifact directory, default target/ctx-artifacts/check
   CLIPPY_FLAGS         Extra clippy flags, default "-D warnings"
 USAGE
@@ -73,6 +74,40 @@ run_examples() {
   done
 }
 
+run_platform_smoke() {
+  local suffix smoke_bin data_root record_id
+
+  ctx_require_host_triple "${CTX_EXPECT_HOST_TRIPLE:-}"
+  ctx_run_timed "platform-smoke-build" cargo build -p ctx --bin ctx "${cargo_locked_args[@]}"
+
+  suffix="$(ctx_host_exe_suffix)"
+  smoke_bin="${CTX_REPO_ROOT}/target/debug/ctx${suffix}"
+  if [[ ! -f "${smoke_bin}" ]]; then
+    printf 'expected smoke binary missing: %s\n' "${smoke_bin}" >&2
+    return 1
+  fi
+
+  data_root="$(mktemp -d "${TMPDIR}/ctx-work-record-smoke.XXXXXX")"
+  ctx_run_timed "platform-smoke-setup" env CTX_DATA_ROOT="${data_root}" "${smoke_bin}" setup
+  record_id="$(
+    CTX_DATA_ROOT="${data_root}" "${smoke_bin}" record \
+      --title "platform smoke" \
+      --body "platform smoke body" \
+      --tag "smoke" \
+      --json \
+      | sed -n 's/.*"id": "\([^"]*\)".*/\1/p' \
+      | head -n 1
+  )"
+  if [[ -z "${record_id}" ]]; then
+    printf 'platform smoke failed to create a record id\n' >&2
+    return 1
+  fi
+  ctx_run_timed "platform-smoke-search" env CTX_DATA_ROOT="${data_root}" "${smoke_bin}" search "platform" --json
+  ctx_run_timed "platform-smoke-context" env CTX_DATA_ROOT="${data_root}" "${smoke_bin}" context "platform" --json
+  ctx_run_timed "platform-smoke-dashboard" env CTX_DATA_ROOT="${data_root}" "${smoke_bin}" dashboard export --output "${data_root}/dashboard"
+  ctx_run_timed "platform-smoke-validate" env CTX_DATA_ROOT="${data_root}" "${smoke_bin}" validate
+}
+
 run_bazel() {
   local bazel_cmd="$1"
 
@@ -114,10 +149,17 @@ run_mode() {
       if [[ ! -f BUILD.bazel && ! -f MODULE.bazel && ! -f WORKSPACE && ! -f WORKSPACE.bazel ]]; then
         ctx_record_skip "bazel-test" "no Bazel workspace files found"
       elif ! bazel_cmd="$(ctx_find_bazel)"; then
+        if [[ "${CTX_REQUIRE_BAZEL:-0}" == "1" ]]; then
+          printf 'bazel/bazelisk is required because Bazel workspace files exist\n' >&2
+          return 1
+        fi
         ctx_record_skip "bazel-test" "bazel/bazelisk is not installed"
       else
         ctx_run_timed "bazel-test" run_bazel "${bazel_cmd}"
       fi
+      ;;
+    platform-smoke)
+      run_platform_smoke
       ;;
     all)
       run_mode fmt

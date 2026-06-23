@@ -104,6 +104,9 @@ validate_contract() {
   require_text "Linux cargo test step" "${pipeline}" 'key: "cargo-test"'
   require_text "Linux examples step" "${pipeline}" 'key: "examples"'
   require_text "Linux Bazel step" "${pipeline}" 'key: "bazel"'
+  require_text "macOS arm64 smoke step" "${pipeline}" 'key: "platform-smoke-macos-arm64"'
+  require_text "macOS x64 smoke step" "${pipeline}" 'key: "platform-smoke-macos-x64"'
+  require_text "Windows x64 smoke step" "${pipeline}" 'key: "platform-smoke-windows-x64"'
   require_text "Linux release dry-run step" "${pipeline}" 'key: "release-dry-run-linux-x64"'
   require_text "macOS arm64 release dry-run step" "${pipeline}" 'key: "release-dry-run-macos-arm64"'
   require_text "macOS x64 release dry-run step" "${pipeline}" 'key: "release-dry-run-macos-x64"'
@@ -119,6 +122,8 @@ validate_contract() {
 
   require_text "docs command wired" "${pipeline}" './scripts/check.sh docs'
   require_text "examples command wired" "${pipeline}" './scripts/check.sh examples'
+  require_text "Bazel is required in CI" "${pipeline}" 'CTX_REQUIRE_BAZEL=1 ./scripts/check.sh bazel'
+  require_text "platform smoke command wired" "${pipeline}" './scripts/check.sh platform-smoke'
   require_text "Linux host triple guard" "${pipeline}" 'CTX_EXPECT_HOST_TRIPLE: "x86_64-unknown-linux-gnu"'
   require_text "macOS arm64 host triple guard" "${pipeline}" 'CTX_EXPECT_HOST_TRIPLE: "aarch64-apple-darwin"'
   require_text "macOS x64 host triple guard" "${pipeline}" 'CTX_EXPECT_HOST_TRIPLE: "x86_64-apple-darwin"'

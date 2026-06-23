@@ -112,7 +112,7 @@ steps:
   - label: ":bazel: bazel"
     key: "bazel"
     depends_on: "examples"
-    command: "CTX_ARTIFACT_DIR=artifacts/buildkite/bazel ./scripts/check.sh bazel"
+    command: "CTX_ARTIFACT_DIR=artifacts/buildkite/bazel CTX_REQUIRE_BAZEL=1 ./scripts/check.sh bazel"
     agents:
       queue: "main-linux"
       os: "linux"
@@ -120,6 +120,57 @@ steps:
     timeout_in_minutes: 45
     artifact_paths:
       - "artifacts/buildkite/bazel/**/*"
+
+  - label: ":mac: smoke macos-arm64"
+    key: "platform-smoke-macos-arm64"
+    depends_on: "bazel"
+    command: "./scripts/check.sh platform-smoke"
+    env:
+      CTX_ARTIFACT_DIR: "artifacts/buildkite/platform-smoke/macos-arm64"
+      CTX_EXPECT_HOST_TRIPLE: "aarch64-apple-darwin"
+    agents:
+      queue: "ctx-mac-gui-shared-arm64"
+      arch: "arm64"
+    concurrency: 1
+    concurrency_group: "ctx-mac-gui-shared-arm64"
+    concurrency_method: "eager"
+    priority: 60
+    timeout_in_minutes: 30
+    artifact_paths:
+      - "artifacts/buildkite/platform-smoke/macos-arm64/**/*"
+
+  - label: ":mac: smoke macos-x64"
+    key: "platform-smoke-macos-x64"
+    depends_on: "bazel"
+    command: "./scripts/check.sh platform-smoke"
+    env:
+      CTX_ARTIFACT_DIR: "artifacts/buildkite/platform-smoke/macos-x64"
+      CTX_EXPECT_HOST_TRIPLE: "x86_64-apple-darwin"
+    agents:
+      queue: "ctx-mac-gui-shared-x64"
+      arch: "x86_64"
+    concurrency: 1
+    concurrency_group: "ctx-mac-gui-shared-x64"
+    concurrency_method: "eager"
+    priority: 50
+    timeout_in_minutes: 30
+    artifact_paths:
+      - "artifacts/buildkite/platform-smoke/macos-x64/**/*"
+
+  - label: ":windows: smoke windows-x64"
+    key: "platform-smoke-windows-x64"
+    depends_on: "bazel"
+    command: "bash ./scripts/check.sh platform-smoke"
+    env:
+      CTX_ARTIFACT_DIR: "artifacts/buildkite/platform-smoke/windows-x64"
+      CTX_EXPECT_HOST_TRIPLE: "x86_64-pc-windows-msvc"
+    agents:
+      queue: "windows-x64"
+      os: "windows"
+      arch: "x86_64"
+    timeout_in_minutes: 30
+    artifact_paths:
+      - "artifacts/buildkite/platform-smoke/windows-x64/**/*"
 
   - label: ":linux: release dry-run linux-x64"
     key: "release-dry-run-linux-x64"
@@ -141,7 +192,7 @@ steps:
 
   - label: ":mac: release dry-run macos-arm64"
     key: "release-dry-run-macos-arm64"
-    depends_on: "bazel"
+    depends_on: "platform-smoke-macos-arm64"
     command: "./scripts/release-dry-run.sh"
     env:
       CTX_ARTIFACT_DIR: "artifacts/buildkite/release-dry-run/macos-arm64"
@@ -161,7 +212,7 @@ steps:
 
   - label: ":mac: release dry-run macos-x64"
     key: "release-dry-run-macos-x64"
-    depends_on: "bazel"
+    depends_on: "platform-smoke-macos-x64"
     command: "./scripts/release-dry-run.sh"
     env:
       CTX_ARTIFACT_DIR: "artifacts/buildkite/release-dry-run/macos-x64"
@@ -181,7 +232,7 @@ steps:
 
   - label: ":windows: release dry-run windows-x64"
     key: "release-dry-run-windows-x64"
-    depends_on: "bazel"
+    depends_on: "platform-smoke-windows-x64"
     command: "bash ./scripts/release-dry-run.sh"
     env:
       CTX_ARTIFACT_DIR: "artifacts/buildkite/release-dry-run/windows-x64"

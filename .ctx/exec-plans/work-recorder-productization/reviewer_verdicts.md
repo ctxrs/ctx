@@ -137,3 +137,36 @@ Required reviewer categories from the plan:
 - CI/release;
 - SDLC/process;
 - final done-ness.
+
+## 2026-06-22 Adversarial Review Results On `de1c718`
+
+- Hosted/private staging gap reviewer: BLOCKED.
+  - Public local Work Recorder implementation is coherent and docs honestly
+    mark hosted/team sync as not implemented.
+  - Private `ctx-private` has reusable Neon/Cloudflare foundations but no
+    tracked Work Recorder hosted implementation, staging URL, migration proof,
+    R2 proof, or hosted security review.
+  - Resolution status:
+    - private hosted implementation has been split into a bounded worker track;
+    - public local work continues independently.
+- CI/release/platform reviewer: BLOCKED.
+  - Repo-owned pipeline shape was coherent, but live Buildkite evidence was
+    missing.
+  - Bazel could silently skip in CI if missing.
+  - macOS/Windows lanes proved release dry-run builds only, not native smoke.
+  - Resolution status:
+    - public patch now makes the Buildkite Bazel lane require Bazel/Bazelisk;
+    - public patch adds macOS arm64, macOS x64, and Windows x64 native smoke
+      lanes before release dry-runs;
+    - live Buildkite URLs remain pending.
+- Local product/security reviewer: FAIL.
+  - Dashboard record fields and tag summary could render raw record content,
+    including secrets and local paths.
+  - Default Markdown context could render raw record/query/tag/body/command
+    content.
+  - JSON search/context dropped evidence stdout/stderr-only matches after FTS.
+  - Resolution status:
+    - public patch adds shared share-safe text redaction;
+    - dashboard and Markdown context render share-safe fields;
+    - JSON search/context now include evidence-output-only matches;
+    - focused and full capped local validation passed.

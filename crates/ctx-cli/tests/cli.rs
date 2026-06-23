@@ -527,9 +527,9 @@ fn dashboard_export_writes_static_local_html_report() {
     let temp = tempdir();
     let first = record(
         &temp,
-        "Render dashboard",
-        "include recent records and search context cues",
-        &["dashboard"],
+        "Render dashboard token=ghp_1234567890abcdef",
+        "include recent records and search context cues password=hunter2 cwd=/tmp/work",
+        &["dashboard", "secret=shhh"],
     );
     let id = first["id"].as_str().unwrap();
 
@@ -558,10 +558,16 @@ fn dashboard_export_writes_static_local_html_report() {
     let html = fs::read_to_string(output_dir.join("index.html")).unwrap();
     assert!(html.contains("Work Records"));
     assert!(html.contains("Static local export"));
-    assert!(html.contains("Render dashboard"));
+    assert!(html.contains("Render dashboard token=[redacted]"));
     assert!(html.contains("https://github.com/ctxrs/ctx/pull/77"));
     assert!(html.contains("Evidence Previews"));
     assert!(html.contains("ctx search &lt;query&gt; --json"));
+    assert!(html.contains("password=[redacted]"));
+    assert!(html.contains("[local-path]"));
+    assert!(!html.contains("ghp_123456"));
+    assert!(!html.contains("hunter2"));
+    assert!(!html.contains("/tmp/work"));
+    assert!(!html.contains("secret=shhh"));
     assert!(!html.contains("<script"));
 }
 
@@ -752,6 +758,94 @@ fn search_json_redacts_secret_like_snippets() {
     assert!(summary.contains("[redacted]"));
     assert!(!summary.contains("ghp_123456"));
     assert!(!summary.contains("hunter2"));
+}
+
+#[test]
+fn search_and_context_json_include_evidence_output_only_matches() {
+    let temp = tempdir();
+    let stdout_path = temp.path().join("stdout.txt");
+    let stderr_path = temp.path().join("stderr.txt");
+    fs::write(
+        &stdout_path,
+        "stdout-only-needle token=ghp_1234567890abcdef cwd=/home/daddy/code/project",
+    )
+    .unwrap();
+    fs::write(&stderr_path, "").unwrap();
+
+    ctx(&temp)
+        .args([
+            "capture",
+            "write-shim-command",
+            "--provider",
+            "git",
+            "--exit-code",
+            "0",
+            "--stdout-file",
+            stdout_path.to_str().unwrap(),
+            "--stderr-file",
+            stderr_path.to_str().unwrap(),
+            "--started-at",
+            "2026-06-22T12:00:00Z",
+            "--duration-ms",
+            "7",
+            "git",
+            "status",
+        ])
+        .assert()
+        .success();
+
+    ctx(&temp).args(["capture", "import"]).assert().success();
+
+    let mut command = ctx(&temp);
+    command.args(["search", "stdout-only-needle", "--json"]);
+    let packet = json_output(&mut command);
+    assert_eq!(packet["results"].as_array().unwrap().len(), 1);
+    let result = &packet["results"][0];
+    assert!(result["why_matched"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value == "evidence_output"));
+    let snippet = result["snippet"].as_str().unwrap();
+    assert!(snippet.contains("stdout-only-needle"));
+    assert!(snippet.contains("token=[redacted]"));
+    assert!(snippet.contains("[local-path]"));
+    assert!(!snippet.contains("ghp_123456"));
+    assert!(!snippet.contains("/home/daddy/code/project"));
+
+    let mut command = ctx(&temp);
+    command.args(["context", "stdout-only-needle", "--json"]);
+    let packet = json_output(&mut command);
+    assert_eq!(packet["results"].as_array().unwrap().len(), 1);
+    let summary = packet["results"][0]["summary"].as_str().unwrap();
+    assert!(summary.contains("stdout-only-needle"));
+    assert!(summary.contains("token=[redacted]"));
+    assert!(summary.contains("[local-path]"));
+    assert!(!summary.contains("ghp_123456"));
+    assert!(!summary.contains("/home/daddy/code/project"));
+}
+
+#[test]
+fn context_markdown_redacts_record_fields_and_commands() {
+    let temp = tempdir();
+    record(
+        &temp,
+        "Deploy token=ghp_1234567890abcdef",
+        "password=hunter2 under /home/daddy/code/project",
+        &["secret=shhh"],
+    );
+
+    ctx(&temp)
+        .args(["context", "password"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("token=[redacted]"))
+        .stdout(predicate::str::contains("password=[redacted]"))
+        .stdout(predicate::str::contains("[local-path]"))
+        .stdout(predicate::str::contains("hunter2").not())
+        .stdout(predicate::str::contains("ghp_123456").not())
+        .stdout(predicate::str::contains("/home/daddy/code/project").not())
+        .stdout(predicate::str::contains("secret=shhh").not());
 }
 
 #[test]

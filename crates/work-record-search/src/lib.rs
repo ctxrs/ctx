@@ -5,9 +5,10 @@ use serde::Serialize;
 use thiserror::Error;
 use uuid::Uuid;
 use work_record_core::{
-    redact_secret_markers, AgentContextPacket, ContextBudget, ContextCitation, ContextCitationType,
-    ContextEvidence, ContextLinks, ContextPagination, ContextResult, ContextTruncation, Evidence,
-    EvidenceFreshness, EvidenceKind, EvidenceStatus, Visibility, WorkRecord,
+    redact_share_safe_markers, AgentContextPacket, ContextBudget, ContextCitation,
+    ContextCitationType, ContextEvidence, ContextLinks, ContextPagination, ContextResult,
+    ContextTruncation, Evidence, EvidenceFreshness, EvidenceKind, EvidenceStatus, Visibility,
+    WorkRecord,
 };
 use work_record_store::Store;
 
@@ -94,7 +95,12 @@ pub fn context_packet(
     let mut results = Vec::new();
 
     for candidate in candidates.iter().take(options.limit) {
-        let safe_summary = safe_snippet(&candidate.record.body, options.snippet_chars);
+        let safe_summary = context_summary(
+            &candidate.record,
+            &candidate.evidence,
+            query.unwrap_or_default(),
+            options.snippet_chars,
+        );
         let evidence = context_evidence(&candidate.evidence, options.evidence_per_result);
         if candidate.evidence.len() > evidence.len() {
             omitted_evidence =
@@ -103,7 +109,7 @@ pub fn context_packet(
 
         let mut result = ContextResult {
             record_id: candidate.record.id,
-            title: candidate.record.title.clone(),
+            title: safe_snippet(&candidate.record.title, 240),
             summary: non_empty(safe_summary),
             rank: candidate.score,
             why_matched: candidate.why_matched.clone(),
@@ -177,8 +183,13 @@ pub fn search_packet(store: &Store, query: &str, options: &PacketOptions) -> Res
     for candidate in candidates.iter().take(options.limit) {
         results.push(SearchPacketResult {
             record_id: candidate.record.id,
-            title: candidate.record.title.clone(),
-            snippet: search_snippet(&candidate.record, query, options.snippet_chars),
+            title: safe_snippet(&candidate.record.title, 240),
+            snippet: search_snippet(
+                &candidate.record,
+                &candidate.evidence,
+                query,
+                options.snippet_chars,
+            ),
             rank: candidate.score,
             why_matched: candidate.why_matched.clone(),
             citations: candidate.citations.clone(),
@@ -409,6 +420,24 @@ fn analyze_record(record: &WorkRecord, evidence: &[Evidence], terms: &[String]) 
                 },
             );
         }
+        if matches_terms(&item.stdout, terms) || matches_terms(&item.stderr, terms) {
+            score += if item.exit_code == 0 { 3.0 } else { 5.0 };
+            add_match(
+                &mut why,
+                &mut citations,
+                if item.exit_code == 0 {
+                    "evidence_output"
+                } else {
+                    "failed_evidence_output"
+                },
+                ContextCitation {
+                    citation_type: ContextCitationType::Evidence,
+                    id: item.id,
+                    label: "evidence output".to_owned(),
+                    time: item.started_at,
+                },
+            );
+        }
     }
 
     MatchAnalysis {
@@ -490,13 +519,70 @@ fn evidence_status(exit_code: i32) -> EvidenceStatus {
     }
 }
 
-fn search_snippet(record: &WorkRecord, query: &str, max_chars: usize) -> String {
-    let body = record.body.trim();
+fn search_snippet(
+    record: &WorkRecord,
+    evidence: &[Evidence],
+    query: &str,
+    max_chars: usize,
+) -> String {
+    let terms = query_terms(query);
+    if matches_terms(&record.body, &terms) {
+        return matched_snippet(&record.body, &terms, max_chars);
+    }
+    for item in evidence {
+        if matches_terms(&item.stdout, &terms) {
+            return matched_snippet(&item.stdout, &terms, max_chars);
+        }
+        if matches_terms(&item.stderr, &terms) {
+            return matched_snippet(&item.stderr, &terms, max_chars);
+        }
+        if matches_terms(&item.command, &terms) {
+            return matched_snippet(&item.command, &terms, max_chars);
+        }
+    }
+    if !record.body.trim().is_empty() {
+        return safe_snippet(&record.body, max_chars);
+    }
+    evidence
+        .iter()
+        .find_map(|item| {
+            if !item.stdout.trim().is_empty() {
+                Some(safe_snippet(&item.stdout, max_chars))
+            } else if !item.stderr.trim().is_empty() {
+                Some(safe_snippet(&item.stderr, max_chars))
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default()
+}
+
+fn context_summary(
+    record: &WorkRecord,
+    evidence: &[Evidence],
+    query: &str,
+    max_chars: usize,
+) -> String {
+    let terms = query_terms(query);
+    if terms.is_empty() || matches_terms(&record.body, &terms) {
+        return safe_snippet(&record.body, max_chars);
+    }
+    for item in evidence {
+        if matches_terms(&item.stdout, &terms) {
+            return matched_snippet(&item.stdout, &terms, max_chars);
+        }
+        if matches_terms(&item.stderr, &terms) {
+            return matched_snippet(&item.stderr, &terms, max_chars);
+        }
+    }
+    safe_snippet(&record.body, max_chars)
+}
+
+fn matched_snippet(input: &str, terms: &[String], max_chars: usize) -> String {
+    let body = input.trim();
     if body.is_empty() {
         return String::new();
     }
-
-    let terms = query_terms(query);
     let lower = body.to_lowercase();
     let start = terms
         .iter()
@@ -509,7 +595,7 @@ fn search_snippet(record: &WorkRecord, query: &str, max_chars: usize) -> String 
 }
 
 fn safe_snippet(input: &str, max_chars: usize) -> String {
-    let redacted = redact_secret_markers(input);
+    let redacted = redact_share_safe_markers(input);
     truncate_chars(redacted.trim(), max_chars)
 }
 
@@ -543,7 +629,20 @@ fn links_for(record: &WorkRecord, options: &PacketOptions) -> ContextLinks {
             .dashboard_base_url
             .as_deref()
             .map(|base| format!("{}/records/{}", base, record.id)),
-        pr: record.pr_url.clone(),
+        pr: record.pr_url.as_deref().and_then(safe_external_url),
+    }
+}
+
+fn safe_external_url(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.starts_with("https://")
+        && !trimmed.contains('@')
+        && !trimmed.contains('?')
+        && !trimmed.contains('#')
+    {
+        Some(trimmed.to_owned())
+    } else {
+        None
     }
 }
 

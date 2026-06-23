@@ -1,6 +1,6 @@
 use serde::Serialize;
 use work_record_core::{
-    redact_secret_markers, Evidence, WorkContext, WorkRecord, WorkRecordArchive,
+    redact_share_safe_markers, Evidence, WorkContext, WorkRecord, WorkRecordArchive,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -119,7 +119,7 @@ pub fn render_dashboard_html(records: &[WorkRecord], evidence: &[Evidence]) -> S
         out.push_str("<section><h2>Tags</h2><div class=\"record\">");
         for tag in summary.tags {
             out.push_str("<div class=\"tag\"><span>");
-            push_escaped(&mut out, &tag.tag);
+            push_escaped(&mut out, &redact_share_safe_markers(&tag.tag));
             out.push_str("</span><strong>");
             out.push_str(&tag.count.to_string());
             out.push_str("</strong></div>");
@@ -137,16 +137,25 @@ pub fn context_markdown(context: &WorkContext) -> String {
     let mut out = String::new();
     out.push_str("# Work Context\n\n");
     if let Some(query) = &context.query {
-        out.push_str(&format!("query: `{query}`\n\n"));
+        out.push_str(&format!(
+            "query: `{}`\n\n",
+            redact_share_safe_markers(query)
+        ));
     }
     for record in &context.records {
-        out.push_str(&format!("## {}\n", record.title));
+        out.push_str(&format!(
+            "## {}\n",
+            redact_share_safe_markers(&record.title)
+        ));
         out.push_str(&format!("id: `{}`\n", record.id));
         if !record.tags.is_empty() {
-            out.push_str(&format!("tags: {}\n", record.tags.join(", ")));
+            out.push_str(&format!(
+                "tags: {}\n",
+                redact_share_safe_markers(&record.tags.join(", "))
+            ));
         }
         out.push('\n');
-        out.push_str(&record.body);
+        out.push_str(&redact_share_safe_markers(&record.body));
         out.push_str("\n\n");
     }
     if !context.evidence.is_empty() {
@@ -154,7 +163,9 @@ pub fn context_markdown(context: &WorkContext) -> String {
         for evidence in &context.evidence {
             out.push_str(&format!(
                 "- `{}` exited {} in {}ms\n",
-                evidence.command, evidence.exit_code, evidence.duration_ms
+                redact_share_safe_markers(&evidence.command),
+                evidence.exit_code,
+                evidence.duration_ms
             ));
         }
     }
@@ -177,9 +188,9 @@ fn render_record(out: &mut String, record: &WorkRecord) {
     out.push_str("<article class=\"record\" id=\"record-");
     out.push_str(&record.id.to_string());
     out.push_str("\"><h3>");
-    push_escaped(out, &record.title);
+    push_escaped(out, &redact_share_safe_markers(&record.title));
     out.push_str("</h3><div class=\"meta\"><span class=\"pill\">");
-    push_escaped(out, &record.kind);
+    push_escaped(out, &redact_share_safe_markers(&record.kind));
     out.push_str("</span><span>");
     push_escaped(out, &record.created_at.to_rfc3339());
     out.push_str("</span>");
@@ -194,7 +205,7 @@ fn render_record(out: &mut String, record: &WorkRecord) {
         out.push_str("<div class=\"meta\">");
         for tag in &record.tags {
             out.push_str("<span class=\"pill\">#");
-            push_escaped(out, tag);
+            push_escaped(out, &redact_share_safe_markers(tag));
             out.push_str("</span>");
         }
         out.push_str("</div>");
@@ -202,21 +213,21 @@ fn render_record(out: &mut String, record: &WorkRecord) {
 
     if !record.body.is_empty() {
         out.push_str("<div class=\"body\">");
-        push_escaped(out, &record.body);
+        push_escaped(out, &redact_share_safe_markers(&record.body));
         out.push_str("</div>");
     }
 
     if let Some(pr_url) = &record.pr_url {
         out.push_str("<div class=\"meta\">PR: ");
-        if is_http_url(pr_url) {
+        if let Some(safe_url) = safe_external_url(pr_url) {
             out.push_str("<a class=\"pr\" rel=\"noreferrer\" href=\"");
-            push_attr_escaped(out, pr_url);
+            push_attr_escaped(out, &safe_url);
             out.push_str("\">");
-            push_escaped(out, pr_url);
+            push_escaped(out, &safe_url);
             out.push_str("</a>");
         } else {
             out.push_str("<span class=\"pr\">");
-            push_escaped(out, pr_url);
+            push_escaped(out, "link withheld");
             out.push_str("</span>");
         }
         out.push_str("</div>");
@@ -227,7 +238,7 @@ fn render_record(out: &mut String, record: &WorkRecord) {
 
 fn render_evidence(out: &mut String, evidence: &Evidence) {
     out.push_str("<article class=\"evidence\"><div><code>");
-    push_escaped(out, &redact_secret_markers(&evidence.command));
+    push_escaped(out, &redact_share_safe_markers(&evidence.command));
     out.push_str("</code></div><div class=\"meta\"><span class=\"");
     out.push_str(if evidence.exit_code == 0 {
         "status-ok"
@@ -243,7 +254,7 @@ fn render_evidence(out: &mut String, evidence: &Evidence) {
     out.push_str("</span></div>");
     if let Some(preview) = evidence_preview(evidence) {
         out.push_str("<pre class=\"preview\">");
-        push_escaped(out, &redact_secret_markers(preview));
+        push_escaped(out, &redact_share_safe_markers(preview));
         out.push_str("</pre>");
     }
     out.push_str("</article>\n");
@@ -259,8 +270,17 @@ fn evidence_preview(evidence: &Evidence) -> Option<&str> {
     }
 }
 
-fn is_http_url(value: &str) -> bool {
-    value.starts_with("https://") || value.starts_with("http://")
+fn safe_external_url(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.starts_with("https://")
+        && !trimmed.contains('@')
+        && !trimmed.contains('?')
+        && !trimmed.contains('#')
+    {
+        Some(trimmed.to_owned())
+    } else {
+        None
+    }
 }
 
 fn safe_workspace_label(value: &str) -> String {
@@ -326,13 +346,13 @@ mod tests {
     #[test]
     fn renders_dashboard_html_with_escaped_content() {
         let mut record = WorkRecord::new(
-            "Ship <dashboard>",
-            "body with <script>alert(1)</script>",
-            vec!["report".into()],
+            "Ship <dashboard> token=ghp_1234567890abcdef",
+            "body with <script>alert(1)</script> password=hunter2 cwd=/tmp/work",
+            vec!["report".into(), "secret=shhh".into()],
             "task",
             Some("/tmp/work".into()),
         );
-        record.pr_url = Some("javascript:alert(1)".into());
+        record.pr_url = Some("https://token@example.test/ctx/pull/1".into());
         let evidence = Evidence::new(
             Some(record.id),
             "cargo test <unsafe> token=secret",
@@ -347,15 +367,58 @@ mod tests {
 
         assert!(html.contains("Local Work Recorder"));
         assert!(html.contains("ctx dashboard export"));
-        assert!(html.contains("Ship &lt;dashboard&gt;"));
+        assert!(html.contains("Ship &lt;dashboard&gt; token=[redacted]"));
         assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
         assert!(html.contains("workspace: work"));
         assert!(!html.contains("/tmp/work"));
+        assert!(!html.contains("hunter2"));
+        assert!(!html.contains("ghp_123456"));
+        assert!(!html.contains("secret=shhh"));
+        assert!(html.contains("password=[redacted]"));
+        assert!(html.contains("[local-path]"));
         assert!(html.contains("cargo test &lt;unsafe&gt; token=[redacted]"));
         assert!(!html.contains("token=secret"));
         assert!(html.contains("password=[redacted]"));
         assert!(!html.contains("hunter2"));
         assert!(!html.contains("<script>alert(1)</script>"));
         assert!(!html.contains("href=\"javascript:alert(1)\""));
+        assert!(!html.contains("https://token@example.test"));
+        assert!(html.contains("link withheld"));
+    }
+
+    #[test]
+    fn context_markdown_redacts_share_unsafe_fields() {
+        let mut record = WorkRecord::new(
+            "Deploy token=ghp_1234567890abcdef",
+            "body password=hunter2 in /home/daddy/code/project",
+            vec!["secret=shhh".into()],
+            "task",
+            None,
+        );
+        record.pr_url = Some("https://github.com/ctxrs/ctx/pull/1".into());
+        let evidence = Evidence::new(
+            Some(record.id),
+            "gh token=secret",
+            0,
+            String::new(),
+            String::new(),
+            Utc::now(),
+            1,
+        );
+        let context = WorkContext {
+            query: Some("password=hunter2".into()),
+            records: vec![record],
+            evidence: vec![evidence],
+        };
+
+        let markdown = context_markdown(&context);
+
+        assert!(markdown.contains("password=[redacted]"));
+        assert!(markdown.contains("token=[redacted]"));
+        assert!(markdown.contains("[local-path]"));
+        assert!(!markdown.contains("hunter2"));
+        assert!(!markdown.contains("ghp_123456"));
+        assert!(!markdown.contains("/home/daddy/code/project"));
+        assert!(!markdown.contains("secret=shhh"));
     }
 }
