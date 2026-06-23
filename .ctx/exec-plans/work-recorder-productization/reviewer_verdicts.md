@@ -1,6 +1,6 @@
 # Work Recorder Productization Reviewer Verdicts
 
-Updated: 2026-06-22T19:23:10-05:00
+Updated: 2026-06-22T19:26:21-05:00
 
 ## Read-Only Mapper Results
 
@@ -39,6 +39,10 @@ No milestone reviewer verdicts have passed yet.
 - Capture spool worker: complete. Added `work-record-capture`, capture fixture
   writer/importer, status/validate spool counts, and tests; integrated into the
   manager branch and validated with focused capture tests plus full check.
+- VCS/PR worker: complete. Added `work-record-vcs`, Git/jj inspection, remote
+  redaction, repo fingerprints, PR URL parsing, root CLI commands, and tests;
+  integrated into the manager branch and validated with focused VCS/CLI tests
+  plus full check.
 
 ## Milestone Review Results
 

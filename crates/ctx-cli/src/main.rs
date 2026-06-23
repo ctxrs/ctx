@@ -19,6 +19,7 @@ use work_record_core::{
     AgentContextPacket, Evidence, WorkRecord, WorkRecordArchive,
 };
 use work_record_store::Store;
+use work_record_vcs::{inspect_path, parse_pull_request_url, GitDetection, JjDetection};
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -65,6 +66,10 @@ enum CommandRoot {
     Evidence(EvidenceCommand),
     #[command(about = "Import passive capture spool events")]
     Capture(CaptureCommand),
+    #[command(about = "Inspect local VCS workspace metadata")]
+    Vcs(VcsCommand),
+    #[command(about = "Parse pull request URLs")]
+    Pr(PrCommand),
     #[command(about = "Attach a pull request URL to a work record")]
     LinkPr(LinkPrArgs),
     #[command(about = "Export work records and evidence as JSON")]
@@ -267,6 +272,45 @@ struct LinkPrArgs {
 }
 
 #[derive(Debug, Args)]
+struct VcsCommand {
+    #[command(subcommand)]
+    command: VcsSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum VcsSubcommand {
+    #[command(about = "Inspect Git and jj workspace metadata")]
+    Inspect(VcsInspectArgs),
+}
+
+#[derive(Debug, Args)]
+struct VcsInspectArgs {
+    #[arg(default_value = ".")]
+    path: PathBuf,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct PrCommand {
+    #[command(subcommand)]
+    command: PrSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum PrSubcommand {
+    #[command(about = "Parse a GitHub/GitLab pull request URL")]
+    Parse(PrParseArgs),
+}
+
+#[derive(Debug, Args)]
+struct PrParseArgs {
+    url: String,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
 struct ExportArgs {
     #[arg(long)]
     output: Option<PathBuf>,
@@ -306,12 +350,97 @@ fn main() -> Result<()> {
             run_work_subcommand(WorkSubcommand::Evidence(args), data_root)
         }
         CommandRoot::Capture(args) => run_capture(args, data_root),
+        CommandRoot::Vcs(args) => run_vcs(args),
+        CommandRoot::Pr(args) => run_pr(args),
         CommandRoot::LinkPr(args) => run_work_subcommand(WorkSubcommand::LinkPr(args), data_root),
         CommandRoot::Export(args) => run_work_subcommand(WorkSubcommand::Export(args), data_root),
         CommandRoot::Import(args) => run_work_subcommand(WorkSubcommand::Import(args), data_root),
         CommandRoot::Validate => run_work_subcommand(WorkSubcommand::Validate, data_root),
         CommandRoot::Workspace(command) => run_workspace(command, data_root),
         CommandRoot::Work(command) => run_work(command, data_root),
+    }
+}
+
+fn run_vcs(command: VcsCommand) -> Result<()> {
+    match command.command {
+        VcsSubcommand::Inspect(args) => {
+            let inspection = inspect_path(args.path)?;
+            if args.json {
+                print_json(serde_json::json!({
+                    "schema_version": 1,
+                    "inspection": inspection,
+                }))?;
+            } else {
+                print_git_detection(&inspection.git);
+                print_jj_detection(&inspection.jj);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn run_pr(command: PrCommand) -> Result<()> {
+    match command.command {
+        PrSubcommand::Parse(args) => {
+            let parsed = parse_pull_request_url(&args.url)?;
+            if args.json {
+                print_json(serde_json::json!({
+                    "schema_version": 1,
+                    "pull_request": parsed,
+                }))?;
+            } else {
+                println!(
+                    "{} {}/{} #{}",
+                    parsed.provider, parsed.owner, parsed.repo, parsed.number
+                );
+                println!("url: {}", parsed.normalized_url);
+                println!("confidence: {}", parsed.confidence);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_git_detection(git: &GitDetection) {
+    if !git.available {
+        println!(
+            "git: unavailable ({})",
+            git.error.as_deref().unwrap_or("unknown error")
+        );
+        return;
+    }
+    let Some(workspace) = &git.workspace else {
+        println!(
+            "git: no workspace ({})",
+            git.error.as_deref().unwrap_or("not a git workspace")
+        );
+        return;
+    };
+
+    println!("git: {}", workspace.root_path);
+    println!("fingerprint: {}", workspace.repo_fingerprint.value);
+    if let Some(remote) = &workspace.primary_remote {
+        println!("remote: {} {}", remote.name, remote.redacted_url);
+    }
+    if workspace.is_worktree {
+        println!("worktree: true");
+    }
+}
+
+fn print_jj_detection(jj: &JjDetection) {
+    if !jj.available {
+        println!(
+            "jj: unavailable ({})",
+            jj.error.as_deref().unwrap_or("unknown error")
+        );
+        return;
+    }
+    match &jj.workspace {
+        Some(workspace) => println!("jj: {}", workspace.root_path),
+        None => println!(
+            "jj: no workspace ({})",
+            jj.error.as_deref().unwrap_or("not a jj workspace")
+        ),
     }
 }
 

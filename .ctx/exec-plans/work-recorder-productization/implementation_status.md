@@ -1,6 +1,6 @@
 # Work Recorder Productization Implementation Status
 
-Updated: 2026-06-22T19:23:10-05:00
+Updated: 2026-06-22T19:26:21-05:00
 
 Task: `feb64c1c-e58c-40f8-b1e9-1094dca0646e`
 
@@ -216,6 +216,20 @@ Integrated implementation work:
 - Capture archive construction now uses the current archive schema, including
   `schema_version` and nested artifact payload preservation.
 
+## VCS And PR Integration
+
+Integrated implementation work:
+
+- Added `work-record-vcs` with Git/jj workspace inspection, redacted remote URL
+  normalization, repo fingerprinting, linked-worktree detection, and GitHub/
+  GitLab PR URL parsing.
+- Added `ctx vcs inspect --json` and `ctx pr parse <url> --json`, both with
+  schema-versioned JSON output.
+- Added CLI tests for VCS inspection redaction and confidence-labeled PR parse
+  output.
+- Resolved merge overlap with capture root subcommands and fixed Clippy
+  `needless_borrow` findings in the PR parser.
+
 ## Validation
 
 - `./scripts/check.sh` in the public `work-record-product` worktree: PASS at
@@ -279,6 +293,13 @@ Integrated implementation work:
   PASS after capture merge. Covered 2 capture CLI integration tests.
 - `TMPDIR=/var/tmp/ctxwr CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=1 BAZEL_JOBS=2 ./scripts/check.sh all && git diff --check`:
   PASS after capture merge. Covered fmt, check, clippy, and tests; Bazel lane
+  recorded `skipped` because neither `bazel` nor `bazelisk` is installed.
+- `TMPDIR=/var/tmp/ctxwr CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=1 cargo test -p work-record-vcs --lib -- --test-threads 1`:
+  PASS after VCS merge. Covered 7 VCS unit tests.
+- `TMPDIR=/var/tmp/ctxwr CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=1 cargo test -p ctx --test cli -- --test-threads 1`:
+  PASS after VCS merge. Covered 15 CLI integration tests.
+- `TMPDIR=/var/tmp/ctxwr CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=1 BAZEL_JOBS=2 ./scripts/check.sh all && git diff --check`:
+  PASS after VCS merge. Covered fmt, check, clippy, and tests; Bazel lane
   recorded `skipped` because neither `bazel` nor `bazelisk` is installed.
 
 ## Reviewer Status
