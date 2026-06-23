@@ -1302,3 +1302,29 @@ None accepted yet.
   - commit and push the Windows smoke JSON parser remediation;
   - trigger and monitor a fresh public Buildkite run proving Windows smoke and
     Windows release dry-run.
+
+## 2026-06-23 Buildkite Windows Release Branch Metadata Follow-Up
+
+- Build 62:
+  <https://buildkite.com/luca-king/ctx-public-release-verification/builds/62>
+- Branch/head:
+  `work-record` / `b61962ec93c05e1b8be69ccaba2bf6562d6a33d6`
+- Outcome:
+  - PASS: 17/18 jobs passed, including pipeline contract, format/docs checks,
+    Cargo check, clippy, Rust tests, examples, Bazel, Linux smoke/release
+    dry-run, macOS arm64 smoke/release dry-run, macOS x64 smoke/release
+    dry-run, Windows smoke, and the documented FreeBSD blocker lane;
+  - Windows release dry-run built the optimized `ctx.exe` successfully with
+    w64devkit GNU;
+  - FAIL: after the successful Windows release build, manifest metadata
+    generation called `.Trim()` on `git branch --show-current`, which is null
+    in Buildkite's detached checkout.
+- Repo-owned remediation:
+  - add `Git-Current-Branch` for Windows CI release metadata;
+  - prefer `BUILDKITE_BRANCH`, then `git branch --show-current`, then
+    `git rev-parse --abbrev-ref HEAD`, with a final `detached` fallback;
+  - add a pipeline contract assertion for detached branch metadata handling.
+- Remaining external evidence gap:
+  - commit and push the Windows release branch metadata remediation;
+  - trigger and monitor a fresh public Buildkite run proving Windows release
+    dry-run.

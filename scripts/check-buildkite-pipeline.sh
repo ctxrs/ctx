@@ -164,6 +164,7 @@ validate_contract() {
   require_text "Windows script supports release dry-run" "${windows_script}" 'release-dry-run'
   require_text "Windows script avoids automatic Args parameter" "${windows_script}" 'param([string[]]$CargoArgs)'
   require_text "Windows script parses typed record JSON" "${windows_script}" '$recordJson.record.id'
+  require_text "Windows script handles detached branch metadata" "${windows_script}" 'BUILDKITE_BRANCH'
   require_text "Windows script uses named Cargo args for platform smoke" "${windows_script}" 'Run-Cargo -CargoArgs (@("build", "-p", "ctx", "--bin", "ctx") + $locked)'
   require_text "Windows script uses named Cargo args for release dry-run" "${windows_script}" 'Run-Cargo -CargoArgs (@("build", "--workspace", "--release", "--bins") + $locked)'
   require_text "FreeBSD blocker marks publishing false" "${blocker_script}" '"publishing": false'

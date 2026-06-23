@@ -1823,6 +1823,26 @@ Future entries must include:
   - rerun focused local syntax/contract/docs/diff checks;
   - trigger and monitor a fresh public Buildkite run for `origin/work-record`.
 
+## 2026-06-23 Build 62 Windows Release Branch Metadata Follow-Up
+
+- Remote Buildkite evidence:
+  - build 62 ran `b61962ec93c05e1b8be69ccaba2bf6562d6a33d6`;
+  - PASS: 17/18 jobs passed, including all Linux/macOS smoke and release
+    dry-run lanes, Windows smoke, and the documented FreeBSD blocker lane;
+  - Windows release dry-run built optimized `ctx.exe` successfully with
+    w64devkit GNU.
+- Failure:
+  - after the successful Windows release build, dry-run manifest generation
+    called `.Trim()` on null because `git branch --show-current` returns no
+    branch name in Buildkite's detached checkout.
+- Remediation validation planned for the next head:
+  - use a Windows `Git-Current-Branch` helper that prefers `BUILDKITE_BRANCH`,
+    then `git branch --show-current`, then `git rev-parse --abbrev-ref HEAD`,
+    and finally `detached`;
+  - add a pipeline contract assertion for detached branch metadata handling;
+  - rerun focused local syntax/contract/docs/diff checks;
+  - trigger and monitor a fresh public Buildkite run for `origin/work-record`.
+
 - Command:
   `./scripts/check-buildkite-pipeline.sh`
 - Repo/worktree:

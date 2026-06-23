@@ -474,6 +474,33 @@ function Host-Triple {
   throw "rustc -vV did not report a host triple"
 }
 
+function Git-Current-Branch {
+  if (-not [string]::IsNullOrWhiteSpace($env:BUILDKITE_BRANCH)) {
+    return $env:BUILDKITE_BRANCH
+  }
+
+  $branchOutput = & git branch --show-current
+  if ($LASTEXITCODE -eq 0) {
+    $branch = [string]($branchOutput | Select-Object -First 1)
+    if (-not [string]::IsNullOrWhiteSpace($branch)) {
+      return $branch.Trim()
+    }
+  }
+
+  $abbrevOutput = & git rev-parse --abbrev-ref HEAD
+  if ($LASTEXITCODE -eq 0) {
+    $abbrev = [string]($abbrevOutput | Select-Object -First 1)
+    if (-not [string]::IsNullOrWhiteSpace($abbrev)) {
+      $abbrev = $abbrev.Trim()
+      if ($abbrev -ne "HEAD") {
+        return $abbrev
+      }
+    }
+  }
+
+  return "detached"
+}
+
 function Require-Host-Triple {
   param([string]$Expected)
   if ([string]::IsNullOrWhiteSpace($Expected)) {
@@ -611,7 +638,7 @@ function Run-Release-Dry-Run {
   $targetTriple = if ($env:CTX_RELEASE_TARGET_TRIPLE) { $env:CTX_RELEASE_TARGET_TRIPLE } else { $hostTriple }
   $platform = if ($env:CTX_RELEASE_PLATFORM) { $env:CTX_RELEASE_PLATFORM } else { "host-$hostTriple" }
   $commit = (& git rev-parse HEAD).Trim()
-  $branch = (& git branch --show-current).Trim()
+  $branch = Git-Current-Branch
   $sourceBin = Join-PathSafe $script:RepoRoot "target\release\ctx.exe"
   if (-not (Test-Path $sourceBin)) {
     throw "expected host binary missing: $sourceBin"
