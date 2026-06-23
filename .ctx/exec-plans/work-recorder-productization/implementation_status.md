@@ -1,6 +1,6 @@
 # Work Recorder Productization Implementation Status
 
-Updated: 2026-06-22T19:21:30-05:00
+Updated: 2026-06-22T19:23:10-05:00
 
 Task: `feb64c1c-e58c-40f8-b1e9-1094dca0646e`
 
@@ -202,6 +202,20 @@ Integrated implementation work after the third architecture/data model review:
   after the architecture/data reviewer PASS noted it as useful follow-up
   coverage.
 
+## Capture Spool Integration
+
+Integrated implementation work:
+
+- Added `work-record-capture` with JSONL spool writer/importer, pending/tmp/
+  processing/done/failed spool accounting, failed import retention with sidecar
+  error metadata, and stable dedupe-key IDs.
+- Added hidden `ctx capture write-fixture` for local fixture generation and
+  public `ctx capture import` with schema-versioned JSON output.
+- `ctx status` reports capture spool counts and `ctx validate` reports failed
+  or processing spool files.
+- Capture archive construction now uses the current archive schema, including
+  `schema_version` and nested artifact payload preservation.
+
 ## Validation
 
 - `./scripts/check.sh` in the public `work-record-product` worktree: PASS at
@@ -259,6 +273,13 @@ Integrated implementation work after the third architecture/data model review:
   PASS after adding both-stream archive round-trip coverage.
 - `TMPDIR=/var/tmp/ctxwr CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=1 cargo test -p ctx -p work-record-core -p work-record-store -- --test-threads 1`:
   PASS after adding both-stream archive round-trip coverage.
+- `TMPDIR=/var/tmp/ctxwr CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=1 cargo test -p work-record-capture --lib -- --test-threads 1`:
+  PASS after capture merge. Covered 3 capture unit tests.
+- `TMPDIR=/var/tmp/ctxwr CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=1 cargo test -p ctx capture -- --test-threads 1`:
+  PASS after capture merge. Covered 2 capture CLI integration tests.
+- `TMPDIR=/var/tmp/ctxwr CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=1 BAZEL_JOBS=2 ./scripts/check.sh all && git diff --check`:
+  PASS after capture merge. Covered fmt, check, clippy, and tests; Bazel lane
+  recorded `skipped` because neither `bazel` nor `bazelisk` is installed.
 
 ## Reviewer Status
 

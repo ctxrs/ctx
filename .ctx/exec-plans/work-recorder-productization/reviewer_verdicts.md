@@ -1,6 +1,6 @@
 # Work Recorder Productization Reviewer Verdicts
 
-Updated: 2026-06-22T19:21:30-05:00
+Updated: 2026-06-22T19:23:10-05:00
 
 ## Read-Only Mapper Results
 
@@ -36,6 +36,9 @@ No milestone reviewer verdicts have passed yet.
   focused CLI tests plus full check.
 - Store foundation worker: complete. Added migration/schema/WAL/busy/FTS
   foundation; integrated into the manager branch and validated with full check.
+- Capture spool worker: complete. Added `work-record-capture`, capture fixture
+  writer/importer, status/validate spool counts, and tests; integrated into the
+  manager branch and validated with focused capture tests plus full check.
 
 ## Milestone Review Results
 

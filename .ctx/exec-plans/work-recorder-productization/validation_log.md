@@ -201,6 +201,45 @@ Future entries must include:
 - failure mode if any;
 - whether the command was local, Buildkite, or staging.
 
+## 2026-06-22 Capture Spool Integration Checks
+
+- Command:
+  `TMPDIR=/var/tmp/ctxwr CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=1 cargo test -p work-record-capture --lib -- --test-threads 1`
+- Repo/worktree:
+  `/home/daddy/code/ctx-multi-repo-workspace/worktrees/ctx/work-record-product`
+- Branch/head:
+  `work-record` / capture merge with uncommitted archive-schema compatibility fix
+- Outcome: PASS
+- Coverage:
+  - 3 capture unit tests passed.
+
+- Command:
+  `TMPDIR=/var/tmp/ctxwr CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=1 cargo test -p ctx capture -- --test-threads 1`
+- Repo/worktree:
+  `/home/daddy/code/ctx-multi-repo-workspace/worktrees/ctx/work-record-product`
+- Branch/head:
+  `work-record` / capture merge with uncommitted archive-schema compatibility fix
+- Outcome: PASS
+- Coverage:
+  - 2 capture CLI integration tests passed.
+
+- Command:
+  `TMPDIR=/var/tmp/ctxwr CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=1 BAZEL_JOBS=2 ./scripts/check.sh all && git diff --check`
+- Repo/worktree:
+  `/home/daddy/code/ctx-multi-repo-workspace/worktrees/ctx/work-record-product`
+- Branch/head:
+  `work-record` / capture merge with uncommitted archive-schema compatibility fix
+- Outcome: PASS
+- Coverage:
+  - `cargo fmt --all -- --check`;
+  - `cargo check --workspace --all-targets --locked`;
+  - `cargo clippy --workspace --all-targets --locked -- -D warnings`;
+  - `cargo test --workspace --all-targets --locked -- --test-threads 1`;
+  - 13 CLI integration tests, 3 capture unit tests, 4 core unit tests, 1 report
+    unit test, and 9 store unit tests passed;
+  - Bazel lane recorded `skipped` because neither `bazel` nor `bazelisk` is
+    installed.
+
 ## 2026-06-22 Foundation Review Fix Checks
 
 - Command:

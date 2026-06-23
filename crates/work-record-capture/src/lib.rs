@@ -313,9 +313,11 @@ pub fn spool_counts(inbox: impl AsRef<Path>) -> Result<SpoolCounts> {
 
 pub fn archive_from_envelopes(envelopes: &[CaptureEnvelope]) -> Result<WorkRecordArchive> {
     let mut archive = WorkRecordArchive {
+        schema_version: 1,
         version: 1,
         records: Vec::new(),
         evidence: Vec::new(),
+        artifacts: Vec::new(),
     };
 
     for envelope in envelopes {
@@ -324,6 +326,7 @@ pub fn archive_from_envelopes(envelopes: &[CaptureEnvelope]) -> Result<WorkRecor
             let nested: WorkRecordArchive = serde_json::from_value(archive_value.clone())?;
             archive.records.extend(nested.records);
             archive.evidence.extend(nested.evidence);
+            archive.artifacts.extend(nested.artifacts);
             continue;
         }
 
