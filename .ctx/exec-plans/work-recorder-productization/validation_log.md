@@ -105,7 +105,7 @@ Updated: 2026-06-22T20:02:05-05:00
 - Repo/worktree:
   `/home/daddy/code/ctx-multi-repo-workspace/worktrees/ctx-private/work-recorder-hosted-team`
 - Branch/head:
-  `ctx/work-recorder-hosted-team` / `6436c5c95`
+  `ctx/work-recorder-hosted-team` / `cd0361115`
 - Outcome: PASS
 - Coverage:
   - `pnpm install --frozen-lockfile`;
@@ -116,11 +116,39 @@ Updated: 2026-06-22T20:02:05-05:00
   - `wrangler deploy --dry-run --env staging`.
 
 - Command:
+  `pnpm install --frozen-lockfile && pnpm exec vitest run test/cloudflare-neon-readiness.test.mjs --pool=threads`
+- Repo/worktree:
+  `/home/daddy/code/ctx-multi-repo-workspace/worktrees/ctx-private/work-recorder-hosted-team/llm-relay-worker`
+- Branch/head:
+  `ctx/work-recorder-hosted-team` / `cd0361115`
+- Outcome: PASS
+- Coverage:
+  - shared readiness script tests, 8 tests;
+  - Work Recorder profile env/wrangler validation;
+  - legacy relay authority table helper compatibility.
+
+- Command:
+  `pnpm readiness:check`
+- Repo/worktree:
+  `/home/daddy/code/ctx-multi-repo-workspace/worktrees/ctx-private/work-recorder-hosted-team/work-recorder-worker`
+- Branch/head:
+  `ctx/work-recorder-hosted-team` / `cd0361115`
+- Outcome: BLOCKED
+- Findings:
+  - Cloudflare operator credentials: present;
+  - Neon API credentials: present and project exists;
+  - Cloudflare Worker `ctx-work-recorder`: missing;
+  - Worker secrets `WORK_RECORDER_DATABASE_URL` and
+    `WORK_RECORDER_SHARED_TOKEN`: missing because Worker is absent;
+  - Infisical keys `WORK_RECORDER_DATABASE_URL`,
+    `WORK_RECORDER_SHARED_TOKEN`, and `CTX_WORK_RECORDS_R2_BUCKET`: missing.
+
+- Command:
   `buildkite-agent pipeline upload --dry-run .buildkite/pipelines/work-recorder-worker.yml`
 - Repo/worktree:
   `/home/daddy/code/ctx-multi-repo-workspace/worktrees/ctx-private/work-recorder-hosted-team`
 - Branch/head:
-  `ctx/work-recorder-hosted-team` / `6436c5c95`
+  `ctx/work-recorder-hosted-team` / `cd0361115`
 - Outcome: BLOCKED
 - Blocker:
   - `buildkite-agent` reported `Missing agent-access-token`.
@@ -203,6 +231,50 @@ Updated: 2026-06-22T20:02:05-05:00
 - Branch/head:
   `work-record` / `6d73e2c`
 - Outcome: PASS
+
+## 2026-06-22 Buildkite Queue Routing Checks
+
+- Command:
+  Buildkite trigger for build 24 on branch `work-record`.
+- Repo/worktree:
+  `ctxrs/ctx` remote branch `work-record`.
+- Branch/head:
+  invalid trigger commit `86df888ee3c5f67e6c1312d63c5e7db6232e71c3`.
+- Outcome: FAILED
+- Build URL:
+  `https://buildkite.com/luca-king/ctx-public-release-verification/builds/24`
+- Failure mode:
+  - checkout failed with `fatal: remote error: upload-pack: not our ref`
+    because the trigger used a nonexistent full SHA.
+
+- Command:
+  Buildkite trigger for build 25 on branch `work-record`.
+- Repo/worktree:
+  `ctxrs/ctx` remote branch `work-record`.
+- Branch/head:
+  `work-record` / `b0dd4c2`
+- Outcome: BLOCKED before verification lanes ran
+- Build URL:
+  `https://buildkite.com/luca-king/ctx-public-release-verification/builds/25`
+- Failure/blocker mode:
+  - initial pipeline upload job passed;
+  - matrix expanded correctly;
+  - first matrix job stayed scheduled on `queue=main-linux`, leaving all
+    dependent lanes waiting.
+
+- Command:
+  `./scripts/check-buildkite-pipeline.sh`
+- Repo/worktree:
+  `/home/daddy/code/ctx-multi-repo-workspace/worktrees/ctx/work-record-product`
+- Branch/head:
+  `work-record` / uncommitted queue-routing remediation on `b0dd4c2`
+- Outcome: PASS
+- Coverage:
+  - Buildkite dry-run parser accepted the rerouted pipeline;
+  - Linux verification lanes now target `queue=release-linux-managed` with
+    `ctx-runner-class=release-linux-control`;
+  - Linux release dry-run still targets
+    `ctx-runner-class=release-linux-x64-stage`.
 
 ## 2026-06-22 Review Blocker Remediation Checks
 

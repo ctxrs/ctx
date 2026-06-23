@@ -113,7 +113,8 @@ validate_contract() {
   require_text "Windows x64 release dry-run step" "${pipeline}" 'key: "release-dry-run-windows-x64"'
   require_text "FreeBSD documented blocker step" "${pipeline}" 'key: "freebsd-x64-blocker"'
 
-  require_text "Linux generic queue" "${pipeline}" 'queue: "main-linux"'
+  require_text "Linux verification queue" "${pipeline}" 'queue: "release-linux-managed"'
+  require_text "Linux verification runner class" "${pipeline}" 'ctx-runner-class: "release-linux-control"'
   require_text "Linux release queue" "${pipeline}" 'queue: "release-linux-managed"'
   require_text "Linux release runner class" "${pipeline}" 'ctx-runner-class: "release-linux-x64-stage"'
   require_text "macOS arm64 queue" "${pipeline}" 'queue: "ctx-mac-gui-shared-arm64"'

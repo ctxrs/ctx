@@ -587,12 +587,29 @@ None accepted yet.
     available.
   - Hosted/private staging remains a separate active workstream.
 
+## 2026-06-22 Buildkite Queue Routing Remediation
+
+- Build 24:
+  - URL: `https://buildkite.com/luca-king/ctx-public-release-verification/builds/24`
+  - Outcome: FAILED before matrix expansion because the trigger used an invalid
+    full commit SHA.
+- Build 25:
+  - URL: `https://buildkite.com/luca-king/ctx-public-release-verification/builds/25`
+  - Triggered on `work-record` at `b0dd4c2`.
+  - Outcome so far: matrix expanded correctly, but the first matrix job stayed
+    scheduled on `queue=main-linux`.
+- Repo-owned remediation:
+  - routed Linux verification and FreeBSD blocker lanes to the known working
+    `queue=release-linux-managed` with `ctx-runner-class=release-linux-control`;
+  - left Linux release dry-run on `ctx-runner-class=release-linux-x64-stage`;
+  - local `./scripts/check-buildkite-pipeline.sh`: PASS after routing change.
+
 ## 2026-06-23 Hosted Worker Foundation Checkpoint
 
 - Private repo/worktree:
   `/home/daddy/code/ctx-multi-repo-workspace/worktrees/ctx-private/work-recorder-hosted-team`
 - Private branch/head:
-  `ctx/work-recorder-hosted-team` / `6436c5c95`
+  `ctx/work-recorder-hosted-team` / `cd0361115`
 - Hosted implementation landed:
   - Cloudflare Worker package `work-recorder-worker`;
   - Neon migration `0013_work_recorder_foundation.sql`;
@@ -609,12 +626,18 @@ None accepted yet.
 - Hosted validation:
   - `pnpm typecheck`: PASS;
   - `pnpm test`: PASS, 11 tests;
+  - `pnpm exec vitest run test/cloudflare-neon-readiness.test.mjs
+    --pool=threads` in `llm-relay-worker`: PASS, 8 tests;
   - `pnpm readiness:check:local`: PASS with dummy local-only env and no
     Cloudflare/Neon API calls;
   - `wrangler deploy --dry-run --env staging`: PASS through
     `scripts/buildkite/run_work_recorder_worker_check.sh`;
   - `git diff --check`: PASS.
 - Remaining external hosted gaps:
+  - real read-only readiness found Cloudflare/Neon operator credentials, but
+    `ctx-work-recorder` Worker does not exist yet;
+  - Infisical lacks `WORK_RECORDER_DATABASE_URL`,
+    `WORK_RECORDER_SHARED_TOKEN`, and `CTX_WORK_RECORDS_R2_BUCKET`;
   - no live Cloudflare deployment has been performed from this branch;
   - no live Neon migration has been applied from this branch;
   - no live R2 bucket proof has been run against real Cloudflare credentials;

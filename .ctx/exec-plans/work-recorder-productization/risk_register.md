@@ -19,7 +19,8 @@ Updated: 2026-06-22T20:02:05-05:00
 | Chrome/headless screenshot capture can fail if it uses the default `/tmp` profile/cache. | Visual review can fail for environment reasons unrelated to dashboard rendering. | Use `/var/tmp` for `TMPDIR`, `--user-data-dir`, and `--disk-cache-dir` when capturing local dashboard screenshots on this host. |
 | Local Git/jj/gh wrapper shims can capture sensitive command output. | Accidental local retention of secrets, source, paths, or private PR data. | Shims are opt-in, local-only, capped per stream, imported explicitly, documented as sensitive, and not connected to hosted sync in this branch. |
 | Hosted worker could accidentally become raw transcript sync before policy exists. | Private prompts, tool output, source snippets, or credentials could leave the machine. | Hosted sync endpoint rejects raw transcript/prompt/tool-output-like keys by default; initial hosted API accepts metadata batches and explicit blob uploads only. |
-| Buildkite upload/proof cannot run from this session. | Pipeline config is locally validated by wrapper, but no live Buildkite URL can be attached yet. | `buildkite-agent pipeline upload --dry-run` was attempted and blocked by missing agent access token; live proof remains an external credential/runner step. |
+| Buildkite runner routing can block live proof even when the pipeline syntax is valid. | Matrix jobs can remain scheduled and prevent release evidence. | Build 25 proved pipeline expansion; Linux verification lanes were rerouted from idle `main-linux` to the known working managed Linux queue and runner class. |
+| Hosted staging is not provisioned yet. | Hosted/team story cannot be claimed as live. | Read-only readiness proves operator credentials exist, but Work Recorder-specific Infisical keys, Worker, and R2 bucket config are missing; keep public docs local-first until provisioning is completed. |
 
 ## Accepted Risks
 

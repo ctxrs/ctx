@@ -7,7 +7,6 @@
 #
 # Known external runner queues are taken from the ctx-private Buildkite queue
 # inventory:
-# - main-linux
 # - release-linux-managed
 # - ctx-mac-gui-shared-arm64
 # - ctx-mac-gui-shared-x64
@@ -30,7 +29,8 @@ steps:
     key: "pipeline-contract"
     command: "CTX_ARTIFACT_DIR=artifacts/buildkite/pipeline-contract ./scripts/check-buildkite-pipeline.sh"
     agents:
-      queue: "main-linux"
+      queue: "release-linux-managed"
+      ctx-runner-class: "release-linux-control"
       os: "linux"
       arch: "x86_64"
     timeout_in_minutes: 5
@@ -42,7 +42,8 @@ steps:
     depends_on: "pipeline-contract"
     command: "CTX_ARTIFACT_DIR=artifacts/buildkite/fmt ./scripts/check.sh fmt"
     agents:
-      queue: "main-linux"
+      queue: "release-linux-managed"
+      ctx-runner-class: "release-linux-control"
       os: "linux"
       arch: "x86_64"
     timeout_in_minutes: 10
@@ -54,7 +55,8 @@ steps:
     depends_on: "fmt"
     command: "CTX_ARTIFACT_DIR=artifacts/buildkite/docs ./scripts/check.sh docs"
     agents:
-      queue: "main-linux"
+      queue: "release-linux-managed"
+      ctx-runner-class: "release-linux-control"
       os: "linux"
       arch: "x86_64"
     timeout_in_minutes: 10
@@ -66,7 +68,8 @@ steps:
     depends_on: "docs"
     command: "CTX_ARTIFACT_DIR=artifacts/buildkite/check ./scripts/check.sh check"
     agents:
-      queue: "main-linux"
+      queue: "release-linux-managed"
+      ctx-runner-class: "release-linux-control"
       os: "linux"
       arch: "x86_64"
     timeout_in_minutes: 30
@@ -78,7 +81,8 @@ steps:
     depends_on: "cargo-check"
     command: "CTX_ARTIFACT_DIR=artifacts/buildkite/clippy ./scripts/check.sh clippy"
     agents:
-      queue: "main-linux"
+      queue: "release-linux-managed"
+      ctx-runner-class: "release-linux-control"
       os: "linux"
       arch: "x86_64"
     timeout_in_minutes: 30
@@ -90,7 +94,8 @@ steps:
     depends_on: "clippy"
     command: "CTX_ARTIFACT_DIR=artifacts/buildkite/test ./scripts/check.sh test"
     agents:
-      queue: "main-linux"
+      queue: "release-linux-managed"
+      ctx-runner-class: "release-linux-control"
       os: "linux"
       arch: "x86_64"
     timeout_in_minutes: 45
@@ -102,7 +107,8 @@ steps:
     depends_on: "cargo-test"
     command: "CTX_ARTIFACT_DIR=artifacts/buildkite/examples ./scripts/check.sh examples"
     agents:
-      queue: "main-linux"
+      queue: "release-linux-managed"
+      ctx-runner-class: "release-linux-control"
       os: "linux"
       arch: "x86_64"
     timeout_in_minutes: 30
@@ -114,7 +120,8 @@ steps:
     depends_on: "examples"
     command: "CTX_ARTIFACT_DIR=artifacts/buildkite/bazel CTX_REQUIRE_BAZEL=1 ./scripts/check.sh bazel"
     agents:
-      queue: "main-linux"
+      queue: "release-linux-managed"
+      ctx-runner-class: "release-linux-control"
       os: "linux"
       arch: "x86_64"
     timeout_in_minutes: 45
@@ -252,7 +259,8 @@ steps:
     depends_on: "bazel"
     command: "CTX_ARTIFACT_DIR=artifacts/buildkite/release-blockers/freebsd-x64 ./scripts/release-platform-blocker.sh freebsd-x64"
     agents:
-      queue: "main-linux"
+      queue: "release-linux-managed"
+      ctx-runner-class: "release-linux-control"
       os: "linux"
       arch: "x86_64"
     timeout_in_minutes: 5
