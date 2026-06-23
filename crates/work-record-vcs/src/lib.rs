@@ -51,11 +51,57 @@ pub struct GitWorkspace {
     pub head_sha: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    #[serde(default)]
+    pub status: GitStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream: Option<GitUpstream>,
+    #[serde(default)]
+    pub recent_commits: Vec<GitCommit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub primary_remote: Option<GitRemote>,
     #[serde(default)]
     pub remotes: Vec<GitRemote>,
     pub repo_fingerprint: RepoFingerprint,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitStatus {
+    pub dirty: bool,
+    pub staged: bool,
+    pub unstaged: bool,
+    pub untracked: bool,
+    pub conflicted: bool,
+    #[serde(default)]
+    pub entries: Vec<GitStatusEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitStatusEntry {
+    pub path: String,
+    pub index_status: String,
+    pub worktree_status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitUpstream {
+    pub name: String,
+    pub ahead: u32,
+    pub behind: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitCommit {
+    pub sha: String,
+    pub short_sha: String,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_timestamp: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,6 +146,63 @@ pub struct JjDetection {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JjWorkspace {
     pub root_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_copy: Option<JjCommit>,
+    #[serde(default)]
+    pub parents: Vec<JjCommit>,
+    #[serde(default)]
+    pub bookmarks: Vec<JjBookmark>,
+    #[serde(default)]
+    pub recent_changes: Vec<JjCommit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub colocated_git: Option<JjColocatedGit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JjCommit {
+    pub change_id: String,
+    pub commit_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short_commit_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub bookmarks: Vec<String>,
+    #[serde(default)]
+    pub parent_change_ids: Vec<String>,
+    #[serde(default)]
+    pub parent_commit_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_timestamp: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JjBookmark {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_id: Option<String>,
+    #[serde(default)]
+    pub remote: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JjColocatedGit {
+    pub root_path: String,
+    pub git_dir: String,
+    pub git_common_dir: String,
+    pub is_worktree: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_sha: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub status: GitStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -188,6 +291,9 @@ pub fn inspect_git(cwd: &Path) -> GitDetection {
             is_worktree,
             head_sha: optional_command_stdout("git", &["rev-parse", "--verify", "HEAD"], cwd),
             branch: optional_non_empty_command_stdout("git", &["branch", "--show-current"], cwd),
+            status: git_status(cwd),
+            upstream: git_upstream(cwd),
+            recent_commits: git_recent_commits(cwd, 10),
             primary_remote,
             remotes,
             repo_fingerprint,
@@ -198,13 +304,21 @@ pub fn inspect_git(cwd: &Path) -> GitDetection {
 
 pub fn inspect_jj(cwd: &Path) -> JjDetection {
     match command_stdout("jj", &["root"], cwd) {
-        CommandResult::Success(stdout) => JjDetection {
-            available: true,
-            workspace: Some(JjWorkspace {
-                root_path: path_to_string(&canonicalize_or_self(&PathBuf::from(stdout))),
-            }),
-            error: None,
-        },
+        CommandResult::Success(stdout) => {
+            let root_path = canonicalize_or_self(&PathBuf::from(stdout));
+            JjDetection {
+                available: true,
+                workspace: Some(JjWorkspace {
+                    root_path: path_to_string(&root_path),
+                    working_copy: jj_log_commits(cwd, "@", 1).into_iter().next(),
+                    parents: jj_log_commits(cwd, "@-", 8),
+                    bookmarks: jj_bookmarks(cwd),
+                    recent_changes: jj_log_commits(cwd, "ancestors(@, 10)", 10),
+                    colocated_git: jj_colocated_git(cwd),
+                }),
+                error: None,
+            }
+        }
         CommandResult::Unavailable(error) => JjDetection {
             available: false,
             workspace: None,
@@ -384,11 +498,241 @@ fn git_remotes(cwd: &Path) -> Vec<GitRemote> {
     remotes
 }
 
+fn git_status(cwd: &Path) -> GitStatus {
+    optional_command_stdout("git", &["status", "--porcelain=v1", "-z"], cwd)
+        .map(|stdout| parse_git_status_porcelain_z(stdout.as_bytes()))
+        .unwrap_or_default()
+}
+
+fn parse_git_status_porcelain_z(raw: &[u8]) -> GitStatus {
+    let mut status = GitStatus::default();
+    let mut parts = raw.split(|byte| *byte == 0).filter(|part| !part.is_empty());
+
+    while let Some(part) = parts.next() {
+        if part.len() < 3 {
+            continue;
+        }
+        let index = part[0] as char;
+        let worktree = part[1] as char;
+        let path = String::from_utf8_lossy(&part[3..]).into_owned();
+        let original_path = if index == 'R' || index == 'C' {
+            parts
+                .next()
+                .map(|path| String::from_utf8_lossy(path).into_owned())
+        } else {
+            None
+        };
+
+        let entry = GitStatusEntry {
+            path,
+            index_status: index.to_string(),
+            worktree_status: worktree.to_string(),
+            original_path,
+        };
+        let staged = index != ' ' && index != '?' && index != '!';
+        let untracked = index == '?' && worktree == '?';
+        let unstaged = worktree != ' ' || untracked;
+        let conflicted = is_conflicted_git_status(index, worktree);
+
+        status.staged |= staged;
+        status.unstaged |= unstaged;
+        status.untracked |= untracked;
+        status.conflicted |= conflicted;
+        status.entries.push(entry);
+    }
+
+    status.dirty = !status.entries.is_empty();
+    status
+}
+
+fn is_conflicted_git_status(index: char, worktree: char) -> bool {
+    matches!(
+        (index, worktree),
+        ('D', 'D') | ('A', 'U') | ('U', 'D') | ('U', 'A') | ('D', 'U') | ('A', 'A') | ('U', 'U')
+    )
+}
+
+fn git_upstream(cwd: &Path) -> Option<GitUpstream> {
+    let name = optional_non_empty_command_stdout(
+        "git",
+        &["rev-parse", "--abbrev-ref", "@{upstream}"],
+        cwd,
+    )?;
+    let (ahead, behind) = optional_command_stdout(
+        "git",
+        &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
+        cwd,
+    )
+    .and_then(|stdout| parse_git_ahead_behind(&stdout))
+    .unwrap_or((0, 0));
+    Some(GitUpstream {
+        name,
+        ahead,
+        behind,
+    })
+}
+
+fn parse_git_ahead_behind(stdout: &str) -> Option<(u32, u32)> {
+    let mut fields = stdout.split_whitespace();
+    let ahead = fields.next()?.parse().ok()?;
+    let behind = fields.next()?.parse().ok()?;
+    Some((ahead, behind))
+}
+
+fn git_recent_commits(cwd: &Path, limit: usize) -> Vec<GitCommit> {
+    let format = "%H%x1f%h%x1f%an%x1f%ae%x1f%aI%x1f%s%x1e";
+    optional_command_stdout(
+        "git",
+        &[
+            "log",
+            "--date=iso-strict",
+            &format!("--max-count={limit}"),
+            &format!("--format={format}"),
+        ],
+        cwd,
+    )
+    .map(|stdout| parse_git_log_records(&stdout))
+    .unwrap_or_default()
+}
+
+fn parse_git_log_records(stdout: &str) -> Vec<GitCommit> {
+    stdout
+        .split('\x1e')
+        .filter_map(|record| {
+            let trimmed = record.trim_matches(|ch| ch == '\n' || ch == '\r');
+            if trimmed.is_empty() {
+                return None;
+            }
+            let mut fields = trimmed.split('\x1f');
+            let sha = non_empty_string(fields.next()?)?;
+            let short_sha = non_empty_string(fields.next()?)?;
+            let author_name = optional_field(fields.next());
+            let author_email = optional_field(fields.next());
+            let author_timestamp = optional_field(fields.next());
+            let summary = fields.collect::<Vec<_>>().join("\x1f");
+            Some(GitCommit {
+                sha,
+                short_sha,
+                summary,
+                author_name,
+                author_email,
+                author_timestamp,
+            })
+        })
+        .collect()
+}
+
 fn primary_remote(remotes: &[GitRemote]) -> Option<&GitRemote> {
     remotes
         .iter()
         .find(|remote| remote.name == "origin")
         .or_else(|| remotes.first())
+}
+
+fn jj_log_commits(cwd: &Path, revset: &str, limit: usize) -> Vec<JjCommit> {
+    let template = r#"change_id ++ "\x1f" ++ commit_id ++ "\x1f" ++ description.first_line() ++ "\x1f" ++ bookmarks.join(",") ++ "\x1f" ++ parents.map(|c| c.change_id()).join(",") ++ "\x1f" ++ parents.map(|c| c.commit_id()).join(",") ++ "\x1f" ++ author.name() ++ "\x1f" ++ author.email() ++ "\x1f" ++ author.timestamp().format("%Y-%m-%dT%H:%M:%SZ") ++ "\x1e""#;
+    optional_command_stdout(
+        "jj",
+        &[
+            "log",
+            "--no-graph",
+            "-r",
+            revset,
+            "--limit",
+            &limit.to_string(),
+            "-T",
+            template,
+        ],
+        cwd,
+    )
+    .map(|stdout| parse_jj_log_records(&stdout))
+    .unwrap_or_default()
+}
+
+fn parse_jj_log_records(stdout: &str) -> Vec<JjCommit> {
+    stdout
+        .split('\x1e')
+        .filter_map(|record| {
+            let trimmed = record.trim_matches(|ch| ch == '\n' || ch == '\r');
+            if trimmed.is_empty() {
+                return None;
+            }
+            let mut fields = trimmed.split('\x1f');
+            let change_id = non_empty_string(fields.next()?)?;
+            let commit_id = non_empty_string(fields.next()?)?;
+            let description = optional_field(fields.next());
+            let bookmarks = split_csv_field(fields.next());
+            let parent_change_ids = split_csv_field(fields.next());
+            let parent_commit_ids = split_csv_field(fields.next());
+            let author_name = optional_field(fields.next());
+            let author_email = optional_field(fields.next());
+            let author_timestamp = optional_field(fields.next());
+            Some(JjCommit {
+                short_commit_id: Some(short_id(&commit_id)),
+                change_id,
+                commit_id,
+                description,
+                bookmarks,
+                parent_change_ids,
+                parent_commit_ids,
+                author_name,
+                author_email,
+                author_timestamp,
+            })
+        })
+        .collect()
+}
+
+fn jj_bookmarks(cwd: &Path) -> Vec<JjBookmark> {
+    let template = r#"name ++ "\x1f" ++ if(remote, "remote", "local") ++ "\x1f" ++ change_id ++ "\x1f" ++ commit_id ++ "\x1e""#;
+    optional_command_stdout("jj", &["bookmark", "list", "-T", template], cwd)
+        .map(|stdout| parse_jj_bookmark_records(&stdout))
+        .unwrap_or_default()
+}
+
+fn parse_jj_bookmark_records(stdout: &str) -> Vec<JjBookmark> {
+    stdout
+        .split('\x1e')
+        .filter_map(|record| {
+            let trimmed = record.trim_matches(|ch| ch == '\n' || ch == '\r');
+            if trimmed.is_empty() {
+                return None;
+            }
+            let mut fields = trimmed.split('\x1f');
+            let name = non_empty_string(fields.next()?)?;
+            let remote = matches!(fields.next().map(str::trim), Some("remote"));
+            let change_id = optional_field(fields.next());
+            let commit_id = optional_field(fields.next());
+            Some(JjBookmark {
+                name,
+                change_id,
+                commit_id,
+                remote,
+            })
+        })
+        .collect()
+}
+
+fn jj_colocated_git(cwd: &Path) -> Option<JjColocatedGit> {
+    let root = match command_stdout("git", &["rev-parse", "--show-toplevel"], cwd) {
+        CommandResult::Success(stdout) => PathBuf::from(stdout),
+        CommandResult::Failure(_) | CommandResult::Unavailable(_) => return None,
+    };
+    let root_path = canonicalize_or_self(&root);
+    let git_dir = optional_command_stdout("git", &["rev-parse", "--absolute-git-dir"], cwd)
+        .map(PathBuf::from)
+        .map(|path| canonicalize_or_self(&path))
+        .unwrap_or_else(|| root_path.join(".git"));
+    let git_common_dir = git_common_dir(cwd, &git_dir);
+    Some(JjColocatedGit {
+        root_path: path_to_string(&root_path),
+        git_dir: path_to_string(&git_dir),
+        git_common_dir: path_to_string(&git_common_dir),
+        is_worktree: git_dir != git_common_dir,
+        head_sha: optional_command_stdout("git", &["rev-parse", "--verify", "HEAD"], cwd),
+        branch: optional_non_empty_command_stdout("git", &["branch", "--show-current"], cwd),
+        status: git_status(cwd),
+    })
 }
 
 fn repo_fingerprint(
@@ -570,17 +914,112 @@ fn command_stdout(program: &str, args: &[&str], cwd: &Path) -> CommandResult {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
             let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
             let message = if stderr.is_empty() { stdout } else { stderr };
-            CommandResult::Failure(if message.is_empty() {
-                format!("{program} exited with {}", output.status)
+            let command = display_command(program, args);
+            CommandResult::Failure(redact_command_error(if message.is_empty() {
+                format!("{command} failed: exited with {}", output.status)
             } else {
-                message
-            })
+                format!("{command} failed: {message}")
+            }))
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             CommandResult::Unavailable(format!("{program} executable not found"))
         }
-        Err(error) => CommandResult::Failure(error.to_string()),
+        Err(error) => CommandResult::Failure(redact_command_error(format!(
+            "{} failed: {error}",
+            display_command(program, args)
+        ))),
     }
+}
+
+fn display_command(program: &str, args: &[&str]) -> String {
+    std::iter::once(program)
+        .chain(args.iter().copied())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn redact_command_error(message: impl AsRef<str>) -> String {
+    let mut redacted = Vec::with_capacity(message.as_ref().len());
+    for token in message.as_ref().split_whitespace() {
+        let token = redact_url_credentials(token);
+        let lower = token.to_ascii_lowercase();
+        if lower.contains("token=")
+            || lower.contains("access_token=")
+            || lower.contains("password=")
+            || lower.contains("credential=")
+        {
+            redacted.push(redact_query_value(&token));
+        } else {
+            redacted.push(token);
+        }
+    }
+    redacted.join(" ")
+}
+
+fn redact_url_credentials(token: &str) -> String {
+    let Some(scheme_end) = token.find("://") else {
+        return token.to_owned();
+    };
+    let authority_start = scheme_end + 3;
+    let Some(at_offset) = token[authority_start..].find('@') else {
+        return token.to_owned();
+    };
+    let at_index = authority_start + at_offset;
+    format!(
+        "{}<redacted>@{}",
+        &token[..authority_start],
+        &token[at_index + 1..]
+    )
+}
+
+fn redact_query_value(token: &str) -> String {
+    let mut out = token.to_owned();
+    for key in ["access_token", "credential", "password", "token"] {
+        out = redact_key_value(&out, key);
+    }
+    out
+}
+
+fn redact_key_value(input: &str, key: &str) -> String {
+    let mut remaining = input;
+    let mut output = String::with_capacity(input.len());
+    let needle = format!("{key}=");
+    while let Some(index) = remaining.to_ascii_lowercase().find(&needle) {
+        output.push_str(&remaining[..index + needle.len()]);
+        output.push_str("<redacted>");
+        remaining = &remaining[index + needle.len()..];
+        let end = remaining
+            .find(|ch| matches!(ch, '&' | ' ' | '\'' | '"' | ')' | ']'))
+            .unwrap_or(remaining.len());
+        remaining = &remaining[end..];
+    }
+    output.push_str(remaining);
+    output
+}
+
+fn non_empty_string(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
+}
+
+fn optional_field(value: Option<&str>) -> Option<String> {
+    value.and_then(non_empty_string)
+}
+
+fn split_csv_field(value: Option<&str>) -> Vec<String> {
+    value
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(non_empty_string)
+        .collect()
+}
+
+fn short_id(value: &str) -> String {
+    value.chars().take(12).collect()
 }
 
 fn canonicalize_or_self(path: &Path) -> PathBuf {
@@ -702,6 +1141,95 @@ mod tests {
     }
 
     #[test]
+    fn git_status_marks_staged_unstaged_untracked_and_recent_commits() {
+        let temp = tempdir();
+        init_git(temp.path());
+        fs::write(temp.path().join("tracked.txt"), "base\n").unwrap();
+        git(temp.path(), ["add", "tracked.txt"]);
+        git(temp.path(), ["commit", "-m", "initial"]);
+        fs::write(temp.path().join("tracked.txt"), "base\nunstaged\n").unwrap();
+        fs::write(temp.path().join("staged.txt"), "staged\n").unwrap();
+        git(temp.path(), ["add", "staged.txt"]);
+        fs::write(temp.path().join("new.txt"), "new\n").unwrap();
+
+        let inspection = inspect_path(temp.path()).unwrap();
+        let workspace = inspection.git.workspace.unwrap();
+        let paths = workspace
+            .status
+            .entries
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(workspace.status.dirty);
+        assert!(workspace.status.staged);
+        assert!(workspace.status.unstaged);
+        assert!(workspace.status.untracked);
+        assert!(!workspace.status.conflicted);
+        assert!(paths.contains(&"tracked.txt"));
+        assert!(paths.contains(&"staged.txt"));
+        assert!(paths.contains(&"new.txt"));
+        assert_eq!(workspace.recent_commits.len(), 1);
+        assert_eq!(workspace.recent_commits[0].summary, "initial");
+        assert_eq!(
+            workspace.recent_commits[0].author_email.as_deref(),
+            Some("ctx@example.invalid")
+        );
+    }
+
+    #[test]
+    fn git_upstream_reports_ahead_and_behind_counts() {
+        let temp = tempdir();
+        let remote = temp.path().join("remote.git");
+        let repo = temp.path().join("repo");
+        git(temp.path(), ["init", "--bare", remote.to_str().unwrap()]);
+        init_git(&repo);
+        fs::write(repo.join("README.md"), "base\n").unwrap();
+        git(&repo, ["add", "README.md"]);
+        git(&repo, ["commit", "-m", "base"]);
+        git(&repo, ["remote", "add", "origin", remote.to_str().unwrap()]);
+        git(&repo, ["push", "-u", "origin", "HEAD:main"]);
+        fs::write(repo.join("local.txt"), "local\n").unwrap();
+        git(&repo, ["add", "local.txt"]);
+        git(&repo, ["commit", "-m", "local"]);
+
+        let clone = temp.path().join("clone");
+        git(
+            temp.path(),
+            ["clone", remote.to_str().unwrap(), clone.to_str().unwrap()],
+        );
+        git(&clone, ["config", "user.name", "Ctx Test"]);
+        git(&clone, ["config", "user.email", "ctx@example.invalid"]);
+        git(&clone, ["checkout", "main"]);
+        fs::write(clone.join("remote.txt"), "remote\n").unwrap();
+        git(&clone, ["add", "remote.txt"]);
+        git(&clone, ["commit", "-m", "remote"]);
+        git(&clone, ["push"]);
+        git(&repo, ["fetch", "origin"]);
+
+        let inspection = inspect_path(&repo).unwrap();
+        let upstream = inspection.git.workspace.unwrap().upstream.unwrap();
+
+        assert_eq!(upstream.name, "origin/main");
+        assert_eq!(upstream.ahead, 1);
+        assert_eq!(upstream.behind, 1);
+    }
+
+    #[test]
+    fn parses_git_porcelain_status_with_renames_and_conflicts() {
+        let raw = b" M changed.txt\0A  staged.txt\0?? new.txt\0R  renamed.txt\0old.txt\0UU conflict.txt\0";
+        let status = parse_git_status_porcelain_z(raw);
+
+        assert!(status.dirty);
+        assert!(status.staged);
+        assert!(status.unstaged);
+        assert!(status.untracked);
+        assert!(status.conflicted);
+        assert_eq!(status.entries[3].path, "renamed.txt");
+        assert_eq!(status.entries[3].original_path.as_deref(), Some("old.txt"));
+    }
+
+    #[test]
     fn multiple_remotes_choose_origin_and_normalize_urls() {
         let temp = tempdir();
         init_git(temp.path());
@@ -750,6 +1278,55 @@ mod tests {
         assert!(!normalized.normalized_url.contains("ghp_secret"));
         assert!(!normalized.redacted_url.contains("x-access-token"));
         assert!(!normalized.redacted_url.contains("secret"));
+    }
+
+    #[test]
+    fn parses_jj_log_records_with_change_ids_bookmarks_and_parents() {
+        let raw = "changeabc\x1fcommitabc123456789\x1fimplement thing\x1fmain,feature\x1fparentchange\x1fparentcommit\x1fA U Thor\x1fa@example.invalid\x1f2026-06-23T12:00:00Z\x1e";
+
+        let commits = parse_jj_log_records(raw);
+
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].change_id, "changeabc");
+        assert_eq!(commits[0].commit_id, "commitabc123456789");
+        assert_eq!(commits[0].short_commit_id.as_deref(), Some("commitabc123"));
+        assert_eq!(commits[0].description.as_deref(), Some("implement thing"));
+        assert_eq!(commits[0].bookmarks, vec!["main", "feature"]);
+        assert_eq!(commits[0].parent_change_ids, vec!["parentchange"]);
+        assert_eq!(commits[0].parent_commit_ids, vec!["parentcommit"]);
+        assert_eq!(
+            commits[0].author_email.as_deref(),
+            Some("a@example.invalid")
+        );
+    }
+
+    #[test]
+    fn parses_jj_bookmark_records() {
+        let raw = "main\x1flocal\x1fchangeabc\x1fcommitabc\x1eorigin/main\x1fremote\x1f\x1fcommitremote\x1e";
+
+        let bookmarks = parse_jj_bookmark_records(raw);
+
+        assert_eq!(bookmarks.len(), 2);
+        assert_eq!(bookmarks[0].name, "main");
+        assert!(!bookmarks[0].remote);
+        assert_eq!(bookmarks[0].change_id.as_deref(), Some("changeabc"));
+        assert_eq!(bookmarks[1].name, "origin/main");
+        assert!(bookmarks[1].remote);
+        assert!(bookmarks[1].change_id.is_none());
+        assert_eq!(bookmarks[1].commit_id.as_deref(), Some("commitremote"));
+    }
+
+    #[test]
+    fn command_errors_are_explicit_and_redacted() {
+        let message = redact_command_error(
+            "git fetch failed: https://x-access-token:ghp_secret@github.com/ctxrs/ctx.git?token=secret failed",
+        );
+
+        assert!(message.contains("git fetch failed"));
+        assert!(message.contains("<redacted>@github.com"));
+        assert!(message.contains("token=<redacted>"));
+        assert!(!message.contains("ghp_secret"));
+        assert!(!message.contains("token=secret"));
     }
 
     #[test]
