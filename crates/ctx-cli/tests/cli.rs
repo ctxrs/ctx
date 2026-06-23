@@ -69,6 +69,15 @@ fn provider_fixture(name: &str) -> String {
         .to_owned()
 }
 
+fn provider_history_fixture(name: &str) -> String {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/provider-history")
+        .join(name)
+        .to_str()
+        .unwrap()
+        .to_owned()
+}
+
 fn redaction_corpus_fixture() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/redaction/redaction-corpus.jsonl")
@@ -758,7 +767,7 @@ fn provider_fixture_import_json_reports_counts_and_summary_record() {
 #[test]
 fn codex_history_import_json_reports_prompt_only_fidelity() {
     let temp = tempdir();
-    let fixture = provider_fixture("codex-history.jsonl");
+    let fixture = provider_history_fixture("codex-history.jsonl");
 
     let mut command = ctx(&temp);
     command.args([

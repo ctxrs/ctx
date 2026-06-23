@@ -1554,6 +1554,12 @@ mod tests {
             .join(name)
     }
 
+    fn provider_history_fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/provider-history")
+            .join(name)
+    }
+
     fn fixed_import_options(path: PathBuf) -> ProviderFixtureImportOptions {
         ProviderFixtureImportOptions {
             machine_id: "test-machine".into(),
@@ -1851,7 +1857,7 @@ mod tests {
     #[test]
     fn codex_history_import_is_prompt_only_summary_fidelity_and_idempotent() {
         let temp = tempdir();
-        let fixture = provider_fixture("codex-history.jsonl");
+        let fixture = provider_history_fixture("codex-history.jsonl");
         let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
 
         let first = import_codex_history_jsonl(
