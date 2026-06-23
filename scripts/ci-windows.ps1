@@ -294,6 +294,7 @@ function Ensure-MinGW-GNU-Build-Environment {
   $mingwGcc = Join-PathSafe $mingwBin "x86_64-w64-mingw32-gcc.exe"
   $mingwGxx = Join-PathSafe $mingwBin "x86_64-w64-mingw32-g++.exe"
   $mingwAr = Join-PathSafe $mingwBin "x86_64-w64-mingw32-ar.exe"
+  $compatLib = Join-PathSafe $mingwCache "compat-libgcc"
   $archive = Join-PathSafe $mingwCache "$mingwName.zip"
   New-Item -ItemType Directory -Force -Path $mingwCache | Out-Null
 
@@ -320,10 +321,23 @@ function Ensure-MinGW-GNU-Build-Environment {
     Remove-Item -Recurse -Force $extractDir
   }
 
+  New-Item -ItemType Directory -Force -Path $compatLib | Out-Null
+  foreach ($lib in @("libgcc.a", "libgcc_eh.a")) {
+    $libPath = Join-PathSafe $compatLib $lib
+    if (-not (Test-Path $libPath)) {
+      & $mingwAr rcs $libPath
+      if ($LASTEXITCODE -ne 0) {
+        throw "failed to create LLVM-MinGW compatibility archive: $libPath"
+      }
+    }
+  }
+
   $env:CC_x86_64_pc_windows_gnu = $mingwGcc
   $env:CXX_x86_64_pc_windows_gnu = $mingwGxx
   $env:AR_x86_64_pc_windows_gnu = $mingwAr
   $env:CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER = $mingwGcc
+  $env:LIBRARY_PATH = if ($env:LIBRARY_PATH) { "$compatLib;$env:LIBRARY_PATH" } else { $compatLib }
+  $env:RUSTFLAGS = if ($env:RUSTFLAGS) { "$env:RUSTFLAGS -L native=$compatLib" } else { "-L native=$compatLib" }
   $env:PATH = "$mingwBin;$env:PATH"
   Write-Host "Windows GNU build tools: mingw=$mingwRoot linker=$mingwGcc"
 }

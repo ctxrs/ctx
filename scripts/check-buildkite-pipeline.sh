@@ -156,6 +156,7 @@ validate_contract() {
   require_text "Windows script bootstraps LLVM-MinGW GNU tools" "${windows_script}" 'Ensure-MinGW-GNU-Build-Environment'
   require_text "Windows script downloads LLVM-MinGW" "${windows_script}" 'mstorsjo/llvm-mingw/releases/download'
   require_text "Windows script uses MinGW linker" "${windows_script}" 'CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER'
+  require_text "Windows script provides LLVM-MinGW libgcc compatibility" "${windows_script}" 'compat-libgcc'
   require_text "Windows script uses external Buildkite tool cache" "${windows_script}" 'BUILDKITE_AGENT_HOME'
   require_text "Windows script can bootstrap Visual Studio Build Tools" "${windows_script}" 'Install-Visual-Studio-Build-Tools'
   require_text "Windows script supports platform smoke" "${windows_script}" 'platform-smoke'

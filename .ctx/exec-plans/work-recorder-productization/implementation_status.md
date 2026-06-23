@@ -1132,6 +1132,27 @@ None accepted yet.
   - trigger and monitor a fresh public Buildkite run proving Windows smoke and
     Windows release dry-run.
 
+## 2026-06-23 Buildkite Windows LLVM-MinGW Libgcc Follow-Up
+
+- Build 51:
+  <https://buildkite.com/luca-king/ctx-public-release-verification/builds/51>
+- Branch/head:
+  `work-record` / `c19d3952a4279823d59923d82cb738cc9f463f01`
+- Outcome:
+  - Windows smoke downloaded/extracted LLVM-MinGW and entered compilation;
+  - FAIL: linking proc-macro build scripts failed because Rust GNU still passes
+    `-lgcc` and `-lgcc_eh`, while LLVM-MinGW uses compiler-rt and does not ship
+    those GCC compatibility archive names.
+- Repo-owned remediation:
+  - create empty `libgcc.a` and `libgcc_eh.a` compatibility archives with
+    LLVM-MinGW `ar`;
+  - add that compatibility directory to `LIBRARY_PATH` and `RUSTFLAGS` before
+    invoking Cargo.
+- Remaining external evidence gap:
+  - commit and push the libgcc compatibility remediation;
+  - trigger and monitor a fresh public Buildkite run proving Windows smoke and
+    Windows release dry-run.
+
 ## 2026-06-23 Buildkite Windows LLVM-MinGW Follow-Up
 
 - Build 49:

@@ -1750,6 +1750,21 @@ Future entries must include:
   - rerun focused local syntax/contract/docs/diff checks;
   - trigger and monitor a fresh public Buildkite run for `origin/work-record`.
 
+## 2026-06-23 Build 51 Windows LLVM-MinGW Libgcc Follow-Up
+
+- Remote Buildkite evidence:
+  - build 51 ran `c19d3952a4279823d59923d82cb738cc9f463f01`;
+  - Windows smoke downloaded/extracted LLVM-MinGW and started compiling;
+  - FAIL: LLVM-MinGW linked far enough to find Windows import libraries, but
+    Rust GNU still requested `-lgcc` and `-lgcc_eh`, which LLVM-MinGW does not
+    ship because it uses compiler-rt.
+- Remediation validation planned for the next head:
+  - create empty compatibility `libgcc.a` and `libgcc_eh.a` archives with
+    LLVM-MinGW `ar`;
+  - expose them through `LIBRARY_PATH` and `RUSTFLAGS`;
+  - rerun focused local syntax/contract/docs/diff checks;
+  - trigger and monitor a fresh public Buildkite run for `origin/work-record`.
+
 - Command:
   `./scripts/check-buildkite-pipeline.sh`
 - Repo/worktree:
