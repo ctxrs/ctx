@@ -1,6 +1,6 @@
 # Work Recorder Provider Release Implementation Status
 
-Last updated: 2026-06-23T21:38:31Z.
+Last updated: 2026-06-23T21:41:18Z.
 
 ## Current Integration Branch
 
@@ -42,6 +42,14 @@ ADE desktop release, `ade.ctx.rs` migration, production hosted launch, and
 ## Current State
 
 - Controlling plan copied into this repo for provenance.
+- Product decisions from the user conversation were incorporated into
+  `exec_plan.md` on 2026-06-23 after the release-lane integration began. These
+  decisions supersede stale path/name/setup/dashboard assumptions in the current
+  branch.
+- Current local head before the product-decision implementation split:
+  `8845bc4 Add Work Recorder 0.1.0 release candidate lanes`; this is one commit
+  ahead of `origin/work-record` and will be followed by a product-decision plan
+  checkpoint before worker branches are created.
 - Initial public and private worktrees created.
 - Implementation agents launched for the initial provider/release/docs/hosted
   streams. Dashboard/CLI polish was launched through the alternate worker-agent
@@ -235,9 +243,18 @@ branch after stopping unsafe concurrent worker validation. That was corrected:
 
 ## Open Coordination Items
 
-- Merge the provider architecture branch before integrating provider-specific
-  work, unless a provider worker produces an intentionally isolated patch.
+- Implement the binding product decisions now tracked in `exec_plan.md`:
+  canonical `~/.ctx` flat layout, `objects/`, `spool/`, low-friction
+  non-service `ctx setup`, localhost dashboard process model, opt-in service,
+  uninstall semantics, and public naming cleanup.
+- Use the new parallel worker branches:
+  - `ctx/wr-root-layout-migration`
+  - `ctx/wr-spool-shim-fallback`
+  - `ctx/wr-setup-dashboard-service-ux`
+  - `ctx/wr-docs-site-naming`
+  - `ctx/wr-release-ci-product-decisions`
 - Keep provider support claims aligned with the support taxonomy in
   `exec_plan.md`.
-- Record Buildkite, R2, Hetzner, provider live E2E, docs preview, and final
-  completion-certifier evidence here as the program advances.
+- Record Buildkite, R2, Hetzner, provider live E2E, docs preview, product
+  decision checks, and final completion-certifier evidence here as the program
+  advances.

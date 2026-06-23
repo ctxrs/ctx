@@ -29,6 +29,101 @@ The core UX should remain passive:
   for explicit enrichment, but basic recording must not require agents to
   remember special commands.
 
+## Binding Product Decisions Added 2026-06-23
+
+These decisions supersede older wording and implementation assumptions in this
+plan, docs, code, release scripts, and tests:
+
+- Public product name remains `ctx`.
+- Public concept language is `work records` and "ctx records agent work".
+- `work graph` is allowed as an advanced/internal data model term, but not as
+  the primary product name.
+- Avoid branding public filesystem paths, docs, commands, README copy, release
+  URLs, completion certificates, and site content around `work-record` as the
+  product name.
+- Default data root is `~/.ctx` itself. `--data-root` and `CTX_DATA_ROOT` mean
+  the ctx root itself, not a parent directory that gets `work-record` appended.
+- Canonical local layout is:
+  - `work.sqlite`
+  - `objects/`
+  - `spool/`
+  - `shims/`
+  - `config.toml`
+  - `logs/`
+- Rename public/local layout terminology from `blobs` to `objects` and from
+  `inbox` to `spool`.
+- Ignore old ADE state if present. Do not warn merely because old ADE dirs
+  exist and do not touch old ADE state.
+- If new Work Recorder data exists at the old `~/.ctx/work-record/` layout,
+  provide safe migration/compatibility or a one-time move path covered by
+  tests.
+- `spool/` is the durable safety queue for passive capture. Shims/hooks may
+  write directly to SQLite when cheap and safe, but must fall back to small raw
+  capture envelopes in `spool/` when SQLite is locked/unavailable/migrating or
+  capture code errors.
+- Underlying commands must keep working even if capture fails. This must be
+  covered by tests for DB lock/failure fallback, malformed spool entries,
+  retry/repair, and `git`/`gh`/`jj` command pass-through.
+- Default `ctx setup` is low-friction and mostly non-interactive. It should
+  create/update local layout, install/update Git/gh/jj capture shims, enable
+  shims for future shells with a managed shell rc block when safe, import known
+  provider history, and start/open the dashboard when interactive desktop/browser
+  conditions allow it.
+- Default `ctx setup` must not ask about optional persistent services. It asks
+  only on real ambiguity/failure. Required flags: `--no-open`, `--no-import`,
+  `--no-shell-update`, `--service`, `--yes`, `--dry-run`.
+- No launchd/systemd/Windows service by default. Recording works without a
+  daemon/service.
+- `ctx dashboard` starts or reuses a small localhost dashboard server and opens
+  it. The dashboard should live-update while open as new work is recorded. In
+  headless/SSH/CI or with `--no-open`, print the URL and command instead of
+  opening a browser.
+- Optional always-running dashboard/background service is opt-in only:
+  `ctx service install`, `ctx service status`, `ctx service uninstall`, and
+  `ctx setup --service`.
+- `ctx uninstall` removes shims, shell rc managed block, and optional service if
+  installed, but keeps recorded data. `ctx uninstall --delete-data` deletes the
+  local store, objects, spool, logs, and config after explicit confirmation or
+  force.
+- `ctx status` must include database path, shim status, dashboard URL/running
+  status, and spool pending count.
+
+Additional required checks for the final certifier:
+
+- README/docs/site/CLI help use `ctx` plus work-records language and do not
+  expose stale `~/.ctx/work-record`, `blobs`, or `inbox` as the canonical
+  product layout.
+- Schemas/config/default paths/tests use flat root, `objects`, and `spool`.
+- Golden CLI output tests exist for setup, status, dashboard, and uninstall.
+- Setup reruns are idempotent.
+- Old ADE-present tests prove old ADE dirs are ignored and not modified.
+- Dashboard open behavior is tested for interactive, headless, and `--no-open`
+  cases.
+
+## Product-Decision Workstreams Added 2026-06-23
+
+Branch from the latest manager checkpoint and keep write scopes disjoint:
+
+- `ctx/wr-root-layout-migration`: `work-record-core`, `work-record-store`,
+  capture directory helpers, migration/compatibility tests, old-ADE ignored
+  tests. Owns flat `~/.ctx`, `objects/`, `spool/`, and old
+  `~/.ctx/work-record/` one-time compatibility.
+- `ctx/wr-spool-shim-fallback`: capture/shim code and tests for SQLite locked
+  or unavailable fallback to `spool/`, malformed spool repair/retry, and
+  underlying `git`/`gh`/`jj` command pass-through.
+- `ctx/wr-setup-dashboard-service-ux`: CLI setup/status/dashboard/uninstall/
+  service command UX, managed shell rc block, dashboard localhost server/open
+  behavior, golden output tests, and idempotency tests.
+- `ctx/wr-docs-site-naming`: README/docs/site/release text and CLI help
+  wording. Owns public language cleanup from stale `work-record` branding while
+  preserving crate/package names where they are internal implementation details.
+- `ctx/wr-release-ci-product-decisions`: Buildkite/release metadata/checks and
+  completion certificate updates so CI explicitly checks these product
+  decisions.
+- Review-only agents after implementation merge: architecture/data, security
+  privacy, CLI/product UX, docs truth, release/SDLC, dashboard visual, and final
+  completion certification.
+
 ## Repositories and Branches
 
 Canonical source repos:
