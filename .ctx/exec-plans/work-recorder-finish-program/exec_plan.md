@@ -70,6 +70,17 @@ Current management decision:
 - The hosted worker must inspect `ctx-private` only and report whether staging is actually launch-shaped or merely scaffolded.
 - The completion certifier must not run until implementation, tests, Buildkite/release evidence, hosted decision, and review artifacts are current.
 
+Active workers started from checkpoint `b7c61ab`:
+
+- VCS/Capture worker: `agent_DidtT1lTSG2akZC5DN0d_Q`, branch/worktree `ctx/wr-finish-capture-vcs` at `/home/daddy/code/ctx-multi-repo-workspace/worktrees/ctx/wr-finish-capture-vcs`.
+- Store/Search worker: `agent_Caf_VyUlTNybNcXfD7zjpw`, branch/worktree `ctx/wr-finish-store-search` at `/home/daddy/code/ctx-multi-repo-workspace/worktrees/ctx/wr-finish-store-search`.
+- Dashboard React worker: `agent_zHT6BLLAT46bi0SfJE72-Q`, branch/worktree `ctx/wr-finish-dashboard-react` at `/home/daddy/code/ctx-multi-repo-workspace/worktrees/ctx/wr-finish-dashboard-react`.
+- CI/Release worker: `agent_I27Kk4yTT3-zrznV85mVnA`, branch/worktree `ctx/wr-finish-ci-release` at `/home/daddy/code/ctx-multi-repo-workspace/worktrees/ctx/wr-finish-ci-release`.
+- Docs/Security worker: `agent_VFC6aSrIRAKBU1rpWy_G2w`, branch/worktree `ctx/wr-finish-docs-security` at `/home/daddy/code/ctx-multi-repo-workspace/worktrees/ctx/wr-finish-docs-security`.
+- Hosted/Staging worker: `agent_24FWhnb-QNiB3GAiGAtgiw`, private branch/worktree `ctx/work-recorder-hosted-team` at `/home/daddy/code/ctx-multi-repo-workspace/worktrees/ctx-private/work-recorder-hosted-team`.
+- Integration Captain: `agent_mkTqn_PgQ_GVZWL00IYr_A`, read-only branch inventory and merge-order analysis.
+- Completion Gap Audit: `agent_AsX0BlUZTfmd-pE84bmanA`, read-only strict criteria matrix before final certification.
+
 ## Non-Negotiable Product Decisions
 
 1. Public `ctx` is the Work Recorder product. Do not re-center the product around the ADE.
