@@ -411,6 +411,133 @@ fn installed_gh_shim_runs_real_command_and_spools_capture() {
     assert_installed_shim_runs_real_command_and_spools("gh");
 }
 
+#[cfg(unix)]
+#[test]
+fn installed_shim_uses_ctx_shim_tmpdir_when_data_root_is_constrained() {
+    let temp = tempdir();
+    let shim_dir = temp.path().join("shims");
+    let real_dir = temp.path().join("real");
+    let data_root_file = temp.path().join("data-root-file");
+    let shim_tmp = temp.path().join("shim-tmp");
+    fs::create_dir_all(&real_dir).unwrap();
+    fs::create_dir_all(&shim_tmp).unwrap();
+    fs::write(&data_root_file, "not a directory").unwrap();
+    for tool in ["git", "jj", "gh"] {
+        write_executable(
+            &real_dir.join(tool),
+            &format!(
+                r#"#!/bin/sh
+echo "{tool} fallback stdout $*"
+echo "{tool} fallback stderr" >&2
+exit 13
+"#
+            ),
+        );
+    }
+
+    ctx(&temp)
+        .args(["shim", "install", "--dir", shim_dir.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let path = format!(
+        "{}:{}:{}",
+        shim_dir.display(),
+        real_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    for tool in ["git", "jj", "gh"] {
+        let output = std::process::Command::new(shim_dir.join(tool))
+            .args(["status", "--short"])
+            .env("PATH", &path)
+            .env("CTX_DATA_ROOT", &data_root_file)
+            .env("CTX_SHIM_TMPDIR", &shim_tmp)
+            .output()
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(13), "{tool} exit code");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            format!("{tool} fallback stdout status --short\n")
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            format!("{tool} fallback stderr\n")
+        );
+    }
+    assert_eq!(
+        fs::read_dir(&shim_tmp).unwrap().count(),
+        0,
+        "shim scratch directory should be cleaned up after capture attempt"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn installed_shim_preserves_real_command_when_capture_scratch_is_unavailable() {
+    let temp = tempdir();
+    let shim_dir = temp.path().join("shims");
+    let real_dir = temp.path().join("real");
+    let blocked = temp.path().join("blocked-file");
+    let cwd = temp.path().join("readonly-cwd");
+    fs::create_dir_all(&real_dir).unwrap();
+    fs::create_dir_all(&cwd).unwrap();
+    fs::write(&blocked, "not a directory").unwrap();
+    let mut permissions = fs::metadata(&cwd).unwrap().permissions();
+    permissions.set_mode(0o555);
+    fs::set_permissions(&cwd, permissions).unwrap();
+    for tool in ["git", "jj", "gh"] {
+        write_executable(
+            &real_dir.join(tool),
+            &format!(
+                r#"#!/bin/sh
+echo "{tool} isolated stdout $*"
+echo "{tool} isolated stderr" >&2
+exit 19
+"#
+            ),
+        );
+    }
+    write_executable(&real_dir.join("mktemp"), "#!/bin/sh\nexit 1\n");
+
+    ctx(&temp)
+        .args(["shim", "install", "--dir", shim_dir.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let path = format!(
+        "{}:{}:{}",
+        shim_dir.display(),
+        real_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    for tool in ["git", "jj", "gh"] {
+        let output = std::process::Command::new(shim_dir.join(tool))
+            .arg("status")
+            .current_dir(&cwd)
+            .env("PATH", &path)
+            .env("CTX_DATA_ROOT", &blocked)
+            .env("CTX_SHIM_TMPDIR", &blocked)
+            .env("TMPDIR", &blocked)
+            .output()
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(19), "{tool} exit code");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            format!("{tool} isolated stdout status\n")
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            format!("{tool} isolated stderr\n")
+        );
+    }
+
+    let mut permissions = fs::metadata(&cwd).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&cwd, permissions).unwrap();
+}
+
 #[test]
 fn root_setup_status_schema_and_validate_work() {
     let temp = tempdir();
@@ -430,7 +557,10 @@ fn root_setup_status_schema_and_validate_work() {
         .stdout(predicate::str::contains("device_path:"))
         .stdout(predicate::str::contains("spool_pending: 0"))
         .stdout(predicate::str::contains("spool_processing: 0"))
-        .stdout(predicate::str::contains("spool_failed: 0"));
+        .stdout(predicate::str::contains("spool_failed: 0"))
+        .stdout(predicate::str::contains("shim_git:"))
+        .stdout(predicate::str::contains("shim_jj:"))
+        .stdout(predicate::str::contains("shim_gh:"));
 
     ctx(&temp)
         .args(["schema"])
@@ -443,6 +573,37 @@ fn root_setup_status_schema_and_validate_work() {
         .assert()
         .success()
         .stdout(predicate::str::contains("valid"));
+}
+
+#[cfg(unix)]
+#[test]
+fn root_status_reports_installed_passive_capture_shims_on_path() {
+    let temp = tempdir();
+    let shim_dir = temp.path().join("shims");
+    let real_dir = temp.path().join("real");
+    fs::create_dir_all(&real_dir).unwrap();
+    for tool in ["git", "jj", "gh"] {
+        write_executable(&real_dir.join(tool), "#!/bin/sh\nexit 0\n");
+    }
+    ctx(&temp)
+        .args(["shim", "install", "--dir", shim_dir.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let path = format!(
+        "{}:{}:{}",
+        shim_dir.display(),
+        real_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    ctx(&temp)
+        .env("PATH", path)
+        .args(["status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("shim_git: installed"))
+        .stdout(predicate::str::contains("shim_jj: installed"))
+        .stdout(predicate::str::contains("shim_gh: installed"));
 }
 
 #[test]

@@ -858,6 +858,13 @@ fn run_workspace_subcommand(command: WorkspaceSubcommand, data_root: PathBuf) ->
             println!("spool_processing: {}", counts.processing);
             println!("spool_done: {}", counts.done);
             println!("spool_failed: {}", counts.failed);
+            for tool in ShimTool::ALL {
+                println!(
+                    "shim_{}: {}",
+                    tool.as_str(),
+                    passive_shim_status(tool)?.display()
+                );
+            }
         }
         WorkspaceSubcommand::Uninstall { yes } => {
             if !yes {
@@ -1613,9 +1620,44 @@ fn uninstall_shims(dir: &Path) -> Result<()> {
 }
 
 fn is_ctx_shim(path: &Path) -> Result<bool> {
-    let contents =
-        fs::read_to_string(path).with_context(|| format!("read shim {}", path.display()))?;
-    Ok(contents.contains("CTX_WORK_RECORD_SHIM=1"))
+    let contents = fs::read(path).with_context(|| format!("read shim {}", path.display()))?;
+    Ok(contents
+        .windows(b"CTX_WORK_RECORD_SHIM=1".len())
+        .any(|window| window == b"CTX_WORK_RECORD_SHIM=1"))
+}
+
+enum PassiveShimStatus {
+    Installed(PathBuf),
+    NotCtx(PathBuf),
+    Missing,
+}
+
+impl PassiveShimStatus {
+    fn display(&self) -> String {
+        match self {
+            Self::Installed(path) => format!("installed {}", path.display()),
+            Self::NotCtx(path) => format!("not_ctx {}", path.display()),
+            Self::Missing => "missing".to_owned(),
+        }
+    }
+}
+
+fn passive_shim_status(tool: ShimTool) -> Result<PassiveShimStatus> {
+    let path_var = match env::var_os("PATH") {
+        Some(path_var) => path_var,
+        None => return Ok(PassiveShimStatus::Missing),
+    };
+    for dir in env::split_paths(&path_var) {
+        let candidate = dir.join(tool.as_str());
+        if candidate.is_file() {
+            return Ok(if is_ctx_shim(&candidate)? {
+                PassiveShimStatus::Installed(candidate)
+            } else {
+                PassiveShimStatus::NotCtx(candidate)
+            });
+        }
+    }
+    Ok(PassiveShimStatus::Missing)
 }
 
 fn wrapper_script(tool: ShimTool, ctx_bin: &Path) -> Result<String> {
@@ -1651,15 +1693,17 @@ if [ -z "$real_cmd" ]; then
     echo "ctx shim: real $tool not found outside $shim_dir" >&2
     exit 127
 fi
-tmpbase=${{CTX_SHIM_TMPDIR:-}}
-if [ -z "$tmpbase" ] && [ -n "${{CTX_DATA_ROOT:-}}" ]; then
-    tmpbase=$CTX_DATA_ROOT
+tmpdir=
+for tmpbase in "${{CTX_SHIM_TMPDIR:-}}" "${{CTX_DATA_ROOT:-}}" "${{TMPDIR:-}}" /tmp .; do
+    if [ -z "$tmpbase" ]; then
+        continue
+    fi
+    mkdir -p "$tmpbase" 2>/dev/null || continue
+    tmpdir=$(mktemp -d "$tmpbase/ctx-shim-$tool.XXXXXX" 2>/dev/null) && break
+done
+if [ -z "$tmpdir" ]; then
+    exec "$real_cmd" "$@"
 fi
-if [ -z "$tmpbase" ]; then
-    tmpbase=${{TMPDIR:-/tmp}}
-fi
-mkdir -p "$tmpbase" || exit 125
-tmpdir=$(mktemp -d "$tmpbase/ctx-shim-$tool.XXXXXX") || exit 125
 stdout_file=$tmpdir/stdout
 stderr_file=$tmpdir/stderr
 started_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
