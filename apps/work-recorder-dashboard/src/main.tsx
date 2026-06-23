@@ -33,6 +33,7 @@ function App() {
   const [query, setQuery] = useState("");
   const [activeTab, setActiveTab] = useState("overview");
   const failedCommands = data.commands.filter((command) => command.exit_code !== 0).length;
+  const linkedPrUrls = uniquePullRequestUrls(data);
 
   React.useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -45,8 +46,7 @@ function App() {
     if (!activeTrigger || !tabList) return;
 
     const scrollActiveTab = () => {
-      const left = activeTrigger.offsetLeft - (tabList.clientWidth - activeTrigger.offsetWidth) / 2;
-      tabList.scrollTo({ left: Math.max(0, left), behavior: "auto" });
+      activeTrigger.scrollIntoView({ block: "nearest", inline: "center", behavior: "instant" });
     };
 
     scrollActiveTab();
@@ -92,7 +92,7 @@ function App() {
         <div className="mb-5 grid gap-3 md:grid-cols-4">
           <Metric label="Records" value={data.summary.record_count} />
           <Metric label="Evidence" value={data.summary.evidence_count} />
-          <Metric label="Linked PRs" value={data.summary.linked_pr_count + data.pull_requests.length} />
+          <Metric label="Linked PRs" value={linkedPrUrls.length} />
           <Metric label="Raw transcripts withheld" value={data.privacy.raw_transcripts_withheld} />
         </div>
 
@@ -333,6 +333,8 @@ function WorkTranscriptView({ data }: { data: DashboardData }) {
 }
 
 function EvidenceView({ data }: { data: DashboardData }) {
+  const linkedPrUrls = uniquePullRequestUrls(data);
+
   return (
     <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
       <section className="panel">
@@ -341,13 +343,13 @@ function EvidenceView({ data }: { data: DashboardData }) {
       </section>
       <section className="panel">
         <SectionHeader icon={<GitBranch className="size-4" />} title="PR Links" />
-        {data.pull_requests.length === 0 && data.records.every((record) => !record.pr_url) ? (
+        {linkedPrUrls.length === 0 ? (
           <EmptyState text="No pull request links are available in this export." />
         ) : (
           <div className="space-y-3">
-            {[...data.pull_requests.map((pr) => pr.url), ...data.records.map((record) => record.pr_url).filter(Boolean)].map((url) => (
-              <a className="link-row" href={String(url)} key={String(url)} rel="noreferrer">
-                {String(url)}
+            {linkedPrUrls.map((url) => (
+              <a className="link-row" href={url} key={url} rel="noreferrer">
+                {url}
               </a>
             ))}
           </div>
@@ -378,16 +380,19 @@ function EvidenceView({ data }: { data: DashboardData }) {
           <EmptyState text="No typed evidence metadata is available in this export." />
         ) : (
           <div className="space-y-3">
-            {data.evidence_metadata.map((evidence) => (
-              <div className="row-card" key={String(evidence.id)}>
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="badge">{String(evidence.kind ?? "evidence")}</span>
-                  <span className={clsx("badge", evidence.status === "passed" ? "badge-ok" : "badge-warn")}>{String(evidence.status ?? "unknown")}</span>
-                  <span className="text-sm text-muted-foreground">{String(evidence.freshness ?? "")}</span>
+            {data.evidence_metadata.map((evidence) => {
+              const tone = evidenceTone(evidence.status);
+              return (
+                <div className={clsx("row-card", tone === "danger" && "row-card-danger")} key={String(evidence.id)}>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="badge">{String(evidence.kind ?? "evidence")}</span>
+                    <span className={clsx("badge", `badge-${tone}`)}>{String(evidence.status ?? "unknown")}</span>
+                    <span className="text-sm text-muted-foreground">{String(evidence.freshness ?? "")}</span>
+                  </div>
+                  {evidence.stale_reason ? <p className="mt-2 text-sm text-muted-foreground">{String(evidence.stale_reason)}</p> : null}
                 </div>
-                {evidence.stale_reason ? <p className="mt-2 text-sm text-muted-foreground">{String(evidence.stale_reason)}</p> : null}
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </section>
@@ -463,7 +468,14 @@ function CommandTable({ commands }: { commands: EvidenceCommand[] }) {
   const columns = useMemo<ColumnDef<EvidenceCommand>[]>(
     () => [
       { accessorKey: "command", header: "Command", cell: (info) => <code>{String(info.getValue())}</code> },
-      { accessorKey: "exit_code", header: "Exit" },
+      {
+        accessorKey: "exit_code",
+        header: "Exit",
+        cell: (info) => {
+          const exitCode = Number(info.getValue());
+          return <ExitBadge exitCode={exitCode} />;
+        }
+      },
       { accessorKey: "duration_ms", header: "Duration" },
       { accessorKey: "output_preview", header: "Preview" }
     ],
@@ -475,13 +487,13 @@ function CommandTable({ commands }: { commands: EvidenceCommand[] }) {
     return (
       <div className="command-card-list">
         {commands.map((command) => (
-          <article className="command-card" key={command.id}>
+          <article className={clsx("command-card", command.exit_code !== 0 && "command-card-danger")} key={command.id}>
             <div className="command-card-command">
               <span>Command</span>
               <code>{command.command}</code>
             </div>
             <div className="command-card-meta">
-              <KeyValue label="Exit" value={command.exit_code} />
+              <KeyValue label="Exit" value={<ExitBadge exitCode={command.exit_code} />} />
               <KeyValue label="Duration" value={`${command.duration_ms}ms`} />
             </div>
             {command.output_preview ? (
@@ -510,7 +522,7 @@ function CommandTable({ commands }: { commands: EvidenceCommand[] }) {
         </thead>
         <tbody>
           {table.getRowModel().rows.map((row) => (
-            <tr key={row.id}>
+            <tr className={row.original.exit_code !== 0 ? "data-row-danger" : undefined} key={row.id}>
               {row.getVisibleCells().map((cell) => (
                 <td key={cell.id}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>
               ))}
@@ -563,6 +575,10 @@ function StatusPill({ tone, icon, children }: { tone: "ok" | "warn" | "danger"; 
   return <span className={clsx("status-pill", `status-${tone}`)}>{icon}{children}</span>;
 }
 
+function ExitBadge({ exitCode }: { exitCode: number }) {
+  return <span className={clsx("badge", exitCode === 0 ? "badge-ok" : "badge-danger")}>Exit {exitCode}</span>;
+}
+
 function EmptyState({ text }: { text: string }) {
   return <div className="empty-state">{text}</div>;
 }
@@ -585,6 +601,24 @@ function tagChartData(data: DashboardData) {
     { name: "commands", count: data.commands.length },
     { name: "events", count: data.events.length }
   ];
+}
+
+function uniquePullRequestUrls(data: DashboardData) {
+  return Array.from(
+    new Set(
+      [
+        ...data.pull_requests.map((pr) => pr.url),
+        ...data.records.map((record) => record.pr_url)
+      ].filter((url): url is string => typeof url === "string" && url.trim().length > 0)
+    )
+  );
+}
+
+function evidenceTone(status: unknown): "ok" | "warn" | "danger" {
+  const normalized = String(status ?? "").toLowerCase();
+  if (normalized === "passed" || normalized === "succeeded" || normalized === "success") return "ok";
+  if (normalized === "failed" || normalized === "error" || normalized === "failure") return "danger";
+  return "warn";
 }
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(

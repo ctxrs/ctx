@@ -80,7 +80,6 @@ pre {
   overscroll-behavior-x: contain;
   border-bottom: 1px solid hsl(var(--border));
   scroll-padding-inline: 12px;
-  scroll-snap-type: x proximity;
   scrollbar-width: thin;
 }
 
@@ -99,7 +98,6 @@ pre {
   white-space: nowrap;
   cursor: pointer;
   scroll-margin-inline: 12px;
-  scroll-snap-align: center;
 }
 
 .tab-trigger[data-state="active"] {
@@ -145,6 +143,12 @@ pre {
   padding: 12px;
 }
 
+.row-card-danger,
+.command-card-danger {
+  border-color: hsl(var(--danger) / 0.55);
+  background: hsl(var(--danger) / 0.08);
+}
+
 .badge,
 .badge-link,
 .status-pill {
@@ -172,6 +176,7 @@ pre {
   color: hsl(var(--warning));
 }
 
+.badge-danger,
 .status-danger {
   border-color: hsl(var(--danger) / 0.35);
   color: hsl(var(--danger));
@@ -212,6 +217,14 @@ pre {
 .data-table th {
   color: hsl(var(--muted-foreground));
   font-weight: 600;
+}
+
+.data-row-danger td {
+  background: hsl(var(--danger) / 0.08);
+}
+
+.data-row-danger td:first-child {
+  border-left: 3px solid hsl(var(--danger));
 }
 
 .command-card-list {
@@ -308,17 +321,10 @@ pre {
     margin-inline: -16px;
     padding-inline: 16px;
     scroll-padding-inline: 16px;
-    scroll-snap-type: x mandatory;
-  }
-
-  .tab-list::before,
-  .tab-list::after {
-    content: "";
-    flex: 0 0 36%;
   }
 
   .tab-trigger {
-    flex-basis: calc(100vw - 32px);
+    min-width: max-content;
     justify-content: center;
     min-height: 42px;
     gap: 6px;

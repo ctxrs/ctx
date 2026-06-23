@@ -9,6 +9,7 @@ test("desktop light populated dashboard", async ({ page }, testInfo) => {
   await expect(page.getByText("Finish dashboard React export")).toBeVisible();
   await expect(page.getByText("Share-safe export")).toBeVisible();
   await expect(page.getByText("1 failing command")).toBeVisible();
+  await expect(page.locator(".metric").filter({ hasText: "Linked PRs" }).getByText("2")).toBeVisible();
   await assertNonBlank(page);
   await screenshot(page, testInfo.project.name, "desktop-light-overview");
 });
@@ -30,6 +31,9 @@ test("mobile evidence failure state", async ({ page }, testInfo) => {
   await expect(page.getByRole("heading", { name: "Evidence Previews" })).toBeVisible();
   await expect(page.getByText("buildkite-agent pipeline upload")).toBeVisible();
   await expect(page.getByText("missing BUILDKITE_AGENT_TOKEN")).toBeVisible();
+  await expect(page.locator(".badge-danger").filter({ hasText: "Exit 1" })).toBeVisible();
+  await expect(page.locator(".row-card-danger").filter({ hasText: "failed" })).toBeVisible();
+  await expect(page.locator(".link-row")).toHaveCount(2);
   await expectActiveTabSettled(page, "PR/Evidence");
   await assertNonBlank(page);
   await screenshot(page, testInfo.project.name, "mobile-evidence-failure");
@@ -44,6 +48,7 @@ test("mobile status and search", async ({ page }, testInfo) => {
   await expect(page.getByRole("heading", { name: "Settings / Status" })).toBeVisible();
   await expect(page.getByText("Work Recorder dashboard export v1")).toBeVisible();
   await expectActiveTabSettled(page, "Status");
+  await expectVisibleActiveTabOnly(page, "Status");
   await assertNonBlank(page);
   await screenshot(page, testInfo.project.name, "mobile-status-search");
 });
@@ -62,6 +67,17 @@ async function expectActiveTabSettled(page: Page, label: string) {
     if (!active || !active.textContent?.includes(String(expectedLabel))) return false;
     const rect = active.getBoundingClientRect();
     return rect.left >= 0 && rect.right <= window.innerWidth;
+  }, label);
+}
+
+async function expectVisibleActiveTabOnly(page: Page, label: string) {
+  await page.waitForFunction((expectedLabel) => {
+    const tabs = Array.from(document.querySelectorAll<HTMLElement>("[role='tab']"));
+    const visibleTabs = tabs.filter((tab) => {
+      const rect = tab.getBoundingClientRect();
+      return rect.right > 0 && rect.left < window.innerWidth;
+    });
+    return visibleTabs.some((tab) => tab.dataset.state === "active" && tab.textContent?.includes(String(expectedLabel)));
   }, label);
 }
 
