@@ -12,12 +12,15 @@ use chrono::{DateTime, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use uuid::Uuid;
 use work_record_capture::{
-    import_spool, inbox_dir as capture_inbox_dir, retry_failed_spool_files, spool_counts,
-    write_fixture, write_shim_command, FixtureOptions, ShimCommandOptions,
+    import_provider_fixture_jsonl, import_spool, inbox_dir as capture_inbox_dir,
+    retry_failed_spool_files, spool_counts, write_fixture, write_shim_command, FixtureOptions,
+    ProviderFixtureImportOptions, ProviderImportSummary, ShimCommandOptions,
 };
 use work_record_core::{
-    blob_dir, database_path, default_data_root, device_path, inbox_dir, work_record_dir,
-    CaptureProvider, Evidence, WorkRecord, WorkRecordArchive,
+    blob_dir, database_path, default_data_root, device_path, inbox_dir, new_id, work_record_dir,
+    Artifact, CaptureProvider, EntityTimestamps, Evidence, EvidenceMetadata, Fidelity, FileTouched,
+    PullRequest, Run, Session, Summary, SummaryKind, SyncMetadata, VcsChange, VcsWorkspace,
+    WorkRecord, WorkRecordArchive,
 };
 use work_record_publish::{
     render_pr_comment, PullRequestTarget, RawTranscriptOptIn, RenderOptions,
@@ -94,7 +97,7 @@ enum CommandRoot {
     #[command(about = "Validate local Work Recorder storage")]
     Validate,
     #[command(about = "Check local Work Recorder health")]
-    Doctor,
+    Doctor(DoctorArgs),
     #[command(about = "Retry failed local capture imports")]
     Repair(RepairArgs),
     #[command(hide = true, about = "Compatibility alias for setup/status/uninstall")]
@@ -158,7 +161,7 @@ enum WorkSubcommand {
     #[command(about = "Validate local Work Recorder storage")]
     Validate,
     #[command(about = "Check local Work Recorder health")]
-    Doctor,
+    Doctor(DoctorArgs),
     #[command(about = "Retry failed local capture imports")]
     Repair(RepairArgs),
 }
@@ -286,6 +289,8 @@ enum CaptureSubcommand {
     WriteShimCommand(CaptureWriteShimCommandArgs),
     #[command(about = "Import pending capture spool files")]
     Import(CaptureImportArgs),
+    #[command(about = "Import a provider fixture JSONL transcript")]
+    ImportProvider(CaptureImportProviderArgs),
 }
 
 #[derive(Debug, Args)]
@@ -308,6 +313,37 @@ struct CaptureWriteFixtureArgs {
 struct CaptureImportArgs {
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Args)]
+struct CaptureImportProviderArgs {
+    #[arg(long, value_enum)]
+    provider: ProviderFixtureProvider,
+    #[arg(long)]
+    input: PathBuf,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ProviderFixtureProvider {
+    Codex,
+    Claude,
+    Pi,
+}
+
+impl ProviderFixtureProvider {
+    fn capture_provider(self) -> CaptureProvider {
+        match self {
+            Self::Codex => CaptureProvider::Codex,
+            Self::Claude => CaptureProvider::Claude,
+            Self::Pi => CaptureProvider::Pi,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        self.capture_provider().as_str()
+    }
 }
 
 #[derive(Debug, Args)]
@@ -473,6 +509,12 @@ struct RepairArgs {
     json: bool,
 }
 
+#[derive(Debug, Clone, Args)]
+struct DoctorArgs {
+    #[arg(long)]
+    privacy: bool,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let data_root = cli
@@ -508,7 +550,7 @@ fn main() -> Result<()> {
         CommandRoot::Export(args) => run_work_subcommand(WorkSubcommand::Export(args), data_root),
         CommandRoot::Import(args) => run_work_subcommand(WorkSubcommand::Import(args), data_root),
         CommandRoot::Validate => run_work_subcommand(WorkSubcommand::Validate, data_root),
-        CommandRoot::Doctor => run_work_subcommand(WorkSubcommand::Doctor, data_root),
+        CommandRoot::Doctor(args) => run_work_subcommand(WorkSubcommand::Doctor(args), data_root),
         CommandRoot::Repair(args) => run_work_subcommand(WorkSubcommand::Repair(args), data_root),
         CommandRoot::Workspace(command) => run_workspace(command, data_root),
         CommandRoot::Work(command) => run_work(command, data_root),
@@ -857,17 +899,30 @@ fn run_work_subcommand(command: WorkSubcommand, data_root: PathBuf) -> Result<()
             }
         }
         WorkSubcommand::Report(args) => {
-            let records = store.list_records(args.limit)?;
-            let evidence = store.recent_evidence(args.limit)?;
+            let data = load_dashboard_data(&store, args.limit)?;
+            let report = data.report();
             match args.format {
                 ReportFormat::Text => {
-                    print!("{}", work_record_report::render_text(&records, &evidence))
+                    print!(
+                        "{}",
+                        work_record_report::render_text(&data.records, &data.evidence)
+                    );
+                    if data.has_rich_sections() {
+                        print!(
+                            "\n{}",
+                            work_record_report::render_evidence_report_markdown(&report)
+                        );
+                    }
                 }
                 ReportFormat::Json => {
-                    let summary = work_record_report::summarize(&records, &evidence);
+                    let summary = work_record_report::summarize(&data.records, &data.evidence);
+                    let report_v2: serde_json::Value = serde_json::from_str(
+                        &work_record_report::render_evidence_report_json(&report)?,
+                    )?;
                     print_json(serde_json::json!({
                         "schema_version": 1,
                         "summary": summary,
+                        "report_v2": report_v2,
                     }))?;
                 }
             }
@@ -900,8 +955,13 @@ fn run_work_subcommand(command: WorkSubcommand, data_root: PathBuf) -> Result<()
             store.import_archive(&archive, args.overwrite)?;
             println!("imported {record_count} records and {evidence_count} evidence items");
         }
-        WorkSubcommand::Validate | WorkSubcommand::Doctor => {
-            print_doctor_findings(&store, &data_root)?
+        WorkSubcommand::Validate => print_doctor_findings(&store, &data_root)?,
+        WorkSubcommand::Doctor(args) => {
+            if args.privacy {
+                print_privacy_doctor(&store, &data_root)?;
+            } else {
+                print_doctor_findings(&store, &data_root)?;
+            }
         }
         WorkSubcommand::Repair(args) => run_repair(args, &mut store, &data_root)?,
     }
@@ -913,9 +973,9 @@ fn run_dashboard(command: DashboardCommand, data_root: PathBuf) -> Result<()> {
         DashboardSubcommand::Export(args) => {
             let mut store = Store::open(database_path(data_root.clone()))?;
             auto_import_pending_spool(&data_root, &mut store)?;
-            let records = store.list_records(args.limit)?;
-            let evidence = store.recent_evidence(args.limit)?;
-            let html = work_record_report::render_dashboard_html(&records, &evidence);
+            let data = load_dashboard_data(&store, args.limit)?;
+            let report = data.report();
+            let html = work_record_report::render_dashboard_html_report(&report);
             fs::create_dir_all(&args.output)?;
             let index = args.output.join("index.html");
             fs::write(&index, html)?;
@@ -923,6 +983,93 @@ fn run_dashboard(command: DashboardCommand, data_root: PathBuf) -> Result<()> {
         }
     }
     Ok(())
+}
+
+struct DashboardData {
+    records: Vec<WorkRecord>,
+    evidence: Vec<Evidence>,
+    sessions: Vec<Session>,
+    runs: Vec<Run>,
+    events: Vec<work_record_core::Event>,
+    vcs_workspaces: Vec<VcsWorkspace>,
+    vcs_changes: Vec<VcsChange>,
+    pull_requests: Vec<PullRequest>,
+    artifacts: Vec<Artifact>,
+    evidence_metadata: Vec<EvidenceMetadata>,
+    files_touched: Vec<FileTouched>,
+    summaries: Vec<Summary>,
+}
+
+impl DashboardData {
+    fn report(&self) -> work_record_report::DashboardReport<'_> {
+        work_record_report::DashboardReport {
+            records: &self.records,
+            evidence: &self.evidence,
+            archive_artifacts: &[],
+            sessions: &self.sessions,
+            runs: &self.runs,
+            events: &self.events,
+            vcs_workspaces: &self.vcs_workspaces,
+            vcs_changes: &self.vcs_changes,
+            pull_requests: &self.pull_requests,
+            artifacts: &self.artifacts,
+            evidence_metadata: &self.evidence_metadata,
+            files_touched: &self.files_touched,
+            summaries: &self.summaries,
+        }
+    }
+
+    fn has_rich_sections(&self) -> bool {
+        !self.sessions.is_empty()
+            || !self.runs.is_empty()
+            || !self.events.is_empty()
+            || !self.vcs_workspaces.is_empty()
+            || !self.vcs_changes.is_empty()
+            || !self.pull_requests.is_empty()
+            || !self.artifacts.is_empty()
+            || !self.evidence_metadata.is_empty()
+            || !self.files_touched.is_empty()
+            || !self.summaries.is_empty()
+    }
+}
+
+fn load_dashboard_data(store: &Store, limit: usize) -> Result<DashboardData> {
+    let records = store.list_records(limit)?;
+    let evidence = store.recent_evidence(limit)?;
+    let mut sessions = Vec::new();
+    let mut runs = Vec::new();
+    let mut events = Vec::new();
+    let mut vcs_changes = Vec::new();
+    let mut pull_requests = Vec::new();
+    let mut artifacts = Vec::new();
+    let mut files_touched = Vec::new();
+    let mut summaries = Vec::new();
+
+    for record in &records {
+        sessions.extend(store.sessions_for_record(record.id)?);
+        runs.extend(store.runs_for_record(record.id)?);
+        events.extend(store.events_for_record(record.id)?);
+        vcs_changes.extend(store.vcs_changes_for_record(record.id)?);
+        pull_requests.extend(store.pull_requests_for_record(record.id)?);
+        artifacts.extend(store.artifacts_for_record(record.id)?);
+        files_touched.extend(store.files_touched_for_record(record.id)?);
+        summaries.extend(store.summaries_for_record(record.id)?);
+    }
+
+    Ok(DashboardData {
+        records,
+        evidence,
+        sessions,
+        runs,
+        events,
+        vcs_workspaces: Vec::new(),
+        vcs_changes,
+        pull_requests,
+        artifacts,
+        evidence_metadata: Vec::new(),
+        files_touched,
+        summaries,
+    })
 }
 
 fn auto_import_pending_spool(data_root: &Path, store: &mut Store) -> Result<()> {
@@ -965,6 +1112,76 @@ fn print_doctor_findings(store: &Store, data_root: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn print_privacy_doctor(store: &Store, data_root: &Path) -> Result<()> {
+    let findings = store.validate()?;
+    let counts = spool_counts(capture_inbox_dir(data_root))?;
+    let work_dir = work_record_dir(data_root.to_path_buf());
+    let db_path = database_path(data_root.to_path_buf());
+    let inbox = capture_inbox_dir(data_root);
+
+    println!("Privacy health");
+    println!("data_root: {}", data_root.display());
+    println!("storage: local_only");
+    println!("hosted_sync: disabled");
+    println!("database: {}", db_path.display());
+    println!("inbox_dir: {}", inbox.display());
+    println!(
+        "validation: {}",
+        if findings.is_empty() {
+            "valid"
+        } else {
+            "findings_present"
+        }
+    );
+    println!("spool_pending: {}", counts.pending);
+    println!("spool_processing: {}", counts.processing);
+    println!("spool_failed: {}", counts.failed);
+    println!(
+        "permissions_work_record_dir: {}",
+        privacy_permission_status(&work_dir)?
+    );
+    println!(
+        "permissions_database: {}",
+        privacy_permission_status(&db_path)?
+    );
+    println!("permissions_inbox: {}", privacy_permission_status(&inbox)?);
+    if counts.failed > 0 {
+        println!("action: inspect failed spool files before sharing logs or retrying");
+    }
+    if counts.pending > 0 || counts.processing > 0 {
+        println!("action: import or inspect pending capture spool files");
+    }
+    for finding in findings {
+        println!("finding: {finding}");
+    }
+    Ok(())
+}
+
+fn privacy_permission_status(path: &Path) -> Result<String> {
+    if !path.exists() {
+        return Ok("missing".to_owned());
+    }
+    let metadata = fs::metadata(path)?;
+    #[cfg(unix)]
+    {
+        let mode = metadata.permissions().mode() & 0o777;
+        if mode & 0o077 == 0 {
+            Ok(format!("private ({mode:o})"))
+        } else {
+            Ok(format!("shared ({mode:o})"))
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let readonly = metadata.permissions().readonly();
+        Ok(if readonly {
+            "readonly".to_owned()
+        } else {
+            "platform_default".to_owned()
+        })
+    }
 }
 
 fn run_repair(args: RepairArgs, store: &mut Store, data_root: &Path) -> Result<()> {
@@ -1054,8 +1271,189 @@ fn run_capture(command: CaptureCommand, data_root: PathBuf) -> Result<()> {
                 ));
             }
         }
+        CaptureSubcommand::ImportProvider(args) => {
+            let mut store = Store::open(database_path(data_root.clone()))?;
+            auto_import_pending_spool(&data_root, &mut store)?;
+            let fixture = read_provider_fixture_summary(&args.input, args.provider)?;
+            let summary = import_provider_fixture_jsonl(
+                &args.input,
+                &mut store,
+                ProviderFixtureImportOptions {
+                    source_path: Some(args.input.clone()),
+                    ..ProviderFixtureImportOptions::default()
+                },
+            )?;
+            let record = if summary.imported_sessions > 0 || summary.imported_events > 0 {
+                Some(insert_provider_import_summary_record(
+                    &store,
+                    args.provider,
+                    &args.input,
+                    &summary,
+                    &fixture,
+                )?)
+            } else {
+                None
+            };
+            if args.json {
+                print_json(serde_json::json!({
+                    "schema_version": 1,
+                    "provider": args.provider.as_str(),
+                    "input": args.input,
+                    "import": summary,
+                    "record": record,
+                }))?;
+            } else {
+                println!(
+                    "imported {} provider item(s), skipped {}, failed {}",
+                    summary.imported, summary.skipped, summary.failed
+                );
+                if let Some(record) = record {
+                    println!("record: {}", record.id);
+                }
+            }
+            if summary.failed > 0 {
+                return Err(anyhow!(
+                    "failed to import {} provider fixture line(s)",
+                    summary.failed
+                ));
+            }
+        }
     }
     Ok(())
+}
+
+#[derive(Debug)]
+struct ProviderFixtureSummary {
+    sessions: Vec<String>,
+    events: Vec<String>,
+}
+
+fn read_provider_fixture_summary(
+    path: &Path,
+    expected_provider: ProviderFixtureProvider,
+) -> Result<ProviderFixtureSummary> {
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("read provider fixture {}", path.display()))?;
+    let mut sessions = Vec::new();
+    let mut events = Vec::new();
+    let expected = expected_provider.as_str();
+
+    for (index, line) in contents.lines().enumerate() {
+        let line_number = index + 1;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_str(line)
+            .with_context(|| format!("parse provider fixture line {line_number}"))?;
+        let provider = value["provider"].as_str().unwrap_or_default();
+        if provider != expected {
+            return Err(anyhow!(
+                "provider fixture line {} is `{}` but --provider is `{}`",
+                line_number,
+                provider,
+                expected
+            ));
+        }
+        if let Some(session_id) = value["session"]["provider_session_id"].as_str() {
+            let session_id = session_id.to_owned();
+            if !sessions.iter().any(|existing| existing == &session_id) {
+                sessions.push(session_id);
+            }
+        }
+        if let Some(event) = value.get("event") {
+            let event_type = event["event_type"].as_str().unwrap_or("event");
+            let role = event["role"].as_str().unwrap_or("unknown");
+            let text = event["payload"]["text"]
+                .as_str()
+                .or_else(|| event["payload"]["cmd"].as_str())
+                .or_else(|| event["payload"]["tool"].as_str())
+                .unwrap_or("");
+            if text.is_empty() {
+                events.push(format!("{role} {event_type}"));
+            } else {
+                events.push(format!("{role} {event_type}: {text}"));
+            }
+        }
+    }
+
+    Ok(ProviderFixtureSummary { sessions, events })
+}
+
+fn insert_provider_import_summary_record(
+    store: &Store,
+    provider: ProviderFixtureProvider,
+    input: &Path,
+    import: &ProviderImportSummary,
+    fixture: &ProviderFixtureSummary,
+) -> Result<WorkRecord> {
+    let provider_name = provider.as_str();
+    let mut body = String::new();
+    body.push_str(&format!(
+        "Provider fixture import for {provider_name} from {}.\n",
+        input.display()
+    ));
+    body.push_str(&format!(
+        "Imported {} sessions, {} events, {} edges; skipped {} items; redacted {} fields.",
+        import.imported_sessions,
+        import.imported_events,
+        import.imported_edges,
+        import.skipped,
+        import.redacted
+    ));
+    if !fixture.sessions.is_empty() {
+        body.push_str("\n\nSessions:\n");
+        for session in fixture.sessions.iter().take(12) {
+            body.push_str("- ");
+            body.push_str(session);
+            body.push('\n');
+        }
+    }
+    if !fixture.events.is_empty() {
+        body.push_str("\nProvider events:\n");
+        for event in fixture.events.iter().take(24) {
+            body.push_str("- ");
+            body.push_str(event);
+            body.push('\n');
+        }
+    }
+
+    let record = WorkRecord::new(
+        format!("Imported {provider_name} provider fixture"),
+        body.clone(),
+        vec!["provider-import".to_owned(), provider_name.to_owned()],
+        "provider-import",
+        input.parent().map(|path| path.display().to_string()),
+    );
+    store.insert_record(&record)?;
+
+    let now = Utc::now();
+    store.upsert_summary(&Summary {
+        id: new_id(),
+        work_record_id: Some(record.id),
+        session_id: None,
+        kind: SummaryKind::ImportedProviderSummary,
+        model_or_source: Some(format!("{provider_name}-fixture")),
+        text: body,
+        citations: Vec::new(),
+        timestamps: EntityTimestamps {
+            created_at: now,
+            updated_at: now,
+        },
+        source_id: None,
+        sync: SyncMetadata {
+            fidelity: Fidelity::Imported,
+            metadata: serde_json::json!({
+                "provider": provider_name,
+                "input": input.display().to_string(),
+                "imported_sessions": import.imported_sessions,
+                "imported_events": import.imported_events,
+                "imported_edges": import.imported_edges,
+            }),
+            ..SyncMetadata::default()
+        },
+    })?;
+
+    Ok(record)
 }
 
 fn run_shim(command: ShimCommand) -> Result<()> {

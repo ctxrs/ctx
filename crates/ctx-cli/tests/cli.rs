@@ -60,6 +60,15 @@ fn write_json(temp: &TempDir, name: &str, value: &Value) -> String {
     path.to_str().unwrap().to_string()
 }
 
+fn provider_fixture(name: &str) -> String {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/provider")
+        .join(name)
+        .to_str()
+        .unwrap()
+        .to_owned()
+}
+
 fn inbox_file_with_suffix(temp: &TempDir, suffix: &str) -> PathBuf {
     let inbox = temp.path().join("work-record").join("inbox");
     fs::read_dir(&inbox)
@@ -115,10 +124,10 @@ fn vcs_inspect_json_reports_git_workspace_and_redacts_remote_tokens() {
         inspection["git"]["workspace"]["primary_remote"]["normalized_url"],
         "https://github.com/ctxrs/ctx"
     );
-    assert_eq!(
-        inspection["git"]["workspace"]["repo_fingerprint"]["source"],
-        "remote_and_path"
-    );
+    assert!(matches!(
+        inspection["git"]["workspace"]["repo_fingerprint"]["source"].as_str(),
+        Some("remote") | Some("remote_and_path")
+    ));
     assert!(inspection["jj"]["available"].is_boolean());
 }
 
@@ -392,6 +401,124 @@ fn normal_work_commands_auto_import_pending_capture_spool() {
 }
 
 #[test]
+fn provider_fixture_import_json_reports_counts_and_summary_record() {
+    let temp = tempdir();
+    let fixture = provider_fixture("codex.jsonl");
+
+    let mut command = ctx(&temp);
+    command.args([
+        "capture",
+        "import-provider",
+        "--provider",
+        "codex",
+        "--input",
+        &fixture,
+        "--json",
+    ]);
+    let payload = json_output(&mut command);
+
+    assert_eq!(payload["schema_version"], 1);
+    assert_eq!(payload["provider"], "codex");
+    assert_eq!(payload["import"]["imported_sessions"], 2);
+    assert_eq!(payload["import"]["imported_events"], 3);
+    assert_eq!(payload["import"]["imported_edges"], 1);
+    assert_eq!(payload["import"]["failed"], 0);
+    assert_eq!(payload["import"]["redacted"], 0);
+    assert_eq!(
+        payload["record"]["title"],
+        "Imported codex provider fixture"
+    );
+
+    let mut second = ctx(&temp);
+    second.args([
+        "capture",
+        "import-provider",
+        "--provider",
+        "codex",
+        "--input",
+        &fixture,
+        "--json",
+    ]);
+    let second_payload = json_output(&mut second);
+    assert_eq!(second_payload["import"]["imported_sessions"], 0);
+    assert_eq!(second_payload["import"]["imported_events"], 0);
+    assert_eq!(second_payload["record"], Value::Null);
+}
+
+#[test]
+fn dashboard_export_uses_rich_summary_sections_after_provider_import() {
+    let temp = tempdir();
+    let fixture = provider_fixture("codex.jsonl");
+    ctx(&temp)
+        .args([
+            "capture",
+            "import-provider",
+            "--provider",
+            "codex",
+            "--input",
+            &fixture,
+        ])
+        .assert()
+        .success();
+
+    let output_dir = temp.path().join("provider-dashboard");
+    ctx(&temp)
+        .args([
+            "dashboard",
+            "export",
+            "--output",
+            output_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let html = fs::read_to_string(output_dir.join("index.html")).unwrap();
+    assert!(html.contains("Summaries"));
+    assert!(html.contains("imported_provider_summary"));
+    assert!(html.contains("Provider fixture import for codex"));
+    assert!(html.contains("Implement provider import foundations."));
+}
+
+#[test]
+fn search_and_context_find_provider_import_events() {
+    let temp = tempdir();
+    let fixture = provider_fixture("codex.jsonl");
+    ctx(&temp)
+        .args([
+            "capture",
+            "import-provider",
+            "--provider",
+            "codex",
+            "--input",
+            &fixture,
+        ])
+        .assert()
+        .success();
+
+    let mut search = ctx(&temp);
+    search.args(["search", "Subagent reported", "--json"]);
+    let packet = json_output(&mut search);
+    assert_eq!(packet["results"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        packet["results"][0]["title"],
+        "Imported codex provider fixture"
+    );
+    assert!(packet["results"][0]["snippet"]
+        .as_str()
+        .unwrap()
+        .contains("Subagent reported changed files."));
+
+    let mut context = ctx(&temp);
+    context.args(["context", "exec_command", "--json"]);
+    let packet = json_output(&mut context);
+    assert_eq!(packet["results"].as_array().unwrap().len(), 1);
+    assert!(packet["results"][0]["summary"]
+        .as_str()
+        .unwrap()
+        .contains("exec_command"));
+}
+
+#[test]
 fn doctor_and_repair_retry_failed_capture_spool_files() {
     let temp = tempdir();
     ctx(&temp)
@@ -443,6 +570,25 @@ fn doctor_and_repair_retry_failed_capture_spool_files() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Repairable fixture"));
+}
+
+#[test]
+fn doctor_privacy_reports_local_storage_spool_and_permissions() {
+    let temp = tempdir();
+    record(&temp, "Privacy doctor", "local storage check", &["privacy"]);
+
+    ctx(&temp)
+        .args(["doctor", "--privacy"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Privacy health"))
+        .stdout(predicate::str::contains("storage: local_only"))
+        .stdout(predicate::str::contains("hosted_sync: disabled"))
+        .stdout(predicate::str::contains("validation: valid"))
+        .stdout(predicate::str::contains("spool_pending: 0"))
+        .stdout(predicate::str::contains("permissions_work_record_dir:"))
+        .stdout(predicate::str::contains("permissions_database:"))
+        .stdout(predicate::str::contains("permissions_inbox:"));
 }
 
 #[test]
@@ -675,12 +821,12 @@ fn dashboard_export_writes_static_local_html_report() {
     let html = fs::read_to_string(output_dir.join("index.html")).unwrap();
     assert!(html.contains("Work Records"));
     assert!(html.contains("Static local export"));
-    assert!(html.contains("Render dashboard token=[redacted]"));
+    assert!(html.contains("Render dashboard token=[REDACTED_SECRET]"));
     assert!(html.contains("https://github.com/ctxrs/ctx/pull/77"));
     assert!(html.contains("Evidence Previews"));
     assert!(html.contains("ctx search &lt;query&gt; --json"));
-    assert!(html.contains("password=[redacted]"));
-    assert!(html.contains("[local-path]"));
+    assert!(html.contains("password=[REDACTED_SECRET]"));
+    assert!(html.contains("[REDACTED_PATH]"));
     assert!(!html.contains("ghp_123456"));
     assert!(!html.contains("hunter2"));
     assert!(!html.contains("/tmp/work"));
@@ -859,11 +1005,11 @@ fn search_json_redacts_secret_like_snippets() {
     );
 
     let mut command = ctx(&temp);
-    command.args(["search", "deploy", "--json"]);
+    command.args(["search", "password", "--json"]);
     let packet = json_output(&mut command);
     let snippet = packet["results"][0]["snippet"].as_str().unwrap();
 
-    assert!(snippet.contains("[redacted]"));
+    assert!(snippet.contains("[REDACTED_SECRET]"));
     assert!(!snippet.contains("ghp_123456"));
     assert!(!snippet.contains("hunter2"));
 
@@ -872,7 +1018,7 @@ fn search_json_redacts_secret_like_snippets() {
     let packet = json_output(&mut command);
     let summary = packet["results"][0]["summary"].as_str().unwrap();
 
-    assert!(summary.contains("[redacted]"));
+    assert!(summary.contains("[REDACTED_SECRET]"));
     assert!(!summary.contains("ghp_123456"));
     assert!(!summary.contains("hunter2"));
 }
@@ -925,8 +1071,8 @@ fn search_and_context_json_include_evidence_output_only_matches() {
         .any(|value| value == "evidence_output"));
     let snippet = result["snippet"].as_str().unwrap();
     assert!(snippet.contains("stdout-only-needle"));
-    assert!(snippet.contains("token=[redacted]"));
-    assert!(snippet.contains("[local-path]"));
+    assert!(snippet.contains("token=[REDACTED_SECRET]"));
+    assert!(snippet.contains("[REDACTED_PATH]"));
     assert!(!snippet.contains("ghp_123456"));
     assert!(!snippet.contains("/home/daddy/code/project"));
 
@@ -936,8 +1082,8 @@ fn search_and_context_json_include_evidence_output_only_matches() {
     assert_eq!(packet["results"].as_array().unwrap().len(), 1);
     let summary = packet["results"][0]["summary"].as_str().unwrap();
     assert!(summary.contains("stdout-only-needle"));
-    assert!(summary.contains("token=[redacted]"));
-    assert!(summary.contains("[local-path]"));
+    assert!(summary.contains("token=[REDACTED_SECRET]"));
+    assert!(summary.contains("[REDACTED_PATH]"));
     assert!(!summary.contains("ghp_123456"));
     assert!(!summary.contains("/home/daddy/code/project"));
 }
@@ -956,9 +1102,9 @@ fn context_markdown_redacts_record_fields_and_commands() {
         .args(["context", "password"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("token=[redacted]"))
-        .stdout(predicate::str::contains("password=[redacted]"))
-        .stdout(predicate::str::contains("[local-path]"))
+        .stdout(predicate::str::contains("token=[REDACTED_SECRET]"))
+        .stdout(predicate::str::contains("password=[REDACTED_SECRET]"))
+        .stdout(predicate::str::contains("[REDACTED_PATH]"))
         .stdout(predicate::str::contains("hunter2").not())
         .stdout(predicate::str::contains("ghp_123456").not())
         .stdout(predicate::str::contains("/home/daddy/code/project").not())

@@ -108,6 +108,9 @@ capture inbox. They do not install repository hooks or start a daemon.
 ```bash
 ctx capture import
 ctx capture import --json
+ctx capture import-provider --provider codex --input tests/fixtures/provider/codex.jsonl --json
+ctx capture import-provider --provider claude --input tests/fixtures/provider/claude.jsonl
+ctx capture import-provider --provider pi --input tests/fixtures/provider/pi.jsonl
 ```
 
 `capture import` imports pending JSONL capture envelope files from the local
@@ -119,10 +122,16 @@ Work Recorder inbox. The inbox path is printed by `ctx status`.
 - `ctx status` prints spool counts;
 - `ctx validate` reports failed or still-processing spool files.
 
-This command imports ctx capture envelopes only. It does not scan existing
-agent transcript directories. Local Git/jj/gh wrapper shims are opt-in through
-`ctx shim`; provider-native hooks and shell hooks are not implemented in this
-branch.
+`capture import-provider` imports normalized provider fixture JSONL for
+`codex`, `claude`, or `pi`. It stores provider sessions/events through the rich
+capture library path and creates a local summary Work Record when new sessions
+or events are imported, so `ctx search`, `ctx context`, `ctx report`, and
+`ctx dashboard export` have useful review material immediately. Re-running the
+same fixture is idempotent for the summary record.
+
+These commands do not scan existing agent transcript directories. Local
+Git/jj/gh wrapper shims are opt-in through `ctx shim`; provider-native hooks
+and shell hooks are not implemented in this branch.
 
 ## VCS and pull request helpers
 
@@ -169,6 +178,7 @@ ctx import --input work-records.json
 cat work-records.json | ctx import
 ctx validate
 ctx doctor
+ctx doctor --privacy
 ctx repair
 ctx repair --json
 ```
@@ -179,8 +189,10 @@ ctx repair --json
 - `import` handles ctx JSON archives only; it does not import local agent
   provider history.
 - `validate` checks local Work Recorder storage and prints `valid` when no findings are found.
-- `doctor` runs the same local health checks using the product-facing command
-  name.
+- `doctor` runs the same local health checks using the product-facing command name.
+- `doctor --privacy` prints local-only storage posture, validation state,
+  capture spool counts, and filesystem permission status for the Work Recorder
+  directory, database, and inbox.
 - `repair` retries failed capture spool files and imports anything that succeeds.
 
 Normal Work Recorder commands import pending capture spool files before serving

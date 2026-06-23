@@ -8,9 +8,10 @@ to pull requests or team workflows.
 
 This branch is an early local Work Recorder. It is useful today for explicit
 records, command evidence, pull request links, search, reports, context output,
-JSON export/import, local dashboard export, local capture spool import, VCS/PR
-inspection, local Git/jj/gh command shims, and local storage validation. It is
-not yet the full passive recorder described in the product direction.
+JSON export/import, local dashboard export, local capture spool import,
+provider fixture import, VCS/PR inspection, local Git/jj/gh command shims, and
+local storage validation. It is not yet the full passive recorder described in
+the product direction.
 
 ## Current Status
 
@@ -26,6 +27,8 @@ Implemented in this branch:
 - export a static local HTML dashboard;
 - export/import ctx JSON archives;
 - import pending local capture spool JSONL files;
+- import normalized Codex, Claude, and Pi provider fixture JSONL into local
+  summary records and rich capture data;
 - automatically import pending capture spool files before normal work views;
 - inspect Git/jj workspace metadata and parse GitHub/GitLab pull request URLs;
 - validate, repair failed capture imports, and remove the local Work Recorder
@@ -35,7 +38,8 @@ Not implemented yet:
 
 - passive provider hooks or shell hooks beyond the local Git/jj/gh wrapper
   shims;
-- importing existing Codex, Claude, Cursor, or other local agent history;
+- scanning existing Codex, Claude, Cursor, or other local agent history
+  directories;
 - posting or updating pull request comments;
 - hosted sync, hosted sharing, accounts, team policy, hosted dashboards,
   organization analytics, or hosted retention controls;
@@ -133,6 +137,16 @@ ctx import --input work-records.json
 `ctx import` imports ctx archive JSON only. It does not import existing
 local agent history from provider transcript directories.
 
+Import a normalized provider fixture:
+
+```bash
+ctx capture import-provider --provider codex --input tests/fixtures/provider/codex.jsonl --json
+```
+
+Provider fixture import currently supports `codex`, `claude`, and `pi` fixture
+JSONL. It creates a summary Work Record for new imported sessions/events so the
+content appears in search, context, report, and dashboard output.
+
 Import pending local capture spool files:
 
 ```bash
@@ -187,13 +201,14 @@ ctx shim install --dir <dir>
 ctx shim env --dir <dir>
 ctx shim uninstall --dir <dir>
 ctx capture import [--json]
+ctx capture import-provider --provider codex|claude|pi --input <path> [--json]
 ctx vcs inspect [path] [--json]
 ctx pr parse <pull-request-url> [--json]
 ctx link-pr <record-id> <pull-request-url>
 ctx export [--output work-records.json]
 ctx import [--input work-records.json] [--overwrite]
 ctx validate
-ctx doctor
+ctx doctor [--privacy]
 ctx repair [--json]
 ```
 
@@ -224,9 +239,10 @@ By default, ctx uses machine-local storage under:
 ```
 
 Set `CTX_DATA_ROOT` to use a different root. The current implementation stores
-records and imported command evidence in SQLite, full evidence payloads in local
-blob files, and pending passive captures in a JSONL inbox. Provider-history
-importers and broader passive normalization pipelines remain product direction.
+records, imported provider fixture summaries, and imported command evidence in
+SQLite, full evidence payloads in local blob files, and pending passive
+captures in a JSONL inbox. Provider-history directory scanners and broader
+passive normalization pipelines remain product direction.
 
 No account is required. No hosted sync runs in this branch. Exported JSON files
 should be reviewed before they leave your machine because records and command
