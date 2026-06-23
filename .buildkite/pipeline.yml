@@ -30,7 +30,7 @@ steps:
     command: "CTX_ARTIFACT_DIR=artifacts/buildkite/pipeline-contract ./scripts/check-buildkite-pipeline.sh"
     agents:
       queue: "release-linux-managed"
-      ctx-runner-class: "release-linux-control"
+      ctx-runner-class: "release-linux-x64-stage"
       os: "linux"
       arch: "x86_64"
     timeout_in_minutes: 5
@@ -43,7 +43,7 @@ steps:
     command: "CTX_ARTIFACT_DIR=artifacts/buildkite/fmt ./scripts/check.sh fmt"
     agents:
       queue: "release-linux-managed"
-      ctx-runner-class: "release-linux-control"
+      ctx-runner-class: "release-linux-x64-stage"
       os: "linux"
       arch: "x86_64"
     timeout_in_minutes: 10
@@ -56,7 +56,7 @@ steps:
     command: "CTX_ARTIFACT_DIR=artifacts/buildkite/docs ./scripts/check.sh docs"
     agents:
       queue: "release-linux-managed"
-      ctx-runner-class: "release-linux-control"
+      ctx-runner-class: "release-linux-x64-stage"
       os: "linux"
       arch: "x86_64"
     timeout_in_minutes: 10
@@ -69,7 +69,7 @@ steps:
     command: "CTX_ARTIFACT_DIR=artifacts/buildkite/check ./scripts/check.sh check"
     agents:
       queue: "release-linux-managed"
-      ctx-runner-class: "release-linux-control"
+      ctx-runner-class: "release-linux-x64-stage"
       os: "linux"
       arch: "x86_64"
     timeout_in_minutes: 30
@@ -82,7 +82,7 @@ steps:
     command: "CTX_ARTIFACT_DIR=artifacts/buildkite/clippy ./scripts/check.sh clippy"
     agents:
       queue: "release-linux-managed"
-      ctx-runner-class: "release-linux-control"
+      ctx-runner-class: "release-linux-x64-stage"
       os: "linux"
       arch: "x86_64"
     timeout_in_minutes: 30
@@ -95,7 +95,7 @@ steps:
     command: "CTX_ARTIFACT_DIR=artifacts/buildkite/test ./scripts/check.sh test"
     agents:
       queue: "release-linux-managed"
-      ctx-runner-class: "release-linux-control"
+      ctx-runner-class: "release-linux-x64-stage"
       os: "linux"
       arch: "x86_64"
     timeout_in_minutes: 45
@@ -108,7 +108,7 @@ steps:
     command: "CTX_ARTIFACT_DIR=artifacts/buildkite/examples ./scripts/check.sh examples"
     agents:
       queue: "release-linux-managed"
-      ctx-runner-class: "release-linux-control"
+      ctx-runner-class: "release-linux-x64-stage"
       os: "linux"
       arch: "x86_64"
     timeout_in_minutes: 30
@@ -121,7 +121,7 @@ steps:
     command: "CTX_ARTIFACT_DIR=artifacts/buildkite/bazel CTX_REQUIRE_BAZEL=1 ./scripts/check.sh bazel"
     agents:
       queue: "release-linux-managed"
-      ctx-runner-class: "release-linux-control"
+      ctx-runner-class: "release-linux-x64-stage"
       os: "linux"
       arch: "x86_64"
     timeout_in_minutes: 45
@@ -260,7 +260,7 @@ steps:
     command: "CTX_ARTIFACT_DIR=artifacts/buildkite/release-blockers/freebsd-x64 ./scripts/release-platform-blocker.sh freebsd-x64"
     agents:
       queue: "release-linux-managed"
-      ctx-runner-class: "release-linux-control"
+      ctx-runner-class: "release-linux-x64-stage"
       os: "linux"
       arch: "x86_64"
     timeout_in_minutes: 5

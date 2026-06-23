@@ -276,6 +276,33 @@ Updated: 2026-06-22T20:02:05-05:00
   - Linux release dry-run still targets
     `ctx-runner-class=release-linux-x64-stage`.
 
+- Command:
+  Buildkite trigger for build 26 on branch `work-record`.
+- Repo/worktree:
+  `ctxrs/ctx` remote branch `work-record`.
+- Branch/head:
+  `work-record` / `75b2bcb`
+- Outcome: FAILED
+- Build URL:
+  `https://buildkite.com/luca-king/ctx-public-release-verification/builds/26`
+- Failure mode:
+  - pipeline upload job passed;
+  - pipeline contract lane passed;
+  - fmt lane failed with exit 127 because `cargo` was not installed on
+    `ctx-runner-class=release-linux-control`.
+
+- Command:
+  `./scripts/check-buildkite-pipeline.sh`
+- Repo/worktree:
+  `/home/daddy/code/ctx-multi-repo-workspace/worktrees/ctx/work-record-product`
+- Branch/head:
+  `work-record` / uncommitted Rust-toolchain runner remediation on `75b2bcb`
+- Outcome: PASS
+- Coverage:
+  - Buildkite dry-run parser accepted the updated pipeline;
+  - Linux verification and FreeBSD blocker lanes now target
+    `ctx-runner-class=release-linux-x64-stage`.
+
 ## 2026-06-22 Review Blocker Remediation Checks
 
 - Command:

@@ -604,6 +604,20 @@ None accepted yet.
   - left Linux release dry-run on `ctx-runner-class=release-linux-x64-stage`;
   - local `./scripts/check-buildkite-pipeline.sh`: PASS after routing change.
 
+## 2026-06-22 Buildkite Rust Toolchain Routing Remediation
+
+- Build 26:
+  - URL: `https://buildkite.com/luca-king/ctx-public-release-verification/builds/26`
+  - Triggered on `work-record` at `75b2bcb`.
+  - Pipeline upload and contract lanes passed.
+  - Fmt lane failed on `ctx-runner-class=release-linux-control` with
+    `cargo: command not found`.
+- Repo-owned remediation:
+  - rerouted Linux verification and FreeBSD blocker lanes to
+    `ctx-runner-class=release-linux-x64-stage`, matching the existing Linux
+    release dry-run runner class that is intended to have Rust/Cargo tooling;
+  - updated the pipeline contract check accordingly.
+
 ## 2026-06-23 Hosted Worker Foundation Checkpoint
 
 - Private repo/worktree:
