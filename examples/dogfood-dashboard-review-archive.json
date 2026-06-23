@@ -1,0 +1,125 @@
+{
+  "schema_version": 1,
+  "version": 1,
+  "records": [
+    {
+      "id": "018f45d0-0000-7000-8000-000000000101",
+      "title": "Dogfood dashboard review: rich local evidence",
+      "body": "Review the dashboard/report path with linked PRs, passing evidence, failing evidence, repeated tags, and redaction-sensitive previews. Fixture paths and tokens are synthetic.",
+      "tags": ["dogfood", "dashboard", "review", "finished-product"],
+      "kind": "task",
+      "workspace": "/home/daddy/code/ctx-multi-repo-workspace/ctx",
+      "pr_url": "https://github.com/ctxrs/ctx/pull/4242",
+      "created_at": "2026-06-23T12:00:00Z",
+      "updated_at": "2026-06-23T12:20:00Z"
+    },
+    {
+      "id": "018f45d0-0000-7000-8000-000000000102",
+      "title": "Dogfood dashboard review: sparse metadata sections",
+      "body": "Exercise reviewer expectations for sections that remain sparse in CLI dashboard exports: sessions, timeline, files touched, VCS metadata, and artifact cards.",
+      "tags": ["dogfood", "dashboard", "sparse-sections"],
+      "kind": "task",
+      "workspace": "/home/daddy/code/ctx-multi-repo-workspace/ctx",
+      "pr_url": null,
+      "created_at": "2026-06-23T12:05:00Z",
+      "updated_at": "2026-06-23T12:15:00Z"
+    },
+    {
+      "id": "018f45d0-0000-7000-8000-000000000103",
+      "title": "Dogfood dashboard review: failed visual check",
+      "body": "Include one failed evidence item so dashboard reviewers can inspect the failed-evidence metric and preview styling without relying on a real broken command.",
+      "tags": ["dogfood", "visual", "failure-path"],
+      "kind": "task",
+      "workspace": "/home/daddy/code/ctx-multi-repo-workspace/ctx",
+      "pr_url": "https://github.com/ctxrs/ctx/pull/4243",
+      "created_at": "2026-06-23T12:10:00Z",
+      "updated_at": "2026-06-23T12:25:00Z"
+    }
+  ],
+  "evidence": [
+    {
+      "id": "018f45d0-0000-7000-8000-000000000201",
+      "record_id": "018f45d0-0000-7000-8000-000000000101",
+      "command": "cargo test -p work-record-report -- dashboard_review",
+      "exit_code": 0,
+      "stdout": "tests ok\ncoverage: 84%\nredaction token=ghp_1234567890abcdef should be redacted in previews\n",
+      "stderr": "",
+      "started_at": "2026-06-23T12:12:00Z",
+      "duration_ms": 321
+    },
+    {
+      "id": "018f45d0-0000-7000-8000-000000000202",
+      "record_id": "018f45d0-0000-7000-8000-000000000102",
+      "command": "scripts/check-docs.sh",
+      "exit_code": 0,
+      "stdout": "lint complete\n",
+      "stderr": "warning: dashboard sparse sections need review\n",
+      "started_at": "2026-06-23T12:14:00Z",
+      "duration_ms": 48
+    },
+    {
+      "id": "018f45d0-0000-7000-8000-000000000203",
+      "record_id": "018f45d0-0000-7000-8000-000000000103",
+      "command": "playwright screenshot --viewport mobile",
+      "exit_code": 1,
+      "stdout": "",
+      "stderr": "expected failure: screenshot diff threshold exceeded\n",
+      "started_at": "2026-06-23T12:18:00Z",
+      "duration_ms": 901
+    }
+  ],
+  "artifacts": [
+    {
+      "id": "018f45d0-0000-7000-8000-000000000301",
+      "evidence_id": "018f45d0-0000-7000-8000-000000000201",
+      "stream": "stdout",
+      "kind": "stdout",
+      "blob_hash": "8b40d9bf63bd65ff4a56c599e9d219355aa4cf65bbe7a8bd2a8c2a6bd33441ac",
+      "blob_path": "blobs/8b/8b40d9bf63bd65ff4a56c599e9d219355aa4cf65bbe7a8bd2a8c2a6bd33441ac",
+      "byte_size": 91,
+      "media_type": "text/plain; charset=utf-8",
+      "preview_text": "tests ok\ncoverage: 84%\nredaction token=[REDACTED_SECRET] should be redacted in previews\n",
+      "redaction_state": "safe_preview",
+      "content": "tests ok\ncoverage: 84%\nredaction token=ghp_1234567890abcdef should be redacted in previews\n"
+    },
+    {
+      "id": "018f45d0-0000-7000-8000-000000000302",
+      "evidence_id": "018f45d0-0000-7000-8000-000000000202",
+      "stream": "stdout",
+      "kind": "stdout",
+      "blob_hash": "5cd3e97095335e94448074bcf3c04d1fc3a4bf736488d63b7a87b817c548f318",
+      "blob_path": "blobs/5c/5cd3e97095335e94448074bcf3c04d1fc3a4bf736488d63b7a87b817c548f318",
+      "byte_size": 14,
+      "media_type": "text/plain; charset=utf-8",
+      "preview_text": "lint complete\n",
+      "redaction_state": "safe_preview",
+      "content": "lint complete\n"
+    },
+    {
+      "id": "018f45d0-0000-7000-8000-000000000303",
+      "evidence_id": "018f45d0-0000-7000-8000-000000000202",
+      "stream": "stderr",
+      "kind": "stderr",
+      "blob_hash": "a1be5582457b942b2904e3371637f4ed67f6c4e084358cd31eadb3af0245331a",
+      "blob_path": "blobs/a1/a1be5582457b942b2904e3371637f4ed67f6c4e084358cd31eadb3af0245331a",
+      "byte_size": 47,
+      "media_type": "text/plain; charset=utf-8",
+      "preview_text": "warning: dashboard sparse sections need review\n",
+      "redaction_state": "safe_preview",
+      "content": "warning: dashboard sparse sections need review\n"
+    },
+    {
+      "id": "018f45d0-0000-7000-8000-000000000304",
+      "evidence_id": "018f45d0-0000-7000-8000-000000000203",
+      "stream": "stderr",
+      "kind": "stderr",
+      "blob_hash": "f8d39324471d99b4175faca5556b7dfb5985432a99381f53bda6727a88269093",
+      "blob_path": "blobs/f8/f8d39324471d99b4175faca5556b7dfb5985432a99381f53bda6727a88269093",
+      "byte_size": 53,
+      "media_type": "text/plain; charset=utf-8",
+      "preview_text": "expected failure: screenshot diff threshold exceeded\n",
+      "redaction_state": "safe_preview",
+      "content": "expected failure: screenshot diff threshold exceeded\n"
+    }
+  ]
+}
