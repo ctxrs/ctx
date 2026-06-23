@@ -6507,7 +6507,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(user_version, 2);
+        assert_eq!(user_version, 3);
         assert_eq!(store.get_record(record_id).unwrap().title, "Legacy v1");
         for table in [
             "capture_sources",
@@ -6515,6 +6515,8 @@ mod tests {
             "runs",
             "events",
             "files_touched",
+            "local_devices",
+            "local_workspaces",
         ] {
             assert!(table_exists(&store.conn, table).unwrap(), "{table}");
         }

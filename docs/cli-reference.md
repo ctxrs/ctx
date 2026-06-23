@@ -242,5 +242,5 @@ retry.
 
 This branch does not include hosted sync, passive provider hooks beyond local
 Git/jj/gh wrapper shims, native Claude/Pi transcript import, public installer
-flow, hosted/team Option A, or hosted/team pull request publishing; hosted
+flow, hosted/team Option A, or hosted/team publishing; hosted/team pull request
 publishing remains outside launch.
