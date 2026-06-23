@@ -221,6 +221,10 @@ ctx_init_resource_env() {
   if (( default_jobs < 1 )); then
     default_jobs=1
   fi
+  if [[ "${CTX_LOCAL_RESOURCE_CAP:-1}" == "1" && -z "${CI:-}" && -z "${BUILDKITE:-}" && -z "${BUILDKITE_BUILD_ID:-}" ]] \
+    && (( default_jobs > 2 )); then
+    default_jobs=2
+  fi
 
   export CTX_CPU_COUNT="${cpu_count}"
   export CTX_TOTAL_MEMORY_GB="${memory_gb}"

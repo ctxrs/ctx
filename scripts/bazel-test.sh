@@ -141,6 +141,10 @@ default_jobs="${cpu_count}"
 if (( memory_jobs < default_jobs )); then
   default_jobs="${memory_jobs}"
 fi
+if [[ "${CTX_LOCAL_RESOURCE_CAP:-1}" == "1" && -z "${CI:-}" && -z "${BUILDKITE:-}" && -z "${BUILDKITE_BUILD_ID:-}" ]] \
+  && (( default_jobs > 2 )); then
+  default_jobs=2
+fi
 
 export CTX_CPU_COUNT="${cpu_count}"
 export CTX_TOTAL_MEMORY_GB="${memory_gb}"

@@ -11,7 +11,8 @@ usage: scripts/check.sh [all|fmt|docs|check|clippy|test|examples|bazel|platform-
 
 Runs resource-capped local checks sequentially. Defaults to "all".
 Environment overrides:
-  CARGO_BUILD_JOBS     Cargo build parallelism, default min(cpu, memory_gb / 3)
+  CARGO                Cargo executable/wrapper, default cargo
+  CARGO_BUILD_JOBS     Cargo build parallelism, default local cap 2; CI uses min(cpu, memory_gb / 3)
   RUST_TEST_THREADS    Rust test threads, default CARGO_BUILD_JOBS
   BAZEL_JOBS           Bazel job count, default CARGO_BUILD_JOBS
   CTX_REQUIRE_BAZEL    If 1, bootstrap Bazelisk when Bazel is missing
@@ -21,6 +22,7 @@ USAGE
 }
 
 cargo_locked_args=()
+cargo_bin="${CARGO:-cargo}"
 
 setup_cargo_args() {
   cargo_locked_args=()
@@ -43,7 +45,7 @@ file_contains() {
 
 run_fmt() {
   ctx_ensure_rust_toolchain
-  cargo fmt --all -- --check
+  "${cargo_bin}" fmt --all -- --check
 }
 
 run_docs() {
@@ -52,28 +54,28 @@ run_docs() {
 
 run_check() {
   ctx_ensure_rust_toolchain
-  cargo check --workspace --all-targets "${cargo_locked_args[@]}"
+  "${cargo_bin}" check --workspace --all-targets "${cargo_locked_args[@]}"
 }
 
 run_clippy() {
   ctx_ensure_rust_toolchain
   if [[ -n "${CLIPPY_FLAGS:-}" ]]; then
-    cargo clippy --workspace --all-targets "${cargo_locked_args[@]}" -- ${CLIPPY_FLAGS}
+    "${cargo_bin}" clippy --workspace --all-targets "${cargo_locked_args[@]}" -- ${CLIPPY_FLAGS}
   else
-    cargo clippy --workspace --all-targets "${cargo_locked_args[@]}" -- -D warnings
+    "${cargo_bin}" clippy --workspace --all-targets "${cargo_locked_args[@]}" -- -D warnings
   fi
 }
 
 run_test() {
   ctx_ensure_rust_toolchain
-  cargo test --workspace --all-targets "${cargo_locked_args[@]}" -- --test-threads "${RUST_TEST_THREADS}"
+  "${cargo_bin}" test --workspace --all-targets "${cargo_locked_args[@]}" -- --test-threads "${RUST_TEST_THREADS}"
 }
 
 run_examples() {
   local suffix example example_name example_bin
 
   ctx_ensure_rust_toolchain
-  ctx_run_timed "examples-build" cargo build -p ctx --bins "${cargo_locked_args[@]}"
+  ctx_run_timed "examples-build" "${cargo_bin}" build -p ctx --bins "${cargo_locked_args[@]}"
 
   suffix="$(ctx_host_exe_suffix)"
   example_bin="${CTX_REPO_ROOT}/target/debug/ctx${suffix}"
@@ -96,7 +98,7 @@ run_platform_smoke() {
 
   ctx_run_timed "platform-smoke-host-triple" ctx_require_host_triple "${CTX_EXPECT_HOST_TRIPLE:-}"
   ctx_ensure_rust_toolchain
-  ctx_run_timed "platform-smoke-build" cargo build -p ctx --bin ctx "${cargo_locked_args[@]}"
+  ctx_run_timed "platform-smoke-build" "${cargo_bin}" build -p ctx --bin ctx "${cargo_locked_args[@]}"
 
   suffix="$(ctx_host_exe_suffix)"
   smoke_bin="${CTX_REPO_ROOT}/target/debug/ctx${suffix}"
@@ -128,7 +130,7 @@ ctx_debug_bin() {
   local suffix bin
 
   ctx_ensure_rust_toolchain
-  ctx_run_timed "ctx-debug-build" cargo build -p ctx --bin ctx "${cargo_locked_args[@]}" >&2
+  ctx_run_timed "ctx-debug-build" "${cargo_bin}" build -p ctx --bin ctx "${cargo_locked_args[@]}" >&2
   suffix="$(ctx_host_exe_suffix)"
   bin="${CTX_REPO_ROOT}/target/debug/ctx${suffix}"
   if [[ ! -f "${bin}" ]]; then
@@ -184,7 +186,7 @@ run_provider_fixtures() {
     return 1
   fi
 
-  ctx_run_timed "provider-fixture-import-tests" cargo test -p work-record-capture provider_fixture_replay "${cargo_locked_args[@]}" -- --test-threads "${RUST_TEST_THREADS}"
+  ctx_run_timed "provider-fixture-import-tests" "${cargo_bin}" test -p work-record-capture provider_fixture_replay "${cargo_locked_args[@]}" -- --test-threads "${RUST_TEST_THREADS}"
   write_mode_summary "provider-fixtures" "passed" "validated inert provider fixture import coverage for codex, pi, and claude"
 }
 
