@@ -90,6 +90,18 @@ ADE desktop release, `ade.ctx.rs` migration, production hosted launch, and
   `Branches have been disabled for this pipeline`. The manager retried with
   `ignore_pipeline_branch_filters: true`, which scheduled build #74 for the
   current head.
+- Buildkite #74 result for `1c895fe51a92a3ad12d4916605c5e65727e13e32`:
+  failed.
+  - `fmt`, docs, and pipeline contract passed.
+  - `clippy` failed on three `clippy::derivable_impls` findings in
+    `crates/work-record-core/src/provider.rs`.
+  - `gated live provider E2E` was `broken` on the
+    `release-linux-managed`/`release-linux-x64-stage` queue.
+  - Manager fixed the clippy failure in
+    `6b450b7 Derive provider default enums` and validated locally with
+    `cargo-lowio clippy -p work-record-core --all-targets -- -D warnings`.
+  - The broken gated live provider E2E job was routed to the provider and
+    release workers for semantics/pipeline remediation.
 
 ## Validation
 
