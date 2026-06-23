@@ -19,8 +19,13 @@ use work_record_core::{
     blob_dir, database_path, default_data_root, device_path, inbox_dir, work_record_dir,
     CaptureProvider, Evidence, WorkRecord, WorkRecordArchive,
 };
+use work_record_publish::{
+    render_pr_comment, PullRequestTarget, RawTranscriptOptIn, RenderOptions,
+};
 use work_record_store::Store;
-use work_record_vcs::{inspect_path, parse_pull_request_url, GitDetection, JjDetection};
+use work_record_vcs::{
+    inspect_path, parse_pull_request_url, GitDetection, GitStatus, JjCommit, JjDetection,
+};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -78,6 +83,8 @@ enum CommandRoot {
     Vcs(VcsCommand),
     #[command(about = "Parse pull request URLs")]
     Pr(PrCommand),
+    #[command(about = "Publish Work Recorder finished-product output")]
+    Publish(PublishCommand),
     #[command(about = "Attach a pull request URL to a work record")]
     LinkPr(LinkPrArgs),
     #[command(about = "Export work records and evidence as JSON")]
@@ -426,6 +433,27 @@ struct PrParseArgs {
 }
 
 #[derive(Debug, Args)]
+struct PublishCommand {
+    #[command(subcommand)]
+    command: PublishSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum PublishSubcommand {
+    #[command(about = "Render or publish a marker-bounded pull request comment")]
+    PrComment(PublishPrCommentArgs),
+}
+
+#[derive(Debug, Args)]
+struct PublishPrCommentArgs {
+    record_id: Uuid,
+    #[arg(long)]
+    dry_run: bool,
+    #[arg(long)]
+    include_raw_transcript: bool,
+}
+
+#[derive(Debug, Args)]
 struct ExportArgs {
     #[arg(long)]
     output: Option<PathBuf>,
@@ -475,6 +503,7 @@ fn main() -> Result<()> {
         CommandRoot::Shim(args) => run_shim(args),
         CommandRoot::Vcs(args) => run_vcs(args),
         CommandRoot::Pr(args) => run_pr(args),
+        CommandRoot::Publish(args) => run_publish(args, data_root),
         CommandRoot::LinkPr(args) => run_work_subcommand(WorkSubcommand::LinkPr(args), data_root),
         CommandRoot::Export(args) => run_work_subcommand(WorkSubcommand::Export(args), data_root),
         CommandRoot::Import(args) => run_work_subcommand(WorkSubcommand::Import(args), data_root),
@@ -543,9 +572,28 @@ fn print_git_detection(git: &GitDetection) {
     };
 
     println!("git: {}", workspace.root_path);
+    if let Some(branch) = &workspace.branch {
+        println!("branch: {branch}");
+    }
+    if let Some(head_sha) = &workspace.head_sha {
+        println!("head: {}", short_id(head_sha));
+    }
+    if let Some(upstream) = &workspace.upstream {
+        println!(
+            "upstream: {} (ahead {}, behind {})",
+            upstream.name, upstream.ahead, upstream.behind
+        );
+    }
+    print_git_status("status", &workspace.status);
     println!("fingerprint: {}", workspace.repo_fingerprint.value);
     if let Some(remote) = &workspace.primary_remote {
         println!("remote: {} {}", remote.name, remote.redacted_url);
+    }
+    if !workspace.recent_commits.is_empty() {
+        println!("recent_commits:");
+        for commit in workspace.recent_commits.iter().take(5) {
+            println!("  {} {}", commit.short_sha, commit.summary);
+        }
     }
     if workspace.is_worktree {
         println!("worktree: true");
@@ -561,12 +609,155 @@ fn print_jj_detection(jj: &JjDetection) {
         return;
     }
     match &jj.workspace {
-        Some(workspace) => println!("jj: {}", workspace.root_path),
+        Some(workspace) => {
+            println!("jj: {}", workspace.root_path);
+            if let Some(working_copy) = &workspace.working_copy {
+                print_jj_commit("working_copy", working_copy);
+            }
+            if !workspace.parents.is_empty() {
+                println!("parents:");
+                for parent in &workspace.parents {
+                    print_jj_commit("  parent", parent);
+                }
+            }
+            if !workspace.bookmarks.is_empty() {
+                println!("bookmarks:");
+                for bookmark in workspace.bookmarks.iter().take(8) {
+                    let remote = if bookmark.remote { " remote" } else { "" };
+                    let target = bookmark
+                        .change_id
+                        .as_deref()
+                        .or(bookmark.commit_id.as_deref())
+                        .map(short_id)
+                        .unwrap_or_else(|| "unknown".to_owned());
+                    println!("  {} -> {}{}", bookmark.name, target, remote);
+                }
+            }
+            if !workspace.recent_changes.is_empty() {
+                println!("recent_changes:");
+                for change in workspace.recent_changes.iter().take(5) {
+                    print_jj_commit("  change", change);
+                }
+            }
+            if let Some(git) = &workspace.colocated_git {
+                println!("colocated_git: {}", git.root_path);
+                if let Some(branch) = &git.branch {
+                    println!("colocated_git_branch: {branch}");
+                }
+                if let Some(head_sha) = &git.head_sha {
+                    println!("colocated_git_head: {}", short_id(head_sha));
+                }
+                print_git_status("colocated_git_status", &git.status);
+                if git.is_worktree {
+                    println!("colocated_git_worktree: true");
+                }
+            }
+        }
         None => println!(
             "jj: no workspace ({})",
             jj.error.as_deref().unwrap_or("not a jj workspace")
         ),
     }
+}
+
+fn print_git_status(label: &str, status: &GitStatus) {
+    println!(
+        "{label}: dirty={} staged={} unstaged={} untracked={} conflicted={}",
+        status.dirty, status.staged, status.unstaged, status.untracked, status.conflicted
+    );
+    if !status.entries.is_empty() {
+        println!("{label}_entries:");
+        for entry in status.entries.iter().take(8) {
+            match &entry.original_path {
+                Some(original) => println!(
+                    "  {}{} {} <- {}",
+                    entry.index_status, entry.worktree_status, entry.path, original
+                ),
+                None => println!(
+                    "  {}{} {}",
+                    entry.index_status, entry.worktree_status, entry.path
+                ),
+            }
+        }
+    }
+}
+
+fn print_jj_commit(label: &str, commit: &JjCommit) {
+    let id = commit
+        .short_commit_id
+        .as_deref()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| short_id(&commit.commit_id));
+    let description = commit.description.as_deref().unwrap_or("(no description)");
+    if commit.bookmarks.is_empty() {
+        println!(
+            "{label}: {} {} {}",
+            short_id(&commit.change_id),
+            id,
+            description
+        );
+    } else {
+        println!(
+            "{label}: {} {} {} [{}]",
+            short_id(&commit.change_id),
+            id,
+            description,
+            commit.bookmarks.join(", ")
+        );
+    }
+}
+
+fn short_id(value: &str) -> String {
+    value.chars().take(12).collect()
+}
+
+fn run_publish(command: PublishCommand, data_root: PathBuf) -> Result<()> {
+    let mut store = Store::open(database_path(data_root.clone()))?;
+    auto_import_pending_spool(&data_root, &mut store)?;
+    match command.command {
+        PublishSubcommand::PrComment(args) => run_publish_pr_comment(args, &store),
+    }
+}
+
+fn run_publish_pr_comment(args: PublishPrCommentArgs, store: &Store) -> Result<()> {
+    let record = store.get_record(args.record_id)?;
+    let evidence = store.evidence_for_record(record.id)?;
+    let pr_url = record.pr_url.as_deref().ok_or_else(|| {
+        anyhow!(
+            "record {} has no linked pull request; run `ctx link-pr {} <pr-url>` first",
+            record.id,
+            record.id
+        )
+    })?;
+    let target = PullRequestTarget::github_from_url(pr_url)?;
+    let options = RenderOptions {
+        raw_transcript: args
+            .include_raw_transcript
+            .then(|| RawTranscriptOptIn::acknowledge_private_data_risk("ctx CLI opt-in flag")),
+    };
+    let rendered = render_pr_comment(&[record], &evidence, &options);
+
+    if args.dry_run {
+        print!("{}", rendered.markdown);
+        return Ok(());
+    }
+
+    let token = env::var("GITHUB_TOKEN")
+        .or_else(|_| env::var("GH_TOKEN"))
+        .map(|value| value.trim().to_owned())
+        .unwrap_or_default();
+    if token.is_empty() {
+        return Err(anyhow!(
+            "live GitHub PR comment publishing requires GITHUB_TOKEN or GH_TOKEN; rerun with --dry-run to render locally"
+        ));
+    }
+
+    Err(anyhow!(
+        "live GitHub PR comment publishing for {}/{}#{} requires an HTTP client integration that is not available yet; rerun with --dry-run to render locally",
+        target.owner,
+        target.repo,
+        target.number
+    ))
 }
 
 fn run_workspace(command: WorkspaceCommand, data_root: PathBuf) -> Result<()> {

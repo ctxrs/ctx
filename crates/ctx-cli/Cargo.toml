@@ -18,6 +18,7 @@ serde_json.workspace = true
 uuid.workspace = true
 work-record-capture = { path = "../work-record-capture" }
 work-record-core = { path = "../work-record-core" }
+work-record-publish = { path = "../work-record-publish" }
 work-record-report = { path = "../work-record-report" }
 work-record-search = { path = "../work-record-search" }
 work-record-store = { path = "../work-record-store" }

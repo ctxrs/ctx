@@ -523,6 +523,121 @@ fn root_record_show_search_context_report_and_link_pr_work() {
 }
 
 #[test]
+fn publish_pr_comment_dry_run_renders_marker_bounded_redacted_markdown() {
+    let temp = tempdir();
+    let item = record(
+        &temp,
+        "Publish token=ghp_1234567890abcdef",
+        "finished product password=hunter2 under /home/daddy/code/private",
+        &["publish", "secret=shhh"],
+    );
+    let id = item["id"].as_str().unwrap();
+
+    ctx(&temp)
+        .args(["link-pr", id, "https://github.com/ctxrs/ctx/pull/42/files"])
+        .assert()
+        .success();
+
+    ctx(&temp)
+        .args(["evidence", "run", "--record", id, "rustc", "--version"])
+        .assert()
+        .success();
+
+    let output = ctx(&temp)
+        .args(["publish", "pr-comment", id, "--dry-run"])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let markdown = String::from_utf8(output).unwrap();
+
+    assert!(markdown.starts_with("<!-- ctx-work-record:finished-product:start -->"));
+    assert!(markdown
+        .trim_end()
+        .ends_with("<!-- ctx-work-record:finished-product:end -->"));
+    assert!(markdown.contains("## Work Recorder Finished Product"));
+    assert!(markdown.contains("https://github.com/ctxrs/ctx/pull/42"));
+    assert!(markdown.contains("token=[redacted]"));
+    assert!(markdown.contains("password=[redacted]"));
+    assert!(markdown.contains("[local-path]"));
+    assert!(markdown.contains("Transcript redacted by default"));
+    assert!(!markdown.contains("ghp_123456"));
+    assert!(!markdown.contains("hunter2"));
+    assert!(!markdown.contains("/home/daddy/code/private"));
+    assert!(!markdown.contains("secret=shhh"));
+}
+
+#[test]
+fn publish_pr_comment_raw_transcript_requires_explicit_flag() {
+    let temp = tempdir();
+    let item = record(
+        &temp,
+        "Publish raw transcript",
+        "raw note password=hunter2",
+        &["publish"],
+    );
+    let id = item["id"].as_str().unwrap();
+
+    ctx(&temp)
+        .args(["link-pr", id, "https://github.com/ctxrs/ctx/pull/43"])
+        .assert()
+        .success();
+
+    ctx(&temp)
+        .args(["evidence", "run", "--record", id, "rustc", "--version"])
+        .assert()
+        .success();
+
+    ctx(&temp)
+        .args([
+            "publish",
+            "pr-comment",
+            id,
+            "--dry-run",
+            "--include-raw-transcript",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Transcript mode: raw opt-in"))
+        .stdout(predicate::str::contains("raw note password=hunter2"))
+        .stdout(predicate::str::contains("stdout:"))
+        .stdout(predicate::str::contains("rustc"));
+}
+
+#[test]
+fn publish_pr_comment_live_publish_reports_missing_token_or_client() {
+    let temp = tempdir();
+    let item = record(&temp, "Publish live", "body", &["publish"]);
+    let id = item["id"].as_str().unwrap();
+
+    ctx(&temp)
+        .args(["link-pr", id, "https://github.com/ctxrs/ctx/pull/44"])
+        .assert()
+        .success();
+
+    ctx(&temp)
+        .env_remove("GITHUB_TOKEN")
+        .env_remove("GH_TOKEN")
+        .args(["publish", "pr-comment", id])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "requires GITHUB_TOKEN or GH_TOKEN",
+        ));
+
+    ctx(&temp)
+        .env("GITHUB_TOKEN", "ghp_testtoken")
+        .args(["publish", "pr-comment", id])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "requires an HTTP client integration that is not available yet",
+        ));
+}
+
+#[test]
 fn dashboard_export_writes_static_local_html_report() {
     let temp = tempdir();
     let first = record(
