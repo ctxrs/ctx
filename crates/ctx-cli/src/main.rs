@@ -30,7 +30,7 @@ use work_record_publish::{
     render_pr_comment, upsert_github_pr_comment, GhCliGitHubPrCommentClient, PublishOptions,
     PublishOutcome, PullRequestTarget, RawTranscriptOptIn, RenderOptions,
 };
-use work_record_store::{Store, StoreError};
+use work_record_store::{classify_evidence_freshness, Store, StoreError};
 use work_record_vcs::{
     inspect_path, parse_pull_request_url, GitDetection, GitStatus, GitWorkspace, JjCommit,
     JjDetection, JjWorkspace,
@@ -1279,6 +1279,11 @@ fn load_dashboard_data(store: &Store, limit: usize) -> Result<DashboardData> {
         evidence_metadata = store.recent_evidence_metadata(limit)?;
     }
     let archive = store.export_archive()?;
+    reclassify_evidence_freshness_for_current_vcs(
+        &mut evidence_metadata,
+        &archive.vcs_changes,
+        &archive.vcs_workspaces,
+    );
     let mut workspace_ids = BTreeSet::new();
     for change in &vcs_changes {
         workspace_ids.insert(change.vcs_workspace_id);
@@ -1314,6 +1319,133 @@ fn load_dashboard_data(store: &Store, limit: usize) -> Result<DashboardData> {
         files_touched,
         summaries,
     })
+}
+
+fn reclassify_evidence_freshness_for_current_vcs(
+    evidence_metadata: &mut [EvidenceMetadata],
+    vcs_changes: &[VcsChange],
+    vcs_workspaces: &[VcsWorkspace],
+) {
+    let changes_by_id: std::collections::BTreeMap<Uuid, &VcsChange> = vcs_changes
+        .iter()
+        .map(|change| (change.id, change))
+        .collect();
+    let workspaces_by_id: std::collections::BTreeMap<Uuid, &VcsWorkspace> = vcs_workspaces
+        .iter()
+        .map(|workspace| (workspace.id, workspace))
+        .collect();
+    for metadata in evidence_metadata.iter_mut() {
+        let (freshness, reason) =
+            current_freshness_for_metadata(metadata, &changes_by_id, &workspaces_by_id);
+        metadata.freshness = freshness;
+        metadata.stale_reason = reason;
+    }
+}
+
+fn current_freshness_for_metadata(
+    metadata: &EvidenceMetadata,
+    changes_by_id: &std::collections::BTreeMap<Uuid, &VcsChange>,
+    workspaces_by_id: &std::collections::BTreeMap<Uuid, &VcsWorkspace>,
+) -> (EvidenceFreshness, Option<String>) {
+    let Some(change_id) = metadata.vcs_change_id else {
+        return (
+            classify_evidence_freshness(metadata, None, None, false),
+            None,
+        );
+    };
+    let Some(change) = changes_by_id.get(&change_id).copied() else {
+        return (
+            EvidenceFreshness::ProbablyFresh,
+            Some(
+                "current VCS state unavailable: recorded change is not in the local archive".into(),
+            ),
+        );
+    };
+    let Some(workspace) = workspaces_by_id.get(&change.vcs_workspace_id).copied() else {
+        return (
+            EvidenceFreshness::ProbablyFresh,
+            Some(
+                "current VCS state unavailable: recorded workspace is not in the local archive"
+                    .into(),
+            ),
+        );
+    };
+
+    let inspection = match inspect_path(Path::new(&workspace.root_path)) {
+        Ok(inspection) => inspection,
+        Err(error) => {
+            return (
+                EvidenceFreshness::ProbablyFresh,
+                Some(format!("current VCS state unavailable: {error}")),
+            );
+        }
+    };
+
+    match workspace.kind {
+        VcsKind::Git => {
+            let Some(git) = inspection.git.workspace.as_ref() else {
+                return (
+                    EvidenceFreshness::ProbablyFresh,
+                    Some("current VCS state unavailable: git workspace not found".into()),
+                );
+            };
+            if git.repo_fingerprint.value != workspace.repo_fingerprint {
+                return (
+                    EvidenceFreshness::ProbablyFresh,
+                    Some("current VCS state unavailable: workspace fingerprint changed".into()),
+                );
+            }
+            let freshness = classify_evidence_freshness(
+                metadata,
+                git.head_sha.as_deref(),
+                git.tree_hash.as_deref(),
+                git.status.dirty,
+            );
+            let reason = match freshness {
+                EvidenceFreshness::Stale => {
+                    Some("current VCS HEAD or tree differs from the evidence capture point".into())
+                }
+                EvidenceFreshness::ProbablyFresh if git.status.dirty => {
+                    Some("current VCS state has uncommitted changes".into())
+                }
+                EvidenceFreshness::ProbablyFresh => {
+                    Some("current VCS state could not prove tree freshness".into())
+                }
+                _ => None,
+            };
+            (freshness, reason)
+        }
+        VcsKind::Jj => {
+            let Some(jj) = inspection.jj.workspace.as_ref() else {
+                return (
+                    EvidenceFreshness::ProbablyFresh,
+                    Some("current VCS state unavailable: jj workspace not found".into()),
+                );
+            };
+            let Some(working_copy) = jj.working_copy.as_ref() else {
+                return (
+                    EvidenceFreshness::ProbablyFresh,
+                    Some("current VCS state unavailable: jj working copy not found".into()),
+                );
+            };
+            let freshness = classify_evidence_freshness(
+                metadata,
+                Some(working_copy.change_id.as_str()),
+                Some(working_copy.commit_id.as_str()),
+                true,
+            );
+            let reason = match freshness {
+                EvidenceFreshness::Stale => {
+                    Some("current jj change differs from the evidence capture point".into())
+                }
+                EvidenceFreshness::ProbablyFresh => {
+                    Some("current jj working-copy freshness is partial".into())
+                }
+                _ => None,
+            };
+            (freshness, reason)
+        }
+    }
 }
 
 fn auto_import_pending_spool(data_root: &Path, store: &mut Store) -> Result<()> {

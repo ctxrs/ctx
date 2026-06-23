@@ -78,6 +78,7 @@ pub struct EvidenceReport {
     pub records: Vec<EvidenceRecordReport>,
     pub commands: Vec<EvidenceCommandReport>,
     pub pull_requests: Vec<SafePullRequest>,
+    pub evidence_metadata: Vec<Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -390,23 +391,7 @@ pub fn dashboard_export_data(report: &DashboardReport<'_>) -> DashboardExportDat
                 })
             }))
             .collect(),
-        evidence_metadata: report
-            .evidence_metadata
-            .iter()
-            .map(|evidence| {
-                json!({
-                    "id": evidence.id.to_string(),
-                    "work_record_id": evidence.work_record_id.to_string(),
-                    "kind": evidence.kind.as_str(),
-                    "status": evidence.status.as_str(),
-                    "freshness": evidence.freshness.as_str(),
-                    "stale_reason": evidence.stale_reason.as_deref().map(redact_share_safe_markers),
-                    "observed_tree_hash": evidence.observed_tree_hash.as_deref().map(redact_share_safe_markers),
-                    "observed_head_sha": evidence.observed_head_sha.as_deref().map(redact_share_safe_markers),
-                    "metadata": redact_metadata_value(&evidence.sync.metadata),
-                })
-            })
-            .collect(),
+        evidence_metadata: evidence_metadata_values(report),
         files_touched: report
             .files_touched
             .iter()
@@ -1020,7 +1005,28 @@ fn evidence_report(report: &DashboardReport<'_>) -> EvidenceReport {
                 })
             })
             .collect(),
+        evidence_metadata: evidence_metadata_values(report),
     }
+}
+
+fn evidence_metadata_values(report: &DashboardReport<'_>) -> Vec<Value> {
+    report
+        .evidence_metadata
+        .iter()
+        .map(|evidence| {
+            json!({
+                "id": evidence.id.to_string(),
+                "work_record_id": evidence.work_record_id.to_string(),
+                "kind": evidence.kind.as_str(),
+                "status": evidence.status.as_str(),
+                "freshness": evidence.freshness.as_str(),
+                "stale_reason": evidence.stale_reason.as_deref().map(redact_share_safe_markers),
+                "observed_tree_hash": evidence.observed_tree_hash.as_deref().map(redact_share_safe_markers),
+                "observed_head_sha": evidence.observed_head_sha.as_deref().map(redact_share_safe_markers),
+                "metadata": redact_metadata_value(&evidence.sync.metadata),
+            })
+        })
+        .collect()
 }
 
 fn privacy_summary(report: &DashboardReport<'_>) -> PrivacySummary {

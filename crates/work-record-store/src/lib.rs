@@ -1648,17 +1648,17 @@ impl Store {
             (id, vcs_workspace_id, provider, url, number, owner, repo, title, state, head_ref, base_ref, head_sha, confidence, link_source, created_at_ms, updated_at_ms, source_id, visibility, fidelity, sync_state, sync_version, deleted_at_ms, metadata_json)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
             ON CONFLICT DO UPDATE SET
-                vcs_workspace_id = excluded.vcs_workspace_id,
+                vcs_workspace_id = COALESCE(excluded.vcs_workspace_id, pull_requests.vcs_workspace_id),
                 url = excluded.url,
-                title = excluded.title,
-                state = excluded.state,
-                head_ref = excluded.head_ref,
-                base_ref = excluded.base_ref,
-                head_sha = excluded.head_sha,
+                title = COALESCE(excluded.title, pull_requests.title),
+                state = COALESCE(excluded.state, pull_requests.state),
+                head_ref = COALESCE(excluded.head_ref, pull_requests.head_ref),
+                base_ref = COALESCE(excluded.base_ref, pull_requests.base_ref),
+                head_sha = COALESCE(excluded.head_sha, pull_requests.head_sha),
                 confidence = excluded.confidence,
                 link_source = excluded.link_source,
                 updated_at_ms = excluded.updated_at_ms,
-                source_id = excluded.source_id,
+                source_id = COALESCE(excluded.source_id, pull_requests.source_id),
                 visibility = excluded.visibility,
                 fidelity = excluded.fidelity,
                 sync_state = excluded.sync_state,
@@ -4564,17 +4564,17 @@ fn upsert_pull_request_tx(tx: &Transaction<'_>, pr: &PullRequest) -> Result<Uuid
         (id, vcs_workspace_id, provider, url, number, owner, repo, title, state, head_ref, base_ref, head_sha, confidence, link_source, created_at_ms, updated_at_ms, source_id, visibility, fidelity, sync_state, sync_version, deleted_at_ms, metadata_json)
         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
         ON CONFLICT DO UPDATE SET
-            vcs_workspace_id = excluded.vcs_workspace_id,
+            vcs_workspace_id = COALESCE(excluded.vcs_workspace_id, pull_requests.vcs_workspace_id),
             url = excluded.url,
-            title = excluded.title,
-            state = excluded.state,
-            head_ref = excluded.head_ref,
-            base_ref = excluded.base_ref,
-            head_sha = excluded.head_sha,
+            title = COALESCE(excluded.title, pull_requests.title),
+            state = COALESCE(excluded.state, pull_requests.state),
+            head_ref = COALESCE(excluded.head_ref, pull_requests.head_ref),
+            base_ref = COALESCE(excluded.base_ref, pull_requests.base_ref),
+            head_sha = COALESCE(excluded.head_sha, pull_requests.head_sha),
             confidence = excluded.confidence,
             link_source = excluded.link_source,
             updated_at_ms = excluded.updated_at_ms,
-            source_id = excluded.source_id,
+            source_id = COALESCE(excluded.source_id, pull_requests.source_id),
             visibility = excluded.visibility,
             fidelity = excluded.fidelity,
             sync_state = excluded.sync_state,
@@ -7607,6 +7607,45 @@ mod tests {
             store.list_pull_requests().unwrap()[0].title.as_deref(),
             Some("Rich storage")
         );
+    }
+
+    #[test]
+    fn partial_pull_request_upsert_preserves_existing_rich_metadata() {
+        let temp = tempdir();
+        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let workspace =
+            git_workspace(Uuid::parse_str("018f45d0-0000-7000-8000-00000000c005").unwrap());
+        let workspace_id = store.upsert_vcs_workspace(&workspace).unwrap();
+        let existing = github_pr(
+            Uuid::parse_str("018f45d0-0000-7000-8000-00000000c006").unwrap(),
+            Some(workspace_id),
+        );
+        store.upsert_pull_request(&existing).unwrap();
+
+        let mut partial = github_pr(
+            Uuid::parse_str("018f45d0-0000-7000-8000-00000000c007").unwrap(),
+            None,
+        );
+        partial.title = None;
+        partial.state = None;
+        partial.head_ref = None;
+        partial.base_ref = None;
+        partial.head_sha = None;
+        partial.sync.fidelity = Fidelity::Partial;
+
+        let pr_id = store.upsert_pull_request(&partial).unwrap();
+        assert_eq!(pr_id, existing.id);
+        let stored = store.list_pull_requests().unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].vcs_workspace_id, Some(workspace_id));
+        assert_eq!(stored[0].title.as_deref(), Some("Rich storage"));
+        assert_eq!(stored[0].state.as_deref(), Some("open"));
+        assert_eq!(
+            stored[0].head_ref.as_deref(),
+            Some("ctx/wr-finish-store-search")
+        );
+        assert_eq!(stored[0].base_ref.as_deref(), Some("main"));
+        assert_eq!(stored[0].head_sha.as_deref(), Some("abcdef"));
     }
 
     #[test]

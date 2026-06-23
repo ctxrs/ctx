@@ -1610,6 +1610,75 @@ fn dashboard_export_writes_static_local_html_report() {
 }
 
 #[test]
+fn report_and_dashboard_reclassify_evidence_against_current_git_head() {
+    let temp = tempdir();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init"]);
+    git(&repo, &["config", "user.email", "ctx@example.test"]);
+    git(&repo, &["config", "user.name", "ctx"]);
+    fs::write(repo.join("README.md"), "initial\n").unwrap();
+    git(&repo, &["add", "README.md"]);
+    git(&repo, &["commit", "-m", "initial"]);
+
+    let mut create = ctx(&temp);
+    create.current_dir(&repo).args([
+        "record",
+        "--title",
+        "Freshness regression",
+        "--body",
+        "capture evidence freshness",
+        "--json",
+    ]);
+    let item = json_output(&mut create);
+    let record_id = item["record"]["id"].as_str().unwrap();
+
+    ctx(&temp)
+        .current_dir(&repo)
+        .args(["evidence", "run", "--record", record_id, "sh", "-c", "true"])
+        .assert()
+        .success();
+
+    fs::write(repo.join("README.md"), "changed\n").unwrap();
+    git(&repo, &["add", "README.md"]);
+    git(&repo, &["commit", "-m", "change head"]);
+
+    let mut report = ctx(&temp);
+    report
+        .current_dir(&repo)
+        .args(["report", "--format", "json"]);
+    let report_json = json_output(&mut report);
+    assert_eq!(
+        report_json["report_v2"]["evidence_metadata"][0]["freshness"],
+        "stale"
+    );
+    assert!(
+        report_json["report_v2"]["evidence_metadata"][0]["stale_reason"]
+            .as_str()
+            .unwrap()
+            .contains("current VCS HEAD or tree differs")
+    );
+
+    let output_dir = temp.path().join("dashboard-stale");
+    ctx(&temp)
+        .current_dir(&repo)
+        .args([
+            "dashboard",
+            "export",
+            "--output",
+            output_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let data = dashboard_data(&output_dir);
+    assert_eq!(data["evidence_metadata"][0]["freshness"], "stale");
+    assert!(data["evidence_metadata"][0]["stale_reason"]
+        .as_str()
+        .unwrap()
+        .contains("current VCS HEAD or tree differs"));
+}
+
+#[test]
 fn evidence_run_is_recorded() {
     let temp = tempdir();
     let item = record(&temp, "Run tests", "capture command output", &["evidence"]);
