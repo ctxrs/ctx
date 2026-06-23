@@ -1,6 +1,6 @@
 # Work Recorder Provider Release Implementation Status
 
-Last updated: 2026-06-23T21:55:49Z.
+Last updated: 2026-06-23T21:59:22Z.
 
 ## Current Integration Branch
 
@@ -257,6 +257,28 @@ ADE desktop release, `ade.ctx.rs` migration, production hosted launch, and
   - `cargo-lowio test -p work-record-store
     store_open_and_blob_writes_repair_private_permissions -- --test-threads 1`
     passed.
+- Integrated docs/site naming:
+  `c80af9a docs: align ctx work records naming`.
+- Manager follow-up fixes:
+  - Resolved release-doc conflicts in favor of `ctx-release-artifacts` and the
+    `ctx/records/release-candidate/v0.1.0/<git-commit>` public staging layout.
+  - Renamed the README banner asset to avoid `work-record` in the public path.
+  - Replaced avoidable dashboard demo references to internal `work-record-*`
+    crate/app names.
+  - Narrowed the product-decision scan to allow the machine-readable provider
+    support matrix to carry internal source paths.
+  - Rebuilt `apps/work-recorder-dashboard/dist` and updated the
+    `work-record-report` embedded dashboard asset list for the new hash.
+- Docs/site validations:
+  - `bash scripts/check-docs.sh` passed.
+  - `git diff --check` passed after merge conflict resolution and follow-up
+    cleanup.
+  - `npm run build` in `apps/work-recorder-dashboard` passed.
+  - `bash scripts/check.sh product-decisions` now fails only on setup/status/
+    dashboard/uninstall golden output markers, setup idempotency marker, and
+    dashboard interactive/headless/`--no-open` coverage markers. The stale
+    public `work-record`, `~/.ctx/work-record`, `blobs`, and `inbox` wording
+    blockers are cleared.
 
 Concurrent worker Cargo/rustc processes were stopped by the manager after they
 violated the host-level resource-safety rule. Remaining validation should be

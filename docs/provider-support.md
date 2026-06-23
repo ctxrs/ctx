@@ -14,7 +14,7 @@ the local Git/jj/gh wrapper shim path installed by `ctx setup`.
 Authoritative machine-readable metadata lives in
 `docs/provider-support-matrix.json`. The shared provider adapter and normalized
 envelope contract is described in `docs/provider-adapter-api.md` and backed by
-typed `work-record-core` provider structs.
+typed provider structs.
 
 The public release taxonomy uses hyphenated labels. The current
 machine-readable metadata serializes equivalent implementation status ids in

@@ -159,6 +159,7 @@ scan_public_product_text() {
 
   [[ -e "${search_root}" ]] || return 0
   if rg -n --glob '!**/node_modules/**' --glob '!**/dist/**' --glob '!target/**' --glob '!Cargo.lock' \
+    --glob '!docs/provider-support-matrix.json' \
     -e "${pattern}" "${search_root}" > "${output}" 2>/dev/null; then
     fail_product_decision "${description}; see ${output}"
   else

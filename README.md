@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/readme/work-record-banner.png" alt="ctx records agent work" />
+  <img src="assets/readme/ctx-records-banner.png" alt="ctx records agent work" />
 </p>
 
 ctx records agent work as durable local **work records** that can be searched,

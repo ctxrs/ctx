@@ -57,7 +57,7 @@ available, live/gated E2E runs for these providers were blocked on this machine.
   - `tests/fixtures/provider/gemini.jsonl`
   - `tests/fixtures/provider/cursor.jsonl`
 - Focused tests:
-  - `cargo test -p work-record-capture provider_fixture_replay_supports_antigravity_gemini_and_cursor`
+  - `cargo test -p ctx --test cli provider_fixture_import_supports_additional_p0_fixture_providers`
   - `cargo test -p ctx-cli provider_fixture_import_supports_antigravity_gemini_and_cursor`
   - `cargo test -p ctx-cli import_local_providers_imports_codex_history_and_reports_unsupported_native_hooks`
   - `cargo test -p ctx-cli provider_fixture_import_supports_additional_p0_fixture_providers`

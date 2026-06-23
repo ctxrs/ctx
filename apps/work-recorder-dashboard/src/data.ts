@@ -70,7 +70,7 @@ export const sampleDashboardData: DashboardData = {
     {
       id: "cmd-test",
       record_id: "rec-dashboard",
-      command: "cargo test -p work-record-report",
+      command: "cargo test -p ctx --test cli dashboard_export_includes_records",
       exit_code: 0,
       duration_ms: 3200,
       started_at: "2026-06-23T12:21:00Z",
@@ -190,7 +190,7 @@ export const sampleDashboardData: DashboardData = {
       host: "github",
       owner: "ctxrs",
       name: "ctx",
-      monorepo_subpath: "apps/work-recorder-dashboard"
+      monorepo_subpath: "apps/dashboard"
     }
   ],
   vcs_changes: [
@@ -251,7 +251,7 @@ export const sampleDashboardData: DashboardData = {
     {
       id: "file-1",
       work_record_id: "rec-dashboard",
-      path: "apps/work-recorder-dashboard/src/App.tsx",
+      path: "apps/dashboard/src/App.tsx",
       change_kind: "modified",
       line_count_delta: 420,
       confidence: "explicit"
