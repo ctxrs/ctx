@@ -2204,6 +2204,7 @@ fn import_local_providers(store: &mut Store) -> Result<LocalProviderImportReport
     ));
     entries.push(provider_unsupported_entry(
         "copilot_cli",
+        "detected-unsupported",
         discover_first_existing(&[
             &[".copilot"],
             &[".config", "gh", "extensions", "gh-copilot"],
@@ -2212,11 +2213,13 @@ fn import_local_providers(store: &mut Store) -> Result<LocalProviderImportReport
     ));
     entries.push(provider_unsupported_entry(
         "factory_droid",
+        "detected-unsupported",
         discover_first_existing_any(&[&[".factory"]], &[&[".factory"]]),
         "Factory Droid configuration can be detected, but no ctx Droid session parser, hook adapter, or droid exec JSON-RPC adapter is implemented",
     ));
     entries.push(provider_unsupported_entry(
         "goose",
+        "detected-unsupported",
         discover_first_existing(&[
             &[".config", "goose", "config.yaml"],
             &[".local", "share", "goose", "sessions", "sessions.db"],
@@ -2226,6 +2229,7 @@ fn import_local_providers(store: &mut Store) -> Result<LocalProviderImportReport
     ));
     entries.push(provider_unsupported_entry(
         "amp",
+        "detected-unsupported",
         discover_first_existing_any(
             &[
                 &[".config", "amp", "settings.json"],
@@ -2237,6 +2241,7 @@ fn import_local_providers(store: &mut Store) -> Result<LocalProviderImportReport
     ));
     entries.push(provider_unsupported_entry(
         "openhands",
+        "detected-unsupported",
         discover_first_existing(&[
             &[".openhands", "conversations"],
             &[".openhands", "settings.json"],
@@ -2246,6 +2251,7 @@ fn import_local_providers(store: &mut Store) -> Result<LocalProviderImportReport
     ));
     entries.push(provider_unsupported_entry(
         "qwen",
+        "detected-unsupported",
         discover_first_existing_any(
             &[&[".qwen", "settings.json"], &[".qwen", "tmp"], &[".qwen"]],
             &[&[".qwen"]],
@@ -2254,6 +2260,7 @@ fn import_local_providers(store: &mut Store) -> Result<LocalProviderImportReport
     ));
     entries.push(provider_unsupported_entry(
         "mistral",
+        "detected-unsupported",
         discover_first_existing_any(
             &[&[".vibe", "config.toml"], &[".vibe"]],
             &[&[".vibe", "config.toml"], &[".vibe"]],
@@ -2262,16 +2269,19 @@ fn import_local_providers(store: &mut Store) -> Result<LocalProviderImportReport
     ));
     entries.push(provider_unsupported_entry(
         "kimi",
+        "detected-unsupported",
         discover_first_existing(&[&[".kimi-code", "config.toml"], &[".kimi-code"]]),
         "Kimi Code local data can be detected, but no ctx Kimi session-record parser, hook adapter, or ACP adapter is implemented",
     ));
     entries.push(provider_unsupported_entry(
         "cagent",
+        "detected-unsupported",
         discover_first_existing(&[&[".cagent", "cagent.debug.log"], &[".cagent"]]),
         "Docker cagent local state/log paths can be detected, but debug logs are not treated as a stable transcript import contract",
     ));
     entries.push(provider_unsupported_entry(
         "aider",
+        "detected-unsupported",
         discover_first_existing_any(
             &[&[".aider.conf.yml"]],
             &[
@@ -2284,6 +2294,7 @@ fn import_local_providers(store: &mut Store) -> Result<LocalProviderImportReport
     ));
     entries.push(provider_unsupported_entry(
         "cline_roo",
+        "detected-unsupported",
         discover_first_existing(&[
             &[
                 ".config",
@@ -2312,6 +2323,7 @@ fn import_local_providers(store: &mut Store) -> Result<LocalProviderImportReport
     ));
     entries.push(provider_unsupported_entry(
         "continue_cody",
+        "detected-unsupported",
         discover_first_existing(&[
             &[".continue", "config.yaml"],
             &[".continue", "logs"],
@@ -2334,6 +2346,7 @@ fn import_local_providers(store: &mut Store) -> Result<LocalProviderImportReport
     ));
     entries.push(provider_unsupported_entry(
         "auggie",
+        "detected-unsupported",
         discover_first_existing_any(
             &[&[".augment", "settings.json"], &[".augment"]],
             &[&[".augment", "settings.json"], &[".augment"]],
@@ -2342,11 +2355,13 @@ fn import_local_providers(store: &mut Store) -> Result<LocalProviderImportReport
     ));
     entries.push(provider_unsupported_entry(
         "junie",
+        "detected-unsupported",
         discover_first_existing(&[&[".junie", "allowlist.json"], &[".junie"]]),
         "Junie local configuration can be detected, but no ctx prompt/session-history parser is implemented",
     ));
     entries.push(provider_unsupported_entry(
         "kilo",
+        "detected-unsupported",
         discover_first_existing(&[
             &[
                 ".config",
@@ -2367,6 +2382,7 @@ fn import_local_providers(store: &mut Store) -> Result<LocalProviderImportReport
     ));
     entries.push(provider_unsupported_entry(
         "swe_agent",
+        "detected-unsupported",
         discover_first_existing_any(&[&[".swe-agent"]], &[&["trajectories"]]),
         "SWE-agent trajectory output can be detected, but no ctx .traj parser is implemented",
     ));
@@ -2405,6 +2421,13 @@ fn import_pi_session_with_record(
     input: &Path,
 ) -> Result<(ProviderImportSummary, Option<WorkRecord>)> {
     let import_record_id = pi_session_import_record_id(input);
+    let provisional_record =
+        pi_session_import_record(import_record_id, input, &ProviderImportSummary::default());
+    match store.get_record(import_record_id) {
+        Ok(_) => {}
+        Err(StoreError::NotFound(_)) => store.upsert_record(&provisional_record)?,
+        Err(err) => return Err(err.into()),
+    }
     let summary = import_pi_session_jsonl(
         input,
         store,

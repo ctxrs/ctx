@@ -1086,14 +1086,15 @@ fn pi_session_capture(
     let event = entry.map(|entry| pi_session_event(&entry, line_number));
     let cursor = event
         .as_ref()
-        .and_then(|event| event.cursor.as_ref())
-        .map(|cursor| ProviderCursorRange {
-            before: None,
-            after: Some(ProviderCursorCheckpoint {
-                stream: provider_cursor_stream(CaptureProvider::Pi, "pi_session_jsonl"),
-                cursor: cursor.clone(),
-                observed_at: event.occurred_at,
-            }),
+        .and_then(|event| {
+            event.cursor.as_ref().map(|cursor| ProviderCursorRange {
+                before: None,
+                after: Some(ProviderCursorCheckpoint {
+                    stream: provider_cursor_stream(CaptureProvider::Pi, "pi_session_jsonl"),
+                    cursor: cursor.clone(),
+                    observed_at: event.occurred_at,
+                }),
+            })
         });
 
     ProviderCaptureEnvelope {
@@ -2624,7 +2625,7 @@ mod tests {
         assert_eq!(first.failed, 0, "{:?}", first.failures);
         assert_eq!(first.imported_sessions, 1);
         assert_eq!(first.imported_events, 5);
-        assert_eq!(first.redacted, 1);
+        assert_eq!(first.redacted, 3);
 
         let second = import_pi_session_jsonl(
             &fixture,

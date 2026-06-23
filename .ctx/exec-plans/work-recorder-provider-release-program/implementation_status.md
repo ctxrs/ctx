@@ -1,6 +1,6 @@
 # Work Recorder Provider Release Implementation Status
 
-Last updated: 2026-06-23T21:30:24Z.
+Last updated: 2026-06-23T21:38:31Z.
 
 ## Current Integration Branch
 
@@ -161,6 +161,53 @@ ADE desktop release, `ade.ctx.rs` migration, production hosted launch, and
   - `cargo-lowio test -p ctx --test cli
     import_local_providers_imports_codex_history_and_reports_unsupported_native_hooks
     -- --test-threads 1` passed.
+- Integrated P0 provider coverage:
+  `dc6ca16 Integrate P0 provider coverage`.
+- P0 provider integration decisions:
+  - Preserved the shared provider capture contract and ported Pi session JSONL
+    into the common `ProviderCaptureAdapter` path.
+  - Preserved the long-tail provider inventory from `48b7b23` while adding P0
+    Codex/Pi supported-import rows and fixture-only rows for Claude Code,
+    OpenCode, Antigravity CLI, Gemini CLI, and Cursor.
+  - Kept passive provider-native hooks explicitly out of scope for the current
+    public candidate. Passive capture remains limited to local Git/jj/gh shim
+    command activity.
+- Manager follow-up fixes:
+  - Fixed Pi session cursor construction to read `occurred_at` from the
+    concrete provider event envelope instead of an `Option`.
+  - Updated the Pi session redaction-count test to match the stricter merged
+    privacy behavior.
+  - Added provisional Work Record creation for explicit Pi session imports,
+    matching the existing provider fixture import path and avoiding dangling
+    `work_record_id` foreign keys during session/event persistence.
+  - Reconciled the provider support status helper signature with long-tail
+    provider rows by assigning them the public `detected-unsupported` status.
+- P0 provider focused validations run serially under
+  `/usr/local/bin/cargo-lowio` with `TMPDIR=$PWD/target/tmp`:
+  - `cargo-lowio test -p work-record-capture
+    pi_session_import_replays_documented_session_jsonl_and_is_idempotent --
+    --test-threads 1` passed after the cursor/redaction fixes.
+  - `cargo-lowio test -p work-record-capture
+    provider_fixture_replay_supports_opencode_fixture -- --test-threads 1`
+    passed.
+  - `cargo-lowio test -p work-record-capture
+    provider_fixture_replay_supports_antigravity_gemini_and_cursor --
+    --test-threads 1` passed.
+  - `cargo-lowio test -p ctx --test cli
+    provider_fixture_import_supports_additional_p0_fixture_providers --
+    --test-threads 1` passed after the long-tail support-status fix.
+  - `cargo-lowio test -p ctx --test cli
+    pi_session_import_json_reports_documented_session_fidelity --
+    --test-threads 1` passed after the provisional-record fix.
+  - `cargo-lowio test -p ctx --test cli
+    import_local_providers_imports_codex_history_and_reports_unsupported_native_hooks
+    -- --test-threads 1` passed.
+  - `cargo-lowio test -p ctx --test cli
+    import_local_providers_imports_discovered_pi_sessions -- --test-threads 1`
+    passed.
+  - `cargo-lowio test -p work-record-store
+    migration_upgrades_existing_v1_mvp_store_with_rich_schema --
+    --test-threads 1` passed.
 
 Concurrent worker Cargo/rustc processes were stopped by the manager after they
 violated the host-level resource-safety rule. Remaining validation should be
