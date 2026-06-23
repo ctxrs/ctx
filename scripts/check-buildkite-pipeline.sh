@@ -152,7 +152,8 @@ validate_contract() {
   require_text "Windows script uses target tool cache" "${windows_script}" 'target\tool-cache\cargo'
   require_text "Windows script supports platform smoke" "${windows_script}" 'platform-smoke'
   require_text "Windows script supports release dry-run" "${windows_script}" 'release-dry-run'
-  require_text "Windows script uses named Cargo args" "${windows_script}" 'Run-Cargo -Args'
+  require_text "Windows script uses named Cargo args for platform smoke" "${windows_script}" 'Run-Cargo -Args (@("build", "-p", "ctx", "--bin", "ctx") + $locked)'
+  require_text "Windows script uses named Cargo args for release dry-run" "${windows_script}" 'Run-Cargo -Args (@("build", "--workspace", "--release", "--bins") + $locked)'
   require_text "FreeBSD blocker marks publishing false" "${blocker_script}" '"publishing": false'
 
   if (( contract_failures > 0 )); then
