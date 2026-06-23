@@ -581,6 +581,96 @@ exit 19
     fs::set_permissions(&cwd, permissions).unwrap();
 }
 
+#[cfg(unix)]
+#[test]
+fn installed_shim_uses_system_utilities_when_path_shadows_capture_helpers() {
+    let temp = tempdir();
+    let shim_dir = temp.path().join("shims");
+    let real_dir = temp.path().join("real");
+    fs::create_dir_all(&real_dir).unwrap();
+    write_executable(
+        &real_dir.join("git"),
+        r#"#!/bin/sh
+printf 'stdout-without-newline:%s' "$*"
+printf 'stderr-without-newline:%s' "$*" >&2
+exit 23
+"#,
+    );
+    for utility in ["cat", "date", "mkdir", "mktemp", "rm"] {
+        write_executable(
+            &real_dir.join(utility),
+            &format!(
+                r#"#!/bin/sh
+printf 'shadowed {utility} should not run\n' >&2
+exit 91
+"#
+            ),
+        );
+    }
+
+    ctx(&temp)
+        .args(["shim", "install", "--dir", shim_dir.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let path = format!(
+        "{}:{}:{}",
+        shim_dir.display(),
+        real_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let output = std::process::Command::new(shim_dir.join("git"))
+        .args(["status", "--short"])
+        .env("PATH", path)
+        .env("CTX_DATA_ROOT", temp.path())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(23));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "stdout-without-newline:status --short"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "stderr-without-newline:status --short"
+    );
+
+    ctx(&temp)
+        .args(["capture", "import", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"imported_records\": 1"))
+        .stdout(predicate::str::contains("\"imported_evidence\": 1"));
+}
+
+#[cfg(unix)]
+#[test]
+fn root_status_reports_unreadable_path_shim_without_failing() {
+    let temp = tempdir();
+    let path_dir = temp.path().join("path");
+    fs::create_dir_all(&path_dir).unwrap();
+    let unreadable = path_dir.join("git");
+    fs::write(&unreadable, "# CTX_WORK_RECORD_SHIM=1\n").unwrap();
+    let mut permissions = fs::metadata(&unreadable).unwrap().permissions();
+    permissions.set_mode(0o111);
+    fs::set_permissions(&unreadable, permissions).unwrap();
+
+    ctx(&temp)
+        .env("PATH", &path_dir)
+        .args(["status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("shim_git: unreadable"))
+        .stdout(predicate::str::contains(
+            "passive_capture_active_on_path: 0/3",
+        ));
+
+    let mut permissions = fs::metadata(&unreadable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&unreadable, permissions).unwrap();
+}
+
 #[test]
 fn root_setup_status_schema_and_validate_work() {
     let temp = tempdir();

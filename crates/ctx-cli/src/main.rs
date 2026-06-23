@@ -2552,6 +2552,7 @@ enum PassiveShimStatus {
     Active(PathBuf),
     InstalledNotActive(PathBuf),
     External(PathBuf),
+    Unreadable(PathBuf, String),
     Missing,
 }
 
@@ -2579,30 +2580,61 @@ impl PassiveShimStatus {
             Self::Active(path) => format!("installed {}", path.display()),
             Self::InstalledNotActive(path) => format!("installed_not_active {}", path.display()),
             Self::External(path) => format!("external {}", path.display()),
+            Self::Unreadable(path, error) => {
+                format!("unreadable {} ({error})", path.display())
+            }
             Self::Missing => "missing".to_owned(),
         }
     }
 }
 
+enum ShimFileStatus {
+    CtxShim,
+    Other,
+    Unreadable(String),
+}
+
+fn classify_shim_file(path: &Path) -> ShimFileStatus {
+    match is_ctx_shim(path) {
+        Ok(true) => ShimFileStatus::CtxShim,
+        Ok(false) => ShimFileStatus::Other,
+        Err(error) => ShimFileStatus::Unreadable(error.to_string()),
+    }
+}
+
 fn passive_shim_status(tool: ShimTool, configured_dir: &Path) -> Result<PassiveShimStatus> {
     let configured = configured_dir.join(tool.as_str());
+    let configured_status = configured
+        .is_file()
+        .then(|| classify_shim_file(&configured));
     if let Some(path_var) = env::var_os("PATH") {
         for dir in env::split_paths(&path_var) {
             let candidate = dir.join(tool.as_str());
             if candidate.is_file() {
-                if is_ctx_shim(&candidate)? {
-                    return Ok(PassiveShimStatus::Active(candidate));
+                match classify_shim_file(&candidate) {
+                    ShimFileStatus::CtxShim => return Ok(PassiveShimStatus::Active(candidate)),
+                    ShimFileStatus::Other => {
+                        if matches!(&configured_status, Some(ShimFileStatus::CtxShim)) {
+                            return Ok(PassiveShimStatus::InstalledNotActive(configured));
+                        }
+                        return Ok(PassiveShimStatus::External(candidate));
+                    }
+                    ShimFileStatus::Unreadable(error) => {
+                        return Ok(PassiveShimStatus::Unreadable(candidate, error));
+                    }
                 }
-                if configured.is_file() && is_ctx_shim(&configured)? {
-                    return Ok(PassiveShimStatus::InstalledNotActive(configured));
-                }
-                return Ok(PassiveShimStatus::External(candidate));
             }
         }
     }
 
-    if configured.is_file() && is_ctx_shim(&configured)? {
-        return Ok(PassiveShimStatus::InstalledNotActive(configured));
+    match configured_status {
+        Some(ShimFileStatus::CtxShim) => {
+            return Ok(PassiveShimStatus::InstalledNotActive(configured));
+        }
+        Some(ShimFileStatus::Unreadable(error)) => {
+            return Ok(PassiveShimStatus::Unreadable(configured, error));
+        }
+        Some(ShimFileStatus::Other) | None => {}
     }
 
     Ok(PassiveShimStatus::Missing)
@@ -2612,11 +2644,28 @@ fn wrapper_script(tool: ShimTool, ctx_bin: &Path) -> Result<String> {
     let tool_name = tool.as_str();
     let ctx_bin = shell_escape_path(ctx_bin);
     Ok(format!(
-        r#"#!/bin/sh
+r#"#!/bin/sh
 # CTX_WORK_RECORD_SHIM=1
 tool="{tool_name}"
-shim_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+case "$0" in
+    */*) shim_script_dir=${{0%/*}} ;;
+    *) shim_script_dir=. ;;
+esac
+shim_dir=$(CDPATH= cd -- "$shim_script_dir" && pwd)
 ctx_bin="${{CTX_SHIM_CTX_BIN:-{ctx_bin}}}"
+ctx_cat=$(command -p -v cat 2>/dev/null || command -v cat 2>/dev/null || printf '%s\n' cat)
+ctx_date=$(command -p -v date 2>/dev/null || command -v date 2>/dev/null || printf '%s\n' date)
+ctx_mkdir=$(command -p -v mkdir 2>/dev/null || command -v mkdir 2>/dev/null || printf '%s\n' mkdir)
+ctx_mktemp=$(command -p -v mktemp 2>/dev/null || command -v mktemp 2>/dev/null || printf '%s\n' mktemp)
+ctx_rm=$(command -p -v rm 2>/dev/null || command -v rm 2>/dev/null || printf '%s\n' rm)
+ctx_now_ms() {{
+    seconds=$("$ctx_date" +%s 2>/dev/null || printf '%s\n' 0)
+    millis=$("$ctx_date" +%s%3N 2>/dev/null || printf '%s\n' "")
+    case "$millis" in
+        ""|*[!0-9]*) printf '%s000\n' "$seconds" ;;
+        *) printf '%s\n' "$millis" ;;
+    esac
+}}
 old_ifs=$IFS
 IFS=:
 clean_path=
@@ -2646,22 +2695,22 @@ for tmpbase in "${{CTX_SHIM_TMPDIR:-}}" "${{CTX_DATA_ROOT:-}}" "${{TMPDIR:-}}" /
     if [ -z "$tmpbase" ]; then
         continue
     fi
-    mkdir -p "$tmpbase" 2>/dev/null || continue
-    tmpdir=$(mktemp -d "$tmpbase/ctx-shim-$tool.XXXXXX" 2>/dev/null) && break
+    "$ctx_mkdir" -p "$tmpbase" 2>/dev/null || continue
+    tmpdir=$("$ctx_mktemp" -d "$tmpbase/ctx-shim-$tool.XXXXXX" 2>/dev/null) && break
 done
 if [ -z "$tmpdir" ]; then
     exec "$real_cmd" "$@"
 fi
 stdout_file=$tmpdir/stdout
 stderr_file=$tmpdir/stderr
-started_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-start_ms=$(date +%s%3N 2>/dev/null || printf '%s000' "$(date +%s)")
+started_at=$("$ctx_date" -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || printf '%s\n' "1970-01-01T00:00:00Z")
+start_ms=$(ctx_now_ms)
 "$real_cmd" "$@" >"$stdout_file" 2>"$stderr_file"
 status=$?
-end_ms=$(date +%s%3N 2>/dev/null || printf '%s000' "$(date +%s)")
+end_ms=$(ctx_now_ms)
 duration_ms=$((end_ms - start_ms))
-cat "$stdout_file"
-cat "$stderr_file" >&2
+"$ctx_cat" "$stdout_file"
+"$ctx_cat" "$stderr_file" >&2
 "$ctx_bin" capture write-shim-command \
     --provider "$tool" \
     --exit-code "$status" \
@@ -2673,7 +2722,7 @@ cat "$stderr_file" >&2
     --real-command "$real_cmd" \
     --shim-dir "$shim_dir" \
     -- "$tool" "$@" >/dev/null 2>&1 || true
-rm -rf "$tmpdir"
+"$ctx_rm" -rf "$tmpdir" >/dev/null 2>&1 || true
 exit "$status"
 "#
     ))
