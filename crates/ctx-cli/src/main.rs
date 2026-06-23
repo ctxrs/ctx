@@ -42,6 +42,8 @@ const DEFAULT_EVIDENCE_MAX_OUTPUT_BYTES: usize = 64 * 1024;
 const DEFAULT_EVIDENCE_TIMEOUT_SECONDS: u64 = 300;
 const DEFAULT_SHIM_MAX_OUTPUT_BYTES: usize = 64 * 1024;
 const TIMEOUT_EXIT_CODE: i32 = 124;
+const SHELL_RC_BEGIN: &str = "# >>> ctx work recorder passive capture >>>";
+const SHELL_RC_END: &str = "# <<< ctx work recorder passive capture <<<";
 
 #[derive(Debug, Parser)]
 #[command(name = "ctx", about = "Work Recorder command line")]
@@ -55,14 +57,11 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum CommandRoot {
     #[command(about = "Create the local Work Recorder data store")]
-    Setup,
+    Setup(SetupArgs),
     #[command(about = "Show local Work Recorder workspace status")]
     Status,
     #[command(about = "Remove local Work Recorder product data")]
-    Uninstall {
-        #[arg(long)]
-        yes: bool,
-    },
+    Uninstall(UninstallArgs),
     #[command(about = "Print the local SQLite schema")]
     Schema,
     #[command(about = "Create a work record")]
@@ -121,20 +120,31 @@ struct WorkspaceCommand {
 #[derive(Debug, Subcommand)]
 enum WorkspaceSubcommand {
     #[command(about = "Create the local Work Recorder data store")]
-    Setup,
+    Setup(SetupArgs),
     #[command(about = "Show local Work Recorder workspace status")]
     Status,
     #[command(about = "Remove local Work Recorder product data")]
-    Uninstall {
-        #[arg(long)]
-        yes: bool,
-    },
+    Uninstall(UninstallArgs),
 }
 
 #[derive(Debug, Args)]
 struct WorkCommand {
     #[command(subcommand)]
     command: WorkSubcommand,
+}
+
+#[derive(Debug, Args, Clone)]
+struct SetupArgs {
+    #[arg(long, value_name = "FILE")]
+    shell_rc: Option<PathBuf>,
+}
+
+#[derive(Debug, Args, Clone)]
+struct UninstallArgs {
+    #[arg(long)]
+    yes: bool,
+    #[arg(long, value_name = "FILE")]
+    shell_rc: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -308,6 +318,8 @@ enum CaptureSubcommand {
     ImportProvider(CaptureImportProviderArgs),
     #[command(about = "Import a Codex prompt history JSONL file")]
     ImportCodexHistory(CaptureImportCodexHistoryArgs),
+    #[command(about = "Discover and safely import supported local provider history")]
+    ImportLocalProviders(CaptureImportLocalProvidersArgs),
 }
 
 #[derive(Debug, Args)]
@@ -346,6 +358,12 @@ struct CaptureImportProviderArgs {
 struct CaptureImportCodexHistoryArgs {
     #[arg(long)]
     input: PathBuf,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct CaptureImportLocalProvidersArgs {
     #[arg(long)]
     json: bool,
 }
@@ -411,12 +429,24 @@ enum ShimSubcommand {
     Env(ShimDirArgs),
     #[command(about = "Remove local wrapper scripts created by ctx")]
     Uninstall(ShimDirArgs),
+    #[command(about = "Add a reversible ctx PATH block to a shell rc file")]
+    ActivateShell(ShimShellArgs),
+    #[command(about = "Remove the reversible ctx PATH block from a shell rc file")]
+    DeactivateShell(ShimShellArgs),
 }
 
 #[derive(Debug, Args)]
 struct ShimDirArgs {
     #[arg(long)]
     dir: PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct ShimShellArgs {
+    #[arg(long)]
+    dir: PathBuf,
+    #[arg(long, value_name = "FILE")]
+    shell_rc: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -550,10 +580,12 @@ fn main() -> Result<()> {
         .context("resolve ctx data root")?;
 
     match cli.command {
-        CommandRoot::Setup => run_workspace_subcommand(WorkspaceSubcommand::Setup, data_root),
+        CommandRoot::Setup(args) => {
+            run_workspace_subcommand(WorkspaceSubcommand::Setup(args), data_root)
+        }
         CommandRoot::Status => run_workspace_subcommand(WorkspaceSubcommand::Status, data_root),
-        CommandRoot::Uninstall { yes } => {
-            run_workspace_subcommand(WorkspaceSubcommand::Uninstall { yes }, data_root)
+        CommandRoot::Uninstall(args) => {
+            run_workspace_subcommand(WorkspaceSubcommand::Uninstall(args), data_root)
         }
         CommandRoot::Schema => run_work_subcommand(WorkSubcommand::Schema, data_root),
         CommandRoot::Record(args) => run_work_subcommand(WorkSubcommand::Record(args), data_root),
@@ -856,11 +888,14 @@ fn run_workspace(command: WorkspaceCommand, data_root: PathBuf) -> Result<()> {
 
 fn run_workspace_subcommand(command: WorkspaceSubcommand, data_root: PathBuf) -> Result<()> {
     match command {
-        WorkspaceSubcommand::Setup => {
+        WorkspaceSubcommand::Setup(args) => {
             let db_path = database_path(data_root.clone());
             let store = Store::open(&db_path)?;
             let shim_dir = default_shim_dir(&data_root);
             install_shims(&shim_dir)?;
+            if let Some(shell_rc) = args.shell_rc.as_ref() {
+                activate_shell_rc(shell_rc, &shim_dir)?;
+            }
             println!("Work Recorder workspace ready");
             println!("database: {}", store.path().display());
             println!("passive_capture_shims: {}", shim_dir.display());
@@ -868,6 +903,9 @@ fn run_workspace_subcommand(command: WorkspaceSubcommand, data_root: PathBuf) ->
                 "activate: export PATH={}:$PATH",
                 shell_escape_path(&shim_dir)
             );
+            if let Some(shell_rc) = args.shell_rc.as_ref() {
+                println!("shell_rc: {}", shell_rc.display());
+            }
         }
         WorkspaceSubcommand::Status => {
             let db_path = database_path(data_root.clone());
@@ -890,18 +928,28 @@ fn run_workspace_subcommand(command: WorkspaceSubcommand, data_root: PathBuf) ->
             println!("spool_processing: {}", counts.processing);
             println!("spool_done: {}", counts.done);
             println!("spool_failed: {}", counts.failed);
+            let mut active = 0;
             for tool in ShimTool::ALL {
-                println!(
-                    "shim_{}: {}",
-                    tool.as_str(),
-                    passive_shim_status(tool, &shim_dir)?.display()
-                );
+                let status = passive_shim_status(tool, &shim_dir)?;
+                if matches!(status, PassiveShimStatus::Active(_)) {
+                    active += 1;
+                }
+                println!("shim_{}: {}", tool.as_str(), status.display());
             }
+            println!(
+                "passive_capture_active_on_path: {active}/{}",
+                ShimTool::ALL.len()
+            );
         }
-        WorkspaceSubcommand::Uninstall { yes } => {
-            if !yes {
+        WorkspaceSubcommand::Uninstall(args) => {
+            if !args.yes {
                 return Err(anyhow!("refusing to uninstall without --yes"));
             }
+            if let Some(shell_rc) = args.shell_rc.as_ref() {
+                deactivate_shell_rc(shell_rc)?;
+            }
+            let shim_dir = default_shim_dir(&data_root);
+            let _ = uninstall_shims(&shim_dir);
             let dir = work_record_dir(data_root);
             if dir.exists() {
                 fs::remove_dir_all(&dir)?;
@@ -1472,25 +1520,7 @@ fn run_capture(command: CaptureCommand, data_root: PathBuf) -> Result<()> {
         CaptureSubcommand::ImportCodexHistory(args) => {
             let mut store = Store::open(database_path(data_root.clone()))?;
             auto_import_pending_spool(&data_root, &mut store)?;
-            let import_record_id = codex_history_import_record_id(&args.input);
-            let summary = import_codex_history_jsonl(
-                &args.input,
-                &mut store,
-                CodexHistoryImportOptions {
-                    source_path: Some(args.input.clone()),
-                    ..CodexHistoryImportOptions::default()
-                },
-            )?;
-            let record = if summary.imported_sessions > 0 || summary.imported_events > 0 {
-                Some(upsert_codex_history_import_summary_record(
-                    &store,
-                    import_record_id,
-                    &args.input,
-                    &summary,
-                )?)
-            } else {
-                None
-            };
+            let (summary, record) = import_codex_history_with_record(&mut store, &args.input)?;
             if args.json {
                 let mut import = serde_json::to_value(&summary)?;
                 redact_json_strings(&mut import);
@@ -1529,8 +1559,231 @@ fn run_capture(command: CaptureCommand, data_root: PathBuf) -> Result<()> {
                 ));
             }
         }
+        CaptureSubcommand::ImportLocalProviders(args) => {
+            let mut store = Store::open(database_path(data_root.clone()))?;
+            auto_import_pending_spool(&data_root, &mut store)?;
+            let report = import_local_providers(&mut store)?;
+            if args.json {
+                print_json(report.to_json())?;
+            } else {
+                report.print_human();
+            }
+        }
     }
     Ok(())
+}
+
+struct LocalProviderImportReport {
+    entries: Vec<LocalProviderEntry>,
+}
+
+struct LocalProviderEntry {
+    provider: &'static str,
+    status: &'static str,
+    path: Option<PathBuf>,
+    source_format: Option<&'static str>,
+    fidelity: Option<&'static str>,
+    imported_sessions: usize,
+    imported_events: usize,
+    skipped: usize,
+    failed: usize,
+    blocker: Option<String>,
+}
+
+impl LocalProviderImportReport {
+    fn to_json(&self) -> serde_json::Value {
+        let providers: Vec<_> = self
+            .entries
+            .iter()
+            .map(|entry| {
+                let mut value = serde_json::json!({
+                    "provider": entry.provider,
+                    "status": entry.status,
+                    "source_format": entry.source_format,
+                    "fidelity": entry.fidelity,
+                    "imported_sessions": entry.imported_sessions,
+                    "imported_events": entry.imported_events,
+                    "skipped": entry.skipped,
+                    "failed": entry.failed,
+                    "blocker": entry.blocker,
+                });
+                if let Some(path) = entry.path.as_ref() {
+                    value["path"] = serde_json::Value::String(redact_share_safe_markers(
+                        &path.display().to_string(),
+                    ));
+                }
+                value
+            })
+            .collect();
+        serde_json::json!({
+            "schema_version": 1,
+            "share_safe": true,
+            "providers": providers,
+        })
+    }
+
+    fn print_human(&self) {
+        for entry in &self.entries {
+            match entry.path.as_ref() {
+                Some(path) => println!("{}: {} {}", entry.provider, entry.status, path.display()),
+                None => println!("{}: {}", entry.provider, entry.status),
+            }
+            if let Some(format) = entry.source_format {
+                println!("{}_source_format: {}", entry.provider, format);
+            }
+            if let Some(fidelity) = entry.fidelity {
+                println!("{}_fidelity: {}", entry.provider, fidelity);
+            }
+            if entry.imported_sessions > 0
+                || entry.imported_events > 0
+                || entry.skipped > 0
+                || entry.failed > 0
+            {
+                println!(
+                    "{}_imported: sessions={} events={} skipped={} failed={}",
+                    entry.provider,
+                    entry.imported_sessions,
+                    entry.imported_events,
+                    entry.skipped,
+                    entry.failed
+                );
+            }
+            if let Some(blocker) = &entry.blocker {
+                println!("{}_blocker: {}", entry.provider, blocker);
+            }
+        }
+    }
+}
+
+fn import_local_providers(store: &mut Store) -> Result<LocalProviderImportReport> {
+    let mut entries = Vec::new();
+
+    if let Some(path) = discover_codex_history_path() {
+        match import_codex_history_with_record(store, &path) {
+            Ok((summary, _)) => entries.push(LocalProviderEntry {
+                provider: "codex",
+                status: "imported",
+                path: Some(path),
+                source_format: Some("codex_history_jsonl"),
+                fidelity: Some("summary_only"),
+                imported_sessions: summary.imported_sessions,
+                imported_events: summary.imported_events,
+                skipped: summary.skipped,
+                failed: summary.failed,
+                blocker: Some(
+                    "prompt history only; no assistant replies, tool calls, command output, artifacts, or child sessions"
+                        .to_owned(),
+                ),
+            }),
+            Err(err) => entries.push(LocalProviderEntry {
+                provider: "codex",
+                status: "failed",
+                path: Some(path),
+                source_format: Some("codex_history_jsonl"),
+                fidelity: Some("summary_only"),
+                imported_sessions: 0,
+                imported_events: 0,
+                skipped: 0,
+                failed: 1,
+                blocker: Some(err.to_string()),
+            }),
+        }
+    } else {
+        entries.push(LocalProviderEntry {
+            provider: "codex",
+            status: "missing",
+            path: default_home_path(&[".codex", "history.jsonl"]),
+            source_format: Some("codex_history_jsonl"),
+            fidelity: Some("summary_only"),
+            imported_sessions: 0,
+            imported_events: 0,
+            skipped: 0,
+            failed: 0,
+            blocker: Some("known Codex prompt history file was not found".to_owned()),
+        });
+    }
+
+    entries.push(provider_unsupported_entry(
+        "claude",
+        discover_first_existing(&[&[".claude", "projects"], &[".claude"]]),
+        "native Claude Code local history schema and stable hook are not implemented; use normalized fixture import only",
+    ));
+    entries.push(provider_unsupported_entry(
+        "pi",
+        discover_first_existing(&[&[".pi", "agent"], &[".pi"]]),
+        "no supported local Pi transcript/history schema is implemented; use normalized fixture import only",
+    ));
+
+    Ok(LocalProviderImportReport { entries })
+}
+
+fn import_codex_history_with_record(
+    store: &mut Store,
+    input: &Path,
+) -> Result<(ProviderImportSummary, Option<WorkRecord>)> {
+    let import_record_id = codex_history_import_record_id(input);
+    let summary = import_codex_history_jsonl(
+        input,
+        store,
+        CodexHistoryImportOptions {
+            source_path: Some(input.to_path_buf()),
+            ..CodexHistoryImportOptions::default()
+        },
+    )?;
+    let record = if summary.imported_sessions > 0 || summary.imported_events > 0 {
+        Some(upsert_codex_history_import_summary_record(
+            store,
+            import_record_id,
+            input,
+            &summary,
+        )?)
+    } else {
+        None
+    };
+    Ok((summary, record))
+}
+
+fn provider_unsupported_entry(
+    provider: &'static str,
+    path: Option<PathBuf>,
+    blocker: &'static str,
+) -> LocalProviderEntry {
+    LocalProviderEntry {
+        provider,
+        status: if path.is_some() {
+            "discovered_unsupported"
+        } else {
+            "missing"
+        },
+        path,
+        source_format: None,
+        fidelity: None,
+        imported_sessions: 0,
+        imported_events: 0,
+        skipped: 0,
+        failed: 0,
+        blocker: Some(blocker.to_owned()),
+    }
+}
+
+fn discover_codex_history_path() -> Option<PathBuf> {
+    default_home_path(&[".codex", "history.jsonl"]).filter(|path| path.is_file())
+}
+
+fn discover_first_existing(candidates: &[&[&str]]) -> Option<PathBuf> {
+    candidates
+        .iter()
+        .filter_map(|segments| default_home_path(segments))
+        .find(|path| path.exists())
+}
+
+fn default_home_path(segments: &[&str]) -> Option<PathBuf> {
+    let home = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE"))?;
+    let mut path = PathBuf::from(home);
+    for segment in segments {
+        path.push(segment);
+    }
+    Some(path)
 }
 
 #[derive(Debug)]
@@ -1798,6 +2051,8 @@ fn run_shim(command: ShimCommand) -> Result<()> {
             Ok(())
         }
         ShimSubcommand::Uninstall(args) => uninstall_shims(&args.dir),
+        ShimSubcommand::ActivateShell(args) => activate_shell_rc(&args.shell_rc, &args.dir),
+        ShimSubcommand::DeactivateShell(args) => deactivate_shell_rc(&args.shell_rc),
     }
 }
 
@@ -1840,6 +2095,95 @@ fn uninstall_shims(dir: &Path) -> Result<()> {
         println!("removed {}", path.display());
     }
     Ok(())
+}
+
+fn activate_shell_rc(shell_rc: &Path, shim_dir: &Path) -> Result<()> {
+    if let Some(parent) = shell_rc.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let original = read_optional_shell_rc(shell_rc)?;
+    let cleaned = remove_shell_rc_block(&original);
+    let mut updated = cleaned;
+    if !updated.is_empty() && !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated.push_str(SHELL_RC_BEGIN);
+    updated.push('\n');
+    updated.push_str(&format!(
+        "export PATH={}:$PATH\n",
+        shell_escape_path(shim_dir)
+    ));
+    updated.push_str(SHELL_RC_END);
+    updated.push('\n');
+    if shell_rc.exists() {
+        let backup = shell_rc_backup_path(shell_rc);
+        fs::copy(shell_rc, &backup).with_context(|| {
+            format!(
+                "backup shell rc {} to {}",
+                shell_rc.display(),
+                backup.display()
+            )
+        })?;
+        println!("backup: {}", backup.display());
+    }
+    fs::write(shell_rc, updated)
+        .with_context(|| format!("write shell rc {}", shell_rc.display()))?;
+    println!("activated {}", shell_rc.display());
+    Ok(())
+}
+
+fn read_optional_shell_rc(shell_rc: &Path) -> Result<String> {
+    match fs::read_to_string(shell_rc) {
+        Ok(contents) => Ok(contents),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(String::new()),
+        Err(err) => Err(err).with_context(|| format!("read shell rc {}", shell_rc.display())),
+    }
+}
+
+fn deactivate_shell_rc(shell_rc: &Path) -> Result<()> {
+    let original = fs::read_to_string(shell_rc)
+        .with_context(|| format!("read shell rc {}", shell_rc.display()))?;
+    let updated = remove_shell_rc_block(&original);
+    if updated != original {
+        let backup = shell_rc_backup_path(shell_rc);
+        fs::copy(shell_rc, &backup).with_context(|| {
+            format!(
+                "backup shell rc {} to {}",
+                shell_rc.display(),
+                backup.display()
+            )
+        })?;
+        fs::write(shell_rc, updated)
+            .with_context(|| format!("write shell rc {}", shell_rc.display()))?;
+    }
+    println!("deactivated {}", shell_rc.display());
+    Ok(())
+}
+
+fn remove_shell_rc_block(input: &str) -> String {
+    let mut output = String::new();
+    let mut in_block = false;
+    for line in input.lines() {
+        if line == SHELL_RC_BEGIN {
+            in_block = true;
+            continue;
+        }
+        if line == SHELL_RC_END {
+            in_block = false;
+            continue;
+        }
+        if !in_block {
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    output
+}
+
+fn shell_rc_backup_path(shell_rc: &Path) -> PathBuf {
+    let mut backup = shell_rc.as_os_str().to_os_string();
+    backup.push(".ctxbak");
+    PathBuf::from(backup)
 }
 
 fn is_ctx_shim(path: &Path) -> Result<bool> {

@@ -21,12 +21,23 @@ ctx schema
 
 ## Set up the local workspace
 
-Create the local SQLite store:
+Create the local SQLite store and ctx-owned passive capture shims:
 
 ```bash
 ctx setup
 ctx status
 ```
+
+`ctx setup` installs Git/jj/gh wrapper shims under
+`${CTX_DATA_ROOT:-~/.ctx}/work-record/shims` and prints the `PATH` export needed
+to activate them. To have ctx add a marker-bounded block to a shell rc file:
+
+```bash
+ctx setup --shell-rc ~/.zshrc
+```
+
+The shell rc change is backed up and can be removed with
+`ctx shim deactivate-shell --dir ~/.ctx/work-record/shims --shell-rc ~/.zshrc`.
 
 ## Create a work record
 
@@ -47,10 +58,10 @@ The JSON output includes the record id. Use that id when attaching evidence or a
 
 Run your normal agent or tools from the same workspace. ctx is designed to work beside existing CLIs instead of replacing them.
 
-This branch does not yet passively import existing agent history or install
-provider hooks. It can import normalized provider fixtures and explicit Codex
-prompt history, but routine work should still use explicit records and
-`ctx evidence run` when you want durable evidence.
+This branch passively captures supported local Git/jj/gh commands after the
+shim directory is active on `PATH`. It can import normalized provider fixtures
+and Codex prompt history, but routine agent transcript capture still needs
+provider-native hooks that are not implemented here.
 
 You can also pipe a longer note into a record:
 
@@ -72,7 +83,8 @@ stdout/stderr saved as local-only blob artifacts.
 
 ## Capture local Git/jj/gh commands
 
-Install reversible wrappers into a directory you control:
+Install reversible wrappers into a directory you control, or use the default
+wrappers created by `ctx setup`:
 
 ```bash
 ctx shim install --dir .ctx-shims
@@ -93,6 +105,9 @@ Remove the wrappers with:
 ```bash
 ctx shim uninstall --dir .ctx-shims
 ```
+
+`ctx status` reports whether each shim is installed and active on `PATH`, plus
+pending, processing, done, and failed spool counts.
 
 ## Link review state
 
@@ -178,9 +193,9 @@ processing, done, and failed spool counts. `ctx doctor` reports failed or stuck
 capture spool files. `ctx repair` retries failed files.
 
 This spool path is local integration plumbing, not a provider-history importer.
-The branch includes opt-in local Git/jj/gh wrapper shims, but does not install
-Codex, Claude, Cursor provider hooks or shell hooks that write the spool
-automatically.
+`ctx setup` installs local Git/jj/gh wrapper shims under the data root; they
+write the spool only after the shim directory is active on `PATH`. Codex,
+Claude, Cursor, and Pi provider-native hooks are not installed.
 
 Provider fixture imports fail closed on malformed JSONL or provider mismatches
 during CLI preflight, before any provider summary record is created. Rows that
@@ -196,9 +211,16 @@ ctx capture import-codex-history --input ~/.codex/history.jsonl --json
 
 This path is `summary_only`: it imports prompt rows grouped by Codex
 `session_id`, not assistant replies, tool calls, command output, artifacts, or
-child sessions. Claude and Pi native history import remain unproven in this
-branch unless a normalized fixture is supplied. See
-[provider-support.md](provider-support.md).
+child sessions. To discover known local provider locations and import only the
+safe supported sources:
+
+```bash
+ctx capture import-local-providers --json
+```
+
+That command imports Codex prompt history when `~/.codex/history.jsonl` exists.
+It reports Claude and Pi local directories as unsupported when discovered; it
+does not invent native transcript support. See [provider-support.md](provider-support.md).
 
 See [../examples/local-record-workflow.sh](../examples/local-record-workflow.sh)
 and [../examples/capture-spool-fixture.sh](../examples/capture-spool-fixture.sh)
@@ -211,3 +233,8 @@ ctx uninstall --yes
 ```
 
 Only run uninstall when you intend to remove the local Work Recorder data store.
+If setup wrote a shell rc activation block, pass the same file to remove it:
+
+```bash
+ctx uninstall --yes --shell-rc ~/.zshrc
+```

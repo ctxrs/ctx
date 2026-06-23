@@ -77,10 +77,12 @@ Follow-ups:
 
 ### Shims and Hooks
 
-The implemented shims are opt-in wrappers for `git`, `jj`, and `gh`. They run
-the real tool later on `PATH`, preserve the exit code, and best-effort spool
-local capture envelopes. Repository hooks, shell hooks, and provider-native
-hooks are not implemented in this branch.
+The implemented shims are wrappers for `git`, `jj`, and `gh`. `ctx setup`
+installs them under the data root, and they capture only after that directory is
+active on `PATH`. They run the real tool later on `PATH`, preserve the exit
+code, and best-effort spool local capture envelopes. Repository hooks and
+provider-native hooks are not implemented in this branch. Shell rc activation is
+available only through explicit marker-bounded commands that write backups.
 
 Risks:
 

@@ -10,13 +10,21 @@ aliases for the current local behavior.
 
 ```bash
 ctx setup
+ctx setup --shell-rc ~/.zshrc
 ctx status
 ctx uninstall --yes
+ctx uninstall --yes --shell-rc ~/.zshrc
 ```
 
-- `setup` creates the local Work Recorder data store.
-- `status` prints the data root, work record directory, database path, and initialization state.
-- `uninstall --yes` removes local Work Recorder product data.
+- `setup` creates the local Work Recorder data store and installs ctx-owned
+  Git/jj/gh passive capture shims under the data root.
+- `setup --shell-rc` adds a marker-bounded `PATH` activation block to the shell
+  rc file and writes a backup first.
+- `status` prints the data root, work record directory, database path,
+  initialization state, shim status, active-on-`PATH` count, and capture spool
+  counts.
+- `uninstall --yes` removes local Work Recorder product data. Add `--shell-rc`
+  to remove the ctx marker-bounded activation block at the same time.
 
 ## Schema
 
@@ -95,6 +103,8 @@ captured command.
 ```bash
 ctx shim install --dir .ctx-shims
 ctx shim env --dir .ctx-shims
+ctx shim activate-shell --dir .ctx-shims --shell-rc ~/.zshrc
+ctx shim deactivate-shell --dir .ctx-shims --shell-rc ~/.zshrc
 ctx shim uninstall --dir .ctx-shims
 ```
 
@@ -102,6 +112,8 @@ ctx shim uninstall --dir .ctx-shims
   the chosen directory.
 - `shim env` prints a shell `PATH` export that places that directory before the
   real tools.
+- `shim activate-shell` and `shim deactivate-shell` manage only the ctx
+  marker-bounded shell rc block and back up the file before changing it.
 - `shim uninstall` removes only wrapper scripts marked as ctx-created shims.
 
 The wrappers run the real command found later on `PATH`, preserve its exit code,
@@ -117,6 +129,7 @@ ctx capture import-provider --provider codex --input tests/fixtures/provider/cod
 ctx capture import-provider --provider claude --input tests/fixtures/provider/claude.jsonl
 ctx capture import-provider --provider pi --input tests/fixtures/provider/pi.jsonl
 ctx capture import-codex-history --input ~/.codex/history.jsonl --json
+ctx capture import-local-providers --json
 ```
 
 `capture import` imports pending JSONL capture envelope files from the local
@@ -148,12 +161,13 @@ with `source_format=codex_history_jsonl` and `fidelity=summary_only`. This path
 does not capture assistant replies, tool calls, command output, artifacts, or
 child session relationships.
 
-These commands do not automatically scan existing agent transcript
-directories. Local Git/jj/gh wrapper shims are opt-in through `ctx shim`;
-provider-native hooks and shell hooks are not implemented in this branch. The
-Codex history command is an explicit local prompt-history JSONL import,
-prompt-only and `summary_only`. See [provider-support.md](provider-support.md)
-for the current support matrix and native-history blockers.
+`capture import-local-providers` checks known local provider locations. It
+imports Codex `~/.codex/history.jsonl` through the same explicit prompt-only
+`summary_only` path when present, reports missing Codex history otherwise, and
+reports discovered Claude or Pi directories as unsupported native hooks instead
+of importing unproven transcripts. Provider-native hooks are not implemented in
+this branch. See [provider-support.md](provider-support.md) for the current
+support matrix and native-history blockers.
 
 ## VCS and pull request helpers
 
@@ -226,6 +240,7 @@ retry.
 
 ## Not yet implemented
 
-This branch does not include hosted sync, passive provider hooks beyond the
-local Git/jj/gh wrapper shims, public installer flow, hosted/team Option A, or
-hosted/team pull request publishing; hosted publishing remains outside launch.
+This branch does not include hosted sync, passive provider hooks beyond local
+Git/jj/gh wrapper shims, native Claude/Pi transcript import, public installer
+flow, hosted/team Option A, or hosted/team pull request publishing; hosted
+publishing remains outside launch.

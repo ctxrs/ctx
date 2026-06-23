@@ -610,7 +610,10 @@ fn root_setup_status_schema_and_validate_work() {
         .stdout(predicate::str::contains("spool_failed: 0"))
         .stdout(predicate::str::contains("shim_git: installed_not_active"))
         .stdout(predicate::str::contains("shim_jj: installed_not_active"))
-        .stdout(predicate::str::contains("shim_gh: installed_not_active"));
+        .stdout(predicate::str::contains("shim_gh: installed_not_active"))
+        .stdout(predicate::str::contains(
+            "passive_capture_active_on_path: 0/3",
+        ));
 
     ctx(&temp)
         .args(["schema"])
@@ -653,7 +656,68 @@ fn root_status_reports_installed_passive_capture_shims_on_path() {
         .success()
         .stdout(predicate::str::contains("shim_git: installed"))
         .stdout(predicate::str::contains("shim_jj: installed"))
-        .stdout(predicate::str::contains("shim_gh: installed"));
+        .stdout(predicate::str::contains("shim_gh: installed"))
+        .stdout(predicate::str::contains(
+            "passive_capture_active_on_path: 3/3",
+        ));
+}
+
+#[test]
+fn setup_can_activate_passive_capture_in_shell_rc_and_deactivate_it() {
+    let temp = tempdir();
+    let shell_rc = temp.path().join(".testrc");
+    fs::write(&shell_rc, "export EXISTING=1\n").unwrap();
+
+    ctx(&temp)
+        .args(["setup", "--shell-rc", shell_rc.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("shell_rc:"));
+
+    let contents = fs::read_to_string(&shell_rc).unwrap();
+    assert!(contents.contains("# >>> ctx work recorder passive capture >>>"));
+    assert!(contents.contains("work-record/shims"));
+    assert!(contents.contains("export EXISTING=1"));
+    assert!(temp.path().join(".testrc.ctxbak").exists());
+
+    ctx(&temp)
+        .args([
+            "shim",
+            "deactivate-shell",
+            "--dir",
+            temp.path()
+                .join("work-record")
+                .join("shims")
+                .to_str()
+                .unwrap(),
+            "--shell-rc",
+            shell_rc.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("deactivated"));
+
+    let contents = fs::read_to_string(&shell_rc).unwrap();
+    assert!(!contents.contains("ctx work recorder passive capture"));
+    assert!(contents.contains("export EXISTING=1"));
+
+    ctx(&temp)
+        .args(["setup", "--shell-rc", shell_rc.to_str().unwrap()])
+        .assert()
+        .success();
+    ctx(&temp)
+        .args([
+            "uninstall",
+            "--yes",
+            "--shell-rc",
+            shell_rc.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("removed"));
+    let contents = fs::read_to_string(&shell_rc).unwrap();
+    assert!(!contents.contains("ctx work recorder passive capture"));
+    assert!(!temp.path().join("work-record").exists());
 }
 
 #[test]
@@ -856,6 +920,68 @@ fn codex_history_import_json_reports_prompt_only_fidelity() {
     assert_eq!(second_payload["import"]["imported_sessions"], 0);
     assert_eq!(second_payload["import"]["imported_events"], 0);
     assert_eq!(second_payload["record"], Value::Null);
+}
+
+#[test]
+fn import_local_providers_imports_codex_history_and_reports_unsupported_native_hooks() {
+    let temp = tempdir();
+    let home = temp.path().join("home");
+    let codex_dir = home.join(".codex");
+    let claude_dir = home.join(".claude").join("projects");
+    let pi_dir = home.join(".pi").join("agent");
+    fs::create_dir_all(&codex_dir).unwrap();
+    fs::create_dir_all(&claude_dir).unwrap();
+    fs::create_dir_all(&pi_dir).unwrap();
+    fs::copy(
+        provider_history_fixture("codex-history.jsonl"),
+        codex_dir.join("history.jsonl"),
+    )
+    .unwrap();
+
+    let mut command = ctx(&temp);
+    command
+        .env("HOME", &home)
+        .args(["capture", "import-local-providers", "--json"]);
+    let payload = json_output(&mut command);
+
+    assert_eq!(payload["schema_version"], 1);
+    assert_eq!(payload["share_safe"], true);
+    let providers = payload["providers"].as_array().unwrap();
+    let codex = providers
+        .iter()
+        .find(|entry| entry["provider"] == "codex")
+        .unwrap();
+    assert_eq!(codex["status"], "imported");
+    assert_eq!(codex["source_format"], "codex_history_jsonl");
+    assert_eq!(codex["fidelity"], "summary_only");
+    assert_eq!(codex["imported_sessions"], 2);
+    assert_eq!(codex["imported_events"], 3);
+    assert!(serde_json::to_string(codex)
+        .unwrap()
+        .contains("no assistant replies"));
+
+    let claude = providers
+        .iter()
+        .find(|entry| entry["provider"] == "claude")
+        .unwrap();
+    assert_eq!(claude["status"], "discovered_unsupported");
+    assert!(serde_json::to_string(claude)
+        .unwrap()
+        .contains("not implemented"));
+    let pi = providers
+        .iter()
+        .find(|entry| entry["provider"] == "pi")
+        .unwrap();
+    assert_eq!(pi["status"], "discovered_unsupported");
+    assert_eq!(pi["imported_events"], 0);
+
+    let mut search = ctx(&temp);
+    search.args(["search", "prompt history", "--json"]);
+    let search_payload = json_output(&mut search);
+    assert_eq!(
+        search_payload["results"][0]["title"],
+        "Imported Codex prompt history"
+    );
 }
 
 #[test]

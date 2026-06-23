@@ -41,9 +41,9 @@ imports are renamed to `.done`; failed imports are renamed to `.failed` and get
 an `.error.json` sidecar.
 
 Treat the inbox and imported JSON archives as sensitive local data. This branch
-does not install provider hooks or shell hooks. Inbox files are created by local
-tooling, fixture workflows, or the opt-in Git/jj/gh wrapper shims that
-explicitly write them.
+does not install provider-native hooks. Inbox files are created by local
+tooling, fixture workflows, or the Git/jj/gh wrapper shims installed by
+`ctx setup` after their directory is active on `PATH`.
 
 ## What may be sensitive
 

@@ -1,15 +1,23 @@
 # Provider Support Matrix
 
-This branch proves provider integration through explicit, local import commands.
-It does not install passive Codex, Claude, or Pi hooks, and it does not scan
-provider directories automatically.
+This branch proves provider integration through explicit, local import commands
+and a conservative local discovery command. It does not install passive Codex,
+Claude, or Pi native hooks.
 
 | Provider | Implemented path | Source format | Fidelity | Captured | Not captured | Proof |
 | --- | --- | --- | --- | --- | --- | --- |
 | Codex | `ctx capture import-provider --provider codex --input <fixture.jsonl>` | normalized provider fixture JSONL | imported | sessions, events, exposed parent-child session edges, cursors, source metadata | native history discovery, assistant/tool fidelity beyond fixture content | `tests/fixtures/provider/codex.jsonl`; capture and CLI tests |
-| Codex | `ctx capture import-codex-history --input ~/.codex/history.jsonl` | Codex prompt history JSONL with `session_id`, `ts`, `text` | summary_only | user prompt events grouped by Codex session id | assistant replies, tool calls, command output, artifacts, child session relationships | `tests/fixtures/provider-history/codex-history.jsonl`; capture and CLI tests; local blocker notes below |
+| Codex | `ctx capture import-codex-history --input ~/.codex/history.jsonl` or `ctx capture import-local-providers` | Codex prompt history JSONL with `session_id`, `ts`, `text` | summary_only | user prompt events grouped by Codex session id | assistant replies, tool calls, command output, artifacts, child session relationships | `tests/fixtures/provider-history/codex-history.jsonl`; capture and CLI tests; local blocker notes below |
 | Claude | `ctx capture import-provider --provider claude --input <fixture.jsonl>` | normalized provider fixture JSONL | imported | sessions, events, cursors, source metadata present in fixture | native Claude Code history discovery, hooks, live capture | `tests/fixtures/provider/claude.jsonl`; capture and CLI tests |
 | Pi | `ctx capture import-provider --provider pi --input <fixture.jsonl>` | normalized provider fixture JSONL | imported | sessions, events, source metadata present in fixture, secret-key redaction in metadata | native Pi history discovery, hooks, live capture | `tests/fixtures/provider/pi.jsonl`; capture and CLI tests |
+
+`ctx capture import-local-providers` checks known local locations:
+
+- Codex: `~/.codex/history.jsonl`; imported idempotently as prompt history when present.
+- Claude: `~/.claude/projects` or `~/.claude`; reported as `discovered_unsupported`
+  when present because no native Claude transcript parser or hook is implemented.
+- Pi: `~/.pi/agent` or `~/.pi`; reported as `discovered_unsupported` when
+  present because no native Pi transcript/history parser or hook is implemented.
 
 ## Source and Fidelity Metadata
 
