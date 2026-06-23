@@ -138,10 +138,19 @@ ctx_bootstrap_rust_toolchain() {
       printf 'cargo is missing and curl is unavailable to install rustup\n' >&2
       return 127
     fi
+    local rustup_installer
     printf 'cargo not found; installing stable Rust toolchain with rustup\n' >&2
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-      | sh -s -- -y --profile minimal --default-toolchain stable \
-        --component rustfmt --component clippy
+    rustup_installer="$(mktemp "${TMPDIR:-/tmp}/ctx-rustup-init.XXXXXX")"
+    if ! curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o "${rustup_installer}"; then
+      rm -f "${rustup_installer}"
+      return 1
+    fi
+    if ! sh "${rustup_installer}" -y --profile minimal --default-toolchain stable \
+      --component rustfmt --component clippy; then
+      rm -f "${rustup_installer}"
+      return 1
+    fi
+    rm -f "${rustup_installer}"
     export PATH="${CARGO_HOME}/bin:${PATH}"
   fi
 

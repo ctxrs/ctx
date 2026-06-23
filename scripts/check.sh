@@ -82,7 +82,7 @@ run_examples() {
 run_platform_smoke() {
   local suffix smoke_bin data_root record_id record_json
 
-  ctx_require_host_triple "${CTX_EXPECT_HOST_TRIPLE:-}"
+  ctx_run_timed "platform-smoke-host-triple" ctx_require_host_triple "${CTX_EXPECT_HOST_TRIPLE:-}"
   ctx_ensure_rust_toolchain
   ctx_run_timed "platform-smoke-build" cargo build -p ctx --bin ctx "${cargo_locked_args[@]}"
 

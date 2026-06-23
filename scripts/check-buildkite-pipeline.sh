@@ -26,11 +26,11 @@ file_contains() {
   local text="$2"
 
   if command -v rg >/dev/null 2>&1; then
-    rg --fixed-strings -q "${text}" "${file}"
+    rg --fixed-strings -q -- "${text}" "${file}"
     return $?
   fi
 
-  grep -F -q "${text}" "${file}"
+  grep -F -q -- "${text}" "${file}"
 }
 
 require_text() {
@@ -129,10 +129,8 @@ validate_contract() {
   require_text "Windows PowerShell wrapper" "${pipeline}" 'powershell -NoProfile -ExecutionPolicy Bypass -File scripts\\ci-windows.ps1'
   require_text "macOS custom checkout plugin" "${pipeline}" 'custom-checkout#v1.8.0'
   require_text "macOS custom checkout cleanup" "${pipeline}" 'delete_checkout: true'
-  require_text "macOS arm64 smoke isolated checkout" "${pipeline}" '/tmp/ctx-buildkite-macos-arm64-smoke-${BUILDKITE_BUILD_NUMBER}'
-  require_text "macOS x64 smoke isolated checkout" "${pipeline}" '/tmp/ctx-buildkite-macos-x64-smoke-${BUILDKITE_BUILD_NUMBER}'
-  require_text "macOS arm64 release isolated checkout" "${pipeline}" '/tmp/ctx-buildkite-macos-arm64-release-${BUILDKITE_BUILD_NUMBER}'
-  require_text "macOS x64 release isolated checkout" "${pipeline}" '/tmp/ctx-buildkite-macos-x64-release-${BUILDKITE_BUILD_NUMBER}'
+  require_text "macOS isolated checkout root" "${pipeline}" 'interpolate_checkout_path: "$${TMPDIR:-/tmp}/ctx-work-record-$${BUILDKITE_BUILD_NUMBER}-$${BUILDKITE_STEP_KEY}-$${BUILDKITE_JOB_ID}"'
+  require_text "macOS hook compatibility script exists" "scripts/buildkite/macos_agent_pre_command.sh" 'Compatibility hook for shared macOS Buildkite agents.'
 
   require_text "docs command wired" "${pipeline}" './scripts/check.sh docs'
   require_text "examples command wired" "${pipeline}" './scripts/check.sh examples'
@@ -150,6 +148,7 @@ validate_contract() {
   require_text "release script does not publish" "${release_script}" '"upload": false'
   require_text "release script enforces host triple" "${release_script}" 'ctx_require_host_triple "${CTX_EXPECT_HOST_TRIPLE:-}"'
   require_text "host triple parser is pipe-safe" "scripts/ci-common.sh" 'rustc_info="$(rustc -vV)"'
+  require_text "rustup bootstrap avoids pipefail SIGPIPE" "scripts/ci-common.sh" '-o "${rustup_installer}"'
   require_text "Windows script bootstraps Rust" "${windows_script}" 'Ensure-Rust-Toolchain'
   require_text "Windows script uses target tool cache" "${windows_script}" 'target\tool-cache\cargo'
   require_text "Windows script supports platform smoke" "${windows_script}" 'platform-smoke'

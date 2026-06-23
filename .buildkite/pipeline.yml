@@ -152,6 +152,7 @@ steps:
       - custom-checkout#v1.8.0:
           skip_checkout: true
           delete_checkout: true
+          interpolate_checkout_path: "$${TMPDIR:-/tmp}/ctx-work-record-$${BUILDKITE_BUILD_NUMBER}-$${BUILDKITE_STEP_KEY}-$${BUILDKITE_JOB_ID}"
           repos:
             - url: "https://github.com/ctxrs/ctx.git"
               ref: "${BUILDKITE_COMMIT}"
@@ -161,7 +162,6 @@ steps:
                 - "--no-tags"
                 - "--filter=blob:none"
     env:
-      BUILDKITE_BUILD_CHECKOUT_PATH: "/tmp/ctx-buildkite-macos-arm64-smoke-${BUILDKITE_BUILD_NUMBER}"
       CTX_ARTIFACT_DIR: "artifacts/buildkite/platform-smoke/macos-arm64"
       CTX_EXPECT_HOST_TRIPLE: "aarch64-apple-darwin"
     agents:
@@ -183,6 +183,7 @@ steps:
       - custom-checkout#v1.8.0:
           skip_checkout: true
           delete_checkout: true
+          interpolate_checkout_path: "$${TMPDIR:-/tmp}/ctx-work-record-$${BUILDKITE_BUILD_NUMBER}-$${BUILDKITE_STEP_KEY}-$${BUILDKITE_JOB_ID}"
           repos:
             - url: "https://github.com/ctxrs/ctx.git"
               ref: "${BUILDKITE_COMMIT}"
@@ -192,7 +193,6 @@ steps:
                 - "--no-tags"
                 - "--filter=blob:none"
     env:
-      BUILDKITE_BUILD_CHECKOUT_PATH: "/tmp/ctx-buildkite-macos-x64-smoke-${BUILDKITE_BUILD_NUMBER}"
       CTX_ARTIFACT_DIR: "artifacts/buildkite/platform-smoke/macos-x64"
       CTX_EXPECT_HOST_TRIPLE: "x86_64-apple-darwin"
     agents:
@@ -247,6 +247,7 @@ steps:
       - custom-checkout#v1.8.0:
           skip_checkout: true
           delete_checkout: true
+          interpolate_checkout_path: "$${TMPDIR:-/tmp}/ctx-work-record-$${BUILDKITE_BUILD_NUMBER}-$${BUILDKITE_STEP_KEY}-$${BUILDKITE_JOB_ID}"
           repos:
             - url: "https://github.com/ctxrs/ctx.git"
               ref: "${BUILDKITE_COMMIT}"
@@ -256,7 +257,6 @@ steps:
                 - "--no-tags"
                 - "--filter=blob:none"
     env:
-      BUILDKITE_BUILD_CHECKOUT_PATH: "/tmp/ctx-buildkite-macos-arm64-release-${BUILDKITE_BUILD_NUMBER}"
       CTX_ARTIFACT_DIR: "artifacts/buildkite/release-dry-run/macos-arm64"
       CTX_RELEASE_PLATFORM: "macos-arm64"
       CTX_RELEASE_TARGET_TRIPLE: "aarch64-apple-darwin"
@@ -280,6 +280,7 @@ steps:
       - custom-checkout#v1.8.0:
           skip_checkout: true
           delete_checkout: true
+          interpolate_checkout_path: "$${TMPDIR:-/tmp}/ctx-work-record-$${BUILDKITE_BUILD_NUMBER}-$${BUILDKITE_STEP_KEY}-$${BUILDKITE_JOB_ID}"
           repos:
             - url: "https://github.com/ctxrs/ctx.git"
               ref: "${BUILDKITE_COMMIT}"
@@ -289,7 +290,6 @@ steps:
                 - "--no-tags"
                 - "--filter=blob:none"
     env:
-      BUILDKITE_BUILD_CHECKOUT_PATH: "/tmp/ctx-buildkite-macos-x64-release-${BUILDKITE_BUILD_NUMBER}"
       CTX_ARTIFACT_DIR: "artifacts/buildkite/release-dry-run/macos-x64"
       CTX_RELEASE_PLATFORM: "macos-x64"
       CTX_RELEASE_TARGET_TRIPLE: "x86_64-apple-darwin"
