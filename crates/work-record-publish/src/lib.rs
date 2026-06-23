@@ -26,6 +26,8 @@ pub enum PublishError {
     PullRequestNotFound,
     #[error("GitHub API rate limit was exceeded")]
     RateLimited,
+    #[error("raw transcript publishing requires a non-empty acknowledgement reason")]
+    InvalidRawTranscriptOptIn,
     #[error("GitHub client error: {0}")]
     Client(String),
 }
@@ -72,10 +74,12 @@ pub struct RawTranscriptOptIn {
 }
 
 impl RawTranscriptOptIn {
-    pub fn acknowledge_private_data_risk(reason: impl Into<String>) -> Self {
-        Self {
-            reason: reason.into(),
+    pub fn acknowledge_private_data_risk(reason: impl Into<String>) -> Result<Self> {
+        let reason = reason.into().trim().to_owned();
+        if reason.is_empty() {
+            return Err(PublishError::InvalidRawTranscriptOptIn);
         }
+        Ok(Self { reason })
     }
 
     pub fn reason(&self) -> &str {
@@ -141,13 +145,13 @@ pub fn render_pr_comment(
         for record in records {
             out.push_str(&format!(
                 "\n- **{}** `{}`\n",
-                render_text(&record.title, raw_transcript_included),
+                render_share_text(&record.title),
                 record.id
             ));
             if !record.tags.is_empty() {
                 out.push_str(&format!(
                     "  - Tags: {}\n",
-                    render_text(&record.tags.join(", "), raw_transcript_included)
+                    render_share_text(&record.tags.join(", "))
                 ));
             }
             if let Some(pr_url) = &record.pr_url {
@@ -155,10 +159,7 @@ pub fn render_pr_comment(
             }
             if !record.body.trim().is_empty() {
                 out.push_str("  - Notes:\n");
-                push_indented_block(
-                    &mut out,
-                    &render_text(&record.body, raw_transcript_included),
-                );
+                push_indented_block(&mut out, &render_share_text(&record.body));
             }
         }
     }
@@ -168,18 +169,18 @@ pub fn render_pr_comment(
         for item in evidence {
             out.push_str(&format!(
                 "\n- `{}` exited {} in {}ms\n",
-                render_text(&item.command, raw_transcript_included),
+                render_share_text(&item.command),
                 item.exit_code,
                 item.duration_ms
             ));
             if raw_transcript_included {
                 if !item.stdout.is_empty() {
                     out.push_str("  - stdout:\n");
-                    push_indented_block(&mut out, &item.stdout);
+                    push_indented_block(&mut out, &render_raw_transcript(&item.stdout));
                 }
                 if !item.stderr.is_empty() {
                     out.push_str("  - stderr:\n");
-                    push_indented_block(&mut out, &item.stderr);
+                    push_indented_block(&mut out, &render_raw_transcript(&item.stderr));
                 }
             } else if !item.stdout.is_empty() || !item.stderr.is_empty() {
                 out.push_str("  - Transcript redacted by default.\n");
@@ -226,6 +227,7 @@ fn marked_section_bounds(body: &str) -> Option<(usize, usize)> {
 pub struct PullRequestComment {
     pub id: u64,
     pub body: String,
+    pub owned_by_ctx: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -241,7 +243,7 @@ pub fn plan_comment_upsert(
 ) -> UpsertPlan {
     let existing = existing_comments
         .iter()
-        .filter(|comment| has_comment_markers(&comment.body))
+        .filter(|comment| comment.owned_by_ctx && has_comment_markers(&comment.body))
         .min_by_key(|comment| comment.id);
 
     match existing {
@@ -373,12 +375,18 @@ pub fn upsert_github_pr_comment<C: GitHubPrCommentClient>(
     }
 }
 
-fn render_text(value: &str, raw_transcript_included: bool) -> String {
-    if raw_transcript_included {
-        value.to_owned()
-    } else {
-        redact_share_safe_markers(value)
-    }
+fn render_share_text(value: &str) -> String {
+    sanitize_comment_markers(&redact_share_safe_markers(value))
+}
+
+fn render_raw_transcript(value: &str) -> String {
+    sanitize_comment_markers(value)
+}
+
+fn sanitize_comment_markers(value: &str) -> String {
+    value
+        .replace(COMMENT_MARKER_START, "[ctx-comment-marker-start-redacted]")
+        .replace(COMMENT_MARKER_END, "[ctx-comment-marker-end-redacted]")
 }
 
 fn render_url(value: &str) -> String {
@@ -457,9 +465,10 @@ mod tests {
     #[test]
     fn raw_transcript_requires_explicit_opt_in() {
         let options = RenderOptions {
-            raw_transcript: Some(RawTranscriptOptIn::acknowledge_private_data_risk(
-                "publishing to a private PR",
-            )),
+            raw_transcript: Some(
+                RawTranscriptOptIn::acknowledge_private_data_risk("publishing to a private PR")
+                    .unwrap(),
+            ),
         };
         let record = record("Ship token=secret", "password=hunter2", vec![], 10);
         let evidence = evidence(
@@ -474,8 +483,49 @@ mod tests {
 
         assert!(rendered.raw_transcript_included);
         assert!(rendered.markdown.contains("Transcript mode: raw opt-in"));
-        assert!(rendered.markdown.contains("password=hunter2"));
+        assert!(rendered.markdown.contains("password=[redacted]"));
         assert!(rendered.markdown.contains("raw stdout password=hunter2"));
+    }
+
+    #[test]
+    fn raw_transcript_opt_in_requires_non_empty_reason() {
+        assert!(matches!(
+            RawTranscriptOptIn::acknowledge_private_data_risk("  "),
+            Err(PublishError::InvalidRawTranscriptOptIn)
+        ));
+    }
+
+    #[test]
+    fn rendered_content_cannot_inject_comment_markers() {
+        let record = record(
+            COMMENT_MARKER_START,
+            COMMENT_MARKER_END,
+            vec![COMMENT_MARKER_START],
+            10,
+        );
+        let options = RenderOptions {
+            raw_transcript: Some(
+                RawTranscriptOptIn::acknowledge_private_data_risk("private fixture").unwrap(),
+            ),
+        };
+        let evidence = evidence(
+            "cargo test",
+            0,
+            COMMENT_MARKER_END,
+            COMMENT_MARKER_START,
+            11,
+        );
+
+        let rendered = render_pr_comment(&[record], &[evidence], &options);
+
+        assert_eq!(rendered.markdown.matches(COMMENT_MARKER_START).count(), 1);
+        assert_eq!(rendered.markdown.matches(COMMENT_MARKER_END).count(), 1);
+        assert!(rendered
+            .markdown
+            .contains("[ctx-comment-marker-start-redacted]"));
+        assert!(rendered
+            .markdown
+            .contains("[ctx-comment-marker-end-redacted]"));
     }
 
     #[test]
@@ -527,6 +577,7 @@ mod tests {
                 &[PullRequestComment {
                     id: 9,
                     body: desired.clone(),
+                    owned_by_ctx: true,
                 }],
                 &desired
             ),
@@ -538,15 +589,32 @@ mod tests {
                     PullRequestComment {
                         id: 10,
                         body: "unrelated".into(),
+                        owned_by_ctx: false,
                     },
                     PullRequestComment {
                         id: 8,
                         body: format!("{COMMENT_MARKER_START}\nold\n{COMMENT_MARKER_END}\n"),
+                        owned_by_ctx: true,
                     },
                 ],
                 &desired
             ),
             UpsertPlan::Update { comment_id: 8 }
+        );
+    }
+
+    #[test]
+    fn upsert_planning_ignores_unowned_marked_comments() {
+        let desired = format!("{COMMENT_MARKER_START}\ndesired\n{COMMENT_MARKER_END}\n");
+        let attacker = PullRequestComment {
+            id: 1,
+            body: format!("{COMMENT_MARKER_START}\nattacker\n{COMMENT_MARKER_END}\n"),
+            owned_by_ctx: false,
+        };
+
+        assert_eq!(
+            plan_comment_upsert(&[attacker], &desired),
+            UpsertPlan::Create
         );
     }
 
@@ -580,6 +648,7 @@ mod tests {
         client.comments = vec![PullRequestComment {
             id: 7,
             body: format!("{COMMENT_MARKER_START}\nold\n{COMMENT_MARKER_END}\n"),
+            owned_by_ctx: true,
         }];
         let updated =
             upsert_github_pr_comment(&mut client, &target, &body, &PublishOptions::default())
@@ -723,6 +792,7 @@ mod tests {
             let comment = PullRequestComment {
                 id: 100,
                 body: body.into(),
+                owned_by_ctx: true,
             };
             self.comments.push(comment.clone());
             Ok(comment)
@@ -738,6 +808,7 @@ mod tests {
             let comment = PullRequestComment {
                 id: comment_id,
                 body: body.into(),
+                owned_by_ctx: true,
             };
             if let Some(existing) = self
                 .comments

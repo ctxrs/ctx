@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     str::FromStr,
     time::Duration,
 };
@@ -44,6 +44,8 @@ pub enum StoreError {
     EvidenceMissingWorkRecord,
     #[error("archive artifact {id} content does not match its blob hash")]
     ArchiveArtifactHashMismatch { id: Uuid },
+    #[error("unsafe blob path in local store: {0}")]
+    UnsafeBlobPath(String),
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
@@ -1108,12 +1110,26 @@ impl Store {
     }
 
     pub fn upsert_event(&self, event: &Event) -> Result<Uuid> {
+        let event_id = if let Some(dedupe_key) = &event.dedupe_key {
+            self.conn
+                .query_row(
+                    "SELECT id FROM events WHERE dedupe_key = ?1",
+                    params![dedupe_key],
+                    |row| parse_uuid(row.get::<_, String>(0)?),
+                )
+                .optional()?
+                .unwrap_or(event.id)
+        } else {
+            event.id
+        };
+
         self.conn.execute(
             r#"
             INSERT INTO events
             (id, seq, work_record_id, session_id, run_id, event_type, role, occurred_at_ms, capture_source_id, payload_json, payload_blob_id, dedupe_key, visibility, redaction_state, fidelity, sync_state, sync_version, deleted_at_ms, metadata_json)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
-            ON CONFLICT DO UPDATE SET
+            ON CONFLICT(id) DO UPDATE SET
+                seq = excluded.seq,
                 work_record_id = excluded.work_record_id,
                 session_id = excluded.session_id,
                 run_id = excluded.run_id,
@@ -1123,6 +1139,7 @@ impl Store {
                 capture_source_id = excluded.capture_source_id,
                 payload_json = excluded.payload_json,
                 payload_blob_id = excluded.payload_blob_id,
+                dedupe_key = excluded.dedupe_key,
                 visibility = excluded.visibility,
                 redaction_state = excluded.redaction_state,
                 fidelity = excluded.fidelity,
@@ -1132,7 +1149,7 @@ impl Store {
                 metadata_json = excluded.metadata_json
             "#,
             params![
-                event.id.to_string(),
+                event_id.to_string(),
                 event.seq as i64,
                 optional_uuid_string(event.work_record_id),
                 optional_uuid_string(event.session_id),
@@ -1156,7 +1173,7 @@ impl Store {
         if let Some(dedupe_key) = &event.dedupe_key {
             return self.event_id_by_dedupe_key(dedupe_key);
         }
-        Ok(event.id)
+        Ok(event_id)
     }
 
     pub fn event_id_by_dedupe_key(&self, dedupe_key: &str) -> Result<Uuid> {
@@ -2209,7 +2226,10 @@ impl Store {
             let media_type = row.get::<_, Option<String>>(7)?;
             let preview_text = row.get::<_, Option<String>>(8)?;
             let redaction_state = parse_text_enum::<RedactionState>(row.get::<_, String>(9)?)?;
-            let content = fs::read_to_string(self.absolute_blob_path(&blob_path))
+            let absolute_blob_path = self
+                .absolute_blob_path(&blob_path)
+                .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?;
+            let content = fs::read_to_string(absolute_blob_path)
                 .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?;
             Ok(WorkRecordArchiveArtifact {
                 id,
@@ -2228,12 +2248,17 @@ impl Store {
         collect_rows(rows)
     }
 
-    fn absolute_blob_path(&self, blob_path: &str) -> PathBuf {
-        if let Some(relative_path) = blob_path.strip_prefix("blobs/") {
-            self.blob_dir.join(relative_path)
-        } else {
-            self.blob_dir.join(blob_path)
+    fn absolute_blob_path(&self, blob_path: &str) -> Result<PathBuf> {
+        let relative_path = blob_path.strip_prefix("blobs/").unwrap_or(blob_path);
+        let path = Path::new(relative_path);
+        if path.is_absolute()
+            || path
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return Err(StoreError::UnsafeBlobPath(blob_path.to_owned()));
         }
+        Ok(self.blob_dir.join(path))
     }
 
     fn rebuild_search_projection(&self) -> Result<()> {
@@ -3983,6 +4008,44 @@ mod tests {
     }
 
     #[test]
+    fn event_upsert_fails_closed_on_seq_conflict_without_dedupe_match() {
+        let temp = tempdir();
+        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let record = WorkRecord::new("Events", "seq conflict", Vec::new(), "task", None);
+        store.insert_record(&record).unwrap();
+        let event = Event {
+            id: Uuid::parse_str("018f45d0-0000-7000-8000-000000000302").unwrap(),
+            seq: 42,
+            work_record_id: Some(record.id),
+            session_id: None,
+            run_id: None,
+            event_type: EventType::Message,
+            role: Some(EventRole::Assistant),
+            occurred_at: fixed_time(),
+            capture_source_id: None,
+            payload: serde_json::json!({"text": "first"}),
+            payload_blob_id: None,
+            dedupe_key: None,
+            redaction_state: RedactionState::SafePreview,
+            sync: sync_metadata(),
+        };
+
+        store.upsert_event(&event).unwrap();
+        let conflict = store.upsert_event(&Event {
+            id: Uuid::parse_str("018f45d0-0000-7000-8000-000000000303").unwrap(),
+            payload: serde_json::json!({"text": "second"}),
+            ..event
+        });
+
+        assert!(conflict.is_err());
+        let stored_id: String = store
+            .conn
+            .query_row("SELECT id FROM events WHERE seq = 42", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(stored_id, "018f45d0-0000-7000-8000-000000000302");
+    }
+
+    #[test]
     fn sync_cursor_roundtrips_source_position_metadata() {
         let temp = tempdir();
         let store = Store::open(temp.path().join("work.sqlite")).unwrap();
@@ -4138,6 +4201,32 @@ mod tests {
             "warn ghp_1234567890abcdef"
         );
         assert!(second.validate().unwrap().is_empty());
+    }
+
+    #[test]
+    fn export_rejects_tampered_artifact_blob_paths() {
+        let temp = tempdir();
+        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let record = WorkRecord::new("Tamper", "blob path", Vec::new(), "task", None);
+        store.insert_record(&record).unwrap();
+        let evidence = Evidence::new(
+            Some(record.id),
+            "cargo test",
+            0,
+            "ok".into(),
+            String::new(),
+            Utc::now(),
+            12,
+        );
+        store.insert_evidence(&evidence).unwrap();
+        store
+            .conn
+            .execute("UPDATE artifacts SET blob_path = '../secret.txt'", [])
+            .unwrap();
+
+        let result = store.export_archive();
+
+        assert!(matches!(result, Err(StoreError::Sql(_))));
     }
 
     #[test]

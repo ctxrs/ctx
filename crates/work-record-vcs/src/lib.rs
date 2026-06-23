@@ -130,6 +130,7 @@ pub struct RepoFingerprint {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RepoFingerprintSource {
+    Remote,
     RemoteAndPath,
     PathOnly,
 }
@@ -364,6 +365,9 @@ pub fn parse_pull_request_url(raw: &str) -> Result<ParsedPullRequest> {
 }
 
 fn parse_github_pr(host: &str, segments: &[String]) -> Option<ParsedPullRequest> {
+    if host != "github.com" {
+        return None;
+    }
     if segments.len() < 4 || segments.get(2)? != "pull" {
         return None;
     }
@@ -741,19 +745,15 @@ fn repo_fingerprint(
     primary_remote_url_normalized: Option<&str>,
 ) -> RepoFingerprint {
     let root = path_to_string(root_path);
-    let source = if primary_remote_url_normalized.is_some() {
-        RepoFingerprintSource::RemoteAndPath
+    let (source, stable_identity) = if let Some(remote) = primary_remote_url_normalized {
+        (RepoFingerprintSource::Remote, remote)
     } else {
-        RepoFingerprintSource::PathOnly
+        (RepoFingerprintSource::PathOnly, root.as_str())
     };
     let mut hasher = Sha256::new();
     hasher.update(kind.as_str().as_bytes());
     hasher.update(b"\0");
-    hasher.update(root.as_bytes());
-    hasher.update(b"\0");
-    if let Some(remote) = primary_remote_url_normalized {
-        hasher.update(remote.as_bytes());
-    }
+    hasher.update(stable_identity.as_bytes());
     let value = hex_lower(&hasher.finalize());
 
     RepoFingerprint {
@@ -1263,7 +1263,7 @@ mod tests {
         );
         assert_eq!(
             workspace.repo_fingerprint.source,
-            RepoFingerprintSource::RemoteAndPath
+            RepoFingerprintSource::Remote
         );
     }
 
@@ -1347,6 +1347,13 @@ mod tests {
             parsed.link.target_type,
             WorkRecordLinkTargetType::PullRequest
         );
+    }
+
+    #[test]
+    fn rejects_non_github_pull_url_as_github_pr() {
+        let parsed = parse_pull_request_url("https://example.com/ctxrs/ctx/pull/42");
+
+        assert!(matches!(parsed, Err(VcsError::InvalidPullRequestUrl(_))));
     }
 
     #[test]
