@@ -2562,15 +2562,17 @@ impl PassiveShimStatus {
             Self::Active(_) => "active",
             Self::InstalledNotActive(_) => "installed_not_active",
             Self::External(_) => "external",
+            Self::Unreadable(_, _) => "unreadable",
             Self::Missing => "missing",
         }
     }
 
     fn path(&self) -> Option<&Path> {
         match self {
-            Self::Active(path) | Self::InstalledNotActive(path) | Self::External(path) => {
-                Some(path)
-            }
+            Self::Active(path)
+            | Self::InstalledNotActive(path)
+            | Self::External(path)
+            | Self::Unreadable(path, _) => Some(path),
             Self::Missing => None,
         }
     }
@@ -2691,13 +2693,21 @@ if [ -z "$real_cmd" ]; then
     exit 127
 fi
 tmpdir=
-for tmpbase in "${{CTX_SHIM_TMPDIR:-}}" "${{CTX_DATA_ROOT:-}}" "${{TMPDIR:-}}" /tmp .; do
+configured_tmp=0
+for tmpbase in "${{CTX_SHIM_TMPDIR:-}}" "${{CTX_DATA_ROOT:-}}" "${{TMPDIR:-}}"; do
     if [ -z "$tmpbase" ]; then
         continue
     fi
+    configured_tmp=1
     "$ctx_mkdir" -p "$tmpbase" 2>/dev/null || continue
     tmpdir=$("$ctx_mktemp" -d "$tmpbase/ctx-shim-$tool.XXXXXX" 2>/dev/null) && break
 done
+if [ -z "$tmpdir" ] && [ "$configured_tmp" = 0 ]; then
+    for tmpbase in /tmp .; do
+        "$ctx_mkdir" -p "$tmpbase" 2>/dev/null || continue
+        tmpdir=$("$ctx_mktemp" -d "$tmpbase/ctx-shim-$tool.XXXXXX" 2>/dev/null) && break
+    done
+fi
 if [ -z "$tmpdir" ]; then
     exec "$real_cmd" "$@"
 fi

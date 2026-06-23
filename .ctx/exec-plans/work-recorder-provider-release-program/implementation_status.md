@@ -1,6 +1,6 @@
 # Work Recorder Provider Release Implementation Status
 
-Last updated: 2026-06-23T20:59:42Z.
+Last updated: 2026-06-23T21:02:34Z.
 
 ## Current Integration Branch
 
@@ -87,6 +87,32 @@ ADE desktop release, `ade.ctx.rs` migration, production hosted launch, and
     passed.
   - `npm run build` in `apps/work-recorder-dashboard` passed with Vite's
     existing chunk-size warning.
+- Integrated VCS/shim hardening:
+  `eaef996 Harden Work Recorder VCS shims`.
+- Manager follow-up fix:
+  - Added the missing `PassiveShimStatus::Unreadable` match arms for CLI JSON
+    state/path reporting.
+  - Changed shim temp fallback so explicit unusable scratch/data dirs cause a
+    direct exec of the wrapped command instead of falling through to `/tmp`,
+    preserving stdout/stderr on hosts where `/tmp` can create dirs but fail
+    writes under quota.
+- VCS/PR focused validations run serially under `/usr/local/bin/cargo-lowio`
+  with `TMPDIR=$PWD/target/tmp`:
+  - `cargo-lowio test -p ctx --test cli
+    installed_shim_uses_system_utilities_when_path_shadows_capture_helpers --
+    --test-threads 1` passed.
+  - `cargo-lowio test -p ctx --test cli
+    installed_shim_preserves_real_command_when_capture_scratch_is_unavailable
+    -- --test-threads 1` passed after the manager follow-up fix.
+  - `cargo-lowio test -p ctx --test cli
+    root_status_reports_unreadable_path_shim_without_failing --
+    --test-threads 1` passed.
+  - `cargo-lowio test -p ctx --test cli
+    pr_parse_json_reports_confidence_labeled_link -- --test-threads 1`
+    passed.
+  - `cargo-lowio test -p ctx --test cli
+    publish_pr_comment_dry_run_renders_marker_bounded_redacted_markdown --
+    --test-threads 1` passed.
 
 Concurrent worker Cargo/rustc processes were stopped by the manager after they
 violated the host-level resource-safety rule. Remaining validation should be
