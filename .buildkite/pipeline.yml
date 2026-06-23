@@ -181,7 +181,6 @@ steps:
   - label: ":satellite: gated live provider E2E"
     key: "provider-live-e2e-gated"
     depends_on: "provider-live-e2e-lanes"
-    if: build.env("CTX_LIVE_PROVIDER_E2E") == "1" && (build.env("CTX_LIVE_PROVIDER_CODEX") == "1" || build.env("CTX_LIVE_PROVIDER_CLAUDE_CODE") == "1" || build.env("CTX_LIVE_PROVIDER_PI") == "1" || build.env("CTX_LIVE_PROVIDER_OPEN_CODE") == "1" || build.env("CTX_LIVE_PROVIDER_ANTIGRAVITY_CLI") == "1" || build.env("CTX_LIVE_PROVIDER_GEMINI_CLI") == "1" || build.env("CTX_LIVE_PROVIDER_CURSOR") == "1")
     command: "CTX_ARTIFACT_DIR=artifacts/buildkite/provider-live-e2e ./scripts/release-provider-live-e2e-lanes.sh run-selected"
     agents:
       queue: "release-linux-managed"

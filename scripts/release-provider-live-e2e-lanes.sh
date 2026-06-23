@@ -209,7 +209,7 @@ run_selected() {
   done < <(provider_ids)
 
   if (( selected == 0 )); then
-    printf '{"schema_version":1,"kind":"provider_live_e2e_result","publishing":false,"status":"skipped","reason":"CTX_LIVE_PROVIDER_E2E was set but no CTX_LIVE_PROVIDER_<PROVIDER> variable was enabled"}\n' \
+    printf '{"schema_version":1,"kind":"provider_live_e2e_result","publishing":false,"status":"skipped","reason":"live provider E2E is opt-in; set CTX_LIVE_PROVIDER_E2E=1 and one CTX_LIVE_PROVIDER_<PROVIDER>=1 variable to run a provider lane"}\n' \
       > "${CTX_ARTIFACT_DIR}/live-e2e-skipped.json"
     printf 'provider live E2E selected no provider lanes\n'
   fi
