@@ -166,7 +166,7 @@ ctx_ensure_rust_toolchain() {
     return 0
   fi
 
-  lock_file="${CTX_RUSTUP_LOCK:-/tmp/ctx-rustup.lock}"
+  lock_file="${CTX_RUSTUP_LOCK:-${TMPDIR:-${CTX_REPO_ROOT}/target/tmp}/ctx-rustup.lock}"
   mkdir -p "$(dirname "${lock_file}")"
   if command -v flock >/dev/null 2>&1; then
     (
