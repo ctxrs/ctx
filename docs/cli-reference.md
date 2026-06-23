@@ -144,10 +144,21 @@ ctx pr parse https://gitlab.com/example/project/-/merge_requests/42 --json
 ```bash
 ctx link-pr <record-id> https://github.com/example/project/pull/42
 ctx link-pr <record-id> https://github.com/example/project/pull/42 --json
+ctx publish pr-comment <record-id> --dry-run
+ctx publish pr-comment <record-id> --dry-run --include-raw-transcript
 ```
 
-Attaches a pull request URL to a Work Record in the local store. This does not
-publish, create, or update a pull request comment.
+- `link-pr` attaches a pull request URL to a Work Record in the local store.
+- `publish pr-comment --dry-run` renders the finished-product PR comment
+  Markdown for the linked GitHub pull request. The output is bounded by ctx
+  comment markers so a future publisher can create or update the same section
+  idempotently.
+- PR comment rendering redacts transcript and secret-like content by default.
+  `--include-raw-transcript` is an explicit opt-in for private PRs where raw
+  command stdout/stderr is acceptable to share.
+- Live GitHub comment publishing is intentionally blocked in this pass. Without
+  `--dry-run`, ctx reports a missing `GITHUB_TOKEN`/`GH_TOKEN` first, then
+  reports that the HTTP client integration is not available yet.
 
 ## Export, import, and validate
 
@@ -180,4 +191,4 @@ retry.
 
 This branch does not include hosted sync, passive provider hooks beyond the
 local Git/jj/gh wrapper shims, public installer flow, hosted/team Option A, or
-pull request comment publisher.
+the live GitHub HTTP client for pull request comment publishing.

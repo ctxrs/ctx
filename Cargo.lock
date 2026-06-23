@@ -257,6 +257,7 @@ dependencies = [
  "uuid",
  "work-record-capture",
  "work-record-core",
+ "work-record-publish",
  "work-record-report",
  "work-record-search",
  "work-record-store",
