@@ -183,4 +183,10 @@ review-blocker fixes.
     mobile tabs wrap, command output previews are readable, provider detail has
     a chronological timeline, and search results include session/run/timestamp
     context.
-- Final done check: pending after this review-status note is committed.
+- Final done check: PASS at `05b83fd`.
+  - Final reviewer verified branch `work-record` was clean; rich Codex fixture
+    content is sanitized; private dogfood outputs remain under untracked
+    `target/`; importer, search/context/report/dashboard, docs, dogfood counts,
+    validation, and focused reviewer PASSes satisfy this follow-up.
+  - Final reviewer reran focused capture, CLI, report, and `git diff --check`
+    validations before returning PASS.
