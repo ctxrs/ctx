@@ -381,6 +381,7 @@ fn ranked_candidates(
             .total_cmp(&left.score)
             .then_with(|| right.record.updated_at.cmp(&left.record.updated_at))
             .then_with(|| left.record.title.cmp(&right.record.title))
+            .then_with(|| left.record.id.cmp(&right.record.id))
     });
     Ok(candidates)
 }
@@ -1598,6 +1599,8 @@ mod tests {
         )
         .unwrap();
         assert!(secret_packet.results.is_empty());
+
+        maybe_write_synthetic_search_smoke_artifact();
     }
 
     #[test]
@@ -1869,6 +1872,167 @@ mod tests {
         let mut bytes = *target_id.as_bytes();
         bytes[15] = bytes[15].wrapping_add(80);
         Uuid::from_bytes(bytes)
+    }
+
+    fn deterministic_tie_record(id: &str) -> WorkRecord {
+        let mut record = WorkRecord::new(
+            "Stable tie title",
+            "stabletie exact equal body for deterministic ranking",
+            vec!["stabletie".into()],
+            "task",
+            None,
+        );
+        record.id = Uuid::parse_str(id).unwrap();
+        record.created_at = fixed_time();
+        record.updated_at = fixed_time();
+        record
+    }
+
+    fn packet_without_generated_at<T: Serialize>(packet: &T) -> serde_json::Value {
+        let mut value = serde_json::to_value(packet).unwrap();
+        value.as_object_mut().unwrap().remove("generated_at");
+        value
+    }
+
+    fn maybe_write_synthetic_search_smoke_artifact() {
+        let Ok(out_dir) = std::env::var("CTX_ARTIFACT_DIR") else {
+            return;
+        };
+
+        let (_temp, store) = test_store();
+        let mut records = Vec::new();
+        for index in 0..48 {
+            let mut record = WorkRecord::new(
+                format!("Synthetic search smoke {index:03}"),
+                format!(
+                    "syntheticneedle generated body {index:03} {}",
+                    "detail ".repeat(12)
+                ),
+                vec!["synthetic".into(), "smoke".into()],
+                "task",
+                Some("/workspace/ctx".into()),
+            );
+            record.id =
+                Uuid::parse_str(&format!("018f45d0-0000-7000-8000-00000002{index:04x}")).unwrap();
+            record.created_at = fixed_time() + chrono::Duration::seconds(index);
+            record.updated_at = record.created_at;
+            records.push(record);
+        }
+
+        let import_started = std::time::Instant::now();
+        store.upsert_records(&records).unwrap();
+        let import_elapsed = import_started.elapsed();
+
+        let options = PacketOptions {
+            limit: 12,
+            max_tokens: 480,
+            snippet_chars: 180,
+            filters: SearchFilters::default(),
+        };
+        let search_started = std::time::Instant::now();
+        let search = search_packet(&store, "syntheticneedle", &options).unwrap();
+        let search_elapsed = search_started.elapsed();
+
+        let context_started = std::time::Instant::now();
+        let context = context_packet(&store, Some("syntheticneedle"), &options).unwrap();
+        let context_elapsed = context_started.elapsed();
+
+        let import_secs = import_elapsed.as_secs_f64();
+        let artifact = serde_json::json!({
+            "schema_version": 1,
+            "profile": "smoke",
+            "corpus": {
+                "records": records.len(),
+                "events": records.len()
+            },
+            "import": {
+                "duration_ms": import_elapsed.as_millis(),
+                "events_per_sec": if import_secs > 0.0 {
+                    records.len() as f64 / import_secs
+                } else {
+                    records.len() as f64
+                }
+            },
+            "storage": {
+                "db_bytes": std::fs::metadata(store.path()).map(|metadata| metadata.len()).unwrap_or(0)
+            },
+            "search": {
+                "duration_ms": search_elapsed.as_millis(),
+                "result_count": search.results.len(),
+                "citation_count": search.results.iter().map(|result| result.citations.len()).sum::<usize>(),
+                "truncation": search.truncation
+            },
+            "context": {
+                "duration_ms": context_elapsed.as_millis(),
+                "result_count": context.results.len(),
+                "citation_count": context.results.iter().map(|result| result.citations.len()).sum::<usize>(),
+                "truncation": context.truncation
+            }
+        });
+
+        let out_dir = std::path::Path::new(&out_dir);
+        std::fs::create_dir_all(out_dir).unwrap();
+        std::fs::write(
+            out_dir.join("synthetic-search-smoke.json"),
+            serde_json::to_vec_pretty(&artifact).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn context_packet_budget_is_deterministic_for_large_history_and_equal_search_ties_use_record_id(
+    ) {
+        let (_temp, store) = test_store();
+        for id in [
+            "018f45d0-0000-7000-8000-000000010004",
+            "018f45d0-0000-7000-8000-000000010001",
+            "018f45d0-0000-7000-8000-000000010003",
+            "018f45d0-0000-7000-8000-000000010002",
+        ] {
+            store.insert_record(&deterministic_tie_record(id)).unwrap();
+        }
+
+        let expected_order = vec![
+            Uuid::parse_str("018f45d0-0000-7000-8000-000000010001").unwrap(),
+            Uuid::parse_str("018f45d0-0000-7000-8000-000000010002").unwrap(),
+            Uuid::parse_str("018f45d0-0000-7000-8000-000000010003").unwrap(),
+            Uuid::parse_str("018f45d0-0000-7000-8000-000000010004").unwrap(),
+        ];
+        let options = PacketOptions {
+            limit: 10,
+            snippet_chars: 160,
+            ..PacketOptions::default()
+        };
+
+        let first_search = search_packet(&store, "stabletie", &options).unwrap();
+        let second_search = search_packet(&store, "stabletie", &options).unwrap();
+        assert_eq!(
+            first_search
+                .results
+                .iter()
+                .map(|result| result.record_id)
+                .collect::<Vec<_>>(),
+            expected_order
+        );
+        assert_eq!(
+            packet_without_generated_at(&first_search),
+            packet_without_generated_at(&second_search)
+        );
+
+        let first_context = context_packet(&store, Some("stabletie"), &options).unwrap();
+        let second_context = context_packet(&store, Some("stabletie"), &options).unwrap();
+        assert_eq!(
+            first_context
+                .results
+                .iter()
+                .map(|result| result.record_id)
+                .collect::<Vec<_>>(),
+            expected_order
+        );
+        assert_eq!(
+            packet_without_generated_at(&first_context),
+            packet_without_generated_at(&second_context)
+        );
     }
 
     #[test]

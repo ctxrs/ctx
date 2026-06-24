@@ -2140,7 +2140,7 @@ impl Store {
     pub fn list_records(&self, limit: usize) -> Result<Vec<WorkRecord>> {
         let mut stmt = self
             .conn
-            .prepare(record_select_sql("ORDER BY created_at DESC LIMIT ?1").as_str())?;
+            .prepare(record_select_sql("ORDER BY created_at DESC, id LIMIT ?1").as_str())?;
         let rows = stmt.query_map(params![limit as i64], record_from_row)?;
         collect_rows(rows)
     }
@@ -2152,7 +2152,7 @@ impl Store {
         let like = format!("%{}%", query);
         let mut stmt = self.conn.prepare(
             record_select_sql(
-                "WHERE title LIKE ?1 OR body LIKE ?1 OR tags_json LIKE ?1 ORDER BY created_at DESC LIMIT ?2",
+                "WHERE title LIKE ?1 OR body LIKE ?1 OR tags_json LIKE ?1 ORDER BY created_at DESC, id LIMIT ?2",
             )
             .as_str(),
         )?;
@@ -2188,7 +2188,7 @@ impl Store {
             FROM matches
             WHERE record_id IS NOT NULL
             GROUP BY record_id
-            ORDER BY MIN(score)
+            ORDER BY MIN(score), record_id
             LIMIT ?2
             "#
         } else {
@@ -2196,7 +2196,7 @@ impl Store {
             SELECT record_id
             FROM work_record_search
             WHERE work_record_search MATCH ?1
-            ORDER BY bm25(work_record_search)
+            ORDER BY bm25(work_record_search), record_id
             LIMIT ?2
             "#
         };
@@ -5957,6 +5957,76 @@ fn collect_rows<T>(
         values.push(row?);
     }
     Ok(values)
+}
+
+#[cfg(test)]
+mod search_order_tests {
+    use super::*;
+
+    fn tempdir() -> tempfile::TempDir {
+        let root = std::env::current_dir().unwrap().join("target/test-data");
+        std::fs::create_dir_all(&root).unwrap();
+        tempfile::Builder::new()
+            .prefix("work-record-store-search-order-")
+            .tempdir_in(root)
+            .unwrap()
+    }
+
+    fn fixed_time() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-06-23T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    fn stable_tie_record(index: u16) -> WorkRecord {
+        let mut record = WorkRecord::new(
+            "Stable tie title",
+            "stabletie exact equal body for deterministic fts ranking",
+            vec!["stabletie".into()],
+            "task",
+            None,
+        );
+        record.id =
+            Uuid::parse_str(&format!("018f45d0-0000-7000-8000-000000010{index:03}")).unwrap();
+        record.created_at = fixed_time();
+        record.updated_at = fixed_time();
+        record
+    }
+
+    fn assert_search_order(store: &Store, expected: &[Uuid]) {
+        let actual = store
+            .search_records("stabletie", 10)
+            .unwrap()
+            .into_iter()
+            .map(|record| record.id)
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn search_records_equal_fts_scores_use_record_id_across_refresh_and_reopen() {
+        let temp = tempdir();
+        let path = temp.path().join("work.sqlite");
+        let store = Store::open(&path).unwrap();
+        for index in [4, 1, 3, 2] {
+            store.insert_record(&stable_tie_record(index)).unwrap();
+        }
+
+        let expected = vec![
+            stable_tie_record(1).id,
+            stable_tie_record(2).id,
+            stable_tie_record(3).id,
+            stable_tie_record(4).id,
+        ];
+        assert_search_order(&store, &expected);
+
+        store.upsert_record(&stable_tie_record(3)).unwrap();
+        assert_search_order(&store, &expected);
+
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_search_order(&reopened, &expected);
+    }
 }
 
 #[cfg(all(test, feature = "legacy-pr-evidence"))]
