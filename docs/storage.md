@@ -49,6 +49,68 @@ locations and records enough information to search and cite imported material.
 If a raw source path moves or is deleted, `ctx show` and `ctx context` should
 still return indexed text and clearly mark the source as unavailable.
 
+## Index Lifecycle
+
+Find the active ctx root before destructive maintenance:
+
+```bash
+ctx status
+```
+
+The default root is `~/.ctx`. If you set `CTX_DATA_ROOT` or pass a data-root
+option, use that root in the commands below instead.
+
+Re-import or update the index:
+
+```bash
+ctx import --all
+ctx import --resume
+ctx import --path ~/.codex/sessions
+```
+
+Current adapters are safe to re-run. They rescan sources idempotently and keep
+source paths or cursors when available.
+
+Remove a source:
+
+```bash
+$EDITOR ~/.ctx/config.toml
+```
+
+The current CLI does not add provider source entries to `config.toml`; default
+provider locations are discovered each time and explicit `--path` imports are
+not remembered as future defaults. If you maintain local source entries in the
+config, remove those entries. To remove data already indexed from that source,
+rebuild the index and import only the sources you still want.
+
+Reset and rebuild the index:
+
+```bash
+rm -f ~/.ctx/work.sqlite ~/.ctx/work.sqlite-wal ~/.ctx/work.sqlite-shm
+ctx setup
+ctx import --all
+```
+
+This removes the local SQLite index and recreates it from provider history. It
+does not delete raw provider transcript files.
+
+Inspect storage size:
+
+```bash
+du -sh ~/.ctx
+du -h ~/.ctx/work.sqlite*
+ctx status --json
+```
+
+Delete all ctx data:
+
+```bash
+rm -rf ~/.ctx
+```
+
+This removes ctx's local index, config, objects, and logs for the default root.
+It does not remove provider-owned history such as `~/.codex/sessions`.
+
 ## Privacy Truth
 
 No local search index can be considered share-safe by default. Indexed prompts,
