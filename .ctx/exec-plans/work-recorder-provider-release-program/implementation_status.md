@@ -1,6 +1,6 @@
 # Work Recorder Provider Release Implementation Status
 
-Last updated: 2026-06-24T01:23:47Z.
+Last updated: 2026-06-24T01:29:30Z.
 
 ## Current Integration Branch
 
@@ -351,6 +351,22 @@ Buildkite #85 / Codex import integration update:
   - `bash scripts/check-docs.sh` passed.
   - `bash scripts/check.sh product-decisions` passed.
   - `bash scripts/check-buildkite-pipeline.sh` passed.
+  - `cargo-lowio fmt --check` passed.
+  - `git diff --check` passed.
+
+Buildkite #86 update:
+
+- Buildkite #86 was triggered for pushed head
+  `72424738de083783fee73cd0272a1dc987886bb5`. It failed in
+  `:rust: clippy` before the rest of the matrix ran.
+- Failure mode: clippy on the Buildkite Rust toolchain rejected
+  `unwrap_or_else(|| "imported")` in the Codex session Work Record title
+  fallback with `clippy::unnecessary-lazy-evaluations`.
+- Remediation: changed the fallback to `unwrap_or("imported")` and let
+  rustfmt normalize the expression.
+- Local validation:
+  - `CTX_ARTIFACT_DIR=target/ctx-artifacts/clippy-after-codex-import-fix
+    bash scripts/check.sh clippy` passed.
   - `cargo-lowio fmt --check` passed.
   - `git diff --check` passed.
 

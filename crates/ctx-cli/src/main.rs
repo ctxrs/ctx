@@ -3069,10 +3069,7 @@ fn codex_session_work_record_title(session: &Session, events: &[Event]) -> Strin
         }
         _ => format!(
             "Codex session: {}",
-            session
-                .external_session_id
-                .as_deref()
-                .unwrap_or_else(|| "imported")
+            session.external_session_id.as_deref().unwrap_or("imported")
         ),
     }
 }
