@@ -63,8 +63,16 @@ impl<'a> DashboardReport<'a> {
             records: &archive.records,
             evidence: &archive.evidence,
             archive_artifacts: &archive.artifacts,
+            sessions: &archive.sessions,
+            runs: &archive.runs,
+            events: &archive.events,
+            vcs_workspaces: &archive.vcs_workspaces,
+            vcs_changes: &archive.vcs_changes,
+            pull_requests: &archive.pull_requests,
+            artifacts: &archive.artifact_records,
             evidence_metadata: &archive.evidence_metadata,
-            ..Self::from_records(&archive.records, &archive.evidence)
+            files_touched: &archive.files_touched,
+            summaries: &archive.summaries,
         }
     }
 }
@@ -239,16 +247,20 @@ pub fn render_dashboard_html_report(report: &DashboardReport<'_>) -> String {
 pub fn dashboard_static_assets() -> Vec<(&'static str, &'static [u8])> {
     vec![
         (
-            "assets/dashboard-Bia-bAEO.js",
-            include_bytes!("../../../apps/ctx-dashboard/dist/assets/dashboard-Bia-bAEO.js"),
+            "assets/dashboard-Ca36SNSf.js",
+            include_bytes!("../../../apps/ctx-dashboard/dist/assets/dashboard-Ca36SNSf.js"),
         ),
         (
-            "assets/styles-Bv3y7hLt.js",
-            include_bytes!("../../../apps/ctx-dashboard/dist/assets/styles-Bv3y7hLt.js"),
+            "assets/styles-BPbpeMB5.js",
+            include_bytes!("../../../apps/ctx-dashboard/dist/assets/styles-BPbpeMB5.js"),
         ),
         (
-            "assets/styles-DWraSZJM.css",
-            include_bytes!("../../../apps/ctx-dashboard/dist/assets/styles-DWraSZJM.css"),
+            "assets/styles-TU1zzzN7.css",
+            include_bytes!("../../../apps/ctx-dashboard/dist/assets/styles-TU1zzzN7.css"),
+        ),
+        (
+            "assets/ctx-logo-C6pLocI_.png",
+            include_bytes!("../../../apps/ctx-dashboard/dist/assets/ctx-logo-C6pLocI_.png"),
         ),
     ]
 }
@@ -262,14 +274,11 @@ pub fn dashboard_export_data(report: &DashboardReport<'_>) -> DashboardExportDat
         privacy: privacy_summary(report),
         views: vec![
             "Overview",
-            "Workspace / Repo",
-            "Provider Coverage",
-            "Session Detail",
-            "PR / Evidence",
-            "Search / Explore",
-            "Settings / Status",
-            "Transcript, Messages, and Tool Calls",
-            "Artifacts",
+            "Records",
+            "Timeline",
+            "PR Evidence",
+            "Search",
+            "Setup Health",
         ],
         records: report
             .records
@@ -445,7 +454,7 @@ pub fn dashboard_export_data(report: &DashboardReport<'_>) -> DashboardExportDat
         status: DashboardStatus {
             export_mode: "Static local export",
             local_only: true,
-            javascript_app: "React/Vite",
+            javascript_app: "ctx dashboard",
             data_contract: "ctx dashboard export v1",
             search_command: "ctx search <query> --json",
         },
@@ -484,7 +493,7 @@ pub fn render_evidence_report_markdown(report: &DashboardReport<'_>) -> String {
         report.pull_requests.len()
     ));
     out.push_str(&format!(
-        "- Raw transcripts withheld: {}\n\n",
+        "- Private transcript payloads withheld: {}\n\n",
         report.privacy.raw_transcripts_withheld
     ));
     out.push_str(&format!("- Provider events: {}\n\n", report.events.len()));
@@ -512,7 +521,6 @@ pub fn render_evidence_report_markdown(report: &DashboardReport<'_>) -> String {
             out.push_str("\n  ```\n");
         }
     }
-
     if !report.events.is_empty() {
         out.push_str("\n## Provider Events\n\n");
         for event in &report.events {
@@ -775,7 +783,7 @@ fn render_transcript_views(out: &mut String, report: &DashboardReport<'_>) {
         })
         .take(12)
         .collect::<Vec<_>>();
-    out.push_str("<section><h2>Transcript, Messages, and Tool Calls</h2>");
+    out.push_str("<section><h2>Transcript preview and tools</h2>");
     if transcript_like.is_empty() {
         out.push_str("<div class=\"empty\">No redacted transcript events are available. Raw transcript objects remain withheld.</div></section>");
         return;
@@ -968,7 +976,7 @@ fn render_privacy(out: &mut String, privacy: &PrivacySummary) {
     out.push_str(
         "<div class=\"tag\"><span>Default output</span><strong>redacted/share-safe</strong></div>",
     );
-    out.push_str("<div class=\"tag\"><span>Raw transcripts withheld</span><strong>");
+    out.push_str("<div class=\"tag\"><span>Private payloads withheld</span><strong>");
     out.push_str(&privacy.raw_transcripts_withheld.to_string());
     out.push_str("</strong></div><div class=\"tag\"><span>Redacted previews</span><strong>");
     out.push_str(&privacy.redacted_previews.to_string());
@@ -1406,7 +1414,7 @@ mod tests {
 
         assert!(html.contains("ctx-dashboard-data"));
         assert_eq!(data["product"], "ctx");
-        assert_eq!(data["status"]["javascript_app"], "React/Vite");
+        assert_eq!(data["status"]["javascript_app"], "ctx dashboard");
         assert!(rendered.contains("Ship <dashboard> token=[REDACTED_SECRET]"));
         assert!(rendered.contains("<script>alert(1)</script>"));
         assert!(rendered.contains("workspace: work"));
@@ -1471,13 +1479,11 @@ mod tests {
 
         for section in [
             "Overview",
-            "Workspace / Repo",
-            "Session Detail",
-            "PR / Evidence",
-            "Search / Explore",
-            "Settings / Status",
-            "Transcript, Messages, and Tool Calls",
-            "Artifacts",
+            "Records",
+            "Timeline",
+            "PR Evidence",
+            "Search",
+            "Setup Health",
         ] {
             assert!(rendered.contains(section), "missing section {section}");
         }
@@ -1486,6 +1492,61 @@ mod tests {
         assert!(rendered.contains("cargo test -p work-record-report token=[REDACTED_SECRET]"));
         assert!(rendered.contains("password=[REDACTED_SECRET]"));
         assert!(rendered.contains("[REDACTED_PATH]/lib.rs"));
+        assert!(!rendered.contains("ghp_123456"));
+        assert!(!rendered.contains("hunter2"));
+        assert!(!rendered.contains("/home/daddy/code/private"));
+        assert!(!rendered.contains("raw transcript secret"));
+    }
+
+    #[test]
+    fn archive_dashboard_rendering_preserves_rich_share_safe_data() {
+        let fixture = rich_fixture();
+        let archive = fixture.archive();
+        let report = DashboardReport::from_archive(&archive);
+        assert_rich_fixture_not_sparse(&report);
+
+        assert_eq!(report.sessions.len(), archive.sessions.len());
+        assert_eq!(report.runs.len(), archive.runs.len());
+        assert_eq!(report.events.len(), archive.events.len());
+        assert_eq!(report.vcs_workspaces.len(), archive.vcs_workspaces.len());
+        assert_eq!(report.vcs_changes.len(), archive.vcs_changes.len());
+        assert_eq!(report.pull_requests.len(), archive.pull_requests.len());
+        assert_eq!(report.artifacts.len(), archive.artifact_records.len());
+        assert_eq!(report.files_touched.len(), archive.files_touched.len());
+        assert_eq!(report.summaries.len(), archive.summaries.len());
+
+        let html = render_dashboard_html_archive(&archive);
+        let data = dashboard_data_from_html(&html);
+        let rendered = data.to_string();
+
+        assert_eq!(data["sessions"].as_array().unwrap().len(), 1);
+        assert_eq!(data["runs"].as_array().unwrap().len(), 1);
+        assert_eq!(data["events"].as_array().unwrap().len(), 3);
+        assert_eq!(data["vcs_workspaces"].as_array().unwrap().len(), 1);
+        assert_eq!(data["vcs_changes"].as_array().unwrap().len(), 1);
+        assert_eq!(data["pull_requests"].as_array().unwrap().len(), 1);
+        assert_eq!(data["artifacts"].as_array().unwrap().len(), 1);
+        assert_eq!(data["files_touched"].as_array().unwrap().len(), 1);
+        assert_eq!(data["summaries"].as_array().unwrap().len(), 1);
+
+        assert_eq!(data["sessions"][0]["is_primary"], false);
+        assert_eq!(
+            data["sessions"][0]["root_session_id"],
+            archive.sessions[0].id.to_string()
+        );
+        assert_eq!(
+            data["sessions"][0]["transcript_blob_id"],
+            archive.artifact_records[0].id.to_string()
+        );
+        assert_eq!(
+            data["pull_requests"][0]["url"],
+            "https://github.com/ctxrs/ctx/pull/42"
+        );
+        assert!(rendered.contains("raw artifact content withheld"));
+        assert!(rendered.contains("raw event payload withheld"));
+        assert!(rendered.contains("[REDACTED_PATH]/lib.rs"));
+        assert!(rendered.contains("Dashboard v2 summary"));
+        assert!(rendered.contains("cargo test -p work-record-report token=[REDACTED_SECRET]"));
         assert!(!rendered.contains("ghp_123456"));
         assert!(!rendered.contains("hunter2"));
         assert!(!rendered.contains("/home/daddy/code/private"));
@@ -1555,6 +1616,25 @@ mod tests {
                 summaries: &self.summaries,
             }
         }
+
+        fn archive(&self) -> WorkRecordArchive {
+            WorkRecordArchive {
+                records: self.records.clone(),
+                evidence: self.evidence.clone(),
+                evidence_metadata: self.evidence_metadata.clone(),
+                artifacts: self.archive_artifacts.clone(),
+                sessions: self.sessions.clone(),
+                runs: self.runs.clone(),
+                events: self.events.clone(),
+                artifact_records: self.artifacts.clone(),
+                vcs_workspaces: self.vcs_workspaces.clone(),
+                vcs_changes: self.vcs_changes.clone(),
+                pull_requests: self.pull_requests.clone(),
+                summaries: self.summaries.clone(),
+                files_touched: self.files_touched.clone(),
+                ..WorkRecordArchive::default()
+            }
+        }
     }
 
     fn assert_rich_fixture_not_sparse(report: &DashboardReport<'_>) {
@@ -1568,6 +1648,7 @@ mod tests {
         assert!(!report.pull_requests.is_empty());
         assert!(!report.artifacts.is_empty());
         assert!(!report.files_touched.is_empty());
+        assert!(!report.summaries.is_empty());
     }
 
     fn rich_fixture() -> RichFixture {
@@ -1704,16 +1785,7 @@ mod tests {
                     role: Some(EventRole::Assistant),
                     occurred_at: t0,
                     capture_source_id: None,
-                    payload: json!({
-                        "provider": "codex",
-                        "provider_session_id": "codex-session",
-                        "body": {
-                            "tool": "exec_command",
-                            "command": "cargo test",
-                            "arguments_preview": "{\"cmd\":\"cargo test\"}",
-                            "text": "exec_command: cargo test"
-                        }
-                    }),
+                    payload: json!({"name": "exec_command", "command": "cargo test"}),
                     payload_blob_id: None,
                     dedupe_key: Some("tool-1".into()),
                     redaction_state: RedactionState::SafePreview,

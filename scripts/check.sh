@@ -368,7 +368,7 @@ run_dashboard_report_artifact_review() {
 
   bin="$(ctx_debug_bin)"
   data_root="$(mktemp -d "${TMPDIR}/ctx-dashboard-report.XXXXXX")"
-  ctx_run_timed "dashboard-report-setup" env CTX_DATA_ROOT="${data_root}" "${bin}" setup
+  ctx_run_timed "dashboard-report-setup" env CTX_DATA_ROOT="${data_root}" "${bin}" setup --no-import --no-open
   record_json="$(CTX_DATA_ROOT="${data_root}" "${bin}" record \
     --title "dashboard report artifact review" \
     --body "Review dashboard and report artifacts before sharing." \
@@ -412,10 +412,18 @@ run_dashboard_report_artifact_review() {
   fi
   file_contains "${dogfood_dir}/manifest.json" '"visual_evidence": "visual-evidence.json"'
   if file_contains "${CTX_ARTIFACT_DIR}/visual-evidence.json" '"visual_status": "captured"'; then
-    test -s "${dogfood_dir}/screenshots/desktop-providers.png"
-    test -s "${dogfood_dir}/screenshots/mobile-providers.png"
-    test -s "${dogfood_dir}/screenshots/desktop-evidence.png"
-    test -s "${dogfood_dir}/screenshots/mobile-evidence.png"
+    test -s "${dogfood_dir}/screenshots/desktop-overview.png"
+    test -s "${dogfood_dir}/screenshots/mobile-overview.png"
+    test -s "${dogfood_dir}/screenshots/desktop-record-detail.png"
+    test -s "${dogfood_dir}/screenshots/mobile-record-detail.png"
+    test -s "${dogfood_dir}/screenshots/desktop-timeline.png"
+    test -s "${dogfood_dir}/screenshots/mobile-timeline.png"
+    test -s "${dogfood_dir}/screenshots/desktop-evidence-failure.png"
+    test -s "${dogfood_dir}/screenshots/mobile-evidence-failure.png"
+    test -s "${dogfood_dir}/screenshots/desktop-search-timeline.png"
+    test -s "${dogfood_dir}/screenshots/mobile-search-timeline.png"
+    test -s "${dogfood_dir}/screenshots/desktop-setup-health.png"
+    test -s "${dogfood_dir}/screenshots/mobile-setup-health.png"
   else
     file_contains "${CTX_ARTIFACT_DIR}/visual-evidence.json" '"visual_status": "accepted_blocker"'
     file_contains "${CTX_ARTIFACT_DIR}/visual-evidence.json" '"accepted_visual_blocker":'

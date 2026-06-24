@@ -51,6 +51,9 @@ export type PullRequest = {
 export type DashboardSession = {
   id: string;
   work_record_id?: string | null;
+  parent_session_id?: string | null;
+  root_session_id?: string | null;
+  is_primary?: boolean | null;
   provider?: string | null;
   support_status?: string | null;
   capture_path?: string | null;
@@ -61,6 +64,7 @@ export type DashboardSession = {
   role_hint?: string | null;
   status?: string | null;
   fidelity?: string | null;
+  transcript_blob_id?: string | null;
   started_at?: string | null;
   ended_at?: string | null;
   [key: string]: unknown;
@@ -88,6 +92,7 @@ export type DashboardEvent = {
   event_type?: string | null;
   role?: string | null;
   preview?: string | null;
+  payload_blob_id?: string | null;
   redaction_state?: string | null;
   fidelity?: string | null;
   occurred_at?: string | null;

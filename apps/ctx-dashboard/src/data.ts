@@ -24,14 +24,11 @@ export const sampleDashboardData: DashboardData = {
   },
   views: [
     "Overview",
-    "Workspace / Repo",
-    "Provider Coverage",
-    "Session Detail",
-    "PR / Evidence",
-    "Search / Explore",
-    "Settings / Status",
-    "Transcript, Messages, and Tool Calls",
-    "Artifacts"
+    "Records",
+    "Timeline",
+    "PR Evidence",
+    "Search",
+    "Setup Health"
   ],
   records: [
     {
@@ -132,11 +129,12 @@ export const sampleDashboardData: DashboardData = {
       support_status: "supported-import",
       capture_path: "import-local-providers",
       privacy_note: "prompt preview redacted; raw history withheld",
-      role_hint: "implementation worker",
-      agent_type: "implementer",
+      role_hint: "manager session",
+      agent_type: "manager",
       status: "imported",
       fidelity: "summary_only",
-      is_primary: false,
+      is_primary: true,
+      root_session_id: "sess-1",
       started_at: "2026-06-23T12:00:00Z",
       ended_at: "2026-06-23T12:38:00Z"
     },
@@ -147,10 +145,13 @@ export const sampleDashboardData: DashboardData = {
       support_status: "fixture-only",
       capture_path: "normalized provider fixture JSONL",
       privacy_note: "fixture transcript redacted before dashboard export",
-      role_hint: "fixture replay",
-      agent_type: "assistant",
+      role_hint: "review subagent",
+      agent_type: "reviewer",
       status: "fixture-only",
       fidelity: "imported_fixture",
+      is_primary: false,
+      parent_session_id: "sess-1",
+      root_session_id: "sess-1",
       started_at: "2026-06-23T11:18:00Z",
       ended_at: "2026-06-23T11:29:00Z"
     },
@@ -166,6 +167,8 @@ export const sampleDashboardData: DashboardData = {
       status: "fixture-only",
       fidelity: "imported",
       is_primary: false,
+      parent_session_id: "sess-1",
+      root_session_id: "sess-1",
       started_at: "2026-06-23T11:15:00Z",
       ended_at: "2026-06-23T11:45:00Z"
     },
@@ -260,6 +263,7 @@ export const sampleDashboardData: DashboardData = {
       event_type: "tool_output",
       role: "tool",
       preview: "built in 2.1s",
+      payload_blob_id: "blob-tool-output-evt-3",
       redaction_state: "safe_preview",
       occurred_at: "2026-06-23T12:28:03Z"
     },
@@ -441,7 +445,7 @@ export const sampleDashboardData: DashboardData = {
       work_record_id: "rec-dashboard",
       kind: "agent",
       model_or_source: "codex",
-      text: "Dashboard export is React/Vite and uses share-safe normalized DTOs."
+      text: "Dashboard export keeps useful review context visible while raw transcript payloads stay withheld."
     },
     {
       id: "summary-provider-1",
@@ -463,7 +467,7 @@ export const sampleDashboardData: DashboardData = {
   status: {
     export_mode: "Static local export",
     local_only: true,
-    javascript_app: "React/Vite",
+    javascript_app: "ctx dashboard",
     data_contract: "ctx dashboard export v1",
     search_command: "ctx search <query> --json"
   }

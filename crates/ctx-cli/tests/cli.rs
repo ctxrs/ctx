@@ -1940,17 +1940,15 @@ fn dashboard_and_report_artifact_lane_is_rich_after_provider_import_evidence_and
     let rendered = data.to_string();
     for view in [
         "Overview",
-        "Workspace / Repo",
-        "Session Detail",
-        "PR / Evidence",
-        "Search / Explore",
-        "Settings / Status",
-        "Transcript, Messages, and Tool Calls",
-        "Artifacts",
+        "Records",
+        "Timeline",
+        "PR Evidence",
+        "Search",
+        "Setup Health",
     ] {
         assert!(rendered.contains(view), "missing dashboard view {view}");
     }
-    assert_eq!(data["status"]["javascript_app"], "React/Vite");
+    assert_eq!(data["status"]["javascript_app"], "ctx dashboard");
     assert!(rendered.contains("imported_provider_summary"));
     assert!(rendered.contains("Provider fixture import for codex"));
     assert!(rendered.contains("Provider fixture import for pi"));
@@ -2450,7 +2448,7 @@ fn dashboard_export_writes_static_local_html_report() {
 
     assert_dashboard_assets(&open_output_dir);
     let open_data = dashboard_data(&open_output_dir);
-    assert_eq!(open_data["status"]["javascript_app"], "React/Vite");
+    assert_eq!(open_data["status"]["javascript_app"], "ctx dashboard");
 }
 
 #[test]

@@ -301,8 +301,11 @@ const views = [
 ];
 const states = [
   { name: 'overview', tab: null, requiredText: 'Work Records' },
-  { name: 'providers', tab: 'Providers', requiredText: 'Provider Coverage' },
-  { name: 'evidence', tab: 'PR/Evidence', requiredText: 'Evidence Previews' },
+  { name: 'record-detail', tab: 'Records', requiredText: 'Files, artifacts, and summaries' },
+  { name: 'timeline', tab: 'Timeline', requiredText: 'Work timeline' },
+  { name: 'evidence-failure', tab: 'PR Evidence', requiredText: 'Command evidence' },
+  { name: 'search-timeline', tab: 'Search', requiredText: 'Search agent history' },
+  { name: 'setup-health', tab: 'Setup Health', requiredText: 'Capture health' },
 ];
 const dashboardRoot = path.resolve(path.dirname(process.env.DASHBOARD_HTML));
 const mimeTypes = new Map([
@@ -352,11 +355,11 @@ function startStaticServer() {
           await page.getByRole('tab', { name: state.tab }).click();
         }
         await page.getByText(state.requiredText).first().waitFor({ state: 'visible', timeout: 5000 });
-        if (state.name === 'providers') {
+        if (state.name === 'setup-health') {
           await page.getByText(/codex|claude|pi|opencode/i).first().waitFor({ state: 'visible', timeout: 5000 });
         }
-        if (state.name === 'evidence') {
-          await page.getByText(/Exit 1|failed|failure|expected failure/i).first().waitFor({ state: 'visible', timeout: 5000 });
+        if (state.name === 'evidence-failure') {
+          await page.locator('.command-card-danger, .evidence-danger, .badge-danger').first().waitFor({ state: 'visible', timeout: 5000 });
         }
         await page.screenshot({
           path: path.join(process.env.SCREENSHOT_DIR, `${view.viewport}-${state.name}.png`),
@@ -375,14 +378,21 @@ function startStaticServer() {
   process.exit(1);
 });
 NODE
+  sanitize_share_artifact "${screenshot_status}"
   cat "${screenshot_status}"
   for expected in \
     desktop-overview.png \
-    desktop-providers.png \
-    desktop-evidence.png \
+    desktop-record-detail.png \
+    desktop-timeline.png \
+    desktop-evidence-failure.png \
+    desktop-search-timeline.png \
+    desktop-setup-health.png \
     mobile-overview.png \
-    mobile-providers.png \
-    mobile-evidence.png; do
+    mobile-record-detail.png \
+    mobile-timeline.png \
+    mobile-evidence-failure.png \
+    mobile-search-timeline.png \
+    mobile-setup-health.png; do
     if [[ ! -s "${screenshot_dir}/${expected}" ]]; then
       printf 'blocker: expected dashboard screenshot missing or empty: %s\n' "${expected}" | tee -a "${screenshot_status}"
       return 1
@@ -403,11 +413,17 @@ write_visual_evidence_manifest() {
     printf '  "accepted_visual_blocker": "%s",\n' "$(json_escape "${blocker}")"
     printf '  "screenshot_count": %s,\n' "$(find "${artifact_dir}/screenshots" -maxdepth 1 -type f -name '*.png' 2>/dev/null | wc -l | tr -d '[:space:]')"
     printf '  "desktop_overview": "screenshots/desktop-overview.png",\n'
-    printf '  "desktop_providers": "screenshots/desktop-providers.png",\n'
-    printf '  "desktop_evidence": "screenshots/desktop-evidence.png",\n'
+    printf '  "desktop_record_detail": "screenshots/desktop-record-detail.png",\n'
+    printf '  "desktop_timeline": "screenshots/desktop-timeline.png",\n'
+    printf '  "desktop_evidence_failure": "screenshots/desktop-evidence-failure.png",\n'
+    printf '  "desktop_search_timeline": "screenshots/desktop-search-timeline.png",\n'
+    printf '  "desktop_setup_health": "screenshots/desktop-setup-health.png",\n'
     printf '  "mobile_overview": "screenshots/mobile-overview.png",\n'
-    printf '  "mobile_providers": "screenshots/mobile-providers.png",\n'
-    printf '  "mobile_evidence": "screenshots/mobile-evidence.png",\n'
+    printf '  "mobile_record_detail": "screenshots/mobile-record-detail.png",\n'
+    printf '  "mobile_timeline": "screenshots/mobile-timeline.png",\n'
+    printf '  "mobile_evidence_failure": "screenshots/mobile-evidence-failure.png",\n'
+    printf '  "mobile_search_timeline": "screenshots/mobile-search-timeline.png",\n'
+    printf '  "mobile_setup_health": "screenshots/mobile-setup-health.png",\n'
     printf '  "screenshot_status": "screenshot-status.txt"\n'
     printf '}\n'
   } >"${path}"
@@ -421,7 +437,7 @@ main() {
   safe_reset_data_root
   mkdir -p "${data_root}"
 
-  run_ctx setup >/dev/null
+  run_ctx setup --no-import --no-open >/dev/null
 
   if [[ "${seed_mode}" == "import" ]]; then
     if [[ ! -f "${archive_path}" ]]; then

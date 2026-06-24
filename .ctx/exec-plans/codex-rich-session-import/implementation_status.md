@@ -190,3 +190,105 @@ review-blocker fixes.
     validation, and focused reviewer PASSes satisfy this follow-up.
   - Final reviewer reran focused capture, CLI, report, and `git diff --check`
     validations before returning PASS.
+
+## Dashboard Reconciliation Addendum
+
+- Date: 2026-06-24
+- Base rich-import head before reconciliation:
+  `2fc5d6251cc31140c3c733524e4c3bda2424cafd`
+- Dashboard UX source reconciled: `origin/ctx/wr-dashboard-value-ux` at
+  `73d6cc4`
+- Integration branch: `work-record`
+
+### What Landed
+
+- Reconciled the records-first dashboard framing from
+  `ctx/wr-dashboard-value-ux` with the richer Codex/session/search/report work
+  from the rich-import pass.
+- Preserved rich Work Record slices in `DashboardReport::from_archive()` and
+  `dashboard_export_data()`: sessions, runs, events, command-output-derived
+  runs, VCS/PR rows, artifacts, files touched, summaries, and evidence metadata.
+- Rebuilt the React/Vite static dashboard assets and updated
+  `dashboard_static_assets()` to embed the final asset set, including
+  `assets/dashboard-Ca36SNSf.js`, the ctx logo, shared JS, and CSS.
+- Updated the public dashboard view names to `Overview`, `Records`, `Timeline`,
+  `PR Evidence`, `Search`, and `Setup Health`.
+- Removed old dashboard framing from the rendered dashboard: no visible
+  `React/Vite`, no `Local ctx dashboard`, no top-level provider metric/tab, no
+  top-level raw-transcript metric, no prime-header dark-mode toggle, and no old
+  `Workspace` / `Providers` / `Status` tabs.
+- Kept richer #91 content where it was better than the UX branch:
+  chronological timeline, command cards with output previews, rich search event
+  context, transcript/tool event previews, child/session labels, PR evidence
+  readiness, artifacts, and setup/capture details.
+- Replaced long provider cursor/sequence badges in event rows with compact event
+  ids when the source sequence is too large to be human useful.
+- Tightened the dashboard visual review scripts so the synthetic review lane
+  uses `setup --no-import --no-open`, validates the new six-view screenshot set,
+  and sanitizes fake-browser failure output before writing it to logs.
+
+### Screenshot Evidence
+
+Final regenerated screenshot bundle:
+
+- `target/ctx-artifacts/dashboard-review-check/screenshots/desktop-overview.png`
+- `target/ctx-artifacts/dashboard-review-check/screenshots/desktop-record-detail.png`
+- `target/ctx-artifacts/dashboard-review-check/screenshots/desktop-timeline.png`
+- `target/ctx-artifacts/dashboard-review-check/screenshots/desktop-evidence-failure.png`
+- `target/ctx-artifacts/dashboard-review-check/screenshots/desktop-search-timeline.png`
+- `target/ctx-artifacts/dashboard-review-check/screenshots/desktop-setup-health.png`
+- `target/ctx-artifacts/dashboard-review-check/screenshots/mobile-overview.png`
+- `target/ctx-artifacts/dashboard-review-check/screenshots/mobile-record-detail.png`
+- `target/ctx-artifacts/dashboard-review-check/screenshots/mobile-timeline.png`
+- `target/ctx-artifacts/dashboard-review-check/screenshots/mobile-evidence-failure.png`
+- `target/ctx-artifacts/dashboard-review-check/screenshots/mobile-search-timeline.png`
+- `target/ctx-artifacts/dashboard-review-check/screenshots/mobile-setup-health.png`
+
+Manual screenshot review notes:
+
+- Desktop and mobile overview show the ctx logo, `Local agent history`,
+  `Work Records`, and user-value signals: needs attention, work records,
+  PR-linked, and searchable history.
+- Mobile tabs wrap cleanly across two rows and record cards do not clip.
+- PR Evidence shows failed and passing command cards, output previews, PR links,
+  and safe artifact previews.
+- Record detail shows evidence, PR links, agent sessions, commands, timeline,
+  transcript preview, tools/raw-payload status, and files/artifacts/summaries.
+- Setup Health contains provider/source details under capture health instead of
+  promoting provider count as a top-level metric.
+- The handoff card uses `Private payloads`, not a top-level raw-transcript
+  metric.
+
+### Validation
+
+Final local validation after dashboard reconciliation:
+
+- `npm --prefix apps/ctx-dashboard run build` - passed.
+- `npm --prefix apps/ctx-dashboard test` - passed, 16 Playwright tests.
+- `cargo-lowio test -p work-record-report dashboard --locked -- --test-threads
+  1` - passed, 3 dashboard tests.
+- `CTX_ARTIFACT_DIR=target/ctx-artifacts/dashboard-review-check
+  ./scripts/check.sh dashboard-report-artifact-review` - passed and captured 12
+  screenshots.
+- `cargo-lowio test -p work-record-capture -p work-record-store -p
+  work-record-search -p work-record-report --locked -- --test-threads 1` -
+  passed: 22 capture, 6 report, 5 search, 48 store tests, plus doctests.
+- `cargo-lowio test -p ctx --test cli --locked -- --test-threads 1` - passed,
+  64 CLI tests.
+- `CARGO=cargo-lowio
+  CTX_ARTIFACT_DIR=target/ctx-artifacts/dashboard-reconcile-hygiene-final
+  ./scripts/check.sh fmt docs check clippy` - passed.
+- Stale dashboard text scan passed except for the intentional negative
+  `React/Vite` Playwright assertion.
+
+### Review Status
+
+- Dashboard/product review: PASS from adversarial reviewer Hume after inspecting
+  source and screenshots. Reviewer verified the old bad items are absent, rich
+  content remains, share-safe/redacted behavior remains, and mobile tabs wrap
+  cleanly.
+- Narrow post-polish re-check: PASS from Hume after the final
+  `Private payloads` wording and final `dashboard-Ca36SNSf.js` asset hash
+  regeneration. Reviewer verified the old dashboard UI remains gone and rich
+  command, PR evidence, artifacts, Setup Health, transcript/tool events,
+  child-session labels, and share-safe/redacted status remain visible.

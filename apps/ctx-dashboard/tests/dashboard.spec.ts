@@ -7,74 +7,71 @@ const distIndex = path.resolve(process.cwd(), "dist/index.html");
 
 test("desktop light populated dashboard", async ({ page }, testInfo) => {
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "Work Records" })).toBeVisible();
-  await expect(page.getByText("Finish dashboard React export")).toBeVisible();
-  await expect(page.getByText("Share-safe export")).toBeVisible();
-  await expect(page.getByText("1 failing command")).toBeVisible();
-  await expect(page.locator(".metric").filter({ hasText: "Linked PRs" }).getByText("2")).toBeVisible();
-  await expect(page.locator(".metric").filter({ hasText: "Providers" }).getByText("4")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Work Records", exact: true })).toBeVisible();
+  await expect(page.getByText("Local agent history")).toBeVisible();
+  await expect(page.getByRole("button", { name: /Finish dashboard React export/ })).toBeVisible();
+  await expect(page.getByText("Needs attention").first()).toBeVisible();
+  await expect(page.getByLabel("Work record signals").getByText("Searchable history")).toBeVisible();
+  await expect(page.getByText("Command failed: buildkite-agent pipeline upload")).toBeVisible();
+  for (const tab of ["Overview", "Records", "Timeline", "PR Evidence", "Search", "Setup Health"]) {
+    await expect(page.getByRole("tab", { name: tab })).toBeVisible();
+  }
+  await expect(page.getByText("React/Vite")).toHaveCount(0);
+  await expect(page.getByText("Providers")).toHaveCount(0);
   await assertNonBlank(page);
   await screenshot(page, testInfo.project.name, "desktop-light-overview");
 });
 
-test("desktop dark provider session detail and commands", async ({ page }, testInfo) => {
+test("desktop record detail shows transcript, tools, subagents, and evidence", async ({ page }, testInfo) => {
   await page.goto("/");
-  await page.getByTitle("Use dark theme").click();
-  await page.getByRole("tab", { name: "Providers" }).click();
-  await expect(page.getByRole("heading", { name: "Provider Coverage" })).toBeVisible();
-  await expect(page.getByText("supported-import").first()).toBeVisible();
-  await expect(page.getByText("fixture-only").first()).toBeVisible();
-  await expect(page.getByText("detected-unsupported").first()).toBeVisible();
-  await expect(page.getByText("import-local-providers").first()).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Session Detail" })).toBeVisible();
-  await expect(page.getByText("Support status")).toBeVisible();
+  await page.getByRole("tab", { name: "Records" }).click();
+  await expect(page.getByRole("heading", { name: "Evidence" })).toBeVisible();
+  await expect(page.getByText("Transcript preview")).toBeVisible();
+  await expect(page.getByText("Tools and raw payloads")).toBeVisible();
+  await expect(page.getByText("manager session").first()).toBeVisible();
+  await expect(page.getByText("raw withheld").first()).toBeVisible();
   await expect(page.getByText("prompt preview redacted; raw history withheld")).toBeVisible();
-  await expect(page.getByText("Prompts and Messages")).toBeVisible();
   await expect(
-    page.locator(".detail-section").filter({ hasText: "Tool Calls and Output" }).getByText("exec_command npm run build")
+    page.locator(".detail-section").filter({ hasText: "Tools and raw payloads" }).getByText("exec_command npm run build")
   ).toBeVisible();
-  await expect(page.getByText("ctx capture import-local-providers --json")).toBeVisible();
   await assertNonBlank(page);
-  await screenshot(page, testInfo.project.name, "desktop-dark-providers");
+  await screenshot(page, testInfo.project.name, "desktop-record-detail");
 });
 
-test("mobile provider cards show support and redaction states", async ({ page }, testInfo) => {
+test("mobile setup health shows capture sources without promoting provider counts", async ({ page }, testInfo) => {
   await page.goto("/");
-  await page.getByRole("tab", { name: "Providers" }).click();
+  await page.getByRole("tab", { name: "Setup Health" }).click();
+  await expect(page.getByRole("heading", { name: "Capture health" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Capture sources" })).toBeVisible();
   await expect(page.locator(".provider-card").filter({ hasText: "claude-code" })).toBeVisible();
-  await page.locator("button.session-button").filter({ hasText: "claude-code" }).click();
-  await expect(page.getByText("fixture transcript redacted before dashboard export")).toBeVisible();
+  await expect(page.getByText("normalized provider fixture JSONL").first()).toBeVisible();
   await expect(page.locator(".provider-card").filter({ hasText: "opencode" })).toBeVisible();
-  await page.locator("button.session-button").filter({ hasText: "opencode" }).click();
   await expect(page.getByText("detected-unsupported").first()).toBeVisible();
-  await expect(page.getByText("install/config detection only").first()).toBeVisible();
-  await expect(page.getByText("no transcript importer enabled")).toBeVisible();
-  await expectActiveTabSettled(page, "Providers");
+  await expectActiveTabSettled(page, "Setup Health");
   await assertNonBlank(page);
-  await screenshot(page, testInfo.project.name, "mobile-provider-coverage");
+  await screenshot(page, testInfo.project.name, "mobile-setup-health");
 });
 
 test("desktop sparse provider fidelity state", async ({ page }, testInfo) => {
   await gotoWithDashboardData(page, "/sparse-dashboard", sparseDashboardData);
-  await page.getByRole("tab", { name: "Providers" }).click();
-  await expect(page.getByRole("heading", { name: "Provider Coverage" })).toBeVisible();
+  await page.getByRole("tab", { name: "Setup Health" }).click();
+  await expect(page.getByRole("heading", { name: "Capture health" })).toBeVisible();
   await expect(page.getByText("No provider sessions")).toBeVisible();
   await expect(page.getByText("summary-only imports").first()).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Session Detail" })).toBeVisible();
   await assertNonBlank(page);
-  await screenshot(page, testInfo.project.name, "desktop-sparse-providers");
+  await screenshot(page, testInfo.project.name, "desktop-sparse-setup-health");
 });
 
 test("mobile evidence failure state", async ({ page }, testInfo) => {
   await page.goto("/");
-  await page.getByRole("tab", { name: "PR/Evidence" }).click();
-  await expect(page.getByRole("heading", { name: "Evidence Previews" })).toBeVisible();
+  await page.getByRole("tab", { name: "PR Evidence" }).click();
+  await expect(page.getByRole("heading", { name: "PR evidence readiness" })).toBeVisible();
   await expect(page.getByText("buildkite-agent pipeline upload")).toBeVisible();
   await expect(page.getByText("[REDACTED_ENV] missing for local CI preview")).toBeVisible();
   await expect(page.locator(".badge-danger").filter({ hasText: "Exit 1" })).toBeVisible();
-  await expect(page.locator(".row-card-danger").filter({ hasText: "failed" })).toBeVisible();
+  await expect(page.locator(".evidence-danger").filter({ hasText: "Check release evidence packet" })).toBeVisible();
   await expect(page.locator(".link-row")).toHaveCount(2);
-  await expectActiveTabSettled(page, "PR/Evidence");
+  await expectActiveTabSettled(page, "PR Evidence");
   await assertNonBlank(page);
   await screenshot(page, testInfo.project.name, "mobile-evidence-failure");
 });
@@ -82,16 +79,16 @@ test("mobile evidence failure state", async ({ page }, testInfo) => {
 test("mobile status and search", async ({ page }, testInfo) => {
   await page.goto("/");
   await page.getByRole("tab", { name: "Search" }).click();
-  await page.getByPlaceholder("Search records, commands, transcript previews, artifacts").fill("provider");
-  await expect(page.getByText("Review provider import coverage")).toBeVisible();
+  await page.getByPlaceholder("Search prompts, commands, tool output previews, files, summaries, PRs").fill("provider");
+  await expect(page.getByText("Review provider import coverage", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("detected-unsupported").first()).toBeVisible();
-  await page.getByRole("tab", { name: "Status" }).click();
-  await expect(page.getByRole("heading", { name: "Settings / Status" })).toBeVisible();
-  await expect(page.getByText("ctx dashboard export v1")).toBeVisible();
-  await expectActiveTabSettled(page, "Status");
-  await expectVisibleActiveTabOnly(page, "Status");
+  await page.getByRole("tab", { name: "Timeline" }).click();
+  await expect(page.getByRole("heading", { name: "Work timeline" })).toBeVisible();
+  await expect(page.getByText("exec_command npm run build")).toBeVisible();
+  await expectActiveTabSettled(page, "Timeline");
+  await expectVisibleActiveTabOnly(page, "Timeline");
   await assertNonBlank(page);
-  await screenshot(page, testInfo.project.name, "mobile-status-search");
+  await screenshot(page, testInfo.project.name, "mobile-search-timeline");
 });
 
 async function screenshot(page: Page, project: string, name: string) {
@@ -167,14 +164,11 @@ const sparseDashboardData = {
   },
   views: [
     "Overview",
-    "Workspace / Repo",
-    "Provider Coverage",
-    "Session Detail",
-    "PR / Evidence",
-    "Search / Explore",
-    "Settings / Status",
-    "Transcript, Messages, and Tool Calls",
-    "Artifacts"
+    "Records",
+    "Timeline",
+    "PR Evidence",
+    "Search",
+    "Setup Health"
   ],
   records: [
     {
@@ -210,7 +204,7 @@ const sparseDashboardData = {
   status: {
     export_mode: "Static local export",
     local_only: true,
-    javascript_app: "React/Vite",
+    javascript_app: "ctx dashboard",
     data_contract: "ctx dashboard export v1",
     search_command: "ctx search <query> --json"
   }
