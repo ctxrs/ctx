@@ -7,7 +7,25 @@ env:
 steps:
   - label: ":bazel: search CI gate"
     key: "search-mvp"
-    command: "./scripts/check.sh --mode=ci"
+    command: |
+      if ! command -v zip >/dev/null 2>&1; then
+        command -v apt-get >/dev/null 2>&1 || {
+          echo "zip is missing and apt-get is unavailable on this Buildkite agent" >&2
+          exit 127
+        }
+        if command -v sudo >/dev/null 2>&1; then
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y zip
+        else
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y zip
+        fi
+      fi
+      command -v zip >/dev/null 2>&1 || {
+        echo "zip is required for Bazel undeclared test output packaging" >&2
+        exit 127
+      }
+      ./scripts/check.sh --mode=ci
     agents:
       queue: "release-linux-managed"
       ctx-runner-class: "release-linux-x64-stage"
