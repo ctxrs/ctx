@@ -1,6 +1,6 @@
 # Work Recorder Provider Release Implementation Status
 
-Last updated: 2026-06-24T01:29:30Z.
+Last updated: 2026-06-24T01:42:14Z.
 
 ## Current Integration Branch
 
@@ -369,6 +369,34 @@ Buildkite #86 update:
     bash scripts/check.sh clippy` passed.
   - `cargo-lowio fmt --check` passed.
   - `git diff --check` passed.
+
+Buildkite #87 update:
+
+- Buildkite #87 was triggered for pushed head
+  `97906874a3cee9a4b80d61bfbc8f0edc77ec7799`.
+- Result: `fmt`, docs, pipeline contract, product-decision checks, `clippy`,
+  Rust tests, and examples passed. The Bazel lane failed in `//:cargo_tests`.
+- Failure mode: the Codex session tree CLI fixture test imported zero sessions
+  under Bazel even though the normal Rust test lane imported two sessions.
+- Root cause: Bazel runfiles expose fixture files as symlinks. The Codex
+  session tree collector accepted regular `.jsonl` files only and skipped
+  symlinked `.jsonl` files.
+- Remediation: the collector now accepts symlinked `.jsonl` entries that
+  resolve to files while continuing not to recurse into symlinked directories.
+  A Unix regression test covers symlinked Codex JSONL session files.
+- Local validation:
+  - `cargo-lowio test --locked -p work-record-capture
+    codex_session_tree_imports_symlinked_jsonl_files -- --test-threads 1`
+    passed.
+  - `cargo-lowio test --locked -p ctx --test cli
+    codex_session_tree_import_json_reports_fast_transcript_fidelity --
+    --test-threads 1` passed.
+  - `cargo-lowio clippy --locked -p work-record-capture --all-targets --
+    -D warnings` passed.
+  - `CTX_ARTIFACT_DIR=target/ctx-artifacts/bazel-codex-symlink-fix
+    bash scripts/check.sh bazel` could not exercise Bazel locally because
+    Bazel/Bazelisk is not installed on this host; it produced a skipped timing
+    artifact. Buildkite remains the required Bazel verification surface.
 
 Private hosted checkpoint:
 

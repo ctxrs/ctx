@@ -1407,13 +1407,28 @@ fn collect_jsonl_paths(root: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
             collect_jsonl_paths(&path, paths)?;
-        } else if file_type.is_file()
-            && path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
-        {
+        } else if is_jsonl_file_entry(&path, &file_type) {
             paths.push(path);
         }
     }
     Ok(())
+}
+
+fn is_jsonl_file_entry(path: &Path, file_type: &fs::FileType) -> bool {
+    if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+        return false;
+    }
+    if file_type.is_file() {
+        return true;
+    }
+    if file_type.is_symlink()
+        && fs::metadata(path)
+            .map(|metadata| metadata.is_file())
+            .unwrap_or(false)
+    {
+        return true;
+    }
+    false
 }
 
 fn parse_rfc3339_utc(value: &str) -> Option<DateTime<Utc>> {
@@ -3593,6 +3608,39 @@ mod tests {
         assert!(child_events
             .iter()
             .any(|event| event.payload.to_string().contains("dashboard search")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_session_tree_imports_symlinked_jsonl_files() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir();
+        let fixture = provider_history_fixture("codex-sessions").join("2026/06/23");
+        let sessions = temp.path().join("sessions/2026/06/23");
+        fs::create_dir_all(&sessions).unwrap();
+        symlink(fixture.join("root.jsonl"), sessions.join("root.jsonl")).unwrap();
+        symlink(
+            fixture.join("subagent.jsonl"),
+            sessions.join("subagent.jsonl"),
+        )
+        .unwrap();
+
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let summary = import_codex_session_tree(
+            temp.path().join("sessions"),
+            &mut store,
+            CodexSessionImportOptions {
+                imported_at: "2026-06-23T16:30:00Z".parse().unwrap(),
+                ..CodexSessionImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+        assert_eq!(summary.imported_sessions, 2);
+        assert_eq!(summary.imported_events, 5);
+        assert_eq!(summary.imported_edges, 1);
     }
 
     #[test]
