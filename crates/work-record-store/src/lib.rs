@@ -854,12 +854,6 @@ CREATE VIRTUAL TABLE IF NOT EXISTS artifact_search USING fts5(
 );
 "#;
 
-const DROP_FTS_TABLES_SQL: &str = r#"
-DROP TABLE IF EXISTS work_record_search;
-DROP TABLE IF EXISTS event_search;
-DROP TABLE IF EXISTS artifact_search;
-"#;
-
 pub struct Store {
     path: PathBuf,
     object_dir: PathBuf,
@@ -3229,7 +3223,7 @@ fn rebuild_capture_sources_provider_check(conn: &Connection) -> Result<()> {
 }
 
 fn create_fts_tables_if_supported(conn: &Connection) -> Result<()> {
-    match conn.execute_batch(&format!("{DROP_FTS_TABLES_SQL}\n{FTS_TABLES_SQL}")) {
+    match conn.execute_batch(FTS_TABLES_SQL) {
         Ok(()) => Ok(()),
         Err(rusqlite::Error::SqliteFailure(error, message))
             if is_missing_fts_module(error.extended_code, message.as_deref()) =>
@@ -6671,6 +6665,35 @@ mod tests {
             assert!(evidence_text.contains("password=[REDACTED_SECRET]"));
             assert!(!evidence_text.contains("hunter2"));
         }
+    }
+
+    #[test]
+    fn opening_second_store_does_not_recreate_fts_tables_under_readers() {
+        let temp = tempdir();
+        let path = temp.path().join("work.sqlite");
+        let store = Store::open(&path).unwrap();
+        if !table_exists(&store.conn, "work_record_search").unwrap() {
+            return;
+        }
+
+        let record = WorkRecord::new(
+            "Concurrent dashboard",
+            "dashboard setup keeps a second connection open",
+            vec!["dashboard".into()],
+            "task",
+            None,
+        );
+        store.insert_record(&record).unwrap();
+
+        let mut stmt = store
+            .conn
+            .prepare("SELECT COUNT(*) FROM work_record_search")
+            .unwrap();
+        let second = Store::open(&path).unwrap();
+        drop(second);
+
+        let count: i64 = stmt.query_row([], |row| row.get(0)).unwrap();
+        assert_eq!(count, 1);
     }
 
     #[test]
