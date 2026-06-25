@@ -1321,6 +1321,21 @@ pub fn import_codex_session_jsonl(
     )
 }
 
+pub fn import_codex_session_paths(
+    paths: Vec<PathBuf>,
+    store: &mut Store,
+    options: CodexSessionImportOptions,
+) -> Result<ProviderImportSummary> {
+    for path in &paths {
+        ensure_regular_provider_transcript_file(path)?;
+    }
+    if options.fast_event_inserts {
+        return import_codex_session_paths_fast(paths, store, options, 0);
+    }
+
+    import_codex_session_paths_normalized(paths, store, options, 0)
+}
+
 pub fn import_codex_session_tree(
     root: impl AsRef<Path>,
     store: &mut Store,
@@ -1338,6 +1353,15 @@ pub fn import_codex_session_tree(
         return import_codex_session_paths_fast(paths, store, options, skipped_by_bounds);
     }
 
+    import_codex_session_paths_normalized(paths, store, options, skipped_by_bounds)
+}
+
+fn import_codex_session_paths_normalized(
+    paths: Vec<PathBuf>,
+    store: &mut Store,
+    options: CodexSessionImportOptions,
+    skipped_by_bounds: usize,
+) -> Result<ProviderImportSummary> {
     let mut merged = ProviderImportSummary::default();
     merged.skipped_sessions += skipped_by_bounds;
     merged.skipped += skipped_by_bounds;
@@ -4940,6 +4964,119 @@ mod tests {
         let child = store.get_session(child_id).unwrap();
         assert_eq!(child.parent_session_id, Some(parent_id));
         assert_eq!(child.root_session_id, Some(parent_id));
+    }
+
+    #[test]
+    fn codex_session_paths_imports_only_explicit_subset() {
+        let temp = tempdir();
+        let fixture = provider_history_fixture("codex-sessions").join("2026/06/23/root.jsonl");
+        let total_bytes = fs::metadata(&fixture).unwrap().len();
+        let progress = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = Arc::clone(&progress);
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let summary = import_codex_session_paths(
+            vec![fixture.clone()],
+            &mut store,
+            CodexSessionImportOptions {
+                source_path: Some(fixture.clone()),
+                imported_at: "2026-06-24T02:30:00Z".parse().unwrap(),
+                progress: Some(Arc::new(move |progress| {
+                    observed.lock().unwrap().push((
+                        progress.total_files,
+                        progress.total_bytes,
+                        progress.done,
+                    ));
+                })),
+                ..CodexSessionImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+        assert_eq!(summary.imported_sessions, 1);
+        assert_eq!(summary.imported_events, 6);
+        assert_eq!(summary.imported_edges, 0);
+        assert_eq!(store.list_sessions().unwrap().len(), 1);
+        let root_id = provider_session_uuid(CaptureProvider::Codex, "codex-session-root");
+        let child_id = provider_session_uuid(CaptureProvider::Codex, "codex-session-child");
+        assert_eq!(store.events_for_session(root_id).unwrap().len(), 6);
+        assert!(store.events_for_session(child_id).unwrap().is_empty());
+
+        let progress = progress.lock().unwrap();
+        assert!(progress
+            .iter()
+            .all(|(files, bytes, _)| { *files == 1 && *bytes == total_bytes }));
+        assert_eq!(progress.last().map(|(_, _, done)| *done), Some(true));
+    }
+
+    #[test]
+    fn codex_session_paths_reimport_skips_existing_events() {
+        let temp = tempdir();
+        let fixture = provider_history_fixture("codex-sessions").join("2026/06/23");
+        let paths = vec![fixture.join("root.jsonl"), fixture.join("subagent.jsonl")];
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let first = import_codex_session_paths(
+            paths.clone(),
+            &mut store,
+            CodexSessionImportOptions {
+                imported_at: "2026-06-24T02:45:00Z".parse().unwrap(),
+                ..CodexSessionImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(first.failed, 0, "{:?}", first.failures);
+        assert_eq!(first.imported_sessions, 2);
+        assert_eq!(first.imported_events, 8);
+        assert_eq!(first.imported_edges, 1);
+
+        let second = import_codex_session_paths(
+            paths,
+            &mut store,
+            CodexSessionImportOptions {
+                imported_at: "2026-06-24T02:45:00Z".parse().unwrap(),
+                ..CodexSessionImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(second.failed, 0, "{:?}", second.failures);
+        assert_eq!(second.imported_sessions, 0);
+        assert_eq!(second.imported_events, 0);
+        assert_eq!(second.imported_edges, 0);
+        assert_eq!(second.skipped_sessions, 2);
+        assert_eq!(second.skipped_events, 8);
+        assert_eq!(second.skipped_edges, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_session_paths_rejects_symlinked_jsonl_files() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir();
+        let fixture = provider_history_fixture("codex-sessions").join("2026/06/23/root.jsonl");
+        let link = temp.path().join("linked-root.jsonl");
+        symlink(&fixture, &link).unwrap();
+
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let err = import_codex_session_paths(
+            vec![link],
+            &mut store,
+            CodexSessionImportOptions {
+                imported_at: "2026-06-24T03:00:00Z".parse().unwrap(),
+                ..CodexSessionImportOptions::default()
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            CaptureError::InvalidProviderTranscriptPath { path, reason }
+                if path.ends_with("linked-root.jsonl")
+                    && reason == "symlinked provider transcript files are rejected"
+        ));
+        assert!(store.list_sessions().unwrap().is_empty());
     }
 
     #[cfg(unix)]
