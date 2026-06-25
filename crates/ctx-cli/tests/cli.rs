@@ -167,6 +167,16 @@ fn help_exposes_only_search_mvp_commands() {
 }
 
 #[test]
+fn root_version_reports_package_version() {
+    let temp = tempdir();
+    ctx(&temp)
+        .arg("--version")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")));
+}
+
+#[test]
 fn removed_commands_are_rejected() {
     let temp = tempdir();
     for command in [

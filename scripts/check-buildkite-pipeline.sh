@@ -119,6 +119,48 @@ if ! grep -F -q 'key: "freebsd-native-release-proof"' "${pipeline}"; then
   exit 1
 fi
 
+for key in \
+  'linux-release-artifact-smoke' \
+  'macos-arm64-release-artifact-smoke' \
+  'macos-x64-release-artifact-smoke' \
+  'windows-x64-release-artifact-smoke'; do
+  if ! grep -F -q "key: \"${key}\"" "${pipeline}"; then
+    printf 'pipeline must include %s for platform artifact smoke proof\n' "${key}" >&2
+    exit 1
+  fi
+done
+
+for platform in linux-x64 macos-arm64 macos-x64 freebsd-x64; do
+  if ! grep -F -q "./scripts/release-artifact-smoke.sh ${platform}" "${pipeline}"; then
+    printf 'pipeline must run release-artifact-smoke.sh for %s\n' "${platform}" >&2
+    exit 1
+  fi
+  if ! grep -F -q "artifacts/buildkite/release-artifact-smoke/${platform}" "${pipeline}"; then
+    printf 'pipeline must export release artifact smoke evidence for %s\n' "${platform}" >&2
+    exit 1
+  fi
+done
+
+if ! grep -F -q '.\scripts\ci-windows.ps1 -Mode release-artifact-smoke' "${pipeline}"; then
+  printf 'pipeline must run Windows release artifact smoke through scripts/ci-windows.ps1\n' >&2
+  exit 1
+fi
+
+if ! grep -F -q 'queue: "macos-arm64"' "${pipeline}"; then
+  printf 'macOS arm64 artifact smoke must route to queue=macos-arm64\n' >&2
+  exit 1
+fi
+
+if ! grep -F -q 'queue: "macos-x64"' "${pipeline}"; then
+  printf 'macOS x64 artifact smoke must route to queue=macos-x64\n' >&2
+  exit 1
+fi
+
+if ! grep -F -q 'queue: "windows-x64"' "${pipeline}"; then
+  printf 'Windows artifact smoke must route to queue=windows-x64\n' >&2
+  exit 1
+fi
+
 if ! grep -F -q 'queue: "freebsd-x64"' "${pipeline}"; then
   printf 'FreeBSD release proof must route to queue=freebsd-x64\n' >&2
   exit 1

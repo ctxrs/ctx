@@ -1012,6 +1012,82 @@ ${marker_json}  "dry_run": true,
 EOF
 }
 
+write_release_evidence_artifact_smoke() {
+  local root="$1"
+  local platform="$2"
+  local platform_key="$3"
+  local target_triple="$4"
+  local marker="${5:-real}"
+  local artifact artifact_rel artifact_full checksum bytes out_dir command_dir generated_at commit branch marker_json
+
+  artifact="ctx-0.1.0-${target_triple}"
+  if [[ "${platform}" == windows-* ]]; then
+    artifact="${artifact}.exe"
+  fi
+  artifact_rel="artifacts/buildkite/release-dry-run/${platform}/${artifact}"
+  artifact_full="${root}/${artifact_rel}"
+  checksum="$(sha256_file "${artifact_full}")"
+  bytes="$(wc -c < "${artifact_full}" | tr -d '[:space:]')"
+  out_dir="${root}/artifacts/buildkite/release-artifact-smoke/${platform}"
+  command_dir="${out_dir}/commands"
+  mkdir -p "${command_dir}"
+  generated_at="$(date +%s)"
+  commit="$(git rev-parse HEAD)"
+  branch="$(git branch --show-current)"
+  marker_json=""
+  if [[ "${marker}" == "contract_fixture" ]]; then
+    marker_json=$'  "evidence_class": "contract_fixture",\n  "self_test_fixture": true,\n'
+  fi
+
+  printf 'release evidence command output for %s\n' "${platform}" > "${command_dir}/version.stdout"
+
+  cat > "${out_dir}/artifact-smoke.json" <<EOF
+{
+  "schema_version": 1,
+  "kind": "ctx_release_artifact_smoke",
+${marker_json}  "mode": "release-artifact-smoke",
+  "status": "passed",
+  "publishing": false,
+  "platform": "$(json_escape "${platform}")",
+  "platform_key": "$(json_escape "${platform_key}")",
+  "target_triple": "$(json_escape "${target_triple}")",
+  "host_triple": "$(json_escape "${target_triple}")",
+  "release_dry_run_dir": "artifacts/buildkite/release-dry-run/${platform}",
+  "release_manifest": "artifacts/buildkite/release-dry-run/${platform}/manifest.json",
+  "release_metadata": "artifacts/buildkite/release-dry-run/${platform}/ctx-release-metadata.env",
+  "release_artifact": "$(json_escape "${artifact_rel}")",
+  "release_artifact_name": "$(json_escape "${artifact}")",
+  "release_artifact_sha256": "$(json_escape "${checksum}")",
+  "release_artifact_bytes": ${bytes},
+  "install_method": "release-evidence-fixture",
+  "installed_artifact_runtime": true,
+  "fixture": "tests/fixtures/provider-history/codex-sessions",
+  "command_output_dir": "artifacts/buildkite/release-artifact-smoke/${platform}/commands",
+  "version_output": "ctx 0.1.0",
+  "version_status": "passed",
+  "setup_status": "passed",
+  "import_status": "passed",
+  "search_status": "passed",
+  "context_status": "passed",
+  "doctor_status": "passed",
+  "validate_status": "passed",
+  "git_commit": "$(json_escape "${commit}")",
+  "git_branch": "$(json_escape "${branch}")",
+  "generated_at_unix_s": ${generated_at}
+}
+EOF
+
+  cat > "${out_dir}/artifact-smoke.md" <<EOF
+# ctx Release Artifact Smoke
+
+- Publishing: false
+- Platform: \`${platform}\`
+- Target triple: \`${target_triple}\`
+- Release artifact: \`${artifact_rel}\`
+- Status: passed
+EOF
+}
+
 write_release_evidence_summary() {
   local root="$1"
   local rel_dir="$2"
@@ -1116,10 +1192,15 @@ write_release_evidence_root() {
 
   release_root="${root}/artifacts/buildkite/release-dry-run"
   write_release_evidence_platform "${release_root}" "linux-x64" "linux_x64" "x86_64-unknown-linux-gnu"
+  write_release_evidence_artifact_smoke "${root}" "linux-x64" "linux_x64" "x86_64-unknown-linux-gnu"
   write_release_evidence_platform "${release_root}" "macos-arm64" "macos_arm64" "aarch64-apple-darwin"
+  write_release_evidence_artifact_smoke "${root}" "macos-arm64" "macos_arm64" "aarch64-apple-darwin"
   write_release_evidence_platform "${release_root}" "macos-x64" "macos_x64" "x86_64-apple-darwin"
+  write_release_evidence_artifact_smoke "${root}" "macos-x64" "macos_x64" "x86_64-apple-darwin"
   write_release_evidence_platform "${release_root}" "windows-x64" "windows_x64" "x86_64-pc-windows-gnu"
+  write_release_evidence_artifact_smoke "${root}" "windows-x64" "windows_x64" "x86_64-pc-windows-gnu"
   write_release_evidence_platform "${release_root}" "freebsd-x64" "freebsd_x64" "x86_64-unknown-freebsd" "${freebsd_marker}"
+  write_release_evidence_artifact_smoke "${root}" "freebsd-x64" "freebsd_x64" "x86_64-unknown-freebsd" "${freebsd_marker}"
 
   CTX_ARTIFACT_DIR="${root}/artifacts/buildkite/release-candidate" \
     bash scripts/release-candidate-metadata.sh "${release_root}"
@@ -1167,6 +1248,79 @@ run_r2_staging_smoke_contract() {
     bash scripts/release-r2-staging-smoke.sh "${candidate_dir}"
 }
 
+host_release_artifact_smoke_spec() {
+  local host_triple
+
+  host_triple="$(rustc -vV | awk '/^host:/ { print $2; exit }')"
+  case "${host_triple}" in
+    x86_64-unknown-linux-gnu)
+      printf '%s|%s|%s\n' "linux-x64" "linux_x64" "${host_triple}"
+      ;;
+    aarch64-apple-darwin)
+      printf '%s|%s|%s\n' "macos-arm64" "macos_arm64" "${host_triple}"
+      ;;
+    x86_64-apple-darwin)
+      printf '%s|%s|%s\n' "macos-x64" "macos_x64" "${host_triple}"
+      ;;
+    x86_64-unknown-freebsd)
+      printf '%s|%s|%s\n' "freebsd-x64" "freebsd_x64" "${host_triple}"
+      ;;
+    *)
+      fail "release artifact smoke contract does not support host triple ${host_triple}"
+      ;;
+  esac
+}
+
+run_release_artifact_smoke_contract() {
+  local spec platform platform_key host_triple contract_root release_dir smoke_dir smoke_json
+
+  spec="$(host_release_artifact_smoke_spec)"
+  IFS='|' read -r platform platform_key host_triple <<<"${spec}"
+  contract_root="${CTX_ARTIFACT_DIR}/release-artifact-smoke-contract"
+  release_dir="${contract_root}/release-dry-run/${platform}"
+  smoke_dir="${contract_root}/release-artifact-smoke/${platform}"
+  rm -rf "${contract_root}"
+  mkdir -p "${release_dir}" "${smoke_dir}"
+
+  CARGO_TARGET_DIR="${CTX_REPO_ROOT}/target" \
+  CTX_RELEASE_PLATFORM="${platform}" \
+  CTX_RELEASE_TARGET_TRIPLE="${host_triple}" \
+  CTX_EXPECT_HOST_TRIPLE="${host_triple}" \
+  CTX_ARTIFACT_DIR="${release_dir}" \
+    run_timed "release-artifact-smoke-contract-dry-run" bash scripts/release-dry-run.sh
+
+  CTX_RELEASE_PLATFORM="${platform}" \
+  CTX_RELEASE_TARGET_TRIPLE="${host_triple}" \
+  CTX_EXPECT_HOST_TRIPLE="${host_triple}" \
+  CTX_RELEASE_DRY_RUN_DIR="${release_dir}" \
+  CTX_ARTIFACT_DIR="${smoke_dir}" \
+    run_timed "release-artifact-smoke-contract-runtime" bash scripts/release-artifact-smoke.sh "${platform}" "${release_dir}"
+
+  smoke_json="${smoke_dir}/artifact-smoke.json"
+  grep -F '"kind": "ctx_release_artifact_smoke"' "${smoke_json}" >/dev/null \
+    || fail 'release artifact smoke did not write the expected evidence kind'
+  grep -F '"status": "passed"' "${smoke_json}" >/dev/null \
+    || fail 'release artifact smoke did not record passing status'
+  grep -F "\"platform\": \"${platform}\"" "${smoke_json}" >/dev/null \
+    || fail 'release artifact smoke did not record the host release platform'
+  grep -F "\"platform_key\": \"${platform_key}\"" "${smoke_json}" >/dev/null \
+    || fail 'release artifact smoke did not record the platform key'
+  grep -F '"installed_artifact_runtime": true' "${smoke_json}" >/dev/null \
+    || fail 'release artifact smoke did not record installed artifact runtime execution'
+  grep -F '"setup_status": "passed"' "${smoke_json}" >/dev/null \
+    || fail 'release artifact smoke did not record setup status'
+  grep -F '"import_status": "passed"' "${smoke_json}" >/dev/null \
+    || fail 'release artifact smoke did not record import status'
+  grep -F '"search_status": "passed"' "${smoke_json}" >/dev/null \
+    || fail 'release artifact smoke did not record search status'
+  grep -F '"context_status": "passed"' "${smoke_json}" >/dev/null \
+    || fail 'release artifact smoke did not record context status'
+  grep -F '"doctor_status": "passed"' "${smoke_json}" >/dev/null \
+    || fail 'release artifact smoke did not record doctor status'
+  grep -F '"validate_status": "passed"' "${smoke_json}" >/dev/null \
+    || fail 'release artifact smoke did not record validate status'
+}
+
 run_completion_certificate_contract() {
   local certificate_dir
 
@@ -1199,6 +1353,8 @@ run_release_artifact_evidence_missing_contract() {
   (( status != 0 )) || fail 'release artifact evidence accepted an empty evidence root'
   grep -F 'required evidence is missing or empty: artifacts/buildkite/release-dry-run/linux-x64/manifest.json' "${log}" >/dev/null \
     || fail 'release artifact evidence did not reject missing linux-x64 artifact proof'
+  grep -F 'required evidence is missing or empty: artifacts/buildkite/release-artifact-smoke/linux-x64/artifact-smoke.json' "${log}" >/dev/null \
+    || fail 'release artifact evidence did not reject missing linux-x64 artifact smoke proof'
   grep -F 'required evidence is missing or empty: artifacts/buildkite/release-exceptions/freebsd-x64/freebsd-x64-exception.json' "${log}" >/dev/null \
     || fail 'release artifact evidence did not require FreeBSD proof or manager-approved exception'
   grep -F 'FreeBSD release exception records manager approval' "${log}" >/dev/null \
@@ -1227,8 +1383,8 @@ run_release_artifact_evidence_freebsd_contract() {
       --artifact-dir "${certificate_dir}"
 
   certificate_json="${certificate_dir}/ctx-completion-certificate.json"
-  grep -F '"status_in_this_certificate": "native_release_dry_run_verified"' "${certificate_json}" >/dev/null \
-    || fail 'completion certificate did not record native FreeBSD proof status'
+  grep -F '"status_in_this_certificate": "native_release_artifact_smoke_verified"' "${certificate_json}" >/dev/null \
+    || fail 'completion certificate did not record native FreeBSD artifact smoke proof status'
   grep -F '"manager_exception_required_for_public_release_without_proof": false' "${certificate_json}" >/dev/null \
     || fail 'completion certificate still required a FreeBSD manager exception with native proof present'
   grep -F 'CTX_RELEASE_ARTIFACT_freebsd_x64=ctx-0.1.0-x86_64-unknown-freebsd' \
@@ -1530,6 +1686,10 @@ case "${mode}" in
     ;;
   r2_staging_smoke_contract)
     run_r2_staging_smoke_contract
+    ;;
+  release_artifact_smoke_contract)
+    run_timed "release-artifact-smoke-contract" \
+      run_release_artifact_smoke_contract
     ;;
   completion_certificate_contract)
     run_completion_certificate_contract

@@ -59,6 +59,103 @@ steps:
       - "bazel-testlogs/**/test.outputs/**/ctx-artifacts/**/*"
       - "bazel-testlogs/**/*.zip"
 
+  - label: ":linux: release artifact smoke"
+    key: "linux-release-artifact-smoke"
+    depends_on: "search-mvp"
+    command: |
+      CTX_RELEASE_PLATFORM=linux-x64 \
+      CTX_RELEASE_TARGET_TRIPLE=x86_64-unknown-linux-gnu \
+      CTX_EXPECT_HOST_TRIPLE=x86_64-unknown-linux-gnu \
+      CTX_ARTIFACT_DIR=artifacts/buildkite/release-dry-run/linux-x64 \
+      ./scripts/release-dry-run.sh
+
+      CTX_RELEASE_PLATFORM=linux-x64 \
+      CTX_RELEASE_TARGET_TRIPLE=x86_64-unknown-linux-gnu \
+      CTX_EXPECT_HOST_TRIPLE=x86_64-unknown-linux-gnu \
+      CTX_RELEASE_DRY_RUN_DIR=artifacts/buildkite/release-dry-run/linux-x64 \
+      CTX_ARTIFACT_DIR=artifacts/buildkite/release-artifact-smoke/linux-x64 \
+      ./scripts/release-artifact-smoke.sh linux-x64
+    agents:
+      queue: "release-linux-managed"
+      ctx-runner-class: "release-linux-x64-stage"
+      os: "linux"
+      arch: "x86_64"
+    timeout_in_minutes: 60
+    artifact_paths:
+      - "artifacts/buildkite/release-dry-run/linux-x64/*"
+      - "artifacts/buildkite/release-artifact-smoke/linux-x64/*"
+      - "artifacts/buildkite/release-artifact-smoke/linux-x64/**/*"
+
+  - label: ":mac: arm64 release artifact smoke"
+    key: "macos-arm64-release-artifact-smoke"
+    depends_on: "search-mvp"
+    command: |
+      CTX_RELEASE_PLATFORM=macos-arm64 \
+      CTX_RELEASE_TARGET_TRIPLE=aarch64-apple-darwin \
+      CTX_EXPECT_HOST_TRIPLE=aarch64-apple-darwin \
+      CTX_ARTIFACT_DIR=artifacts/buildkite/release-dry-run/macos-arm64 \
+      ./scripts/release-dry-run.sh
+
+      CTX_RELEASE_PLATFORM=macos-arm64 \
+      CTX_RELEASE_TARGET_TRIPLE=aarch64-apple-darwin \
+      CTX_EXPECT_HOST_TRIPLE=aarch64-apple-darwin \
+      CTX_RELEASE_DRY_RUN_DIR=artifacts/buildkite/release-dry-run/macos-arm64 \
+      CTX_ARTIFACT_DIR=artifacts/buildkite/release-artifact-smoke/macos-arm64 \
+      ./scripts/release-artifact-smoke.sh macos-arm64
+    agents:
+      queue: "macos-arm64"
+      ctx-runner-class: "release-macos-arm64-stage"
+      os: "macos"
+      arch: "arm64"
+    timeout_in_minutes: 60
+    artifact_paths:
+      - "artifacts/buildkite/release-dry-run/macos-arm64/*"
+      - "artifacts/buildkite/release-artifact-smoke/macos-arm64/*"
+      - "artifacts/buildkite/release-artifact-smoke/macos-arm64/**/*"
+
+  - label: ":mac: x64 release artifact smoke"
+    key: "macos-x64-release-artifact-smoke"
+    depends_on: "search-mvp"
+    command: |
+      CTX_RELEASE_PLATFORM=macos-x64 \
+      CTX_RELEASE_TARGET_TRIPLE=x86_64-apple-darwin \
+      CTX_EXPECT_HOST_TRIPLE=x86_64-apple-darwin \
+      CTX_ARTIFACT_DIR=artifacts/buildkite/release-dry-run/macos-x64 \
+      ./scripts/release-dry-run.sh
+
+      CTX_RELEASE_PLATFORM=macos-x64 \
+      CTX_RELEASE_TARGET_TRIPLE=x86_64-apple-darwin \
+      CTX_EXPECT_HOST_TRIPLE=x86_64-apple-darwin \
+      CTX_RELEASE_DRY_RUN_DIR=artifacts/buildkite/release-dry-run/macos-x64 \
+      CTX_ARTIFACT_DIR=artifacts/buildkite/release-artifact-smoke/macos-x64 \
+      ./scripts/release-artifact-smoke.sh macos-x64
+    agents:
+      queue: "macos-x64"
+      ctx-runner-class: "release-macos-x64-stage"
+      os: "macos"
+      arch: "x86_64"
+    timeout_in_minutes: 60
+    artifact_paths:
+      - "artifacts/buildkite/release-dry-run/macos-x64/*"
+      - "artifacts/buildkite/release-artifact-smoke/macos-x64/*"
+      - "artifacts/buildkite/release-artifact-smoke/macos-x64/**/*"
+
+  - label: ":windows: x64 release artifact smoke"
+    key: "windows-x64-release-artifact-smoke"
+    depends_on: "search-mvp"
+    command: |
+      powershell -NoProfile -ExecutionPolicy Bypass -Command "$$env:CTX_RELEASE_PLATFORM='windows-x64'; $$env:CTX_RELEASE_TARGET_TRIPLE='x86_64-pc-windows-gnu'; $$env:CTX_EXPECT_HOST_TRIPLE='x86_64-pc-windows-gnu'; $$env:CTX_ARTIFACT_DIR='artifacts/buildkite/release-dry-run/windows-x64'; .\scripts\ci-windows.ps1 -Mode release-dry-run; $$env:CTX_RELEASE_DRY_RUN_DIR='artifacts/buildkite/release-dry-run/windows-x64'; $$env:CTX_ARTIFACT_DIR='artifacts/buildkite/release-artifact-smoke/windows-x64'; .\scripts\ci-windows.ps1 -Mode release-artifact-smoke"
+    agents:
+      queue: "windows-x64"
+      ctx-runner-class: "release-windows-x64-stage"
+      os: "windows"
+      arch: "x86_64"
+    timeout_in_minutes: 60
+    artifact_paths:
+      - "artifacts/buildkite/release-dry-run/windows-x64/*"
+      - "artifacts/buildkite/release-artifact-smoke/windows-x64/*"
+      - "artifacts/buildkite/release-artifact-smoke/windows-x64/**/*"
+
   - label: ":freebsd: native release proof"
     key: "freebsd-native-release-proof"
     depends_on: "search-mvp"
@@ -106,6 +203,9 @@ steps:
 
       cargo test --workspace --all-targets --locked -- --test-threads "$${RUST_TEST_THREADS:-2}"
       ./scripts/release-dry-run.sh
+      CTX_RELEASE_DRY_RUN_DIR=artifacts/buildkite/release-dry-run/freebsd-x64 \
+      CTX_ARTIFACT_DIR=artifacts/buildkite/release-artifact-smoke/freebsd-x64 \
+      ./scripts/release-artifact-smoke.sh freebsd-x64
     env:
       CTX_ARTIFACT_DIR: "artifacts/buildkite/release-dry-run/freebsd-x64"
       CTX_RELEASE_PLATFORM: "freebsd-x64"
@@ -120,3 +220,5 @@ steps:
     artifact_paths:
       - "artifacts/buildkite/release-dry-run/freebsd-x64/*"
       - "artifacts/buildkite/release-dry-run/freebsd-x64/**/*"
+      - "artifacts/buildkite/release-artifact-smoke/freebsd-x64/*"
+      - "artifacts/buildkite/release-artifact-smoke/freebsd-x64/**/*"

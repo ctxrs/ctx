@@ -21,6 +21,10 @@ Public install instructions stay blocked until all of the following are true:
   `macos-x64`, `windows-x64`, and `freebsd-x64`, or an explicit
   manager-approved release exception names the missing target.
 - Published checksums match those artifacts.
+- Each produced platform artifact has packaged artifact runtime smoke evidence
+  from installing or extracting the exact staged artifact and running
+  `ctx --version`, `setup`, `import`, `search`, `context`, `doctor`, and
+  `validate` against the fixture data.
 - Signing, notarization, SBOM, and provenance evidence is approved.
 - R2 staging has passed with approved credentials.
 - The completion certificate records real release evidence, not a contract

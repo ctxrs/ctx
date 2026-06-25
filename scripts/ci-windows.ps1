@@ -1,6 +1,6 @@
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet("platform-smoke", "release-dry-run")]
+  [ValidateSet("platform-smoke", "release-dry-run", "release-artifact-smoke")]
   [string]$Mode
 )
 
@@ -567,6 +567,50 @@ function Run-Ctx {
   }
 }
 
+function Run-Ctx-Capture {
+  param(
+    [string]$Name,
+    [string]$Binary,
+    [string[]]$CtxArgs,
+    [string]$OutDir
+  )
+
+  $stdout = Join-PathSafe $OutDir "$Name.stdout"
+  $stderr = Join-PathSafe $OutDir "$Name.stderr"
+  & $Binary @CtxArgs > $stdout 2> $stderr
+  if ($LASTEXITCODE -ne 0) {
+    throw "$Binary $($CtxArgs -join ' ') failed with exit code $LASTEXITCODE; stdout=$stdout stderr=$stderr"
+  }
+}
+
+function Env-Value {
+  param(
+    [string]$Path,
+    [string]$Key
+  )
+
+  foreach ($line in Get-Content -Path $Path) {
+    if ($line -match '^\s*#') {
+      continue
+    }
+    if ($line.StartsWith("$Key=")) {
+      return $line.Substring($Key.Length + 1).TrimEnd("`r")
+    }
+  }
+  throw "$Path does not set $Key"
+}
+
+function To-Repo-Relative {
+  param([string]$Path)
+
+  $full = [System.IO.Path]::GetFullPath($Path)
+  $prefix = $script:RepoRoot.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+  if ($full.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+    return $full.Substring($prefix.Length).Replace("\", "/")
+  }
+  return $Path.Replace("\", "/")
+}
+
 function Run-Platform-Smoke {
   Require-Host-Triple $env:CTX_EXPECT_HOST_TRIPLE
   Ensure-Rust-Toolchain
@@ -704,6 +748,148 @@ function Run-Release-Dry-Run {
   Write-Host "release dry-run install metadata: $(Join-PathSafe $script:ArtifactDir "ctx-release-metadata.env")"
 }
 
+function Run-Release-Artifact-Smoke {
+  $platform = if ($env:CTX_RELEASE_PLATFORM) { $env:CTX_RELEASE_PLATFORM } else { "windows-x64" }
+  if ($platform -ne "windows-x64") {
+    throw "Windows release artifact smoke only supports windows-x64, got $platform"
+  }
+  $targetTriple = if ($env:CTX_RELEASE_TARGET_TRIPLE) { $env:CTX_RELEASE_TARGET_TRIPLE } else { "x86_64-pc-windows-gnu" }
+  $platformKey = "windows_x64"
+  Require-Host-Triple $env:CTX_EXPECT_HOST_TRIPLE
+
+  $releaseDir = if ($env:CTX_RELEASE_DRY_RUN_DIR) { $env:CTX_RELEASE_DRY_RUN_DIR } else { Join-PathSafe $script:RepoRoot "artifacts\buildkite\release-dry-run\windows-x64" }
+  $metadata = Join-PathSafe $releaseDir "ctx-release-metadata.env"
+  $manifest = Join-PathSafe $releaseDir "manifest.json"
+  if (-not (Test-Path $metadata)) {
+    throw "release artifact smoke metadata is missing: $metadata"
+  }
+  if (-not (Test-Path $manifest)) {
+    throw "release artifact smoke manifest is missing: $manifest"
+  }
+
+  $version = Env-Value -Path $metadata -Key "CTX_RELEASE_VERSION"
+  $artifact = Env-Value -Path $metadata -Key "CTX_RELEASE_ARTIFACT_$platformKey"
+  $checksum = Env-Value -Path $metadata -Key "CTX_RELEASE_SHA256_$platformKey"
+  $artifactPath = Join-PathSafe $releaseDir $artifact
+  if (-not (Test-Path $artifactPath)) {
+    throw "release artifact smoke artifact is missing: $artifactPath"
+  }
+  $actualChecksum = Sha256-File $artifactPath
+  if ($actualChecksum -ne $checksum) {
+    throw "release artifact smoke checksum mismatch for $artifactPath: metadata $checksum, file $actualChecksum"
+  }
+  $artifactBytes = (Get-Item $artifactPath).Length
+
+  $tempRoot = Join-PathSafe $env:TMPDIR ("ctx-release-artifact-smoke-" + [Guid]::NewGuid().ToString("N"))
+  $binDir = Join-PathSafe $tempRoot "bin"
+  $homeDir = Join-PathSafe $tempRoot "home"
+  $dataRoot = Join-PathSafe $tempRoot "data-root"
+  $commandDir = Join-PathSafe $script:ArtifactDir "commands"
+  New-Item -ItemType Directory -Force -Path $binDir, $homeDir, $dataRoot, $commandDir | Out-Null
+
+  $installedBin = Join-PathSafe $binDir "ctx.exe"
+  Copy-Item -Force $artifactPath $installedBin
+  $oldDataRoot = $env:CTX_DATA_ROOT
+  $oldHome = $env:HOME
+  $env:CTX_DATA_ROOT = $dataRoot
+  $env:HOME = $homeDir
+  foreach ($secretName in @("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "AZURE_OPENAI_API_KEY")) {
+    if (Test-Path "Env:$secretName") {
+      Remove-Item "Env:$secretName"
+    }
+  }
+
+  try {
+    Run-Ctx-Capture -Name "version" -Binary $installedBin -CtxArgs @("--version") -OutDir $commandDir
+    $versionOutput = ((Get-Content -Path (Join-PathSafe $commandDir "version.stdout") -Raw).Trim() -split "`n" | Select-Object -First 1).Trim()
+    if ($versionOutput -notlike "*$version*") {
+      throw "ctx --version output does not contain release version $version`: $versionOutput"
+    }
+    $fixture = "tests/fixtures/provider-history/codex-sessions"
+    $fixturePath = Join-PathSafe $script:RepoRoot "tests\fixtures\provider-history\codex-sessions"
+    Run-Ctx-Capture -Name "setup" -Binary $installedBin -CtxArgs @("setup") -OutDir $commandDir
+    Run-Ctx-Capture -Name "import" -Binary $installedBin -CtxArgs @("import", "--provider", "codex", "--path", $fixturePath, "--json") -OutDir $commandDir
+    Run-Ctx-Capture -Name "search" -Binary $installedBin -CtxArgs @("search", "onboarding", "--json") -OutDir $commandDir
+    Run-Ctx-Capture -Name "context" -Binary $installedBin -CtxArgs @("context", "onboarding", "--json") -OutDir $commandDir
+    Run-Ctx-Capture -Name "doctor" -Binary $installedBin -CtxArgs @("doctor", "--json") -OutDir $commandDir
+    Run-Ctx-Capture -Name "validate" -Binary $installedBin -CtxArgs @("validate", "--json") -OutDir $commandDir
+  } finally {
+    if ($null -eq $oldDataRoot) {
+      Remove-Item Env:CTX_DATA_ROOT -ErrorAction SilentlyContinue
+    } else {
+      $env:CTX_DATA_ROOT = $oldDataRoot
+    }
+    if ($null -eq $oldHome) {
+      Remove-Item Env:HOME -ErrorAction SilentlyContinue
+    } else {
+      $env:HOME = $oldHome
+    }
+  }
+
+  $commit = (& git rev-parse HEAD).Trim()
+  $branch = Git-Current-Branch
+  $generatedAt = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+  $hostTriple = Host-Triple
+  $smokeJson = Join-PathSafe $script:ArtifactDir "artifact-smoke.json"
+  $smokeMd = Join-PathSafe $script:ArtifactDir "artifact-smoke.md"
+
+  @{
+    schema_version = 1
+    kind = "ctx_release_artifact_smoke"
+    mode = "release-artifact-smoke"
+    status = "passed"
+    publishing = $false
+    platform = $platform
+    platform_key = $platformKey
+    target_triple = $targetTriple
+    host_triple = $hostTriple
+    release_dry_run_dir = To-Repo-Relative $releaseDir
+    release_manifest = To-Repo-Relative $manifest
+    release_metadata = To-Repo-Relative $metadata
+    release_artifact = To-Repo-Relative $artifactPath
+    release_artifact_name = $artifact
+    release_artifact_sha256 = $checksum
+    release_artifact_bytes = $artifactBytes
+    install_method = "direct-binary-copy"
+    installed_artifact_runtime = $true
+    fixture = "tests/fixtures/provider-history/codex-sessions"
+    command_output_dir = To-Repo-Relative $commandDir
+    version_output = $versionOutput
+    version_status = "passed"
+    setup_status = "passed"
+    import_status = "passed"
+    search_status = "passed"
+    context_status = "passed"
+    doctor_status = "passed"
+    validate_status = "passed"
+    git_commit = $commit
+    git_branch = $branch
+    buildkite = @{
+      build_url = if ($env:BUILDKITE_BUILD_URL) { $env:BUILDKITE_BUILD_URL } else { "local" }
+      build_id = if ($env:BUILDKITE_BUILD_ID) { $env:BUILDKITE_BUILD_ID } else { "" }
+      job_id = if ($env:BUILDKITE_JOB_ID) { $env:BUILDKITE_JOB_ID } else { "" }
+    }
+    generated_at_unix_s = $generatedAt
+  } | ConvertTo-Json -Depth 8 | Set-Content -Path $smokeJson -Encoding utf8
+
+  @(
+    "# ctx Release Artifact Smoke"
+    ""
+    "- Publishing: false"
+    "- Platform: ``$platform``"
+    "- Target triple: ``$targetTriple``"
+    "- Release artifact: ``$(To-Repo-Relative $artifactPath)``"
+    "- SHA-256: ``$checksum``"
+    "- Install method: ``direct-binary-copy``"
+    "- Fixture: ``tests/fixtures/provider-history/codex-sessions``"
+    "- Commands: ``ctx --version``, ``ctx setup``, ``ctx import``, ``ctx search``, ``ctx context``, ``ctx doctor``, ``ctx validate``"
+    "- Status: passed"
+  ) | Set-Content -Path $smokeMd -Encoding utf8
+
+  Write-Host "release artifact smoke: $smokeJson"
+  Write-Host "release artifact smoke notes: $smokeMd"
+}
+
 $script:ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $script:RepoRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($script:ScriptDir, ".."))
 Set-Location $script:RepoRoot
@@ -721,6 +907,8 @@ try {
     Run-Step "platform-smoke" { Run-Platform-Smoke }
   } elseif ($Mode -eq "release-dry-run") {
     Run-Step "release-dry-run" { Run-Release-Dry-Run }
+  } elseif ($Mode -eq "release-artifact-smoke") {
+    Run-Step "release-artifact-smoke" { Run-Release-Artifact-Smoke }
   } else {
     throw "unknown Windows CI mode: $Mode"
   }
