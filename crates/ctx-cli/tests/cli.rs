@@ -235,6 +235,7 @@ fn help_exposes_only_search_mvp_commands() {
         "vcs",
         "pr",
         "repair",
+        "watch",
     ] {
         assert!(
             !commands.contains(&format!("  {forbidden}")),
@@ -273,6 +274,7 @@ fn removed_commands_are_rejected() {
         "vcs",
         "pr",
         "repair",
+        "watch",
     ] {
         ctx(&temp)
             .arg(command)
