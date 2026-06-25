@@ -10,18 +10,18 @@ use std::{
 use std::os::unix::fs::PermissionsExt;
 
 use chrono::{DateTime, Utc};
+use ctx_history_core::{
+    new_id, redact_preview, redact_share_safe_preview, AgentType, Artifact, ArtifactKind,
+    CaptureProvider, CaptureSource, CaptureSourceDescriptor, EntityTimestamps, Event, EventRole,
+    EventType, Fidelity, FileTouched, HistoryRecord, HistoryRecordLink, RedactionState, Run,
+    RunStatus, RunType, Session, SessionEdge, SessionHistoryArchive, SessionStatus, Summary,
+    SyncCursor, SyncMetadata, SyncState, VcsChange, VcsWorkspace, Visibility,
+};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
-use work_record_core::{
-    new_id, redact_preview, redact_share_safe_preview, AgentType, Artifact, ArtifactKind,
-    CaptureProvider, CaptureSource, CaptureSourceDescriptor, EntityTimestamps, Event, EventRole,
-    EventType, Fidelity, FileTouched, RedactionState, Run, RunStatus, RunType, Session,
-    SessionEdge, SessionStatus, Summary, SyncCursor, SyncMetadata, SyncState, VcsChange,
-    VcsWorkspace, Visibility, WorkRecord, WorkRecordArchive, WorkRecordLink,
-};
 #[derive(Debug, Error)]
 pub enum StoreError {
     #[error("sqlite error: {0}")]
@@ -36,9 +36,9 @@ pub enum StoreError {
     Uuid(#[from] uuid::Error),
     #[error("record not found: {0}")]
     NotFound(Uuid),
-    #[error("unsupported work record store schema version: {0}")]
+    #[error("unsupported history store schema version: {0}")]
     UnsupportedSchemaVersion(i64),
-    #[error("unsupported work record archive version: {0}")]
+    #[error("unsupported session history archive version: {0}")]
     UnsupportedArchiveVersion(u32),
     #[error("archive conflicts with existing {kind}: {id}")]
     ImportConflict { kind: &'static str, id: Uuid },
@@ -70,7 +70,7 @@ const SCHEMA_VERSION: i64 = 7;
 const BUSY_TIMEOUT: Duration = Duration::from_millis(5_000);
 const OBJECTS_DIR: &str = "objects";
 const SPOOL_DIR: &str = "spool";
-const LEGACY_WORK_RECORD_DIR: &str = "work-record";
+const LEGACY_HISTORY_DIR_NAME: &str = "work-record";
 const LEGACY_BLOBS_DIR: &str = "blobs";
 const LEGACY_INBOX_DIR: &str = "inbox";
 
@@ -152,7 +152,7 @@ impl CatalogIndexedStatus {
 #[derive(Debug, Clone, PartialEq)]
 pub struct EventSearchHit {
     pub event_id: Uuid,
-    pub work_record_id: Option<Uuid>,
+    pub history_record_id: Option<Uuid>,
     pub session_id: Option<Uuid>,
     pub run_id: Option<Uuid>,
     pub seq: u64,
@@ -173,7 +173,7 @@ pub struct EventSearchHit {
     pub record_workspace: Option<String>,
 }
 
-const WORK_RECORD_COLUMNS: &[ColumnSpec] = &[
+const HISTORY_RECORD_COLUMNS: &[ColumnSpec] = &[
     ColumnSpec {
         name: "summary",
         definition: "summary TEXT",
@@ -742,7 +742,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_source_id ON audit_log(source_id);
 "#;
 
 const FTS_TABLES_SQL: &str = r#"
-CREATE VIRTUAL TABLE IF NOT EXISTS work_record_search USING fts5(
+CREATE VIRTUAL TABLE IF NOT EXISTS ctx_history_search USING fts5(
     record_id UNINDEXED,
     title,
     summary,
@@ -784,7 +784,7 @@ impl Store {
         let path = path.as_ref().to_path_buf();
         let mut migrated_legacy_layout = false;
         if let Some(parent) = path.parent() {
-            migrated_legacy_layout = migrate_legacy_work_record_layout(parent)?;
+            migrated_legacy_layout = migrate_legacy_history_layout(parent)?;
             fs::create_dir_all(parent)?;
             restrict_private_dir(parent)?;
         }
@@ -934,7 +934,7 @@ impl Store {
     }
 
     pub fn optimize_search_index(&self) -> Result<()> {
-        for table in ["work_record_search", "event_search", "artifact_search"] {
+        for table in ["ctx_history_search", "event_search", "artifact_search"] {
             if table_exists(&self.conn, table)? {
                 self.conn.execute(
                     format!("INSERT INTO {table}({table}) VALUES ('optimize')").as_str(),
@@ -1389,7 +1389,7 @@ impl Store {
             "#,
             params![
                 session.id.to_string(),
-                optional_uuid_string(session.work_record_id),
+                optional_uuid_string(session.history_record_id),
                 optional_uuid_string(session.parent_session_id),
                 optional_uuid_string(session.root_session_id),
                 optional_uuid_string(session.capture_source_id),
@@ -1540,7 +1540,7 @@ impl Store {
             "#,
             params![
                 run.id.to_string(),
-                optional_uuid_string(run.work_record_id),
+                optional_uuid_string(run.history_record_id),
                 optional_uuid_string(run.session_id),
                 run.run_type.as_str(),
                 run.status.as_str(),
@@ -1577,7 +1577,7 @@ impl Store {
             )?
             .execute(params![
                 run.id.to_string(),
-                optional_uuid_string(run.work_record_id),
+                optional_uuid_string(run.history_record_id),
                 optional_uuid_string(run.session_id),
                 run.run_type.as_str(),
                 run.status.as_str(),
@@ -1705,7 +1705,7 @@ impl Store {
             params![
                 event_id.to_string(),
                 event.seq as i64,
-                optional_uuid_string(event.work_record_id),
+                optional_uuid_string(event.history_record_id),
                 optional_uuid_string(event.session_id),
                 optional_uuid_string(event.run_id),
                 event.event_type.as_str(),
@@ -1743,7 +1743,7 @@ impl Store {
             .execute(params![
                 event.id.to_string(),
                 event.seq as i64,
-                optional_uuid_string(event.work_record_id),
+                optional_uuid_string(event.history_record_id),
                 optional_uuid_string(event.session_id),
                 optional_uuid_string(event.run_id),
                 event.event_type.as_str(),
@@ -2111,7 +2111,7 @@ impl Store {
             "#,
             params![
                 summary.id.to_string(),
-                optional_uuid_string(summary.work_record_id),
+                optional_uuid_string(summary.history_record_id),
                 optional_uuid_string(summary.session_id),
                 summary.kind.as_str(),
                 summary.model_or_source.as_deref(),
@@ -2166,7 +2166,7 @@ impl Store {
             "#,
             params![
                 file.id.to_string(),
-                optional_uuid_string(file.work_record_id),
+                optional_uuid_string(file.history_record_id),
                 optional_uuid_string(file.run_id),
                 optional_uuid_string(file.event_id),
                 optional_uuid_string(file.vcs_workspace_id),
@@ -2294,7 +2294,7 @@ impl Store {
         collect_rows(rows)
     }
 
-    pub fn upsert_work_record_link(&self, link: &WorkRecordLink) -> Result<Uuid> {
+    pub fn upsert_history_record_link(&self, link: &HistoryRecordLink) -> Result<Uuid> {
         self.conn.execute(
             r#"
             INSERT INTO work_record_links
@@ -2313,7 +2313,7 @@ impl Store {
             "#,
             params![
                 link.id.to_string(),
-                link.work_record_id.to_string(),
+                link.history_record_id.to_string(),
                 link.target_type.as_str(),
                 link.target_id.to_string(),
                 link.link_type.as_str(),
@@ -2333,7 +2333,7 @@ impl Store {
             .query_row(
                 "SELECT id FROM work_record_links WHERE work_record_id = ?1 AND target_type = ?2 AND target_id = ?3 AND link_type = ?4",
                 params![
-                    link.work_record_id.to_string(),
+                    link.history_record_id.to_string(),
                     link.target_type.as_str(),
                     link.target_id.to_string(),
                     link.link_type.as_str()
@@ -2343,11 +2343,11 @@ impl Store {
             .map_err(StoreError::from)
     }
 
-    fn list_work_record_links(&self) -> Result<Vec<WorkRecordLink>> {
+    fn list_history_record_links(&self) -> Result<Vec<HistoryRecordLink>> {
         let mut stmt = self
             .conn
-            .prepare(work_record_link_select_sql("ORDER BY updated_at_ms, id").as_str())?;
-        let rows = stmt.query_map([], work_record_link_from_row)?;
+            .prepare(history_record_link_select_sql("ORDER BY updated_at_ms, id").as_str())?;
+        let rows = stmt.query_map([], history_record_link_from_row)?;
         collect_rows(rows)
     }
 
@@ -2417,7 +2417,7 @@ impl Store {
             .map_err(StoreError::from)
     }
 
-    pub fn insert_record(&self, record: &WorkRecord) -> Result<()> {
+    pub fn insert_record(&self, record: &HistoryRecord) -> Result<()> {
         let created_at_ms = timestamp_ms(record.created_at);
         let updated_at_ms = timestamp_ms(record.updated_at);
         self.conn.execute(
@@ -2448,13 +2448,13 @@ impl Store {
         Ok(())
     }
 
-    pub fn upsert_record(&self, record: &WorkRecord) -> Result<()> {
+    pub fn upsert_record(&self, record: &HistoryRecord) -> Result<()> {
         self.upsert_record_row(record)?;
         self.rebuild_search_projection()?;
         Ok(())
     }
 
-    pub fn upsert_records(&self, records: &[WorkRecord]) -> Result<()> {
+    pub fn upsert_records(&self, records: &[HistoryRecord]) -> Result<()> {
         if records.is_empty() {
             return Ok(());
         }
@@ -2473,7 +2473,7 @@ impl Store {
         Ok(())
     }
 
-    fn upsert_record_row(&self, record: &WorkRecord) -> Result<()> {
+    fn upsert_record_row(&self, record: &HistoryRecord) -> Result<()> {
         let created_at_ms = timestamp_ms(record.created_at);
         let updated_at_ms = timestamp_ms(record.updated_at);
         self.conn.execute(
@@ -2517,7 +2517,7 @@ impl Store {
         Ok(())
     }
 
-    pub fn get_record(&self, id: Uuid) -> Result<WorkRecord> {
+    pub fn get_record(&self, id: Uuid) -> Result<HistoryRecord> {
         self.conn
             .query_row(
                 record_select_sql("WHERE id = ?1").as_str(),
@@ -2528,11 +2528,11 @@ impl Store {
             .ok_or(StoreError::NotFound(id))
     }
 
-    pub fn list_records(&self, limit: usize) -> Result<Vec<WorkRecord>> {
+    pub fn list_records(&self, limit: usize) -> Result<Vec<HistoryRecord>> {
         self.list_records_page(limit, 0)
     }
 
-    pub fn list_records_page(&self, limit: usize, offset: usize) -> Result<Vec<WorkRecord>> {
+    pub fn list_records_page(&self, limit: usize, offset: usize) -> Result<Vec<HistoryRecord>> {
         let mut stmt = self.conn.prepare(
             record_select_sql("ORDER BY created_at DESC, id LIMIT ?1 OFFSET ?2").as_str(),
         )?;
@@ -2540,7 +2540,7 @@ impl Store {
         collect_rows(rows)
     }
 
-    pub fn search_records(&self, query: &str, limit: usize) -> Result<Vec<WorkRecord>> {
+    pub fn search_records(&self, query: &str, limit: usize) -> Result<Vec<HistoryRecord>> {
         self.search_records_page(query, limit, 0)
     }
 
@@ -2549,7 +2549,7 @@ impl Store {
         query: &str,
         limit: usize,
         offset: usize,
-    ) -> Result<Vec<WorkRecord>> {
+    ) -> Result<Vec<HistoryRecord>> {
         if let Some(records) = self.search_records_fts(query, limit, offset)? {
             return Ok(records);
         }
@@ -2569,8 +2569,8 @@ impl Store {
         query: &str,
         limit: usize,
         offset: usize,
-    ) -> Result<Option<Vec<WorkRecord>>> {
-        if !table_exists(&self.conn, "work_record_search")? {
+    ) -> Result<Option<Vec<HistoryRecord>>> {
+        if !table_exists(&self.conn, "ctx_history_search")? {
             return Ok(None);
         }
         let Some(match_query) = fts_match_query(query) else {
@@ -2581,9 +2581,9 @@ impl Store {
         let sql = if has_event_search && has_artifact_search {
             r#"
             WITH matches(record_id, score) AS (
-                SELECT record_id, bm25(work_record_search)
-                FROM work_record_search
-                WHERE work_record_search MATCH ?1
+                SELECT record_id, bm25(ctx_history_search)
+                FROM ctx_history_search
+                WHERE ctx_history_search MATCH ?1
                 UNION ALL
                 SELECT work_record_id, bm25(event_search)
                 FROM event_search
@@ -2603,9 +2603,9 @@ impl Store {
         } else {
             r#"
             SELECT record_id
-            FROM work_record_search
-            WHERE work_record_search MATCH ?1
-            ORDER BY bm25(work_record_search), record_id
+            FROM ctx_history_search
+            WHERE ctx_history_search MATCH ?1
+            ORDER BY bm25(ctx_history_search), record_id
             LIMIT ?2 OFFSET ?3
             "#
         };
@@ -2620,7 +2620,7 @@ impl Store {
         Ok(Some(records))
     }
 
-    pub fn max_events_per_work_record(&self) -> Result<i64> {
+    pub fn max_events_per_history_record(&self) -> Result<i64> {
         let max_events = self.conn.query_row(
             r#"
             SELECT COALESCE(MAX(event_count), 0)
@@ -2737,7 +2737,7 @@ impl Store {
                 let source_metadata_json = row.get::<_, Option<String>>(17)?;
                 Ok(EventSearchHit {
                     event_id: parse_uuid(row.get::<_, String>(0)?)?,
-                    work_record_id: parse_optional_uuid(row.get(1)?)?,
+                    history_record_id: parse_optional_uuid(row.get(1)?)?,
                     session_id: parse_optional_uuid(row.get(2)?)?,
                     run_id: parse_optional_uuid(row.get(3)?)?,
                     seq: row.get::<_, i64>(4)? as u64,
@@ -2762,8 +2762,8 @@ impl Store {
         collect_rows(rows)
     }
 
-    pub fn export_archive(&self) -> Result<WorkRecordArchive> {
-        Ok(WorkRecordArchive {
+    pub fn export_archive(&self) -> Result<SessionHistoryArchive> {
+        Ok(SessionHistoryArchive {
             schema_version: 2,
             version: 2,
             records: self.list_records(usize::MAX)?,
@@ -2774,13 +2774,17 @@ impl Store {
             artifact_records: self.list_artifacts()?,
             vcs_workspaces: self.list_vcs_workspaces()?,
             vcs_changes: self.list_vcs_changes()?,
-            work_record_links: self.list_work_record_links()?,
+            history_record_links: self.list_history_record_links()?,
             summaries: self.list_summaries()?,
             files_touched: self.list_files_touched()?,
         })
     }
 
-    pub fn import_archive(&mut self, archive: &WorkRecordArchive, overwrite: bool) -> Result<()> {
+    pub fn import_archive(
+        &mut self,
+        archive: &SessionHistoryArchive,
+        overwrite: bool,
+    ) -> Result<()> {
         validate_archive_version(archive)?;
         reject_archive_event_internal_conflicts(archive)?;
         let blob_dir = self.object_dir.clone();
@@ -2802,7 +2806,7 @@ impl Store {
 
     pub fn import_archive_from_capture_source(
         &mut self,
-        archive: &WorkRecordArchive,
+        archive: &SessionHistoryArchive,
         source_id: Uuid,
         source: &CaptureSourceDescriptor,
         occurred_at: DateTime<Utc>,
@@ -2880,8 +2884,8 @@ fn configure_connection(conn: &Connection, busy_timeout: Duration) -> Result<()>
     Ok(())
 }
 
-fn migrate_legacy_work_record_layout(data_root: &Path) -> Result<bool> {
-    let legacy_dir = data_root.join(LEGACY_WORK_RECORD_DIR);
+fn migrate_legacy_history_layout(data_root: &Path) -> Result<bool> {
+    let legacy_dir = data_root.join(LEGACY_HISTORY_DIR_NAME);
     if !legacy_dir.is_dir() {
         return Ok(false);
     }
@@ -2960,11 +2964,11 @@ fn object_relative_path(hash: &str) -> String {
 }
 
 fn rebuild_search_projection(conn: &Connection) -> Result<()> {
-    if !table_exists(conn, "work_record_search")? {
+    if !table_exists(conn, "ctx_history_search")? {
         return Ok(());
     }
 
-    conn.execute("DELETE FROM work_record_search", [])?;
+    conn.execute("DELETE FROM ctx_history_search", [])?;
     let has_event_search = table_exists(conn, "event_search")?;
     if has_event_search {
         conn.execute("DELETE FROM event_search", [])?;
@@ -2982,7 +2986,7 @@ fn rebuild_search_projection(conn: &Connection) -> Result<()> {
 
     let mut insert_record_search = conn.prepare(
         r#"
-        INSERT INTO work_record_search
+        INSERT INTO ctx_history_search
         (record_id, title, summary, primary_user_text, decision_text, context_text, tag_text)
         VALUES (?1, ?2, ?3, ?4, '', ?5, ?6)
         "#,
@@ -3002,11 +3006,11 @@ fn rebuild_search_projection(conn: &Connection) -> Result<()> {
 }
 
 fn ensure_search_projection_initialized(conn: &Connection) -> Result<()> {
-    if !table_exists(conn, "work_record_search")? {
+    if !table_exists(conn, "ctx_history_search")? {
         return Ok(());
     }
 
-    let mut projection_rows = table_row_count(conn, "work_record_search")?;
+    let mut projection_rows = table_row_count(conn, "ctx_history_search")?;
     if table_exists(conn, "event_search")? {
         projection_rows += table_row_count(conn, "event_search")?;
     }
@@ -3030,7 +3034,7 @@ fn ensure_search_projection_initialized(conn: &Connection) -> Result<()> {
 fn table_row_count(conn: &Connection, table: &str) -> Result<i64> {
     match table {
         "artifacts" | "artifact_search" | "events" | "event_search" | "work_records"
-        | "work_record_search" => {}
+        | "ctx_history_search" => {}
         _ => unreachable!("invalid table {table}"),
     }
     let sql = format!("SELECT COUNT(*) FROM {table}");
@@ -3113,7 +3117,7 @@ fn insert_event_search_projection_for_event(conn: &Connection, event: &Event) ->
     )?
     .execute(params![
         event.id.to_string(),
-        optional_uuid_string(event.work_record_id),
+        optional_uuid_string(event.history_record_id),
         optional_uuid_string(event.session_id),
         event.role.map(|role| role.as_str()),
         preview,
@@ -3216,7 +3220,7 @@ fn migrate_to_v1(conn: &Connection) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE;")?;
     let migration = (|| -> Result<()> {
         conn.execute_batch(CREATE_TABLES_SQL)?;
-        ensure_columns(conn, "work_records", WORK_RECORD_COLUMNS)?;
+        ensure_columns(conn, "work_records", HISTORY_RECORD_COLUMNS)?;
         backfill_legacy_tables(conn)?;
         conn.execute_batch(INDEXES_SQL)?;
         conn.execute_batch("PRAGMA user_version = 1;")?;
@@ -3241,7 +3245,7 @@ fn migrate_to_v2(conn: &Connection) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE;")?;
     let migration = (|| -> Result<()> {
         conn.execute_batch(CREATE_TABLES_SQL)?;
-        ensure_columns(conn, "work_records", WORK_RECORD_COLUMNS)?;
+        ensure_columns(conn, "work_records", HISTORY_RECORD_COLUMNS)?;
         backfill_legacy_tables(conn)?;
         conn.execute_batch(INDEXES_SQL)?;
         conn.execute_batch("PRAGMA user_version = 2;")?;
@@ -3266,7 +3270,7 @@ fn migrate_to_v3(conn: &Connection) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE;")?;
     let migration = (|| -> Result<()> {
         conn.execute_batch(CREATE_TABLES_SQL)?;
-        ensure_columns(conn, "work_records", WORK_RECORD_COLUMNS)?;
+        ensure_columns(conn, "work_records", HISTORY_RECORD_COLUMNS)?;
         backfill_legacy_tables(conn)?;
         conn.execute_batch(INDEXES_SQL)?;
         conn.execute_batch("PRAGMA user_version = 3;")?;
@@ -3750,7 +3754,7 @@ fn restrict_private_file(_path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn validate_archive_version(archive: &WorkRecordArchive) -> Result<()> {
+pub fn validate_archive_version(archive: &SessionHistoryArchive) -> Result<()> {
     if matches!((archive.schema_version, archive.version), (1, 1) | (2, 2)) {
         Ok(())
     } else {
@@ -3760,7 +3764,7 @@ pub fn validate_archive_version(archive: &WorkRecordArchive) -> Result<()> {
     }
 }
 
-fn reject_import_conflicts(tx: &Transaction<'_>, archive: &WorkRecordArchive) -> Result<()> {
+fn reject_import_conflicts(tx: &Transaction<'_>, archive: &SessionHistoryArchive) -> Result<()> {
     for record in &archive.records {
         if row_exists(tx, "work_records", record.id)? {
             return Err(StoreError::ImportConflict {
@@ -3785,7 +3789,7 @@ fn reject_capture_source_import_conflict(tx: &Transaction<'_>, source_id: Uuid) 
 
 fn reject_import_invariant_conflicts(
     tx: &Transaction<'_>,
-    archive: &WorkRecordArchive,
+    archive: &SessionHistoryArchive,
 ) -> Result<()> {
     if archive.schema_version < 2 && archive.version < 2 {
         return Ok(());
@@ -3807,7 +3811,10 @@ fn row_exists(tx: &Transaction<'_>, table: &str, id: Uuid) -> Result<bool> {
         .is_some())
 }
 
-fn reject_rich_import_conflicts(tx: &Transaction<'_>, archive: &WorkRecordArchive) -> Result<()> {
+fn reject_rich_import_conflicts(
+    tx: &Transaction<'_>,
+    archive: &SessionHistoryArchive,
+) -> Result<()> {
     if archive.schema_version < 2 && archive.version < 2 {
         return Ok(());
     }
@@ -3932,24 +3939,24 @@ fn reject_rich_import_conflicts(tx: &Transaction<'_>, archive: &WorkRecordArchiv
             file.id,
         )?;
     }
-    for link in &archive.work_record_links {
+    for link in &archive.history_record_links {
         reject_entity_conflict(
-            existing_work_record_link_by_id(tx, link.id)?,
+            existing_history_record_link_by_id(tx, link.id)?,
             link,
-            "work_record_link",
+            "history_record_link",
             link.id,
         )?;
         reject_entity_conflict(
-            existing_work_record_link_by_identity(tx, link)?,
+            existing_history_record_link_by_identity(tx, link)?,
             link,
-            "work_record_link",
+            "history_record_link",
             link.id,
         )?;
     }
     Ok(())
 }
 
-fn reject_archive_event_internal_conflicts(archive: &WorkRecordArchive) -> Result<()> {
+fn reject_archive_event_internal_conflicts(archive: &SessionHistoryArchive) -> Result<()> {
     let mut seen_seq: HashMap<u64, &Event> = HashMap::new();
     let mut seen_provider_events: HashMap<(String, String, u64), String> = HashMap::new();
 
@@ -4197,35 +4204,35 @@ fn existing_file_touched_by_id(tx: &Transaction<'_>, id: Uuid) -> Result<Option<
     .map_err(StoreError::from)
 }
 
-fn existing_work_record_link_by_id(
+fn existing_history_record_link_by_id(
     tx: &Transaction<'_>,
     id: Uuid,
-) -> Result<Option<WorkRecordLink>> {
+) -> Result<Option<HistoryRecordLink>> {
     tx.query_row(
-        work_record_link_select_sql("WHERE id = ?1").as_str(),
+        history_record_link_select_sql("WHERE id = ?1").as_str(),
         params![id.to_string()],
-        work_record_link_from_row,
+        history_record_link_from_row,
     )
     .optional()
     .map_err(StoreError::from)
 }
 
-fn existing_work_record_link_by_identity(
+fn existing_history_record_link_by_identity(
     tx: &Transaction<'_>,
-    link: &WorkRecordLink,
-) -> Result<Option<WorkRecordLink>> {
+    link: &HistoryRecordLink,
+) -> Result<Option<HistoryRecordLink>> {
     tx.query_row(
-        work_record_link_select_sql(
+        history_record_link_select_sql(
             "WHERE work_record_id = ?1 AND target_type = ?2 AND target_id = ?3 AND link_type = ?4",
         )
         .as_str(),
         params![
-            link.work_record_id.to_string(),
+            link.history_record_id.to_string(),
             link.target_type.as_str(),
             link.target_id.to_string(),
             link.link_type.as_str()
         ],
-        work_record_link_from_row,
+        history_record_link_from_row,
     )
     .optional()
     .map_err(StoreError::from)
@@ -4240,7 +4247,7 @@ fn expected_archive_blob_path(id: Uuid, blob_hash: &str) -> Result<String> {
 
 fn validate_archive_artifact_record_blobs(
     blob_dir: &Path,
-    archive: &WorkRecordArchive,
+    archive: &SessionHistoryArchive,
 ) -> Result<()> {
     for artifact in &archive.artifact_records {
         validate_archive_artifact_record_blob(blob_dir, artifact)?;
@@ -4323,7 +4330,7 @@ fn upsert_capture_source_tx(
 fn import_rich_archive_entities_tx(
     tx: &Transaction<'_>,
     blob_dir: &Path,
-    archive: &WorkRecordArchive,
+    archive: &SessionHistoryArchive,
     _blob_guard: &mut BlobWriteGuard,
 ) -> Result<()> {
     if archive.schema_version < 2 && archive.version < 2 {
@@ -4359,8 +4366,8 @@ fn import_rich_archive_entities_tx(
     for file in &archive.files_touched {
         upsert_file_touched_tx(tx, file)?;
     }
-    for link in &archive.work_record_links {
-        upsert_work_record_link_tx(tx, link)?;
+    for link in &archive.history_record_links {
+        upsert_history_record_link_tx(tx, link)?;
     }
     Ok(())
 }
@@ -4439,7 +4446,7 @@ fn upsert_session_tx(tx: &Transaction<'_>, session: &Session) -> Result<()> {
         "#,
         params![
             session.id.to_string(),
-            optional_uuid_string(session.work_record_id),
+            optional_uuid_string(session.history_record_id),
             optional_uuid_string(session.parent_session_id),
             optional_uuid_string(session.root_session_id),
             optional_uuid_string(session.capture_source_id),
@@ -4495,7 +4502,7 @@ fn upsert_run_tx(tx: &Transaction<'_>, run: &Run) -> Result<()> {
         "#,
         params![
             run.id.to_string(),
-            optional_uuid_string(run.work_record_id),
+            optional_uuid_string(run.history_record_id),
             optional_uuid_string(run.session_id),
             run.run_type.as_str(),
             run.status.as_str(),
@@ -4566,7 +4573,7 @@ fn upsert_event_tx(tx: &Transaction<'_>, event: &Event) -> Result<Uuid> {
         params![
             event_id.to_string(),
             event.seq as i64,
-            optional_uuid_string(event.work_record_id),
+            optional_uuid_string(event.history_record_id),
             optional_uuid_string(event.session_id),
             optional_uuid_string(event.run_id),
             event.event_type.as_str(),
@@ -4744,7 +4751,7 @@ fn upsert_vcs_change_tx(tx: &Transaction<'_>, change: &VcsChange) -> Result<Uuid
 
 fn upsert_record_tx(
     tx: &Transaction<'_>,
-    record: &WorkRecord,
+    record: &HistoryRecord,
     source_id: Option<Uuid>,
 ) -> Result<()> {
     let created_at_ms = timestamp_ms(record.created_at);
@@ -4816,7 +4823,7 @@ fn upsert_summary_tx(tx: &Transaction<'_>, summary: &Summary) -> Result<()> {
         "#,
         params![
             summary.id.to_string(),
-            optional_uuid_string(summary.work_record_id),
+            optional_uuid_string(summary.history_record_id),
             optional_uuid_string(summary.session_id),
             summary.kind.as_str(),
             summary.model_or_source.as_deref(),
@@ -4863,7 +4870,7 @@ fn upsert_file_touched_tx(tx: &Transaction<'_>, file: &FileTouched) -> Result<()
         "#,
         params![
             file.id.to_string(),
-            optional_uuid_string(file.work_record_id),
+            optional_uuid_string(file.history_record_id),
             optional_uuid_string(file.run_id),
             optional_uuid_string(file.event_id),
             optional_uuid_string(file.vcs_workspace_id),
@@ -4886,7 +4893,7 @@ fn upsert_file_touched_tx(tx: &Transaction<'_>, file: &FileTouched) -> Result<()
     Ok(())
 }
 
-fn upsert_work_record_link_tx(tx: &Transaction<'_>, link: &WorkRecordLink) -> Result<Uuid> {
+fn upsert_history_record_link_tx(tx: &Transaction<'_>, link: &HistoryRecordLink) -> Result<Uuid> {
     tx.execute(
         r#"
         INSERT INTO work_record_links
@@ -4905,7 +4912,7 @@ fn upsert_work_record_link_tx(tx: &Transaction<'_>, link: &WorkRecordLink) -> Re
         "#,
         params![
             link.id.to_string(),
-            link.work_record_id.to_string(),
+            link.history_record_id.to_string(),
             link.target_type.as_str(),
             link.target_id.to_string(),
             link.link_type.as_str(),
@@ -4924,7 +4931,7 @@ fn upsert_work_record_link_tx(tx: &Transaction<'_>, link: &WorkRecordLink) -> Re
     tx.query_row(
         "SELECT id FROM work_record_links WHERE work_record_id = ?1 AND target_type = ?2 AND target_id = ?3 AND link_type = ?4",
         params![
-            link.work_record_id.to_string(),
+            link.history_record_id.to_string(),
             link.target_type.as_str(),
             link.target_id.to_string(),
             link.link_type.as_str()
@@ -4938,7 +4945,7 @@ fn capture_source_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CaptureS
     Ok(CaptureSource {
         id: parse_uuid(row.get::<_, String>(0)?)?,
         descriptor: CaptureSourceDescriptor {
-            kind: parse_text_enum::<work_record_core::CaptureSourceKind>(row.get::<_, String>(1)?)?,
+            kind: parse_text_enum::<ctx_history_core::CaptureSourceKind>(row.get::<_, String>(1)?)?,
             provider: parse_text_enum::<CaptureProvider>(row.get::<_, String>(2)?)?,
             machine_id: row.get(3)?,
             process_id: row.get::<_, Option<i64>>(4)?.map(|value| value as u32),
@@ -5036,7 +5043,7 @@ fn session_select_sql(tail: &str) -> String {
 fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
     Ok(Session {
         id: parse_uuid(row.get::<_, String>(0)?)?,
-        work_record_id: parse_optional_uuid(row.get(1)?)?,
+        history_record_id: parse_optional_uuid(row.get(1)?)?,
         parent_session_id: parse_optional_uuid(row.get(2)?)?,
         root_session_id: parse_optional_uuid(row.get(3)?)?,
         capture_source_id: parse_optional_uuid(row.get(4)?)?,
@@ -5067,7 +5074,7 @@ fn run_select_sql(tail: &str) -> String {
 fn run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Run> {
     Ok(Run {
         id: parse_uuid(row.get::<_, String>(0)?)?,
-        work_record_id: parse_optional_uuid(row.get(1)?)?,
+        history_record_id: parse_optional_uuid(row.get(1)?)?,
         session_id: parse_optional_uuid(row.get(2)?)?,
         run_type: parse_text_enum::<RunType>(row.get::<_, String>(3)?)?,
         status: parse_text_enum::<RunStatus>(row.get::<_, String>(4)?)?,
@@ -5097,7 +5104,7 @@ fn event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
     Ok(Event {
         id: parse_uuid(row.get::<_, String>(0)?)?,
         seq: row.get::<_, i64>(1)? as u64,
-        work_record_id: parse_optional_uuid(row.get(2)?)?,
+        history_record_id: parse_optional_uuid(row.get(2)?)?,
         session_id: parse_optional_uuid(row.get(3)?)?,
         run_id: parse_optional_uuid(row.get(4)?)?,
         event_type: parse_text_enum::<EventType>(row.get::<_, String>(5)?)?,
@@ -5149,11 +5156,11 @@ fn vcs_workspace_select_sql(tail: &str) -> String {
 fn vcs_workspace_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<VcsWorkspace> {
     Ok(VcsWorkspace {
         id: parse_uuid(row.get::<_, String>(0)?)?,
-        kind: parse_text_enum::<work_record_core::VcsKind>(row.get::<_, String>(1)?)?,
+        kind: parse_text_enum::<ctx_history_core::VcsKind>(row.get::<_, String>(1)?)?,
         root_path: row.get(2)?,
         repo_fingerprint: row.get(3)?,
         primary_remote_url_normalized: row.get(4)?,
-        host: parse_text_enum::<work_record_core::VcsHost>(row.get::<_, String>(5)?)?,
+        host: parse_text_enum::<ctx_history_core::VcsHost>(row.get::<_, String>(5)?)?,
         owner: row.get(6)?,
         name: row.get(7)?,
         monorepo_subpath: row.get(8)?,
@@ -5176,14 +5183,14 @@ fn vcs_change_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<VcsChange> {
     Ok(VcsChange {
         id: parse_uuid(row.get::<_, String>(0)?)?,
         vcs_workspace_id: parse_uuid(row.get::<_, String>(1)?)?,
-        kind: parse_text_enum::<work_record_core::VcsChangeKind>(row.get::<_, String>(2)?)?,
+        kind: parse_text_enum::<ctx_history_core::VcsChangeKind>(row.get::<_, String>(2)?)?,
         change_id: row.get(3)?,
         parent_change_ids: serde_json::from_str(&row.get::<_, String>(4)?)
             .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?,
         branch_or_bookmark: row.get(5)?,
         tree_hash: row.get(6)?,
         author_time: optional_ms_to_time(row.get(7)?)?,
-        confidence: parse_text_enum::<work_record_core::Confidence>(row.get::<_, String>(8)?)?,
+        confidence: parse_text_enum::<ctx_history_core::Confidence>(row.get::<_, String>(8)?)?,
         timestamps: EntityTimestamps {
             created_at: ms_to_time(row.get(9)?)?,
             updated_at: ms_to_time(row.get(10)?)?,
@@ -5202,9 +5209,9 @@ fn summary_select_sql(tail: &str) -> String {
 fn summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Summary> {
     Ok(Summary {
         id: parse_uuid(row.get::<_, String>(0)?)?,
-        work_record_id: parse_optional_uuid(row.get(1)?)?,
+        history_record_id: parse_optional_uuid(row.get(1)?)?,
         session_id: parse_optional_uuid(row.get(2)?)?,
-        kind: parse_text_enum::<work_record_core::SummaryKind>(row.get::<_, String>(3)?)?,
+        kind: parse_text_enum::<ctx_history_core::SummaryKind>(row.get::<_, String>(3)?)?,
         model_or_source: row.get(4)?,
         text: row.get(5)?,
         citations: serde_json::from_str(&row.get::<_, String>(6)?)
@@ -5227,18 +5234,18 @@ fn file_touched_select_sql(tail: &str) -> String {
 fn file_touched_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileTouched> {
     Ok(FileTouched {
         id: parse_uuid(row.get::<_, String>(0)?)?,
-        work_record_id: parse_optional_uuid(row.get(1)?)?,
+        history_record_id: parse_optional_uuid(row.get(1)?)?,
         run_id: parse_optional_uuid(row.get(2)?)?,
         event_id: parse_optional_uuid(row.get(3)?)?,
         vcs_workspace_id: parse_optional_uuid(row.get(4)?)?,
         path: row.get(5)?,
         change_kind: row
             .get::<_, Option<String>>(6)?
-            .map(parse_text_enum::<work_record_core::FileChangeKind>)
+            .map(parse_text_enum::<ctx_history_core::FileChangeKind>)
             .transpose()?,
         old_path: row.get(7)?,
         line_count_delta: row.get(8)?,
-        confidence: parse_text_enum::<work_record_core::Confidence>(row.get::<_, String>(9)?)?,
+        confidence: parse_text_enum::<ctx_history_core::Confidence>(row.get::<_, String>(9)?)?,
         timestamps: EntityTimestamps {
             created_at: ms_to_time(row.get(10)?)?,
             updated_at: ms_to_time(row.get(11)?)?,
@@ -5248,24 +5255,24 @@ fn file_touched_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileTouche
     })
 }
 
-fn work_record_link_select_sql(tail: &str) -> String {
+fn history_record_link_select_sql(tail: &str) -> String {
     format!(
         "SELECT id, work_record_id, target_type, target_id, link_type, confidence, source_id, created_at_ms, updated_at_ms, visibility, fidelity, sync_state, sync_version, deleted_at_ms, metadata_json FROM work_record_links {tail}"
     )
 }
 
-fn work_record_link_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkRecordLink> {
-    Ok(WorkRecordLink {
+fn history_record_link_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HistoryRecordLink> {
+    Ok(HistoryRecordLink {
         id: parse_uuid(row.get::<_, String>(0)?)?,
-        work_record_id: parse_uuid(row.get::<_, String>(1)?)?,
-        target_type: parse_text_enum::<work_record_core::WorkRecordLinkTargetType>(
+        history_record_id: parse_uuid(row.get::<_, String>(1)?)?,
+        target_type: parse_text_enum::<ctx_history_core::HistoryRecordLinkTargetType>(
             row.get::<_, String>(2)?,
         )?,
         target_id: parse_uuid(row.get::<_, String>(3)?)?,
-        link_type: parse_text_enum::<work_record_core::WorkRecordLinkType>(
+        link_type: parse_text_enum::<ctx_history_core::HistoryRecordLinkType>(
             row.get::<_, String>(4)?,
         )?,
-        confidence: parse_text_enum::<work_record_core::Confidence>(row.get::<_, String>(5)?)?,
+        confidence: parse_text_enum::<ctx_history_core::Confidence>(row.get::<_, String>(5)?)?,
         source_id: parse_optional_uuid(row.get(6)?)?,
         timestamps: EntityTimestamps {
             created_at: ms_to_time(row.get(7)?)?,
@@ -5342,9 +5349,9 @@ fn record_select_sql(tail: &str) -> String {
     )
 }
 
-fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkRecord> {
+fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HistoryRecord> {
     let tags_json: String = row.get(3)?;
-    Ok(WorkRecord {
+    Ok(HistoryRecord {
         id: parse_uuid(row.get::<_, String>(0)?)?,
         title: row.get(1)?,
         body: row.get(2)?,
@@ -5459,7 +5466,7 @@ mod search_order_tests {
         let root = std::env::current_dir().unwrap().join("target/test-data");
         fs::create_dir_all(&root).unwrap();
         tempfile::Builder::new()
-            .prefix("work-record-store-search-order-")
+            .prefix("ctx-history-store-search-order-")
             .tempdir_in(root)
             .unwrap()
     }
@@ -5470,8 +5477,8 @@ mod search_order_tests {
             .with_timezone(&Utc)
     }
 
-    fn stable_tie_record(index: u16) -> WorkRecord {
-        let mut record = WorkRecord::new(
+    fn stable_tie_record(index: u16) -> HistoryRecord {
+        let mut record = HistoryRecord::new(
             "Stable tie title",
             "stabletie exact equal body for deterministic fts ranking",
             vec!["stabletie".into()],
@@ -5529,7 +5536,7 @@ mod catalog_tests {
         let root = std::env::current_dir().unwrap().join("target/test-data");
         fs::create_dir_all(&root).unwrap();
         tempfile::Builder::new()
-            .prefix("work-record-store-catalog-")
+            .prefix("ctx-history-store-catalog-")
             .tempdir_in(root)
             .unwrap()
     }
@@ -5585,7 +5592,7 @@ mod catalog_tests {
     fn imported_session(external_session_id: &str) -> Session {
         Session {
             id: new_id(),
-            work_record_id: None,
+            history_record_id: None,
             parent_session_id: None,
             root_session_id: None,
             capture_source_id: None,

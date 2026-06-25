@@ -11,22 +11,22 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
+use ctx_history_core::{
+    inbox_dir as core_inbox_dir, new_id, redact_share_safe_markers, AgentType, CaptureEnvelope,
+    CaptureProvider, CaptureSource, CaptureSourceDescriptor, CaptureSourceKind, Confidence,
+    EntityTimestamps, Event, EventRole, EventType, Fidelity, HistoryRecord,
+    ProviderCaptureEnvelope, ProviderCursorCheckpoint, ProviderCursorRange, ProviderEventEnvelope,
+    ProviderRawRetention, ProviderRedactionBoundary, ProviderSessionEnvelope,
+    ProviderSourceEnvelope, ProviderSourceTrust, RedactionState, Run, RunStatus, RunType, Session,
+    SessionEdge, SessionEdgeType, SessionHistoryArchive, SessionStatus, SyncCursor, SyncMetadata,
+    SyncState, Visibility, PROVIDER_CAPTURE_ENVELOPE_SCHEMA_VERSION,
+};
+use ctx_history_store::{CatalogSession, Store, StoreError};
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use thiserror::Error;
 use uuid::Uuid;
-use work_record_core::{
-    inbox_dir as core_inbox_dir, new_id, redact_share_safe_markers, AgentType, CaptureEnvelope,
-    CaptureProvider, CaptureSource, CaptureSourceDescriptor, CaptureSourceKind, Confidence,
-    EntityTimestamps, Event, EventRole, EventType, Fidelity, ProviderCaptureEnvelope,
-    ProviderCursorCheckpoint, ProviderCursorRange, ProviderEventEnvelope, ProviderRawRetention,
-    ProviderRedactionBoundary, ProviderSessionEnvelope, ProviderSourceEnvelope,
-    ProviderSourceTrust, RedactionState, Run, RunStatus, RunType, Session, SessionEdge,
-    SessionEdgeType, SessionStatus, SyncCursor, SyncMetadata, SyncState, Visibility, WorkRecord,
-    WorkRecordArchive, PROVIDER_CAPTURE_ENVELOPE_SCHEMA_VERSION,
-};
-use work_record_store::{CatalogSession, Store, StoreError};
 
 pub mod provider_sources;
 pub use provider_sources::{
@@ -43,7 +43,7 @@ pub enum CaptureError {
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
     #[error("store error: {0}")]
-    Store(#[from] work_record_store::StoreError),
+    Store(#[from] ctx_history_store::StoreError),
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
     #[error("time parse error: {0}")]
@@ -181,7 +181,7 @@ pub struct ProviderFixtureImportOptions {
     pub machine_id: String,
     pub source_path: Option<PathBuf>,
     pub imported_at: DateTime<Utc>,
-    pub work_record_id: Option<Uuid>,
+    pub history_record_id: Option<Uuid>,
     pub expected_provider: Option<CaptureProvider>,
     pub allow_partial_failures: bool,
     pub source_format: String,
@@ -194,7 +194,7 @@ impl Default for ProviderFixtureImportOptions {
             machine_id: default_machine_id(),
             source_path: None,
             imported_at: Utc::now(),
-            work_record_id: None,
+            history_record_id: None,
             expected_provider: None,
             allow_partial_failures: false,
             source_format: "normalized_provider_fixture_jsonl".to_owned(),
@@ -229,7 +229,7 @@ pub struct CodexHistoryImportOptions {
     pub machine_id: String,
     pub source_path: Option<PathBuf>,
     pub imported_at: DateTime<Utc>,
-    pub work_record_id: Option<Uuid>,
+    pub history_record_id: Option<Uuid>,
     pub allow_partial_failures: bool,
 }
 
@@ -239,7 +239,7 @@ impl Default for CodexHistoryImportOptions {
             machine_id: default_machine_id(),
             source_path: None,
             imported_at: Utc::now(),
-            work_record_id: None,
+            history_record_id: None,
             allow_partial_failures: false,
         }
     }
@@ -250,7 +250,7 @@ pub struct CodexSessionImportOptions {
     pub machine_id: String,
     pub source_path: Option<PathBuf>,
     pub imported_at: DateTime<Utc>,
-    pub work_record_id: Option<Uuid>,
+    pub history_record_id: Option<Uuid>,
     pub allow_partial_failures: bool,
     pub max_session_files: Option<usize>,
     pub max_total_bytes: Option<u64>,
@@ -273,7 +273,7 @@ impl Default for CodexSessionImportOptions {
             machine_id: default_machine_id(),
             source_path: None,
             imported_at: Utc::now(),
-            work_record_id: None,
+            history_record_id: None,
             allow_partial_failures: false,
             max_session_files: None,
             max_total_bytes: None,
@@ -292,7 +292,7 @@ impl std::fmt::Debug for CodexSessionImportOptions {
             .field("machine_id", &self.machine_id)
             .field("source_path", &self.source_path)
             .field("imported_at", &self.imported_at)
-            .field("work_record_id", &self.work_record_id)
+            .field("history_record_id", &self.history_record_id)
             .field("allow_partial_failures", &self.allow_partial_failures)
             .field("max_session_files", &self.max_session_files)
             .field("max_total_bytes", &self.max_total_bytes)
@@ -368,7 +368,7 @@ pub struct PiSessionImportOptions {
     pub machine_id: String,
     pub source_path: Option<PathBuf>,
     pub imported_at: DateTime<Utc>,
-    pub work_record_id: Option<Uuid>,
+    pub history_record_id: Option<Uuid>,
     pub allow_partial_failures: bool,
 }
 
@@ -378,7 +378,7 @@ impl Default for PiSessionImportOptions {
             machine_id: default_machine_id(),
             source_path: None,
             imported_at: Utc::now(),
-            work_record_id: None,
+            history_record_id: None,
             allow_partial_failures: false,
         }
     }
@@ -389,7 +389,7 @@ pub struct ClaudeProjectsImportOptions {
     pub machine_id: String,
     pub source_path: Option<PathBuf>,
     pub imported_at: DateTime<Utc>,
-    pub work_record_id: Option<Uuid>,
+    pub history_record_id: Option<Uuid>,
     pub allow_partial_failures: bool,
 }
 
@@ -399,7 +399,7 @@ impl Default for ClaudeProjectsImportOptions {
             machine_id: default_machine_id(),
             source_path: None,
             imported_at: Utc::now(),
-            work_record_id: None,
+            history_record_id: None,
             allow_partial_failures: false,
         }
     }
@@ -410,7 +410,7 @@ pub struct OpenCodeSqliteImportOptions {
     pub machine_id: String,
     pub source_path: Option<PathBuf>,
     pub imported_at: DateTime<Utc>,
-    pub work_record_id: Option<Uuid>,
+    pub history_record_id: Option<Uuid>,
     pub allow_partial_failures: bool,
 }
 
@@ -420,7 +420,7 @@ impl Default for OpenCodeSqliteImportOptions {
             machine_id: default_machine_id(),
             source_path: None,
             imported_at: Utc::now(),
-            work_record_id: None,
+            history_record_id: None,
             allow_partial_failures: false,
         }
     }
@@ -431,7 +431,7 @@ pub struct AntigravityCliImportOptions {
     pub machine_id: String,
     pub source_path: Option<PathBuf>,
     pub imported_at: DateTime<Utc>,
-    pub work_record_id: Option<Uuid>,
+    pub history_record_id: Option<Uuid>,
     pub allow_partial_failures: bool,
 }
 
@@ -441,7 +441,7 @@ impl Default for AntigravityCliImportOptions {
             machine_id: default_machine_id(),
             source_path: None,
             imported_at: Utc::now(),
-            work_record_id: None,
+            history_record_id: None,
             allow_partial_failures: false,
         }
     }
@@ -452,7 +452,7 @@ pub struct GeminiCliImportOptions {
     pub machine_id: String,
     pub source_path: Option<PathBuf>,
     pub imported_at: DateTime<Utc>,
-    pub work_record_id: Option<Uuid>,
+    pub history_record_id: Option<Uuid>,
     pub allow_partial_failures: bool,
 }
 
@@ -462,7 +462,7 @@ impl Default for GeminiCliImportOptions {
             machine_id: default_machine_id(),
             source_path: None,
             imported_at: Utc::now(),
-            work_record_id: None,
+            history_record_id: None,
             allow_partial_failures: false,
         }
     }
@@ -473,7 +473,7 @@ pub struct FactoryAiDroidImportOptions {
     pub machine_id: String,
     pub source_path: Option<PathBuf>,
     pub imported_at: DateTime<Utc>,
-    pub work_record_id: Option<Uuid>,
+    pub history_record_id: Option<Uuid>,
     pub allow_partial_failures: bool,
 }
 
@@ -483,7 +483,7 @@ impl Default for FactoryAiDroidImportOptions {
             machine_id: default_machine_id(),
             source_path: None,
             imported_at: Utc::now(),
-            work_record_id: None,
+            history_record_id: None,
             allow_partial_failures: false,
         }
     }
@@ -494,7 +494,7 @@ pub struct CopilotCliImportOptions {
     pub machine_id: String,
     pub source_path: Option<PathBuf>,
     pub imported_at: DateTime<Utc>,
-    pub work_record_id: Option<Uuid>,
+    pub history_record_id: Option<Uuid>,
     pub allow_partial_failures: bool,
 }
 
@@ -504,7 +504,7 @@ impl Default for CopilotCliImportOptions {
             machine_id: default_machine_id(),
             source_path: None,
             imported_at: Utc::now(),
-            work_record_id: None,
+            history_record_id: None,
             allow_partial_failures: false,
         }
     }
@@ -515,7 +515,7 @@ pub struct CursorNativeImportOptions {
     pub machine_id: String,
     pub source_path: Option<PathBuf>,
     pub imported_at: DateTime<Utc>,
-    pub work_record_id: Option<Uuid>,
+    pub history_record_id: Option<Uuid>,
     pub allow_partial_failures: bool,
 }
 
@@ -525,7 +525,7 @@ impl Default for CursorNativeImportOptions {
             machine_id: default_machine_id(),
             source_path: None,
             imported_at: Utc::now(),
-            work_record_id: None,
+            history_record_id: None,
             allow_partial_failures: false,
         }
     }
@@ -647,7 +647,7 @@ impl Default for ProviderAdapterContext {
 
 #[derive(Debug, Clone)]
 pub struct NormalizedProviderImportOptions {
-    pub work_record_id: Option<Uuid>,
+    pub history_record_id: Option<Uuid>,
     pub allow_partial_failures: bool,
     pub persist_cursors: bool,
     pub wrap_transaction: bool,
@@ -657,7 +657,7 @@ pub struct NormalizedProviderImportOptions {
 impl Default for NormalizedProviderImportOptions {
     fn default() -> Self {
         Self {
-            work_record_id: None,
+            history_record_id: None,
             allow_partial_failures: false,
             persist_cursors: true,
             wrap_transaction: true,
@@ -1481,7 +1481,7 @@ pub fn fixture_envelope(options: FixtureOptions) -> Result<CaptureEnvelope> {
         options.tags
     };
     let payload = json!({
-        "kind": "work_record",
+        "kind": "history_record",
         "title": options.title,
         "body": options.body,
         "tags": tags,
@@ -1608,7 +1608,7 @@ pub fn import_provider_fixture_jsonl(
         store,
         normalization,
         NormalizedProviderImportOptions {
-            work_record_id: options.work_record_id,
+            history_record_id: options.history_record_id,
             allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
@@ -1643,7 +1643,7 @@ pub fn import_codex_history_jsonl(
         store,
         normalization,
         NormalizedProviderImportOptions {
-            work_record_id: options.work_record_id,
+            history_record_id: options.history_record_id,
             allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
@@ -1681,7 +1681,7 @@ pub fn import_codex_session_jsonl(
         store,
         normalization,
         NormalizedProviderImportOptions {
-            work_record_id: options.work_record_id,
+            history_record_id: options.history_record_id,
             allow_partial_failures: options.allow_partial_failures,
             persist_cursors: false,
             wrap_transaction: true,
@@ -1781,7 +1781,7 @@ fn import_codex_session_paths_parallel_normalized(
         let summary = match import_provider_capture_lines(
             store,
             NormalizedProviderImportOptions {
-                work_record_id: options.work_record_id,
+                history_record_id: options.history_record_id,
                 allow_partial_failures: options.allow_partial_failures,
                 persist_cursors: false,
                 wrap_transaction: false,
@@ -2059,7 +2059,7 @@ fn import_codex_session_path_fast(
         include_notices: options.include_notices,
     };
     let import_options = NormalizedProviderImportOptions {
-        work_record_id: options.work_record_id,
+        history_record_id: options.history_record_id,
         allow_partial_failures: options.allow_partial_failures,
         persist_cursors: false,
         wrap_transaction: false,
@@ -2177,7 +2177,7 @@ fn import_codex_session_path_fast(
             store,
             header,
             &event,
-            options.work_record_id,
+            options.history_record_id,
             line_number,
             context.imported_at,
         )?;
@@ -2190,7 +2190,7 @@ fn import_codex_provider_event_fast(
     store: &mut Store,
     header: &CodexSessionHeader,
     event: &ProviderEventEnvelope,
-    work_record_id: Option<Uuid>,
+    history_record_id: Option<Uuid>,
     line_number: usize,
     imported_at: DateTime<Utc>,
 ) -> Result<ProviderImportSummary> {
@@ -2215,7 +2215,7 @@ fn import_codex_provider_event_fast(
         provider_session_id: &header.id,
         session_id,
         source_id,
-        work_record_id,
+        history_record_id,
         event,
         payload: &payload,
         event_hash: &event_hash,
@@ -2223,7 +2223,7 @@ fn import_codex_provider_event_fast(
     let normalized_event = Event {
         id: provider_event_uuid(provider, &header.id, event.provider_event_index),
         seq: provider_event_seq(provider, &header.id, event.provider_event_index),
-        work_record_id,
+        history_record_id,
         session_id: Some(session_id),
         run_id: command_run.as_ref().map(|run| run.id),
         event_type: event.event_type,
@@ -2705,7 +2705,7 @@ pub fn import_pi_session_jsonl(
         store,
         normalization,
         NormalizedProviderImportOptions {
-            work_record_id: options.work_record_id,
+            history_record_id: options.history_record_id,
             allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
@@ -2740,7 +2740,7 @@ pub fn import_claude_projects_jsonl_tree(
         store,
         normalization,
         NormalizedProviderImportOptions {
-            work_record_id: options.work_record_id,
+            history_record_id: options.history_record_id,
             allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
@@ -2775,7 +2775,7 @@ pub fn import_opencode_sqlite(
         store,
         normalization,
         NormalizedProviderImportOptions {
-            work_record_id: options.work_record_id,
+            history_record_id: options.history_record_id,
             allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
@@ -2796,7 +2796,7 @@ pub fn import_antigravity_cli_history(
             machine_id: options.machine_id,
             source_path: options.source_path,
             imported_at: options.imported_at,
-            work_record_id: options.work_record_id,
+            history_record_id: options.history_record_id,
             allow_partial_failures: options.allow_partial_failures,
         },
         AntigravityCliJsonlAdapter,
@@ -2815,7 +2815,7 @@ pub fn import_gemini_cli_history(
             machine_id: options.machine_id,
             source_path: options.source_path,
             imported_at: options.imported_at,
-            work_record_id: options.work_record_id,
+            history_record_id: options.history_record_id,
             allow_partial_failures: options.allow_partial_failures,
         },
         GeminiCliJsonlAdapter,
@@ -2834,7 +2834,7 @@ pub fn import_cursor_native_history(
             machine_id: options.machine_id,
             source_path: options.source_path,
             imported_at: options.imported_at,
-            work_record_id: options.work_record_id,
+            history_record_id: options.history_record_id,
             allow_partial_failures: options.allow_partial_failures,
         },
         CursorAgentTranscriptJsonlAdapter,
@@ -2853,7 +2853,7 @@ pub fn import_factory_ai_droid_sessions(
             machine_id: options.machine_id,
             source_path: options.source_path,
             imported_at: options.imported_at,
-            work_record_id: options.work_record_id,
+            history_record_id: options.history_record_id,
             allow_partial_failures: options.allow_partial_failures,
         },
         FactoryAiDroidJsonlAdapter,
@@ -2872,7 +2872,7 @@ pub fn import_copilot_cli_session_events(
             machine_id: options.machine_id,
             source_path: options.source_path,
             imported_at: options.imported_at,
-            work_record_id: options.work_record_id,
+            history_record_id: options.history_record_id,
             allow_partial_failures: options.allow_partial_failures,
         },
         CopilotCliSessionEventsAdapter,
@@ -2884,7 +2884,7 @@ struct NativeJsonlTreeImport<'a> {
     machine_id: String,
     source_path: Option<PathBuf>,
     imported_at: DateTime<Utc>,
-    work_record_id: Option<Uuid>,
+    history_record_id: Option<Uuid>,
     allow_partial_failures: bool,
 }
 
@@ -2911,7 +2911,7 @@ fn import_native_jsonl_tree<A: ProviderCaptureAdapter>(
         store,
         normalization,
         NormalizedProviderImportOptions {
-            work_record_id: request.work_record_id,
+            history_record_id: request.history_record_id,
             allow_partial_failures: request.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
@@ -5669,7 +5669,7 @@ fn import_provider_capture_line(
     };
     let normalized_session = Session {
         id: session_id,
-        work_record_id: options.work_record_id,
+        history_record_id: options.history_record_id,
         parent_session_id,
         root_session_id,
         capture_source_id: Some(source_id),
@@ -5786,7 +5786,7 @@ fn import_provider_capture_line(
             provider_session_id: &session.provider_session_id,
             session_id,
             source_id,
-            work_record_id: options.work_record_id,
+            history_record_id: options.history_record_id,
             event,
             payload: &payload,
             event_hash: &event_hash,
@@ -5802,7 +5802,7 @@ fn import_provider_capture_line(
                 &session.provider_session_id,
                 event.provider_event_index,
             ),
-            work_record_id: options.work_record_id,
+            history_record_id: options.history_record_id,
             session_id: Some(session_id),
             run_id: command_run.as_ref().map(|run| run.id),
             event_type: event.event_type,
@@ -6203,18 +6203,18 @@ pub fn retry_failed_spool_files(inbox: impl AsRef<Path>) -> Result<SpoolRepairSu
     Ok(summary)
 }
 
-pub fn archive_from_envelopes(envelopes: &[CaptureEnvelope]) -> Result<WorkRecordArchive> {
-    let mut archive = WorkRecordArchive {
+pub fn archive_from_envelopes(envelopes: &[CaptureEnvelope]) -> Result<SessionHistoryArchive> {
+    let mut archive = SessionHistoryArchive {
         schema_version: 1,
         version: 1,
         records: Vec::new(),
-        ..WorkRecordArchive::default()
+        ..SessionHistoryArchive::default()
     };
 
     for envelope in envelopes {
         validate_envelope(envelope)?;
         if let Some(archive_value) = envelope.payload.get("archive") {
-            let nested: WorkRecordArchive = serde_json::from_value(archive_value.clone())?;
+            let nested: SessionHistoryArchive = serde_json::from_value(archive_value.clone())?;
             archive.records.extend(nested.records);
             archive.capture_sources.extend(nested.capture_sources);
             archive.sessions.extend(nested.sessions);
@@ -6223,7 +6223,9 @@ pub fn archive_from_envelopes(envelopes: &[CaptureEnvelope]) -> Result<WorkRecor
             archive.artifact_records.extend(nested.artifact_records);
             archive.vcs_workspaces.extend(nested.vcs_workspaces);
             archive.vcs_changes.extend(nested.vcs_changes);
-            archive.work_record_links.extend(nested.work_record_links);
+            archive
+                .history_record_links
+                .extend(nested.history_record_links);
             archive.summaries.extend(nested.summaries);
             archive.files_touched.extend(nested.files_touched);
             continue;
@@ -6248,7 +6250,7 @@ pub fn archive_from_envelopes(envelopes: &[CaptureEnvelope]) -> Result<WorkRecor
 
 pub fn stable_capture_uuid(dedupe_key: &str, role: &str) -> Uuid {
     let mut bytes = [0_u8; 16];
-    let name = format!("ctx-work-record-capture:{dedupe_key}:{role}");
+    let name = format!("ctx-ctx-history-capture:{dedupe_key}:{role}");
     let first = fnv1a64(name.as_bytes()).to_be_bytes();
     let second = fnv1a64(format!("{name}:uuid-v7").as_bytes()).to_be_bytes();
 
@@ -6364,7 +6366,7 @@ fn state_path(processing_path: &Path, state_suffix: &str) -> Result<PathBuf> {
     Ok(processing_path.with_file_name(format!("{base}{state_suffix}")))
 }
 
-fn record_from_envelope(envelope: &CaptureEnvelope, value: &Value) -> Result<WorkRecord> {
+fn record_from_envelope(envelope: &CaptureEnvelope, value: &Value) -> Result<HistoryRecord> {
     let id = uuid_field(value, "id")?
         .unwrap_or_else(|| stable_capture_uuid(&envelope.dedupe_key, "record"));
     let title = string_field(value, "title")
@@ -6381,8 +6383,12 @@ fn record_from_envelope(envelope: &CaptureEnvelope, value: &Value) -> Result<Wor
         ]
     });
     let kind = string_field(value, "record_kind")
+        .or_else(|| string_field(value, "history_record_kind"))
         .or_else(|| string_field(value, "work_record_kind"))
-        .or_else(|| string_field(value, "kind").filter(|kind| kind != "work_record"))
+        .or_else(|| {
+            string_field(value, "kind")
+                .filter(|kind| kind != "history_record" && kind != "work_record")
+        })
         .unwrap_or_else(|| "capture".to_owned());
     let workspace = string_field(value, "workspace")
         .or_else(|| envelope.cwd.clone())
@@ -6390,7 +6396,7 @@ fn record_from_envelope(envelope: &CaptureEnvelope, value: &Value) -> Result<Wor
     let created_at = datetime_field(value, "created_at")?.unwrap_or(envelope.occurred_at);
     let updated_at = datetime_field(value, "updated_at")?.unwrap_or(created_at);
 
-    Ok(WorkRecord {
+    Ok(HistoryRecord {
         id,
         title,
         body,
@@ -6481,7 +6487,7 @@ struct ProviderCommandRunInput<'a> {
     provider_session_id: &'a str,
     session_id: Uuid,
     source_id: Uuid,
-    work_record_id: Option<Uuid>,
+    history_record_id: Option<Uuid>,
     event: &'a ProviderEventEnvelope,
     payload: &'a Value,
     event_hash: &'a str,
@@ -6493,7 +6499,7 @@ fn provider_command_run_from_event(input: ProviderCommandRunInput<'_>) -> Option
         provider_session_id,
         session_id,
         source_id,
-        work_record_id,
+        history_record_id,
         event,
         payload,
         event_hash,
@@ -6519,7 +6525,7 @@ fn provider_command_run_from_event(input: ProviderCommandRunInput<'_>) -> Option
         .unwrap_or(event.occurred_at);
     Some(Run {
         id: provider_run_uuid(provider, provider_session_id, key),
-        work_record_id,
+        history_record_id,
         session_id: Some(session_id),
         run_type: RunType::Command,
         status: provider_command_run_status(payload),
@@ -6711,6 +6717,7 @@ fn payload_has_record_fields(value: &Value) -> bool {
         "summary",
         "tags",
         "record_kind",
+        "history_record_kind",
         "work_record_kind",
         "workspace",
     ]
@@ -6760,7 +6767,7 @@ mod tests {
 
     fn tempdir() -> TempDir {
         tempfile::Builder::new()
-            .prefix("work-record-capture-")
+            .prefix("ctx-history-capture-")
             .tempdir()
             .unwrap()
     }
@@ -6841,7 +6848,7 @@ mod tests {
             imported_at: DateTime::parse_from_rfc3339("2026-06-23T15:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
-            work_record_id: None,
+            history_record_id: None,
             expected_provider: None,
             allow_partial_failures: false,
             ..ProviderFixtureImportOptions::default()

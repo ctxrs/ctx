@@ -1,7 +1,7 @@
 [package]
-name = "work-record-store"
+name = "ctx-history-search"
 version = "0.1.0"
-description = "Internal SQLite storage layer for ctx local agent history"
+description = "Internal search projection and ranking helpers for ctx"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -11,12 +11,13 @@ publish = false
 
 [dependencies]
 chrono.workspace = true
-rusqlite.workspace = true
+regex.workspace = true
+serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
-work-record-core = { path = "../work-record-core" }
+ctx-history-core = { path = "../ctx-history-core" }
+ctx-history-store = { path = "../ctx-history-store" }
 
 [dev-dependencies]
 tempfile.workspace = true

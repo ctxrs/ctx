@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use work_record_core::{CaptureProvider, ProviderRawRetention, ProviderRedactionBoundary};
+use ctx_history_core::{CaptureProvider, ProviderRawRetention, ProviderRedactionBoundary};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderSourceKind {

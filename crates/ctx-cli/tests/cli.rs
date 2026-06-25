@@ -746,7 +746,10 @@ fn fresh_home_search_mvp_flow() {
     list_command.args(["list", "--json"]);
     let listed = json_output(&mut list_command);
     assert_eq!(listed["schema_version"], 1);
-    assert_omits_keys(&listed, &["record_id", "work_record_id", "kind"]);
+    assert_omits_keys(
+        &listed,
+        &["record_id", "history_record_id", "work_record_id", "kind"],
+    );
     assert_eq!(listed["items"][0]["item_type"], "agent_history");
     let first_id = listed["items"][0]["item_id"].as_str().unwrap().to_owned();
     assert_eq!(listed["items"][0]["id"], listed["items"][0]["item_id"]);
@@ -756,7 +759,13 @@ fn fresh_home_search_mvp_flow() {
     assert_eq!(search["share_safe"], false);
     assert_omits_keys(
         &search,
-        &["record_id", "work_record_id", "raw_source_path", "kind"],
+        &[
+            "record_id",
+            "history_record_id",
+            "work_record_id",
+            "raw_source_path",
+            "kind",
+        ],
     );
     assert!(search["results"][0]["item_id"].is_string());
     assert_eq!(search["results"][0]["item_type"], "agent_history");
@@ -787,6 +796,7 @@ fn fresh_home_search_mvp_flow() {
         &show,
         &[
             "record_id",
+            "history_record_id",
             "work_record_id",
             "kind",
             "payload",
@@ -1708,7 +1718,7 @@ fn privacy_redaction_oracle_covers_cli_json_and_sqlite() {
     );
     let record_index = sqlite_column_text(
         &conn,
-        "SELECT COALESCE(title, '') || ' ' || COALESCE(summary, '') || ' ' || COALESCE(primary_user_text, '') || ' ' || COALESCE(decision_text, '') || ' ' || COALESCE(context_text, '') || ' ' || COALESCE(tag_text, '') FROM work_record_search",
+        "SELECT COALESCE(title, '') || ' ' || COALESCE(summary, '') || ' ' || COALESCE(primary_user_text, '') || ' ' || COALESCE(decision_text, '') || ' ' || COALESCE(context_text, '') || ' ' || COALESCE(tag_text, '') FROM ctx_history_search",
     );
     let sqlite_text = format!("{event_payloads}\n{event_index}\n{record_index}");
     assert!(sqlite_text.contains("[REDACTED"));

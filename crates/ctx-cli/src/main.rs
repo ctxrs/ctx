@@ -22,7 +22,7 @@ mod net;
 
 use analytics::AnalyticsEvent;
 use config::{AppConfig, CONFIG_FILE};
-use work_record_capture::{
+use ctx_history_capture::{
     catalog_codex_session_tree, discover_provider_sources, import_antigravity_cli_history,
     import_claude_projects_jsonl_tree, import_codex_history_jsonl, import_codex_session_jsonl,
     import_codex_session_paths, import_codex_session_tree, import_copilot_cli_session_events,
@@ -36,11 +36,11 @@ use work_record_capture::{
     GeminiCliImportOptions, OpenCodeSqliteImportOptions, PiSessionImportOptions,
     ProviderFixtureImportOptions, ProviderImportSummary, ProviderImportSupport, ProviderSource,
 };
-use work_record_core::{
+use ctx_history_core::{
     database_path, default_data_root, CaptureProvider, ContextCitation, ContextCitationType, Event,
-    EventType, Fidelity, ProviderRawRetention, Session, WorkRecord,
+    EventType, Fidelity, HistoryRecord, ProviderRawRetention, Session,
 };
-use work_record_store::{CatalogSession, CatalogSourceIndexUpdate, Store};
+use ctx_history_store::{CatalogSession, CatalogSourceIndexUpdate, Store};
 
 const WAL_TRUNCATE_MIN_BYTES: u64 = 64 * 1024 * 1024;
 const NORMALIZED_PROVIDER_IMPORT_DEV_ENV: &str = "CTX_PROVIDER_NORMALIZED_IMPORT_DEV";
@@ -1228,7 +1228,7 @@ fn run_show(args: ShowArgs, data_root: PathBuf) -> Result<()> {
 fn event_preview(event: &Event) -> String {
     for key in ["text", "summary", "command", "message"] {
         if let Some(value) = event.payload.get(key).and_then(|value| value.as_str()) {
-            return work_record_search::redacted_snippet(value, 120);
+            return ctx_history_search::redacted_snippet(value, 120);
         }
     }
     if let Some(body) = event.payload.get("body") {
@@ -1242,7 +1242,7 @@ fn event_preview(event: &Event) -> String {
             "name",
         ] {
             if let Some(value) = body.get(key).and_then(|value| value.as_str()) {
-                return work_record_search::redacted_snippet(value, 120);
+                return ctx_history_search::redacted_snippet(value, 120);
             }
         }
     }
@@ -1250,7 +1250,7 @@ fn event_preview(event: &Event) -> String {
 }
 
 impl ListItemDto {
-    fn record(record: &WorkRecord) -> Value {
+    fn record(record: &HistoryRecord) -> Value {
         compact_json(json!({
             "id": record.id,
             "item_id": record.id,
@@ -1276,7 +1276,7 @@ impl ListItemDto {
 }
 
 impl ShowDto {
-    fn record(record: &WorkRecord) -> Value {
+    fn record(record: &HistoryRecord) -> Value {
         compact_json(json!({
             "id": record.id,
             "item_id": record.id,
@@ -1332,7 +1332,7 @@ impl ShowDto {
 }
 
 impl SearchDto {
-    fn packet(store: &Store, packet: &work_record_search::SearchPacket) -> Value {
+    fn packet(store: &Store, packet: &ctx_history_search::SearchPacket) -> Value {
         compact_json(json!({
             "schema_version": packet.schema_version,
             "query": packet.query,
@@ -1372,7 +1372,7 @@ impl SearchDto {
 
 fn search_result_item_type(
     store: &Store,
-    result: &work_record_search::SearchPacketResult,
+    result: &ctx_history_search::SearchPacketResult,
 ) -> String {
     if result.event_id == Some(result.record_id) {
         return "event".to_owned();
@@ -1405,7 +1405,7 @@ fn public_citations(citations: &[ContextCitation]) -> Vec<Value> {
 
 fn public_citation_item_type(citation_type: ContextCitationType) -> &'static str {
     match citation_type {
-        ContextCitationType::WorkRecord => "indexed_item",
+        ContextCitationType::HistoryRecord => "indexed_item",
         ContextCitationType::Session => "session",
         ContextCitationType::Run => "run",
         ContextCitationType::Event => "event",
@@ -1416,7 +1416,7 @@ fn public_citation_item_type(citation_type: ContextCitationType) -> &'static str
     }
 }
 
-fn public_record_item_type(record: &WorkRecord) -> String {
+fn public_record_item_type(record: &HistoryRecord) -> String {
     let item_type = record.kind.trim();
     match item_type {
         "" | "record" | "work_record" => "indexed_item".to_owned(),
@@ -1488,7 +1488,7 @@ fn run_search(args: SearchArgs, data_root: PathBuf) -> Result<()> {
     refresh_before_search(&args, &data_root)?;
     let store = Store::open(database_path(data_root))?;
     let query = args.query.unwrap_or_default();
-    let options = work_record_search::PacketOptions {
+    let options = ctx_history_search::PacketOptions {
         limit: args.limit,
         filters: search_filters(
             args.provider,
@@ -1499,13 +1499,13 @@ fn run_search(args: SearchArgs, data_root: PathBuf) -> Result<()> {
             args.event_type.clone(),
             args.file.clone(),
         )?,
-        ..work_record_search::PacketOptions::default()
+        ..ctx_history_search::PacketOptions::default()
     };
     if args.json {
-        let packet = work_record_search::search_packet(&store, &query, &options)?;
+        let packet = ctx_history_search::search_packet(&store, &query, &options)?;
         print_share_safe_value(SearchDto::packet(&store, &packet))?;
     } else {
-        let packet = work_record_search::search_packet(&store, &query, &options)?;
+        let packet = ctx_history_search::search_packet(&store, &query, &options)?;
         for result in packet.results {
             println!("{} {}", result.record_id, result.title);
             println!("  {}", result.snippet);
@@ -1798,7 +1798,7 @@ fn import_one_source_inner(
             store,
             ProviderFixtureImportOptions {
                 source_path: Some(source.path.clone()),
-                work_record_id: Some(record_id),
+                history_record_id: Some(record_id),
                 expected_provider: Some(source.provider),
                 allow_partial_failures: true,
                 source_format: "normalized_provider_jsonl".to_owned(),
@@ -1817,7 +1817,7 @@ fn import_one_source_inner(
                             store,
                             CodexSessionImportOptions {
                                 source_path: Some(source.path.clone()),
-                                work_record_id: Some(record_id),
+                                history_record_id: Some(record_id),
                                 allow_partial_failures: true,
                                 tool_output_mode,
                                 event_mode,
@@ -1849,7 +1849,7 @@ fn import_one_source_inner(
                         store,
                         CodexHistoryImportOptions {
                             source_path: Some(source.path.clone()),
-                            work_record_id: Some(record_id),
+                            history_record_id: Some(record_id),
                             allow_partial_failures: true,
                             ..CodexHistoryImportOptions::default()
                         },
@@ -1861,7 +1861,7 @@ fn import_one_source_inner(
                         store,
                         CodexSessionImportOptions {
                             source_path: Some(source.path.clone()),
-                            work_record_id: Some(record_id),
+                            history_record_id: Some(record_id),
                             allow_partial_failures: true,
                             tool_output_mode,
                             event_mode,
@@ -1878,7 +1878,7 @@ fn import_one_source_inner(
                 store,
                 PiSessionImportOptions {
                     source_path: Some(source.path.clone()),
-                    work_record_id: Some(record_id),
+                    history_record_id: Some(record_id),
                     allow_partial_failures: true,
                     ..PiSessionImportOptions::default()
                 },
@@ -1889,7 +1889,7 @@ fn import_one_source_inner(
                 store,
                 ClaudeProjectsImportOptions {
                     source_path: Some(source.path.clone()),
-                    work_record_id: Some(record_id),
+                    history_record_id: Some(record_id),
                     allow_partial_failures: true,
                     ..ClaudeProjectsImportOptions::default()
                 },
@@ -1900,7 +1900,7 @@ fn import_one_source_inner(
                 store,
                 OpenCodeSqliteImportOptions {
                     source_path: Some(source.path.clone()),
-                    work_record_id: Some(record_id),
+                    history_record_id: Some(record_id),
                     allow_partial_failures: true,
                     ..OpenCodeSqliteImportOptions::default()
                 },
@@ -1911,7 +1911,7 @@ fn import_one_source_inner(
                 store,
                 GeminiCliImportOptions {
                     source_path: Some(source.path.clone()),
-                    work_record_id: Some(record_id),
+                    history_record_id: Some(record_id),
                     allow_partial_failures: true,
                     ..GeminiCliImportOptions::default()
                 },
@@ -1922,7 +1922,7 @@ fn import_one_source_inner(
                 store,
                 CursorNativeImportOptions {
                     source_path: Some(source.path.clone()),
-                    work_record_id: Some(record_id),
+                    history_record_id: Some(record_id),
                     allow_partial_failures: true,
                     ..CursorNativeImportOptions::default()
                 },
@@ -1933,7 +1933,7 @@ fn import_one_source_inner(
                 store,
                 CopilotCliImportOptions {
                     source_path: Some(source.path.clone()),
-                    work_record_id: Some(record_id),
+                    history_record_id: Some(record_id),
                     allow_partial_failures: true,
                     ..CopilotCliImportOptions::default()
                 },
@@ -1944,7 +1944,7 @@ fn import_one_source_inner(
                 store,
                 FactoryAiDroidImportOptions {
                     source_path: Some(source.path.clone()),
-                    work_record_id: Some(record_id),
+                    history_record_id: Some(record_id),
                     allow_partial_failures: true,
                     ..FactoryAiDroidImportOptions::default()
                 },
@@ -1955,7 +1955,7 @@ fn import_one_source_inner(
                 store,
                 AntigravityCliImportOptions {
                     source_path: Some(source.path.clone()),
-                    work_record_id: Some(record_id),
+                    history_record_id: Some(record_id),
                     allow_partial_failures: true,
                     ..AntigravityCliImportOptions::default()
                 },
@@ -2008,7 +2008,7 @@ fn import_incremental_codex_session_tree(
         store,
         CodexSessionImportOptions {
             source_path: Some(source.path.clone()),
-            work_record_id: Some(record_id),
+            history_record_id: Some(record_id),
             allow_partial_failures: true,
             tool_output_mode,
             event_mode,
@@ -2147,13 +2147,13 @@ fn source_stats(path: &Path) -> Result<SourceStats> {
     Ok(stats)
 }
 
-fn import_record_for_source(source: &SourceInfo) -> WorkRecord {
+fn import_record_for_source(source: &SourceInfo) -> HistoryRecord {
     let key = format!(
         "agent-history:{}:{}",
         source.provider.as_str(),
         source.path.display()
     );
-    let mut record = WorkRecord::new(
+    let mut record = HistoryRecord::new(
         format!("{} agent history", source.provider.as_str()),
         format!(
             "Indexed local agent history from {} ({})",
@@ -2184,12 +2184,12 @@ fn explicit_path_source(provider: CaptureProvider, path: PathBuf) -> SourceInfo 
         && looks_like_normalized_provider_jsonl(&source.path)
     {
         source.source_format = "normalized_provider_jsonl";
-        source.source_kind = work_record_capture::ProviderSourceKind::NormalizedDeveloperInput;
+        source.source_kind = ctx_history_capture::ProviderSourceKind::NormalizedDeveloperInput;
         source.import_support = ProviderImportSupport::NormalizedDeveloperOnly;
         source.status = if source.exists {
-            work_record_capture::ProviderSourceStatus::Available
+            ctx_history_capture::ProviderSourceStatus::Available
         } else {
-            work_record_capture::ProviderSourceStatus::Missing
+            ctx_history_capture::ProviderSourceStatus::Missing
         };
         source.unsupported_reason = None;
     }
@@ -2257,8 +2257,8 @@ fn search_filters(
     include_subagents: bool,
     event_type: Option<String>,
     file: Option<PathBuf>,
-) -> Result<work_record_search::SearchFilters> {
-    Ok(work_record_search::SearchFilters {
+) -> Result<ctx_history_search::SearchFilters> {
+    Ok(ctx_history_search::SearchFilters {
         provider: provider.map(ProviderArg::capture_provider),
         repo,
         since: since.as_deref().map(parse_since_filter).transpose()?,

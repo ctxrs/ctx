@@ -1,10 +1,10 @@
 [workspace]
 members = [
     "crates/ctx-cli",
-    "crates/work-record-capture",
-    "crates/work-record-core",
-    "crates/work-record-search",
-    "crates/work-record-store",
+    "crates/ctx-history-capture",
+    "crates/ctx-history-core",
+    "crates/ctx-history-search",
+    "crates/ctx-history-store",
 ]
 resolver = "2"
 

@@ -1,7 +1,7 @@
 [package]
-name = "work-record-search"
+name = "ctx-history-capture"
 version = "0.1.0"
-description = "Internal search projection and ranking helpers for ctx"
+description = "Internal provider import adapters for ctx local agent history"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -11,13 +11,13 @@ publish = false
 
 [dependencies]
 chrono.workspace = true
-regex.workspace = true
+rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
-work-record-core = { path = "../work-record-core" }
-work-record-store = { path = "../work-record-store" }
+ctx-history-core = { path = "../ctx-history-core" }
+ctx-history-store = { path = "../ctx-history-store" }
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -110,7 +110,7 @@ case "${mode}" in
     run_cargo_test -p ctx --test cli privacy_redaction_oracle_covers_cli_json_and_sqlite
     ;;
   search_determinism_tests)
-    run_cargo_test -p work-record-search search_packet_is_deterministic_for_large_history_and_equal_ties_use_record_id
+    run_cargo_test -p ctx-history-search search_packet_is_deterministic_for_large_history_and_equal_ties_use_record_id
     ;;
   *)
     fail "unknown bazel test mode: ${mode}"

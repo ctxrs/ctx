@@ -78,10 +78,10 @@ fi
 if grep_files 'work-record-(publish|report|vcs)[[:space:]]*=' \
   Cargo.toml \
   crates/ctx-cli/Cargo.toml \
-  crates/work-record-capture/Cargo.toml \
-  crates/work-record-core/Cargo.toml \
-  crates/work-record-search/Cargo.toml \
-  crates/work-record-store/Cargo.toml >/dev/null 2>&1; then
+  crates/ctx-history-capture/Cargo.toml \
+  crates/ctx-history-core/Cargo.toml \
+  crates/ctx-history-search/Cargo.toml \
+  crates/ctx-history-store/Cargo.toml >/dev/null 2>&1; then
   fail 'default crate manifests depend on publish/report/vcs crates'
 fi
 
@@ -131,7 +131,7 @@ for package in metadata.get("packages", []):
 fi
 
 if grep_files 'ctx dashboard|ctx shim|ctx publish|ctx evidence|ctx pr|ctx link-pr|ctx context|ctx update|ctx uninstall|ctx watch|publish pr-comment|dashboard export|gh CLI|GhCli|upsert_github|wrapper scripts|write-shim-command|write_shim_command|capture_shim_command|shim_command_envelope|ShimCommandOptions|CommandRoot::Context|CommandRoot::Update|CommandRoot::Uninstall|CommandRoot::Watch|ContextArgs|UpdateArgs|UninstallArgs|WatchArgs|run_context|run_update|run_uninstall|run_watch|maybe_auto_update|check_or_apply_update|watch_strategy|polling_catch_up' \
-  .bazelignore .bazelrc .bazelversion .buildkite .gitignore Cargo.toml BUILD.bazel MODULE.bazel scripts crates/ctx-cli/src crates/work-record-capture/src crates/work-record-search/src >/dev/null 2>&1; then
+  .bazelignore .bazelrc .bazelversion .buildkite .gitignore Cargo.toml BUILD.bazel MODULE.bazel scripts crates/ctx-cli/src crates/ctx-history-capture/src crates/ctx-history-search/src >/dev/null 2>&1; then
   fail 'default binary/release path contains dashboard, shim, PR publish, watch, or gh integration text'
 fi
 

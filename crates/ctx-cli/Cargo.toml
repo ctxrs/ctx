@@ -22,10 +22,10 @@ clap.workspace = true
 serde_json.workspace = true
 ureq = { version = "2.10", default-features = true }
 uuid.workspace = true
-work-record-capture = { path = "../work-record-capture" }
-work-record-core = { path = "../work-record-core" }
-work-record-search = { path = "../work-record-search" }
-work-record-store = { path = "../work-record-store" }
+ctx-history-capture = { path = "../ctx-history-capture" }
+ctx-history-core = { path = "../ctx-history-core" }
+ctx-history-search = { path = "../ctx-history-search" }
+ctx-history-store = { path = "../ctx-history-store" }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

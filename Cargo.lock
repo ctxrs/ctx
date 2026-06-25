@@ -271,6 +271,10 @@ dependencies = [
  "assert_cmd",
  "chrono",
  "clap",
+ "ctx-history-capture",
+ "ctx-history-core",
+ "ctx-history-search",
+ "ctx-history-store",
  "libc",
  "predicates",
  "rusqlite",
@@ -278,10 +282,63 @@ dependencies = [
  "tempfile",
  "ureq",
  "uuid",
- "work-record-capture",
- "work-record-core",
- "work-record-search",
- "work-record-store",
+]
+
+[[package]]
+name = "ctx-history-capture"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "ctx-history-core",
+ "ctx-history-store",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "ctx-history-core"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "directories",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "ctx-history-search"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "ctx-history-core",
+ "ctx-history-store",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "ctx-history-store"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "ctx-history-core",
+ "rusqlite",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "uuid",
 ]
 
 [[package]]
@@ -1453,63 +1510,6 @@ name = "windows_x86_64_msvc"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
-
-[[package]]
-name = "work-record-capture"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "rusqlite",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "uuid",
- "work-record-core",
- "work-record-store",
-]
-
-[[package]]
-name = "work-record-core"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "directories",
- "regex",
- "serde",
- "serde_json",
- "thiserror",
- "uuid",
-]
-
-[[package]]
-name = "work-record-search"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "regex",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "uuid",
- "work-record-core",
- "work-record-store",
-]
-
-[[package]]
-name = "work-record-store"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "rusqlite",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror",
- "uuid",
- "work-record-core",
-]
 
 [[package]]
 name = "writeable"

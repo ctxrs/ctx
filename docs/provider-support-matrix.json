@@ -60,7 +60,7 @@
       "public_docs": "docs/providers.md",
       "tests": [
         "crates/ctx-cli/tests/cli.rs",
-        "crates/work-record-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/lib.rs",
         "tests/fixtures/provider/codex.jsonl",
         "tests/fixtures/provider-history/codex-sessions",
         "tests/fixtures/provider-history/codex-rich-sessions"
@@ -116,7 +116,7 @@
       "public_docs": "docs/providers.md",
       "tests": [
         "crates/ctx-cli/tests/cli.rs",
-        "crates/work-record-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/lib.rs",
         "tests/fixtures/provider/pi.jsonl",
         "tests/fixtures/provider-history/pi-session.jsonl",
         "tests/fixtures/provider-history/pi-malformed-partial.jsonl"
@@ -179,7 +179,7 @@
       "fixture_paths": [],
       "tests": [
         "crates/ctx-cli/tests/cli.rs",
-        "crates/work-record-capture/src/lib.rs"
+        "crates/ctx-history-capture/src/lib.rs"
       ]
     },
     {
@@ -234,7 +234,7 @@
       "fixture_paths": [],
       "tests": [
         "crates/ctx-cli/tests/cli.rs",
-        "crates/work-record-capture/src/lib.rs"
+        "crates/ctx-history-capture/src/lib.rs"
       ]
     },
     {
@@ -297,7 +297,7 @@
       ],
       "tests": [
         "crates/ctx-cli/tests/cli.rs",
-        "crates/work-record-capture/src/lib.rs"
+        "crates/ctx-history-capture/src/lib.rs"
       ]
     },
     {
@@ -352,7 +352,7 @@
       "fixture_paths": [],
       "tests": [
         "crates/ctx-cli/tests/cli.rs",
-        "crates/work-record-capture/src/lib.rs"
+        "crates/ctx-history-capture/src/lib.rs"
       ]
     },
     {
@@ -368,7 +368,7 @@
           "fidelity": "imported",
           "proof": [
             "ctx import --provider cursor --path ~/.cursor/projects",
-            "cargo test -p work-record-capture --test cursor_native"
+            "cargo test -p ctx-history-capture --test cursor_native"
           ],
           "notes": [
             "Reads Cursor CLI agent transcript JSONL files under ~/.cursor/projects/*/agent-transcripts/*/*.jsonl.",
@@ -410,7 +410,7 @@
         "tests/fixtures/provider-history/cursor/2026.06.24/projects"
       ],
       "tests": [
-        "crates/work-record-capture/tests/cursor_native.rs",
+        "crates/ctx-history-capture/tests/cursor_native.rs",
         "crates/ctx-cli/tests/cli.rs"
       ]
     },
@@ -466,7 +466,7 @@
       "fixture_paths": [],
       "tests": [
         "crates/ctx-cli/tests/cli.rs",
-        "crates/work-record-capture/src/lib.rs"
+        "crates/ctx-history-capture/src/lib.rs"
       ]
     },
     {
@@ -521,7 +521,7 @@
       "fixture_paths": [],
       "tests": [
         "crates/ctx-cli/tests/cli.rs",
-        "crates/work-record-capture/src/lib.rs"
+        "crates/ctx-history-capture/src/lib.rs"
       ]
     }
   ]

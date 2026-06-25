@@ -4,15 +4,15 @@ use std::{
 };
 
 use chrono::Utc;
+use ctx_history_core::{
+    redact_share_safe_markers, Artifact, ContextCitation, ContextCitationType, ContextLinks,
+    ContextPagination, ContextTruncation, Event, EventType, FileTouched, HistoryRecord,
+    RedactionState, Run, Session, Summary, VcsChange, Visibility,
+};
+use ctx_history_store::{EventSearchHit, Store};
 use serde::Serialize;
 use thiserror::Error;
 use uuid::Uuid;
-use work_record_core::{
-    redact_share_safe_markers, Artifact, ContextCitation, ContextCitationType, ContextLinks,
-    ContextPagination, ContextTruncation, Event, EventType, FileTouched, RedactionState, Run,
-    Session, Summary, VcsChange, Visibility, WorkRecord,
-};
-use work_record_store::{EventSearchHit, Store};
 
 pub const SEARCH_PACKET_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_RESULT_LIMIT: usize = 10;
@@ -23,7 +23,7 @@ const FILTERED_SEARCH_PAGE_SIZE: usize = 500;
 #[derive(Debug, Error)]
 pub enum SearchError {
     #[error("store error: {0}")]
-    Store(#[from] work_record_store::StoreError),
+    Store(#[from] ctx_history_store::StoreError),
 }
 
 pub type Result<T> = std::result::Result<T, SearchError>;
@@ -48,7 +48,7 @@ impl Default for PacketOptions {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SearchFilters {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<work_record_core::CaptureProvider>,
+    pub provider: Option<ctx_history_core::CaptureProvider>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -101,7 +101,7 @@ pub struct SearchPacketResult {
     pub snippet: String,
     pub rank: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<work_record_core::CaptureProvider>,
+    pub provider: Option<ctx_history_core::CaptureProvider>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<chrono::DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -124,7 +124,7 @@ pub struct SearchPacketResult {
 
 #[derive(Debug, Clone)]
 struct Candidate {
-    record: WorkRecord,
+    record: HistoryRecord,
     context: RecordContext,
     score: f32,
     why_matched: Vec<String>,
@@ -141,7 +141,7 @@ struct RecordContext {
     files_touched: Vec<FileTouched>,
     vcs_changes: Vec<VcsChange>,
     summaries: Vec<Summary>,
-    sources: BTreeMap<Uuid, work_record_core::CaptureSource>,
+    sources: BTreeMap<Uuid, ctx_history_core::CaptureSource>,
 }
 
 #[derive(Debug, Clone)]
@@ -156,7 +156,7 @@ struct SearchSection {
 #[derive(Debug, Clone)]
 struct HitMetadata {
     time: chrono::DateTime<Utc>,
-    provider: Option<work_record_core::CaptureProvider>,
+    provider: Option<ctx_history_core::CaptureProvider>,
     session_id: Option<Uuid>,
     event_id: Option<Uuid>,
     event_seq: Option<u64>,
@@ -344,12 +344,12 @@ fn event_hit_matches_filters(hit: &EventSearchHit, filters: &SearchFilters) -> b
     }
     if filters.primary_only {
         let is_primary = hit.session_is_primary.unwrap_or(false)
-            || hit.agent_type == Some(work_record_core::AgentType::Primary);
+            || hit.agent_type == Some(ctx_history_core::AgentType::Primary);
         if !is_primary {
             return false;
         }
     } else if !filters.include_subagents
-        && hit.agent_type == Some(work_record_core::AgentType::Subagent)
+        && hit.agent_type == Some(ctx_history_core::AgentType::Subagent)
     {
         return false;
     }
@@ -461,9 +461,9 @@ fn event_result_title(hit: &EventSearchHit) -> String {
 fn event_result_label(hit: &EventSearchHit) -> &'static str {
     match hit.event_type {
         EventType::Message => match hit.role {
-            Some(work_record_core::EventRole::User) => "user message",
-            Some(work_record_core::EventRole::Assistant) => "assistant message",
-            Some(work_record_core::EventRole::System) => "system message",
+            Some(ctx_history_core::EventRole::User) => "user message",
+            Some(ctx_history_core::EventRole::Assistant) => "assistant message",
+            Some(ctx_history_core::EventRole::System) => "system message",
             _ => "message",
         },
         EventType::ToolCall => "tool call",
@@ -597,7 +597,7 @@ fn ranked_candidates(
 
 fn candidate_for_record(
     store: &Store,
-    record: WorkRecord,
+    record: HistoryRecord,
     terms: &[String],
     filters: &SearchFilters,
 ) -> Result<Option<Candidate>> {
@@ -690,7 +690,11 @@ struct MatchAnalysis {
     primary_hit: Option<HitMetadata>,
 }
 
-fn analyze_record(record: &WorkRecord, context: &RecordContext, terms: &[String]) -> MatchAnalysis {
+fn analyze_record(
+    record: &HistoryRecord,
+    context: &RecordContext,
+    terms: &[String],
+) -> MatchAnalysis {
     let mut score = 0.0_f32;
     let mut why = Vec::new();
     let mut citations = Vec::new();
@@ -701,7 +705,7 @@ fn analyze_record(record: &WorkRecord, context: &RecordContext, terms: &[String]
             &mut citations,
             "recent_activity",
             ContextCitation {
-                citation_type: ContextCitationType::WorkRecord,
+                citation_type: ContextCitationType::HistoryRecord,
                 id: record.id,
                 label: "recent session".to_owned(),
                 time: record.updated_at,
@@ -772,7 +776,7 @@ fn add_match(
     }
 }
 
-fn search_sections(record: &WorkRecord, context: &RecordContext) -> Vec<SearchSection> {
+fn search_sections(record: &HistoryRecord, context: &RecordContext) -> Vec<SearchSection> {
     let mut sections = Vec::new();
     let record_hit = empty_hit(record.updated_at);
     sections.push(SearchSection {
@@ -780,7 +784,7 @@ fn search_sections(record: &WorkRecord, context: &RecordContext) -> Vec<SearchSe
         weight: 8.0,
         text: record.title.clone(),
         citation: citation(
-            ContextCitationType::WorkRecord,
+            ContextCitationType::HistoryRecord,
             record.id,
             "session title",
             record.updated_at,
@@ -792,7 +796,7 @@ fn search_sections(record: &WorkRecord, context: &RecordContext) -> Vec<SearchSe
         weight: 5.0,
         text: record.body.clone(),
         citation: citation(
-            ContextCitationType::WorkRecord,
+            ContextCitationType::HistoryRecord,
             record.id,
             "session text",
             record.updated_at,
@@ -805,7 +809,7 @@ fn search_sections(record: &WorkRecord, context: &RecordContext) -> Vec<SearchSe
             weight: 3.0,
             text: tag.clone(),
             citation: citation(
-                ContextCitationType::WorkRecord,
+                ContextCitationType::HistoryRecord,
                 record.id,
                 "session tag",
                 record.updated_at,
@@ -866,12 +870,12 @@ fn search_sections(record: &WorkRecord, context: &RecordContext) -> Vec<SearchSe
         let hit = event_hit(event, context);
         sections.push(SearchSection {
             reason: match event.event_type {
-                work_record_core::EventType::Message => "message",
-                work_record_core::EventType::ToolCall => "tool_call",
-                work_record_core::EventType::ToolOutput => "tool_output",
-                work_record_core::EventType::CommandStarted
-                | work_record_core::EventType::CommandOutput
-                | work_record_core::EventType::CommandFinished => "command_event",
+                ctx_history_core::EventType::Message => "message",
+                ctx_history_core::EventType::ToolCall => "tool_call",
+                ctx_history_core::EventType::ToolOutput => "tool_output",
+                ctx_history_core::EventType::CommandStarted
+                | ctx_history_core::EventType::CommandOutput
+                | ctx_history_core::EventType::CommandFinished => "command_event",
                 _ => "event",
             },
             weight: event_weight(event),
@@ -1094,11 +1098,11 @@ fn source_hit(
 fn source_for_id(
     source_id: Option<Uuid>,
     context: &RecordContext,
-) -> Option<&work_record_core::CaptureSource> {
+) -> Option<&ctx_history_core::CaptureSource> {
     source_id.and_then(|id| context.sources.get(&id))
 }
 
-fn source_cursor(source: &work_record_core::CaptureSource) -> Option<String> {
+fn source_cursor(source: &ctx_history_core::CaptureSource) -> Option<String> {
     source
         .sync
         .metadata
@@ -1135,11 +1139,11 @@ fn joined<const N: usize>(parts: [&str; N]) -> String {
 
 fn event_weight(event: &Event) -> f32 {
     match event.event_type {
-        work_record_core::EventType::Message => 4.0,
-        work_record_core::EventType::ToolCall | work_record_core::EventType::ToolOutput => 3.5,
-        work_record_core::EventType::CommandStarted
-        | work_record_core::EventType::CommandOutput
-        | work_record_core::EventType::CommandFinished => 3.0,
+        ctx_history_core::EventType::Message => 4.0,
+        ctx_history_core::EventType::ToolCall | ctx_history_core::EventType::ToolOutput => 3.5,
+        ctx_history_core::EventType::CommandStarted
+        | ctx_history_core::EventType::CommandOutput
+        | ctx_history_core::EventType::CommandFinished => 3.0,
         _ => 2.0,
     }
 }
@@ -1276,7 +1280,7 @@ fn has_filters(filters: &SearchFilters) -> bool {
 }
 
 fn record_matches_filters(
-    record: &WorkRecord,
+    record: &HistoryRecord,
     context: &RecordContext,
     filters: &SearchFilters,
 ) -> bool {
@@ -1309,7 +1313,7 @@ fn record_matches_filters(
 
     if filters.primary_only {
         if !context.sessions.iter().any(|session| {
-            session.is_primary || session.agent_type == work_record_core::AgentType::Primary
+            session.is_primary || session.agent_type == ctx_history_core::AgentType::Primary
         }) {
             return false;
         }
@@ -1317,9 +1321,9 @@ fn record_matches_filters(
         && context
             .sessions
             .iter()
-            .any(|session| session.agent_type == work_record_core::AgentType::Subagent)
+            .any(|session| session.agent_type == ctx_history_core::AgentType::Subagent)
         && !context.sessions.iter().any(|session| {
-            session.is_primary || session.agent_type == work_record_core::AgentType::Primary
+            session.is_primary || session.agent_type == ctx_history_core::AgentType::Primary
         })
     {
         return false;
@@ -1397,7 +1401,7 @@ fn matches_terms(value: &str, terms: &[String]) -> bool {
 }
 
 fn search_snippet(
-    record: &WorkRecord,
+    record: &HistoryRecord,
     context: &RecordContext,
     query: &str,
     max_chars: usize,
@@ -1451,7 +1455,7 @@ fn take_chars_from(input: &str, start: usize, max_chars: usize) -> String {
     input.chars().skip(start).take(max_chars).collect()
 }
 
-fn links_for(_record: &WorkRecord, _options: &PacketOptions) -> ContextLinks {
+fn links_for(_record: &HistoryRecord, _options: &PacketOptions) -> ContextLinks {
     ContextLinks {}
 }
 
@@ -1469,12 +1473,12 @@ fn pagination(cursor_base: Option<usize>, has_more: bool) -> ContextPagination {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use work_record_core::{
+    use ctx_history_core::{
         AgentType, ArtifactKind, CaptureProvider, CaptureSource, CaptureSourceDescriptor,
         CaptureSourceKind, Confidence, EntityTimestamps, EventRole, EventType, Fidelity,
-        FileChangeKind, RedactionState, RunStatus, RunType, SessionStatus, SummaryKind,
-        SyncMetadata, SyncState, VcsChangeKind, VcsHost, VcsKind, VcsWorkspace, WorkRecordArchive,
-        WorkRecordLink, WorkRecordLinkTargetType, WorkRecordLinkType,
+        FileChangeKind, HistoryRecordLink, HistoryRecordLinkTargetType, HistoryRecordLinkType,
+        RedactionState, RunStatus, RunType, SessionHistoryArchive, SessionStatus, SummaryKind,
+        SyncMetadata, SyncState, VcsChangeKind, VcsHost, VcsKind, VcsWorkspace,
     };
 
     fn tempdir() -> tempfile::TempDir {
@@ -1485,7 +1489,7 @@ mod tests {
             .join("target/test-data");
         std::fs::create_dir_all(&root).unwrap();
         tempfile::Builder::new()
-            .prefix("work-record-search-")
+            .prefix("ctx-history-search-")
             .tempdir_in(root)
             .unwrap()
     }
@@ -1514,10 +1518,10 @@ mod tests {
         }
     }
 
-    fn test_store() -> (tempfile::TempDir, work_record_store::Store) {
+    fn test_store() -> (tempfile::TempDir, ctx_history_store::Store) {
         let temp = tempdir();
         let path = temp.path().join("work.sqlite");
-        let store = work_record_store::Store::open(path).unwrap();
+        let store = ctx_history_store::Store::open(path).unwrap();
         (temp, store)
     }
 
@@ -1537,7 +1541,7 @@ mod tests {
     #[test]
     fn rich_search_matches_typed_metadata_with_citations_and_redaction() {
         let (_temp, store) = test_store();
-        let record = WorkRecord::new(
+        let record = HistoryRecord::new(
             "Plain work",
             "ordinary body without the query",
             vec!["needle-tag".into()],
@@ -1563,7 +1567,7 @@ mod tests {
 
         let session = Session {
             id: Uuid::parse_str("018f45d0-0000-7000-8000-000000000202").unwrap(),
-            work_record_id: Some(record.id),
+            history_record_id: Some(record.id),
             parent_session_id: None,
             root_session_id: None,
             capture_source_id: None,
@@ -1584,7 +1588,7 @@ mod tests {
 
         let run = Run {
             id: Uuid::parse_str("018f45d0-0000-7000-8000-000000000203").unwrap(),
-            work_record_id: Some(record.id),
+            history_record_id: Some(record.id),
             session_id: Some(session.id),
             run_type: RunType::Command,
             status: RunStatus::Failed,
@@ -1604,7 +1608,7 @@ mod tests {
         let event = Event {
             id: Uuid::parse_str("018f45d0-0000-7000-8000-000000000204").unwrap(),
             seq: 1,
-            work_record_id: Some(record.id),
+            history_record_id: Some(record.id),
             session_id: Some(session.id),
             run_id: Some(run.id),
             event_type: EventType::ToolCall,
@@ -1656,11 +1660,11 @@ mod tests {
 
         let file = FileTouched {
             id: Uuid::parse_str("018f45d0-0000-7000-8000-000000000208").unwrap(),
-            work_record_id: Some(record.id),
+            history_record_id: Some(record.id),
             run_id: Some(run.id),
             event_id: Some(event.id),
             vcs_workspace_id: Some(workspace_id),
-            path: "crates/work-record-search/src/needle_file.rs".into(),
+            path: "crates/ctx-history-search/src/needle_file.rs".into(),
             change_kind: Some(FileChangeKind::Modified),
             old_path: None,
             line_count_delta: Some(12),
@@ -1673,7 +1677,7 @@ mod tests {
 
         let summary = Summary {
             id: Uuid::parse_str("018f45d0-0000-7000-8000-000000000209").unwrap(),
-            work_record_id: Some(record.id),
+            history_record_id: Some(record.id),
             session_id: Some(session.id),
             kind: SummaryKind::ImportedProviderSummary,
             model_or_source: Some("codex".into()),
@@ -1687,20 +1691,20 @@ mod tests {
 
         for (target_type, target_id, link_type) in [
             (
-                WorkRecordLinkTargetType::VcsChange,
+                HistoryRecordLinkTargetType::VcsChange,
                 change.id,
-                WorkRecordLinkType::References,
+                HistoryRecordLinkType::References,
             ),
             (
-                WorkRecordLinkTargetType::Artifact,
+                HistoryRecordLinkTargetType::Artifact,
                 artifact.id,
-                WorkRecordLinkType::Produced,
+                HistoryRecordLinkType::Produced,
             ),
         ] {
             store
-                .upsert_work_record_link(&WorkRecordLink {
+                .upsert_history_record_link(&HistoryRecordLink {
                     id: new_link_id(target_id),
-                    work_record_id: record.id,
+                    history_record_id: record.id,
                     target_type,
                     target_id,
                     link_type,
@@ -1753,7 +1757,7 @@ mod tests {
         }
 
         for citation_type in [
-            ContextCitationType::WorkRecord,
+            ContextCitationType::HistoryRecord,
             ContextCitationType::Session,
             ContextCitationType::Run,
             ContextCitationType::Event,
@@ -1794,7 +1798,7 @@ mod tests {
     #[test]
     fn nested_provider_body_event_preview_drives_search() {
         let (_temp, store) = test_store();
-        let record = WorkRecord::new(
+        let record = HistoryRecord::new(
             "Provider event record",
             "ordinary body without event query",
             Vec::new(),
@@ -1804,7 +1808,7 @@ mod tests {
         store.insert_record(&record).unwrap();
         let session = Session {
             id: Uuid::parse_str("018f45d0-0000-7000-8000-000000000301").unwrap(),
-            work_record_id: Some(record.id),
+            history_record_id: Some(record.id),
             parent_session_id: None,
             root_session_id: None,
             capture_source_id: None,
@@ -1825,7 +1829,7 @@ mod tests {
         let event = Event {
             id: Uuid::parse_str("018f45d0-0000-7000-8000-000000000302").unwrap(),
             seq: 1,
-            work_record_id: Some(record.id),
+            history_record_id: Some(record.id),
             session_id: Some(session.id),
             run_id: None,
             event_type: EventType::ToolCall,
@@ -1886,7 +1890,7 @@ mod tests {
     #[test]
     fn large_agent_history_search_returns_event_hits() {
         let (_temp, store) = test_store();
-        let record = WorkRecord::new(
+        let record = HistoryRecord::new(
             "Large provider history",
             "single imported agent-history record",
             Vec::new(),
@@ -1897,7 +1901,7 @@ mod tests {
 
         let session = Session {
             id: Uuid::parse_str("018f45d0-0000-7000-8000-000000000601").unwrap(),
-            work_record_id: Some(record.id),
+            history_record_id: Some(record.id),
             parent_session_id: None,
             root_session_id: None,
             capture_source_id: None,
@@ -1916,7 +1920,7 @@ mod tests {
         };
         store.upsert_session(&session).unwrap();
 
-        let other_record = WorkRecord::new(
+        let other_record = HistoryRecord::new(
             "Large provider history shard",
             "another imported agent-history record",
             Vec::new(),
@@ -1926,7 +1930,7 @@ mod tests {
         store.insert_record(&other_record).unwrap();
         let other_session = Session {
             id: Uuid::parse_str("018f45d0-0000-7000-8000-000000000602").unwrap(),
-            work_record_id: Some(other_record.id),
+            history_record_id: Some(other_record.id),
             parent_session_id: None,
             root_session_id: None,
             capture_source_id: None,
@@ -1969,7 +1973,7 @@ mod tests {
                 .upsert_event(&Event {
                     id: event_id,
                     seq: 10_000 + index,
-                    work_record_id: Some(event_record_id),
+                    history_record_id: Some(event_record_id),
                     session_id: Some(event_session),
                     run_id: None,
                     event_type: EventType::Message,
@@ -2021,7 +2025,7 @@ mod tests {
     #[test]
     fn search_filters_and_citations_expose_source_metadata() {
         let (_temp, store) = test_store();
-        let record = WorkRecord::new(
+        let record = HistoryRecord::new(
             "Source-backed session",
             "ordinary body",
             Vec::new(),
@@ -2062,7 +2066,7 @@ mod tests {
 
         let session = Session {
             id: Uuid::parse_str("018f45d0-0000-7000-8000-000000000402").unwrap(),
-            work_record_id: Some(record.id),
+            history_record_id: Some(record.id),
             parent_session_id: None,
             root_session_id: None,
             capture_source_id: Some(source_id),
@@ -2084,7 +2088,7 @@ mod tests {
         let event = Event {
             id: Uuid::parse_str("018f45d0-0000-7000-8000-000000000403").unwrap(),
             seq: 401,
-            work_record_id: Some(record.id),
+            history_record_id: Some(record.id),
             session_id: Some(session.id),
             run_id: None,
             event_type: EventType::ToolCall,
@@ -2108,7 +2112,7 @@ mod tests {
 
         let file = FileTouched {
             id: Uuid::parse_str("018f45d0-0000-7000-8000-000000000404").unwrap(),
-            work_record_id: Some(record.id),
+            history_record_id: Some(record.id),
             run_id: None,
             event_id: Some(event.id),
             vcs_workspace_id: None,
@@ -2185,7 +2189,7 @@ mod tests {
         let mut records = Vec::new();
 
         for index in 0..501_u16 {
-            let mut decoy = WorkRecord::new(
+            let mut decoy = HistoryRecord::new(
                 "Overflow filter shared title",
                 format!("{query} identical body for paging regression"),
                 Vec::new(),
@@ -2198,7 +2202,7 @@ mod tests {
             records.push(decoy);
         }
 
-        let mut target = WorkRecord::new(
+        let mut target = HistoryRecord::new(
             "Overflow filter shared title",
             format!("{query} identical body for paging regression"),
             Vec::new(),
@@ -2213,7 +2217,7 @@ mod tests {
 
         let session = Session {
             id: Uuid::parse_str("018f45d0-0000-7000-8000-fffffffffffe").unwrap(),
-            work_record_id: Some(target.id),
+            history_record_id: Some(target.id),
             parent_session_id: None,
             root_session_id: None,
             capture_source_id: None,
@@ -2234,7 +2238,7 @@ mod tests {
 
         let file = FileTouched {
             id: Uuid::parse_str("018f45d0-0000-7000-8000-fffffffffffd").unwrap(),
-            work_record_id: Some(target.id),
+            history_record_id: Some(target.id),
             run_id: None,
             event_id: None,
             vcs_workspace_id: None,
@@ -2336,7 +2340,7 @@ mod tests {
         .into_iter()
         .enumerate()
         {
-            let mut record = WorkRecord::new(
+            let mut record = HistoryRecord::new(
                 "Same page filtered candidate",
                 format!("{query} identical body for same page ranking"),
                 Vec::new(),
@@ -2354,7 +2358,7 @@ mod tests {
 
         let late_file_match = FileTouched {
             id: Uuid::parse_str("018f45d0-0000-7000-8000-000000000104").unwrap(),
-            work_record_id: Some(expected_best_id),
+            history_record_id: Some(expected_best_id),
             run_id: None,
             event_id: None,
             vcs_workspace_id: None,
@@ -2410,8 +2414,8 @@ mod tests {
         Uuid::from_bytes(bytes)
     }
 
-    fn deterministic_tie_record(id: &str) -> WorkRecord {
-        let mut record = WorkRecord::new(
+    fn deterministic_tie_record(id: &str) -> HistoryRecord {
+        let mut record = HistoryRecord::new(
             "Stable tie title",
             "stabletie exact equal body for deterministic ranking",
             vec!["stabletie".into()],
@@ -2438,7 +2442,7 @@ mod tests {
         let (_temp, store) = test_store();
         let mut records = Vec::new();
         for index in 0..48 {
-            let mut record = WorkRecord::new(
+            let mut record = HistoryRecord::new(
                 format!("Synthetic search smoke {index:03}"),
                 format!(
                     "syntheticneedle generated body {index:03} {}",
@@ -2765,8 +2769,11 @@ mod tests {
         }
     }
 
-    fn synthetic_perf_archive(event_count: usize, events_per_record: usize) -> WorkRecordArchive {
-        let mut archive = WorkRecordArchive::default();
+    fn synthetic_perf_archive(
+        event_count: usize,
+        events_per_record: usize,
+    ) -> SessionHistoryArchive {
+        let mut archive = SessionHistoryArchive::default();
         let record_count = event_count.div_ceil(events_per_record);
         let workspace_id = perf_uuid(0x5000, 0);
         archive.vcs_workspaces.push(VcsWorkspace {
@@ -2793,7 +2800,7 @@ mod tests {
             let file_id = perf_uuid(0x4100, record_index as u64);
             let time = fixed_time() + chrono::Duration::seconds(record_index as i64);
 
-            let mut record = WorkRecord::new(
+            let mut record = HistoryRecord::new(
                 format!("Synthetic perf profile {record_index:05}"),
                 format!(
                     "perfneedle import search retrieval profile record {record_index:05}; \
@@ -2845,7 +2852,7 @@ mod tests {
 
             archive.sessions.push(Session {
                 id: session_id,
-                work_record_id: Some(record_id),
+                history_record_id: Some(record_id),
                 parent_session_id: None,
                 root_session_id: None,
                 capture_source_id: Some(source_id),
@@ -2868,7 +2875,7 @@ mod tests {
 
             archive.runs.push(Run {
                 id: run_id,
-                work_record_id: Some(record_id),
+                history_record_id: Some(record_id),
                 session_id: Some(session_id),
                 run_type: RunType::Command,
                 status: RunStatus::Succeeded,
@@ -2891,7 +2898,7 @@ mod tests {
 
             archive.summaries.push(Summary {
                 id: summary_id,
-                work_record_id: Some(record_id),
+                history_record_id: Some(record_id),
                 session_id: Some(session_id),
                 kind: SummaryKind::ImportedProviderSummary,
                 model_or_source: Some("synthetic-perf".into()),
@@ -2910,7 +2917,7 @@ mod tests {
 
             archive.files_touched.push(FileTouched {
                 id: file_id,
-                work_record_id: Some(record_id),
+                history_record_id: Some(record_id),
                 run_id: Some(run_id),
                 event_id: None,
                 vcs_workspace_id: Some(workspace_id),
@@ -2952,7 +2959,7 @@ mod tests {
                 archive.events.push(Event {
                     id: event_id,
                     seq: (event_index + 1) as u64,
-                    work_record_id: Some(record_id),
+                    history_record_id: Some(record_id),
                     session_id: Some(session_id),
                     run_id: Some(run_id),
                     event_type,

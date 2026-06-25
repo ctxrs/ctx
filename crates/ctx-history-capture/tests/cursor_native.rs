@@ -3,10 +3,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use ctx_history_capture::{import_cursor_native_history, CursorNativeImportOptions};
+use ctx_history_store::Store;
 use rusqlite::Connection;
 use tempfile::TempDir;
-use work_record_capture::{import_cursor_native_history, CursorNativeImportOptions};
-use work_record_store::Store;
 
 fn tempdir() -> TempDir {
     tempfile::Builder::new()

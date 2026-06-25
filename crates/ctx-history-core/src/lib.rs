@@ -182,7 +182,7 @@ text_enum! {
 }
 
 text_enum! {
-    pub enum WorkRecordStatus {
+    pub enum HistoryRecordStatus {
         Open => "open",
         Active => "active",
         Completed => "completed",
@@ -314,7 +314,7 @@ text_enum! {
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum WorkRecordLinkTargetType {
+pub enum HistoryRecordLinkTargetType {
     Session,
     Run,
     #[default]
@@ -324,7 +324,7 @@ pub enum WorkRecordLinkTargetType {
     Artifact,
 }
 
-impl WorkRecordLinkTargetType {
+impl HistoryRecordLinkTargetType {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Session => "session",
@@ -348,13 +348,13 @@ impl WorkRecordLinkTargetType {
     }
 }
 
-impl fmt::Display for WorkRecordLinkTargetType {
+impl fmt::Display for HistoryRecordLinkTargetType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
 }
 
-impl FromStr for WorkRecordLinkTargetType {
+impl FromStr for HistoryRecordLinkTargetType {
     type Err = CoreError;
 
     fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
@@ -366,14 +366,14 @@ impl FromStr for WorkRecordLinkTargetType {
             "vcs_change" => Ok(Self::VcsChange),
             "artifact" => Ok(Self::Artifact),
             _ => Err(CoreError::InvalidEnumValue {
-                enum_name: "WorkRecordLinkTargetType",
+                enum_name: "HistoryRecordLinkTargetType",
                 value: value.to_owned(),
             }),
         }
     }
 }
 
-impl Serialize for WorkRecordLinkTargetType {
+impl Serialize for HistoryRecordLinkTargetType {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -382,7 +382,7 @@ impl Serialize for WorkRecordLinkTargetType {
     }
 }
 
-impl<'de> Deserialize<'de> for WorkRecordLinkTargetType {
+impl<'de> Deserialize<'de> for HistoryRecordLinkTargetType {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -393,7 +393,7 @@ impl<'de> Deserialize<'de> for WorkRecordLinkTargetType {
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum WorkRecordLinkType {
+pub enum HistoryRecordLinkType {
     Produced,
     Touched,
     #[default]
@@ -401,7 +401,7 @@ pub enum WorkRecordLinkType {
     LikelyRelated,
 }
 
-impl WorkRecordLinkType {
+impl HistoryRecordLinkType {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Produced => "produced",
@@ -416,13 +416,13 @@ impl WorkRecordLinkType {
     }
 }
 
-impl fmt::Display for WorkRecordLinkType {
+impl fmt::Display for HistoryRecordLinkType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
 }
 
-impl FromStr for WorkRecordLinkType {
+impl FromStr for HistoryRecordLinkType {
     type Err = CoreError;
 
     fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
@@ -432,14 +432,14 @@ impl FromStr for WorkRecordLinkType {
             "references" => Ok(Self::References),
             "likely_related" => Ok(Self::LikelyRelated),
             _ => Err(CoreError::InvalidEnumValue {
-                enum_name: "WorkRecordLinkType",
+                enum_name: "HistoryRecordLinkType",
                 value: value.to_owned(),
             }),
         }
     }
 }
 
-impl Serialize for WorkRecordLinkType {
+impl Serialize for HistoryRecordLinkType {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -448,7 +448,7 @@ impl Serialize for WorkRecordLinkType {
     }
 }
 
-impl<'de> Deserialize<'de> for WorkRecordLinkType {
+impl<'de> Deserialize<'de> for HistoryRecordLinkType {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -556,7 +556,7 @@ text_enum! {
 
 text_enum! {
     pub enum ContextCitationType {
-        WorkRecord => "work_record",
+        HistoryRecord => "history_record",
         Session => "session",
         Run => "run",
         Event => "event",
@@ -569,7 +569,7 @@ text_enum! {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkRecord {
+pub struct HistoryRecord {
     pub id: Uuid,
     pub title: String,
     pub body: String,
@@ -580,7 +580,7 @@ pub struct WorkRecord {
     pub updated_at: DateTime<Utc>,
 }
 
-impl WorkRecord {
+impl HistoryRecord {
     pub fn new(
         title: impl Into<String>,
         body: impl Into<String>,
@@ -603,12 +603,12 @@ impl WorkRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct WorkRecordArchive {
+pub struct SessionHistoryArchive {
     #[serde(default = "legacy_archive_schema_version")]
     pub schema_version: u32,
     #[serde(default = "legacy_archive_schema_version")]
     pub version: u32,
-    pub records: Vec<WorkRecord>,
+    pub records: Vec<HistoryRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capture_sources: Vec<CaptureSource>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -623,15 +623,20 @@ pub struct WorkRecordArchive {
     pub vcs_workspaces: Vec<VcsWorkspace>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub vcs_changes: Vec<VcsChange>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub work_record_links: Vec<WorkRecordLink>,
+    #[serde(
+        default,
+        rename = "history_record_links",
+        alias = "work_record_links",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub history_record_links: Vec<HistoryRecordLink>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub summaries: Vec<Summary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files_touched: Vec<FileTouched>,
 }
 
-impl Default for WorkRecordArchive {
+impl Default for SessionHistoryArchive {
     fn default() -> Self {
         Self {
             schema_version: archive_schema_version(),
@@ -644,7 +649,7 @@ impl Default for WorkRecordArchive {
             artifact_records: Vec::new(),
             vcs_workspaces: Vec::new(),
             vcs_changes: Vec::new(),
-            work_record_links: Vec::new(),
+            history_record_links: Vec::new(),
             summaries: Vec::new(),
             files_touched: Vec::new(),
         }
@@ -714,13 +719,13 @@ pub struct CaptureSource {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct WorkRecordMetadata {
+pub struct HistoryRecordMetadata {
     pub id: Uuid,
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
     #[serde(default)]
-    pub status: WorkRecordStatus,
+    pub status: HistoryRecordStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub primary_vcs_workspace_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -741,8 +746,13 @@ pub struct WorkRecordMetadata {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Session {
     pub id: Uuid,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub work_record_id: Option<Uuid>,
+    #[serde(
+        default,
+        rename = "history_record_id",
+        alias = "work_record_id",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub history_record_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -790,8 +800,13 @@ pub struct SessionEdge {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Run {
     pub id: Uuid,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub work_record_id: Option<Uuid>,
+    #[serde(
+        default,
+        rename = "history_record_id",
+        alias = "work_record_id",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub history_record_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<Uuid>,
     pub run_type: RunType,
@@ -821,8 +836,13 @@ pub struct Run {
 pub struct Event {
     pub id: Uuid,
     pub seq: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub work_record_id: Option<Uuid>,
+    #[serde(
+        default,
+        rename = "history_record_id",
+        alias = "work_record_id",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub history_record_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -894,12 +914,13 @@ pub struct VcsChange {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct WorkRecordLink {
+pub struct HistoryRecordLink {
     pub id: Uuid,
-    pub work_record_id: Uuid,
-    pub target_type: WorkRecordLinkTargetType,
+    #[serde(rename = "history_record_id", alias = "work_record_id")]
+    pub history_record_id: Uuid,
+    pub target_type: HistoryRecordLinkTargetType,
     pub target_id: Uuid,
-    pub link_type: WorkRecordLinkType,
+    pub link_type: HistoryRecordLinkType,
     #[serde(default)]
     pub confidence: Confidence,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -933,7 +954,7 @@ pub struct Artifact {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CitationReference {
-    pub target_type: WorkRecordLinkTargetType,
+    pub target_type: HistoryRecordLinkTargetType,
     pub target_id: Uuid,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
@@ -942,8 +963,13 @@ pub struct CitationReference {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Summary {
     pub id: Uuid,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub work_record_id: Option<Uuid>,
+    #[serde(
+        default,
+        rename = "history_record_id",
+        alias = "work_record_id",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub history_record_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<Uuid>,
     pub kind: SummaryKind,
@@ -963,8 +989,13 @@ pub struct Summary {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileTouched {
     pub id: Uuid,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub work_record_id: Option<Uuid>,
+    #[serde(
+        default,
+        rename = "history_record_id",
+        alias = "work_record_id",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub history_record_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1001,8 +1032,9 @@ pub struct Tag {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkRecordTag {
-    pub work_record_id: Uuid,
+pub struct HistoryRecordTag {
+    #[serde(rename = "history_record_id", alias = "work_record_id")]
+    pub history_record_id: Uuid,
     pub tag_id: Uuid,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_id: Option<Uuid>,
@@ -1206,16 +1238,16 @@ pub fn default_data_root() -> Result<PathBuf> {
     Ok(base.home_dir().join(".ctx"))
 }
 
-pub fn work_record_dir(root: PathBuf) -> PathBuf {
+pub fn history_dir(root: PathBuf) -> PathBuf {
     root
 }
 
 pub fn database_path(root: PathBuf) -> PathBuf {
-    work_record_dir(root).join("work.sqlite")
+    history_dir(root).join("work.sqlite")
 }
 
 pub fn object_dir(root: PathBuf) -> PathBuf {
-    work_record_dir(root).join("objects")
+    history_dir(root).join("objects")
 }
 
 pub fn blob_dir(root: PathBuf) -> PathBuf {
@@ -1223,7 +1255,7 @@ pub fn blob_dir(root: PathBuf) -> PathBuf {
 }
 
 pub fn spool_dir(root: PathBuf) -> PathBuf {
-    work_record_dir(root).join("spool")
+    history_dir(root).join("spool")
 }
 
 pub fn inbox_dir(root: PathBuf) -> PathBuf {
@@ -1231,15 +1263,15 @@ pub fn inbox_dir(root: PathBuf) -> PathBuf {
 }
 
 pub fn config_path(root: PathBuf) -> PathBuf {
-    work_record_dir(root).join("config.toml")
+    history_dir(root).join("config.toml")
 }
 
 pub fn logs_dir(root: PathBuf) -> PathBuf {
-    work_record_dir(root).join("logs")
+    history_dir(root).join("logs")
 }
 
 pub fn device_path(root: PathBuf) -> PathBuf {
-    work_record_dir(root).join("device.json")
+    history_dir(root).join("device.json")
 }
 
 pub fn redact_preview(text: &str, max_chars: usize) -> String {
@@ -1475,6 +1507,31 @@ mod tests {
     }
 
     #[test]
+    fn history_record_json_names_accept_legacy_aliases() {
+        let record_id = Uuid::parse_str("018f45d0-0000-7000-8000-000000000001").unwrap();
+        let session: Session = serde_json::from_value(json!({
+            "id": "018f45d0-0000-7000-8000-000000000002",
+            "work_record_id": record_id,
+            "provider": "codex",
+            "agent_type": "primary",
+            "status": "imported",
+            "started_at": "2026-06-22T00:00:00Z",
+            "created_at": "2026-06-22T00:00:00Z",
+            "updated_at": "2026-06-22T00:00:00Z"
+        }))
+        .unwrap();
+
+        assert_eq!(session.history_record_id, Some(record_id));
+        let value = serde_json::to_value(&session).unwrap();
+        assert_eq!(value["history_record_id"], record_id.to_string());
+        assert!(value.get("work_record_id").is_none());
+        assert_eq!(
+            serde_json::to_string(&ContextCitationType::HistoryRecord).unwrap(),
+            "\"history_record\""
+        );
+    }
+
+    #[test]
     fn redacts_common_secret_markers() {
         let redacted = redact_secret_markers(
             "token=ghp_1234567890abcdef password=hunter2 secret=shhh \
@@ -1535,7 +1592,7 @@ mod tests {
 
     #[test]
     fn generated_ids_are_uuid_v7_and_paths_are_centralized() {
-        let record = WorkRecord::new("Task", "body", Vec::new(), "task", None);
+        let record = HistoryRecord::new("Task", "body", Vec::new(), "task", None);
 
         assert_eq!(record.id.get_version_num(), 7);
     }
@@ -1543,10 +1600,7 @@ mod tests {
     #[test]
     fn local_layout_paths_are_flat_under_data_root() {
         let root = PathBuf::from("/tmp/ctx-root");
-        assert_eq!(
-            work_record_dir(root.clone()),
-            PathBuf::from("/tmp/ctx-root")
-        );
+        assert_eq!(history_dir(root.clone()), PathBuf::from("/tmp/ctx-root"));
         assert_eq!(
             database_path(root.clone()),
             PathBuf::from("/tmp/ctx-root/work.sqlite")
