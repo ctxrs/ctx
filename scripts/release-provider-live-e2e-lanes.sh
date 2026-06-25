@@ -34,11 +34,6 @@ Required live env for Pi:
 Optional runner env:
   CTX_LIVE_PROVIDER_CTX_BIN=/path/to/ctx
 
-Required generated OpenRouter env:
-  CTX_LIVE_PROVIDER_E2E=1
-  CTX_LIVE_PROVIDER_OPENROUTER=1
-  CTX_LIVE_PROVIDER_OPENROUTER_GENERATE=1
-  OpenRouter credential, endpoint, and model environment hydrated by Infisical
 USAGE
 }
 
@@ -56,7 +51,6 @@ provider_env_name() {
     copilot_cli) printf 'CTX_LIVE_PROVIDER_COPILOT_CLI' ;;
     factory_ai_droid) printf 'CTX_LIVE_PROVIDER_FACTORY_AI_DROID' ;;
     amp) printf 'CTX_LIVE_PROVIDER_AMP' ;;
-    openrouter) printf 'CTX_LIVE_PROVIDER_OPENROUTER' ;;
     *) return 1 ;;
   esac
 }
@@ -75,18 +69,12 @@ provider_display_name() {
     copilot_cli) printf 'Copilot CLI' ;;
     factory_ai_droid) printf 'Factory AI Droid' ;;
     amp) printf 'Amp' ;;
-    openrouter) printf 'OpenRouter Generated Harness' ;;
     *) return 1 ;;
   esac
 }
 
 provider_secret_scope() {
-  local provider="${1:-}"
-
-  case "${provider}" in
-    openrouter) printf 'openrouter_generation' ;;
-    *) printf 'none' ;;
-  esac
+  printf 'none'
 }
 
 provider_ids() {
@@ -100,8 +88,7 @@ provider_ids() {
     cursor \
     copilot_cli \
     factory_ai_droid \
-    amp \
-    openrouter
+    amp
 }
 
 provider_live_capability() {
@@ -109,7 +96,6 @@ provider_live_capability() {
 
   case "${provider}" in
     codex|pi) printf 'local_history_smoke' ;;
-    openrouter) printf 'credentialed_generated_multi_session_smoke' ;;
     *) printf 'fixture_only_blocker' ;;
   esac
 }
@@ -142,58 +128,6 @@ provider_query_env() {
     pi) printf 'CTX_LIVE_PROVIDER_PI_QUERY' ;;
     *) return 1 ;;
   esac
-}
-
-openrouter_generated_provider_ids() {
-  printf '%s\n' \
-    codex \
-    pi \
-    claude \
-    opencode \
-    antigravity \
-    gemini \
-    cursor \
-    copilot_cli \
-    factory_ai_droid \
-    amp
-}
-
-openrouter_generated_provider_cli_arg() {
-  local provider="$1"
-
-  case "${provider}" in
-    copilot_cli) printf 'copilot-cli' ;;
-    factory_ai_droid) printf 'factory-ai-droid' ;;
-    *) printf '%s' "${provider}" ;;
-  esac
-}
-
-openrouter_generated_provider_output_path() {
-  local root="$1"
-  local provider="$2"
-
-  case "${provider}" in
-    codex) printf '%s/provider-history/codex-sessions' "${root}" ;;
-    *) printf '%s/provider-history/%s.jsonl' "${root}" "${provider}" ;;
-  esac
-}
-
-openrouter_query_marker() {
-  local provider="$1"
-
-  printf 'ctx-openrouter-%s-multi-session' "${provider}"
-}
-
-openrouter_credential_configured() {
-  [[ -n "${OPENROUTER_API_KEY:-${CTX_OPENROUTER_API_KEY:-}}" ]]
-}
-
-openrouter_model_configured() {
-  [[ -n "${CTX_LIVE_PROVIDER_OPENROUTER_MODEL:-}" ]] && return 0
-  [[ -n "${CTX_E2E_OPENROUTER_MODEL_OVERRIDE:-}" ]] && return 0
-  [[ -n "${CTX_RELEASE_E2E_OPENROUTER_MODEL:-}" ]] && return 0
-  [[ -n "${CTX_RELEASE_PREFLIGHT_OPENROUTER_MODEL:-}" ]] && return 0
-  [[ "${CTX_LIVE_PROVIDER_OPENROUTER_ALLOW_DEFAULT_FREE_MODEL:-0}" == "1" ]]
 }
 
 ctx_path_kind() {
@@ -562,9 +496,6 @@ write_lane_definitions() {
       if [[ "${capability}" == "local_history_smoke" ]]; then
         printf '      "capability": "local_history_import_search_smoke",\n'
         printf '      "enabled_when": "CTX_LIVE_PROVIDER_E2E=1 and CTX_LIVE_PROVIDER_ACCEPT_LOCAL_HISTORY=1 and %s=1 and %s is set and %s or CTX_LIVE_PROVIDER_QUERY is set",\n' "$(ctx_json_escape "${env_name}")" "$(ctx_json_escape "${required_path_env}")" "$(ctx_json_escape "${query_env}")"
-      elif [[ "${capability}" == "credentialed_generated_multi_session_smoke" ]]; then
-        printf '      "capability": "credentialed_generated_multi_session_import_search_smoke",\n'
-        printf '      "enabled_when": "CTX_LIVE_PROVIDER_E2E=1 and %s=1 and CTX_LIVE_PROVIDER_OPENROUTER_GENERATE=1 and Infisical-hydrated OpenRouter credential/endpoint/model configuration is available",\n' "$(ctx_json_escape "${env_name}")"
       else
         printf '      "capability": "fixture_only_blocker",\n'
         printf '      "enabled_when": "CTX_LIVE_PROVIDER_E2E=1 and %s=1",\n' "$(ctx_json_escape "${env_name}")"
@@ -574,8 +505,6 @@ write_lane_definitions() {
       printf '      "passes_api_key_env_to_ctx": false,\n'
       if [[ "${capability}" == "local_history_smoke" ]]; then
         printf '      "artifact_redaction": "aggregate_and_oracle_counts_only",\n'
-      elif [[ "${capability}" == "credentialed_generated_multi_session_smoke" ]]; then
-        printf '      "artifact_redaction": "aggregate_and_oracle_counts_only",\n'
       else
         printf '      "artifact_redaction": "aggregate_counts_only",\n'
       fi
@@ -583,13 +512,7 @@ write_lane_definitions() {
       printf '      "expected_artifacts": [\n'
       printf '        "artifacts/buildkite/provider-live-e2e/%s/live-e2e.json",\n' "$(ctx_json_escape "${provider}")"
       printf '        "artifacts/buildkite/provider-live-e2e/%s/live-e2e.md"' "$(ctx_json_escape "${provider}")"
-      if [[ "${capability}" == "credentialed_generated_multi_session_smoke" ]]; then
-        printf ',\n'
-        printf '        "artifacts/buildkite/provider-live-e2e/%s/generated-providers/*/live-e2e.json",\n' "$(ctx_json_escape "${provider}")"
-        printf '        "artifacts/buildkite/provider-live-e2e/%s/generated-providers/*/live-e2e.md"\n' "$(ctx_json_escape "${provider}")"
-      else
-        printf '\n'
-      fi
+      printf '\n'
       printf '      ],\n'
       if [[ "${capability}" == "local_history_smoke" ]]; then
         printf '      "required_path_env": "%s",\n' "$(ctx_json_escape "${required_path_env}")"
@@ -598,17 +521,6 @@ write_lane_definitions() {
           printf '      "optional_path_env": "%s",\n' "$(ctx_json_escape "${optional_path_env}")"
         fi
         printf '      "default_status": "skipped_until_explicit_local_history_opt_in",\n'
-      elif [[ "${capability}" == "credentialed_generated_multi_session_smoke" ]]; then
-        printf '      "generation_opt_in_env": "CTX_LIVE_PROVIDER_OPENROUTER_GENERATE=1",\n'
-        printf '      "infisical_wrapper": "scripts/run-openrouter-provider-e2e-infisical.sh",\n'
-        printf '      "infisical_project_env": "CTX_OPENROUTER_INFISICAL_PROJECT_ID",\n'
-        printf '      "infisical_env_env": "CTX_OPENROUTER_INFISICAL_ENV",\n'
-        printf '      "infisical_path_env": "CTX_OPENROUTER_INFISICAL_PATH",\n'
-        printf '      "generated_provider_count": 10,\n'
-        printf '      "per_provider_evidence_root": "generated-providers",\n'
-        printf '      "ctx_network_required": false,\n'
-        printf '      "credential_used_before_ctx_import": true,\n'
-        printf '      "default_status": "skipped_until_explicit_openrouter_generation_opt_in",\n'
       else
         printf '      "default_status": "skipped_until_explicit_provider_opt_in",\n'
         printf '      "selected_status": "blocked_fixture_only_provider",\n'
@@ -650,14 +562,6 @@ write_lane_definitions() {
           "CTX_LIVE_PROVIDER_QUERY" \
           "${secret_scope}" \
           "${provider//_/-}"
-      elif [[ "${capability}" == "credentialed_generated_multi_session_smoke" ]]; then
-        printf '| %s | `%s=1`, `%s=1`, `%s=1`, Infisical-hydrated OpenRouter credential/endpoint/model configuration | generated multi-session import/search for all harness providers | `%s` | `live-provider-e2e-%s` |\n' \
-          "${display}" \
-          "CTX_LIVE_PROVIDER_E2E" \
-          "${env_name}" \
-          "CTX_LIVE_PROVIDER_OPENROUTER_GENERATE" \
-          "${secret_scope}" \
-          "${provider//_/-}"
       else
         printf '| %s | `%s=1`, `%s=1` | native-import blocker | `%s` | `live-provider-e2e-%s` |\n' \
           "${display}" \
@@ -669,7 +573,7 @@ write_lane_definitions() {
     done < <(provider_ids)
     printf '\n'
     printf 'Codex and Pi lanes use only explicit local-history paths, a temporary `CTX_DATA_ROOT`, and redacted aggregate/oracle-count artifacts.\n'
-    printf 'The OpenRouter generated lane uses `scripts/run-openrouter-provider-e2e-infisical.sh` to hydrate OpenRouter credential and endpoint configuration from Infisical only before `ctx import` creates temporary synthetic histories, then runs `ctx` with a scrubbed environment.\n'
+    printf 'OpenRouter-generated histories are a developer drafting/static-fixture aid only; they are not provider-live lanes, release evidence, or native local-history proof.\n'
     printf 'Providers without native local importers remain blockers for native local-history proof until the public CLI ships a native importer.\n'
   } > "${markdown}"
 
@@ -687,9 +591,6 @@ write_skipped_result() {
   env_name="$(provider_env_name "${provider}")"
   display="$(provider_display_name "${provider}")"
   enabled_by="CTX_LIVE_PROVIDER_E2E=1, CTX_LIVE_PROVIDER_ACCEPT_LOCAL_HISTORY=1, and ${env_name}=1"
-  if [[ "${provider}" == "openrouter" ]]; then
-    enabled_by="CTX_LIVE_PROVIDER_E2E=1, ${env_name}=1, and CTX_LIVE_PROVIDER_OPENROUTER_GENERATE=1"
-  fi
   mkdir -p "${out_dir}"
   json="${out_dir}/live-e2e.json"
   markdown="${out_dir}/live-e2e.md"
@@ -1328,482 +1229,6 @@ EOF
   artifact_guard_no_raw_values "${json}" "${markdown}" "${required_path}" "${optional_path}" "${raw_query_guard}"
 }
 
-provider_results_json_array() {
-  local jsonl="$1"
-
-  python3 - "${jsonl}" <<'PY'
-import json
-import sys
-
-items = []
-with open(sys.argv[1], encoding="utf-8") as handle:
-    for line in handle:
-        line = line.strip()
-        if line:
-            items.append(json.loads(line))
-print(json.dumps(items, sort_keys=True, indent=2))
-PY
-}
-
-provider_results_markdown_table() {
-  local jsonl="$1"
-
-  python3 - "${jsonl}" <<'PY'
-import json
-import sys
-
-print("| Provider | Status | Source format | Sessions | Events | Edges | Search | Retrieval oracle | Evidence |")
-print("| --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- |")
-with open(sys.argv[1], encoding="utf-8") as handle:
-    for line in handle:
-        line = line.strip()
-        if not line:
-            continue
-        item = json.loads(line)
-        print(
-            "| {provider} | {status} | `{source_format}` | {sessions} | {events} | {edges} | {search} | {oracle} | `{json_path}`, `{md_path}` |".format(
-                provider=item["provider"],
-                status=item["status"],
-                source_format=item["source_format"],
-                sessions=item["imported_sessions"],
-                events=item["imported_events"],
-                edges=item["imported_edges"],
-                search=item["search_results"],
-                oracle="true" if item["retrieval_oracle_passed"] else "false",
-                json_path=item["evidence_json"],
-                md_path=item["evidence_markdown"],
-            )
-        )
-PY
-}
-
-write_openrouter_generated_provider_evidence() {
-  local json="$1"
-  local markdown="$2"
-  local generated_provider="$3"
-  local source_format="$4"
-  local imported_sessions="$5"
-  local imported_events="$6"
-  local imported_edges="$7"
-  local search_results="$8"
-  local generated_at commit branch
-
-  mkdir -p "$(dirname "${json}")" "$(dirname "${markdown}")"
-  generated_at="$(date +%s)"
-  commit="$(git rev-parse HEAD)"
-  branch="$(git branch --show-current)"
-
-  cat > "${json}" <<EOF
-{
-  "schema_version": 1,
-  "kind": "openrouter_generated_provider_live_e2e_result",
-  "publishing": false,
-  "provider": "$(ctx_json_escape "${generated_provider}")",
-  "status": "passed",
-  "evidence_class": "credentialed_openrouter_generated_history_provider",
-  "source_format": "$(ctx_json_escape "${source_format}")",
-  "provider_command_execution": false,
-  "api_key_env_passed_to_ctx": false,
-  "credential_used_before_ctx_import": true,
-  "ctx_network_required": false,
-  "source_exists_oracle_required": false,
-  "temporary_ctx_data_root": true,
-  "raw_ctx_command_outputs_persisted": false,
-  "raw_generated_histories_persisted": false,
-  "raw_transcripts_persisted": false,
-  "raw_snippets_persisted": false,
-  "raw_queries_persisted": false,
-  "raw_source_paths_persisted": false,
-  "artifact_redaction": "aggregate_and_oracle_counts_only_no_raw_transcripts_snippets_queries_or_source_paths",
-  "imported_sessions": ${imported_sessions},
-  "imported_events": ${imported_events},
-  "imported_edges": ${imported_edges},
-  "search_results": ${search_results},
-  "retrieval_oracle_passed": true,
-  "execution": {
-    "ctx_invocation_environment": "scrubbed_env",
-    "provider_command_execution": false,
-    "api_key_env_passed_to_ctx": false,
-    "credential_used_before_ctx_import": true,
-    "ctx_network_required": false,
-    "temporary_ctx_data_root": true,
-    "raw_ctx_command_outputs_persisted": false,
-    "raw_generated_histories_persisted": false,
-    "raw_transcripts_persisted": false,
-    "raw_snippets_persisted": false,
-    "raw_queries_persisted": false,
-    "raw_source_paths_persisted": false
-  },
-  "import": {
-    "imported_sessions": ${imported_sessions},
-    "imported_events": ${imported_events},
-    "imported_edges": ${imported_edges}
-  },
-  "retrieval": {
-    "search_results": ${search_results}
-  },
-  "retrieval_oracle": {
-    "passed": true,
-    "source_exists_oracle_required": false
-  },
-  "git_commit": "$(ctx_json_escape "${commit}")",
-  "git_branch": "$(ctx_json_escape "${branch}")",
-  "generated_at_unix_s": ${generated_at}
-}
-EOF
-
-  cat > "${markdown}" <<EOF
-# OpenRouter Generated Provider Evidence
-
-- Publishing: false
-- Provider: \`${generated_provider}\`
-- Status: passed
-- Evidence class: credentialed OpenRouter generated history provider
-- Source format: \`${source_format}\`
-- Provider command execution: false
-- API key environment passed to ctx: false
-- Credential used before ctx import: true
-- ctx network required: false
-- Source-exists oracle required: false
-- Temporary \`CTX_DATA_ROOT\`: true
-- Artifact redaction: aggregate counts only; no raw transcripts, snippets, queries, or source paths.
-- Raw ctx command outputs persisted: false
-- Raw generated histories persisted: false
-- Raw transcripts persisted: false
-- Raw snippets persisted: false
-- Raw queries persisted: false
-- Raw source paths persisted: false
-- Imported sessions: ${imported_sessions}
-- Imported events: ${imported_events}
-- Imported edges: ${imported_edges}
-- Search results: ${search_results}
-- Retrieval oracle: true
-EOF
-}
-
-run_openrouter_generated_provider() {
-  local out_dir="$1"
-  local provider="openrouter"
-  local env_name display ctx_bin tmp_root data_root safe_home generator provider_results_jsonl
-  local setup_json status_json doctor_json validate_json generated_at commit branch json markdown
-  local selected=0 passed=0 failed=0 total_sessions=0 total_events=0 total_edges=0
-  local generated_provider generated_provider_cli_arg generated_output generated_json generated_source_path generated_source_format
-  local query import_json search_json oracle_json oracle_pass
-  local imported_sessions imported_events imported_edges import_failed search_results
-  local status_status doctor_status validate_status setup_status generator_status import_status search_status
-  local failed_stderr_summary generator_stderr generator_stderr_summary provider_results_json provider_results_markdown
-  local indexed_items indexed_sources doctor_ok validate_valid
-  local api_key_guard ctx_secret_guard raw_query_guards=() raw_source_path_guards=()
-  local provider_evidence_json provider_evidence_markdown provider_evidence_json_rel provider_evidence_markdown_rel
-
-  env_name="$(provider_env_name "${provider}")"
-  display="$(provider_display_name "${provider}")"
-
-  if [[ "${CTX_LIVE_PROVIDER_E2E:-0}" != "1" ]]; then
-    write_skipped_result "${provider}" "${out_dir}" "global_opt_in_missing" \
-      "live provider E2E is opt-in; set CTX_LIVE_PROVIDER_E2E=1 to run this lane"
-    return 0
-  fi
-  if [[ "${!env_name:-0}" != "1" ]]; then
-    write_skipped_result "${provider}" "${out_dir}" "provider_opt_in_missing" \
-      "generated OpenRouter lane is opt-in; set ${env_name}=1 to run it"
-    return 0
-  fi
-  if [[ "${CTX_LIVE_PROVIDER_OPENROUTER_GENERATE:-0}" != "1" ]]; then
-    write_skipped_result "${provider}" "${out_dir}" "generation_opt_in_missing" \
-      "generated OpenRouter history creation requires CTX_LIVE_PROVIDER_OPENROUTER_GENERATE=1"
-    return 0
-  fi
-  if ! openrouter_credential_configured; then
-    write_skipped_result "${provider}" "${out_dir}" "openrouter_credential_missing" \
-      "Infisical-hydrated OpenRouter credential configuration is required for generated provider history"
-    return 0
-  fi
-  if ! openrouter_model_configured; then
-    write_skipped_result "${provider}" "${out_dir}" "openrouter_model_missing" \
-      "Infisical-hydrated OpenRouter model configuration is required, or explicitly allow the default free model"
-    return 0
-  fi
-  if ! require_python3; then
-    write_live_failure_result "${provider}" "${out_dir}" "python3_missing" \
-      "python3 is required for generated provider live E2E"
-    return 1
-  fi
-  if ! ctx_bin="$(find_ctx_bin)"; then
-    write_live_failure_result "${provider}" "${out_dir}" "ctx_binary_missing" \
-      "ctx binary was not found; set CTX_LIVE_PROVIDER_CTX_BIN to an existing ctx binary"
-    return 1
-  fi
-
-  mkdir -p "${out_dir}" "${TMPDIR:-${CTX_REPO_ROOT}/target/tmp}"
-  tmp_root="$(mktemp -d "${TMPDIR:-${CTX_REPO_ROOT}/target/tmp}/ctx-openrouter-live-e2e.XXXXXX")"
-  data_root="${tmp_root}/ctx-data"
-  safe_home="${tmp_root}/home"
-  provider_results_jsonl="${tmp_root}/provider-results.jsonl"
-  generator="${CTX_REPO_ROOT}/scripts/generate-openrouter-provider-history.py"
-  mkdir -p "${safe_home}"
-  : > "${provider_results_jsonl}"
-
-  setup_json="${tmp_root}/setup.json"
-  set +e
-  run_ctx_json "${ctx_bin}" "${data_root}" "${safe_home}" "${setup_json}" setup --json
-  setup_status=$?
-  set -e
-  if (( setup_status != 0 )); then
-    write_live_failure_result "${provider}" "${out_dir}" "ctx_setup_failed" \
-      "ctx setup failed while using a temporary CTX_DATA_ROOT" \
-      "${CTX_LIVE_LAST_STDERR_SUMMARY}"
-    rm -rf "${tmp_root}"
-    return 1
-  fi
-
-  while IFS= read -r generated_provider; do
-    selected=$(( selected + 1 ))
-    query="$(openrouter_query_marker "${generated_provider}")"
-    generated_provider_cli_arg="$(openrouter_generated_provider_cli_arg "${generated_provider}")"
-    raw_query_guards+=("${query}")
-    generated_output="$(openrouter_generated_provider_output_path "${tmp_root}" "${generated_provider}")"
-    generated_json="${tmp_root}/generated-${generated_provider}.json"
-    generator_stderr="${tmp_root}/generated-${generated_provider}.stderr.raw"
-    generator_stderr_summary="${tmp_root}/generated-${generated_provider}.stderr.redacted"
-
-    set +e
-    python3 "${generator}" \
-      --provider "${generated_provider}" \
-      --output "${generated_output}" \
-      --query "${query}" > "${generated_json}" 2> "${generator_stderr}"
-    generator_status=$?
-    set -e
-    if (( generator_status != 0 )); then
-      write_redacted_ctx_stderr_summary "${generator_stderr}" "${generator_stderr_summary}" "openrouter-generator" "${generator_status}"
-      write_live_failure_result "${provider}" "${out_dir}" "openrouter_generation_failed" \
-        "OpenRouter generated history creation failed for one provider" \
-        "${generator_stderr_summary}"
-      rm -rf "${tmp_root}"
-      return 1
-    fi
-    rm -f "${generator_stderr}"
-
-    generated_source_path="$(json_string "${generated_json}" "output_path")"
-    generated_source_format="$(json_string "${generated_json}" "source_format")"
-    raw_source_path_guards+=("${generated_source_path}")
-    import_json="${tmp_root}/import-${generated_provider}.json"
-    search_json="${tmp_root}/search-${generated_provider}.json"
-    oracle_json="${tmp_root}/oracle-${generated_provider}.json"
-
-    set +e
-    run_ctx_json "${ctx_bin}" "${data_root}" "${safe_home}" "${import_json}" import --provider "${generated_provider_cli_arg}" --path "${generated_source_path}" --json
-    import_status=$?
-    set -e
-    if (( import_status != 0 )); then
-      write_live_failure_result "${provider}" "${out_dir}" "ctx_import_failed" \
-        "ctx import failed for generated OpenRouter provider history ${generated_provider}" \
-        "${CTX_LIVE_LAST_STDERR_SUMMARY}"
-      rm -rf "${tmp_root}"
-      return 1
-    fi
-
-    imported_sessions="$(json_int "${import_json}" "totals.imported_sessions")"
-    imported_events="$(json_int "${import_json}" "totals.imported_events")"
-    imported_edges="$(json_int "${import_json}" "totals.imported_edges")"
-    import_failed="$(json_int "${import_json}" "totals.failed")"
-    if (( imported_sessions < 2 || imported_events < 2 || import_failed > 0 )); then
-      write_live_failure_result "${provider}" "${out_dir}" "generated_import_counts_failed" \
-        "ctx import did not ingest multiple generated sessions/events cleanly"
-      rm -rf "${tmp_root}"
-      return 1
-    fi
-
-    set +e
-    failed_stderr_summary=""
-    run_ctx_json "${ctx_bin}" "${data_root}" "${safe_home}" "${search_json}" search "${query}" --provider "${generated_provider_cli_arg}" --limit 5 --json
-    search_status=$?
-    if (( search_status != 0 )); then
-      failed_stderr_summary="${CTX_LIVE_LAST_STDERR_SUMMARY}"
-    fi
-    set -e
-    if (( search_status != 0 )); then
-      write_live_failure_result "${provider}" "${out_dir}" "ctx_retrieval_failed" \
-        "ctx search failed for generated OpenRouter provider history" \
-        "${failed_stderr_summary}"
-      rm -rf "${tmp_root}"
-      return 1
-    fi
-
-    json_provider_retrieval_oracle "${generated_provider}" "${search_json}" 0 > "${oracle_json}"
-    oracle_pass="$(json_bool "${oracle_json}" "passed")"
-    search_results="$(json_int "${search_json}" "results[]")"
-    if [[ "${oracle_pass}" != "true" || "${search_results}" == "0" ]]; then
-      local oracle_search_provider_matches oracle_search_citation_count oracle_search_citation_source_exists_true
-      oracle_search_provider_matches="$(json_int "${oracle_json}" "search.provider_matches")"
-      oracle_search_citation_count="$(json_int "${oracle_json}" "search.citation_count")"
-      oracle_search_citation_source_exists_true="$(json_int "${oracle_json}" "search.citation_source_exists_true")"
-      write_live_failure_result "${provider}" "${out_dir}" "retrieval_oracle_failed" \
-        "ctx search did not return provider-filtered citations for generated provider ${generated_provider}; search_results=${search_results}; oracle_pass=${oracle_pass}; search_provider_matches=${oracle_search_provider_matches}; search_citations=${oracle_search_citation_count}; search_citation_source_exists_true=${oracle_search_citation_source_exists_true}; source_exists_oracle_required=false"
-      rm -rf "${tmp_root}"
-      return 1
-    fi
-
-    total_sessions=$(( total_sessions + imported_sessions ))
-    total_events=$(( total_events + imported_events ))
-    total_edges=$(( total_edges + imported_edges ))
-    passed=$(( passed + 1 ))
-    provider_evidence_json_rel="generated-providers/${generated_provider}/live-e2e.json"
-    provider_evidence_markdown_rel="generated-providers/${generated_provider}/live-e2e.md"
-    provider_evidence_json="${out_dir}/${provider_evidence_json_rel}"
-    provider_evidence_markdown="${out_dir}/${provider_evidence_markdown_rel}"
-    write_openrouter_generated_provider_evidence \
-      "${provider_evidence_json}" \
-      "${provider_evidence_markdown}" \
-      "${generated_provider}" \
-      "${generated_source_format}" \
-      "${imported_sessions}" \
-      "${imported_events}" \
-      "${imported_edges}" \
-      "${search_results}"
-    artifact_guard_no_raw_values \
-      "${provider_evidence_json}" \
-      "${provider_evidence_markdown}" \
-      "${generated_source_path}" \
-      "${query}" \
-      "${OPENROUTER_API_KEY:-}" \
-      "${CTX_OPENROUTER_API_KEY:-}"
-    printf '{"provider":"%s","status":"passed","source_format":"%s","imported_sessions":%s,"imported_events":%s,"imported_edges":%s,"search_results":%s,"retrieval_oracle_passed":true,"source_exists_oracle_required":false,"evidence_json":"%s","evidence_markdown":"%s"}\n' \
-      "$(ctx_json_escape "${generated_provider}")" \
-      "$(ctx_json_escape "${generated_source_format}")" \
-      "${imported_sessions}" \
-      "${imported_events}" \
-      "${imported_edges}" \
-      "${search_results}" \
-      "$(ctx_json_escape "${provider_evidence_json_rel}")" \
-      "$(ctx_json_escape "${provider_evidence_markdown_rel}")" >> "${provider_results_jsonl}"
-  done < <(openrouter_generated_provider_ids)
-
-  status_json="${tmp_root}/status.json"
-  doctor_json="${tmp_root}/doctor.json"
-  validate_json="${tmp_root}/validate.json"
-  set +e
-  run_ctx_json "${ctx_bin}" "${data_root}" "${safe_home}" "${status_json}" status --json
-  status_status=$?
-  if (( status_status != 0 )); then
-    failed_stderr_summary="${CTX_LIVE_LAST_STDERR_SUMMARY}"
-  fi
-  run_ctx_json "${ctx_bin}" "${data_root}" "${safe_home}" "${doctor_json}" doctor --json
-  doctor_status=$?
-  if (( doctor_status != 0 && -z "${failed_stderr_summary:-}" )); then
-    failed_stderr_summary="${CTX_LIVE_LAST_STDERR_SUMMARY}"
-  fi
-  run_ctx_json "${ctx_bin}" "${data_root}" "${safe_home}" "${validate_json}" validate --json
-  validate_status=$?
-  if (( validate_status != 0 && -z "${failed_stderr_summary:-}" )); then
-    failed_stderr_summary="${CTX_LIVE_LAST_STDERR_SUMMARY}"
-  fi
-  set -e
-  if (( status_status != 0 || doctor_status != 0 || validate_status != 0 )); then
-    write_live_failure_result "${provider}" "${out_dir}" "ctx_health_failed" \
-      "ctx status, doctor, or validate failed after generated provider imports" \
-      "${failed_stderr_summary}"
-    rm -rf "${tmp_root}"
-    return 1
-  fi
-
-  indexed_items="$(json_int "${status_json}" "indexed_items")"
-  indexed_sources="$(json_int "${status_json}" "indexed_sources")"
-  doctor_ok="$(json_bool "${doctor_json}" "ok")"
-  validate_valid="$(json_bool "${validate_json}" "valid")"
-  if [[ "${doctor_ok}" != "true" || "${validate_valid}" != "true" ]]; then
-    write_live_failure_result "${provider}" "${out_dir}" "ctx_health_failed" \
-      "ctx doctor or validate reported an unhealthy temporary data root"
-    rm -rf "${tmp_root}"
-    return 1
-  fi
-
-  provider_results_json="$(provider_results_json_array "${provider_results_jsonl}")"
-  provider_results_markdown="$(provider_results_markdown_table "${provider_results_jsonl}")"
-  mkdir -p "${out_dir}"
-  json="${out_dir}/live-e2e.json"
-  markdown="${out_dir}/live-e2e.md"
-  generated_at="$(date +%s)"
-  commit="$(git rev-parse HEAD)"
-  branch="$(git branch --show-current)"
-
-  cat > "${json}" <<EOF
-{
-  "schema_version": 1,
-  "kind": "provider_live_e2e_result",
-  "publishing": false,
-  "provider": "openrouter",
-  "display_name": "$(ctx_json_escape "${display}")",
-  "status": "passed",
-  "evidence_class": "credentialed_openrouter_generated_history",
-  "provider_command_execution": false,
-  "api_key_env_passed_to_ctx": false,
-  "credential_used_before_ctx_import": true,
-  "ctx_network_required": false,
-  "source_exists_oracle_required": false,
-  "temporary_ctx_data_root": true,
-  "raw_ctx_command_outputs_persisted": false,
-  "raw_generated_histories_persisted": false,
-  "raw_transcripts_persisted": false,
-  "raw_snippets_persisted": false,
-  "raw_queries_persisted": false,
-  "raw_source_paths_persisted": false,
-  "artifact_redaction": "aggregate_and_oracle_counts_only_no_raw_transcripts_snippets_queries_or_source_paths",
-  "generated_provider_count": ${selected},
-  "providers_passed": ${passed},
-  "providers_failed": ${failed},
-  "generated_sessions_imported": ${total_sessions},
-  "generated_events_imported": ${total_events},
-  "generated_edges_imported": ${total_edges},
-  "per_provider_evidence_root": "generated-providers",
-  "generated_providers": ${provider_results_json},
-  "health": {
-    "indexed_items": ${indexed_items},
-    "indexed_sources": ${indexed_sources},
-    "doctor_ok": ${doctor_ok},
-    "validate_valid": ${validate_valid}
-  },
-  "git_commit": "$(ctx_json_escape "${commit}")",
-  "git_branch": "$(ctx_json_escape "${branch}")",
-  "generated_at_unix_s": ${generated_at}
-}
-EOF
-
-  cat > "${markdown}" <<EOF
-# OpenRouter Generated Provider Live E2E
-
-- Publishing: false
-- Status: passed
-- Evidence class: credentialed OpenRouter generated history
-- Provider command execution: false
-- API key environment passed to ctx: false
-- Credential used before ctx import: true
-- ctx network required: false
-- Source-exists oracle required: false
-- Temporary \`CTX_DATA_ROOT\`: true
-- Artifact redaction: aggregate counts only; no raw transcripts, snippets, queries, or source paths.
-- Generated providers: ${selected}
-- Providers passed: ${passed}
-- Imported sessions: ${total_sessions}
-- Imported events: ${total_events}
-- Imported edges: ${total_edges}
-- Per-provider evidence root: \`generated-providers\`
-- Indexed items: ${indexed_items}
-- Indexed sources: ${indexed_sources}
-- Doctor OK: ${doctor_ok}
-- Validate valid: ${validate_valid}
-
-## Generated Provider Evidence
-
-${provider_results_markdown}
-EOF
-
-  api_key_guard="${OPENROUTER_API_KEY:-}"
-  ctx_secret_guard="${CTX_OPENROUTER_API_KEY:-}"
-  rm -rf "${tmp_root}"
-  artifact_guard_no_raw_values "${json}" "${markdown}" "${api_key_guard}" "${ctx_secret_guard}" "${raw_query_guards[@]}" "${raw_source_path_guards[@]}"
-}
-
 run_selected() {
   local selected=0 passed=0 skipped=0 blocked=0 failed=0 provider env_name provider_dir status provider_exit
 
@@ -1823,8 +1248,6 @@ run_selected() {
       set +e
       if [[ "$(provider_live_capability "${provider}")" == "local_history_smoke" ]]; then
         run_local_history_provider "${provider}" "${provider_dir}"
-      elif [[ "$(provider_live_capability "${provider}")" == "credentialed_generated_multi_session_smoke" ]]; then
-        run_openrouter_generated_provider "${provider_dir}"
       else
         run_fixture_only_provider "${provider}" "${provider_dir}"
       fi
@@ -1885,8 +1308,6 @@ main() {
       provider_env_name "${provider}" >/dev/null
       if [[ "$(provider_live_capability "${provider}")" == "local_history_smoke" ]]; then
         ctx_run_timed "provider-live-e2e-${provider}" run_local_history_provider "${provider}" "${CTX_ARTIFACT_DIR}"
-      elif [[ "$(provider_live_capability "${provider}")" == "credentialed_generated_multi_session_smoke" ]]; then
-        ctx_run_timed "provider-live-e2e-${provider}" run_openrouter_generated_provider "${CTX_ARTIFACT_DIR}"
       else
         ctx_run_timed "provider-live-e2e-${provider}" run_fixture_only_provider "${provider}" "${CTX_ARTIFACT_DIR}"
       fi

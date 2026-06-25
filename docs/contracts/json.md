@@ -190,12 +190,11 @@ Both commands read local storage and return findings:
 ```bash
 scripts/release-provider-live-e2e-lanes.sh run codex
 scripts/release-provider-live-e2e-lanes.sh run pi
-scripts/release-provider-live-e2e-lanes.sh run openrouter
 scripts/release-provider-live-e2e-lanes.sh run-selected
 ```
 
 These manual artifacts are not raw `ctx` command output. They are redacted
-summaries written only after explicit local-history or generated-history opt-in.
+summaries written only after explicit native local-history opt-in.
 
 `live-e2e.json` returns:
 
@@ -206,50 +205,14 @@ summaries written only after explicit local-history or generated-history opt-in.
 - `status`, such as `passed`, `skipped`, `blocked`, or `failed`;
 - `evidence_class: "manual_opt_in_local_history"` for passing Codex/Pi
   local-history provider runs;
-- `evidence_class: "credentialed_openrouter_generated_history"` for the passing
-  OpenRouter generated-history aggregate run;
 - `provider_command_execution: false`;
 - `api_key_env_passed_to_ctx: false`;
-- `credential_used_before_ctx_import: true` for OpenRouter generated-history
-  runs;
-- `ctx_network_required: false` for OpenRouter generated-history runs after the
-  temporary histories have been created;
 - `temporary_ctx_data_root: true` for passing provider runs;
 - redaction flags for raw transcripts, snippets, queries, source paths, and raw
   ctx command output;
 - aggregate import counts;
 - aggregate search result counts;
 - aggregate health counts and booleans;
-- `per_provider_evidence_root: "generated-providers"` and
-  `generated_providers[]` for the OpenRouter generated-history aggregate;
-- git commit, branch, and generated timestamp.
-
-The OpenRouter generated-history aggregate also writes per-provider redacted
-artifacts under:
-
-```text
-generated-providers/<provider>/live-e2e.json
-generated-providers/<provider>/live-e2e.md
-```
-
-Each generated-provider `live-e2e.json` returns:
-
-- `schema_version`;
-- `kind: "openrouter_generated_provider_live_e2e_result"`;
-- `publishing: false`;
-- `provider`;
-- `status: "passed"`;
-- `evidence_class: "credentialed_openrouter_generated_history_provider"`;
-- `source_format`;
-- execution flags including `provider_command_execution: false`,
-  `api_key_env_passed_to_ctx: false`, `credential_used_before_ctx_import: true`,
-  `ctx_network_required: false`, and `temporary_ctx_data_root: true`;
-- raw-output redaction flags for generated histories, transcripts, snippets,
-  queries, source paths, and raw ctx command output;
-- imported session/event/edge counts;
-- search result counts;
-- `retrieval_oracle.passed: true`;
-- `retrieval_oracle.source_exists_oracle_required: false`;
 - git commit, branch, and generated timestamp.
 
 The selected runner writes a root `live-e2e.json` with selected, passed,

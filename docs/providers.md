@@ -20,21 +20,24 @@ ctx sources
 ctx sources --json
 ```
 
-If a provider is not listed by `ctx sources`, the current CLI does not discover
-or import that provider's native history.
+`ctx sources --json` reports each known provider source with `import_support`
+and `native_import` fields. Sources with `import_support: "unsupported"` are
+detections or blockers, not importable native history.
 
-## Normalized Harness Imports
+## Developer Normalized Inputs
 
-The CLI also accepts explicit normalized provider JSONL for Claude, OpenCode,
-Antigravity, Gemini, Cursor, Copilot CLI, Factory AI Droid, and Amp. This path
-is for adapter harnesses, generated test histories, and future native importer
-development. It is not native provider history discovery.
+The CLI has a developer/test-only normalized provider JSONL input for Claude,
+OpenCode, Antigravity, Gemini, Cursor, Copilot CLI, Factory AI Droid, and Amp.
+Set `CTX_PROVIDER_NORMALIZED_IMPORT_DEV=1` when using that input. It is for
+adapter harnesses, generated static fixture drafting, and future native importer
+development. It is not native provider history discovery or user-facing
+provider support.
 
-If one of these providers is selected without `--path`, `ctx import` returns an
-error explaining that an explicit normalized provider JSONL path is required.
-Do not document one of these providers as natively locally importable until the
-CLI can discover or parse that provider's real local history and the provider
-support matrix marks the shipped path accordingly.
+If one of these providers is selected without a proven native importer, `ctx
+import` returns a provider-specific native-history blocker. Do not document one
+of these providers as natively locally importable until the CLI can discover or
+parse that provider's real local history and the provider support matrix marks
+the shipped path accordingly.
 
 ## Live Provider E2E
 
@@ -72,30 +75,14 @@ booleans only. They must not include raw transcripts, snippets, queries, or
 source paths. Provider-specific native lanes for providers without native
 local-history importers produce blocked artifacts instead of passing live proof.
 
-There is also a default-off generated OpenRouter lane. That lane uses
-`scripts/run-openrouter-provider-e2e-infisical.sh` to hydrate OpenRouter
-credential and endpoint configuration from Infisical before `ctx import` creates
-temporary synthetic multi-session histories for the 10 generated providers. If
-the Buildkite agent hook already hydrated OpenRouter env from Infisical, the
-wrapper uses that pre-hydrated environment without requiring an `infisical`
-binary.
-Buildkite invokes the target through `scripts/check.sh -- test`, so Bazel
-bootstrap is the same as the main CI gate. The lane passes a deterministic
-non-secret OpenRouter model override to the Bazel test environment because
-Buildkite runner hooks pre-hydrate credentials but not model names; the
-generator has an optional free-model guard for projects whose OpenRouter
-provider policy permits free aliases. It then runs the
-same scrubbed `ctx setup`, `ctx import`, `ctx search`, `ctx status`, `ctx
-doctor`, and `ctx validate` flow and writes redacted per-provider evidence
-under `generated-providers/<provider>/` plus an aggregate summary. It proves ctx
-retrieval over generated provider histories for the normalized-only providers;
-it does not prove native vendor transcript discovery.
+OpenRouter-generated histories are a developer drafting aid for static fixtures
+only. They are not a provider-live lane, release-contract requirement, CI gate,
+or native vendor transcript discovery proof.
 
 Bazel provider-live targets skip the `ctx` build when the lane is skipped or
-only writes native-import blocker artifacts. When a real Codex, Pi, or generated
-OpenRouter run is selected, the wrapper may build or use `ctx`, but the lane
-runtime still uses only `ctx` commands with credential and provider CLI
-environments left out.
+only writes native-import blocker artifacts. When a real Codex or Pi run is
+selected, the wrapper may build or use `ctx`, but the lane runtime still uses
+only `ctx` commands with credential and provider CLI environments left out.
 
 ## Import Rules
 

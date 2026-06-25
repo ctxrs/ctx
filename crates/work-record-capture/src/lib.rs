@@ -27,6 +27,13 @@ use work_record_core::{
 };
 use work_record_store::{CatalogSession, Store, StoreError};
 
+pub mod provider_sources;
+pub use provider_sources::{
+    discover_provider_sources, provider_source_for_path, provider_source_spec,
+    provider_source_specs, ProviderCatalogSupport, ProviderDefaultLocation, ProviderImportSupport,
+    ProviderSource, ProviderSourceKind, ProviderSourceSpec, ProviderSourceStatus,
+};
+
 pub const CAPTURE_SCHEMA_VERSION: u32 = 1;
 #[derive(Debug, Error)]
 pub enum CaptureError {

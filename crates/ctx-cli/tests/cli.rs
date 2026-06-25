@@ -992,7 +992,9 @@ fn normalized_provider_cli_flow_covers_all_harness_providers_with_multiple_sessi
         let query = format!("{stored_provider}-multi-session-oracle");
         let fixture = write_multi_session_provider_fixture(&temp, stored_provider, &query);
 
-        let imported = json_output(ctx(&temp).args([
+        let mut import_cmd = ctx(&temp);
+        import_cmd.env("CTX_PROVIDER_NORMALIZED_IMPORT_DEV", "1");
+        let imported = json_output(import_cmd.args([
             "import",
             "--provider",
             cli_provider,
@@ -1026,7 +1028,9 @@ fn normalized_provider_cli_flow_covers_all_harness_providers_with_multiple_sessi
         let validate = json_output(ctx(&temp).args(["validate", "--json"]));
         assert_eq!(validate["valid"], true);
 
-        let second = json_output(ctx(&temp).args([
+        let mut second_cmd = ctx(&temp);
+        second_cmd.env("CTX_PROVIDER_NORMALIZED_IMPORT_DEV", "1");
+        let second = json_output(second_cmd.args([
             "import",
             "--provider",
             cli_provider,
@@ -1069,32 +1073,59 @@ fn normalized_provider_cli_flow_covers_all_harness_providers_with_multiple_sessi
 
 #[test]
 fn normalized_provider_cli_requires_explicit_path_for_non_discovered_providers() {
-    for (cli_provider, stored_provider) in [
-        ("claude", "claude"),
-        ("opencode", "opencode"),
-        ("antigravity", "antigravity"),
-        ("gemini", "gemini"),
-        ("cursor", "cursor"),
-        ("copilot-cli", "copilot_cli"),
-        ("factory-ai-droid", "factory_ai_droid"),
-        ("amp", "amp"),
+    for (cli_provider, expected_blocker) in [
+        ("claude", "native Claude local-history import is blocked"),
+        ("opencode", "native OpenCode import is blocked"),
+        ("antigravity", "native Antigravity import is blocked"),
+        ("gemini", "native Gemini import is blocked"),
+        ("cursor", "native Cursor import is blocked"),
+        (
+            "copilot-cli",
+            "Copilot CLI local history is detected but unsupported",
+        ),
+        (
+            "factory-ai-droid",
+            "Factory AI Droid native import is blocked",
+        ),
+        ("amp", "Amp native local thread import is blocked"),
     ] {
         let temp = tempdir();
         ctx(&temp)
             .args(["import", "--provider", cli_provider, "--json"])
             .assert()
             .failure()
-            .stderr(predicate::str::contains(format!(
-                "{stored_provider} imports require an explicit --path to normalized provider JSONL",
-            )));
+            .stderr(predicate::str::contains(expected_blocker));
     }
+}
+
+#[test]
+fn normalized_provider_cli_requires_developer_opt_in_for_explicit_path() {
+    let temp = tempdir();
+    let fixture = provider_fixture("claude.jsonl");
+
+    ctx(&temp)
+        .args([
+            "import",
+            "--provider",
+            "claude",
+            "--path",
+            &fixture,
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "claude normalized provider JSONL import is a developer-only input",
+        ));
 }
 
 #[test]
 fn normalized_provider_cli_rejects_provider_mismatches() {
     let temp = tempdir();
     let fixture = provider_fixture("claude.jsonl");
-    let imported = json_output(ctx(&temp).args([
+    let mut import_cmd = ctx(&temp);
+    import_cmd.env("CTX_PROVIDER_NORMALIZED_IMPORT_DEV", "1");
+    let imported = json_output(import_cmd.args([
         "import",
         "--provider",
         "gemini",

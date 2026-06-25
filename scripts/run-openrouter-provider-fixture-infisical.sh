@@ -3,14 +3,14 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-usage: scripts/run-openrouter-provider-e2e-infisical.sh COMMAND [ARG...]
+usage: scripts/run-openrouter-provider-fixture-infisical.sh COMMAND [ARG...]
 
-Runs a command with OpenRouter live-E2E secrets hydrated through Infisical.
+Runs a manual OpenRouter fixture-drafting command with secrets hydrated through Infisical.
 If the runner hook already provided OPENROUTER_API_KEY or CTX_OPENROUTER_API_KEY,
 the command is executed with that pre-hydrated environment.
 
 Configuration:
-  CTX_LIVE_PROVIDER_OPENROUTER_USE_INFISICAL=0  bypass Infisical and exec COMMAND
+  CTX_OPENROUTER_FIXTURE_USE_INFISICAL=0  bypass Infisical and exec COMMAND
   CTX_OPENROUTER_INFISICAL_PROJECT_ID           Infisical project id
   CTX_OPENROUTER_INFISICAL_ENV                  Infisical environment, defaults to prod
   CTX_OPENROUTER_INFISICAL_PATH                 Infisical path, defaults to /
@@ -34,7 +34,7 @@ if (( $# == 0 )); then
   exit 64
 fi
 
-if [[ "${CTX_LIVE_PROVIDER_OPENROUTER_USE_INFISICAL:-1}" != "1" ]]; then
+if [[ "${CTX_OPENROUTER_FIXTURE_USE_INFISICAL:-1}" != "1" ]]; then
   exec "$@"
 fi
 

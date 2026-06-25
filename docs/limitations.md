@@ -10,9 +10,11 @@ shipped.
 - Pi local import is supported only when a matching local `sessions.jsonl` file
   exists.
 - Claude, OpenCode, Antigravity, Gemini, Cursor, Copilot CLI, Factory AI
-  Droid, and Amp accept explicit normalized provider JSONL paths for harnesses,
-  but have no native local importer, native transcript parser, or discovery in
-  the public CLI.
+  Droid, and Amp may appear in `ctx sources` as detection-only rows, but have no
+  native local importer or native transcript parser in the public CLI.
+- Developer/test harnesses can import normalized provider JSONL for those
+  unsupported providers only with `CTX_PROVIDER_NORMALIZED_IMPORT_DEV=1`; this
+  is not native provider support.
 - Unknown provider formats should not be parsed optimistically.
 
 ## Import Semantics

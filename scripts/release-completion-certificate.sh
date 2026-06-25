@@ -863,9 +863,9 @@ validate_provider_live_e2e_lanes() {
   require_contract_fixture_boundary "${manifest}" "provider live E2E lanes"
   require_contains "${notes}" "CTX_LIVE_PROVIDER_E2E=1" "provider live E2E notes record global opt-in"
   require_contains "${notes}" "Codex" "provider live E2E notes include Codex"
-  require_contains "${notes}" "Claude Code" "provider live E2E notes include Claude Code"
-  require_contains "${notes}" "Gemini CLI" "provider live E2E notes include Gemini CLI"
-  require_contains "${notes}" "OpenRouter" "provider live E2E notes include OpenRouter generated harness"
+  require_contains "${notes}" "Pi" "provider live E2E notes include Pi"
+  require_contains "${notes}" "native local-history importers" "provider live E2E notes mark unproven providers blocked"
+  require_not_contains "${notes}" "OpenRouter Generated Harness" "provider live E2E notes do not require OpenRouter generated harness"
 }
 
 validate_release_docs() {
@@ -1358,7 +1358,9 @@ EOF
 - Self-test fixture: true
 - Publishing: false
 - Global opt-in: `CTX_LIVE_PROVIDER_E2E=1`
-- Providers listed by the release contract include Codex, Claude Code, Gemini CLI, and OpenRouter Generated Harness.
+- Native provider live-import lanes currently include Codex and Pi only.
+- Claude Code, Gemini CLI, and other detected providers are blocked pending
+  native local-history importers and sanitized native fixtures.
 EOF
 }
 

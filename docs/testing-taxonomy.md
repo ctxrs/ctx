@@ -20,7 +20,7 @@ validate must not require API keys or product network calls.
 | `release` | Real release artifact proof. | Run only when actual platform artifacts, checksums, install verification, and release evidence are being produced or certified. It is stronger than `release_contract`, not an alias for it. |
 | `nightly` | Broad scheduled validation outside the critical development path. | Run from scheduled automation or by request when slow checks are useful but should not block ordinary iteration. |
 | `perf` | Performance benchmarks and regression checks. | Run before accepting search, indexing, storage, ranking, or dependency changes that could materially alter runtime, memory, or index size. |
-| `provider_live` | Opt-in proof that ctx can import provider history and retrieve search results from it. | Run manually when provider import behavior changes, explicit local history paths are available, or credential-gated generated histories are requested. It must use redacted aggregate artifacts only and must not execute provider CLIs. |
+| `provider_live` | Opt-in proof that ctx can import proven native local provider history and retrieve search results from it. | Run manually when provider import behavior changes and explicit local history paths are available. It must use redacted aggregate artifacts only and must not execute provider CLIs. |
 | `platform` | Operating-system and install proof beyond the default Linux gate. | Run before claiming support for platform-specific packaging, install, shell, filesystem, or worker behavior. |
 | `manual` | Explicitly selected checks requiring local resources, external workers, or human review. | Run only when a mode or target says it is manual. Keep it out of default wildcard, production, and release-contract runs unless explicitly requested. |
 
@@ -45,25 +45,10 @@ when needed.
 - Claims about produced binaries, checksums, install commands, or platform
   availability require `release` artifact proof.
 - Provider-live validation is never implied by `production` or
-  `release_contract`; it requires explicit local-history or generated-history
-  opt-in.
-- Generated OpenRouter provider-live validation uses
-  `scripts/run-openrouter-provider-e2e-infisical.sh` to hydrate OpenRouter
-  credential and endpoint configuration from Infisical before import to create
-  temporary synthetic histories for 10 generated providers. On runners where
-  agent hooks already hydrate OpenRouter env from Infisical, the wrapper uses
-  that pre-hydrated environment.
-  Buildkite invokes the target through `scripts/check.sh -- test` so runner
-  Bazel/Bazelisk bootstrap stays identical to the main CI gate. The live lane
-  passes a deterministic non-secret OpenRouter model override to the test
-  environment because Buildkite runner hooks pre-hydrate credentials but not
-  model names; the generator also has an optional free-model guard for projects
-  whose OpenRouter provider policy permits free aliases.
-  The credential must not be passed to `ctx`, generated raw histories must not
-  be published as artifacts, redacted per-provider evidence is written under
-  `generated-providers/<provider>/`, and setup, import, search, status, doctor,
-  and validate remain local filesystem operations with no product network
-  dependency.
+  `release_contract`; it requires explicit local-history opt-in.
+- OpenRouter-generated histories are developer drafting inputs for static
+  fixtures only. They are not a `provider_live` target, CI gate,
+  release-contract requirement, or native provider import proof.
 - Performance-sensitive changes should add `perf` to the normal gate instead of
   replacing correctness checks.
 - The search performance gate is manual and non-default. Run

@@ -59,39 +59,6 @@ steps:
       - "bazel-testlogs/**/test.outputs/**/ctx-artifacts/**/*"
       - "bazel-testlogs/**/*.zip"
 
-  - label: ":satellite: OpenRouter generated provider E2E"
-    key: "live-provider-e2e-openrouter"
-    depends_on: "search-mvp"
-    if: build.env("CTX_LIVE_PROVIDER_OPENROUTER") == "1"
-    command: |
-      ./scripts/run-openrouter-provider-e2e-infisical.sh \
-        ./scripts/check.sh -- test //:provider_live_e2e_openrouter --config=ci --test_output=all \
-          --test_env=CTX_LIVE_PROVIDER_E2E=1 \
-          --test_env=CTX_LIVE_PROVIDER_OPENROUTER=1 \
-          --test_env=CTX_LIVE_PROVIDER_OPENROUTER_GENERATE=1 \
-          --test_env=CTX_LIVE_PROVIDER_OPENROUTER_ALLOW_DEFAULT_FREE_MODEL=1 \
-          --test_env=OPENROUTER_API_KEY \
-          --test_env=CTX_OPENROUTER_API_KEY \
-          --test_env=OPENROUTER_BASE_URL \
-          --test_env=CTX_OPENROUTER_BASE_URL \
-          --test_env=CTX_E2E_OPENROUTER_MODEL_OVERRIDE=google/gemini-2.5-flash \
-          --test_env=CTX_LIVE_PROVIDER_OPENROUTER_MODEL
-    env:
-      CTX_LIVE_PROVIDER_OPENROUTER_USE_INFISICAL: "1"
-      CTX_OPENROUTER_INFISICAL_PROJECT_ID: "590927ab-758e-41b0-9e15-4cf070e87cf4"
-      CTX_OPENROUTER_INFISICAL_ENV: "prod"
-      CTX_OPENROUTER_INFISICAL_PATH: "/"
-    agents:
-      queue: "release-linux-managed"
-      ctx-runner-class: "release-linux-x64-stage"
-      os: "linux"
-      arch: "x86_64"
-    timeout_in_minutes: 30
-    artifact_paths:
-      - "bazel-testlogs/provider_live_e2e_openrouter/**/*.log"
-      - "bazel-testlogs/provider_live_e2e_openrouter/**/test.outputs/**/*"
-      - "bazel-testlogs/provider_live_e2e_openrouter/**/*.zip"
-
   - label: ":linux: release artifact smoke"
     key: "linux-release-artifact-smoke"
     depends_on: "search-mvp"

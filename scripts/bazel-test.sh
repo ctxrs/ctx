@@ -1169,7 +1169,9 @@ EOF
 
 - Publishing: false
 - Global opt-in: `CTX_LIVE_PROVIDER_E2E=1`
-- Providers listed by the release contract include Codex, Claude Code, Gemini CLI, and OpenRouter Generated Harness.
+- Native provider live-import lanes currently include Codex and Pi only.
+- Claude Code, Gemini CLI, and other detected providers are blocked pending
+  native local-history importers and sanitized native fixtures.
 EOF
 }
 
@@ -1636,10 +1638,6 @@ run_release_artifact_evidence_freebsd_contract() {
 provider_live_selected_needs_ctx_bin() {
   [[ "${CTX_LIVE_PROVIDER_E2E:-0}" == "1" ]] || return 1
 
-  if [[ "${CTX_LIVE_PROVIDER_OPENROUTER:-0}" == "1" && "${CTX_LIVE_PROVIDER_OPENROUTER_GENERATE:-0}" == "1" ]]; then
-    return 0
-  fi
-
   [[ "${CTX_LIVE_PROVIDER_ACCEPT_LOCAL_HISTORY:-0}" == "1" ]] || return 1
 
   if [[ "${CTX_LIVE_PROVIDER_CODEX:-0}" == "1" && -n "${CTX_LIVE_PROVIDER_CODEX_SESSIONS_PATH:-}" ]]; then
@@ -1657,9 +1655,6 @@ provider_live_single_needs_ctx_bin() {
   [[ "${CTX_LIVE_PROVIDER_E2E:-0}" == "1" ]] || return 1
 
   case "${provider}" in
-    openrouter)
-      [[ "${CTX_LIVE_PROVIDER_OPENROUTER:-0}" == "1" && "${CTX_LIVE_PROVIDER_OPENROUTER_GENERATE:-0}" == "1" ]]
-      ;;
     codex)
       [[ "${CTX_LIVE_PROVIDER_ACCEPT_LOCAL_HISTORY:-0}" == "1" ]] || return 1
       [[ "${CTX_LIVE_PROVIDER_CODEX:-0}" == "1" && -n "${CTX_LIVE_PROVIDER_CODEX_SESSIONS_PATH:-}" ]]
@@ -1901,9 +1896,6 @@ case "${mode}" in
     ;;
   provider_live_e2e_pi)
     run_provider_live_e2e pi
-    ;;
-  provider_live_e2e_openrouter)
-    run_provider_live_e2e openrouter
     ;;
   provider_live_e2e_selected)
     run_provider_live_e2e_selected

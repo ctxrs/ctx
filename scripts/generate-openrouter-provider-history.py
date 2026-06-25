@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Generate temporary provider histories for credential-gated live E2E.
+"""Draft temporary static provider-history fixtures with OpenRouter.
 
-This script is a test harness. It may use OpenRouter credentials to generate
-synthetic assistant text, but the generated histories are then imported by ctx
-as ordinary local files. Do not call this from product setup/import/search.
+This is a developer drafting helper only. It may use OpenRouter credentials to
+generate synthetic assistant text for files that a developer reviews and
+sanitizes before committing as static fixtures. It is not a release, CI,
+provider-live, or native provider-support proof.
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ PROVIDER_ALIASES = {
 }
 
 DEFAULT_FREE_MODEL = "meta-llama/llama-3.1-8b-instruct:free"
-REQUIRE_FREE_MODEL_ENV = "CTX_LIVE_PROVIDER_OPENROUTER_REQUIRE_FREE_MODEL"
+REQUIRE_FREE_MODEL_ENV = "CTX_OPENROUTER_FIXTURE_REQUIRE_FREE_MODEL"
 
 
 def env_first(*names: str) -> str | None:
@@ -55,21 +56,18 @@ def model_for(provider: str, explicit: str | None) -> str:
         return explicit
     provider_key = provider_env_name(provider)
     model = env_first(
-        f"CTX_E2E_{provider_key}_OPENROUTER_MODEL_OVERRIDE",
-        "CTX_LIVE_PROVIDER_OPENROUTER_MODEL",
-        "CTX_E2E_OPENROUTER_MODEL_OVERRIDE",
-        "CTX_RELEASE_E2E_OPENROUTER_MODEL",
-        "CTX_RELEASE_PREFLIGHT_OPENROUTER_MODEL",
+        f"CTX_OPENROUTER_FIXTURE_{provider_key}_MODEL",
+        "CTX_OPENROUTER_FIXTURE_MODEL",
     )
     if model:
         return model
-    if os.environ.get("CTX_LIVE_PROVIDER_OPENROUTER_ALLOW_DEFAULT_FREE_MODEL") == "1":
+    if os.environ.get("CTX_OPENROUTER_FIXTURE_ALLOW_DEFAULT_FREE_MODEL") == "1":
         return os.environ.get(
-            "CTX_LIVE_PROVIDER_OPENROUTER_DEFAULT_FREE_MODEL", DEFAULT_FREE_MODEL
+            "CTX_OPENROUTER_FIXTURE_DEFAULT_FREE_MODEL", DEFAULT_FREE_MODEL
         )
     raise SystemExit(
-        "OpenRouter model env is required; set CTX_LIVE_PROVIDER_OPENROUTER_MODEL "
-        "or CTX_E2E_OPENROUTER_MODEL_OVERRIDE"
+        "OpenRouter model env is required; set CTX_OPENROUTER_FIXTURE_MODEL "
+        "or a provider-specific CTX_OPENROUTER_FIXTURE_<PROVIDER>_MODEL"
     )
 
 
@@ -93,7 +91,7 @@ def openrouter_completion(provider: str, query: str, model: str) -> str:
         base_url = "https://openrouter.ai/api/v1"
     url = base_url.rstrip("/") + "/chat/completions"
     prompt = (
-        "Write one short, non-sensitive assistant response for a ctx live E2E "
+        "Write one short, non-sensitive assistant response for a ctx static fixture "
         f"synthetic {provider} history. Include this marker exactly once: {query}. "
         "Do not include credentials, personal data, URLs with tokens, or local paths."
     )
@@ -102,7 +100,7 @@ def openrouter_completion(provider: str, query: str, model: str) -> str:
         "messages": [
             {
                 "role": "system",
-                "content": "You generate synthetic release smoke test text only.",
+                "content": "You generate synthetic static fixture drafting text only.",
             },
             {"role": "user", "content": prompt},
         ],
@@ -116,7 +114,7 @@ def openrouter_completion(provider: str, query: str, model: str) -> str:
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
             "HTTP-Referer": "https://github.com/ctxrs/ctx",
-            "X-Title": "search live e2e",
+            "X-Title": "search fixture drafting",
         },
         method="POST",
     )
@@ -166,9 +164,9 @@ def normalized_rows(provider: str, query: str, completion: str) -> list[dict]:
         "role_hint": "primary",
         "is_primary": True,
         "status": "imported",
-        "cwd": "/workspace/openrouter-provider-e2e",
+        "cwd": "/workspace/openrouter-provider-fixture",
         "metadata": {
-            "source": "openrouter-live-e2e",
+            "source": "openrouter-static-fixture",
             "synthetic": True,
             "raw_retention": "path_reference",
         },
@@ -187,8 +185,8 @@ def normalized_rows(provider: str, query: str, completion: str) -> list[dict]:
                 "event_type": "message",
                 "role": "user",
                 "occurred_at": at(1),
-                "payload": {"text": f"{query} primary requests provider release smoke."},
-                "metadata": {"source": "openrouter-live-e2e"},
+                "payload": {"text": f"{query} primary requests provider fixture draft."},
+                "metadata": {"source": "openrouter-static-fixture"},
             },
         },
         {
@@ -211,7 +209,7 @@ def normalized_rows(provider: str, query: str, completion: str) -> list[dict]:
                 "role": "assistant",
                 "occurred_at": at(3),
                 "payload": {"text": f"{query} worker generated response: {completion}"},
-                "metadata": {"source": "openrouter-live-e2e"},
+                "metadata": {"source": "openrouter-static-fixture"},
             },
         },
         {
@@ -227,8 +225,8 @@ def normalized_rows(provider: str, query: str, completion: str) -> list[dict]:
                 "event_type": "message",
                 "role": "assistant",
                 "occurred_at": at(61),
-                "payload": {"text": f"{query} followup validates release smoke retrieval."},
-                "metadata": {"source": "openrouter-live-e2e"},
+                "payload": {"text": f"{query} followup validates static fixture retrieval."},
+                "metadata": {"source": "openrouter-static-fixture"},
             },
         },
     ]
@@ -249,10 +247,10 @@ def write_codex_history(output: Path, query: str, completion: str) -> tuple[Path
                 "payload": {
                     "id": primary,
                     "timestamp": at(0),
-                    "cwd": "/workspace/openrouter-provider-e2e",
-                    "originator": "codex-live-e2e",
+                    "cwd": "/workspace/openrouter-provider-fixture",
+                    "originator": "codex-static-fixture",
                     "cli_version": "synthetic",
-                    "source": "openrouter-live-e2e",
+                    "source": "openrouter-static-fixture",
                     "model_provider": "openrouter",
                 },
             },
@@ -290,8 +288,8 @@ def write_codex_history(output: Path, query: str, completion: str) -> tuple[Path
                 "payload": {
                     "id": worker,
                     "timestamp": at(3),
-                    "cwd": "/workspace/openrouter-provider-e2e",
-                    "originator": "codex-live-e2e",
+                    "cwd": "/workspace/openrouter-provider-fixture",
+                    "originator": "codex-static-fixture",
                     "cli_version": "synthetic",
                     "source": {
                         "subagent": {
@@ -328,10 +326,10 @@ def write_codex_history(output: Path, query: str, completion: str) -> tuple[Path
                 "payload": {
                     "id": followup,
                     "timestamp": at(60),
-                    "cwd": "/workspace/openrouter-provider-e2e",
-                    "originator": "codex-live-e2e",
+                    "cwd": "/workspace/openrouter-provider-fixture",
+                    "originator": "codex-static-fixture",
                     "cli_version": "synthetic",
-                    "source": "openrouter-live-e2e",
+                    "source": "openrouter-static-fixture",
                     "model_provider": "openrouter",
                 },
             },
@@ -356,7 +354,7 @@ def write_pi_history(output: Path, query: str, completion: str) -> tuple[Path, i
             "version": 3,
             "id": "pi-openrouter-primary",
             "timestamp": at(0),
-            "cwd": "/workspace/openrouter-provider-e2e",
+            "cwd": "/workspace/openrouter-provider-fixture",
         },
         {
             "type": "message",
@@ -374,7 +372,7 @@ def write_pi_history(output: Path, query: str, completion: str) -> tuple[Path, i
                 "role": "assistant",
                 "content": f"{query} generated response: {completion}",
                 "provider": "openrouter",
-                "model": "openrouter-live-e2e",
+                "model": "openrouter-static-fixture",
             },
         },
         {
@@ -382,7 +380,7 @@ def write_pi_history(output: Path, query: str, completion: str) -> tuple[Path, i
             "version": 3,
             "id": "pi-openrouter-worker",
             "timestamp": at(3),
-            "cwd": "/workspace/openrouter-provider-e2e",
+            "cwd": "/workspace/openrouter-provider-fixture",
         },
         {
             "type": "message",
@@ -396,7 +394,7 @@ def write_pi_history(output: Path, query: str, completion: str) -> tuple[Path, i
             "version": 3,
             "id": "pi-openrouter-followup",
             "timestamp": at(60),
-            "cwd": "/workspace/openrouter-provider-e2e",
+            "cwd": "/workspace/openrouter-provider-fixture",
         },
         {
             "type": "message",

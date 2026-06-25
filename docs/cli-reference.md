@@ -50,10 +50,14 @@ machine. Current rows include:
 
 - Codex session trees at `~/.codex/sessions`;
 - Codex prompt history at `~/.codex/history.jsonl`;
-- Pi session JSONL at `~/.pi/sessions.jsonl`.
+- Pi session JSONL at `~/.pi/sessions.jsonl`;
+- detection-only rows for known but unsupported Claude, OpenCode,
+  Antigravity, Gemini, Cursor, Copilot CLI, Factory AI Droid, and Amp local
+  locations.
 
 Each JSON row includes `provider`, `path`, `exists`, `source_format`, `status`,
-and `raw_retention`. `sources` reads home-directory path metadata and writes
+`import_support`, `native_import`, `raw_retention`, and any
+`unsupported_reason`. `sources` reads home-directory path metadata and writes
 nothing.
 
 ## Import
@@ -65,7 +69,6 @@ ctx import --provider codex
 ctx import --provider pi
 ctx import --path ~/.codex/sessions
 ctx import --provider pi --path ~/.pi/sessions.jsonl
-ctx import --provider copilot-cli --path ./copilot_cli.normalized.jsonl
 ctx import --resume
 ctx import --json
 ```
@@ -81,9 +84,13 @@ Import selection rules:
 - with `--provider`, import discovered sources for that provider;
 - with `--path`, import exactly that path;
 - with `--path` and no provider, parse the path as Codex format;
-- with Claude, OpenCode, Antigravity, Gemini, Cursor, Copilot CLI, Factory AI
-  Droid, or Amp, `--path` is required and must point to normalized provider
-  JSONL rather than native provider history.
+- Claude, OpenCode, Antigravity, Gemini, Cursor, Copilot CLI, Factory AI Droid,
+  and Amp fail closed until native local-history importers ship.
+
+Developer/test fixtures for those unsupported providers may be imported from
+normalized provider JSONL only when `CTX_PROVIDER_NORMALIZED_IMPORT_DEV=1` is
+set. That input is not native provider support and is not used by default
+discovery or `--all`.
 
 The current `--resume` flag is an idempotent-rescan mode marker. JSON reports
 `resume: true` and `resume_mode: "idempotent_rescan"`, but provider-native

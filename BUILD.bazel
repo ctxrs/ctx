@@ -214,20 +214,6 @@ sh_test(
 )
 
 sh_test(
-    name = "provider_live_e2e_openrouter",
-    srcs = ["scripts/bazel-test.sh"],
-    args = ["provider_live_e2e_openrouter"],
-    data = CTX_GATE_DATA,
-    tags = [
-        "exclusive",
-        "external",
-        "local",
-        "manual",
-        "provider-live",
-    ],
-)
-
-sh_test(
     name = "provider_live_e2e_selected",
     srcs = ["scripts/bazel-test.sh"],
     args = ["provider_live_e2e_selected"],
@@ -405,7 +391,6 @@ test_suite(
         ":provider_live_e2e_lane_definitions",
         ":provider_live_e2e_codex",
         ":provider_live_e2e_pi",
-        ":provider_live_e2e_openrouter",
         ":provider_live_e2e_selected",
     ],
 )

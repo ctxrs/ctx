@@ -10,7 +10,7 @@ that provider.
 | --- | --- |
 | `local_import` | The CLI can import an existing local history source for this provider. |
 | `local_import_when_supported` | The CLI has an importer for a specific local format, but support depends on that file existing and matching the documented format. |
-| `normalized_import_only` | The CLI can import explicit normalized provider JSONL for harnesses and adapters, but does not discover or parse the provider's native local history. |
+| `normalized_import_only` | Developer/test-only normalized provider JSONL exists, but this is not user-facing provider support. |
 | `fixture_only` | The repository has sanitized fixture coverage, but the public CLI does not discover or import native local history for that provider. |
 | `detected_unsupported` | The CLI can detect something about the provider but intentionally does not import it. |
 | `blocked` | No shipped discovery or import path exists. |
@@ -25,14 +25,14 @@ is:
 | --- | --- | --- | --- |
 | Codex | `local_import` | `~/.codex/sessions`, `~/.codex/history.jsonl`, or an explicit Codex path. | Manual opt-in local-history smoke. |
 | Pi | `local_import_when_supported` | `~/.pi/sessions.jsonl` or an explicit Pi JSONL path. | Manual opt-in local-history smoke. |
-| Claude | `normalized_import_only` | Explicit normalized provider JSONL path only; no native local-history discovery. | Manual opt-in generated-history smoke. |
-| OpenCode | `normalized_import_only` | Explicit normalized provider JSONL path only; no native local-history discovery. | Manual opt-in generated-history smoke. |
-| Antigravity | `normalized_import_only` | Explicit normalized provider JSONL path only; no native local-history discovery. | Manual opt-in generated-history smoke. |
-| Gemini | `normalized_import_only` | Explicit normalized provider JSONL path only; no native local-history discovery. | Manual opt-in generated-history smoke. |
-| Cursor | `normalized_import_only` | Explicit normalized provider JSONL path only; no native local-history discovery. | Manual opt-in generated-history smoke. |
-| Copilot CLI | `normalized_import_only` | Explicit normalized provider JSONL path only; no native local-history discovery or parser. | Manual opt-in generated-history smoke. |
-| Factory AI Droid | `normalized_import_only` | Explicit normalized provider JSONL path only; no native local-history discovery or parser. | Manual opt-in generated-history smoke. |
-| Amp | `normalized_import_only` | Explicit normalized provider JSONL path only; no native local-history discovery or parser. | Manual opt-in generated-history smoke. |
+| Claude | `detected_unsupported` | Native `.claude/projects` import is blocked until a read-only parser and native fixtures ship. | No live lane; native importer required first. |
+| OpenCode | `detected_unsupported` | Native `opencode.db` or export import is blocked until a read-only parser and native fixtures ship. | No live lane; native importer required first. |
+| Antigravity | `detected_unsupported` | Native import is blocked until a stable local transcript path/schema is proven. | No live lane; native importer required first. |
+| Gemini | `detected_unsupported` | Native session/checkpoint import is blocked until a parser and native fixtures ship. | No live lane; native importer required first. |
+| Cursor | `detected_unsupported` | Native import is blocked until persisted local DB/files and a read-only parser are proven. | No live lane; native importer required first. |
+| Copilot CLI | `detected_unsupported` | Native session-state/session-store import is blocked until schemas, redaction, and read-only fixtures ship. | No live lane; native importer required first. |
+| Factory AI Droid | `detected_unsupported` | Native import is blocked because no stable durable local transcript path/schema is proven. | No live lane; native importer required first. |
+| Amp | `detected_unsupported` | Native local thread import is blocked because no stable local thread file path/schema is proven. | No live lane; native importer required first. |
 
 Fidelity fields in the machine-readable matrix describe the default public CLI
 import behavior and normalized ctx storage fields. Codex command, patch, output,
@@ -71,27 +71,10 @@ provider-filter, citation, `source_exists`, and health oracle counts.
 Fixture-only providers write blocked artifacts until a native read-only local
 importer ships.
 
-The generated OpenRouter lane is separate from native local-history proof. It
-uses `scripts/run-openrouter-provider-e2e-infisical.sh` to hydrate OpenRouter
-credential and endpoint configuration from Infisical before the Bazel target
-generates temporary synthetic histories for Codex, Pi, Claude, OpenCode,
-Antigravity, Gemini, Cursor, Copilot CLI, Factory AI Droid, and Amp. On
-Buildkite runners where the agent hook has already hydrated OpenRouter env from
-Infisical, the same wrapper uses that pre-hydrated environment instead of
-requiring an `infisical` binary on `PATH`.
-Buildkite invokes the Bazel target through `scripts/check.sh -- test`, so the
-same Bazel/Bazelisk bootstrap path is used as the main CI gate. The lane passes
-a deterministic non-secret OpenRouter model override to the Bazel test
-environment because Buildkite runner hooks pre-hydrate credentials but not model
-names; the generator has an optional free-model guard for projects whose
-OpenRouter provider policy permits free aliases.
-Then it runs only `ctx setup`, `ctx import`, `ctx search`, `ctx status`, `ctx
-doctor`, and `ctx validate` with a scrubbed environment. The
-credential is not passed to `ctx`, generated raw histories are not persisted as
-artifacts, and the lane writes redacted per-provider evidence under
-`generated-providers/<provider>/` plus an aggregate summary. `source_exists`
-counts are not required for those temporary histories, and the lane stays out
-of default `production` and `release_contract` gates.
+OpenRouter-generated histories may be used only as a developer drafting aid for
+static fixture work. They are not a default Bazel target, CI target, Buildkite
+step, provider-live lane, release-contract requirement, live test gate, or
+native local-history proof.
 
 The Bazel provider-live wrapper does not build `ctx` for skipped or fixture-only
 blocker lanes. A true Codex or Pi local-history live run may build or use the
@@ -102,8 +85,9 @@ provider network credentials are not used by those lane commands.
 
 ## Required Evidence For Promotion
 
-Before a provider moves beyond `fixture_only`, `normalized_import_only`, or
-`blocked` into native local-history support, the change needs:
+Before a provider moves beyond `fixture_only`, `normalized_import_only`,
+`detected_unsupported`, or `blocked` into native local-history support, the
+change needs:
 
 - a documented local source format;
 - read-only source discovery or an explicit `--path` contract;

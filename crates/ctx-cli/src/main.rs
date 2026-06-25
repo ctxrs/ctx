@@ -14,21 +14,23 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde_json::{json, Value};
 use uuid::Uuid;
 use work_record_capture::{
-    catalog_codex_session_tree, import_codex_history_jsonl, import_codex_session_jsonl,
-    import_codex_session_paths, import_codex_session_tree, import_pi_session_jsonl,
-    import_provider_fixture_jsonl, stable_capture_uuid, CatalogSummary, CodexHistoryImportOptions,
+    catalog_codex_session_tree, discover_provider_sources, import_codex_history_jsonl,
+    import_codex_session_jsonl, import_codex_session_paths, import_codex_session_tree,
+    import_pi_session_jsonl, import_provider_fixture_jsonl, provider_source_for_path,
+    provider_source_spec, stable_capture_uuid, CatalogSummary, CodexHistoryImportOptions,
     CodexSessionCatalogOptions, CodexSessionImportOptions, CodexSessionImportProgress,
     CodexSessionImportProgressCallback, CodexToolOutputMode, PiSessionImportOptions,
-    ProviderFixtureImportOptions, ProviderImportSummary,
+    ProviderFixtureImportOptions, ProviderImportSummary, ProviderImportSupport, ProviderSource,
 };
 use work_record_core::{
     database_path, default_data_root, CaptureProvider, ContextCitation, ContextCitationType, Event,
-    EventType, Fidelity, Session, WorkRecord,
+    EventType, Fidelity, ProviderRawRetention, Session, WorkRecord,
 };
 use work_record_store::{CatalogSession, Store};
 
 const CONFIG_FILE: &str = "config.toml";
 const WAL_TRUNCATE_MIN_BYTES: u64 = 64 * 1024 * 1024;
+const NORMALIZED_PROVIDER_IMPORT_DEV_ENV: &str = "CTX_PROVIDER_NORMALIZED_IMPORT_DEV";
 
 #[derive(Debug, Parser)]
 #[command(name = "ctx", version, about = "Search local agent history")]
@@ -182,24 +184,9 @@ impl ProviderArg {
             Self::Amp => CaptureProvider::Amp,
         }
     }
-
-    fn as_str(self) -> &'static str {
-        self.capture_provider().as_str()
-    }
-
-    fn supports_discovery(self) -> bool {
-        matches!(self, Self::Codex | Self::Pi)
-    }
 }
 
-#[derive(Debug, Clone)]
-struct SourceInfo {
-    provider: ProviderArg,
-    path: PathBuf,
-    exists: bool,
-    source_format: &'static str,
-    status: &'static str,
-}
+type SourceInfo = ProviderSource;
 
 #[derive(Debug, Default)]
 struct ImportTotals {
@@ -347,7 +334,7 @@ impl ProgressReporter {
         source: &SourceInfo,
         source_offset_bytes: u64,
     ) -> Option<CodexSessionImportProgressCallback> {
-        if !self.is_enabled() || !matches!(source.provider, ProviderArg::Codex) {
+        if !self.is_enabled() || source.provider != CaptureProvider::Codex {
             return None;
         }
         let reporter = self.clone();
@@ -375,7 +362,7 @@ impl ProgressReporter {
         source_index: usize,
         source_states: Arc<Mutex<Vec<SourceProgressSnapshot>>>,
     ) -> Option<CodexSessionImportProgressCallback> {
-        if !self.is_enabled() || !matches!(source.provider, ProviderArg::Codex) {
+        if !self.is_enabled() || source.provider != CaptureProvider::Codex {
             return None;
         }
         let reporter = self.clone();
@@ -754,7 +741,7 @@ fn run_sources(args: JsonArgs) -> Result<()> {
                 "{} {} {} ({})",
                 source.provider.as_str(),
                 source.path.display(),
-                source.status,
+                source.status.as_str(),
                 source.source_format
             );
         }
@@ -769,7 +756,7 @@ fn catalog_available_sources(
     let mut totals = CatalogTotals::default();
     let mut catalog_sources = Vec::new();
     for source in sources {
-        if source.provider.as_str() != ProviderArg::Codex.as_str()
+        if source.provider != CaptureProvider::Codex
             || source.source_format != "codex_session_jsonl_tree"
             || !source.exists
         {
@@ -1520,26 +1507,70 @@ fn run_validate(args: JsonArgs, data_root: PathBuf) -> Result<()> {
 
 fn import_requests(args: &ImportArgs) -> Result<Vec<SourceInfo>> {
     if let Some(path) = &args.path {
-        let provider = args.provider.unwrap_or(ProviderArg::Codex);
-        return Ok(vec![source_for_path(provider, path.clone())]);
+        let provider = args
+            .provider
+            .unwrap_or(ProviderArg::Codex)
+            .capture_provider();
+        let source = source_for_path(provider, path.clone());
+        validate_source_import_supported(&source)?;
+        return Ok(vec![source]);
     }
     if args.all || args.provider.is_none() {
         return Ok(discovered_sources()
             .into_iter()
-            .filter(|source| source.exists)
+            .filter(|source| {
+                source.exists && matches!(source.import_support, ProviderImportSupport::Native)
+            })
             .collect());
     }
-    let provider = args.provider.expect("checked provider");
-    if !provider.supports_discovery() {
+    let provider = args.provider.expect("checked provider").capture_provider();
+    let sources = discovered_sources()
+        .into_iter()
+        .filter(|source| source.provider == provider && source.exists)
+        .collect::<Vec<_>>();
+    if sources.is_empty() {
+        let spec = provider_source_spec(provider);
+        if let Some(reason) = spec.and_then(|spec| spec.unsupported_reason) {
+            return Err(anyhow!(
+                "{} native import is unsupported: {reason}",
+                provider.as_str()
+            ));
+        }
         return Err(anyhow!(
-            "{} imports require an explicit --path to normalized provider JSONL",
+            "no native {} history found; use `ctx sources` to inspect discovered provider paths",
             provider.as_str()
         ));
     }
-    Ok(discovered_sources()
-        .into_iter()
-        .filter(|source| source.provider.as_str() == provider.as_str() && source.exists)
-        .collect())
+    for source in &sources {
+        validate_source_import_supported(source)?;
+    }
+    Ok(sources)
+}
+
+fn validate_source_import_supported(source: &SourceInfo) -> Result<()> {
+    match source.import_support {
+        ProviderImportSupport::Native => Ok(()),
+        ProviderImportSupport::NormalizedDeveloperOnly => {
+            if env::var_os(NORMALIZED_PROVIDER_IMPORT_DEV_ENV).is_some() {
+                Ok(())
+            } else {
+                Err(anyhow!(
+                    "{} normalized provider JSONL import is a developer-only input; set {}=1 to use it explicitly",
+                    source.provider.as_str(),
+                    NORMALIZED_PROVIDER_IMPORT_DEV_ENV
+                ))
+            }
+        }
+        ProviderImportSupport::Unsupported => {
+            let reason = source
+                .unsupported_reason
+                .unwrap_or("no native local-history parser is implemented");
+            Err(anyhow!(
+                "{} native import is unsupported: {reason}",
+                source.provider.as_str()
+            ))
+        }
+    }
 }
 
 fn import_one_source(
@@ -1582,7 +1613,7 @@ fn import_one_source_inner(
     let tool_output_mode = codex_tool_output_mode()?;
     let include_notices = codex_include_notices();
     let summary = match source.provider {
-        ProviderArg::Codex => {
+        CaptureProvider::Codex => {
             if source.path.is_dir() {
                 if full_rescan {
                     import_codex_session_tree(
@@ -1643,7 +1674,7 @@ fn import_one_source_inner(
                 .map_err(anyhow::Error::from)
             }
         }
-        ProviderArg::Pi => import_pi_session_jsonl(
+        CaptureProvider::Pi => import_pi_session_jsonl(
             &source.path,
             store,
             PiSessionImportOptions {
@@ -1654,20 +1685,20 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
-        ProviderArg::Claude
-        | ProviderArg::OpenCode
-        | ProviderArg::Antigravity
-        | ProviderArg::Gemini
-        | ProviderArg::Cursor
-        | ProviderArg::CopilotCli
-        | ProviderArg::FactoryAiDroid
-        | ProviderArg::Amp => import_provider_fixture_jsonl(
+        CaptureProvider::Claude
+        | CaptureProvider::OpenCode
+        | CaptureProvider::Antigravity
+        | CaptureProvider::Gemini
+        | CaptureProvider::Cursor
+        | CaptureProvider::CopilotCli
+        | CaptureProvider::FactoryAiDroid
+        | CaptureProvider::Amp => import_provider_fixture_jsonl(
             &source.path,
             store,
             ProviderFixtureImportOptions {
                 source_path: Some(source.path.clone()),
                 work_record_id: Some(record_id),
-                expected_provider: Some(source.provider.capture_provider()),
+                expected_provider: Some(source.provider),
                 allow_partial_failures: true,
                 source_format: "normalized_provider_jsonl".to_owned(),
                 fidelity: Fidelity::Partial,
@@ -1675,6 +1706,10 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
+        other => Err(anyhow!(
+            "{} is not registered for provider history import",
+            other.as_str()
+        )),
     }?;
     if refresh_search_after_import {
         store.refresh_search_index()?;
@@ -1782,7 +1817,7 @@ fn mark_catalog_sessions_failed(
 }
 
 fn source_uses_incremental_event_search(source: &SourceInfo) -> bool {
-    matches!(source.provider, ProviderArg::Codex)
+    source.provider == CaptureProvider::Codex
 }
 
 fn codex_tool_output_mode() -> Result<CodexToolOutputMode> {
@@ -1860,46 +1895,14 @@ fn import_record_for_source(source: &SourceInfo) -> WorkRecord {
 }
 
 fn discovered_sources() -> Vec<SourceInfo> {
-    let mut sources = Vec::new();
-    if let Some(home) = home_dir() {
-        sources.push(source_for_path(
-            ProviderArg::Codex,
-            home.join(".codex").join("sessions"),
-        ));
-        sources.push(SourceInfo {
-            provider: ProviderArg::Codex,
-            path: home.join(".codex").join("history.jsonl"),
-            exists: home.join(".codex").join("history.jsonl").exists(),
-            source_format: "codex_history_jsonl",
-            status: if home.join(".codex").join("history.jsonl").exists() {
-                "available"
-            } else {
-                "missing"
-            },
-        });
-        sources.push(source_for_path(
-            ProviderArg::Pi,
-            home.join(".pi").join("sessions.jsonl"),
-        ));
-    }
-    sources
+    home_dir()
+        .as_deref()
+        .map(discover_provider_sources)
+        .unwrap_or_default()
 }
 
-fn source_for_path(provider: ProviderArg, path: PathBuf) -> SourceInfo {
-    let exists = path.exists();
-    let source_format = match provider {
-        ProviderArg::Codex if path.is_dir() => "codex_session_jsonl_tree",
-        ProviderArg::Codex => "codex_session_jsonl",
-        ProviderArg::Pi => "pi_session_jsonl",
-        _ => "normalized_provider_jsonl",
-    };
-    SourceInfo {
-        provider,
-        path,
-        exists,
-        source_format,
-        status: if exists { "available" } else { "missing" },
-    }
+fn source_for_path(provider: CaptureProvider, path: PathBuf) -> SourceInfo {
+    provider_source_for_path(provider, path)
 }
 
 fn sources_json(sources: &[SourceInfo]) -> Vec<Value> {
@@ -1911,11 +1914,32 @@ fn sources_json(sources: &[SourceInfo]) -> Vec<Value> {
                 "path": source.path,
                 "exists": source.exists,
                 "source_format": source.source_format,
-                "status": source.status,
-                "raw_retention": "path_reference",
+                "status": source.status.as_str(),
+                "import_support": import_support_json(source.import_support),
+                "native_import": matches!(source.import_support, ProviderImportSupport::Native),
+                "raw_retention": raw_retention_json(source.raw_retention),
+                "unsupported_reason": source.unsupported_reason,
             })
         })
         .collect()
+}
+
+fn import_support_json(support: ProviderImportSupport) -> &'static str {
+    match support {
+        ProviderImportSupport::Native => "native",
+        ProviderImportSupport::NormalizedDeveloperOnly => "normalized_developer_only",
+        ProviderImportSupport::Unsupported => "unsupported",
+    }
+}
+
+fn raw_retention_json(retention: ProviderRawRetention) -> &'static str {
+    match retention {
+        ProviderRawRetention::None => "none",
+        ProviderRawRetention::PathReference => "path_reference",
+        ProviderRawRetention::MetadataOnly => "metadata_only",
+        ProviderRawRetention::LocalBlob => "local_blob",
+        ProviderRawRetention::Withheld => "withheld",
+    }
 }
 
 fn search_filters(
