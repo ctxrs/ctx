@@ -12,8 +12,6 @@ shipped.
 - Antigravity, Claude, OpenCode, Gemini, Cursor, Copilot CLI, and Factory AI
   Droid local import is supported only when their documented local history
   paths exist and match the supported native formats in the provider matrix.
-- Amp may appear in `ctx sources` as a detection-only row, but has no native
-  local importer or native transcript parser in the public CLI.
 - Developer/test harnesses can import normalized provider JSONL only with
   `CTX_PROVIDER_NORMALIZED_IMPORT_DEV=1`; this is not native provider support.
 - Unknown provider formats should not be parsed optimistically.
@@ -43,7 +41,5 @@ shipped.
 
 ## Operations
 
-- `ctx update` installs only signed release manifests with matching artifact
-  checksums.
 - Core setup/import/search are local filesystem operations.
 - No provider beyond the support matrix should be described as supported.

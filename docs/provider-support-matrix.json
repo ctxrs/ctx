@@ -523,64 +523,6 @@
         "crates/ctx-cli/tests/cli.rs",
         "crates/work-record-capture/src/lib.rs"
       ]
-    },
-    {
-      "id": "amp",
-      "display_name": "Amp",
-      "priority": "p1",
-      "status": "detected_unsupported",
-      "capture_provider": "amp",
-      "implemented_paths": [
-        {
-          "kind": "detection",
-          "source_format": "native_local_history_unimplemented",
-          "fidelity": "summary_only",
-          "proof": [
-            "ctx sources"
-          ],
-          "notes": [
-            "Amp native local thread import is blocked because no stable local thread file path/schema is proven.",
-            "Detection may report ~/.config/amp/settings.json when present, but ctx does not import it."
-          ]
-        },
-        {
-          "kind": "normalized_import",
-          "source_format": "normalized_provider_jsonl",
-          "fidelity": "partial",
-          "proof": [
-            "CTX_PROVIDER_NORMALIZED_IMPORT_DEV=1 ctx import --provider <provider> --path <normalized-provider-jsonl>"
-          ],
-          "notes": [
-            "Developer/test-only normalized JSONL input; not user-facing provider support and not native local-history proof."
-          ]
-        }
-      ],
-      "imports_existing_history": false,
-      "captures_new_runs_passively": false,
-      "child_sessions_supported": false,
-      "fidelity": {
-        "user_prompts": false,
-        "assistant_messages": false,
-        "tool_calls": false,
-        "tool_output": false,
-        "command_output": false,
-        "files_touched": false,
-        "artifacts": false,
-        "model_identity": false,
-        "costs": false,
-        "token_usage": false,
-        "parent_child_session_edges": false
-      },
-      "blockers": [
-        "Amp native local thread import is blocked because no stable local thread file path/schema is proven."
-      ],
-      "public_docs": "docs/provider-support.md",
-      "fixture_paths": [
-        "tests/fixtures/provider/amp.jsonl"
-      ],
-      "tests": [
-        "crates/ctx-cli/tests/cli.rs"
-      ]
     }
   ]
 }

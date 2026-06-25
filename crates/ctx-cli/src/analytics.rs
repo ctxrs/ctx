@@ -13,8 +13,6 @@ pub struct AnalyticsEvent<'a> {
     pub json_output: bool,
     pub success: bool,
     pub duration: Duration,
-    pub update_channel: &'a str,
-    pub auto_update: bool,
 }
 
 pub fn send_cli_event(data_root: &Path, config: &AppConfig, event: AnalyticsEvent<'_>) {
@@ -37,11 +35,11 @@ fn send_cli_event_inner(
     let status = if event.success { "ok" } else { "error" };
     let duration_ms = event.duration.as_millis().min(i64::MAX as u128) as i64;
     let payload = json!({
-        "broker_install_id": install_id,
-        "broker_runtime": "cli",
-        "broker_app_version": env!("CARGO_PKG_VERSION"),
-        "broker_os": std::env::consts::OS,
-        "broker_arch": std::env::consts::ARCH,
+        "ctx_install_id": install_id,
+        "ctx_runtime": "cli",
+        "ctx_app_version": env!("CARGO_PKG_VERSION"),
+        "ctx_os": std::env::consts::OS,
+        "ctx_arch": std::env::consts::ARCH,
         "events": [{
             "event_id": Uuid::now_v7().to_string(),
             "event_name": "cli_invocation",
@@ -63,8 +61,6 @@ fn send_cli_event_inner(
             "properties": {
                 "action": event.action,
                 "json_output": event.json_output,
-                "update_channel": event.update_channel,
-                "auto_update": event.auto_update,
                 "analytics_client": "ctx-cli"
             }
         }]

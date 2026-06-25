@@ -2,8 +2,8 @@
 
 `ctx search` finds matching indexed sessions and events. It first performs a
 quiet best-effort refresh of discovered native provider history, then queries
-the local SQLite store. With analytics disabled, it sends no analytics; with
-default analytics enabled, the command may create `install.json` and send
+the local SQLite store. With analytics disabled, it sends no analytics. If
+analytics is explicitly enabled, the command may create `install.json` and send
 coarse invocation metadata.
 
 ## Search
@@ -38,7 +38,7 @@ A result can include:
 
 Search filters narrow both human output and JSON:
 
-- `--provider codex|pi`;
+- `--provider codex|pi|claude|opencode|antigravity|gemini|cursor|copilot-cli|factory-ai-droid`;
 - `--repo <name-or-path>`;
 - `--since <rfc3339-or-days>d`;
 - `--event-type <event-type>`;

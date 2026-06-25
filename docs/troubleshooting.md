@@ -39,7 +39,8 @@ ctx doctor --json
 ctx validate
 ```
 
-Check whether the command marked any nested schema as provisional.
+Check the command contract in [contracts/json.md](contracts/json.md), including
+whether the field is documented as nullable or compatibility-only.
 
 ## Store Problems
 

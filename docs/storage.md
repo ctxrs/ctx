@@ -55,19 +55,18 @@ is known.
 | Command | Reads | Writes |
 | --- | --- | --- |
 | `ctx setup` | home path metadata for source discovery | data root, `work.sqlite`, `config.toml`, and possibly `install.json` for analytics |
-| `ctx status` | data root metadata, existing SQLite store | possibly `install.json` for analytics and `update-state.json` for throttled updates |
+| `ctx status` | data root metadata, existing SQLite store | possibly `install.json` for analytics |
 | `ctx sources` | known provider paths under the user's home | possibly `install.json` for analytics |
 | `ctx import` | provider transcript files and path metadata | data root, `config.toml` if missing, SQLite index, and possibly `install.json` for analytics |
 | `ctx list` | SQLite index | possibly `install.json` for analytics |
 | `ctx show` | SQLite index | possibly `install.json` for analytics |
 | `ctx search` | provider transcript files, path metadata, and SQLite index | SQLite index for newly discovered history and possibly `install.json` for analytics |
-| `ctx doctor` | SQLite index and data root metadata | possibly `install.json` for analytics and `update-state.json` for throttled updates |
-| `ctx validate` | SQLite index | possibly `install.json` for analytics and `update-state.json` for throttled updates |
-| `ctx uninstall --yes` | data root metadata and current executable path when `--remove-binary` is set | removes the data root unless `--keep-data` is set, and removes the binary only with `--remove-binary` |
+| `ctx doctor` | SQLite index and data root metadata | possibly `install.json` for analytics |
+| `ctx validate` | SQLite index | possibly `install.json` for analytics |
 
 Setup, import, and search do not require source repository writes, model APIs,
-API keys, or remote accounts. First-party analytics and update checks are the
-only default network features; disable them for strict local-only runs.
+API keys, or remote accounts. First-party analytics are disabled by default and
+are the only first-party network feature in this surface.
 
 ## Default Config
 
@@ -78,29 +77,15 @@ only default network features; disable them for strict local-only runs.
 The day-1 generated config is:
 
 ```toml
-[updates]
-channel = "stable"
-auto_update = true
-```
-
-Analytics are enabled by default when `[analytics] enabled` is absent. To opt
-out, add:
-
-```toml
 [analytics]
 enabled = false
 ```
 
-Automatic update checks use the `stable` channel by default. These checks report
-availability in JSON mode and install verified updates in interactive status,
-doctor, and validate runs. ctx verifies the signed release manifest, artifact
-size, and SHA-256 digest before replacing its own binary, and keeps the previous
-binary next to the install target with a `.ctx-previous` suffix. To disable the
-checks, add:
+To opt in to first-party analytics, add:
 
 ```toml
-[updates]
-auto_update = false
+[analytics]
+enabled = true
 ```
 
 ## Index Lifecycle
@@ -185,5 +170,4 @@ Core setup, source discovery, import, and search commands are local filesystem
 operations. The tools that originally produced provider transcripts may have
 used the network according to their own configuration; ctx indexing those
 transcripts does not repeat that behavior. Analytics sends coarse command
-metadata unless disabled. Updates use the release endpoint only for `ctx update`
-and the throttled status/doctor/validate auto-update path.
+metadata only when enabled.

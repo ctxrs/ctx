@@ -4,7 +4,8 @@ ctx JSON is for local agents and scripts. It can include prompts, command
 output previews, and local paths. Treat it as private until a user reviews and
 redacts it.
 
-All JSON commands currently use `schema_version: 1`.
+Command result JSON currently uses `schema_version: 1`. Progress-event JSON is
+stderr telemetry and does not include `schema_version`.
 
 ## Setup
 
@@ -57,7 +58,15 @@ Each source includes:
 - `exists`;
 - `source_format`;
 - `status`;
-- `raw_retention`.
+- `import_support`;
+- `native_import`;
+- `raw_retention`;
+- `unsupported_reason`.
+
+`status` is `available`, `missing`, or `unsupported`. `import_support` is
+`native`, `normalized_developer_only`, or `unsupported`. `native_import` is a
+boolean derived from `import_support == "native"`. `unsupported_reason` is a
+string for unsupported rows and otherwise null.
 
 ## Import
 
@@ -76,6 +85,40 @@ Writes the local SQLite index and returns:
 `totals` and each source row include file, byte, session, event, edge, skipped,
 and failed counts. `resume_mode` is currently `idempotent_rescan` when
 `--resume` is passed and `normal_scan` otherwise.
+
+## Progress
+
+```bash
+ctx setup --progress json
+ctx import --progress json
+ctx import --json --progress json
+```
+
+`--progress json` writes newline-delimited progress objects to stderr for
+`setup` and `import`. It does not change command result stdout. This means
+`ctx import --json --progress json` writes the import result object to stdout
+and zero or more progress objects to stderr.
+
+Each progress object includes:
+
+- `type: "ctx_progress"`;
+- `operation`, currently `setup` or `import`;
+- `phase`;
+- `message`;
+- `completed_bytes`;
+- `total_bytes`;
+- `percent`;
+- `elapsed_seconds`;
+- `eta_seconds`, nullable when no estimate is available or the operation is
+  complete;
+- `completed_files`, nullable;
+- `total_files`, nullable;
+- `imported_events`, nullable;
+- `done`.
+
+Progress events are operational telemetry, not durable result records. Consumers
+should key on `type` and `operation`, ignore unknown fields, and read the final
+command result from stdout when `--json` is present.
 
 ## List
 

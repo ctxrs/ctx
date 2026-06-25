@@ -8225,7 +8225,6 @@ mod tests {
                 3,
                 1,
             ),
-            ("amp.jsonl", CaptureProvider::Amp, "amp-session-1", 1, 2, 0),
         ] {
             let fixture = provider_fixture(fixture_name);
             let (fixture, sessions, events, edges) = if fixture.exists() {

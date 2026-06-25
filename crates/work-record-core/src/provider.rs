@@ -55,7 +55,6 @@ pub enum ProviderId {
     Goose,
     #[serde(rename = "openhands")]
     OpenHands,
-    Amp,
     Cagent,
     Qwen,
     Mistral,
@@ -70,7 +69,7 @@ pub enum ProviderId {
 }
 
 impl ProviderId {
-    pub const ALL: [Self; 28] = [
+    pub const ALL: [Self; 27] = [
         Self::Codex,
         Self::ClaudeCode,
         Self::ClaudeCliCrp,
@@ -87,7 +86,6 @@ impl ProviderId {
         Self::DroidFactoryAi,
         Self::Goose,
         Self::OpenHands,
-        Self::Amp,
         Self::Cagent,
         Self::Qwen,
         Self::Mistral,
@@ -400,7 +398,6 @@ mod tests {
             ProviderId::Cursor,
             ProviderId::CopilotCli,
             ProviderId::FactoryAiDroid,
-            ProviderId::Amp,
             ProviderId::GeminiCli,
             ProviderId::OpenCode,
             ProviderId::Pi,

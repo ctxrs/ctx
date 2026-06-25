@@ -21,9 +21,6 @@ The current CLI imports local history for:
 - Copilot CLI session event logs under `~/.copilot/session-state`;
 - Factory AI Droid session JSONL files under `~/.factory/sessions`.
 
-Amp may be detected, but native local import remains blocked until the provider
-support matrix documents a stable supported local format.
-
 Use `ctx sources` for the truth on the current machine:
 
 ```bash

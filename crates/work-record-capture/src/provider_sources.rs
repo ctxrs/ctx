@@ -134,12 +134,6 @@ const FACTORY_DROID_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLoca
     source_kind: ProviderSourceKind::NativeHistory,
 }];
 
-const AMP_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".config", "amp", "settings.json"],
-    source_format: "amp_settings",
-    source_kind: ProviderSourceKind::DetectionOnly,
-}];
-
 const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
     ProviderSourceSpec {
         provider: CaptureProvider::Codex,
@@ -230,18 +224,6 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         raw_retention: ProviderRawRetention::PathReference,
         redaction_boundary: ProviderRedactionBoundary::BeforeExport,
         unsupported_reason: None,
-    },
-    ProviderSourceSpec {
-        provider: CaptureProvider::Amp,
-        display_name: "Amp",
-        default_locations: AMP_DEFAULTS,
-        import_support: ProviderImportSupport::Unsupported,
-        catalog_support: ProviderCatalogSupport::None,
-        raw_retention: ProviderRawRetention::None,
-        redaction_boundary: ProviderRedactionBoundary::ManualReview,
-        unsupported_reason: Some(
-            "Amp native local thread import is blocked because no stable local thread file path/schema is proven",
-        ),
     },
 ];
 

@@ -36,10 +36,10 @@ ctx sources
 ctx sources --json
 ```
 
-Expect rows for supported local import providers such as Codex, Pi, Claude,
-OpenCode, Gemini, Cursor, Copilot CLI, and Factory AI Droid. Antigravity and
-Amp may appear as detection-only unsupported rows. A row with `exists: false`
-means ctx knows the default path but did not find local history there.
+Expect rows for supported local import providers such as Codex, Pi,
+Antigravity, Claude, OpenCode, Gemini, Cursor, Copilot CLI, and Factory AI
+Droid. A row with `exists: false` means ctx knows the default path but did not
+find local history there.
 
 ## 4. Import
 

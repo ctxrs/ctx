@@ -13,15 +13,10 @@ the search-only product.
 - `ctx list` and `ctx show` write nothing in local-only security mode.
 - In local-only security mode, setup/import/search do not use network access or
   API keys.
-- In the side-effect oracle and local-only security mode, analytics and update
-  checks are disabled by env so the core no-network invariant is strict.
-- With default user config, first-party analytics may create `install.json` and
-  send coarse CLI invocation metadata, and updates may fetch a release
-  manifest. Both are configurable in `config.toml` or env.
-- Updates must replace the ctx binary only after verifying a signed release
-  manifest and matching artifact checksum.
-- `ctx uninstall --yes` must refuse filesystem roots, home directories,
-  symlinked data roots, and directories without ctx-owned state markers.
+- In the side-effect oracle and local-only security mode, analytics are
+  disabled by env so the core no-network invariant is strict.
+- First-party analytics are disabled by default. If enabled, analytics may
+  create `install.json` and send coarse CLI invocation metadata.
 - Provider files are read as sources and not modified.
 - Provider transcript imports reject symlinked JSONL files by default.
 - JSON output is private by default and must not be described as share-safe.

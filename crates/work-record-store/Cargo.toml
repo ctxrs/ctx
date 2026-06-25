@@ -1,13 +1,13 @@
 [package]
 name = "work-record-store"
 version = "0.1.0"
+description = "Internal SQLite storage layer for ctx local agent history"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
-
-[features]
-legacy-pr-evidence = ["work-record-core/legacy-pr-evidence"]
+publish = false
 
 [dependencies]
 chrono.workspace = true

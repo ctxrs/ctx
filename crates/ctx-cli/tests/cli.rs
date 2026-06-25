@@ -1,10 +1,7 @@
 use assert_cmd::Command;
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use ed25519_dalek::{Signer, SigningKey};
 use predicates::prelude::*;
 use rusqlite::Connection;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
     fs,
@@ -22,7 +19,6 @@ fn ctx(temp: &TempDir) -> Command {
     command.env("CTX_DATA_ROOT", temp.path());
     command.env("HOME", temp.path());
     command.env("CTX_ANALYTICS_OFF", "1");
-    command.env("CTX_DISABLE_AUTO_UPDATE", "1");
     command
 }
 
@@ -65,7 +61,12 @@ fn materialized_fixture(category: &str, name: &str) -> String {
             .unwrap()
             .as_nanos()
     );
-    let target = materialized_root.join(unique);
+    let mut target = materialized_root.join(unique);
+    if source.is_file() {
+        if let Some(extension) = source.extension() {
+            target.set_extension(extension);
+        }
+    }
     if source.is_dir() {
         copy_dir_all(&source, &target);
     } else {
@@ -181,82 +182,6 @@ fn copy_dir_all(from: &Path, to: &Path) {
 
 fn file_url(path: &Path) -> String {
     format!("file://{}", path.display())
-}
-
-fn write_update_manifest(
-    temp: &TempDir,
-    version: &str,
-    artifact: &Path,
-    sha_override: Option<&str>,
-) -> PathBuf {
-    let artifact_bytes = fs::read(artifact).unwrap();
-    let sha256 = sha_override
-        .map(str::to_owned)
-        .unwrap_or_else(|| hex_sha256(&artifact_bytes));
-    let manifest = temp.path().join("latest.json");
-    let signed = json!({
-            "version": version,
-            "platforms": {
-                (platform_key()): {
-                    "cli": {
-                        "url_path": file_url(artifact),
-                        "sha256": sha256,
-                        "bytes": artifact_bytes.len()
-                    }
-                }
-            }
-    });
-    let signature = test_update_signing_key()
-        .sign(&serde_json::to_vec(&signed).unwrap())
-        .to_bytes();
-    fs::write(
-        &manifest,
-        serde_json::to_vec_pretty(&json!({
-            "schema_version": 1,
-            "signed": signed,
-            "signatures": [{
-                "key_id": TEST_UPDATE_KEY_ID,
-                "algorithm": "ed25519",
-                "signature": BASE64.encode(signature),
-            }]
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    manifest
-}
-
-const TEST_UPDATE_KEY_ID: &str = "ctx-test";
-
-fn test_update_signing_key() -> SigningKey {
-    SigningKey::from_bytes(&[7u8; 32])
-}
-
-fn trusted_update_keys_env() -> String {
-    let public_key = test_update_signing_key().verifying_key().to_bytes();
-    format!("{TEST_UPDATE_KEY_ID}:{}", BASE64.encode(public_key))
-}
-
-fn hex_sha256(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut out = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(&mut out, "{byte:02x}");
-    }
-    out
-}
-
-fn platform_key() -> &'static str {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("linux", "x86_64") => "linux-x64",
-        ("linux", "aarch64") => "linux-arm64",
-        ("macos", "aarch64") => "macos-arm64",
-        ("macos", "x86_64") => "macos-x64",
-        ("windows", "x86_64") => "windows-x64",
-        ("freebsd", "x86_64") => "freebsd-x64",
-        _ => "unknown",
-    }
 }
 
 fn json_output(command: &mut Command) -> Value {
@@ -407,17 +332,7 @@ fn help_exposes_only_search_mvp_commands() {
         .unwrap_or(&help);
 
     for expected in [
-        "setup",
-        "status",
-        "sources",
-        "import",
-        "list",
-        "show",
-        "search",
-        "update",
-        "uninstall",
-        "doctor",
-        "validate",
+        "setup", "status", "sources", "import", "list", "show", "search", "doctor", "validate",
     ] {
         assert!(
             commands.contains(expected),
@@ -443,6 +358,8 @@ fn help_exposes_only_search_mvp_commands() {
         "repair",
         "watch",
         "context",
+        "update",
+        "uninstall",
     ] {
         assert!(
             !commands.contains(&format!("  {forbidden}")),
@@ -482,6 +399,9 @@ fn removed_commands_are_rejected() {
         "pr",
         "repair",
         "watch",
+        "context",
+        "update",
+        "uninstall",
     ] {
         ctx(&temp)
             .arg(command)
@@ -514,14 +434,13 @@ fn setup_does_not_migrate_legacy_shim_directory() {
 fn setup_writes_day_one_config_contract_without_overwriting_existing_config() {
     let temp = tempdir();
     let config_path = temp.path().join("config.toml");
-    let expected = "[updates]\n\
-channel = \"stable\"\n\
-auto_update = true\n";
+    let expected = "[analytics]\n\
+enabled = false\n";
 
     ctx(&temp).arg("setup").assert().success();
     assert_eq!(fs::read_to_string(&config_path).unwrap(), expected);
 
-    let user_config = "# user managed ctx config\n[updates]\nchannel = \"nightly\"\n";
+    let user_config = "# user managed ctx config\n[analytics]\nenabled = false\n";
     fs::write(&config_path, user_config).unwrap();
 
     ctx(&temp).arg("setup").assert().success();
@@ -644,7 +563,6 @@ fn provider_help_matches_implemented_importers() {
         "cursor",
         "copilot-cli",
         "factory-ai-droid",
-        "amp",
     ] {
         assert!(help.contains(value), "provider {value} missing in\n{help}");
     }
@@ -662,7 +580,7 @@ fn public_subcommand_help_is_golden_enough_for_search_mvp() {
             vec![
                 "Usage: ctx import",
                 "--provider <PROVIDER>",
-                "[possible values: codex, pi, claude, opencode, antigravity, gemini, cursor, copilot-cli, factory-ai-droid, amp]",
+                "[possible values: codex, pi, claude, opencode, antigravity, gemini, cursor, copilot-cli, factory-ai-droid]",
                 "--path <PATH>",
                 "--resume",
                 "--json",
@@ -683,26 +601,6 @@ fn public_subcommand_help_is_golden_enough_for_search_mvp() {
                 "--event-type <EVENT_TYPE>",
                 "--file <FILE>",
                 "--json",
-            ],
-        ),
-        (
-            "update",
-            vec![
-                "Usage: ctx update",
-                "--json",
-                "--check-only",
-                "--apply",
-                "--force",
-            ],
-        ),
-        (
-            "uninstall",
-            vec![
-                "Usage: ctx uninstall",
-                "--json",
-                "--yes",
-                "--keep-data",
-                "--remove-binary",
             ],
         ),
         ("doctor", vec!["Usage: ctx doctor", "--json"]),
@@ -732,215 +630,6 @@ fn public_subcommand_help_is_golden_enough_for_search_mvp() {
 }
 
 #[test]
-fn update_check_uses_local_manifest_without_touching_binary() {
-    let temp = tempdir();
-    let artifact = temp.path().join("ctx-new");
-    fs::write(&artifact, b"new ctx binary").unwrap();
-    let manifest = write_update_manifest(&temp, "9.9.9", &artifact, None);
-
-    let update = json_output(
-        ctx(&temp)
-            .args(["update", "--check-only", "--json"])
-            .env("CTX_UPDATE_MANIFEST_URL", file_url(&manifest))
-            .env("CTX_UPDATE_TRUSTED_PUBKEYS", trusted_update_keys_env()),
-    );
-
-    assert_eq!(update["schema_version"], 1);
-    assert_eq!(update["current_version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(update["latest_version"], "9.9.9");
-    assert_eq!(update["update_available"], true);
-    assert_eq!(update["action"], "check_only");
-    assert_eq!(update["applied"], false);
-}
-
-#[test]
-fn update_default_applies_signed_manifest_and_keeps_previous_backup() {
-    let temp = tempdir();
-    let artifact = temp.path().join("ctx-new");
-    fs::write(&artifact, b"new ctx binary").unwrap();
-    let manifest = write_update_manifest(&temp, "9.9.9", &artifact, None);
-    let target = temp.path().join("bin").join("ctx");
-    fs::create_dir_all(target.parent().unwrap()).unwrap();
-    fs::write(&target, b"old ctx binary").unwrap();
-
-    let update = json_output(
-        ctx(&temp)
-            .args(["update", "--json"])
-            .env("CTX_UPDATE_MANIFEST_URL", file_url(&manifest))
-            .env("CTX_UPDATE_TRUSTED_PUBKEYS", trusted_update_keys_env())
-            .env("CTX_UPDATE_TARGET", &target),
-    );
-
-    assert_eq!(update["action"], "applied");
-    assert_eq!(update["applied"], true);
-    assert_eq!(fs::read(&target).unwrap(), b"new ctx binary");
-    assert_eq!(
-        fs::read(target.with_file_name("ctx.ctx-previous")).unwrap(),
-        b"old ctx binary"
-    );
-}
-
-#[test]
-fn update_apply_rejects_bad_signature_and_preserves_target() {
-    let temp = tempdir();
-    let artifact = temp.path().join("ctx-new");
-    fs::write(&artifact, b"new ctx binary").unwrap();
-    let manifest = write_update_manifest(&temp, "9.9.9", &artifact, None);
-    let mut manifest_value: Value = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
-    manifest_value["signatures"][0]["signature"] = Value::String(BASE64.encode([0u8; 64]));
-    fs::write(
-        &manifest,
-        serde_json::to_vec_pretty(&manifest_value).unwrap(),
-    )
-    .unwrap();
-    let target = temp.path().join("bin").join("ctx");
-    fs::create_dir_all(target.parent().unwrap()).unwrap();
-    fs::write(&target, b"old ctx binary").unwrap();
-
-    ctx(&temp)
-        .args(["update", "--apply", "--json"])
-        .env("CTX_UPDATE_MANIFEST_URL", file_url(&manifest))
-        .env("CTX_UPDATE_TRUSTED_PUBKEYS", trusted_update_keys_env())
-        .env("CTX_UPDATE_TARGET", &target)
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "update manifest signature could not be verified",
-        ));
-
-    assert_eq!(fs::read(&target).unwrap(), b"old ctx binary");
-    assert!(!temp.path().join("update-state.json").exists());
-}
-
-#[test]
-fn update_apply_rejects_bad_checksum_and_preserves_target() {
-    let temp = tempdir();
-    let artifact = temp.path().join("ctx-new");
-    fs::write(&artifact, b"new ctx binary").unwrap();
-    let manifest = write_update_manifest(&temp, "9.9.9", &artifact, Some(&"0".repeat(64)));
-    let target = temp.path().join("bin").join("ctx");
-    fs::create_dir_all(target.parent().unwrap()).unwrap();
-    fs::write(&target, b"old ctx binary").unwrap();
-
-    ctx(&temp)
-        .args(["update", "--json"])
-        .env("CTX_UPDATE_MANIFEST_URL", file_url(&manifest))
-        .env("CTX_UPDATE_TRUSTED_PUBKEYS", trusted_update_keys_env())
-        .env("CTX_UPDATE_TARGET", &target)
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "update artifact checksum mismatch",
-        ));
-
-    assert_eq!(fs::read(&target).unwrap(), b"old ctx binary");
-}
-
-#[test]
-fn auto_update_status_applies_signed_update_by_default() {
-    let temp = tempdir();
-    let artifact = temp.path().join("ctx-new");
-    fs::write(&artifact, b"new ctx binary").unwrap();
-    let manifest = write_update_manifest(&temp, "9.9.9", &artifact, None);
-    let target = temp.path().join("bin").join("ctx");
-    fs::create_dir_all(target.parent().unwrap()).unwrap();
-    fs::write(&target, b"old ctx binary").unwrap();
-
-    ctx(&temp)
-        .arg("status")
-        .env_remove("CTX_DISABLE_AUTO_UPDATE")
-        .env("CTX_UPDATE_MANIFEST_URL", file_url(&manifest))
-        .env("CTX_UPDATE_TRUSTED_PUBKEYS", trusted_update_keys_env())
-        .env("CTX_UPDATE_TARGET", &target)
-        .assert()
-        .success()
-        .stderr(predicate::str::contains("ctx updated to 9.9.9"));
-
-    let state: Value =
-        serde_json::from_slice(&fs::read(temp.path().join("update-state.json")).unwrap()).unwrap();
-    assert_eq!(state["last_result"], "applied");
-    assert_eq!(state["update_available"], true);
-    assert_eq!(state["applied"], true);
-    assert_eq!(fs::read(&target).unwrap(), b"new ctx binary");
-}
-
-#[test]
-fn uninstall_requires_explicit_confirmation() {
-    let temp = tempdir();
-    ctx(&temp)
-        .arg("uninstall")
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "refusing to uninstall without --yes",
-        ));
-    assert!(temp.path().exists());
-}
-
-#[test]
-fn uninstall_removes_data_root_and_optional_binary_target() {
-    let temp = tempdir();
-    let data_root = temp.path().join(".ctx");
-    fs::create_dir_all(&data_root).unwrap();
-    fs::write(data_root.join("work.sqlite"), b"local data").unwrap();
-    let bin_temp = tempdir();
-    let target = bin_temp.path().join("ctx");
-    fs::write(&target, b"ctx binary").unwrap();
-
-    let uninstall = json_output(
-        ctx(&temp)
-            .args(["uninstall", "--yes", "--remove-binary", "--json"])
-            .env("CTX_DATA_ROOT", &data_root)
-            .env("CTX_UNINSTALL_TARGET", &target),
-    );
-
-    assert_eq!(uninstall["schema_version"], 1);
-    assert_eq!(uninstall["removed_data"], true);
-    assert_eq!(uninstall["removed_binary"], true);
-    assert!(!data_root.exists());
-    assert!(temp.path().exists());
-    assert!(!target.exists());
-}
-
-#[test]
-fn uninstall_refuses_non_ctx_data_root() {
-    let temp = tempdir();
-    let data_root = temp.path().join(".ctx");
-    fs::create_dir_all(&data_root).unwrap();
-    fs::write(data_root.join("user-file.txt"), b"not ctx state").unwrap();
-
-    ctx(&temp)
-        .args(["uninstall", "--yes"])
-        .env("CTX_DATA_ROOT", &data_root)
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("no ctx-owned state file found"));
-    assert!(data_root.join("user-file.txt").exists());
-}
-
-#[test]
-fn uninstall_refuses_non_ctx_binary_target_name() {
-    let temp = tempdir();
-    let data_root = temp.path().join(".ctx");
-    fs::create_dir_all(&data_root).unwrap();
-    fs::write(data_root.join("work.sqlite"), b"local data").unwrap();
-    let bin_temp = tempdir();
-    let target = bin_temp.path().join("not-ctx");
-    fs::write(&target, b"binary").unwrap();
-
-    ctx(&temp)
-        .args(["uninstall", "--yes", "--remove-binary"])
-        .env("CTX_DATA_ROOT", &data_root)
-        .env("CTX_UNINSTALL_TARGET", &target)
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("expected a ctx executable name"));
-    assert!(data_root.exists());
-    assert!(data_root.join("work.sqlite").exists());
-    assert!(target.exists());
-}
-
-#[test]
 fn analytics_sends_coarse_cli_metadata_when_enabled() {
     let temp = tempdir();
     let events_path = temp.path().join("analytics.jsonl");
@@ -948,13 +637,14 @@ fn analytics_sends_coarse_cli_metadata_when_enabled() {
     ctx(&temp)
         .arg("status")
         .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENABLED", "1")
         .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .assert()
         .success();
 
     let body = fs::read_to_string(&events_path).unwrap();
     let event: Value = serde_json::from_str(body.lines().next().unwrap()).unwrap();
-    assert_eq!(event["broker_runtime"], "cli");
+    assert_eq!(event["ctx_runtime"], "cli");
     assert_eq!(event["events"][0]["event_name"], "cli_invocation");
     assert_eq!(event["events"][0]["origin_runtime"], "cli");
     assert_eq!(event["events"][0]["surface"], "cli");
@@ -1075,6 +765,17 @@ fn fresh_home_search_mvp_flow() {
     assert_eq!(search["results"][0]["item_type"], "agent_history");
     assert!(search["results"][0]["citations"][0]["item_id"].is_string());
     assert!(search["results"][0]["citations"][0]["item_type"].is_string());
+
+    let human_search = ctx(&temp)
+        .args(["search", "agent-history"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let human_search = String::from_utf8(human_search).unwrap();
+    assert!(human_search.contains("citation: indexed_item"));
+    assert!(!human_search.contains("work_record"));
 
     let file_search =
         json_output(ctx(&temp).args(["search", "--file", "crates/foo/src/lib.rs", "--json"]));
@@ -1411,7 +1112,6 @@ fn normalized_provider_cli_flow_covers_all_harness_providers_with_multiple_sessi
         ("cursor", "cursor"),
         ("copilot-cli", "copilot_cli"),
         ("factory-ai-droid", "factory_ai_droid"),
-        ("amp", "amp"),
     ] {
         let temp = tempdir();
         let query = format!("{stored_provider}-multi-session-oracle");
@@ -1775,7 +1475,6 @@ fn normalized_provider_cli_requires_explicit_path_for_non_discovered_providers()
             "factory-ai-droid",
             "no native factory_ai_droid history found",
         ),
-        ("amp", "Amp native local thread import is blocked"),
     ] {
         let temp = tempdir();
         ctx(&temp)
@@ -1822,14 +1521,21 @@ fn antigravity_cli_imports_native_transcript_tree() {
 #[test]
 fn normalized_provider_cli_requires_developer_opt_in_for_explicit_path() {
     let temp = tempdir();
-    let fixture = provider_fixture("amp.jsonl");
+    let fixture = provider_fixture("claude.jsonl");
 
     ctx(&temp)
-        .args(["import", "--provider", "amp", "--path", &fixture, "--json"])
+        .args([
+            "import",
+            "--provider",
+            "claude",
+            "--path",
+            &fixture,
+            "--json",
+        ])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "amp normalized provider JSONL import is a developer-only input",
+            "claude normalized provider JSONL import is a developer-only input",
         ));
 }
 
@@ -1839,10 +1545,16 @@ fn normalized_provider_cli_rejects_provider_mismatches() {
     let fixture = provider_fixture("claude.jsonl");
     let mut import_cmd = ctx(&temp);
     import_cmd.env("CTX_PROVIDER_NORMALIZED_IMPORT_DEV", "1");
-    let imported =
-        json_output(import_cmd.args(["import", "--provider", "amp", "--path", &fixture, "--json"]));
+    let imported = json_output(import_cmd.args([
+        "import",
+        "--provider",
+        "gemini",
+        "--path",
+        &fixture,
+        "--json",
+    ]));
     assert_eq!(imported["schema_version"], 1);
-    assert_eq!(imported["sources"][0]["provider"], "amp");
+    assert_eq!(imported["sources"][0]["provider"], "gemini");
     assert_eq!(imported["totals"]["imported_sessions"], 0);
     assert_eq!(imported["totals"]["imported_events"], 0);
     assert_eq!(imported["totals"]["failed"], 2);

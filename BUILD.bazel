@@ -1,6 +1,9 @@
 CTX_GATE_DATA = glob([
+    ".bazelignore",
     ".bazelrc",
+    ".bazelversion",
     ".buildkite/**",
+    ".gitignore",
     "BUILD.bazel",
     "Cargo.lock",
     "Cargo.toml",

@@ -172,7 +172,6 @@ text_enum! {
         Cursor => "cursor",
         CopilotCli => "copilot_cli",
         FactoryAiDroid => "factory_ai_droid",
-        Amp => "amp",
         Shell => "shell",
         Git => "git",
         Jj => "jj",
@@ -322,11 +321,7 @@ pub enum WorkRecordLinkTargetType {
     Event,
     VcsWorkspace,
     VcsChange,
-    #[cfg(feature = "legacy-pr-evidence")]
-    PullRequest,
     Artifact,
-    #[cfg(feature = "legacy-pr-evidence")]
-    Evidence,
 }
 
 impl WorkRecordLinkTargetType {
@@ -337,39 +332,19 @@ impl WorkRecordLinkTargetType {
             Self::Event => "event",
             Self::VcsWorkspace => "vcs_workspace",
             Self::VcsChange => "vcs_change",
-            #[cfg(feature = "legacy-pr-evidence")]
-            Self::PullRequest => "pull_request",
             Self::Artifact => "artifact",
-            #[cfg(feature = "legacy-pr-evidence")]
-            Self::Evidence => "evidence",
         }
     }
 
     pub fn variants() -> &'static [&'static str] {
-        #[cfg(feature = "legacy-pr-evidence")]
-        {
-            &[
-                "session",
-                "run",
-                "event",
-                "vcs_workspace",
-                "vcs_change",
-                "pull_request",
-                "artifact",
-                "evidence",
-            ]
-        }
-        #[cfg(not(feature = "legacy-pr-evidence"))]
-        {
-            &[
-                "session",
-                "run",
-                "event",
-                "vcs_workspace",
-                "vcs_change",
-                "artifact",
-            ]
-        }
+        &[
+            "session",
+            "run",
+            "event",
+            "vcs_workspace",
+            "vcs_change",
+            "artifact",
+        ]
     }
 }
 
@@ -389,11 +364,7 @@ impl FromStr for WorkRecordLinkTargetType {
             "event" => Ok(Self::Event),
             "vcs_workspace" => Ok(Self::VcsWorkspace),
             "vcs_change" => Ok(Self::VcsChange),
-            #[cfg(feature = "legacy-pr-evidence")]
-            "pull_request" => Ok(Self::PullRequest),
             "artifact" => Ok(Self::Artifact),
-            #[cfg(feature = "legacy-pr-evidence")]
-            "evidence" => Ok(Self::Evidence),
             _ => Err(CoreError::InvalidEnumValue {
                 enum_name: "WorkRecordLinkTargetType",
                 value: value.to_owned(),
@@ -427,10 +398,6 @@ pub enum WorkRecordLinkType {
     Touched,
     #[default]
     References,
-    #[cfg(feature = "legacy-pr-evidence")]
-    EvidenceFor,
-    #[cfg(feature = "legacy-pr-evidence")]
-    PublishedTo,
     LikelyRelated,
 }
 
@@ -440,30 +407,12 @@ impl WorkRecordLinkType {
             Self::Produced => "produced",
             Self::Touched => "touched",
             Self::References => "references",
-            #[cfg(feature = "legacy-pr-evidence")]
-            Self::EvidenceFor => "evidence_for",
-            #[cfg(feature = "legacy-pr-evidence")]
-            Self::PublishedTo => "published_to",
             Self::LikelyRelated => "likely_related",
         }
     }
 
     pub fn variants() -> &'static [&'static str] {
-        #[cfg(feature = "legacy-pr-evidence")]
-        {
-            &[
-                "produced",
-                "touched",
-                "references",
-                "evidence_for",
-                "published_to",
-                "likely_related",
-            ]
-        }
-        #[cfg(not(feature = "legacy-pr-evidence"))]
-        {
-            &["produced", "touched", "references", "likely_related"]
-        }
+        &["produced", "touched", "references", "likely_related"]
     }
 }
 
@@ -481,10 +430,6 @@ impl FromStr for WorkRecordLinkType {
             "produced" => Ok(Self::Produced),
             "touched" => Ok(Self::Touched),
             "references" => Ok(Self::References),
-            #[cfg(feature = "legacy-pr-evidence")]
-            "evidence_for" => Ok(Self::EvidenceFor),
-            #[cfg(feature = "legacy-pr-evidence")]
-            "published_to" => Ok(Self::PublishedTo),
             "likely_related" => Ok(Self::LikelyRelated),
             _ => Err(CoreError::InvalidEnumValue {
                 enum_name: "WorkRecordLinkType",
@@ -657,43 +602,6 @@ impl WorkRecord {
     }
 }
 
-#[cfg(feature = "legacy-pr-evidence")]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Evidence {
-    pub id: Uuid,
-    pub record_id: Option<Uuid>,
-    pub command: String,
-    pub exit_code: i32,
-    pub stdout: String,
-    pub stderr: String,
-    pub started_at: DateTime<Utc>,
-    pub duration_ms: i64,
-}
-
-#[cfg(feature = "legacy-pr-evidence")]
-impl Evidence {
-    pub fn new(
-        record_id: Option<Uuid>,
-        command: impl Into<String>,
-        exit_code: i32,
-        stdout: String,
-        stderr: String,
-        started_at: DateTime<Utc>,
-        duration_ms: i64,
-    ) -> Self {
-        Self {
-            id: new_id(),
-            record_id,
-            command: command.into(),
-            exit_code,
-            stdout,
-            stderr,
-            started_at,
-            duration_ms,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkRecordArchive {
     #[serde(default = "legacy_archive_schema_version")]
@@ -701,14 +609,6 @@ pub struct WorkRecordArchive {
     #[serde(default = "legacy_archive_schema_version")]
     pub version: u32,
     pub records: Vec<WorkRecord>,
-    #[cfg(feature = "legacy-pr-evidence")]
-    pub evidence: Vec<Evidence>,
-    #[cfg(feature = "legacy-pr-evidence")]
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub evidence_metadata: Vec<EvidenceMetadata>,
-    #[cfg(feature = "legacy-pr-evidence")]
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub artifacts: Vec<WorkRecordArchiveArtifact>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capture_sources: Vec<CaptureSource>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -723,9 +623,6 @@ pub struct WorkRecordArchive {
     pub vcs_workspaces: Vec<VcsWorkspace>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub vcs_changes: Vec<VcsChange>,
-    #[cfg(feature = "legacy-pr-evidence")]
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub pull_requests: Vec<PullRequest>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub work_record_links: Vec<WorkRecordLink>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -740,12 +637,6 @@ impl Default for WorkRecordArchive {
             schema_version: archive_schema_version(),
             version: archive_schema_version(),
             records: Vec::new(),
-            #[cfg(feature = "legacy-pr-evidence")]
-            evidence: Vec::new(),
-            #[cfg(feature = "legacy-pr-evidence")]
-            evidence_metadata: Vec::new(),
-            #[cfg(feature = "legacy-pr-evidence")]
-            artifacts: Vec::new(),
             capture_sources: Vec::new(),
             sessions: Vec::new(),
             runs: Vec::new(),
@@ -753,32 +644,11 @@ impl Default for WorkRecordArchive {
             artifact_records: Vec::new(),
             vcs_workspaces: Vec::new(),
             vcs_changes: Vec::new(),
-            #[cfg(feature = "legacy-pr-evidence")]
-            pull_requests: Vec::new(),
             work_record_links: Vec::new(),
             summaries: Vec::new(),
             files_touched: Vec::new(),
         }
     }
-}
-
-#[cfg(feature = "legacy-pr-evidence")]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkRecordArchiveArtifact {
-    pub id: Uuid,
-    pub evidence_id: Uuid,
-    pub stream: String,
-    pub kind: ArtifactKind,
-    pub blob_hash: String,
-    pub blob_path: String,
-    pub byte_size: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub media_type: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preview_text: Option<String>,
-    #[serde(default)]
-    pub redaction_state: RedactionState,
-    pub content: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1023,64 +893,6 @@ pub struct VcsChange {
     pub sync: SyncMetadata,
 }
 
-#[cfg(feature = "legacy-pr-evidence")]
-text_enum! {
-    pub enum PullRequestProvider {
-        Github => "github",
-        Gitlab => "gitlab",
-        Unknown => "unknown",
-    }
-    default Unknown
-}
-
-#[cfg(feature = "legacy-pr-evidence")]
-text_enum! {
-    pub enum PullRequestLinkSource {
-        Explicit => "explicit",
-        GhShim => "gh_shim",
-        CapturedUrl => "captured_url",
-        InferredBranch => "inferred_branch",
-        InferredCommit => "inferred_commit",
-        Manual => "manual",
-    }
-    default Manual
-}
-
-#[cfg(feature = "legacy-pr-evidence")]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PullRequest {
-    pub id: Uuid,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub vcs_workspace_id: Option<Uuid>,
-    pub provider: PullRequestProvider,
-    pub url: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub number: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub repo: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub head_ref: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base_ref: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub head_sha: Option<String>,
-    #[serde(default)]
-    pub confidence: Confidence,
-    pub link_source: PullRequestLinkSource,
-    #[serde(flatten)]
-    pub timestamps: EntityTimestamps,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_id: Option<Uuid>,
-    #[serde(flatten)]
-    pub sync: SyncMetadata,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkRecordLink {
     pub id: Uuid,
@@ -1111,78 +923,6 @@ pub struct Artifact {
     pub preview_text: Option<String>,
     #[serde(default)]
     pub redaction_state: RedactionState,
-    #[serde(flatten)]
-    pub timestamps: EntityTimestamps,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_id: Option<Uuid>,
-    #[serde(flatten)]
-    pub sync: SyncMetadata,
-}
-
-#[cfg(feature = "legacy-pr-evidence")]
-text_enum! {
-    pub enum EvidenceKind {
-        Test => "test",
-        Lint => "lint",
-        Build => "build",
-        Typecheck => "typecheck",
-        Screenshot => "screenshot",
-        Review => "review",
-        Ci => "ci",
-        Manual => "manual",
-    }
-    default Manual
-}
-
-#[cfg(feature = "legacy-pr-evidence")]
-text_enum! {
-    pub enum EvidenceStatus {
-        Passed => "passed",
-        Failed => "failed",
-        Skipped => "skipped",
-        Stale => "stale",
-        Unknown => "unknown",
-    }
-    default Unknown
-}
-
-#[cfg(feature = "legacy-pr-evidence")]
-text_enum! {
-    pub enum EvidenceFreshness {
-        Fresh => "fresh",
-        ProbablyFresh => "probably_fresh",
-        Stale => "stale",
-        Unbound => "unbound",
-        Inferred => "inferred",
-    }
-    default Unbound
-}
-
-#[cfg(feature = "legacy-pr-evidence")]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct EvidenceMetadata {
-    pub id: Uuid,
-    pub work_record_id: Uuid,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub vcs_change_id: Option<Uuid>,
-    pub kind: EvidenceKind,
-    pub status: EvidenceStatus,
-    #[serde(default)]
-    pub freshness: EvidenceFreshness,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command_run_id: Option<Uuid>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub artifact_id: Option<Uuid>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub observed_tree_hash: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub observed_head_sha: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub started_at: Option<DateTime<Utc>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ended_at: Option<DateTime<Utc>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stale_reason: Option<String>,
     #[serde(flatten)]
     pub timestamps: EntityTimestamps,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1705,8 +1445,6 @@ mod tests {
         assert_eq!(SyncState::default(), SyncState::LocalOnly);
         assert_eq!(Confidence::default(), Confidence::Unknown);
         assert_eq!(RedactionState::default(), RedactionState::SafePreview);
-        #[cfg(feature = "legacy-pr-evidence")]
-        assert_eq!(EvidenceFreshness::default(), EvidenceFreshness::Unbound);
         assert_eq!(
             serde_json::from_str::<CaptureProvider>("\"copilot_cli\"").unwrap(),
             CaptureProvider::CopilotCli
@@ -1714,10 +1452,6 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<CaptureProvider>("\"factory_ai_droid\"").unwrap(),
             CaptureProvider::FactoryAiDroid
-        );
-        assert_eq!(
-            serde_json::from_str::<CaptureProvider>("\"amp\"").unwrap(),
-            CaptureProvider::Amp
         );
 
         let sync: SyncMetadata = serde_json::from_value(json!({})).unwrap();
@@ -1761,14 +1495,14 @@ mod tests {
     #[test]
     fn share_safe_redaction_hides_local_paths() {
         let redacted = redact_share_safe_markers(
-            "cwd=/home/daddy/code/project tmp=/tmp/work ci=/var/lib/buildkite-agent/builds/project token=ghp_1234567890abcdef",
+            "cwd=/home/example/code/project tmp=/tmp/work ci=/var/lib/buildkite-agent/builds/project token=ghp_1234567890abcdef",
         );
 
         assert!(redacted.contains("cwd=[REDACTED_PATH]"));
         assert!(redacted.contains("tmp=[REDACTED_PATH]"));
         assert!(redacted.contains("ci=[REDACTED_PATH]"));
         assert!(redacted.contains("token=[REDACTED_SECRET]"));
-        assert!(!redacted.contains("/home/daddy/code/project"));
+        assert!(!redacted.contains("/home/example/code/project"));
         assert!(!redacted.contains("/tmp/work"));
         assert!(!redacted.contains("/var/lib/buildkite-agent/builds/project"));
         assert!(!redacted.contains("ghp_123456"));
@@ -1802,20 +1536,8 @@ mod tests {
     #[test]
     fn generated_ids_are_uuid_v7_and_paths_are_centralized() {
         let record = WorkRecord::new("Task", "body", Vec::new(), "task", None);
-        #[cfg(feature = "legacy-pr-evidence")]
-        let evidence = Evidence::new(
-            Some(record.id),
-            "cargo test",
-            0,
-            String::new(),
-            String::new(),
-            Utc::now(),
-            1,
-        );
 
         assert_eq!(record.id.get_version_num(), 7);
-        #[cfg(feature = "legacy-pr-evidence")]
-        assert_eq!(evidence.id.get_version_num(), 7);
     }
 
     #[test]

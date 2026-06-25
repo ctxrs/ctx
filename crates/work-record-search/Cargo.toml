@@ -1,10 +1,13 @@
 [package]
 name = "work-record-search"
 version = "0.1.0"
+description = "Internal search projection and ranking helpers for ctx"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
+publish = false
 
 [dependencies]
 chrono.workspace = true

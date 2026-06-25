@@ -32,7 +32,6 @@ is:
 | Cursor | `local_import_when_supported` | `~/.cursor/projects` agent transcript JSONL tree or an explicit Cursor agent transcript path. | Static local-history fixture smoke. |
 | Copilot CLI | `local_import_when_supported` | `~/.copilot/session-state` or an explicit Copilot CLI session-state tree. | Static local-history fixture smoke. |
 | Factory AI Droid | `local_import_when_supported` | `~/.factory/sessions` or an explicit Factory AI Droid sessions tree. | Static local-history fixture smoke. |
-| Amp | `detected_unsupported` | Native local thread import is blocked because no stable local thread file path/schema is proven. | Detection and blocker coverage only. |
 
 Fidelity fields in the machine-readable matrix describe the default public CLI
 import behavior and normalized ctx storage fields. Codex command, patch, output,

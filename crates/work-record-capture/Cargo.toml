@@ -1,10 +1,13 @@
 [package]
 name = "work-record-capture"
 version = "0.1.0"
+description = "Internal provider import adapters for ctx local agent history"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
+publish = false
 
 [dependencies]
 chrono.workspace = true

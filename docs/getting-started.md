@@ -32,9 +32,8 @@ CTX_DATA_ROOT=/tmp/ctx-demo ctx status
 ```
 
 Setup does not write to source repositories, call model APIs, require API keys,
-or start a background process. First-party analytics are enabled by default,
-send only coarse command metadata, and can be disabled with
-`[analytics] enabled = false` in `config.toml`.
+or start a background process. First-party analytics are disabled by default
+and can be enabled with `[analytics] enabled = true` in `config.toml`.
 
 ## 3. See Available Sources
 
@@ -44,9 +43,8 @@ ctx sources --json
 ```
 
 `sources` checks known provider locations on the current machine. Today it
-reports supported Codex, Pi, Claude, OpenCode, Gemini, Cursor, Copilot CLI, and
-Factory AI Droid local history paths, plus detection-only rows for unsupported
-Antigravity and Amp locations when relevant.
+reports supported Codex, Pi, Antigravity, Claude, OpenCode, Gemini, Cursor,
+Copilot CLI, and Factory AI Droid local history paths.
 
 ## 4. Import History
 

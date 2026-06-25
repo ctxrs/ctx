@@ -18,6 +18,7 @@ does not append another product directory.
 ```bash
 ctx setup
 ctx setup --json
+ctx setup --progress json --json
 ctx status
 ctx status --json
 ctx doctor
@@ -28,8 +29,8 @@ ctx validate --json
 
 - `setup` creates the data root, opens or creates `work.sqlite`, writes
   `config.toml` when needed, discovers known provider history locations, and
-  prints next steps. The generated config sets the update channel to `stable`
-  and leaves analytics enabled by default unless disabled in config or env.
+  prints next steps. The generated config leaves analytics disabled by default
+  unless enabled in config or env.
 - `status` reports the ctx root, database path, config path, indexed item
   count, indexed source count, initialization state, and local-only marker.
 - `doctor` opens local storage and reports validation findings.
@@ -37,41 +38,9 @@ ctx validate --json
 
 Setup and health checks do not change shell startup files, install repository
 integrations, write into source repositories, call model APIs, require API keys,
-or start background processes. Core storage checks are local. Analytics and
-updates are first-party network features: analytics can be disabled with
-`[analytics] enabled = false`, and updates run through `ctx update` plus the
-throttled status/doctor/validate auto-update path. JSON stdout remains
-structured; update notices use stderr.
-
-## Updates
-
-```bash
-ctx update
-ctx update --check-only
-ctx update --apply
-ctx update --json
-```
-
-`ctx update` reads the configured release channel, verifies the signed release
-manifest, downloads the matching artifact, checks its size and SHA-256 digest,
-then stages and replaces the current binary. The previous binary is kept beside
-the install target with a `.ctx-previous` suffix. Use `--check-only` to report
-availability without installing. `--apply` is accepted for explicit install
-commands, but install is already the default. Set `[updates] auto_update =
-false` to disable the throttled background install checks.
-
-## Uninstall
-
-```bash
-ctx uninstall --yes
-ctx uninstall --yes --remove-binary
-ctx uninstall --yes --keep-data
-ctx uninstall --yes --json
-```
-
-`uninstall` refuses to run unless `--yes` is present. By default it removes the
-ctx data root. `--keep-data` leaves local storage in place. `--remove-binary`
-also removes the current ctx executable, or `CTX_UNINSTALL_TARGET` when set.
+or start background processes. Core storage checks are local. First-party
+analytics are disabled by default and can be enabled with
+`[analytics] enabled = true`. JSON stdout remains structured.
 
 ## Sources
 
@@ -87,8 +56,7 @@ machine. Current rows include:
 - Codex prompt history at `~/.codex/history.jsonl`;
 - Pi session JSONL at `~/.pi/sessions.jsonl`;
 - native rows for supported Antigravity, Claude, OpenCode, Gemini, Cursor,
-  Copilot CLI, and Factory AI Droid local history locations;
-- detection-only rows for known but unsupported Amp local locations.
+  Copilot CLI, and Factory AI Droid local history locations.
 
 Each JSON row includes `provider`, `path`, `exists`, `source_format`, `status`,
 `import_support`, `native_import`, `raw_retention`, and any
@@ -113,6 +81,7 @@ ctx import --path ~/.codex/sessions
 ctx import --provider pi --path ~/.pi/sessions.jsonl
 ctx import --resume
 ctx import --json
+ctx import --progress json --json
 ```
 
 `import` indexes provider history into the local SQLite store. It creates the
@@ -125,8 +94,7 @@ Import selection rules:
 - with no arguments or with `--all`, import all discovered sources that exist;
 - with `--provider`, import discovered sources for that provider;
 - with `--path`, import exactly that path;
-- with `--path` and no provider, parse the path as Codex format;
-- Amp fails closed until a native local-history importer ships.
+- with `--path` and no provider, parse the path as Codex format.
 
 Developer/test fixtures may be imported from normalized provider JSONL only
 when `CTX_PROVIDER_NORMALIZED_IMPORT_DEV=1` is set. That input is not native
@@ -150,8 +118,9 @@ ctx show <item-uuid> --json
 (default `20`). `show` reads one indexed item UUID and returns the matching
 session or compatibility item plus events when available.
 
-With analytics disabled, these commands write nothing. With default analytics
-enabled, they may create `install.json` and send coarse invocation metadata.
+With analytics disabled, these commands write nothing. If analytics is
+explicitly enabled, they may create `install.json` and send coarse invocation
+metadata.
 JSON output may expose local paths, event payloads, and compatibility field
 names from the current store schema, so treat it as private local data.
 
@@ -176,8 +145,7 @@ pagination/truncation fields.
 
 Filters:
 
-- `--provider
-  codex|pi|claude|opencode|antigravity|gemini|cursor|copilot-cli|factory-ai-droid|amp`;
+- `--provider codex|pi|claude|opencode|antigravity|gemini|cursor|copilot-cli|factory-ai-droid`;
 - `--repo <name-or-path>`;
 - `--since <rfc3339-or-days>d`, for example `2026-06-01T00:00:00Z` or `30d`;
 - `--event-type <event-type>`;
@@ -188,8 +156,21 @@ Filters:
 
 `search` reads provider history and SQLite, and may write newly discovered
 history into the local index before querying. With analytics disabled, it sends
-no analytics; with default analytics enabled, it may create `install.json` and
-send coarse invocation metadata.
+no analytics. If analytics is explicitly enabled, it may create `install.json`
+and send coarse invocation metadata.
+
+## Progress Output
+
+`setup` and `import` accept `--progress auto|plain|json|none`. `auto` writes
+plain progress only to an interactive stderr and stays quiet for `--json` or
+non-interactive stderr. `--progress json` writes newline-delimited progress
+objects to stderr. It does not change stdout, so command result JSON remains a
+single object when `--json` is also present.
+
+Progress JSON is a best-effort operation stream. Each object has
+`type: "ctx_progress"` plus `operation`, `phase`, `message`,
+`completed_bytes`, `total_bytes`, `percent`, `elapsed_seconds`, `eta_seconds`,
+`completed_files`, `total_files`, `imported_events`, and `done`.
 
 ## JSON Contract
 
@@ -206,8 +187,6 @@ ctx import --json
 ctx list --json
 ctx show <item-uuid> --json
 ctx search [query] --json
-ctx update --json
-ctx uninstall --yes --json
 ctx doctor --json
 ctx validate --json
 ```
