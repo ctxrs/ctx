@@ -86,9 +86,45 @@ steps:
       - "artifacts/buildkite/release-artifact-smoke/linux-x64/*"
       - "artifacts/buildkite/release-artifact-smoke/linux-x64/**/*"
 
+  - label: ":mac: arm64 checkout cleanup"
+    key: "macos-arm64-checkout-cleanup"
+    depends_on: "search-mvp"
+    skip_checkout: true
+    command: |
+      checkout_root="$${BUILDKITE_BUILD_PATH:-}"
+      checkout_dir="$${checkout_root}/$${BUILDKITE_ORGANIZATION_SLUG:-luca-king}/$${BUILDKITE_PIPELINE_SLUG:-ctx-public-release-verification}"
+      if [ -n "$${checkout_root}" ] && [ -d "$${checkout_dir}" ]; then
+        chmod -R u+rwX "$${checkout_dir}" || true
+        rm -rf "$${checkout_dir}"
+      fi
+    agents:
+      queue: "ctx-mac-gui-shared-arm64"
+      os: "darwin"
+      arch: "arm64"
+    timeout_in_minutes: 10
+
+  - label: ":mac: x64 checkout cleanup"
+    key: "macos-x64-checkout-cleanup"
+    depends_on: "search-mvp"
+    skip_checkout: true
+    command: |
+      checkout_root="$${BUILDKITE_BUILD_PATH:-}"
+      checkout_dir="$${checkout_root}/$${BUILDKITE_ORGANIZATION_SLUG:-luca-king}/$${BUILDKITE_PIPELINE_SLUG:-ctx-public-release-verification}"
+      if [ -n "$${checkout_root}" ] && [ -d "$${checkout_dir}" ]; then
+        chmod -R u+rwX "$${checkout_dir}" || true
+        rm -rf "$${checkout_dir}"
+      fi
+    agents:
+      queue: "ctx-mac-gui-shared-x64"
+      os: "darwin"
+      arch: "x86_64"
+    timeout_in_minutes: 10
+
   - label: ":mac: arm64 release artifact smoke"
     key: "macos-arm64-release-artifact-smoke"
-    depends_on: "search-mvp"
+    depends_on:
+      - "search-mvp"
+      - "macos-arm64-checkout-cleanup"
     command: |
       CTX_RELEASE_PLATFORM=macos-arm64 \
       CTX_RELEASE_TARGET_TRIPLE=aarch64-apple-darwin \
@@ -114,7 +150,9 @@ steps:
 
   - label: ":mac: x64 release artifact smoke"
     key: "macos-x64-release-artifact-smoke"
-    depends_on: "search-mvp"
+    depends_on:
+      - "search-mvp"
+      - "macos-x64-checkout-cleanup"
     command: |
       CTX_RELEASE_PLATFORM=macos-x64 \
       CTX_RELEASE_TARGET_TRIPLE=x86_64-apple-darwin \

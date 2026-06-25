@@ -243,6 +243,24 @@ if ! grep -F -q 'queue: "ctx-mac-gui-shared-x64"' "${pipeline}"; then
   exit 1
 fi
 
+for cleanup_key in macos-arm64-checkout-cleanup macos-x64-checkout-cleanup; do
+  if ! grep -F -q "key: \"${cleanup_key}\"" "${pipeline}"; then
+    printf 'pipeline must include %s before macOS artifact smoke\n' "${cleanup_key}" >&2
+    exit 1
+  fi
+  if ! grep -F -q "      - \"${cleanup_key}\"" "${pipeline}"; then
+    printf 'macOS artifact smoke must depend on %s\n' "${cleanup_key}" >&2
+    exit 1
+  fi
+done
+
+if ! grep -F -q 'skip_checkout: true' "${pipeline}" ||
+  ! grep -F -q 'chmod -R u+rwX "$${checkout_dir}"' "${pipeline}" ||
+  ! grep -F -q 'rm -rf "$${checkout_dir}"' "${pipeline}"; then
+  printf 'macOS cleanup steps must skip checkout and remove stale checkout directories\n' >&2
+  exit 1
+fi
+
 if ! grep -F -q 'os: "darwin"' "${pipeline}"; then
   printf 'macOS artifact smoke must require darwin agents\n' >&2
   exit 1
