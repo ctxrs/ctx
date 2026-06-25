@@ -211,7 +211,7 @@ fn help_exposes_only_search_mvp_commands() {
 
     for expected in [
         "setup", "status", "sources", "import", "list", "show", "search", "context", "doctor",
-        "validate",
+        "validate", "watch",
     ] {
         assert!(
             commands.contains(expected),
@@ -317,13 +317,22 @@ fn setup_catalogs_codex_sessions_without_deep_import() {
     .unwrap();
 
     let setup = json_output(ctx(&temp).args(["setup", "--json"]));
+    assert_eq!(setup["mode"], "incremental_catch_up");
     assert_eq!(setup["catalog"]["cataloged_sessions"], 1);
+    assert_eq!(setup["catalog"]["indexed_sessions"], 0);
+    assert_eq!(setup["catalog"]["pending_sessions"], 1);
     assert_eq!(setup["catalog"]["source_files"], 1);
     assert_eq!(setup["catalog"]["failed_sessions"], 0);
+    assert_eq!(setup["catalog"]["stale_sessions"], 0);
+    assert_eq!(setup["incremental"]["cataloged_sessions"], 1);
+    assert_eq!(setup["incremental"]["pending_sessions"], 1);
 
     let status = json_output(ctx(&temp).args(["status", "--json"]));
+    assert_eq!(status["mode"], "incremental_catch_up");
     assert_eq!(status["cataloged_sessions"], 1);
     assert_eq!(status["indexed_catalog_sessions"], 0);
+    assert_eq!(status["pending_catalog_sessions"], 1);
+    assert_eq!(status["incremental"]["failed_sessions"], Value::Null);
     assert_eq!(status["indexed_items"], 0);
 }
 
@@ -349,6 +358,7 @@ fn import_progress_json_goes_to_stderr_without_polluting_stdout() {
 
     let stdout: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(stdout["schema_version"], 1);
+    assert_eq!(stdout["mode"], "incremental_catch_up");
     assert!(stdout["totals"]["imported_sessions"].as_u64().unwrap() > 0);
 
     let stderr = String::from_utf8(output.stderr).unwrap();
@@ -392,6 +402,39 @@ fn import_all_discovers_and_imports_providers_together() {
 }
 
 #[test]
+fn watch_once_runs_incremental_catch_up_without_real_home_files() {
+    let temp = tempdir();
+    let fixture = provider_history_fixture("codex-sessions");
+
+    let watched = json_output(ctx(&temp).args([
+        "watch",
+        "--once",
+        "--provider",
+        "codex",
+        "--path",
+        &fixture,
+        "--poll-interval",
+        "2",
+        "--json",
+    ]));
+
+    assert_eq!(watched["schema_version"], 1);
+    assert_eq!(watched["mode"], "incremental_catch_up");
+    assert_eq!(watched["strategy"], "polling_catch_up");
+    assert_eq!(watched["once"], true);
+    assert_eq!(watched["poll_interval_seconds"], 2);
+    assert_eq!(watched["import"]["schema_version"], 1);
+    assert_eq!(watched["import"]["mode"], "incremental_catch_up");
+    assert!(
+        watched["import"]["totals"]["imported_sessions"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert!(watched["incremental"]["indexed_sessions"].is_u64());
+}
+
+#[test]
 fn provider_help_matches_implemented_importers() {
     let temp = tempdir();
     let output = ctx(&temp)
@@ -422,6 +465,15 @@ fn public_subcommand_help_is_golden_enough_for_search_mvp() {
                 "[possible values: codex, pi]",
                 "--path <PATH>",
                 "--resume",
+                "--json",
+            ],
+        ),
+        (
+            "watch",
+            vec![
+                "Usage: ctx watch",
+                "--once",
+                "--poll-interval <POLL_INTERVAL>",
                 "--json",
             ],
         ),
@@ -519,9 +571,11 @@ fn fresh_home_search_mvp_flow() {
         "--json",
     ]));
     assert_eq!(import["schema_version"], 1);
+    assert_eq!(import["mode"], "incremental_catch_up");
     assert!(import["totals"]["imported_sessions"].as_u64().unwrap() > 0);
     assert!(import["totals"]["source_files"].as_u64().unwrap() > 0);
     assert!(import["totals"]["source_bytes"].as_u64().unwrap() > 0);
+    assert!(import["incremental"]["indexed_sessions"].is_u64());
 
     let mut list_command = ctx(&temp);
     list_command.args(["list", "--json"]);
@@ -616,7 +670,8 @@ fn codex_cli_resume_is_idempotent_rescan_and_filters_subagents() {
     ]));
     assert_eq!(first["schema_version"], 1);
     assert_eq!(first["resume"], false);
-    assert_eq!(first["resume_mode"], "normal_scan");
+    assert_eq!(first["mode"], "incremental_catch_up");
+    assert_eq!(first["resume_mode"], "incremental_catch_up");
     assert_eq!(first["totals"]["imported_sessions"], 2);
     assert_eq!(first["totals"]["imported_events"], 6);
     assert_eq!(first["totals"]["imported_edges"], 1);
@@ -645,7 +700,7 @@ fn codex_cli_resume_is_idempotent_rescan_and_filters_subagents() {
     ]));
     assert_eq!(second["schema_version"], 1);
     assert_eq!(second["resume"], true);
-    assert_eq!(second["resume_mode"], "idempotent_rescan");
+    assert_eq!(second["resume_mode"], "idempotent_catch_up");
     assert_eq!(second["totals"]["imported_sessions"], 0);
     assert_eq!(second["totals"]["imported_events"], 0);
     assert_eq!(second["totals"]["imported_edges"], 0);
@@ -795,7 +850,7 @@ fn pi_cli_import_search_and_context_flow() {
         "--json",
     ]));
     assert_eq!(second["resume"], true);
-    assert_eq!(second["resume_mode"], "idempotent_rescan");
+    assert_eq!(second["resume_mode"], "idempotent_catch_up");
     assert_eq!(second["totals"]["imported_sessions"], 0);
     assert_eq!(second["totals"]["imported_events"], 0);
     assert_eq!(second["totals"]["skipped"].as_u64().unwrap(), 7);
