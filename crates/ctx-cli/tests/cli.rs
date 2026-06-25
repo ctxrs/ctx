@@ -738,6 +738,35 @@ fn update_apply_is_blocked_until_signed_manifest_verification() {
 }
 
 #[test]
+fn auto_update_status_check_is_notice_only() {
+    let temp = tempdir();
+    let artifact = temp.path().join("ctx-new");
+    fs::write(&artifact, b"new ctx binary").unwrap();
+    let manifest = write_update_manifest(&temp, "9.9.9", &artifact, None);
+    let target = temp.path().join("bin").join("ctx");
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    fs::write(&target, b"old ctx binary").unwrap();
+
+    ctx(&temp)
+        .arg("status")
+        .env_remove("CTX_DISABLE_AUTO_UPDATE")
+        .env("CTX_UPDATE_MANIFEST_URL", file_url(&manifest))
+        .env("CTX_UPDATE_TARGET", &target)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "install is disabled until signed release manifests are supported",
+        ));
+
+    let state: Value =
+        serde_json::from_slice(&fs::read(temp.path().join("update-state.json")).unwrap()).unwrap();
+    assert_eq!(state["last_result"], "check_only");
+    assert_eq!(state["update_available"], true);
+    assert_eq!(state["applied"], false);
+    assert_eq!(fs::read(&target).unwrap(), b"old ctx binary");
+}
+
+#[test]
 fn analytics_sends_coarse_cli_metadata_when_enabled() {
     let temp = tempdir();
     let events_path = temp.path().join("analytics.jsonl");
