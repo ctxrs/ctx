@@ -18,13 +18,19 @@ Multi-platform artifact proof requires separate evidence for each install
 target. A production release requires proof for `linux-x64`, `macos-arm64`,
 `macos-x64`, `windows-x64`, and `freebsd-x64`, or an explicit
 manager-approved release exception that names the missing target and reason.
+Each platform proof must include both the staged artifact manifest and a
+packaged artifact runtime smoke result. The smoke installs or extracts the
+exact staged artifact into a temporary bin directory, then runs `ctx --version`,
+`ctx setup`, `ctx import`, `ctx search`, `ctx context`, `ctx doctor`, and
+`ctx validate` against the checked-in fixture data.
 
 FreeBSD is a first-class release target, not an optional stretch target. The
 public Buildkite pipeline includes a native `freebsd-x64` lane that builds and
-tests ctx on FreeBSD, writes the dry-run manifest, and exports artifact plus
-checksum evidence for `x86_64-unknown-freebsd`. Contract self-tests may still
-emit a `freebsd-x64` blocker fixture, but real release evidence does not need a
-manager-approved release exception when the native manifest and metadata are
+tests ctx on FreeBSD, writes the dry-run manifest, runs packaged artifact
+runtime smoke, and exports artifact, checksum, and smoke evidence for
+`x86_64-unknown-freebsd`. Contract self-tests may still emit a `freebsd-x64`
+blocker fixture, but real release evidence does not need a manager-approved
+release exception when the native manifest, metadata, and artifact smoke are
 present.
 
 R2 staging evidence proves only that the object layout and upload plan are

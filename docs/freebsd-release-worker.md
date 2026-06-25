@@ -10,7 +10,8 @@ not optional for a production release.
 - Required tools: Bash, Git, Rust stable, Cargo, and `sha256sum`, `shasum`, or
   FreeBSD `sha256`
 - Expected lane shape: build the ctx CLI on the native worker, write the release
-  dry-run manifest, and export the artifact plus checksum evidence
+  dry-run manifest, run packaged artifact runtime smoke, and export the
+  artifact, checksum, and smoke evidence
 
 ## Buildkite Lane
 
@@ -26,6 +27,13 @@ CTX_RELEASE_TARGET_TRIPLE=x86_64-unknown-freebsd \
 CTX_EXPECT_HOST_TRIPLE=x86_64-unknown-freebsd \
 CTX_ARTIFACT_DIR=artifacts/buildkite/release-dry-run/freebsd-x64 \
 ./scripts/release-dry-run.sh
+
+CTX_RELEASE_PLATFORM=freebsd-x64 \
+CTX_RELEASE_TARGET_TRIPLE=x86_64-unknown-freebsd \
+CTX_EXPECT_HOST_TRIPLE=x86_64-unknown-freebsd \
+CTX_RELEASE_DRY_RUN_DIR=artifacts/buildkite/release-dry-run/freebsd-x64 \
+CTX_ARTIFACT_DIR=artifacts/buildkite/release-artifact-smoke/freebsd-x64 \
+./scripts/release-artifact-smoke.sh freebsd-x64
 ```
 
 The expected evidence is:
@@ -34,6 +42,8 @@ The expected evidence is:
 - `artifacts/buildkite/release-dry-run/freebsd-x64/ctx-release-metadata.env`
 - `artifacts/buildkite/release-dry-run/freebsd-x64/checksums.sha256`
 - `artifacts/buildkite/release-dry-run/freebsd-x64/ctx-0.1.0-x86_64-unknown-freebsd`
+- `artifacts/buildkite/release-artifact-smoke/freebsd-x64/artifact-smoke.json`
+- `artifacts/buildkite/release-artifact-smoke/freebsd-x64/artifact-smoke.md`
 
 ## Release Requirement
 
@@ -47,6 +57,6 @@ certificate from implying full platform proof.
 
 The contract self-test may still generate a FreeBSD blocker fixture to prove the
 certificate rejects missing platform proof. Real release evidence does not need
-that blocker when the native manifest and metadata above are present. If
-`queue=freebsd-x64` is not provisioned or cannot run the lane, that is an
-infrastructure blocker, not release proof.
+that blocker when the native manifest, metadata, and artifact smoke above are
+present. If `queue=freebsd-x64` is not provisioned or cannot run the lane, that
+is an infrastructure blocker, not release proof.

@@ -458,6 +458,51 @@ validate_release_dry_run() {
   fi
 }
 
+validate_release_artifact_smoke() {
+  local platform="$1"
+  local target_triple="$2"
+  local manifest="$3"
+  local metadata="$4"
+  local platform_key smoke artifact_path artifact_checksum artifact_bytes metadata_artifact expected_artifact_path status_field
+
+  platform_key="${platform//-/_}"
+  smoke="artifacts/buildkite/release-artifact-smoke/${platform}/artifact-smoke.json"
+  require_file "${smoke}"
+  require_json_parser || return 0
+
+  require_manifest_value "${smoke}" ".schema_version" "1" "${platform} artifact smoke records schema version"
+  require_manifest_value "${smoke}" ".kind" "ctx_release_artifact_smoke" "${platform} artifact smoke records kind"
+  require_manifest_value "${smoke}" ".mode" "release-artifact-smoke" "${platform} artifact smoke records mode"
+  require_manifest_value "${smoke}" ".status" "passed" "${platform} artifact smoke records passing status"
+  require_manifest_value "${smoke}" ".publishing" "false" "${platform} artifact smoke records non-publishing status"
+  require_manifest_value "${smoke}" ".platform" "${platform}" "${platform} artifact smoke records platform"
+  require_manifest_value "${smoke}" ".platform_key" "${platform_key}" "${platform} artifact smoke records platform key"
+  require_manifest_value "${smoke}" ".target_triple" "${target_triple}" "${platform} artifact smoke records target triple"
+  require_manifest_value "${smoke}" ".release_manifest" "${manifest}" "${platform} artifact smoke references release manifest"
+  require_manifest_value "${smoke}" ".release_metadata" "${metadata}" "${platform} artifact smoke references release metadata"
+  require_manifest_value "${smoke}" ".installed_artifact_runtime" "true" "${platform} artifact smoke ran installed artifact runtime"
+  require_manifest_value "${smoke}" ".fixture" "tests/fixtures/provider-history/codex-sessions" "${platform} artifact smoke records fixture"
+  require_manifest_current_head "${smoke}" "${platform} artifact smoke records current head"
+  require_contract_fixture_boundary "${smoke}" "${platform} artifact smoke"
+
+  artifact_path="$(manifest_value "${manifest}" ".artifacts[0].path")"
+  artifact_checksum="$(manifest_value "${manifest}" ".artifacts[0].sha256")"
+  artifact_bytes="$(manifest_value "${manifest}" ".artifacts[0].bytes")"
+  metadata_artifact="$(env_value "${metadata}" "CTX_RELEASE_ARTIFACT_${platform_key}")"
+  expected_artifact_path="artifacts/buildkite/release-dry-run/${platform}/${metadata_artifact}"
+  if [[ "${artifact_path}" != "${expected_artifact_path}" ]]; then
+    fail_certificate "${platform} manifest artifact path must match metadata artifact: expected ${expected_artifact_path}, got ${artifact_path:-<missing>}"
+  fi
+  require_manifest_value "${smoke}" ".release_artifact" "${artifact_path}" "${platform} artifact smoke references exact staged artifact"
+  require_manifest_value "${smoke}" ".release_artifact_name" "${metadata_artifact}" "${platform} artifact smoke records artifact name"
+  require_manifest_value "${smoke}" ".release_artifact_sha256" "${artifact_checksum}" "${platform} artifact smoke records artifact checksum"
+  require_manifest_value "${smoke}" ".release_artifact_bytes" "${artifact_bytes}" "${platform} artifact smoke records artifact bytes"
+
+  for status_field in version setup import search context doctor validate; do
+    require_manifest_value "${smoke}" ".${status_field}_status" "passed" "${platform} artifact smoke records ${status_field} command"
+  done
+}
+
 validate_freebsd_release_target() {
   local manifest="artifacts/buildkite/release-dry-run/freebsd-x64/manifest.json"
   local metadata="artifacts/buildkite/release-dry-run/freebsd-x64/ctx-release-metadata.env"
@@ -482,6 +527,11 @@ validate_freebsd_release_target() {
       "x86_64-unknown-freebsd" \
       "${manifest}" \
       "${metadata}"
+    validate_release_artifact_smoke \
+      "freebsd-x64" \
+      "x86_64-unknown-freebsd" \
+      "${manifest}" \
+      "${metadata}"
     return 0
   fi
 
@@ -498,14 +548,14 @@ completion_freebsd_status() {
     return 0
   fi
   if [[ -s "${completion_evidence_root}/${manifest}" && -s "${completion_evidence_root}/${metadata}" ]]; then
-    printf 'native_release_dry_run_verified'
+    printf 'native_release_artifact_smoke_verified'
     return 0
   fi
   printf 'manager_exception_verified'
 }
 
 completion_freebsd_manager_exception_required_json() {
-  if [[ "$(completion_freebsd_status)" == "native_release_dry_run_verified" ]]; then
+  if [[ "$(completion_freebsd_status)" == "native_release_artifact_smoke_verified" ]]; then
     printf 'false'
   else
     printf 'true'
@@ -684,12 +734,14 @@ validate_release_docs() {
   require_contains "docs/release-install.md" "source build path" "release install docs document source build status"
   require_contains "docs/release-install.md" "freebsd-x64" "release install docs include FreeBSD as a required release target"
   require_contains "docs/release-install.md" "manager-approved release exception" "release install docs require explicit target exceptions"
+  require_contains "docs/release-install.md" "packaged artifact runtime smoke" "release install docs require packaged artifact smoke"
   require_not_contains "docs/release-install.md" "ctx.rs/install" "release install docs must not expose public installer endpoint"
   require_not_contains "docs/release-install.md" "curl -fsSL" "release install docs must not expose curl installer command"
 
   require_contains "docs/release-supply-chain.md" "Contract fixture evidence" "release supply-chain docs distinguish contract fixtures"
   require_contains "docs/release-supply-chain.md" "Host artifact dry-run" "release supply-chain docs distinguish host dry-run"
   require_contains "docs/release-supply-chain.md" "Multi-platform artifact proof" "release supply-chain docs distinguish platform proof"
+  require_contains "docs/release-supply-chain.md" "packaged artifact runtime smoke" "release supply-chain docs include artifact runtime smoke"
   require_contains "docs/release-supply-chain.md" "freebsd-x64" "release supply-chain docs include FreeBSD platform proof"
   require_contains "docs/release-supply-chain.md" "first-class release target" "release supply-chain docs keep FreeBSD in scope"
   require_contains "docs/release-supply-chain.md" "manager-approved release exception" "release supply-chain docs require explicit target exceptions"
@@ -698,10 +750,12 @@ validate_release_docs() {
   require_contains "docs/release-r2-layout.md" "R2 staging layout" "release R2 docs describe staging layout"
   require_contains "docs/release-r2-layout.md" "ctx/releases/release-candidate/" "release R2 docs record candidate prefix"
   require_contains "docs/release-r2-layout.md" "freebsd-x64" "release R2 docs include FreeBSD artifact staging"
+  require_contains "docs/release-r2-layout.md" "release-artifact-smoke" "release R2 docs reference artifact smoke evidence"
   require_contains "docs/release-r2-layout.md" "No installer endpoint cutover" "release R2 docs keep public installer cutover blocked"
 
   require_contains "docs/freebsd-release-worker.md" "freebsd-x64" "FreeBSD release worker docs record queue label"
   require_contains "docs/freebsd-release-worker.md" "x86_64-unknown-freebsd" "FreeBSD release worker docs record target triple"
+  require_contains "docs/freebsd-release-worker.md" "release-artifact-smoke" "FreeBSD release worker docs include artifact smoke evidence"
   require_contains "docs/freebsd-release-worker.md" "first-class release target" "FreeBSD release worker docs keep FreeBSD in scope"
   require_contains "docs/freebsd-release-worker.md" "manager-approved" "FreeBSD release worker docs require manager approval if missing"
   require_contains "docs/freebsd-release-worker.md" "exception" "FreeBSD release worker docs require explicit exception if missing"
@@ -792,6 +846,95 @@ write_contract_release_dry_runs() {
 
   while IFS='|' read -r platform platform_key target_triple suffix; do
     write_contract_release_dry_run_platform "${root}" "${platform}" "${platform_key}" "${target_triple}" "${suffix}"
+  done < <(completion_release_platforms)
+}
+
+write_contract_release_artifact_smoke_platform() {
+  local root="$1"
+  local platform="$2"
+  local platform_key="$3"
+  local target_triple="$4"
+  local suffix="$5"
+  local artifact artifact_rel artifact_full checksum bytes out_dir json markdown generated_at commit branch command_dir
+
+  artifact="ctx-0.1.0-${target_triple}${suffix}"
+  artifact_rel="artifacts/buildkite/release-dry-run/${platform}/${artifact}"
+  artifact_full="${root}/${artifact_rel}"
+  checksum="$(sha256_file "${artifact_full}")"
+  bytes="$(wc -c < "${artifact_full}" | tr -d '[:space:]')"
+  out_dir="${root}/artifacts/buildkite/release-artifact-smoke/${platform}"
+  command_dir="${out_dir}/commands"
+  json="${out_dir}/artifact-smoke.json"
+  markdown="${out_dir}/artifact-smoke.md"
+  mkdir -p "${command_dir}"
+  generated_at="$(date +%s)"
+  commit="$(git rev-parse HEAD)"
+  branch="$(git branch --show-current)"
+
+  printf 'contract fixture command output for %s\n' "${platform}" > "${command_dir}/version.stdout"
+
+  cat > "${json}" <<EOF
+{
+  "schema_version": 1,
+  "kind": "ctx_release_artifact_smoke",
+  "evidence_class": "contract_fixture",
+  "self_test_fixture": true,
+  "mode": "release-artifact-smoke",
+  "status": "passed",
+  "publishing": false,
+  "platform": "$(ctx_json_escape "${platform}")",
+  "platform_key": "$(ctx_json_escape "${platform_key}")",
+  "target_triple": "$(ctx_json_escape "${target_triple}")",
+  "host_triple": "$(ctx_json_escape "${target_triple}")",
+  "release_dry_run_dir": "artifacts/buildkite/release-dry-run/${platform}",
+  "release_manifest": "artifacts/buildkite/release-dry-run/${platform}/manifest.json",
+  "release_metadata": "artifacts/buildkite/release-dry-run/${platform}/ctx-release-metadata.env",
+  "release_artifact": "$(ctx_json_escape "${artifact_rel}")",
+  "release_artifact_name": "$(ctx_json_escape "${artifact}")",
+  "release_artifact_sha256": "$(ctx_json_escape "${checksum}")",
+  "release_artifact_bytes": ${bytes},
+  "install_method": "contract-fixture",
+  "installed_artifact_runtime": true,
+  "fixture": "tests/fixtures/provider-history/codex-sessions",
+  "command_output_dir": "artifacts/buildkite/release-artifact-smoke/${platform}/commands",
+  "version_output": "ctx 0.1.0",
+  "version_status": "passed",
+  "setup_status": "passed",
+  "import_status": "passed",
+  "search_status": "passed",
+  "context_status": "passed",
+  "doctor_status": "passed",
+  "validate_status": "passed",
+  "git_commit": "$(ctx_json_escape "${commit}")",
+  "git_branch": "$(ctx_json_escape "${branch}")",
+  "buildkite": {
+    "build_url": "$(ctx_json_escape "${BUILDKITE_BUILD_URL:-local}")",
+    "build_id": "$(ctx_json_escape "${BUILDKITE_BUILD_ID:-}")",
+    "job_id": "$(ctx_json_escape "${BUILDKITE_JOB_ID:-}")"
+  },
+  "generated_at_unix_s": ${generated_at}
+}
+EOF
+
+  cat > "${markdown}" <<EOF
+# ctx Release Artifact Smoke Contract Fixture
+
+- Evidence class: contract_fixture
+- Self-test fixture: true
+- Publishing: false
+- Platform: \`${platform}\`
+- Target triple: \`${target_triple}\`
+- Release artifact: \`${artifact_rel}\`
+- Status: passed
+EOF
+}
+
+write_contract_release_artifact_smokes() {
+  local root="$1"
+  local platform platform_key target_triple suffix
+
+  while IFS='|' read -r platform platform_key target_triple suffix; do
+    write_contract_release_artifact_smoke_platform "${root}" "${platform}" "${platform_key}" "${target_triple}" "${suffix}"
   done < <(completion_release_platforms)
 }
 
@@ -1141,6 +1284,7 @@ write_completion_contract_fixture() {
     > "${root}/artifacts/buildkite/pipeline-contract/pipeline-contract.txt"
 
   write_contract_release_dry_runs "${root}"
+  write_contract_release_artifact_smokes "${root}"
   write_contract_freebsd_blocker "${root}"
   write_contract_release_candidate "${root}"
   write_contract_r2_staging_smoke "${root}"
@@ -1157,7 +1301,17 @@ validate_evidence() {
     "x86_64-unknown-linux-gnu" \
     "artifacts/buildkite/release-dry-run/linux-x64/manifest.json" \
     "artifacts/buildkite/release-dry-run/linux-x64/ctx-release-metadata.env"
+  validate_release_artifact_smoke \
+    "linux-x64" \
+    "x86_64-unknown-linux-gnu" \
+    "artifacts/buildkite/release-dry-run/linux-x64/manifest.json" \
+    "artifacts/buildkite/release-dry-run/linux-x64/ctx-release-metadata.env"
   validate_release_dry_run \
+    "macos-arm64" \
+    "aarch64-apple-darwin" \
+    "artifacts/buildkite/release-dry-run/macos-arm64/manifest.json" \
+    "artifacts/buildkite/release-dry-run/macos-arm64/ctx-release-metadata.env"
+  validate_release_artifact_smoke \
     "macos-arm64" \
     "aarch64-apple-darwin" \
     "artifacts/buildkite/release-dry-run/macos-arm64/manifest.json" \
@@ -1167,7 +1321,17 @@ validate_evidence() {
     "x86_64-apple-darwin" \
     "artifacts/buildkite/release-dry-run/macos-x64/manifest.json" \
     "artifacts/buildkite/release-dry-run/macos-x64/ctx-release-metadata.env"
+  validate_release_artifact_smoke \
+    "macos-x64" \
+    "x86_64-apple-darwin" \
+    "artifacts/buildkite/release-dry-run/macos-x64/manifest.json" \
+    "artifacts/buildkite/release-dry-run/macos-x64/ctx-release-metadata.env"
   validate_release_dry_run \
+    "windows-x64" \
+    "x86_64-pc-windows-gnu" \
+    "artifacts/buildkite/release-dry-run/windows-x64/manifest.json" \
+    "artifacts/buildkite/release-dry-run/windows-x64/ctx-release-metadata.env"
+  validate_release_artifact_smoke \
     "windows-x64" \
     "x86_64-pc-windows-gnu" \
     "artifacts/buildkite/release-dry-run/windows-x64/manifest.json" \
@@ -1254,11 +1418,11 @@ write_certificate() {
 
 ## Required Release Targets
 
-- \`linux-x64\`: required production release proof
-- \`macos-arm64\`: required production release proof
-- \`macos-x64\`: required production release proof
-- \`windows-x64\`: required production release proof
-- \`freebsd-x64\`: required production release proof through a native \`freebsd-x64\` Buildkite lane; status \`${freebsd_status}\`
+- \`linux-x64\`: required production release proof, including packaged artifact runtime smoke
+- \`macos-arm64\`: required production release proof, including packaged artifact runtime smoke
+- \`macos-x64\`: required production release proof, including packaged artifact runtime smoke
+- \`windows-x64\`: required production release proof, including packaged artifact runtime smoke
+- \`freebsd-x64\`: required production release proof through a native \`freebsd-x64\` Buildkite lane, including packaged artifact runtime smoke; status \`${freebsd_status}\`
 
 A production release requires proof for every target above, or an explicit
 manager-approved release exception that names the missing target. When the
@@ -1271,14 +1435,19 @@ fixture only and does not make FreeBSD optional.
 - Pipeline contract artifact: \`artifacts/buildkite/pipeline-contract/pipeline-contract.txt\`
 - Linux x64 release dry-run manifest: \`artifacts/buildkite/release-dry-run/linux-x64/manifest.json\`
 - Linux x64 release dry-run install metadata: \`artifacts/buildkite/release-dry-run/linux-x64/ctx-release-metadata.env\`
+- Linux x64 packaged artifact smoke: \`artifacts/buildkite/release-artifact-smoke/linux-x64/artifact-smoke.json\`
 - macOS arm64 release dry-run manifest: \`artifacts/buildkite/release-dry-run/macos-arm64/manifest.json\`
 - macOS arm64 release dry-run install metadata: \`artifacts/buildkite/release-dry-run/macos-arm64/ctx-release-metadata.env\`
+- macOS arm64 packaged artifact smoke: \`artifacts/buildkite/release-artifact-smoke/macos-arm64/artifact-smoke.json\`
 - macOS x64 release dry-run manifest: \`artifacts/buildkite/release-dry-run/macos-x64/manifest.json\`
 - macOS x64 release dry-run install metadata: \`artifacts/buildkite/release-dry-run/macos-x64/ctx-release-metadata.env\`
+- macOS x64 packaged artifact smoke: \`artifacts/buildkite/release-artifact-smoke/macos-x64/artifact-smoke.json\`
 - Windows x64 release dry-run manifest: \`artifacts/buildkite/release-dry-run/windows-x64/manifest.json\`
 - Windows x64 release dry-run install metadata: \`artifacts/buildkite/release-dry-run/windows-x64/ctx-release-metadata.env\`
+- Windows x64 packaged artifact smoke: \`artifacts/buildkite/release-artifact-smoke/windows-x64/artifact-smoke.json\`
 - FreeBSD x64 release dry-run manifest: \`artifacts/buildkite/release-dry-run/freebsd-x64/manifest.json\`
 - FreeBSD x64 release dry-run install metadata: \`artifacts/buildkite/release-dry-run/freebsd-x64/ctx-release-metadata.env\`
+- FreeBSD x64 packaged artifact smoke, only when native evidence is present: \`artifacts/buildkite/release-artifact-smoke/freebsd-x64/artifact-smoke.json\`
 - FreeBSD x64 manager exception, only if native evidence is absent: \`artifacts/buildkite/release-exceptions/freebsd-x64/freebsd-x64-exception.json\`
 - FreeBSD x64 contract blocker fixture, only in contract self-test mode: \`artifacts/buildkite/release-blockers/freebsd-x64/freebsd-x64-blocker.json\`
 - Release candidate metadata: \`artifacts/buildkite/release-candidate/ctx-release-metadata.env\`
@@ -1328,22 +1497,26 @@ EOF
     {
       "platform": "linux-x64",
       "required": true,
-      "status_in_this_certificate": "dry_run_manifest_required"
+      "status_in_this_certificate": "artifact_smoke_required",
+      "artifact_smoke": "artifacts/buildkite/release-artifact-smoke/linux-x64/artifact-smoke.json"
     },
     {
       "platform": "macos-arm64",
       "required": true,
-      "status_in_this_certificate": "dry_run_manifest_required"
+      "status_in_this_certificate": "artifact_smoke_required",
+      "artifact_smoke": "artifacts/buildkite/release-artifact-smoke/macos-arm64/artifact-smoke.json"
     },
     {
       "platform": "macos-x64",
       "required": true,
-      "status_in_this_certificate": "dry_run_manifest_required"
+      "status_in_this_certificate": "artifact_smoke_required",
+      "artifact_smoke": "artifacts/buildkite/release-artifact-smoke/macos-x64/artifact-smoke.json"
     },
     {
       "platform": "windows-x64",
       "required": true,
-      "status_in_this_certificate": "dry_run_manifest_required"
+      "status_in_this_certificate": "artifact_smoke_required",
+      "artifact_smoke": "artifacts/buildkite/release-artifact-smoke/windows-x64/artifact-smoke.json"
     },
     {
       "platform": "freebsd-x64",
@@ -1355,6 +1528,7 @@ EOF
       "manager_exception_required_for_public_release_without_proof": ${freebsd_manager_exception_required},
       "manifest_artifact": "artifacts/buildkite/release-dry-run/freebsd-x64/manifest.json",
       "metadata_artifact": "artifacts/buildkite/release-dry-run/freebsd-x64/ctx-release-metadata.env",
+      "artifact_smoke": "artifacts/buildkite/release-artifact-smoke/freebsd-x64/artifact-smoke.json",
       "blocker_artifact": "artifacts/buildkite/release-blockers/freebsd-x64/freebsd-x64-blocker.json"
     }
   ],
@@ -1373,14 +1547,19 @@ EOF
     "pipeline_contract": "artifacts/buildkite/pipeline-contract/pipeline-contract.txt",
     "release_dry_run_linux_x64": "artifacts/buildkite/release-dry-run/linux-x64/manifest.json",
     "release_dry_run_linux_x64_metadata": "artifacts/buildkite/release-dry-run/linux-x64/ctx-release-metadata.env",
+    "release_artifact_smoke_linux_x64": "artifacts/buildkite/release-artifact-smoke/linux-x64/artifact-smoke.json",
     "release_dry_run_macos_arm64": "artifacts/buildkite/release-dry-run/macos-arm64/manifest.json",
     "release_dry_run_macos_arm64_metadata": "artifacts/buildkite/release-dry-run/macos-arm64/ctx-release-metadata.env",
+    "release_artifact_smoke_macos_arm64": "artifacts/buildkite/release-artifact-smoke/macos-arm64/artifact-smoke.json",
     "release_dry_run_macos_x64": "artifacts/buildkite/release-dry-run/macos-x64/manifest.json",
     "release_dry_run_macos_x64_metadata": "artifacts/buildkite/release-dry-run/macos-x64/ctx-release-metadata.env",
+    "release_artifact_smoke_macos_x64": "artifacts/buildkite/release-artifact-smoke/macos-x64/artifact-smoke.json",
     "release_dry_run_windows_x64": "artifacts/buildkite/release-dry-run/windows-x64/manifest.json",
     "release_dry_run_windows_x64_metadata": "artifacts/buildkite/release-dry-run/windows-x64/ctx-release-metadata.env",
+    "release_artifact_smoke_windows_x64": "artifacts/buildkite/release-artifact-smoke/windows-x64/artifact-smoke.json",
     "release_dry_run_freebsd_x64": "artifacts/buildkite/release-dry-run/freebsd-x64/manifest.json",
     "release_dry_run_freebsd_x64_metadata": "artifacts/buildkite/release-dry-run/freebsd-x64/ctx-release-metadata.env",
+    "release_artifact_smoke_freebsd_x64": "artifacts/buildkite/release-artifact-smoke/freebsd-x64/artifact-smoke.json",
     "freebsd_x64_manager_exception": "artifacts/buildkite/release-exceptions/freebsd-x64/freebsd-x64-exception.json",
     "freebsd_x64_blocker": "artifacts/buildkite/release-blockers/freebsd-x64/freebsd-x64-blocker.json",
     "freebsd_x64_required_target_status": "artifacts/buildkite/release-blockers/freebsd-x64/freebsd-x64-blocker.json",

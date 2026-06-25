@@ -29,7 +29,7 @@ use work_record_store::Store;
 const CONFIG_FILE: &str = "config.toml";
 
 #[derive(Debug, Parser)]
-#[command(name = "ctx", about = "Search local agent history")]
+#[command(name = "ctx", version, about = "Search local agent history")]
 struct Cli {
     #[arg(long, env = "CTX_DATA_ROOT", global = true)]
     data_root: Option<PathBuf>,
