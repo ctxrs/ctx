@@ -24,7 +24,7 @@ use work_record_core::{
     database_path, default_data_root, CaptureProvider, ContextCitation, ContextCitationType, Event,
     EventType, Session, WorkRecord,
 };
-use work_record_store::{CatalogSession, Store};
+use work_record_store::{CatalogCounts, CatalogSession, Store};
 
 const CONFIG_FILE: &str = "config.toml";
 const WAL_TRUNCATE_MIN_BYTES: u64 = 64 * 1024 * 1024;
@@ -48,6 +48,8 @@ enum CommandRoot {
     Sources(JsonArgs),
     #[command(about = "Index provider history into local search")]
     Import(ImportArgs),
+    #[command(about = "Poll provider history and run incremental catch-up imports")]
+    Watch(WatchArgs),
     #[command(about = "List indexed agent history items")]
     List(ListArgs),
     #[command(about = "Show one indexed agent history item")]
@@ -98,6 +100,37 @@ impl ImportArgs {
             "idempotent_rescan"
         } else {
             "normal_scan"
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+struct WatchArgs {
+    #[arg(long, value_enum)]
+    provider: Option<ProviderArg>,
+    #[arg(long)]
+    path: Option<PathBuf>,
+    #[arg(long)]
+    all: bool,
+    #[arg(long)]
+    once: bool,
+    #[arg(long, default_value_t = 5)]
+    poll_interval: u64,
+    #[arg(long)]
+    json: bool,
+    #[arg(long, value_enum, default_value_t = ProgressArg::Auto)]
+    progress: ProgressArg,
+}
+
+impl WatchArgs {
+    fn import_args(&self) -> ImportArgs {
+        ImportArgs {
+            provider: self.provider,
+            path: self.path.clone(),
+            all: self.all,
+            resume: false,
+            json: self.json,
+            progress: self.progress,
         }
     }
 }
@@ -243,6 +276,15 @@ impl CatalogTotals {
         self.skipped_sessions += summary.skipped_sessions;
         self.failed_sessions += summary.failed_sessions;
     }
+}
+
+#[derive(Debug)]
+struct ImportReport {
+    resume: bool,
+    resume_mode: &'static str,
+    totals: ImportTotals,
+    sources: Vec<Value>,
+    catalog_counts: CatalogCounts,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -627,6 +669,7 @@ fn main() -> Result<()> {
         CommandRoot::Status(args) => run_status(args, data_root),
         CommandRoot::Sources(args) => run_sources(args),
         CommandRoot::Import(args) => run_import(args, data_root),
+        CommandRoot::Watch(args) => run_watch(args, data_root),
         CommandRoot::List(args) => run_list(args, data_root),
         CommandRoot::Show(args) => run_show(args, data_root),
         CommandRoot::Search(args) => run_search(args, data_root),
@@ -804,6 +847,20 @@ fn catalog_available_sources(
 }
 
 fn run_import(args: ImportArgs, data_root: PathBuf) -> Result<()> {
+    let report = execute_import(&args, data_root, "import")?;
+    if args.json {
+        print_json(import_report_json(&report))?;
+    } else {
+        print_import_report(&report);
+    }
+    Ok(())
+}
+
+fn execute_import(
+    args: &ImportArgs,
+    data_root: PathBuf,
+    operation: &'static str,
+) -> Result<ImportReport> {
     fs::create_dir_all(&data_root)?;
     write_default_config(&data_root)?;
     let db_path = database_path(data_root);
@@ -827,7 +884,7 @@ fn run_import(args: ImportArgs, data_root: PathBuf) -> Result<()> {
         planned_sources.push((source, stats));
     }
 
-    let progress = ProgressReporter::new(args.progress, args.json, "import", planned_total_bytes);
+    let progress = ProgressReporter::new(args.progress, args.json, operation, planned_total_bytes);
     progress.message(
         "discovering",
         format!(
@@ -992,39 +1049,116 @@ fn run_import(args: ImportArgs, data_root: PathBuf) -> Result<()> {
     progress.message("finalizing", "checkpointing search database");
     Store::open(&db_path)?.checkpoint_wal_truncate_if_larger_than(WAL_TRUNCATE_MIN_BYTES)?;
 
-    if args.json {
-        print_json(json!({
-            "schema_version": 1,
-            "resume": args.resume,
-            "resume_mode": args.resume_mode(),
-            "totals": {
-                "source_files": totals.source_files,
-                "source_bytes": totals.source_bytes,
-                "imported_sessions": totals.imported_sessions,
-                "imported_events": totals.imported_events,
-                "imported_edges": totals.imported_edges,
-                "skipped": totals.skipped,
-                "failed": totals.failed,
-            },
-            "sources": imported_sources,
-        }))?;
-    } else {
-        println!("source_files: {}", totals.source_files);
-        println!("source_bytes: {}", totals.source_bytes);
-        println!("imported_sessions: {}", totals.imported_sessions);
-        println!("imported_events: {}", totals.imported_events);
-        println!("imported_edges: {}", totals.imported_edges);
-        println!("skipped: {}", totals.skipped);
-        println!("failed: {}", totals.failed);
-        println!("resume: {}", args.resume);
-        println!("resume_mode: {}", args.resume_mode());
-    }
+    let catalog_counts = Store::open(&db_path)?.catalog_session_counts()?;
     progress.done(
         "finalizing",
         format!("indexed {} source file(s)", totals.source_files),
         totals.source_bytes,
     );
+    Ok(ImportReport {
+        resume: args.resume,
+        resume_mode: args.resume_mode(),
+        totals,
+        sources: imported_sources,
+        catalog_counts,
+    })
+}
+
+fn run_watch(args: WatchArgs, data_root: PathBuf) -> Result<()> {
+    let poll_interval = args.poll_interval.max(1);
+    let mut iteration = 1u64;
+    loop {
+        let import_args = args.import_args();
+        let report = execute_import(&import_args, data_root.clone(), "watch")?;
+        if args.json {
+            print_json(watch_report_json(&args, &report, iteration, poll_interval))?;
+        } else {
+            print_watch_report(&args, &report, iteration, poll_interval);
+        }
+        if args.once {
+            break;
+        }
+        iteration = iteration.saturating_add(1);
+        thread::sleep(StdDuration::from_secs(poll_interval));
+    }
     Ok(())
+}
+
+fn import_report_json(report: &ImportReport) -> Value {
+    json!({
+        "schema_version": 1,
+        "resume": report.resume,
+        "resume_mode": report.resume_mode,
+        "totals": {
+            "source_files": report.totals.source_files,
+            "source_bytes": report.totals.source_bytes,
+            "imported_sessions": report.totals.imported_sessions,
+            "imported_events": report.totals.imported_events,
+            "imported_edges": report.totals.imported_edges,
+            "skipped": report.totals.skipped,
+            "failed": report.totals.failed,
+        },
+        "sources": &report.sources,
+        "catalog": catalog_counts_json(&report.catalog_counts),
+    })
+}
+
+fn watch_report_json(
+    args: &WatchArgs,
+    report: &ImportReport,
+    iteration: u64,
+    poll_interval: u64,
+) -> Value {
+    json!({
+        "schema_version": 1,
+        "strategy": "polling_catch_up",
+        "once": args.once,
+        "iteration": iteration,
+        "poll_interval_seconds": poll_interval,
+        "import": import_report_json(report),
+        "catalog": catalog_counts_json(&report.catalog_counts),
+    })
+}
+
+fn catalog_counts_json(counts: &CatalogCounts) -> Value {
+    json!({
+        "cataloged_sessions": counts.total,
+        "indexed_sessions": counts.indexed,
+        "pending_sessions": counts.pending,
+        "failed_sessions": counts.failed,
+        "stale_sessions": counts.stale,
+    })
+}
+
+fn print_import_report(report: &ImportReport) {
+    println!("source_files: {}", report.totals.source_files);
+    println!("source_bytes: {}", report.totals.source_bytes);
+    println!("imported_sessions: {}", report.totals.imported_sessions);
+    println!("imported_events: {}", report.totals.imported_events);
+    println!("imported_edges: {}", report.totals.imported_edges);
+    println!("skipped: {}", report.totals.skipped);
+    println!("failed: {}", report.totals.failed);
+    println!("resume: {}", report.resume);
+    println!("resume_mode: {}", report.resume_mode);
+    println!("cataloged_sessions: {}", report.catalog_counts.total);
+    println!(
+        "indexed_catalog_sessions: {}",
+        report.catalog_counts.indexed
+    );
+    println!(
+        "pending_catalog_sessions: {}",
+        report.catalog_counts.pending
+    );
+    println!("failed_catalog_sessions: {}", report.catalog_counts.failed);
+    println!("stale_catalog_sessions: {}", report.catalog_counts.stale);
+}
+
+fn print_watch_report(args: &WatchArgs, report: &ImportReport, iteration: u64, poll_interval: u64) {
+    println!("watch_strategy: polling_catch_up");
+    println!("watch_iteration: {iteration}");
+    println!("watch_once: {}", args.once);
+    println!("watch_poll_interval_seconds: {poll_interval}");
+    print_import_report(report);
 }
 
 #[derive(Debug)]

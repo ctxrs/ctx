@@ -211,7 +211,7 @@ fn help_exposes_only_search_mvp_commands() {
 
     for expected in [
         "setup", "status", "sources", "import", "list", "show", "search", "context", "doctor",
-        "validate",
+        "validate", "watch",
     ] {
         assert!(
             commands.contains(expected),
@@ -392,6 +392,35 @@ fn import_all_discovers_and_imports_providers_together() {
 }
 
 #[test]
+fn watch_once_runs_incremental_catch_up_without_real_home_files() {
+    let temp = tempdir();
+    let fixture = provider_history_fixture("codex-sessions");
+
+    let watched = json_output(ctx(&temp).args([
+        "watch",
+        "--once",
+        "--provider",
+        "codex",
+        "--path",
+        &fixture,
+        "--poll-interval",
+        "2",
+        "--json",
+    ]));
+
+    assert_eq!(watched["schema_version"], 1);
+    assert_eq!(watched["strategy"], "polling_catch_up");
+    assert_eq!(watched["once"], true);
+    assert_eq!(watched["poll_interval_seconds"], 2);
+    assert_eq!(watched["import"]["schema_version"], 1);
+    assert_eq!(watched["import"]["resume"], false);
+    assert_eq!(watched["import"]["resume_mode"], "normal_scan");
+    assert_eq!(watched["import"]["totals"]["imported_sessions"], 2);
+    assert_eq!(watched["catalog"]["indexed_sessions"], 2);
+    assert_eq!(watched["catalog"]["pending_sessions"], 0);
+}
+
+#[test]
 fn provider_help_matches_implemented_importers() {
     let temp = tempdir();
     let output = ctx(&temp)
@@ -422,6 +451,16 @@ fn public_subcommand_help_is_golden_enough_for_search_mvp() {
                 "[possible values: codex, pi]",
                 "--path <PATH>",
                 "--resume",
+                "--json",
+            ],
+        ),
+        (
+            "watch",
+            vec![
+                "Usage: ctx watch",
+                "--provider <PROVIDER>",
+                "--once",
+                "--poll-interval <POLL_INTERVAL>",
                 "--json",
             ],
         ),
