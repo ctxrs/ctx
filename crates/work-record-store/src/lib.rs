@@ -112,7 +112,7 @@ pub fn classify_evidence_freshness(
     EvidenceFreshness::Fresh
 }
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 const BUSY_TIMEOUT: Duration = Duration::from_millis(5_000);
 const OBJECTS_DIR: &str = "objects";
 const SPOOL_DIR: &str = "spool";
@@ -164,6 +164,25 @@ pub struct CatalogCounts {
     pub total: usize,
     pub indexed: usize,
     pub stale: usize,
+    pub pending: usize,
+    pub failed: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatalogIndexedStatus {
+    Pending,
+    Indexed,
+    Failed,
+}
+
+impl CatalogIndexedStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Indexed => "indexed",
+            Self::Failed => "failed",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -254,6 +273,33 @@ const WORK_RECORD_COLUMNS: &[ColumnSpec] = &[
     ColumnSpec {
         name: "metadata_json",
         definition: "metadata_json TEXT NOT NULL DEFAULT '{}'",
+    },
+];
+
+const CATALOG_SESSION_IMPORT_STATE_COLUMNS: &[ColumnSpec] = &[
+    ColumnSpec {
+        name: "indexed_at_ms",
+        definition: "indexed_at_ms INTEGER",
+    },
+    ColumnSpec {
+        name: "indexed_file_size_bytes",
+        definition: "indexed_file_size_bytes INTEGER",
+    },
+    ColumnSpec {
+        name: "indexed_file_modified_at_ms",
+        definition: "indexed_file_modified_at_ms INTEGER",
+    },
+    ColumnSpec {
+        name: "indexed_status",
+        definition: "indexed_status TEXT NOT NULL DEFAULT 'pending' CHECK (indexed_status IN ('pending', 'indexed', 'failed'))",
+    },
+    ColumnSpec {
+        name: "indexed_error",
+        definition: "indexed_error TEXT",
+    },
+    ColumnSpec {
+        name: "indexed_event_count",
+        definition: "indexed_event_count INTEGER",
     },
 ];
 
@@ -380,6 +426,12 @@ CREATE TABLE IF NOT EXISTS catalog_sessions (
     file_modified_at_ms INTEGER NOT NULL,
     cataloged_at_ms INTEGER NOT NULL,
     is_stale INTEGER NOT NULL DEFAULT 0,
+    indexed_at_ms INTEGER,
+    indexed_file_size_bytes INTEGER,
+    indexed_file_modified_at_ms INTEGER,
+    indexed_status TEXT NOT NULL DEFAULT 'pending' CHECK (indexed_status IN ('pending', 'indexed', 'failed')),
+    indexed_error TEXT,
+    indexed_event_count INTEGER,
     metadata_json TEXT NOT NULL DEFAULT '{}'
 );
 
@@ -742,6 +794,7 @@ CREATE INDEX IF NOT EXISTS idx_capture_sources_external_session_id ON capture_so
 
 CREATE INDEX IF NOT EXISTS idx_catalog_sessions_provider_external_session_id ON catalog_sessions(provider, external_session_id);
 CREATE INDEX IF NOT EXISTS idx_catalog_sessions_provider_source_root_stale ON catalog_sessions(provider, source_root, is_stale);
+CREATE INDEX IF NOT EXISTS idx_catalog_sessions_provider_source_root_import ON catalog_sessions(provider, source_root, is_stale, indexed_status);
 CREATE INDEX IF NOT EXISTS idx_catalog_sessions_started_at ON catalog_sessions(session_started_at_ms);
 CREATE INDEX IF NOT EXISTS idx_catalog_sessions_cwd ON catalog_sessions(cwd);
 CREATE INDEX IF NOT EXISTS idx_sessions_provider_external_session_id ON sessions(provider, external_session_id);
@@ -976,6 +1029,9 @@ impl Store {
         if user_version < 5 {
             migrate_to_v5(&self.conn)?;
         }
+        if user_version < 6 {
+            migrate_to_v6(&self.conn)?;
+        }
         create_fts_tables_if_supported(&self.conn)?;
         Ok(())
     }
@@ -1130,6 +1186,42 @@ impl Store {
                 file_modified_at_ms = excluded.file_modified_at_ms,
                 cataloged_at_ms = excluded.cataloged_at_ms,
                 is_stale = 0,
+                indexed_at_ms = CASE
+                    WHEN catalog_sessions.file_size_bytes = excluded.file_size_bytes
+                     AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
+                    THEN catalog_sessions.indexed_at_ms
+                    ELSE NULL
+                END,
+                indexed_file_size_bytes = CASE
+                    WHEN catalog_sessions.file_size_bytes = excluded.file_size_bytes
+                     AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
+                    THEN catalog_sessions.indexed_file_size_bytes
+                    ELSE NULL
+                END,
+                indexed_file_modified_at_ms = CASE
+                    WHEN catalog_sessions.file_size_bytes = excluded.file_size_bytes
+                     AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
+                    THEN catalog_sessions.indexed_file_modified_at_ms
+                    ELSE NULL
+                END,
+                indexed_status = CASE
+                    WHEN catalog_sessions.file_size_bytes = excluded.file_size_bytes
+                     AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
+                    THEN catalog_sessions.indexed_status
+                    ELSE 'pending'
+                END,
+                indexed_error = CASE
+                    WHEN catalog_sessions.file_size_bytes = excluded.file_size_bytes
+                     AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
+                    THEN catalog_sessions.indexed_error
+                    ELSE NULL
+                END,
+                indexed_event_count = CASE
+                    WHEN catalog_sessions.file_size_bytes = excluded.file_size_bytes
+                     AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
+                    THEN catalog_sessions.indexed_event_count
+                    ELSE NULL
+                END,
                 metadata_json = excluded.metadata_json
             "#,
         )?;
@@ -1155,6 +1247,102 @@ impl Store {
         Ok(())
     }
 
+    pub fn list_pending_catalog_sessions(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+    ) -> Result<Vec<CatalogSession>> {
+        let mut stmt = self.conn.prepare(
+            format!(
+                "{} WHERE provider = ?1
+                   AND source_root = ?2
+                   AND is_stale = 0
+                   AND {}
+                 ORDER BY session_started_at_ms, source_path",
+                catalog_session_select_sql(""),
+                catalog_pending_import_condition_sql("catalog_sessions")
+            )
+            .as_str(),
+        )?;
+        let rows = stmt.query_map(
+            params![provider.as_str(), source_root],
+            catalog_session_from_row,
+        )?;
+        collect_rows(rows)
+    }
+
+    pub fn mark_catalog_source_indexed(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        source_path: &str,
+        file_size_bytes: u64,
+        file_modified_at_ms: i64,
+        event_count: u64,
+        indexed_at_ms: i64,
+    ) -> Result<usize> {
+        let changed = self.conn.execute(
+            r#"
+            UPDATE catalog_sessions
+            SET indexed_at_ms = ?4,
+                indexed_file_size_bytes = ?5,
+                indexed_file_modified_at_ms = ?6,
+                indexed_status = ?8,
+                indexed_error = NULL,
+                indexed_event_count = ?7
+            WHERE provider = ?1
+              AND source_root = ?2
+              AND source_path = ?3
+              AND is_stale = 0
+            "#,
+            params![
+                provider.as_str(),
+                source_root,
+                source_path,
+                indexed_at_ms,
+                capped_i64(file_size_bytes),
+                file_modified_at_ms,
+                capped_i64(event_count),
+                CatalogIndexedStatus::Indexed.as_str(),
+            ],
+        )?;
+        Ok(changed)
+    }
+
+    pub fn mark_catalog_source_failed(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        source_path: &str,
+        error: &str,
+        indexed_at_ms: i64,
+    ) -> Result<usize> {
+        let changed = self.conn.execute(
+            r#"
+            UPDATE catalog_sessions
+            SET indexed_at_ms = ?4,
+                indexed_file_size_bytes = NULL,
+                indexed_file_modified_at_ms = NULL,
+                indexed_status = ?6,
+                indexed_error = ?5,
+                indexed_event_count = NULL
+            WHERE provider = ?1
+              AND source_root = ?2
+              AND source_path = ?3
+              AND is_stale = 0
+            "#,
+            params![
+                provider.as_str(),
+                source_root,
+                source_path,
+                indexed_at_ms,
+                error,
+                CatalogIndexedStatus::Failed.as_str(),
+            ],
+        )?;
+        Ok(changed)
+    }
+
     pub fn catalog_session_count(&self) -> Result<usize> {
         self.conn
             .query_row(
@@ -1172,25 +1360,27 @@ impl Store {
             [],
             |row| row.get::<_, i64>(0),
         )? as usize;
-        let indexed = self.conn.query_row(
-            r#"
-                SELECT COUNT(*)
-                FROM catalog_sessions AS catalog
-                WHERE catalog.is_stale = 0
-                  AND catalog.external_session_id IS NOT NULL
-                  AND EXISTS (
-                    SELECT 1
-                    FROM sessions AS session
-                    WHERE session.provider = catalog.provider
-                      AND session.external_session_id = catalog.external_session_id
-                    LIMIT 1
-                  )
-                "#,
+        let indexed = self
+            .conn
+            .query_row(catalog_indexed_count_sql().as_str(), [], |row| {
+                row.get::<_, i64>(0)
+            })? as usize;
+        let stale = self.conn.query_row(
+            "SELECT COUNT(*) FROM catalog_sessions WHERE is_stale != 0",
             [],
             |row| row.get::<_, i64>(0),
         )? as usize;
-        let stale = self.conn.query_row(
-            "SELECT COUNT(*) FROM catalog_sessions WHERE is_stale != 0",
+        let pending = self.conn.query_row(
+            format!(
+                "SELECT COUNT(*) FROM catalog_sessions WHERE is_stale = 0 AND {}",
+                catalog_pending_import_condition_sql("catalog_sessions")
+            )
+            .as_str(),
+            [],
+            |row| row.get::<_, i64>(0),
+        )? as usize;
+        let failed = self.conn.query_row(
+            "SELECT COUNT(*) FROM catalog_sessions WHERE is_stale = 0 AND indexed_status = 'failed'",
             [],
             |row| row.get::<_, i64>(0),
         )? as usize;
@@ -1198,6 +1388,8 @@ impl Store {
             total,
             indexed,
             stale,
+            pending,
+            failed,
         })
     }
 
@@ -3751,8 +3943,41 @@ fn migrate_to_v5(conn: &Connection) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE;")?;
     let migration = (|| -> Result<()> {
         conn.execute_batch(CREATE_TABLES_SQL)?;
+        ensure_columns(
+            conn,
+            "catalog_sessions",
+            CATALOG_SESSION_IMPORT_STATE_COLUMNS,
+        )?;
         conn.execute_batch(INDEXES_SQL)?;
         conn.execute_batch("PRAGMA user_version = 5;")?;
+        Ok(())
+    })();
+
+    match migration {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;")?;
+            Ok(())
+        }
+        Err(err) => {
+            if let Err(rollback_err) = conn.execute_batch("ROLLBACK;") {
+                return Err(StoreError::Sql(rollback_err));
+            }
+            Err(err)
+        }
+    }
+}
+
+fn migrate_to_v6(conn: &Connection) -> Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE;")?;
+    let migration = (|| -> Result<()> {
+        conn.execute_batch(CREATE_TABLES_SQL)?;
+        ensure_columns(
+            conn,
+            "catalog_sessions",
+            CATALOG_SESSION_IMPORT_STATE_COLUMNS,
+        )?;
+        conn.execute_batch(INDEXES_SQL)?;
+        conn.execute_batch("PRAGMA user_version = 6;")?;
         Ok(())
     })();
 
@@ -3986,6 +4211,10 @@ fn timestamp_ms(value: DateTime<Utc>) -> i64 {
 
 fn capped_i64(value: u64) -> i64 {
     value.min(i64::MAX as u64) as i64
+}
+
+fn nonnegative_i64_to_u64(value: i64) -> rusqlite::Result<u64> {
+    u64::try_from(value).map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))
 }
 
 fn time_ms(value: i64) -> DateTime<Utc> {
@@ -5976,6 +6205,74 @@ fn capture_source_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CaptureS
     })
 }
 
+fn catalog_session_select_sql(tail: &str) -> String {
+    format!(
+        "SELECT source_path, provider, source_format, source_root, external_session_id, parent_external_session_id, agent_type, role_hint, external_agent_id, cwd, session_started_at_ms, file_size_bytes, file_modified_at_ms, cataloged_at_ms, metadata_json FROM catalog_sessions {tail}"
+    )
+}
+
+fn catalog_session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CatalogSession> {
+    Ok(CatalogSession {
+        source_path: row.get(0)?,
+        provider: parse_text_enum::<CaptureProvider>(row.get::<_, String>(1)?)?,
+        source_format: row.get(2)?,
+        source_root: row.get(3)?,
+        external_session_id: row.get(4)?,
+        parent_external_session_id: row.get(5)?,
+        agent_type: parse_text_enum::<AgentType>(row.get::<_, String>(6)?)?,
+        role_hint: row.get(7)?,
+        external_agent_id: row.get(8)?,
+        cwd: row.get(9)?,
+        session_started_at_ms: row.get(10)?,
+        file_size_bytes: nonnegative_i64_to_u64(row.get(11)?)?,
+        file_modified_at_ms: row.get(12)?,
+        cataloged_at_ms: row.get(13)?,
+        metadata: parse_json(row.get::<_, String>(14)?)?,
+    })
+}
+
+fn catalog_pending_import_condition_sql(alias: &str) -> String {
+    format!(
+        r#"
+        (
+            {alias}.indexed_status != 'indexed'
+            OR {alias}.indexed_file_size_bytes IS NULL
+            OR {alias}.indexed_file_modified_at_ms IS NULL
+            OR {alias}.indexed_file_size_bytes != {alias}.file_size_bytes
+            OR {alias}.indexed_file_modified_at_ms != {alias}.file_modified_at_ms
+            OR NOT EXISTS (
+                SELECT 1
+                FROM sessions AS session
+                WHERE session.provider = {alias}.provider
+                  AND {alias}.external_session_id IS NOT NULL
+                  AND session.external_session_id = {alias}.external_session_id
+                LIMIT 1
+            )
+        )
+        "#
+    )
+}
+
+fn catalog_indexed_count_sql() -> String {
+    r#"
+    SELECT COUNT(*)
+    FROM catalog_sessions AS catalog
+    WHERE catalog.is_stale = 0
+      AND catalog.indexed_status = 'indexed'
+      AND catalog.indexed_file_size_bytes = catalog.file_size_bytes
+      AND catalog.indexed_file_modified_at_ms = catalog.file_modified_at_ms
+      AND EXISTS (
+        SELECT 1
+        FROM sessions AS session
+        WHERE session.provider = catalog.provider
+          AND catalog.external_session_id IS NOT NULL
+          AND session.external_session_id = catalog.external_session_id
+        LIMIT 1
+      )
+    "#
+    .to_owned()
+}
+
 fn session_select_sql(tail: &str) -> String {
     format!(
         "SELECT id, work_record_id, parent_session_id, root_session_id, capture_source_id, provider, external_session_id, external_agent_id, agent_type, role_hint, is_primary, status, fidelity, transcript_blob_id, started_at_ms, ended_at_ms, created_at_ms, updated_at_ms, visibility, sync_state, sync_version, deleted_at_ms, metadata_json FROM sessions {tail}"
@@ -6626,58 +6923,96 @@ mod catalog_tests {
         }
     }
 
+    fn catalog_session(
+        source_path: &str,
+        external_session_id: &str,
+        mtime_ms: i64,
+    ) -> CatalogSession {
+        CatalogSession {
+            provider: CaptureProvider::Codex,
+            source_format: "codex_session_jsonl".into(),
+            source_root: "/home/user/.codex/sessions".into(),
+            source_path: source_path.into(),
+            external_session_id: Some(external_session_id.into()),
+            parent_external_session_id: None,
+            agent_type: AgentType::Primary,
+            role_hint: Some("primary".into()),
+            external_agent_id: None,
+            cwd: Some("/repo".into()),
+            session_started_at_ms: Some(mtime_ms),
+            file_size_bytes: 42,
+            file_modified_at_ms: mtime_ms,
+            cataloged_at_ms: mtime_ms,
+            metadata: serde_json::json!({"catalog_scope": "session_meta"}),
+        }
+    }
+
+    fn imported_session(external_session_id: &str) -> Session {
+        Session {
+            id: new_id(),
+            work_record_id: None,
+            parent_session_id: None,
+            root_session_id: None,
+            capture_source_id: None,
+            provider: CaptureProvider::Codex,
+            external_session_id: Some(external_session_id.into()),
+            external_agent_id: None,
+            agent_type: AgentType::Primary,
+            role_hint: Some("primary".into()),
+            is_primary: true,
+            status: SessionStatus::Imported,
+            transcript_blob_id: None,
+            started_at: fixed_time(),
+            ended_at: None,
+            timestamps: timestamps(),
+            sync: sync_metadata(),
+        }
+    }
+
     #[test]
     fn catalog_sessions_count_indexed_and_stale_rows() {
         let temp = tempdir();
         let store = Store::open(temp.path().join("work.sqlite")).unwrap();
         let cataloged_at_ms = timestamp_ms(fixed_time());
         store
-            .upsert_catalog_sessions(&[CatalogSession {
-                provider: CaptureProvider::Codex,
-                source_format: "codex_session_jsonl".into(),
-                source_root: "/home/user/.codex/sessions".into(),
-                source_path: "/home/user/.codex/sessions/2026/06/24/rollout.jsonl".into(),
-                external_session_id: Some("codex-session-1".into()),
-                parent_external_session_id: None,
-                agent_type: AgentType::Primary,
-                role_hint: Some("primary".into()),
-                external_agent_id: None,
-                cwd: Some("/repo".into()),
-                session_started_at_ms: Some(cataloged_at_ms),
-                file_size_bytes: 42,
-                file_modified_at_ms: cataloged_at_ms,
+            .upsert_catalog_sessions(&[catalog_session(
+                "/home/user/.codex/sessions/2026/06/24/rollout.jsonl",
+                "codex-session-1",
                 cataloged_at_ms,
-                metadata: serde_json::json!({"catalog_scope": "session_meta"}),
-            }])
+            )])
             .unwrap();
 
         let counts = store.catalog_session_counts().unwrap();
         assert_eq!(counts.total, 1);
         assert_eq!(counts.indexed, 0);
         assert_eq!(counts.stale, 0);
+        assert_eq!(counts.pending, 1);
+        assert_eq!(counts.failed, 0);
+        assert_eq!(
+            store
+                .list_pending_catalog_sessions(CaptureProvider::Codex, "/home/user/.codex/sessions")
+                .unwrap()
+                .len(),
+            1
+        );
 
         store
-            .upsert_session(&Session {
-                id: new_id(),
-                work_record_id: None,
-                parent_session_id: None,
-                root_session_id: None,
-                capture_source_id: None,
-                provider: CaptureProvider::Codex,
-                external_session_id: Some("codex-session-1".into()),
-                external_agent_id: None,
-                agent_type: AgentType::Primary,
-                role_hint: Some("primary".into()),
-                is_primary: true,
-                status: SessionStatus::Imported,
-                transcript_blob_id: None,
-                started_at: fixed_time(),
-                ended_at: None,
-                timestamps: timestamps(),
-                sync: sync_metadata(),
-            })
+            .upsert_session(&imported_session("codex-session-1"))
             .unwrap();
-        assert_eq!(store.catalog_session_counts().unwrap().indexed, 1);
+        store
+            .mark_catalog_source_indexed(
+                CaptureProvider::Codex,
+                "/home/user/.codex/sessions",
+                "/home/user/.codex/sessions/2026/06/24/rollout.jsonl",
+                42,
+                cataloged_at_ms,
+                3,
+                cataloged_at_ms + 10,
+            )
+            .unwrap();
+        let counts = store.catalog_session_counts().unwrap();
+        assert_eq!(counts.indexed, 1);
+        assert_eq!(counts.pending, 0);
 
         store
             .mark_catalog_source_stale(
@@ -6690,6 +7025,165 @@ mod catalog_tests {
         assert_eq!(counts.total, 0);
         assert_eq!(counts.indexed, 0);
         assert_eq!(counts.stale, 1);
+        assert_eq!(counts.pending, 0);
+    }
+
+    #[test]
+    fn catalog_import_planning_requires_current_index_state_and_matching_session() {
+        let temp = tempdir();
+        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let cataloged_at_ms = timestamp_ms(fixed_time());
+        store
+            .upsert_catalog_sessions(&[catalog_session(
+                "/home/user/.codex/sessions/2026/06/24/rollout.jsonl",
+                "codex-session-1",
+                cataloged_at_ms,
+            )])
+            .unwrap();
+        store
+            .mark_catalog_source_indexed(
+                CaptureProvider::Codex,
+                "/home/user/.codex/sessions",
+                "/home/user/.codex/sessions/2026/06/24/rollout.jsonl",
+                42,
+                cataloged_at_ms,
+                3,
+                cataloged_at_ms + 10,
+            )
+            .unwrap();
+
+        let pending = store
+            .list_pending_catalog_sessions(CaptureProvider::Codex, "/home/user/.codex/sessions")
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(store.catalog_session_counts().unwrap().indexed, 0);
+
+        store
+            .upsert_session(&imported_session("codex-session-1"))
+            .unwrap();
+        let pending = store
+            .list_pending_catalog_sessions(CaptureProvider::Codex, "/home/user/.codex/sessions")
+            .unwrap();
+        assert!(pending.is_empty());
+        let counts = store.catalog_session_counts().unwrap();
+        assert_eq!(counts.indexed, 1);
+        assert_eq!(counts.pending, 0);
+    }
+
+    #[test]
+    fn catalog_import_mark_failed_records_error_and_remains_pending() {
+        let temp = tempdir();
+        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let cataloged_at_ms = timestamp_ms(fixed_time());
+        store
+            .upsert_catalog_sessions(&[catalog_session(
+                "/home/user/.codex/sessions/2026/06/24/rollout.jsonl",
+                "codex-session-1",
+                cataloged_at_ms,
+            )])
+            .unwrap();
+
+        let changed = store
+            .mark_catalog_source_failed(
+                CaptureProvider::Codex,
+                "/home/user/.codex/sessions",
+                "/home/user/.codex/sessions/2026/06/24/rollout.jsonl",
+                "bad json",
+                cataloged_at_ms + 10,
+            )
+            .unwrap();
+        assert_eq!(changed, 1);
+
+        let counts = store.catalog_session_counts().unwrap();
+        assert_eq!(counts.failed, 1);
+        assert_eq!(counts.pending, 1);
+        let (status, error, indexed_at_ms): (String, Option<String>, Option<i64>) = store
+            .conn
+            .query_row(
+                "SELECT indexed_status, indexed_error, indexed_at_ms FROM catalog_sessions WHERE source_path = ?1",
+                ["/home/user/.codex/sessions/2026/06/24/rollout.jsonl"],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(status, CatalogIndexedStatus::Failed.as_str());
+        assert_eq!(error.as_deref(), Some("bad json"));
+        assert_eq!(indexed_at_ms, Some(cataloged_at_ms + 10));
+    }
+
+    #[test]
+    fn catalog_upsert_preserves_index_state_until_file_changes() {
+        let temp = tempdir();
+        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let cataloged_at_ms = timestamp_ms(fixed_time());
+        let source_path = "/home/user/.codex/sessions/2026/06/24/rollout.jsonl";
+        store
+            .upsert_catalog_sessions(&[catalog_session(
+                source_path,
+                "codex-session-1",
+                cataloged_at_ms,
+            )])
+            .unwrap();
+        store
+            .upsert_session(&imported_session("codex-session-1"))
+            .unwrap();
+        store
+            .mark_catalog_source_indexed(
+                CaptureProvider::Codex,
+                "/home/user/.codex/sessions",
+                source_path,
+                42,
+                cataloged_at_ms,
+                3,
+                cataloged_at_ms + 10,
+            )
+            .unwrap();
+
+        store
+            .upsert_catalog_sessions(&[catalog_session(
+                source_path,
+                "codex-session-1",
+                cataloged_at_ms,
+            )])
+            .unwrap();
+        assert_eq!(store.catalog_session_counts().unwrap().indexed, 1);
+
+        let mut changed = catalog_session(source_path, "codex-session-1", cataloged_at_ms + 1);
+        changed.file_size_bytes = 43;
+        store.upsert_catalog_sessions(&[changed]).unwrap();
+
+        let counts = store.catalog_session_counts().unwrap();
+        assert_eq!(counts.indexed, 0);
+        assert_eq!(counts.pending, 1);
+        let (status, indexed_size, indexed_mtime, indexed_event_count): (
+            String,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+        ) = store
+            .conn
+            .query_row(
+                "SELECT indexed_status, indexed_file_size_bytes, indexed_file_modified_at_ms, indexed_event_count FROM catalog_sessions WHERE source_path = ?1",
+                [source_path],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(status, CatalogIndexedStatus::Pending.as_str());
+        assert_eq!(indexed_size, None);
+        assert_eq!(indexed_mtime, None);
+        assert_eq!(indexed_event_count, None);
+    }
+
+    #[test]
+    fn catalog_schema_includes_import_state_columns() {
+        let temp = tempdir();
+        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let schema = store.schema().unwrap();
+        assert!(schema.contains("indexed_at_ms INTEGER"));
+        assert!(schema.contains("indexed_file_size_bytes INTEGER"));
+        assert!(schema.contains("indexed_file_modified_at_ms INTEGER"));
+        assert!(schema.contains("indexed_status TEXT NOT NULL DEFAULT 'pending'"));
+        assert!(schema.contains("indexed_error TEXT"));
+        assert!(schema.contains("indexed_event_count INTEGER"));
     }
 }
 
