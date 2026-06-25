@@ -13,8 +13,6 @@ pub struct AnalyticsEvent<'a> {
     pub json_output: bool,
     pub success: bool,
     pub duration: Duration,
-    pub update_channel: &'a str,
-    pub auto_update: bool,
 }
 
 pub fn send_cli_event(data_root: &Path, config: &AppConfig, event: AnalyticsEvent<'_>) {
@@ -63,8 +61,6 @@ fn send_cli_event_inner(
             "properties": {
                 "action": event.action,
                 "json_output": event.json_output,
-                "update_channel": event.update_channel,
-                "auto_update": event.auto_update,
                 "analytics_client": "ctx-cli"
             }
         }]

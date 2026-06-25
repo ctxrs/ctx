@@ -3,7 +3,6 @@ use std::{
     env, fs,
     io::Write,
     path::{Path, PathBuf},
-    time::Duration,
 };
 
 use anyhow::{Context, Result};
@@ -13,7 +12,6 @@ pub const CONFIG_FILE: &str = "config.toml";
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub analytics: AnalyticsConfig,
-    pub updates: UpdatesConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -22,26 +20,12 @@ pub struct AnalyticsConfig {
     pub endpoint: String,
 }
 
-#[derive(Debug, Clone)]
-pub struct UpdatesConfig {
-    pub auto_update: bool,
-    pub channel: String,
-    pub endpoint_base: String,
-    pub check_interval: Duration,
-}
-
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             analytics: AnalyticsConfig {
-                enabled: true,
+                enabled: false,
                 endpoint: "https://api.ctx.rs/functions/v1/telemetry".to_owned(),
-            },
-            updates: UpdatesConfig {
-                auto_update: true,
-                channel: "stable".to_owned(),
-                endpoint_base: "https://api.ctx.rs/functions/v1".to_owned(),
-                check_interval: Duration::from_secs(24 * 60 * 60),
             },
         }
     }
@@ -68,18 +52,6 @@ impl AppConfig {
         if let Some(endpoint) = parse_string(values.get("analytics.endpoint")) {
             self.analytics.endpoint = endpoint;
         }
-        if let Some(auto_update) = parse_bool(values.get("updates.auto_update")) {
-            self.updates.auto_update = auto_update;
-        }
-        if let Some(channel) = parse_string(values.get("updates.channel")) {
-            self.updates.channel = channel;
-        }
-        if let Some(endpoint_base) = parse_string(values.get("updates.endpoint_base")) {
-            self.updates.endpoint_base = endpoint_base;
-        }
-        if let Some(seconds) = parse_u64(values.get("updates.check_interval_seconds")) {
-            self.updates.check_interval = Duration::from_secs(seconds);
-        }
     }
 
     fn apply_env(&mut self) {
@@ -96,29 +68,6 @@ impl AppConfig {
                 self.analytics.endpoint = endpoint;
             }
         }
-        if env_flag("CTX_DISABLE_AUTO_UPDATE") || env_flag("CTX_NO_AUTO_UPDATE") {
-            self.updates.auto_update = false;
-        }
-        if let Ok(value) = env::var("CTX_AUTO_UPDATE") {
-            if let Some(enabled) = parse_bool_value(&value) {
-                self.updates.auto_update = enabled;
-            }
-        }
-        if let Ok(channel) = env::var("CTX_UPDATE_CHANNEL") {
-            if !channel.trim().is_empty() {
-                self.updates.channel = channel;
-            }
-        }
-        if let Ok(endpoint_base) = env::var("CTX_UPDATE_ENDPOINT_BASE") {
-            if !endpoint_base.trim().is_empty() {
-                self.updates.endpoint_base = endpoint_base;
-            }
-        }
-        if let Ok(seconds) = env::var("CTX_UPDATE_CHECK_INTERVAL_SECONDS") {
-            if let Ok(seconds) = seconds.parse::<u64>() {
-                self.updates.check_interval = Duration::from_secs(seconds);
-            }
-        }
     }
 
     pub fn config_path(data_root: &Path) -> PathBuf {
@@ -133,9 +82,8 @@ pub fn write_default_config(data_root: &Path) -> Result<()> {
     }
     let mut file = fs::File::create(&path)?;
     file.write_all(
-        b"[updates]\n\
-channel = \"stable\"\n\
-auto_update = true\n",
+        b"[analytics]\n\
+enabled = false\n",
     )?;
     Ok(())
 }
@@ -194,10 +142,6 @@ fn parse_bool_value(value: &str) -> Option<bool> {
     }
 }
 
-fn parse_u64(value: Option<&String>) -> Option<u64> {
-    value.and_then(|value| value.trim().trim_matches('"').parse::<u64>().ok())
-}
-
 fn env_flag(key: &str) -> bool {
     env::var_os(key).is_some_and(|value| {
         let value = value.to_string_lossy();
@@ -217,19 +161,13 @@ mod tests {
         let values = parse_toml_subset(
             r#"
 [analytics]
-enabled = false
-
-[updates]
-channel = "beta"
-auto_update = false
-check_interval_seconds = 60
+enabled = true
+endpoint = "file:///tmp/ctx-analytics.jsonl"
 "#,
         );
         let mut config = AppConfig::default();
         config.apply_values(&values);
-        assert!(!config.analytics.enabled);
-        assert!(!config.updates.auto_update);
-        assert_eq!(config.updates.channel, "beta");
-        assert_eq!(config.updates.check_interval, Duration::from_secs(60));
+        assert!(config.analytics.enabled);
+        assert_eq!(config.analytics.endpoint, "file:///tmp/ctx-analytics.jsonl");
     }
 }

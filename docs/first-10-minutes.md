@@ -36,8 +36,10 @@ ctx sources
 ctx sources --json
 ```
 
-Expect Codex and Pi rows. A row with `exists: false` means ctx knows the default
-path but did not find local history there.
+Expect rows for supported local import providers such as Codex, Pi, Claude,
+OpenCode, Gemini, Cursor, Copilot CLI, and Factory AI Droid. Antigravity and
+Amp may appear as detection-only unsupported rows. A row with `exists: false`
+means ctx knows the default path but did not find local history there.
 
 ## 4. Import
 
@@ -50,6 +52,7 @@ If no sources exist, pass an explicit path:
 ```bash
 ctx import --provider codex --path ~/.codex/sessions
 ctx import --provider pi --path ~/.pi/sessions.jsonl
+ctx import --provider cursor --path ~/.cursor/projects
 ```
 
 ## 5. Search

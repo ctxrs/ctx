@@ -1,9 +1,9 @@
 # Search
 
 `ctx search` finds matching indexed sessions and events. It reads the local
-SQLite store. With analytics disabled, it writes nothing; with default
-analytics enabled, the command may create `install.json` and send coarse
-invocation metadata.
+SQLite store. With default analytics disabled, it writes nothing. If
+first-party analytics are explicitly enabled, the command may create
+`install.json` and send coarse invocation metadata.
 
 ## Search
 
@@ -37,7 +37,8 @@ A result can include:
 
 Search filters narrow both human output and JSON:
 
-- `--provider codex|pi`;
+- `--provider <provider-id>`, such as `codex`, `pi`, `claude`, `opencode`,
+  `gemini`, `cursor`, `copilot-cli`, or `factory-ai-droid`;
 - `--repo <name-or-path>`;
 - `--since <rfc3339-or-days>d`;
 - `--event-type <event-type>`;

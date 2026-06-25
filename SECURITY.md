@@ -14,14 +14,16 @@ Security review for the current product covers:
 - SQLite metadata and searchable text in `work.sqlite`;
 - local `config.toml` and diagnostic logs when present;
 - read-only discovery of known provider history paths;
-- explicit imports for supported Codex and Pi local transcript formats;
+- explicit imports for supported local transcript formats, including Codex,
+  Pi, Claude, OpenCode, Gemini, Cursor, Copilot CLI, and Factory AI Droid;
 - search, list, show, status, doctor, and validate output;
 - JSON output treated as private local data unless reviewed and redacted.
 
 Setup, source discovery, import, and search do not require API keys,
-repository writes, shell startup-file edits, or background processes. In
-local-only security mode, analytics and update checks are disabled and these
-commands do not use network access.
+repository writes, shell startup-file edits, or background processes.
+First-party analytics are disabled by default and send only when explicitly
+enabled. In local-only security mode, analytics are disabled and these commands
+do not use network access.
 
 ## Reporting Vulnerabilities
 
@@ -69,4 +71,3 @@ the local-only no-network/no-repository-write behavior described in the docs.
 - [Security checks](docs/security-checks.md)
 - [Storage and privacy](docs/storage.md)
 - [Redaction corpus](docs/redaction-corpus.md)
-- [Dependency and license audit decisions](docs/dependency-license-audit.md)

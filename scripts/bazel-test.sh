@@ -96,6 +96,9 @@ case "${mode}" in
   package_audit_fast)
     CTX_AUDIT_SKIP_RELEASE_BUILD=1 run bash scripts/audit-search-mvp-package.sh
     ;;
+  package_audit_release)
+    run bash scripts/audit-search-mvp-package.sh
+    ;;
   fresh_home_e2e)
     run_cargo_test -p ctx --test cli fresh_home_search_mvp_flow
     ;;

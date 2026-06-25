@@ -65,9 +65,9 @@ if tracked_files | grep -E '^(examples|assets)/' | grep -E -i 'dashboard|work-re
   fail 'tracked examples or assets contain removed product-surface material'
 fi
 
-if grep_files 'Work Recorder|work recorder|ctx publish|ctx evidence|ctx pr|ctx link-pr|dashboard export|gh CLI|GhCli|upsert_github|write-shim-command|write_shim_command|capture_shim_command|shim_command_envelope' \
+if grep_files 'Work Recorder|work recorder|ctx publish|ctx evidence|ctx pr|ctx link-pr|ctx context|ctx update|update checks|auto-update|update-state|auto_update|CTX_UPDATE|release manifest|dashboard export|gh CLI|GhCli|upsert_github|write-shim-command|write_shim_command|capture_shim_command|shim_command_envelope' \
   README.md SECURITY.md docs skills scripts crates/ctx-cli/src >/dev/null 2>&1; then
-  fail 'public docs/help/release path contains removed Work Recorder, dashboard, shim, PR, or gh surface text'
+  fail 'public docs/help/release path contains removed Work Recorder, updater, dashboard, shim, PR, or gh surface text'
 fi
 
 if grep_files 'work-record-(publish|report|vcs)[[:space:]]*=' \
@@ -88,7 +88,7 @@ if printf '%s\n' "${cargo_tree_output}" | grep -E 'work-record-(publish|report|v
   fail 'default ctx dependency graph includes publish/report/vcs crates'
 fi
 
-if grep_files 'ctx dashboard|ctx shim|ctx publish|ctx evidence|ctx pr|ctx link-pr|ctx watch|publish pr-comment|dashboard export|gh CLI|GhCli|upsert_github|wrapper scripts|write-shim-command|write_shim_command|capture_shim_command|shim_command_envelope|ShimCommandOptions|CommandRoot::Watch|WatchArgs|run_watch|watch_strategy|polling_catch_up' \
+if grep_files 'ctx dashboard|ctx shim|ctx publish|ctx evidence|ctx pr|ctx link-pr|ctx context|ctx update|ctx watch|publish pr-comment|dashboard export|gh CLI|GhCli|upsert_github|wrapper scripts|write-shim-command|write_shim_command|capture_shim_command|shim_command_envelope|ShimCommandOptions|CommandRoot::Context|CommandRoot::Update|CommandRoot::Watch|ContextArgs|UpdateArgs|WatchArgs|run_context|run_watch|maybe_auto_update|check_or_apply_update|watch_strategy|polling_catch_up' \
   Cargo.toml BUILD.bazel MODULE.bazel scripts crates/ctx-cli/src crates/work-record-capture/src crates/work-record-search/src >/dev/null 2>&1; then
   fail 'default binary/release path contains dashboard, shim, PR publish, watch, or gh integration text'
 fi
@@ -110,7 +110,7 @@ if [[ "${CTX_AUDIT_SKIP_RELEASE_BUILD:-0}" != "1" ]]; then
   elif command -v strings >/dev/null 2>&1; then
     binary_strings="$(strings "${binary}")"
     if printf '%s\n' "${binary_strings}" \
-      | grep -E 'ctx dashboard|ctx shim|ctx publish|ctx evidence|ctx pr|ctx link-pr|ctx watch|GhCli|upsert_github|write-shim-command|write_shim_command|capture_shim_command|shim_command_envelope|dashboard export|watch_strategy|polling_catch_up' >/dev/null; then
+      | grep -E 'ctx dashboard|ctx shim|ctx publish|ctx evidence|ctx pr|ctx link-pr|ctx context|ctx update|ctx watch|GhCli|upsert_github|write-shim-command|write_shim_command|capture_shim_command|shim_command_envelope|dashboard export|maybe_auto_update|check_or_apply_update|watch_strategy|polling_catch_up' >/dev/null; then
       fail 'release ctx binary contains removed dashboard/shim/PR-publish/watch command strings'
     fi
     if printf '%s\n' "${binary_strings}" \

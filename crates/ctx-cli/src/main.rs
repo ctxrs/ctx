@@ -19,7 +19,6 @@ mod analytics;
 mod config;
 mod identity;
 mod net;
-mod updates;
 
 use analytics::AnalyticsEvent;
 use config::{AppConfig, CONFIG_FILE};
@@ -70,8 +69,6 @@ enum CommandRoot {
     Show(ShowArgs),
     #[command(about = "Search indexed agent history")]
     Search(SearchArgs),
-    #[command(about = "Check for ctx CLI updates")]
-    Update(UpdateArgs),
     #[command(about = "Check local ctx health")]
     Doctor(JsonArgs),
     #[command(about = "Validate local ctx storage")]
@@ -156,19 +153,6 @@ struct SearchArgs {
     json: bool,
 }
 
-#[derive(Debug, Args)]
-struct UpdateArgs {
-    #[arg(long)]
-    json: bool,
-    #[arg(long, conflicts_with = "apply")]
-    check_only: bool,
-    /// Reserved until signed release manifest verification ships.
-    #[arg(long)]
-    apply: bool,
-    #[arg(long)]
-    force: bool,
-}
-
 impl CommandRoot {
     fn name(&self) -> &'static str {
         match self {
@@ -179,7 +163,6 @@ impl CommandRoot {
             Self::List(_) => "list",
             Self::Show(_) => "show",
             Self::Search(_) => "search",
-            Self::Update(_) => "update",
             Self::Doctor(_) => "doctor",
             Self::Validate(_) => "validate",
         }
@@ -194,18 +177,9 @@ impl CommandRoot {
             Self::List(args) => args.json,
             Self::Show(args) => args.json,
             Self::Search(args) => args.json,
-            Self::Update(args) => args.json,
             Self::Doctor(args) => args.json,
             Self::Validate(args) => args.json,
         }
-    }
-
-    fn allows_auto_update_check(&self) -> bool {
-        matches!(self, Self::Status(_) | Self::Doctor(_) | Self::Validate(_))
-    }
-
-    fn sends_analytics(&self) -> bool {
-        !matches!(self, Self::Update(args) if args.apply)
     }
 }
 
@@ -672,7 +646,6 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let action = cli.command.name();
     let json_output = cli.command.json_output();
-    let sends_analytics = cli.command.sends_analytics();
     let data_root = cli
         .data_root
         .clone()
@@ -680,10 +653,6 @@ fn main() -> Result<()> {
         .unwrap_or_else(default_data_root)
         .context("resolve ctx data root")?;
     let config = AppConfig::load(&data_root)?;
-
-    if cli.command.allows_auto_update_check() {
-        updates::maybe_auto_update(&data_root, &config, json_output);
-    }
 
     let result = match cli.command {
         CommandRoot::Setup(args) => run_setup(args, data_root.clone()),
@@ -693,24 +662,19 @@ fn main() -> Result<()> {
         CommandRoot::List(args) => run_list(args, data_root.clone()),
         CommandRoot::Show(args) => run_show(args, data_root.clone()),
         CommandRoot::Search(args) => run_search(args, data_root.clone()),
-        CommandRoot::Update(args) => run_update(args, data_root.clone(), &config),
         CommandRoot::Doctor(args) => run_doctor(args, data_root.clone()),
         CommandRoot::Validate(args) => run_validate(args, data_root.clone()),
     };
-    if sends_analytics {
-        analytics::send_cli_event(
-            &data_root,
-            &config,
-            AnalyticsEvent {
-                action,
-                json_output,
-                success: result.is_ok(),
-                duration: started.elapsed(),
-                update_channel: &config.updates.channel,
-                auto_update: config.updates.auto_update,
-            },
-        );
-    }
+    analytics::send_cli_event(
+        &data_root,
+        &config,
+        AnalyticsEvent {
+            action,
+            json_output,
+            success: result.is_ok(),
+            duration: started.elapsed(),
+        },
+    );
     result
 }
 
@@ -1557,37 +1521,6 @@ fn run_search(args: SearchArgs, data_root: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn run_update(args: UpdateArgs, data_root: PathBuf, config: &AppConfig) -> Result<()> {
-    let outcome = updates::check_or_apply_update(
-        &data_root,
-        config,
-        updates::UpdateOptions {
-            apply: args.apply,
-            check_only: args.check_only || !args.apply,
-            force: args.force,
-        },
-    )?;
-    if args.json {
-        print_json(outcome.json())?;
-    } else {
-        println!("current_version: {}", outcome.current_version);
-        println!(
-            "latest_version: {}",
-            outcome.latest_version.as_deref().unwrap_or("unknown")
-        );
-        println!("channel: {}", outcome.channel);
-        println!("platform: {}", outcome.platform);
-        println!("update_available: {}", outcome.update_available);
-        println!("action: {}", outcome.action);
-        println!("applied: {}", outcome.applied);
-        if let Some(path) = outcome.install_path {
-            println!("install_path: {}", path.display());
-        }
-        println!("{}", outcome.message);
-    }
-    Ok(())
-}
-
 fn run_doctor(args: JsonArgs, data_root: PathBuf) -> Result<()> {
     let store = Store::open(database_path(data_root.clone()))?;
     let mut findings = store.validate()?;
@@ -1891,22 +1824,20 @@ fn import_one_source_inner(
                 },
             )
             .map_err(anyhow::Error::from),
-            CaptureProvider::Antigravity | CaptureProvider::Amp => {
-                import_provider_fixture_jsonl(
-                    &source.path,
-                    store,
-                    ProviderFixtureImportOptions {
-                        source_path: Some(source.path.clone()),
-                        work_record_id: Some(record_id),
-                        expected_provider: Some(source.provider),
-                        allow_partial_failures: true,
-                        source_format: "normalized_provider_jsonl".to_owned(),
-                        fidelity: Fidelity::Partial,
-                        ..ProviderFixtureImportOptions::default()
-                    },
-                )
-                .map_err(anyhow::Error::from)
-            }
+            CaptureProvider::Antigravity | CaptureProvider::Amp => import_provider_fixture_jsonl(
+                &source.path,
+                store,
+                ProviderFixtureImportOptions {
+                    source_path: Some(source.path.clone()),
+                    work_record_id: Some(record_id),
+                    expected_provider: Some(source.provider),
+                    allow_partial_failures: true,
+                    source_format: "normalized_provider_jsonl".to_owned(),
+                    fidelity: Fidelity::Partial,
+                    ..ProviderFixtureImportOptions::default()
+                },
+            )
+            .map_err(anyhow::Error::from),
             other => Err(anyhow!(
                 "{} is not registered for provider history import",
                 other.as_str()

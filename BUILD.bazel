@@ -79,6 +79,13 @@ sh_test(
 )
 
 sh_test(
+    name = "package_audit_release",
+    srcs = ["scripts/bazel-test.sh"],
+    args = ["package_audit_release"],
+    data = CTX_GATE_DATA,
+)
+
+sh_test(
     name = "fresh_home_e2e",
     srcs = ["scripts/bazel-test.sh"],
     args = ["fresh_home_e2e"],
@@ -136,6 +143,7 @@ test_suite(
     name = "ci",
     tests = [
         ":presubmit",
+        ":package_audit_release",
     ],
 )
 

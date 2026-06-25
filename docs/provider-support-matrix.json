@@ -359,7 +359,7 @@
       "implemented_paths": [
         {
           "kind": "native_import",
-          "source_format": "cursor_agent_transcript_jsonl",
+          "source_format": "cursor_agent_transcript_jsonl_tree",
           "fidelity": "imported",
           "proof": [
             "ctx import --provider cursor --path ~/.cursor/projects",

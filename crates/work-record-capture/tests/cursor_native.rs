@@ -1,4 +1,7 @@
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use rusqlite::Connection;
 use tempfile::TempDir;
@@ -18,11 +21,32 @@ fn provider_history_fixture(path: &str) -> PathBuf {
         .join(path)
 }
 
+fn materialized_provider_history_fixture(temp: &TempDir, path: &str) -> PathBuf {
+    let source = provider_history_fixture(path);
+    let target = temp.path().join("materialized-provider-history").join(path);
+    copy_dir_all(&source, &target);
+    target
+}
+
+fn copy_dir_all(source: &Path, target: &Path) {
+    fs::create_dir_all(target).unwrap();
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let source_path = entry.path();
+        let target_path = target.join(entry.file_name());
+        if source_path.is_dir() {
+            copy_dir_all(&source_path, &target_path);
+        } else {
+            fs::copy(&source_path, &target_path).unwrap();
+        }
+    }
+}
+
 #[test]
 fn imports_cursor_agent_transcript_jsonl_tree() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");
-    let fixture = provider_history_fixture("cursor/2026.06.24/projects");
+    let fixture = materialized_provider_history_fixture(&temp, "cursor/2026.06.24/projects");
     let mut store = Store::open(&db_path).unwrap();
 
     let summary = import_cursor_native_history(

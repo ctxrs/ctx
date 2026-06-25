@@ -46,7 +46,7 @@ Modes:
   fast       formatting, docs, static package surface, and CLI contracts
   presubmit  fast plus clippy, workspace tests, fresh-home, and provider smoke
   smoke      fast plus fresh-home and provider smoke
-  ci         presubmit gate used by Buildkite
+  ci         presubmit plus release/content gates used by Buildkite
 USAGE
 }
 
@@ -103,8 +103,11 @@ case "${mode}" in
   fast)
     run_bazel test //:fast --config=ci
     ;;
-  presubmit|ci)
+  presubmit)
     run_bazel test //:presubmit --config=ci
+    ;;
+  ci)
+    run_bazel test //:ci --config=ci
     ;;
   smoke)
     run_bazel test //:smoke --config=ci

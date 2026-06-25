@@ -28,8 +28,8 @@ ctx validate --json
 
 - `setup` creates the data root, opens or creates `work.sqlite`, writes
   `config.toml` when needed, discovers known provider history locations, and
-  prints next steps. The generated config sets the update channel to `stable`
-  and leaves analytics enabled by default unless disabled in config or env.
+  prints next steps. The generated config leaves first-party analytics disabled
+  unless enabled in config or env.
 - `status` reports the ctx root, database path, config path, indexed item
   count, indexed source count, initialization state, and local-only marker.
 - `doctor` opens local storage and reports validation findings.
@@ -37,25 +37,9 @@ ctx validate --json
 
 Setup and health checks do not change shell startup files, install repository
 integrations, write into source repositories, call model APIs, require API keys,
-or start background processes. Core storage checks are local. Analytics and
-updates are first-party network features: analytics can be disabled with
-`[analytics] enabled = false`, and update checks are explicit via `ctx update`
-plus the throttled status/doctor/validate auto-update path. JSON stdout remains
-structured; update notices use stderr.
-
-## Updates
-
-```bash
-ctx update
-ctx update --check-only
-ctx update --json
-```
-
-`ctx update` reads the configured release channel and downloads the matching
-manifest. It reports available versions but does not replace the current binary
-until signed release manifest verification ships. The `--apply` flag is
-reserved and currently fails closed. Set `[updates] auto_update = false` to
-disable the throttled background availability checks.
+or start background processes. Core storage checks are local. Optional
+first-party analytics can be enabled with `[analytics] enabled = true`. JSON
+stdout remains structured.
 
 ## Sources
 
@@ -70,10 +54,10 @@ machine. Current rows include:
 - Codex session trees at `~/.codex/sessions`;
 - Codex prompt history at `~/.codex/history.jsonl`;
 - Pi session JSONL at `~/.pi/sessions.jsonl`;
-- native rows for supported Claude, OpenCode, Gemini, Copilot CLI, and Factory
-  AI Droid local history locations;
-- detection-only rows for known but unsupported Antigravity, Cursor, and Amp
-  local locations.
+- native rows for supported Claude, OpenCode, Gemini, Cursor, Copilot CLI, and
+  Factory AI Droid local history locations;
+- detection-only rows for known but unsupported Antigravity and Amp local
+  locations.
 
 Each JSON row includes `provider`, `path`, `exists`, `source_format`, `status`,
 `import_support`, `native_import`, `raw_retention`, and any
@@ -87,6 +71,12 @@ ctx import
 ctx import --all
 ctx import --provider codex
 ctx import --provider pi
+ctx import --provider claude
+ctx import --provider opencode
+ctx import --provider gemini
+ctx import --provider cursor
+ctx import --provider copilot-cli
+ctx import --provider factory-ai-droid
 ctx import --path ~/.codex/sessions
 ctx import --provider pi --path ~/.pi/sessions.jsonl
 ctx import --resume
@@ -104,8 +94,7 @@ Import selection rules:
 - with `--provider`, import discovered sources for that provider;
 - with `--path`, import exactly that path;
 - with `--path` and no provider, parse the path as Codex format;
-- Antigravity, Cursor, and Amp fail closed until native local-history importers
-  ship.
+- Antigravity and Amp fail closed until native local-history importers ship.
 
 Developer/test fixtures may be imported from normalized provider JSONL only
 when `CTX_PROVIDER_NORMALIZED_IMPORT_DEV=1` is set. That input is not native
@@ -129,10 +118,11 @@ ctx show <item-uuid> --json
 (default `20`). `show` reads one indexed item UUID and returns the matching
 session or compatibility item plus events when available.
 
-With analytics disabled, these commands write nothing. With default analytics
-enabled, they may create `install.json` and send coarse invocation metadata.
-JSON output may expose local paths, event payloads, and compatibility field
-names from the current store schema, so treat it as private local data.
+With default analytics disabled, these commands write nothing. If first-party
+analytics are explicitly enabled, they may create `install.json` and send
+coarse invocation metadata. JSON output may expose local paths, event payloads,
+and compatibility field names from the current store schema, so treat it as
+private local data.
 
 ## Search
 
@@ -163,9 +153,9 @@ Filters:
 - `--include-subagents`;
 - `--limit <n>`.
 
-`search` reads SQLite. With analytics disabled, it writes nothing; with default
-analytics enabled, it may create `install.json` and send coarse invocation
-metadata.
+`search` reads SQLite. With default analytics disabled, it writes nothing. If
+first-party analytics are explicitly enabled, it may create `install.json` and
+send coarse invocation metadata.
 
 ## JSON Contract
 

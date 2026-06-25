@@ -19,8 +19,8 @@ The current production surface is intentionally narrow:
 
 ctx does not run model inference, install shell integration, modify source
 repositories, start background processes, require API keys, or use a remote
-account for setup, import, or search. First-party analytics and update checks
-are configurable separately in `~/.ctx/config.toml`.
+account for setup, import, or search. Optional first-party analytics are
+disabled by default and can be enabled explicitly in `~/.ctx/config.toml`.
 
 ## Install Or Run
 
@@ -87,7 +87,6 @@ ctx import
 ctx list
 ctx show <item-uuid>
 ctx search [query]
-ctx update
 ctx doctor
 ctx validate
 ```
@@ -109,7 +108,6 @@ ctx import --json
 ctx list --json
 ctx show <item-uuid> --json
 ctx search [query] --json
-ctx update --json
 ctx doctor --json
 ctx validate --json
 ```

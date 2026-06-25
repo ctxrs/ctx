@@ -11,7 +11,16 @@ The current CLI imports local history for:
 - Codex session JSONL trees under `~/.codex/sessions`;
 - Codex `~/.codex/history.jsonl`;
 - Pi `~/.pi/sessions.jsonl` when that local file exists and matches the
-  supported JSONL format.
+  supported JSONL format;
+- Claude Code project JSONL transcripts under `~/.claude/projects`;
+- OpenCode SQLite history under `~/.local/share/opencode/opencode.db`;
+- Gemini CLI chat JSONL records under `~/.gemini`;
+- Cursor CLI agent transcript JSONL files under `~/.cursor/projects`;
+- Copilot CLI session event logs under `~/.copilot/session-state`;
+- Factory AI Droid session JSONL files under `~/.factory/sessions`.
+
+Antigravity and Amp may be detected, but native local import remains blocked
+until the provider support matrix documents a stable supported local format.
 
 Use `ctx sources` for the truth on the current machine:
 

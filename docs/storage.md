@@ -54,19 +54,20 @@ is known.
 
 | Command | Reads | Writes |
 | --- | --- | --- |
-| `ctx setup` | home path metadata for source discovery | data root, `work.sqlite`, `config.toml`, and possibly `install.json` for analytics |
-| `ctx status` | data root metadata, existing SQLite store | possibly `install.json` for analytics and `update-state.json` for throttled update checks |
-| `ctx sources` | known provider paths under the user's home | possibly `install.json` for analytics |
-| `ctx import` | provider transcript files and path metadata | data root, `config.toml` if missing, SQLite index, and possibly `install.json` for analytics |
-| `ctx list` | SQLite index | possibly `install.json` for analytics |
-| `ctx show` | SQLite index | possibly `install.json` for analytics |
-| `ctx search` | SQLite index | possibly `install.json` for analytics |
-| `ctx doctor` | SQLite index and data root metadata | possibly `install.json` for analytics and `update-state.json` for throttled update checks |
-| `ctx validate` | SQLite index | possibly `install.json` for analytics and `update-state.json` for throttled update checks |
+| `ctx setup` | home path metadata for source discovery | data root, `work.sqlite`, `config.toml`, and possibly `install.json` when analytics are explicitly enabled |
+| `ctx status` | data root metadata, existing SQLite store | possibly `install.json` when analytics are explicitly enabled |
+| `ctx sources` | known provider paths under the user's home | possibly `install.json` when analytics are explicitly enabled |
+| `ctx import` | provider transcript files and path metadata | data root, `config.toml` if missing, SQLite index, and possibly `install.json` when analytics are explicitly enabled |
+| `ctx list` | SQLite index | possibly `install.json` when analytics are explicitly enabled |
+| `ctx show` | SQLite index | possibly `install.json` when analytics are explicitly enabled |
+| `ctx search` | SQLite index | possibly `install.json` when analytics are explicitly enabled |
+| `ctx doctor` | SQLite index and data root metadata | possibly `install.json` when analytics are explicitly enabled |
+| `ctx validate` | SQLite index | possibly `install.json` when analytics are explicitly enabled |
 
 Setup, import, and search do not require source repository writes, model APIs,
-API keys, or remote accounts. First-party analytics and update checks are the
-only default network features; disable them for strict local-only runs.
+API keys, remote accounts, or network access. First-party analytics are
+disabled by default and must be explicitly enabled before they write
+`install.json` or send telemetry.
 
 ## Default Config
 
@@ -77,26 +78,15 @@ only default network features; disable them for strict local-only runs.
 The day-1 generated config is:
 
 ```toml
-[updates]
-channel = "stable"
-auto_update = true
-```
-
-Analytics are enabled by default when `[analytics] enabled` is absent. To opt
-out, add:
-
-```toml
 [analytics]
 enabled = false
 ```
 
-Automatic update checks use the `stable` channel by default. These checks report
-availability only; ctx does not replace its own binary until signed release
-manifest verification ships. To disable the checks, add:
+To opt in to first-party analytics, add:
 
 ```toml
-[updates]
-auto_update = false
+[analytics]
+enabled = true
 ```
 
 ## Index Lifecycle
@@ -181,5 +171,4 @@ Core setup, source discovery, import, and search commands are local filesystem
 operations. The tools that originally produced provider transcripts may have
 used the network according to their own configuration; ctx indexing those
 transcripts does not repeat that behavior. Analytics sends coarse command
-metadata unless disabled. Update checks use the release endpoint only for
-`ctx update` and the throttled status/doctor/validate auto-update path.
+metadata only when explicitly enabled.

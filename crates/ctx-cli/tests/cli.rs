@@ -2,7 +2,6 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use rusqlite::Connection;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
     fs,
@@ -20,7 +19,6 @@ fn ctx(temp: &TempDir) -> Command {
     command.env("CTX_DATA_ROOT", temp.path());
     command.env("HOME", temp.path());
     command.env("CTX_ANALYTICS_OFF", "1");
-    command.env("CTX_DISABLE_AUTO_UPDATE", "1");
     command
 }
 
@@ -181,60 +179,6 @@ fn file_url(path: &Path) -> String {
     format!("file://{}", path.display())
 }
 
-fn write_update_manifest(
-    temp: &TempDir,
-    version: &str,
-    artifact: &Path,
-    sha_override: Option<&str>,
-) -> PathBuf {
-    let artifact_bytes = fs::read(artifact).unwrap();
-    let sha256 = sha_override
-        .map(str::to_owned)
-        .unwrap_or_else(|| hex_sha256(&artifact_bytes));
-    let manifest = temp.path().join("latest.json");
-    fs::write(
-        &manifest,
-        serde_json::to_vec_pretty(&json!({
-            "schema_version": 1,
-            "version": version,
-            "platforms": {
-                (platform_key()): {
-                    "cli": {
-                        "url_path": file_url(artifact),
-                        "sha256": sha256,
-                        "bytes": artifact_bytes.len()
-                    }
-                }
-            }
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    manifest
-}
-
-fn hex_sha256(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut out = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(&mut out, "{byte:02x}");
-    }
-    out
-}
-
-fn platform_key() -> &'static str {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("linux", "x86_64") => "linux-x64",
-        ("linux", "aarch64") => "linux-arm64",
-        ("macos", "aarch64") => "macos-arm64",
-        ("macos", "x86_64") => "macos-x64",
-        ("windows", "x86_64") => "windows-x64",
-        ("freebsd", "x86_64") => "freebsd-x64",
-        _ => "unknown",
-    }
-}
-
 fn json_output(command: &mut Command) -> Value {
     let output = command.assert().success().get_output().stdout.clone();
     serde_json::from_slice(&output).unwrap()
@@ -383,8 +327,7 @@ fn help_exposes_only_search_mvp_commands() {
         .unwrap_or(&help);
 
     for expected in [
-        "setup", "status", "sources", "import", "list", "show", "search", "update", "doctor",
-        "validate",
+        "setup", "status", "sources", "import", "list", "show", "search", "doctor", "validate",
     ] {
         assert!(
             commands.contains(expected),
@@ -409,6 +352,7 @@ fn help_exposes_only_search_mvp_commands() {
         "pr",
         "repair",
         "watch",
+        "update",
         "context",
     ] {
         assert!(
@@ -449,6 +393,7 @@ fn removed_commands_are_rejected() {
         "pr",
         "repair",
         "watch",
+        "update",
     ] {
         ctx(&temp)
             .arg(command)
@@ -481,14 +426,13 @@ fn setup_does_not_migrate_legacy_shim_directory() {
 fn setup_writes_day_one_config_contract_without_overwriting_existing_config() {
     let temp = tempdir();
     let config_path = temp.path().join("config.toml");
-    let expected = "[updates]\n\
-channel = \"stable\"\n\
-auto_update = true\n";
+    let expected = "[analytics]\n\
+enabled = false\n";
 
     ctx(&temp).arg("setup").assert().success();
     assert_eq!(fs::read_to_string(&config_path).unwrap(), expected);
 
-    let user_config = "# user managed ctx config\n[updates]\nchannel = \"nightly\"\n";
+    let user_config = "# user managed ctx config\n[analytics]\nenabled = true\n";
     fs::write(&config_path, user_config).unwrap();
 
     ctx(&temp).arg("setup").assert().success();
@@ -652,16 +596,6 @@ fn public_subcommand_help_is_golden_enough_for_search_mvp() {
                 "--json",
             ],
         ),
-        (
-            "update",
-            vec![
-                "Usage: ctx update",
-                "--json",
-                "--check-only",
-                "--apply",
-                "--force",
-            ],
-        ),
         ("doctor", vec!["Usage: ctx doctor", "--json"]),
         ("validate", vec!["Usage: ctx validate", "--json"]),
     ] {
@@ -689,107 +623,6 @@ fn public_subcommand_help_is_golden_enough_for_search_mvp() {
 }
 
 #[test]
-fn update_check_uses_local_manifest_without_touching_binary() {
-    let temp = tempdir();
-    let artifact = temp.path().join("ctx-new");
-    fs::write(&artifact, b"new ctx binary").unwrap();
-    let manifest = write_update_manifest(&temp, "9.9.9", &artifact, None);
-
-    let update = json_output(
-        ctx(&temp)
-            .args(["update", "--check-only", "--json"])
-            .env("CTX_UPDATE_MANIFEST_URL", file_url(&manifest)),
-    );
-
-    assert_eq!(update["schema_version"], 1);
-    assert_eq!(update["current_version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(update["latest_version"], "9.9.9");
-    assert_eq!(update["update_available"], true);
-    assert_eq!(update["action"], "check_only");
-    assert_eq!(update["applied"], false);
-}
-
-#[test]
-fn update_default_is_check_only() {
-    let temp = tempdir();
-    let artifact = temp.path().join("ctx-new");
-    fs::write(&artifact, b"new ctx binary").unwrap();
-    let manifest = write_update_manifest(&temp, "9.9.9", &artifact, None);
-    let target = temp.path().join("bin").join("ctx");
-    fs::create_dir_all(target.parent().unwrap()).unwrap();
-    fs::write(&target, b"old ctx binary").unwrap();
-
-    let update = json_output(
-        ctx(&temp)
-            .args(["update", "--json"])
-            .env("CTX_UPDATE_MANIFEST_URL", file_url(&manifest))
-            .env("CTX_UPDATE_TARGET", &target),
-    );
-
-    assert_eq!(update["action"], "check_only");
-    assert_eq!(update["applied"], false);
-    assert_eq!(fs::read(&target).unwrap(), b"old ctx binary");
-}
-
-#[test]
-fn update_apply_is_blocked_until_signed_manifest_verification() {
-    let temp = tempdir();
-    let events_path = temp.path().join("analytics.jsonl");
-    let target = temp.path().join("bin").join("ctx");
-    fs::create_dir_all(target.parent().unwrap()).unwrap();
-    fs::write(&target, b"old ctx binary").unwrap();
-
-    ctx(&temp)
-        .args(["update", "--apply", "--json"])
-        .env_remove("CTX_ANALYTICS_OFF")
-        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
-        .env(
-            "CTX_UPDATE_MANIFEST_URL",
-            file_url(&temp.path().join("missing-latest.json")),
-        )
-        .env("CTX_UPDATE_TARGET", &target)
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "ctx update --apply is disabled until signed release manifest verification ships",
-        ));
-
-    assert_eq!(fs::read(&target).unwrap(), b"old ctx binary");
-    assert!(!temp.path().join("update-state.json").exists());
-    assert!(!temp.path().join("install.json").exists());
-    assert!(!events_path.exists());
-}
-
-#[test]
-fn auto_update_status_check_is_notice_only() {
-    let temp = tempdir();
-    let artifact = temp.path().join("ctx-new");
-    fs::write(&artifact, b"new ctx binary").unwrap();
-    let manifest = write_update_manifest(&temp, "9.9.9", &artifact, None);
-    let target = temp.path().join("bin").join("ctx");
-    fs::create_dir_all(target.parent().unwrap()).unwrap();
-    fs::write(&target, b"old ctx binary").unwrap();
-
-    ctx(&temp)
-        .arg("status")
-        .env_remove("CTX_DISABLE_AUTO_UPDATE")
-        .env("CTX_UPDATE_MANIFEST_URL", file_url(&manifest))
-        .env("CTX_UPDATE_TARGET", &target)
-        .assert()
-        .success()
-        .stderr(predicate::str::contains(
-            "install is disabled until signed release manifests are supported",
-        ));
-
-    let state: Value =
-        serde_json::from_slice(&fs::read(temp.path().join("update-state.json")).unwrap()).unwrap();
-    assert_eq!(state["last_result"], "check_only");
-    assert_eq!(state["update_available"], true);
-    assert_eq!(state["applied"], false);
-    assert_eq!(fs::read(&target).unwrap(), b"old ctx binary");
-}
-
-#[test]
 fn analytics_sends_coarse_cli_metadata_when_enabled() {
     let temp = tempdir();
     let events_path = temp.path().join("analytics.jsonl");
@@ -797,6 +630,7 @@ fn analytics_sends_coarse_cli_metadata_when_enabled() {
     ctx(&temp)
         .arg("status")
         .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENABLED", "true")
         .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .assert()
         .success();
