@@ -21,8 +21,8 @@ manager-approved release exception that names the missing target and reason.
 Each platform proof must include both the staged artifact manifest and a
 packaged artifact runtime smoke result. The smoke installs or extracts the
 exact staged artifact into a temporary bin directory, then runs `ctx --version`,
-`ctx setup`, `ctx import`, `ctx search`, `ctx context`, `ctx doctor`, and
-`ctx validate` against the checked-in fixture data.
+`ctx setup`, `ctx import`, `ctx search`, `ctx doctor`, and `ctx validate`
+against the checked-in fixture data.
 
 FreeBSD is a first-class release target, not an optional stretch target. The
 public Buildkite pipeline includes a native `freebsd-x64` lane that builds and

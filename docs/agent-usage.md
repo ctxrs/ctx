@@ -7,14 +7,14 @@ Agents should query ctx before repeating investigation work.
 1. Run `ctx status --json` to confirm the local store is readable.
 2. Run `ctx sources --json` to see which local provider paths currently exist.
 3. Search narrowly with provider, repository, file, or date filters.
-4. Use `ctx context` for the best matching query before changing code.
+4. Use `ctx show --json` for the best matching result before changing code.
 5. Cite ctx material in notes or final answers when it influenced the work.
 
 Example:
 
 ```bash
 ctx search "sqlite migration failed" --repo ctx --json
-ctx context "sqlite migration failed" --repo ctx --max-tokens 6000
+ctx show <item-uuid> --json
 ```
 
 ## Deterministic Use
@@ -44,8 +44,8 @@ Agent harnesses should prefer JSON for routing and ranking:
 ctx status --json
 ctx sources --json
 ctx search "release blocker" --json
-ctx context "release blocker" --json
+ctx show <item-uuid> --json
 ```
 
-Use human Markdown context when the next step is to paste retrieved material
-into an agent prompt.
+Use cited search snippets and `show` output as retrieved material when the next
+step is to brief another agent.

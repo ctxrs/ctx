@@ -74,13 +74,13 @@ Use result IDs with `ctx show` when you need surrounding events. Search also
 accepts filters such as `--provider`, `--repo`, `--since`, `--event-type`,
 `--file`, `--primary-only`, `--include-subagents`, and `--limit`.
 
-## 6. Build Agent Context
+## 6. Use Search JSON For Agents
 
 ```bash
-ctx context "failed migration" --max-tokens 8000
-ctx context "failed migration" --json
+ctx search "failed migration" --json
+ctx show <item-uuid> --json
 ```
 
-Context output is a deterministic retrieval bundle, not generated analysis. It
-is designed to be pasted into an agent prompt or consumed as JSON by an agent
-harness.
+Search JSON is the supported machine-readable retrieval API. It contains cited
+snippets and source metadata, but it is retrieved source material rather than
+generated analysis.

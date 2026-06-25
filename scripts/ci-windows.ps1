@@ -651,7 +651,6 @@ function Run-Platform-Smoke {
   }
   Run-Ctx $bin @("search", "onboarding", "--json")
   Run-Ctx $bin @("show", $recordId, "--json")
-  Run-Ctx $bin @("context", "onboarding", "--json")
   Run-Ctx $bin @("status", "--json")
   Run-Ctx $bin @("doctor", "--json")
   Run-Ctx $bin @("validate", "--json")
@@ -810,7 +809,6 @@ function Run-Release-Artifact-Smoke {
     Run-Ctx-Capture -Name "setup" -Binary $installedBin -CtxArgs @("setup") -OutDir $commandDir
     Run-Ctx-Capture -Name "import" -Binary $installedBin -CtxArgs @("import", "--provider", "codex", "--path", $fixturePath, "--json") -OutDir $commandDir
     Run-Ctx-Capture -Name "search" -Binary $installedBin -CtxArgs @("search", "onboarding", "--json") -OutDir $commandDir
-    Run-Ctx-Capture -Name "context" -Binary $installedBin -CtxArgs @("context", "onboarding", "--json") -OutDir $commandDir
     Run-Ctx-Capture -Name "doctor" -Binary $installedBin -CtxArgs @("doctor", "--json") -OutDir $commandDir
     Run-Ctx-Capture -Name "validate" -Binary $installedBin -CtxArgs @("validate", "--json") -OutDir $commandDir
   } finally {
@@ -859,7 +857,6 @@ function Run-Release-Artifact-Smoke {
     setup_status = "passed"
     import_status = "passed"
     search_status = "passed"
-    context_status = "passed"
     doctor_status = "passed"
     validate_status = "passed"
     git_commit = $commit
@@ -882,7 +879,7 @@ function Run-Release-Artifact-Smoke {
     "- SHA-256: ``$checksum``"
     "- Install method: ``direct-binary-copy``"
     "- Fixture: ``tests/fixtures/provider-history/codex-sessions``"
-    "- Commands: ``ctx --version``, ``ctx setup``, ``ctx import``, ``ctx search``, ``ctx context``, ``ctx doctor``, ``ctx validate``"
+    "- Commands: ``ctx --version``, ``ctx setup``, ``ctx import``, ``ctx search``, ``ctx doctor``, ``ctx validate``"
     "- Status: passed"
   ) | Set-Content -Path $smokeMd -Encoding utf8
 

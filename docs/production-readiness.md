@@ -5,16 +5,16 @@ bounded, and testable.
 
 ## Product Readiness
 
-- Public docs describe only local provider import, search, and context.
+- Public docs describe only local provider import and search.
 - A fresh agent can initialize storage, import supported local history, search,
-  inspect results, and build cited context from the docs.
+  and inspect cited results from the docs.
 - Provider support is truthful and machine-readable.
 - Limitations are documented next to the happy path.
 
 ## Security Readiness
 
 - Command read/write behavior is documented.
-- Core setup/import/search/context are local operations.
+- Core setup/import/search are local operations.
 - JSON output is private by default.
 - Raw provider ownership is clear.
 - Redaction limits are explicit.

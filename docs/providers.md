@@ -82,9 +82,9 @@ bootstrap is the same as the main CI gate. The lane uses the
 Infisical/OpenRouter model configuration supplied to the Bazel test environment;
 the generator has an optional free-model guard for projects whose OpenRouter
 provider policy permits free aliases. It then runs the
-same scrubbed `ctx setup`, `ctx import`, `ctx search`, `ctx context`, `ctx
-status`, `ctx doctor`, and `ctx validate` flow and writes redacted per-provider
-evidence under `generated-providers/<provider>/` plus an aggregate summary. It proves ctx
+same scrubbed `ctx setup`, `ctx import`, `ctx search`, `ctx status`, `ctx
+doctor`, and `ctx validate` flow and writes redacted per-provider evidence
+under `generated-providers/<provider>/` plus an aggregate summary. It proves ctx
 retrieval over generated provider histories; it does not prove native vendor
 transcript discovery.
 
@@ -112,5 +112,5 @@ An imported session may include messages, tool calls, command events, output
 previews, file references, parent/child agent relationships, usage metadata, and
 lifecycle events. Not every provider exposes every field.
 
-Search and context output must identify the provider and cite the source path or
-cursor when available so an agent can verify important details.
+Search output must identify the provider and cite the source path or cursor
+when available so an agent can verify important details.

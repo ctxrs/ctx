@@ -65,14 +65,8 @@ Copy an item ID from the result and inspect it:
 ctx show <item-uuid>
 ```
 
-## 6. Build Context
-
-```bash
-ctx context "build failure" --max-tokens 6000
-```
-
-Use the citations in the context output when the retrieved material affects an
-answer or implementation.
+Use citations from `ctx search --json` or `ctx show` when the retrieved material
+affects an answer or implementation.
 
 ## Failure Paths
 

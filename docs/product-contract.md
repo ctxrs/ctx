@@ -15,7 +15,6 @@ product boundary is retrieval, not interpretation.
 - `ctx import` explicitly indexes supported local transcript formats.
 - `ctx list` and `ctx show` inspect indexed items.
 - `ctx search` returns ranked matches from the local index.
-- `ctx context` returns a bounded retrieval bundle for agents.
 - `ctx doctor` and `ctx validate` report local storage health.
 - JSON output supports local agents and scripts.
 
@@ -26,15 +25,16 @@ product boundary is retrieval, not interpretation.
 - browser UI;
 - source repository modification;
 - shell startup-file modification;
-- API-key requirements for core setup/import/search/context;
+- API-key requirements for core setup/import/search;
 - background collection;
+- context-packet generation as a default product workflow;
 - provider-native import claims that are not listed in the support matrix.
 
 ## Determinism
 
-For the same database, query, filters, result limit, and token budget, search
-and context should return the same ranked material in the same order. Timestamps
-such as `generated_at` can differ between runs.
+For the same database, query, filters, and result limit, search should return
+the same ranked material in the same order. Timestamps such as `generated_at`
+can differ between runs.
 
 ## Citation Contract
 

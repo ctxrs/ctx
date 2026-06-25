@@ -1,6 +1,6 @@
 # Limitations
 
-ctx is production-scoped to local search and deterministic context retrieval.
+ctx is production-scoped to local history indexing and search retrieval.
 These limitations are intentional unless another document says a capability has
 shipped.
 
@@ -30,9 +30,9 @@ shipped.
   not a claim of semantic understanding.
 - Empty or very broad queries can return metadata-driven matches.
 
-## Context Semantics
+## Retrieval Semantics
 
-- Context output is retrieval material, not generated analysis.
+- Search output is retrieval material, not generated analysis.
 - Token counts are estimates.
 - If a raw source moves, ctx may still return indexed text from SQLite.
 - JSON is local/private and can include sensitive content.
@@ -41,5 +41,5 @@ shipped.
 
 - Source builds are documented; public release install commands wait for release
   artifacts and verification instructions.
-- Core setup/import/search/context are local filesystem operations.
+- Core setup/import/search are local filesystem operations.
 - No provider beyond the support matrix should be described as supported.

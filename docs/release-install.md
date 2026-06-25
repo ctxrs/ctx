@@ -24,8 +24,8 @@ Public install instructions stay blocked until all of the following are true:
 - Published checksums match those artifacts.
 - Each produced platform artifact has packaged artifact runtime smoke evidence
   from installing or extracting the exact staged artifact and running
-  `ctx --version`, `setup`, `import`, `search`, `context`, `doctor`, and
-  `validate` against the fixture data.
+  `ctx --version`, `setup`, `import`, `search`, `doctor`, and `validate`
+  against the fixture data.
 - Dependency advisory/license evidence is approved.
 - Signing, notarization, SBOM, and provenance evidence is approved.
 - R2 staging upload/readback has passed with approved credentials.

@@ -35,11 +35,11 @@ generated conclusion.
    ctx search "<query>" --since 30d --json
    ```
 
-4. Build deterministic context for the best query:
+4. Inspect the best cited result:
 
    ```bash
-   ctx context "<query>" --max-tokens 6000
-   ctx context "<query>" --max-tokens 6000 --json
+   ctx search "<query>" --json
+   ctx show <item-uuid> --json
    ```
 
 5. Cite ctx material when it affects your answer or implementation. Include the
@@ -53,7 +53,7 @@ generated conclusion.
   that decision.
 - If you synthesize across multiple snippets, label it as your synthesis and
   cite the supporting snippets.
-- Prefer JSON for programmatic ranking and Markdown context for prompt input.
+- Prefer JSON for programmatic ranking and cited result inspection.
 - Treat `~/.ctx`, provider transcript paths, and JSON output as private local
   history unless the user explicitly asks to share reviewed excerpts.
 - If a source citation is stale or unavailable, say that ctx returned indexed

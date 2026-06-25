@@ -6,8 +6,8 @@ the change touches wider contracts, release proof, platforms, provider import,
 or performance.
 
 The product boundary does not expand in any mode: ctx remains a search-only,
-local CLI for existing local agent history. Setup, import, search, context,
-doctor, and validate must not require API keys or product network calls.
+local CLI for existing local agent history. Setup, import, search, doctor, and
+validate must not require API keys or product network calls.
 
 ## Modes
 
@@ -20,7 +20,7 @@ doctor, and validate must not require API keys or product network calls.
 | `release` | Real release artifact proof. | Run only when actual platform artifacts, checksums, install verification, and release evidence are being produced or certified. It is stronger than `release_contract`, not an alias for it. |
 | `nightly` | Broad scheduled validation outside the critical development path. | Run from scheduled automation or by request when slow checks are useful but should not block ordinary iteration. |
 | `perf` | Performance benchmarks and regression checks. | Run before accepting search, indexing, storage, ranking, or dependency changes that could materially alter runtime, memory, or index size. |
-| `provider_live` | Opt-in proof that ctx can import provider history and retrieve search/context from it. | Run manually when provider import behavior changes, explicit local history paths are available, or credential-gated generated histories are requested. It must use redacted aggregate artifacts only and must not execute provider CLIs. |
+| `provider_live` | Opt-in proof that ctx can import provider history and retrieve search results from it. | Run manually when provider import behavior changes, explicit local history paths are available, or credential-gated generated histories are requested. It must use redacted aggregate artifacts only and must not execute provider CLIs. |
 | `platform` | Operating-system and install proof beyond the default Linux gate. | Run before claiming support for platform-specific packaging, install, shell, filesystem, or worker behavior. |
 | `manual` | Explicitly selected checks requiring local resources, external workers, or human review. | Run only when a mode or target says it is manual. Keep it out of default wildcard, production, and release-contract runs unless explicitly requested. |
 
@@ -59,17 +59,17 @@ when needed.
   whose OpenRouter provider policy permits free aliases.
   The credential must not be passed to `ctx`, generated raw histories must not
   be published as artifacts, redacted per-provider evidence is written under
-  `generated-providers/<provider>/`, and setup, import, search, context, status,
-  doctor, and validate remain local filesystem operations with no product
-  network dependency.
+  `generated-providers/<provider>/`, and setup, import, search, status, doctor,
+  and validate remain local filesystem operations with no product network
+  dependency.
 - Performance-sensitive changes should add `perf` to the normal gate instead of
   replacing correctness checks.
 - The search performance gate is manual and non-default. Run
   `bazel test //:search_perf_bench --config=ci --test_output=all` when search,
-  context, storage, import, or indexing changes need measured evidence. It
-  builds a synthetic local corpus with at least 10k provider events, records
-  import/search/context timings, p50/p95 samples, SQLite footprint bytes, and
-  threshold pass/fail checks in `synthetic-search-perf.json`.
+  storage, import, or indexing changes need measured evidence. It builds a
+  synthetic local corpus with at least 10k provider events, records
+  import/search timings, p50/p95 samples, SQLite footprint bytes, and threshold
+  pass/fail checks in `synthetic-search-perf.json`.
 - For explicit slow evidence, run the same target with
   `--test_env=CTX_SEARCH_PERF_SLOW=1` or
   `--test_env=CTX_SEARCH_PERF_EVENTS=100000`. Slow-mode evidence is not part of

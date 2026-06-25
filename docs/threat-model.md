@@ -13,9 +13,9 @@ The current CLI protects a local search index for developer agent history.
 ## Boundaries
 
 ctx reads provider history and writes only to the configured ctx data root
-during normal setup and import commands. Search, context, list, show, sources,
-status, doctor, and validate read local data and should not write outside the
-ctx data root.
+during normal setup and import commands. Search, list, show, sources, status,
+doctor, and validate read local data and should not write outside the ctx data
+root.
 
 Source repositories and provider homes remain outside ctx ownership. Provider
 files are read as import sources, not modified.

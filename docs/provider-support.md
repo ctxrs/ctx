@@ -80,8 +80,8 @@ same Bazel/Bazelisk bootstrap path is used as the main CI gate. The lane uses
 the Infisical/OpenRouter model configuration supplied to the Bazel test
 environment; the generator has an optional free-model guard for projects whose
 OpenRouter provider policy permits free aliases.
-Then it runs only `ctx setup`, `ctx import`, `ctx search`, `ctx context`, `ctx
-status`, `ctx doctor`, and `ctx validate` with a scrubbed environment. The
+Then it runs only `ctx setup`, `ctx import`, `ctx search`, `ctx status`, `ctx
+doctor`, and `ctx validate` with a scrubbed environment. The
 credential is not passed to `ctx`, generated raw histories are not persisted as
 artifacts, and the lane writes redacted per-provider evidence under
 `generated-providers/<provider>/` plus an aggregate summary. `source_exists`
@@ -91,8 +91,8 @@ of default `production` and `release_contract` gates.
 The Bazel provider-live wrapper does not build `ctx` for skipped or fixture-only
 blocker lanes. A true Codex or Pi local-history live run may build or use the
 selected `ctx` binary, but the runtime flow invokes only `ctx setup`, `ctx
-import`, `ctx search`, `ctx context`, `ctx status`, `ctx doctor`, and `ctx
-validate` with a scrubbed environment. Provider CLIs, provider API keys, and
+import`, `ctx search`, `ctx status`, `ctx doctor`, and `ctx validate` with a
+scrubbed environment. Provider CLIs, provider API keys, and
 provider network credentials are not used by those lane commands.
 
 ## Required Evidence For Promotion
@@ -104,7 +104,7 @@ Before a provider moves beyond `fixture_only`, `normalized_import_only`, or
 - read-only source discovery or an explicit `--path` contract;
 - malformed-input tests;
 - idempotent re-import tests;
-- source citation fields in search/context output;
+- source citation fields in search output;
 - storage and redaction notes for provider-specific sensitive fields;
 - a redacted live E2E artifact when claiming live local-history support;
 - docs updates in this file and `provider-support-matrix.json`.

@@ -384,7 +384,6 @@ run_fresh_home_flow() {
 
   run_timed "fresh-home-search" env CTX_DATA_ROOT="${data_root}" "${ctx_bin}" search onboarding --json
   run_timed "fresh-home-show" env CTX_DATA_ROOT="${data_root}" "${ctx_bin}" show "${record_id}" --json
-  run_timed "fresh-home-context" env CTX_DATA_ROOT="${data_root}" "${ctx_bin}" context onboarding --json
   run_timed "fresh-home-status" env CTX_DATA_ROOT="${data_root}" "${ctx_bin}" status --json
   run_timed "fresh-home-doctor" env CTX_DATA_ROOT="${data_root}" "${ctx_bin}" doctor --json
   run_timed "fresh-home-validate" env CTX_DATA_ROOT="${data_root}" "${ctx_bin}" validate --json
@@ -520,7 +519,6 @@ run_security_runtime_flow() {
 
   run_security_ctx_command "${prefix}-search" "${workspace}" "${home_dir}" "${data_root}" "${ctx_bin}" search onboarding --json
   run_security_ctx_command "${prefix}-show" "${workspace}" "${home_dir}" "${data_root}" "${ctx_bin}" show "${record_id}" --json
-  run_security_ctx_command "${prefix}-context" "${workspace}" "${home_dir}" "${data_root}" "${ctx_bin}" context onboarding --json
   run_security_ctx_command "${prefix}-status" "${workspace}" "${home_dir}" "${data_root}" "${ctx_bin}" status --json
   run_security_ctx_command "${prefix}-doctor" "${workspace}" "${home_dir}" "${data_root}" "${ctx_bin}" doctor --json
   run_security_ctx_command "${prefix}-validate" "${workspace}" "${home_dir}" "${data_root}" "${ctx_bin}" validate --json
@@ -677,8 +675,6 @@ run_security_no_network_oracle() {
     "${workspace}" "${home_dir}" "${data_root}" "${ctx_bin}" import --provider codex --path "${fixture}" --json
   run_straced_security_ctx_command "security-no-network-search" "${strace_bin}" "${trace_dir}/search.log" \
     "${workspace}" "${home_dir}" "${data_root}" "${ctx_bin}" search onboarding --json
-  run_straced_security_ctx_command "security-no-network-context" "${strace_bin}" "${trace_dir}/context.log" \
-    "${workspace}" "${home_dir}" "${data_root}" "${ctx_bin}" context onboarding --json
 
   set +e
   grep -R -n -E 'AF_INET|AF_INET6' "${trace_dir}" > "${violations}"
@@ -689,7 +685,7 @@ run_security_no_network_oracle() {
     write_no_network_report "${report}" "failed" "AF_INET or AF_INET6 network activity observed" "${strace_bin}" "${trace_dir}"
     printf 'no-network oracle detected AF_INET/AF_INET6 activity:\n' >&2
     cat "${violations}" >&2
-    fail 'setup/import/search/context attempted network activity'
+    fail 'setup/import/search attempted network activity'
   fi
   if (( grep_status > 1 )); then
     cat "${violations}" >&2 || true
@@ -772,7 +768,7 @@ run_security_no_repo_writes() {
   if [[ "${before}" != "${after}" ]]; then
     printf 'git status before Bazel no-repo-writes flow:\n%s\n' "${before}" >&2
     printf 'git status after Bazel no-repo-writes flow:\n%s\n' "${after}" >&2
-    fail 'setup/import/search/context flow modified repo-visible files'
+    fail 'setup/import/search flow modified repo-visible files'
   fi
 }
 
@@ -1080,7 +1076,6 @@ ${marker_json}  "mode": "release-artifact-smoke",
   "setup_status": "passed",
   "import_status": "passed",
   "search_status": "passed",
-  "context_status": "passed",
   "doctor_status": "passed",
   "validate_status": "passed",
   "git_commit": "$(json_escape "${commit}")",
@@ -1335,8 +1330,6 @@ run_release_artifact_smoke_contract() {
     || fail 'release artifact smoke did not record import status'
   grep -F '"search_status": "passed"' "${smoke_json}" >/dev/null \
     || fail 'release artifact smoke did not record search status'
-  grep -F '"context_status": "passed"' "${smoke_json}" >/dev/null \
-    || fail 'release artifact smoke did not record context status'
   grep -F '"doctor_status": "passed"' "${smoke_json}" >/dev/null \
     || fail 'release artifact smoke did not record doctor status'
   grep -F '"validate_status": "passed"' "${smoke_json}" >/dev/null \

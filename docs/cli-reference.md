@@ -138,23 +138,10 @@ Filters:
 
 ## Context
 
-```bash
-ctx context "checkout retry"
-ctx context "checkout retry" --max-tokens 6000
-ctx context "checkout retry" --provider codex --since 30d
-ctx context "checkout retry" --limit 5 --json
-```
-
-`context` returns a deterministic retrieval bundle for agents. It uses the same
-filters as `search`, plus `--max-tokens` to bound returned material. The output
-includes query, filters, token budget, selected results, snippets, match
-reasons, citations, and truncation metadata.
-
-`context` does not call a model or infer conclusions. If an indexed transcript
-contains a provider-authored synopsis, ctx may return that text as cited source
-material.
-
-`context` reads SQLite and writes nothing.
+`ctx context` is deprecated and hidden from default CLI help. Use
+`ctx search --json` for machine-readable retrieval. The old command remains
+available for compatibility with existing scripts, emits a deprecation warning
+on stderr, reads SQLite, and writes nothing.
 
 ## JSON Contract
 
@@ -171,7 +158,6 @@ ctx import --json
 ctx list --json
 ctx show <item-uuid> --json
 ctx search [query] --json
-ctx context <query> --json
 ctx doctor --json
 ctx validate --json
 ```

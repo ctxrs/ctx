@@ -34,8 +34,7 @@ R2 staging smoke is not the same as packaged artifact runtime smoke. Each
 produced platform artifact must already have
 `artifacts/buildkite/release-artifact-smoke/<platform>/artifact-smoke.json`
 showing that the exact staged artifact was installed or extracted and exercised
-with `ctx --version`, `setup`, `import`, `search`, `context`, `doctor`, and
-`validate`.
+with `ctx --version`, `setup`, `import`, `search`, `doctor`, and `validate`.
 
 ## Cutover Rules
 

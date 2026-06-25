@@ -1,6 +1,6 @@
 # Redaction Corpus
 
-Search and context output may include sensitive local history. Redaction tests
+Search output may include sensitive local history. Redaction tests
 should cover at least:
 
 - common API key shapes;

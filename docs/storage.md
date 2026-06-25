@@ -46,9 +46,9 @@ the raw source path when available.
 
 ctx does not own provider homes. Import reads from configured or discovered
 locations and records enough information to search and cite imported material.
-If a raw source path moves or is deleted, `ctx show`, `ctx search`, and
-`ctx context` can still return indexed text and should mark source availability
-when that information is known.
+If a raw source path moves or is deleted, `ctx show` and `ctx search` can still
+return indexed text and should mark source availability when that information
+is known.
 
 ## Command Read/Write Behavior
 
@@ -61,12 +61,11 @@ when that information is known.
 | `ctx list` | SQLite index | nothing |
 | `ctx show` | SQLite index | nothing |
 | `ctx search` | SQLite index | nothing |
-| `ctx context` | SQLite index | nothing |
 | `ctx doctor` | SQLite index and data root metadata | nothing intentional |
 | `ctx validate` | SQLite index | nothing intentional |
 
-Setup, import, search, and context do not require network access or source
-repository writes.
+Setup, import, and search do not require network access or source repository
+writes.
 
 ## Index Lifecycle
 
@@ -141,12 +140,12 @@ Recommended handling:
 - do not share SQLite databases or logs;
 - review JSON output before sharing it outside the machine;
 - delete or reinitialize the local store when working on shared machines;
-- use provider filters and token budgets to limit agent context to relevant
-  material.
+- use provider filters and result limits to keep agent retrieval focused on
+  relevant material.
 
 ## Network Behavior
 
-Core setup, source discovery, import, search, and context commands are local
-filesystem operations. The tools that originally produced provider transcripts
-may have used the network according to their own configuration; ctx indexing
-those transcripts does not repeat that behavior.
+Core setup, source discovery, import, and search commands are local filesystem
+operations. The tools that originally produced provider transcripts may have
+used the network according to their own configuration; ctx indexing those
+transcripts does not repeat that behavior.

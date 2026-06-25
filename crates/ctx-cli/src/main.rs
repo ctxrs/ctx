@@ -29,6 +29,8 @@ use work_record_store::{CatalogSession, Store};
 
 const CONFIG_FILE: &str = "config.toml";
 const WAL_TRUNCATE_MIN_BYTES: u64 = 64 * 1024 * 1024;
+const CONTEXT_DEPRECATION_WARNING: &str =
+    "warning: `ctx context` is deprecated; use `ctx search --json` for machine-readable retrieval.";
 
 #[derive(Debug, Parser)]
 #[command(name = "ctx", version, about = "Search local agent history")]
@@ -55,7 +57,10 @@ enum CommandRoot {
     Show(ShowArgs),
     #[command(about = "Search indexed agent history")]
     Search(SearchArgs),
-    #[command(about = "Render deterministic cited context for an agent")]
+    #[command(
+        hide = true,
+        about = "Deprecated: use `ctx search --json` for machine-readable retrieval"
+    )]
     Context(ContextArgs),
     #[command(about = "Check local ctx health")]
     Doctor(JsonArgs),
@@ -710,7 +715,6 @@ fn run_setup(args: SetupArgs, data_root: PathBuf) -> Result<()> {
         println!("  ctx sources");
         println!("  ctx import --all");
         println!("  ctx search \"what failed before\"");
-        println!("  ctx context \"what should the next agent know\"");
     }
     Ok(())
 }
@@ -1323,7 +1327,7 @@ impl SearchDto {
                 .map(|result| {
                     compact_json(json!({
                         "item_id": result.record_id,
-                        "item_type": item_type_for_id(store, result.record_id),
+                        "item_type": search_result_item_type(store, result),
                         "session_id": result.session_id,
                         "event_id": result.event_id,
                         "event_seq": result.event_seq,
@@ -1347,6 +1351,19 @@ impl SearchDto {
             "truncation": packet.truncation,
         }))
     }
+}
+
+fn search_result_item_type(
+    store: &Store,
+    result: &work_record_search::SearchPacketResult,
+) -> String {
+    if result.event_id == Some(result.record_id) {
+        return "event".to_owned();
+    }
+    if result.session_id == Some(result.record_id) {
+        return "session".to_owned();
+    }
+    item_type_for_id(store, result.record_id)
 }
 
 impl ContextDto {
@@ -1518,6 +1535,7 @@ fn run_search(args: SearchArgs, data_root: PathBuf) -> Result<()> {
 }
 
 fn run_context(args: ContextArgs, data_root: PathBuf) -> Result<()> {
+    eprintln!("{CONTEXT_DEPRECATION_WARNING}");
     let store = Store::open(database_path(data_root))?;
     let options = work_record_search::PacketOptions {
         limit: args.limit,
@@ -2075,7 +2093,7 @@ fn write_default_config(data_root: &Path) -> Result<()> {
     file.write_all(
         b"# ctx local agent history search\n\
 data_root_version = 1\n\
-network_during_import_search_context = false\n",
+network_during_import_search = false\n",
     )?;
     Ok(())
 }

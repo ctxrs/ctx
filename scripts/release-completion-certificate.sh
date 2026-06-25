@@ -511,7 +511,7 @@ validate_release_artifact_smoke() {
   require_manifest_value "${smoke}" ".release_artifact_sha256" "${artifact_checksum}" "${platform} artifact smoke records artifact checksum"
   require_manifest_value "${smoke}" ".release_artifact_bytes" "${artifact_bytes}" "${platform} artifact smoke records artifact bytes"
 
-  for status_field in version setup import search context doctor validate; do
+  for status_field in version setup import search doctor validate; do
     require_manifest_value "${smoke}" ".${status_field}_status" "passed" "${platform} artifact smoke records ${status_field} command"
   done
 }
@@ -1047,7 +1047,6 @@ write_contract_release_artifact_smoke_platform() {
   "setup_status": "passed",
   "import_status": "passed",
   "search_status": "passed",
-  "context_status": "passed",
   "doctor_status": "passed",
   "validate_status": "passed",
   "git_commit": "$(ctx_json_escape "${commit}")",
@@ -1617,7 +1616,7 @@ fixture only and does not make FreeBSD optional.
 - Product decision regression artifact: \`artifacts/buildkite/finished-product/product-decisions/product-decisions.json\`
 - Provider fixture import artifact: \`artifacts/buildkite/finished-product/provider-fixtures/provider-fixtures.json\`
 - Provider live E2E lane definitions: \`artifacts/buildkite/provider-live-e2e-lanes/provider-live-e2e-lanes.json\`
-- Rich search/context artifact: \`artifacts/buildkite/finished-product/rich-search-context/rich-context.json\`
+- Rich search artifact: \`artifacts/buildkite/finished-product/rich-search-context/rich-context.json\`
 - Search MVP package/content audit: \`artifacts/buildkite/finished-product/search-mvp-package-audit/search-mvp-package-audit.json\`
 - Security/malicious archive fixture artifact: \`artifacts/buildkite/finished-product/security-archive-fixtures/security-archive-fixtures.md\`
 - jj e2e blocker status artifact: \`artifacts/buildkite/finished-product/jj-e2e-blocker-status/jj-e2e-blocker-status.txt\`

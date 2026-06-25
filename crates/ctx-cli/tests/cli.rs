@@ -332,8 +332,7 @@ fn help_exposes_only_search_mvp_commands() {
         .unwrap_or(&help);
 
     for expected in [
-        "setup", "status", "sources", "import", "list", "show", "search", "context", "doctor",
-        "validate",
+        "setup", "status", "sources", "import", "list", "show", "search", "doctor", "validate",
     ] {
         assert!(
             commands.contains(expected),
@@ -358,6 +357,7 @@ fn help_exposes_only_search_mvp_commands() {
         "pr",
         "repair",
         "watch",
+        "context",
     ] {
         assert!(
             !commands.contains(&format!("  {forbidden}")),
@@ -575,22 +575,6 @@ fn public_subcommand_help_is_golden_enough_for_search_mvp() {
                 "--json",
             ],
         ),
-        (
-            "context",
-            vec![
-                "Usage: ctx context",
-                "<QUERY>",
-                "--max-tokens <MAX_TOKENS>",
-                "--provider <PROVIDER>",
-                "--repo <REPO>",
-                "--since <SINCE>",
-                "--primary-only",
-                "--include-subagents",
-                "--event-type <EVENT_TYPE>",
-                "--file <FILE>",
-                "--json",
-            ],
-        ),
         ("doctor", vec!["Usage: ctx doctor", "--json"]),
         ("validate", vec!["Usage: ctx validate", "--json"]),
     ] {
@@ -615,6 +599,35 @@ fn public_subcommand_help_is_golden_enough_for_search_mvp() {
             );
         }
     }
+}
+
+#[test]
+fn deprecated_context_command_is_hidden_but_still_available() {
+    let temp = tempdir();
+    let root_output = ctx(&temp)
+        .arg("--help")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let root_help = String::from_utf8(root_output).unwrap();
+    let commands = root_help
+        .split("Commands:")
+        .nth(1)
+        .and_then(|tail| tail.split("Options:").next())
+        .unwrap_or(&root_help);
+    assert!(
+        !commands.contains("context"),
+        "deprecated context command appeared in root help\n{root_help}"
+    );
+
+    ctx(&temp)
+        .args(["context", "onboarding", "--json"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("`ctx context` is deprecated"))
+        .stdout(predicate::str::contains(r#""schema_version""#));
 }
 
 #[test]

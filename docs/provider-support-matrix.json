@@ -55,7 +55,7 @@
         "parent_child_session_edges": true
       },
       "redaction_notes": [
-        "Search/context output is local/private; review before sharing."
+        "Search output is local/private; review before sharing."
       ],
       "live_e2e": {
         "status": "manual_opt_in_local_history",

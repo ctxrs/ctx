@@ -157,36 +157,10 @@ Each result can include:
 
 ## Context
 
-```bash
-ctx context <query> --json
-```
-
-Writes nothing and returns:
-
-- `schema_version`;
-- `query`;
-- `filters`;
-- `generated_at`;
-- `budget`;
-- `results[]`;
-- `pagination`;
-- `truncation`;
-- `share_safe: false`.
-
-Each result can include:
-
-- `item_id`, the opaque item identifier used with `ctx show`;
-- `item_type`, such as `agent_history`;
-- `title`;
-- `summary`;
-- `rank`;
-- `why_matched`;
-- `citations[]`;
-- `links`;
-- `visibility`.
-
-`summary` is returned only from indexed source material or bounded local
-previews. ctx does not call a model to create it during context rendering.
+`ctx context <query> --json` is deprecated and hidden from default CLI help.
+Use `ctx search [query] --json` for the supported machine-readable retrieval
+contract. The legacy command remains available for compatibility, writes
+nothing, and emits its deprecation warning on stderr so stdout remains JSON.
 
 ## Citation Fields
 
@@ -251,7 +225,7 @@ summaries written only after explicit local-history or generated-history opt-in.
 - redaction flags for raw transcripts, snippets, queries, source paths, and raw
   ctx command output;
 - aggregate import counts;
-- aggregate search/context result counts;
+- aggregate search result counts;
 - aggregate health counts and booleans;
 - `per_provider_evidence_root: "generated-providers"` and
   `generated_providers[]` for the OpenRouter generated-history aggregate;
@@ -280,7 +254,7 @@ Each generated-provider `live-e2e.json` returns:
 - raw-output redaction flags for generated histories, transcripts, snippets,
   queries, source paths, and raw ctx command output;
 - imported session/event/edge counts;
-- search/context result counts;
+- search result counts;
 - `retrieval_oracle.passed: true`;
 - `retrieval_oracle.source_exists_oracle_required: false`;
 - git commit, branch, and generated timestamp.

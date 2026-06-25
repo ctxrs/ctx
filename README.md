@@ -3,9 +3,8 @@
 Search local agent history.
 
 ctx indexes existing local agent transcripts into a local SQLite store so a
-future agent can search prior sessions and retrieve deterministic context with
-citations. The first user is an agent calling the CLI; humans can use the same
-commands to inspect the index.
+future agent can search prior sessions with citations. The first user is an
+agent calling the CLI; humans can use the same commands to inspect the index.
 
 ## Product Boundary
 
@@ -15,13 +14,12 @@ The current production surface is intentionally narrow:
 - explicitly import supported local transcripts;
 - store a searchable local SQLite index under `~/.ctx` by default;
 - search indexed sessions and events;
-- render deterministic context bundles with citations;
 - return JSON for agent-facing workflows;
-- keep setup, import, search, and context local to this machine.
+- keep setup, import, and search local to this machine.
 
 ctx does not run model inference, install shell integration, modify source
 repositories, start background processes, require API keys, or use a remote
-account for setup, import, search, or context.
+account for setup, import, or search.
 
 ## Install Or Run
 
@@ -67,7 +65,6 @@ Search and inspect results:
 ctx list
 ctx search "checkout retry"
 ctx show <item-uuid>
-ctx context "checkout retry"
 ```
 
 Use JSON for agent workflows:
@@ -75,7 +72,6 @@ Use JSON for agent workflows:
 ```bash
 ctx sources --json
 ctx search "sqlite migration" --json
-ctx context "sqlite migration" --json
 ```
 
 ## Public CLI
@@ -90,7 +86,6 @@ ctx import
 ctx list
 ctx show <item-uuid>
 ctx search [query]
-ctx context <query>
 ctx doctor
 ctx validate
 ```
@@ -112,7 +107,6 @@ ctx import --json
 ctx list --json
 ctx show <item-uuid> --json
 ctx search [query] --json
-ctx context <query> --json
 ctx doctor --json
 ctx validate --json
 ```
@@ -135,7 +129,7 @@ SQLite.
 - [First 10 minutes](docs/first-10-minutes.md)
 - [Getting started](docs/getting-started.md)
 - [CLI reference](docs/cli-reference.md)
-- [Search and context](docs/search.md)
+- [Search](docs/search.md)
 - [JSON contracts](docs/contracts/json.md)
 - [Storage and privacy](docs/storage.md)
 - [Providers](docs/providers.md)

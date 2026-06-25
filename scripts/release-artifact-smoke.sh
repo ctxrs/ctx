@@ -16,7 +16,6 @@ temporary bin directory, then runs:
   ctx setup
   ctx import --provider codex --path tests/fixtures/provider-history/codex-sessions --json
   ctx search onboarding --json
-  ctx context onboarding --json
   ctx doctor --json
   ctx validate --json
 
@@ -242,7 +241,6 @@ write_artifact_smoke_evidence() {
   "setup_status": "passed",
   "import_status": "passed",
   "search_status": "passed",
-  "context_status": "passed",
   "doctor_status": "passed",
   "validate_status": "passed",
   "git_commit": "$(ctx_json_escape "${commit}")",
@@ -266,7 +264,7 @@ EOF
 - SHA-256: \`${artifact_checksum}\`
 - Install method: \`${install_method}\`
 - Fixture: \`${fixture}\`
-- Commands: \`ctx --version\`, \`ctx setup\`, \`ctx import\`, \`ctx search\`, \`ctx context\`, \`ctx doctor\`, \`ctx validate\`
+- Commands: \`ctx --version\`, \`ctx setup\`, \`ctx import\`, \`ctx search\`, \`ctx doctor\`, \`ctx validate\`
 - Status: passed
 EOF
 
@@ -341,8 +339,6 @@ run_release_artifact_smoke() {
     "${command_dir}/import.stdout" "${command_dir}/import.stderr" import --provider codex --path "${fixture}" --json
   run_ctx_smoke_step "search" "${installed_bin}" "${home_dir}" "${data_root}" \
     "${command_dir}/search.stdout" "${command_dir}/search.stderr" search onboarding --json
-  run_ctx_smoke_step "context" "${installed_bin}" "${home_dir}" "${data_root}" \
-    "${command_dir}/context.stdout" "${command_dir}/context.stderr" context onboarding --json
   run_ctx_smoke_step "doctor" "${installed_bin}" "${home_dir}" "${data_root}" \
     "${command_dir}/doctor.stdout" "${command_dir}/doctor.stderr" doctor --json
   run_ctx_smoke_step "validate" "${installed_bin}" "${home_dir}" "${data_root}" \

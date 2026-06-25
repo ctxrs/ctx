@@ -8,12 +8,12 @@ true for the search-only product.
 - `ctx setup` creates only the configured ctx data root and local storage files.
 - `ctx sources` writes nothing.
 - `ctx import` writes only the configured ctx data root and SQLite index.
-- `ctx search`, `ctx context`, `ctx list`, and `ctx show` write nothing.
-- Core setup/import/search/context do not require network access or API keys.
+- `ctx search`, `ctx list`, and `ctx show` write nothing.
+- Core setup/import/search do not require network access or API keys.
 - Provider files are read as sources and not modified.
 - Provider transcript imports reject symlinked JSONL files by default.
 - JSON output is private by default and must not be described as share-safe.
-- Search/context/show JSON and SQLite search projections must not expose
+- Search/show JSON and SQLite search projections must not expose
   secret-shaped values that the redaction oracle covers.
 - Unsupported providers remain explicit in the provider support matrix.
 
@@ -51,14 +51,14 @@ bazel test //:security_static_audit //:security_no_repo_writes //:privacy_redact
 network/client, subprocess, browser, daemon, LLM/API-key, and PATH mutation
 surfaces, and checks public setup/docs/install surfaces for PATH edits or API-key
 requirements. `//:privacy_redaction_oracle` imports a synthetic provider
-history with fake secret-shaped values, then checks `search`, `context`, `show`,
-and SQLite search projections for redaction.
+history with fake secret-shaped values, then checks `search`, `show`, and
+SQLite search projections for redaction.
 
 `//:security_no_repo_writes` also runs a runtime side-effect oracle with a temp
 home, fake repository sentinels, repository hook sentinels, and a read-only
 copied provider fixture. It emits `side-effect-oracle.json`, before/after
 manifests, and `no-network-oracle.json` under `CTX_ARTIFACT_DIR`. When `strace`
-is available and usable, setup/import/search/context are traced and the gate
+is available and usable, setup/import/search are traced and the gate
 fails on `AF_INET` or `AF_INET6` activity. If `strace` is missing or unusable,
 the no-network artifact records a skipped status with the reason.
 
@@ -76,9 +76,8 @@ write raw transcript content into artifacts. It is not part of the default
 production or release-contract gate.
 
 The default product boundary remains local search only. Security docs and tests
-should continue to reject claims that setup, import, search, context, doctor, or
-validate need remote accounts, background processes, repository mutation, or API
-keys.
+should continue to reject claims that setup, import, search, doctor, or validate
+need remote accounts, background processes, repository mutation, or API keys.
 
 ## Manual Review Checklist
 

@@ -2796,6 +2796,47 @@ impl Store {
         Ok(max_events)
     }
 
+    pub fn has_at_least_events(&self, threshold: i64) -> Result<bool> {
+        if threshold <= 0 {
+            return Ok(true);
+        }
+        let exists = self.conn.query_row(
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                FROM events
+                LIMIT 1 OFFSET ?1
+            )
+            "#,
+            params![threshold - 1],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(exists != 0)
+    }
+
+    pub fn has_provider_data(&self, provider: CaptureProvider) -> Result<bool> {
+        let exists = self.conn.query_row(
+            r#"
+            SELECT
+                EXISTS(
+                    SELECT 1
+                    FROM sessions
+                    WHERE provider = ?1
+                    LIMIT 1
+                )
+                OR EXISTS(
+                    SELECT 1
+                    FROM capture_sources
+                    WHERE provider = ?1
+                    LIMIT 1
+                )
+            "#,
+            params![provider.as_str()],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(exists != 0)
+    }
+
     pub fn search_event_hits(&self, query: &str, limit: usize) -> Result<Vec<EventSearchHit>> {
         self.search_event_hits_page(query, limit, 0)
     }

@@ -19,7 +19,7 @@ pub const AGENT_CONTEXT_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_MAX_TOKENS: u32 = 12_000;
 pub const DEFAULT_RESULT_LIMIT: usize = 10;
 pub const DEFAULT_SNIPPET_CHARS: usize = 320;
-const LARGE_EVENT_RECORD_THRESHOLD: i64 = 1_024;
+const LARGE_EVENT_CORPUS_THRESHOLD: i64 = 1_024;
 const FILTERED_SEARCH_PAGE_SIZE: usize = 500;
 
 #[derive(Debug, Error)]
@@ -249,6 +249,11 @@ pub fn context_packet(
 
 pub fn search_packet(store: &Store, query: &str, options: &PacketOptions) -> Result<SearchPacket> {
     let options = normalized_options(options);
+    if let Some(provider) = options.filters.provider {
+        if !store.has_provider_data(provider)? {
+            return Ok(empty_search_packet(query, &options));
+        }
+    }
     if let Some(packet) = fast_event_search_packet(store, query, &options)? {
         return Ok(packet);
     }
@@ -325,7 +330,7 @@ fn fast_event_search_packet(
     if query.trim().is_empty() || options.filters.file.is_some() {
         return Ok(None);
     }
-    if store.max_events_per_work_record()? < LARGE_EVENT_RECORD_THRESHOLD {
+    if !store.has_at_least_events(LARGE_EVENT_CORPUS_THRESHOLD)? {
         return Ok(None);
     }
 
@@ -393,6 +398,18 @@ fn fast_event_search_packet(
         pagination: pagination(Some(cursor_offset), has_more),
         truncation,
     }))
+}
+
+fn empty_search_packet(query: &str, options: &PacketOptions) -> SearchPacket {
+    SearchPacket {
+        schema_version: AGENT_CONTEXT_SCHEMA_VERSION,
+        query: query.to_owned(),
+        filters: options.filters.clone(),
+        generated_at: Utc::now(),
+        results: Vec::new(),
+        pagination: pagination(Some(0), false),
+        truncation: ContextTruncation::default(),
+    }
 }
 
 fn event_hit_matches_filters(hit: &EventSearchHit, filters: &SearchFilters) -> bool {
@@ -2041,12 +2058,46 @@ mod tests {
         };
         store.upsert_session(&session).unwrap();
 
+        let other_record = WorkRecord::new(
+            "Large provider history shard",
+            "another imported agent-history record",
+            Vec::new(),
+            "agent_history",
+            Some("/workspace/ctx".into()),
+        );
+        store.insert_record(&other_record).unwrap();
+        let other_session = Session {
+            id: Uuid::parse_str("018f45d0-0000-7000-8000-000000000602").unwrap(),
+            work_record_id: Some(other_record.id),
+            parent_session_id: None,
+            root_session_id: None,
+            capture_source_id: None,
+            provider: CaptureProvider::Codex,
+            external_session_id: Some("large-history-session-shard".into()),
+            external_agent_id: None,
+            agent_type: AgentType::Primary,
+            role_hint: Some("primary".into()),
+            is_primary: true,
+            status: SessionStatus::Imported,
+            transcript_blob_id: None,
+            started_at: fixed_time(),
+            ended_at: None,
+            timestamps: timestamps(),
+            sync: sync_metadata(),
+        };
+        store.upsert_session(&other_session).unwrap();
+
         let target_event_id = Uuid::parse_str("018f45d0-0000-7000-8000-0000000006ff").unwrap();
-        for index in 0..=(LARGE_EVENT_RECORD_THRESHOLD as u64) {
-            let event_id = if index == LARGE_EVENT_RECORD_THRESHOLD as u64 {
+        for index in 0..=(LARGE_EVENT_CORPUS_THRESHOLD as u64) {
+            let (event_record_id, event_session) = if index < 512 {
+                (other_record.id, other_session.id)
+            } else {
+                (record.id, session.id)
+            };
+            let event_id = if index == LARGE_EVENT_CORPUS_THRESHOLD as u64 {
                 target_event_id
             } else {
-                let mut bytes = *session.id.as_bytes();
+                let mut bytes = *event_session.as_bytes();
                 bytes[14] = (index / 256) as u8;
                 bytes[15] = index as u8;
                 Uuid::from_bytes(bytes)
@@ -2060,8 +2111,8 @@ mod tests {
                 .upsert_event(&Event {
                     id: event_id,
                     seq: 10_000 + index,
-                    work_record_id: Some(record.id),
-                    session_id: Some(session.id),
+                    work_record_id: Some(event_record_id),
+                    session_id: Some(event_session),
                     run_id: None,
                     event_type: EventType::Message,
                     role: Some(EventRole::Assistant),
