@@ -2423,34 +2423,52 @@ impl Store {
     }
 
     pub fn list_records(&self, limit: usize) -> Result<Vec<WorkRecord>> {
-        let mut stmt = self
-            .conn
-            .prepare(record_select_sql("ORDER BY created_at DESC, id LIMIT ?1").as_str())?;
-        let rows = stmt.query_map(params![limit as i64], record_from_row)?;
+        self.list_records_page(limit, 0)
+    }
+
+    pub fn list_records_page(&self, limit: usize, offset: usize) -> Result<Vec<WorkRecord>> {
+        let mut stmt = self.conn.prepare(
+            record_select_sql("ORDER BY created_at DESC, id LIMIT ?1 OFFSET ?2").as_str(),
+        )?;
+        let rows = stmt.query_map(params![limit as i64, offset as i64], record_from_row)?;
         collect_rows(rows)
     }
 
     pub fn search_records(&self, query: &str, limit: usize) -> Result<Vec<WorkRecord>> {
-        if let Some(records) = self.search_records_fts(query, limit)? {
+        self.search_records_page(query, limit, 0)
+    }
+
+    pub fn search_records_page(
+        &self,
+        query: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<WorkRecord>> {
+        if let Some(records) = self.search_records_fts(query, limit, offset)? {
             return Ok(records);
         }
         let like = format!("%{}%", query);
         let mut stmt = self.conn.prepare(
             record_select_sql(
-                "WHERE title LIKE ?1 OR body LIKE ?1 OR tags_json LIKE ?1 ORDER BY created_at DESC, id LIMIT ?2",
+                "WHERE title LIKE ?1 OR body LIKE ?1 OR tags_json LIKE ?1 ORDER BY created_at DESC, id LIMIT ?2 OFFSET ?3",
             )
             .as_str(),
         )?;
-        let rows = stmt.query_map(params![like, limit as i64], record_from_row)?;
+        let rows = stmt.query_map(params![like, limit as i64, offset as i64], record_from_row)?;
         collect_rows(rows)
     }
 
-    fn search_records_fts(&self, query: &str, limit: usize) -> Result<Option<Vec<WorkRecord>>> {
+    fn search_records_fts(
+        &self,
+        query: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Option<Vec<WorkRecord>>> {
         if !table_exists(&self.conn, "work_record_search")? {
             return Ok(None);
         }
         let Some(match_query) = fts_match_query(query) else {
-            return Ok(Some(self.list_records(limit)?));
+            return Ok(Some(self.list_records_page(limit, offset)?));
         };
         let has_event_search = table_exists(&self.conn, "event_search")?;
         let has_artifact_search = table_exists(&self.conn, "artifact_search")?;
@@ -2474,7 +2492,7 @@ impl Store {
             WHERE record_id IS NOT NULL
             GROUP BY record_id
             ORDER BY MIN(score), record_id
-            LIMIT ?2
+            LIMIT ?2 OFFSET ?3
             "#
         } else {
             r#"
@@ -2482,11 +2500,11 @@ impl Store {
             FROM work_record_search
             WHERE work_record_search MATCH ?1
             ORDER BY bm25(work_record_search), record_id
-            LIMIT ?2
+            LIMIT ?2 OFFSET ?3
             "#
         };
         let mut stmt = self.conn.prepare(sql)?;
-        let rows = stmt.query_map(params![match_query, limit as i64], |row| {
+        let rows = stmt.query_map(params![match_query, limit as i64, offset as i64], |row| {
             row.get::<_, String>(0)
         })?;
         let mut records = Vec::new();
@@ -2513,6 +2531,15 @@ impl Store {
     }
 
     pub fn search_event_hits(&self, query: &str, limit: usize) -> Result<Vec<EventSearchHit>> {
+        self.search_event_hits_page(query, limit, 0)
+    }
+
+    pub fn search_event_hits_page(
+        &self,
+        query: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<EventSearchHit>> {
         if !table_exists(&self.conn, "event_search")? {
             return Ok(Vec::new());
         }
@@ -2553,35 +2580,38 @@ impl Store {
             LEFT JOIN work_records wr ON wr.id = COALESCE(e.work_record_id, event_search.work_record_id, s.work_record_id, rs.work_record_id, r.work_record_id)
             WHERE event_search MATCH ?1
             ORDER BY bm25(event_search), e.occurred_at_ms DESC, e.seq DESC, event_search.event_id
-            LIMIT ?2
+            LIMIT ?2 OFFSET ?3
             "#,
         )?;
-        let rows = stmt.query_map(params![match_query, limit.max(1) as i64], |row| {
-            let payload_json = row.get::<_, String>(16)?;
-            let source_metadata_json = row.get::<_, Option<String>>(17)?;
-            Ok(EventSearchHit {
-                event_id: parse_uuid(row.get::<_, String>(0)?)?,
-                work_record_id: parse_optional_uuid(row.get(1)?)?,
-                session_id: parse_optional_uuid(row.get(2)?)?,
-                run_id: parse_optional_uuid(row.get(3)?)?,
-                seq: row.get::<_, i64>(4)? as u64,
-                event_type: parse_text_enum::<EventType>(row.get::<_, String>(5)?)?,
-                role: parse_optional_text_enum::<EventRole>(row.get(6)?)?,
-                occurred_at: ms_to_time(row.get(7)?)?,
-                preview: row.get(8)?,
-                score: row.get(9)?,
-                provider: parse_optional_text_enum::<CaptureProvider>(row.get(10)?)?,
-                session_external_session_id: row.get(11)?,
-                agent_type: parse_optional_text_enum::<AgentType>(row.get(12)?)?,
-                session_is_primary: row.get::<_, Option<i64>>(13)?.map(|value| value != 0),
-                cwd: row.get(14)?,
-                raw_source_path: row.get(15)?,
-                cursor: event_search_cursor(&payload_json, source_metadata_json.as_deref())?,
-                record_title: row.get(18)?,
-                record_kind: row.get(19)?,
-                record_workspace: row.get(20)?,
-            })
-        })?;
+        let rows = stmt.query_map(
+            params![match_query, limit.max(1) as i64, offset as i64],
+            |row| {
+                let payload_json = row.get::<_, String>(16)?;
+                let source_metadata_json = row.get::<_, Option<String>>(17)?;
+                Ok(EventSearchHit {
+                    event_id: parse_uuid(row.get::<_, String>(0)?)?,
+                    work_record_id: parse_optional_uuid(row.get(1)?)?,
+                    session_id: parse_optional_uuid(row.get(2)?)?,
+                    run_id: parse_optional_uuid(row.get(3)?)?,
+                    seq: row.get::<_, i64>(4)? as u64,
+                    event_type: parse_text_enum::<EventType>(row.get::<_, String>(5)?)?,
+                    role: parse_optional_text_enum::<EventRole>(row.get(6)?)?,
+                    occurred_at: ms_to_time(row.get(7)?)?,
+                    preview: row.get(8)?,
+                    score: row.get(9)?,
+                    provider: parse_optional_text_enum::<CaptureProvider>(row.get(10)?)?,
+                    session_external_session_id: row.get(11)?,
+                    agent_type: parse_optional_text_enum::<AgentType>(row.get(12)?)?,
+                    session_is_primary: row.get::<_, Option<i64>>(13)?.map(|value| value != 0),
+                    cwd: row.get(14)?,
+                    raw_source_path: row.get(15)?,
+                    cursor: event_search_cursor(&payload_json, source_metadata_json.as_deref())?,
+                    record_title: row.get(18)?,
+                    record_kind: row.get(19)?,
+                    record_workspace: row.get(20)?,
+                })
+            },
+        )?;
         collect_rows(rows)
     }
 

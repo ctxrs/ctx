@@ -20,7 +20,7 @@ pub const DEFAULT_MAX_TOKENS: u32 = 12_000;
 pub const DEFAULT_RESULT_LIMIT: usize = 10;
 pub const DEFAULT_SNIPPET_CHARS: usize = 320;
 const LARGE_EVENT_RECORD_THRESHOLD: i64 = 1_024;
-const MAX_FAST_EVENT_FETCH_LIMIT: usize = 5_000;
+const FILTERED_SEARCH_PAGE_SIZE: usize = 500;
 
 #[derive(Debug, Error)]
 pub enum SearchError {
@@ -329,22 +329,45 @@ fn fast_event_search_packet(
         return Ok(None);
     }
 
-    let fetch_limit = fast_event_fetch_limit(options);
-    let hits = store.search_event_hits(query, fetch_limit)?;
+    let target_results = options.limit.saturating_add(1);
+    let filtered = has_filters(&options.filters);
+    let page_size = if filtered {
+        FILTERED_SEARCH_PAGE_SIZE.max(target_results)
+    } else {
+        target_results
+    };
     let mut results = Vec::new();
-    let mut raw_hits_seen = 0_usize;
-    for hit in hits {
-        raw_hits_seen += 1;
-        if !event_hit_matches_filters(&hit, &options.filters) {
-            continue;
+    let mut offset = 0_usize;
+
+    loop {
+        let hits = if filtered {
+            store.search_event_hits_page(query, page_size, offset)?
+        } else {
+            store.search_event_hits(query, page_size)?
+        };
+        let page_len = hits.len();
+
+        for hit in hits {
+            if !event_hit_matches_filters(&hit, &options.filters) {
+                continue;
+            }
+            results.push(event_search_result(&hit, query, options.snippet_chars));
+            if results.len() >= target_results {
+                break;
+            }
         }
-        results.push(event_search_result(&hit, query, options.snippet_chars));
-        if results.len() > options.limit {
+
+        if !filtered || results.len() >= target_results || page_len < page_size {
             break;
         }
+        let next_offset = offset.saturating_add(page_size);
+        if next_offset == offset {
+            break;
+        }
+        offset = next_offset;
     }
 
-    let has_more = results.len() > options.limit || raw_hits_seen >= fetch_limit;
+    let has_more = results.len() > options.limit;
     if results.len() > options.limit {
         results.truncate(options.limit);
     }
@@ -370,18 +393,6 @@ fn fast_event_search_packet(
         pagination: pagination(Some(cursor_offset), has_more),
         truncation,
     }))
-}
-
-fn fast_event_fetch_limit(options: &PacketOptions) -> usize {
-    if has_filters(&options.filters) {
-        options
-            .limit
-            .saturating_mul(80)
-            .saturating_add(1)
-            .clamp(options.limit.saturating_add(1), MAX_FAST_EVENT_FETCH_LIMIT)
-    } else {
-        options.limit.saturating_add(1)
-    }
 }
 
 fn event_hit_matches_filters(hit: &EventSearchHit, filters: &SearchFilters) -> bool {
@@ -579,47 +590,61 @@ fn ranked_candidates(
     query: Option<&str>,
     options: &PacketOptions,
 ) -> Result<Vec<Candidate>> {
-    let fetch_limit = if has_filters(&options.filters) {
-        options
-            .limit
-            .saturating_mul(25)
-            .clamp(options.limit + 1, 500)
-    } else {
-        options.limit.saturating_add(1)
-    };
-    let mut records = Vec::<WorkRecord>::new();
-    let mut seen = BTreeSet::<Uuid>::new();
-
-    match query {
-        Some(query) if !query.trim().is_empty() => {
-            for record in store.search_records(query, fetch_limit)? {
-                if seen.insert(record.id) {
-                    records.push(record);
-                }
-            }
-        }
-        _ => {
-            records = store.list_records(fetch_limit)?;
-        }
-    }
-
+    let target_candidates = options.limit.saturating_add(1);
+    let filtered = has_filters(&options.filters);
     let terms = query_terms(query.unwrap_or_default());
     let mut candidates = Vec::new();
-    for record in records {
-        let context = hydrate_record_context(store, record.id)?;
-        if !record_matches_filters(&record, &context, &options.filters) {
-            continue;
+    let mut seen = BTreeSet::<Uuid>::new();
+
+    if filtered {
+        let page_size = FILTERED_SEARCH_PAGE_SIZE.max(target_candidates);
+        let mut offset = 0_usize;
+        loop {
+            let records = match query {
+                Some(query) if !query.trim().is_empty() => {
+                    store.search_records_page(query, page_size, offset)?
+                }
+                _ => store.list_records_page(page_size, offset)?,
+            };
+            let page_len = records.len();
+
+            for record in records {
+                if !seen.insert(record.id) {
+                    continue;
+                }
+                if let Some(candidate) =
+                    candidate_for_record(store, record, &terms, &options.filters)?
+                {
+                    candidates.push(candidate);
+                    if candidates.len() >= target_candidates {
+                        break;
+                    }
+                }
+            }
+
+            if candidates.len() >= target_candidates || page_len < page_size {
+                break;
+            }
+            let next_offset = offset.saturating_add(page_size);
+            if next_offset == offset {
+                break;
+            }
+            offset = next_offset;
         }
-        let analysis = analyze_record(&record, &context, &terms);
-        if terms.is_empty() || analysis.score > 0.0 {
-            candidates.push(Candidate {
-                record,
-                context,
-                score: analysis.score,
-                why_matched: analysis.why_matched,
-                citations: analysis.citations,
-                primary_hit: analysis.primary_hit,
-            });
+    } else {
+        let fetch_limit = target_candidates;
+        let records = match query {
+            Some(query) if !query.trim().is_empty() => store.search_records(query, fetch_limit)?,
+            _ => store.list_records(fetch_limit)?,
+        };
+        for record in records {
+            if !seen.insert(record.id) {
+                continue;
+            }
+            if let Some(candidate) = candidate_for_record(store, record, &terms, &options.filters)?
+            {
+                candidates.push(candidate);
+            }
         }
     }
 
@@ -633,6 +658,31 @@ fn ranked_candidates(
             .then_with(|| left.record.id.cmp(&right.record.id))
     });
     Ok(candidates)
+}
+
+fn candidate_for_record(
+    store: &Store,
+    record: WorkRecord,
+    terms: &[String],
+    filters: &SearchFilters,
+) -> Result<Option<Candidate>> {
+    let context = hydrate_record_context(store, record.id)?;
+    if !record_matches_filters(&record, &context, filters) {
+        return Ok(None);
+    }
+    let analysis = analyze_record(&record, &context, terms);
+    if terms.is_empty() || analysis.score > 0.0 {
+        Ok(Some(Candidate {
+            record,
+            context,
+            score: analysis.score,
+            why_matched: analysis.why_matched,
+            citations: analysis.citations,
+            primary_hit: analysis.primary_hit,
+        }))
+    } else {
+        Ok(None)
+    }
 }
 
 fn hydrate_record_context(store: &Store, record_id: Uuid) -> Result<RecordContext> {
@@ -2216,6 +2266,150 @@ mod tests {
         )
         .unwrap();
         assert!(wrong_provider.results.is_empty());
+    }
+
+    #[test]
+    fn filtered_search_pages_past_fts_decoys() {
+        let (_temp, store) = test_store();
+        let query = "overflow-filter-needle";
+        let old_time = fixed_time() - chrono::Duration::days(14);
+        let mut records = Vec::new();
+
+        for index in 0..501_u16 {
+            let mut decoy = WorkRecord::new(
+                "Overflow filter shared title",
+                format!("{query} identical body for paging regression"),
+                Vec::new(),
+                "task",
+                None,
+            );
+            decoy.id = Uuid::parse_str(&format!("018f45d0-0000-7000-8000-{index:012x}")).unwrap();
+            decoy.created_at = old_time;
+            decoy.updated_at = old_time;
+            records.push(decoy);
+        }
+
+        let mut target = WorkRecord::new(
+            "Overflow filter shared title",
+            format!("{query} identical body for paging regression"),
+            Vec::new(),
+            "task",
+            Some("/workspace/ctx-filter-target".into()),
+        );
+        target.id = Uuid::parse_str("018f45d0-0000-7000-8000-ffffffffffff").unwrap();
+        target.created_at = old_time;
+        target.updated_at = fixed_time();
+        records.push(target.clone());
+        store.upsert_records(&records).unwrap();
+
+        let session = Session {
+            id: Uuid::parse_str("018f45d0-0000-7000-8000-fffffffffffe").unwrap(),
+            work_record_id: Some(target.id),
+            parent_session_id: None,
+            root_session_id: None,
+            capture_source_id: None,
+            provider: CaptureProvider::Codex,
+            external_session_id: Some("overflow-filter-session".into()),
+            external_agent_id: None,
+            agent_type: AgentType::Primary,
+            role_hint: Some("primary".into()),
+            is_primary: true,
+            status: SessionStatus::Imported,
+            transcript_blob_id: None,
+            started_at: fixed_time(),
+            ended_at: None,
+            timestamps: timestamps(),
+            sync: sync_metadata(),
+        };
+        store.upsert_session(&session).unwrap();
+
+        let file = FileTouched {
+            id: Uuid::parse_str("018f45d0-0000-7000-8000-fffffffffffd").unwrap(),
+            work_record_id: Some(target.id),
+            run_id: None,
+            event_id: None,
+            vcs_workspace_id: None,
+            path: "crates/search/src/overflow_filter.rs".into(),
+            change_kind: Some(FileChangeKind::Modified),
+            old_path: None,
+            line_count_delta: Some(3),
+            confidence: Confidence::Explicit,
+            timestamps: timestamps(),
+            source_id: None,
+            sync: sync_metadata(),
+        };
+        store.upsert_file_touched(&file).unwrap();
+
+        let first_raw_page = store.search_records(query, 500).unwrap();
+        assert_eq!(first_raw_page.len(), 500);
+        assert!(
+            !first_raw_page.iter().any(|record| record.id == target.id),
+            "regression setup must place the filtered hit behind the first 500 raw matches"
+        );
+
+        let cases = vec![
+            (
+                "provider",
+                SearchFilters {
+                    provider: Some(CaptureProvider::Codex),
+                    ..SearchFilters::default()
+                },
+            ),
+            (
+                "repo",
+                SearchFilters {
+                    repo: Some("ctx-filter-target".into()),
+                    ..SearchFilters::default()
+                },
+            ),
+            (
+                "file",
+                SearchFilters {
+                    file: Some("overflow_filter.rs".into()),
+                    ..SearchFilters::default()
+                },
+            ),
+            (
+                "since",
+                SearchFilters {
+                    since: Some(fixed_time() - chrono::Duration::hours(1)),
+                    ..SearchFilters::default()
+                },
+            ),
+            (
+                "combined",
+                SearchFilters {
+                    provider: Some(CaptureProvider::Codex),
+                    repo: Some("ctx-filter-target".into()),
+                    since: Some(fixed_time() - chrono::Duration::hours(1)),
+                    file: Some("overflow_filter.rs".into()),
+                    ..SearchFilters::default()
+                },
+            ),
+        ];
+
+        for (name, filters) in cases {
+            let packet = search_packet(
+                &store,
+                query,
+                &PacketOptions {
+                    limit: 1,
+                    filters,
+                    ..PacketOptions::default()
+                },
+            )
+            .unwrap();
+
+            assert_eq!(
+                packet
+                    .results
+                    .iter()
+                    .map(|result| result.record_id)
+                    .collect::<Vec<_>>(),
+                vec![target.id],
+                "{name} filter failed to page past decoys"
+            );
+        }
     }
 
     fn new_link_id(target_id: Uuid) -> Uuid {
