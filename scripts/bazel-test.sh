@@ -1090,6 +1090,15 @@ EOF
 EOF
 }
 
+write_release_evidence_supply_chain_r2() {
+  local root="$1"
+
+  CTX_ARTIFACT_DIR="${root}/artifacts/buildkite/supply-chain" \
+    bash scripts/release-supply-chain-proof.sh
+  CTX_ARTIFACT_DIR="${root}/artifacts/buildkite/r2-staging-readback" \
+    bash scripts/release-r2-staging-readback-proof.sh "${root}/artifacts/buildkite/release-candidate"
+}
+
 write_release_evidence_docs() {
   local root="$1"
   local path
@@ -1125,6 +1134,7 @@ write_release_evidence_root() {
     bash scripts/release-candidate-metadata.sh "${release_root}"
   CTX_ARTIFACT_DIR="${root}/artifacts/buildkite/r2-staging-smoke" \
     bash scripts/release-r2-staging-smoke.sh "${root}/artifacts/buildkite/release-candidate"
+  write_release_evidence_supply_chain_r2 "${root}"
   write_release_evidence_finished_artifacts "${root}"
   write_release_evidence_provider_live_lanes "${root}"
   write_release_evidence_docs "${root}"
@@ -1165,6 +1175,79 @@ run_r2_staging_smoke_contract() {
   mkdir -p "${r2_dir}"
   CTX_ARTIFACT_DIR="${r2_dir}" run_timed "r2-staging-smoke-contract" \
     bash scripts/release-r2-staging-smoke.sh "${candidate_dir}"
+}
+
+run_release_supply_chain_r2_contract() {
+  local supply_dir r2_dir candidate_dir upload_log upload_status contract_dir evidence_root certificate_dir log status
+
+  supply_dir="${CTX_ARTIFACT_DIR}/supply-chain"
+  rm -rf "${supply_dir}"
+  mkdir -p "${supply_dir}"
+  CTX_ARTIFACT_DIR="${supply_dir}" run_timed "release-supply-chain-proof-contract" \
+    bash scripts/release-supply-chain-proof.sh
+  grep -F '"kind": "ctx_dependency_advisory_license_audit"' \
+    "${supply_dir}/dependency-advisory-license-audit.json" >/dev/null \
+    || fail 'supply-chain proof did not write dependency advisory/license evidence'
+  grep -F '"kind": "ctx_sbom_provenance_signature_evidence"' \
+    "${supply_dir}/sbom-provenance-signature.json" >/dev/null \
+    || fail 'supply-chain proof did not write SBOM/provenance/signature evidence'
+  grep -F '"required_before_public_release": true' \
+    "${supply_dir}/sbom-provenance-signature.json" >/dev/null \
+    || fail 'supply-chain artifact evidence does not block public release without proof'
+
+  run_release_candidate_metadata_contract
+  candidate_dir="${CTX_ARTIFACT_DIR}/release-candidate"
+  r2_dir="${CTX_ARTIFACT_DIR}/r2-staging-readback"
+  rm -rf "${r2_dir}"
+  mkdir -p "${r2_dir}"
+  CTX_ARTIFACT_DIR="${r2_dir}" run_timed "r2-staging-readback-blocked-contract" \
+    bash scripts/release-r2-staging-readback-proof.sh "${candidate_dir}"
+  grep -F '"kind": "ctx_r2_staging_readback"' "${r2_dir}/r2-staging-readback.json" >/dev/null \
+    || fail 'R2 readback proof did not write readback evidence'
+  grep -F '"status": "blocked_manual_required"' "${r2_dir}/r2-staging-readback.json" >/dev/null \
+    || fail 'R2 readback proof must be blocked without upload/readback credentials'
+  grep -F '"upload_performed": false' "${r2_dir}/r2-staging-readback.json" >/dev/null \
+    || fail 'R2 readback proof must not claim upload without credentials'
+  grep -F '"readback_performed": false' "${r2_dir}/r2-staging-readback.json" >/dev/null \
+    || fail 'R2 readback proof must not claim readback without credentials'
+  grep -F '"no_ctx_rs_cutover": true' "${r2_dir}/r2-staging-readback.json" >/dev/null \
+    || fail 'R2 readback proof must record no ctx.rs cutover'
+
+  upload_log="${CTX_ARTIFACT_DIR}/r2-upload-without-approval.log"
+  set +e
+  CTX_RELEASE_R2_UPLOAD_READBACK=1 \
+  CTX_ARTIFACT_DIR="${CTX_ARTIFACT_DIR}/r2-upload-without-approval" \
+    bash scripts/release-r2-staging-readback-proof.sh "${candidate_dir}" > "${upload_log}" 2>&1
+  upload_status=$?
+  set -e
+  (( upload_status != 0 )) || fail 'R2 upload/readback mode ran without manager approval'
+  grep -F 'CTX_RELEASE_R2_UPLOAD_READBACK=1 requires CTX_RELEASE_R2_MANAGER_APPROVED=1' "${upload_log}" >/dev/null \
+    || fail 'R2 upload/readback mode did not explain missing manager approval'
+
+  contract_dir="$(mktemp -d "${TMPDIR}/supply-chain-r2-certificate.XXXXXX")"
+  evidence_root="${contract_dir}/evidence"
+  certificate_dir="${contract_dir}/certificate-output"
+  log="${contract_dir}/missing-supply-chain-r2.log"
+  write_release_evidence_root "${evidence_root}" "real"
+  rm -rf "${evidence_root}/artifacts/buildkite/supply-chain"
+  rm -rf "${evidence_root}/artifacts/buildkite/r2-staging-readback"
+  mkdir -p "${certificate_dir}"
+
+  set +e
+  bash scripts/release-completion-certificate.sh \
+    --mode=release-evidence \
+    --evidence-root "${evidence_root}" \
+    --artifact-dir "${certificate_dir}" > "${log}" 2>&1
+  status=$?
+  set -e
+
+  (( status != 0 )) || fail 'release artifact evidence accepted missing supply-chain evidence'
+  grep -F 'required evidence is missing or empty: artifacts/buildkite/supply-chain/dependency-advisory-license-audit.json' "${log}" >/dev/null \
+    || fail 'release artifact evidence did not require dependency advisory/license evidence'
+  grep -F 'required evidence is missing or empty: artifacts/buildkite/supply-chain/sbom-provenance-signature.json' "${log}" >/dev/null \
+    || fail 'release artifact evidence did not require SBOM/provenance/signature evidence'
+  grep -F 'required evidence is missing or empty: artifacts/buildkite/r2-staging-readback/r2-staging-readback.json' "${log}" >/dev/null \
+    || fail 'release artifact evidence did not require R2 staging readback evidence'
 }
 
 run_completion_certificate_contract() {
@@ -1530,6 +1613,9 @@ case "${mode}" in
     ;;
   r2_staging_smoke_contract)
     run_r2_staging_smoke_contract
+    ;;
+  release_supply_chain_r2_contract)
+    run_release_supply_chain_r2_contract
     ;;
   completion_certificate_contract)
     run_completion_certificate_contract

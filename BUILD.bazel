@@ -242,6 +242,13 @@ sh_test(
 )
 
 sh_test(
+    name = "release_supply_chain_r2_contract",
+    srcs = ["scripts/bazel-test.sh"],
+    args = ["release_supply_chain_r2_contract"],
+    data = CTX_GATE_DATA,
+)
+
+sh_test(
     name = "completion_certificate_contract",
     srcs = ["scripts/bazel-test.sh"],
     args = ["completion_certificate_contract"],
@@ -331,6 +338,7 @@ test_suite(
         ":provider_live_e2e_lane_definitions",
         ":release_candidate_metadata_contract",
         ":r2_staging_smoke_contract",
+        ":release_supply_chain_r2_contract",
         ":completion_certificate_contract",
         ":release_artifact_evidence_missing_contract",
         ":release_artifact_evidence_freebsd_contract",

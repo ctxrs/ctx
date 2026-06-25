@@ -295,6 +295,18 @@ require_manifest_current_head() {
   fi
 }
 
+require_manifest_positive_int() {
+  local path="$1"
+  local query="$2"
+  local description="$3"
+  local actual
+
+  actual="$(manifest_value "${path}" "${query}")"
+  if [[ ! "${actual}" =~ ^[1-9][0-9]*$ ]]; then
+    fail_certificate "${description}: ${path} expected a positive integer, got ${actual:-<missing>}"
+  fi
+}
+
 default_freebsd_exception_path() {
   printf '%s\n' "artifacts/buildkite/release-exceptions/freebsd-x64/freebsd-x64-exception.json"
 }
@@ -659,6 +671,131 @@ EOF
   require_contains "${manifest}" '"installers"' "release candidate manifest records installers"
 }
 
+validate_dependency_advisory_license_audit() {
+  local manifest="artifacts/buildkite/supply-chain/dependency-advisory-license-audit.json"
+  local status advisory_status license_status
+
+  require_file "${manifest}"
+  require_json_parser || return 0
+  require_manifest_value "${manifest}" ".schema_version" "1" "dependency advisory/license audit records schema version"
+  require_manifest_value "${manifest}" ".kind" "ctx_dependency_advisory_license_audit" "dependency advisory/license audit records kind"
+  require_manifest_value "${manifest}" ".mode" "dependency-advisory-license-audit" "dependency advisory/license audit records mode"
+  require_manifest_value "${manifest}" ".publishing" "false" "dependency advisory/license audit records non-publishing status"
+  require_manifest_value "${manifest}" ".package" "ctx" "dependency advisory/license audit records package"
+  require_manifest_value "${manifest}" ".version" "0.1.0" "dependency advisory/license audit records version"
+  require_manifest_value "${manifest}" ".required_before_public_release" "true" "dependency advisory/license audit blocks public release until proof exists"
+  require_manifest_current_head "${manifest}" "dependency advisory/license audit records current head"
+  require_contract_fixture_boundary "${manifest}" "dependency advisory/license audit"
+  require_manifest_positive_int "${manifest}" ".cargo_metadata.packages_checked" "dependency advisory/license audit records checked package count"
+  require_manifest_value "${manifest}" ".license_audit.status" "passed" "dependency license audit records passing license inventory"
+  require_manifest_value "${manifest}" ".license_audit.missing_license_count" "0" "dependency license audit records no missing license metadata"
+
+  status="$(manifest_value "${manifest}" ".status")"
+  case "${status}" in
+    passed|blocked_manual_required)
+      ;;
+    *)
+      fail_certificate "dependency advisory/license audit status must be passed or blocked_manual_required, got ${status:-<missing>}"
+      ;;
+  esac
+
+  advisory_status="$(manifest_value "${manifest}" ".advisory_audit.status")"
+  case "${advisory_status}" in
+    passed|provided_manual_evidence|blocked_manual_required)
+      ;;
+    *)
+      fail_certificate "dependency advisory audit status must be passed, provided_manual_evidence, or blocked_manual_required, got ${advisory_status:-<missing>}"
+      ;;
+  esac
+  if [[ "${advisory_status}" != "passed" ]]; then
+    require_manifest_value "${manifest}" ".advisory_audit.manual_lane" "true" "dependency advisory audit records manual lane when tool proof is absent"
+    require_manifest_value "${manifest}" ".advisory_audit.manager_approval_required" "true" "dependency advisory audit requires manager approval when tool proof is absent"
+  fi
+
+  license_status="$(manifest_value "${manifest}" ".license_audit.status")"
+  if [[ "${license_status}" != "passed" ]]; then
+    fail_certificate "dependency license audit must pass before completion evidence can be written"
+  fi
+}
+
+validate_sbom_provenance_signature_evidence() {
+  local manifest="artifacts/buildkite/supply-chain/sbom-provenance-signature.json"
+  local status field field_status
+
+  require_file "${manifest}"
+  require_json_parser || return 0
+  require_manifest_value "${manifest}" ".schema_version" "1" "SBOM/provenance/signature evidence records schema version"
+  require_manifest_value "${manifest}" ".kind" "ctx_sbom_provenance_signature_evidence" "SBOM/provenance/signature evidence records kind"
+  require_manifest_value "${manifest}" ".mode" "sbom-provenance-signature" "SBOM/provenance/signature evidence records mode"
+  require_manifest_value "${manifest}" ".publishing" "false" "SBOM/provenance/signature evidence records non-publishing status"
+  require_manifest_value "${manifest}" ".package" "ctx" "SBOM/provenance/signature evidence records package"
+  require_manifest_value "${manifest}" ".version" "0.1.0" "SBOM/provenance/signature evidence records version"
+  require_manifest_value "${manifest}" ".required_before_public_release" "true" "SBOM/provenance/signature evidence blocks public release until proof exists"
+  require_manifest_current_head "${manifest}" "SBOM/provenance/signature evidence records current head"
+  require_contract_fixture_boundary "${manifest}" "SBOM/provenance/signature evidence"
+
+  status="$(manifest_value "${manifest}" ".status")"
+  case "${status}" in
+    passed|blocked_manual_required)
+      ;;
+    *)
+      fail_certificate "SBOM/provenance/signature evidence status must be passed or blocked_manual_required, got ${status:-<missing>}"
+      ;;
+  esac
+
+  for field in sbom provenance signature notarization; do
+    field_status="$(manifest_value "${manifest}" ".${field}.status")"
+    case "${field_status}" in
+      provided_manual_evidence|blocked_manual_required)
+        ;;
+      *)
+        fail_certificate "${field} evidence status must be provided_manual_evidence or blocked_manual_required, got ${field_status:-<missing>}"
+        continue
+        ;;
+    esac
+    require_manifest_value "${manifest}" ".${field}.required_before_public_release" "true" "${field} evidence is required before public release"
+    if [[ "${field_status}" == "blocked_manual_required" ]]; then
+      require_manifest_value "${manifest}" ".${field}.manual_lane" "true" "${field} evidence records manual lane when external proof is absent"
+      require_manifest_value "${manifest}" ".${field}.manager_approval_required" "true" "${field} evidence requires manager approval when external proof is absent"
+    fi
+  done
+}
+
+validate_r2_staging_readback_evidence() {
+  local manifest="artifacts/buildkite/r2-staging-readback/r2-staging-readback.json"
+  local status
+
+  require_file "${manifest}"
+  require_json_parser || return 0
+  require_manifest_value "${manifest}" ".schema_version" "1" "R2 staging readback records schema version"
+  require_manifest_value "${manifest}" ".kind" "ctx_r2_staging_readback" "R2 staging readback records kind"
+  require_manifest_value "${manifest}" ".mode" "r2-staging-readback" "R2 staging readback records mode"
+  require_manifest_value "${manifest}" ".publishing" "false" "R2 staging readback records non-publishing status"
+  require_manifest_value "${manifest}" ".no_ctx_rs_cutover" "true" "R2 staging readback records no ctx.rs cutover"
+  require_manifest_value "${manifest}" ".required_before_public_release" "true" "R2 staging readback blocks public release until proof exists"
+  require_manifest_current_head "${manifest}" "R2 staging readback records current head"
+  require_contract_fixture_boundary "${manifest}" "R2 staging readback"
+  require_manifest_positive_int "${manifest}" ".validated_upload_object_count" "R2 staging readback records planned object count"
+
+  status="$(manifest_value "${manifest}" ".status")"
+  case "${status}" in
+    passed)
+      require_manifest_value "${manifest}" ".upload_performed" "true" "R2 staging readback records real upload"
+      require_manifest_value "${manifest}" ".readback_performed" "true" "R2 staging readback records real readback"
+      require_manifest_positive_int "${manifest}" ".validated_readback_object_count" "R2 staging readback records readback object count"
+      ;;
+    blocked_manual_required)
+      require_manifest_value "${manifest}" ".upload_performed" "false" "R2 staging readback must not claim upload when blocked"
+      require_manifest_value "${manifest}" ".readback_performed" "false" "R2 staging readback must not claim readback when blocked"
+      require_manifest_value "${manifest}" ".manual_lane" "true" "R2 staging readback records manual lane when credentials are absent"
+      require_manifest_value "${manifest}" ".manager_approval_required" "true" "R2 staging readback requires manager approval when credentials are absent"
+      ;;
+    *)
+      fail_certificate "R2 staging readback status must be passed or blocked_manual_required, got ${status:-<missing>}"
+      ;;
+  esac
+}
+
 validate_provider_live_e2e_lanes() {
   local manifest="artifacts/buildkite/provider-live-e2e-lanes/provider-live-e2e-lanes.json"
   local notes="artifacts/buildkite/provider-live-e2e-lanes/provider-live-e2e-lanes.md"
@@ -684,6 +821,8 @@ validate_release_docs() {
   require_contains "docs/release-install.md" "source build path" "release install docs document source build status"
   require_contains "docs/release-install.md" "freebsd-x64" "release install docs include FreeBSD as a required release target"
   require_contains "docs/release-install.md" "manager-approved release exception" "release install docs require explicit target exceptions"
+  require_contains "docs/release-install.md" "Dependency advisory/license evidence" "release install docs require dependency advisory/license approval"
+  require_contains "docs/release-install.md" "R2 staging upload/readback" "release install docs require R2 upload/readback approval"
   require_not_contains "docs/release-install.md" "ctx.rs/install" "release install docs must not expose public installer endpoint"
   require_not_contains "docs/release-install.md" "curl -fsSL" "release install docs must not expose curl installer command"
 
@@ -694,11 +833,15 @@ validate_release_docs() {
   require_contains "docs/release-supply-chain.md" "first-class release target" "release supply-chain docs keep FreeBSD in scope"
   require_contains "docs/release-supply-chain.md" "manager-approved release exception" "release supply-chain docs require explicit target exceptions"
   require_contains "docs/release-supply-chain.md" "Signing, notarization, SBOM, and provenance" "release supply-chain docs list external supply-chain blockers"
+  require_contains "docs/release-supply-chain.md" "Dependency advisory/license evidence" "release supply-chain docs describe dependency advisory/license evidence"
+  require_contains "docs/release-supply-chain.md" "blocked_manual_required" "release supply-chain docs require truthful blocked manual lanes"
 
   require_contains "docs/release-r2-layout.md" "R2 staging layout" "release R2 docs describe staging layout"
   require_contains "docs/release-r2-layout.md" "ctx/releases/release-candidate/" "release R2 docs record candidate prefix"
   require_contains "docs/release-r2-layout.md" "freebsd-x64" "release R2 docs include FreeBSD artifact staging"
   require_contains "docs/release-r2-layout.md" "No installer endpoint cutover" "release R2 docs keep public installer cutover blocked"
+  require_contains "docs/release-r2-layout.md" "Upload/readback proof" "release R2 docs describe upload/readback proof"
+  require_contains "docs/release-r2-layout.md" "CTX_RELEASE_R2_MANAGER_APPROVED=1" "release R2 docs require manager-approved upload/readback"
 
   require_contains "docs/freebsd-release-worker.md" "freebsd-x64" "FreeBSD release worker docs record queue label"
   require_contains "docs/freebsd-release-worker.md" "x86_64-unknown-freebsd" "FreeBSD release worker docs record target triple"
@@ -1030,6 +1173,15 @@ EOF
 EOF
 }
 
+write_contract_supply_chain_r2_proofs() {
+  local root="$1"
+
+  CTX_ARTIFACT_DIR="${root}/artifacts/buildkite/supply-chain" \
+    bash scripts/release-supply-chain-proof.sh --contract-fixture
+  CTX_ARTIFACT_DIR="${root}/artifacts/buildkite/r2-staging-readback" \
+    bash scripts/release-r2-staging-readback-proof.sh --contract-fixture
+}
+
 write_contract_provider_live_lanes() {
   local root="$1"
   local out_dir="${root}/artifacts/buildkite/provider-live-e2e-lanes"
@@ -1144,6 +1296,7 @@ write_completion_contract_fixture() {
   write_contract_freebsd_blocker "${root}"
   write_contract_release_candidate "${root}"
   write_contract_r2_staging_smoke "${root}"
+  write_contract_supply_chain_r2_proofs "${root}"
   write_contract_finished_artifacts "${root}"
   write_contract_provider_live_lanes "${root}"
   write_contract_release_docs "${root}"
@@ -1186,6 +1339,9 @@ validate_evidence() {
     require_manifest_value "artifacts/buildkite/r2-staging-smoke/r2-staging-smoke.json" ".validated_upload_object_count" "10" "R2 staging smoke validates upload object count"
   fi
   require_contains "artifacts/buildkite/r2-staging-smoke/r2-staging-smoke.md" "R2 object upload and public HTTPS smoke require approved credentials" "R2 staging smoke records upload blocker"
+  validate_dependency_advisory_license_audit
+  validate_sbom_provenance_signature_evidence
+  validate_r2_staging_readback_evidence
   require_summary_status "artifacts/buildkite/finished-product/product-decisions/product-decisions.json" "product-decisions"
   require_summary_status "artifacts/buildkite/finished-product/provider-fixtures/provider-fixtures.json" "provider-fixtures"
   validate_provider_live_e2e_lanes
@@ -1284,6 +1440,9 @@ fixture only and does not make FreeBSD optional.
 - Release candidate metadata: \`artifacts/buildkite/release-candidate/ctx-release-metadata.env\`
 - Release candidate R2 upload plan: \`artifacts/buildkite/release-candidate/r2-upload-plan.md\`
 - R2 staging smoke artifact: \`artifacts/buildkite/r2-staging-smoke/r2-staging-smoke.json\`
+- Dependency advisory/license audit: \`artifacts/buildkite/supply-chain/dependency-advisory-license-audit.json\`
+- SBOM, provenance, signature, and notarization evidence: \`artifacts/buildkite/supply-chain/sbom-provenance-signature.json\`
+- R2 staging upload/readback proof: \`artifacts/buildkite/r2-staging-readback/r2-staging-readback.json\`
 - Product decision regression artifact: \`artifacts/buildkite/finished-product/product-decisions/product-decisions.json\`
 - Provider fixture import artifact: \`artifacts/buildkite/finished-product/provider-fixtures/provider-fixtures.json\`
 - Provider live E2E lane definitions: \`artifacts/buildkite/provider-live-e2e-lanes/provider-live-e2e-lanes.json\`
@@ -1302,6 +1461,7 @@ fixture only and does not make FreeBSD optional.
 - This certificate is not a release approval and does not certify a real public RC until every blocker below is replaced by explicit PASS evidence.
 - FreeBSD is a required first-class release target. Native \`freebsd-x64\` proof must be present before production release approval unless a manager-approved release exception explicitly names \`freebsd-x64\`.
 - R2 object upload and public HTTPS installer smoke require approved credentials and an explicit manager-run command; normal CI validates the staging plan only.
+- Dependency advisory proof, license inventory review, SBOM, provenance, signature, notarization, and R2 readback evidence must be present before any public release approval.
 - Provider live E2E lanes are defined but remain opt-in; providers cannot be marked \`supported-live\` without real lane artifacts.
 - Full jj e2e validation requires a runner image with \`jj\` installed; the CI lane records availability and blocker status without installing external tools.
 - Production release publication requires final release metadata with non-placeholder SHA-256 checksums for every published artifact.
@@ -1388,6 +1548,9 @@ EOF
     "release_candidate_manifest": "artifacts/buildkite/release-candidate/release-candidate-manifest.json",
     "release_candidate_r2_upload_plan": "artifacts/buildkite/release-candidate/r2-upload-plan.md",
     "r2_staging_smoke": "artifacts/buildkite/r2-staging-smoke/r2-staging-smoke.json",
+    "dependency_advisory_license_audit": "artifacts/buildkite/supply-chain/dependency-advisory-license-audit.json",
+    "sbom_provenance_signature_evidence": "artifacts/buildkite/supply-chain/sbom-provenance-signature.json",
+    "r2_staging_readback": "artifacts/buildkite/r2-staging-readback/r2-staging-readback.json",
     "product_decision_regressions": "artifacts/buildkite/finished-product/product-decisions/product-decisions.json",
     "provider_fixture_import": "artifacts/buildkite/finished-product/provider-fixtures/provider-fixtures.json",
     "provider_live_e2e_lane_definitions": "artifacts/buildkite/provider-live-e2e-lanes/provider-live-e2e-lanes.json",
@@ -1408,6 +1571,7 @@ EOF
     "This certificate is not a release approval and does not certify a real public RC until every blocker below is replaced by explicit PASS evidence.",
     "FreeBSD is a required first-class release target. Native freebsd-x64 proof must be present before production release approval unless a manager-approved release exception explicitly names freebsd-x64.",
     "R2 object upload and public HTTPS installer smoke require approved credentials and an explicit manager-run command; normal CI validates the staging plan only.",
+    "Dependency advisory proof, license inventory review, SBOM, provenance, signature, notarization, and R2 readback evidence must be present before any public release approval.",
     "Provider live E2E lanes are defined but remain opt-in; providers cannot be marked supported-live without real lane artifacts.",
     "Full jj e2e validation requires a runner image with jj installed; the CI lane records availability and blocker status without installing external tools.",
     "Production release publication requires final release metadata with non-placeholder SHA-256 checksums for every published artifact.",

@@ -31,11 +31,29 @@ R2 staging evidence proves only that the object layout and upload plan are
 well-formed. Normal CI does not upload objects, move channels, or expose public
 install instructions.
 
+Dependency advisory/license evidence is written by
+`scripts/release-supply-chain-proof.sh`. The script inventories `Cargo.lock`
+with `cargo metadata --locked`, checks that every package declares license
+metadata, and records whether advisory proof came from `cargo audit` or a
+manager-supplied audit artifact. If advisory tooling is unavailable, the JSON
+must say `blocked_manual_required`; it must not claim a pass.
+
+SBOM, provenance, signature, and notarization evidence use the same script and
+the same rule: generated artifacts may be supplied through explicit environment
+paths, otherwise the evidence is a non-publishing manual blocker. A public
+release cannot treat missing signing or SBOM infrastructure as success.
+
 ## Release Blockers
 
 Signing, notarization, SBOM, and provenance are external blockers. Public
 release approval requires configured credentials, approved policy, generated
 artifacts, and verification instructions for each item.
+
+Dependency advisory proof, license inventory review, SBOM publication,
+provenance publication, signature verification, notarization where applicable,
+and R2 upload/readback proof are required-before-public-release evidence.
+Contract fixtures and blocked manual lanes are useful for CI shape checks, but
+they do not approve a release.
 
 The completion certificate remains non-publishing until all blockers are
 replaced by explicit pass evidence or by a manager-approved release exception
