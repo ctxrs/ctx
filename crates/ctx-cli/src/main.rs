@@ -989,6 +989,11 @@ fn run_import(args: ImportArgs, data_root: PathBuf) -> Result<()> {
         }
     }
 
+    if totals.imported_sessions > 0 || totals.imported_events > 0 || totals.imported_edges > 0 {
+        progress.message("finalizing", "optimizing search index");
+        Store::open(&db_path)?.optimize_search_index()?;
+    }
+
     progress.message("finalizing", "checkpointing search database");
     Store::open(&db_path)?.checkpoint_wal_truncate_if_larger_than(WAL_TRUNCATE_MIN_BYTES)?;
 

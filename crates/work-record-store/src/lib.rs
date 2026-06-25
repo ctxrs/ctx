@@ -1054,6 +1054,18 @@ impl Store {
         self.rebuild_search_projection()
     }
 
+    pub fn optimize_search_index(&self) -> Result<()> {
+        for table in ["work_record_search", "event_search", "artifact_search"] {
+            if table_exists(&self.conn, table)? {
+                self.conn.execute(
+                    format!("INSERT INTO {table}({table}) VALUES ('optimize')").as_str(),
+                    [],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn event_search_projection_needs_backfill(&self) -> Result<bool> {
         if !table_exists(&self.conn, "event_search")? {
             return Ok(false);
@@ -7023,6 +7035,13 @@ mod catalog_tests {
             .query_row("SELECT total_changes()", [], |row| row.get(0))
             .unwrap();
         assert!(after_changed > after_noop);
+    }
+
+    #[test]
+    fn search_index_optimize_is_safe_on_initialized_store() {
+        let temp = tempdir();
+        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        store.optimize_search_index().unwrap();
     }
 
     #[test]
