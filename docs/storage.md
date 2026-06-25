@@ -89,8 +89,9 @@ out, add:
 enabled = false
 ```
 
-Automatic update checks use the `stable` channel by default. To disable them,
-add:
+Automatic update checks use the `stable` channel by default. These checks report
+availability only; ctx does not replace its own binary until signed release
+manifest verification ships. To disable the checks, add:
 
 ```toml
 [updates]

@@ -15,7 +15,6 @@ anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 ureq = { version = "2.10", default-features = true }
 uuid.workspace = true
 work-record-capture = { path = "../work-record-capture" }
@@ -30,4 +29,5 @@ libc.workspace = true
 assert_cmd.workspace = true
 predicates.workspace = true
 rusqlite.workspace = true
+sha2.workspace = true
 tempfile.workspace = true

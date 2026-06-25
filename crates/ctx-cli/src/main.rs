@@ -65,7 +65,7 @@ enum CommandRoot {
     Show(ShowArgs),
     #[command(about = "Search indexed agent history")]
     Search(SearchArgs),
-    #[command(about = "Check for and apply ctx CLI updates")]
+    #[command(about = "Check for ctx CLI updates")]
     Update(UpdateArgs),
     #[command(about = "Check local ctx health")]
     Doctor(JsonArgs),
@@ -157,6 +157,7 @@ struct UpdateArgs {
     json: bool,
     #[arg(long, conflicts_with = "apply")]
     check_only: bool,
+    /// Reserved until signed release manifest verification ships.
     #[arg(long)]
     apply: bool,
     #[arg(long)]
@@ -1545,15 +1546,13 @@ fn run_search(args: SearchArgs, data_root: PathBuf) -> Result<()> {
 }
 
 fn run_update(args: UpdateArgs, data_root: PathBuf, config: &AppConfig) -> Result<()> {
-    let apply = args.apply || !args.check_only;
     let outcome = updates::check_or_apply_update(
         &data_root,
         config,
         updates::UpdateOptions {
-            apply,
-            check_only: args.check_only,
+            apply: args.apply,
+            check_only: args.check_only || !args.apply,
             force: args.force,
-            quiet: args.json,
         },
     )?;
     if args.json {

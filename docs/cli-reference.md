@@ -51,10 +51,11 @@ ctx update --check-only
 ctx update --json
 ```
 
-`ctx update` reads the configured release channel, downloads the matching
-manifest, verifies the selected CLI artifact SHA-256, and replaces the current
-binary atomically when an update is available. Set `[updates] auto_update =
-false` to disable background checks.
+`ctx update` reads the configured release channel and downloads the matching
+manifest. It reports available versions but does not replace the current binary
+until signed release manifest verification ships. The `--apply` flag is
+reserved and currently fails closed. Set `[updates] auto_update = false` to
+disable the throttled background availability checks.
 
 ## Sources
 

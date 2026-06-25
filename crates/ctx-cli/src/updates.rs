@@ -6,7 +6,6 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
 use crate::{config::AppConfig, net};
 
@@ -17,7 +16,6 @@ pub struct UpdateOptions {
     pub apply: bool,
     pub check_only: bool,
     pub force: bool,
-    pub quiet: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -57,8 +55,6 @@ impl UpdateOutcome {
 #[derive(Debug, Clone)]
 struct Artifact {
     url: String,
-    sha256: String,
-    bytes: Option<u64>,
 }
 
 pub fn maybe_auto_update(data_root: &Path, config: &AppConfig, json_output: bool) {
@@ -69,10 +65,9 @@ pub fn maybe_auto_update(data_root: &Path, config: &AppConfig, json_output: bool
         return;
     }
     let options = UpdateOptions {
-        apply: true,
-        check_only: false,
+        apply: false,
+        check_only: true,
         force: false,
-        quiet: true,
     };
     match check_or_apply_update(data_root, config, options) {
         Ok(outcome) => {
@@ -128,8 +123,13 @@ pub fn check_or_apply_update(
     }
 
     let artifact = resolve_artifact(&manifest, &platform, &manifest_url)?;
-    let should_apply = options.apply || (config.updates.auto_update && !options.check_only);
-    if !should_apply {
+    if options.apply {
+        return Err(anyhow!(
+            "ctx update --apply is disabled until signed release manifest verification ships"
+        ));
+    }
+
+    if options.check_only || !options.apply {
         let latest = latest_version
             .clone()
             .unwrap_or_else(|| "unknown".to_owned());
@@ -144,69 +144,14 @@ pub fn check_or_apply_update(
             applied: false,
             artifact_url: Some(artifact.url),
             install_path: None,
-            message: format!("ctx {latest} is available; run `ctx update --apply` to install"),
+            message: format!(
+                "ctx {latest} is available; install is disabled until signed release manifests are supported"
+            ),
         };
         write_update_state(data_root, &outcome)?;
         return Ok(outcome);
     }
-
-    if is_dev_binary()
-        && !env_flag("CTX_ALLOW_DEV_AUTO_UPDATE")
-        && env::var_os("CTX_UPDATE_TARGET").is_none()
-    {
-        let latest = latest_version
-            .clone()
-            .unwrap_or_else(|| "unknown".to_owned());
-        let outcome = UpdateOutcome {
-            current_version,
-            latest_version,
-            channel,
-            manifest_url,
-            platform,
-            update_available: true,
-            action: "skipped_dev_binary",
-            applied: false,
-            artifact_url: Some(artifact.url),
-            install_path: None,
-            message: format!("ctx {latest} is available; dev binary auto-update skipped"),
-        };
-        write_update_state(data_root, &outcome)?;
-        return Ok(outcome);
-    }
-
-    let artifact_bytes = net::get_bytes(&artifact.url)?;
-    if let Some(expected_bytes) = artifact.bytes {
-        if artifact_bytes.len() as u64 != expected_bytes {
-            return Err(anyhow!(
-                "downloaded artifact size mismatch: expected {expected_bytes}, got {}",
-                artifact_bytes.len()
-            ));
-        }
-    }
-    verify_sha256(&artifact_bytes, &artifact.sha256)?;
-    let target = update_target()?;
-    replace_binary(&target, &artifact_bytes)?;
-    let latest = latest_version
-        .clone()
-        .unwrap_or_else(|| "unknown".to_owned());
-    let outcome = UpdateOutcome {
-        current_version,
-        latest_version,
-        channel,
-        manifest_url,
-        platform,
-        update_available: true,
-        action: "applied",
-        applied: true,
-        artifact_url: Some(artifact.url),
-        install_path: Some(target),
-        message: format!("ctx updated to {latest}; rerun your command to use the new version"),
-    };
-    write_update_state(data_root, &outcome)?;
-    if !options.quiet {
-        eprintln!("{}", outcome.message);
-    }
-    Ok(outcome)
+    unreachable!("update application is disabled until signed manifests ship")
 }
 
 fn should_check_now(data_root: &Path, interval: Duration) -> bool {
@@ -316,11 +261,8 @@ fn artifact_from_value(value: &Value, manifest_url: &str) -> Option<Artifact> {
         .or_else(|| value.get("download_url"))
         .or_else(|| value.get("path"))
         .and_then(|value| value.as_str())?;
-    let sha256 = value.get("sha256").and_then(|value| value.as_str())?;
     Some(Artifact {
         url: resolve_url(url, manifest_url),
-        sha256: sha256.to_owned(),
-        bytes: value.get("bytes").and_then(|value| value.as_u64()),
     })
 }
 
@@ -344,74 +286,6 @@ fn resolve_url(url: &str, manifest_url: &str) -> String {
         base.trim_end_matches('/'),
         url.trim_start_matches('/')
     )
-}
-
-fn verify_sha256(bytes: &[u8], expected: &str) -> Result<()> {
-    let actual = hex_sha256(bytes);
-    if !actual.eq_ignore_ascii_case(expected.trim()) {
-        return Err(anyhow!(
-            "sha256 mismatch: expected {expected}, got {actual}"
-        ));
-    }
-    Ok(())
-}
-
-fn hex_sha256(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut out = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(&mut out, "{byte:02x}");
-    }
-    out
-}
-
-fn update_target() -> Result<PathBuf> {
-    if let Ok(path) = env::var("CTX_UPDATE_TARGET") {
-        if !path.trim().is_empty() {
-            return Ok(PathBuf::from(path));
-        }
-    }
-    env::current_exe().context("resolve current executable")
-}
-
-fn replace_binary(target: &Path, bytes: &[u8]) -> Result<()> {
-    let parent = target
-        .parent()
-        .ok_or_else(|| anyhow!("update target has no parent: {}", target.display()))?;
-    fs::create_dir_all(parent)?;
-    let nonce = format!("{}.{}", std::process::id(), now_unix_s());
-    let staged = parent.join(format!(".ctx-update-{nonce}"));
-    let backup = parent.join(format!(".ctx-backup-{nonce}"));
-    fs::write(&staged, bytes)?;
-    set_executable(&staged)?;
-    if target.exists() {
-        fs::rename(target, &backup)
-            .with_context(|| format!("move current binary {}", target.display()))?;
-    }
-    if let Err(err) = fs::rename(&staged, target) {
-        if backup.exists() {
-            let _ = fs::rename(&backup, target);
-        }
-        return Err(err).with_context(|| format!("promote update {}", target.display()));
-    }
-    if backup.exists() {
-        let _ = fs::remove_file(&backup);
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn set_executable(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn set_executable(_path: &Path) -> Result<()> {
-    Ok(())
 }
 
 fn platform_key() -> String {
@@ -438,13 +312,6 @@ fn parse_version(version: &str) -> Vec<u64> {
         .filter(|part| !part.is_empty())
         .map(|part| part.parse::<u64>().unwrap_or(0))
         .collect()
-}
-
-fn is_dev_binary() -> bool {
-    env::current_exe().ok().is_some_and(|path| {
-        let text = path.display().to_string();
-        text.contains("/target/debug/") || text.contains("/target/release/")
-    })
 }
 
 fn env_flag(key: &str) -> bool {

@@ -693,7 +693,7 @@ fn update_check_uses_local_manifest_without_touching_binary() {
 }
 
 #[test]
-fn update_apply_verifies_sha256_and_replaces_target_atomically() {
+fn update_default_is_check_only() {
     let temp = tempdir();
     let artifact = temp.path().join("ctx-new");
     fs::write(&artifact, b"new ctx binary").unwrap();
@@ -709,28 +709,30 @@ fn update_apply_verifies_sha256_and_replaces_target_atomically() {
             .env("CTX_UPDATE_TARGET", &target),
     );
 
-    assert_eq!(update["action"], "applied");
-    assert_eq!(update["applied"], true);
-    assert_eq!(fs::read(&target).unwrap(), b"new ctx binary");
+    assert_eq!(update["action"], "check_only");
+    assert_eq!(update["applied"], false);
+    assert_eq!(fs::read(&target).unwrap(), b"old ctx binary");
 }
 
 #[test]
-fn update_apply_rejects_bad_checksum_and_preserves_target() {
+fn update_apply_is_blocked_until_signed_manifest_verification() {
     let temp = tempdir();
     let artifact = temp.path().join("ctx-new");
     fs::write(&artifact, b"new ctx binary").unwrap();
-    let manifest = write_update_manifest(&temp, "9.9.9", &artifact, Some("00"));
+    let manifest = write_update_manifest(&temp, "9.9.9", &artifact, None);
     let target = temp.path().join("bin").join("ctx");
     fs::create_dir_all(target.parent().unwrap()).unwrap();
     fs::write(&target, b"old ctx binary").unwrap();
 
     ctx(&temp)
-        .args(["update", "--json"])
+        .args(["update", "--apply", "--json"])
         .env("CTX_UPDATE_MANIFEST_URL", file_url(&manifest))
         .env("CTX_UPDATE_TARGET", &target)
         .assert()
         .failure()
-        .stderr(predicate::str::contains("sha256 mismatch"));
+        .stderr(predicate::str::contains(
+            "ctx update --apply is disabled until signed release manifest verification ships",
+        ));
 
     assert_eq!(fs::read(&target).unwrap(), b"old ctx binary");
 }

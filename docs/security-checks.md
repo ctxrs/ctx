@@ -10,6 +10,13 @@ true for the search-only product.
 - `ctx import` writes only the configured ctx data root and SQLite index.
 - `ctx search`, `ctx list`, and `ctx show` write nothing.
 - Core setup/import/search do not require network access or API keys.
+- In the side-effect oracle and local-only security mode, analytics and update
+  checks are disabled by env so the core no-network invariant is strict.
+- With default user config, first-party analytics may create `install.json` and
+  send coarse CLI invocation metadata, and update checks may fetch a release
+  manifest. Both are configurable in `config.toml` or env.
+- Update checks must not replace the ctx binary until signed release manifest
+  verification ships.
 - Provider files are read as sources and not modified.
 - Provider transcript imports reject symlinked JSONL files by default.
 - JSON output is private by default and must not be described as share-safe.
