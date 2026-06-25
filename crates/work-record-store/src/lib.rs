@@ -917,12 +917,20 @@ impl Store {
         Ok(())
     }
 
+    pub fn checkpoint_wal_passive_if_larger_than(&self, min_bytes: u64) -> Result<bool> {
+        let Some(wal_bytes) = self.wal_bytes()? else {
+            return Ok(false);
+        };
+        if wal_bytes < min_bytes {
+            return Ok(false);
+        }
+        self.checkpoint_wal_passive()?;
+        Ok(true)
+    }
+
     pub fn checkpoint_wal_truncate_if_larger_than(&self, min_bytes: u64) -> Result<bool> {
-        let wal_path = self.wal_path();
-        let wal_bytes = match fs::metadata(&wal_path) {
-            Ok(metadata) => metadata.len(),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(err) => return Err(StoreError::Io(err)),
+        let Some(wal_bytes) = self.wal_bytes()? else {
+            return Ok(false);
         };
         if wal_bytes < min_bytes {
             return Ok(false);
@@ -935,6 +943,14 @@ impl Store {
         let mut path = self.path.as_os_str().to_os_string();
         path.push("-wal");
         PathBuf::from(path)
+    }
+
+    fn wal_bytes(&self) -> Result<Option<u64>> {
+        match fs::metadata(self.wal_path()) {
+            Ok(metadata) => Ok(Some(metadata.len())),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(StoreError::Io(err)),
+        }
     }
 
     pub fn migrate(&self) -> Result<()> {

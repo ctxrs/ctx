@@ -1446,7 +1446,9 @@ fn import_codex_session_paths_fast(
                 return Err(err.into());
             }
             in_transaction = false;
-            store.checkpoint_wal_passive()?;
+            store.checkpoint_wal_passive_if_larger_than(
+                CODEX_FAST_IMPORT_PASSIVE_CHECKPOINT_MIN_BYTES,
+            )?;
         }
         completed_files += 1;
         completed_bytes = completed_bytes.saturating_add(file_bytes);
@@ -1476,7 +1478,7 @@ fn import_codex_session_paths_fast(
         let _ = store.rollback_batch();
         return Err(err.into());
     }
-    store.checkpoint_wal_passive()?;
+    store.checkpoint_wal_passive_if_larger_than(CODEX_FAST_IMPORT_PASSIVE_CHECKPOINT_MIN_BYTES)?;
     report_codex_import_progress(
         &options,
         total_files,
@@ -2149,6 +2151,7 @@ const CODEX_MAX_TEXT_CHARS: usize = 16_000;
 const CODEX_MAX_METADATA_TEXT_CHARS: usize = 4_000;
 const CODEX_MAX_OUTPUT_PREVIEW_CHARS: usize = 4_000;
 const CODEX_FAST_IMPORT_TRANSACTION_FILES: usize = 512;
+const CODEX_FAST_IMPORT_PASSIVE_CHECKPOINT_MIN_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 fn collect_jsonl_paths(root: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
     let metadata = fs::symlink_metadata(root)?;
