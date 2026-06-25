@@ -717,16 +717,16 @@ fn update_default_is_check_only() {
 #[test]
 fn update_apply_is_blocked_until_signed_manifest_verification() {
     let temp = tempdir();
-    let artifact = temp.path().join("ctx-new");
-    fs::write(&artifact, b"new ctx binary").unwrap();
-    let manifest = write_update_manifest(&temp, "9.9.9", &artifact, None);
     let target = temp.path().join("bin").join("ctx");
     fs::create_dir_all(target.parent().unwrap()).unwrap();
     fs::write(&target, b"old ctx binary").unwrap();
 
     ctx(&temp)
         .args(["update", "--apply", "--json"])
-        .env("CTX_UPDATE_MANIFEST_URL", file_url(&manifest))
+        .env(
+            "CTX_UPDATE_MANIFEST_URL",
+            file_url(&temp.path().join("missing-latest.json")),
+        )
         .env("CTX_UPDATE_TARGET", &target)
         .assert()
         .failure()
@@ -735,6 +735,7 @@ fn update_apply_is_blocked_until_signed_manifest_verification() {
         ));
 
     assert_eq!(fs::read(&target).unwrap(), b"old ctx binary");
+    assert!(!temp.path().join("update-state.json").exists());
 }
 
 #[test]

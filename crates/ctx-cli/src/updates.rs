@@ -90,6 +90,12 @@ pub fn check_or_apply_update(
     config: &AppConfig,
     options: UpdateOptions,
 ) -> Result<UpdateOutcome> {
+    if options.apply {
+        return Err(anyhow!(
+            "ctx update --apply is disabled until signed release manifest verification ships"
+        ));
+    }
+
     fs::create_dir_all(data_root)?;
     let current_version = env!("CARGO_PKG_VERSION").to_owned();
     let channel = config.updates.channel.clone();
@@ -123,12 +129,6 @@ pub fn check_or_apply_update(
     }
 
     let artifact = resolve_artifact(&manifest, &platform, &manifest_url)?;
-    if options.apply {
-        return Err(anyhow!(
-            "ctx update --apply is disabled until signed release manifest verification ships"
-        ));
-    }
-
     if options.check_only || !options.apply {
         let latest = latest_version
             .clone()

@@ -54,18 +54,19 @@ is known.
 
 | Command | Reads | Writes |
 | --- | --- | --- |
-| `ctx setup` | home path metadata for source discovery | data root, `work.sqlite`, `config.toml` |
-| `ctx status` | data root metadata, existing SQLite store | nothing intentional |
-| `ctx sources` | known provider paths under the user's home | nothing |
-| `ctx import` | provider transcript files and path metadata | data root, `config.toml` if missing, SQLite index |
-| `ctx list` | SQLite index | nothing |
-| `ctx show` | SQLite index | nothing |
-| `ctx search` | SQLite index | nothing |
-| `ctx doctor` | SQLite index and data root metadata | nothing intentional |
-| `ctx validate` | SQLite index | nothing intentional |
+| `ctx setup` | home path metadata for source discovery | data root, `work.sqlite`, `config.toml`, and possibly `install.json` for analytics |
+| `ctx status` | data root metadata, existing SQLite store | possibly `install.json` for analytics and `update-state.json` for throttled update checks |
+| `ctx sources` | known provider paths under the user's home | possibly `install.json` for analytics |
+| `ctx import` | provider transcript files and path metadata | data root, `config.toml` if missing, SQLite index, and possibly `install.json` for analytics |
+| `ctx list` | SQLite index | possibly `install.json` for analytics |
+| `ctx show` | SQLite index | possibly `install.json` for analytics |
+| `ctx search` | SQLite index | possibly `install.json` for analytics |
+| `ctx doctor` | SQLite index and data root metadata | possibly `install.json` for analytics and `update-state.json` for throttled update checks |
+| `ctx validate` | SQLite index | possibly `install.json` for analytics and `update-state.json` for throttled update checks |
 
-Setup, import, and search do not require network access or source repository
-writes.
+Setup, import, and search do not require source repository writes, model APIs,
+API keys, or remote accounts. First-party analytics and update checks are the
+only default network features; disable them for strict local-only runs.
 
 ## Default Config
 

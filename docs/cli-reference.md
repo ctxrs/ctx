@@ -162,7 +162,9 @@ Filters:
 - `--include-subagents`;
 - `--limit <n>`.
 
-`search` reads SQLite and writes nothing.
+`search` reads SQLite. With analytics disabled, it writes nothing; with default
+analytics enabled, it may create `install.json` and send coarse invocation
+metadata.
 
 ## JSON Contract
 

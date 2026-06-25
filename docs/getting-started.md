@@ -31,8 +31,10 @@ ctx --data-root /tmp/ctx-demo setup
 CTX_DATA_ROOT=/tmp/ctx-demo ctx status
 ```
 
-Setup is local. It does not write to source repositories, require network
-access, call model APIs, require API keys, or start a background process.
+Setup does not write to source repositories, call model APIs, require API keys,
+or start a background process. With default config, first-party analytics may
+send coarse command metadata and create `install.json`; disable analytics in
+`config.toml` or env for a strict local-only setup run.
 
 ## 3. See Available Sources
 

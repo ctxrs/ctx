@@ -1,7 +1,9 @@
 # Search
 
 `ctx search` finds matching indexed sessions and events. It reads the local
-SQLite store and writes nothing.
+SQLite store. With analytics disabled, it writes nothing; with default
+analytics enabled, the command may create `install.json` and send coarse
+invocation metadata.
 
 ## Search
 
