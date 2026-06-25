@@ -15,11 +15,12 @@ The current production surface is intentionally narrow:
 - store a searchable local SQLite index under `~/.ctx` by default;
 - search indexed sessions and events;
 - return JSON for agent-facing workflows;
-- keep setup, import, and search local to this machine.
+- keep transcript import and search data local to this machine.
 
 ctx does not run model inference, install shell integration, modify source
 repositories, start background processes, require API keys, or use a remote
-account for setup, import, or search.
+account for setup, import, or search. First-party analytics and update checks
+are configurable separately in `~/.ctx/config.toml`.
 
 ## Install Or Run
 
@@ -86,6 +87,7 @@ ctx import
 ctx list
 ctx show <item-uuid>
 ctx search [query]
+ctx update
 ctx doctor
 ctx validate
 ```
@@ -107,6 +109,7 @@ ctx import --json
 ctx list --json
 ctx show <item-uuid> --json
 ctx search [query] --json
+ctx update --json
 ctx doctor --json
 ctx validate --json
 ```

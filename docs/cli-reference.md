@@ -28,15 +28,33 @@ ctx validate --json
 
 - `setup` creates the data root, opens or creates `work.sqlite`, writes
   `config.toml` when needed, discovers known provider history locations, and
-  prints next steps.
+  prints next steps. The generated config sets the update channel to `stable`
+  and leaves analytics enabled by default unless disabled in config or env.
 - `status` reports the ctx root, database path, config path, indexed item
   count, indexed source count, initialization state, and local-only marker.
 - `doctor` opens local storage and reports validation findings.
 - `validate` opens local storage and reports database validation findings.
 
-Setup and health checks are local. They do not change shell startup files,
-install repository integrations, write into source repositories, call model
-APIs, make network calls, require API keys, or start background processes.
+Setup and health checks do not change shell startup files, install repository
+integrations, write into source repositories, call model APIs, require API keys,
+or start background processes. Core storage checks are local. Analytics and
+updates are first-party network features: analytics can be disabled with
+`[analytics] enabled = false`, and update checks are explicit via `ctx update`
+plus the throttled status/doctor/validate auto-update path. JSON stdout remains
+structured; update notices use stderr.
+
+## Updates
+
+```bash
+ctx update
+ctx update --check-only
+ctx update --json
+```
+
+`ctx update` reads the configured release channel, downloads the matching
+manifest, verifies the selected CLI artifact SHA-256, and replaces the current
+binary atomically when an update is available. Set `[updates] auto_update =
+false` to disable background checks.
 
 ## Sources
 

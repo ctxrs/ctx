@@ -374,19 +374,19 @@ run_fresh_home_flow() {
   data_root="$(mktemp -d "${TMPDIR}/ctx-fresh-home.XXXXXX")"
   fixture="${CTX_REPO_ROOT}/tests/fixtures/provider-history/codex-sessions"
 
-  run_timed "fresh-home-setup" env CTX_DATA_ROOT="${data_root}" "${ctx_bin}" setup
-  run_timed "fresh-home-sources" env CTX_DATA_ROOT="${data_root}" "${ctx_bin}" sources --json
-  run_timed "fresh-home-import" env CTX_DATA_ROOT="${data_root}" "${ctx_bin}" import --provider codex --path "${fixture}" --json
+  run_timed "fresh-home-setup" env CTX_DATA_ROOT="${data_root}" CTX_ANALYTICS_OFF=1 CTX_DISABLE_AUTO_UPDATE=1 "${ctx_bin}" setup
+  run_timed "fresh-home-sources" env CTX_DATA_ROOT="${data_root}" CTX_ANALYTICS_OFF=1 CTX_DISABLE_AUTO_UPDATE=1 "${ctx_bin}" sources --json
+  run_timed "fresh-home-import" env CTX_DATA_ROOT="${data_root}" CTX_ANALYTICS_OFF=1 CTX_DISABLE_AUTO_UPDATE=1 "${ctx_bin}" import --provider codex --path "${fixture}" --json
 
-  list_json="$(CTX_DATA_ROOT="${data_root}" "${ctx_bin}" list --json)"
+  list_json="$(CTX_DATA_ROOT="${data_root}" CTX_ANALYTICS_OFF=1 CTX_DISABLE_AUTO_UPDATE=1 "${ctx_bin}" list --json)"
   record_id="$(printf '%s\n' "${list_json}" | sed -n 's/.*"id": "\([^"]*\)".*/\1/p' | head -n1)"
   [[ -n "${record_id}" ]] || fail 'fresh-home list did not return a record id'
 
-  run_timed "fresh-home-search" env CTX_DATA_ROOT="${data_root}" "${ctx_bin}" search onboarding --json
-  run_timed "fresh-home-show" env CTX_DATA_ROOT="${data_root}" "${ctx_bin}" show "${record_id}" --json
-  run_timed "fresh-home-status" env CTX_DATA_ROOT="${data_root}" "${ctx_bin}" status --json
-  run_timed "fresh-home-doctor" env CTX_DATA_ROOT="${data_root}" "${ctx_bin}" doctor --json
-  run_timed "fresh-home-validate" env CTX_DATA_ROOT="${data_root}" "${ctx_bin}" validate --json
+  run_timed "fresh-home-search" env CTX_DATA_ROOT="${data_root}" CTX_ANALYTICS_OFF=1 CTX_DISABLE_AUTO_UPDATE=1 "${ctx_bin}" search onboarding --json
+  run_timed "fresh-home-show" env CTX_DATA_ROOT="${data_root}" CTX_ANALYTICS_OFF=1 CTX_DISABLE_AUTO_UPDATE=1 "${ctx_bin}" show "${record_id}" --json
+  run_timed "fresh-home-status" env CTX_DATA_ROOT="${data_root}" CTX_ANALYTICS_OFF=1 CTX_DISABLE_AUTO_UPDATE=1 "${ctx_bin}" status --json
+  run_timed "fresh-home-doctor" env CTX_DATA_ROOT="${data_root}" CTX_ANALYTICS_OFF=1 CTX_DISABLE_AUTO_UPDATE=1 "${ctx_bin}" doctor --json
+  run_timed "fresh-home-validate" env CTX_DATA_ROOT="${data_root}" CTX_ANALYTICS_OFF=1 CTX_DISABLE_AUTO_UPDATE=1 "${ctx_bin}" validate --json
 }
 
 file_mode() {
@@ -474,6 +474,8 @@ run_security_ctx_command() {
         -u AZURE_OPENAI_API_KEY \
         HOME="${home_dir}" \
         CTX_DATA_ROOT="${data_root}" \
+        CTX_ANALYTICS_OFF=1 \
+        CTX_DISABLE_AUTO_UPDATE=1 \
         "${ctx_bin}" "$@"
   )
 }
@@ -495,6 +497,8 @@ capture_security_ctx_command() {
       -u AZURE_OPENAI_API_KEY \
       HOME="${home_dir}" \
       CTX_DATA_ROOT="${data_root}" \
+      CTX_ANALYTICS_OFF=1 \
+      CTX_DISABLE_AUTO_UPDATE=1 \
       "${ctx_bin}" "$@"
   )
 }
@@ -627,6 +631,8 @@ run_straced_security_ctx_command() {
           -u AZURE_OPENAI_API_KEY \
           HOME="${home_dir}" \
           CTX_DATA_ROOT="${data_root}" \
+          CTX_ANALYTICS_OFF=1 \
+          CTX_DISABLE_AUTO_UPDATE=1 \
           "${ctx_bin}" "$@"
   )
 }
@@ -797,12 +803,16 @@ assert_no_matches() {
 
 run_security_static_audit() {
   local ctx_package="ctx"
-  local runtime_crates=(
-    crates/ctx-cli/src
+  local local_only_crates=(
     crates/work-record-capture/src
     crates/work-record-core/src
     crates/work-record-search/src
     crates/work-record-store/src
+  )
+  local ctx_cli_local_modules=(
+    crates/ctx-cli/src/main.rs
+    crates/ctx-cli/src/config.rs
+    crates/ctx-cli/src/identity.rs
   )
   local public_surfaces=(
     README.md
@@ -818,25 +828,29 @@ run_security_static_audit() {
   cargo_test_filter work-record-capture codex_session_tree_rejects_symlinked_jsonl_files
 
   assert_no_matches \
-    rust-network-clients \
+    rust-network-clients-core \
     'std::net::|Tcp(Stream|Listener)|UdpSocket|Unix(Stream|Listener)|reqwest|ureq|hyper|tonic|axum|warp|actix_web|tungstenite|tokio::net' \
-    "${runtime_crates[@]}" Cargo.toml Cargo.lock
+    "${local_only_crates[@]}"
+  assert_no_matches \
+    rust-network-clients-ctx-cli-local \
+    'std::net::|Tcp(Stream|Listener)|UdpSocket|Unix(Stream|Listener)|reqwest|ureq|hyper|tonic|axum|warp|actix_web|tungstenite|tokio::net' \
+    "${ctx_cli_local_modules[@]}"
   assert_no_matches \
     rust-subprocess-spawn \
     'std::process::Command|process::Command|Command::new' \
-    "${runtime_crates[@]}"
+    crates/ctx-cli/src "${local_only_crates[@]}"
   assert_no_matches \
     rust-browser-daemon \
     'webbrowser|open::that|xdg-open|open_browser|daemonize|start_server|serve_forever' \
-    "${runtime_crates[@]}"
+    crates/ctx-cli/src "${local_only_crates[@]}"
   assert_no_matches \
     rust-llm-api-surface \
     'OPENAI_API_KEY|ANTHROPIC_API_KEY|GEMINI_API_KEY|GOOGLE_API_KEY|async_openai|openai::|anthropic::|gemini::' \
-    "${runtime_crates[@]}" Cargo.toml Cargo.lock
+    crates/ctx-cli/src "${local_only_crates[@]}" Cargo.toml Cargo.lock
   assert_no_matches \
     rust-path-mutation \
     'env::set_var\([^)]*["'\'']PATH["'\'']|std::env::set_var\([^)]*["'\'']PATH["'\'']' \
-    "${runtime_crates[@]}"
+    crates/ctx-cli/src "${local_only_crates[@]}"
   assert_no_matches \
     public-path-mutation \
     'export[[:space:]]+PATH=|PATH=.*\$[{]?PATH|setx[[:space:]]+PATH|\.bashrc|\.zshrc|fish_user_paths|shell hook' \

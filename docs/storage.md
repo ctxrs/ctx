@@ -67,6 +67,36 @@ is known.
 Setup, import, and search do not require network access or source repository
 writes.
 
+## Default Config
+
+`ctx setup` creates `~/.ctx/config.toml` when the default root is used, or
+`config.toml` under the configured data root when `CTX_DATA_ROOT` or
+`--data-root` points elsewhere. Existing config files are left in place.
+
+The day-1 generated config is:
+
+```toml
+[updates]
+channel = "stable"
+auto_update = true
+```
+
+Analytics are enabled by default when `[analytics] enabled` is absent. To opt
+out, add:
+
+```toml
+[analytics]
+enabled = false
+```
+
+Automatic update checks use the `stable` channel by default. To disable them,
+add:
+
+```toml
+[updates]
+auto_update = false
+```
+
 ## Index Lifecycle
 
 Find the active ctx root before destructive maintenance:
@@ -148,4 +178,6 @@ Recommended handling:
 Core setup, source discovery, import, and search commands are local filesystem
 operations. The tools that originally produced provider transcripts may have
 used the network according to their own configuration; ctx indexing those
-transcripts does not repeat that behavior.
+transcripts does not repeat that behavior. Analytics sends coarse command
+metadata unless disabled. Update checks use the release endpoint only for
+`ctx update` and the throttled status/doctor/validate auto-update path.

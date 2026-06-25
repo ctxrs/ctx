@@ -13,6 +13,15 @@ use chrono::{Duration, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde_json::{json, Value};
 use uuid::Uuid;
+
+mod analytics;
+mod config;
+mod identity;
+mod net;
+mod updates;
+
+use analytics::AnalyticsEvent;
+use config::{AppConfig, CONFIG_FILE};
 use work_record_capture::{
     catalog_codex_session_tree, discover_provider_sources, import_codex_history_jsonl,
     import_codex_session_jsonl, import_codex_session_paths, import_codex_session_tree,
@@ -28,7 +37,6 @@ use work_record_core::{
 };
 use work_record_store::{CatalogSession, Store};
 
-const CONFIG_FILE: &str = "config.toml";
 const WAL_TRUNCATE_MIN_BYTES: u64 = 64 * 1024 * 1024;
 const NORMALIZED_PROVIDER_IMPORT_DEV_ENV: &str = "CTX_PROVIDER_NORMALIZED_IMPORT_DEV";
 
@@ -57,6 +65,8 @@ enum CommandRoot {
     Show(ShowArgs),
     #[command(about = "Search indexed agent history")]
     Search(SearchArgs),
+    #[command(about = "Check for and apply ctx CLI updates")]
+    Update(UpdateArgs),
     #[command(about = "Check local ctx health")]
     Doctor(JsonArgs),
     #[command(about = "Validate local ctx storage")]
@@ -139,6 +149,54 @@ struct SearchArgs {
     file: Option<PathBuf>,
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Args)]
+struct UpdateArgs {
+    #[arg(long)]
+    json: bool,
+    #[arg(long, conflicts_with = "apply")]
+    check_only: bool,
+    #[arg(long)]
+    apply: bool,
+    #[arg(long)]
+    force: bool,
+}
+
+impl CommandRoot {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Setup(_) => "setup",
+            Self::Status(_) => "status",
+            Self::Sources(_) => "sources",
+            Self::Import(_) => "import",
+            Self::List(_) => "list",
+            Self::Show(_) => "show",
+            Self::Search(_) => "search",
+            Self::Update(_) => "update",
+            Self::Doctor(_) => "doctor",
+            Self::Validate(_) => "validate",
+        }
+    }
+
+    fn json_output(&self) -> bool {
+        match self {
+            Self::Setup(args) => args.json,
+            Self::Status(args) => args.json,
+            Self::Sources(args) => args.json,
+            Self::Import(args) => args.json,
+            Self::List(args) => args.json,
+            Self::Show(args) => args.json,
+            Self::Search(args) => args.json,
+            Self::Update(args) => args.json,
+            Self::Doctor(args) => args.json,
+            Self::Validate(args) => args.json,
+        }
+    }
+
+    fn allows_auto_update_check(&self) -> bool {
+        matches!(self, Self::Status(_) | Self::Doctor(_) | Self::Validate(_))
+    }
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -600,32 +658,54 @@ struct ShowDto;
 struct SearchDto;
 
 fn main() -> Result<()> {
+    let started = Instant::now();
     let cli = Cli::parse();
+    let action = cli.command.name();
+    let json_output = cli.command.json_output();
     let data_root = cli
         .data_root
         .clone()
         .map(Ok)
         .unwrap_or_else(default_data_root)
         .context("resolve ctx data root")?;
+    let config = AppConfig::load(&data_root)?;
 
-    match cli.command {
-        CommandRoot::Setup(args) => run_setup(args, data_root),
-        CommandRoot::Status(args) => run_status(args, data_root),
-        CommandRoot::Sources(args) => run_sources(args),
-        CommandRoot::Import(args) => run_import(args, data_root),
-        CommandRoot::List(args) => run_list(args, data_root),
-        CommandRoot::Show(args) => run_show(args, data_root),
-        CommandRoot::Search(args) => run_search(args, data_root),
-        CommandRoot::Doctor(args) => run_doctor(args, data_root),
-        CommandRoot::Validate(args) => run_validate(args, data_root),
+    if cli.command.allows_auto_update_check() {
+        updates::maybe_auto_update(&data_root, &config, json_output);
     }
+
+    let result = match cli.command {
+        CommandRoot::Setup(args) => run_setup(args, data_root.clone()),
+        CommandRoot::Status(args) => run_status(args, data_root.clone()),
+        CommandRoot::Sources(args) => run_sources(args),
+        CommandRoot::Import(args) => run_import(args, data_root.clone()),
+        CommandRoot::List(args) => run_list(args, data_root.clone()),
+        CommandRoot::Show(args) => run_show(args, data_root.clone()),
+        CommandRoot::Search(args) => run_search(args, data_root.clone()),
+        CommandRoot::Update(args) => run_update(args, data_root.clone(), &config),
+        CommandRoot::Doctor(args) => run_doctor(args, data_root.clone()),
+        CommandRoot::Validate(args) => run_validate(args, data_root.clone()),
+    };
+    analytics::send_cli_event(
+        &data_root,
+        &config,
+        AnalyticsEvent {
+            action,
+            json_output,
+            success: result.is_ok(),
+            duration: started.elapsed(),
+            update_channel: &config.updates.channel,
+            auto_update: config.updates.auto_update,
+        },
+    );
+    result
 }
 
 fn run_setup(args: SetupArgs, data_root: PathBuf) -> Result<()> {
     fs::create_dir_all(&data_root)?;
     let db_path = database_path(data_root.clone());
     let store = Store::open(&db_path)?;
-    write_default_config(&data_root)?;
+    config::write_default_config(&data_root)?;
     let sources = discovered_sources();
     let progress = ProgressReporter::new(args.progress, args.json, "setup", 0);
     progress.message("cataloging", "cataloging discovered Codex sessions");
@@ -789,7 +869,7 @@ fn catalog_available_sources(
 
 fn run_import(args: ImportArgs, data_root: PathBuf) -> Result<()> {
     fs::create_dir_all(&data_root)?;
-    write_default_config(&data_root)?;
+    config::write_default_config(&data_root)?;
     let db_path = database_path(data_root);
     let mut store = Store::open(&db_path)?;
     let mut totals = ImportTotals::default();
@@ -1464,6 +1544,39 @@ fn run_search(args: SearchArgs, data_root: PathBuf) -> Result<()> {
     Ok(())
 }
 
+fn run_update(args: UpdateArgs, data_root: PathBuf, config: &AppConfig) -> Result<()> {
+    let apply = args.apply || !args.check_only;
+    let outcome = updates::check_or_apply_update(
+        &data_root,
+        config,
+        updates::UpdateOptions {
+            apply,
+            check_only: args.check_only,
+            force: args.force,
+            quiet: args.json,
+        },
+    )?;
+    if args.json {
+        print_json(outcome.json())?;
+    } else {
+        println!("current_version: {}", outcome.current_version);
+        println!(
+            "latest_version: {}",
+            outcome.latest_version.as_deref().unwrap_or("unknown")
+        );
+        println!("channel: {}", outcome.channel);
+        println!("platform: {}", outcome.platform);
+        println!("update_available: {}", outcome.update_available);
+        println!("action: {}", outcome.action);
+        println!("applied: {}", outcome.applied);
+        if let Some(path) = outcome.install_path {
+            println!("install_path: {}", path.display());
+        }
+        println!("{}", outcome.message);
+    }
+    Ok(())
+}
+
 fn run_doctor(args: JsonArgs, data_root: PathBuf) -> Result<()> {
     let store = Store::open(database_path(data_root.clone()))?;
     let mut findings = store.validate()?;
@@ -1977,20 +2090,6 @@ fn parse_since_filter(value: &str) -> Result<chrono::DateTime<Utc>> {
     Ok(chrono::DateTime::parse_from_rfc3339(trimmed)
         .with_context(|| format!("invalid --since value: {value}"))?
         .with_timezone(&Utc))
-}
-
-fn write_default_config(data_root: &Path) -> Result<()> {
-    let path = data_root.join(CONFIG_FILE);
-    if path.exists() {
-        return Ok(());
-    }
-    let mut file = fs::File::create(&path)?;
-    file.write_all(
-        b"# ctx local agent history search\n\
-data_root_version = 1\n\
-network_during_import_search = false\n",
-    )?;
-    Ok(())
 }
 
 fn print_json(value: Value) -> Result<()> {
