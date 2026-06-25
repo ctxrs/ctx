@@ -1,8 +1,9 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use rusqlite::Connection;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::{
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
 };
@@ -33,6 +34,15 @@ fn provider_history_fixture(name: &str) -> String {
         .to_owned()
 }
 
+fn provider_fixture(name: &str) -> String {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/provider")
+        .join(name)
+        .to_str()
+        .unwrap()
+        .to_owned()
+}
+
 fn redaction_fixture(name: &str) -> String {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/redaction")
@@ -40,6 +50,97 @@ fn redaction_fixture(name: &str) -> String {
         .to_str()
         .unwrap()
         .to_owned()
+}
+
+fn write_multi_session_provider_fixture(
+    temp: &TempDir,
+    provider: &str,
+    query_marker: &str,
+) -> String {
+    let path = temp
+        .path()
+        .join(format!("{provider}-normalized-multi-session.jsonl"));
+    let primary = format!("{provider}-normalized-primary");
+    let followup = format!("{provider}-normalized-followup");
+    let lines = [
+        json!({
+            "provider": provider,
+            "session": {
+                "provider_session_id": primary,
+                "agent_type": "primary",
+                "role_hint": "primary",
+                "is_primary": true,
+                "status": "imported",
+                "started_at": "2026-06-24T12:00:00Z",
+                "cwd": "/workspace/provider-e2e",
+                "metadata": {"source": "cli-test", "scenario": "multi-session"}
+            },
+            "event": {
+                "provider_event_index": 0,
+                "cursor": format!("{provider}-primary-user-0"),
+                "event_type": "message",
+                "role": "user",
+                "occurred_at": "2026-06-24T12:00:01Z",
+                "payload": {"text": format!("{query_marker} primary asks for release smoke proof")},
+                "metadata": {"source": "cli-test"}
+            }
+        }),
+        json!({
+            "provider": provider,
+            "session": {
+                "provider_session_id": format!("{provider}-normalized-worker"),
+                "parent_provider_session_id": primary,
+                "root_provider_session_id": primary,
+                "external_agent_id": format!("{provider}-worker"),
+                "agent_type": "subagent",
+                "role_hint": "worker",
+                "is_primary": false,
+                "status": "imported",
+                "started_at": "2026-06-24T12:00:02Z",
+                "cwd": "/workspace/provider-e2e",
+                "metadata": {"source": "cli-test", "scenario": "multi-session"}
+            },
+            "event": {
+                "provider_event_index": 0,
+                "cursor": format!("{provider}-worker-assistant-0"),
+                "event_type": "summary",
+                "role": "assistant",
+                "occurred_at": "2026-06-24T12:00:03Z",
+                "payload": {"text": format!("{query_marker} worker reports provider-filter citations")},
+                "metadata": {"source": "cli-test"}
+            }
+        }),
+        json!({
+            "provider": provider,
+            "session": {
+                "provider_session_id": followup,
+                "agent_type": "primary",
+                "role_hint": "primary",
+                "is_primary": true,
+                "status": "imported",
+                "started_at": "2026-06-24T12:01:00Z",
+                "cwd": "/workspace/provider-e2e",
+                "metadata": {"source": "cli-test", "scenario": "multi-session"}
+            },
+            "event": {
+                "provider_event_index": 0,
+                "cursor": format!("{provider}-followup-user-0"),
+                "event_type": "message",
+                "role": "user",
+                "occurred_at": "2026-06-24T12:01:01Z",
+                "payload": {"text": format!("{query_marker} followup checks release smoke context")},
+                "metadata": {"source": "cli-test"}
+            }
+        }),
+    ];
+    let body = lines
+        .iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    fs::write(&path, body).unwrap();
+    path.to_str().unwrap().to_owned()
 }
 
 fn copy_dir_all(from: &Path, to: &Path) {
@@ -190,6 +291,27 @@ fn assert_provider_citations(result: &Value, provider: &str) {
         );
         assert!(citation["cursor"].is_string());
     }
+}
+
+fn assert_provider_citation_count(packet: &Value, provider: &str, expected: usize) {
+    let citations = packet["results"][0]["citations"].as_array().unwrap();
+    assert_eq!(
+        citations.len(),
+        expected,
+        "unexpected citation count in {packet:#}"
+    );
+
+    let mut sessions = BTreeSet::new();
+    for citation in citations {
+        assert_eq!(citation["provider"], provider, "citation provider failed");
+        assert_eq!(
+            citation["source_exists"], true,
+            "citation source_exists failed"
+        );
+        assert!(citation["cursor"].is_string());
+        sessions.insert(citation["session_id"].as_str().unwrap().to_owned());
+    }
+    assert_eq!(sessions.len(), expected, "expected citations from sessions");
 }
 
 #[test]
@@ -405,8 +527,17 @@ fn provider_help_matches_implemented_importers() {
         .clone();
     let help = String::from_utf8(output).unwrap();
 
-    assert!(help.contains("[possible values: codex, pi]"));
-    assert!(!help.contains("claude"));
+    for value in [
+        "codex",
+        "pi",
+        "claude",
+        "opencode",
+        "antigravity",
+        "gemini",
+        "cursor",
+    ] {
+        assert!(help.contains(value), "provider {value} missing in\n{help}");
+    }
 }
 
 #[test]
@@ -421,7 +552,7 @@ fn public_subcommand_help_is_golden_enough_for_search_mvp() {
             vec![
                 "Usage: ctx import",
                 "--provider <PROVIDER>",
-                "[possible values: codex, pi]",
+                "[possible values: codex, pi, claude, opencode, antigravity, gemini, cursor]",
                 "--path <PATH>",
                 "--resume",
                 "--json",
@@ -477,7 +608,7 @@ fn public_subcommand_help_is_golden_enough_for_search_mvp() {
                 "{command} help missing {needle} in\n{help}"
             );
         }
-        for forbidden in ["dashboard", "shim", "publish", "link-pr", "claude"] {
+        for forbidden in ["dashboard", "shim", "publish", "link-pr"] {
             assert!(
                 !help.contains(forbidden),
                 "{command} help leaked {forbidden} in\n{help}"
@@ -881,6 +1012,132 @@ fn pi_cli_import_search_and_context_flow() {
         2
     );
     assert_eq!(sqlite_count(&conn, "SELECT COUNT(*) FROM session_edges"), 0);
+}
+
+#[test]
+fn normalized_provider_cli_flow_covers_all_harness_providers_with_multiple_sessions() {
+    for (cli_provider, stored_provider) in [
+        ("claude", "claude"),
+        ("opencode", "opencode"),
+        ("antigravity", "antigravity"),
+        ("gemini", "gemini"),
+        ("cursor", "cursor"),
+    ] {
+        let temp = tempdir();
+        let query = format!("{stored_provider}-multi-session-oracle");
+        let fixture = write_multi_session_provider_fixture(&temp, stored_provider, &query);
+
+        let imported = json_output(ctx(&temp).args([
+            "import",
+            "--provider",
+            cli_provider,
+            "--path",
+            &fixture,
+            "--json",
+        ]));
+        assert_eq!(imported["schema_version"], 1);
+        assert_eq!(imported["sources"][0]["provider"], stored_provider);
+        assert_eq!(
+            imported["sources"][0]["source_format"],
+            "normalized_provider_jsonl"
+        );
+        assert_eq!(imported["totals"]["imported_sessions"], 3);
+        assert_eq!(imported["totals"]["imported_events"], 3);
+        assert_eq!(imported["totals"]["imported_edges"], 1);
+        assert_eq!(imported["totals"]["failed"], 0);
+
+        let search =
+            json_output(ctx(&temp).args(["search", &query, "--provider", cli_provider, "--json"]));
+        assert_search_provider_oracle(&search, stored_provider, &query, 1, "message");
+        assert_provider_citation_count(&search, stored_provider, 3);
+
+        let context =
+            json_output(ctx(&temp).args(["context", &query, "--provider", cli_provider, "--json"]));
+        assert_context_provider_oracle(&context, stored_provider, &query, 1, "message");
+        assert_provider_citation_count(&context, stored_provider, 3);
+
+        let status = json_output(ctx(&temp).args(["status", "--json"]));
+        assert_eq!(status["indexed_items"], 4);
+        assert_eq!(status["indexed_sources"], 3);
+
+        let doctor = json_output(ctx(&temp).args(["doctor", "--json"]));
+        assert_eq!(doctor["ok"], true);
+
+        let validate = json_output(ctx(&temp).args(["validate", "--json"]));
+        assert_eq!(validate["valid"], true);
+
+        let second = json_output(ctx(&temp).args([
+            "import",
+            "--provider",
+            cli_provider,
+            "--path",
+            &fixture,
+            "--resume",
+            "--json",
+        ]));
+        assert_eq!(second["resume"], true);
+        assert_eq!(second["resume_mode"], "idempotent_rescan");
+        assert_eq!(second["totals"]["imported_sessions"], 0);
+        assert_eq!(second["totals"]["imported_events"], 0);
+        assert_eq!(second["totals"]["imported_edges"], 0);
+        assert!(second["totals"]["skipped"].as_u64().unwrap() >= 6);
+
+        let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
+        assert_eq!(
+            sqlite_count(
+                &conn,
+                &format!("SELECT COUNT(*) FROM sessions WHERE provider = '{stored_provider}'")
+            ),
+            3
+        );
+        assert_eq!(
+            sqlite_count(
+                &conn,
+                &format!("SELECT COUNT(*) FROM events e JOIN sessions s ON e.session_id = s.id WHERE s.provider = '{stored_provider}'")
+            ),
+            3
+        );
+        assert_eq!(
+            sqlite_count(
+                &conn,
+                &format!("SELECT COUNT(*) FROM session_edges se JOIN sessions child ON se.to_session_id = child.id WHERE child.provider = '{stored_provider}'")
+            ),
+            1
+        );
+    }
+}
+
+#[test]
+fn normalized_provider_cli_requires_explicit_path_for_non_discovered_providers() {
+    let temp = tempdir();
+    ctx(&temp)
+        .args(["import", "--provider", "claude", "--json"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "claude imports require an explicit --path to normalized provider JSONL",
+        ));
+}
+
+#[test]
+fn normalized_provider_cli_rejects_provider_mismatches() {
+    let temp = tempdir();
+    let fixture = provider_fixture("claude.jsonl");
+    let imported = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "gemini",
+        "--path",
+        &fixture,
+        "--json",
+    ]));
+    assert_eq!(imported["schema_version"], 1);
+    assert_eq!(imported["sources"][0]["provider"], "gemini");
+    assert_eq!(imported["totals"]["imported_sessions"], 0);
+    assert_eq!(imported["totals"]["imported_events"], 0);
+    assert_eq!(imported["totals"]["failed"], 2);
+    assert_eq!(imported["sources"][0]["failed"], 2);
+    assert!(imported["sources"][0].get("failures").is_none());
 }
 
 #[test]

@@ -59,6 +59,27 @@ steps:
       - "bazel-testlogs/**/test.outputs/**/ctx-artifacts/**/*"
       - "bazel-testlogs/**/*.zip"
 
+  - label: ":satellite: OpenRouter generated provider E2E"
+    key: "live-provider-e2e-openrouter"
+    depends_on: "search-mvp"
+    if: build.env("CTX_LIVE_PROVIDER_OPENROUTER") == "1"
+    command: |
+      CTX_LIVE_PROVIDER_E2E=1 \
+      CTX_LIVE_PROVIDER_OPENROUTER=1 \
+      CTX_LIVE_PROVIDER_OPENROUTER_GENERATE=1 \
+      CTX_LIVE_PROVIDER_OPENROUTER_ALLOW_DEFAULT_FREE_MODEL=1 \
+      CTX_ARTIFACT_DIR=artifacts/buildkite/provider-live-e2e/openrouter \
+        ./scripts/bazel-test.sh provider_live_e2e_openrouter
+    agents:
+      queue: "release-linux-managed"
+      ctx-runner-class: "release-linux-x64-stage"
+      os: "linux"
+      arch: "x86_64"
+    timeout_in_minutes: 30
+    artifact_paths:
+      - "artifacts/buildkite/provider-live-e2e/openrouter/*"
+      - "artifacts/buildkite/provider-live-e2e/openrouter/**/*"
+
   - label: ":linux: release artifact smoke"
     key: "linux-release-artifact-smoke"
     depends_on: "search-mvp"

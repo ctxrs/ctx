@@ -60,6 +60,18 @@ if command -v ruby >/dev/null 2>&1; then
     aggregate_artifacts = Array(aggregate["artifact_paths"])
     aggregate_depends = Array(aggregate["depends_on"])
 
+    openrouter = data["steps"].find { |step| step["key"] == "live-provider-e2e-openrouter" }
+    abort "missing live-provider-e2e-openrouter step" unless openrouter
+    abort "live-provider-e2e-openrouter must depend on search-mvp" unless Array(openrouter["depends_on"]).include?("search-mvp") || openrouter["depends_on"] == "search-mvp"
+    abort "live-provider-e2e-openrouter must be default-off behind CTX_LIVE_PROVIDER_OPENROUTER" unless openrouter["if"].to_s.include?("CTX_LIVE_PROVIDER_OPENROUTER")
+    openrouter_command = openrouter["command"].to_s
+    abort "live-provider-e2e-openrouter must run the Bazel OpenRouter provider target" unless openrouter_command.include?("./scripts/bazel-test.sh provider_live_e2e_openrouter")
+    abort "live-provider-e2e-openrouter must explicitly opt into generation" unless openrouter_command.include?("CTX_LIVE_PROVIDER_OPENROUTER_GENERATE=1")
+    abort "live-provider-e2e-openrouter must allow the configured free-model fallback only in the explicit lane" unless openrouter_command.include?("CTX_LIVE_PROVIDER_OPENROUTER_ALLOW_DEFAULT_FREE_MODEL=1")
+    openrouter_artifacts = Array(openrouter["artifact_paths"])
+    abort "live-provider-e2e-openrouter must upload generated provider evidence" unless openrouter_artifacts.include?("artifacts/buildkite/provider-live-e2e/openrouter/**/*")
+    abort "aggregate-release-evidence must not depend on the credential-gated OpenRouter live lane" if aggregate_depends.include?("live-provider-e2e-openrouter")
+
     platform_steps = {
       "linux-release-artifact-smoke" => "linux-x64",
       "macos-arm64-release-artifact-smoke" => "macos-arm64",
@@ -195,6 +207,23 @@ if ! grep -F -q './scripts/check.sh --mode=ci' "${pipeline}"; then
   printf 'pipeline must run ./scripts/check.sh --mode=ci\n' >&2
   exit 1
 fi
+
+if ! grep -F -q 'key: "live-provider-e2e-openrouter"' "${pipeline}"; then
+  printf 'pipeline must include the default-off OpenRouter generated provider E2E step\n' >&2
+  exit 1
+fi
+
+for required in \
+  'if: build.env("CTX_LIVE_PROVIDER_OPENROUTER") == "1"' \
+  'CTX_LIVE_PROVIDER_OPENROUTER_GENERATE=1' \
+  'CTX_LIVE_PROVIDER_OPENROUTER_ALLOW_DEFAULT_FREE_MODEL=1' \
+  './scripts/bazel-test.sh provider_live_e2e_openrouter' \
+  'artifacts/buildkite/provider-live-e2e/openrouter/**/*'; do
+  if ! grep -F -q "${required}" "${pipeline}"; then
+    printf 'pipeline OpenRouter generated provider E2E step is missing %s\n' "${required}" >&2
+    exit 1
+  fi
+done
 
 if ! grep -F -q 'key: "freebsd-native-release-proof"' "${pipeline}"; then
   printf 'pipeline must include the native FreeBSD release proof step\n' >&2

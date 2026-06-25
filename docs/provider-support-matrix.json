@@ -13,18 +13,31 @@
           "kind": "native_import",
           "source_format": "codex_session_jsonl_tree",
           "fidelity": "imported",
-          "proof": ["ctx sources", "ctx import --provider codex"],
-          "notes": ["Reads supported local session JSONL files under ~/.codex/sessions."]
+          "proof": [
+            "ctx sources",
+            "ctx import --provider codex"
+          ],
+          "notes": [
+            "Reads supported local session JSONL files under ~/.codex/sessions."
+          ]
         },
         {
           "kind": "native_import",
           "source_format": "codex_history_jsonl",
           "fidelity": "partial",
-          "proof": ["ctx sources", "ctx import --provider codex"],
-          "notes": ["Reads ~/.codex/history.jsonl when present."]
+          "proof": [
+            "ctx sources",
+            "ctx import --provider codex"
+          ],
+          "notes": [
+            "Reads ~/.codex/history.jsonl when present."
+          ]
         }
       ],
-      "history_locations": ["~/.codex/sessions", "~/.codex/history.jsonl"],
+      "history_locations": [
+        "~/.codex/sessions",
+        "~/.codex/history.jsonl"
+      ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": true,
@@ -41,7 +54,9 @@
         "token_usage": false,
         "parent_child_session_edges": true
       },
-      "redaction_notes": ["Search/context output is local/private; review before sharing."],
+      "redaction_notes": [
+        "Search/context output is local/private; review before sharing."
+      ],
       "live_e2e": {
         "status": "manual_opt_in_local_history",
         "default_enabled": false,
@@ -59,7 +74,10 @@
         "optional_env": [
           "CTX_LIVE_PROVIDER_CODEX_HISTORY_PATH"
         ],
-        "artifacts": ["live-e2e.json", "live-e2e.md"],
+        "artifacts": [
+          "live-e2e.json",
+          "live-e2e.md"
+        ],
         "redaction": [
           "aggregate and oracle counts only",
           "no raw transcripts",
@@ -94,11 +112,18 @@
           "kind": "native_import",
           "source_format": "pi_session_jsonl",
           "fidelity": "partial",
-          "proof": ["ctx sources", "ctx import --provider pi"],
-          "notes": ["Reads ~/.pi/sessions.jsonl when that file exists and matches the supported JSONL format."]
+          "proof": [
+            "ctx sources",
+            "ctx import --provider pi"
+          ],
+          "notes": [
+            "Reads ~/.pi/sessions.jsonl when that file exists and matches the supported JSONL format."
+          ]
         }
       ],
-      "history_locations": ["~/.pi/sessions.jsonl"],
+      "history_locations": [
+        "~/.pi/sessions.jsonl"
+      ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": false,
@@ -115,7 +140,9 @@
         "token_usage": false,
         "parent_child_session_edges": false
       },
-      "redaction_notes": ["Fixture redaction exists; real local output remains private by default."],
+      "redaction_notes": [
+        "Fixture redaction exists; real local output remains private by default."
+      ],
       "live_e2e": {
         "status": "manual_opt_in_local_history",
         "default_enabled": false,
@@ -131,7 +158,10 @@
           "CTX_LIVE_PROVIDER_PI_QUERY or CTX_LIVE_PROVIDER_QUERY"
         ],
         "optional_env": [],
-        "artifacts": ["live-e2e.json", "live-e2e.md"],
+        "artifacts": [
+          "live-e2e.json",
+          "live-e2e.md"
+        ],
         "redaction": [
           "aggregate and oracle counts only",
           "no raw transcripts",
@@ -159,15 +189,21 @@
       "id": "claude_code",
       "display_name": "Claude",
       "priority": "p1",
-      "status": "fixture_only",
+      "status": "normalized_import_only",
       "capture_provider": "claude",
       "implemented_paths": [
         {
-          "kind": "fixture",
-          "source_format": "normalized_provider_fixture_jsonl",
+          "kind": "normalized_import",
+          "source_format": "normalized_provider_jsonl",
           "fidelity": "partial",
-          "proof": ["tests/fixtures/provider/claude.jsonl"],
-          "notes": ["Sanitized fixture contract only; no native local importer in the public CLI."]
+          "proof": [
+            "ctx import --provider claude --path <normalized-provider-jsonl>",
+            "tests/fixtures/provider/claude.jsonl"
+          ],
+          "notes": [
+            "Explicit normalized provider JSONL only; no native local-history discovery or native transcript parser is shipped.",
+            "Used for adapter harnesses, generated provider E2E, and future native importer development."
+          ]
         }
       ],
       "imports_existing_history": false,
@@ -186,32 +222,68 @@
         "token_usage": false,
         "parent_child_session_edges": false
       },
-      "blockers": ["No native local history importer is shipped."],
+      "blockers": [
+        "No native local-history importer or discovery is shipped."
+      ],
       "live_e2e": {
-        "status": "blocked_fixture_only",
+        "status": "manual_opt_in_generated_history",
         "default_enabled": false,
         "provider_command_execution": false,
         "api_key_env_passed_to_ctx": false,
-        "script": "scripts/release-provider-live-e2e-lanes.sh run claude_code",
-        "artifact_status": "blocked",
-        "blocker": "No native local history importer is shipped."
+        "credential_used_before_ctx_import": true,
+        "ctx_network_required": false,
+        "temporary_ctx_data_root": true,
+        "script": "scripts/release-provider-live-e2e-lanes.sh run openrouter",
+        "required_env": [
+          "CTX_LIVE_PROVIDER_E2E=1",
+          "CTX_LIVE_PROVIDER_OPENROUTER=1",
+          "CTX_LIVE_PROVIDER_OPENROUTER_GENERATE=1",
+          "runner OpenRouter credential configuration",
+          "runner OpenRouter model configuration or explicit free-model fallback"
+        ],
+        "artifacts": [
+          "live-e2e.json",
+          "live-e2e.md"
+        ],
+        "redaction": [
+          "aggregate and oracle counts only",
+          "no raw generated histories",
+          "no raw transcripts",
+          "no raw snippets",
+          "no raw queries",
+          "no raw source paths",
+          "provider-filter, citation, and retrieval oracle counts only",
+          "source_exists counts are not required because generated histories are temporary and are not persisted as artifacts"
+        ],
+        "native_import_blocker": "Generated-history proof does not claim native local-history import support."
       },
       "public_docs": "docs/provider-support.md",
-      "fixture_paths": ["tests/fixtures/provider/claude.jsonl"]
+      "fixture_paths": [
+        "tests/fixtures/provider/claude.jsonl"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs"
+      ]
     },
     {
       "id": "open_code",
       "display_name": "OpenCode",
       "priority": "p1",
-      "status": "fixture_only",
+      "status": "normalized_import_only",
       "capture_provider": "opencode",
       "implemented_paths": [
         {
-          "kind": "fixture",
-          "source_format": "normalized_provider_fixture_jsonl",
+          "kind": "normalized_import",
+          "source_format": "normalized_provider_jsonl",
           "fidelity": "partial",
-          "proof": ["tests/fixtures/provider/opencode.jsonl"],
-          "notes": ["Sanitized fixture contract only; no native local importer in the public CLI."]
+          "proof": [
+            "ctx import --provider opencode --path <normalized-provider-jsonl>",
+            "tests/fixtures/provider/opencode.jsonl"
+          ],
+          "notes": [
+            "Explicit normalized provider JSONL only; no native local-history discovery or native transcript parser is shipped.",
+            "Used for adapter harnesses, generated provider E2E, and future native importer development."
+          ]
         }
       ],
       "imports_existing_history": false,
@@ -230,32 +302,68 @@
         "token_usage": false,
         "parent_child_session_edges": true
       },
-      "blockers": ["No native local history importer is shipped."],
+      "blockers": [
+        "No native local-history importer or discovery is shipped."
+      ],
       "live_e2e": {
-        "status": "blocked_fixture_only",
+        "status": "manual_opt_in_generated_history",
         "default_enabled": false,
         "provider_command_execution": false,
         "api_key_env_passed_to_ctx": false,
-        "script": "scripts/release-provider-live-e2e-lanes.sh run open_code",
-        "artifact_status": "blocked",
-        "blocker": "No native local history importer is shipped."
+        "credential_used_before_ctx_import": true,
+        "ctx_network_required": false,
+        "temporary_ctx_data_root": true,
+        "script": "scripts/release-provider-live-e2e-lanes.sh run openrouter",
+        "required_env": [
+          "CTX_LIVE_PROVIDER_E2E=1",
+          "CTX_LIVE_PROVIDER_OPENROUTER=1",
+          "CTX_LIVE_PROVIDER_OPENROUTER_GENERATE=1",
+          "runner OpenRouter credential configuration",
+          "runner OpenRouter model configuration or explicit free-model fallback"
+        ],
+        "artifacts": [
+          "live-e2e.json",
+          "live-e2e.md"
+        ],
+        "redaction": [
+          "aggregate and oracle counts only",
+          "no raw generated histories",
+          "no raw transcripts",
+          "no raw snippets",
+          "no raw queries",
+          "no raw source paths",
+          "provider-filter, citation, and retrieval oracle counts only",
+          "source_exists counts are not required because generated histories are temporary and are not persisted as artifacts"
+        ],
+        "native_import_blocker": "Generated-history proof does not claim native local-history import support."
       },
       "public_docs": "docs/provider-support.md",
-      "fixture_paths": ["tests/fixtures/provider/opencode.jsonl"]
+      "fixture_paths": [
+        "tests/fixtures/provider/opencode.jsonl"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs"
+      ]
     },
     {
       "id": "antigravity_cli",
       "display_name": "Antigravity",
       "priority": "p1",
-      "status": "fixture_only",
+      "status": "normalized_import_only",
       "capture_provider": "antigravity",
       "implemented_paths": [
         {
-          "kind": "fixture",
-          "source_format": "normalized_provider_fixture_jsonl",
+          "kind": "normalized_import",
+          "source_format": "normalized_provider_jsonl",
           "fidelity": "partial",
-          "proof": ["tests/fixtures/provider/antigravity.jsonl"],
-          "notes": ["Sanitized fixture contract only; no native local importer in the public CLI."]
+          "proof": [
+            "ctx import --provider antigravity --path <normalized-provider-jsonl>",
+            "tests/fixtures/provider/antigravity.jsonl"
+          ],
+          "notes": [
+            "Explicit normalized provider JSONL only; no native local-history discovery or native transcript parser is shipped.",
+            "Used for adapter harnesses, generated provider E2E, and future native importer development."
+          ]
         }
       ],
       "imports_existing_history": false,
@@ -274,32 +382,68 @@
         "token_usage": false,
         "parent_child_session_edges": true
       },
-      "blockers": ["No native local history importer is shipped."],
+      "blockers": [
+        "No native local-history importer or discovery is shipped."
+      ],
       "live_e2e": {
-        "status": "blocked_fixture_only",
+        "status": "manual_opt_in_generated_history",
         "default_enabled": false,
         "provider_command_execution": false,
         "api_key_env_passed_to_ctx": false,
-        "script": "scripts/release-provider-live-e2e-lanes.sh run antigravity_cli",
-        "artifact_status": "blocked",
-        "blocker": "No native local history importer is shipped."
+        "credential_used_before_ctx_import": true,
+        "ctx_network_required": false,
+        "temporary_ctx_data_root": true,
+        "script": "scripts/release-provider-live-e2e-lanes.sh run openrouter",
+        "required_env": [
+          "CTX_LIVE_PROVIDER_E2E=1",
+          "CTX_LIVE_PROVIDER_OPENROUTER=1",
+          "CTX_LIVE_PROVIDER_OPENROUTER_GENERATE=1",
+          "runner OpenRouter credential configuration",
+          "runner OpenRouter model configuration or explicit free-model fallback"
+        ],
+        "artifacts": [
+          "live-e2e.json",
+          "live-e2e.md"
+        ],
+        "redaction": [
+          "aggregate and oracle counts only",
+          "no raw generated histories",
+          "no raw transcripts",
+          "no raw snippets",
+          "no raw queries",
+          "no raw source paths",
+          "provider-filter, citation, and retrieval oracle counts only",
+          "source_exists counts are not required because generated histories are temporary and are not persisted as artifacts"
+        ],
+        "native_import_blocker": "Generated-history proof does not claim native local-history import support."
       },
       "public_docs": "docs/provider-support.md",
-      "fixture_paths": ["tests/fixtures/provider/antigravity.jsonl"]
+      "fixture_paths": [
+        "tests/fixtures/provider/antigravity.jsonl"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs"
+      ]
     },
     {
       "id": "gemini_cli",
       "display_name": "Gemini",
       "priority": "p1",
-      "status": "fixture_only",
+      "status": "normalized_import_only",
       "capture_provider": "gemini",
       "implemented_paths": [
         {
-          "kind": "fixture",
-          "source_format": "normalized_provider_fixture_jsonl",
+          "kind": "normalized_import",
+          "source_format": "normalized_provider_jsonl",
           "fidelity": "partial",
-          "proof": ["tests/fixtures/provider/gemini.jsonl"],
-          "notes": ["Sanitized fixture contract only; no native local importer in the public CLI."]
+          "proof": [
+            "ctx import --provider gemini --path <normalized-provider-jsonl>",
+            "tests/fixtures/provider/gemini.jsonl"
+          ],
+          "notes": [
+            "Explicit normalized provider JSONL only; no native local-history discovery or native transcript parser is shipped.",
+            "Used for adapter harnesses, generated provider E2E, and future native importer development."
+          ]
         }
       ],
       "imports_existing_history": false,
@@ -318,32 +462,68 @@
         "token_usage": false,
         "parent_child_session_edges": false
       },
-      "blockers": ["No native local history importer is shipped."],
+      "blockers": [
+        "No native local-history importer or discovery is shipped."
+      ],
       "live_e2e": {
-        "status": "blocked_fixture_only",
+        "status": "manual_opt_in_generated_history",
         "default_enabled": false,
         "provider_command_execution": false,
         "api_key_env_passed_to_ctx": false,
-        "script": "scripts/release-provider-live-e2e-lanes.sh run gemini_cli",
-        "artifact_status": "blocked",
-        "blocker": "No native local history importer is shipped."
+        "credential_used_before_ctx_import": true,
+        "ctx_network_required": false,
+        "temporary_ctx_data_root": true,
+        "script": "scripts/release-provider-live-e2e-lanes.sh run openrouter",
+        "required_env": [
+          "CTX_LIVE_PROVIDER_E2E=1",
+          "CTX_LIVE_PROVIDER_OPENROUTER=1",
+          "CTX_LIVE_PROVIDER_OPENROUTER_GENERATE=1",
+          "runner OpenRouter credential configuration",
+          "runner OpenRouter model configuration or explicit free-model fallback"
+        ],
+        "artifacts": [
+          "live-e2e.json",
+          "live-e2e.md"
+        ],
+        "redaction": [
+          "aggregate and oracle counts only",
+          "no raw generated histories",
+          "no raw transcripts",
+          "no raw snippets",
+          "no raw queries",
+          "no raw source paths",
+          "provider-filter, citation, and retrieval oracle counts only",
+          "source_exists counts are not required because generated histories are temporary and are not persisted as artifacts"
+        ],
+        "native_import_blocker": "Generated-history proof does not claim native local-history import support."
       },
       "public_docs": "docs/provider-support.md",
-      "fixture_paths": ["tests/fixtures/provider/gemini.jsonl"]
+      "fixture_paths": [
+        "tests/fixtures/provider/gemini.jsonl"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs"
+      ]
     },
     {
       "id": "cursor",
       "display_name": "Cursor",
       "priority": "p1",
-      "status": "fixture_only",
+      "status": "normalized_import_only",
       "capture_provider": "cursor",
       "implemented_paths": [
         {
-          "kind": "fixture",
-          "source_format": "normalized_provider_fixture_jsonl",
+          "kind": "normalized_import",
+          "source_format": "normalized_provider_jsonl",
           "fidelity": "partial",
-          "proof": ["tests/fixtures/provider/cursor.jsonl"],
-          "notes": ["Sanitized fixture contract only; no native local importer in the public CLI."]
+          "proof": [
+            "ctx import --provider cursor --path <normalized-provider-jsonl>",
+            "tests/fixtures/provider/cursor.jsonl"
+          ],
+          "notes": [
+            "Explicit normalized provider JSONL only; no native local-history discovery or native transcript parser is shipped.",
+            "Used for adapter harnesses, generated provider E2E, and future native importer development."
+          ]
         }
       ],
       "imports_existing_history": false,
@@ -362,18 +542,48 @@
         "token_usage": false,
         "parent_child_session_edges": false
       },
-      "blockers": ["No native local history importer is shipped."],
+      "blockers": [
+        "No native local-history importer or discovery is shipped."
+      ],
       "live_e2e": {
-        "status": "blocked_fixture_only",
+        "status": "manual_opt_in_generated_history",
         "default_enabled": false,
         "provider_command_execution": false,
         "api_key_env_passed_to_ctx": false,
-        "script": "scripts/release-provider-live-e2e-lanes.sh run cursor",
-        "artifact_status": "blocked",
-        "blocker": "No native local history importer is shipped."
+        "credential_used_before_ctx_import": true,
+        "ctx_network_required": false,
+        "temporary_ctx_data_root": true,
+        "script": "scripts/release-provider-live-e2e-lanes.sh run openrouter",
+        "required_env": [
+          "CTX_LIVE_PROVIDER_E2E=1",
+          "CTX_LIVE_PROVIDER_OPENROUTER=1",
+          "CTX_LIVE_PROVIDER_OPENROUTER_GENERATE=1",
+          "runner OpenRouter credential configuration",
+          "runner OpenRouter model configuration or explicit free-model fallback"
+        ],
+        "artifacts": [
+          "live-e2e.json",
+          "live-e2e.md"
+        ],
+        "redaction": [
+          "aggregate and oracle counts only",
+          "no raw generated histories",
+          "no raw transcripts",
+          "no raw snippets",
+          "no raw queries",
+          "no raw source paths",
+          "provider-filter, citation, and retrieval oracle counts only",
+          "source_exists counts are not required because generated histories are temporary and are not persisted as artifacts"
+        ],
+        "native_import_blocker": "Generated-history proof does not claim native local-history import support."
       },
       "public_docs": "docs/provider-support.md",
-      "fixture_paths": ["tests/fixtures/provider/cursor.jsonl"]
+      "fixture_paths": [
+        "tests/fixtures/provider/cursor.jsonl"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs"
+      ]
     }
   ]
 }

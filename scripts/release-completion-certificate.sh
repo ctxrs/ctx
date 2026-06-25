@@ -865,6 +865,7 @@ validate_provider_live_e2e_lanes() {
   require_contains "${notes}" "Codex" "provider live E2E notes include Codex"
   require_contains "${notes}" "Claude Code" "provider live E2E notes include Claude Code"
   require_contains "${notes}" "Gemini CLI" "provider live E2E notes include Gemini CLI"
+  require_contains "${notes}" "OpenRouter" "provider live E2E notes include OpenRouter generated harness"
 }
 
 validate_release_docs() {
@@ -1358,7 +1359,7 @@ EOF
 - Self-test fixture: true
 - Publishing: false
 - Global opt-in: `CTX_LIVE_PROVIDER_E2E=1`
-- Providers listed by the release contract include Codex, Claude Code, and Gemini CLI.
+- Providers listed by the release contract include Codex, Claude Code, Gemini CLI, and OpenRouter Generated Harness.
 EOF
 }
 

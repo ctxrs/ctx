@@ -23,22 +23,24 @@ ctx sources --json
 If a provider is not listed by `ctx sources`, the current CLI does not discover
 or import that provider's native history.
 
-## Fixture-Only Providers
+## Normalized Harness Imports
 
-The repository includes normalized fixtures for Claude, OpenCode,
-Antigravity, Gemini, and Cursor provider shapes. Those fixtures are useful for
-adapter contracts and tests, but they are not native local importers in the
-public CLI.
+The CLI also accepts explicit normalized provider JSONL for Claude, OpenCode,
+Antigravity, Gemini, and Cursor. This path is for adapter harnesses, generated
+test histories, and future native importer development. It is not native
+provider history discovery.
 
-Do not document one of these providers as locally importable until the CLI can
-discover or import that provider's real local history and the provider support
-matrix marks the shipped path accordingly.
+If one of these providers is selected without `--path`, `ctx import` returns an
+error explaining that an explicit normalized provider JSONL path is required.
+Do not document one of these providers as natively locally importable until the
+CLI can discover or parse that provider's real local history and the provider
+support matrix marks the shipped path accordingly.
 
 ## Live Provider E2E
 
-Live provider E2E is an opt-in local-history import smoke, not a provider
-runner. The lane never executes provider CLIs, never passes API-key environment
-variables to `ctx`, and runs `ctx` with a temporary `CTX_DATA_ROOT`.
+Live provider E2E is opt-in proof, not a provider runner. The lane never
+executes provider CLIs, never passes credential environment variables to `ctx`,
+and runs `ctx` with a temporary `CTX_DATA_ROOT`.
 
 Only Codex and Pi have live E2E lanes because those are the providers with
 native local import paths in the public CLI. A live run requires
@@ -66,14 +68,21 @@ scripts/release-provider-live-e2e-lanes.sh run pi
 
 The resulting `live-e2e.json` and `live-e2e.md` contain aggregate counts and
 booleans only. They must not include raw transcripts, snippets, queries, or
-source paths. Fixture-only providers produce blocked artifacts instead of
-passing live proof.
+source paths. Provider-specific native lanes for providers without native
+local-history importers produce blocked artifacts instead of passing live proof.
+
+There is also a default-off generated OpenRouter lane. That lane uses runner
+credential and endpoint configuration before `ctx import` to create temporary
+synthetic multi-session histories for every harness provider, then runs the same
+scrubbed `ctx setup`, `ctx import`, `ctx search`, `ctx context`, `ctx status`,
+`ctx doctor`, and `ctx validate` flow. It proves ctx retrieval over generated
+provider histories; it does not prove native vendor transcript discovery.
 
 Bazel provider-live targets skip the `ctx` build when the lane is skipped or
-only writes fixture-only blocker artifacts. When a real Codex or Pi local-history
-run is selected, the wrapper may build or use `ctx`, but the lane runtime still
-uses only `ctx` commands with provider API keys and provider CLI environments
-left out.
+only writes native-import blocker artifacts. When a real Codex, Pi, or generated
+OpenRouter run is selected, the wrapper may build or use `ctx`, but the lane
+runtime still uses only `ctx` commands with credential and provider CLI
+environments left out.
 
 ## Import Rules
 

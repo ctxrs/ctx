@@ -79,7 +79,10 @@ Import selection rules:
 - with no arguments or with `--all`, import all discovered sources that exist;
 - with `--provider`, import discovered sources for that provider;
 - with `--path`, import exactly that path;
-- with `--path` and no provider, parse the path as Codex format.
+- with `--path` and no provider, parse the path as Codex format;
+- with Claude, OpenCode, Antigravity, Gemini, or Cursor, `--path` is required
+  and must point to normalized provider JSONL rather than native provider
+  history.
 
 The current `--resume` flag is an idempotent-rescan mode marker. JSON reports
 `resume: true` and `resume_mode: "idempotent_rescan"`, but provider-native

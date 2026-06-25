@@ -16,13 +16,14 @@ use uuid::Uuid;
 use work_record_capture::{
     catalog_codex_session_tree, import_codex_history_jsonl, import_codex_session_jsonl,
     import_codex_session_paths, import_codex_session_tree, import_pi_session_jsonl,
-    stable_capture_uuid, CatalogSummary, CodexHistoryImportOptions, CodexSessionCatalogOptions,
-    CodexSessionImportOptions, CodexSessionImportProgress, CodexSessionImportProgressCallback,
-    CodexToolOutputMode, PiSessionImportOptions, ProviderImportSummary,
+    import_provider_fixture_jsonl, stable_capture_uuid, CatalogSummary, CodexHistoryImportOptions,
+    CodexSessionCatalogOptions, CodexSessionImportOptions, CodexSessionImportProgress,
+    CodexSessionImportProgressCallback, CodexToolOutputMode, PiSessionImportOptions,
+    ProviderFixtureImportOptions, ProviderImportSummary,
 };
 use work_record_core::{
     database_path, default_data_root, CaptureProvider, ContextCitation, ContextCitationType, Event,
-    EventType, Session, WorkRecord,
+    EventType, Fidelity, Session, WorkRecord,
 };
 use work_record_store::{CatalogSession, Store};
 
@@ -169,6 +170,15 @@ struct ContextArgs {
 enum ProviderArg {
     Codex,
     Pi,
+    #[value(alias = "claude-code")]
+    Claude,
+    #[value(name = "opencode", alias = "open-code")]
+    OpenCode,
+    #[value(alias = "antigravity-cli")]
+    Antigravity,
+    #[value(alias = "gemini-cli")]
+    Gemini,
+    Cursor,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -184,11 +194,20 @@ impl ProviderArg {
         match self {
             Self::Codex => CaptureProvider::Codex,
             Self::Pi => CaptureProvider::Pi,
+            Self::Claude => CaptureProvider::Claude,
+            Self::OpenCode => CaptureProvider::OpenCode,
+            Self::Antigravity => CaptureProvider::Antigravity,
+            Self::Gemini => CaptureProvider::Gemini,
+            Self::Cursor => CaptureProvider::Cursor,
         }
     }
 
     fn as_str(self) -> &'static str {
         self.capture_provider().as_str()
+    }
+
+    fn supports_discovery(self) -> bool {
+        matches!(self, Self::Codex | Self::Pi)
     }
 }
 
@@ -1625,6 +1644,12 @@ fn import_requests(args: &ImportArgs) -> Result<Vec<SourceInfo>> {
             .collect());
     }
     let provider = args.provider.expect("checked provider");
+    if !provider.supports_discovery() {
+        return Err(anyhow!(
+            "{} imports require an explicit --path to normalized provider JSONL",
+            provider.as_str()
+        ));
+    }
     Ok(discovered_sources()
         .into_iter()
         .filter(|source| source.provider.as_str() == provider.as_str() && source.exists)
@@ -1740,6 +1765,24 @@ fn import_one_source_inner(
                 work_record_id: Some(record_id),
                 allow_partial_failures: true,
                 ..PiSessionImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
+        ProviderArg::Claude
+        | ProviderArg::OpenCode
+        | ProviderArg::Antigravity
+        | ProviderArg::Gemini
+        | ProviderArg::Cursor => import_provider_fixture_jsonl(
+            &source.path,
+            store,
+            ProviderFixtureImportOptions {
+                source_path: Some(source.path.clone()),
+                work_record_id: Some(record_id),
+                expected_provider: Some(source.provider.capture_provider()),
+                allow_partial_failures: true,
+                source_format: "normalized_provider_jsonl".to_owned(),
+                fidelity: Fidelity::Partial,
+                ..ProviderFixtureImportOptions::default()
             },
         )
         .map_err(anyhow::Error::from),
@@ -1959,6 +2002,7 @@ fn source_for_path(provider: ProviderArg, path: PathBuf) -> SourceInfo {
         ProviderArg::Codex if path.is_dir() => "codex_session_jsonl_tree",
         ProviderArg::Codex => "codex_session_jsonl",
         ProviderArg::Pi => "pi_session_jsonl",
+        _ => "normalized_provider_jsonl",
     };
     SourceInfo {
         provider,

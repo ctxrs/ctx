@@ -453,7 +453,7 @@ fn event_search_result(
     let raw_source_exists = hit
         .raw_source_path
         .as_deref()
-        .map(|path| Path::new(path).is_file());
+        .map(|path| Path::new(path).exists());
     let mut citations = vec![ContextCitation {
         citation_type: ContextCitationType::Event,
         id: hit.event_id,
@@ -1150,7 +1150,7 @@ fn source_hit(
         cwd: source.descriptor.cwd.clone(),
         raw_source_exists: raw_source_path
             .as_deref()
-            .map(|path| Path::new(path).is_file()),
+            .map(|path| Path::new(path).exists()),
         raw_source_path,
         cursor: source_cursor(source),
     }

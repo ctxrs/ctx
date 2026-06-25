@@ -9,8 +9,9 @@ shipped.
 - Codex local import is supported for documented local JSONL sources.
 - Pi local import is supported only when a matching local `sessions.jsonl` file
   exists.
-- Claude, OpenCode, Antigravity, Gemini, and Cursor have fixture contracts but
-  no native local importer in the public CLI.
+- Claude, OpenCode, Antigravity, Gemini, and Cursor accept explicit normalized
+  provider JSONL paths for harnesses, but have no native local importer or
+  discovery in the public CLI.
 - Unknown provider formats should not be parsed optimistically.
 
 ## Import Semantics
