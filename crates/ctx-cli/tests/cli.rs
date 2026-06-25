@@ -171,8 +171,13 @@ fn assert_search_provider_oracle(
     for result in results {
         assert_eq!(result["provider"], provider, "provider filter failed");
         assert_eq!(result["source_exists"], true, "source_exists failed");
-        assert!(result["item_id"].is_string());
-        assert!(result["item_type"].is_string());
+        assert_eq!(result["item_type"], "event");
+        assert!(result["ctx_event_id"].is_string());
+        assert!(result["ctx_session_id"].is_string());
+        assert!(result["provider_session_id"].is_string());
+        assert!(result["source_path"].is_string());
+        assert!(result["cursor"].is_string());
+        assert_suggested_next_commands(result);
         assert!(result["why_matched"]
             .as_array()
             .unwrap()
@@ -186,19 +191,54 @@ fn assert_provider_citations(result: &Value, provider: &str) {
     let citations = result["citations"].as_array().unwrap();
     assert!(!citations.is_empty(), "missing citations in {result:#}");
     for citation in citations {
-        assert!(citation["item_id"].is_string());
-        assert!(citation["item_type"].is_string());
+        assert!(
+            citation["ctx_event_id"].is_string() || citation["ctx_session_id"].is_string(),
+            "citation needs a ctx-owned event or session id in {citation:#}"
+        );
         assert_eq!(citation["provider"], provider, "citation provider failed");
         assert_eq!(
             citation["source_exists"], true,
             "citation source_exists failed"
         );
+        assert!(citation["source_path"].is_string());
         assert!(citation["cursor"].is_string());
     }
 }
 
+fn assert_suggested_next_commands(result: &Value) {
+    let commands = result["suggested_next_commands"].as_array().unwrap();
+    assert!(
+        commands.iter().any(|command| command
+            .as_str()
+            .unwrap_or("")
+            .starts_with("ctx show event ")),
+        "missing show event suggestion in {result:#}"
+    );
+    assert!(
+        commands.iter().any(|command| command
+            .as_str()
+            .unwrap_or("")
+            .starts_with("ctx show session ")),
+        "missing show session suggestion in {result:#}"
+    );
+    assert!(
+        commands.iter().any(|command| command
+            .as_str()
+            .unwrap_or("")
+            .starts_with("ctx locate event ")),
+        "missing locate event suggestion in {result:#}"
+    );
+    assert!(
+        commands.iter().any(|command| command
+            .as_str()
+            .unwrap_or("")
+            .starts_with("ctx export session ")),
+        "missing export session suggestion in {result:#}"
+    );
+}
+
 #[test]
-fn help_exposes_only_search_mvp_commands() {
+fn help_exposes_session_retrieval_commands() {
     let temp = tempdir();
     let output = ctx(&temp)
         .arg("--help")
@@ -215,7 +255,8 @@ fn help_exposes_only_search_mvp_commands() {
         .unwrap_or(&help);
 
     for expected in [
-        "setup", "status", "sources", "import", "list", "show", "search", "doctor", "validate",
+        "setup", "status", "sources", "import", "list", "show", "search", "locate", "export",
+        "doctor", "validate",
     ] {
         assert!(
             commands.contains(expected),
@@ -230,7 +271,6 @@ fn help_exposes_only_search_mvp_commands() {
         "link-pr",
         "record",
         "report",
-        "export",
         "schema",
         "workspace",
         "work",
@@ -272,7 +312,6 @@ fn removed_commands_are_rejected() {
         "link-pr",
         "record",
         "report",
-        "export",
         "schema",
         "workspace",
         "work",
@@ -450,7 +489,7 @@ fn provider_help_matches_implemented_importers() {
 }
 
 #[test]
-fn public_subcommand_help_is_golden_enough_for_search_mvp() {
+fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
     let temp = tempdir();
     for (command, required) in [
         ("setup", vec!["Usage: ctx setup", "--json"]),
@@ -468,7 +507,12 @@ fn public_subcommand_help_is_golden_enough_for_search_mvp() {
             ],
         ),
         ("list", vec!["Usage: ctx list", "--limit <LIMIT>", "--json"]),
-        ("show", vec!["Usage: ctx show", "<ID>", "--json"]),
+        ("show", vec!["Usage: ctx show", "session", "event"]),
+        ("locate", vec!["Usage: ctx locate", "session", "event"]),
+        (
+            "export",
+            vec!["Usage: ctx export", "session"],
+        ),
         (
             "search",
             vec![
@@ -505,6 +549,48 @@ fn public_subcommand_help_is_golden_enough_for_search_mvp() {
             assert!(
                 !help.contains(forbidden),
                 "{command} help leaked {forbidden} in\n{help}"
+            );
+        }
+    }
+}
+
+#[test]
+fn provider_session_lookup_requires_explicit_provider_flags_in_help() {
+    let temp = tempdir();
+    for args in [
+        vec!["show", "session", "--help"],
+        vec!["locate", "session", "--help"],
+        vec!["locate", "event", "--help"],
+        vec!["export", "session", "--help"],
+    ] {
+        let output = ctx(&temp)
+            .args(args.clone())
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let help = String::from_utf8(output).unwrap();
+        for needle in [
+            "--provider <PROVIDER>",
+            "--provider-session <PROVIDER_SESSION>",
+        ] {
+            if args.as_slice() == ["locate", "event", "--help"] {
+                continue;
+            }
+            assert!(
+                help.contains(needle),
+                "{args:?} help missing {needle} in\n{help}"
+            );
+        }
+        if args[0] == "locate" {
+            assert!(
+                help.contains("[possible values: text, json]"),
+                "{args:?} help should restrict locate formats to text/json in\n{help}"
+            );
+            assert!(
+                !help.contains("markdown") && !help.contains("jsonl"),
+                "{args:?} help leaked unsupported locate formats in\n{help}"
             );
         }
     }
@@ -661,8 +747,10 @@ fn fresh_home_search_mvp_flow() {
     let listed = json_output(&mut list_command);
     assert_eq!(listed["schema_version"], 1);
     assert_omits_keys(&listed, &["record_id", "history_record_id", "kind"]);
-    assert_eq!(listed["items"][0]["item_type"], "agent_history");
-    let first_id = listed["items"][0]["item_id"].as_str().unwrap().to_owned();
+    assert_eq!(listed["items"][0]["item_type"], "session");
+    assert!(listed["items"][0]["ctx_session_id"].is_string());
+    assert!(listed["items"][0]["provider_session_id"].is_string());
+    assert!(listed["items"][0]["item_id"].is_string());
     assert_eq!(listed["items"][0]["id"], listed["items"][0]["item_id"]);
 
     let search = json_output(ctx(&temp).args(["search", "onboarding", "--json"]));
@@ -670,34 +758,62 @@ fn fresh_home_search_mvp_flow() {
     assert_eq!(search["share_safe"], false);
     assert_omits_keys(
         &search,
-        &["record_id", "history_record_id", "raw_source_path", "kind"],
+        &[
+            "record_id",
+            "history_record_id",
+            "raw_source_path",
+            "kind",
+            "external_session_id",
+        ],
     );
-    assert!(search["results"][0]["item_id"].is_string());
-    assert_eq!(search["results"][0]["item_type"], "agent_history");
-    assert!(search["results"][0]["citations"][0]["item_id"].is_string());
-    assert!(search["results"][0]["citations"][0]["item_type"].is_string());
+    let first_result = &search["results"][0];
+    assert_eq!(first_result["item_type"], "event");
+    let ctx_event_id = first_result["ctx_event_id"].as_str().unwrap().to_owned();
+    let ctx_session_id = first_result["ctx_session_id"].as_str().unwrap().to_owned();
+    assert!(first_result["provider_session_id"].is_string());
+    assert!(first_result["source_path"].is_string());
+    assert!(first_result["cursor"].is_string());
+    assert_suggested_next_commands(first_result);
+    assert!(first_result["citations"][0]["ctx_event_id"].is_string());
+    assert!(first_result["citations"][0]["ctx_session_id"].is_string());
 
     let human_search = ctx(&temp)
-        .args(["search", "agent-history"])
+        .args(["search", "onboarding"])
         .assert()
         .success()
         .get_output()
         .stdout
         .clone();
     let human_search = String::from_utf8(human_search).unwrap();
-    assert!(human_search.contains("citation: indexed_item"));
+    assert!(human_search.contains("ctx_event_id"));
+    assert!(human_search.contains("ctx_session_id"));
+    assert!(human_search.contains("provider_session_id"));
+    assert!(human_search.contains("next: ctx show event"));
+    assert!(human_search.contains("next: ctx locate event"));
+    assert!(human_search.contains("next: ctx show session"));
+    assert!(!human_search.contains("work_record"));
+    assert!(!human_search.contains("history_record"));
 
     let file_search =
         json_output(ctx(&temp).args(["search", "--file", "crates/foo/src/lib.rs", "--json"]));
     assert_eq!(file_search["query"], "");
     assert!(file_search["results"].is_array());
 
-    let show = json_output(ctx(&temp).args(["show", &first_id, "--json"]));
-    assert_eq!(show["schema_version"], 1);
-    assert_eq!(show["item"]["item_id"], first_id);
-    assert_eq!(show["item"]["item_type"], "agent_history");
+    let show_event = json_output(ctx(&temp).args([
+        "show",
+        "event",
+        &ctx_event_id,
+        "--window",
+        "2",
+        "--format",
+        "json",
+    ]));
+    assert_eq!(show_event["schema_version"], 1);
+    assert_eq!(show_event["item_type"], "event_window");
+    assert_eq!(show_event["event"]["ctx_event_id"], ctx_event_id);
+    assert_eq!(show_event["event"]["ctx_session_id"], ctx_session_id);
     assert_omits_keys(
-        &show,
+        &show_event,
         &[
             "record_id",
             "history_record_id",
@@ -708,11 +824,58 @@ fn fresh_home_search_mvp_flow() {
             "capture_source_id",
         ],
     );
-    assert!(show["events"]
+    assert!(show_event["events"]
         .as_array()
         .unwrap()
         .iter()
-        .all(|event| event["item_type"] == "event" && event["preview"].is_string()));
+        .all(|event| event["ctx_event_id"].is_string()
+            && event["ctx_session_id"].is_string()
+            && event["preview"].is_string()));
+
+    let show_session = json_output(ctx(&temp).args([
+        "show",
+        "session",
+        &ctx_session_id,
+        "--mode",
+        "lite",
+        "--format",
+        "json",
+    ]));
+    assert_eq!(show_session["schema_version"], 1);
+    assert_eq!(show_session["item_type"], "session_transcript");
+    assert_eq!(show_session["session"]["item_type"], "session");
+    assert_eq!(show_session["session"]["item_id"], ctx_session_id);
+    assert_eq!(show_session["mode"], "lite");
+
+    let locate_event = json_output(ctx(&temp).args(["locate", "event", &ctx_event_id, "--json"]));
+    assert_eq!(locate_event["schema_version"], 1);
+    assert_eq!(locate_event["item_type"], "event_location");
+    assert_eq!(locate_event["ctx_event_id"], ctx_event_id);
+    assert_eq!(locate_event["ctx_session_id"], ctx_session_id);
+    assert_eq!(locate_event["provider"], "codex");
+    assert!(locate_event["provider_session_id"].is_string());
+    assert!(locate_event["source"]["path"].is_string());
+    assert!(locate_event["cursor"].is_string());
+
+    let export_path = temp.path().join("transcript.md");
+    ctx(&temp)
+        .args([
+            "export",
+            "session",
+            &ctx_session_id,
+            "--mode",
+            "lite",
+            "--format",
+            "markdown",
+            "--out",
+            export_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    assert!(
+        export_path.exists(),
+        "export session should write the requested artifact path"
+    );
 
     let status = json_output(ctx(&temp).args(["status", "--json"]));
     assert_eq!(status["schema_version"], 1);
@@ -1458,9 +1621,22 @@ fn privacy_redaction_oracle_covers_cli_json_and_sqlite() {
     assert_eq!(search["schema_version"], 1);
     assert_eq!(search["share_safe"], false);
     assert!(!search["results"].as_array().unwrap().is_empty());
-    let item_id = search["results"][0]["item_id"].as_str().unwrap().to_owned();
 
-    let show = json_output(ctx(&temp).args(["show", &item_id, "--json"]));
+    let listed = json_output(ctx(&temp).args(["list", "--json"]));
+    let ctx_session_id = listed["items"][0]["ctx_session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let show = json_output(ctx(&temp).args([
+        "show",
+        "session",
+        &ctx_session_id,
+        "--mode",
+        "log",
+        "--format",
+        "json",
+    ]));
     assert_eq!(show["schema_version"], 1);
     assert!(show["events"]
         .as_array()

@@ -103,6 +103,8 @@ pub struct SearchPacketResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<ctx_history_core::CaptureProvider>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<chrono::DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
@@ -157,6 +159,7 @@ struct SearchSection {
 struct HitMetadata {
     time: chrono::DateTime<Utc>,
     provider: Option<ctx_history_core::CaptureProvider>,
+    provider_session_id: Option<String>,
     session_id: Option<Uuid>,
     event_id: Option<Uuid>,
     event_seq: Option<u64>,
@@ -181,8 +184,13 @@ pub fn search_packet(store: &Store, query: &str, options: &PacketOptions) -> Res
     let mut results = Vec::new();
 
     for candidate in candidates.iter().take(options.limit) {
+        let record_id = candidate
+            .primary_hit
+            .as_ref()
+            .and_then(|hit| hit.event_id.or(hit.session_id))
+            .unwrap_or(candidate.record.id);
         results.push(SearchPacketResult {
-            record_id: candidate.record.id,
+            record_id,
             session_id: candidate
                 .primary_hit
                 .as_ref()
@@ -198,6 +206,10 @@ pub fn search_packet(store: &Store, query: &str, options: &PacketOptions) -> Res
             ),
             rank: candidate.score,
             provider: candidate.primary_hit.as_ref().and_then(|hit| hit.provider),
+            provider_session_id: candidate
+                .primary_hit
+                .as_ref()
+                .and_then(|hit| hit.provider_session_id.clone()),
             timestamp: candidate.primary_hit.as_ref().map(|hit| hit.time),
             cwd: candidate
                 .primary_hit
@@ -426,6 +438,7 @@ fn event_search_result(
         snippet: matched_snippet(&hit.preview, &terms, snippet_chars),
         rank: (-hit.score as f32).max(0.0),
         provider: hit.provider,
+        provider_session_id: hit.session_external_session_id.clone(),
         timestamp: Some(hit.occurred_at),
         cwd: hit.cwd.clone(),
         raw_source_path: hit.raw_source_path.clone(),
@@ -1003,6 +1016,7 @@ fn empty_hit(time: chrono::DateTime<Utc>) -> HitMetadata {
     HitMetadata {
         time,
         provider: None,
+        provider_session_id: None,
         session_id: None,
         event_id: None,
         event_seq: None,
@@ -1016,6 +1030,7 @@ fn empty_hit(time: chrono::DateTime<Utc>) -> HitMetadata {
 fn session_hit(session: &Session, context: &RecordContext) -> HitMetadata {
     let mut hit = source_hit(session.capture_source_id, session.started_at, context);
     hit.provider = Some(session.provider);
+    hit.provider_session_id = session.external_session_id.clone();
     hit.session_id = Some(session.id);
     if hit.cwd.is_none() {
         hit.cwd = source_for_id(session.capture_source_id, context)
@@ -1046,10 +1061,15 @@ fn event_hit(event: &Event, context: &RecordContext) -> HitMetadata {
     hit.event_seq = Some(event.seq);
     hit.cursor = event_cursor(event).or(hit.cursor);
     if hit.provider.is_none() {
-        hit.provider = event
+        if let Some(session) = event
             .session_id
             .and_then(|id| context.sessions.iter().find(|session| session.id == id))
-            .map(|session| session.provider);
+        {
+            hit.provider = Some(session.provider);
+            if hit.provider_session_id.is_none() {
+                hit.provider_session_id = session.external_session_id.clone();
+            }
+        }
     }
     hit
 }
@@ -1083,6 +1103,7 @@ fn source_hit(
     HitMetadata {
         time,
         provider: Some(source.descriptor.provider),
+        provider_session_id: source.descriptor.external_session_id.clone(),
         session_id: None,
         event_id: None,
         event_seq: None,
@@ -1163,8 +1184,11 @@ fn event_text(event: &Event) -> String {
     ])
 }
 
-fn event_preview_text(event: &Event) -> String {
-    if event.redaction_state == RedactionState::Raw {
+pub fn event_preview_text(event: &Event) -> String {
+    if matches!(
+        event.redaction_state,
+        RedactionState::Raw | RedactionState::Withheld
+    ) {
         return "raw event payload withheld".to_owned();
     }
     if let Some(preview) = event_payload_preview(&event.payload) {
@@ -1536,6 +1560,30 @@ mod tests {
         assert!(snippet.contains("password=[REDACTED_SECRET]"));
         assert!(!snippet.contains("ghp_123456"));
         assert!(!snippet.contains("hunter2"));
+    }
+
+    #[test]
+    fn withheld_events_do_not_render_payload_previews() {
+        let event = Event {
+            id: Uuid::parse_str("018f45d0-0000-7000-8000-000000000010").unwrap(),
+            seq: 1,
+            history_record_id: None,
+            session_id: None,
+            run_id: None,
+            event_type: EventType::Message,
+            role: Some(EventRole::Assistant),
+            occurred_at: fixed_time(),
+            capture_source_id: None,
+            payload: serde_json::json!({"text": "secret payload that must not render"}),
+            payload_blob_id: None,
+            dedupe_key: None,
+            redaction_state: RedactionState::Withheld,
+            sync: sync_metadata(),
+        };
+
+        let preview = event_preview_text(&event);
+        assert_eq!(preview, "raw event payload withheld");
+        assert!(!preview.contains("secret payload"));
     }
 
     #[test]

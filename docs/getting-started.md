@@ -67,18 +67,22 @@ When `--path` is used without `--provider`, ctx treats the path as Codex format.
 ```bash
 ctx search "failed migration"
 ctx search "failed migration" --json
-ctx show <item-uuid>
+ctx show event <ctx-event-id> --window 3
+ctx show session <ctx-session-id> --mode lite
 ```
 
-Use result IDs with `ctx show` when you need surrounding events. Search also
-accepts filters such as `--provider`, `--repo`, `--since`, `--event-type`,
-`--file`, `--primary-only`, `--include-subagents`, and `--limit`.
+Use `ctx_event_id` with `ctx show event` when you need a hit plus surrounding
+events. Use `ctx_session_id` with `ctx show session` when you need the
+transcript. Search also accepts filters such as `--provider`, `--repo`,
+`--since`, `--event-type`, `--file`, `--primary-only`, `--include-subagents`,
+and `--limit`.
 
 ## 6. Use Search JSON For Agents
 
 ```bash
 ctx search "failed migration" --json
-ctx show <item-uuid> --json
+ctx show event <ctx-event-id> --format json
+ctx show session <ctx-session-id> --mode lite --format json
 ```
 
 Search JSON is the supported machine-readable retrieval API. It contains cited

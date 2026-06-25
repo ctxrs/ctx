@@ -1,6 +1,7 @@
 # Search
 
-`ctx search` finds matching indexed sessions and events. It first performs a
+`ctx search` finds matching indexed history, with event hits preferred when
+event context is available. It first performs a
 quiet best-effort refresh of discovered native provider history, then queries
 the local SQLite store.
 
@@ -19,18 +20,27 @@ ctx search "token budget" --limit 5 --json
 
 A result can include:
 
-- an opaque item ID usable with `ctx show`;
+- `ctx_event_id`, the ctx-owned event ID for event hits;
+- `ctx_session_id`, the ctx-owned session ID when known;
+- `provider_session_id`, the provider-owned session ID when known;
 - title or event label;
 - snippet with redaction and truncation where needed;
 - rank and match reasons;
 - provider;
-- session ID;
-- event ID or event sequence;
+- event sequence;
 - timestamp;
 - working directory when known;
 - source path and cursor when available;
 - source availability flag when known;
-- citations.
+- citations;
+- `suggested_next_commands`, copyable commands for `ctx show`, `ctx locate`,
+  and `ctx export`.
+
+Search result IDs are ctx-owned. Provider-owned IDs are exposed as metadata so
+humans can recognize the original provider session, but they are not positional
+lookup IDs. Provider-owned lookup must be explicit, for example
+`--provider codex --provider-session <provider-session-id>` on commands that
+support it.
 
 ## Filters
 

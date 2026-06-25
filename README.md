@@ -13,7 +13,8 @@ The current production surface is intentionally narrow:
 - discover local provider history locations;
 - explicitly import supported local transcripts;
 - store a searchable local SQLite index under `~/.ctx` by default;
-- search indexed sessions and events;
+- search indexed events and return ctx-owned event/session IDs;
+- render, locate, and export indexed session transcripts;
 - return JSON for agent-facing workflows;
 - keep imported transcript text, prompts, and search data in local storage by
   default.
@@ -69,7 +70,9 @@ Search and inspect results:
 ```bash
 ctx list
 ctx search "checkout retry"
-ctx show <item-uuid>
+ctx show event <ctx-event-id> --window 3
+ctx show session <ctx-session-id> --mode lite
+ctx locate event <ctx-event-id>
 ```
 
 Use JSON for agent workflows:
@@ -89,8 +92,12 @@ ctx status
 ctx sources
 ctx import
 ctx list
-ctx show <item-uuid>
 ctx search [query]
+ctx show session <ctx-session-id>
+ctx show event <ctx-event-id>
+ctx locate session <ctx-session-id>
+ctx locate event <ctx-event-id>
+ctx export session <ctx-session-id>
 ctx doctor
 ctx validate
 ```
@@ -110,8 +117,12 @@ ctx status --json
 ctx sources --json
 ctx import --json
 ctx list --json
-ctx show <item-uuid> --json
 ctx search [query] --json
+ctx show session <ctx-session-id> --format json
+ctx show event <ctx-event-id> --format json
+ctx locate session <ctx-session-id> --format json
+ctx locate event <ctx-event-id> --format json
+ctx export session <ctx-session-id> --mode full --format json
 ctx doctor --json
 ctx validate --json
 ```
@@ -122,10 +133,13 @@ ctx indexes provider history as sessions and events. An event may be a user
 message, assistant message, tool call, command, command output preview, file
 reference, lifecycle marker, or provider-specific metadata.
 
-Search results include opaque IDs for `ctx show`, provider names, timestamps,
-working-directory metadata when known, snippets, match reasons, and citations.
-Raw provider transcript files remain in provider-owned locations such as
-`~/.codex/sessions`; ctx stores the searchable text and metadata it needs in
+Search results are local hits over indexed history. Event hits include
+ctx-owned `ctx_event_id`; hits with known session context include
+`ctx_session_id`. Results can also include provider names and provider-owned
+session IDs as metadata, timestamps, working-directory metadata when known,
+source paths/cursors, snippets, match reasons, citations, and suggested next
+commands. Raw provider transcript files remain in provider-owned locations such
+as `~/.codex/sessions`; ctx stores the searchable text and metadata it needs in
 SQLite.
 
 ## Docs
@@ -150,8 +164,8 @@ SQLite.
 
 Validation modes are documented in
 [Testing taxonomy](docs/testing-taxonomy.md). The default production boundary is
-still search-only and local: validation must not imply background collection,
-remote account, API-key, or provider-execution behavior.
+still local retrieval: validation must not imply background collection, remote
+account, API-key, or provider-execution behavior.
 
 For docs-only changes, start with:
 

@@ -134,31 +134,70 @@ Returns:
 Items include:
 
 - `id`, a compatibility alias for `item_id`;
-- `item_id`, the opaque identifier to pass to `ctx show`;
-- `item_type`, such as `agent_history` or `session`;
+- `item_id`, the ctx-owned identifier;
+- `item_type`, such as `session` or a compatibility indexed item type;
 - fields available for that indexed item.
 
-Session rows can include `provider`, `external_session_id`, `agent_type`,
+Session rows can include `provider`, `provider_session_id`, `agent_type`,
 `role`, `is_primary`, `status`, `started_at`, `ended_at`, `source_id`,
 `source_path`, and `source_exists`.
 
 ## Show
 
 ```bash
-ctx show <item-uuid> --json
+ctx show session <ctx-session-id> --format json
+ctx show event <ctx-event-id> --format json
 ```
 
 Writes nothing and returns:
 
 - `schema_version`;
-- `item`;
-- `events[]` for sessions and indexed items;
-- `sessions[]` for indexed items.
+- `item_type`, either `session_transcript` or `event_window`;
+- `mode` for session transcripts;
+- `format`;
+- `session` for session output;
+- `event` for event output;
+- `source`;
+- `events[]`.
 
-`show --json` does not serialize raw store row shapes. Events are projected to
-local/private previews with `event_id`, `item_id`, `item_type`, `session_id`,
-`sequence`, `event_type`, `role`, `occurred_at`, `source_id`, `source_path`,
-`source_exists`, `cursor`, `preview`, and `redaction_state`.
+`session` includes the ctx-owned `item_id`, `provider`, and
+`provider_session_id` when known. `event` and `events[]` rows include
+`ctx_event_id`, `ctx_session_id`, `sequence`, `event_type`, `role`,
+`occurred_at`, `source`, `cursor`, `text` or `preview`, and
+`redaction_state`.
+
+## Locate
+
+```bash
+ctx locate session <ctx-session-id> --format json
+ctx locate event <ctx-event-id> --format json
+```
+
+Writes nothing and returns provenance metadata:
+
+- `schema_version`;
+- `item_type`, either `session_location` or `event_location`;
+- `ctx_session_id`;
+- `ctx_event_id` for event output;
+- `provider`;
+- `provider_session_id` when known;
+- `source`;
+- `resume`.
+
+`source` includes `path`, `cursor`, `exists`, `source_id`, and
+`source_format` when known. `resume` includes provider cursor or import resume
+metadata when available.
+
+## Export
+
+```bash
+ctx export session <ctx-session-id> --mode full --format json --out transcript.json
+```
+
+With `--out`, writes the requested transcript artifact to that path and prints
+nothing on success. Without `--out`, stdout is the requested transcript
+artifact. JSON and JSONL artifact rows use the same ctx-owned ID fields as
+`show`.
 
 ## Search
 
@@ -179,10 +218,9 @@ Returns:
 
 Each result can include:
 
-- `item_id`, the opaque item identifier used with `ctx show`;
-- `item_type`, such as `agent_history`;
-- `session_id`;
-- `event_id`;
+- `ctx_event_id` for event hits;
+- `ctx_session_id` when known;
+- `provider_session_id`;
 - `event_seq`;
 - `title`;
 - `snippet`;
@@ -195,8 +233,12 @@ Each result can include:
 - `cursor`;
 - `why_matched`;
 - `citations[]`;
-- `links`;
+- `suggested_next_commands[]`;
 - `visibility`.
+
+`suggested_next_commands` can include `ctx show event`, `ctx show session`,
+`ctx locate event`, `ctx locate session`, and `ctx export session` command
+strings when the required ctx IDs are known.
 
 ## Citation Fields
 
@@ -204,6 +246,8 @@ Citations can include:
 
 - `item_id`;
 - `item_type`;
+- `ctx_event_id`;
+- `ctx_session_id`;
 - `label`;
 - `time`;
 - `provider`;
@@ -236,5 +280,7 @@ schemas above; there is no separate provider artifact schema in the public CLI.
 
 ## Compatibility Limits
 
-`list --json` currently includes `id` as an alias for `item_id` because it was
-part of the early local output. New agents should prefer `item_id`.
+Compatibility `item_id`, `id`, `session_id`, and `event_id` fields can remain
+in some outputs. New integrations should prefer ctx-owned `ctx_session_id` and
+`ctx_event_id` where present, and should treat provider-owned IDs as metadata
+unless an explicit provider lookup flag is present.

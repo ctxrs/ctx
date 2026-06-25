@@ -80,8 +80,8 @@ case "${mode}" in
     run_cargo_test --workspace
     ;;
   cli_contract_tests)
-    run_cargo_test -p ctx --test cli help_exposes_only_search_mvp_commands
-    run_cargo_test -p ctx --test cli public_subcommand_help_is_golden_enough_for_search_mvp
+    run_cargo_test -p ctx --test cli help_exposes_session_retrieval_commands
+    run_cargo_test -p ctx --test cli public_subcommand_help_is_golden_enough_for_session_retrieval
     run_cargo_test -p ctx --test cli provider_help_matches_implemented_importers
     ;;
   docs_check)

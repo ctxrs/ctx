@@ -37,7 +37,7 @@ use ctx_history_capture::{
 };
 use ctx_history_core::{
     database_path, default_data_root, CaptureProvider, ContextCitation, ContextCitationType, Event,
-    EventType, HistoryRecord, ProviderRawRetention, Session,
+    EventRole, EventType, HistoryRecord, ProviderRawRetention, RedactionState, Session,
 };
 use ctx_history_store::{CatalogSession, CatalogSourceIndexUpdate, Store};
 
@@ -64,8 +64,12 @@ enum CommandRoot {
     Import(ImportArgs),
     #[command(about = "List indexed agent history items")]
     List(ListArgs),
-    #[command(about = "Show one indexed agent history item")]
+    #[command(about = "Show an indexed session transcript or event")]
     Show(ShowArgs),
+    #[command(about = "Locate provider/source metadata for an indexed session or event")]
+    Locate(LocateArgs),
+    #[command(about = "Export an indexed session transcript")]
+    Export(ExportArgs),
     #[command(about = "Search indexed agent history")]
     Search(SearchArgs),
     #[command(about = "Check local ctx health")]
@@ -124,9 +128,109 @@ struct ListArgs {
 
 #[derive(Debug, Args)]
 struct ShowArgs {
-    id: Uuid,
+    #[command(subcommand)]
+    target: ShowTarget,
+}
+
+#[derive(Debug, Subcommand)]
+enum ShowTarget {
+    #[command(about = "Show a session transcript")]
+    Session(ShowSessionArgs),
+    #[command(about = "Show one event or a surrounding event window")]
+    Event(ShowEventArgs),
+}
+
+#[derive(Debug, Args)]
+struct ShowSessionArgs {
+    id: Option<Uuid>,
+    #[arg(long, value_enum)]
+    provider: Option<ProviderArg>,
+    #[arg(long = "provider-session")]
+    provider_session: Option<String>,
+    #[arg(long, value_enum, default_value_t = TranscriptMode::Full)]
+    mode: TranscriptMode,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    format: OutputFormat,
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ShowEventArgs {
+    id: Uuid,
+    #[arg(long, default_value_t = 0)]
+    before: usize,
+    #[arg(long, default_value_t = 0)]
+    after: usize,
+    #[arg(long)]
+    window: Option<usize>,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    format: OutputFormat,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct LocateArgs {
+    #[command(subcommand)]
+    target: LocateTarget,
+}
+
+#[derive(Debug, Subcommand)]
+enum LocateTarget {
+    #[command(about = "Locate provider/source metadata for a session")]
+    Session(LocateSessionArgs),
+    #[command(about = "Locate provider/source metadata for an event")]
+    Event(LocateEventArgs),
+}
+
+#[derive(Debug, Args)]
+struct LocateSessionArgs {
+    id: Option<Uuid>,
+    #[arg(long, value_enum)]
+    provider: Option<ProviderArg>,
+    #[arg(long = "provider-session")]
+    provider_session: Option<String>,
+    #[arg(long, value_enum, default_value_t = LocateFormat::Text)]
+    format: LocateFormat,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct LocateEventArgs {
+    id: Uuid,
+    #[arg(long, value_enum, default_value_t = LocateFormat::Text)]
+    format: LocateFormat,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ExportArgs {
+    #[command(subcommand)]
+    target: ExportTarget,
+}
+
+#[derive(Debug, Subcommand)]
+enum ExportTarget {
+    #[command(about = "Export a session transcript")]
+    Session(ExportSessionArgs),
+}
+
+#[derive(Debug, Args)]
+struct ExportSessionArgs {
+    id: Option<Uuid>,
+    #[arg(long, value_enum)]
+    provider: Option<ProviderArg>,
+    #[arg(long = "provider-session")]
+    provider_session: Option<String>,
+    #[arg(long, value_enum, default_value_t = TranscriptMode::Full)]
+    mode: TranscriptMode,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Markdown)]
+    format: OutputFormat,
+    #[arg(long)]
+    out: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -161,6 +265,8 @@ impl CommandRoot {
             Self::Import(_) => "import",
             Self::List(_) => "list",
             Self::Show(_) => "show",
+            Self::Locate(_) => "locate",
+            Self::Export(_) => "export",
             Self::Search(_) => "search",
             Self::Doctor(_) => "doctor",
             Self::Validate(_) => "validate",
@@ -174,10 +280,90 @@ impl CommandRoot {
             Self::Sources(args) => args.json,
             Self::Import(args) => args.json,
             Self::List(args) => args.json,
-            Self::Show(args) => args.json,
+            Self::Show(args) => args.json_output(),
+            Self::Locate(args) => args.json_output(),
+            Self::Export(args) => args.json_output(),
             Self::Search(args) => args.json,
             Self::Doctor(args) => args.json,
             Self::Validate(args) => args.json,
+        }
+    }
+}
+
+impl ShowArgs {
+    fn json_output(&self) -> bool {
+        match &self.target {
+            ShowTarget::Session(args) => args.json || args.format == OutputFormat::Json,
+            ShowTarget::Event(args) => args.json || args.format == OutputFormat::Json,
+        }
+    }
+}
+
+impl LocateArgs {
+    fn json_output(&self) -> bool {
+        match &self.target {
+            LocateTarget::Session(args) => args.json || args.format == LocateFormat::Json,
+            LocateTarget::Event(args) => args.json || args.format == LocateFormat::Json,
+        }
+    }
+}
+
+impl ExportArgs {
+    fn json_output(&self) -> bool {
+        matches!(
+            &self.target,
+            ExportTarget::Session(args) if args.out.is_none() && args.format == OutputFormat::Json
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum TranscriptMode {
+    Full,
+    Lite,
+    Log,
+}
+
+impl TranscriptMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Lite => "lite",
+            Self::Log => "log",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum OutputFormat {
+    Text,
+    Markdown,
+    Json,
+    Jsonl,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum LocateFormat {
+    Text,
+    Json,
+}
+
+impl LocateFormat {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Json => "json",
+        }
+    }
+}
+
+impl OutputFormat {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Markdown => "markdown",
+            Self::Json => "json",
+            Self::Jsonl => "jsonl",
         }
     }
 }
@@ -659,6 +845,8 @@ fn main() -> Result<()> {
         CommandRoot::Import(args) => run_import(args, data_root.clone(), &mut analytics_properties),
         CommandRoot::List(args) => run_list(args, data_root.clone(), &mut analytics_properties),
         CommandRoot::Show(args) => run_show(args, data_root.clone(), &mut analytics_properties),
+        CommandRoot::Locate(args) => run_locate(args, data_root.clone(), &mut analytics_properties),
+        CommandRoot::Export(args) => run_export(args, data_root.clone(), &mut analytics_properties),
         CommandRoot::Search(args) => run_search(args, data_root.clone(), &mut analytics_properties),
         CommandRoot::Doctor(args) => run_doctor(args, data_root.clone(), &mut analytics_properties),
         CommandRoot::Validate(args) => {
@@ -725,9 +913,55 @@ fn command_analytics_properties(command: &CommandRoot) -> AnalyticsProperties {
         CommandRoot::List(args) => {
             analytics::insert_count_bucket(&mut properties, "limit_bucket", args.limit as u64);
         }
-        CommandRoot::Show(_) => {
-            analytics::insert_str(&mut properties, "target_kind", "unknown_id");
-        }
+        CommandRoot::Show(args) => match &args.target {
+            ShowTarget::Session(args) => {
+                analytics::insert_str(&mut properties, "target_kind", "session");
+                analytics::insert_str(&mut properties, "transcript_mode", args.mode.as_str());
+                analytics::insert_str(&mut properties, "output_format", args.format.as_str());
+                analytics::insert_bool(
+                    &mut properties,
+                    "provider_lookup",
+                    args.provider.is_some() || args.provider_session.is_some(),
+                );
+            }
+            ShowTarget::Event(args) => {
+                analytics::insert_str(&mut properties, "target_kind", "event");
+                analytics::insert_str(&mut properties, "output_format", args.format.as_str());
+                analytics::insert_count_bucket(
+                    &mut properties,
+                    "window_bucket",
+                    args.window.unwrap_or(args.before.max(args.after)) as u64,
+                );
+            }
+        },
+        CommandRoot::Locate(args) => match &args.target {
+            LocateTarget::Session(args) => {
+                analytics::insert_str(&mut properties, "target_kind", "session");
+                analytics::insert_str(&mut properties, "output_format", args.format.as_str());
+                analytics::insert_bool(
+                    &mut properties,
+                    "provider_lookup",
+                    args.provider.is_some() || args.provider_session.is_some(),
+                );
+            }
+            LocateTarget::Event(args) => {
+                analytics::insert_str(&mut properties, "target_kind", "event");
+                analytics::insert_str(&mut properties, "output_format", args.format.as_str());
+            }
+        },
+        CommandRoot::Export(args) => match &args.target {
+            ExportTarget::Session(args) => {
+                analytics::insert_str(&mut properties, "target_kind", "session");
+                analytics::insert_str(&mut properties, "transcript_mode", args.mode.as_str());
+                analytics::insert_str(&mut properties, "output_format", args.format.as_str());
+                analytics::insert_bool(&mut properties, "writes_out_file", args.out.is_some());
+                analytics::insert_bool(
+                    &mut properties,
+                    "provider_lookup",
+                    args.provider.is_some() || args.provider_session.is_some(),
+                );
+            }
+        },
         CommandRoot::Search(args) => {
             analytics::insert_bool(&mut properties, "has_query", args.query.is_some());
             analytics::insert_bool(
@@ -1306,35 +1540,26 @@ fn run_list(
     analytics_properties: &mut AnalyticsProperties,
 ) -> Result<()> {
     let store = Store::open(database_path(data_root))?;
-    let records = store.list_records(args.limit)?;
-    let remaining = args.limit.saturating_sub(records.len());
     let sessions = store
         .list_sessions()?
         .into_iter()
-        .take(remaining)
+        .take(args.limit)
         .collect::<Vec<_>>();
-    let item_count = records.len() + sessions.len();
     analytics::insert_count_bucket(
         analytics_properties,
         "items_returned_bucket",
-        item_count as u64,
+        sessions.len() as u64,
     );
     if args.json {
-        let mut items = Vec::new();
-        for record in records {
-            items.push(ListItemDto::record(&record));
-        }
-        for session in sessions {
-            items.push(ListItemDto::session(&session));
-        }
+        let items = sessions
+            .iter()
+            .map(ListItemDto::session)
+            .collect::<Vec<_>>();
         print_json(json!({
             "schema_version": 1,
             "items": items,
         }))?;
     } else {
-        for record in records {
-            println!("{} {}", record.id, record.title);
-        }
         for session in sessions {
             println!(
                 "{} session {}",
@@ -1354,142 +1579,755 @@ fn run_show(
     analytics_properties: &mut AnalyticsProperties,
 ) -> Result<()> {
     let store = Store::open(database_path(data_root))?;
-    let Ok(record) = store.get_record(args.id) else {
-        let session = store.get_session(args.id)?;
-        let events = store.events_for_session(session.id)?;
-        analytics::insert_str(analytics_properties, "target_kind", "session");
-        analytics::insert_count_bucket(
-            analytics_properties,
-            "events_returned_bucket",
-            events.len() as u64,
-        );
-        if args.json {
-            print_json(compact_json(json!({
-                "schema_version": 1,
-                "item": ShowDto::session(&store, &session),
-                "events": events
-                    .iter()
-                    .map(|event| ShowDto::event(&store, event))
-                    .collect::<Vec<_>>(),
-            })))?;
-        } else {
-            println!("id: {}", session.id);
-            println!("kind: session");
-            println!("provider: {}", session.provider);
-            if let Some(external_session_id) = session.external_session_id {
-                println!("external_session_id: {external_session_id}");
-            }
-            if !events.is_empty() {
-                println!();
-                println!("events:");
-                for event in events.iter().take(20) {
-                    println!(
-                        "  {} {:?} {}",
-                        event.id,
-                        event.event_type,
-                        event_preview(event)
-                    );
-                }
-            }
+    match args.target {
+        ShowTarget::Session(args) => {
+            let session = resolve_session(
+                &store,
+                args.id,
+                args.provider.map(ProviderArg::capture_provider),
+                args.provider_session.as_deref(),
+            )?;
+            let events = store.events_for_session(session.id)?;
+            analytics::insert_count_bucket(
+                analytics_properties,
+                "events_returned_bucket",
+                events.len() as u64,
+            );
+            let format = effective_format(args.format, args.json);
+            write_rendered_session(&store, &session, &events, args.mode, format, None)?;
         }
-        return Ok(());
-    };
-    let sessions = store.sessions_for_record(record.id)?;
-    let events = store.events_for_record(record.id)?;
-    analytics::insert_str(analytics_properties, "target_kind", "agent_history");
-    analytics::insert_count_bucket(
-        analytics_properties,
-        "sessions_returned_bucket",
-        sessions.len() as u64,
-    );
-    analytics::insert_count_bucket(
-        analytics_properties,
-        "events_returned_bucket",
-        events.len() as u64,
-    );
-    if args.json {
-        print_json(compact_json(json!({
-            "schema_version": 1,
-            "item": ShowDto::record(&record),
-            "sessions": sessions
-                .iter()
-                .map(|session| ShowDto::session(&store, session))
-                .collect::<Vec<_>>(),
-            "events": events
-                .iter()
-                .map(|event| ShowDto::event(&store, event))
-                .collect::<Vec<_>>(),
-        })))?;
-    } else {
-        println!("id: {}", record.id);
-        println!("title: {}", record.title);
-        if !record.body.trim().is_empty() {
-            println!();
-            println!("{}", record.body);
-        }
-        if !sessions.is_empty() {
-            println!();
-            println!("sessions:");
-            for session in sessions {
-                println!(
-                    "  {} {} {:?}",
-                    session.id, session.provider, session.agent_type
-                );
-            }
-        }
-        if !events.is_empty() {
-            println!();
-            println!("events:");
-            for event in events.iter().take(20) {
-                println!("  {} {}", event.id, event.event_type.as_str());
-            }
+        ShowTarget::Event(args) => {
+            let event = store.get_event(args.id)?;
+            let events = event_window(&store, &event, args.before, args.after, args.window)?;
+            analytics::insert_count_bucket(
+                analytics_properties,
+                "events_returned_bucket",
+                events.len() as u64,
+            );
+            let format = effective_format(args.format, args.json);
+            write_rendered_events(&store, &event, &events, format, None)?;
         }
     }
     Ok(())
 }
 
 fn event_preview(event: &Event) -> String {
-    for key in ["text", "summary", "command", "message"] {
-        if let Some(value) = event.payload.get(key).and_then(|value| value.as_str()) {
-            return ctx_history_search::redacted_snippet(value, 120);
-        }
+    let preview = ctx_history_search::event_preview_text(event);
+    if preview.trim().is_empty() {
+        format!("{} event", event.event_type.as_str())
+    } else {
+        ctx_history_search::redacted_snippet(&preview, 120)
     }
-    if let Some(body) = event.payload.get("body") {
-        for key in [
-            "arguments_preview",
-            "text",
-            "summary",
-            "command",
-            "message",
-            "tool",
-            "name",
-        ] {
-            if let Some(value) = body.get(key).and_then(|value| value.as_str()) {
-                return ctx_history_search::redacted_snippet(value, 120);
+}
+
+fn run_locate(
+    args: LocateArgs,
+    data_root: PathBuf,
+    _analytics_properties: &mut AnalyticsProperties,
+) -> Result<()> {
+    let store = Store::open(database_path(data_root))?;
+    match args.target {
+        LocateTarget::Session(args) => {
+            let session = resolve_session(
+                &store,
+                args.id,
+                args.provider.map(ProviderArg::capture_provider),
+                args.provider_session.as_deref(),
+            )?;
+            let value = locate_session_json(&store, &session);
+            if locate_json_output(args.format, args.json) {
+                print_json(value)?;
+            } else {
+                print_locate_session_text(&value)?;
+            }
+        }
+        LocateTarget::Event(args) => {
+            let event = store.get_event(args.id)?;
+            let value = locate_event_json(&store, &event);
+            if locate_json_output(args.format, args.json) {
+                print_json(value)?;
+            } else {
+                print_locate_event_text(&value)?;
             }
         }
     }
-    format!("{} event", event.event_type.as_str())
+    Ok(())
+}
+
+fn run_export(
+    args: ExportArgs,
+    data_root: PathBuf,
+    analytics_properties: &mut AnalyticsProperties,
+) -> Result<()> {
+    let store = Store::open(database_path(data_root))?;
+    match args.target {
+        ExportTarget::Session(args) => {
+            let session = resolve_session(
+                &store,
+                args.id,
+                args.provider.map(ProviderArg::capture_provider),
+                args.provider_session.as_deref(),
+            )?;
+            let events = store.events_for_session(session.id)?;
+            analytics::insert_count_bucket(
+                analytics_properties,
+                "events_returned_bucket",
+                events.len() as u64,
+            );
+            write_rendered_session(&store, &session, &events, args.mode, args.format, args.out)?;
+        }
+    }
+    Ok(())
+}
+
+fn effective_format(format: OutputFormat, json: bool) -> OutputFormat {
+    if json {
+        OutputFormat::Json
+    } else {
+        format
+    }
+}
+
+fn locate_json_output(format: LocateFormat, json: bool) -> bool {
+    json || format == LocateFormat::Json
+}
+
+fn resolve_session(
+    store: &Store,
+    id: Option<Uuid>,
+    provider: Option<CaptureProvider>,
+    provider_session: Option<&str>,
+) -> Result<Session> {
+    if let Some(id) = id {
+        return store.get_session(id).with_context(|| {
+            format!("session {id} was not found; use `ctx search --json` to get ctx_session_id")
+        });
+    }
+    let provider = provider.ok_or_else(|| {
+        anyhow!(
+            "session lookup requires either a ctx session id or --provider with --provider-session"
+        )
+    })?;
+    let provider_session = provider_session
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            anyhow!("session lookup requires --provider-session when no ctx session id is provided")
+        })?;
+    let matches = store
+        .list_sessions()?
+        .into_iter()
+        .filter(|session| {
+            session.provider == provider
+                && session.external_session_id.as_deref() == Some(provider_session)
+        })
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [session] => Ok(session.clone()),
+        [] => Err(anyhow!(
+            "no {provider} session with provider_session_id {provider_session:?} is indexed"
+        )),
+        _ => Err(anyhow!(
+            "multiple {provider} sessions with provider_session_id {provider_session:?} are indexed; use ctx_session_id"
+        )),
+    }
+}
+
+fn event_window(
+    store: &Store,
+    event: &Event,
+    before: usize,
+    after: usize,
+    window: Option<usize>,
+) -> Result<Vec<Event>> {
+    let Some(session_id) = event.session_id else {
+        return Ok(vec![event.clone()]);
+    };
+    let events = store.events_for_session(session_id)?;
+    let Some(index) = events.iter().position(|candidate| candidate.id == event.id) else {
+        return Ok(vec![event.clone()]);
+    };
+    let (before, after) = window
+        .map(|window| (window, window))
+        .unwrap_or((before, after));
+    let start = index.saturating_sub(before);
+    let end = (index + after + 1).min(events.len());
+    Ok(events[start..end].to_vec())
+}
+
+fn write_rendered_session(
+    store: &Store,
+    session: &Session,
+    events: &[Event],
+    mode: TranscriptMode,
+    format: OutputFormat,
+    out: Option<PathBuf>,
+) -> Result<()> {
+    let body = match format {
+        OutputFormat::Text => render_session_text(store, session, events, mode),
+        OutputFormat::Markdown => render_session_markdown(store, session, events, mode),
+        OutputFormat::Json => serde_json::to_string_pretty(&session_transcript_json(
+            store, session, events, mode, format,
+        ))?,
+        OutputFormat::Jsonl => render_session_jsonl(store, session, events, mode)?,
+    };
+    write_output(body, out)
+}
+
+fn write_rendered_events(
+    store: &Store,
+    selected: &Event,
+    events: &[Event],
+    format: OutputFormat,
+    out: Option<PathBuf>,
+) -> Result<()> {
+    let body = match format {
+        OutputFormat::Text => render_events_text(store, selected, events),
+        OutputFormat::Markdown => render_events_markdown(store, selected, events),
+        OutputFormat::Json => {
+            serde_json::to_string_pretty(&event_window_json(store, selected, events, format))?
+        }
+        OutputFormat::Jsonl => render_events_jsonl(store, events)?,
+    };
+    write_output(body, out)
+}
+
+fn write_output(body: String, out: Option<PathBuf>) -> Result<()> {
+    if let Some(out) = out {
+        if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&out, body).with_context(|| format!("write {}", out.display()))?;
+    } else {
+        print!("{body}");
+        if !body.ends_with('\n') {
+            println!();
+        }
+    }
+    Ok(())
+}
+
+fn selected_transcript_events(events: &[Event], mode: TranscriptMode) -> Vec<&Event> {
+    match mode {
+        TranscriptMode::Log => events.iter().collect(),
+        TranscriptMode::Full => events.iter().filter(|event| is_message(event)).collect(),
+        TranscriptMode::Lite => lite_transcript_events(events),
+    }
+}
+
+fn lite_transcript_events(events: &[Event]) -> Vec<&Event> {
+    let mut selected = Vec::new();
+    let mut pending_assistant: Option<&Event> = None;
+    for event in events {
+        if is_user_message(event) {
+            if let Some(assistant) = pending_assistant.take() {
+                selected.push(assistant);
+            }
+            selected.push(event);
+        } else if is_assistant_message(event) {
+            pending_assistant = Some(event);
+        }
+    }
+    if let Some(assistant) = pending_assistant {
+        selected.push(assistant);
+    }
+    selected
+}
+
+fn is_message(event: &Event) -> bool {
+    event.event_type == EventType::Message
+        && matches!(
+            event.role,
+            Some(EventRole::User | EventRole::Assistant | EventRole::System)
+        )
+}
+
+fn is_user_message(event: &Event) -> bool {
+    event.event_type == EventType::Message && event.role == Some(EventRole::User)
+}
+
+fn is_assistant_message(event: &Event) -> bool {
+    event.event_type == EventType::Message && event.role == Some(EventRole::Assistant)
+}
+
+fn event_content(event: &Event) -> String {
+    if matches!(
+        event.redaction_state,
+        RedactionState::Raw | RedactionState::Withheld
+    ) {
+        return "raw event payload withheld".to_owned();
+    }
+    if let Some(value) = event.payload.get("body").and_then(event_value_text) {
+        return ctx_history_search::redacted_snippet(&value, 16_000);
+    }
+    if let Some(value) = event_value_text(&event.payload) {
+        return ctx_history_search::redacted_snippet(&value, 16_000);
+    }
+    let preview = ctx_history_search::event_preview_text(event);
+    if preview.trim().is_empty() {
+        format!("{} event", event.event_type.as_str())
+    } else {
+        ctx_history_search::redacted_snippet(&preview, 16_000)
+    }
+}
+
+fn event_value_text(value: &Value) -> Option<String> {
+    if let Some(value) = value
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(value.to_owned());
+    }
+    let object = value.as_object()?;
+    for key in [
+        "text",
+        "preview",
+        "summary",
+        "command",
+        "output_preview",
+        "output",
+        "message",
+    ] {
+        if let Some(value) = object
+            .get(key)
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return Some(value.to_owned());
+        }
+    }
+    let structured = ["tool", "name", "arguments_preview", "status"]
+        .into_iter()
+        .filter_map(|key| object.get(key).and_then(|value| value.as_str()))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    if structured.is_empty() {
+        None
+    } else {
+        Some(structured.join(" "))
+    }
+}
+
+fn render_session_text(
+    store: &Store,
+    session: &Session,
+    events: &[Event],
+    mode: TranscriptMode,
+) -> String {
+    let mut out = String::new();
+    push_session_header(&mut out, store, session, mode, OutputFormat::Text);
+    for event in selected_transcript_events(events, mode) {
+        push_event_text_block(&mut out, event);
+    }
+    out
+}
+
+fn render_session_markdown(
+    store: &Store,
+    session: &Session,
+    events: &[Event],
+    mode: TranscriptMode,
+) -> String {
+    let mut out = String::new();
+    let label = session
+        .external_session_id
+        .clone()
+        .unwrap_or_else(|| session.id.to_string());
+    out.push_str(&format!("# {} session {}\n\n", session.provider, label));
+    push_session_metadata_markdown(&mut out, store, session, mode, OutputFormat::Markdown);
+    for event in selected_transcript_events(events, mode) {
+        let heading = event
+            .role
+            .map(|role| role.as_str())
+            .unwrap_or(event.event_type.as_str());
+        out.push_str(&format!(
+            "\n## {} - {} - {}\n\n",
+            heading,
+            event.event_type.as_str(),
+            event.occurred_at
+        ));
+        out.push_str(&format!("ctx_event_id: `{}`\n\n", event.id));
+        out.push_str(&event_content(event));
+        out.push('\n');
+    }
+    out
+}
+
+fn push_session_header(
+    out: &mut String,
+    store: &Store,
+    session: &Session,
+    mode: TranscriptMode,
+    format: OutputFormat,
+) {
+    out.push_str(&format!("ctx_session_id: {}\n", session.id));
+    out.push_str(&format!("provider: {}\n", session.provider));
+    if let Some(provider_session_id) = &session.external_session_id {
+        out.push_str(&format!("provider_session_id: {provider_session_id}\n"));
+    }
+    out.push_str(&format!("mode: {}\n", mode.as_str()));
+    out.push_str(&format!("format: {}\n", format.as_str()));
+    if let Some(source) = source_json_for(store, session.capture_source_id) {
+        if let Some(path) = source.get("path").and_then(|value| value.as_str()) {
+            out.push_str(&format!("source_path: {path}\n"));
+        }
+    }
+    out.push('\n');
+}
+
+fn push_session_metadata_markdown(
+    out: &mut String,
+    store: &Store,
+    session: &Session,
+    mode: TranscriptMode,
+    format: OutputFormat,
+) {
+    out.push_str(&format!("- ctx_session_id: `{}`\n", session.id));
+    out.push_str(&format!("- provider: `{}`\n", session.provider));
+    if let Some(provider_session_id) = &session.external_session_id {
+        out.push_str(&format!("- provider_session_id: `{provider_session_id}`\n"));
+    }
+    out.push_str(&format!("- mode: `{}`\n", mode.as_str()));
+    out.push_str(&format!("- format: `{}`\n", format.as_str()));
+    if let Some(source) = source_json_for(store, session.capture_source_id) {
+        if let Some(path) = source.get("path").and_then(|value| value.as_str()) {
+            out.push_str(&format!("- source_path: `{path}`\n"));
+        }
+    }
+}
+
+fn push_event_text_block(out: &mut String, event: &Event) {
+    let role = event.role.map(|role| role.as_str()).unwrap_or("-");
+    out.push_str(&format!(
+        "[{}] {} {} {}\n",
+        event.occurred_at,
+        role,
+        event.event_type.as_str(),
+        event.id
+    ));
+    out.push_str(&event_content(event));
+    out.push_str("\n\n");
+}
+
+fn render_events_text(store: &Store, selected: &Event, events: &[Event]) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("ctx_event_id: {}\n", selected.id));
+    if let Some(session_id) = selected.session_id {
+        out.push_str(&format!("ctx_session_id: {session_id}\n"));
+        if let Ok(session) = store.get_session(session_id) {
+            out.push_str(&format!("provider: {}\n", session.provider));
+            if let Some(provider_session_id) = session.external_session_id {
+                out.push_str(&format!("provider_session_id: {provider_session_id}\n"));
+            }
+        }
+    }
+    out.push('\n');
+    for event in events {
+        push_event_text_block(&mut out, event);
+    }
+    out
+}
+
+fn render_events_markdown(store: &Store, selected: &Event, events: &[Event]) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("# Event {}\n\n", selected.id));
+    if let Some(session_id) = selected.session_id {
+        out.push_str(&format!("- ctx_session_id: `{session_id}`\n"));
+        if let Ok(session) = store.get_session(session_id) {
+            out.push_str(&format!("- provider: `{}`\n", session.provider));
+            if let Some(provider_session_id) = session.external_session_id {
+                out.push_str(&format!("- provider_session_id: `{provider_session_id}`\n"));
+            }
+        }
+    }
+    for event in events {
+        let role = event.role.map(|role| role.as_str()).unwrap_or("-");
+        out.push_str(&format!(
+            "\n## {} - {} - {}\n\n",
+            role,
+            event.event_type.as_str(),
+            event.occurred_at
+        ));
+        out.push_str(&format!("ctx_event_id: `{}`\n\n", event.id));
+        out.push_str(&event_content(event));
+        out.push('\n');
+    }
+    out
+}
+
+fn session_transcript_json(
+    store: &Store,
+    session: &Session,
+    events: &[Event],
+    mode: TranscriptMode,
+    format: OutputFormat,
+) -> Value {
+    compact_json(json!({
+        "schema_version": 1,
+        "target": "session",
+        "item_type": "session_transcript",
+        "ctx_session_id": session.id,
+        "provider": session.provider,
+        "provider_session_id": session.external_session_id,
+        "mode": mode.as_str(),
+        "format": format.as_str(),
+        "session": ShowDto::session(store, session),
+        "source": source_json_for(store, session.capture_source_id),
+        "events": selected_transcript_events(events, mode)
+            .into_iter()
+            .map(|event| transcript_event_json(store, event))
+            .collect::<Vec<_>>(),
+    }))
+}
+
+fn event_window_json(
+    store: &Store,
+    selected: &Event,
+    events: &[Event],
+    format: OutputFormat,
+) -> Value {
+    compact_json(json!({
+        "schema_version": 1,
+        "target": "event",
+        "item_type": "event_window",
+        "ctx_event_id": selected.id,
+        "ctx_session_id": selected.session_id,
+        "format": format.as_str(),
+        "event": transcript_event_json(store, selected),
+        "events": events
+            .iter()
+            .map(|event| transcript_event_json(store, event))
+            .collect::<Vec<_>>(),
+    }))
+}
+
+fn transcript_event_json(store: &Store, event: &Event) -> Value {
+    let session = event.session_id.and_then(|id| store.get_session(id).ok());
+    compact_json(json!({
+        "ctx_event_id": event.id,
+        "item_id": event.id,
+        "item_type": "event",
+        "ctx_session_id": event.session_id,
+        "provider": session.as_ref().map(|session| session.provider),
+        "provider_session_id": session
+            .as_ref()
+            .and_then(|session| session.external_session_id.clone()),
+        "sequence": event.seq,
+        "event_type": event.event_type,
+        "role": event.role,
+        "occurred_at": event.occurred_at,
+        "source_id": event.capture_source_id,
+        "source_path": source_path_for(store, event.capture_source_id),
+        "source_exists": source_path_exists(source_path_for(store, event.capture_source_id).as_deref()),
+        "source": source_json_for(store, event.capture_source_id),
+        "cursor": event_cursor(event),
+        "preview": event_preview(event),
+        "text": event_content(event),
+        "redaction_state": event.redaction_state,
+    }))
+}
+
+fn render_session_jsonl(
+    store: &Store,
+    session: &Session,
+    events: &[Event],
+    mode: TranscriptMode,
+) -> Result<String> {
+    let mut lines = Vec::new();
+    for event in selected_transcript_events(events, mode) {
+        lines.push(serde_json::to_string(&compact_json(json!({
+            "schema_version": 1,
+            "item_type": "session_transcript_event",
+            "mode": mode.as_str(),
+            "ctx_session_id": session.id,
+            "provider": session.provider,
+            "provider_session_id": session.external_session_id,
+            "event": transcript_event_json(store, event),
+        })))?);
+    }
+    Ok(lines.join("\n") + "\n")
+}
+
+fn render_events_jsonl(store: &Store, events: &[Event]) -> Result<String> {
+    let mut lines = Vec::new();
+    for event in events {
+        lines.push(serde_json::to_string(&transcript_event_json(store, event))?);
+    }
+    Ok(lines.join("\n") + "\n")
+}
+
+fn locate_session_json(store: &Store, session: &Session) -> Value {
+    compact_json(json!({
+        "schema_version": 1,
+        "target": "session",
+        "item_type": "session_location",
+        "ctx_session_id": session.id,
+        "provider": session.provider,
+        "provider_session_id": session.external_session_id,
+        "parent_ctx_session_id": session.parent_session_id,
+        "root_ctx_session_id": session.root_session_id,
+        "agent_type": session.agent_type,
+        "role": session.role_hint,
+        "status": session.status,
+        "started_at": session.started_at,
+        "ended_at": session.ended_at,
+        "source": source_json_for(store, session.capture_source_id),
+        "resume": provider_resume_json(session.provider, session.external_session_id.as_deref()),
+    }))
+}
+
+fn locate_event_json(store: &Store, event: &Event) -> Value {
+    let session = event.session_id.and_then(|id| store.get_session(id).ok());
+    compact_json(json!({
+        "schema_version": 1,
+        "target": "event",
+        "item_type": "event_location",
+        "ctx_event_id": event.id,
+        "ctx_session_id": event.session_id,
+        "provider": session.as_ref().map(|session| session.provider),
+        "provider_session_id": session
+            .as_ref()
+            .and_then(|session| session.external_session_id.clone()),
+        "sequence": event.seq,
+        "event_type": event.event_type,
+        "role": event.role,
+        "occurred_at": event.occurred_at,
+        "source": source_json_for(store, event.capture_source_id),
+        "cursor": event_cursor(event),
+        "resume": session
+            .as_ref()
+            .map(|session| provider_resume_json(session.provider, session.external_session_id.as_deref())),
+    }))
+}
+
+fn source_json_for(store: &Store, source_id: Option<Uuid>) -> Option<Value> {
+    let source = source_id.and_then(|source_id| store.get_capture_source(source_id).ok())?;
+    let path = source.descriptor.raw_source_path.clone();
+    Some(compact_json(json!({
+        "source_id": source.id,
+        "provider": source.descriptor.provider,
+        "provider_session_id": source.descriptor.external_session_id,
+        "path": path,
+        "exists": source_path_exists(path.as_deref()),
+        "cwd": source.descriptor.cwd,
+        "started_at": source.started_at,
+        "ended_at": source.ended_at,
+        "source_format": source_format(&source.sync.metadata),
+        "cursor": source_cursor(&source.sync.metadata),
+    })))
+}
+
+fn source_format(metadata: &Value) -> Option<String> {
+    for pointer in [
+        "/source_format",
+        "/format",
+        "/provider/source_format",
+        "/source/source_format",
+    ] {
+        if let Some(value) = metadata.pointer(pointer).and_then(|value| value.as_str()) {
+            return Some(value.to_owned());
+        }
+    }
+    None
+}
+
+fn source_cursor(metadata: &Value) -> Option<String> {
+    metadata
+        .pointer("/cursor/after/cursor")
+        .and_then(|value| value.as_str())
+        .or_else(|| metadata.pointer("/cursor").and_then(|value| value.as_str()))
+        .map(str::to_owned)
+}
+
+fn provider_resume_json(provider: CaptureProvider, provider_session_id: Option<&str>) -> Value {
+    let (command, argv) = match (provider, provider_session_id) {
+        (CaptureProvider::Codex, Some(session_id)) => (
+            Some(format!("codex resume {}", shell_quote_arg(session_id))),
+            Some(vec![
+                "codex".to_owned(),
+                "resume".to_owned(),
+                session_id.to_owned(),
+            ]),
+        ),
+        _ => (None, None),
+    };
+    compact_json(json!({
+        "available": command.is_some(),
+        "command": command,
+        "argv": argv,
+    }))
+}
+
+fn shell_quote_arg(value: &str) -> String {
+    if !value.is_empty()
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '@'))
+    {
+        return value.to_owned();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn print_locate_session_text(value: &Value) -> Result<()> {
+    println!(
+        "ctx_session_id: {}",
+        value["ctx_session_id"].as_str().unwrap_or("")
+    );
+    print_optional_json_str(value, "provider");
+    print_optional_json_str(value, "provider_session_id");
+    if let Some(source) = value.get("source") {
+        print_optional_json_str(source, "path");
+        print_optional_json_str(source, "source_format");
+        if let Some(exists) = source.get("exists").and_then(|value| value.as_bool()) {
+            println!("source_exists: {exists}");
+        }
+    }
+    if let Some(command) = value
+        .get("resume")
+        .and_then(|resume| resume.get("command"))
+        .and_then(|value| value.as_str())
+    {
+        println!("resume_command: {command}");
+    }
+    Ok(())
+}
+
+fn print_locate_event_text(value: &Value) -> Result<()> {
+    println!(
+        "ctx_event_id: {}",
+        value["ctx_event_id"].as_str().unwrap_or("")
+    );
+    print_optional_json_str(value, "ctx_session_id");
+    print_optional_json_str(value, "provider");
+    print_optional_json_str(value, "provider_session_id");
+    print_optional_json_str(value, "event_type");
+    print_optional_json_str(value, "role");
+    print_optional_json_str(value, "cursor");
+    if let Some(source) = value.get("source") {
+        print_optional_json_str(source, "path");
+    }
+    Ok(())
+}
+
+fn print_optional_json_str(value: &Value, key: &str) {
+    if let Some(text) = value.get(key).and_then(|value| value.as_str()) {
+        println!("{key}: {text}");
+    }
 }
 
 impl ListItemDto {
-    fn record(record: &HistoryRecord) -> Value {
-        compact_json(json!({
-            "id": record.id,
-            "item_id": record.id,
-            "item_type": public_record_item_type(record),
-            "title": record.title,
-            "created_at": record.created_at,
-            "updated_at": record.updated_at,
-        }))
-    }
-
     fn session(session: &Session) -> Value {
         compact_json(json!({
             "id": session.id,
             "item_id": session.id,
+            "ctx_session_id": session.id,
             "item_type": "session",
             "provider": session.provider,
+            "provider_session_id": session.external_session_id,
             "external_session_id": session.external_session_id,
             "agent_type": session.agent_type,
             "started_at": session.started_at,
@@ -1499,20 +2337,6 @@ impl ListItemDto {
 }
 
 impl ShowDto {
-    fn record(record: &HistoryRecord) -> Value {
-        compact_json(json!({
-            "id": record.id,
-            "item_id": record.id,
-            "item_type": public_record_item_type(record),
-            "title": record.title,
-            "text": record.body,
-            "tags": record.tags,
-            "workspace": record.workspace,
-            "created_at": record.created_at,
-            "updated_at": record.updated_at,
-        }))
-    }
-
     fn session(store: &Store, session: &Session) -> Value {
         let source_path = source_path_for(store, session.capture_source_id);
         compact_json(json!({
@@ -1532,26 +2356,6 @@ impl ShowDto {
             "source_exists": source_path_exists(source_path.as_deref()),
         }))
     }
-
-    fn event(store: &Store, event: &Event) -> Value {
-        let source_path = source_path_for(store, event.capture_source_id);
-        compact_json(json!({
-            "event_id": event.id,
-            "item_id": event.id,
-            "item_type": "event",
-            "session_id": event.session_id,
-            "sequence": event.seq,
-            "event_type": event.event_type,
-            "role": event.role,
-            "occurred_at": event.occurred_at,
-            "source_id": event.capture_source_id,
-            "source_path": source_path,
-            "source_exists": source_path_exists(source_path.as_deref()),
-            "cursor": event_cursor(event),
-            "preview": event_preview(event),
-            "redaction_state": event.redaction_state,
-        }))
-    }
 }
 
 impl SearchDto {
@@ -1568,6 +2372,8 @@ impl SearchDto {
                     compact_json(json!({
                         "item_id": result.record_id,
                         "item_type": search_result_item_type(store, result),
+                        "ctx_event_id": result.event_id,
+                        "ctx_session_id": result.session_id,
                         "session_id": result.session_id,
                         "event_id": result.event_id,
                         "event_seq": result.event_seq,
@@ -1575,11 +2381,13 @@ impl SearchDto {
                         "snippet": result.snippet,
                         "rank": result.rank,
                         "provider": result.provider,
+                        "provider_session_id": result.provider_session_id,
                         "timestamp": result.timestamp,
                         "cwd": result.cwd,
                         "source_path": result.raw_source_path,
                         "source_exists": result.raw_source_exists,
                         "cursor": result.cursor,
+                        "suggested_next_commands": search_next_commands(result),
                         "why_matched": result.why_matched,
                         "citations": public_citations(&result.citations),
                         "links": result.links,
@@ -1606,13 +2414,41 @@ fn search_result_item_type(
     item_type_for_id(store, result.record_id)
 }
 
+fn search_next_commands(result: &ctx_history_search::SearchPacketResult) -> Vec<String> {
+    let mut commands = Vec::new();
+    if let Some(id) = result.event_id {
+        commands.push(format!("ctx show event {id} --window 10"));
+        commands.push(format!("ctx locate event {id}"));
+    }
+    if let Some(id) = result.session_id {
+        commands.push(format!("ctx show session {id} --mode lite"));
+        commands.push(format!("ctx locate session {id}"));
+        commands.push(format!(
+            "ctx export session {id} --mode full --format markdown --out /tmp/ctx-session-{id}.md"
+        ));
+    }
+    commands
+}
+
 fn public_citations(citations: &[ContextCitation]) -> Vec<Value> {
     citations
         .iter()
         .map(|citation| {
+            let ctx_event_id = if citation.citation_type == ContextCitationType::Event {
+                Some(citation.id)
+            } else {
+                None
+            };
+            let ctx_session_id = if citation.citation_type == ContextCitationType::Session {
+                Some(citation.id)
+            } else {
+                citation.session_id
+            };
             compact_json(json!({
                 "item_id": citation.id,
                 "item_type": public_citation_item_type(citation.citation_type),
+                "ctx_event_id": ctx_event_id,
+                "ctx_session_id": ctx_session_id,
                 "label": citation.label,
                 "time": citation.time,
                 "provider": citation.provider,
@@ -1749,8 +2585,20 @@ fn run_search(
         print_share_safe_value(SearchDto::packet(&store, &packet))?;
     } else {
         for result in packet.results {
-            println!("{} {}", result.record_id, result.title);
+            println!("{}", result.title);
+            if let Some(event_id) = result.event_id {
+                println!("  ctx_event_id: {event_id}");
+            }
+            if let Some(session_id) = result.session_id {
+                println!("  ctx_session_id: {session_id}");
+            }
+            if let Some(provider_session_id) = &result.provider_session_id {
+                println!("  provider_session_id: {provider_session_id}");
+            }
             println!("  {}", result.snippet);
+            for command in search_next_commands(&result).into_iter().take(3) {
+                println!("  next: {command}");
+            }
             for citation in result.citations.iter().take(2) {
                 println!(
                     "  citation: {} {}",

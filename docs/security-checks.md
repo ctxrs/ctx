@@ -1,7 +1,7 @@
 # Security Checks
 
 This page defines the checks public docs and validation should keep true for
-the search-only product.
+the local retrieval product.
 
 ## Required Invariants
 
@@ -10,13 +10,16 @@ the search-only product.
 - `ctx import` writes only the configured ctx data root and SQLite index.
 - `ctx search` may refresh supported local provider history into the configured
   ctx data root before querying.
-- `ctx list` and `ctx show` write nothing in local-only security mode.
+- `ctx list`, `ctx show`, and `ctx locate` write nothing in local-only security
+  mode.
+- `ctx export session` writes only the explicit `--out` path when one is
+  provided.
 - In local-only security mode, setup/import/search do not use network access or
   API keys.
 - Provider files are read as sources and not modified.
 - Provider transcript imports reject symlinked JSONL files by default.
 - JSON output is private by default and must not be described as share-safe.
-- Search/show JSON and SQLite search projections must not expose
+- Search/show/locate/export JSON and SQLite search projections must not expose
   secret-shaped values that the redaction oracle covers.
 - Unsupported providers remain explicit in the provider support matrix.
 

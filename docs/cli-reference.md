@@ -98,19 +98,48 @@ The current `--resume` flag is an idempotent-rescan mode marker. JSON reports
 `resume: true` and `resume_mode: "idempotent_rescan"`, but provider-native
 cursor resume is not a universal contract yet.
 
-## List And Show
+## List, Show, Locate, And Export
 
 ```bash
 ctx list
 ctx list --limit 50
 ctx list --json
-ctx show <item-uuid>
-ctx show <item-uuid> --json
+ctx show session <ctx-session-id> --mode full --format text
+ctx show session <ctx-session-id> --mode lite --format markdown
+ctx show session <ctx-session-id> --mode log --format jsonl
+ctx show event <ctx-event-id> --window 3 --format text
+ctx show event <ctx-event-id> --before 5 --after 10 --format json
+ctx locate session <ctx-session-id>
+ctx locate event <ctx-event-id>
+ctx export session <ctx-session-id> --mode full --format markdown --out transcript.md
+ctx export session <ctx-session-id> --mode log --format jsonl
 ```
 
 `list` reads the local database and returns indexed items up to `--limit`
-(default `20`). `show` reads one indexed item UUID and returns the matching
-session or compatibility item plus events when available.
+(default `20`).
+
+`show session` renders one transcript by ctx-owned session ID. `--mode full`
+keeps all user/assistant/system message events, `--mode lite` renders a compact
+agent-readable transcript with user messages and final assistant messages, and
+`--mode log` renders all imported events including tool and command activity.
+`--format` accepts `text`, `markdown`, `json`, or `jsonl`.
+
+`show event` renders one ctx-owned event hit. `--before` and `--after` include
+neighboring events in the same session; `--window N` is shorthand for
+`--before N --after N`. It accepts the same output formats as `show session`.
+
+`locate session` and `locate event` print provenance metadata: ctx IDs,
+provider, provider-owned session IDs, source path and cursor, source
+availability, import fidelity, and resume/cursor metadata when available.
+
+`export session` renders the same transcript modes and formats as `show
+session`. Without `--out`, it writes the artifact to stdout. With `--out`, it
+writes the artifact to that path and prints nothing on success.
+
+Provider-owned IDs are metadata, not positional IDs. Positional session and
+event arguments are ctx-owned IDs. To look up a provider-owned session, use an
+explicit provider lookup such as `--provider codex --provider-session
+<provider-session-id>` on commands that support provider lookup.
 
 JSON output may expose local paths, event payloads, and compatibility field
 names from the current store schema, so treat it as private local data.
@@ -129,9 +158,11 @@ ctx search "token budget" --limit 5 --json
 `search` quietly refreshes discovered native provider history before querying
 indexed sessions and events. The refresh is best-effort and keeps JSON stdout
 reserved for the search result object. The query argument is optional so file
-or metadata filters can drive a search. Results include an opaque item ID usable
-with `ctx show`, title, snippet, rank, match reasons, provider and event
-metadata when known, source-path/cursor data when available, citations, and
+or metadata filters can drive a search. Results are local hits over indexed
+history. Event hits include `ctx_event_id`; hits with known session context
+include `ctx_session_id`; provider metadata including `provider_session_id` is
+included when known. Results also include title, snippet, rank, match reasons,
+source-path/cursor data, citations, `suggested_next_commands`, and
 pagination/truncation fields.
 
 Filters:
@@ -174,7 +205,11 @@ ctx status --json
 ctx sources --json
 ctx import --json
 ctx list --json
-ctx show <item-uuid> --json
+ctx show session <ctx-session-id> --format json
+ctx show event <ctx-event-id> --format json
+ctx locate session <ctx-session-id> --format json
+ctx locate event <ctx-event-id> --format json
+ctx export session <ctx-session-id> --mode full --format json
 ctx search [query] --json
 ctx doctor --json
 ctx validate --json

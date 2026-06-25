@@ -61,10 +61,12 @@ ctx search "build failure" --limit 5
 ctx search "build failure" --limit 5 --json
 ```
 
-Copy an item ID from the result and inspect it:
+Copy ctx-owned IDs from the result and inspect the hit or transcript:
 
 ```bash
-ctx show <item-uuid>
+ctx show event <ctx-event-id> --window 3
+ctx show session <ctx-session-id> --mode lite
+ctx locate event <ctx-event-id>
 ```
 
 Use citations from `ctx search --json` or `ctx show` when the retrieved material
