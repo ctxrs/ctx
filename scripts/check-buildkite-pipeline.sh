@@ -71,7 +71,7 @@ if command -v ruby >/dev/null 2>&1; then
     abort "live-provider-e2e-openrouter must allow the configured free-model fallback only in the explicit lane" unless openrouter_command.include?("CTX_LIVE_PROVIDER_OPENROUTER_ALLOW_DEFAULT_FREE_MODEL=1")
     abort "live-provider-e2e-openrouter must pass OpenRouter API credentials only into the Bazel test env" unless openrouter_command.include?("--test_env=OPENROUTER_API_KEY")
     abort "live-provider-e2e-openrouter must pass OpenRouter endpoint config into the Bazel test env" unless openrouter_command.include?("--test_env=OPENROUTER_BASE_URL")
-    abort "live-provider-e2e-openrouter must pass OpenRouter model config into the Bazel test env" unless openrouter_command.include?("--test_env=CTX_E2E_OPENROUTER_MODEL_OVERRIDE") && openrouter_command.include?("--test_env=CTX_LIVE_PROVIDER_OPENROUTER_MODEL")
+    abort "live-provider-e2e-openrouter must pass deterministic OpenRouter model config into the Bazel test env" unless openrouter_command.include?("--test_env=CTX_E2E_OPENROUTER_MODEL_OVERRIDE=google/gemini-2.5-flash") && openrouter_command.include?("--test_env=CTX_LIVE_PROVIDER_OPENROUTER_MODEL")
     openrouter_env = openrouter["env"] || {}
     abort "live-provider-e2e-openrouter must opt into Infisical hydration" unless openrouter_env["CTX_LIVE_PROVIDER_OPENROUTER_USE_INFISICAL"].to_s == "1"
     abort "live-provider-e2e-openrouter must configure the OpenRouter Infisical project id" unless openrouter_env["CTX_OPENROUTER_INFISICAL_PROJECT_ID"].to_s.match?(/\A[0-9a-f-]{36}\z/)
@@ -235,7 +235,7 @@ for required in \
   'CTX_OPENROUTER_INFISICAL_PATH: "/"' \
   '--test_env=OPENROUTER_API_KEY' \
   '--test_env=OPENROUTER_BASE_URL' \
-  '--test_env=CTX_E2E_OPENROUTER_MODEL_OVERRIDE' \
+  '--test_env=CTX_E2E_OPENROUTER_MODEL_OVERRIDE=google/gemini-2.5-flash' \
   '--test_env=CTX_LIVE_PROVIDER_OPENROUTER_MODEL' \
   'bazel-testlogs/provider_live_e2e_openrouter/**/test.outputs/**/*' \
   'bazel-testlogs/provider_live_e2e_openrouter/**/*.zip'; do

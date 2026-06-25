@@ -78,9 +78,10 @@ temporary synthetic multi-session histories for every harness provider. If the
 Buildkite agent hook already hydrated OpenRouter env from Infisical, the wrapper
 uses that pre-hydrated environment without requiring an `infisical` binary.
 Buildkite invokes the target through `scripts/check.sh -- test`, so Bazel
-bootstrap is the same as the main CI gate. The lane uses the
-Infisical/OpenRouter model configuration supplied to the Bazel test environment;
-the generator has an optional free-model guard for projects whose OpenRouter
+bootstrap is the same as the main CI gate. The lane passes a deterministic
+non-secret OpenRouter model override to the Bazel test environment because
+Buildkite runner hooks pre-hydrate credentials but not model names; the
+generator has an optional free-model guard for projects whose OpenRouter
 provider policy permits free aliases. It then runs the
 same scrubbed `ctx setup`, `ctx import`, `ctx search`, `ctx status`, `ctx
 doctor`, and `ctx validate` flow and writes redacted per-provider evidence

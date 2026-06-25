@@ -74,7 +74,7 @@ steps:
           --test_env=CTX_OPENROUTER_API_KEY \
           --test_env=OPENROUTER_BASE_URL \
           --test_env=CTX_OPENROUTER_BASE_URL \
-          --test_env=CTX_E2E_OPENROUTER_MODEL_OVERRIDE \
+          --test_env=CTX_E2E_OPENROUTER_MODEL_OVERRIDE=google/gemini-2.5-flash \
           --test_env=CTX_LIVE_PROVIDER_OPENROUTER_MODEL
     env:
       CTX_LIVE_PROVIDER_OPENROUTER_USE_INFISICAL: "1"

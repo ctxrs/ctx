@@ -58,4 +58,4 @@ the same result metadata and citations as the human output. A citation with
 file was not available at the stored path when the result was built.
 
 `ctx context` is deprecated. It remains available for older scripts, but it is
-hidden from the default CLI help and is not part of the supported search MVP.
+hidden from the default CLI help and is not part of the supported search CLI.

@@ -76,9 +76,10 @@ Antigravity, Gemini, and Cursor. On Buildkite runners where the agent hook has
 already hydrated OpenRouter env from Infisical, the same wrapper uses that
 pre-hydrated environment instead of requiring an `infisical` binary on `PATH`.
 Buildkite invokes the Bazel target through `scripts/check.sh -- test`, so the
-same Bazel/Bazelisk bootstrap path is used as the main CI gate. The lane uses
-the Infisical/OpenRouter model configuration supplied to the Bazel test
-environment; the generator has an optional free-model guard for projects whose
+same Bazel/Bazelisk bootstrap path is used as the main CI gate. The lane passes
+a deterministic non-secret OpenRouter model override to the Bazel test
+environment because Buildkite runner hooks pre-hydrate credentials but not model
+names; the generator has an optional free-model guard for projects whose
 OpenRouter provider policy permits free aliases.
 Then it runs only `ctx setup`, `ctx import`, `ctx search`, `ctx status`, `ctx
 doctor`, and `ctx validate` with a scrubbed environment. The

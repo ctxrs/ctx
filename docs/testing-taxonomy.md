@@ -54,8 +54,9 @@ when needed.
   OpenRouter env from Infisical, the wrapper uses that pre-hydrated environment.
   Buildkite invokes the target through `scripts/check.sh -- test` so runner
   Bazel/Bazelisk bootstrap stays identical to the main CI gate. The live lane
-  uses the Infisical/OpenRouter model configuration supplied to the test
-  environment; the generator also has an optional free-model guard for projects
+  passes a deterministic non-secret OpenRouter model override to the test
+  environment because Buildkite runner hooks pre-hydrate credentials but not
+  model names; the generator also has an optional free-model guard for projects
   whose OpenRouter provider policy permits free aliases.
   The credential must not be passed to `ctx`, generated raw histories must not
   be published as artifacts, redacted per-provider evidence is written under
