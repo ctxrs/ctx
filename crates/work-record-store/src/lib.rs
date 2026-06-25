@@ -1286,6 +1286,65 @@ impl Store {
         Ok(())
     }
 
+    pub fn list_catalog_sessions_for_source(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+    ) -> Result<Vec<CatalogSession>> {
+        let mut stmt = self.conn.prepare(
+            format!(
+                "{} WHERE provider = ?1 AND source_root = ?2",
+                catalog_session_select_sql("")
+            )
+            .as_str(),
+        )?;
+        let rows = stmt.query_map(
+            params![provider.as_str(), source_root],
+            catalog_session_from_row,
+        )?;
+        collect_rows(rows)
+    }
+
+    pub fn mark_catalog_source_missing_paths_stale(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        current_paths: &[String],
+        cataloged_at_ms: i64,
+    ) -> Result<usize> {
+        self.conn.execute(
+            "CREATE TEMP TABLE IF NOT EXISTS temp_catalog_current_paths(source_path TEXT PRIMARY KEY)",
+            [],
+        )?;
+        self.conn
+            .execute("DELETE FROM temp_catalog_current_paths", [])?;
+        {
+            let mut stmt = self.conn.prepare(
+                "INSERT OR IGNORE INTO temp_catalog_current_paths(source_path) VALUES (?1)",
+            )?;
+            for path in current_paths {
+                stmt.execute(params![path.as_str()])?;
+            }
+        }
+        let changed = self.conn.execute(
+            r#"
+            UPDATE catalog_sessions
+            SET is_stale = 1, cataloged_at_ms = ?3
+            WHERE provider = ?1
+              AND source_root = ?2
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM temp_catalog_current_paths current
+                  WHERE current.source_path = catalog_sessions.source_path
+              )
+            "#,
+            params![provider.as_str(), source_root, cataloged_at_ms],
+        )?;
+        self.conn
+            .execute("DELETE FROM temp_catalog_current_paths", [])?;
+        Ok(changed)
+    }
+
     pub fn list_pending_catalog_sessions(
         &self,
         provider: CaptureProvider,

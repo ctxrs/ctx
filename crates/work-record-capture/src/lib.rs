@@ -255,9 +255,16 @@ pub struct CodexSessionImportOptions {
     pub max_session_files: Option<usize>,
     pub max_total_bytes: Option<u64>,
     pub tool_output_mode: CodexToolOutputMode,
+    pub event_mode: CodexEventImportMode,
     pub include_notices: bool,
     pub fast_event_inserts: bool,
     pub progress: Option<CodexSessionImportProgressCallback>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexEventImportMode {
+    Search,
+    Rich,
 }
 
 impl Default for CodexSessionImportOptions {
@@ -271,6 +278,7 @@ impl Default for CodexSessionImportOptions {
             max_session_files: None,
             max_total_bytes: None,
             tool_output_mode: CodexToolOutputMode::Full,
+            event_mode: CodexEventImportMode::Rich,
             include_notices: true,
             fast_event_inserts: true,
             progress: None,
@@ -289,6 +297,7 @@ impl std::fmt::Debug for CodexSessionImportOptions {
             .field("max_session_files", &self.max_session_files)
             .field("max_total_bytes", &self.max_total_bytes)
             .field("tool_output_mode", &self.tool_output_mode)
+            .field("event_mode", &self.event_mode)
             .field("include_notices", &self.include_notices)
             .field("fast_event_inserts", &self.fast_event_inserts)
             .field("progress", &self.progress.as_ref().map(|_| "<callback>"))
@@ -577,6 +586,7 @@ pub struct ProviderAdapterContext {
     pub source_path: Option<PathBuf>,
     pub imported_at: DateTime<Utc>,
     pub tool_output_mode: CodexToolOutputMode,
+    pub event_mode: CodexEventImportMode,
     pub include_notices: bool,
 }
 
@@ -587,6 +597,7 @@ impl Default for ProviderAdapterContext {
             source_path: None,
             imported_at: Utc::now(),
             tool_output_mode: CodexToolOutputMode::Full,
+            event_mode: CodexEventImportMode::Rich,
             include_notices: true,
         }
     }
@@ -936,7 +947,7 @@ impl ProviderCaptureAdapter for CodexSessionJsonlAdapter {
             if line.iter().all(u8::is_ascii_whitespace) {
                 continue;
             }
-            if !should_parse_codex_session_line(&line) {
+            if !should_parse_codex_session_line(&line, context.event_mode) {
                 continue;
             }
             if should_skip_codex_tool_output_line(&line, context.tool_output_mode) {
@@ -1004,6 +1015,7 @@ impl ProviderCaptureAdapter for CodexSessionJsonlAdapter {
                 occurred_at,
                 &mut call_contexts,
                 context.tool_output_mode,
+                context.event_mode,
             ) {
                 if !context.include_notices && event.event_type == EventType::Notice {
                     result.summary.skipped += 1;
@@ -1021,11 +1033,14 @@ impl ProviderCaptureAdapter for CodexSessionJsonlAdapter {
     }
 }
 
-fn should_parse_codex_session_line(line: &[u8]) -> bool {
+fn should_parse_codex_session_line(line: &[u8], event_mode: CodexEventImportMode) -> bool {
     if contains_bytes(line, br#""type":"session_meta""#)
         || contains_bytes(line, br#""type":"compacted""#)
-        || contains_bytes(line, br#""type":"event_msg""#)
     {
+        return true;
+    }
+
+    if event_mode == CodexEventImportMode::Rich && contains_bytes(line, br#""type":"event_msg""#) {
         return true;
     }
 
@@ -1033,17 +1048,22 @@ fn should_parse_codex_session_line(line: &[u8]) -> bool {
         return false;
     }
 
-    (contains_bytes(line, br#""type":"message""#)
+    if contains_bytes(line, br#""type":"message""#)
         && (contains_bytes(line, br#""role":"user""#)
-            || contains_bytes(line, br#""role":"assistant""#)))
-        || contains_bytes(line, br#""type":"function_call""#)
-        || contains_bytes(line, br#""type":"custom_tool_call""#)
-        || contains_bytes(line, br#""type":"web_search_call""#)
-        || contains_bytes(line, br#""type":"tool_search_call""#)
-        || contains_bytes(line, br#""type":"function_call_output""#)
-        || contains_bytes(line, br#""type":"custom_tool_call_output""#)
-        || contains_bytes(line, br#""type":"tool_search_output""#)
-        || contains_bytes(line, br#""type":"reasoning""#)
+            || contains_bytes(line, br#""role":"assistant""#))
+    {
+        return true;
+    }
+
+    event_mode == CodexEventImportMode::Rich
+        && (contains_bytes(line, br#""type":"function_call""#)
+            || contains_bytes(line, br#""type":"custom_tool_call""#)
+            || contains_bytes(line, br#""type":"web_search_call""#)
+            || contains_bytes(line, br#""type":"tool_search_call""#)
+            || contains_bytes(line, br#""type":"function_call_output""#)
+            || contains_bytes(line, br#""type":"custom_tool_call_output""#)
+            || contains_bytes(line, br#""type":"tool_search_output""#)
+            || contains_bytes(line, br#""type":"reasoning""#))
 }
 
 fn is_codex_tool_output_line(line: &[u8]) -> bool {
@@ -1485,6 +1505,7 @@ pub fn import_provider_fixture_jsonl(
             source_path: Some(source_path),
             imported_at: options.imported_at,
             tool_output_mode: CodexToolOutputMode::Full,
+            event_mode: CodexEventImportMode::Rich,
             include_notices: true,
         },
     )?;
@@ -1519,6 +1540,7 @@ pub fn import_codex_history_jsonl(
             source_path: Some(source_path),
             imported_at: options.imported_at,
             tool_output_mode: CodexToolOutputMode::Full,
+            event_mode: CodexEventImportMode::Rich,
             include_notices: true,
         },
     )?;
@@ -1556,6 +1578,7 @@ pub fn import_codex_session_jsonl(
             source_path: Some(source_path),
             imported_at: options.imported_at,
             tool_output_mode: options.tool_output_mode,
+            event_mode: options.event_mode,
             include_notices: options.include_notices,
         },
     )?;
@@ -1581,11 +1604,11 @@ pub fn import_codex_session_paths(
     for path in &paths {
         ensure_regular_provider_transcript_file(path)?;
     }
-    if options.fast_event_inserts {
+    if options.fast_event_inserts && paths.len() <= 1 {
         return import_codex_session_paths_fast(paths, store, options, 0);
     }
 
-    import_codex_session_paths_normalized(paths, store, options, 0)
+    import_codex_session_paths_parallel_normalized(paths, store, options, 0)
 }
 
 pub fn import_codex_session_tree(
@@ -1601,14 +1624,14 @@ pub fn import_codex_session_tree(
         options.max_session_files,
         options.max_total_bytes,
     )?;
-    if options.fast_event_inserts {
+    if options.fast_event_inserts && paths.len() <= 1 {
         return import_codex_session_paths_fast(paths, store, options, skipped_by_bounds);
     }
 
-    import_codex_session_paths_normalized(paths, store, options, skipped_by_bounds)
+    import_codex_session_paths_parallel_normalized(paths, store, options, skipped_by_bounds)
 }
 
-fn import_codex_session_paths_normalized(
+fn import_codex_session_paths_parallel_normalized(
     paths: Vec<PathBuf>,
     store: &mut Store,
     options: CodexSessionImportOptions,
@@ -1617,24 +1640,31 @@ fn import_codex_session_paths_normalized(
     let mut merged = ProviderImportSummary::default();
     merged.skipped_sessions += skipped_by_bounds;
     merged.skipped += skipped_by_bounds;
-    let mut captures = Vec::new();
     let mut in_transaction = false;
     if !paths.is_empty() {
         store.begin_immediate_batch()?;
         in_transaction = true;
     }
-    for path in paths {
-        let normalization = match CodexSessionJsonlAdapter.normalize_path(
-            &path,
-            &ProviderAdapterContext {
-                machine_id: options.machine_id.clone(),
-                source_path: Some(path.clone()),
-                imported_at: options.imported_at,
-                tool_output_mode: options.tool_output_mode,
-                include_notices: options.include_notices,
-            },
-        ) {
-            Ok(normalization) => normalization,
+    let total_files = paths.len();
+    let total_bytes = codex_session_paths_total_bytes(&paths);
+    let mut completed_files = 0usize;
+    let mut completed_bytes = 0u64;
+    report_codex_import_progress(
+        &options,
+        total_files,
+        total_bytes,
+        completed_files,
+        completed_bytes,
+        &merged,
+        false,
+    );
+
+    let parallelism = import_parallelism(paths.len());
+    let chunk_size = parallelism.saturating_mul(8).max(16);
+    for chunk in paths.chunks(chunk_size) {
+        let normalized = match normalize_codex_session_paths_parallel(chunk, &options, parallelism)
+        {
+            Ok(normalized) => normalized,
             Err(err) => {
                 if in_transaction {
                     let _ = store.rollback_batch();
@@ -1642,34 +1672,149 @@ fn import_codex_session_paths_normalized(
                 return Err(err);
             }
         };
-        merged.merge(normalization.summary);
-        captures.extend(normalization.captures);
-    }
-    let summary = match import_provider_capture_lines(
-        store,
-        NormalizedProviderImportOptions {
-            work_record_id: options.work_record_id,
-            allow_partial_failures: options.allow_partial_failures,
-            persist_cursors: false,
-            wrap_transaction: false,
-            fast_event_inserts: options.fast_event_inserts,
-        },
-        merged,
-        captures,
-    ) {
-        Ok(summary) => summary,
-        Err(err) => {
-            if in_transaction {
-                let _ = store.rollback_batch();
-            }
-            return Err(err);
+        let mut chunk_summary = ProviderImportSummary::default();
+        let mut chunk_captures = Vec::new();
+        let mut chunk_bytes = 0u64;
+        for (_, path, normalization) in normalized {
+            chunk_bytes = chunk_bytes.saturating_add(
+                fs::metadata(&path)
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0),
+            );
+            chunk_summary.merge(normalization.summary);
+            chunk_captures.extend(normalization.captures);
         }
-    };
-    merged = summary;
+        let summary = match import_provider_capture_lines(
+            store,
+            NormalizedProviderImportOptions {
+                work_record_id: options.work_record_id,
+                allow_partial_failures: options.allow_partial_failures,
+                persist_cursors: false,
+                wrap_transaction: false,
+                fast_event_inserts: options.fast_event_inserts,
+            },
+            chunk_summary,
+            chunk_captures,
+        ) {
+            Ok(summary) => summary,
+            Err(err) => {
+                if in_transaction {
+                    let _ = store.rollback_batch();
+                }
+                return Err(err);
+            }
+        };
+        merged.merge(summary);
+        completed_files += chunk.len();
+        completed_bytes = completed_bytes.saturating_add(chunk_bytes);
+        report_codex_import_progress(
+            &options,
+            total_files,
+            total_bytes,
+            completed_files,
+            completed_bytes,
+            &merged,
+            false,
+        );
+    }
     if in_transaction {
         store.commit_batch()?;
     }
+    store.checkpoint_wal_passive_if_larger_than(CODEX_FAST_IMPORT_PASSIVE_CHECKPOINT_MIN_BYTES)?;
+    report_codex_import_progress(
+        &options,
+        total_files,
+        total_bytes,
+        completed_files,
+        completed_bytes,
+        &merged,
+        true,
+    );
     Ok(merged)
+}
+
+fn normalize_codex_session_paths_parallel(
+    paths: &[PathBuf],
+    options: &CodexSessionImportOptions,
+    parallelism: usize,
+) -> Result<Vec<(usize, PathBuf, ProviderNormalizationResult)>> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    if parallelism <= 1 || paths.len() == 1 {
+        let mut normalized = Vec::with_capacity(paths.len());
+        for (index, path) in paths.iter().enumerate() {
+            normalized.push((
+                index,
+                path.clone(),
+                normalize_codex_session_path(path, options)?,
+            ));
+        }
+        return Ok(normalized);
+    }
+
+    let chunk_size = paths.len().div_ceil(parallelism).max(1);
+    let mut batches = thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for (chunk_index, chunk) in paths.chunks(chunk_size).enumerate() {
+            let chunk = chunk.to_vec();
+            handles.push(scope.spawn(move || {
+                let mut normalized = Vec::with_capacity(chunk.len());
+                let base_index = chunk_index * chunk_size;
+                for (offset, path) in chunk.iter().enumerate() {
+                    normalized.push((
+                        base_index + offset,
+                        path.clone(),
+                        normalize_codex_session_path(path, options)?,
+                    ));
+                }
+                Result::<Vec<_>>::Ok(normalized)
+            }));
+        }
+        let mut batches = Vec::with_capacity(handles.len());
+        for handle in handles {
+            batches.push(handle.join().map_err(|_| {
+                CaptureError::InvalidPayload("Codex import worker panicked".into())
+            })??);
+        }
+        Result::<Vec<_>>::Ok(batches)
+    })?;
+    let total = batches.iter().map(Vec::len).sum();
+    let mut normalized = Vec::with_capacity(total);
+    for batch in batches.drain(..) {
+        normalized.extend(batch);
+    }
+    normalized.sort_by_key(|(index, _, _)| *index);
+    Ok(normalized)
+}
+
+fn normalize_codex_session_path(
+    path: &Path,
+    options: &CodexSessionImportOptions,
+) -> Result<ProviderNormalizationResult> {
+    CodexSessionJsonlAdapter.normalize_path(
+        path,
+        &ProviderAdapterContext {
+            machine_id: options.machine_id.clone(),
+            source_path: Some(path.to_path_buf()),
+            imported_at: options.imported_at,
+            tool_output_mode: options.tool_output_mode,
+            event_mode: options.event_mode,
+            include_notices: options.include_notices,
+        },
+    )
+}
+
+fn import_parallelism(path_count: usize) -> usize {
+    if path_count <= 1 {
+        return 1;
+    }
+    thread::available_parallelism()
+        .ok()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(path_count)
+        .min(8)
 }
 
 fn import_codex_session_paths_fast(
@@ -1816,6 +1961,7 @@ fn import_codex_session_path_fast(
         source_path: Some(path.to_path_buf()),
         imported_at: options.imported_at,
         tool_output_mode: options.tool_output_mode,
+        event_mode: options.event_mode,
         include_notices: options.include_notices,
     };
     let import_options = NormalizedProviderImportOptions {
@@ -1840,7 +1986,7 @@ fn import_codex_session_path_fast(
         if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        if !should_parse_codex_session_line(&line) {
+        if !should_parse_codex_session_line(&line, options.event_mode) {
             continue;
         }
         if should_skip_codex_tool_output_line(&line, options.tool_output_mode) {
@@ -1924,6 +2070,7 @@ fn import_codex_session_path_fast(
             occurred_at,
             &mut call_contexts,
             options.tool_output_mode,
+            options.event_mode,
         ) else {
             continue;
         };
@@ -2063,24 +2210,65 @@ pub fn catalog_codex_session_tree(
         skipped_sessions: skipped_by_bounds,
         ..CatalogSummary::default()
     };
+    let existing = store
+        .list_catalog_sessions_for_source(CaptureProvider::Codex, &source_root)?
+        .into_iter()
+        .map(|session| (session.source_path.clone(), session))
+        .collect::<BTreeMap<_, _>>();
+    let mut current_paths = Vec::with_capacity(paths.len());
+    let mut cached_sessions = Vec::new();
+    let mut paths_to_parse = Vec::new();
+    let mut metadata_failures = Vec::new();
+    for path in paths {
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                summary.failed_sessions += 1;
+                metadata_failures.push(format!("{}: {err}", path.display()));
+                continue;
+            }
+        };
+        summary.source_files += 1;
+        summary.source_bytes = summary.source_bytes.saturating_add(metadata.len());
+        let source_path = path.display().to_string();
+        current_paths.push(source_path.clone());
+        if let Some(session) = cached_catalog_session_if_unchanged(
+            existing.get(&source_path),
+            &metadata,
+            cataloged_at_ms,
+        ) {
+            cached_sessions.push(session);
+        } else {
+            paths_to_parse.push(path);
+        }
+    }
+    if !options.allow_partial_failures && !metadata_failures.is_empty() {
+        return Err(CaptureError::InvalidPayload(format!(
+            "catalog failed: {}",
+            metadata_failures.remove(0)
+        )));
+    }
     let (scan_summary, sessions) = catalog_codex_session_paths(
-        paths,
+        paths_to_parse,
         &source_root,
         cataloged_at_ms,
         options.allow_partial_failures,
         options.parallelism,
     )?;
-    summary.source_files += scan_summary.source_files;
-    summary.source_bytes = summary
-        .source_bytes
-        .saturating_add(scan_summary.source_bytes);
     summary.failed_sessions += scan_summary.failed_sessions;
+    let mut sessions = sessions;
+    sessions.extend(cached_sessions);
     summary.cataloged_sessions = sessions.len();
 
     store.begin_immediate_batch()?;
     let persist = (|| -> Result<()> {
-        store.mark_catalog_source_stale(CaptureProvider::Codex, &source_root, cataloged_at_ms)?;
         store.upsert_catalog_sessions(&sessions)?;
+        store.mark_catalog_source_missing_paths_stale(
+            CaptureProvider::Codex,
+            &source_root,
+            &current_paths,
+            cataloged_at_ms,
+        )?;
         Ok(())
     })();
     match persist {
@@ -2093,6 +2281,26 @@ pub fn catalog_codex_session_tree(
         }
     }
     Ok(summary)
+}
+
+fn cached_catalog_session_if_unchanged(
+    session: Option<&CatalogSession>,
+    metadata: &fs::Metadata,
+    cataloged_at_ms: i64,
+) -> Option<CatalogSession> {
+    let session = session?;
+    let modified_at_ms = system_time_ms(metadata.modified().unwrap_or(UNIX_EPOCH));
+    if session.provider == CaptureProvider::Codex
+        && session.source_format == CODEX_SESSION_SOURCE_FORMAT
+        && session.file_size_bytes == metadata.len()
+        && session.file_modified_at_ms == modified_at_ms
+    {
+        let mut session = session.clone();
+        session.cataloged_at_ms = cataloged_at_ms;
+        Some(session)
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, Default)]
@@ -2394,6 +2602,7 @@ pub fn import_pi_session_jsonl(
             source_path: Some(source_path),
             imported_at: options.imported_at,
             tool_output_mode: CodexToolOutputMode::Full,
+            event_mode: CodexEventImportMode::Rich,
             include_notices: true,
         },
     )?;
@@ -2428,6 +2637,7 @@ pub fn import_claude_projects_jsonl_tree(
             source_path: Some(source_path),
             imported_at: options.imported_at,
             tool_output_mode: CodexToolOutputMode::Full,
+            event_mode: CodexEventImportMode::Rich,
             include_notices: true,
         },
     )?;
@@ -2462,6 +2672,7 @@ pub fn import_opencode_sqlite(
             source_path: Some(source_path),
             imported_at: options.imported_at,
             tool_output_mode: CodexToolOutputMode::Full,
+            event_mode: CodexEventImportMode::Rich,
             include_notices: true,
         },
     )?;
@@ -2560,6 +2771,7 @@ fn import_native_jsonl_tree<A: ProviderCaptureAdapter>(
             source_path: Some(source_path),
             imported_at: request.imported_at,
             tool_output_mode: CodexToolOutputMode::Full,
+            event_mode: CodexEventImportMode::Rich,
             include_notices: true,
         },
     )?;
@@ -2797,8 +3009,13 @@ fn codex_session_capture(
                 "model_provider": header.model_provider,
                 "parent_session": header.parent_session,
                 "raw_session_meta_keys": header.raw.as_object().map(|object| object.keys().cloned().collect::<Vec<_>>()),
+                "import_profile": match context.event_mode {
+                    CodexEventImportMode::Search => "search",
+                    CodexEventImportMode::Rich => "rich",
+                },
                 "limitations": [
-                    "default backfill indexes user and assistant messages, tool call previews, command output previews, reasoning summaries, lifecycle notices, and parent-child session edges where present",
+                    "search profile indexes session metadata, user and assistant messages, compacted context summaries, and parent-child session edges where present",
+                    "rich profile can additionally index tool call previews, command output previews, reasoning summaries, and lifecycle notices",
                     "full raw tool arguments, complete command output, encrypted reasoning content, bootstrap context, and binary artifacts remain in the raw transcript referenced by raw_source_path",
                     "previews are capped and redacted before export"
                 ],
@@ -2814,6 +3031,7 @@ fn codex_session_event(
     occurred_at: DateTime<Utc>,
     call_contexts: &mut BTreeMap<String, CodexToolCallContext>,
     tool_output_mode: CodexToolOutputMode,
+    event_mode: CodexEventImportMode,
 ) -> Option<ProviderEventEnvelope> {
     let entry_type = value
         .get("type")
@@ -2828,6 +3046,7 @@ fn codex_session_event(
                 occurred_at,
                 call_contexts,
                 tool_output_mode,
+                event_mode,
             )
         }
         "compacted" => {
@@ -2855,6 +3074,9 @@ fn codex_session_event(
             ))
         }
         "event_msg" => {
+            if event_mode == CodexEventImportMode::Search {
+                return None;
+            }
             let payload = value.get("payload")?;
             let msg_type = payload
                 .get("type")
@@ -2903,6 +3125,7 @@ fn codex_response_item_event(
     occurred_at: DateTime<Utc>,
     call_contexts: &mut BTreeMap<String, CodexToolCallContext>,
     tool_output_mode: CodexToolOutputMode,
+    event_mode: CodexEventImportMode,
 ) -> Option<ProviderEventEnvelope> {
     let item_type = payload
         .get("type")
@@ -2910,6 +3133,7 @@ fn codex_response_item_event(
         .unwrap_or("unknown");
     match item_type {
         "message" => codex_message_event(payload, line_number, occurred_at),
+        _ if event_mode == CodexEventImportMode::Search => None,
         "function_call" | "custom_tool_call" | "web_search_call" | "tool_search_call" => {
             codex_tool_call_event(payload, line_number, occurred_at, call_contexts)
         }
@@ -6932,6 +7156,43 @@ mod tests {
             failure,
             CodexToolOutputMode::Skip
         ));
+    }
+
+    #[test]
+    fn codex_search_event_mode_only_parses_search_relevant_lines() {
+        let session_meta = br#"{"timestamp":"2026-06-24T01:00:00.000Z","type":"session_meta","payload":{"id":"s"}}"#;
+        let user_message = br#"{"timestamp":"2026-06-24T01:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"question"}]}}"#;
+        let assistant_message = br#"{"timestamp":"2026-06-24T01:00:02.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]}}"#;
+        let tool_call = br#"{"timestamp":"2026-06-24T01:00:03.000Z","type":"response_item","payload":{"type":"function_call","call_id":"call-1","name":"shell","arguments":"cargo test"}}"#;
+        let tool_output = br#"{"timestamp":"2026-06-24T01:00:04.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-1","output":"passed"}}"#;
+        let reasoning = br#"{"timestamp":"2026-06-24T01:00:05.000Z","type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"thinking"}]}}"#;
+        let notice = br#"{"timestamp":"2026-06-24T01:00:06.000Z","type":"event_msg","payload":{"type":"task_complete"}}"#;
+
+        for line in [
+            session_meta.as_slice(),
+            user_message.as_slice(),
+            assistant_message.as_slice(),
+        ] {
+            assert!(should_parse_codex_session_line(
+                line,
+                CodexEventImportMode::Search
+            ));
+        }
+        for line in [
+            tool_call.as_slice(),
+            tool_output.as_slice(),
+            reasoning.as_slice(),
+            notice.as_slice(),
+        ] {
+            assert!(!should_parse_codex_session_line(
+                line,
+                CodexEventImportMode::Search
+            ));
+            assert!(should_parse_codex_session_line(
+                line,
+                CodexEventImportMode::Rich
+            ));
+        }
     }
 
     #[test]

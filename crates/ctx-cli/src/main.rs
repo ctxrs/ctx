@@ -29,12 +29,12 @@ use work_record_capture::{
     import_codex_session_tree, import_copilot_cli_session_events, import_factory_ai_droid_sessions,
     import_gemini_cli_history, import_opencode_sqlite, import_pi_session_jsonl,
     import_provider_fixture_jsonl, provider_source_for_path, provider_source_spec,
-    stable_capture_uuid, CatalogSummary, ClaudeProjectsImportOptions, CodexHistoryImportOptions,
-    CodexSessionCatalogOptions, CodexSessionImportOptions, CodexSessionImportProgress,
-    CodexSessionImportProgressCallback, CodexToolOutputMode, CopilotCliImportOptions,
-    FactoryAiDroidImportOptions, GeminiCliImportOptions, OpenCodeSqliteImportOptions,
-    PiSessionImportOptions, ProviderFixtureImportOptions, ProviderImportSummary,
-    ProviderImportSupport, ProviderSource,
+    stable_capture_uuid, CatalogSummary, ClaudeProjectsImportOptions, CodexEventImportMode,
+    CodexHistoryImportOptions, CodexSessionCatalogOptions, CodexSessionImportOptions,
+    CodexSessionImportProgress, CodexSessionImportProgressCallback, CodexToolOutputMode,
+    CopilotCliImportOptions, FactoryAiDroidImportOptions, GeminiCliImportOptions,
+    OpenCodeSqliteImportOptions, PiSessionImportOptions, ProviderFixtureImportOptions,
+    ProviderImportSummary, ProviderImportSupport, ProviderSource,
 };
 use work_record_core::{
     database_path, default_data_root, CaptureProvider, ContextCitation, ContextCitationType, Event,
@@ -1735,6 +1735,7 @@ fn import_one_source_inner(
     let record_id = record.id;
     store.upsert_record(&record)?;
     let tool_output_mode = codex_tool_output_mode()?;
+    let event_mode = codex_event_import_mode()?;
     let include_notices = codex_include_notices();
     let summary = if source.source_format == "normalized_provider_jsonl" {
         import_provider_fixture_jsonl(
@@ -1764,6 +1765,7 @@ fn import_one_source_inner(
                                 work_record_id: Some(record_id),
                                 allow_partial_failures: true,
                                 tool_output_mode,
+                                event_mode,
                                 include_notices,
                                 progress: progress.clone(),
                                 ..CodexSessionImportOptions::default()
@@ -1776,6 +1778,7 @@ fn import_one_source_inner(
                             source,
                             record_id,
                             tool_output_mode,
+                            event_mode,
                             include_notices,
                             progress.clone(),
                         )
@@ -1806,6 +1809,7 @@ fn import_one_source_inner(
                             work_record_id: Some(record_id),
                             allow_partial_failures: true,
                             tool_output_mode,
+                            event_mode,
                             include_notices,
                             progress,
                             ..CodexSessionImportOptions::default()
@@ -1913,6 +1917,7 @@ fn import_incremental_codex_session_tree(
     source: &SourceInfo,
     record_id: Uuid,
     tool_output_mode: CodexToolOutputMode,
+    event_mode: CodexEventImportMode,
     include_notices: bool,
     progress: Option<CodexSessionImportProgressCallback>,
 ) -> Result<ProviderImportSummary> {
@@ -1945,6 +1950,7 @@ fn import_incremental_codex_session_tree(
             work_record_id: Some(record_id),
             allow_partial_failures: true,
             tool_output_mode,
+            event_mode,
             include_notices,
             progress,
             ..CodexSessionImportOptions::default()
@@ -2030,6 +2036,20 @@ fn codex_tool_output_mode() -> Result<CodexToolOutputMode> {
         return Ok(CodexToolOutputMode::Skip);
     }
     Ok(CodexToolOutputMode::Skip)
+}
+
+fn codex_event_import_mode() -> Result<CodexEventImportMode> {
+    if let Some(raw) = env::var_os("CTX_CODEX_EVENT_MODE") {
+        let raw = raw.to_string_lossy();
+        return match raw.as_ref() {
+            "search" | "message" | "messages" => Ok(CodexEventImportMode::Search),
+            "rich" | "full" => Ok(CodexEventImportMode::Rich),
+            other => Err(anyhow!(
+                "unsupported CTX_CODEX_EVENT_MODE={other:?}; expected search or rich"
+            )),
+        };
+    }
+    Ok(CodexEventImportMode::Search)
 }
 
 fn codex_include_notices() -> bool {
