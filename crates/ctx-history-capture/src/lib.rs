@@ -1615,7 +1615,7 @@ pub fn import_provider_fixture_jsonl(
             allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
-            fast_event_inserts: false,
+            fast_event_inserts: true,
         },
     )
 }
@@ -1691,6 +1691,200 @@ pub fn import_codex_session_jsonl(
             fast_event_inserts: options.fast_event_inserts,
         },
     )
+}
+
+pub fn import_codex_session_jsonl_tail(
+    path: impl AsRef<Path>,
+    start_offset: u64,
+    store: &mut Store,
+    options: CodexSessionImportOptions,
+) -> Result<ProviderImportSummary> {
+    let path = path.as_ref();
+    if start_offset == 0 {
+        return import_codex_session_jsonl(path, store, options);
+    }
+    ensure_regular_provider_transcript_file(path)?;
+    let total_bytes = fs::metadata(path)?.len();
+    if start_offset >= total_bytes {
+        return Ok(ProviderImportSummary::default());
+    }
+
+    let mut summary = ProviderImportSummary::default();
+    let mut caches = ProviderImportCaches::default();
+    let context = ProviderAdapterContext {
+        machine_id: options.machine_id.clone(),
+        source_path: Some(path.to_path_buf()),
+        imported_at: options.imported_at,
+        tool_output_mode: options.tool_output_mode,
+        event_mode: options.event_mode,
+        include_notices: options.include_notices,
+    };
+    let import_options = NormalizedProviderImportOptions {
+        history_record_id: options.history_record_id,
+        allow_partial_failures: options.allow_partial_failures,
+        persist_cursors: false,
+        wrap_transaction: false,
+        fast_event_inserts: true,
+    };
+
+    report_codex_import_progress(
+        &options,
+        1,
+        total_bytes - start_offset,
+        0,
+        0,
+        &summary,
+        false,
+    );
+
+    let mut began_transaction = false;
+    let import = (|| -> Result<ProviderImportSummary> {
+        let file = File::open(path)?;
+        let mut reader = BufReader::new(file);
+        let mut line = Vec::new();
+        let mut line_number = 0usize;
+        let mut position = 0u64;
+
+        let read = reader.read_until(b'\n', &mut line)?;
+        if read == 0 {
+            return Ok(summary);
+        }
+        line_number += 1;
+        position = position.saturating_add(read as u64);
+        let header_value: Value = serde_json::from_slice(&line)?;
+        let header = codex_session_header(header_value)?;
+
+        while position < start_offset {
+            line.clear();
+            let read = reader.read_until(b'\n', &mut line)?;
+            if read == 0 {
+                return Ok(summary);
+            }
+            line_number += 1;
+            position = position.saturating_add(read as u64);
+        }
+
+        store.begin_immediate_batch()?;
+        began_transaction = true;
+        let header_capture =
+            codex_session_capture(&header, None, line_number, header.timestamp, &context);
+        summary.merge(import_provider_capture_line(
+            store,
+            &header_capture,
+            &import_options,
+            line_number,
+            &mut caches,
+        )?);
+
+        let mut call_contexts: BTreeMap<String, CodexToolCallContext> = BTreeMap::new();
+        let mut completed_bytes = 0u64;
+        loop {
+            line.clear();
+            let read = reader.read_until(b'\n', &mut line)?;
+            if read == 0 {
+                break;
+            }
+            line_number += 1;
+            completed_bytes = completed_bytes.saturating_add(read as u64);
+            if line.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
+            if !should_parse_codex_session_line(&line, options.event_mode) {
+                continue;
+            }
+            if should_skip_codex_tool_output_line(&line, options.tool_output_mode) {
+                summary.skipped += 1;
+                summary.skipped_events += 1;
+                continue;
+            }
+
+            let value: Value = match serde_json::from_slice(&line) {
+                Ok(value) => value,
+                Err(err) => {
+                    summary.failed += 1;
+                    summary.failures.push(ProviderImportFailure {
+                        line: line_number,
+                        error: err.to_string(),
+                    });
+                    if !options.allow_partial_failures {
+                        return Ok(summary);
+                    }
+                    continue;
+                }
+            };
+            if value
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|entry_type| entry_type == "session_meta")
+            {
+                continue;
+            }
+            let occurred_at = value
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .and_then(parse_rfc3339_utc)
+                .unwrap_or(header.timestamp);
+            let Some(event) = codex_session_event(
+                &value,
+                line_number,
+                occurred_at,
+                &mut call_contexts,
+                options.tool_output_mode,
+                options.event_mode,
+            ) else {
+                continue;
+            };
+            if !options.include_notices && event.event_type == EventType::Notice {
+                summary.skipped += 1;
+                summary.skipped_events += 1;
+                continue;
+            }
+            summary.merge(import_codex_provider_event_fast(
+                store,
+                &header,
+                &event,
+                options.history_record_id,
+                line_number,
+                context.imported_at,
+            )?);
+            report_codex_import_progress(
+                &options,
+                1,
+                total_bytes - start_offset,
+                0,
+                completed_bytes,
+                &summary,
+                false,
+            );
+        }
+
+        resolve_pending_provider_edges(store, &mut summary, &mut caches)?;
+        Ok(summary)
+    })();
+
+    match import {
+        Ok(summary) => {
+            if began_transaction {
+                store.commit_batch()?;
+            }
+            report_codex_import_progress(
+                &options,
+                1,
+                total_bytes - start_offset,
+                1,
+                total_bytes - start_offset,
+                &summary,
+                true,
+            );
+            Ok(summary)
+        }
+        Err(err) => {
+            if began_transaction {
+                let _ = store.rollback_batch();
+            }
+            Err(err)
+        }
+    }
 }
 
 pub fn import_codex_session_paths(
@@ -2742,7 +2936,7 @@ pub fn import_pi_session_jsonl(
             allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
-            fast_event_inserts: false,
+            fast_event_inserts: true,
         },
     )
 }
@@ -2777,7 +2971,7 @@ pub fn import_claude_projects_jsonl_tree(
             allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
-            fast_event_inserts: false,
+            fast_event_inserts: true,
         },
     )
 }
@@ -2812,7 +3006,7 @@ pub fn import_opencode_sqlite(
             allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
-            fast_event_inserts: false,
+            fast_event_inserts: true,
         },
     )
 }
@@ -2948,7 +3142,7 @@ fn import_native_jsonl_tree<A: ProviderCaptureAdapter>(
             allow_partial_failures: request.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
-            fast_event_inserts: false,
+            fast_event_inserts: true,
         },
     )
 }

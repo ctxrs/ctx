@@ -4,8 +4,9 @@ use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tempfile::{Builder, TempDir};
 
@@ -934,7 +935,8 @@ fn fresh_home_search_mvp_flow() {
     assert!(listed["items"][0]["item_id"].is_string());
     assert_eq!(listed["items"][0]["id"], listed["items"][0]["item_id"]);
 
-    let search = json_output(ctx(&temp).args(["search", "onboarding", "--json"]));
+    let search =
+        json_output(ctx(&temp).args(["search", "onboarding", "--provider", "codex", "--json"]));
     assert_eq!(search["schema_version"], 1);
     assert_eq!(search["share_safe"], false);
     assert_omits_keys(
@@ -1175,11 +1177,11 @@ fn search_refresh_off_serves_existing_index_without_importing() {
 }
 
 #[test]
-fn search_refresh_auto_skips_large_catalog_refresh_before_querying() {
+fn search_refresh_auto_imports_fresh_work_despite_large_existing_catalog() {
     let temp = tempdir();
+    let fixture = PathBuf::from(provider_history_fixture("codex-sessions"));
     let discovered = temp.path().join(".codex").join("sessions");
-    fs::create_dir_all(&discovered).unwrap();
-    fs::write(discovered.join("session.jsonl"), "{}\n").unwrap();
+    copy_dir_all(&fixture, &discovered);
     let _ = json_output(ctx(&temp).args(["search", "anything", "--refresh", "off", "--json"]));
 
     let mut conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
@@ -1208,58 +1210,166 @@ fn search_refresh_auto_skips_large_catalog_refresh_before_querying() {
         }
     }
     tx.commit().unwrap();
-    let search = json_output(ctx(&temp).args(["search", "anything", "--json"]));
+    let search =
+        json_output(ctx(&temp).args(["search", "onboarding", "--provider", "codex", "--json"]));
     assert_eq!(search["freshness"]["mode"], "auto");
-    assert_eq!(search["freshness"]["status"], "skipped_large_index");
+    assert_eq!(search["freshness"]["status"], "completed");
     assert_eq!(search["freshness"]["source_count"], 1);
-
-    ctx(&temp)
-        .args(["search", "anything"])
-        .assert()
-        .success()
-        .stderr(predicate::str::contains(
-            "search refresh skipped a large Codex source or index",
-        ));
-}
-
-#[test]
-fn search_refresh_auto_skips_large_discovered_source_on_fresh_database() {
-    let temp = tempdir();
-    let discovered = temp.path().join(".codex").join("sessions");
-    fs::create_dir_all(&discovered).unwrap();
-    let large = fs::File::create(discovered.join("large.jsonl")).unwrap();
-    large.set_len(1024 * 1024 * 1024 + 1).unwrap();
-
-    let search = json_output(ctx(&temp).args(["search", "anything", "--json"]));
-    assert_eq!(search["freshness"]["mode"], "auto");
-    assert_eq!(search["freshness"]["status"], "skipped_large_index");
-    assert_eq!(search["freshness"]["source_count"], 1);
-    assert!(search["results"].as_array().unwrap().is_empty());
+    assert_eq!(search["freshness"]["totals"]["imported_sessions"], 2);
+    assert_search_provider_oracle(&search, "codex", "onboarding", 1, "message");
 
     let status = json_output(ctx(&temp).args(["status", "--json"]));
-    assert_eq!(status["cataloged_sessions"], 0);
+    assert_eq!(status["pending_catalog_sessions"], 0);
 }
 
 #[test]
-fn search_refresh_auto_skips_many_small_discovered_source_files() {
+fn search_refresh_auto_tail_imports_appended_codex_session_event() {
     let temp = tempdir();
+    let fixture = PathBuf::from(provider_history_fixture("codex-sessions"));
     let discovered = temp.path().join(".codex").join("sessions");
-    fs::create_dir_all(&discovered).unwrap();
-    for index in 0..10_000 {
-        fs::write(
-            discovered.join(format!("small-{index:05}.jsonl")),
-            format!("{{\"type\":\"noop\",\"index\":{index}}}\n"),
+    copy_dir_all(&fixture, &discovered);
+    let root_session = discovered.join("2026/06/23/root.jsonl");
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(&root_session)
+        .unwrap();
+    for index in 0..250 {
+        writeln!(
+            file,
+            "{}",
+            json!({
+                "timestamp": "2026-06-23T15:00:00.000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": format!("tail-refresh-baseline-{index}")}]
+                }
+            })
         )
         .unwrap();
     }
+    drop(file);
 
-    let search = json_output(ctx(&temp).args(["search", "anything", "--json"]));
-    assert_eq!(search["freshness"]["mode"], "auto");
-    assert_eq!(search["freshness"]["status"], "skipped_large_index");
-    assert_eq!(search["freshness"]["source_count"], 1);
+    let first =
+        json_output(ctx(&temp).args(["search", "onboarding", "--provider", "codex", "--json"]));
+    assert_search_provider_oracle(&first, "codex", "onboarding", 1, "message");
 
-    let status = json_output(ctx(&temp).args(["status", "--json"]));
-    assert_eq!(status["cataloged_sessions"], 0);
+    let appended_needle = "tail-refresh-append-oracle";
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(&root_session)
+        .unwrap();
+    writeln!(
+        file,
+        "{}",
+        json!({
+            "timestamp": "2026-06-23T15:00:30.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": appended_needle}]
+            }
+        })
+    )
+    .unwrap();
+
+    let started = Instant::now();
+    let refreshed =
+        json_output(ctx(&temp).args(["search", appended_needle, "--provider", "codex", "--json"]));
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "tail refresh took {elapsed:?}"
+    );
+    assert_eq!(refreshed["freshness"]["status"], "completed");
+    assert_eq!(refreshed["freshness"]["totals"]["imported_events"], 1);
+    assert!(
+        refreshed["freshness"]["totals"]["skipped"]
+            .as_u64()
+            .unwrap()
+            < 20,
+        "tail refresh unexpectedly reprocessed old events: {}",
+        refreshed["freshness"]["totals"]
+    );
+    assert_search_provider_oracle(&refreshed, "codex", appended_needle, 1, "message");
+}
+
+#[test]
+fn search_refresh_auto_imports_discovered_top_provider_sources() {
+    for (cli_provider, stored_provider, install_fixture) in [
+        (
+            "claude",
+            "claude",
+            install_default_claude_fixture as fn(&TempDir, &str),
+        ),
+        ("pi", "pi", install_default_pi_fixture),
+        ("cursor", "cursor", install_default_cursor_fixture),
+    ] {
+        let temp = tempdir();
+        let query = format!("{stored_provider}-default-refresh-oracle");
+        install_fixture(&temp, &query);
+
+        let search =
+            json_output(ctx(&temp).args(["search", &query, "--provider", cli_provider, "--json"]));
+        assert_eq!(search["freshness"]["mode"], "auto");
+        assert_eq!(search["freshness"]["status"], "completed");
+        assert_eq!(search["freshness"]["source_count"], 1);
+        assert!(
+            search["freshness"]["totals"]["imported_sessions"]
+                .as_u64()
+                .unwrap()
+                >= 1
+        );
+        assert_search_provider_oracle(&search, stored_provider, &query, 1, "message");
+
+        let started = Instant::now();
+        let refreshed =
+            json_output(ctx(&temp).args(["search", &query, "--provider", cli_provider, "--json"]));
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "{cli_provider} no-op refresh took {elapsed:?}"
+        );
+        assert_eq!(refreshed["freshness"]["mode"], "auto");
+        assert_eq!(refreshed["freshness"]["status"], "completed");
+        assert_eq!(refreshed["freshness"]["totals"]["imported_sessions"], 0);
+        assert_eq!(refreshed["freshness"]["totals"]["imported_events"], 0);
+        assert_search_provider_oracle(&refreshed, stored_provider, &query, 1, "message");
+    }
+}
+
+#[test]
+fn search_refresh_strict_json_emits_progress_on_stderr() {
+    let temp = tempdir();
+    let fixture = PathBuf::from(provider_history_fixture("codex-sessions"));
+    copy_dir_all(&fixture, &temp.path().join(".codex").join("sessions"));
+
+    let output = ctx(&temp)
+        .args([
+            "search",
+            "onboarding",
+            "--provider",
+            "codex",
+            "--refresh",
+            "strict",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(stdout["freshness"]["status"], "completed");
+    assert_search_provider_oracle(&stdout, "codex", "onboarding", 1, "message");
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains(r#""type":"ctx_progress""#), "{stderr}");
+    assert!(
+        stderr.contains(r#""operation":"search-refresh""#),
+        "{stderr}"
+    );
 }
 
 #[test]
@@ -1569,6 +1679,41 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
         let validate = json_output(ctx(&temp).args(["validate", "--json"]));
         assert_eq!(validate["valid"], true);
     }
+}
+
+fn install_default_claude_fixture(temp: &TempDir, query: &str) {
+    let source = PathBuf::from(write_native_claude_fixture(temp, query));
+    copy_dir_all(&source, &temp.path().join(".claude").join("projects"));
+}
+
+fn install_default_pi_fixture(temp: &TempDir, query: &str) {
+    let root = temp.path().join(".pi");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        root.join("sessions.jsonl"),
+        format!(
+            "{}\n{}\n",
+            json!({
+                "type": "session",
+                "version": 3,
+                "id": "pi-default-refresh",
+                "timestamp": "2026-06-24T12:00:00.000Z",
+                "cwd": "/workspace"
+            }),
+            json!({
+                "type": "message",
+                "id": "pi-default-refresh-user",
+                "timestamp": "2026-06-24T12:00:01.000Z",
+                "message": {"role": "user", "content": query}
+            })
+        ),
+    )
+    .unwrap();
+}
+
+fn install_default_cursor_fixture(temp: &TempDir, query: &str) {
+    let source = PathBuf::from(write_native_cursor_fixture(temp, query));
+    copy_dir_all(&source, &temp.path().join(".cursor").join("projects"));
 }
 
 fn write_native_claude_fixture(temp: &TempDir, query: &str) -> String {
@@ -1951,9 +2096,7 @@ fn pi_cli_rejects_directory_import_path() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "provider transcript paths must be regular files",
-        ));
+        .stderr(predicate::str::contains("no importable pi history files"));
 }
 
 #[test]

@@ -66,8 +66,8 @@ pub enum StoreError {
 
 pub type Result<T> = std::result::Result<T, StoreError>;
 
-const SCHEMA_VERSION: i64 = 8;
-const BUSY_TIMEOUT: Duration = Duration::from_millis(5_000);
+const SCHEMA_VERSION: i64 = 9;
+const BUSY_TIMEOUT: Duration = Duration::from_millis(30_000);
 const OBJECTS_DIR: &str = "objects";
 const SPOOL_DIR: &str = "spool";
 const LEGACY_HISTORY_DIR_NAME: &str = "work-record";
@@ -120,6 +120,33 @@ pub struct CatalogSourceIndexUpdate<'a> {
     pub file_size_bytes: u64,
     pub file_modified_at_ms: i64,
     pub event_count: u64,
+    pub indexed_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CatalogSourceIndexState {
+    pub indexed_file_size_bytes: Option<u64>,
+    pub indexed_file_modified_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceImportFile {
+    pub provider: CaptureProvider,
+    pub source_format: String,
+    pub source_root: String,
+    pub source_path: String,
+    pub file_size_bytes: u64,
+    pub file_modified_at_ms: i64,
+    pub observed_at_ms: i64,
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceImportFileIndexUpdate<'a> {
+    pub source_root: &'a str,
+    pub source_path: &'a str,
+    pub file_size_bytes: u64,
+    pub file_modified_at_ms: i64,
     pub indexed_at_ms: i64,
 }
 
@@ -309,6 +336,24 @@ CREATE TABLE IF NOT EXISTS catalog_sessions (
     indexed_error TEXT,
     indexed_event_count INTEGER,
     metadata_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS source_import_files (
+    provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'antigravity', 'gemini', 'cursor', 'copilot_cli', 'factory_ai_droid', 'shell', 'git', 'jj', 'gh', 'unknown')),
+    source_format TEXT NOT NULL,
+    source_root TEXT NOT NULL,
+    source_path TEXT NOT NULL,
+    file_size_bytes INTEGER NOT NULL,
+    file_modified_at_ms INTEGER NOT NULL,
+    observed_at_ms INTEGER NOT NULL,
+    is_stale INTEGER NOT NULL DEFAULT 0,
+    indexed_at_ms INTEGER,
+    indexed_file_size_bytes INTEGER,
+    indexed_file_modified_at_ms INTEGER,
+    indexed_status TEXT NOT NULL DEFAULT 'pending' CHECK (indexed_status IN ('pending', 'indexed', 'failed')),
+    indexed_error TEXT,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (provider, source_root, source_path)
 );
 
 CREATE TABLE IF NOT EXISTS vcs_workspaces (
@@ -673,6 +718,8 @@ CREATE INDEX IF NOT EXISTS idx_catalog_sessions_provider_source_root_stale ON ca
 CREATE INDEX IF NOT EXISTS idx_catalog_sessions_provider_source_root_import ON catalog_sessions(provider, source_root, is_stale, indexed_status);
 CREATE INDEX IF NOT EXISTS idx_catalog_sessions_started_at ON catalog_sessions(session_started_at_ms);
 CREATE INDEX IF NOT EXISTS idx_catalog_sessions_cwd ON catalog_sessions(cwd);
+CREATE INDEX IF NOT EXISTS idx_source_import_files_provider_source_root_import ON source_import_files(provider, source_root, is_stale, indexed_status);
+CREATE INDEX IF NOT EXISTS idx_source_import_files_provider_source_root_stale ON source_import_files(provider, source_root, is_stale);
 CREATE INDEX IF NOT EXISTS idx_sessions_provider_external_session_id ON sessions(provider, external_session_id);
 
 CREATE INDEX IF NOT EXISTS idx_history_records_primary_vcs_workspace_id ON history_records(primary_vcs_workspace_id);
@@ -914,6 +961,9 @@ impl Store {
         if user_version < 8 {
             migrate_to_v8(&self.conn)?;
         }
+        if user_version < 9 {
+            migrate_to_v9(&self.conn)?;
+        }
         create_fts_tables_if_supported(&self.conn)?;
         Ok(())
     }
@@ -1084,19 +1134,19 @@ impl Store {
                     WHEN catalog_sessions.file_size_bytes = excluded.file_size_bytes
                      AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
                     THEN catalog_sessions.indexed_at_ms
-                    ELSE NULL
+                    ELSE catalog_sessions.indexed_at_ms
                 END,
                 indexed_file_size_bytes = CASE
                     WHEN catalog_sessions.file_size_bytes = excluded.file_size_bytes
                      AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
                     THEN catalog_sessions.indexed_file_size_bytes
-                    ELSE NULL
+                    ELSE catalog_sessions.indexed_file_size_bytes
                 END,
                 indexed_file_modified_at_ms = CASE
                     WHEN catalog_sessions.file_size_bytes = excluded.file_size_bytes
                      AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
                     THEN catalog_sessions.indexed_file_modified_at_ms
-                    ELSE NULL
+                    ELSE catalog_sessions.indexed_file_modified_at_ms
                 END,
                 indexed_status = CASE
                     WHEN catalog_sessions.file_size_bytes = excluded.file_size_bytes
@@ -1114,7 +1164,7 @@ impl Store {
                     WHEN catalog_sessions.file_size_bytes = excluded.file_size_bytes
                      AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
                     THEN catalog_sessions.indexed_event_count
-                    ELSE NULL
+                    ELSE catalog_sessions.indexed_event_count
                 END,
                 metadata_json = excluded.metadata_json
             WHERE catalog_sessions.provider IS NOT excluded.provider
@@ -1308,6 +1358,241 @@ impl Store {
                 indexed_status = ?6,
                 indexed_error = ?5,
                 indexed_event_count = NULL
+            WHERE provider = ?1
+              AND source_root = ?2
+              AND source_path = ?3
+              AND is_stale = 0
+            "#,
+            params![
+                provider.as_str(),
+                source_root,
+                source_path,
+                indexed_at_ms,
+                error,
+                CatalogIndexedStatus::Failed.as_str(),
+            ],
+        )?;
+        Ok(changed)
+    }
+
+    pub fn catalog_source_index_state(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        source_path: &str,
+    ) -> Result<Option<CatalogSourceIndexState>> {
+        self.conn
+            .query_row(
+                r#"
+                SELECT indexed_file_size_bytes, indexed_file_modified_at_ms
+                FROM catalog_sessions
+                WHERE provider = ?1
+                  AND source_root = ?2
+                  AND source_path = ?3
+                  AND is_stale = 0
+                "#,
+                params![provider.as_str(), source_root, source_path],
+                |row| {
+                    let indexed_file_size_bytes = row
+                        .get::<_, Option<i64>>(0)?
+                        .map(nonnegative_i64_to_u64)
+                        .transpose()?;
+                    Ok(CatalogSourceIndexState {
+                        indexed_file_size_bytes,
+                        indexed_file_modified_at_ms: row.get(1)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn upsert_source_import_files(&self, files: &[SourceImportFile]) -> Result<()> {
+        if files.is_empty() {
+            return Ok(());
+        }
+        let mut stmt = self.conn.prepare(
+            r#"
+            INSERT INTO source_import_files (
+                provider, source_format, source_root, source_path,
+                file_size_bytes, file_modified_at_ms, observed_at_ms, is_stale,
+                metadata_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8)
+            ON CONFLICT(provider, source_root, source_path) DO UPDATE SET
+                source_format = excluded.source_format,
+                file_size_bytes = excluded.file_size_bytes,
+                file_modified_at_ms = excluded.file_modified_at_ms,
+                observed_at_ms = excluded.observed_at_ms,
+                is_stale = 0,
+                indexed_at_ms = CASE
+                    WHEN source_import_files.file_size_bytes = excluded.file_size_bytes
+                     AND source_import_files.file_modified_at_ms = excluded.file_modified_at_ms
+                    THEN source_import_files.indexed_at_ms
+                    ELSE NULL
+                END,
+                indexed_file_size_bytes = CASE
+                    WHEN source_import_files.file_size_bytes = excluded.file_size_bytes
+                     AND source_import_files.file_modified_at_ms = excluded.file_modified_at_ms
+                    THEN source_import_files.indexed_file_size_bytes
+                    ELSE NULL
+                END,
+                indexed_file_modified_at_ms = CASE
+                    WHEN source_import_files.file_size_bytes = excluded.file_size_bytes
+                     AND source_import_files.file_modified_at_ms = excluded.file_modified_at_ms
+                    THEN source_import_files.indexed_file_modified_at_ms
+                    ELSE NULL
+                END,
+                indexed_status = CASE
+                    WHEN source_import_files.file_size_bytes = excluded.file_size_bytes
+                     AND source_import_files.file_modified_at_ms = excluded.file_modified_at_ms
+                    THEN source_import_files.indexed_status
+                    ELSE 'pending'
+                END,
+                indexed_error = CASE
+                    WHEN source_import_files.file_size_bytes = excluded.file_size_bytes
+                     AND source_import_files.file_modified_at_ms = excluded.file_modified_at_ms
+                    THEN source_import_files.indexed_error
+                    ELSE NULL
+                END,
+                metadata_json = excluded.metadata_json
+            WHERE source_import_files.source_format IS NOT excluded.source_format
+               OR source_import_files.file_size_bytes != excluded.file_size_bytes
+               OR source_import_files.file_modified_at_ms != excluded.file_modified_at_ms
+               OR source_import_files.is_stale != 0
+               OR source_import_files.metadata_json IS NOT excluded.metadata_json
+            "#,
+        )?;
+        for file in files {
+            stmt.execute(params![
+                file.provider.as_str(),
+                file.source_format.as_str(),
+                file.source_root.as_str(),
+                file.source_path.as_str(),
+                capped_i64(file.file_size_bytes),
+                file.file_modified_at_ms,
+                file.observed_at_ms,
+                serde_json::to_string(&file.metadata)?,
+            ])?;
+        }
+        Ok(())
+    }
+
+    pub fn mark_source_import_missing_paths_stale(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        current_paths: &[String],
+        observed_at_ms: i64,
+    ) -> Result<usize> {
+        self.conn.execute_batch(
+            "CREATE TEMP TABLE IF NOT EXISTS temp_source_import_current_paths (source_path TEXT PRIMARY KEY)",
+        )?;
+        self.conn
+            .execute("DELETE FROM temp_source_import_current_paths", [])?;
+        {
+            let mut stmt = self.conn.prepare(
+                "INSERT OR IGNORE INTO temp_source_import_current_paths (source_path) VALUES (?1)",
+            )?;
+            for source_path in current_paths {
+                stmt.execute(params![source_path])?;
+            }
+        }
+        let changed = self.conn.execute(
+            r#"
+            UPDATE source_import_files
+            SET is_stale = 1, observed_at_ms = ?3
+            WHERE provider = ?1
+              AND source_root = ?2
+              AND is_stale = 0
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM temp_source_import_current_paths AS current
+                  WHERE current.source_path = source_import_files.source_path
+              )
+            "#,
+            params![provider.as_str(), source_root, observed_at_ms],
+        )?;
+        self.conn
+            .execute("DELETE FROM temp_source_import_current_paths", [])?;
+        Ok(changed)
+    }
+
+    pub fn list_pending_source_import_files(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+    ) -> Result<Vec<SourceImportFile>> {
+        let mut stmt = self.conn.prepare(
+            format!(
+                "{} WHERE provider = ?1
+                   AND source_root = ?2
+                   AND is_stale = 0
+                   AND (
+                       indexed_status != 'indexed'
+                       OR indexed_file_size_bytes IS NULL
+                       OR indexed_file_modified_at_ms IS NULL
+                       OR indexed_file_size_bytes != file_size_bytes
+                       OR indexed_file_modified_at_ms != file_modified_at_ms
+                   )
+                 ORDER BY source_path",
+                source_import_file_select_sql("")
+            )
+            .as_str(),
+        )?;
+        let rows = stmt.query_map(
+            params![provider.as_str(), source_root],
+            source_import_file_from_row,
+        )?;
+        collect_rows(rows)
+    }
+
+    pub fn mark_source_import_file_indexed(
+        &self,
+        provider: CaptureProvider,
+        update: SourceImportFileIndexUpdate<'_>,
+    ) -> Result<usize> {
+        let changed = self.conn.execute(
+            r#"
+            UPDATE source_import_files
+            SET indexed_at_ms = ?4,
+                indexed_file_size_bytes = ?5,
+                indexed_file_modified_at_ms = ?6,
+                indexed_status = ?7,
+                indexed_error = NULL
+            WHERE provider = ?1
+              AND source_root = ?2
+              AND source_path = ?3
+              AND is_stale = 0
+            "#,
+            params![
+                provider.as_str(),
+                update.source_root,
+                update.source_path,
+                update.indexed_at_ms,
+                capped_i64(update.file_size_bytes),
+                update.file_modified_at_ms,
+                CatalogIndexedStatus::Indexed.as_str(),
+            ],
+        )?;
+        Ok(changed)
+    }
+
+    pub fn mark_source_import_file_failed(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        source_path: &str,
+        error: &str,
+        indexed_at_ms: i64,
+    ) -> Result<usize> {
+        let changed = self.conn.execute(
+            r#"
+            UPDATE source_import_files
+            SET indexed_at_ms = ?4,
+                indexed_file_size_bytes = NULL,
+                indexed_file_modified_at_ms = NULL,
+                indexed_status = ?6,
+                indexed_error = ?5
             WHERE provider = ?1
               AND source_root = ?2
               AND source_path = ?3
@@ -1747,6 +2032,7 @@ impl Store {
                 serde_json::to_string(&event.sync.metadata)?,
             ],
         )?;
+        upsert_event_search_projection_for_event(&self.conn, event_id, event)?;
         if let Some(dedupe_key) = &event.dedupe_key {
             return self.event_id_by_dedupe_key(dedupe_key);
         }
@@ -1784,6 +2070,11 @@ impl Store {
                 optional_timestamp_ms(event.sync.deleted_at),
                 serde_json::to_string(&event.sync.metadata)?,
             ])?;
+        if changed == 0 {
+            if let Some(dedupe_key) = &event.dedupe_key {
+                reject_provider_event_hash_conflict(&self.conn, dedupe_key)?;
+            }
+        }
         if changed > 0 {
             insert_event_search_projection_for_event(&self.conn, event)?;
         }
@@ -2467,13 +2758,13 @@ impl Store {
                 record.updated_at.to_rfc3339(),
             ],
         )?;
-        self.rebuild_search_projection()?;
+        upsert_record_search_projection(&self.conn, record)?;
         Ok(())
     }
 
     pub fn upsert_record(&self, record: &HistoryRecord) -> Result<()> {
         self.upsert_record_row(record)?;
-        self.rebuild_search_projection()?;
+        upsert_record_search_projection(&self.conn, record)?;
         Ok(())
     }
 
@@ -2492,7 +2783,9 @@ impl Store {
             let _ = self.rollback_batch();
             return Err(err);
         }
-        self.rebuild_search_projection()?;
+        for record in records {
+            upsert_record_search_projection(&self.conn, record)?;
+        }
         Ok(())
     }
 
@@ -3028,6 +3321,32 @@ fn rebuild_search_projection(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn upsert_record_search_projection(conn: &Connection, record: &HistoryRecord) -> Result<()> {
+    if !table_exists(conn, "ctx_history_search")? {
+        return Ok(());
+    }
+    conn.execute(
+        "DELETE FROM ctx_history_search WHERE record_id = ?1",
+        params![record.id.to_string()],
+    )?;
+    conn.execute(
+        r#"
+        INSERT INTO ctx_history_search
+        (record_id, title, summary, primary_user_text, decision_text, context_text, tag_text)
+        VALUES (?1, ?2, ?3, ?4, '', ?5, ?6)
+        "#,
+        params![
+            record.id.to_string(),
+            redact_preview(&record.title, 512),
+            redact_preview(&record.body, 2048),
+            redact_preview(&record.body, 2048),
+            "",
+            redact_preview(&record.tags.join(" "), 1024),
+        ],
+    )?;
+    Ok(())
+}
+
 fn ensure_search_projection_initialized(conn: &Connection) -> Result<()> {
     if !table_exists(conn, "ctx_history_search")? {
         return Ok(());
@@ -3131,6 +3450,29 @@ fn populate_event_search_projection(conn: &Connection) -> Result<()> {
 }
 
 fn insert_event_search_projection_for_event(conn: &Connection, event: &Event) -> Result<()> {
+    insert_event_search_projection_for_event_id(conn, event.id, event)
+}
+
+fn upsert_event_search_projection_for_event(
+    conn: &Connection,
+    event_id: Uuid,
+    event: &Event,
+) -> Result<()> {
+    if !table_exists(conn, "event_search")? {
+        return Ok(());
+    }
+    conn.execute(
+        "DELETE FROM event_search WHERE event_id = ?1",
+        params![event_id.to_string()],
+    )?;
+    insert_event_search_projection_for_event_id(conn, event_id, event)
+}
+
+fn insert_event_search_projection_for_event_id(
+    conn: &Connection,
+    event_id: Uuid,
+    event: &Event,
+) -> Result<()> {
     if !table_exists(conn, "event_search")? {
         return Ok(());
     }
@@ -3146,7 +3488,7 @@ fn insert_event_search_projection_for_event(conn: &Connection, event: &Event) ->
         "#,
     )?
     .execute(params![
-        event.id.to_string(),
+        event_id.to_string(),
         optional_uuid_string(event.history_record_id),
         optional_uuid_string(event.session_id),
         event.role.map(|role| role.as_str()),
@@ -3491,6 +3833,29 @@ fn migrate_to_v8(conn: &Connection) -> Result<()> {
     }
 }
 
+fn migrate_to_v9(conn: &Connection) -> Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE;")?;
+    let migration = (|| -> Result<()> {
+        conn.execute_batch(CREATE_TABLES_SQL)?;
+        conn.execute_batch(INDEXES_SQL)?;
+        conn.execute_batch("PRAGMA user_version = 9;")?;
+        Ok(())
+    })();
+
+    match migration {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;")?;
+            Ok(())
+        }
+        Err(err) => {
+            if let Err(rollback_err) = conn.execute_batch("ROLLBACK;") {
+                return Err(StoreError::Sql(rollback_err));
+            }
+            Err(err)
+        }
+    }
+}
+
 fn drop_legacy_history_record_indexes(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
@@ -3700,25 +4065,48 @@ fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
 }
 
 fn reject_provider_event_hash_conflict(conn: &Connection, dedupe_key: &str) -> Result<()> {
-    let mut stmt = conn.prepare("SELECT dedupe_key FROM events WHERE dedupe_key IS NOT NULL")?;
-    reject_provider_event_hash_conflict_from_rows(dedupe_key, &mut stmt)
+    let Some((provider, external_session_id, provider_index, _new_hash)) =
+        parse_provider_event_dedupe_key(dedupe_key)
+    else {
+        return Ok(());
+    };
+    let prefix = provider_event_dedupe_key_prefix(&provider, &external_session_id, provider_index);
+    let upper_bound = provider_event_dedupe_key_upper_bound(&prefix);
+    let mut stmt = conn.prepare(
+        "SELECT dedupe_key FROM events
+         WHERE dedupe_key >= ?1 AND dedupe_key < ?2
+         ORDER BY dedupe_key",
+    )?;
+    let rows = stmt.query_map(params![prefix, upper_bound], |row| row.get::<_, String>(0))?;
+    reject_provider_event_hash_conflict_from_rows(dedupe_key, rows)
 }
 
 fn reject_provider_event_hash_conflict_tx(tx: &Transaction<'_>, dedupe_key: &str) -> Result<()> {
-    let mut stmt = tx.prepare("SELECT dedupe_key FROM events WHERE dedupe_key IS NOT NULL")?;
-    reject_provider_event_hash_conflict_from_rows(dedupe_key, &mut stmt)
+    let Some((provider, external_session_id, provider_index, _new_hash)) =
+        parse_provider_event_dedupe_key(dedupe_key)
+    else {
+        return Ok(());
+    };
+    let prefix = provider_event_dedupe_key_prefix(&provider, &external_session_id, provider_index);
+    let upper_bound = provider_event_dedupe_key_upper_bound(&prefix);
+    let mut stmt = tx.prepare(
+        "SELECT dedupe_key FROM events
+         WHERE dedupe_key >= ?1 AND dedupe_key < ?2
+         ORDER BY dedupe_key",
+    )?;
+    let rows = stmt.query_map(params![prefix, upper_bound], |row| row.get::<_, String>(0))?;
+    reject_provider_event_hash_conflict_from_rows(dedupe_key, rows)
 }
 
 fn reject_provider_event_hash_conflict_from_rows(
     dedupe_key: &str,
-    stmt: &mut rusqlite::Statement<'_>,
+    rows: rusqlite::MappedRows<'_, impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<String>>,
 ) -> Result<()> {
     let Some((provider, external_session_id, provider_index, new_hash)) =
         parse_provider_event_dedupe_key(dedupe_key)
     else {
         return Ok(());
     };
-    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
     for row in rows {
         let existing_key = row?;
         let Some((existing_provider, existing_session_id, existing_index, existing_hash)) =
@@ -3741,6 +4129,20 @@ fn reject_provider_event_hash_conflict_from_rows(
         }
     }
     Ok(())
+}
+
+fn provider_event_dedupe_key_prefix(
+    provider: &str,
+    external_session_id: &str,
+    provider_index: u64,
+) -> String {
+    format!("provider:{provider}:{external_session_id}:{provider_index}:")
+}
+
+fn provider_event_dedupe_key_upper_bound(prefix: &str) -> String {
+    let mut upper_bound = prefix.to_owned();
+    upper_bound.push(char::MAX);
+    upper_bound
 }
 
 fn parse_provider_event_dedupe_key(dedupe_key: &str) -> Option<(String, String, u64, String)> {
@@ -5125,6 +5527,25 @@ fn catalog_session_select_sql(tail: &str) -> String {
     )
 }
 
+fn source_import_file_select_sql(tail: &str) -> String {
+    format!(
+        "SELECT provider, source_format, source_root, source_path, file_size_bytes, file_modified_at_ms, observed_at_ms, metadata_json FROM source_import_files {tail}"
+    )
+}
+
+fn source_import_file_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SourceImportFile> {
+    Ok(SourceImportFile {
+        provider: parse_text_enum::<CaptureProvider>(row.get::<_, String>(0)?)?,
+        source_format: row.get(1)?,
+        source_root: row.get(2)?,
+        source_path: row.get(3)?,
+        file_size_bytes: nonnegative_i64_to_u64(row.get(4)?)?,
+        file_modified_at_ms: row.get(5)?,
+        observed_at_ms: row.get(6)?,
+        metadata: parse_json(row.get::<_, String>(7)?)?,
+    })
+}
+
 fn catalog_session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CatalogSession> {
     Ok(CatalogSession {
         source_path: row.get(0)?,
@@ -5679,6 +6100,37 @@ mod search_order_tests {
         let reopened = Store::open(&path).unwrap();
         assert_search_order(&reopened, &expected);
     }
+
+    #[test]
+    fn upsert_record_updates_record_search_without_rebuilding_event_search() {
+        let temp = tempdir();
+        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        store
+            .conn
+            .execute(
+                r#"
+                INSERT INTO event_search
+                (event_id, history_record_id, session_id, role, safe_preview_text, rank_bucket)
+                VALUES ('sentinel-event', NULL, NULL, 'user', 'preserve-event-search-row', 'message')
+                "#,
+                [],
+            )
+            .unwrap();
+
+        let record = stable_tie_record(5);
+        store.upsert_record(&record).unwrap();
+
+        let sentinel_count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM event_search WHERE event_id = 'sentinel-event'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(sentinel_count, 1);
+        assert_search_order(&store, &[record.id]);
+    }
 }
 
 #[cfg(test)]
@@ -6036,9 +6488,62 @@ mod catalog_tests {
             )
             .unwrap();
         assert_eq!(status, CatalogIndexedStatus::Pending.as_str());
-        assert_eq!(indexed_size, None);
-        assert_eq!(indexed_mtime, None);
-        assert_eq!(indexed_event_count, None);
+        assert_eq!(indexed_size, Some(42));
+        assert_eq!(indexed_mtime, Some(cataloged_at_ms));
+        assert_eq!(indexed_event_count, Some(3));
+    }
+
+    #[test]
+    fn source_import_manifest_upsert_ignores_observed_at_for_unchanged_files() {
+        let temp = tempdir();
+        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let observed_at_ms = timestamp_ms(fixed_time());
+        let mut file = SourceImportFile {
+            provider: CaptureProvider::Claude,
+            source_format: "claude_projects_jsonl_tree".into(),
+            source_root: "/home/user/.claude/projects".into(),
+            source_path: "/home/user/.claude/projects/session.jsonl".into(),
+            file_size_bytes: 42,
+            file_modified_at_ms: observed_at_ms,
+            observed_at_ms,
+            metadata: serde_json::json!({}),
+        };
+        store
+            .upsert_source_import_files(std::slice::from_ref(&file))
+            .unwrap();
+        store
+            .mark_source_import_file_indexed(
+                CaptureProvider::Claude,
+                SourceImportFileIndexUpdate {
+                    source_root: "/home/user/.claude/projects",
+                    source_path: "/home/user/.claude/projects/session.jsonl",
+                    file_size_bytes: 42,
+                    file_modified_at_ms: observed_at_ms,
+                    indexed_at_ms: observed_at_ms + 10,
+                },
+            )
+            .unwrap();
+        let after_indexed: i64 = store
+            .conn
+            .query_row("SELECT total_changes()", [], |row| row.get(0))
+            .unwrap();
+
+        file.observed_at_ms += 1_000;
+        store
+            .upsert_source_import_files(std::slice::from_ref(&file))
+            .unwrap();
+        let after_noop: i64 = store
+            .conn
+            .query_row("SELECT total_changes()", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(after_noop, after_indexed);
+        assert!(store
+            .list_pending_source_import_files(
+                CaptureProvider::Claude,
+                "/home/user/.claude/projects"
+            )
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
