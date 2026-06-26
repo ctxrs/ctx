@@ -4444,27 +4444,49 @@ fn opencode_session_message_rows(conn: &Connection) -> Result<Vec<OpenCodeMessag
         &["id", "session_id", "data"],
     )?;
     let entry_type = optional_column_expr(&columns, "type", "'message'");
-    let seq = optional_column_expr(&columns, "seq", "0");
     let time_created = optional_column_expr(&columns, "time_created", "0");
     let time_updated = optional_column_expr(&columns, "time_updated", time_created);
+    let (seq_expr, order_expr) = if columns.contains("seq") {
+        ("seq", "seq, id")
+    } else if columns.contains("time_created") {
+        ("NULL", "time_created, id")
+    } else {
+        ("NULL", "id")
+    };
     let sql = format!(
-        "select id, session_id, {entry_type}, {seq}, {time_created}, {time_updated}, data \
-         from session_message order by session_id, {seq}, id"
+        "select id, session_id, {entry_type}, {seq_expr}, {time_created}, {time_updated}, data \
+         from session_message order by session_id, {order_expr}"
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], |row| {
-        Ok(OpenCodeMessageRow {
-            id: row.get(0)?,
-            session_id: row.get(1)?,
-            entry_type: row.get(2)?,
-            seq: row.get(3)?,
-            time_created: row.get(4)?,
-            time_updated: row.get(5)?,
-            data: row.get(6)?,
-        })
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<i64>>(3)?,
+            row.get::<_, i64>(4)?,
+            row.get::<_, i64>(5)?,
+            row.get::<_, String>(6)?,
+        ))
     })?;
-    rows.collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(CaptureError::from)
+    let rows = rows
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(CaptureError::from)?;
+    let mut messages = Vec::new();
+    let mut next_seq_by_session = BTreeMap::<String, i64>::new();
+    for (id, session_id, entry_type, seq, time_created, time_updated, data) in rows {
+        let seq = seq.unwrap_or_else(|| next_opencode_seq(&mut next_seq_by_session, &session_id));
+        messages.push(OpenCodeMessageRow {
+            id,
+            session_id,
+            entry_type,
+            seq,
+            time_created,
+            time_updated,
+            data,
+        });
+    }
+    Ok(messages)
 }
 
 fn opencode_session_entry_rows(conn: &Connection) -> Result<Vec<OpenCodeMessageRow>> {
@@ -8030,6 +8052,40 @@ mod tests {
     }
 
     #[test]
+    fn native_opencode_synthesizes_session_message_seq_when_missing() {
+        let temp = tempdir();
+        let fixture = write_opencode_session_message_without_seq_db(&temp);
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let summary = import_opencode_sqlite(
+            &fixture,
+            &mut store,
+            OpenCodeSqliteImportOptions {
+                allow_partial_failures: true,
+                ..OpenCodeSqliteImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.imported_sessions, 1);
+        assert_eq!(summary.imported_events, 2);
+
+        let session_id = provider_session_uuid(CaptureProvider::OpenCode, "opencode-no-seq");
+        let events = store.events_for_session(session_id).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[0].payload["body"]["session_message_seq"].as_i64(),
+            Some(1)
+        );
+        assert_eq!(
+            events[1].payload["body"]["session_message_seq"].as_i64(),
+            Some(2)
+        );
+        assert_ne!(events[0].id, events[1].id);
+    }
+
+    #[test]
     fn native_opencode_reports_malformed_and_corrupt_db() {
         let temp = tempdir();
         let malformed = write_opencode_smoke_db(&temp, true);
@@ -8268,6 +8324,46 @@ mod tests {
         conn.execute(
             "insert into session_message values (?1, ?2, 'assistant', 1, 1782259202000, 1782259202000, ?3)",
             ["msg-child", "opencode-child", child_data],
+        )
+        .unwrap();
+        path
+    }
+
+    fn write_opencode_session_message_without_seq_db(temp: &TempDir) -> PathBuf {
+        let path = temp.path().join("opencode-no-seq.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "create table session (
+                id text primary key, title text not null, directory text not null,
+                time_created integer not null, time_updated integer not null
+            );
+            create table session_message (
+                id text primary key, session_id text not null, type text not null,
+                time_created integer not null, time_updated integer not null, data text not null
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "insert into session values (?1, 'no seq', '/workspace', 1782259200000, 1782259200000)",
+            ["opencode-no-seq"],
+        )
+        .unwrap();
+        conn.execute(
+            "insert into session_message values (?1, ?2, 'user', 1782259200000, 1782259200000, ?3)",
+            [
+                "msg-no-seq-user",
+                "opencode-no-seq",
+                "{\"time\":{\"created\":1782259200000},\"text\":\"first no seq\"}",
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "insert into session_message values (?1, ?2, 'assistant', 1782259201000, 1782259201000, ?3)",
+            [
+                "msg-no-seq-assistant",
+                "opencode-no-seq",
+                "{\"time\":{\"created\":1782259201000},\"text\":\"second no seq\"}",
+            ],
         )
         .unwrap();
         path

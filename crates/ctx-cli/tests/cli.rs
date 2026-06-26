@@ -568,6 +568,24 @@ fn import_all_reports_source_failure_without_losing_successes() {
 }
 
 #[test]
+fn failed_import_attempt_does_not_count_as_indexed_history() {
+    let temp = tempdir();
+    let opencode_dir = temp.path().join(".local/share/opencode");
+    fs::create_dir_all(&opencode_dir).unwrap();
+    fs::write(opencode_dir.join("opencode.db"), b"not sqlite").unwrap();
+
+    ctx(&temp)
+        .args(["import", "--all", "--json", "--progress", "none"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("all import sources failed"));
+
+    let status = json_output(ctx(&temp).args(["status", "--json"]));
+    assert_eq!(status["indexed_items"], 0);
+    assert_eq!(status["indexed_sources"], 0);
+}
+
+#[test]
 fn provider_help_matches_implemented_importers() {
     let temp = tempdir();
     let output = ctx(&temp)

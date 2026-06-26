@@ -1172,8 +1172,7 @@ fn run_setup(
     };
     let setup_store = Store::open(&db_path)?;
     let catalog_counts = setup_store.catalog_session_counts()?;
-    let indexed_items =
-        setup_store.list_records(usize::MAX)?.len() + setup_store.list_sessions()?.len();
+    let indexed_items = indexed_history_item_count(&setup_store)?;
 
     if args.json {
         print_json(json!({
@@ -1292,6 +1291,15 @@ fn setup_has_indexed_content(indexed_items: usize) -> bool {
     indexed_items > 0
 }
 
+fn indexed_history_item_count(store: &Store) -> Result<usize> {
+    let sessions = store.list_sessions()?;
+    let mut count = sessions.len();
+    for session in sessions {
+        count = count.saturating_add(store.events_for_session(session.id)?.len());
+    }
+    Ok(count)
+}
+
 fn setup_has_failed_sources(report: Option<&ImportReport>) -> bool {
     report.is_some_and(|report| report.totals.failed_sources > 0)
 }
@@ -1307,7 +1315,7 @@ fn run_status(
     let (records, sources, catalog_counts) = if initialized {
         let store = Store::open(&db_path)?;
         (
-            store.list_records(usize::MAX)?.len() + store.list_sessions()?.len(),
+            indexed_history_item_count(&store)?,
             store.list_capture_sources()?.len(),
             store.catalog_session_counts()?,
         )
@@ -3081,7 +3089,7 @@ fn run_search(
     };
     let packet = ctx_history_search::search_packet(&store, &query, &options)?;
     let result_count = packet.results.len();
-    let indexed_items = store.list_records(usize::MAX)?.len() + store.list_sessions()?.len();
+    let indexed_items = indexed_history_item_count(&store)?;
     let citation_count = packet
         .results
         .iter()
