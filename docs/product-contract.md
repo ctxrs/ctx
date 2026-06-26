@@ -10,7 +10,8 @@ product boundary is retrieval, not interpretation.
 
 ## In Scope
 
-- `ctx setup` initializes local storage.
+- `ctx setup` initializes local storage and indexes discovered supported local
+  transcript formats.
 - `ctx sources` reports known local provider history paths.
 - `ctx import` indexes supported local transcript formats.
 - `ctx list` reports indexed session rows.

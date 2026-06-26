@@ -265,7 +265,7 @@ dependencies = [
 
 [[package]]
 name = "ctx"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -286,7 +286,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-capture"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "ctx-history-core",
@@ -301,7 +301,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "directories",
@@ -314,7 +314,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-search"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "ctx-history-core",
@@ -329,7 +329,7 @@ dependencies = [
 
 [[package]]
 name = "ctx-history-store"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "ctx-history-core",

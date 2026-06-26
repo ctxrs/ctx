@@ -3,16 +3,18 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-usage: scripts/install.sh --metadata PATH_OR_URL [--platform PLATFORM] [--bin-dir DIR]
+usage: scripts/install.sh --metadata PATH_OR_URL [--platform PLATFORM] [--bin-dir DIR] [--no-setup]
 
 Installs the ctx binary from explicit release metadata with pinned SHA-256
-checksums. The installer never evaluates remote scripts or metadata as shell.
+checksums, then runs ctx setup to index discovered local history. The installer
+never evaluates remote scripts or metadata as shell.
 
 Options:
   --metadata PATH_OR_URL  Required. Local metadata file or HTTPS URL.
   --platform PLATFORM    linux-x64, macos-arm64, macos-x64, or freebsd-x64.
                          Defaults to the current host when it can be detected.
   --bin-dir DIR          Install directory. Defaults to $HOME/.local/bin.
+  --no-setup             Install only; do not run ctx setup after install.
   --dry-run              Validate metadata and print the planned install.
   -h, --help             Show this help.
 
@@ -146,6 +148,7 @@ metadata_source=""
 platform=""
 bin_dir="${HOME:-}/.local/bin"
 dry_run=0
+run_setup=1
 
 while (($# > 0)); do
   case "$1" in
@@ -160,6 +163,9 @@ while (($# > 0)); do
     --bin-dir)
       shift
       bin_dir="${1:-}"
+      ;;
+    --no-setup)
+      run_setup=0
       ;;
     --dry-run)
       dry_run=1
@@ -234,3 +240,15 @@ fi
 mkdir -p "${bin_dir}"
 install -m 0755 "${download_path}" "${install_path}"
 printf 'installed ctx to %s\n' "${install_path}"
+
+if [[ "${CTX_INSTALL_NO_SETUP:-0}" == "1" ]]; then
+  run_setup=0
+fi
+
+if ((run_setup)); then
+  setup_progress="${CTX_SETUP_PROGRESS:-auto}"
+  printf 'running ctx setup to index local history (pass --no-setup or set CTX_INSTALL_NO_SETUP=1 to skip next time)\n'
+  "${install_path}" setup --progress "${setup_progress}"
+else
+  printf 'setup skipped; run %s setup to index local history\n' "${install_path}"
+fi

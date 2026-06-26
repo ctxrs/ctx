@@ -9,10 +9,14 @@ it repeats work.
 curl -fsSL https://cli.ctx.rs/install | sh
 ```
 
+The install script installs `ctx` and runs `ctx setup` so discovered local
+history is indexed before it exits. Use `sh -s -- --no-setup` for install-only
+CI or packaging flows.
+
 When working from source, use `cargo build -p ctx` or
 `cargo install --path crates/ctx-cli`.
 
-## 2. Create Local Storage
+## 2. Set Up And Index
 
 ```bash
 ctx setup
@@ -20,8 +24,9 @@ ctx status
 ```
 
 Setup creates the configured ctx data root, initializes SQLite, writes
-`config.toml` when missing, discovers known provider history paths, and prints
-next steps. The default data root is `~/.ctx`.
+`config.toml` when missing, discovers known provider history paths, catalogs
+Codex sessions, imports discovered sources, optimizes the local search index,
+and prints next steps. The default data root is `~/.ctx`.
 
 Use a different root when testing:
 
@@ -44,7 +49,7 @@ ctx sources --json
 reports supported Codex, Pi, Antigravity, Claude, OpenCode, Gemini, Cursor,
 Copilot CLI, and Factory AI Droid local history paths.
 
-## 4. Import History
+## 4. Re-Run Or Target Imports
 
 ```bash
 ctx import --all
@@ -55,7 +60,8 @@ ctx import --path ~/.codex/sessions
 ctx import --resume --json
 ```
 
-Imports are explicit and safe to re-run. Current importers rescan sources
+Setup already imports discovered sources. Use `ctx import` to repair, re-run,
+resume, or target a specific provider/path. Current importers rescan sources
 idempotently and skip or replace unchanged indexed rows. The `--resume` flag is
 reported as `idempotent_rescan`; it does not yet mean every provider has a
 native cursor-resume API.

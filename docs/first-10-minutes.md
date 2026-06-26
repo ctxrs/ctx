@@ -15,14 +15,16 @@ If ctx is not installed:
 curl -fsSL https://cli.ctx.rs/install | sh
 ```
 
-## 2. Initialize Local Storage
+## 2. Set Up And Index
 
 ```bash
 ctx setup
 ctx status --json
 ```
 
-The default root is `~/.ctx`. Use a temporary root for trials:
+`ctx setup` creates local storage, discovers supported provider history,
+catalogs Codex sessions, imports discovered sources, and optimizes the local
+search index. The default root is `~/.ctx`. Use a temporary root for trials:
 
 ```bash
 ctx --data-root /tmp/ctx-first-10 setup
@@ -40,13 +42,14 @@ Antigravity, Claude, OpenCode, Gemini, Cursor, Copilot CLI, and Factory AI
 Droid. A row with `exists: false` means ctx knows the default path but did not
 find local history there.
 
-## 4. Import
+## 4. Re-Run Or Target Imports
 
 ```bash
 ctx import --all
 ```
 
-If no sources exist, pass an explicit path:
+Setup already imports discovered sources. Use `ctx import` when you want to
+repair, re-run, resume, or pass an explicit path:
 
 ```bash
 ctx import --provider codex --path ~/.codex/sessions

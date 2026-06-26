@@ -19,9 +19,18 @@ Writes local storage and returns:
 - `data_root`;
 - `database_path`;
 - `config_path`;
+- `mode`, either `ready` or `catalog_only`;
+- `indexed_items`;
 - `sources`;
+- `catalog`;
+- `catalog_sources`;
+- `import`;
 - `network_required: false`;
 - `repo_writes: false`.
+
+`import.ran` is true for the default setup path and false for
+`ctx setup --catalog-only`. When it runs, `import.totals` and `import.sources`
+use the same shape as `ctx import --json`.
 
 ## Status
 
@@ -96,8 +105,9 @@ ctx import --json --progress json
 
 `--progress json` writes newline-delimited progress objects to stderr for
 `setup` and `import`. It does not change command result stdout. This means
-`ctx import --json --progress json` writes the import result object to stdout
-and zero or more progress objects to stderr.
+`ctx setup --json --progress json` and `ctx import --json --progress json`
+write the command result object to stdout and zero or more progress objects to
+stderr.
 
 Each progress object includes:
 

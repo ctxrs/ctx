@@ -60,7 +60,7 @@ analytics marker described under network behavior.
 
 | Command | Reads | Writes |
 | --- | --- | --- |
-| `ctx setup` | home path metadata for source discovery | data root, `work.sqlite`, and `config.toml` |
+| `ctx setup` | provider transcript files and home path metadata for source discovery | data root, `work.sqlite`, `config.toml`, and SQLite index |
 | `ctx status` | data root metadata and existing SQLite store | none |
 | `ctx sources` | known provider paths under the user's home | none |
 | `ctx import` | provider transcript files and path metadata | data root, `config.toml` if missing, and SQLite index |
@@ -124,7 +124,6 @@ Reset and rebuild the index:
 ```bash
 rm -f ~/.ctx/work.sqlite ~/.ctx/work.sqlite-wal ~/.ctx/work.sqlite-shm
 ctx setup
-ctx import --all
 ```
 
 This removes the local SQLite index and recreates it from provider history. It

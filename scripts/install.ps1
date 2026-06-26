@@ -3,6 +3,8 @@ param(
     [string]$Metadata,
     [string]$Platform = "",
     [string]$BinDir = "",
+    [switch]$NoSetup,
+    [string]$SetupProgress = "",
     [switch]$DryRun
 )
 
@@ -117,6 +119,24 @@ try {
     New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
     Copy-Item -LiteralPath $downloadPath -Destination $installPath -Force
     Write-Host "installed ctx to $installPath"
+
+    $runSetup = -not $NoSetup -and $env:CTX_INSTALL_NO_SETUP -ne "1"
+    if ($runSetup) {
+        if ([string]::IsNullOrWhiteSpace($SetupProgress)) {
+            if ([string]::IsNullOrWhiteSpace($env:CTX_SETUP_PROGRESS)) {
+                $SetupProgress = "auto"
+            } else {
+                $SetupProgress = $env:CTX_SETUP_PROGRESS
+            }
+        }
+        Write-Host "running ctx setup to index local history (pass -NoSetup or set CTX_INSTALL_NO_SETUP=1 to skip next time)"
+        & $installPath setup --progress $SetupProgress
+        if ($LASTEXITCODE -ne 0) {
+            Fail "ctx setup failed after install"
+        }
+    } else {
+        Write-Host "setup skipped; run $installPath setup to index local history"
+    }
 } finally {
     Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 }

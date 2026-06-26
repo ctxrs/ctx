@@ -1,1 +1,1 @@
-module(name = "ctx_search", version = "0.1.0")
+module(name = "ctx_search", version = "0.2.0")

@@ -54,7 +54,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum CommandRoot {
-    #[command(about = "Create local ctx storage and show next steps")]
+    #[command(about = "Create local ctx storage and index discovered history")]
     Setup(SetupArgs),
     #[command(about = "Show local ctx index status")]
     Status(JsonArgs),
@@ -80,6 +80,8 @@ enum CommandRoot {
 
 #[derive(Debug, Args)]
 struct SetupArgs {
+    #[arg(long, alias = "no-import")]
+    catalog_only: bool,
     #[arg(long)]
     json: bool,
     #[arg(long, value_enum, default_value_t = ProgressArg::Auto)]
@@ -106,16 +108,6 @@ struct ImportArgs {
     json: bool,
     #[arg(long, value_enum, default_value_t = ProgressArg::Auto)]
     progress: ProgressArg,
-}
-
-impl ImportArgs {
-    fn resume_mode(&self) -> &'static str {
-        if self.resume {
-            "idempotent_rescan"
-        } else {
-            "normal_scan"
-        }
-    }
 }
 
 #[derive(Debug, Args)]
@@ -424,6 +416,44 @@ struct ImportTotals {
     imported_edges: usize,
     skipped: usize,
     failed: usize,
+}
+
+#[derive(Debug)]
+struct ImportReport {
+    resume: bool,
+    totals: ImportTotals,
+    sources: Vec<Value>,
+}
+
+impl ImportReport {
+    fn empty(resume: bool) -> Self {
+        Self {
+            resume,
+            totals: ImportTotals::default(),
+            sources: Vec::new(),
+        }
+    }
+
+    fn resume_mode(&self) -> &'static str {
+        resume_mode_name(self.resume)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ImportRunOptions {
+    progress: ProgressArg,
+    json: bool,
+    print_human: bool,
+    allow_empty_sources: bool,
+    operation: &'static str,
+}
+
+fn resume_mode_name(resume: bool) -> &'static str {
+    if resume {
+        "idempotent_rescan"
+    } else {
+        "normal_scan"
+    }
 }
 
 impl ImportTotals {
@@ -944,6 +974,7 @@ fn command_analytics_properties(command: &CommandRoot) -> AnalyticsProperties {
     let mut properties = analytics::empty_properties();
     match command {
         CommandRoot::Setup(args) => {
+            analytics::insert_bool(&mut properties, "catalog_only", args.catalog_only);
             analytics::insert_str(
                 &mut properties,
                 "progress_mode",
@@ -1082,6 +1113,7 @@ fn run_setup(
     fs::create_dir_all(&data_root)?;
     let db_path = database_path(data_root.clone());
     let store = Store::open(&db_path)?;
+    let config_path = data_root.join(CONFIG_FILE);
     config::write_default_config(&data_root)?;
     let sources = discovered_sources();
     let progress = ProgressReporter::new(args.progress, args.json, "setup", 0);
@@ -1113,13 +1145,44 @@ fn run_setup(
         "catalog_source_bytes_bucket",
         catalog.source_bytes,
     );
+    let import_report = if args.catalog_only {
+        None
+    } else {
+        drop(store);
+        let import_args = ImportArgs {
+            provider: None,
+            path: None,
+            all: true,
+            resume: false,
+            json: args.json,
+            progress: args.progress,
+        };
+        Some(run_import_internal(
+            &import_args,
+            data_root.clone(),
+            analytics_properties,
+            ImportRunOptions {
+                progress: args.progress,
+                json: args.json,
+                print_human: !args.json,
+                allow_empty_sources: true,
+                operation: "setup",
+            },
+        )?)
+    };
+    let setup_store = Store::open(&db_path)?;
+    let catalog_counts = setup_store.catalog_session_counts()?;
+    let indexed_items =
+        setup_store.list_records(usize::MAX)?.len() + setup_store.list_sessions()?.len();
 
     if args.json {
         print_json(json!({
             "schema_version": 1,
             "data_root": data_root,
-            "database_path": store.path(),
-            "config_path": data_root.join(CONFIG_FILE),
+            "database_path": db_path,
+            "config_path": config_path,
+            "mode": if args.catalog_only { "catalog_only" } else { "ready" },
+            "indexed_items": indexed_items,
             "sources": sources_json(&sources),
             "catalog": {
                 "sources": catalog.sources,
@@ -1134,19 +1197,22 @@ fn run_setup(
                 "stale_sessions": catalog_counts.stale,
             },
             "catalog_sources": catalog_sources,
+            "import": setup_import_json(import_report.as_ref()),
             "network_required": false,
             "repo_writes": false,
         }))?;
     } else {
         progress.finish_line();
-        if catalog_counts.pending > 0 {
-            println!("ctx catalog is ready; import is still pending");
-        } else {
-            println!("ctx local agent history search is ready");
-        }
+        print_setup_status_line(
+            import_report.as_ref(),
+            args.catalog_only,
+            catalog_counts.pending,
+            indexed_items,
+        );
         println!("data_root: {}", data_root.display());
-        println!("database_path: {}", store.path().display());
-        println!("config_path: {}", data_root.join(CONFIG_FILE).display());
+        println!("database_path: {}", db_path.display());
+        println!("config_path: {}", config_path.display());
+        println!("indexed_items: {indexed_items}");
         println!("cataloged_sessions: {}", catalog.cataloged_sessions);
         println!("indexed_catalog_sessions: {}", catalog_counts.indexed);
         println!("pending_catalog_sessions: {}", catalog_counts.pending);
@@ -1154,15 +1220,80 @@ fn run_setup(
         println!("stale_catalog_sessions: {}", catalog_counts.stale);
         println!("catalog_source_files: {}", catalog.source_files);
         println!("catalog_source_bytes: {}", catalog.source_bytes);
+        if let Some(report) = &import_report {
+            println!("imported_sources: {}", report.totals.imported_sources);
+            println!("failed_sources: {}", report.totals.failed_sources);
+            println!("imported_sessions: {}", report.totals.imported_sessions);
+            println!("imported_events: {}", report.totals.imported_events);
+            println!("imported_edges: {}", report.totals.imported_edges);
+        }
         println!("next_steps:");
-        println!("  ctx sources");
-        if catalog_counts.pending > 0 {
+        if args.catalog_only {
             println!("  ctx import --all");
-        } else {
+            println!("  ctx sources");
+        } else if setup_has_indexed_content(indexed_items) {
             println!("  ctx search \"what failed before\"");
+            println!("  ctx sources");
+            if setup_has_failed_sources(import_report.as_ref()) {
+                println!("  ctx import --provider <provider>");
+            }
+        } else {
+            println!("  ctx sources");
+            println!("  ctx import --all");
         }
     }
     Ok(())
+}
+
+fn setup_import_json(report: Option<&ImportReport>) -> Value {
+    match report {
+        Some(report) => json!({
+            "ran": true,
+            "resume": report.resume,
+            "resume_mode": report.resume_mode(),
+            "totals": import_totals_json(&report.totals),
+            "sources": report.sources.clone(),
+        }),
+        None => json!({
+            "ran": false,
+            "reason": "catalog_only",
+        }),
+    }
+}
+
+fn print_setup_status_line(
+    report: Option<&ImportReport>,
+    catalog_only: bool,
+    pending_catalog_sessions: usize,
+    indexed_items: usize,
+) {
+    if catalog_only {
+        if pending_catalog_sessions > 0 {
+            println!("ctx catalog is ready; import is still pending");
+        } else {
+            println!("ctx catalog is ready");
+        }
+        return;
+    }
+    let Some(report) = report else {
+        println!("ctx is initialized; no local history was indexed");
+        return;
+    };
+    if setup_has_indexed_content(indexed_items) && report.totals.failed_sources > 0 {
+        println!("ctx indexed available local agent history; some sources were skipped");
+    } else if setup_has_indexed_content(indexed_items) {
+        println!("ctx local agent history search is ready");
+    } else {
+        println!("ctx is initialized; no local history was indexed");
+    }
+}
+
+fn setup_has_indexed_content(indexed_items: usize) -> bool {
+    indexed_items > 0
+}
+
+fn setup_has_failed_sources(report: Option<&ImportReport>) -> bool {
+    report.is_some_and(|report| report.totals.failed_sources > 0)
 }
 
 fn run_status(
@@ -1315,6 +1446,29 @@ fn run_import(
     data_root: PathBuf,
     analytics_properties: &mut AnalyticsProperties,
 ) -> Result<()> {
+    let json = args.json;
+    let progress = args.progress;
+    let report = run_import_internal(
+        &args,
+        data_root,
+        analytics_properties,
+        ImportRunOptions {
+            progress,
+            json,
+            print_human: !json,
+            allow_empty_sources: false,
+            operation: "import",
+        },
+    )?;
+    print_import_report(&report, json)
+}
+
+fn run_import_internal(
+    args: &ImportArgs,
+    data_root: PathBuf,
+    analytics_properties: &mut AnalyticsProperties,
+    options: ImportRunOptions,
+) -> Result<ImportReport> {
     fs::create_dir_all(&data_root)?;
     config::write_default_config(&data_root)?;
     let db_path = database_path(data_root);
@@ -1322,8 +1476,11 @@ fn run_import(
     let mut totals = ImportTotals::default();
     let mut imported_sources = Vec::new();
 
-    let requests = import_requests(&args)?;
+    let requests = import_requests(args)?;
     if requests.is_empty() {
+        if options.allow_empty_sources {
+            return Ok(ImportReport::empty(args.resume));
+        }
         return Err(anyhow!(
             "no importable provider history sources found; use --path or run `ctx sources`"
         ));
@@ -1348,7 +1505,12 @@ fn run_import(
         planned_total_bytes,
     );
 
-    let progress = ProgressReporter::new(args.progress, args.json, "import", planned_total_bytes);
+    let progress = ProgressReporter::new(
+        options.progress,
+        options.json,
+        options.operation,
+        planned_total_bytes,
+    );
     let allow_source_failures = args.all && args.path.is_none();
     progress.message(
         "discovering",
@@ -1369,7 +1531,7 @@ fn run_import(
                 .any(|(source, _)| !source_uses_incremental_event_search(source));
         drop(store);
 
-        if !args.json {
+        if options.print_human {
             progress.finish_line();
             println!("sources:");
             for (source, stats) in &planned_sources {
@@ -1494,7 +1656,7 @@ fn run_import(
                         outcome.stats,
                         &outcome.summary,
                     );
-                    if !args.json {
+                    if options.print_human {
                         progress.finish_line();
                         print_source_imported(&outcome.source, &outcome.summary);
                     }
@@ -1513,7 +1675,7 @@ fn run_import(
                         failure.stats,
                         &failure.error,
                     );
-                    if !args.json {
+                    if options.print_human {
                         progress.finish_line();
                         print_source_failed(&failure);
                     }
@@ -1530,7 +1692,7 @@ fn run_import(
     } else {
         let mut completed_source_bytes = 0u64;
         for (source, stats) in planned_sources {
-            if !args.json {
+            if options.print_human {
                 progress.finish_line();
                 println!(
                     "importing {} {} ({} files, {})",
@@ -1550,7 +1712,7 @@ fn run_import(
                         format!("imported {}", source.provider.as_str()),
                         completed_source_bytes,
                     );
-                    if !args.json {
+                    if options.print_human {
                         progress.finish_line();
                         print_source_imported(&source, &summary);
                     }
@@ -1575,7 +1737,7 @@ fn run_import(
                             ),
                             completed_source_bytes,
                         );
-                        if !args.json {
+                        if options.print_human {
                             progress.finish_line();
                             print_source_failed(&failure);
                         }
@@ -1596,37 +1758,8 @@ fn run_import(
     progress.message("finalizing", "checkpointing search database");
     Store::open(&db_path)?.checkpoint_wal_truncate_if_larger_than(WAL_TRUNCATE_MIN_BYTES)?;
 
-    if args.json {
-        print_json(json!({
-            "schema_version": 1,
-            "resume": args.resume,
-            "resume_mode": args.resume_mode(),
-            "totals": {
-                "source_files": totals.source_files,
-                "source_bytes": totals.source_bytes,
-                "imported_sources": totals.imported_sources,
-                "failed_sources": totals.failed_sources,
-                "imported_sessions": totals.imported_sessions,
-                "imported_events": totals.imported_events,
-                "imported_edges": totals.imported_edges,
-                "skipped": totals.skipped,
-                "failed": totals.failed,
-            },
-            "sources": imported_sources,
-        }))?;
-    } else {
+    if options.print_human {
         progress.finish_line();
-        println!("source_files: {}", totals.source_files);
-        println!("source_bytes: {}", totals.source_bytes);
-        println!("imported_sources: {}", totals.imported_sources);
-        println!("failed_sources: {}", totals.failed_sources);
-        println!("imported_sessions: {}", totals.imported_sessions);
-        println!("imported_events: {}", totals.imported_events);
-        println!("imported_edges: {}", totals.imported_edges);
-        println!("skipped: {}", totals.skipped);
-        println!("failed: {}", totals.failed);
-        println!("resume: {}", args.resume);
-        println!("resume_mode: {}", args.resume_mode());
     }
     progress.done(
         "finalizing",
@@ -1667,7 +1800,58 @@ fn run_import(
     if totals.imported_sources == 0 && totals.failed_sources > 0 {
         return Err(anyhow!("all import sources failed"));
     }
-    Ok(())
+    Ok(ImportReport {
+        resume: args.resume,
+        totals,
+        sources: imported_sources,
+    })
+}
+
+fn print_import_report(report: &ImportReport, json_output: bool) -> Result<()> {
+    if json_output {
+        print_json(import_report_json(report))
+    } else {
+        print_import_report_human(report);
+        Ok(())
+    }
+}
+
+fn import_report_json(report: &ImportReport) -> Value {
+    json!({
+        "schema_version": 1,
+        "resume": report.resume,
+        "resume_mode": report.resume_mode(),
+        "totals": import_totals_json(&report.totals),
+        "sources": report.sources.clone(),
+    })
+}
+
+fn import_totals_json(totals: &ImportTotals) -> Value {
+    json!({
+        "source_files": totals.source_files,
+        "source_bytes": totals.source_bytes,
+        "imported_sources": totals.imported_sources,
+        "failed_sources": totals.failed_sources,
+        "imported_sessions": totals.imported_sessions,
+        "imported_events": totals.imported_events,
+        "imported_edges": totals.imported_edges,
+        "skipped": totals.skipped,
+        "failed": totals.failed,
+    })
+}
+
+fn print_import_report_human(report: &ImportReport) {
+    println!("source_files: {}", report.totals.source_files);
+    println!("source_bytes: {}", report.totals.source_bytes);
+    println!("imported_sources: {}", report.totals.imported_sources);
+    println!("failed_sources: {}", report.totals.failed_sources);
+    println!("imported_sessions: {}", report.totals.imported_sessions);
+    println!("imported_events: {}", report.totals.imported_events);
+    println!("imported_edges: {}", report.totals.imported_edges);
+    println!("skipped: {}", report.totals.skipped);
+    println!("failed: {}", report.totals.failed);
+    println!("resume: {}", report.resume);
+    println!("resume_mode: {}", report.resume_mode());
 }
 
 #[derive(Debug)]

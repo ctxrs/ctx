@@ -17,6 +17,7 @@ does not append another product directory.
 
 ```bash
 ctx setup
+ctx setup --catalog-only
 ctx setup --json
 ctx setup --progress json --json
 ctx status
@@ -28,8 +29,11 @@ ctx validate --json
 ```
 
 - `setup` creates the data root, opens or creates `work.sqlite`, writes
-  `config.toml` when needed, discovers known provider history locations, and
-  prints next steps.
+  `config.toml` when needed, discovers known provider history locations,
+  catalogs Codex sessions, imports all discovered importable sources, optimizes
+  the local search index, and prints next steps.
+- `setup --catalog-only` stops after discovery/cataloging. It is useful for
+  fast inventory or troubleshooting, but it does not make history searchable.
 - `status` reports the ctx root, database path, config path, indexed item
   count, indexed source count, initialization state, and local-only marker.
 - `doctor` opens local storage and reports validation findings.
@@ -82,10 +86,12 @@ ctx import --json
 ctx import --progress json --json
 ```
 
-`import` indexes provider history into the local SQLite store. It creates the
-data root and default config if needed, reads provider transcript files, and
-writes indexed source metadata, sessions, events, searchable text, citations,
-and import totals to SQLite.
+`import` explicitly indexes provider history into the local SQLite store. The
+normal first-run path is `ctx setup`, which already imports discovered sources.
+Use `import` to repair, re-run, resume, or target a specific provider/path. It
+creates the data root and default config if needed, reads provider transcript
+files, and writes indexed source metadata, sessions, events, searchable text,
+citations, and import totals to SQLite.
 
 Import selection rules:
 

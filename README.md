@@ -32,6 +32,10 @@ Install the latest stable CLI release:
 curl -fsSL https://cli.ctx.rs/install | sh
 ```
 
+The install script installs the binary and runs `ctx setup` so discovered local
+history is indexed before the command returns. Use
+`sh -s -- --no-setup` when you only want to install the binary.
+
 Build from this checkout:
 
 ```bash
@@ -48,7 +52,7 @@ cargo run -p ctx -- search "retry handling"
 
 ## First 10 Minutes
 
-Create local storage and discover provider history:
+Create local storage and index discovered provider history:
 
 ```bash
 ctx setup
@@ -56,7 +60,7 @@ ctx status
 ctx sources
 ```
 
-Index local history explicitly:
+Re-run or target imports explicitly when you need repair or provider control:
 
 ```bash
 ctx import --all
@@ -88,6 +92,7 @@ The current command surface is:
 
 ```text
 ctx setup
+ctx setup --catalog-only
 ctx status
 ctx sources
 ctx import

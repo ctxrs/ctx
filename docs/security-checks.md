@@ -5,7 +5,8 @@ the local retrieval product.
 
 ## Required Invariants
 
-- `ctx setup` creates only the configured ctx data root and local storage files.
+- `ctx setup` reads supported provider history and writes only the configured
+  ctx data root and SQLite index.
 - `ctx sources` writes nothing in local-only security mode.
 - `ctx import` writes only the configured ctx data root and SQLite index.
 - `ctx search` may refresh supported local provider history into the configured

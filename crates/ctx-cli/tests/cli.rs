@@ -372,7 +372,7 @@ fn setup_writes_day_one_config_contract_without_overwriting_existing_config() {
 }
 
 #[test]
-fn setup_catalogs_codex_sessions_without_deep_import() {
+fn setup_catalog_only_catalogs_codex_sessions_without_import() {
     let temp = tempdir();
     let sessions = temp
         .path()
@@ -386,10 +386,11 @@ fn setup_catalogs_codex_sessions_without_deep_import() {
     )
     .unwrap();
 
-    let setup = json_output(ctx(&temp).args(["setup", "--json"]));
+    let setup = json_output(ctx(&temp).args(["setup", "--catalog-only", "--json"]));
     assert_eq!(setup["catalog"]["cataloged_sessions"], 1);
     assert_eq!(setup["catalog"]["source_files"], 1);
     assert_eq!(setup["catalog"]["failed_sessions"], 0);
+    assert_eq!(setup["import"]["ran"], false);
 
     let status = json_output(ctx(&temp).args(["status", "--json"]));
     assert_eq!(status["cataloged_sessions"], 1);
@@ -397,7 +398,7 @@ fn setup_catalogs_codex_sessions_without_deep_import() {
     assert_eq!(status["indexed_items"], 0);
 
     let human_setup = ctx(&temp)
-        .args(["setup", "--progress", "none"])
+        .args(["setup", "--catalog-only", "--progress", "none"])
         .assert()
         .success()
         .get_output()
@@ -407,6 +408,57 @@ fn setup_catalogs_codex_sessions_without_deep_import() {
     assert!(human_setup.contains("ctx catalog is ready; import is still pending"));
     assert!(human_setup.contains("  ctx import --all"));
     assert!(!human_setup.contains("ctx search \"what failed before\""));
+}
+
+#[test]
+fn setup_imports_discovered_codex_sessions_by_default() {
+    let temp = tempdir();
+    let sessions = temp
+        .path()
+        .join(".codex")
+        .join("sessions")
+        .join("2026/06/24");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(
+        sessions.join("rollout-2026-06-24T10-00-00-codex-session-setup.jsonl"),
+        concat!(
+            r#"{"timestamp":"2026-06-24T10:00:00.000Z","type":"session_meta","payload":{"id":"codex-session-setup","timestamp":"2026-06-24T10:00:00.000Z","cwd":"/repo/app","originator":"codex-cli","cli_version":"0.200.0","source":"cli","model_provider":"openai"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-06-24T10:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"setup should import"}]}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    let setup = json_output(ctx(&temp).args(["setup", "--json", "--progress", "none"]));
+    assert_eq!(setup["catalog"]["cataloged_sessions"], 1);
+    assert_eq!(setup["import"]["ran"], true);
+    assert_eq!(setup["import"]["totals"]["failed_sources"], 0);
+    assert_eq!(setup["import"]["totals"]["imported_sessions"], 1);
+    assert!(
+        setup["import"]["totals"]["imported_events"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
+
+    let status = json_output(ctx(&temp).args(["status", "--json"]));
+    assert_eq!(status["cataloged_sessions"], 1);
+    assert_eq!(status["indexed_catalog_sessions"], 1);
+    assert_eq!(status["pending_catalog_sessions"], 0);
+    assert!(status["indexed_items"].as_u64().unwrap() > 0);
+
+    let human_setup = ctx(&temp)
+        .args(["setup", "--progress", "none"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let human_setup = String::from_utf8(human_setup).unwrap();
+    assert!(human_setup.contains("ctx local agent history search is ready"));
+    assert!(human_setup.contains("imported_sources: 1"));
+    assert!(human_setup.contains("  ctx search \"what failed before\""));
 }
 
 #[test]
@@ -766,14 +818,13 @@ fn fresh_home_search_mvp_flow() {
         .arg("setup")
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "local agent history search is ready",
-        ));
+        .stdout(predicate::str::contains("no local history was indexed"));
 
     let setup_json = json_output(ctx(&temp).args(["setup", "--json"]));
     assert_eq!(setup_json["schema_version"], 1);
     assert_eq!(setup_json["network_required"], false);
     assert_eq!(setup_json["repo_writes"], false);
+    assert_eq!(setup_json["import"]["ran"], true);
 
     let sources = json_output(ctx(&temp).args(["sources", "--json"]));
     assert_eq!(sources["schema_version"], 1);
@@ -1341,29 +1392,58 @@ fn write_native_opencode_fixture(temp: &TempDir, query: &str) -> String {
     let conn = Connection::open(&path).unwrap();
     conn.execute_batch(
         "create table session (
-            id text primary key, parent_id text, title text not null, directory text not null,
-            model text, agent text, time_created integer not null, time_updated integer not null,
-            tokens_input integer not null, tokens_output integer not null,
-            tokens_reasoning integer not null, tokens_cache_read integer not null,
-            tokens_cache_write integer not null
+            id text primary key,
+            project_id text not null,
+            parent_id text,
+            slug text not null,
+            directory text not null,
+            title text not null,
+            version text not null,
+            share_url text,
+            summary_additions integer,
+            summary_deletions integer,
+            summary_files integer,
+            summary_diffs text,
+            revert text,
+            permission text,
+            time_created integer not null,
+            time_updated integer not null,
+            time_compacting integer,
+            time_archived integer,
+            workspace_id text
         );
-        create table session_message (
-            id text primary key, session_id text not null, type text not null, seq integer not null,
-            time_created integer not null, time_updated integer not null, data text not null
+        create table message (
+            id text primary key,
+            session_id text not null,
+            time_created integer not null,
+            time_updated integer not null,
+            data text not null
+        );
+        create table part (
+            id text primary key,
+            message_id text not null,
+            session_id text not null,
+            time_created integer not null,
+            time_updated integer not null,
+            data text not null
         );",
     )
     .unwrap();
     conn.execute(
-        "insert into session values (?1, null, 'native', '/workspace', '{\"id\":\"test\"}', 'build', 1782259200000, 1782259200000, 1, 1, 0, 0, 0)",
+        "insert into session (
+            id, project_id, parent_id, slug, directory, title, version, permission,
+            time_created, time_updated
+        ) values (?1, 'project-1', null, 'native', '/workspace', 'native', '0.8.0',
+            'default', 1782259200000, 1782259200000)",
         ["opencode-cli-native"],
     )
     .unwrap();
     conn.execute(
-        "insert into session_message values (?1, ?2, 'user', 1, 1782259200000, 1782259200000, ?3)",
+        "insert into message values (?1, ?2, 1782259200000, 1782259200000, ?3)",
         [
             "opencode-cli-native-user",
             "opencode-cli-native",
-            &format!(r#"{{"time":{{"created":1782259200000}},"text":"{query}"}}"#),
+            &format!(r#"{{"role":"user","time":{{"created":1782259200000}},"text":"{query}"}}"#),
         ],
     )
     .unwrap();
