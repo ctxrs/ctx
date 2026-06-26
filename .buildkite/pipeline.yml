@@ -48,8 +48,8 @@ steps:
       ensure_runner_tool rg ripgrep "ripgrep (rg) is required for static package audits"
       ./scripts/check.sh --mode=ci
     agents:
-      queue: "linux-managed"
-      ctx-runner-class: "linux-x64-smoke"
+      queue: "release-linux-managed"
+      ctx-runner-class: "release-linux-control"
       os: "linux"
       arch: "x86_64"
     timeout_in_minutes: 60

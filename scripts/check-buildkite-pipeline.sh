@@ -15,6 +15,8 @@ if command -v ruby >/dev/null 2>&1; then
     abort "pipeline step must be a mapping" unless smoke.is_a?(Hash)
     abort "pipeline public smoke step must be keyed" unless smoke.key?("key")
     abort "missing public-smoke step" unless smoke["key"] == "public-smoke"
+    abort "public-smoke must use the release-linux-managed queue" unless smoke.dig("agents", "queue") == "release-linux-managed"
+    abort "public-smoke must use the release-linux-control runner" unless smoke.dig("agents", "ctx-runner-class") == "release-linux-control"
     command = smoke["command"].to_s
     abort "public-smoke must run scripts/check.sh --mode=ci" unless command.include?("./scripts/check.sh --mode=ci")
     abort "public-smoke must install missing Ubuntu runner packages before Bazel tests" unless command.include?("apt-get install -y")
@@ -37,6 +39,8 @@ fi
 
 for required in \
   'key: "public-smoke"' \
+  'queue: "release-linux-managed"' \
+  'ctx-runner-class: "release-linux-control"' \
   'ensure_runner_tool zip zip' \
   'ensure_runner_tool rg ripgrep' \
   './scripts/check.sh --mode=ci'; do
@@ -46,7 +50,7 @@ for required in \
   fi
 done
 
-if grep -E -q 'release-artifact|release-linux|r2-|provider-live|OpenRouter|completion-certificate|freebsd-native-release-proof' "${pipeline}"; then
+if grep -E -q 'release-artifact|r2-|provider-live|OpenRouter|completion-certificate|freebsd-native-release-proof' "${pipeline}"; then
   printf 'pipeline contains non-smoke release or provider-live wiring\n' >&2
   exit 1
 fi
