@@ -23,6 +23,12 @@ curl -fsSL https://ctx.rs/install | sh
 npx skills add ctxrs/ctx
 ```
 
+## 50x more token-efficient than raw transcript search
+
+By structuring agent history into sessions, events, metadata, and indexed fields, then returning ranked cited matches, agents can access meaningful history with far fewer tokens than raw search. Results vary by query and corpus, but raw search is often so token-heavy that it can be effectively the same as not having usable history.
+
+<img src="docs/assets/ctx-token-efficiency-chart.png" alt="Token output per agent history search: ctx search 917 tokens, raw transcript search 45,734 tokens." width="100%">
+
 ## How it works
 
 Your past agent sessions are stored in local provider history files. ctx discovers supported sources, imports the real persisted records, and stores normalized session and event data in a local SQLite database optimized for retrieval.
