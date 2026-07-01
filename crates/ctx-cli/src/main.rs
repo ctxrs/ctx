@@ -1,6 +1,6 @@
 use std::{
     env, fs,
-    io::{IsTerminal, Read, Write},
+    io::{Cursor, IsTerminal, Read, Write},
     path::{Path, PathBuf},
     str::FromStr,
     sync::{Arc, Mutex},
@@ -18,6 +18,7 @@ use uuid::Uuid;
 mod analytics;
 mod config;
 mod docs;
+mod history_source_plugins;
 mod identity;
 mod mcp;
 mod net;
@@ -30,9 +31,10 @@ use ctx_history_capture::{
     import_antigravity_cli_history, import_claude_projects_jsonl_tree, import_codex_history_jsonl,
     import_codex_session_jsonl, import_codex_session_jsonl_tail, import_codex_session_paths,
     import_codex_session_tree, import_copilot_cli_session_events, import_cursor_native_history,
-    import_custom_history_jsonl_v1, import_factory_ai_droid_sessions, import_gemini_cli_history,
-    import_opencode_sqlite, import_pi_session_jsonl, provider_source_for_path,
-    provider_source_spec, stable_capture_uuid, validate_custom_history_jsonl_v1,
+    import_custom_history_jsonl_v1, import_custom_history_jsonl_v1_reader,
+    import_factory_ai_droid_sessions, import_gemini_cli_history, import_opencode_sqlite,
+    import_pi_session_jsonl, provider_source_for_path, provider_source_spec, stable_capture_uuid,
+    validate_custom_history_jsonl_v1, validate_custom_history_jsonl_v1_reader,
     AntigravityCliImportOptions, CatalogSummary, ClaudeProjectsImportOptions, CodexEventImportMode,
     CodexHistoryImportOptions, CodexSessionCatalogOptions, CodexSessionImportOptions,
     CodexSessionImportProgress, CodexSessionImportProgressCallback, CodexToolOutputMode,
@@ -42,14 +44,19 @@ use ctx_history_capture::{
     ProviderSourceStatus,
 };
 use ctx_history_core::{
-    database_path, default_data_root, CaptureProvider, ContextCitation, ContextCitationType, Event,
-    EventRole, EventType, HistoryRecord, ProviderRawRetention, RedactionState, Session,
+    database_path, default_data_root, CaptureProvider, ContextCitation, ContextCitationType,
+    CtxHistoryJsonlRecord, Event, EventRole, EventType, HistoryRecord, ProviderRawRetention,
+    RedactionState, Session,
 };
 use ctx_history_store::{
     CatalogSession, CatalogSourceIndexUpdate, RawSqlOptions, RawSqlResult, RawSqlValue,
     SourceImportFile, SourceImportFileIndexUpdate, Store, StoreError, RAW_SQL_DEFAULT_MAX_COLUMNS,
     RAW_SQL_DEFAULT_MAX_ROWS, RAW_SQL_DEFAULT_MAX_SQL_BYTES, RAW_SQL_DEFAULT_MAX_VALUE_BYTES,
     RAW_SQL_MAX_TIMEOUT,
+};
+use history_source_plugins::{
+    discover_history_source_plugins, run_history_source_plugin, HistorySourcePluginRefresh,
+    HistorySourcePluginRunOptions, HistorySourcePluginSource,
 };
 
 const WAL_TRUNCATE_MIN_BYTES: u64 = 64 * 1024 * 1024;
@@ -125,13 +132,27 @@ struct ImportArgs {
     #[arg(long)]
     path: Option<PathBuf>,
     #[arg(
+        long = "history-source",
+        alias = "plugin",
+        conflicts_with_all = ["provider", "path", "format", "all"]
+    )]
+    history_source: Option<String>,
+    #[arg(
+        long = "history-source-manifest",
+        alias = "plugin-manifest",
+        conflicts_with_all = ["provider", "path", "format"]
+    )]
+    history_source_manifest: Vec<PathBuf>,
+    #[arg(long = "reset-cursor")]
+    reset_cursor: bool,
+    #[arg(
         long,
         value_enum,
         requires = "path",
-        conflicts_with_all = ["provider", "all"]
+        conflicts_with_all = ["provider", "all", "history_source"]
     )]
     format: Option<ImportFormatArg>,
-    #[arg(long, conflicts_with_all = ["provider", "path", "format"])]
+    #[arg(long, conflicts_with_all = ["provider", "path", "format", "history_source"])]
     all: bool,
     #[arg(long)]
     resume: bool,
@@ -662,6 +683,7 @@ struct ImportRunOptions {
     json: bool,
     print_human: bool,
     allow_empty_sources: bool,
+    include_history_source_plugins: bool,
     operation: &'static str,
 }
 
@@ -1217,7 +1239,9 @@ fn main() -> Result<()> {
     let result = match cli.command {
         CommandRoot::Setup(args) => run_setup(args, data_root.clone(), &mut analytics_properties),
         CommandRoot::Status(args) => run_status(args, data_root.clone(), &mut analytics_properties),
-        CommandRoot::Sources(args) => run_sources(args, &mut analytics_properties),
+        CommandRoot::Sources(args) => {
+            run_sources(args, data_root.clone(), &mut analytics_properties)
+        }
         CommandRoot::Import(args) => run_import(args, data_root.clone(), &mut analytics_properties),
         CommandRoot::Show(args) => run_show(args, data_root.clone(), &mut analytics_properties),
         CommandRoot::Locate(args) => run_locate(args, data_root.clone(), &mut analytics_properties),
@@ -1270,6 +1294,8 @@ fn command_analytics_properties(command: &CommandRoot) -> AnalyticsProperties {
                 "source_mode",
                 if args.format.is_some() {
                     "explicit_format"
+                } else if args.history_source.is_some() {
+                    "history_source_plugin"
                 } else if args.path.is_some() {
                     "explicit_path"
                 } else if args.all {
@@ -1287,6 +1313,7 @@ fn command_analytics_properties(command: &CommandRoot) -> AnalyticsProperties {
                     provider.capture_provider().as_str(),
                 );
             }
+            analytics::insert_bool(&mut properties, "reset_cursor", args.reset_cursor);
             analytics::insert_str(
                 &mut properties,
                 "progress_mode",
@@ -1441,6 +1468,9 @@ fn run_setup(
         let import_args = ImportArgs {
             provider: None,
             path: None,
+            history_source: None,
+            history_source_manifest: Vec::new(),
+            reset_cursor: false,
             format: None,
             all: true,
             resume: false,
@@ -1456,6 +1486,7 @@ fn run_setup(
                 json: args.json,
                 print_human: !args.json,
                 allow_empty_sources: true,
+                include_history_source_plugins: false,
                 operation: "setup",
             },
         )?)
@@ -1657,8 +1688,13 @@ fn run_status(
     Ok(())
 }
 
-fn run_sources(args: JsonArgs, analytics_properties: &mut AnalyticsProperties) -> Result<()> {
+fn run_sources(
+    args: JsonArgs,
+    data_root: PathBuf,
+    analytics_properties: &mut AnalyticsProperties,
+) -> Result<()> {
     let sources = discovered_sources();
+    let plugin_sources = discover_history_source_plugins(&data_root, &[])?;
     let existing = sources.iter().filter(|source| source.exists).count();
     let importable = sources
         .iter()
@@ -1671,7 +1707,7 @@ fn run_sources(args: JsonArgs, analytics_properties: &mut AnalyticsProperties) -
     analytics::insert_count_bucket(
         analytics_properties,
         "providers_detected_bucket",
-        sources.len() as u64,
+        sources.len().saturating_add(plugin_sources.len()) as u64,
     );
     analytics::insert_count_bucket(
         analytics_properties,
@@ -1684,9 +1720,11 @@ fn run_sources(args: JsonArgs, analytics_properties: &mut AnalyticsProperties) -
         importable as u64,
     );
     if args.json {
+        let mut source_values = sources_json(&sources);
+        source_values.extend(plugin_sources_json(&plugin_sources));
         print_json(json!({
             "schema_version": 1,
-            "sources": sources_json(&sources),
+            "sources": source_values,
         }))?;
     } else {
         for source in sources {
@@ -1695,6 +1733,13 @@ fn run_sources(args: JsonArgs, analytics_properties: &mut AnalyticsProperties) -
                 source.provider.as_str(),
                 source.path.display(),
                 source.status.as_str(),
+                source.source_format
+            );
+        }
+        for source in plugin_sources {
+            println!(
+                "custom {} available (history-source-plugin:{})",
+                source.label(),
                 source.source_format
             );
         }
@@ -1759,6 +1804,7 @@ fn run_import(
             json,
             print_human: !json,
             allow_empty_sources: false,
+            include_history_source_plugins: true,
             operation: "import",
         },
     )?;
@@ -1773,7 +1819,7 @@ fn run_import_internal(
 ) -> Result<ImportReport> {
     fs::create_dir_all(&data_root)?;
     config::write_default_config(&data_root)?;
-    let db_path = database_path(data_root);
+    let db_path = database_path(data_root.clone());
     let mut store = Store::open(&db_path)?;
     let mut totals = ImportTotals::default();
     let mut imported_sources = Vec::new();
@@ -1790,12 +1836,17 @@ fn run_import_internal(
     }
 
     let requests = import_requests(args)?;
-    if requests.is_empty() {
+    let plugin_requests = history_source_plugin_import_requests(
+        args,
+        &data_root,
+        options.include_history_source_plugins,
+    )?;
+    if requests.is_empty() && plugin_requests.is_empty() {
         if options.allow_empty_sources {
             return Ok(ImportReport::empty(args.resume));
         }
         return Err(anyhow!(
-            "no importable provider history sources found; use --path or run `ctx sources`"
+            "no importable provider history sources found; use --path, --history-source, or run `ctx sources`"
         ));
     }
 
@@ -1810,7 +1861,7 @@ fn run_import_internal(
     analytics::insert_count_bucket(
         analytics_properties,
         "sources_seen_bucket",
-        planned_sources.len() as u64,
+        planned_sources.len().saturating_add(plugin_requests.len()) as u64,
     );
     analytics::insert_bytes_bucket(
         analytics_properties,
@@ -1829,7 +1880,7 @@ fn run_import_internal(
         "discovering",
         format!(
             "found {} import source(s), {}",
-            planned_sources.len(),
+            planned_sources.len().saturating_add(plugin_requests.len()),
             format_bytes(planned_total_bytes)
         ),
     );
@@ -1838,6 +1889,64 @@ fn run_import_internal(
     }
     if let Some(warning) = large_import_warning(&planned_sources, planned_total_bytes) {
         progress.warning(warning);
+    }
+
+    for plugin_source in plugin_requests {
+        if options.print_human {
+            progress.finish_line();
+            println!("importing history source plugin {}", plugin_source.label());
+        }
+        progress.message(
+            "indexing",
+            format!("running history source plugin {}", plugin_source.label()),
+        );
+        match import_history_source_plugin(
+            &mut store,
+            &plugin_source,
+            &data_root,
+            args.resume || args.reset_cursor,
+        ) {
+            Ok((summary, stats)) => {
+                totals.add(&summary, &stats);
+                progress.done(
+                    "indexing",
+                    format!("imported history source plugin {}", plugin_source.label()),
+                    planned_total_bytes,
+                );
+                if options.print_human {
+                    progress.finish_line();
+                    print_history_source_plugin_imported(&plugin_source, &summary);
+                }
+                imported_sources.push(history_source_plugin_import_json(
+                    &plugin_source,
+                    &stats,
+                    &summary,
+                ));
+            }
+            Err(err) => {
+                let error = error_summary(&err);
+                if allow_source_failures && !import_error_is_systemic(&error) {
+                    totals.add_source_failure(&SourceStats::default());
+                    progress.done(
+                        "indexing",
+                        format!(
+                            "skipped history source plugin {}: {}",
+                            plugin_source.label(),
+                            one_line_error(&error)
+                        ),
+                        planned_total_bytes,
+                    );
+                    if options.print_human {
+                        progress.finish_line();
+                        print_history_source_plugin_failed(&plugin_source, &error);
+                    }
+                    imported_sources
+                        .push(history_source_plugin_failure_json(&plugin_source, &error));
+                } else {
+                    return Err(err);
+                }
+            }
+        }
     }
 
     if should_parallelize_import(&planned_sources) {
@@ -2114,7 +2223,12 @@ fn run_import_internal(
     );
     analytics::insert_count_bucket(analytics_properties, "failed_bucket", totals.failed as u64);
     if totals.imported_sources == 0 && totals.failed_sources > 0 {
-        return Err(anyhow!("all import sources failed"));
+        let detail = imported_sources
+            .iter()
+            .find_map(|source| source.get("error").and_then(Value::as_str))
+            .map(|error| format!("; first failure: {error}"))
+            .unwrap_or_default();
+        return Err(anyhow!("all import sources failed{detail}"));
     }
     Ok(ImportReport {
         resume: args.resume,
@@ -2412,6 +2526,32 @@ fn custom_format_import_json(
     })
 }
 
+fn history_source_plugin_import_json(
+    source: &HistorySourcePluginSource,
+    stats: &SourceStats,
+    summary: &ProviderImportSummary,
+) -> Value {
+    json!({
+        "status": "imported",
+        "provider": CaptureProvider::Custom.as_str(),
+        "kind": "history_source_plugin",
+        "plugin": source.plugin_name,
+        "history_source": source.label(),
+        "provider_key": source.provider_key,
+        "source_id": source.source_id,
+        "source_format": source.source_format,
+        "manifest_path": source.manifest_path,
+        "source_files": stats.files,
+        "source_bytes": stats.bytes,
+        "imported_sessions": summary.imported_sessions,
+        "imported_events": summary.imported_events,
+        "imported_edges": summary.imported_edges,
+        "skipped": summary.skipped,
+        "failed": summary.failed,
+        "failures": provider_failures_json(summary),
+    })
+}
+
 fn provider_failures_json(summary: &ProviderImportSummary) -> Vec<Value> {
     summary
         .failures
@@ -2438,10 +2578,42 @@ fn source_failure_json(failure: &ImportSourceFailure) -> Value {
     })
 }
 
+fn history_source_plugin_failure_json(source: &HistorySourcePluginSource, error: &str) -> Value {
+    json!({
+        "status": "failed",
+        "provider": CaptureProvider::Custom.as_str(),
+        "kind": "history_source_plugin",
+        "plugin": source.plugin_name,
+        "history_source": source.label(),
+        "provider_key": source.provider_key,
+        "source_id": source.source_id,
+        "source_format": source.source_format,
+        "manifest_path": source.manifest_path,
+        "source_files": 0,
+        "source_bytes": 0,
+        "error": one_line_error(error),
+    })
+}
+
 fn print_source_imported(source: &SourceInfo, summary: &ProviderImportSummary) {
     println!(
         "imported {}: sessions={} events={} edges={} skipped={} failed={}",
         source.provider.as_str(),
+        summary.imported_sessions,
+        summary.imported_events,
+        summary.imported_edges,
+        summary.skipped,
+        summary.failed
+    );
+}
+
+fn print_history_source_plugin_imported(
+    source: &HistorySourcePluginSource,
+    summary: &ProviderImportSummary,
+) {
+    println!(
+        "imported history source plugin {}: sessions={} events={} edges={} skipped={} failed={}",
+        source.label(),
         summary.imported_sessions,
         summary.imported_events,
         summary.imported_edges,
@@ -2457,6 +2629,15 @@ fn print_source_failed(failure: &ImportSourceFailure) {
         source_error_reason(&failure.source, &failure.error)
     );
     println!("  path: {}", failure.source.path.display());
+}
+
+fn print_history_source_plugin_failed(source: &HistorySourcePluginSource, error: &str) {
+    println!(
+        "skipped history source plugin {}: {}",
+        source.label(),
+        one_line_error(error)
+    );
+    println!("  manifest: {}", source.manifest_path.display());
 }
 
 fn source_error_reason(source: &SourceInfo, error: &str) -> String {
@@ -4309,6 +4490,9 @@ fn run_doctor(
 }
 
 fn import_requests(args: &ImportArgs) -> Result<Vec<SourceInfo>> {
+    if args.history_source.is_some() || !args.history_source_manifest.is_empty() {
+        return Ok(Vec::new());
+    }
     if let Some(path) = &args.path {
         let provider = args
             .provider
@@ -4354,6 +4538,209 @@ fn import_requests(args: &ImportArgs) -> Result<Vec<SourceInfo>> {
         validate_source_import_supported(source)?;
     }
     Ok(sources)
+}
+
+fn history_source_plugin_import_requests(
+    args: &ImportArgs,
+    data_root: &Path,
+    include_plugins: bool,
+) -> Result<Vec<HistorySourcePluginSource>> {
+    if !include_plugins {
+        return Ok(Vec::new());
+    }
+    if !args.all && args.history_source.is_none() && args.history_source_manifest.is_empty() {
+        return Ok(Vec::new());
+    }
+    let sources = discover_history_source_plugins(data_root, &args.history_source_manifest)?;
+    if let Some(selector) = &args.history_source {
+        let matches = sources
+            .into_iter()
+            .filter(|source| source.matches_selector(selector))
+            .collect::<Vec<_>>();
+        if matches.is_empty() {
+            return Err(anyhow!(
+                "no history source plugin matched `{selector}`; use `ctx sources` to inspect configured plugins"
+            ));
+        }
+        if matches.len() > 1 {
+            let labels = matches
+                .iter()
+                .map(HistorySourcePluginSource::label)
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(anyhow!(
+                "history source plugin selector `{selector}` matched multiple sources ({labels}); use plugin/source or provider_key/source_id"
+            ));
+        }
+        return Ok(matches);
+    }
+    if args.all {
+        return Ok(sources
+            .into_iter()
+            .filter(|source| source.enabled)
+            .collect());
+    }
+    Ok(sources
+        .into_iter()
+        .filter(|source| {
+            args.history_source_manifest
+                .iter()
+                .any(|path| manifest_arg_matches_source(path, &source.manifest_path))
+        })
+        .collect())
+}
+
+fn manifest_arg_matches_source(arg: &Path, manifest_path: &Path) -> bool {
+    if arg.is_file() {
+        return same_pathish(arg, manifest_path);
+    }
+    if arg.is_dir() {
+        return manifest_path.starts_with(arg);
+    }
+    same_pathish(arg, manifest_path)
+}
+
+fn same_pathish(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    let left = fs::canonicalize(left).unwrap_or_else(|_| left.to_path_buf());
+    let right = fs::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());
+    left == right
+}
+
+fn import_history_source_plugin(
+    store: &mut Store,
+    source: &HistorySourcePluginSource,
+    data_root: &Path,
+    full_rescan: bool,
+) -> Result<(ProviderImportSummary, SourceStats)> {
+    let record = import_record_for_history_source_plugin(source);
+    let record_id = record.id;
+    let options = CustomHistoryJsonlV1ImportOptions::default();
+    let machine_id = options.machine_id.clone();
+    let cursor_stream = source.cursor_stream();
+    let previous_cursor = if full_rescan {
+        None
+    } else {
+        store
+            .get_sync_cursor(None, &machine_id, &cursor_stream)?
+            .map(|cursor| cursor.cursor)
+    };
+    let run = run_history_source_plugin(
+        source,
+        HistorySourcePluginRunOptions {
+            data_root,
+            machine_id: &machine_id,
+            cursor: previous_cursor.as_deref(),
+            cursor_stream: &cursor_stream,
+            full_rescan,
+        },
+    )?;
+    let _plugin_stderr = &run.stderr;
+    validate_history_source_plugin_output(source, &run.stdout, &machine_id)?;
+    let validation = validate_custom_history_jsonl_v1_reader(Cursor::new(run.stdout.as_slice()))
+        .map_err(anyhow::Error::from)?;
+    if validation.failed > 0 {
+        return Err(history_source_plugin_import_failure(source, &validation));
+    }
+    let stats = SourceStats {
+        files: 1,
+        bytes: run.stdout.len() as u64,
+    };
+    store.upsert_record(&record)?;
+    let summary = import_custom_history_jsonl_v1_reader(
+        Cursor::new(run.stdout),
+        store,
+        CustomHistoryJsonlV1ImportOptions {
+            machine_id,
+            source_path: Some(source.manifest_path.clone()),
+            history_record_id: Some(record_id),
+            allow_partial_failures: false,
+            ..options
+        },
+    )
+    .map_err(anyhow::Error::from)?;
+    if summary.failed > 0 {
+        return Err(history_source_plugin_import_failure(source, &summary));
+    }
+    Ok((summary, stats))
+}
+
+fn validate_history_source_plugin_output(
+    source: &HistorySourcePluginSource,
+    stdout: &[u8],
+    machine_id: &str,
+) -> Result<()> {
+    let text = std::str::from_utf8(stdout).with_context(|| {
+        format!(
+            "history source plugin {} emitted non-UTF-8 ctx-history-jsonl-v1 output",
+            source.label()
+        )
+    })?;
+    let mut saw_source = false;
+    for (index, line) in text.lines().enumerate() {
+        let line_number = index + 1;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let record: CtxHistoryJsonlRecord = serde_json::from_str(line).with_context(|| {
+            format!(
+                "history source plugin {} emitted invalid ctx-history-jsonl-v1 at line {line_number}",
+                source.label()
+            )
+        })?;
+        let CtxHistoryJsonlRecord::Source(source_record) = record else {
+            continue;
+        };
+        saw_source = true;
+        if source_record.provider_key != source.provider_key
+            || source_record.source_id != source.source_id
+            || source_record.source_format != source.source_format
+        {
+            return Err(anyhow!(
+                "history source plugin {} emitted source identity {}/{}/{} but manifest declares {}/{}/{}",
+                source.label(),
+                source_record.provider_key,
+                source_record.source_id,
+                source_record.source_format,
+                source.provider_key,
+                source.source_id,
+                source.source_format
+            ));
+        }
+        if let Some(source_machine_id) = source_record.machine_id {
+            if source_machine_id != machine_id {
+                return Err(anyhow!(
+                    "history source plugin {} emitted machine_id `{source_machine_id}` but ctx is importing as `{machine_id}`; omit machine_id or set it to CTX_HISTORY_MACHINE_ID",
+                    source.label()
+                ));
+            }
+        }
+    }
+    if !saw_source {
+        return Err(anyhow!(
+            "history source plugin {} emitted no source record",
+            source.label()
+        ));
+    }
+    Ok(())
+}
+
+fn history_source_plugin_import_failure(
+    source: &HistorySourcePluginSource,
+    summary: &ProviderImportSummary,
+) -> anyhow::Error {
+    let detail = summary
+        .failures
+        .first()
+        .map(|failure| format!("line {}: {}", failure.line, failure.error))
+        .unwrap_or_else(|| "unknown validation failure".to_owned());
+    anyhow!(
+        "history source plugin {} import failed with {} failure(s); first failure: {detail}",
+        source.label(),
+        summary.failed
+    )
 }
 
 fn validate_source_import_supported(source: &SourceInfo) -> Result<()> {
@@ -5144,6 +5531,35 @@ fn import_record_for_custom_history(path: &Path, format: ImportFormatArg) -> His
     record
 }
 
+fn import_record_for_history_source_plugin(source: &HistorySourcePluginSource) -> HistoryRecord {
+    let key = format!(
+        "history-source-plugin:{}:{}:{}:{}:{}",
+        source.plugin_name, source.id, source.provider_key, source.source_id, source.source_format
+    );
+    let mut record = HistoryRecord::new(
+        format!("history source plugin {}", source.label()),
+        format!(
+            "Indexed custom agent history from history source plugin {} ({})",
+            source.label(),
+            source.source_format
+        ),
+        vec![
+            "agent-history".into(),
+            "custom".into(),
+            "history-source-plugin".into(),
+            source.provider_key.clone(),
+            source.source_format.clone(),
+        ],
+        "agent_history",
+        source
+            .manifest_path
+            .parent()
+            .map(|path| path.display().to_string()),
+    );
+    record.id = stable_capture_uuid(&key, "record");
+    record
+}
+
 fn discovered_sources() -> Vec<SourceInfo> {
     home_dir()
         .as_deref()
@@ -5178,6 +5594,43 @@ fn sources_json(sources: &[SourceInfo]) -> Vec<Value> {
             })
         })
         .collect()
+}
+
+fn plugin_sources_json(sources: &[HistorySourcePluginSource]) -> Vec<Value> {
+    sources
+        .iter()
+        .map(|source| {
+            json!({
+                "provider": CaptureProvider::Custom.as_str(),
+                "kind": "history_source_plugin",
+                "plugin": source.plugin_name,
+                "plugin_display_name": source.plugin_display_name,
+                "plugin_version": source.plugin_version,
+                "history_source": source.label(),
+                "history_source_id": source.id,
+                "display_name": source.display_name,
+                "provider_key": source.provider_key,
+                "source_id": source.source_id,
+                "source_format": source.source_format,
+                "manifest_path": source.manifest_path,
+                "enabled": source.enabled,
+                "refresh": history_source_plugin_refresh_json(source.refresh),
+                "status": "available",
+                "import_support": "history_source_plugin",
+                "native_import": false,
+                "importable": true,
+                "raw_retention": "metadata_only",
+                "unsupported_reason": null,
+            })
+        })
+        .collect()
+}
+
+fn history_source_plugin_refresh_json(refresh: HistorySourcePluginRefresh) -> &'static str {
+    match refresh {
+        HistorySourcePluginRefresh::Manual => "manual",
+        HistorySourcePluginRefresh::Auto => "auto",
+    }
 }
 
 fn import_support_json(support: ProviderImportSupport) -> &'static str {

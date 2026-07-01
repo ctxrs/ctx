@@ -215,6 +215,15 @@ const TOPICS: &[DocTopic] = &[
         body: include_str!("../../../docs/custom-history-import-format.md"),
     },
     DocTopic {
+        id: "history-source-plugins",
+        title: "History Source Plugins",
+        audience: "integrator-agent",
+        summary: "Local plugin manifests, stdout import, cursor handoff, and adapter shapes.",
+        tags: &["providers", "plugins", "imports", "custom"],
+        source_path: "docs/history-source-plugins.md",
+        body: include_str!("../../../docs/history-source-plugins.md"),
+    },
+    DocTopic {
         id: "provider-support",
         title: "Provider Support",
         audience: "human-agent",

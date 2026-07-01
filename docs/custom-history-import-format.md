@@ -3,16 +3,23 @@
 `ctx-history-jsonl-v1` is the public JSONL format for importing session history
 from tools without a built-in local-history adapter.
 
-## Transport
+## Transports
 
-Version 1 uses an explicit local file path:
+The same JSONL schema can be imported from an explicit local file path:
 
 ```bash
 ctx import --format ctx-history-jsonl-v1 --path ./history.jsonl
 ```
 
-ctx does not discover a fixed storage location for this format. The file is not
-read from stdin, and ctx does not execute exporter commands in v1.
+or from a local history-source plugin command:
+
+```bash
+ctx import --history-source my-agent
+```
+
+ctx does not discover a fixed storage location for this format. File imports
+are explicit paths. Plugin imports are explicit local command adapters declared
+by a local manifest; see `docs/history-source-plugins.md`.
 
 Each line is one JSON object. Every object has a `record_type` field with one
 of:
@@ -203,19 +210,24 @@ Example:
 
 ## Incremental Semantics
 
-v1 imports are explicit, local, and idempotent. On each
-`ctx import --format ctx-history-jsonl-v1 --path <file>`, ctx rescans the file
-and upserts equivalent records instead of appending duplicates.
+v1 imports are explicit, local, and idempotent. On each file import, ctx rescans
+the file and upserts equivalent records instead of appending duplicates. On each
+plugin import, ctx invokes the plugin, validates stdout atomically, and upserts
+the emitted records.
 
 When a source record supplies `cursor`, ctx rewrites its storage stream under a
 `provider:custom:<provider_key>:<opaque-id>` namespace and also preserves the
 exporter-supplied cursor object in source metadata. Event `native_cursor` values
-are also preserved. ctx does not negotiate with external exporters in v1, does
-not call exporter commands, and does not request a delta range; exporter
-negotiation is a follow-up capability.
+are also preserved.
 
-If an import is interrupted, run the same command again. The expected behavior
-is another idempotent rescan of the same JSONL file.
+For plugin imports, ctx passes the previously stored source cursor to the next
+command through `CTX_HISTORY_CURSOR_JSON` and `CTX_HISTORY_CURSOR_FILE`. The
+cursor string remains exporter-owned, so it can encode byte offsets, SQLite row
+ids, session sequence maps, or another native high-water mark.
+
+If an import is interrupted, run the same command again. File imports perform
+another idempotent rescan. Plugin imports receive the last successfully stored
+cursor; failed plugin runs do not advance it.
 
 ## Compact Example
 

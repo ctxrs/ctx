@@ -1741,6 +1741,49 @@ pub fn import_custom_history_jsonl_v1(
         options.allow_partial_failures,
         &mut summary,
     )?;
+    import_custom_history_source_cursors(store, &normalization.source_cursors)?;
+    Ok(summary)
+}
+
+pub fn import_custom_history_jsonl_v1_reader(
+    reader: impl BufRead,
+    store: &mut Store,
+    options: CustomHistoryJsonlV1ImportOptions,
+) -> Result<ProviderImportSummary> {
+    let normalization = normalize_custom_history_jsonl_v1_reader(
+        reader,
+        &ProviderAdapterContext {
+            machine_id: options.machine_id,
+            source_path: options.source_path,
+            imported_at: options.imported_at,
+            tool_output_mode: CodexToolOutputMode::Full,
+            event_mode: CodexEventImportMode::Rich,
+            include_notices: true,
+        },
+    )?;
+    if normalization.provider.summary.failed > 0 && !options.allow_partial_failures {
+        return Ok(normalization.provider.summary);
+    }
+
+    let mut summary = import_normalized_provider_captures(
+        store,
+        normalization.provider,
+        NormalizedProviderImportOptions {
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+            persist_cursors: true,
+            wrap_transaction: true,
+            fast_event_inserts: true,
+        },
+    )?;
+    import_custom_history_edges(
+        store,
+        &normalization.edges,
+        options.history_record_id,
+        options.allow_partial_failures,
+        &mut summary,
+    )?;
+    import_custom_history_source_cursors(store, &normalization.source_cursors)?;
     Ok(summary)
 }
 
@@ -1753,6 +1796,14 @@ pub fn validate_custom_history_jsonl_v1(path: impl AsRef<Path>) -> Result<Provid
             ..ProviderAdapterContext::default()
         },
     )?;
+    Ok(normalization.provider.summary)
+}
+
+pub fn validate_custom_history_jsonl_v1_reader(
+    reader: impl BufRead,
+) -> Result<ProviderImportSummary> {
+    let normalization =
+        normalize_custom_history_jsonl_v1_reader(reader, &ProviderAdapterContext::default())?;
     Ok(normalization.provider.summary)
 }
 
@@ -3327,6 +3378,13 @@ const CODEX_FAST_IMPORT_PASSIVE_CHECKPOINT_MIN_BYTES: u64 = 2 * 1024 * 1024 * 10
 struct CustomHistoryJsonlV1NormalizationResult {
     provider: ProviderNormalizationResult,
     edges: Vec<(usize, CustomHistoryJsonlV1EdgeImport)>,
+    source_cursors: Vec<CustomHistoryJsonlV1SourceCursorImport>,
+}
+
+#[derive(Debug, Clone)]
+struct CustomHistoryJsonlV1SourceCursorImport {
+    machine_id: String,
+    checkpoint: ProviderCursorCheckpoint,
 }
 
 #[derive(Debug, Clone)]
@@ -3350,6 +3408,13 @@ fn normalize_custom_history_jsonl_v1(
     ensure_regular_provider_transcript_file(path)?;
     let file = File::open(path)?;
     let reader = BufReader::new(file);
+    normalize_custom_history_jsonl_v1_reader(reader, context)
+}
+
+fn normalize_custom_history_jsonl_v1_reader(
+    reader: impl BufRead,
+    context: &ProviderAdapterContext,
+) -> Result<CustomHistoryJsonlV1NormalizationResult> {
     let mut summary = ProviderImportSummary::default();
     let mut records = Vec::new();
 
@@ -3559,6 +3624,23 @@ fn normalize_custom_history_jsonl_v1(
         summary,
         ..ProviderNormalizationResult::default()
     };
+    let mut source_cursors = Vec::new();
+    for (_, source) in sources.values() {
+        let machine_id = source
+            .machine_id
+            .clone()
+            .unwrap_or_else(|| context.machine_id.clone());
+        if let Some(after) = source
+            .cursor
+            .as_ref()
+            .and_then(|cursor| custom_history_normalized_cursor_range(source, cursor).after)
+        {
+            source_cursors.push(CustomHistoryJsonlV1SourceCursorImport {
+                machine_id,
+                checkpoint: after,
+            });
+        }
+    }
     for (line_number, session) in sessions.values() {
         let source = &sources
             .get(&session.source_id)
@@ -3609,6 +3691,7 @@ fn normalize_custom_history_jsonl_v1(
     Ok(CustomHistoryJsonlV1NormalizationResult {
         provider: result,
         edges: custom_edges,
+        source_cursors,
     })
 }
 
@@ -3621,6 +3704,7 @@ fn custom_history_failed_normalization(
             ..ProviderNormalizationResult::default()
         },
         edges: Vec::new(),
+        source_cursors: Vec::new(),
     }
 }
 
@@ -4047,15 +4131,27 @@ fn custom_history_internal_session_id(
 }
 
 fn custom_history_cursor_stream(source: &CtxHistoryJsonlSourceRecord) -> String {
+    custom_history_jsonl_v1_cursor_stream(
+        &source.provider_key,
+        &source.source_id,
+        &source.source_format,
+    )
+}
+
+pub fn custom_history_jsonl_v1_cursor_stream(
+    provider_key: &str,
+    source_id: &str,
+    source_format: &str,
+) -> String {
     let key = custom_history_key(json!({
         "schema": CTX_HISTORY_JSONL_V1_SCHEMA_VERSION,
         "kind": "cursor_stream",
-        "provider_key": source.provider_key,
-        "source_id": source.source_id,
-        "source_format": source.source_format,
+        "provider_key": provider_key,
+        "source_id": source_id,
+        "source_format": source_format,
     }));
     let stream_id = stable_capture_uuid(&key, "custom-cursor-stream");
-    format!("provider:custom:{}:{stream_id}", source.provider_key)
+    format!("provider:custom:{provider_key}:{stream_id}")
 }
 
 fn custom_history_normalized_cursor_range(
@@ -4194,6 +4290,32 @@ fn import_custom_history_edges(
     if let Err(err) = store.commit_batch() {
         let _ = store.rollback_batch();
         return Err(err.into());
+    }
+    Ok(())
+}
+
+fn import_custom_history_source_cursors(
+    store: &mut Store,
+    cursors: &[CustomHistoryJsonlV1SourceCursorImport],
+) -> Result<()> {
+    for cursor in cursors {
+        store.upsert_sync_cursor(&SyncCursor {
+            id: stable_capture_uuid(
+                &format!(
+                    "provider-cursor:{}:{}:{}",
+                    CaptureProvider::Custom.as_str(),
+                    cursor.machine_id,
+                    cursor.checkpoint.stream
+                ),
+                "provider-sync-cursor",
+            ),
+            team_id: None,
+            device_id: cursor.machine_id.clone(),
+            stream: cursor.checkpoint.stream.clone(),
+            cursor: cursor.checkpoint.cursor.clone(),
+            last_synced_at: Some(cursor.checkpoint.observed_at),
+            timestamps: timestamps(cursor.checkpoint.observed_at),
+        })?;
     }
     Ok(())
 }
@@ -11491,6 +11613,77 @@ mod tests {
         assert_eq!(second.imported_edges, 0);
         assert_eq!(second.skipped_events, 2);
         assert_eq!(second.skipped_edges, 2);
+    }
+
+    #[test]
+    fn custom_history_jsonl_reader_import_persists_normalized_cursor() {
+        let temp = tempdir();
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let input = [
+            r#"{"record_type":"manifest","schema_version":"ctx-history-jsonl-v1"}"#,
+            r#"{"record_type":"source","source_id":"src","provider_key":"stream-agent","source_format":"stream-v1","cursor":{"after":{"stream":"native-stream","cursor":"{\"message_id\":7}","observed_at":"2026-07-01T12:00:00Z"}}}"#,
+            r#"{"record_type":"session","source_id":"src","session_id":"run","started_at":"2026-07-01T11:59:00Z"}"#,
+            r#"{"record_type":"event","source_id":"src","session_id":"run","event_index":0,"event_type":"message","role":"assistant","occurred_at":"2026-07-01T12:00:00Z","preview":"stream import marker"}"#,
+        ]
+        .join("\n");
+
+        let summary = import_custom_history_jsonl_v1_reader(
+            std::io::Cursor::new(input.into_bytes()),
+            &mut store,
+            CustomHistoryJsonlV1ImportOptions {
+                source_path: Some(PathBuf::from("plugin://stream-agent/default")),
+                imported_at: "2026-07-01T12:01:00Z".parse().unwrap(),
+                ..CustomHistoryJsonlV1ImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+        assert_eq!(summary.imported_sessions, 1);
+        assert_eq!(summary.imported_events, 1);
+        let cursor = store
+            .get_sync_cursor(
+                None,
+                &CustomHistoryJsonlV1ImportOptions::default().machine_id,
+                &custom_history_jsonl_v1_cursor_stream("stream-agent", "src", "stream-v1"),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(cursor.cursor, r#"{"message_id":7}"#);
+    }
+
+    #[test]
+    fn custom_history_jsonl_reader_persists_source_only_cursor() {
+        let temp = tempdir();
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let input = [
+            r#"{"record_type":"manifest","schema_version":"ctx-history-jsonl-v1"}"#,
+            r#"{"record_type":"source","source_id":"src","provider_key":"stream-agent","source_format":"stream-v1","cursor":{"after":{"stream":"native-stream","cursor":"{\"message_id\":9}","observed_at":"2026-07-01T12:02:00Z"}}}"#,
+        ]
+        .join("\n");
+
+        let summary = import_custom_history_jsonl_v1_reader(
+            std::io::Cursor::new(input.into_bytes()),
+            &mut store,
+            CustomHistoryJsonlV1ImportOptions {
+                imported_at: "2026-07-01T12:03:00Z".parse().unwrap(),
+                ..CustomHistoryJsonlV1ImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+        assert_eq!(summary.imported_sessions, 0);
+        assert_eq!(summary.imported_events, 0);
+        let cursor = store
+            .get_sync_cursor(
+                None,
+                &CustomHistoryJsonlV1ImportOptions::default().machine_id,
+                &custom_history_jsonl_v1_cursor_stream("stream-agent", "src", "stream-v1"),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(cursor.cursor, r#"{"message_id":9}"#);
     }
 
     #[test]
