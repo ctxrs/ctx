@@ -30,14 +30,16 @@ use ctx_history_capture::{
     import_antigravity_cli_history, import_claude_projects_jsonl_tree, import_codex_history_jsonl,
     import_codex_session_jsonl, import_codex_session_jsonl_tail, import_codex_session_paths,
     import_codex_session_tree, import_copilot_cli_session_events, import_cursor_native_history,
-    import_factory_ai_droid_sessions, import_gemini_cli_history, import_opencode_sqlite,
-    import_pi_session_jsonl, provider_source_for_path, provider_source_spec, stable_capture_uuid,
+    import_custom_history_jsonl_v1, import_factory_ai_droid_sessions, import_gemini_cli_history,
+    import_opencode_sqlite, import_pi_session_jsonl, provider_source_for_path,
+    provider_source_spec, stable_capture_uuid, validate_custom_history_jsonl_v1,
     AntigravityCliImportOptions, CatalogSummary, ClaudeProjectsImportOptions, CodexEventImportMode,
     CodexHistoryImportOptions, CodexSessionCatalogOptions, CodexSessionImportOptions,
     CodexSessionImportProgress, CodexSessionImportProgressCallback, CodexToolOutputMode,
-    CopilotCliImportOptions, CursorNativeImportOptions, FactoryAiDroidImportOptions,
-    GeminiCliImportOptions, OpenCodeSqliteImportOptions, PiSessionImportOptions,
-    ProviderImportSummary, ProviderImportSupport, ProviderSource, ProviderSourceStatus,
+    CopilotCliImportOptions, CursorNativeImportOptions, CustomHistoryJsonlV1ImportOptions,
+    FactoryAiDroidImportOptions, GeminiCliImportOptions, OpenCodeSqliteImportOptions,
+    PiSessionImportOptions, ProviderImportSummary, ProviderImportSupport, ProviderSource,
+    ProviderSourceStatus,
 };
 use ctx_history_core::{
     database_path, default_data_root, CaptureProvider, ContextCitation, ContextCitationType, Event,
@@ -119,10 +121,17 @@ struct DoctorArgs {
 #[derive(Debug, Args)]
 struct ImportArgs {
     #[arg(long, value_enum)]
-    provider: Option<ProviderArg>,
+    provider: Option<NativeProviderArg>,
     #[arg(long)]
     path: Option<PathBuf>,
-    #[arg(long, conflicts_with_all = ["provider", "path"])]
+    #[arg(
+        long,
+        value_enum,
+        requires = "path",
+        conflicts_with_all = ["provider", "all"]
+    )]
+    format: Option<ImportFormatArg>,
+    #[arg(long, conflicts_with_all = ["provider", "path", "format"])]
     all: bool,
     #[arg(long)]
     resume: bool,
@@ -495,7 +504,7 @@ impl OutputFormat {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
-enum ProviderArg {
+enum NativeProviderArg {
     Codex,
     Pi,
     #[value(alias = "claude-code")]
@@ -517,12 +526,66 @@ enum ProviderArg {
     FactoryAiDroid,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ProviderArg {
+    Codex,
+    Pi,
+    #[value(alias = "claude-code")]
+    Claude,
+    #[value(name = "opencode", alias = "open-code")]
+    OpenCode,
+    #[value(alias = "antigravity-cli")]
+    Antigravity,
+    #[value(alias = "gemini-cli")]
+    Gemini,
+    Cursor,
+    #[value(alias = "copilot", alias = "copilot_cli")]
+    CopilotCli,
+    #[value(
+        alias = "factoryai-droid",
+        alias = "factory-droid",
+        alias = "factory_ai_droid"
+    )]
+    FactoryAiDroid,
+    Custom,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ImportFormatArg {
+    #[value(name = "ctx-history-jsonl-v1", alias = "custom-history-jsonl-v1")]
+    CtxHistoryJsonlV1,
+}
+
+impl ImportFormatArg {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::CtxHistoryJsonlV1 => "ctx-history-jsonl-v1",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum ProgressArg {
     Auto,
     Plain,
     Json,
     None,
+}
+
+impl NativeProviderArg {
+    fn capture_provider(self) -> CaptureProvider {
+        match self {
+            Self::Codex => CaptureProvider::Codex,
+            Self::Pi => CaptureProvider::Pi,
+            Self::Claude => CaptureProvider::Claude,
+            Self::OpenCode => CaptureProvider::OpenCode,
+            Self::Antigravity => CaptureProvider::Antigravity,
+            Self::Gemini => CaptureProvider::Gemini,
+            Self::Cursor => CaptureProvider::Cursor,
+            Self::CopilotCli => CaptureProvider::CopilotCli,
+            Self::FactoryAiDroid => CaptureProvider::FactoryAiDroid,
+        }
+    }
 }
 
 impl ProviderArg {
@@ -537,6 +600,7 @@ impl ProviderArg {
             Self::Cursor => CaptureProvider::Cursor,
             Self::CopilotCli => CaptureProvider::CopilotCli,
             Self::FactoryAiDroid => CaptureProvider::FactoryAiDroid,
+            Self::Custom => CaptureProvider::Custom,
         }
     }
 
@@ -551,6 +615,7 @@ impl ProviderArg {
             Self::Cursor => "cursor",
             Self::CopilotCli => "copilot-cli",
             Self::FactoryAiDroid => "factory-ai-droid",
+            Self::Custom => "custom",
         }
     }
 }
@@ -1203,7 +1268,9 @@ fn command_analytics_properties(command: &CommandRoot) -> AnalyticsProperties {
             analytics::insert_str(
                 &mut properties,
                 "source_mode",
-                if args.path.is_some() {
+                if args.format.is_some() {
+                    "explicit_format"
+                } else if args.path.is_some() {
                     "explicit_path"
                 } else if args.all {
                     "all_discovered"
@@ -1374,6 +1441,7 @@ fn run_setup(
         let import_args = ImportArgs {
             provider: None,
             path: None,
+            format: None,
             all: true,
             resume: false,
             json: args.json,
@@ -1710,6 +1778,17 @@ fn run_import_internal(
     let mut totals = ImportTotals::default();
     let mut imported_sources = Vec::new();
 
+    if let Some(format) = args.format {
+        return run_explicit_format_import(
+            args,
+            format,
+            db_path,
+            store,
+            analytics_properties,
+            options,
+        );
+    }
+
     let requests = import_requests(args)?;
     if requests.is_empty() {
         if options.allow_empty_sources {
@@ -2044,6 +2123,148 @@ fn run_import_internal(
     })
 }
 
+fn run_explicit_format_import(
+    args: &ImportArgs,
+    format: ImportFormatArg,
+    db_path: PathBuf,
+    mut store: Store,
+    analytics_properties: &mut AnalyticsProperties,
+    options: ImportRunOptions,
+) -> Result<ImportReport> {
+    let path = args
+        .path
+        .as_ref()
+        .context("--format requires an explicit --path")?;
+    let stats =
+        source_stats(path).with_context(|| format!("scan import source {}", path.display()))?;
+    analytics::insert_count_bucket(analytics_properties, "sources_seen_bucket", 1);
+    analytics::insert_bytes_bucket(analytics_properties, "source_bytes_bucket", stats.bytes);
+
+    let progress = ProgressReporter::new(
+        options.progress,
+        options.json,
+        options.operation,
+        stats.bytes,
+    );
+    progress.message(
+        "discovering",
+        format!(
+            "found 1 {} source, {}",
+            format.as_str(),
+            format_bytes(stats.bytes)
+        ),
+    );
+    if let Some(warning) = low_disk_space_warning(&db_path, stats.bytes) {
+        progress.warning(warning);
+    }
+    if (stats.files >= LARGE_IMPORT_SOURCE_FILES_WARNING
+        || stats.bytes >= LARGE_IMPORT_SOURCE_BYTES_WARNING)
+        && stats.files > 0
+    {
+        let warning = format!(
+            "large import: {} source file(s), {}; initial indexing may use sustained CPU and disk",
+            stats.files,
+            format_bytes(stats.bytes)
+        );
+        progress.warning(warning);
+    }
+
+    let validation = match format {
+        ImportFormatArg::CtxHistoryJsonlV1 => {
+            validate_custom_history_jsonl_v1(path).map_err(anyhow::Error::from)?
+        }
+    };
+    if validation.failed > 0 {
+        return Err(explicit_format_import_failure(format, &validation));
+    }
+
+    let record = import_record_for_custom_history(path, format);
+    let record_id = record.id;
+    store.upsert_record(&record)?;
+    progress.message("indexing", format!("importing {}", format.as_str()));
+    let summary = match format {
+        ImportFormatArg::CtxHistoryJsonlV1 => import_custom_history_jsonl_v1(
+            path,
+            &mut store,
+            CustomHistoryJsonlV1ImportOptions {
+                source_path: Some(path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: false,
+                ..CustomHistoryJsonlV1ImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from)?,
+    };
+    if summary.failed > 0 {
+        return Err(explicit_format_import_failure(format, &summary));
+    }
+
+    let mut totals = ImportTotals::default();
+    totals.add(&summary, &stats);
+    if totals.imported_sessions > 0 || totals.imported_events > 0 || totals.imported_edges > 0 {
+        progress.message("finalizing", "optimizing search index");
+        Store::open(&db_path)?.optimize_search_index()?;
+    }
+    progress.message("finalizing", "checkpointing search database");
+    Store::open(&db_path)?.checkpoint_wal_truncate_if_larger_than(WAL_TRUNCATE_MIN_BYTES)?;
+    if options.print_human {
+        progress.finish_line();
+    }
+    progress.done(
+        "finalizing",
+        format!("indexed 1 {} source file", format.as_str()),
+        stats.bytes,
+    );
+    analytics::insert_count_bucket(
+        analytics_properties,
+        "source_files_bucket",
+        stats.files as u64,
+    );
+    analytics::insert_count_bucket(analytics_properties, "failed_sources_bucket", 0);
+    analytics::insert_count_bucket(
+        analytics_properties,
+        "sessions_imported_bucket",
+        totals.imported_sessions as u64,
+    );
+    analytics::insert_count_bucket(
+        analytics_properties,
+        "events_imported_bucket",
+        totals.imported_events as u64,
+    );
+    analytics::insert_count_bucket(
+        analytics_properties,
+        "edges_imported_bucket",
+        totals.imported_edges as u64,
+    );
+    analytics::insert_count_bucket(
+        analytics_properties,
+        "skipped_bucket",
+        totals.skipped as u64,
+    );
+    analytics::insert_count_bucket(analytics_properties, "failed_bucket", totals.failed as u64);
+    Ok(ImportReport {
+        resume: args.resume,
+        totals,
+        sources: vec![custom_format_import_json(format, path, &stats, &summary)],
+    })
+}
+
+fn explicit_format_import_failure(
+    format: ImportFormatArg,
+    summary: &ProviderImportSummary,
+) -> anyhow::Error {
+    let detail = summary
+        .failures
+        .first()
+        .map(|failure| format!("line {}: {}", failure.line, failure.error))
+        .unwrap_or_else(|| "unknown validation failure".to_owned());
+    anyhow!(
+        "{} import failed with {} failure(s); first failure: {detail}",
+        format.as_str(),
+        summary.failed
+    )
+}
+
 fn print_import_report(report: &ImportReport, json_output: bool) -> Result<()> {
     if json_output {
         print_json(import_report_json(report))
@@ -2157,6 +2378,29 @@ fn source_import_json(
         "provider": source.provider.as_str(),
         "path": source.path,
         "source_format": source.source_format,
+        "source_files": stats.files,
+        "source_bytes": stats.bytes,
+        "imported_sessions": summary.imported_sessions,
+        "imported_events": summary.imported_events,
+        "imported_edges": summary.imported_edges,
+        "skipped": summary.skipped,
+        "failed": summary.failed,
+        "failures": provider_failures_json(summary),
+    })
+}
+
+fn custom_format_import_json(
+    format: ImportFormatArg,
+    path: &Path,
+    stats: &SourceStats,
+    summary: &ProviderImportSummary,
+) -> Value {
+    json!({
+        "status": "imported",
+        "provider": CaptureProvider::Custom.as_str(),
+        "path": path,
+        "format": format.as_str(),
+        "source_format": format.as_str(),
         "source_files": stats.files,
         "source_bytes": stats.bytes,
         "imported_sessions": summary.imported_sessions,
@@ -4068,7 +4312,7 @@ fn import_requests(args: &ImportArgs) -> Result<Vec<SourceInfo>> {
     if let Some(path) = &args.path {
         let provider = args
             .provider
-            .unwrap_or(ProviderArg::Codex)
+            .unwrap_or(NativeProviderArg::Codex)
             .capture_provider();
         let source = explicit_path_source(provider, path.clone());
         validate_source_import_supported(&source)?;
@@ -4874,6 +5118,27 @@ fn import_record_for_source(source: &SourceInfo) -> HistoryRecord {
         vec!["agent-history".into(), source.provider.as_str().into()],
         "agent_history",
         source.path.parent().map(|path| path.display().to_string()),
+    );
+    record.id = stable_capture_uuid(&key, "record");
+    record
+}
+
+fn import_record_for_custom_history(path: &Path, format: ImportFormatArg) -> HistoryRecord {
+    let key = format!("custom-history:{}:{}", format.as_str(), path.display());
+    let mut record = HistoryRecord::new(
+        "custom agent history".to_owned(),
+        format!(
+            "Indexed custom agent history from {} ({})",
+            path.display(),
+            format.as_str()
+        ),
+        vec![
+            "agent-history".into(),
+            "custom".into(),
+            format.as_str().into(),
+        ],
+        "agent_history",
+        path.parent().map(|path| path.display().to_string()),
     );
     record.id = stable_capture_uuid(&key, "record");
     record

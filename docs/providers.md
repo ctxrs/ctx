@@ -24,6 +24,13 @@ The current CLI imports local history for:
   `~/.copilot/session-state`;
 - Factory AI Droid session JSONL files under `~/.factory/sessions`.
 
+These are built-in provider adapters for native local history. The custom
+history format is separate: `ctx import --format ctx-history-jsonl-v1 --path
+<file>` reads an explicit JSONL interchange file from any exporter. It is
+stored internally under the bounded provider `custom` while preserving the
+exporter's `provider_key`, `source_id`, and `session_id` as metadata and ID
+namespace components. It is not auto-discovered by `ctx sources`.
+
 Use `ctx sources` for the truth on the current machine:
 
 ```bash
@@ -70,6 +77,10 @@ Provider imports should be:
 - idempotent for unchanged source files;
 - clear about which fields were indexed and which were left raw-only;
 - conservative when a transcript schema is unknown or malformed.
+
+Custom history imports follow the same read-only and idempotent principles, but
+their compatibility contract is the `ctx-history-jsonl-v1` schema rather than a
+provider-owned native transcript format.
 
 ## Fidelity
 

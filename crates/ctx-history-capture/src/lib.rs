@@ -13,13 +13,16 @@ use std::{
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
     inbox_dir as core_inbox_dir, new_id, AgentType, CaptureEnvelope, CaptureProvider,
-    CaptureSource, CaptureSourceDescriptor, CaptureSourceKind, Confidence, EntityTimestamps, Event,
-    EventRole, EventType, Fidelity, FileChangeKind, FileTouched, HistoryRecord,
-    ProviderCaptureEnvelope, ProviderCursorCheckpoint, ProviderCursorRange, ProviderEventEnvelope,
-    ProviderRawRetention, ProviderRedactionBoundary, ProviderSessionEnvelope,
-    ProviderSourceEnvelope, ProviderSourceTrust, RedactionState, Run, RunStatus, RunType, Session,
-    SessionEdge, SessionEdgeType, SessionHistoryArchive, SessionStatus, SyncCursor, SyncMetadata,
-    SyncState, Visibility, PROVIDER_CAPTURE_ENVELOPE_SCHEMA_VERSION,
+    CaptureSource, CaptureSourceDescriptor, CaptureSourceKind, Confidence,
+    CtxHistoryJsonlEdgeRecord, CtxHistoryJsonlEventRecord, CtxHistoryJsonlFileTouchRecord,
+    CtxHistoryJsonlRecord, CtxHistoryJsonlSessionRecord, CtxHistoryJsonlSourceRecord,
+    EntityTimestamps, Event, EventRole, EventType, Fidelity, FileChangeKind, FileTouched,
+    HistoryRecord, ProviderCaptureEnvelope, ProviderCursorCheckpoint, ProviderCursorRange,
+    ProviderEventEnvelope, ProviderRawRetention, ProviderRedactionBoundary,
+    ProviderSessionEnvelope, ProviderSourceEnvelope, ProviderSourceTrust, RedactionState, Run,
+    RunStatus, RunType, Session, SessionEdge, SessionEdgeType, SessionHistoryArchive,
+    SessionStatus, SyncCursor, SyncMetadata, SyncState, Visibility,
+    CTX_HISTORY_JSONL_V1_SCHEMA_VERSION, PROVIDER_CAPTURE_ENVELOPE_SCHEMA_VERSION,
 };
 use ctx_history_store::{CatalogSession, Store, StoreError};
 use rusqlite::{Connection, OpenFlags};
@@ -200,6 +203,27 @@ impl Default for ProviderFixtureImportOptions {
             allow_partial_failures: false,
             source_format: "normalized_provider_fixture_jsonl".to_owned(),
             fidelity: Fidelity::Imported,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CustomHistoryJsonlV1ImportOptions {
+    pub machine_id: String,
+    pub source_path: Option<PathBuf>,
+    pub imported_at: DateTime<Utc>,
+    pub history_record_id: Option<Uuid>,
+    pub allow_partial_failures: bool,
+}
+
+impl Default for CustomHistoryJsonlV1ImportOptions {
+    fn default() -> Self {
+        Self {
+            machine_id: default_machine_id(),
+            source_path: None,
+            imported_at: Utc::now(),
+            history_record_id: None,
+            allow_partial_failures: false,
         }
     }
 }
@@ -1672,6 +1696,64 @@ pub fn import_provider_fixture_jsonl(
             fast_event_inserts: true,
         },
     )
+}
+
+pub fn import_custom_history_jsonl_v1(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: CustomHistoryJsonlV1ImportOptions,
+) -> Result<ProviderImportSummary> {
+    let path = path.as_ref();
+    let source_path = options
+        .source_path
+        .clone()
+        .unwrap_or_else(|| path.to_path_buf());
+    let normalization = normalize_custom_history_jsonl_v1(
+        path,
+        &ProviderAdapterContext {
+            machine_id: options.machine_id,
+            source_path: Some(source_path),
+            imported_at: options.imported_at,
+            tool_output_mode: CodexToolOutputMode::Full,
+            event_mode: CodexEventImportMode::Rich,
+            include_notices: true,
+        },
+    )?;
+    if normalization.provider.summary.failed > 0 && !options.allow_partial_failures {
+        return Ok(normalization.provider.summary);
+    }
+
+    let mut summary = import_normalized_provider_captures(
+        store,
+        normalization.provider,
+        NormalizedProviderImportOptions {
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+            persist_cursors: true,
+            wrap_transaction: true,
+            fast_event_inserts: true,
+        },
+    )?;
+    import_custom_history_edges(
+        store,
+        &normalization.edges,
+        options.history_record_id,
+        options.allow_partial_failures,
+        &mut summary,
+    )?;
+    Ok(summary)
+}
+
+pub fn validate_custom_history_jsonl_v1(path: impl AsRef<Path>) -> Result<ProviderImportSummary> {
+    let path = path.as_ref();
+    let normalization = normalize_custom_history_jsonl_v1(
+        path,
+        &ProviderAdapterContext {
+            source_path: Some(path.to_path_buf()),
+            ..ProviderAdapterContext::default()
+        },
+    )?;
+    Ok(normalization.provider.summary)
 }
 
 pub fn import_codex_history_jsonl(
@@ -3240,6 +3322,881 @@ const PROVIDER_MAX_TEXT_CHARS: usize = 16_000;
 const PROVIDER_MAX_PREVIEW_CHARS: usize = 4_000;
 const CODEX_FAST_IMPORT_TRANSACTION_FILES: usize = 512;
 const CODEX_FAST_IMPORT_PASSIVE_CHECKPOINT_MIN_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+#[derive(Debug, Clone, Default)]
+struct CustomHistoryJsonlV1NormalizationResult {
+    provider: ProviderNormalizationResult,
+    edges: Vec<(usize, CustomHistoryJsonlV1EdgeImport)>,
+}
+
+#[derive(Debug, Clone)]
+struct CustomHistoryJsonlV1EdgeImport {
+    provider_key: String,
+    source_id: String,
+    from_provider_session_id: String,
+    to_provider_session_id: String,
+    edge_id: Option<String>,
+    edge_type: SessionEdgeType,
+    confidence: Confidence,
+    occurred_at: DateTime<Utc>,
+    fidelity: Fidelity,
+    metadata: Value,
+}
+
+fn normalize_custom_history_jsonl_v1(
+    path: &Path,
+    context: &ProviderAdapterContext,
+) -> Result<CustomHistoryJsonlV1NormalizationResult> {
+    ensure_regular_provider_transcript_file(path)?;
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    let mut summary = ProviderImportSummary::default();
+    let mut records = Vec::new();
+
+    for (index, line) in reader.lines().enumerate() {
+        let line_number = index + 1;
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<CtxHistoryJsonlRecord>(&line) {
+            Ok(record) => records.push((line_number, record)),
+            Err(err) => push_provider_import_failure(&mut summary, line_number, err.to_string()),
+        }
+    }
+
+    if summary.failed > 0 {
+        return Ok(custom_history_failed_normalization(summary));
+    }
+
+    let mut manifest_line = None;
+    let mut sources = BTreeMap::<String, (usize, CtxHistoryJsonlSourceRecord)>::new();
+    let mut sessions = BTreeMap::<(String, String), (usize, CtxHistoryJsonlSessionRecord)>::new();
+    let mut events = Vec::<(usize, CtxHistoryJsonlEventRecord)>::new();
+    let mut event_keys = BTreeSet::<(String, String, u64)>::new();
+    let mut file_touches = Vec::<(usize, CtxHistoryJsonlFileTouchRecord)>::new();
+    let mut touch_keys = BTreeSet::<(String, String, u64)>::new();
+    let mut edges = Vec::<(usize, CtxHistoryJsonlEdgeRecord)>::new();
+    let mut edge_keys = BTreeSet::<(String, String, String, String)>::new();
+
+    for (line_number, record) in records {
+        match record {
+            CtxHistoryJsonlRecord::Manifest(manifest) => {
+                if manifest.schema_version != CTX_HISTORY_JSONL_V1_SCHEMA_VERSION {
+                    push_provider_import_failure(
+                        &mut summary,
+                        line_number,
+                        format!(
+                            "unsupported custom history schema version `{}`",
+                            manifest.schema_version
+                        ),
+                    );
+                }
+                if manifest_line.replace(line_number).is_some() {
+                    push_provider_import_failure(
+                        &mut summary,
+                        line_number,
+                        "duplicate manifest record".to_owned(),
+                    );
+                }
+            }
+            CtxHistoryJsonlRecord::Source(source) => {
+                validate_custom_source_record(&mut summary, line_number, &source);
+                if sources
+                    .insert(source.source_id.clone(), (line_number, source))
+                    .is_some()
+                {
+                    push_provider_import_failure(
+                        &mut summary,
+                        line_number,
+                        "duplicate source_id".to_owned(),
+                    );
+                }
+            }
+            CtxHistoryJsonlRecord::Session(session) => {
+                validate_custom_history_identifier(
+                    &mut summary,
+                    line_number,
+                    "source_id",
+                    &session.source_id,
+                );
+                validate_custom_history_identifier(
+                    &mut summary,
+                    line_number,
+                    "session_id",
+                    &session.session_id,
+                );
+                let key = (session.source_id.clone(), session.session_id.clone());
+                if sessions.insert(key, (line_number, session)).is_some() {
+                    push_provider_import_failure(
+                        &mut summary,
+                        line_number,
+                        "duplicate session record".to_owned(),
+                    );
+                }
+            }
+            CtxHistoryJsonlRecord::Event(event) => {
+                validate_custom_history_identifier(
+                    &mut summary,
+                    line_number,
+                    "source_id",
+                    &event.source_id,
+                );
+                validate_custom_history_identifier(
+                    &mut summary,
+                    line_number,
+                    "session_id",
+                    &event.session_id,
+                );
+                let key = (
+                    event.source_id.clone(),
+                    event.session_id.clone(),
+                    event.event_index,
+                );
+                if !event_keys.insert(key) {
+                    push_provider_import_failure(
+                        &mut summary,
+                        line_number,
+                        "duplicate event_index for session".to_owned(),
+                    );
+                }
+                events.push((line_number, event));
+            }
+            CtxHistoryJsonlRecord::FileTouch(file_touch) => {
+                validate_custom_history_identifier(
+                    &mut summary,
+                    line_number,
+                    "source_id",
+                    &file_touch.source_id,
+                );
+                validate_custom_history_identifier(
+                    &mut summary,
+                    line_number,
+                    "session_id",
+                    &file_touch.session_id,
+                );
+                if file_touch.path.trim().is_empty() {
+                    push_provider_import_failure(
+                        &mut summary,
+                        line_number,
+                        "file_touch path must not be empty".to_owned(),
+                    );
+                }
+                let key = (
+                    file_touch.source_id.clone(),
+                    file_touch.session_id.clone(),
+                    file_touch.touch_index,
+                );
+                if !touch_keys.insert(key) {
+                    push_provider_import_failure(
+                        &mut summary,
+                        line_number,
+                        "duplicate touch_index for session".to_owned(),
+                    );
+                }
+                file_touches.push((line_number, file_touch));
+            }
+            CtxHistoryJsonlRecord::Edge(edge) => {
+                validate_custom_history_identifier(
+                    &mut summary,
+                    line_number,
+                    "source_id",
+                    &edge.source_id,
+                );
+                validate_custom_history_identifier(
+                    &mut summary,
+                    line_number,
+                    "from_session_id",
+                    &edge.from_session_id,
+                );
+                validate_custom_history_identifier(
+                    &mut summary,
+                    line_number,
+                    "to_session_id",
+                    &edge.to_session_id,
+                );
+                let edge_key = edge.edge_id.clone().unwrap_or_else(|| {
+                    format!(
+                        "{}:{}:{}",
+                        edge.from_session_id,
+                        edge.to_session_id,
+                        edge.edge_type.as_str()
+                    )
+                });
+                let key = (
+                    edge.source_id.clone(),
+                    edge.from_session_id.clone(),
+                    edge.to_session_id.clone(),
+                    edge_key,
+                );
+                if !edge_keys.insert(key) {
+                    push_provider_import_failure(
+                        &mut summary,
+                        line_number,
+                        "duplicate edge record".to_owned(),
+                    );
+                }
+                edges.push((line_number, edge));
+            }
+        }
+    }
+
+    validate_custom_history_references(
+        &mut summary,
+        manifest_line,
+        &sources,
+        &sessions,
+        &events,
+        &event_keys,
+        &file_touches,
+        &edges,
+    );
+    if summary.failed > 0 {
+        return Ok(custom_history_failed_normalization(summary));
+    }
+
+    let mut result = ProviderNormalizationResult {
+        summary,
+        ..ProviderNormalizationResult::default()
+    };
+    for (line_number, session) in sessions.values() {
+        let source = &sources
+            .get(&session.source_id)
+            .expect("session source already validated")
+            .1;
+        result.captures.push((
+            *line_number,
+            custom_history_session_capture(source, session, None, context),
+        ));
+    }
+    for (line_number, event) in events {
+        let (_, session) = sessions
+            .get(&(event.source_id.clone(), event.session_id.clone()))
+            .expect("event session already validated");
+        let source = &sources
+            .get(&event.source_id)
+            .expect("event source already validated")
+            .1;
+        let envelope = custom_history_event_envelope(source, &event);
+        result.captures.push((
+            line_number,
+            custom_history_session_capture(source, session, Some(envelope), context),
+        ));
+    }
+    for (line_number, file_touch) in file_touches {
+        let source = &sources
+            .get(&file_touch.source_id)
+            .expect("file_touch source already validated")
+            .1;
+        result.files_touched.push((
+            line_number,
+            custom_history_file_touch_envelope(source, &file_touch),
+        ));
+    }
+
+    let mut custom_edges = Vec::new();
+    for (line_number, edge) in edges {
+        let source = &sources
+            .get(&edge.source_id)
+            .expect("edge source already validated")
+            .1;
+        custom_edges.push((
+            line_number,
+            custom_history_edge_import(source, &edge, context.imported_at),
+        ));
+    }
+
+    Ok(CustomHistoryJsonlV1NormalizationResult {
+        provider: result,
+        edges: custom_edges,
+    })
+}
+
+fn custom_history_failed_normalization(
+    summary: ProviderImportSummary,
+) -> CustomHistoryJsonlV1NormalizationResult {
+    CustomHistoryJsonlV1NormalizationResult {
+        provider: ProviderNormalizationResult {
+            summary,
+            ..ProviderNormalizationResult::default()
+        },
+        edges: Vec::new(),
+    }
+}
+
+fn push_provider_import_failure(summary: &mut ProviderImportSummary, line: usize, error: String) {
+    summary.failed += 1;
+    summary.failures.push(ProviderImportFailure { line, error });
+}
+
+fn validate_custom_source_record(
+    summary: &mut ProviderImportSummary,
+    line_number: usize,
+    source: &CtxHistoryJsonlSourceRecord,
+) {
+    validate_custom_history_identifier(summary, line_number, "source_id", &source.source_id);
+    validate_custom_history_identifier(
+        summary,
+        line_number,
+        "source_format",
+        &source.source_format,
+    );
+    let valid = !source.provider_key.is_empty()
+        && source.provider_key.len() <= 128
+        && source.provider_key.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
+        })
+        && source
+            .provider_key
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit());
+    if !valid {
+        push_provider_import_failure(
+            summary,
+            line_number,
+            "provider_key must be 1 to 128 bytes, start with a lowercase ASCII letter or digit, and use only lowercase ASCII letters, digits, '.', '_', or '-'".to_owned(),
+        );
+    }
+}
+
+fn validate_custom_history_identifier(
+    summary: &mut ProviderImportSummary,
+    line_number: usize,
+    field: &str,
+    value: &str,
+) {
+    let error = if value.trim().is_empty() {
+        Some(format!("{field} must not be empty"))
+    } else if value.len() > 512 {
+        Some(format!("{field} must be at most 512 bytes"))
+    } else if value.chars().any(char::is_control) {
+        Some(format!("{field} must not contain control characters"))
+    } else {
+        None
+    };
+    if let Some(error) = error {
+        push_provider_import_failure(summary, line_number, error);
+    }
+}
+
+fn validate_custom_history_references(
+    summary: &mut ProviderImportSummary,
+    manifest_line: Option<usize>,
+    sources: &BTreeMap<String, (usize, CtxHistoryJsonlSourceRecord)>,
+    sessions: &BTreeMap<(String, String), (usize, CtxHistoryJsonlSessionRecord)>,
+    events: &[(usize, CtxHistoryJsonlEventRecord)],
+    event_keys: &BTreeSet<(String, String, u64)>,
+    file_touches: &[(usize, CtxHistoryJsonlFileTouchRecord)],
+    edges: &[(usize, CtxHistoryJsonlEdgeRecord)],
+) {
+    if manifest_line.is_none() {
+        push_provider_import_failure(
+            summary,
+            0,
+            "missing manifest record for ctx-history-jsonl-v1".to_owned(),
+        );
+    }
+
+    for (line_number, session) in sessions.values() {
+        if !sources.contains_key(&session.source_id) {
+            push_provider_import_failure(
+                summary,
+                *line_number,
+                format!(
+                    "session references unknown source_id `{}`",
+                    session.source_id
+                ),
+            );
+        }
+        if let Some(parent) = &session.parent_session_id {
+            let key = (session.source_id.clone(), parent.clone());
+            if !sessions.contains_key(&key) {
+                push_provider_import_failure(
+                    summary,
+                    *line_number,
+                    format!("session references unknown parent_session_id `{parent}`"),
+                );
+            }
+        }
+        if let Some(root) = &session.root_session_id {
+            let key = (session.source_id.clone(), root.clone());
+            if root != &session.session_id && !sessions.contains_key(&key) {
+                push_provider_import_failure(
+                    summary,
+                    *line_number,
+                    format!("session references unknown root_session_id `{root}`"),
+                );
+            }
+        }
+    }
+
+    for (line_number, event) in events {
+        if !sessions.contains_key(&(event.source_id.clone(), event.session_id.clone())) {
+            push_provider_import_failure(
+                summary,
+                *line_number,
+                format!(
+                    "event references unknown session `{}` in source `{}`",
+                    event.session_id, event.source_id
+                ),
+            );
+        }
+    }
+
+    for (line_number, file_touch) in file_touches {
+        if !sessions.contains_key(&(file_touch.source_id.clone(), file_touch.session_id.clone())) {
+            push_provider_import_failure(
+                summary,
+                *line_number,
+                format!(
+                    "file_touch references unknown session `{}` in source `{}`",
+                    file_touch.session_id, file_touch.source_id
+                ),
+            );
+        }
+        if let Some(event_index) = file_touch.event_index {
+            let key = (
+                file_touch.source_id.clone(),
+                file_touch.session_id.clone(),
+                event_index,
+            );
+            if !event_keys.contains(&key) {
+                push_provider_import_failure(
+                    summary,
+                    *line_number,
+                    format!("file_touch references unknown event_index `{event_index}`"),
+                );
+            }
+        }
+    }
+
+    for (line_number, edge) in edges {
+        let from_key = (edge.source_id.clone(), edge.from_session_id.clone());
+        let to_key = (edge.source_id.clone(), edge.to_session_id.clone());
+        if !sessions.contains_key(&from_key) {
+            push_provider_import_failure(
+                summary,
+                *line_number,
+                format!(
+                    "edge references unknown from_session_id `{}`",
+                    edge.from_session_id
+                ),
+            );
+        }
+        if !sessions.contains_key(&to_key) {
+            push_provider_import_failure(
+                summary,
+                *line_number,
+                format!(
+                    "edge references unknown to_session_id `{}`",
+                    edge.to_session_id
+                ),
+            );
+        }
+        if edge.edge_type == SessionEdgeType::ParentChild {
+            let Some((_, child)) = sessions.get(&to_key) else {
+                continue;
+            };
+            if let Some(parent) = &child.parent_session_id {
+                if parent != &edge.from_session_id {
+                    push_provider_import_failure(
+                        summary,
+                        *line_number,
+                        format!(
+                            "parent_child edge from_session_id `{}` conflicts with session parent_session_id `{parent}`",
+                            edge.from_session_id
+                        ),
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn custom_history_session_capture(
+    source: &CtxHistoryJsonlSourceRecord,
+    session: &CtxHistoryJsonlSessionRecord,
+    event: Option<ProviderEventEnvelope>,
+    context: &ProviderAdapterContext,
+) -> ProviderCaptureEnvelope {
+    let provider_session_id = custom_history_internal_session_id(
+        &source.provider_key,
+        &source.source_id,
+        &session.session_id,
+    );
+    let event_cursor = event.as_ref().and_then(|event| {
+        event.cursor.as_ref().map(|cursor| ProviderCursorRange {
+            before: None,
+            after: Some(ProviderCursorCheckpoint {
+                stream: custom_history_cursor_stream(source),
+                cursor: cursor.clone(),
+                observed_at: event.occurred_at,
+            }),
+        })
+    });
+    let source_cursor = source
+        .cursor
+        .as_ref()
+        .map(|cursor| custom_history_normalized_cursor_range(source, cursor))
+        .or(event_cursor);
+    ProviderCaptureEnvelope {
+        schema_version: PROVIDER_CAPTURE_ENVELOPE_SCHEMA_VERSION,
+        provider: CaptureProvider::Custom,
+        source: ProviderSourceEnvelope {
+            source_format: source.source_format.clone(),
+            machine_id: source
+                .machine_id
+                .clone()
+                .unwrap_or_else(|| context.machine_id.clone()),
+            observed_at: source.observed_at.unwrap_or(context.imported_at),
+            raw_source_path: source.raw_source_path.clone().or_else(|| {
+                context
+                    .source_path
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+            }),
+            raw_retention: source.raw_retention,
+            redaction_boundary: source.redaction_boundary,
+            trust: match source.trust {
+                ProviderSourceTrust::Unknown => ProviderSourceTrust::ProviderExport,
+                other => other,
+            },
+            fidelity: source.fidelity,
+            cursor: source_cursor,
+            idempotency_key: Some(format!(
+                "ctx-history-jsonl-v1:{}:{}",
+                source.provider_key, source.source_id
+            )),
+            metadata: custom_history_metadata(
+                source.metadata.clone(),
+                json!({
+                    "provider_key": source.provider_key,
+                    "source_id": source.source_id,
+                    "source_format": source.source_format,
+                    "raw_uri": source.raw_uri,
+                    "raw_source_path": source.raw_source_path,
+                    "fingerprint": source.fingerprint,
+                    "importer_version": source.importer_version,
+                    "cursor": source.cursor,
+                }),
+            ),
+        },
+        session: ProviderSessionEnvelope {
+            provider_session_id,
+            parent_provider_session_id: session.parent_session_id.as_ref().map(|parent| {
+                custom_history_internal_session_id(&source.provider_key, &source.source_id, parent)
+            }),
+            root_provider_session_id: session.root_session_id.as_ref().map(|root| {
+                custom_history_internal_session_id(&source.provider_key, &source.source_id, root)
+            }),
+            external_agent_id: session.external_agent_id.clone(),
+            agent_type: session.agent_type,
+            role_hint: session.role_hint.clone(),
+            is_primary: session.is_primary,
+            status: session.status,
+            started_at: session.started_at,
+            ended_at: session.ended_at,
+            cwd: session.cwd.clone(),
+            fidelity: session.fidelity,
+            idempotency_key: session.idempotency_key.clone().or_else(|| {
+                Some(format!(
+                    "ctx-history-jsonl-v1:{}:{}:{}",
+                    source.provider_key, source.source_id, session.session_id
+                ))
+            }),
+            artifacts: session.artifacts.clone(),
+            metadata: custom_history_metadata(
+                session.metadata.clone(),
+                json!({
+                    "provider_key": source.provider_key,
+                    "source_id": source.source_id,
+                    "session_id": session.session_id,
+                    "native_session_id": session.native_session_id,
+                    "parent_session_id": session.parent_session_id,
+                    "root_session_id": session.root_session_id,
+                }),
+            ),
+        },
+        event,
+    }
+}
+
+fn custom_history_event_envelope(
+    source: &CtxHistoryJsonlSourceRecord,
+    event: &CtxHistoryJsonlEventRecord,
+) -> ProviderEventEnvelope {
+    let payload = if let Some(preview) = &event.preview {
+        json!({ "text": preview })
+    } else {
+        event.payload.clone()
+    };
+    let raw_payload = event
+        .preview
+        .as_ref()
+        .map(|_| event.payload.clone())
+        .filter(|payload| payload != &json!({}));
+    ProviderEventEnvelope {
+        provider_event_index: event.event_index,
+        provider_event_hash: event.event_hash.clone(),
+        cursor: event.native_cursor.clone(),
+        event_type: event.event_type,
+        role: event.role,
+        occurred_at: event.occurred_at,
+        fidelity: event.fidelity,
+        redaction_state: event.redaction_state,
+        idempotency_key: event.idempotency_key.clone(),
+        artifacts: event.artifacts.clone(),
+        payload,
+        metadata: custom_history_metadata(
+            event.metadata.clone(),
+            json!({
+                "provider_key": source.provider_key,
+                "source_id": event.source_id,
+                "session_id": event.session_id,
+                "event_id": event.event_id,
+                "native_cursor": event.native_cursor,
+                "preview": event.preview,
+                "raw_payload": raw_payload,
+            }),
+        ),
+    }
+}
+
+fn custom_history_file_touch_envelope(
+    source: &CtxHistoryJsonlSourceRecord,
+    file_touch: &CtxHistoryJsonlFileTouchRecord,
+) -> ProviderFileTouchedEnvelope {
+    ProviderFileTouchedEnvelope {
+        provider: CaptureProvider::Custom,
+        provider_session_id: custom_history_internal_session_id(
+            &source.provider_key,
+            &source.source_id,
+            &file_touch.session_id,
+        ),
+        provider_touch_index: file_touch.touch_index,
+        provider_event_index: file_touch.event_index,
+        path: file_touch.path.clone(),
+        change_kind: file_touch.change_kind,
+        old_path: file_touch.old_path.clone(),
+        line_count_delta: file_touch.line_count_delta,
+        confidence: file_touch.confidence,
+        occurred_at: file_touch.occurred_at,
+        source_format: source.source_format.clone(),
+        metadata: custom_history_metadata(
+            file_touch.metadata.clone(),
+            json!({
+                "provider_key": source.provider_key,
+                "source_id": file_touch.source_id,
+                "session_id": file_touch.session_id,
+            }),
+        ),
+    }
+}
+
+fn custom_history_edge_import(
+    source: &CtxHistoryJsonlSourceRecord,
+    edge: &CtxHistoryJsonlEdgeRecord,
+    imported_at: DateTime<Utc>,
+) -> CustomHistoryJsonlV1EdgeImport {
+    CustomHistoryJsonlV1EdgeImport {
+        provider_key: source.provider_key.clone(),
+        source_id: source.source_id.clone(),
+        from_provider_session_id: custom_history_internal_session_id(
+            &source.provider_key,
+            &source.source_id,
+            &edge.from_session_id,
+        ),
+        to_provider_session_id: custom_history_internal_session_id(
+            &source.provider_key,
+            &source.source_id,
+            &edge.to_session_id,
+        ),
+        edge_id: edge.edge_id.clone(),
+        edge_type: edge.edge_type,
+        confidence: edge.confidence,
+        occurred_at: edge.occurred_at.unwrap_or(imported_at),
+        fidelity: edge.fidelity,
+        metadata: custom_history_metadata(
+            edge.metadata.clone(),
+            json!({
+                "provider_key": source.provider_key,
+                "source_id": edge.source_id,
+                "from_session_id": edge.from_session_id,
+                "to_session_id": edge.to_session_id,
+                "edge_id": edge.edge_id,
+            }),
+        ),
+    }
+}
+
+fn custom_history_internal_session_id(
+    provider_key: &str,
+    source_id: &str,
+    session_id: &str,
+) -> String {
+    let key = custom_history_key(json!({
+        "schema": CTX_HISTORY_JSONL_V1_SCHEMA_VERSION,
+        "kind": "session",
+        "provider_key": provider_key,
+        "source_id": source_id,
+        "session_id": session_id,
+    }));
+    let id = stable_capture_uuid(&key, "custom-provider-session-id");
+    format!("ctx-history-jsonl-v1-{id}")
+}
+
+fn custom_history_cursor_stream(source: &CtxHistoryJsonlSourceRecord) -> String {
+    let key = custom_history_key(json!({
+        "schema": CTX_HISTORY_JSONL_V1_SCHEMA_VERSION,
+        "kind": "cursor_stream",
+        "provider_key": source.provider_key,
+        "source_id": source.source_id,
+        "source_format": source.source_format,
+    }));
+    let stream_id = stable_capture_uuid(&key, "custom-cursor-stream");
+    format!("provider:custom:{}:{stream_id}", source.provider_key)
+}
+
+fn custom_history_normalized_cursor_range(
+    source: &CtxHistoryJsonlSourceRecord,
+    cursor: &ProviderCursorRange,
+) -> ProviderCursorRange {
+    ProviderCursorRange {
+        before: cursor
+            .before
+            .as_ref()
+            .map(|checkpoint| custom_history_normalized_cursor_checkpoint(source, checkpoint)),
+        after: cursor
+            .after
+            .as_ref()
+            .map(|checkpoint| custom_history_normalized_cursor_checkpoint(source, checkpoint)),
+    }
+}
+
+fn custom_history_normalized_cursor_checkpoint(
+    source: &CtxHistoryJsonlSourceRecord,
+    checkpoint: &ProviderCursorCheckpoint,
+) -> ProviderCursorCheckpoint {
+    ProviderCursorCheckpoint {
+        stream: custom_history_cursor_stream(source),
+        cursor: checkpoint.cursor.clone(),
+        observed_at: checkpoint.observed_at,
+    }
+}
+
+fn custom_history_key(value: Value) -> String {
+    serde_json::to_string(&value).expect("custom history identity key is serializable")
+}
+
+fn custom_history_metadata(base: Value, custom: Value) -> Value {
+    let mut map = match base {
+        Value::Object(map) => map,
+        Value::Null => serde_json::Map::new(),
+        other => {
+            let mut map = serde_json::Map::new();
+            map.insert("metadata".to_owned(), other);
+            map
+        }
+    };
+    map.insert("ctx_history_jsonl_v1".to_owned(), custom);
+    Value::Object(map)
+}
+
+fn import_custom_history_edges(
+    store: &mut Store,
+    edges: &[(usize, CustomHistoryJsonlV1EdgeImport)],
+    history_record_id: Option<Uuid>,
+    allow_partial_failures: bool,
+    summary: &mut ProviderImportSummary,
+) -> Result<()> {
+    if edges.is_empty() {
+        return Ok(());
+    }
+
+    store.begin_immediate_batch()?;
+    for (line_number, edge) in edges {
+        let edge_id = if edge.edge_type == SessionEdgeType::ParentChild {
+            provider_edge_uuid(
+                CaptureProvider::Custom,
+                &edge.to_provider_session_id,
+                "parent_child",
+            )
+        } else {
+            let key = custom_history_key(json!({
+                "schema": CTX_HISTORY_JSONL_V1_SCHEMA_VERSION,
+                "kind": "session_edge",
+                "provider_key": edge.provider_key,
+                "source_id": edge.source_id,
+                "from_provider_session_id": edge.from_provider_session_id,
+                "to_provider_session_id": edge.to_provider_session_id,
+                "edge_type": edge.edge_type.as_str(),
+                "edge_id": edge.edge_id,
+            }));
+            stable_capture_uuid(&key, "session-edge")
+        };
+        let from_session_id =
+            provider_session_uuid(CaptureProvider::Custom, &edge.from_provider_session_id);
+        let to_session_id =
+            provider_session_uuid(CaptureProvider::Custom, &edge.to_provider_session_id);
+        let source_id = provider_source_uuid(CaptureProvider::Custom, &edge.to_provider_session_id);
+        let mut exists_cache = BTreeMap::<Uuid, bool>::new();
+        if !provider_session_exists_cached(store, from_session_id, &mut exists_cache)?
+            || !provider_session_exists_cached(store, to_session_id, &mut exists_cache)?
+        {
+            push_provider_import_failure(
+                summary,
+                *line_number,
+                "edge endpoint session was not imported".to_owned(),
+            );
+            if !allow_partial_failures {
+                let _ = store.rollback_batch();
+                return Ok(());
+            }
+            continue;
+        }
+        let was_present = store.session_edge_exists(edge_id)?;
+        let session_edge = SessionEdge {
+            id: edge_id,
+            from_session_id,
+            to_session_id,
+            edge_type: edge.edge_type,
+            confidence: edge.confidence,
+            source_id: Some(source_id),
+            timestamps: timestamps(edge.occurred_at),
+            sync: provider_sync_metadata(
+                edge.fidelity,
+                json!({
+                    "provider_key": edge.provider_key,
+                    "source_id": edge.source_id,
+                    "history_record_id": history_record_id,
+                    "metadata": edge.metadata,
+                }),
+            ),
+        };
+        store.upsert_session_edge(&session_edge)?;
+        if edge.edge_type == SessionEdgeType::ParentChild {
+            let mut child = store.get_session(to_session_id)?;
+            child.parent_session_id = Some(from_session_id);
+            if child.root_session_id.is_none() {
+                child.root_session_id = Some(from_session_id);
+            }
+            store.upsert_session(&child)?;
+        }
+        if was_present {
+            summary.skipped_edges += 1;
+            summary.skipped += 1;
+        } else {
+            summary.imported_edges += 1;
+            summary.imported += 1;
+        }
+    }
+    if let Err(err) = store.commit_batch() {
+        let _ = store.rollback_batch();
+        return Err(err.into());
+    }
+    Ok(())
+}
 
 fn collect_jsonl_paths(root: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
     let metadata = fs::symlink_metadata(root)?;
@@ -6605,7 +7562,12 @@ fn import_provider_capture_lines(
             }
         }
     }
-    resolve_pending_provider_edges(store, &mut summary, &mut caches)?;
+    if let Err(err) = resolve_pending_provider_edges(store, &mut summary, &mut caches) {
+        if has_captures && options.wrap_transaction {
+            let _ = store.rollback_batch();
+        }
+        return Err(err);
+    }
     for (line_number, file) in files_touched {
         if let Err(err) = import_provider_file_touched_line(store, &file, &options) {
             summary.failed += 1;
@@ -6614,6 +7576,12 @@ fn import_provider_capture_lines(
                 error: err.to_string(),
             });
         }
+    }
+    if summary.failed > 0 && !options.allow_partial_failures {
+        if has_captures && options.wrap_transaction {
+            let _ = store.rollback_batch();
+        }
+        return Ok(summary);
     }
     if has_captures && options.wrap_transaction {
         if let Err(err) = store.commit_batch() {
@@ -7865,6 +8833,10 @@ mod tests {
         materialized_fixture("provider-history", name)
     }
 
+    fn custom_history_fixture(name: &str) -> PathBuf {
+        materialized_fixture("custom-history-jsonl", name)
+    }
+
     fn materialized_fixture(category: &str, name: &str) -> PathBuf {
         let source = match category {
             "provider" => PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -7872,6 +8844,9 @@ mod tests {
                 .join(name),
             "provider-history" => PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../../tests/fixtures/provider-history")
+                .join(name),
+            "custom-history-jsonl" => PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/custom-history-jsonl")
                 .join(name),
             _ => panic!("unknown fixture category {category}"),
         };
@@ -10419,6 +11394,338 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(cursor.cursor, "line:3");
+    }
+
+    #[test]
+    fn custom_history_jsonl_imports_full_shape_and_is_idempotent() {
+        let temp = tempdir();
+        let fixture = custom_history_fixture("basic.jsonl");
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let first = import_custom_history_jsonl_v1(
+            &fixture,
+            &mut store,
+            CustomHistoryJsonlV1ImportOptions {
+                source_path: Some(fixture.clone()),
+                imported_at: "2026-06-23T12:10:00Z".parse().unwrap(),
+                ..CustomHistoryJsonlV1ImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(first.failed, 0, "{:?}", first.failures);
+        assert_eq!(first.imported_sessions, 2);
+        assert_eq!(first.imported_events, 2);
+        assert_eq!(first.imported_edges, 2);
+
+        let root_provider_session_id =
+            custom_history_internal_session_id("demo-agent", "demo-source", "demo-session");
+        let child_provider_session_id =
+            custom_history_internal_session_id("demo-agent", "demo-source", "demo-session-worker");
+        let root_id = provider_session_uuid(CaptureProvider::Custom, &root_provider_session_id);
+        let child_id = provider_session_uuid(CaptureProvider::Custom, &child_provider_session_id);
+        let root = store.get_session(root_id).unwrap();
+        let child = store.get_session(child_id).unwrap();
+        assert_eq!(root.provider, CaptureProvider::Custom);
+        assert_eq!(child.parent_session_id, Some(root_id));
+        assert!(root
+            .sync
+            .metadata
+            .to_string()
+            .contains("\"provider_key\":\"demo-agent\""));
+        let events = store.events_for_session(root_id).unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(events[0].payload.to_string().contains("Add a parser test."));
+
+        let conn = rusqlite::Connection::open(temp.path().join("work.sqlite")).unwrap();
+        let touched: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files_touched", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(touched, 1);
+        let spawned_edges: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM session_edges WHERE edge_type = 'spawned'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(spawned_edges, 1);
+        let cursor_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_cursors WHERE stream LIKE 'provider:custom:demo-agent:%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cursor_count, 1);
+        let cursor: String = conn
+            .query_row(
+                "SELECT cursor FROM sync_cursors WHERE stream LIKE 'provider:custom:demo-agent:%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cursor, "5");
+        let raw_cursor_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_cursors WHERE stream = 'demo-agent:demo-source'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(raw_cursor_count, 0);
+        drop(conn);
+
+        let second = import_custom_history_jsonl_v1(
+            &fixture,
+            &mut store,
+            CustomHistoryJsonlV1ImportOptions {
+                source_path: Some(fixture.clone()),
+                imported_at: "2026-06-23T12:10:00Z".parse().unwrap(),
+                ..CustomHistoryJsonlV1ImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(second.failed, 0);
+        assert_eq!(second.imported_sessions, 0);
+        assert_eq!(second.imported_events, 0);
+        assert_eq!(second.imported_edges, 0);
+        assert_eq!(second.skipped_events, 2);
+        assert_eq!(second.skipped_edges, 2);
+    }
+
+    #[test]
+    fn custom_history_jsonl_malformed_import_is_atomic_by_default() {
+        let temp = tempdir();
+        let fixture = custom_history_fixture("malformed-partial.jsonl");
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let summary = import_custom_history_jsonl_v1(
+            &fixture,
+            &mut store,
+            CustomHistoryJsonlV1ImportOptions {
+                source_path: Some(fixture.clone()),
+                imported_at: "2026-06-23T13:10:00Z".parse().unwrap(),
+                ..CustomHistoryJsonlV1ImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.imported_sessions, 0);
+        assert_eq!(summary.imported_events, 0);
+        assert_eq!(summary.failed, 1);
+        assert_eq!(store.capture_source_count().unwrap(), 0);
+        let conn = rusqlite::Connection::open(temp.path().join("work.sqlite")).unwrap();
+        let sessions: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+            .unwrap();
+        let events: i64 = conn
+            .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(sessions, 0);
+        assert_eq!(events, 0);
+    }
+
+    #[test]
+    fn custom_history_jsonl_preview_overrides_raw_payload_for_searchable_event_payload() {
+        let temp = tempdir();
+        let fixture = temp.path().join("preview-overrides-payload.jsonl");
+        fs::write(
+            &fixture,
+            [
+                r#"{"record_type":"manifest","schema_version":"ctx-history-jsonl-v1"}"#,
+                r#"{"record_type":"source","source_id":"src","provider_key":"preview-agent","source_format":"demo"}"#,
+                r#"{"record_type":"session","source_id":"src","session_id":"run","started_at":"2026-06-23T14:00:00Z"}"#,
+                r#"{"record_type":"event","source_id":"src","session_id":"run","event_index":0,"event_type":"message","role":"assistant","occurred_at":"2026-06-23T14:00:01Z","payload":{"raw":"unindexed-raw-payload-token"},"preview":"bounded searchable preview text"}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let summary = import_custom_history_jsonl_v1(
+            &fixture,
+            &mut store,
+            CustomHistoryJsonlV1ImportOptions {
+                source_path: Some(fixture.clone()),
+                imported_at: "2026-06-23T14:10:00Z".parse().unwrap(),
+                ..CustomHistoryJsonlV1ImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+        let session_id = provider_session_uuid(
+            CaptureProvider::Custom,
+            &custom_history_internal_session_id("preview-agent", "src", "run"),
+        );
+        let events = store.events_for_session(session_id).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].payload["body"],
+            json!({ "text": "bounded searchable preview text" })
+        );
+        assert!(!events[0]
+            .payload
+            .to_string()
+            .contains("unindexed-raw-payload-token"));
+        assert_eq!(
+            events[0].sync.metadata["metadata"]["ctx_history_jsonl_v1"]["raw_payload"]["raw"]
+                .as_str(),
+            Some("unindexed-raw-payload-token")
+        );
+    }
+
+    #[test]
+    fn custom_history_jsonl_namespaces_provider_keys_to_avoid_collisions() {
+        let temp = tempdir();
+        let fixture = temp.path().join("same-native-ids.jsonl");
+        fs::write(
+            &fixture,
+            [
+                r#"{"record_type":"manifest","schema_version":"ctx-history-jsonl-v1"}"#,
+                r#"{"record_type":"source","source_id":"src","provider_key":"alpha","source_format":"demo"}"#,
+                r#"{"record_type":"session","source_id":"src","session_id":"same","started_at":"2026-06-23T14:00:00Z"}"#,
+                r#"{"record_type":"event","source_id":"src","session_id":"same","event_index":0,"event_type":"message","role":"user","occurred_at":"2026-06-23T14:00:01Z","payload":{"text":"alpha text"}}"#,
+                r#"{"record_type":"source","source_id":"src-2","provider_key":"beta","source_format":"demo"}"#,
+                r#"{"record_type":"session","source_id":"src-2","session_id":"same","started_at":"2026-06-23T14:01:00Z"}"#,
+                r#"{"record_type":"event","source_id":"src-2","session_id":"same","event_index":0,"event_type":"message","role":"user","occurred_at":"2026-06-23T14:01:01Z","payload":{"text":"beta text"}}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let summary = import_custom_history_jsonl_v1(
+            &fixture,
+            &mut store,
+            CustomHistoryJsonlV1ImportOptions {
+                source_path: Some(fixture.clone()),
+                imported_at: "2026-06-23T14:10:00Z".parse().unwrap(),
+                ..CustomHistoryJsonlV1ImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+        assert_eq!(summary.imported_sessions, 2);
+        assert_eq!(summary.imported_events, 2);
+        let alpha_session = provider_session_uuid(
+            CaptureProvider::Custom,
+            &custom_history_internal_session_id("alpha", "src", "same"),
+        );
+        let beta_session = provider_session_uuid(
+            CaptureProvider::Custom,
+            &custom_history_internal_session_id("beta", "src-2", "same"),
+        );
+        assert_ne!(alpha_session, beta_session);
+        assert!(store
+            .events_for_session(alpha_session)
+            .unwrap()
+            .iter()
+            .any(|event| event.payload.to_string().contains("alpha text")));
+        assert!(store
+            .events_for_session(beta_session)
+            .unwrap()
+            .iter()
+            .any(|event| event.payload.to_string().contains("beta text")));
+    }
+
+    #[test]
+    fn custom_history_jsonl_hashes_delimited_identifiers_without_collisions() {
+        let temp = tempdir();
+        let fixture = temp.path().join("delimited-identifiers.jsonl");
+        fs::write(
+            &fixture,
+            [
+                r#"{"record_type":"manifest","schema_version":"ctx-history-jsonl-v1"}"#,
+                r#"{"record_type":"source","source_id":"a:b","provider_key":"delim-agent","source_format":"demo"}"#,
+                r#"{"record_type":"session","source_id":"a:b","session_id":"c","started_at":"2026-06-23T14:00:00Z"}"#,
+                r#"{"record_type":"event","source_id":"a:b","session_id":"c","event_index":0,"event_type":"message","role":"user","occurred_at":"2026-06-23T14:00:01Z","payload":{"text":"left text"}}"#,
+                r#"{"record_type":"source","source_id":"a","provider_key":"delim-agent","source_format":"demo"}"#,
+                r#"{"record_type":"session","source_id":"a","session_id":"b:c","started_at":"2026-06-23T14:01:00Z"}"#,
+                r#"{"record_type":"event","source_id":"a","session_id":"b:c","event_index":0,"event_type":"message","role":"user","occurred_at":"2026-06-23T14:01:01Z","payload":{"text":"right text"}}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let summary = import_custom_history_jsonl_v1(
+            &fixture,
+            &mut store,
+            CustomHistoryJsonlV1ImportOptions {
+                source_path: Some(fixture.clone()),
+                imported_at: "2026-06-23T14:10:00Z".parse().unwrap(),
+                ..CustomHistoryJsonlV1ImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+        assert_eq!(summary.imported_sessions, 2);
+        assert_eq!(summary.imported_events, 2);
+        let left_session = provider_session_uuid(
+            CaptureProvider::Custom,
+            &custom_history_internal_session_id("delim-agent", "a:b", "c"),
+        );
+        let right_session = provider_session_uuid(
+            CaptureProvider::Custom,
+            &custom_history_internal_session_id("delim-agent", "a", "b:c"),
+        );
+        assert_ne!(left_session, right_session);
+        assert!(store
+            .events_for_session(left_session)
+            .unwrap()
+            .iter()
+            .any(|event| event.payload.to_string().contains("left text")));
+        assert!(store
+            .events_for_session(right_session)
+            .unwrap()
+            .iter()
+            .any(|event| event.payload.to_string().contains("right text")));
+    }
+
+    #[test]
+    fn custom_history_jsonl_dedupes_explicit_parent_child_edge_from_session_parent() {
+        let temp = tempdir();
+        let fixture = temp.path().join("duplicate-parent-child.jsonl");
+        fs::write(
+            &fixture,
+            [
+                r#"{"record_type":"manifest","schema_version":"ctx-history-jsonl-v1"}"#,
+                r#"{"record_type":"source","source_id":"src","provider_key":"edge-agent","source_format":"demo"}"#,
+                r#"{"record_type":"session","source_id":"src","session_id":"root","started_at":"2026-06-23T15:00:00Z"}"#,
+                r#"{"record_type":"session","source_id":"src","session_id":"child","parent_session_id":"root","started_at":"2026-06-23T15:00:01Z"}"#,
+                r#"{"record_type":"edge","source_id":"src","from_session_id":"root","to_session_id":"child","edge_type":"parent_child","edge_id":"explicit-parent","occurred_at":"2026-06-23T15:00:02Z"}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let summary = import_custom_history_jsonl_v1(
+            &fixture,
+            &mut store,
+            CustomHistoryJsonlV1ImportOptions {
+                source_path: Some(fixture.clone()),
+                imported_at: "2026-06-23T15:10:00Z".parse().unwrap(),
+                ..CustomHistoryJsonlV1ImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+        assert_eq!(summary.imported_edges, 1);
+        assert_eq!(summary.skipped_edges, 1);
+        let conn = rusqlite::Connection::open(temp.path().join("work.sqlite")).unwrap();
+        let parent_child_edges: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM session_edges WHERE edge_type = 'parent_child'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(parent_child_edges, 1);
     }
 
     #[test]

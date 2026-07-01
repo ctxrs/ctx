@@ -31,6 +31,10 @@ fn provider_history_fixture(name: &str) -> String {
     materialized_fixture("provider-history", name)
 }
 
+fn custom_history_fixture(name: &str) -> String {
+    materialized_fixture("custom-history-jsonl", name)
+}
+
 fn redaction_fixture(name: &str) -> String {
     materialized_fixture("redaction", name)
 }
@@ -39,6 +43,9 @@ fn materialized_fixture(category: &str, name: &str) -> String {
     let source = match category {
         "provider-history" => PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/fixtures/provider-history")
+            .join(name),
+        "custom-history-jsonl" => PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/custom-history-jsonl")
             .join(name),
         "provider" => PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/fixtures/provider")
@@ -730,6 +737,114 @@ fn import_progress_json_goes_to_stderr_without_polluting_stdout() {
 }
 
 #[test]
+fn import_custom_history_jsonl_format_is_searchable_and_idempotent() {
+    let temp = tempdir();
+    let fixture = custom_history_fixture("basic.jsonl");
+
+    let first = json_output(ctx(&temp).args([
+        "import",
+        "--format",
+        "ctx-history-jsonl-v1",
+        "--path",
+        &fixture,
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(first["totals"]["imported_sessions"], 2);
+    assert_eq!(first["totals"]["imported_events"], 2);
+    assert_eq!(first["totals"]["imported_edges"], 2);
+    assert_eq!(first["sources"][0]["provider"], "custom");
+    assert_eq!(first["sources"][0]["format"], "ctx-history-jsonl-v1");
+
+    let search = json_output(ctx(&temp).args([
+        "search",
+        "parser test",
+        "--provider",
+        "custom",
+        "--refresh",
+        "off",
+        "--json",
+    ]));
+    assert!(
+        !search["results"].as_array().unwrap().is_empty(),
+        "custom import was not searchable: {search:#}"
+    );
+
+    let second = json_output(ctx(&temp).args([
+        "import",
+        "--format",
+        "ctx-history-jsonl-v1",
+        "--path",
+        &fixture,
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(second["totals"]["imported_sessions"], 0);
+    assert_eq!(second["totals"]["imported_events"], 0);
+    assert_eq!(second["totals"]["imported_edges"], 0);
+    assert_eq!(second["totals"]["skipped"], 6);
+}
+
+#[test]
+fn import_custom_history_jsonl_format_rejects_malformed_atomically() {
+    let temp = tempdir();
+    let fixture = custom_history_fixture("malformed-partial.jsonl");
+
+    let stderr = failure_stderr(ctx(&temp).args([
+        "import",
+        "--format",
+        "ctx-history-jsonl-v1",
+        "--path",
+        &fixture,
+        "--progress",
+        "none",
+    ]));
+    assert!(
+        stderr.contains("ctx-history-jsonl-v1 import failed"),
+        "{stderr}"
+    );
+
+    let status = json_output(ctx(&temp).args(["status", "--json"]));
+    assert_eq!(status["indexed_items"], 0);
+    let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
+    assert_eq!(
+        sqlite_count(&conn, "SELECT COUNT(*) FROM history_records"),
+        0
+    );
+    assert_eq!(
+        sqlite_count(&conn, "SELECT COUNT(*) FROM ctx_history_search"),
+        0
+    );
+    assert_eq!(
+        sqlite_count(&conn, "SELECT COUNT(*) FROM capture_sources"),
+        0
+    );
+    assert_eq!(sqlite_count(&conn, "SELECT COUNT(*) FROM sessions"), 0);
+    assert_eq!(sqlite_count(&conn, "SELECT COUNT(*) FROM events"), 0);
+}
+
+#[test]
+fn import_custom_history_format_is_not_a_native_provider_importer() {
+    let temp = tempdir();
+    let stderr = failure_stderr(ctx(&temp).args(["import", "--provider", "custom"]));
+    assert!(stderr.contains("invalid value 'custom'"), "{stderr}");
+
+    let fixture = custom_history_fixture("basic.jsonl");
+    let stderr = failure_stderr(ctx(&temp).args([
+        "import",
+        "--format",
+        "ctx-history-jsonl-v1",
+        "--path",
+        &fixture,
+        "--all",
+    ]));
+    assert!(stderr.contains("--format"), "{stderr}");
+    assert!(stderr.contains("--all"), "{stderr}");
+}
+
+#[test]
 fn import_all_discovers_and_imports_providers_together() {
     let temp = tempdir();
     copy_dir_all(
@@ -1005,6 +1120,7 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
                 "--provider <PROVIDER>",
                 "[possible values: codex, pi, claude, opencode, antigravity, gemini, cursor, copilot-cli, factory-ai-droid]",
                 "--path <PATH>",
+                "--format <FORMAT>",
                 "--resume",
                 "--json",
             ],
