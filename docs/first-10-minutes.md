@@ -26,9 +26,9 @@ ctx status --json
 ```
 
 `ctx setup` creates local storage, discovers supported provider history,
-catalogs Codex sessions, imports discovered auto-importable sources, and
-optimizes the local search index. The default root is `~/.ctx`. Use a temporary
-root for trials:
+catalogs Codex sessions, imports discovered native provider sources, and
+optimizes the local search index. It does not execute history-source plugin
+commands. The default root is `~/.ctx`. Use a temporary root for trials:
 
 ```bash
 ctx --data-root /tmp/ctx-first-10 setup

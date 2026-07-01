@@ -272,6 +272,7 @@ dependencies = [
  "predicates",
  "ring",
  "rusqlite",
+ "serde",
  "serde_json",
  "sha2",
  "tempfile",

@@ -76,8 +76,8 @@ analytics marker described under network behavior.
 | --- | --- | --- |
 | `ctx setup` | provider transcript files and home path metadata for source discovery | data root, `work.sqlite`, `config.toml`, and SQLite index |
 | `ctx status` | data root metadata and existing SQLite store | none |
-| `ctx sources` | known provider paths under the user's home | none |
-| `ctx import` | provider transcript files and path metadata, or the explicit custom history JSONL file passed with `--format ctx-history-jsonl-v1 --path` | data root, `config.toml` if missing, and SQLite index |
+| `ctx sources` | known provider paths under the user's home and local history-source plugin manifests | none |
+| `ctx import` | provider transcript files and path metadata, the explicit custom history JSONL file passed with `--format ctx-history-jsonl-v1 --path`, or stdout from an explicit history-source plugin command | data root, `config.toml` if missing, and SQLite index |
 | `ctx show` | SQLite index | selected `--out` path for `show session` when provided |
 | `ctx locate` | SQLite index and raw source path metadata | none |
 | `ctx search` | native provider transcript files, path metadata, and SQLite index | SQLite index for newly discovered native provider history |
@@ -127,6 +127,7 @@ ctx import --all
 ctx import --resume
 ctx import --path ~/.codex/sessions
 ctx import --format ctx-history-jsonl-v1 --path ./history.jsonl
+ctx import --history-source dorkos
 ```
 
 Current adapters are safe to re-run. They rescan sources idempotently and keep
@@ -134,8 +135,10 @@ source paths or cursors when available.
 Custom history JSONL imports follow the same v1 lifecycle: ctx rescans the
 explicit file, upserts already-imported records, stores supplied source cursor
 metadata under ctx-owned custom cursor streams, and preserves event native
-cursors. The path is not added to `config.toml` or treated as a fixed provider
-location.
+cursors. History-source plugins receive the previous stored cursor on each
+explicit import and stream the same JSONL format to stdout. Failed plugin runs
+do not advance cursors. Explicit file paths and plugin manifests are not added
+to `config.toml` or treated as fixed provider homes.
 
 ## Upgrade Reindexing
 

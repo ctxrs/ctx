@@ -28,8 +28,9 @@ ctx status
 
 Setup creates the configured ctx data root, initializes SQLite, writes
 `config.toml` when missing, discovers known provider history paths, catalogs
-Codex sessions, imports discovered sources, optimizes the local search index,
-and prints next steps. The default data root is `~/.ctx`.
+Codex sessions, imports discovered native provider sources, optimizes the local
+search index, and prints next steps. It does not execute history-source plugin
+commands. The default data root is `~/.ctx`.
 
 Use a different root when testing:
 

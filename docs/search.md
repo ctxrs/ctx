@@ -104,13 +104,14 @@ are intentionally looking for material from the active session tree.
 
 `--refresh` defaults to `auto`. `auto` attempts a best-effort pre-search import
 of discovered native provider sources and serves the existing index if that
-refresh fails. On large discovered sources or already-cataloged indexes, `auto`
-serves current results without a foreground catch-up scan; use
-`--refresh strict` or `ctx import --all` when you need a full catch-up before
-querying. `off` skips the pre-search refresh. `strict` fails the search if the
-refresh cannot run or import successfully. Preview native sources such as
-NanoClaw and AstrBot are searched from the existing index until they are
-explicitly imported through a supported path.
+refresh fails. Search refresh does not execute history-source plugin commands.
+On large discovered sources or already-cataloged indexes, `auto` serves current
+results without a foreground catch-up scan; use `--refresh strict` or
+`ctx import --all` when you need a full catch-up before querying. `off` skips
+the pre-search refresh. `strict` fails the search if the refresh cannot run or
+import successfully. Preview native sources such as NanoClaw and AstrBot, plus
+search-only sources without native import support, are searched from the
+existing index until they are explicitly imported through a supported path.
 
 Use `--refresh off` for a strictly read-only search over the existing ctx index.
 This avoids provider imports and avoids updating the ctx SQLite store.

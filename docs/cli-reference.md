@@ -28,8 +28,9 @@ ctx doctor --json
 
 - `setup` creates the data root, opens or creates `work.sqlite`, writes
   `config.toml` when needed, discovers known provider history locations,
-  catalogs Codex sessions, imports all discovered auto-importable sources,
-  optimizes the local search index, and prints next steps.
+  catalogs Codex sessions, imports discovered native provider sources, optimizes
+  the local search index, and prints next steps. It does not execute
+  history-source plugin commands.
 - `setup --catalog-only` stops after discovery/cataloging. It is useful for
   fast inventory or troubleshooting, but it does not make history searchable.
 - `status` reports the ctx root, database path, config path, indexed item
@@ -60,12 +61,17 @@ machine. Current rows include:
 - native rows for supported Antigravity, Claude, OpenCode, OpenClaw, Hermes,
   Gemini, Cursor, Copilot CLI, and Factory AI Droid local history locations;
 - preview rows for NanoClaw project roots and AstrBot SQLite history when those
-  paths are discoverable.
+  paths are discoverable;
+- local history-source plugin manifests under `$CTX_DATA_ROOT/plugins` or
+  `CTX_HISTORY_PLUGIN_PATH`.
 
-Each JSON row includes `provider`, `path`, `exists`, `source_format`, `status`,
-`import_support`, `native_import`, `importable`, `raw_retention`, and any
-`unsupported_reason`. `sources` reads home-directory path metadata and writes
-nothing to provider files or source repositories.
+Native JSON rows include `provider`, `path`, `exists`, `source_format`,
+`status`, `import_support`, `native_import`, `importable`, `raw_retention`, and
+any `unsupported_reason`. Plugin JSON rows use
+`kind: "history_source_plugin"` and include `plugin`, `history_source`,
+`provider_key`, `source_id`, `manifest_path`, and `enabled`. `sources` reads
+path metadata and plugin manifests, writes nothing to provider files or source
+repositories, and does not execute plugin commands.
 
 ## Import
 
@@ -88,13 +94,19 @@ ctx import --provider factory-ai-droid
 ctx import --path ~/.codex/sessions
 ctx import --provider pi --path ~/.pi/sessions.jsonl
 ctx import --format ctx-history-jsonl-v1 --path ./history.jsonl
+ctx import --history-source dorkos
+ctx import --plugin dorkos/default
+ctx import --history-source-manifest ./ctx-history-plugin.json
+ctx import --plugin-manifest ./ctx-history-plugin.json
+ctx import --history-source hermes --reset-cursor
 ctx import --resume
 ctx import --json
 ctx import --progress json --json
 ```
 
 `import` explicitly indexes provider history into the local SQLite store. The
-normal first-run path is `ctx setup`, which already imports discovered sources.
+normal first-run path is `ctx setup`, which already imports discovered native
+provider sources.
 Use `import` to repair, re-run, resume, or target a specific provider/path. It
 creates the data root and default config if needed, reads provider transcript
 files, and writes indexed source metadata, sessions, events, searchable text,
@@ -105,13 +117,23 @@ Custom history can be imported from an explicit JSONL file with
 remembered as a provider home; see `docs/custom-history-import-format.md` for
 the schema and incremental semantics.
 
+History-source plugins are local command adapters that stream
+`ctx-history-jsonl-v1` to stdout. Use `--history-source <selector>` for an
+explicit plugin import, or `--history-source-manifest <path>` to test a manifest
+without installing it. `--plugin` and `--plugin-manifest` are aliases.
+`--reset-cursor` withholds the previous plugin cursor for that run and asks the
+plugin to perform a full rescan. See `docs/history-source-plugins.md`.
+
 Import selection rules:
 
-- with no arguments or with `--all`, import all discovered auto-importable
-  sources that exist;
+- with no arguments, import discovered native sources that exist;
+- with `--all`, import discovered native sources that exist and enabled
+  history-source plugin sources;
 - with `--provider`, import discovered sources for that provider;
 - with `--format ctx-history-jsonl-v1 --path <file>`, import that custom
   history JSONL file;
+- with `--history-source`, import matching local plugin sources;
+- with `--history-source-manifest`, import sources from that manifest path;
 - with `--path`, import exactly that path;
 - with `--path` and no provider, parse the path as Codex format.
 
@@ -180,11 +202,12 @@ ctx search "this current task" --include-current-session
 
 `search` defaults to `--refresh auto`, which quietly refreshes discovered native
 provider sources before querying indexed sessions and events. The refresh is
-best-effort and keeps JSON stdout reserved for the search result object. On
-large discovered sources or already-cataloged indexes, `auto` serves current
-results without a foreground catch-up scan; use `--refresh strict` or
-`ctx import --all` when you need a full catch-up before querying. Use
-`--refresh off` to search the existing index without refreshing, or
+best-effort and keeps JSON stdout reserved for the search result object.
+History-source plugin commands are not executed by search refresh. On large
+discovered sources or already-cataloged indexes, `auto` serves current results
+without a foreground catch-up scan; use `--refresh strict` or `ctx import --all`
+when you need a full catch-up before querying. Use `--refresh off` to search the
+existing index without refreshing, or
 `--refresh strict` to fail when the pre-search refresh cannot run or import
 successfully. Preview native sources such as NanoClaw and AstrBot are searched
 from the existing index until they are explicitly imported through a supported
