@@ -1077,7 +1077,7 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
                 "Print expanded text details",
             ],
         ),
-        ("doctor", vec!["Usage: ctx doctor", "--json"]),
+        ("doctor", vec!["Usage: ctx doctor", "--json", "--progress"]),
     ] {
         let output = ctx(&temp)
             .args([command, "--help"])
@@ -2043,6 +2043,18 @@ fn fresh_home_search_mvp_flow() {
     let doctor = json_output(ctx(&temp).args(["doctor", "--json"]));
     assert_eq!(doctor["schema_version"], 1);
     assert_eq!(doctor["ok"], true);
+    assert_eq!(doctor["progress"], "auto");
+
+    let doctor_progress = ctx(&temp)
+        .args(["doctor", "--json", "--progress", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stderr
+        .clone();
+    let doctor_progress = String::from_utf8(doctor_progress).unwrap();
+    assert!(doctor_progress.contains(r#""operation":"doctor""#));
+    assert!(doctor_progress.contains(r#""phase":"checking""#));
 }
 
 #[test]

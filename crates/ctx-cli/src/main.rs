@@ -89,7 +89,7 @@ enum CommandRoot {
     #[command(about = "Check or apply signed ctx CLI upgrades")]
     Upgrade(upgrade::UpgradeArgs),
     #[command(about = "Check local ctx health")]
-    Doctor(JsonArgs),
+    Doctor(DoctorArgs),
 }
 
 #[derive(Debug, Args)]
@@ -106,6 +106,14 @@ struct SetupArgs {
 struct JsonArgs {
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct DoctorArgs {
+    #[arg(long)]
+    json: bool,
+    #[arg(long, value_enum, default_value_t = ProgressArg::Auto)]
+    progress: ProgressArg,
 }
 
 #[derive(Debug, Args)]
@@ -4010,11 +4018,17 @@ fn refresh_sources_for_search(
 }
 
 fn run_doctor(
-    args: JsonArgs,
+    args: DoctorArgs,
     data_root: PathBuf,
     analytics_properties: &mut AnalyticsProperties,
 ) -> Result<()> {
+    let progress = ProgressReporter::new(args.progress, args.json, "doctor", 0);
+    progress.message("opening", "opening ctx store");
     let store = Store::open(database_path(data_root.clone()))?;
+    progress.message(
+        "checking",
+        "running sqlite integrity and foreign key checks",
+    );
     let mut findings = store.validate()?;
     if !data_root.exists() {
         findings.push(format!("data root does not exist: {}", data_root.display()));
@@ -4024,10 +4038,20 @@ fn run_doctor(
         "finding_count_bucket",
         findings.len() as u64,
     );
+    progress.done(
+        "done",
+        if findings.is_empty() {
+            "ctx doctor passed"
+        } else {
+            "ctx doctor found issues"
+        },
+        0,
+    );
     if args.json {
         print_json(json!({
             "schema_version": 1,
             "ok": findings.is_empty(),
+            "progress": progress_mode_name(args.progress),
             "findings": findings,
         }))?;
     } else if findings.is_empty() {
