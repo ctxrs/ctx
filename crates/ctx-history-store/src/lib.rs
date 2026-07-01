@@ -2228,6 +2228,14 @@ impl Store {
             .ok_or(StoreError::NotFound(id))
     }
 
+    pub fn sessions_by_id_prefix(&self, prefix: &str) -> Result<Vec<Session>> {
+        let mut stmt = self
+            .conn
+            .prepare(session_select_sql("WHERE id LIKE ?1 ORDER BY id LIMIT 2").as_str())?;
+        let rows = stmt.query_map(params![format!("{prefix}%")], session_from_row)?;
+        collect_rows(rows)
+    }
+
     pub fn session_by_external_session(
         &self,
         provider: CaptureProvider,
@@ -2621,6 +2629,14 @@ impl Store {
             )
             .optional()?
             .ok_or(StoreError::NotFound(id))
+    }
+
+    pub fn events_by_id_prefix(&self, prefix: &str) -> Result<Vec<Event>> {
+        let mut stmt = self
+            .conn
+            .prepare(event_select_sql("WHERE id LIKE ?1 ORDER BY id LIMIT 2").as_str())?;
+        let rows = stmt.query_map(params![format!("{prefix}%")], event_from_row)?;
+        collect_rows(rows)
     }
 
     pub fn events_for_session(&self, session_id: Uuid) -> Result<Vec<Event>> {

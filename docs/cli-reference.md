@@ -174,9 +174,12 @@ returns the strongest matching span from each session, plus
 `more_matches_in_session` and `session_importance` when more indexed events from
 that session also matched. Use `--session <ctx-session-id>` after a default
 search has identified a session to inspect; scoped session search returns dense
-event hits. Use `--events` without `--session` for dense event-level results
-across sessions. Repeat `--term <query-or-keyword>` when you want to broaden a
-search across several related words or phrases and merge the ranked results.
+event hits. Session/event commands accept full ctx IDs or unambiguous ctx ID
+prefixes of at least eight hex characters. Use `--events` without `--session`
+for dense event-level results across sessions. Repeat
+`--term <query-or-keyword>` when you want to broaden a search across several
+related words or phrases and merge the ranked results; `--term` is OR-style
+broadening, not a must-include filter.
 Default search excludes subagent sessions so primary human-agent intent and
 decisions stay prominent. Use `--include-subagents` when implementation details,
 code review notes, test output, or failure analysis from subagent sessions
@@ -199,12 +202,16 @@ optimized for agent reading; use `--verbose` for expanded text diagnostics.
 Filters:
 
 - `--provider codex|pi|claude|opencode|antigravity|gemini|cursor|copilot-cli|factory-ai-droid`;
-- `--workspace <name-or-path>`;
+- `--workspace <name-or-path>`, substring match over stored workspace, cwd,
+  source path, or repository-name text;
 - `--since <rfc3339-or-days>d`, for example `2026-06-01T00:00:00Z` or `30d`;
-- `--event-type <event-type>`;
-- `--file <path>`;
-- `--session <ctx-session-id>`, for dense event results within one session;
-- `--term <query-or-keyword>`, repeatable broadening terms merged with the main query;
+- `--event-type <event-type>`, one of `message`, `tool_call`, `tool_output`,
+  `command_started`, `command_output`, `command_finished`, `file_touched`,
+  `vcs_change`, `artifact`, `summary`, or `notice`;
+- `--file <path>`, indexed touched-file path metadata, not the current
+  filesystem;
+- `--session <ctx-session-id-or-prefix>`, for dense event results within one session;
+- `--term <query-or-keyword>`, repeatable broadening terms merged with OR-style semantics;
 - `--events`, for dense event-level results instead of the default session-diverse results;
 - `--include-subagents`;
 - `--limit <n>`, capped at `200`;

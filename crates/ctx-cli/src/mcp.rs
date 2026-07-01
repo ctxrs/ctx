@@ -320,7 +320,7 @@ fn tool_search(arguments: &Value, data_root: &Path) -> Result<Value> {
         return Err(anyhow!("limit must be between 1 and {MAX_SEARCH_LIMIT}"));
     }
     let provider = optional_provider(arguments, "provider")?;
-    let session = optional_uuid(arguments, "session")?;
+    let session = optional_string(arguments, "session")?;
     let workspace = optional_string(arguments, "workspace")?;
     let since = optional_string(arguments, "since")?;
     let primary_only = optional_bool(arguments, "primary_only")?.unwrap_or(false);

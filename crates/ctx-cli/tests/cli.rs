@@ -1054,13 +1054,15 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
                 "Add another search query or keyword",
                 "--provider <PROVIDER>",
                 "--workspace <WORKSPACE>",
-                "Filter by workspace path or name text",
+                "Filter by stored workspace",
                 "--since <SINCE>",
                 "Filter to recent history, as RFC3339 or a day window like 30d",
                 "--include-subagents",
                 "Include subagent sessions",
                 "--event-type <EVENT_TYPE>",
+                "Filter by event type:",
                 "--file <FILE>",
+                "indexed touched-file path metadata",
                 "--session <SESSION>",
                 "--events",
                 "--limit <LIMIT>",
@@ -1838,6 +1840,28 @@ fn fresh_home_search_mvp_flow() {
         .iter()
         .all(|result| result["ctx_session_id"] == ctx_session_id));
 
+    let session_prefix = &ctx_session_id[..8];
+    let prefixed_session_events = json_output(ctx(&temp).args([
+        "search",
+        "onboarding",
+        "--provider",
+        "codex",
+        "--session",
+        session_prefix,
+        "--json",
+    ]));
+    assert_event_search_provider_oracle(
+        &prefixed_session_events,
+        "codex",
+        "onboarding",
+        1,
+        "message",
+    );
+    assert_eq!(
+        prefixed_session_events["filters"]["session"],
+        ctx_session_id
+    );
+
     let human_search = ctx(&temp)
         .args(["search", "onboarding"])
         .assert()
@@ -1913,6 +1937,17 @@ fn fresh_home_search_mvp_flow() {
             && event["ctx_session_id"].is_string()
             && event["preview"].is_string()));
 
+    let show_event_prefix = json_output(ctx(&temp).args([
+        "show",
+        "event",
+        &ctx_event_id[..8],
+        "--window",
+        "1",
+        "--format",
+        "json",
+    ]));
+    assert_eq!(show_event_prefix["event"]["ctx_event_id"], ctx_event_id);
+
     let show_session =
         json_output(ctx(&temp).args(["show", "session", &ctx_session_id, "--format", "json"]));
     assert_eq!(show_session["schema_version"], 1);
@@ -1920,6 +1955,10 @@ fn fresh_home_search_mvp_flow() {
     assert_eq!(show_session["session"]["item_type"], "session");
     assert_eq!(show_session["session"]["item_id"], ctx_session_id);
     assert_eq!(show_session["mode"], "lite");
+
+    let show_session_prefix =
+        json_output(ctx(&temp).args(["show", "session", &ctx_session_id[..8], "--format", "json"]));
+    assert_eq!(show_session_prefix["session"]["item_id"], ctx_session_id);
 
     let show_session_full = json_output(ctx(&temp).args([
         "show",

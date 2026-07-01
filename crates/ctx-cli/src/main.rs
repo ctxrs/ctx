@@ -140,7 +140,8 @@ enum ShowTarget {
 
 #[derive(Debug, Args)]
 struct ShowSessionArgs {
-    id: Option<Uuid>,
+    #[arg(help = "ctx session id or unambiguous id prefix")]
+    id: Option<String>,
     #[arg(long, value_enum)]
     provider: Option<ProviderArg>,
     #[arg(long = "provider-session")]
@@ -157,7 +158,8 @@ struct ShowSessionArgs {
 
 #[derive(Debug, Args)]
 struct ShowEventArgs {
-    id: Uuid,
+    #[arg(help = "ctx event id or unambiguous id prefix")]
+    id: String,
     #[arg(long, default_value_t = 0)]
     before: usize,
     #[arg(long, default_value_t = 0)]
@@ -186,7 +188,8 @@ enum LocateTarget {
 
 #[derive(Debug, Args)]
 struct LocateSessionArgs {
-    id: Option<Uuid>,
+    #[arg(help = "ctx session id or unambiguous id prefix")]
+    id: Option<String>,
     #[arg(long, value_enum)]
     provider: Option<ProviderArg>,
     #[arg(long = "provider-session")]
@@ -199,7 +202,8 @@ struct LocateSessionArgs {
 
 #[derive(Debug, Args)]
 struct LocateEventArgs {
-    id: Uuid,
+    #[arg(help = "ctx event id or unambiguous id prefix")]
+    id: String,
     #[arg(long, value_enum, default_value_t = LocateFormat::Text)]
     format: LocateFormat,
     #[arg(long)]
@@ -212,7 +216,7 @@ struct SearchArgs {
     query: Option<String>,
     #[arg(
         long,
-        help = "Add another search query or keyword; repeat to broaden and merge results"
+        help = "Add another search query or keyword; repeat to broaden with OR-style merged results"
     )]
     term: Vec<String>,
     #[arg(
@@ -224,7 +228,10 @@ struct SearchArgs {
     limit: usize,
     #[arg(long, help = "Search only one provider")]
     provider: Option<ProviderArg>,
-    #[arg(long, help = "Filter by workspace path or name text")]
+    #[arg(
+        long,
+        help = "Filter by stored workspace, cwd, source path, or repo-name text"
+    )]
     workspace: Option<String>,
     #[arg(
         long,
@@ -242,12 +249,21 @@ struct SearchArgs {
         help = "Include subagent sessions in addition to primary-agent sessions"
     )]
     include_subagents: bool,
-    #[arg(long, help = "Filter by event type, such as message or tool_call")]
+    #[arg(
+        long,
+        help = "Filter by event type: message, tool_call, tool_output, command_started, command_output, command_finished, file_touched, vcs_change, artifact, summary, or notice"
+    )]
     event_type: Option<String>,
-    #[arg(long, help = "Filter by file path text")]
+    #[arg(
+        long,
+        help = "Filter by indexed touched-file path metadata, not the current filesystem"
+    )]
     file: Option<PathBuf>,
-    #[arg(long, help = "Search event hits within one ctx session id")]
-    session: Option<Uuid>,
+    #[arg(
+        long,
+        help = "Search event hits within one ctx session id or unambiguous id prefix"
+    )]
+    session: Option<String>,
     #[arg(
         long,
         help = "Return dense event-level results instead of diverse session results"
@@ -314,7 +330,7 @@ impl SqlArgs {
 }
 
 pub(crate) struct SearchFilterInput {
-    session: Option<Uuid>,
+    session: Option<String>,
     provider: Option<ProviderArg>,
     workspace: Option<String>,
     since: Option<String>,
@@ -2311,7 +2327,7 @@ fn run_show(
             write_rendered_session(&store, &session, &events, args.mode, format, args.out)?;
         }
         ShowTarget::Event(args) => {
-            let event = store.get_event(args.id)?;
+            let event = resolve_event(&store, &args.id)?;
             let events = event_window(&store, &event, args.before, args.after, args.window)?;
             analytics::insert_count_bucket(
                 analytics_properties,
@@ -2356,7 +2372,7 @@ fn run_locate(
             }
         }
         LocateTarget::Event(args) => {
-            let event = store.get_event(args.id)?;
+            let event = resolve_event(&store, &args.id)?;
             let value = locate_event_json(&store, &event);
             if locate_json_output(args.format, args.json) {
                 print_json(value)?;
@@ -2382,14 +2398,12 @@ fn locate_json_output(format: LocateFormat, json: bool) -> bool {
 
 fn resolve_session(
     store: &Store,
-    id: Option<Uuid>,
+    id: Option<String>,
     provider: Option<CaptureProvider>,
     provider_session: Option<&str>,
 ) -> Result<Session> {
     if let Some(id) = id {
-        return store.get_session(id).with_context(|| {
-            format!("session {id} was not found; use `ctx search` or `ctx search --verbose` to get ctx_session_id")
-        });
+        return resolve_session_by_id_text(store, &id);
     }
     let provider = provider.ok_or_else(|| {
         anyhow!(
@@ -2685,6 +2699,67 @@ fn push_session_metadata_markdown(
             out.push_str(&format!("- source_path: `{path}`\n"));
         }
     }
+}
+
+fn resolve_session_by_id_text(store: &Store, value: &str) -> Result<Session> {
+    if let Ok(id) = Uuid::parse_str(value.trim()) {
+        return store.get_session(id).with_context(|| {
+            format!("session {id} was not found; use `ctx search --verbose` to get ctx_session_id")
+        });
+    }
+    let prefix = normalize_uuid_prefix(value, "session")?;
+    match store.sessions_by_id_prefix(&prefix)?.as_slice() {
+        [session] => Ok(session.clone()),
+        [] => Err(anyhow!(
+            "session id prefix {prefix:?} was not found; use `ctx search --verbose` to get ctx_session_id"
+        )),
+        matches => Err(anyhow!(
+            "session id prefix {prefix:?} is ambiguous; first matches are {} and {}; use a longer ctx_session_id",
+            matches[0].id,
+            matches[1].id
+        )),
+    }
+}
+
+fn resolve_session_id(store: &Store, value: &str) -> Result<Uuid> {
+    Ok(resolve_session_by_id_text(store, value)?.id)
+}
+
+fn resolve_event(store: &Store, value: &str) -> Result<Event> {
+    if let Ok(id) = Uuid::parse_str(value.trim()) {
+        return store.get_event(id).with_context(|| {
+            format!(
+                "event {id} was not found; use `ctx search --events --verbose` to get ctx_event_id"
+            )
+        });
+    }
+    let prefix = normalize_uuid_prefix(value, "event")?;
+    match store.events_by_id_prefix(&prefix)?.as_slice() {
+        [event] => Ok(event.clone()),
+        [] => Err(anyhow!(
+            "event id prefix {prefix:?} was not found; use `ctx search --events --verbose` to get ctx_event_id"
+        )),
+        matches => Err(anyhow!(
+            "event id prefix {prefix:?} is ambiguous; first matches are {} and {}; use a longer ctx_event_id",
+            matches[0].id,
+            matches[1].id
+        )),
+    }
+}
+
+fn normalize_uuid_prefix(value: &str, kind: &str) -> Result<String> {
+    let prefix = value.trim();
+    if prefix.len() < 8 {
+        return Err(anyhow!(
+            "{kind} id prefix must be at least 8 hex characters, or pass a full ctx UUID"
+        ));
+    }
+    if prefix.contains('-') || !prefix.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err(anyhow!(
+            "{kind} id must be a full ctx UUID or an unambiguous hex prefix from `ctx search --verbose`"
+        ));
+    }
+    Ok(prefix.to_ascii_lowercase())
 }
 
 fn push_event_text_block(out: &mut String, event: &Event) {
@@ -4837,13 +4912,23 @@ fn search_filters(
     input: SearchFilterInput,
     store: Option<&Store>,
 ) -> Result<ctx_history_search::SearchFilters> {
-    let exclude_provider_session = if input.include_current_session || input.session.is_some() {
+    let session = input
+        .session
+        .as_deref()
+        .map(|value| {
+            let store = store.ok_or_else(|| {
+                anyhow!("session id prefix resolution requires an open ctx store")
+            })?;
+            resolve_session_id(store, value)
+        })
+        .transpose()?;
+    let exclude_provider_session = if input.include_current_session || session.is_some() {
         None
     } else {
         current_codex_provider_session_filter(store)
     };
     Ok(ctx_history_search::SearchFilters {
-        session: input.session,
+        session,
         provider: input.provider.map(ProviderArg::capture_provider),
         repo: input.workspace,
         since: input.since.as_deref().map(parse_since_filter).transpose()?,

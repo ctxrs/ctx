@@ -43,23 +43,29 @@ A result can include:
 - `suggested_next_commands`, copyable commands for `ctx show`, `ctx locate`,
   and scoped follow-up searches.
 
-Search result IDs are ctx-owned. Provider-owned IDs are exposed as metadata so
-humans can recognize the original provider session, but they are not positional
-lookup IDs. Provider-owned lookup must be explicit, for example
-`--provider codex --provider-session <provider-session-id>` on commands that
-support it.
+Search result IDs are ctx-owned. Commands accept full ctx IDs or unambiguous
+ctx ID prefixes of at least eight hex characters. Provider-owned IDs are
+exposed as metadata so humans can recognize the original provider session, but
+they are not positional lookup IDs. Provider-owned lookup must be explicit, for
+example `--provider codex --provider-session <provider-session-id>` on commands
+that support it.
 
 ## Filters
 
 Search filters narrow both human output and JSON:
 
 - `--provider codex|pi|claude|opencode|antigravity|gemini|cursor|copilot-cli|factory-ai-droid`;
-- `--workspace <name-or-path>`;
+- `--workspace <name-or-path>`, substring match over stored workspace, cwd,
+  source path, or repository-name text;
 - `--since <rfc3339-or-days>d`;
-- `--event-type <event-type>`;
-- `--file <path>`;
-- `--session <ctx-session-id>`;
-- `--term <query-or-keyword>`, repeatable broadening terms merged with the main query;
+- `--event-type <event-type>`, one of `message`, `tool_call`, `tool_output`,
+  `command_started`, `command_output`, `command_finished`, `file_touched`,
+  `vcs_change`, `artifact`, `summary`, or `notice`;
+- `--file <path>`, indexed touched-file path metadata, not the current
+  filesystem;
+- `--session <ctx-session-id-or-prefix>`;
+- `--term <query-or-keyword>`, repeatable broadening terms merged with OR-style
+  semantics, not required terms;
 - `--events`;
 - `--include-subagents`;
 - `--limit <n>`;

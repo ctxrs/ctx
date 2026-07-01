@@ -91,8 +91,9 @@ ctx show session <ctx-session-id>
 
 Use `ctx_event_id` with `ctx show event` when you need a hit plus surrounding
 events. Use `ctx_session_id` with `ctx show session` when you need the
-transcript. Search also accepts filters such as `--provider`, `--workspace`,
-`--since`, `--event-type`, `--file`, `--include-subagents`,
+transcript. Commands accept full ctx IDs or unambiguous ID prefixes of at least
+eight hex characters. Search also accepts filters such as `--provider`,
+`--workspace`, `--since`, `--event-type`, `--file`, `--include-subagents`,
 `--include-current-session`, `--term`, `--limit`, and
 `--refresh auto|off|strict`.
 `--limit` is capped at `200`.
