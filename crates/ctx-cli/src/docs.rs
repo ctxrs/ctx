@@ -116,6 +116,15 @@ const TOPICS: &[DocTopic] = &[
         body: include_str!("../../../docs/cli-reference.md"),
     },
     DocTopic {
+        id: "rust-sdk",
+        title: "Rust SDK",
+        audience: "developer",
+        summary: "Use ctx from Rust in process without spawning the CLI.",
+        tags: &["rust", "sdk", "integration"],
+        source_path: "docs/rust-sdk.md",
+        body: include_str!("../../../docs/rust-sdk.md"),
+    },
+    DocTopic {
         id: "search",
         title: "Search",
         audience: "agent",

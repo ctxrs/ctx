@@ -117,3 +117,4 @@ ctx keeps retrieval tied to sessions and events, so another agent can inspect th
 | [How it works](https://ctx.rs/concepts/how-it-works) | Understand discovery, import, SQLite storage, search refresh, and cited retrieval. |
 | [Supported agents](https://ctx.rs/concepts/supported-agents) | See which agent histories ctx can discover, import, and search today. |
 | [CLI reference](https://ctx.rs/reference/cli) | Review setup, status, sources, import, show, locate, search, MCP, and doctor. |
+| [Rust SDK](docs/rust-sdk.md) | Use ctx from Rust in process without spawning the CLI. |

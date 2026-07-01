@@ -356,6 +356,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ctx-sdk"
+version = "0.11.0"
+dependencies = [
+ "chrono",
+ "ctx-history-capture",
+ "ctx-history-core",
+ "ctx-history-search",
+ "ctx-history-store",
+ "rusqlite",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "difflib"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

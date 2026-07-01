@@ -1,0 +1,24 @@
+[package]
+name = "ctx-sdk"
+version = "0.11.0"
+description = "In-process Rust SDK for ctx local agent history"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+chrono.workspace = true
+ctx-history-capture = { path = "../ctx-history-capture" }
+ctx-history-core = { path = "../ctx-history-core" }
+ctx-history-search = { path = "../ctx-history-search" }
+ctx-history-store = { path = "../ctx-history-store" }
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+rusqlite.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
