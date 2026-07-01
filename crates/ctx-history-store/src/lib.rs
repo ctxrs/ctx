@@ -1502,19 +1502,19 @@ impl Store {
                     WHEN catalog_sessions.file_size_bytes = excluded.file_size_bytes
                      AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
                     THEN catalog_sessions.indexed_at_ms
-                    ELSE catalog_sessions.indexed_at_ms
+                    ELSE NULL
                 END,
                 indexed_file_size_bytes = CASE
                     WHEN catalog_sessions.file_size_bytes = excluded.file_size_bytes
                      AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
                     THEN catalog_sessions.indexed_file_size_bytes
-                    ELSE catalog_sessions.indexed_file_size_bytes
+                    ELSE NULL
                 END,
                 indexed_file_modified_at_ms = CASE
                     WHEN catalog_sessions.file_size_bytes = excluded.file_size_bytes
                      AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
                     THEN catalog_sessions.indexed_file_modified_at_ms
-                    ELSE catalog_sessions.indexed_file_modified_at_ms
+                    ELSE NULL
                 END,
                 indexed_status = CASE
                     WHEN catalog_sessions.file_size_bytes = excluded.file_size_bytes
@@ -1532,7 +1532,7 @@ impl Store {
                     WHEN catalog_sessions.file_size_bytes = excluded.file_size_bytes
                      AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
                     THEN catalog_sessions.indexed_event_count
-                    ELSE catalog_sessions.indexed_event_count
+                    ELSE NULL
                 END,
                 metadata_json = excluded.metadata_json
             WHERE catalog_sessions.provider IS NOT excluded.provider
@@ -7469,9 +7469,9 @@ mod catalog_tests {
             )
             .unwrap();
         assert_eq!(status, CatalogIndexedStatus::Pending.as_str());
-        assert_eq!(indexed_size, Some(42));
-        assert_eq!(indexed_mtime, Some(cataloged_at_ms));
-        assert_eq!(indexed_event_count, Some(3));
+        assert_eq!(indexed_size, None);
+        assert_eq!(indexed_mtime, None);
+        assert_eq!(indexed_event_count, None);
     }
 
     #[test]
