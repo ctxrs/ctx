@@ -1508,11 +1508,56 @@ fn upgrade_verifies_signed_metadata_and_fails_closed() {
         stderr.contains("download release metadata signature"),
         "{stderr}"
     );
+
+    let default_signature_path = tempdir();
+    let release = fake_release(&default_signature_path, "9.9.9");
+    let check = json_output(
+        ctx(&default_signature_path)
+            .args(["upgrade", "check", "--json"])
+            .env("CTX_UPGRADE_TARGET", &release.target)
+            .env("CTX_RELEASE_METADATA_URL", file_url(&release.metadata))
+            .env(
+                "CTX_RELEASE_METADATA_PUBLIC_KEY_PEM",
+                TEST_RELEASE_PUBLIC_KEY_PEM,
+            ),
+    );
+    assert_eq!(check["status"], "available");
 }
 
 #[cfg(unix)]
 #[test]
 fn upgrade_rejects_unsafe_metadata_and_bad_artifacts() {
+    let duplicate_key = tempdir();
+    let release = fake_release(&duplicate_key, "9.9.9");
+    rewrite_fake_release_metadata(&release, |metadata| {
+        format!("{metadata}CTX_RELEASE_VERSION=8.8.8\n")
+    });
+    let stderr = failure_stderr(fake_release_env(
+        ctx(&duplicate_key).args(["upgrade", "check"]),
+        &release,
+    ));
+    assert!(
+        stderr.contains("metadata contains duplicate key CTX_RELEASE_VERSION"),
+        "{stderr}"
+    );
+
+    let malformed_bool = tempdir();
+    let release = fake_release(&malformed_bool, "9.9.9");
+    rewrite_fake_release_metadata(&release, |metadata| {
+        metadata.replace(
+            "CTX_RELEASE_SELF_UPGRADE_ALLOWED=true\n",
+            "CTX_RELEASE_SELF_UPGRADE_ALLOWED=definitely\n",
+        )
+    });
+    let stderr = failure_stderr(fake_release_env(
+        ctx(&malformed_bool).args(["upgrade", "check"]),
+        &release,
+    ));
+    assert!(
+        stderr.contains("metadata CTX_RELEASE_SELF_UPGRADE_ALLOWED must be a boolean"),
+        "{stderr}"
+    );
+
     let missing_policy = tempdir();
     let release = fake_release(&missing_policy, "9.9.9");
     rewrite_fake_release_metadata(&release, |metadata| {

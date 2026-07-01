@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     env, fs,
     io::Write,
     path::{Path, PathBuf},
@@ -567,7 +568,8 @@ fn parse_release_metadata(
     expected_channel: &str,
 ) -> Result<ReleaseMetadata> {
     let text = std::str::from_utf8(bytes).context("release metadata is not UTF-8")?;
-    let value = |key: &str| metadata_value(text, key);
+    let metadata = parse_metadata_map(text)?;
+    let value = |key: &str| metadata_value(&metadata, key);
     let schema = value("CTX_RELEASE_SCHEMA_VERSION")
         .ok_or_else(|| anyhow!("metadata missing CTX_RELEASE_SCHEMA_VERSION"))?;
     if schema != "1" {
@@ -596,27 +598,45 @@ fn parse_release_metadata(
         sha256,
         source_commit: value("CTX_RELEASE_SOURCE_COMMIT"),
         published_at: value("CTX_RELEASE_PUBLISHED_AT"),
-        self_upgrade_allowed: metadata_bool(text, "CTX_RELEASE_SELF_UPGRADE_ALLOWED", false),
-        auto_upgrade_allowed: metadata_bool(text, "CTX_RELEASE_AUTO_UPGRADE_ALLOWED", false),
+        self_upgrade_allowed: metadata_bool(&metadata, "CTX_RELEASE_SELF_UPGRADE_ALLOWED", false)?,
+        auto_upgrade_allowed: metadata_bool(&metadata, "CTX_RELEASE_AUTO_UPGRADE_ALLOWED", false)?,
         store_schema_version: value("CTX_RELEASE_STORE_SCHEMA_VERSION"),
     })
 }
 
-fn metadata_value(text: &str, key: &str) -> Option<String> {
-    text.lines().find_map(|line| {
+fn parse_metadata_map(text: &str) -> Result<BTreeMap<String, String>> {
+    let mut metadata = BTreeMap::new();
+    for line in text.lines() {
         let line = line.trim();
         if line.starts_with('#') || line.is_empty() {
-            return None;
+            continue;
         }
-        let (candidate, value) = line.split_once('=')?;
-        (candidate == key).then(|| value.trim_end_matches('\r').to_owned())
-    })
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if metadata
+            .insert(key.to_owned(), value.trim_end_matches('\r').to_owned())
+            .is_some()
+        {
+            return Err(anyhow!("metadata contains duplicate key {key}"));
+        }
+    }
+    Ok(metadata)
 }
 
-fn metadata_bool(text: &str, key: &str, default: bool) -> bool {
-    metadata_value(text, key).map_or(default, |value| {
-        matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes")
-    })
+fn metadata_value(metadata: &BTreeMap<String, String>, key: &str) -> Option<String> {
+    metadata.get(key).cloned()
+}
+
+fn metadata_bool(metadata: &BTreeMap<String, String>, key: &str, default: bool) -> Result<bool> {
+    let Some(value) = metadata_value(metadata, key) else {
+        return Ok(default);
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" => Ok(true),
+        "0" | "false" | "no" => Ok(false),
+        _ => Err(anyhow!("metadata {key} must be a boolean")),
+    }
 }
 
 fn verify_metadata_signature(metadata: &[u8], signature: &[u8]) -> Result<()> {
