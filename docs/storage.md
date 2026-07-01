@@ -77,7 +77,7 @@ analytics marker described under network behavior.
 | `ctx setup` | provider transcript files and home path metadata for source discovery | data root, `work.sqlite`, `config.toml`, and SQLite index |
 | `ctx status` | data root metadata and existing SQLite store | none |
 | `ctx sources` | known provider paths under the user's home | none |
-| `ctx import` | provider transcript files and path metadata | data root, `config.toml` if missing, and SQLite index |
+| `ctx import` | provider transcript files and path metadata, or the explicit custom history JSONL file passed with `--format ctx-history-jsonl-v1 --path` | data root, `config.toml` if missing, and SQLite index |
 | `ctx show` | SQLite index | selected `--out` path for `show session` when provided |
 | `ctx locate` | SQLite index and raw source path metadata | none |
 | `ctx search` | native provider transcript files, path metadata, and SQLite index | SQLite index for newly discovered native provider history |
@@ -126,10 +126,16 @@ Re-import or update the index:
 ctx import --all
 ctx import --resume
 ctx import --path ~/.codex/sessions
+ctx import --format ctx-history-jsonl-v1 --path ./history.jsonl
 ```
 
 Current adapters are safe to re-run. They rescan sources idempotently and keep
 source paths or cursors when available.
+Custom history JSONL imports follow the same v1 lifecycle: ctx rescans the
+explicit file, upserts already-imported records, stores supplied source cursor
+metadata under ctx-owned custom cursor streams, and preserves event native
+cursors. The path is not added to `config.toml` or treated as a fixed provider
+location.
 
 ## Upgrade Reindexing
 
@@ -153,8 +159,9 @@ $EDITOR ~/.ctx/config.toml
 
 The current CLI does not add provider source entries to `config.toml`; default
 provider locations are discovered each time and explicit `--path` imports are
-not remembered as future defaults. To remove already indexed data, rebuild the
-index and import only the sources you still want.
+not remembered as future defaults. Custom history JSONL paths are also
+one-shot explicit imports. To remove already indexed data, rebuild the index and
+import only the sources you still want.
 
 ## SQL Inspection
 

@@ -81,6 +81,7 @@ ctx import --provider copilot-cli
 ctx import --provider factory-ai-droid
 ctx import --path ~/.codex/sessions
 ctx import --provider pi --path ~/.pi/sessions.jsonl
+ctx import --format ctx-history-jsonl-v1 --path ./history.jsonl
 ctx import --resume
 ctx import --json
 ctx import --progress json --json
@@ -93,10 +94,17 @@ creates the data root and default config if needed, reads provider transcript
 files, and writes indexed source metadata, sessions, events, searchable text,
 citations, and import totals to SQLite.
 
+Custom history can be imported from an explicit JSONL file with
+`--format ctx-history-jsonl-v1 --path <file>`. This path is not discovered or
+remembered as a provider home; see `docs/custom-history-import-format.md` for
+the schema and incremental semantics.
+
 Import selection rules:
 
 - with no arguments or with `--all`, import all discovered sources that exist;
 - with `--provider`, import discovered sources for that provider;
+- with `--format ctx-history-jsonl-v1 --path <file>`, import that custom
+  history JSONL file;
 - with `--path`, import exactly that path;
 - with `--path` and no provider, parse the path as Codex format.
 
@@ -201,7 +209,7 @@ optimized for agent reading; use `--verbose` for expanded text diagnostics.
 
 Filters:
 
-- `--provider codex|pi|claude|opencode|antigravity|gemini|cursor|copilot-cli|factory-ai-droid`;
+- `--provider codex|pi|claude|opencode|antigravity|gemini|cursor|copilot-cli|factory-ai-droid|custom`;
 - `--workspace <name-or-path>`, substring match over stored workspace, cwd,
   source path, or repository-name text;
 - `--since <rfc3339-or-days>d`, for example `2026-06-01T00:00:00Z` or `30d`;

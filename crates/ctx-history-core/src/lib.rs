@@ -93,8 +93,10 @@ macro_rules! text_enum {
     };
 }
 
+mod history_jsonl;
 mod provider;
 
+pub use history_jsonl::*;
 pub use provider::*;
 
 text_enum! {
@@ -176,6 +178,7 @@ text_enum! {
         Git => "git",
         Jj => "jj",
         Gh => "gh",
+        Custom => "custom",
         Unknown => "unknown",
     }
     default Unknown

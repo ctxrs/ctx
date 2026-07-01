@@ -206,6 +206,15 @@ const TOPICS: &[DocTopic] = &[
         body: include_str!("../../../docs/providers.md"),
     },
     DocTopic {
+        id: "custom-history-import-format",
+        title: "Custom History Import Format",
+        audience: "integrator-agent",
+        summary: "ctx-history-jsonl-v1 records, transport, identity, cursors, and import rules.",
+        tags: &["providers", "imports", "jsonl", "custom"],
+        source_path: "docs/custom-history-import-format.md",
+        body: include_str!("../../../docs/custom-history-import-format.md"),
+    },
+    DocTopic {
         id: "provider-support",
         title: "Provider Support",
         audience: "human-agent",
