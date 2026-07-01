@@ -6,7 +6,7 @@ use std::{
 
 use chrono::Utc;
 use ctx_history_core::{
-    Artifact, ContextCitation, ContextCitationType, ContextLinks, ContextPagination,
+    utc_now, Artifact, ContextCitation, ContextCitationType, ContextLinks, ContextPagination,
     ContextTruncation, Event, EventType, FileTouched, HistoryRecord, RedactionState, Run, Session,
     Summary, VcsChange, Visibility,
 };
@@ -250,7 +250,7 @@ pub fn search_packet(store: &Store, query: &str, options: &PacketOptions) -> Res
         schema_version: SEARCH_PACKET_SCHEMA_VERSION,
         query: query.to_owned(),
         filters: options.filters,
-        generated_at: Utc::now(),
+        generated_at: utc_now(),
         results,
         pagination: pagination(Some(cursor_offset), has_more),
         truncation,
@@ -324,7 +324,7 @@ pub fn search_packet_terms(
         schema_version: SEARCH_PACKET_SCHEMA_VERSION,
         query: search_terms.join(" OR "),
         filters: options.filters,
-        generated_at: Utc::now(),
+        generated_at: utc_now(),
         results: merged_results,
         pagination: pagination(Some(cursor_offset), has_more),
         truncation,
@@ -640,7 +640,7 @@ fn fast_event_search_packet(
         schema_version: SEARCH_PACKET_SCHEMA_VERSION,
         query: query.to_owned(),
         filters: options.filters.clone(),
-        generated_at: Utc::now(),
+        generated_at: utc_now(),
         results,
         pagination: pagination(Some(cursor_offset), has_more),
         truncation,
@@ -652,7 +652,7 @@ fn empty_search_packet(query: &str, options: &PacketOptions) -> SearchPacket {
         schema_version: SEARCH_PACKET_SCHEMA_VERSION,
         query: query.to_owned(),
         filters: options.filters.clone(),
-        generated_at: Utc::now(),
+        generated_at: utc_now(),
         results: Vec::new(),
         pagination: pagination(Some(0), false),
         truncation: ContextTruncation::default(),

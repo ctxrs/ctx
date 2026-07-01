@@ -14,7 +14,7 @@ use std::os::unix::fs::PermissionsExt;
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    new_id, AgentType, Artifact, ArtifactKind, CaptureProvider, CaptureSource,
+    new_id, utc_now, AgentType, Artifact, ArtifactKind, CaptureProvider, CaptureSource,
     CaptureSourceDescriptor, EntityTimestamps, Event, EventRole, EventType, Fidelity, FileTouched,
     HistoryRecord, HistoryRecordLink, RedactionState, Run, RunStatus, RunType, Session,
     SessionEdge, SessionHistoryArchive, SessionStatus, Summary, SyncCursor, SyncMetadata,
@@ -2789,7 +2789,7 @@ impl Store {
         if let Some(device) = self.local_device()? {
             return Ok(device);
         }
-        let now = Utc::now();
+        let now = utc_now();
         let device = LocalDeviceIdentity {
             id: new_id(),
             stable_device_id: format!("ctx-device-{}", new_id().simple()),
@@ -2821,7 +2821,7 @@ impl Store {
         let root = root_path.as_ref();
         let root_path_hash = sha256_hex(root.display().to_string().as_bytes());
         let display_root = root.display().to_string();
-        let now = Utc::now();
+        let now = utc_now();
         let id = new_id();
         self.conn.execute(
             r#"

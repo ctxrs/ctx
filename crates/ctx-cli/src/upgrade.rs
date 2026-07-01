@@ -8,8 +8,8 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use chrono::Utc;
 use clap::{Args, Subcommand};
+use ctx_history_core::utc_now;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -949,7 +949,7 @@ fn write_install_marker_to(marker_path: &Path, plan: &UpgradePlan) -> Result<()>
         "source_commit": plan.metadata.source_commit,
         "published_at": plan.metadata.published_at,
         "store_schema_version": plan.metadata.store_schema_version,
-        "installed_at": Utc::now(),
+        "installed_at": utc_now(),
     });
     atomic_write_json(marker_path, &body)
 }
@@ -988,7 +988,7 @@ fn write_state_checked(data_root: &Path, plan: &UpgradePlan, status: &str) -> Re
     let body = json!({
         "schema_version": 1,
         "status": status,
-        "checked_at": Utc::now(),
+        "checked_at": utc_now(),
         "last_checked_unix_s": now_unix_s(),
         "current_version": plan.current_version,
         "latest_version": plan.latest_version,
@@ -1007,7 +1007,7 @@ fn write_state_error(data_root: &Path, error: &str) -> Result<()> {
     let body = json!({
         "schema_version": 1,
         "status": "error",
-        "checked_at": Utc::now(),
+        "checked_at": utc_now(),
         "last_checked_unix_s": now_unix_s(),
         "error": error,
     });
@@ -1081,7 +1081,7 @@ fn append_upgrade_log(data_root: &Path, message: &str) {
         let _ = fs::create_dir_all(parent);
     }
     if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&path) {
-        let _ = writeln!(file, "{} {}", Utc::now().to_rfc3339(), message);
+        let _ = writeln!(file, "{} {}", utc_now().to_rfc3339(), message);
     }
 }
 

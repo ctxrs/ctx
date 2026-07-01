@@ -40,8 +40,9 @@ use ctx_history_capture::{
     ProviderImportSummary, ProviderImportSupport, ProviderSource, ProviderSourceStatus,
 };
 use ctx_history_core::{
-    database_path, default_data_root, CaptureProvider, ContextCitation, ContextCitationType, Event,
-    EventRole, EventType, HistoryRecord, ProviderRawRetention, RedactionState, Session,
+    database_path, default_data_root, utc_now, CaptureProvider, ContextCitation,
+    ContextCitationType, Event, EventRole, EventType, HistoryRecord, ProviderRawRetention,
+    RedactionState, Session,
 };
 use ctx_history_store::{
     CatalogSession, CatalogSourceIndexUpdate, RawSqlOptions, RawSqlResult, RawSqlValue,
@@ -4365,7 +4366,7 @@ fn import_manifested_source(
         .iter()
         .map(|file| file.source_path.clone())
         .collect::<Vec<_>>();
-    let observed_at_ms = Utc::now().timestamp_millis();
+    let observed_at_ms = utc_now().timestamp_millis();
     store.begin_immediate_batch()?;
     let persist = (|| -> Result<()> {
         store.upsert_source_import_files(&files)?;
@@ -4406,7 +4407,7 @@ fn import_manifested_source(
                         source_path: &pending_file.source_path,
                         file_size_bytes: pending_file.file_size_bytes,
                         file_modified_at_ms: pending_file.file_modified_at_ms,
-                        indexed_at_ms: Utc::now().timestamp_millis(),
+                        indexed_at_ms: utc_now().timestamp_millis(),
                     },
                 )?;
                 merge_provider_import_summary(&mut summary, file_summary);
@@ -4417,7 +4418,7 @@ fn import_manifested_source(
                     &source_root,
                     &pending_file.source_path,
                     &err.to_string(),
-                    Utc::now().timestamp_millis(),
+                    utc_now().timestamp_millis(),
                 )?;
                 return Err(err);
             }
@@ -4455,7 +4456,7 @@ fn merge_provider_import_summary(
 fn collect_source_import_files(source: &SourceInfo) -> Result<Vec<SourceImportFile>> {
     let paths = collect_source_import_paths(source)?;
     let source_root = source.path.display().to_string();
-    let observed_at_ms = Utc::now().timestamp_millis();
+    let observed_at_ms = utc_now().timestamp_millis();
     let mut files = Vec::with_capacity(paths.len());
     for path in paths {
         let metadata = fs::metadata(&path)
@@ -4640,7 +4641,7 @@ fn import_incremental_codex_session_tree(
                 store,
                 session,
                 event_count,
-                Utc::now().timestamp_millis(),
+                utc_now().timestamp_millis(),
             )?;
             merge_provider_import_summary(&mut summary, tail_summary);
         } else {
@@ -4686,7 +4687,7 @@ fn mark_catalog_sessions_indexed(
     sessions: &[CatalogSession],
     summary: &ProviderImportSummary,
 ) -> Result<()> {
-    let indexed_at_ms = Utc::now().timestamp_millis();
+    let indexed_at_ms = utc_now().timestamp_millis();
     let event_count = if sessions.len() == 1 {
         Some(
             summary
@@ -4763,7 +4764,7 @@ fn mark_catalog_sessions_failed(
     sessions: &[CatalogSession],
     error: &str,
 ) -> Result<()> {
-    let indexed_at_ms = Utc::now().timestamp_millis();
+    let indexed_at_ms = utc_now().timestamp_millis();
     for session in sessions {
         store.mark_catalog_source_failed(
             session.provider,
@@ -4998,7 +4999,7 @@ fn parse_since_filter(value: &str) -> Result<chrono::DateTime<Utc>> {
         let days: i64 = days
             .parse()
             .with_context(|| format!("invalid --since day window: {value}"))?;
-        return Ok(Utc::now() - Duration::days(days));
+        return Ok(utc_now() - Duration::days(days));
     }
     Ok(chrono::DateTime::parse_from_rfc3339(trimmed)
         .with_context(|| format!("invalid --since value: {value}"))?

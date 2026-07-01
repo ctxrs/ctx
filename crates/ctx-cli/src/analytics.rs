@@ -1,7 +1,7 @@
 use std::{env, path::Path, time::Duration};
 
 use anyhow::Result;
-use chrono::Utc;
+use ctx_history_core::utc_now;
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
@@ -60,7 +60,7 @@ fn send_cli_event_inner(
             "event_id": Uuid::now_v7().to_string(),
             "event_name": "cli_invocation",
             "event_version": 1,
-            "occurred_at": Utc::now(),
+            "occurred_at": utc_now(),
             "plane": "product",
             "delivery": "remote",
             "origin_runtime": "cli",

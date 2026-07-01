@@ -12,7 +12,7 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    inbox_dir as core_inbox_dir, new_id, AgentType, CaptureEnvelope, CaptureProvider,
+    inbox_dir as core_inbox_dir, new_id, utc_now, AgentType, CaptureEnvelope, CaptureProvider,
     CaptureSource, CaptureSourceDescriptor, CaptureSourceKind, Confidence, EntityTimestamps, Event,
     EventRole, EventType, Fidelity, FileChangeKind, FileTouched, HistoryRecord,
     ProviderCaptureEnvelope, ProviderCursorCheckpoint, ProviderCursorRange, ProviderEventEnvelope,
@@ -86,7 +86,7 @@ impl SpoolWriter {
 
         let machine_id = sanitize_filename_component(machine_id);
         let pid = std::process::id();
-        let unix_ms = Utc::now().timestamp_millis();
+        let unix_ms = utc_now().timestamp_millis();
         let random = new_id().simple().to_string();
         let name = format!("capture-{machine_id}-{pid}-{unix_ms}-{random}.jsonl");
         let final_path = inbox.join(name);
@@ -148,7 +148,7 @@ impl Default for FixtureOptions {
             dedupe_key: None,
             machine_id: None,
             cwd: None,
-            occurred_at: Utc::now(),
+            occurred_at: utc_now(),
         }
     }
 }
@@ -194,7 +194,7 @@ impl Default for ProviderFixtureImportOptions {
         Self {
             machine_id: default_machine_id(),
             source_path: None,
-            imported_at: Utc::now(),
+            imported_at: utc_now(),
             history_record_id: None,
             expected_provider: None,
             allow_partial_failures: false,
@@ -239,7 +239,7 @@ impl Default for CodexHistoryImportOptions {
         Self {
             machine_id: default_machine_id(),
             source_path: None,
-            imported_at: Utc::now(),
+            imported_at: utc_now(),
             history_record_id: None,
             allow_partial_failures: false,
         }
@@ -273,7 +273,7 @@ impl Default for CodexSessionImportOptions {
         Self {
             machine_id: default_machine_id(),
             source_path: None,
-            imported_at: Utc::now(),
+            imported_at: utc_now(),
             history_record_id: None,
             allow_partial_failures: false,
             max_session_files: None,
@@ -346,7 +346,7 @@ impl Default for CodexSessionCatalogOptions {
     fn default() -> Self {
         Self {
             source_root: None,
-            cataloged_at: Utc::now(),
+            cataloged_at: utc_now(),
             allow_partial_failures: true,
             max_session_files: None,
             max_total_bytes: None,
@@ -380,7 +380,7 @@ impl Default for PiSessionImportOptions {
         Self {
             machine_id: default_machine_id(),
             source_path: None,
-            imported_at: Utc::now(),
+            imported_at: utc_now(),
             history_record_id: None,
             allow_partial_failures: false,
         }
@@ -401,7 +401,7 @@ impl Default for ClaudeProjectsImportOptions {
         Self {
             machine_id: default_machine_id(),
             source_path: None,
-            imported_at: Utc::now(),
+            imported_at: utc_now(),
             history_record_id: None,
             allow_partial_failures: false,
         }
@@ -422,7 +422,7 @@ impl Default for OpenCodeSqliteImportOptions {
         Self {
             machine_id: default_machine_id(),
             source_path: None,
-            imported_at: Utc::now(),
+            imported_at: utc_now(),
             history_record_id: None,
             allow_partial_failures: false,
         }
@@ -443,7 +443,7 @@ impl Default for AntigravityCliImportOptions {
         Self {
             machine_id: default_machine_id(),
             source_path: None,
-            imported_at: Utc::now(),
+            imported_at: utc_now(),
             history_record_id: None,
             allow_partial_failures: false,
         }
@@ -464,7 +464,7 @@ impl Default for GeminiCliImportOptions {
         Self {
             machine_id: default_machine_id(),
             source_path: None,
-            imported_at: Utc::now(),
+            imported_at: utc_now(),
             history_record_id: None,
             allow_partial_failures: false,
         }
@@ -485,7 +485,7 @@ impl Default for FactoryAiDroidImportOptions {
         Self {
             machine_id: default_machine_id(),
             source_path: None,
-            imported_at: Utc::now(),
+            imported_at: utc_now(),
             history_record_id: None,
             allow_partial_failures: false,
         }
@@ -506,7 +506,7 @@ impl Default for CopilotCliImportOptions {
         Self {
             machine_id: default_machine_id(),
             source_path: None,
-            imported_at: Utc::now(),
+            imported_at: utc_now(),
             history_record_id: None,
             allow_partial_failures: false,
         }
@@ -527,7 +527,7 @@ impl Default for CursorNativeImportOptions {
         Self {
             machine_id: default_machine_id(),
             source_path: None,
-            imported_at: Utc::now(),
+            imported_at: utc_now(),
             history_record_id: None,
             allow_partial_failures: false,
         }
@@ -646,7 +646,7 @@ impl Default for ProviderAdapterContext {
         Self {
             machine_id: default_machine_id(),
             source_path: None,
-            imported_at: Utc::now(),
+            imported_at: utc_now(),
             tool_output_mode: CodexToolOutputMode::Full,
             event_mode: CodexEventImportMode::Rich,
             include_notices: true,
@@ -6419,7 +6419,7 @@ fn pi_session_event(entry: &Value, line_number: usize) -> ProviderEventEnvelope 
         .and_then(Value::as_str)
         .and_then(|timestamp| DateTime::parse_from_rfc3339(timestamp).ok())
         .map(|time| time.with_timezone(&Utc))
-        .unwrap_or_else(Utc::now);
+        .unwrap_or_else(utc_now);
     let event_type = pi_event_type(entry_type, message);
     let role = message_role.map(pi_event_role);
     let text = message.and_then(pi_message_text);
@@ -7454,7 +7454,7 @@ fn ensure_regular_spool_file(path: &Path) -> Result<()> {
 fn write_failure_metadata(failed_path: &Path, err: &CaptureError) -> Result<()> {
     let sidecar = append_suffix(failed_path, ".error.json")?;
     let metadata = json!({
-        "failed_at": Utc::now(),
+        "failed_at": utc_now(),
         "spool_file": failed_path,
         "error": err.to_string(),
     });

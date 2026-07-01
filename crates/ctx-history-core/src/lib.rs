@@ -1,4 +1,4 @@
-use std::{env, fmt, path::PathBuf, str::FromStr, sync::OnceLock};
+use std::{env, fmt, path::PathBuf, str::FromStr, sync::OnceLock, time::SystemTime};
 
 use chrono::{DateTime, Utc};
 use directories::BaseDirs;
@@ -19,6 +19,10 @@ pub enum CoreError {
 }
 
 pub type Result<T> = std::result::Result<T, CoreError>;
+
+pub fn utc_now() -> DateTime<Utc> {
+    DateTime::<Utc>::from(SystemTime::now())
+}
 
 macro_rules! text_enum {
     (
@@ -588,7 +592,7 @@ impl HistoryRecord {
         kind: impl Into<String>,
         workspace: Option<String>,
     ) -> Self {
-        let now = Utc::now();
+        let now = utc_now();
         Self {
             id: new_id(),
             title: title.into(),

@@ -56,7 +56,16 @@ rustup target add "${target}" >/dev/null
 out_dir="${CTX_PUBLIC_CLI_ARTIFACT_DIR:-target/public-cli-artifacts}"
 mkdir -p "${out_dir}"
 
-if [[ "${platform}" == "freebsd-x64" ]]; then
+if [[ "${platform}" == macos-* && "$(uname -s)" != "Darwin" ]]; then
+  if ! command -v cargo-zigbuild >/dev/null 2>&1; then
+    cargo install cargo-zigbuild --locked
+  fi
+  if ! command -v zig >/dev/null 2>&1; then
+    echo "error: zig is required to cross-build ${platform} from $(uname -s)" >&2
+    exit 127
+  fi
+  cargo zigbuild -p ctx --release --target "${target}" --locked
+elif [[ "${platform}" == "freebsd-x64" ]]; then
   if ! command -v cross >/dev/null 2>&1; then
     cargo install cross --locked
   fi

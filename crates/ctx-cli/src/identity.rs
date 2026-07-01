@@ -4,7 +4,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use chrono::Utc;
+use ctx_history_core::utc_now;
 use serde_json::json;
 use uuid::Uuid;
 
@@ -29,7 +29,7 @@ pub fn install_id(data_root: &Path) -> Result<String> {
     let body = serde_json::to_vec_pretty(&json!({
         "schema_version": 1,
         "install_id": id,
-        "created_at": Utc::now(),
+        "created_at": utc_now(),
     }))?;
     fs::write(&path, body).with_context(|| format!("write {}", path.display()))?;
     Ok(id)
