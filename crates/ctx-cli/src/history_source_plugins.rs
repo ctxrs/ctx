@@ -2,15 +2,15 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env,
     fs::{self, OpenOptions},
-    io::{Read, Write},
+    io::{ErrorKind, Read, Write},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, ChildStderr, ChildStdout, Command, ExitStatus, Stdio},
     thread,
     time::{Duration, Instant},
 };
 
 #[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::{fs::OpenOptionsExt, io::AsRawFd};
 
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
@@ -19,6 +19,8 @@ use uuid::Uuid;
 const PLUGIN_MANIFEST_FILE: &str = "ctx-history-plugin.json";
 const LEGACY_PLUGIN_MANIFEST_FILE: &str = "plugin.json";
 const DEFAULT_PLUGIN_TIMEOUT_SECONDS: u64 = 300;
+const MAX_PLUGIN_STDOUT_BYTES: usize = 64 * 1024 * 1024;
+const MAX_PLUGIN_STDERR_BYTES: usize = 256 * 1024;
 const MAX_PLUGIN_STDERR_SNIPPET_BYTES: usize = 4096;
 const MAX_INLINE_CURSOR_ENV_BYTES: usize = 8192;
 const SAFE_PLUGIN_ENV: &[&str] = &[
@@ -231,48 +233,23 @@ pub fn run_history_source_plugin(
             });
         }
     };
-    let mut stdout = child
+    let stdout = child
         .stdout
         .take()
         .context("history source plugin stdout was not piped")?;
-    let mut stderr = child
+    let stderr = child
         .stderr
         .take()
         .context("history source plugin stderr was not piped")?;
-    let stdout_handle = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stdout.read_to_end(&mut bytes).map(|_| bytes)
-    });
-    let stderr_handle = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stderr.read_to_end(&mut bytes).map(|_| bytes)
-    });
-
-    let started = Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
-        }
-        if started.elapsed() >= source.timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            cleanup_cursor_file(cursor_file.as_ref());
-            return Err(anyhow!(
-                "history source plugin {} timed out after {}s",
-                source.label(),
-                source.timeout.as_secs()
-            ));
-        }
-        thread::sleep(Duration::from_millis(25));
-    };
-
-    let stdout = stdout_handle
-        .join()
-        .map_err(|_| anyhow!("history source plugin stdout reader panicked"))??;
-    let stderr = stderr_handle
-        .join()
-        .map_err(|_| anyhow!("history source plugin stderr reader panicked"))??;
+    let run_result = collect_child_output_with_timeout(
+        &mut child,
+        stdout,
+        stderr,
+        source.timeout,
+        &source.label(),
+    );
     cleanup_cursor_file(cursor_file.as_ref());
+    let (status, stdout, stderr) = run_result?;
     let stderr = String::from_utf8_lossy(&stderr).trim().to_owned();
     if !status.success() {
         let detail = if stderr.is_empty() {
@@ -286,6 +263,186 @@ pub fn run_history_source_plugin(
         ));
     }
     Ok(HistorySourcePluginRun { stdout, stderr })
+}
+
+#[cfg(unix)]
+fn collect_child_output_with_timeout(
+    child: &mut Child,
+    mut stdout: ChildStdout,
+    mut stderr: ChildStderr,
+    timeout: Duration,
+    source_label: &str,
+) -> Result<(ExitStatus, Vec<u8>, Vec<u8>)> {
+    set_nonblocking(stdout.as_raw_fd())?;
+    set_nonblocking(stderr.as_raw_fd())?;
+
+    let started = Instant::now();
+    let mut status = None;
+    let mut stdout_open = true;
+    let mut stderr_open = true;
+    let mut stdout_bytes = Vec::new();
+    let mut stderr_bytes = Vec::new();
+    loop {
+        if stdout_open {
+            read_available_with_limit(
+                &mut stdout,
+                &mut stdout_bytes,
+                &mut stdout_open,
+                MAX_PLUGIN_STDOUT_BYTES,
+                "stdout",
+                source_label,
+            )
+            .inspect_err(|_| {
+                let _ = child.kill();
+                let _ = child.wait();
+            })?;
+        }
+        if stderr_open {
+            read_available_with_limit(
+                &mut stderr,
+                &mut stderr_bytes,
+                &mut stderr_open,
+                MAX_PLUGIN_STDERR_BYTES,
+                "stderr",
+                source_label,
+            )
+            .inspect_err(|_| {
+                let _ = child.kill();
+                let _ = child.wait();
+            })?;
+        }
+        if status.is_none() {
+            status = child.try_wait()?;
+        }
+        if let Some(status) = status {
+            if !stdout_open && !stderr_open {
+                return Ok((status, stdout_bytes, stderr_bytes));
+            }
+        }
+        if started.elapsed() >= timeout {
+            if status.is_none() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            return Err(anyhow!(
+                "history source plugin {source_label} timed out after {}s",
+                timeout.as_secs()
+            ));
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[cfg(not(unix))]
+fn collect_child_output_with_timeout(
+    child: &mut Child,
+    stdout: ChildStdout,
+    stderr: ChildStderr,
+    timeout: Duration,
+    source_label: &str,
+) -> Result<(ExitStatus, Vec<u8>, Vec<u8>)> {
+    let stdout_source = source_label.to_owned();
+    let stdout_handle = thread::spawn(move || {
+        read_pipe_with_limit(stdout, MAX_PLUGIN_STDOUT_BYTES, "stdout", &stdout_source)
+    });
+    let stderr_source = source_label.to_owned();
+    let stderr_handle = thread::spawn(move || {
+        read_pipe_with_limit(stderr, MAX_PLUGIN_STDERR_BYTES, "stderr", &stderr_source)
+    });
+
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(anyhow!(
+                "history source plugin {source_label} timed out after {}s",
+                timeout.as_secs()
+            ));
+        }
+        thread::sleep(Duration::from_millis(25));
+    };
+
+    let stdout = stdout_handle
+        .join()
+        .map_err(|_| anyhow!("history source plugin stdout reader panicked"))??;
+    let stderr = stderr_handle
+        .join()
+        .map_err(|_| anyhow!("history source plugin stderr reader panicked"))??;
+    Ok((status, stdout, stderr))
+}
+
+#[cfg(unix)]
+fn set_nonblocking(fd: std::os::fd::RawFd) -> Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error()).context("read plugin pipe flags");
+    }
+    let result = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    if result < 0 {
+        return Err(std::io::Error::last_os_error()).context("set plugin pipe nonblocking");
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn read_available_with_limit<R: Read>(
+    reader: &mut R,
+    bytes: &mut Vec<u8>,
+    open: &mut bool,
+    max_bytes: usize,
+    name: &str,
+    source_label: &str,
+) -> Result<()> {
+    let mut buffer = [0u8; 8192];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => {
+                *open = false;
+                return Ok(());
+            }
+            Ok(count) => {
+                if bytes.len().saturating_add(count) > max_bytes {
+                    return Err(anyhow!(
+                        "history source plugin {source_label} {name} exceeded {max_bytes} byte limit"
+                    ));
+                }
+                bytes.extend_from_slice(&buffer[..count]);
+            }
+            Err(err) if err.kind() == ErrorKind::WouldBlock => return Ok(()),
+            Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("read history source plugin {source_label} {name}"))
+            }
+        }
+    }
+}
+
+#[cfg(any(test, not(unix)))]
+fn read_pipe_with_limit<R: Read>(
+    mut reader: R,
+    max_bytes: usize,
+    name: &str,
+    source_label: &str,
+) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            return Ok(bytes);
+        }
+        if bytes.len().saturating_add(count) > max_bytes {
+            return Err(anyhow!(
+                "history source plugin {source_label} {name} exceeded {max_bytes} byte limit"
+            ));
+        }
+        bytes.extend_from_slice(&buffer[..count]);
+    }
 }
 
 fn inherit_safe_plugin_env(command: &mut Command) {
@@ -503,4 +660,28 @@ fn stderr_snippet(value: &str) -> String {
         snippet.push_str("...");
     }
     snippet
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn read_pipe_with_limit_accepts_output_at_limit() {
+        let bytes = read_pipe_with_limit(Cursor::new(b"abcd"), 4, "stdout", "plugin/default")
+            .expect("output at limit should pass");
+        assert_eq!(bytes, b"abcd");
+    }
+
+    #[test]
+    fn read_pipe_with_limit_rejects_output_over_limit() {
+        let err = read_pipe_with_limit(Cursor::new(b"abcde"), 4, "stdout", "plugin/default")
+            .expect_err("output over limit should fail");
+        assert!(
+            err.to_string()
+                .contains("history source plugin plugin/default stdout exceeded 4 byte limit"),
+            "{err}"
+        );
+    }
 }

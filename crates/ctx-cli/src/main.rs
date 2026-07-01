@@ -312,7 +312,7 @@ struct SearchArgs {
         value_enum,
         default_value_t = RefreshArg::Auto,
         help = "Pre-search refresh behavior: auto, off, or strict",
-        long_help = "Pre-search refresh behavior. auto best-effort refreshes discovered native provider sources and serves the existing index if refresh fails; off searches the existing index only; strict fails if the refresh cannot run or import successfully."
+        long_help = "Pre-search refresh behavior. auto best-effort refreshes discovered native provider sources and enabled auto history-source plugins, then serves the existing index if refresh fails; off searches the existing index only; strict fails if the refresh cannot run or import successfully."
     )]
     refresh: RefreshArg,
     #[arg(
@@ -4296,16 +4296,27 @@ fn refresh_before_search(args: &SearchArgs, data_root: &Path) -> Result<SearchRe
         return Ok(SearchRefreshReport::skipped(RefreshArg::Off, "skipped"));
     }
     let sources = search_refresh_sources(args.provider);
-    if sources.is_empty() {
+    let plugin_sources = match search_refresh_plugin_sources(data_root, args.provider) {
+        Ok(sources) => sources,
+        Err(err) if args.refresh == RefreshArg::Auto => {
+            return Ok(SearchRefreshReport::failed(
+                RefreshArg::Auto,
+                sources.len(),
+                error_summary(&err),
+            ));
+        }
+        Err(err) => return Err(err.context("search refresh failed")),
+    };
+    if sources.is_empty() && plugin_sources.is_empty() {
         if args.refresh == RefreshArg::Strict {
             return Err(anyhow!(
-                "strict search refresh found no supported discovered native provider sources; use --refresh off to search the existing index"
+                "strict search refresh found no supported discovered native provider or enabled auto history-source plugin sources; use --refresh off to search the existing index"
             ));
         }
         return Ok(SearchRefreshReport::skipped(args.refresh, "no_sources"));
     }
-    let source_count = sources.len();
-    match refresh_sources_for_search(data_root, sources, args.refresh, args.json) {
+    let source_count = sources.len().saturating_add(plugin_sources.len());
+    match refresh_sources_for_search(data_root, sources, plugin_sources, args.refresh, args.json) {
         Ok(totals) => Ok(SearchRefreshReport::completed(
             args.refresh,
             source_count,
@@ -4340,9 +4351,23 @@ fn search_refresh_sources(provider: Option<ProviderArg>) -> Vec<SourceInfo> {
         .collect()
 }
 
+fn search_refresh_plugin_sources(
+    data_root: &Path,
+    provider: Option<ProviderArg>,
+) -> Result<Vec<HistorySourcePluginSource>> {
+    if !matches!(provider, None | Some(ProviderArg::Custom)) {
+        return Ok(Vec::new());
+    }
+    Ok(discover_history_source_plugins(data_root, &[])?
+        .into_iter()
+        .filter(|source| source.enabled && source.refresh == HistorySourcePluginRefresh::Auto)
+        .collect())
+}
+
 fn refresh_sources_for_search(
     data_root: &Path,
     sources: Vec<SourceInfo>,
+    plugin_sources: Vec<HistorySourcePluginSource>,
     refresh: RefreshArg,
     json_output: bool,
 ) -> Result<ImportTotals> {
@@ -4353,7 +4378,7 @@ fn refresh_sources_for_search(
         .into_iter()
         .map(|source| (source, SourceStats::default()))
         .collect::<Vec<_>>();
-    if planned_sources.is_empty() {
+    if planned_sources.is_empty() && plugin_sources.is_empty() {
         return Ok(ImportTotals::default());
     }
 
@@ -4434,6 +4459,27 @@ fn refresh_sources_for_search(
                 "refreshing",
                 format!("refreshed {}", source.provider.as_str()),
                 completed_source_bytes,
+            );
+        }
+    }
+
+    if !plugin_sources.is_empty() {
+        let mut store = Store::open(&db_path)?;
+        for plugin_source in plugin_sources {
+            progress.message(
+                "refreshing",
+                format!("running history source plugin {}", plugin_source.label()),
+            );
+            let (summary, stats) =
+                import_history_source_plugin(&mut store, &plugin_source, data_root, false)
+                    .with_context(|| {
+                        format!("refresh history source plugin {}", plugin_source.label())
+                    })?;
+            totals.add(&summary, &stats);
+            progress.done(
+                "refreshing",
+                format!("refreshed history source plugin {}", plugin_source.label()),
+                0,
             );
         }
     }

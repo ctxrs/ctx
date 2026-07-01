@@ -14,10 +14,11 @@ product boundary is retrieval, not interpretation.
   transcript formats.
 - `ctx sources` reports known local provider history paths, including whether a
   native source is currently importable.
-- `ctx import` indexes supported local transcript formats.
-- `ctx search` can refresh discovered native provider sources before returning
-  ranked local hits from the local index, with event IDs when a hit maps to an
-  indexed event.
+- `ctx import` indexes supported local transcript formats and selected local
+  history-source plugins.
+- `ctx search` can refresh discovered native provider sources and enabled auto
+  history-source plugins before returning ranked local hits from the local
+  index, with event IDs when a hit maps to an indexed event.
 - `ctx show session` and `ctx show event` render transcripts, hits, and context
   windows using ctx-owned IDs, and `ctx show session --out` writes transcript
   artifacts.

@@ -6,7 +6,8 @@ searchable in ctx without ctx owning their storage schemas.
 The narrow waist is:
 
 1. A local manifest declares one or more history sources.
-2. ctx invokes the declared command only during explicit import.
+2. ctx invokes enabled auto-refresh commands during search refresh, or any
+   selected source during explicit import.
 3. The command writes `ctx-history-jsonl-v1` records to stdout.
 4. ctx validates and imports that stream atomically.
 5. ctx passes the previous source cursor back on the next run.
@@ -41,6 +42,7 @@ Manifest example:
       "source_id": "default",
       "source_format": "dorkos-claude-jsonl-v1",
       "enabled": true,
+      "refresh": "auto",
       "command": ["ctx-history-source-dorkos", "export"],
       "timeout_seconds": 300
     }
@@ -51,8 +53,10 @@ Manifest example:
 `name`, `id`, `provider_key`, and `source_id` must be stable lowercase ASCII
 identifiers. `command` is an argv array; ctx does not run it through a shell.
 
-`enabled: true` means `ctx import --all` may run that source. Explicit imports
-can run a discovered source even when it is not enabled.
+`enabled: true` means `ctx import --all` may run that source. `refresh: auto`
+means `ctx search` may run it during the normal pre-search refresh. Explicit
+imports can run a discovered source even when it is not enabled or is marked
+`refresh: manual`.
 
 ## Import
 
@@ -78,9 +82,11 @@ from the supplied manifest path.
 `CTX_HISTORY_FULL_RESCAN=1`. The plugin should emit a fresh `source.cursor.after`
 checkpoint if the rescan succeeds.
 
-`ctx setup` and search refresh do not execute plugins in this version. Run
-`ctx import --history-source <id>` or `ctx import --all` to catch up
-plugin-backed sources before searching.
+`ctx setup` does not execute plugins. `ctx search` defaults to `--refresh auto`
+and runs discovered plugin sources only when they are both `enabled: true` and
+`refresh: auto`; `--refresh off` never runs plugins, and `--refresh strict`
+fails if an auto plugin refresh fails. Plugin refresh is incremental because ctx
+passes the previously stored source cursor before invoking the command.
 
 ## Runtime Environment
 
@@ -108,6 +114,9 @@ while the plugin process runs and is the reliable cursor handoff path.
 The plugin must write only `ctx-history-jsonl-v1` JSONL to stdout. Progress and
 diagnostics belong on stderr. If the command exits nonzero or stdout is invalid,
 ctx imports nothing from that run and does not advance the cursor.
+stdout is capped at 64 MiB per run and stderr at 256 KiB, so plugins should emit
+incremental batches from the supplied cursor instead of full historical dumps
+during normal refresh.
 
 Plugin commands receive a limited inherited environment by default: `PATH`,
 `HOME`, basic locale variables, temporary-directory variables, and XDG data or

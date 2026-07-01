@@ -47,10 +47,21 @@ fn write_history_source_plugin(
     enabled: bool,
     cursor_log: Option<&Path>,
 ) -> HistorySourcePluginFixture {
-    write_history_source_plugin_at(
+    write_history_source_plugin_with_refresh(temp, provider, enabled, None, cursor_log)
+}
+
+fn write_history_source_plugin_with_refresh(
+    temp: &TempDir,
+    provider: &str,
+    enabled: bool,
+    refresh: Option<&str>,
+    cursor_log: Option<&Path>,
+) -> HistorySourcePluginFixture {
+    write_history_source_plugin_at_with_refresh(
         &temp.path().join("history-plugins"),
         provider,
         enabled,
+        refresh,
         cursor_log,
     )
 }
@@ -59,6 +70,16 @@ fn write_history_source_plugin_at(
     root: &Path,
     provider: &str,
     enabled: bool,
+    cursor_log: Option<&Path>,
+) -> HistorySourcePluginFixture {
+    write_history_source_plugin_at_with_refresh(root, provider, enabled, None, cursor_log)
+}
+
+fn write_history_source_plugin_at_with_refresh(
+    root: &Path,
+    provider: &str,
+    enabled: bool,
+    refresh: Option<&str>,
     cursor_log: Option<&Path>,
 ) -> HistorySourcePluginFixture {
     let manifest_dir = root.join(provider);
@@ -145,20 +166,24 @@ for record in records:
         cursor_log_py = cursor_log_py
     );
     fs::write(&script, script_body).unwrap();
+    let mut source_manifest = json!({
+        "id": "default",
+        "provider_key": provider,
+        "source_id": "default",
+        "source_format": format!("{provider}-history-v1"),
+        "enabled": enabled,
+        "command": [python_command(), script.display().to_string(), provider],
+        "timeout_seconds": 10
+    });
+    if let Some(refresh) = refresh {
+        source_manifest["refresh"] = json!(refresh);
+    }
     let manifest = json!({
         "schema_version": 1,
         "name": provider,
         "display_name": format!("{provider} history"),
         "version": "0.1.0",
-        "history_sources": [{
-            "id": "default",
-            "provider_key": provider,
-            "source_id": "default",
-            "source_format": format!("{provider}-history-v1"),
-            "enabled": enabled,
-            "command": [python_command(), script.display().to_string(), provider],
-            "timeout_seconds": 10
-        }]
+        "history_sources": [source_manifest]
     });
     fs::write(
         manifest_dir.join("ctx-history-plugin.json"),
@@ -180,23 +205,55 @@ fn write_raw_history_source_plugin(
     provider: &str,
     script_body: &str,
 ) -> HistorySourcePluginFixture {
+    write_raw_history_source_plugin_with_options(temp, provider, script_body, false, None)
+}
+
+fn write_raw_history_source_plugin_with_options(
+    temp: &TempDir,
+    provider: &str,
+    script_body: &str,
+    enabled: bool,
+    refresh: Option<&str>,
+) -> HistorySourcePluginFixture {
+    write_raw_history_source_plugin_with_options_and_timeout(
+        temp,
+        provider,
+        script_body,
+        enabled,
+        refresh,
+        10,
+    )
+}
+
+fn write_raw_history_source_plugin_with_options_and_timeout(
+    temp: &TempDir,
+    provider: &str,
+    script_body: &str,
+    enabled: bool,
+    refresh: Option<&str>,
+    timeout_seconds: u64,
+) -> HistorySourcePluginFixture {
     let manifest_dir = temp.path().join("history-plugins").join(provider);
     fs::create_dir_all(&manifest_dir).unwrap();
     let script = manifest_dir.join("export.py");
     let run_marker = manifest_dir.join("ran");
     fs::write(&script, script_body).unwrap();
+    let mut source_manifest = json!({
+        "id": "default",
+        "provider_key": provider,
+        "source_id": "default",
+        "source_format": format!("{provider}-history-v1"),
+        "enabled": enabled,
+        "command": [python_command(), script.display().to_string()],
+        "timeout_seconds": timeout_seconds
+    });
+    if let Some(refresh) = refresh {
+        source_manifest["refresh"] = json!(refresh);
+    }
     let manifest = json!({
         "schema_version": 1,
         "name": provider,
-        "history_sources": [{
-            "id": "default",
-            "provider_key": provider,
-            "source_id": "default",
-            "source_format": format!("{provider}-history-v1"),
-            "enabled": false,
-            "command": [python_command(), script.display().to_string()],
-            "timeout_seconds": 10
-        }]
+        "history_sources": [source_manifest]
     });
     fs::write(
         manifest_dir.join("ctx-history-plugin.json"),
@@ -3226,6 +3283,279 @@ fn search_refresh_off_serves_existing_index_without_importing() {
     let fresh =
         json_output(ctx(&temp).args(["search", "onboarding", "--provider", "codex", "--json"]));
     assert_search_provider_oracle(&fresh, "codex", "onboarding", 1, "message");
+}
+
+#[test]
+fn search_refresh_auto_runs_enabled_auto_history_source_plugins_incrementally() {
+    let temp = tempdir();
+    let cursor_log = temp.path().join("cursor-log.txt");
+    let plugin = write_history_source_plugin_with_refresh(
+        &temp,
+        "hermes",
+        true,
+        Some("auto"),
+        Some(&cursor_log),
+    );
+
+    let initial = json_output(
+        ctx(&temp)
+            .env("CTX_HISTORY_PLUGIN_PATH", &plugin.manifest_dir)
+            .args([
+                "search",
+                "hermes plugin initial marker",
+                "--provider",
+                "custom",
+                "--json",
+            ]),
+    );
+    assert_eq!(initial["freshness"]["mode"], "auto");
+    assert_eq!(initial["freshness"]["status"], "completed");
+    assert_eq!(initial["freshness"]["source_count"], 1);
+    assert_eq!(initial["freshness"]["totals"]["imported_sources"], 1);
+    assert_eq!(initial["freshness"]["totals"]["imported_sessions"], 1);
+    assert_eq!(initial["freshness"]["totals"]["imported_events"], 1);
+    assert!(
+        !initial["results"].as_array().unwrap().is_empty(),
+        "initial plugin refresh was not searchable before query: {initial:#}"
+    );
+    assert!(plugin.run_marker.exists());
+
+    fs::remove_file(&plugin.run_marker).unwrap();
+    let incremental = json_output(
+        ctx(&temp)
+            .env("CTX_HISTORY_PLUGIN_PATH", &plugin.manifest_dir)
+            .args([
+                "search",
+                "hermes plugin incremental marker",
+                "--provider",
+                "custom",
+                "--json",
+            ]),
+    );
+    assert_eq!(incremental["freshness"]["mode"], "auto");
+    assert_eq!(incremental["freshness"]["status"], "completed");
+    assert_eq!(incremental["freshness"]["source_count"], 1);
+    assert_eq!(incremental["freshness"]["totals"]["imported_sources"], 1);
+    assert_eq!(incremental["freshness"]["totals"]["imported_events"], 1);
+    assert!(
+        !incremental["results"].as_array().unwrap().is_empty(),
+        "incremental plugin refresh was not searchable before query: {incremental:#}"
+    );
+    assert!(plugin.run_marker.exists());
+
+    let cursor_log = fs::read_to_string(cursor_log).unwrap();
+    assert!(cursor_log.contains(r#""message_id":7"#), "{cursor_log}");
+    assert!(cursor_log.contains("cursor_file="), "{cursor_log}");
+}
+
+#[test]
+fn search_refresh_auto_combines_native_sources_and_auto_history_source_plugins() {
+    let temp = tempdir();
+    let fixture = PathBuf::from(provider_history_fixture("codex-sessions"));
+    copy_dir_all(&fixture, &temp.path().join(".codex").join("sessions"));
+    let plugin =
+        write_history_source_plugin_with_refresh(&temp, "hermes", true, Some("auto"), None);
+
+    let search = json_output(
+        ctx(&temp)
+            .env("CTX_HISTORY_PLUGIN_PATH", &plugin.manifest_dir)
+            .args(["search", "hermes plugin initial marker", "--json"]),
+    );
+
+    assert_eq!(search["freshness"]["mode"], "auto");
+    assert_eq!(search["freshness"]["status"], "completed");
+    assert_eq!(search["freshness"]["source_count"], 2);
+    assert!(
+        search["freshness"]["totals"]["imported_sessions"]
+            .as_u64()
+            .unwrap()
+            >= 3
+    );
+    assert!(
+        !search["results"].as_array().unwrap().is_empty(),
+        "combined refresh did not make plugin history searchable: {search:#}"
+    );
+    assert!(plugin.run_marker.exists());
+}
+
+#[test]
+fn search_refresh_provider_filter_does_not_execute_history_source_plugins() {
+    let temp = tempdir();
+    let fixture = PathBuf::from(provider_history_fixture("codex-sessions"));
+    copy_dir_all(&fixture, &temp.path().join(".codex").join("sessions"));
+    let plugin =
+        write_history_source_plugin_with_refresh(&temp, "hermes", true, Some("auto"), None);
+
+    let search = json_output(
+        ctx(&temp)
+            .env("CTX_HISTORY_PLUGIN_PATH", &plugin.manifest_dir)
+            .args(["search", "onboarding", "--provider", "codex", "--json"]),
+    );
+
+    assert_eq!(search["freshness"]["mode"], "auto");
+    assert_eq!(search["freshness"]["status"], "completed");
+    assert_eq!(search["freshness"]["source_count"], 1);
+    assert_search_provider_oracle(&search, "codex", "onboarding", 1, "message");
+    assert!(!plugin.run_marker.exists());
+}
+
+#[test]
+fn search_refresh_off_does_not_execute_history_source_plugins() {
+    let temp = tempdir();
+    let plugin =
+        write_history_source_plugin_with_refresh(&temp, "hermes", true, Some("auto"), None);
+
+    let search = json_output(
+        ctx(&temp)
+            .env("CTX_HISTORY_PLUGIN_PATH", &plugin.manifest_dir)
+            .args([
+                "search",
+                "hermes plugin initial marker",
+                "--provider",
+                "custom",
+                "--refresh",
+                "off",
+                "--json",
+            ]),
+    );
+
+    assert_eq!(search["freshness"]["mode"], "off");
+    assert_eq!(search["freshness"]["status"], "skipped");
+    assert!(search["results"].as_array().unwrap().is_empty());
+    assert!(!plugin.run_marker.exists());
+}
+
+#[test]
+fn search_refresh_auto_skips_disabled_or_manual_history_source_plugins() {
+    let temp = tempdir();
+    let plugin_root = temp.path().join("history-plugins");
+    let manual = write_history_source_plugin_at_with_refresh(
+        &plugin_root,
+        "hermes",
+        true,
+        Some("manual"),
+        None,
+    );
+    let disabled = write_history_source_plugin_at_with_refresh(
+        &plugin_root,
+        "dorkos",
+        false,
+        Some("auto"),
+        None,
+    );
+
+    let search = json_output(
+        ctx(&temp)
+            .env("CTX_HISTORY_PLUGIN_PATH", &plugin_root)
+            .args([
+                "search",
+                "plugin initial marker",
+                "--provider",
+                "custom",
+                "--json",
+            ]),
+    );
+
+    assert_eq!(search["freshness"]["mode"], "auto");
+    assert_eq!(search["freshness"]["status"], "no_sources");
+    assert_eq!(search["freshness"]["source_count"], 0);
+    assert!(search["results"].as_array().unwrap().is_empty());
+    assert!(!manual.run_marker.exists());
+    assert!(!disabled.run_marker.exists());
+}
+
+#[test]
+fn search_refresh_strict_fails_on_history_source_plugin_failure() {
+    let temp = tempdir();
+    let script = r#"#!/usr/bin/env python3
+import sys
+print("plugin exploded", file=sys.stderr)
+sys.exit(23)
+"#;
+    let plugin = write_raw_history_source_plugin_with_options(
+        &temp,
+        "badplugin",
+        script,
+        true,
+        Some("auto"),
+    );
+
+    let stderr = failure_stderr(
+        ctx(&temp)
+            .env("CTX_HISTORY_PLUGIN_PATH", &plugin.manifest_dir)
+            .args([
+                "search",
+                "anything",
+                "--provider",
+                "custom",
+                "--refresh",
+                "strict",
+                "--json",
+            ]),
+    );
+
+    assert!(stderr.contains("search refresh failed"), "{stderr}");
+    assert!(
+        stderr.contains("history source plugin badplugin/default failed"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("plugin exploded"), "{stderr}");
+}
+
+#[test]
+fn search_refresh_strict_times_out_when_plugin_helper_keeps_stdout_open() {
+    let temp = tempdir();
+    let script = r#"#!/usr/bin/env python3
+import json
+import os
+import subprocess
+
+observed = "2026-07-01T12:00:00Z"
+source_id = os.environ["CTX_HISTORY_SOURCE_ID"]
+provider_key = os.environ["CTX_HISTORY_PROVIDER_KEY"]
+source_format = os.environ["CTX_HISTORY_SOURCE_FORMAT"]
+cursor_stream = os.environ["CTX_HISTORY_CURSOR_STREAM"]
+records = [
+    {"record_type": "manifest", "schema_version": "ctx-history-jsonl-v1"},
+    {"record_type": "source", "source_id": source_id, "provider_key": provider_key, "source_format": source_format, "observed_at": observed, "cursor": {"after": {"stream": cursor_stream, "cursor": json.dumps({"seq": 1}), "observed_at": observed}}},
+    {"record_type": "session", "source_id": source_id, "session_id": "hanging-session", "started_at": observed, "agent_type": "primary", "is_primary": True, "status": "completed"},
+    {"record_type": "event", "source_id": source_id, "session_id": "hanging-session", "event_index": 0, "event_type": "message", "role": "assistant", "occurred_at": observed, "payload": {"text": "hanging plugin marker"}, "preview": "hanging plugin marker"},
+]
+for record in records:
+    print(json.dumps(record, separators=(",", ":")), flush=True)
+subprocess.Popen(["sh", "-c", "sleep 5"])
+"#;
+    let plugin = write_raw_history_source_plugin_with_options_and_timeout(
+        &temp,
+        "hanging",
+        script,
+        true,
+        Some("auto"),
+        1,
+    );
+
+    let started = Instant::now();
+    let stderr = failure_stderr(
+        ctx(&temp)
+            .env("CTX_HISTORY_PLUGIN_PATH", &plugin.manifest_dir)
+            .args([
+                "search",
+                "hanging plugin marker",
+                "--provider",
+                "custom",
+                "--refresh",
+                "strict",
+                "--json",
+            ]),
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "plugin timeout did not bound pipe draining: {stderr}"
+    );
+    assert!(
+        stderr.contains("history source plugin hanging/default timed out after 1s"),
+        "{stderr}"
+    );
 }
 
 #[test]

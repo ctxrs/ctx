@@ -190,13 +190,12 @@ ctx search "this current task" --include-current-session
 ```
 
 `search` defaults to `--refresh auto`, which quietly refreshes discovered native
-provider sources before querying indexed sessions and events. The refresh is
-best-effort and keeps JSON stdout reserved for the search result object.
-History-source plugin commands are not executed by search refresh. On large
-discovered sources or already-cataloged indexes, `auto` serves current results
-without a foreground catch-up scan; use `--refresh strict` or `ctx import --all`
-when you need a full catch-up before querying. Use `--refresh off` to search the
-existing index without refreshing, or
+provider sources and enabled auto history-source plugins before querying indexed
+sessions and events. The refresh is best-effort and keeps JSON stdout reserved
+for the search result object. On large discovered sources or already-cataloged
+indexes, `auto` serves current results without a foreground catch-up scan; use
+`--refresh strict` or `ctx import --all` when you need a full catch-up before
+querying. Use `--refresh off` to search the existing index without refreshing, or
 `--refresh strict` to fail when the pre-search refresh cannot run or import
 successfully. Search-only sources without native import support are searched
 from the existing index until they are explicitly imported through a supported
@@ -254,9 +253,10 @@ CLI provider filters use kebab-case names. JSON output and stable SQL views use
 provider IDs in ctx output; multiword IDs may be snake_case, such as `copilot_cli` or
 `factory_ai_droid`.
 
-`search` reads discovered native provider files for pre-search refresh plus
-SQLite, and may write newly discovered native provider history into the local
-index before querying.
+`search` reads discovered native provider files and runs enabled auto
+history-source plugin commands for pre-search refresh, then queries SQLite. It
+may write newly discovered provider or plugin history into the local index before
+querying.
 
 ## SQL
 
