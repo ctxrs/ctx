@@ -215,7 +215,7 @@ public struct LocalCLIAdapter: Sendable {
         if let dataRoot {
             result.append(contentsOf: ["--data-root", dataRoot])
         }
-        result.append(contentsOf: arguments.map(String.init))
+        result.append(contentsOf: arguments)
         return result
     }
 

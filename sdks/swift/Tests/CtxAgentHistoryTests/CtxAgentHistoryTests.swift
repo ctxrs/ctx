@@ -253,13 +253,18 @@ final class CtxAgentHistoryTests: XCTestCase {
             case .importHistory:
                 XCTAssertEqual(envelope.importResult?.totals.importedEvents, 2, url.lastPathComponent)
             case .search:
-                XCTAssertEqual(envelope.search?.results.first?.resultScope, "event", url.lastPathComponent)
+                XCTAssertNotNil(envelope.search?.results, url.lastPathComponent)
+                if let first = envelope.search?.results.first {
+                    XCTAssertEqual(first.resultScope, "event", url.lastPathComponent)
+                }
             case .showEvent:
                 XCTAssertEqual(envelope.event?.events.first?.ctxEventId, "11111111-1111-4111-8111-111111111111", url.lastPathComponent)
             case .showSession:
                 XCTAssertEqual(envelope.session?.session?.title, "Fixture session", url.lastPathComponent)
-            case .locateEvent, .locateSession:
+            case .locateEvent:
                 XCTAssertEqual(envelope.location?.source.cursor, "line:2", url.lastPathComponent)
+            case .locateSession:
+                XCTAssertEqual(envelope.location?.source.cursor, "session:codex-fixture-session", url.lastPathComponent)
             case .initialize, .sync, .error:
                 break
             }

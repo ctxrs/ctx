@@ -24,7 +24,8 @@ let package = Package(
         .executableTarget(
             name: "LocalAgentHistorySmoke",
             dependencies: ["CtxAgentHistory"],
-            path: "Examples/LocalAgentHistorySmoke"
+            path: "Examples/LocalAgentHistorySmoke",
+            exclude: ["README.md"]
         ),
         .testTarget(
             name: "CtxAgentHistoryTests",
