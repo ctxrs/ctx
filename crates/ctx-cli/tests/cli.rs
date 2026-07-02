@@ -4749,18 +4749,17 @@ fn pi_cli_rejects_directory_import_path() {
 #[test]
 fn import_rejects_nonexistent_path() {
     let temp = tempdir();
+    let path = temp.path().join("missing-codex-history");
+    let path = path.to_str().unwrap();
 
     ctx(&temp)
-        .args([
-            "import",
-            "--provider",
-            "codex",
-            "--path",
-            "/nonexistent-ctx-test-path",
-        ])
+        .args(["import", "--provider", "codex", "--path", path])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("import path does not exist"));
+        .stderr(
+            predicate::str::contains("import path does not exist")
+                .and(predicate::str::contains(path)),
+        );
 }
 
 #[test]
