@@ -3718,6 +3718,49 @@ fn mcp_search_and_show_tools_return_structured_json_without_refresh() {
 }
 
 #[test]
+fn mcp_search_requires_query_term_or_file_without_opening_store() {
+    let temp = tempdir();
+    let responses = mcp_roundtrip(
+        &temp,
+        &[
+            json!({
+                "jsonrpc": "2.0",
+                "id": "init",
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "clientInfo": { "name": "ctx-test", "version": "0" }
+                }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": "search",
+                "method": "tools/call",
+                "params": {
+                    "name": "search",
+                    "arguments": {
+                        "provider": "codex",
+                        "limit": 5
+                    }
+                }
+            }),
+        ],
+    );
+
+    let result = &responses[1]["result"];
+    assert_eq!(result["isError"], true);
+    assert!(result["structuredContent"]["error"]
+        .as_str()
+        .unwrap()
+        .contains("search needs a query or file"));
+    assert!(
+        !temp.path().join("work.sqlite").exists(),
+        "invalid MCP search should fail before opening the ctx store"
+    );
+}
+
+#[test]
 fn mcp_sources_and_search_support_history_source_plugins() {
     let temp = tempdir();
     let plugin = write_history_source_plugin(&temp, "hermes", false, None);
@@ -5937,7 +5980,7 @@ fn human_search_reports_no_results() {
         .stdout
         .clone();
     let fresh = String::from_utf8(fresh).unwrap();
-    assert!(fresh.contains("no results"));
+    assert!(fresh.contains("no results for definitely-no-results-here"));
     assert!(fresh.contains("next: ctx import --all"));
 
     let fixture = provider_history_fixture("codex-sessions");
@@ -5961,8 +6004,81 @@ fn human_search_reports_no_results() {
         .stdout
         .clone();
     let indexed = String::from_utf8(indexed).unwrap();
-    assert!(indexed.contains("no results"));
+    assert!(indexed.contains("no results for definitely-no-results-here"));
     assert!(indexed.contains("next: try broader terms with ctx search --term"));
+
+    let term_only = ctx(&temp)
+        .args(["search", "--term", "term-only-no-results"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let term_only = String::from_utf8(term_only).unwrap();
+    assert!(term_only.contains("no results for --term term-only-no-results"));
+}
+
+#[test]
+fn search_requires_query_term_or_file_before_refreshing() {
+    let temp = tempdir();
+    let stderr = failure_stderr(ctx(&temp).args(["search", "--provider", "codex"]));
+    assert!(
+        stderr.contains("search needs a query, --term, or --file"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("ctx search \"failed migration\""),
+        "{stderr}"
+    );
+    assert!(
+        !temp.path().join("work.sqlite").exists(),
+        "invalid search should fail before creating the ctx store"
+    );
+
+    let punctuation = failure_stderr(ctx(&temp).args(["search", "!!!"]));
+    assert!(
+        punctuation.contains("search needs a query, --term, or --file"),
+        "{punctuation}"
+    );
+    let hyphen_only = failure_stderr(ctx(&temp).args(["search", "--", "---"]));
+    assert!(
+        hyphen_only.contains("search needs a query, --term, or --file"),
+        "{hyphen_only}"
+    );
+    let underscore_term = failure_stderr(ctx(&temp).args(["search", "--term", "___"]));
+    assert!(
+        underscore_term.contains("search needs a query, --term, or --file"),
+        "{underscore_term}"
+    );
+}
+
+#[test]
+fn file_only_search_returns_touched_file_matches() {
+    let temp = tempdir();
+    let fixture = provider_history_fixture("codex-rich-sessions");
+    json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "codex",
+        "--path",
+        &fixture,
+        "--json",
+    ]));
+
+    let search = json_output(ctx(&temp).args(["search", "--file", "src/main.rs", "--json"]));
+    assert_eq!(search["query"], "");
+    let results = search["results"].as_array().unwrap();
+    assert_eq!(results.len(), 1);
+    assert!(results[0]["why_matched"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason == "file_touched"));
+    assert!(results[0]["citations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|citation| citation["item_type"] == "file" && citation["label"] == "file touched"));
 }
 
 #[test]

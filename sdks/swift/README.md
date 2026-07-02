@@ -45,7 +45,7 @@ The public client mirrors the `agent-history-v1` operations:
 - `sources()`
 - `importHistory()`
 - `sync()`
-- `search()`
+- `search()` with a query, term, or file option
 - `showEvent()`
 - `showSession()`
 - `locateEvent()`

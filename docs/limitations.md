@@ -33,7 +33,8 @@ shipped.
 - Large outputs may be represented as bounded previews.
 - Ranking is deterministic for the same local database and options, but it is
   not a claim of semantic understanding.
-- Empty or very broad queries can return metadata-driven matches.
+- Empty or punctuation-only search is invalid. Broad valid queries can still
+  return metadata-driven matches.
 
 ## Retrieval Semantics
 

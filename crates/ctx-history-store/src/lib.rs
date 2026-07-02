@@ -3534,6 +3534,9 @@ impl Store {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<HistoryRecord>> {
+        if fts_match_query(query).is_none() {
+            return Ok(Vec::new());
+        }
         if let Some(records) = self.search_records_fts(query, limit, offset)? {
             return Ok(records);
         }
@@ -3558,7 +3561,7 @@ impl Store {
             return Ok(None);
         }
         let Some(match_query) = fts_match_query(query) else {
-            return Ok(Some(self.list_records_page(limit, offset)?));
+            return Ok(Some(Vec::new()));
         };
         let has_event_search = table_exists(&self.conn, "event_search")?;
         let has_artifact_search = table_exists(&self.conn, "artifact_search")?;
@@ -5396,7 +5399,7 @@ fn fts_match_query(query: &str) -> Option<String> {
     let terms = query
         .split_whitespace()
         .map(|term| term.trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '-'))
-        .filter(|term| !term.is_empty())
+        .filter(|term| term.chars().any(char::is_alphanumeric))
         .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
         .collect::<Vec<_>>();
     if terms.is_empty() {
@@ -7638,6 +7641,20 @@ mod search_order_tests {
         drop(store);
         let reopened = Store::open(&path).unwrap();
         assert_search_order(&reopened, &expected);
+    }
+
+    #[test]
+    fn search_records_empty_or_no_token_query_returns_empty() {
+        let temp = tempdir();
+        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let record = stable_tie_record(1);
+        store.insert_record(&record).unwrap();
+
+        assert!(store.search_records("", 10).unwrap().is_empty());
+        assert!(store.search_records("!!!", 10).unwrap().is_empty());
+        assert!(store.search_records("---", 10).unwrap().is_empty());
+        assert!(store.search_records("___", 10).unwrap().is_empty());
+        assert!(store.search_records_page("", 10, 0).unwrap().is_empty());
     }
 
     #[test]

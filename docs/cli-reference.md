@@ -213,8 +213,9 @@ querying. Use `--refresh off` to search the existing index without refreshing, o
 `--refresh strict` to fail when the pre-search refresh cannot run or import
 successfully. Preview native sources such as NanoClaw and AstrBot are searched
 from the existing index until they are explicitly imported through a supported
-path. The query argument is optional so file or metadata filters can drive a
-search. Default results are session-diverse: ctx
+path. Search requires a non-empty query, at least one non-empty `--term`, or
+`--file <path>`; provider, workspace, time, session, event, source, and result
+flags only narrow an actual search. Default results are session-diverse: ctx
 returns the strongest matching span from each session, plus
 `more_matches_in_session` and `session_importance` when more indexed events from
 that session also matched. Use `--session <ctx-session-id>` after a default
@@ -433,7 +434,7 @@ ctx show session <ctx-session-id> --format json
 ctx show event <ctx-event-id> --format json
 ctx locate session <ctx-session-id> --format json
 ctx locate event <ctx-event-id> --format json
-ctx search [query] --json
+ctx search <query>|--term <term>|--file <path> --json
 ctx sql "SELECT COUNT(*) FROM ctx_sessions" --json
 ctx docs list --json
 ctx docs search <query> --json

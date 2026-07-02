@@ -39,7 +39,7 @@ The public methods mirror the agent-history-v1 client surface:
 - `init()` for `ctx setup --json`
 - `sources()`
 - `import_()` and `sync()` (`import` is a reserved Python keyword)
-- `search()`
+- `search()` with a query, term, or file option
 - `show_event()` / `showEvent()`
 - `show_session()` / `showSession()`
 - `locate_event()` / `locateEvent()`

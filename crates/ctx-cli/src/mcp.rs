@@ -19,9 +19,9 @@ use uuid::Uuid;
 use super::{
     compact_json, config::CONFIG_FILE, discovered_plugin_sources_json, discovered_sources,
     event_window, event_window_json, indexed_history_item_count, mark_share_safe,
-    raw_sql_result_json, search_filters, session_transcript_json, sources_json, OutputFormat,
-    ProviderArg, RefreshArg, SearchDto, SearchFilterInput, SearchRefreshReport,
-    SourceIdentityFilterArgs, TranscriptMode, MAX_SEARCH_LIMIT,
+    raw_sql_result_json, search_filters, search_has_intent, session_transcript_json, sources_json,
+    OutputFormat, ProviderArg, RefreshArg, SearchDto, SearchFilterInput, SearchIntentInput,
+    SearchRefreshReport, SourceIdentityFilterArgs, TranscriptMode, MAX_SEARCH_LIMIT,
 };
 
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
@@ -320,7 +320,6 @@ fn tool_sources(data_root: &Path) -> Result<Value> {
 }
 
 fn tool_search(arguments: &Value, data_root: &Path) -> Result<Value> {
-    let store = open_existing_store(data_root)?;
     let query = optional_string(arguments, "query")?.unwrap_or_default();
     let limit = optional_usize(arguments, "limit")?.unwrap_or(20);
     if !(1..=MAX_SEARCH_LIMIT).contains(&limit) {
@@ -338,6 +337,14 @@ fn tool_search(arguments: &Value, data_root: &Path) -> Result<Value> {
     let include_subagents = optional_bool(arguments, "include_subagents")?.unwrap_or(false);
     let event_type = optional_string(arguments, "event_type")?;
     let file = optional_string(arguments, "file")?.map(PathBuf::from);
+    if !search_has_intent(SearchIntentInput {
+        query: Some(&query),
+        terms: &[],
+        file: file.as_deref(),
+    }) {
+        return Err(anyhow!("search needs a query or file"));
+    }
+    let store = open_existing_store(data_root)?;
     let events = optional_bool(arguments, "events")?.unwrap_or(false) || session.is_some();
     let include_current_session =
         optional_bool(arguments, "include_current_session")?.unwrap_or(false);
@@ -505,9 +512,9 @@ fn tool_definitions() -> Vec<Value> {
         json!({
             "name": "search",
             "title": "Search",
-            "description": "Search the existing local ctx index. This does not refresh or import provider history.",
+            "description": "Search the existing local ctx index by query text or touched-file path. This does not refresh or import provider history.",
             "inputSchema": object_schema(json!({
-                "query": { "type": "string" },
+                "query": { "type": "string", "description": "Non-empty text query. Required unless file is provided." },
                 "limit": { "type": "integer", "minimum": 1, "maximum": MAX_SEARCH_LIMIT, "default": 20 },
                 "provider": { "type": "string", "enum": provider_names() },
                 "history_source": { "type": "string", "description": "Custom history source selector as plugin/source or provider_key/source_id." },
@@ -518,7 +525,7 @@ fn tool_definitions() -> Vec<Value> {
                 "since": { "type": "string", "description": "RFC3339 timestamp or day window such as 30d." },
                 "include_subagents": { "type": "boolean", "default": false, "description": "Include subagent sessions in addition to primary-agent sessions." },
                 "event_type": { "type": "string", "enum": event_type_names() },
-                "file": { "type": "string" },
+                "file": { "type": "string", "description": "Indexed touched-file path. Required unless query is provided." },
                 "session": { "type": "string", "description": "ctx session id." },
                 "events": { "type": "boolean", "default": false },
                 "include_current_session": { "type": "boolean", "default": false, "description": "Include the active Codex session tree when CODEX_THREAD_ID is set." }

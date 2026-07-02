@@ -459,6 +459,51 @@ impl From<&SearchArgs> for SourceIdentityFilterArgs {
     }
 }
 
+pub(crate) struct SearchIntentInput<'a> {
+    query: Option<&'a str>,
+    terms: &'a [String],
+    file: Option<&'a Path>,
+}
+
+pub(crate) fn search_has_intent(input: SearchIntentInput<'_>) -> bool {
+    input.query.is_some_and(has_search_token)
+        || input.terms.iter().any(|term| has_search_token(term))
+        || input
+            .file
+            .and_then(|path| path.to_str())
+            .is_some_and(|file| !file.trim().is_empty())
+}
+
+fn has_search_token(value: &str) -> bool {
+    value.split_whitespace().any(|term| {
+        term.trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '-')
+            .chars()
+            .any(char::is_alphanumeric)
+    })
+}
+
+pub(crate) fn missing_search_intent_error() -> anyhow::Error {
+    anyhow!(
+        "search needs a query, --term, or --file\n\nTry:\n  ctx search \"failed migration\"\n  ctx search --term \"failed migration\" --term rollback\n  ctx search --file crates/foo/src/lib.rs"
+    )
+}
+
+fn search_no_results_target(query: &str, terms: &[String]) -> String {
+    if !query.trim().is_empty() {
+        return shell_quote_arg(query);
+    }
+    let rendered_terms = terms
+        .iter()
+        .filter(|term| !term.trim().is_empty())
+        .map(|term| format!("--term {}", shell_quote_arg(term)))
+        .collect::<Vec<_>>();
+    if rendered_terms.is_empty() {
+        "search".to_owned()
+    } else {
+        rendered_terms.join(" ")
+    }
+}
+
 impl CommandRoot {
     fn name(&self) -> &'static str {
         match self {
@@ -4275,6 +4320,14 @@ fn run_search(
     data_root: PathBuf,
     analytics_properties: &mut AnalyticsProperties,
 ) -> Result<()> {
+    if !search_has_intent(SearchIntentInput {
+        query: args.query.as_deref(),
+        terms: &args.term,
+        file: args.file.as_deref(),
+    }) {
+        return Err(missing_search_intent_error());
+    }
+
     let refresh_started = Instant::now();
     let refresh = refresh_before_search(&args, &data_root)?;
     analytics::insert_duration(
@@ -4395,10 +4448,26 @@ fn run_search(
             }
         }
         if packet.results.is_empty() {
-            println!("no results");
-            if query.trim().is_empty() && !uses_composed_terms {
-                println!("next: ctx search \"what changed recently\" --limit 20");
+            if let Some(file) = args
+                .file
+                .as_deref()
+                .filter(|_| query.trim().is_empty() && !uses_composed_terms)
+            {
+                println!("no indexed events touched {}", file.display());
+                let indexed_items = indexed_history_item_count(&store)?;
+                if indexed_items == 0 {
+                    println!("next: ctx import --all");
+                } else {
+                    println!(
+                        "next: ctx search {}",
+                        shell_quote_arg(&file.display().to_string())
+                    );
+                }
             } else {
+                println!(
+                    "no results for {}",
+                    search_no_results_target(&query, &args.term)
+                );
                 let indexed_items = indexed_history_item_count(&store)?;
                 if indexed_items == 0 {
                     println!("next: ctx import --all");

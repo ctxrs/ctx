@@ -1055,6 +1055,13 @@ fn ranked_candidates(
     let mut candidates = Vec::new();
     let mut seen = BTreeSet::<Uuid>::new();
     let mut scan_budget_exhausted = false;
+    let file_only = terms.is_empty() && file_scope.is_some();
+    if terms.is_empty() && !file_only {
+        return Ok(CandidateSearch {
+            candidates,
+            scan_budget_exhausted,
+        });
+    }
 
     if filtered {
         let page_size = FILTERED_SEARCH_PAGE_SIZE.max(target_candidates);
@@ -1062,11 +1069,15 @@ fn ranked_candidates(
         let mut pages_scanned = 0_usize;
         loop {
             pages_scanned = pages_scanned.saturating_add(1);
-            let records = match query {
-                Some(query) if !query.trim().is_empty() => {
-                    store.search_records_page(query, page_size, offset)?
+            let records = if file_only {
+                store.list_records_page(page_size, offset)?
+            } else {
+                match query {
+                    Some(query) if !query.trim().is_empty() => {
+                        store.search_records_page(query, page_size, offset)?
+                    }
+                    _ => Vec::new(),
                 }
-                _ => store.list_records_page(page_size, offset)?,
             };
             let page_len = records.len();
 
@@ -1103,9 +1114,15 @@ fn ranked_candidates(
         }
     } else {
         let fetch_limit = target_candidates;
-        let records = match query {
-            Some(query) if !query.trim().is_empty() => store.search_records(query, fetch_limit)?,
-            _ => store.list_records(fetch_limit)?,
+        let records = if file_only {
+            store.list_records(fetch_limit)?
+        } else {
+            match query {
+                Some(query) if !query.trim().is_empty() => {
+                    store.search_records(query, fetch_limit)?
+                }
+                _ => Vec::new(),
+            }
         };
         for record in records {
             if !seen.insert(record.id) {
@@ -1256,6 +1273,37 @@ fn analyze_record(
     let mut citations = Vec::new();
 
     if terms.is_empty() {
+        if filters
+            .file
+            .as_ref()
+            .is_some_and(|file| !file.trim().is_empty())
+        {
+            let mut primary_hit = None;
+            for section in search_sections(record, context, filters)
+                .into_iter()
+                .filter(|section| section.reason == "file_touched")
+            {
+                if primary_hit.is_none() {
+                    primary_hit = Some(section.hit.clone());
+                }
+                score += section.weight;
+                add_match(
+                    &mut why,
+                    &mut citations,
+                    section.reason,
+                    section.citation,
+                    &section.hit,
+                );
+            }
+            if !why.is_empty() {
+                return MatchAnalysis {
+                    score,
+                    why_matched: why,
+                    citations,
+                    primary_hit,
+                };
+            }
+        }
         add_match(
             &mut why,
             &mut citations,
@@ -2209,7 +2257,7 @@ fn query_terms(query: &str) -> Vec<String> {
         .split(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '-')
         .filter_map(|term| {
             let term = term.trim().to_lowercase();
-            if term.is_empty() {
+            if term.is_empty() || !term.chars().any(char::is_alphanumeric) {
                 None
             } else {
                 Some(term)
@@ -3521,6 +3569,33 @@ mod tests {
                 && citation.cursor.as_deref() == Some("line:8")
         }));
 
+        let file_only = search_packet(
+            &store,
+            "",
+            &PacketOptions {
+                limit: 10,
+                filters: SearchFilters {
+                    provider: Some(CaptureProvider::Codex),
+                    file: Some("source_filter.rs".into()),
+                    ..SearchFilters::default()
+                },
+                ..PacketOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(file_only.results.len(), 1);
+        assert!(file_only.results[0]
+            .why_matched
+            .iter()
+            .any(|reason| reason == "file_touched"));
+        assert!(!file_only.results[0]
+            .why_matched
+            .iter()
+            .any(|reason| reason == "recent_activity"));
+        assert!(file_only.results[0].citations.iter().any(|citation| {
+            citation.citation_type == ContextCitationType::File && citation.id == file.id
+        }));
+
         let wrong_provider = search_packet(
             &store,
             "source-filter-needle",
@@ -4164,7 +4239,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_query_filtered_search_stops_at_scan_budget() {
+    fn empty_query_filtered_search_returns_empty_without_scanning() {
         let (_temp, store) = test_store();
         let mut records = Vec::new();
         for index in 0..=(FILTERED_SEARCH_PAGE_SIZE * FILTERED_SEARCH_MAX_PAGES) {
@@ -4197,8 +4272,29 @@ mod tests {
         .unwrap();
 
         assert!(packet.results.is_empty());
-        assert!(packet.truncation.truncated);
-        assert_eq!(packet.truncation.reason.as_deref(), Some("scan_budget"));
+        assert!(!packet.truncation.truncated);
+        assert_eq!(packet.truncation.reason.as_deref(), None);
+    }
+
+    #[test]
+    fn no_token_query_returns_empty_without_recent_activity() {
+        let (_temp, store) = test_store();
+        let record = HistoryRecord::new(
+            "No-token query decoy",
+            "This record should not be returned for punctuation-only search.",
+            Vec::new(),
+            "task",
+            Some("/workspace/punctuation".into()),
+        );
+        store.upsert_record(&record).unwrap();
+
+        for query in ["!!!", "---", "___"] {
+            let packet =
+                search_packet(&store, query, &PacketOptions::default()).expect("search packet");
+
+            assert!(packet.results.is_empty(), "{query}");
+            assert!(!packet.truncation.truncated, "{query}");
+        }
     }
 
     #[test]

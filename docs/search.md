@@ -90,6 +90,11 @@ for a file, or combine it with query terms to find sessions that both mention a
 topic and touched that path. It searches paths recorded during import; it does
 not inspect the current filesystem.
 
+Search requires a non-empty query, at least one non-empty `--term`, or
+`--file <path>`. Provider, workspace, time, session, event, source, and result
+flags only narrow an actual search; by themselves they do not browse recent
+history.
+
 The default searches primary-agent sessions so human intent and decisions stay
 prominent. Use `--include-subagents` when you want implementation details, code
 review notes, test output, or failure analysis from subagent sessions too.

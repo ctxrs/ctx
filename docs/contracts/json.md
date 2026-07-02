@@ -199,7 +199,7 @@ artifact. JSON and JSONL artifact rows use the same ctx-owned ID fields as
 ## Search
 
 ```bash
-ctx search [query] --json
+ctx search <query>|--term <term>|--file <path> --json
 ```
 
 Returns:

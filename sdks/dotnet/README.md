@@ -55,7 +55,7 @@ Console.WriteLine(results.ToJsonObject().ToJsonString());
 - `SourcesAsync()`
 - `ImportHistoryAsync(ImportOptions?)`
 - `SyncAsync(ImportOptions?)`
-- `SearchAsync(SearchOptions?)`
+- `SearchAsync(SearchOptions)` with a query, term, or file option
 - `ShowEventAsync(string, ShowEventOptions?)`
 - `ShowSessionAsync(string, ShowSessionOptions?)`
 - `ShowSessionAsync(ShowSessionOptions)`
