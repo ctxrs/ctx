@@ -113,8 +113,8 @@ ensure_darwin_cross_tools() {
 }
 
 version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next(pkg["version"] for pkg in data["packages"] if pkg["name"] == "ctx"))')"
-if [[ "${version}" != "0.15.0" ]]; then
-  echo "error: ctx package version must be 0.15.0 for this release, got ${version}" >&2
+if [[ "${version}" != "0.16.0" ]]; then
+  echo "error: ctx package version must be 0.16.0 for this release, got ${version}" >&2
   exit 1
 fi
 
@@ -156,12 +156,12 @@ fi
 case "${platform}" in
   linux-x64)
     "${staged}" --version | tee "${staged}.version"
-    grep -Fx "ctx 0.15.0" "${staged}.version" >/dev/null
+    grep -Fx "ctx 0.16.0" "${staged}.version" >/dev/null
     ;;
   macos-arm64)
     if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]]; then
       "${staged}" --version | tee "${staged}.version"
-      grep -Fx "ctx 0.15.0" "${staged}.version" >/dev/null
+      grep -Fx "ctx 0.16.0" "${staged}.version" >/dev/null
     else
       printf 'not run on this host: %s\n' "${platform}" > "${staged}.version"
     fi
@@ -169,7 +169,7 @@ case "${platform}" in
   macos-x64)
     if [[ "$(uname -s)" == "Darwin" ]] && /usr/bin/arch -x86_64 /usr/bin/true >/dev/null 2>&1; then
       /usr/bin/arch -x86_64 "${staged}" --version | tee "${staged}.version"
-      grep -Fx "ctx 0.15.0" "${staged}.version" >/dev/null
+      grep -Fx "ctx 0.16.0" "${staged}.version" >/dev/null
     else
       printf 'not run on this host: %s\n' "${platform}" > "${staged}.version"
     fi

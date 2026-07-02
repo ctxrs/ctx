@@ -141,7 +141,9 @@ JSON string. ctx stores it under a stable custom stream derived from:
 - `provider_key`
 - `source_id`
 - `source_format`
-- local machine id
+
+The local machine id is stored separately with the cursor so multiple machines
+can import the same custom source without overwriting each other's progress.
 
 On the next import, ctx passes the stored `cursor.after.cursor` value back in
 the runtime environment. This keeps native cursor design inside the provider

@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env,
     fs::{self, OpenOptions},
-    io::{ErrorKind, Read, Write},
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::{Child, ChildStderr, ChildStdout, Command, ExitStatus, Stdio},
     thread,
@@ -11,6 +11,8 @@ use std::{
 
 #[cfg(unix)]
 use std::os::unix::{fs::OpenOptionsExt, io::AsRawFd};
+#[cfg(not(unix))]
+use std::sync::mpsc;
 
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
@@ -352,13 +354,28 @@ fn collect_child_output_with_timeout(
     timeout: Duration,
     source_label: &str,
 ) -> Result<(ExitStatus, Vec<u8>, Vec<u8>)> {
+    #[derive(Clone, Copy)]
+    enum PipeKind {
+        Stdout,
+        Stderr,
+    }
+
+    let (tx, rx) = mpsc::channel();
     let stdout_source = source_label.to_owned();
+    let stdout_tx = tx.clone();
     let stdout_handle = thread::spawn(move || {
-        read_pipe_with_limit(stdout, MAX_PLUGIN_STDOUT_BYTES, "stdout", &stdout_source)
+        let _ = stdout_tx.send((
+            PipeKind::Stdout,
+            read_pipe_with_limit(stdout, MAX_PLUGIN_STDOUT_BYTES, "stdout", &stdout_source),
+        ));
     });
     let stderr_source = source_label.to_owned();
+    let stderr_tx = tx;
     let stderr_handle = thread::spawn(move || {
-        read_pipe_with_limit(stderr, MAX_PLUGIN_STDERR_BYTES, "stderr", &stderr_source)
+        let _ = stderr_tx.send((
+            PipeKind::Stderr,
+            read_pipe_with_limit(stderr, MAX_PLUGIN_STDERR_BYTES, "stderr", &stderr_source),
+        ));
     });
 
     let started = Instant::now();
@@ -377,12 +394,50 @@ fn collect_child_output_with_timeout(
         thread::sleep(Duration::from_millis(25));
     };
 
-    let stdout = stdout_handle
-        .join()
-        .map_err(|_| anyhow!("history source plugin stdout reader panicked"))??;
-    let stderr = stderr_handle
-        .join()
-        .map_err(|_| anyhow!("history source plugin stderr reader panicked"))??;
+    let mut stdout = None;
+    let mut stderr = None;
+    while stdout.is_none() || stderr.is_none() {
+        let Some(remaining) = timeout.checked_sub(started.elapsed()) else {
+            return Err(anyhow!(
+                "history source plugin {source_label} timed out after {}s",
+                timeout.as_secs()
+            ));
+        };
+        if remaining == Duration::ZERO {
+            return Err(anyhow!(
+                "history source plugin {source_label} timed out after {}s",
+                timeout.as_secs()
+            ));
+        }
+        match rx.recv_timeout(remaining) {
+            Ok((PipeKind::Stdout, result)) => {
+                stdout = Some(result?);
+            }
+            Ok((PipeKind::Stderr, result)) => {
+                stderr = Some(result?);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                return Err(anyhow!(
+                    "history source plugin {source_label} timed out after {}s",
+                    timeout.as_secs()
+                ));
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(anyhow!(
+                    "history source plugin {source_label} output reader stopped before pipes were drained"
+                ));
+            }
+        }
+    }
+
+    if stdout_handle.join().is_err() {
+        return Err(anyhow!("history source plugin stdout reader panicked"));
+    }
+    if stderr_handle.join().is_err() {
+        return Err(anyhow!("history source plugin stderr reader panicked"));
+    }
+    let stdout = stdout.expect("stdout reader result");
+    let stderr = stderr.expect("stderr reader result");
     Ok((status, stdout, stderr))
 }
 
@@ -423,8 +478,8 @@ fn read_available_with_limit<R: Read>(
                 }
                 bytes.extend_from_slice(&buffer[..count]);
             }
-            Err(err) if err.kind() == ErrorKind::WouldBlock => return Ok(()),
-            Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(err) => {
                 return Err(err)
                     .with_context(|| format!("read history source plugin {source_label} {name}"))
