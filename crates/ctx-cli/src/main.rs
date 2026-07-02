@@ -4189,6 +4189,12 @@ fn import_requests(args: &ImportArgs) -> Result<Vec<SourceInfo>> {
             .unwrap_or(ProviderArg::Codex)
             .capture_provider();
         let source = explicit_path_source(provider, path.clone());
+        if !source.exists {
+            return Err(anyhow!(
+                "import path does not exist: {}",
+                source.path.display()
+            ));
+        }
         validate_source_import_supported(&source)?;
         return Ok(vec![source]);
     }
