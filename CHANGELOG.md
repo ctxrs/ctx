@@ -22,7 +22,7 @@ The latest stable installer is documented at <https://ctx.rs/install>.
   understand custom history sources.
 - Search-time refresh can run enabled custom history plugins before querying.
 - Plugin docs are linked from the README, embedded docs, and ctx.rs site.
-- README and import-source UX were tightened after the 0.15 release.
+- README and import-source UX were tightened.
 
 ### Fixed
 
@@ -47,11 +47,6 @@ The latest stable installer is documented at <https://ctx.rs/install>.
 ### Changed
 
 - Updated provider docs and fixture coverage for the new native sources.
-- Bumped the CLI/runtime crates to `0.15.0`.
-
-### Fixed
-
-- Cleaned up provider-code clippy issues before release.
 
 ### Commits and PRs
 
@@ -175,10 +170,6 @@ The latest stable installer is documented at <https://ctx.rs/install>.
 - Older data roots can refresh derived search projections and re-read original
   provider transcripts when they still exist.
 - Agent skill docs were refreshed.
-
-### Fixed
-
-- Reverted the experimental ctx web search UI before release.
 
 ### Commits and PRs
 
