@@ -1050,7 +1050,6 @@ fn ranked_candidates(
     file_scope: Option<&FileTouchScope>,
 ) -> Result<CandidateSearch> {
     let target_candidates = options.limit.saturating_add(1);
-    let filtered = has_filters(&options.filters);
     let terms = query_terms(query.unwrap_or_default());
     let mut candidates = Vec::new();
     let mut seen = BTreeSet::<Uuid>::new();
@@ -1063,21 +1062,47 @@ fn ranked_candidates(
         });
     }
 
+    if file_only {
+        let Some(scope) = file_scope else {
+            return Ok(CandidateSearch {
+                candidates,
+                scan_budget_exhausted,
+            });
+        };
+        for record_id in &scope.history_record_ids {
+            if !seen.insert(*record_id) {
+                continue;
+            }
+            let record = store.get_record(*record_id)?;
+            if let Some(candidate) =
+                candidate_for_record(store, record, &terms, &options.filters, file_scope)?
+            {
+                candidates.push(candidate);
+            }
+        }
+        normalize_scores(&mut candidates);
+        candidates.sort_by(compare_candidates);
+        if candidates.len() > target_candidates {
+            candidates.truncate(target_candidates);
+        }
+        return Ok(CandidateSearch {
+            candidates,
+            scan_budget_exhausted,
+        });
+    }
+
+    let filtered = has_filters(&options.filters);
     if filtered {
         let page_size = FILTERED_SEARCH_PAGE_SIZE.max(target_candidates);
         let mut offset = 0_usize;
         let mut pages_scanned = 0_usize;
         loop {
             pages_scanned = pages_scanned.saturating_add(1);
-            let records = if file_only {
-                store.list_records_page(page_size, offset)?
-            } else {
-                match query {
-                    Some(query) if !query.trim().is_empty() => {
-                        store.search_records_page(query, page_size, offset)?
-                    }
-                    _ => Vec::new(),
+            let records = match query {
+                Some(query) if !query.trim().is_empty() => {
+                    store.search_records_page(query, page_size, offset)?
                 }
+                _ => Vec::new(),
             };
             let page_len = records.len();
 
@@ -1114,15 +1139,9 @@ fn ranked_candidates(
         }
     } else {
         let fetch_limit = target_candidates;
-        let records = if file_only {
-            store.list_records(fetch_limit)?
-        } else {
-            match query {
-                Some(query) if !query.trim().is_empty() => {
-                    store.search_records(query, fetch_limit)?
-                }
-                _ => Vec::new(),
-            }
+        let records = match query {
+            Some(query) if !query.trim().is_empty() => store.search_records(query, fetch_limit)?,
+            _ => Vec::new(),
         };
         for record in records {
             if !seen.insert(record.id) {
@@ -1140,14 +1159,7 @@ fn ranked_candidates(
     }
 
     normalize_scores(&mut candidates);
-    candidates.sort_by(|left, right| {
-        right
-            .score
-            .total_cmp(&left.score)
-            .then_with(|| right.record.updated_at.cmp(&left.record.updated_at))
-            .then_with(|| left.record.title.cmp(&right.record.title))
-            .then_with(|| left.record.id.cmp(&right.record.id))
-    });
+    candidates.sort_by(compare_candidates);
     if candidates.len() > target_candidates {
         candidates.truncate(target_candidates);
     }
@@ -1155,6 +1167,15 @@ fn ranked_candidates(
         candidates,
         scan_budget_exhausted,
     })
+}
+
+fn compare_candidates(left: &Candidate, right: &Candidate) -> Ordering {
+    right
+        .score
+        .total_cmp(&left.score)
+        .then_with(|| right.record.updated_at.cmp(&left.record.updated_at))
+        .then_with(|| left.record.title.cmp(&right.record.title))
+        .then_with(|| left.record.id.cmp(&right.record.id))
 }
 
 fn candidate_for_record(
@@ -1394,19 +1415,23 @@ fn search_sections(
 ) -> Vec<SearchSection> {
     let mut sections = Vec::new();
     let record_hit = record_context_display_hit(context, filters, record.updated_at);
-    sections.push(SearchSection {
-        reason: "title",
-        weight: 8.0,
-        text: record.title.clone(),
-        citation: citation(
-            ContextCitationType::HistoryRecord,
-            record.id,
-            "session title",
-            record.updated_at,
-        ),
-        hit: record_hit.clone(),
-    });
-    let include_record_text = record_text_matches_agent_scope(context, filters)
+    let include_record_bookkeeping_text = !is_agent_history_bookkeeping_record(record);
+    if include_record_bookkeeping_text {
+        sections.push(SearchSection {
+            reason: "title",
+            weight: 8.0,
+            text: record.title.clone(),
+            citation: citation(
+                ContextCitationType::HistoryRecord,
+                record.id,
+                "session title",
+                record.updated_at,
+            ),
+            hit: record_hit.clone(),
+        });
+    }
+    let include_record_text = include_record_bookkeeping_text
+        && record_text_matches_agent_scope(context, filters)
         && !context_has_excluded_provider_session(context, filters);
     if include_record_text {
         sections.push(SearchSection {
@@ -1622,6 +1647,19 @@ fn search_sections(
     }
 
     sections
+}
+
+fn is_agent_history_bookkeeping_record(record: &HistoryRecord) -> bool {
+    record.kind == "agent_history"
+        || record.tags.iter().any(|tag| tag == "agent-history")
+        || record
+            .body
+            .trim_start()
+            .starts_with("Indexed local agent history from ")
+        || record
+            .body
+            .trim_start()
+            .starts_with("Indexed custom agent history from ")
 }
 
 fn session_matches_agent_scope(session: &Session, filters: &SearchFilters) -> bool {
@@ -2507,6 +2545,7 @@ fn search_snippet(
         }
     }
     if !record.body.trim().is_empty()
+        && !is_agent_history_bookkeeping_record(record)
         && record_text_matches_agent_scope(context, filters)
         && !context_has_excluded_provider_session(context, filters)
     {
@@ -4197,6 +4236,178 @@ mod tests {
         .unwrap();
 
         assert!(packet.results.is_empty());
+    }
+
+    #[test]
+    fn file_only_search_finds_old_sparse_file_touch_beyond_recent_scan_budget() {
+        let (_temp, store) = test_store();
+        let old_time = fixed_time() - chrono::Duration::days(30);
+        let target_id = Uuid::parse_str("018f45d0-0000-7000-8003-ffffffffffff").unwrap();
+        let mut target = HistoryRecord::new(
+            "Old sparse file touch",
+            "older session that only relates through file touch scope",
+            Vec::new(),
+            "task",
+            Some("/workspace/ctx".into()),
+        );
+        target.id = target_id;
+        target.created_at = old_time;
+        target.updated_at = old_time;
+        store.upsert_record(&target).unwrap();
+        store
+            .upsert_file_touched(&FileTouched {
+                id: Uuid::parse_str("018f45d0-0000-7000-8003-fffffffffffe").unwrap(),
+                history_record_id: Some(target_id),
+                run_id: None,
+                event_id: None,
+                vcs_workspace_id: None,
+                path: "crates/ctx-history-search/src/sparse_history.rs".into(),
+                change_kind: Some(FileChangeKind::Modified),
+                old_path: None,
+                line_count_delta: Some(1),
+                confidence: Confidence::Explicit,
+                timestamps: EntityTimestamps {
+                    created_at: old_time,
+                    updated_at: old_time,
+                },
+                source_id: None,
+                sync: sync_metadata(),
+            })
+            .unwrap();
+
+        let mut decoys = Vec::new();
+        for index in 0..=(FILTERED_SEARCH_PAGE_SIZE * FILTERED_SEARCH_MAX_PAGES) {
+            let decoy_time = fixed_time() + chrono::Duration::seconds(index as i64);
+            let mut decoy = HistoryRecord::new(
+                "Recent unrelated session",
+                format!("recent non-file decoy {index:05}"),
+                Vec::new(),
+                "task",
+                Some("/workspace/other".into()),
+            );
+            decoy.id = Uuid::parse_str(&format!("018f45d0-0000-7000-8004-{index:012x}")).unwrap();
+            decoy.created_at = decoy_time;
+            decoy.updated_at = decoy_time;
+            decoys.push(decoy);
+        }
+        store.upsert_records(&decoys).unwrap();
+
+        let old_scan_window = store
+            .list_records_page(FILTERED_SEARCH_PAGE_SIZE * FILTERED_SEARCH_MAX_PAGES, 0)
+            .unwrap();
+        assert!(
+            !old_scan_window.iter().any(|record| record.id == target_id),
+            "regression setup must place the file match beyond the old recent-record scan window"
+        );
+
+        let packet = search_packet(
+            &store,
+            "",
+            &PacketOptions {
+                limit: 5,
+                filters: SearchFilters {
+                    file: Some("sparse_history.rs".into()),
+                    ..SearchFilters::default()
+                },
+                ..PacketOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            packet
+                .results
+                .iter()
+                .map(|result| result.record_id)
+                .collect::<Vec<_>>(),
+            vec![target_id]
+        );
+        assert!(!packet.truncation.truncated);
+        assert!(packet.results[0]
+            .why_matched
+            .iter()
+            .any(|reason| reason == "file_touched"));
+    }
+
+    #[test]
+    fn search_ignores_agent_history_bookkeeping_terms_without_content_evidence() {
+        let (_temp, store) = test_store();
+        let mut record = HistoryRecord::new(
+            "codex agent history",
+            "Indexed local agent history from /tmp/codex/sessions.jsonl (codex_session_jsonl)",
+            vec!["agent-history".into(), "codex".into()],
+            "agent_history",
+            Some("/tmp/codex".into()),
+        );
+        record.id = Uuid::parse_str("018f45d0-0000-7000-8005-000000000001").unwrap();
+        record.created_at = fixed_time();
+        record.updated_at = fixed_time();
+        store.upsert_record(&record).unwrap();
+
+        for query in [
+            "Indexed local agent history",
+            "agent-history",
+            "codex_session_jsonl",
+        ] {
+            let packet = search_packet(&store, query, &PacketOptions::default()).unwrap();
+            assert!(
+                packet.results.is_empty(),
+                "bookkeeping-only query {query:?} returned {:?}",
+                packet.results
+            );
+        }
+
+        let session = Session {
+            id: Uuid::parse_str("018f45d0-0000-7000-8005-000000000002").unwrap(),
+            history_record_id: Some(record.id),
+            parent_session_id: None,
+            root_session_id: None,
+            capture_source_id: None,
+            provider: CaptureProvider::Codex,
+            external_session_id: Some("bookkeeping-content-session".into()),
+            external_agent_id: None,
+            agent_type: AgentType::Primary,
+            role_hint: Some("primary".into()),
+            is_primary: true,
+            status: SessionStatus::Imported,
+            transcript_blob_id: None,
+            started_at: fixed_time(),
+            ended_at: None,
+            timestamps: timestamps(),
+            sync: sync_metadata(),
+        };
+        store.upsert_session(&session).unwrap();
+        let event = Event {
+            id: Uuid::parse_str("018f45d0-0000-7000-8005-000000000003").unwrap(),
+            seq: 1,
+            history_record_id: Some(record.id),
+            session_id: Some(session.id),
+            run_id: None,
+            event_type: EventType::Message,
+            role: Some(EventRole::Assistant),
+            occurred_at: fixed_time(),
+            capture_source_id: None,
+            payload: serde_json::json!({
+                "text": "actual agent-history session evidence"
+            }),
+            payload_blob_id: None,
+            dedupe_key: None,
+            redaction_state: RedactionState::SafePreview,
+            sync: sync_metadata(),
+        };
+        store.upsert_event(&event).unwrap();
+
+        let packet = search_packet(&store, "agent-history", &PacketOptions::default()).unwrap();
+        assert_eq!(packet.results.len(), 1);
+        assert_eq!(packet.results[0].event_id, Some(event.id));
+        assert!(packet.results[0]
+            .why_matched
+            .iter()
+            .any(|reason| reason == "message"));
+        assert!(!packet.results[0]
+            .why_matched
+            .iter()
+            .any(|reason| reason == "title" || reason == "tag"));
     }
 
     #[test]
