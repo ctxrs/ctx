@@ -3462,6 +3462,71 @@ fn fresh_home_search_mvp_flow() {
     assert!(report_json["source"]["path"].is_null());
     assert!(report_json["source"]["cwd"].is_null());
 
+    let cloud_work_record =
+        json_output(ctx(&temp).args(["report", "session", &ctx_session_id, "--cloud-work-record"]));
+    assert_eq!(cloud_work_record["title"], report_json["title"]);
+    assert_eq!(cloud_work_record["source"]["type"], "session");
+    assert_eq!(cloud_work_record["source"]["id"], ctx_session_id);
+    assert_eq!(cloud_work_record["visibility"], "private");
+    assert_eq!(
+        cloud_work_record["occurred_at"],
+        report_json["session"]["started_at"]
+    );
+    assert!(cloud_work_record["body"]
+        .as_str()
+        .unwrap()
+        .contains("Transcript text and signal text are omitted"));
+    assert_eq!(
+        cloud_work_record["metadata"]["payload_kind"],
+        "ctx_cloud_work_record_create"
+    );
+    assert_eq!(
+        cloud_work_record["metadata"]["ctx_report_schema_version"],
+        1
+    );
+    assert_eq!(cloud_work_record["metadata"]["provider"], "codex");
+    assert!(cloud_work_record["metadata"]["provider_session_id"].is_string());
+    assert_eq!(
+        cloud_work_record["metadata"]["activity"]["transcript_included"],
+        false
+    );
+    assert_eq!(
+        cloud_work_record["metadata"]["privacy"]["local_paths_included"],
+        false
+    );
+    assert!(cloud_work_record["metadata"]["source"]["path"].is_null());
+    assert!(cloud_work_record["metadata"]["source"]["cwd"].is_null());
+    let cloud_work_record_text = serde_json::to_string(&cloud_work_record).unwrap();
+    assert!(!cloud_work_record_text.contains("Fix the onboarding bug"));
+    assert!(!cloud_work_record_text.contains("all onboarding tests passed"));
+    assert!(!cloud_work_record_text.contains("source_path"));
+    assert!(!cloud_work_record_text.contains("\"cwd\""));
+    assert!(!cloud_work_record_text.contains("/repo/app"));
+
+    let team_cloud_work_record = json_output(ctx(&temp).args([
+        "report",
+        "session",
+        &ctx_session_id,
+        "--cloud-work-record",
+        "--visibility",
+        "team",
+    ]));
+    assert_eq!(team_cloud_work_record["visibility"], "team");
+
+    ctx(&temp)
+        .args([
+            "report",
+            "session",
+            &ctx_session_id,
+            "--cloud-work-record",
+            "--include-transcript",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--cloud-work-record cannot be used with --include-transcript",
+        ));
+
     let show_session_full = json_output(ctx(&temp).args([
         "show",
         "session",

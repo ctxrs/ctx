@@ -188,13 +188,25 @@ enum ReportTarget {
 struct ReportSessionArgs {
     #[arg(help = "ctx session id or unambiguous id prefix")]
     id: String,
-    #[arg(long, value_enum, default_value_t = ReportFormat::Markdown)]
+    #[arg(long, value_enum, default_value_t = ReportFormat::Markdown, conflicts_with = "cloud_work_record")]
     format: ReportFormat,
     #[arg(
         long,
         help = "Include the lite transcript in the report; this may expose private prompt or transcript text"
     )]
     include_transcript: bool,
+    #[arg(
+        long = "cloud-work-record",
+        help = "Emit a local JSON payload suitable for POST /v1/cloud/work-records; no network call is made"
+    )]
+    cloud_work_record: bool,
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = ReportCloudVisibility::Private,
+        help = "Requested cloud work-record visibility when --cloud-work-record is used"
+    )]
+    visibility: ReportCloudVisibility,
     #[arg(long)]
     out: Option<PathBuf>,
 }
@@ -601,7 +613,9 @@ impl ShowArgs {
 impl ReportArgs {
     fn json_output(&self) -> bool {
         match &self.target {
-            ReportTarget::Session(args) => args.format == ReportFormat::Json,
+            ReportTarget::Session(args) => {
+                args.cloud_work_record || args.format == ReportFormat::Json
+            }
         }
     }
 }
@@ -665,6 +679,13 @@ enum ReportFormat {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ReportCloudVisibility {
+    Private,
+    Team,
+    Org,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum LocateFormat {
     Text,
     Json,
@@ -704,6 +725,16 @@ impl ReportFormat {
             Self::Markdown => "markdown",
             Self::Html => "html",
             Self::Json => "json",
+        }
+    }
+}
+
+impl ReportCloudVisibility {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Private => "private",
+            Self::Team => "team",
+            Self::Org => "org",
         }
     }
 }
@@ -3082,6 +3113,8 @@ fn run_report(
                 &events,
                 args.format,
                 args.include_transcript,
+                args.cloud_work_record,
+                args.visibility,
                 args.out,
             )?;
         }
@@ -3248,8 +3281,22 @@ fn write_rendered_report_session(
     events: &[Event],
     format: ReportFormat,
     include_transcript: bool,
+    cloud_work_record: bool,
+    visibility: ReportCloudVisibility,
     out: Option<PathBuf>,
 ) -> Result<()> {
+    if cloud_work_record {
+        if include_transcript {
+            return Err(anyhow!(
+                "--cloud-work-record cannot be used with --include-transcript"
+            ));
+        }
+        let body = serde_json::to_string_pretty(&report_session_cloud_work_record_json(
+            store, session, events, visibility,
+        ))?;
+        return write_output(body, out);
+    }
+
     let body = match format {
         ReportFormat::Markdown => {
             render_report_session_markdown(store, session, events, include_transcript)
@@ -3689,6 +3736,71 @@ fn report_session_json(
                 .collect::<Vec<_>>()
         }),
     }))
+}
+
+fn report_session_cloud_work_record_json(
+    store: &Store,
+    session: &Session,
+    events: &[Event],
+    visibility: ReportCloudVisibility,
+) -> Value {
+    let transcript_events = selected_transcript_events(events, TranscriptMode::Lite);
+    let command_signals = report_command_signals(events);
+    let test_signals = report_test_signals(events);
+    let failure_signals = report_failure_signals(events);
+    compact_json(json!({
+        "title": format!("ctx session report: {}", report_session_title(session)),
+        "body": report_session_cloud_work_record_body(
+            session,
+            events.len(),
+            transcript_events.len(),
+            command_signals.len(),
+            test_signals.len(),
+            failure_signals.len(),
+        ),
+        "source": {
+            "type": "session",
+            "id": session.id,
+        },
+        "visibility": visibility.as_str(),
+        "occurred_at": session.started_at,
+        "metadata": {
+            "ctx_report_schema_version": 1,
+            "payload_kind": "ctx_cloud_work_record_create",
+            "provider": session.provider,
+            "provider_session_id": session.external_session_id,
+            "session": report_session_summary_json(session),
+            "source": report_source_json_for(store, session.capture_source_id),
+            "activity": {
+                "events": events.len(),
+                "lite_transcript_events": transcript_events.len(),
+                "transcript_included": false,
+                "command_signals": command_signals.len(),
+                "test_signals": test_signals.len(),
+                "failure_signals": failure_signals.len(),
+            },
+            "privacy": {
+                "transcript_included": false,
+                "signal_text_included": false,
+                "local_paths_included": false,
+                "cwd_included": false,
+            },
+        },
+    }))
+}
+
+fn report_session_cloud_work_record_body(
+    session: &Session,
+    events: usize,
+    lite_transcript_events: usize,
+    command_signals: usize,
+    test_signals: usize,
+    failure_signals: usize,
+) -> String {
+    format!(
+        "Public-safe ctx session report for {}. Indexed {events} event(s), {lite_transcript_events} lite transcript event(s), {command_signals} command signal(s), {test_signals} test signal(s), and {failure_signals} failure signal(s). Transcript text and signal text are omitted.",
+        session.provider,
+    )
 }
 
 fn report_session_summary_json(session: &Session) -> Value {

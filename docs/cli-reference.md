@@ -185,6 +185,19 @@ explicit provider lookup such as `--provider codex --provider-session
 JSON output may expose local paths, event payloads, and compatibility field
 names from the current store schema, so treat it as private local data.
 
+## Report
+
+```bash
+ctx report session <ctx-session-id>
+ctx report session <ctx-session-id> --format html --out report.html
+ctx report session <ctx-session-id> --format json
+ctx report session <ctx-session-id> --include-transcript
+```
+
+`report session` creates a public-safe session report by default. Markdown,
+HTML, and JSON report outputs omit transcript text, signal text, source paths,
+and cwd unless `--include-transcript` is passed for local-only review.
+
 ## Search
 
 ```bash
