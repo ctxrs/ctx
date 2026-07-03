@@ -126,7 +126,22 @@ struct UpgradePlan {
     update_available: bool,
     managed: bool,
     warnings: Vec<String>,
+    path: PathDiagnostics,
     metadata: ReleaseMetadata,
+}
+
+#[derive(Debug, Clone)]
+struct PathDiagnostics {
+    current_exe: PathBuf,
+    entries: Vec<PathDiagnosticEntry>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct PathDiagnosticEntry {
+    path: PathBuf,
+    version: Option<String>,
+    current: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -164,8 +179,26 @@ impl UpgradeOutcome {
             "artifact_url": plan.map(|plan| plan.artifact_url.as_str()),
             "install_path": plan.map(|plan| plan.install_path.display().to_string()),
             "managed": plan.map(|plan| plan.managed).unwrap_or(false),
+            "path": plan.map(|plan| plan.path.json()),
             "applied": self.applied,
             "dry_run": self.dry_run,
+            "warnings": self.warnings,
+        })
+    }
+}
+
+impl PathDiagnostics {
+    fn json(&self) -> Value {
+        json!({
+            "current_exe": self.current_exe.display().to_string(),
+            "first_ctx": self.entries.first().map(|entry| entry.path.display().to_string()),
+            "entries": self.entries.iter().map(|entry| {
+                json!({
+                    "path": entry.path.display().to_string(),
+                    "version": entry.version.as_deref(),
+                    "current": entry.current,
+                })
+            }).collect::<Vec<_>>(),
             "warnings": self.warnings,
         })
     }
@@ -400,6 +433,9 @@ fn build_upgrade_plan(
         &current_version,
         &mut warnings,
     )?;
+    let managed = warnings.is_empty();
+    let path = path_diagnostics(&marker.install_path, &current_version);
+    warnings.extend(path.warnings.clone());
     let metadata_url = metadata_url(config, &channel);
     let signature_url = metadata_signature_url(&metadata_url);
     let metadata_bytes = net::get_bytes(&metadata_url)
@@ -425,8 +461,9 @@ fn build_upgrade_plan(
         artifact_sha256: metadata.sha256.clone(),
         install_path: marker.install_path.clone(),
         update_available,
-        managed: warnings.is_empty(),
+        managed,
         warnings,
+        path,
         metadata,
     })
 }
@@ -450,6 +487,11 @@ fn render_status(data_root: &Path, json_output: bool) -> Result<()> {
             "status": "never_checked"
         })
     });
+    let current_version = env!("CARGO_PKG_VERSION");
+    let current_exe = current_install_path().ok();
+    let path_diagnostics = current_exe
+        .as_ref()
+        .map(|path| path_diagnostics(path, current_version));
     let marker = read_verified_install_marker_for_current_exe()
         .map(|marker| {
             json!({
@@ -470,8 +512,14 @@ fn render_status(data_root: &Path, json_output: bool) -> Result<()> {
     let value = json!({
         "schema_version": 1,
         "command": "upgrade_status",
+        "current_version": current_version,
         "state": state,
         "install": marker,
+        "path": path_diagnostics.as_ref().map(PathDiagnostics::json),
+        "warnings": path_diagnostics
+            .as_ref()
+            .map(|diagnostics| diagnostics.warnings.clone())
+            .unwrap_or_default(),
     });
     if json_output {
         println!("{}", serde_json::to_string_pretty(&value)?);
@@ -484,10 +532,28 @@ fn render_status(data_root: &Path, json_output: bool) -> Result<()> {
         if let Some(path) = marker.get("install_path").and_then(Value::as_str) {
             println!("install: {path}");
         }
+        if let Some(diagnostics) = &path_diagnostics {
+            println!("current_exe: {}", diagnostics.current_exe.display());
+            if let Some(first) = diagnostics.entries.first() {
+                println!("path_ctx: {}", first.path.display());
+            }
+            for warning in &diagnostics.warnings {
+                eprintln!("warning: {warning}");
+            }
+        }
     } else {
         println!("ctx upgrade status: unmanaged install");
         if let Some(reason) = marker.get("reason").and_then(Value::as_str) {
             println!("{reason}");
+        }
+        if let Some(diagnostics) = &path_diagnostics {
+            println!("current_exe: {}", diagnostics.current_exe.display());
+            if let Some(first) = diagnostics.entries.first() {
+                println!("path_ctx: {}", first.path.display());
+            }
+            for warning in &diagnostics.warnings {
+                eprintln!("warning: {warning}");
+            }
         }
     }
     Ok(())
@@ -1002,6 +1068,91 @@ fn current_binary_sha() -> Result<String> {
     let path = current_install_path()?;
     let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
     Ok(sha256_hex(&bytes))
+}
+
+fn path_diagnostics(current_exe: &Path, current_version: &str) -> PathDiagnostics {
+    let current_identity = path_identity(current_exe);
+    let current_display = current_exe.display().to_string();
+    let binary_name = if cfg!(windows) { "ctx.exe" } else { "ctx" };
+    let mut entries = Vec::new();
+    for dir in env::var_os("PATH")
+        .map(|path| env::split_paths(&path).collect::<Vec<_>>())
+        .unwrap_or_default()
+    {
+        let candidate = dir.join(binary_name);
+        if !candidate.is_file() {
+            continue;
+        }
+        if entries
+            .iter()
+            .any(|entry: &PathDiagnosticEntry| same_path(&entry.path, &candidate))
+        {
+            continue;
+        }
+        let current = path_identity(&candidate) == current_identity;
+        entries.push(PathDiagnosticEntry {
+            version: ctx_binary_version(&candidate).ok(),
+            path: candidate,
+            current,
+        });
+    }
+
+    let mut warnings = Vec::new();
+    match entries.first() {
+        Some(first) if !first.current => warnings.push(format!(
+            "PATH resolves ctx to {} before the current executable {}; your shell may keep using the earlier binary after upgrade",
+            first.path.display(),
+            current_display
+        )),
+        None => warnings.push(format!(
+            "current ctx executable {current_display} is not discoverable on PATH"
+        )),
+        _ => {}
+    }
+    if entries.len() > 1 {
+        warnings.push(format!(
+            "multiple ctx binaries are on PATH; first is {}",
+            entries[0].path.display()
+        ));
+    }
+    let expected = format!("ctx {current_version}");
+    for entry in &entries {
+        if let Some(version) = &entry.version {
+            if version != &expected {
+                warnings.push(format!(
+                    "ctx on PATH at {} reports {version}; current binary reports {expected}",
+                    entry.path.display()
+                ));
+            }
+        }
+    }
+
+    PathDiagnostics {
+        current_exe: current_exe.to_path_buf(),
+        entries,
+        warnings,
+    }
+}
+
+fn path_identity(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    path_identity(left) == path_identity(right)
+}
+
+fn ctx_binary_version(path: &Path) -> Result<String> {
+    let output = Command::new(path)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| format!("run {} --version", path.display()))?;
+    if !output.status.success() {
+        return Err(anyhow!("{} --version failed", path.display()));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout.lines().next().unwrap_or_default().trim().to_owned())
 }
 
 fn write_state_checked(data_root: &Path, plan: &UpgradePlan, status: &str) -> Result<()> {

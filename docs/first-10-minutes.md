@@ -115,8 +115,8 @@ ctx upgrade status
 ```
 
 `ctx docs` is embedded in the binary for humans and agents. `ctx upgrade status`
-shows whether the current binary is managed by the official installer and
-eligible for signed self-upgrades.
+shows whether the current binary is managed by the official installer, eligible
+for signed self-upgrades, and shadowed by another `ctx` binary on `PATH`.
 
 ## Failure Paths
 

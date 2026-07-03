@@ -389,6 +389,9 @@ binary, such as `~/.local/bin/ctx.install.json`, recording the managed install
 path, platform, version, channel, binary SHA-256, metadata URL, and artifact
 URL. Source builds, `cargo install`, package-manager installs, copied binaries,
 and mismatched sidecars are treated as unmanaged and will not self-upgrade.
+`ctx upgrade status --json` also reports the current executable and every `ctx`
+binary found on `PATH`, with warnings when an older binary shadows the managed
+install or multiple `ctx` binaries are present.
 
 Official installer-managed installs default to background auto-upgrade after
 successful normal commands when signed release metadata explicitly allows

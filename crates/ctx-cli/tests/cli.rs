@@ -2361,6 +2361,42 @@ fn upgrade_status_check_and_apply_support_managed_installs() {
 
 #[cfg(unix)]
 #[test]
+fn upgrade_status_reports_path_shadowing() {
+    let temp = tempdir();
+    let release = fake_release(&temp, "9.9.9");
+    let shadow_dir = temp.path().join("shadow-bin");
+    fs::create_dir_all(&shadow_dir).unwrap();
+    let shadow_ctx = shadow_dir.join("ctx");
+    write_fake_ctx_binary(&shadow_ctx, "0.9.0");
+    let managed_dir = release.target.parent().unwrap();
+    let path = std::env::join_paths([shadow_dir.as_path(), managed_dir]).unwrap();
+
+    let mut command = ctx(&temp);
+    command
+        .args(["upgrade", "status", "--json"])
+        .env("PATH", path);
+    let status = json_output(fake_release_env(&mut command, &release));
+
+    assert_eq!(status["current_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        status["path"]["entries"][0]["path"],
+        shadow_ctx.display().to_string()
+    );
+    assert_eq!(status["path"]["entries"][0]["version"], "ctx 0.9.0");
+    assert!(status["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| { warning.as_str().unwrap().contains("PATH resolves ctx to") }));
+    assert!(status["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| { warning.as_str().unwrap().contains("reports ctx 0.9.0") }));
+}
+
+#[cfg(unix)]
+#[test]
 fn upgrade_rejects_unmanaged_install_before_network() {
     let temp = tempdir();
     let stderr = failure_stderr(

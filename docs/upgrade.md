@@ -19,6 +19,8 @@ The installer writes a sidecar marker next to the binary, such as
 version, channel, binary SHA-256, metadata URL, and artifact URL. Source builds,
 `cargo install`, package-manager installs, copied binaries, and mismatched
 sidecars are treated as unmanaged and will not self-upgrade.
+`ctx upgrade status --json` also lists every `ctx` binary found on `PATH` and
+warns when another binary shadows the managed install.
 
 Official installer-managed installs default to background auto-upgrade after
 successful normal commands when signed release metadata explicitly allows
