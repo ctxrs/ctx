@@ -4025,27 +4025,28 @@ fn prune_null_json(value: &mut Value) {
     }
 }
 
-fn run_sql(args: SqlArgs, data_root: PathBuf) -> Result<()> {
-    let sql = read_sql_input(&args)?;
-    let db_path = database_path(data_root);
+fn open_existing_store_read_only(db_path: &Path, command: &str) -> Result<Store> {
     if !db_path.exists() {
         return Err(anyhow!(
             "ctx store is not initialized at {}; run `ctx setup` or `ctx import` first",
             db_path.display()
         ));
     }
-    let store = match Store::open_read_only(&db_path) {
-        Ok(store) => store,
-        Err(StoreError::UnsupportedSchemaVersion(version)) => {
-            return Err(anyhow!(
-                "ctx store schema version {version} is not supported by this ctx binary; run `ctx status` once to migrate before using `ctx sql`"
-            ));
-        }
+    match Store::open_read_only(db_path) {
+        Ok(store) => Ok(store),
+        Err(StoreError::UnsupportedSchemaVersion(version)) => Err(anyhow!(
+            "ctx store schema version {version} is not supported by this ctx binary; run `ctx status` once to migrate before using `{command}`"
+        )),
         Err(err) => {
-            return Err(err)
-                .with_context(|| format!("open read-only ctx store {}", db_path.display()));
+            Err(err).with_context(|| format!("open read-only ctx store {}", db_path.display()))
         }
-    };
+    }
+}
+
+fn run_sql(args: SqlArgs, data_root: PathBuf) -> Result<()> {
+    let sql = read_sql_input(&args)?;
+    let db_path = database_path(data_root);
+    let store = open_existing_store_read_only(&db_path, "ctx sql")?;
     let result = store.raw_sql_query(
         &sql,
         RawSqlOptions {
@@ -4328,6 +4329,8 @@ fn run_search(
         return Err(missing_search_intent_error());
     }
 
+    let db_path = database_path(data_root.clone());
+    let had_existing_store = db_path.exists();
     let refresh_started = Instant::now();
     let refresh = refresh_before_search(&args, &data_root)?;
     analytics::insert_duration(
@@ -4350,9 +4353,22 @@ fn run_search(
         "search_refresh_source_count_bucket",
         refresh.source_count as u64,
     );
-    let db_path = database_path(data_root);
     insert_db_size_bucket(analytics_properties, &db_path);
-    let store = Store::open(&db_path)?;
+    if refresh.status == "failed" && args.refresh == RefreshArg::Auto && !had_existing_store {
+        return Err(anyhow!(
+            "search refresh failed and no existing ctx index is available; run `ctx import` first or retry with `--refresh strict`: {}",
+            refresh.error.as_deref().unwrap_or("unknown refresh error")
+        ));
+    }
+    let store = if args.refresh == RefreshArg::Off
+        || refresh.status == "failed"
+        || refresh.status == "completed"
+        || had_existing_store
+    {
+        open_existing_store_read_only(&db_path, "ctx search")?
+    } else {
+        Store::open(&db_path)?
+    };
     insert_store_analytics_counts(analytics_properties, &store)?;
     let source_identity = SourceIdentityFilterArgs::from(&args);
     let query = args.query.unwrap_or_default();
@@ -4835,14 +4851,23 @@ fn run_doctor(
 ) -> Result<()> {
     let progress = ProgressReporter::new(args.progress, args.json, "doctor", 0);
     progress.message("opening", "opening ctx store");
-    let store = Store::open(database_path(data_root.clone()))?;
-    progress.message(
-        "checking",
-        "running sqlite integrity and foreign key checks",
-    );
-    let mut findings = store.validate()?;
+    let db_path = database_path(data_root.clone());
+    let mut findings = Vec::new();
     if !data_root.exists() {
         findings.push(format!("data root does not exist: {}", data_root.display()));
+    }
+    if !db_path.exists() {
+        findings.push(format!(
+            "ctx store is not initialized at {}; run `ctx setup` or `ctx import` first",
+            db_path.display()
+        ));
+    } else {
+        let store = open_existing_store_read_only(&db_path, "ctx doctor")?;
+        progress.message(
+            "checking",
+            "running sqlite integrity and foreign key checks",
+        );
+        findings.extend(store.validate()?);
     }
     analytics::insert_count_bucket(
         analytics_properties,

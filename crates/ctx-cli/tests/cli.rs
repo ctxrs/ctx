@@ -3464,6 +3464,30 @@ fn fresh_home_search_mvp_flow() {
 }
 
 #[test]
+fn doctor_reports_missing_store_without_creating_it() {
+    let temp = tempdir();
+
+    let doctor = json_output(ctx(&temp).args(["doctor", "--json"]));
+
+    assert_eq!(doctor["schema_version"], 1);
+    assert_eq!(doctor["ok"], false);
+    assert!(doctor["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|finding| {
+            finding
+                .as_str()
+                .unwrap()
+                .contains("ctx store is not initialized")
+        }));
+    assert!(
+        !temp.path().join("work.sqlite").exists(),
+        "doctor should not create the ctx store"
+    );
+}
+
+#[test]
 fn mcp_status_and_tools_list_are_read_only_without_initialized_store() {
     let temp = tempdir();
     let responses = mcp_roundtrip(
@@ -4077,13 +4101,22 @@ fn search_refreshes_discovered_codex_sessions_before_query() {
 #[test]
 fn search_refresh_off_serves_existing_index_without_importing() {
     let temp = tempdir();
-    let fixture = PathBuf::from(provider_history_fixture("codex-sessions"));
+    let indexed_fixture = provider_history_fixture("codex-sessions");
+    json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "codex",
+        "--path",
+        &indexed_fixture,
+        "--json",
+    ]));
+    let discovered_fixture = provider_history_fixture("codex-rich-sessions");
     let discovered = temp.path().join(".codex").join("sessions");
-    copy_dir_all(&fixture, &discovered);
+    copy_dir_all(&PathBuf::from(discovered_fixture), &discovered);
 
     let stale = json_output(ctx(&temp).args([
         "search",
-        "onboarding",
+        "redacted sample app",
         "--provider",
         "codex",
         "--refresh",
@@ -4095,8 +4128,8 @@ fn search_refresh_off_serves_existing_index_without_importing() {
     assert!(stale["results"].as_array().unwrap().is_empty());
 
     let status = json_output(ctx(&temp).args(["status", "--json"]));
-    assert_eq!(status["cataloged_sessions"], 0);
-    assert_eq!(status["indexed_catalog_sessions"], 0);
+    assert_eq!(status["cataloged_sessions"], 2);
+    assert_eq!(status["indexed_catalog_sessions"], 2);
 
     let fresh =
         json_output(ctx(&temp).args(["search", "onboarding", "--provider", "codex", "--json"]));
@@ -4263,6 +4296,7 @@ fn search_refresh_provider_filter_does_not_execute_history_source_plugins() {
 #[test]
 fn search_refresh_off_does_not_execute_history_source_plugins() {
     let temp = tempdir();
+    json_output(ctx(&temp).args(["setup", "--json"]));
     let plugin =
         write_history_source_plugin_with_refresh(&temp, "hermes", true, Some("auto"), None);
 
@@ -4364,6 +4398,78 @@ sys.exit(23)
 }
 
 #[test]
+fn search_refresh_auto_failure_without_prior_store_fails_instead_of_serving_empty_index() {
+    let temp = tempdir();
+    let script = r#"#!/usr/bin/env python3
+import sys
+print("plugin exploded", file=sys.stderr)
+sys.exit(23)
+"#;
+    let plugin = write_raw_history_source_plugin_with_options(
+        &temp,
+        "badplugin",
+        script,
+        true,
+        Some("auto"),
+    );
+
+    let stderr = failure_stderr(
+        ctx(&temp)
+            .env("CTX_HISTORY_PLUGIN_PATH", &plugin.manifest_dir)
+            .args(["search", "anything", "--provider", "custom", "--json"]),
+    );
+
+    assert!(
+        stderr.contains("search refresh failed and no existing ctx index is available"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("history source plugin badplugin/default failed"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("plugin exploded"), "{stderr}");
+}
+
+#[test]
+fn search_refresh_auto_failure_serves_prior_index() {
+    let temp = tempdir();
+    let fixture = provider_history_fixture("codex-sessions");
+    let script = r#"#!/usr/bin/env python3
+import sys
+print("plugin exploded", file=sys.stderr)
+sys.exit(23)
+"#;
+    let plugin = write_raw_history_source_plugin_with_options(
+        &temp,
+        "badplugin",
+        script,
+        true,
+        Some("auto"),
+    );
+    json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "codex",
+        "--path",
+        &fixture,
+        "--json",
+    ]));
+
+    let search = json_output(
+        ctx(&temp)
+            .env("CTX_HISTORY_PLUGIN_PATH", &plugin.manifest_dir)
+            .args(["search", "onboarding", "--json"]),
+    );
+
+    assert_eq!(search["freshness"]["status"], "failed");
+    assert!(search["freshness"]["error"]
+        .as_str()
+        .unwrap()
+        .contains("history source plugin badplugin/default failed"));
+    assert!(!search["results"].as_array().unwrap().is_empty());
+}
+
+#[test]
 fn search_refresh_strict_times_out_when_plugin_helper_keeps_stdout_open() {
     let temp = tempdir();
     let script = r#"#!/usr/bin/env python3
@@ -4423,9 +4529,9 @@ subprocess.Popen(["sh", "-c", "sleep 5"])
 fn search_refresh_auto_imports_fresh_work_despite_large_existing_catalog() {
     let temp = tempdir();
     let fixture = PathBuf::from(provider_history_fixture("codex-sessions"));
+    let _ = json_output(ctx(&temp).args(["setup", "--json"]));
     let discovered = temp.path().join(".codex").join("sessions");
     copy_dir_all(&fixture, &discovered);
-    let _ = json_output(ctx(&temp).args(["search", "anything", "--refresh", "off", "--json"]));
 
     let mut conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
     let tx = conn.transaction().unwrap();
@@ -6049,6 +6155,18 @@ fn search_requires_query_term_or_file_before_refreshing() {
     assert!(
         underscore_term.contains("search needs a query, --term, or --file"),
         "{underscore_term}"
+    );
+}
+
+#[test]
+fn search_refresh_off_requires_existing_store_without_creating_one() {
+    let temp = tempdir();
+    let stderr = failure_stderr(ctx(&temp).args(["search", "anything", "--refresh", "off"]));
+
+    assert!(stderr.contains("ctx store is not initialized"), "{stderr}");
+    assert!(
+        !temp.path().join("work.sqlite").exists(),
+        "refresh-off search should not create the ctx store"
     );
 }
 
