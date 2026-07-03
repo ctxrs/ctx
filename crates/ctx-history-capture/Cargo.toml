@@ -1,6 +1,6 @@
 [package]
 name = "ctx-history-capture"
-version = "0.17.0"
+version = "0.18.0"
 description = "Internal provider import adapters for ctx local agent history"
 edition.workspace = true
 license.workspace = true

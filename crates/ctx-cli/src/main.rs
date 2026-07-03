@@ -20,6 +20,7 @@ mod config;
 mod docs;
 mod history_source_plugins;
 mod identity;
+mod install_marker;
 mod mcp;
 mod net;
 mod upgrade;
@@ -1389,6 +1390,19 @@ fn main() -> Result<()> {
         .unwrap_or_else(default_data_root)
         .context("resolve ctx data root")?;
     let config = AppConfig::load(&data_root)?;
+    if matches!(&cli.command, CommandRoot::Setup(_)) && sends_analytics {
+        analytics::send_cli_event(
+            &data_root,
+            &config,
+            AnalyticsEvent {
+                action: "setup_started",
+                json_output,
+                success: true,
+                duration: StdDuration::ZERO,
+                properties: analytics_properties.clone(),
+            },
+        );
+    }
 
     let result = match cli.command {
         CommandRoot::Setup(args) => run_setup(args, data_root.clone(), &mut analytics_properties),

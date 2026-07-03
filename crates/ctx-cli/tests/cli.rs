@@ -28,6 +28,39 @@ fn ctx(temp: &TempDir) -> Command {
     command
 }
 
+fn ctx_from_binary(temp: &TempDir, binary: &Path) -> Command {
+    let mut command = Command::new(binary);
+    command.env("CTX_DATA_ROOT", temp.path());
+    command.env("HOME", temp.path());
+    command.env("CTX_ANALYTICS_OFF", "1");
+    command
+}
+
+fn copied_ctx_binary(temp: &TempDir) -> PathBuf {
+    let source = PathBuf::from(Command::cargo_bin("ctx").unwrap().get_program().to_owned());
+    let target = temp.path().join(if cfg!(windows) {
+        "ctx-test-copy.exe"
+    } else {
+        "ctx-test-copy"
+    });
+    fs::copy(&source, &target).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = fs::metadata(&target).unwrap().permissions();
+        permissions.set_mode(permissions.mode() | 0o700);
+        fs::set_permissions(&target, permissions).unwrap();
+    }
+    target
+}
+
+fn hosted_install_marker_path(binary: &Path) -> PathBuf {
+    let mut marker = binary.as_os_str().to_owned();
+    marker.push(".install.json");
+    PathBuf::from(marker)
+}
+
 fn initialize_empty_store(temp: &TempDir) {
     fs::create_dir_all(temp.path().join(".codex").join("sessions")).unwrap();
     ctx(temp)
@@ -363,6 +396,10 @@ fn read_analytics_events(path: &Path) -> Vec<Value> {
 
 fn analytics_event_properties(event: &Value) -> &serde_json::Map<String, Value> {
     event["events"][0]["properties"].as_object().unwrap()
+}
+
+fn analytics_cli_event(event: &Value) -> &Value {
+    &event["events"][0]
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -2321,6 +2358,7 @@ fn fake_release(temp: &TempDir, latest_version: &str) -> FakeRelease {
     let marker = json!({
         "schema_version": 1,
         "manager": "ctx-hosted-installer",
+        "install_attempt_id": "ia_test_upgrade_attempt",
         "install_path": target,
         "platform": test_platform_key().replace('_', "-"),
         "channel": "stable",
@@ -2435,6 +2473,7 @@ fn upgrade_status_check_and_apply_support_managed_installs() {
         serde_json::from_slice(&fs::read(install_marker_path(&release.target)).unwrap()).unwrap();
     assert_eq!(marker["version"], "9.9.9");
     assert_eq!(marker["sha256"], release.artifact_sha);
+    assert_eq!(marker["install_attempt_id"], "ia_test_upgrade_attempt");
 }
 
 #[cfg(unix)]
@@ -3117,6 +3156,204 @@ fn analytics_payloads_omit_sensitive_command_data() {
 }
 
 #[test]
+fn hosted_install_marker_enriches_analytics_event_without_properties_leak() {
+    let temp = tempdir();
+    let data_root = temp.path().join("ctx-data");
+    let home = temp.path().join("home");
+    let state = temp.path().join("state");
+    let events_path = temp.path().join("analytics.jsonl");
+    let binary = copied_ctx_binary(&temp);
+    let install_attempt_id = "attempt_01JZCTXHOSTED";
+    let marker_secret = "marker-secret-must-not-leak";
+    fs::write(
+        hosted_install_marker_path(&binary),
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": 1,
+            "install_attempt_id": install_attempt_id,
+            "installer_private_note": marker_secret,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    ctx_from_binary(&temp, &binary)
+        .arg("status")
+        .env("CTX_DATA_ROOT", &data_root)
+        .env("HOME", &home)
+        .env("XDG_STATE_HOME", &state)
+        .env("LOCALAPPDATA", &state)
+        .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
+        .env("CTX_UPGRADE_OFF", "1")
+        .assert()
+        .success();
+
+    let events = read_analytics_events(&events_path);
+    assert_eq!(events.len(), 1);
+    let cli_event = analytics_cli_event(&events[0]);
+    assert_eq!(cli_event["install_attempt_id"], install_attempt_id);
+    let properties = analytics_event_properties(&events[0]);
+    assert_eq!(properties["install_manager"], "ctx-hosted-installer");
+    assert!(
+        properties.get("install_attempt_id").is_none(),
+        "raw marker id must stay out of analytics properties: {properties:#?}"
+    );
+    assert_no_json_string_contains(
+        &Value::Object(properties.clone()),
+        &[install_attempt_id, marker_secret],
+    );
+}
+
+#[test]
+fn malformed_hosted_install_marker_is_ignored() {
+    let temp = tempdir();
+    let data_root = temp.path().join("ctx-data");
+    let home = temp.path().join("home");
+    let state = temp.path().join("state");
+    let events_path = temp.path().join("analytics.jsonl");
+    let binary = copied_ctx_binary(&temp);
+    fs::write(
+        hosted_install_marker_path(&binary),
+        b"{not-json marker-secret-must-not-leak",
+    )
+    .unwrap();
+
+    ctx_from_binary(&temp, &binary)
+        .arg("status")
+        .env("CTX_DATA_ROOT", &data_root)
+        .env("HOME", &home)
+        .env("XDG_STATE_HOME", &state)
+        .env("LOCALAPPDATA", &state)
+        .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
+        .env("CTX_UPGRADE_OFF", "1")
+        .assert()
+        .success();
+
+    let events = read_analytics_events(&events_path);
+    assert_eq!(events.len(), 1);
+    let cli_event = analytics_cli_event(&events[0]);
+    assert!(cli_event.get("install_attempt_id").is_none());
+    let properties = analytics_event_properties(&events[0]);
+    assert!(properties.get("install_manager").is_none());
+    assert_no_json_string_contains(
+        &Value::Object(properties.clone()),
+        &["marker-secret-must-not-leak"],
+    );
+}
+
+#[test]
+fn setup_analytics_emits_start_and_completion_events() {
+    let temp = tempdir();
+    let data_root = temp.path().join("ctx-data");
+    let home = temp.path().join("home");
+    let state = temp.path().join("state");
+    let events_path = temp.path().join("analytics.jsonl");
+    fs::create_dir_all(home.join(".codex").join("sessions")).unwrap();
+
+    ctx(&temp)
+        .args(["setup", "--catalog-only", "--progress", "none"])
+        .env("CTX_DATA_ROOT", &data_root)
+        .env("HOME", &home)
+        .env("XDG_STATE_HOME", &state)
+        .env("LOCALAPPDATA", &state)
+        .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
+        .env("CTX_UPGRADE_OFF", "1")
+        .assert()
+        .success();
+
+    let events = read_analytics_events(&events_path);
+    assert_eq!(events.len(), 2);
+    let actions = events
+        .iter()
+        .map(|event| {
+            analytics_event_properties(event)["action"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(actions, ["setup_started", "setup"]);
+    for event in &events {
+        assert_eq!(analytics_cli_event(event)["event_name"], "cli_invocation");
+        assert_eq!(analytics_cli_event(event)["status"], "ok");
+        assert_eq!(analytics_cli_event(event)["success"], true);
+        assert_analytics_properties_are_allowlisted(analytics_event_properties(event));
+    }
+}
+
+#[test]
+fn setup_analytics_opt_out_suppresses_start_completion_and_identities() {
+    let temp = tempdir();
+    let data_root = temp.path().join("ctx-data");
+    let home = temp.path().join("home");
+    let state = temp.path().join("state");
+    let events_path = temp.path().join("analytics.jsonl");
+    fs::create_dir_all(home.join(".codex").join("sessions")).unwrap();
+
+    ctx(&temp)
+        .args(["setup", "--catalog-only", "--progress", "none"])
+        .env("CTX_DATA_ROOT", &data_root)
+        .env("HOME", &home)
+        .env("XDG_STATE_HOME", &state)
+        .env("LOCALAPPDATA", &state)
+        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
+        .env("CTX_UPGRADE_OFF", "1")
+        .assert()
+        .success();
+
+    assert!(
+        !events_path.exists(),
+        "setup analytics opt-out should suppress start and completion events"
+    );
+    assert!(
+        !data_root.join("install.json").exists(),
+        "setup analytics opt-out should not create an install identity"
+    );
+    assert!(
+        !expected_device_path(&home, &state).exists(),
+        "setup analytics opt-out should not create a device identity"
+    );
+}
+
+#[test]
+fn setup_analytics_dry_run_suppresses_start_completion_and_identities() {
+    let temp = tempdir();
+    let data_root = temp.path().join("ctx-data");
+    let home = temp.path().join("home");
+    let state = temp.path().join("state");
+    let events_path = temp.path().join("analytics.jsonl");
+    fs::create_dir_all(home.join(".codex").join("sessions")).unwrap();
+
+    ctx(&temp)
+        .args(["setup", "--catalog-only", "--progress", "none"])
+        .env("CTX_DATA_ROOT", &data_root)
+        .env("HOME", &home)
+        .env("XDG_STATE_HOME", &state)
+        .env("LOCALAPPDATA", &state)
+        .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_DRY_RUN", "1")
+        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
+        .env("CTX_UPGRADE_OFF", "1")
+        .assert()
+        .success();
+
+    assert!(
+        !events_path.exists(),
+        "setup analytics dry run should suppress start and completion events"
+    );
+    assert!(
+        !data_root.join("install.json").exists(),
+        "setup analytics dry run should not create an install identity"
+    );
+    assert!(
+        !expected_device_path(&home, &state).exists(),
+        "setup analytics dry run should not create a device identity"
+    );
+}
+
+#[test]
 fn analytics_config_opt_out_suppresses_delivery() {
     let temp = tempdir();
     let state = temp.path().join("state");
@@ -3278,6 +3515,7 @@ fn assert_analytics_properties_are_allowlisted(properties: &serde_json::Map<Stri
         "indexed_items_bucket",
         "indexed_sessions_bucket",
         "indexed_sources_bucket",
+        "install_manager",
         "initialized",
         "json_output",
         "limit_bucket",

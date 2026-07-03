@@ -1,6 +1,6 @@
 [package]
 name = "ctx-history-search"
-version = "0.17.0"
+version = "0.18.0"
 description = "Internal search projection and ranking helpers for ctx"
 edition.workspace = true
 license.workspace = true

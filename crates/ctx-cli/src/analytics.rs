@@ -5,7 +5,7 @@ use ctx_history_core::utc_now;
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
-use crate::{config::AppConfig, identity, net};
+use crate::{config::AppConfig, identity, install_marker, net};
 
 pub type AnalyticsProperties = Map<String, Value>;
 
@@ -38,6 +38,7 @@ fn send_cli_event_inner(
     let install_id = identity::install_id(data_root)?;
     let status = if event.success { "ok" } else { "error" };
     let duration_ms = event.duration.as_millis().min(i64::MAX as u128) as i64;
+    let install_marker = install_marker::current_exe_install_marker();
     let mut properties = event.properties;
     properties.insert("action".to_owned(), Value::String(event.action.to_owned()));
     properties.insert("json_output".to_owned(), Value::Bool(event.json_output));
@@ -45,11 +46,46 @@ fn send_cli_event_inner(
         "analytics_client".to_owned(),
         Value::String("ctx-cli".to_owned()),
     );
+    if install_marker.is_some() {
+        properties.insert(
+            "install_manager".to_owned(),
+            Value::String("ctx-hosted-installer".to_owned()),
+        );
+    }
     if !event.success {
         properties.insert(
             "failure_kind".to_owned(),
             Value::String("command_error".to_owned()),
         );
+    }
+    let mut cli_event = json!({
+        "event_id": Uuid::now_v7().to_string(),
+        "event_name": "cli_invocation",
+        "event_version": 1,
+        "occurred_at": utc_now(),
+        "plane": "product",
+        "delivery": "remote",
+        "origin_runtime": "cli",
+        "origin_install_id": install_id,
+        "origin_device_id": device_id,
+        "app_version": env!("CARGO_PKG_VERSION"),
+        "os": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+        "surface": "cli",
+        "source": "ctx-cli",
+        "duration_ms": duration_ms,
+        "duration_bucket": duration_bucket(event.duration),
+        "status": status,
+        "success": event.success,
+        "properties": properties
+    });
+    if let Some(marker) = install_marker {
+        if let Some(object) = cli_event.as_object_mut() {
+            object.insert(
+                "install_attempt_id".to_owned(),
+                Value::String(marker.install_attempt_id),
+            );
+        }
     }
     let payload = json!({
         "broker_install_id": install_id,
@@ -58,27 +94,7 @@ fn send_cli_event_inner(
         "broker_app_version": env!("CARGO_PKG_VERSION"),
         "broker_os": std::env::consts::OS,
         "broker_arch": std::env::consts::ARCH,
-        "events": [{
-            "event_id": Uuid::now_v7().to_string(),
-            "event_name": "cli_invocation",
-            "event_version": 1,
-            "occurred_at": utc_now(),
-            "plane": "product",
-            "delivery": "remote",
-            "origin_runtime": "cli",
-            "origin_install_id": install_id,
-            "origin_device_id": device_id,
-            "app_version": env!("CARGO_PKG_VERSION"),
-            "os": std::env::consts::OS,
-            "arch": std::env::consts::ARCH,
-            "surface": "cli",
-            "source": "ctx-cli",
-            "duration_ms": duration_ms,
-            "duration_bucket": duration_bucket(event.duration),
-            "status": status,
-            "success": event.success,
-            "properties": properties
-        }]
+        "events": [cli_event]
     });
     let body = serde_json::to_vec(&payload)?;
     net::post_json(&config.analytics.endpoint, &body)

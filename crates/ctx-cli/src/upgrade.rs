@@ -24,6 +24,7 @@ const LOG_FILE: &str = "logs/upgrade.log";
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const VERSION_PROBE_OUTPUT_LIMIT: usize = 4096;
 const STALE_UPGRADE_LOCK_AFTER: Duration = Duration::from_secs(30 * 60);
+const MAX_INSTALL_ATTEMPT_ID_CHARS: usize = 128;
 const DEFAULT_METADATA_PUBLIC_KEY_PEM: &str = r#"-----BEGIN RSA PUBLIC KEY-----
 MIIBigKCAYEAyBPNIx3H/NwWlN9CPHY5kOEe9kQEshOJEMpv3Atq086H1FWqliTm
 3BCWiO4s/89wNMn11Pla2JetCWNiWsbxm3BIxCd1o6cq8y9ur6Zk1RGOQBLQgqhF
@@ -848,7 +849,8 @@ fn replace_binary(staged: &Path, plan: &UpgradePlan) -> Result<ApplyResult> {
     let script = staged.with_extension("ps1");
     let marker_tmp = staged.with_extension("install.json.tmp");
     let marker_path = install_marker_path(target);
-    write_install_marker_to(&marker_tmp, plan)?;
+    let install_attempt_id = existing_install_attempt_id(&marker_path);
+    write_install_marker_to(&marker_tmp, plan, install_attempt_id.as_deref())?;
     let parent = std::process::id();
     let body = format!(
         r#"$ErrorActionPreference = 'Stop'
@@ -1016,11 +1018,16 @@ fn verify_install_marker(marker: &InstallMarker, platform: &str) -> Result<()> {
 
 fn write_install_marker_after_upgrade(plan: &UpgradePlan) -> Result<()> {
     let marker_path = install_marker_path(&plan.install_path);
-    write_install_marker_to(&marker_path, plan)
+    let install_attempt_id = existing_install_attempt_id(&marker_path);
+    write_install_marker_to(&marker_path, plan, install_attempt_id.as_deref())
 }
 
-fn write_install_marker_to(marker_path: &Path, plan: &UpgradePlan) -> Result<()> {
-    let body = json!({
+fn write_install_marker_to(
+    marker_path: &Path,
+    plan: &UpgradePlan,
+    install_attempt_id: Option<&str>,
+) -> Result<()> {
+    let mut body = json!({
         "schema_version": 1,
         "manager": "ctx-hosted-installer",
         "install_path": plan.install_path,
@@ -1035,7 +1042,32 @@ fn write_install_marker_to(marker_path: &Path, plan: &UpgradePlan) -> Result<()>
         "store_schema_version": plan.metadata.store_schema_version,
         "installed_at": utc_now(),
     });
+    if let Some(install_attempt_id) = install_attempt_id {
+        if let Some(object) = body.as_object_mut() {
+            object.insert(
+                "install_attempt_id".to_owned(),
+                Value::String(install_attempt_id.to_owned()),
+            );
+        }
+    }
     atomic_write_json(marker_path, &body)
+}
+
+fn existing_install_attempt_id(marker_path: &Path) -> Option<String> {
+    read_json_file(marker_path).and_then(|value| optional_install_attempt_id(&value))
+}
+
+fn optional_install_attempt_id(value: &Value) -> Option<String> {
+    let id = value.get("install_attempt_id")?.as_str()?.trim();
+    is_valid_install_attempt_id(id).then(|| id.to_owned())
+}
+
+fn is_valid_install_attempt_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.chars().count() <= MAX_INSTALL_ATTEMPT_ID_CHARS
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 fn string_field(value: &Value, key: &str) -> Result<String> {
