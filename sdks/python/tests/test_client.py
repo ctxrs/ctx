@@ -64,7 +64,10 @@ class LocalCliAdapterTests(unittest.TestCase):
             self.assertEqual(client.init(catalog_only=True)["operation"], "init")
             self.assertEqual(client.sources()["operation"], "sources")
             self.assertEqual(client.import_(provider="codex", resume=True)["operation"], "import")
-            self.assertEqual(client.sync(path="/tmp/history.jsonl")["operation"], "sync")
+            self.assertEqual(
+                client.sync(provider="codex", path="/tmp/history.jsonl")["operation"],
+                "sync",
+            )
             self.assertEqual(
                 client.search(
                     "sqlite",

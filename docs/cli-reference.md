@@ -93,7 +93,7 @@ ctx import --provider gemini
 ctx import --provider cursor
 ctx import --provider copilot-cli
 ctx import --provider factory-ai-droid
-ctx import --path ~/.codex/sessions
+ctx import --provider codex --path ~/.codex/sessions
 ctx import --provider pi --path ~/.pi/sessions.jsonl
 ctx import --format ctx-history-jsonl-v1 --path ./history.jsonl
 ctx import --history-source example-agent/default
@@ -135,8 +135,8 @@ Import selection rules:
   history JSONL file;
 - with `--history-source`, import matching local plugin sources;
 - with `--history-source-manifest`, import sources from that manifest path;
-- with `--path`, import exactly that path;
-- with `--path` and no provider, parse the path as Codex format.
+- with `--provider <provider> --path <path>`, import exactly that native
+  provider path.
 
 Preview providers such as NanoClaw and AstrBot are not included in `--all` or
 pre-search refresh. Import them explicitly with `--provider` when discovery

@@ -6258,15 +6258,25 @@ fn import_rejects_nonexistent_path() {
             predicate::str::contains("import path does not exist")
                 .and(predicate::str::contains(path)),
         );
+}
+
+#[test]
+fn import_path_requires_provider_before_opening_store() {
+    let temp = tempdir();
+    let path = temp.path().join("missing-codex-history");
+    let path = path.to_str().unwrap();
 
     ctx(&temp)
         .args(["import", "--path", path])
         .assert()
         .failure()
-        .stderr(
-            predicate::str::contains("import path does not exist")
-                .and(predicate::str::contains(path)),
-        );
+        .stderr(predicate::str::contains(
+            "ctx import --path requires --provider",
+        ));
+    assert!(
+        !temp.path().join("work.sqlite").exists(),
+        "native path import without provider should fail before opening the store"
+    );
 }
 
 #[cfg(unix)]

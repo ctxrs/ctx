@@ -125,7 +125,7 @@ Re-import or update the index:
 ```bash
 ctx import --all
 ctx import --resume
-ctx import --path ~/.codex/sessions
+ctx import --provider codex --path ~/.codex/sessions
 ctx import --format ctx-history-jsonl-v1 --path ./history.jsonl
 ctx import --history-source example-agent/default
 ```

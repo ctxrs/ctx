@@ -12,7 +12,7 @@ Confirm the provider keeps history on this machine and pass an explicit path if
 needed:
 
 ```bash
-ctx import --path ~/.codex/sessions
+ctx import --provider codex --path ~/.codex/sessions
 ```
 
 ## Search Misses Recent Work

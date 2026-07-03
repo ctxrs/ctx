@@ -121,7 +121,8 @@ eligible for signed self-upgrades.
 ## Failure Paths
 
 - No sources listed: this machine may not have supported local provider
-  history. Use `ctx import --path` only for a known supported format.
+  history. Use `ctx import --provider <provider> --path <path>` only for a
+  known supported native provider format.
 - Import fails on a file: rerun with `--json` and inspect the per-source
   `failed` count.
 - Search returns no results: confirm `ctx status` shows indexed items, then

@@ -133,7 +133,10 @@ struct DoctorArgs {
 struct ImportArgs {
     #[arg(long, value_enum)]
     provider: Option<NativeProviderArg>,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Import exactly this path; native provider paths require --provider"
+    )]
     path: Option<PathBuf>,
     #[arg(long = "history-source", conflicts_with_all = ["provider", "path", "format", "all"])]
     history_source: Option<String>,
@@ -2030,6 +2033,7 @@ fn run_import_internal(
     analytics_properties: &mut AnalyticsProperties,
     options: ImportRunOptions,
 ) -> Result<ImportReport> {
+    validate_import_args(args)?;
     fs::create_dir_all(&data_root)?;
     config::write_default_config(&data_root)?;
     let db_path = database_path(data_root.clone());
@@ -4900,6 +4904,15 @@ fn run_doctor(
     Ok(())
 }
 
+fn validate_import_args(args: &ImportArgs) -> Result<()> {
+    if args.path.is_some() && args.format.is_none() && args.provider.is_none() {
+        return Err(anyhow!(
+            "ctx import --path requires --provider for native provider history; use `ctx import --provider codex --path <path>` or `ctx import --format ctx-history-jsonl-v1 --path <file>`"
+        ));
+    }
+    Ok(())
+}
+
 fn import_requests(args: &ImportArgs) -> Result<Vec<SourceInfo>> {
     if args.history_source.is_some() || !args.history_source_manifest.is_empty() {
         return Ok(Vec::new());
@@ -4907,7 +4920,7 @@ fn import_requests(args: &ImportArgs) -> Result<Vec<SourceInfo>> {
     if let Some(path) = &args.path {
         let provider = args
             .provider
-            .unwrap_or(NativeProviderArg::Codex)
+            .context("ctx import --path requires --provider for native provider history")?
             .capture_provider();
         let source = explicit_path_source(provider, path.clone());
         if !source

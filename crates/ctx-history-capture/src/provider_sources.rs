@@ -1,6 +1,7 @@
 use std::{
     collections::HashSet,
     env,
+    io::ErrorKind,
     path::{Path, PathBuf},
 };
 
@@ -536,23 +537,37 @@ fn provider_source_from_location(
     location: &ProviderDefaultLocation,
     path: PathBuf,
 ) -> ProviderSource {
-    let exists = path.exists();
-    let status = if matches!(spec.import_support, ProviderImportSupport::Unsupported) {
-        ProviderSourceStatus::Unsupported
-    } else if !exists {
-        ProviderSourceStatus::Missing
-    } else {
-        match default_location_import_probe(spec.provider, location, &path) {
-            BoundedProbe::Found => ProviderSourceStatus::Available,
-            BoundedProbe::NotFound => ProviderSourceStatus::Empty,
-            BoundedProbe::BudgetExhausted => ProviderSourceStatus::Unknown,
-        }
-    };
-    let unsupported_reason = match status {
-        ProviderSourceStatus::Empty => empty_source_reason(spec.provider),
-        ProviderSourceStatus::Unknown => unknown_source_reason(spec.provider),
-        _ => spec.unsupported_reason,
-    };
+    let path_exists = path.try_exists();
+    let exists = path_exists.as_ref().copied().unwrap_or(true);
+    let (status, unsupported_reason) =
+        if matches!(spec.import_support, ProviderImportSupport::Unsupported) {
+            (ProviderSourceStatus::Unsupported, spec.unsupported_reason)
+        } else {
+            match path_exists {
+                Ok(false) => (ProviderSourceStatus::Missing, spec.unsupported_reason),
+                Err(_) => (
+                    ProviderSourceStatus::Unknown,
+                    probe_io_error_reason(spec.provider),
+                ),
+                Ok(true) => match default_location_import_probe(spec.provider, location, &path) {
+                    BoundedProbe::Found => {
+                        (ProviderSourceStatus::Available, spec.unsupported_reason)
+                    }
+                    BoundedProbe::NotFound => (
+                        ProviderSourceStatus::Empty,
+                        empty_source_reason(spec.provider),
+                    ),
+                    BoundedProbe::BudgetExhausted => (
+                        ProviderSourceStatus::Unknown,
+                        unknown_source_reason(spec.provider),
+                    ),
+                    BoundedProbe::IoError => (
+                        ProviderSourceStatus::Unknown,
+                        probe_io_error_reason(spec.provider),
+                    ),
+                },
+            }
+        };
     ProviderSource {
         provider: spec.provider,
         path,
@@ -633,6 +648,51 @@ fn unknown_source_reason(provider: CaptureProvider) -> Option<&'static str> {
     }
 }
 
+fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'static str> {
+    match provider {
+        CaptureProvider::Codex => {
+            Some("path exists but Codex session transcripts could not be read; check permissions")
+        }
+        CaptureProvider::Pi => {
+            Some("path exists but the Pi session file could not be read; check permissions")
+        }
+        CaptureProvider::Claude => {
+            Some("path exists but Claude project transcripts could not be read; check permissions")
+        }
+        CaptureProvider::OpenCode => {
+            Some("path exists but the OpenCode database could not be read; check permissions")
+        }
+        CaptureProvider::Antigravity => {
+            Some("path exists but Antigravity transcripts could not be read; check permissions")
+        }
+        CaptureProvider::Gemini => {
+            Some("path exists but Gemini CLI chat transcripts could not be read; check permissions")
+        }
+        CaptureProvider::Cursor => {
+            Some("path exists but Cursor agent transcripts could not be read; check permissions")
+        }
+        CaptureProvider::CopilotCli => {
+            Some("path exists but Copilot CLI session events could not be read; check permissions")
+        }
+        CaptureProvider::FactoryAiDroid => {
+            Some("path exists but Factory AI Droid sessions could not be read; check permissions")
+        }
+        CaptureProvider::OpenClaw => Some(
+            "path exists but OpenClaw session transcripts could not be read; check permissions",
+        ),
+        CaptureProvider::Hermes => {
+            Some("path exists but the Hermes state database could not be read; check permissions")
+        }
+        CaptureProvider::NanoClaw => {
+            Some("path exists but the NanoClaw project store could not be read; check permissions")
+        }
+        CaptureProvider::AstrBot => {
+            Some("path exists but the AstrBot data database could not be read; check permissions")
+        }
+        _ => None,
+    }
+}
+
 fn default_location_import_probe(
     provider: CaptureProvider,
     location: &ProviderDefaultLocation,
@@ -640,16 +700,16 @@ fn default_location_import_probe(
 ) -> BoundedProbe {
     match provider {
         CaptureProvider::Codex if location.source_format == "codex_history_jsonl" => {
-            BoundedProbe::from_bool(path.is_file())
+            path_is_file_probe(path)
         }
         CaptureProvider::Codex => has_jsonl_file_under_matching(path, 10_000, |_| true),
-        CaptureProvider::Pi => BoundedProbe::from_bool(path.is_file()),
-        CaptureProvider::OpenCode => BoundedProbe::from_bool(path.is_file()),
+        CaptureProvider::Pi => path_is_file_probe(path),
+        CaptureProvider::OpenCode => path_is_file_probe(path),
         CaptureProvider::Claude => has_jsonl_file_under_matching(path, 10_000, |_| true),
         CaptureProvider::OpenClaw => has_openclaw_session_jsonl(path, 10_000),
-        CaptureProvider::Hermes => BoundedProbe::from_bool(path.is_file()),
+        CaptureProvider::Hermes => path_is_file_probe(path),
         CaptureProvider::NanoClaw => has_nanoclaw_project(path),
-        CaptureProvider::AstrBot => BoundedProbe::from_bool(path.is_file()),
+        CaptureProvider::AstrBot => path_is_file_probe(path),
         CaptureProvider::Antigravity => has_jsonl_file_under_matching(path, 10_000, |candidate| {
             matches!(
                 candidate.file_name().and_then(|name| name.to_str()),
@@ -664,29 +724,45 @@ fn default_location_import_probe(
             candidate.file_name().and_then(|name| name.to_str()) == Some("events.jsonl")
         }),
         CaptureProvider::FactoryAiDroid => has_jsonl_file_under_matching(path, 10_000, |_| true),
-        _ => BoundedProbe::from_bool(path.exists()),
+        CaptureProvider::Shell
+        | CaptureProvider::Git
+        | CaptureProvider::Jj
+        | CaptureProvider::Gh
+        | CaptureProvider::Custom
+        | CaptureProvider::Unknown => BoundedProbe::NotFound,
     }
 }
 
 fn has_gemini_chat_jsonl(root: &Path, max_entries: usize) -> BoundedProbe {
     let tmp = root.join("tmp");
-    if !tmp.is_dir() {
-        return BoundedProbe::NotFound;
+    match path_is_dir_probe(&tmp) {
+        BoundedProbe::Found => {}
+        BoundedProbe::IoError => return BoundedProbe::IoError,
+        _ => return BoundedProbe::NotFound,
     }
     has_jsonl_file_under_matching(&tmp, max_entries, |path| path_has_component(path, "chats"))
 }
 
 fn has_openclaw_session_jsonl(root: &Path, max_entries: usize) -> BoundedProbe {
-    if root.is_file() {
-        return BoundedProbe::from_bool(
-            root.extension().and_then(|ext| ext.to_str()) == Some("jsonl"),
-        );
+    match path_metadata_probe(root) {
+        PathProbe::File => {
+            return BoundedProbe::from_bool(
+                root.extension().and_then(|ext| ext.to_str()) == Some("jsonl"),
+            );
+        }
+        PathProbe::Dir => {}
+        PathProbe::Missing | PathProbe::Other => return BoundedProbe::NotFound,
+        PathProbe::IoError => return BoundedProbe::IoError,
     }
     let agents = root.join("agents");
-    if agents.is_dir() {
-        return has_jsonl_file_under_matching(&agents, max_entries, |path| {
-            path_has_component(path, "sessions")
-        });
+    match path_is_dir_probe(&agents) {
+        BoundedProbe::Found => {
+            return has_jsonl_file_under_matching(&agents, max_entries, |path| {
+                path_has_component(path, "sessions")
+            });
+        }
+        BoundedProbe::IoError => return BoundedProbe::IoError,
+        _ => {}
     }
     has_jsonl_file_under_matching(root, max_entries, |path| {
         path_has_component(path, "sessions")
@@ -694,9 +770,14 @@ fn has_openclaw_session_jsonl(root: &Path, max_entries: usize) -> BoundedProbe {
 }
 
 fn has_nanoclaw_project(root: &Path) -> BoundedProbe {
-    BoundedProbe::from_bool(
-        root.join("data").join("v2.db").is_file() && root.join("data").join("v2-sessions").is_dir(),
-    )
+    match (
+        path_is_file_probe(&root.join("data").join("v2.db")),
+        path_is_dir_probe(&root.join("data").join("v2-sessions")),
+    ) {
+        (BoundedProbe::Found, BoundedProbe::Found) => BoundedProbe::Found,
+        (BoundedProbe::IoError, _) | (_, BoundedProbe::IoError) => BoundedProbe::IoError,
+        _ => BoundedProbe::NotFound,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -704,6 +785,7 @@ enum BoundedProbe {
     Found,
     NotFound,
     BudgetExhausted,
+    IoError,
 }
 
 impl BoundedProbe {
@@ -716,38 +798,81 @@ impl BoundedProbe {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathProbe {
+    File,
+    Dir,
+    Other,
+    Missing,
+    IoError,
+}
+
+fn path_metadata_probe(path: &Path) -> PathProbe {
+    match path.metadata() {
+        Ok(metadata) if metadata.is_file() => PathProbe::File,
+        Ok(metadata) if metadata.is_dir() => PathProbe::Dir,
+        Ok(_) => PathProbe::Other,
+        Err(err) if err.kind() == ErrorKind::NotFound => PathProbe::Missing,
+        Err(_) => PathProbe::IoError,
+    }
+}
+
+fn path_is_file_probe(path: &Path) -> BoundedProbe {
+    match path_metadata_probe(path) {
+        PathProbe::File => BoundedProbe::Found,
+        PathProbe::IoError => BoundedProbe::IoError,
+        _ => BoundedProbe::NotFound,
+    }
+}
+
+fn path_is_dir_probe(path: &Path) -> BoundedProbe {
+    match path_metadata_probe(path) {
+        PathProbe::Dir => BoundedProbe::Found,
+        PathProbe::IoError => BoundedProbe::IoError,
+        _ => BoundedProbe::NotFound,
+    }
+}
+
 fn has_jsonl_file_under_matching(
     root: &Path,
     max_entries: usize,
     matches_path: impl Fn(&Path) -> bool,
 ) -> BoundedProbe {
-    if root.is_file() {
-        return if root.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
-            && matches_path(root)
-        {
-            BoundedProbe::Found
-        } else {
-            BoundedProbe::NotFound
-        };
-    }
-    if !root.is_dir() {
-        return BoundedProbe::NotFound;
+    match path_metadata_probe(root) {
+        PathProbe::File => {
+            return if root.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
+                && matches_path(root)
+            {
+                BoundedProbe::Found
+            } else {
+                BoundedProbe::NotFound
+            };
+        }
+        PathProbe::Dir => {}
+        PathProbe::Missing | PathProbe::Other => return BoundedProbe::NotFound,
+        PathProbe::IoError => return BoundedProbe::IoError,
     }
 
     let mut visited = 0usize;
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => return BoundedProbe::IoError,
         };
-        for entry in entries.flatten() {
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => return BoundedProbe::IoError,
+            };
             visited = visited.saturating_add(1);
             if visited > max_entries {
                 return BoundedProbe::BudgetExhausted;
             }
             let path = entry.path();
-            let Ok(file_type) = entry.file_type() else {
-                continue;
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(_) => return BoundedProbe::IoError,
             };
             if file_type.is_dir() {
                 stack.push(path);
@@ -943,6 +1068,55 @@ mod tests {
             CaptureProvider::Claude,
             ProviderSourceStatus::Unknown,
         );
+    }
+
+    #[test]
+    fn default_location_probe_does_not_fallback_to_path_existence_for_unhandled_providers() {
+        let temp = tempfile::tempdir().unwrap();
+        let existing = temp.path().join("shell-history");
+        std::fs::write(&existing, "{}\n").unwrap();
+        let location = ProviderDefaultLocation {
+            path_components: &["shell-history"],
+            source_format: "shell_history",
+            source_kind: ProviderSourceKind::NativeHistory,
+        };
+
+        assert_eq!(
+            default_location_import_probe(CaptureProvider::Shell, &location, &existing),
+            BoundedProbe::NotFound
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn default_source_probe_reports_unreadable_directory_as_unknown() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join(".codex/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let original_permissions = std::fs::metadata(&sessions).unwrap().permissions();
+        std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        if std::fs::read_dir(&sessions).is_ok() {
+            std::fs::set_permissions(&sessions, original_permissions).unwrap();
+            return;
+        }
+
+        let source = discover_provider_sources(temp.path())
+            .into_iter()
+            .find(|source| {
+                source.provider == CaptureProvider::Codex
+                    && source.source_format == "codex_session_jsonl_tree"
+            })
+            .unwrap();
+        std::fs::set_permissions(&sessions, original_permissions).unwrap();
+
+        assert_eq!(source.status, ProviderSourceStatus::Unknown);
+        assert!(source
+            .unsupported_reason
+            .unwrap()
+            .contains("could not be read"));
     }
 
     fn assert_source_status(

@@ -65,7 +65,7 @@ ctx import --all
 ctx import --provider codex
 ctx import --provider pi
 ctx import --provider cursor
-ctx import --path ~/.codex/sessions
+ctx import --provider codex --path ~/.codex/sessions
 ctx import --resume --json
 ```
 
@@ -79,7 +79,8 @@ After upgrading an older data root to `0.10.x` or newer, the first refresh or im
 re-read previously indexed provider transcripts once. That rebuilds search
 content with touched-file metadata and local/private transcript text.
 
-When `--path` is used without `--provider`, ctx treats the path as Codex format.
+Native provider `--path` imports require `--provider`. Custom JSONL imports use
+`--format ctx-history-jsonl-v1 --path <file>` instead.
 
 ## 5. Search
 
