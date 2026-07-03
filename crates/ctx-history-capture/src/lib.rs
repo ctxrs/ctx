@@ -33,10 +33,10 @@ use uuid::Uuid;
 
 pub mod provider_sources;
 pub use provider_sources::{
-    discover_provider_sources, discover_provider_sources_for_provider, provider_source_for_path,
-    provider_source_spec, provider_source_specs, ProviderCatalogSupport, ProviderDefaultLocation,
-    ProviderImportSupport, ProviderSource, ProviderSourceKind, ProviderSourceSpec,
-    ProviderSourceStatus,
+    discover_codex_home_sources, discover_provider_sources, discover_provider_sources_for_provider,
+    provider_source_for_path, provider_source_spec, provider_source_specs, ProviderCatalogSupport,
+    ProviderDefaultLocation, ProviderImportSupport, ProviderSource, ProviderSourceKind,
+    ProviderSourceSpec, ProviderSourceStatus,
 };
 
 pub const CAPTURE_SCHEMA_VERSION: u32 = 1;

@@ -27,15 +27,15 @@ mod upgrade;
 use analytics::{AnalyticsEvent, AnalyticsProperties};
 use config::{AppConfig, CONFIG_FILE};
 use ctx_history_capture::{
-    catalog_codex_session_tree, discover_provider_sources, discover_provider_sources_for_provider,
-    import_antigravity_cli_history, import_astrbot_sqlite, import_claude_projects_jsonl_tree,
-    import_codex_history_jsonl, import_codex_session_jsonl, import_codex_session_jsonl_tail,
-    import_codex_session_paths, import_codex_session_tree, import_copilot_cli_session_events,
-    import_cursor_native_history, import_custom_history_jsonl_v1,
-    import_custom_history_jsonl_v1_reader, import_factory_ai_droid_sessions,
-    import_gemini_cli_history, import_hermes_sqlite, import_nanoclaw_project,
-    import_openclaw_history, import_opencode_sqlite, import_pi_session_jsonl,
-    provider_source_for_path, provider_source_spec, stable_capture_uuid,
+    catalog_codex_session_tree, discover_codex_home_sources, discover_provider_sources,
+    discover_provider_sources_for_provider, import_antigravity_cli_history, import_astrbot_sqlite,
+    import_claude_projects_jsonl_tree, import_codex_history_jsonl, import_codex_session_jsonl,
+    import_codex_session_jsonl_tail, import_codex_session_paths, import_codex_session_tree,
+    import_copilot_cli_session_events, import_cursor_native_history,
+    import_custom_history_jsonl_v1, import_custom_history_jsonl_v1_reader,
+    import_factory_ai_droid_sessions, import_gemini_cli_history, import_hermes_sqlite,
+    import_nanoclaw_project, import_openclaw_history, import_opencode_sqlite,
+    import_pi_session_jsonl, provider_source_for_path, provider_source_spec, stable_capture_uuid,
     validate_custom_history_jsonl_v1, validate_custom_history_jsonl_v1_reader,
     AntigravityCliImportOptions, AstrBotSqliteImportOptions, CatalogSummary,
     ClaudeProjectsImportOptions, CodexEventImportMode, CodexHistoryImportOptions,
@@ -4687,11 +4687,8 @@ fn refresh_before_search(args: &SearchArgs, data_root: &Path) -> Result<SearchRe
 }
 
 fn search_refresh_sources(provider: Option<ProviderArg>) -> Vec<SourceInfo> {
-    let Some(home) = home_dir() else {
-        return Vec::new();
-    };
     let mut sources = if let Some(provider) = provider {
-        discover_provider_sources_for_provider(&home, provider.capture_provider())
+        discovered_sources_for_provider(provider.capture_provider())
     } else {
         discovered_sources()
     };
@@ -6167,17 +6164,48 @@ fn import_record_for_history_source_plugin(source: &HistorySourcePluginSource) -
 }
 
 fn discovered_sources() -> Vec<SourceInfo> {
-    home_dir()
-        .as_deref()
-        .map(discover_provider_sources)
-        .unwrap_or_default()
+    discovered_sources_for_homes(home_dir(), codex_home_dir())
 }
 
 fn discovered_sources_for_provider(provider: CaptureProvider) -> Vec<SourceInfo> {
-    home_dir()
-        .as_deref()
+    discovered_sources_for_provider_from_homes(provider, home_dir(), codex_home_dir())
+}
+
+fn discovered_sources_for_homes(
+    home: Option<PathBuf>,
+    codex_home: Option<PathBuf>,
+) -> Vec<SourceInfo> {
+    let mut sources = Vec::new();
+    if let Some(codex_home) = codex_home.as_deref() {
+        sources.extend(codex_home_sources(codex_home));
+    }
+    if let Some(home) = home.as_deref() {
+        let mut home_sources = discover_provider_sources(home);
+        if codex_home.is_some() {
+            home_sources.retain(|source| source.provider != CaptureProvider::Codex);
+        }
+        sources.extend(home_sources);
+    }
+    sources
+}
+
+fn discovered_sources_for_provider_from_homes(
+    provider: CaptureProvider,
+    home: Option<PathBuf>,
+    codex_home: Option<PathBuf>,
+) -> Vec<SourceInfo> {
+    if provider == CaptureProvider::Codex {
+        if let Some(codex_home) = codex_home.as_deref() {
+            return codex_home_sources(codex_home);
+        }
+    }
+    home.as_deref()
         .map(|home| discover_provider_sources_for_provider(home, provider))
         .unwrap_or_default()
+}
+
+fn codex_home_sources(codex_home: &Path) -> Vec<SourceInfo> {
+    discover_codex_home_sources(codex_home)
 }
 
 fn explicit_path_source(provider: CaptureProvider, path: PathBuf) -> SourceInfo {
@@ -6438,12 +6466,27 @@ fn mark_share_safe(value: &mut Value) {
 }
 
 fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+    non_empty_env_path("HOME")
+}
+
+fn codex_home_dir() -> Option<PathBuf> {
+    non_empty_env_path("CODEX_HOME")
+}
+
+fn non_empty_env_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{catalog_import_checkpoint_matches, sha256_file_prefix_hex, shell_quote_arg};
+    use super::{
+        catalog_import_checkpoint_matches, discovered_sources_for_homes,
+        discovered_sources_for_provider_from_homes, sha256_file_prefix_hex, shell_quote_arg,
+    };
+    use ctx_history_capture::ProviderSourceStatus;
+    use ctx_history_core::CaptureProvider;
     use std::{fs, io::Write};
     use tempfile::tempdir;
 
@@ -6470,5 +6513,80 @@ mod tests {
 
         fs::write(&path, "mutated\n").unwrap();
         assert!(!catalog_import_checkpoint_matches(&path, 7, Some(&prefix_hash)).unwrap());
+    }
+
+    #[test]
+    fn discovered_sources_use_codex_home_for_codex_when_set() {
+        let home = tempdir().unwrap();
+        let codex_home = tempdir().unwrap();
+        fs::create_dir_all(codex_home.path().join("sessions")).unwrap();
+
+        let sources = discovered_sources_for_homes(
+            Some(home.path().to_path_buf()),
+            Some(codex_home.path().to_path_buf()),
+        );
+
+        let codex_paths = sources
+            .iter()
+            .filter(|source| source.provider == CaptureProvider::Codex)
+            .map(|source| source.path.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            codex_paths,
+            vec![
+                codex_home.path().join("sessions"),
+                codex_home.path().join("history.jsonl"),
+            ]
+        );
+        let session_source = sources
+            .iter()
+            .find(|source| {
+                source.provider == CaptureProvider::Codex
+                    && source.source_format == "codex_session_jsonl_tree"
+            })
+            .unwrap();
+        assert_eq!(session_source.status, ProviderSourceStatus::Empty);
+        assert!(sources
+            .iter()
+            .any(|source| source.provider == CaptureProvider::Claude
+                && source.path.starts_with(home.path())));
+    }
+
+    #[test]
+    fn provider_specific_codex_discovery_uses_codex_home_when_set() {
+        let home = tempdir().unwrap();
+        let codex_home = tempdir().unwrap();
+        fs::create_dir_all(codex_home.path().join("sessions")).unwrap();
+
+        let sources = discovered_sources_for_provider_from_homes(
+            CaptureProvider::Codex,
+            Some(home.path().to_path_buf()),
+            Some(codex_home.path().to_path_buf()),
+        );
+
+        assert_eq!(sources.len(), 2);
+        assert!(sources
+            .iter()
+            .all(|source| source.path.starts_with(codex_home.path())));
+        assert!(sources.iter().any(|source| {
+            source.source_format == "codex_session_jsonl_tree"
+                && source.status == ProviderSourceStatus::Empty
+        }));
+    }
+
+    #[test]
+    fn provider_specific_non_codex_discovery_still_uses_home() {
+        let home = tempdir().unwrap();
+        let codex_home = tempdir().unwrap();
+
+        let sources = discovered_sources_for_provider_from_homes(
+            CaptureProvider::Claude,
+            Some(home.path().to_path_buf()),
+            Some(codex_home.path().to_path_buf()),
+        );
+
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].provider, CaptureProvider::Claude);
+        assert!(sources[0].path.starts_with(home.path()));
     }
 }

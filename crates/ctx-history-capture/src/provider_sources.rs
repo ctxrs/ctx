@@ -347,6 +347,31 @@ pub fn discover_provider_sources_for_provider(
     )
 }
 
+pub fn discover_codex_home_sources(codex_home: &Path) -> Vec<ProviderSource> {
+    let spec = provider_source_spec(CaptureProvider::Codex)
+        .expect("Codex provider source spec must be registered");
+    let locations = [
+        (
+            codex_home.join("sessions"),
+            "codex_session_jsonl_tree",
+            ProviderSourceKind::NativeHistory,
+        ),
+        (
+            codex_home.join("history.jsonl"),
+            "codex_history_jsonl",
+            ProviderSourceKind::NativeHistory,
+        ),
+    ];
+    dedupe_sources(
+        locations
+            .into_iter()
+            .map(|(path, source_format, source_kind)| {
+                provider_source_from_parts(spec, path, source_format, source_kind)
+            })
+            .collect(),
+    )
+}
+
 fn discover_provider_sources_for_spec(
     home: &Path,
     spec: &ProviderSourceSpec,
@@ -951,6 +976,35 @@ mod tests {
             })
             .unwrap();
         assert_eq!(source.status, ProviderSourceStatus::Available);
+    }
+
+    #[test]
+    fn codex_home_source_discovery_uses_codex_home_with_normal_probes() {
+        let codex_home = tempfile::tempdir().unwrap();
+        let sessions = codex_home.path().join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+
+        let sources = discover_codex_home_sources(codex_home.path());
+        let session_source = sources
+            .iter()
+            .find(|source| source.source_format == "codex_session_jsonl_tree")
+            .unwrap();
+        let history_source = sources
+            .iter()
+            .find(|source| source.source_format == "codex_history_jsonl")
+            .unwrap();
+
+        assert_eq!(session_source.path, sessions);
+        assert_eq!(session_source.status, ProviderSourceStatus::Empty);
+        assert_eq!(history_source.path, codex_home.path().join("history.jsonl"));
+        assert_eq!(history_source.status, ProviderSourceStatus::Missing);
+
+        std::fs::write(sessions.join("session.jsonl"), "{}\n").unwrap();
+        let session_source = discover_codex_home_sources(codex_home.path())
+            .into_iter()
+            .find(|source| source.source_format == "codex_session_jsonl_tree")
+            .unwrap();
+        assert_eq!(session_source.status, ProviderSourceStatus::Available);
     }
 
     #[test]
