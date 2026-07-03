@@ -91,6 +91,27 @@ func TestSearchBuildsAgentHistoryV1Operation(t *testing.T) {
 	}
 }
 
+func TestSearchRequiresQueryTermOrFileBeforeTransport(t *testing.T) {
+	transport := &recordingTransport{response: `{"schema_version":1,"results":[]}`}
+	client := NewClient(WithTransport(transport))
+
+	for name, opts := range map[string]SearchOptions{
+		"empty":        {},
+		"filters only": {Refresh: "off", Limit: 5},
+		"blank query":  {Query: "   "},
+		"blank terms":  {Terms: []string{"", "   "}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := client.Search(context.Background(), opts); !IsErrorKind(err, ErrorKindInvalidArgument) {
+				t.Fatalf("Search error kind mismatch: %v", err)
+			}
+		})
+	}
+	if transport.op.Args != nil {
+		t.Fatalf("Search invoked transport despite invalid input: %#v", transport.op.Args)
+	}
+}
+
 func TestShowAndLocateValidateRequiredEventID(t *testing.T) {
 	client := NewClient(WithTransport(fakeTransport{response: `{}`}))
 	if _, err := client.ShowEvent(context.Background(), ShowEventOptions{}); !IsErrorKind(err, ErrorKindInvalidArgument) {

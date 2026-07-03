@@ -2885,7 +2885,7 @@ fn error_summary(error: &anyhow::Error) -> String {
         .map(ToString::to_string)
         .unwrap_or_else(|| top.clone());
     if is_sqlite_busy_text(&top) || is_sqlite_busy_text(&root) {
-        return "ctx index is busy because another ctx import or search refresh is writing to the local database; retry in a moment, or use `ctx search --refresh off` to search the existing index".to_owned();
+        return "ctx index is busy because another ctx import or search refresh is writing to the local database; retry in a moment, or rerun the search with `--refresh off` to use the existing index".to_owned();
     }
     if root == top || top.contains(&root) {
         top
@@ -3355,14 +3355,14 @@ fn push_session_metadata_markdown(
 fn resolve_session_by_id_text(store: &Store, value: &str) -> Result<Session> {
     if let Ok(id) = Uuid::parse_str(value.trim()) {
         return store.get_session(id).with_context(|| {
-            format!("session {id} was not found; use `ctx search --verbose` to get ctx_session_id")
+            format!("session {id} was not found; rerun the search that found it with `--verbose` to get ctx_session_id")
         });
     }
     let prefix = normalize_uuid_prefix(value, "session")?;
     match store.sessions_by_id_prefix(&prefix)?.as_slice() {
         [session] => Ok(session.clone()),
         [] => Err(anyhow!(
-            "session id prefix {prefix:?} was not found; use `ctx search --verbose` to get ctx_session_id"
+            "session id prefix {prefix:?} was not found; rerun the search that found it with `--verbose` to get ctx_session_id"
         )),
         matches => Err(anyhow!(
             "session id prefix {prefix:?} is ambiguous; first matches are {} and {}; use a longer ctx_session_id",
@@ -3380,7 +3380,7 @@ fn resolve_event(store: &Store, value: &str) -> Result<Event> {
     if let Ok(id) = Uuid::parse_str(value.trim()) {
         return store.get_event(id).with_context(|| {
             format!(
-                "event {id} was not found; use `ctx search --events --verbose` to get ctx_event_id"
+                "event {id} was not found; rerun the event search with `--events --verbose` to get ctx_event_id"
             )
         });
     }
@@ -3388,7 +3388,7 @@ fn resolve_event(store: &Store, value: &str) -> Result<Event> {
     match store.events_by_id_prefix(&prefix)?.as_slice() {
         [event] => Ok(event.clone()),
         [] => Err(anyhow!(
-            "event id prefix {prefix:?} was not found; use `ctx search --events --verbose` to get ctx_event_id"
+            "event id prefix {prefix:?} was not found; rerun the event search with `--events --verbose` to get ctx_event_id"
         )),
         matches => Err(anyhow!(
             "event id prefix {prefix:?} is ambiguous; first matches are {} and {}; use a longer ctx_event_id",
@@ -3407,7 +3407,7 @@ fn normalize_uuid_prefix(value: &str, kind: &str) -> Result<String> {
     }
     if prefix.contains('-') || !prefix.chars().all(|ch| ch.is_ascii_hexdigit()) {
         return Err(anyhow!(
-            "{kind} id must be a full ctx UUID or an unambiguous hex prefix from `ctx search --verbose`"
+            "{kind} id must be a full ctx UUID or an unambiguous hex prefix from verbose search output"
         ));
     }
     Ok(prefix.to_ascii_lowercase())
@@ -4492,7 +4492,7 @@ fn run_search(
                 if indexed_items == 0 {
                     println!("next: ctx import --all");
                 } else {
-                    println!("next: try broader terms with ctx search --term");
+                    println!("next: try broader terms with ctx search --term \"<term>\"");
                 }
             }
         }
@@ -4665,7 +4665,7 @@ fn refresh_before_search(args: &SearchArgs, data_root: &Path) -> Result<SearchRe
     if sources.is_empty() && plugin_sources.is_empty() {
         if args.refresh == RefreshArg::Strict {
             return Err(anyhow!(
-                "strict search refresh found no supported discovered native provider or enabled auto history-source plugin sources; use --refresh off to search the existing index"
+                "strict search refresh found no supported discovered native provider or enabled auto history-source plugin sources; rerun the search with --refresh off to use the existing index"
             ));
         }
         return Ok(SearchRefreshReport::skipped(args.refresh, "no_sources"));

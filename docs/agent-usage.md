@@ -18,9 +18,9 @@ ctx show event <ctx-event-id> --window 5
 ```
 
 Normal `ctx search` uses `--refresh auto`, which can import newly discovered
-provider history into the local ctx index before querying. Use
-`ctx search ... --refresh off` when the task requires a strictly read-only
-query over the existing index.
+provider history into the local ctx index before querying. Rerun the same
+search with `--refresh off` when the task requires a strictly read-only query
+over the existing index.
 
 Use `ctx sql` only when normal search does not express the question, such as
 exact counts, joins, audits, or scripting over stable `ctx_*` views. It is

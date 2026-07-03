@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 // Operation is the adapter-neutral command executed by a transport.
@@ -156,6 +157,9 @@ func (c *Client) Sync(ctx context.Context, opts ImportOptions) (*ImportResponse,
 }
 
 func (c *Client) Search(ctx context.Context, opts SearchOptions) (*SearchResponse, error) {
+	if !opts.hasIntent() {
+		return nil, sdkError(ErrorKindInvalidArgument, "search requires a query, term, or file option", nil)
+	}
 	args := []string{"search"}
 	if opts.Query != "" {
 		args = append(args, opts.Query)
@@ -196,6 +200,18 @@ func (c *Client) Search(ctx context.Context, opts SearchOptions) (*SearchRespons
 		return nil, err
 	}
 	return &out, nil
+}
+
+func (opts SearchOptions) hasIntent() bool {
+	if strings.TrimSpace(opts.Query) != "" || strings.TrimSpace(opts.File) != "" {
+		return true
+	}
+	for _, term := range opts.Terms {
+		if strings.TrimSpace(term) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Client) ShowSession(ctx context.Context, opts ShowSessionOptions) (*ShowSessionResponse, error) {

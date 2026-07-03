@@ -188,6 +188,12 @@ final class CtxAgentHistoryTests: XCTestCase {
         XCTAssertThrowsError(try parse.showSession(ShowSessionOptions(provider: "codex"))) { error in
             XCTAssertEqual((error as? CtxAgentHistorySDKError)?.code, .invalidRequest)
         }
+        XCTAssertThrowsError(try parse.search(options: SearchOptions(refresh: "off"))) { error in
+            XCTAssertEqual((error as? CtxAgentHistorySDKError)?.code, .invalidRequest)
+        }
+        XCTAssertThrowsError(try parse.search("   ")) { error in
+            XCTAssertEqual((error as? CtxAgentHistorySDKError)?.code, .invalidRequest)
+        }
     }
 
     func testAllStructuredErrorCodesRoundTripThroughContractError() throws {

@@ -70,6 +70,7 @@ public struct AgentHistoryClient: Sendable {
     }
 
     public func search(_ query: String? = nil, options: SearchOptions = SearchOptions()) throws -> SearchResponse {
+        try requireSearchIntent(query: query, options: options)
         var arguments = ["search"]
         if let query {
             arguments.append(query)
@@ -291,6 +292,23 @@ private func appendOption(_ arguments: inout [String], _ name: String, _ value: 
     if let value, !value.isEmpty {
         arguments.append(contentsOf: [name, value])
     }
+}
+
+private func requireSearchIntent(query: String?, options: SearchOptions) throws {
+    if hasSearchText(query) || hasSearchText(options.file) || options.terms.contains(where: { hasSearchText($0) }) {
+        return
+    }
+    throw CtxAgentHistorySDKError(
+        code: .invalidRequest,
+        message: "search requires a query, term, or file option"
+    )
+}
+
+private func hasSearchText(_ value: String?) -> Bool {
+    guard let value else {
+        return false
+    }
+    return !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
 }
 
 private func requireID(_ name: String, _ id: String) throws {

@@ -7,6 +7,7 @@ from .errors import (
     CtxAgentHistoryError,
     CtxAgentHistoryProtocolError,
     CtxAgentHistoryTimeoutError,
+    CtxAgentHistoryValidationError,
     HostedTransportNotImplementedError,
 )
 from .types import (
@@ -35,6 +36,7 @@ __all__ = [
     "CtxAgentHistoryError",
     "CtxAgentHistoryProtocolError",
     "CtxAgentHistoryTimeoutError",
+    "CtxAgentHistoryValidationError",
     "ErrorResponse",
     "HostedConfig",
     "HostedTransportNotImplementedError",

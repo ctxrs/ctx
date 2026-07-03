@@ -22,7 +22,7 @@ const results = await client.search("sqlite storage", { refresh: "off" });
 - `import(options)` wraps `ctx import --json`.
 - `sync(options)` is an alias for `import(options)`.
 - `search(query, options)` and file/term-based `search(options)` wrap
-  `ctx search --json`.
+  `ctx search <query>|--term <term>|--file <path> --json`.
 - `showEvent(id, { before, after, window })` wraps `ctx show event --format json`.
 - `showSession(id, { mode })` wraps `ctx show session --format json`.
 - `showSession({ provider, providerSession, mode })` looks up by provider-owned session ID.

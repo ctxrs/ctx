@@ -84,6 +84,25 @@ class CtxAgentHistoryProtocolError(CtxAgentHistoryError):
         )
 
 
+class CtxAgentHistoryValidationError(CtxAgentHistoryError):
+    """Raised before invoking ctx for invalid SDK input."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        details: Optional[Mapping[str, Any]] = None,
+        cause: Optional[BaseException] = None,
+    ) -> None:
+        super().__init__(
+            message,
+            code="invalid_request",
+            details=details,
+            retryable=False,
+            cause=cause,
+        )
+
+
 class CtxAgentHistoryTimeoutError(CtxAgentHistoryError):
     """Raised when the local ctx CLI exceeds the configured timeout."""
 

@@ -84,6 +84,7 @@ public class AgentHistoryClient {
 
     public SearchResponse search(AgentHistoryOptions.Search options) {
         AgentHistoryOptions.Search safe = options == null ? AgentHistoryOptions.search() : options;
+        requireSearchIntent(safe);
         List<String> args = new ArrayList<>();
         args.add("search");
         if (safe.query() != null && !safe.query().isEmpty()) {
@@ -110,6 +111,18 @@ public class AgentHistoryClient {
         if (safe.events()) args.add("--events");
         if (safe.includeCurrentSession()) args.add("--include-current-session");
         return new SearchResponse(executeEnvelope("search", args));
+    }
+
+    private static void requireSearchIntent(AgentHistoryOptions.Search options) {
+        if (hasText(options.query()) || hasText(options.file())) {
+            return;
+        }
+        for (String term : options.terms()) {
+            if (hasText(term)) {
+                return;
+            }
+        }
+        throw new CtxAgentHistoryException.Validation("search requires a query, term, or file option");
     }
 
     public ShowEventResponse showEvent(String id, AgentHistoryOptions.ShowEvent options) {
@@ -232,6 +245,10 @@ public class AgentHistoryClient {
             args.add(flag);
             args.add(value);
         }
+    }
+
+    private static boolean hasText(String value) {
+        return value != null && !value.trim().isEmpty();
     }
 
     private static void addInt(List<String> args, String flag, Integer value) {

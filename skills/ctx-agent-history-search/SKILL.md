@@ -63,9 +63,9 @@ Use this skill in two modes:
 
    When the prompt asks for a topic history or report across multiple sessions,
    run several `ctx search` queries with different wording and filters to find
-   promising sessions. Use scoped `ctx search ... --session <ctx-session-id>`
-   when a session looks relevant and you need dense event-level matches from
-   that session.
+   promising sessions. Use scoped
+   `ctx search "<query>" --session <ctx-session-id>` when a session looks
+   relevant and you need dense event-level matches from that session.
 
    Default search returns primary-agent sessions so human intent and decisions
    stay prominent. Use `--include-subagents` when implementation details, code
@@ -144,7 +144,7 @@ material.
    chronology, alternatives, or detailed evidence.
 2. Run several targeted searches. Vary query terms across user wording, file or
    module names, error text, commands, branch names, and decision terms. Start
-   with default `ctx search`, then broaden with `--term` or narrow with
+   with `ctx search "<topic>"`, then broaden with `--term` or narrow with
    `--workspace`, `--provider`, `--file`, `--since`, or
    `--session <ctx-session-id>`.
    Use `--include-subagents` when reviews, implementation attempts, test output,

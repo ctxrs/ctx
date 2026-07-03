@@ -20,6 +20,7 @@ from .types import (
     StatusResponse,
     SyncResponse,
 )
+from .validation import validate_search_intent
 from .version import API_VERSION, SDK_VERSION, VersionInfo
 
 Pathish = Union[str, Path]
@@ -134,13 +135,15 @@ class AgentHistoryClient:
         refresh: Optional[str] = None,
         include_current_session: bool = False,
     ) -> SearchResponse:
+        file_value = str(file) if file is not None else None
+        validate_search_intent(query=query, terms=terms, file=file_value)
         return self._transport.search(
             query=query,
             provider=provider,
             workspace=workspace,
             since=since,
             event_type=event_type,
-            file=str(file) if file is not None else None,
+            file=file_value,
             session=session,
             terms=list(terms) if terms is not None else None,
             events=events,

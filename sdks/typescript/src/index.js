@@ -163,6 +163,7 @@ export class LocalAgentHistoryClient {
       typeof queryOrOptions === "string"
         ? { ...maybeOptions, query: queryOrOptions }
         : { ...queryOrOptions };
+    validateSearchIntent(options);
     const args = ["search"];
     if (options.query) {
       args.push(options.query);
@@ -429,6 +430,27 @@ function appendSearchArgs(args, options) {
   appendFlag(args, "--events", options.events);
   appendOptional(args, "--refresh", options.refresh);
   appendFlag(args, "--include-current-session", options.includeCurrentSession);
+}
+
+function validateSearchIntent(options) {
+  if (hasSearchText(options.query) || hasSearchText(options.file) || hasSearchTerm(options)) {
+    return;
+  }
+  throw new CtxValidationError("search requires a query, term, or file option", {
+    details: { options },
+  });
+}
+
+function hasSearchTerm(options) {
+  const value = options.terms ?? options.term;
+  if (Array.isArray(value)) {
+    return value.some(hasSearchText);
+  }
+  return hasSearchText(value);
+}
+
+function hasSearchText(value) {
+  return typeof value === "string" && value.trim().length > 0;
 }
 
 function appendSessionLookupArgs(args, options) {

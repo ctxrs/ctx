@@ -81,7 +81,7 @@ future fields remain additive and accessible. SDK failures derive from
 - `ctx setup --json`
 - `ctx sources --json`
 - `ctx import --json`
-- `ctx search ... --json`
+- `ctx search <query>|--term <term>|--file <path> --json`
 - `ctx show event ... --format json`
 - `ctx show session ... --format json`
 - `ctx locate event ... --format json`

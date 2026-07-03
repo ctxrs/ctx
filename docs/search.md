@@ -135,9 +135,10 @@ only retrieves indexed local evidence; it does not synthesize conclusions.
 
 ## Machine Output
 
-Use default text output for agent reading. Use `ctx search --json` for scripts,
-`jq`, or exact field extraction. JSON results include the same result metadata
-and citations as the human output, plus a top-level `freshness` object
+Use default text output for agent reading. Use `ctx search <query> --json` or a
+term/file search with `--json` for scripts, `jq`, or exact field extraction.
+JSON results include the same result metadata and citations as the human output,
+plus a top-level `freshness` object
 describing the pre-search refresh mode and outcome. A citation with
 `source_exists: false` means ctx can return indexed text, but the raw provider
 file was not available at the stored path when the result was built.

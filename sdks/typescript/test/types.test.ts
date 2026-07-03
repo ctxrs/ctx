@@ -44,6 +44,15 @@ expectType<string | null | undefined>(search.search.results[0]!.ctxEventId);
 // @ts-expect-error search results expose ctxEventId, not ctx_event_id.
 search.search.results[0]!.ctx_event_id;
 
+const termSearch = await client.search({ terms: ["local agent history"], refresh: "off" });
+expectType<SearchEnvelope>(termSearch);
+const fileSearch = await client.search({ file: "src/lib.rs", refresh: "off" });
+expectType<SearchEnvelope>(fileSearch);
+// @ts-expect-error search requires a query, term, or file option.
+await client.search();
+// @ts-expect-error search filters alone are not a search intent.
+await client.search({ refresh: "off", limit: 5 });
+
 const shown = await client.showEvent("11111111-1111-4111-8111-111111111111");
 expectType<ShowEventEnvelope>(shown);
 expectType<string | null | undefined>(shown.event.events[0]!.ctxSessionId);

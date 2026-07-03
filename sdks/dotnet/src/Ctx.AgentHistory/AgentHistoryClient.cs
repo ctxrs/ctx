@@ -71,6 +71,7 @@ public sealed class AgentHistoryClient
     public async Task<SearchResponse> SearchAsync(SearchOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new SearchOptions();
+        RequireSearchIntent(options);
         var args = new List<string> { "search" };
         if (!string.IsNullOrWhiteSpace(options.Query))
         {
@@ -250,6 +251,18 @@ public sealed class AgentHistoryClient
             throw new CtxAgentHistoryValidationException($"{kind} lookup requires an id or provider session id");
         }
         return args;
+    }
+
+    private static void RequireSearchIntent(SearchOptions options)
+    {
+        if (!string.IsNullOrWhiteSpace(options.Query)
+            || !string.IsNullOrWhiteSpace(options.File)
+            || (options.Terms?.Any(term => !string.IsNullOrWhiteSpace(term)) ?? false))
+        {
+            return;
+        }
+
+        throw new CtxAgentHistoryValidationException("search requires a query, term, or file option");
     }
 
     private static void RequireValue(string value, string name)

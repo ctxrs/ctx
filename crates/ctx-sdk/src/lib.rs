@@ -115,6 +115,21 @@ impl Default for SearchOptions {
     }
 }
 
+impl SearchOptions {
+    fn has_intent(&self) -> bool {
+        self.query
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|query| !query.is_empty())
+            || self.terms.iter().any(|term| !term.trim().is_empty())
+            || self
+                .file
+                .as_ref()
+                .map(|path| !path.to_string_lossy().trim().is_empty())
+                .unwrap_or(false)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchRefresh {
     Auto,
@@ -215,6 +230,13 @@ impl AgentHistoryClient {
         &self,
         options: SearchOptions,
     ) -> Result<AgentHistoryEnvelope, AgentHistoryError> {
+        if !options.has_intent() {
+            return Err(AgentHistoryError::new(
+                AgentHistoryErrorCode::InvalidRequest,
+                "search requires a query, term, or file option",
+                false,
+            ));
+        }
         let mut owned = Vec::<String>::new();
         owned.push("search".to_owned());
         if let Some(query) = options.query {
@@ -673,6 +695,31 @@ mod tests {
         };
         assert_eq!(options.refresh.as_arg(), "off");
         assert_eq!(options.terms, vec!["ctx"]);
+    }
+
+    #[test]
+    fn search_requires_query_term_or_file_before_cli() {
+        let client = AgentHistoryClient::local(LocalBackendConfig {
+            ctx_binary: PathBuf::from("/definitely/missing/ctx"),
+            data_root: None,
+            timeout: Duration::from_secs(1),
+        });
+
+        for options in [
+            SearchOptions::default(),
+            SearchOptions {
+                refresh: SearchRefresh::Off,
+                ..SearchOptions::default()
+            },
+            SearchOptions {
+                query: Some("   ".to_owned()),
+                terms: vec!["".to_owned(), "   ".to_owned()],
+                ..SearchOptions::default()
+            },
+        ] {
+            let err = client.search(options).unwrap_err();
+            assert_eq!(err.body.code, AgentHistoryErrorCode::InvalidRequest);
+        }
     }
 
     #[test]

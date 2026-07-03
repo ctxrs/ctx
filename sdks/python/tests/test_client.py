@@ -22,7 +22,7 @@ from ctx_agent_history import (
     AgentHistoryClient,
 )
 from ctx_agent_history.errors import CtxAgentHistoryCliError, CtxAgentHistoryProtocolError
-from ctx_agent_history.errors import CtxAgentHistoryTimeoutError
+from ctx_agent_history.errors import CtxAgentHistoryTimeoutError, CtxAgentHistoryValidationError
 from ctx_agent_history.types import AgentHistoryErrorCode
 import dogfood_local
 
@@ -98,6 +98,20 @@ class LocalCliAdapterTests(unittest.TestCase):
             self.assertEqual(client.locateEvent("event-1")["operation"], "locateEvent")
             self.assertEqual(client.locate_session("session-1")["operation"], "locateSession")
             self.assertEqual(client.locateSession("session-1")["operation"], "locateSession")
+
+    def test_search_requires_query_term_or_file_before_cli(self) -> None:
+        with fake_ctx(fail=True) as cli:
+            client = AgentHistoryClient.local(ctx_binary=str(cli))
+
+            for call in (
+                lambda: client.search(),
+                lambda: client.search(refresh="off", limit=5),
+                lambda: client.search("   "),
+            ):
+                with self.subTest(call=call):
+                    with self.assertRaises(CtxAgentHistoryValidationError) as raised:
+                        call()
+                    self.assertEqual(raised.exception.code, "invalid_request")
 
     def test_versioning_reports_sdk_api_transport_and_ctx_version(self) -> None:
         with fake_ctx() as cli:

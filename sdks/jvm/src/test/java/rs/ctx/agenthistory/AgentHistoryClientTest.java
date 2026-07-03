@@ -15,6 +15,7 @@ public final class AgentHistoryClientTest {
         decodesAllCanonicalFixturesThroughTypedResponses();
         normalizesRawShowAndLocateResponses();
         buildsSearchCommand();
+        searchRequiresIntent();
         hostedIsExplicitlyUnsupported();
     }
 
@@ -173,6 +174,21 @@ public final class AgentHistoryClientTest {
         assertContainsInOrder(transport.lastOperation.args(), "--refresh", "off");
     }
 
+    private static void searchRequiresIntent() {
+        FakeTransport transport = new FakeTransport(
+                "local-cli",
+                "{\"schema_version\":1,\"query\":\"client\",\"results\":[]}");
+        AgentHistoryClient client = AgentHistoryClient.withTransport(transport);
+
+        assertValidation(() -> client.search());
+        assertValidation(() -> client.search(AgentHistoryOptions.search().refresh("off").limit(5)));
+        assertValidation(() -> client.search("   "));
+        assertValidation(() -> client.search(AgentHistoryOptions.search().term("   ")));
+        if (transport.lastOperation != null) {
+            throw new AssertionError("invalid search invoked transport: " + transport.lastOperation.args());
+        }
+    }
+
     private static void hostedIsExplicitlyUnsupported() {
         AgentHistoryClient client = AgentHistoryClient.hosted(HostedConfig.builder().baseUrl("https://ctx.example.invalid").build());
         try {
@@ -212,6 +228,16 @@ public final class AgentHistoryClientTest {
         if (want == null ? got != null : !want.equals(got)) {
             throw new AssertionError("want " + want + " got " + got);
         }
+    }
+
+    private static void assertValidation(Runnable action) {
+        try {
+            action.run();
+        } catch (CtxAgentHistoryException.Validation error) {
+            assertEquals("invalid_request", error.code());
+            return;
+        }
+        throw new AssertionError("expected validation error");
     }
 
     private static final class FakeTransport implements AgentHistoryTransport {

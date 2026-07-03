@@ -6147,7 +6147,7 @@ fn human_search_reports_no_results() {
         .clone();
     let indexed = String::from_utf8(indexed).unwrap();
     assert!(indexed.contains("no results for definitely-no-results-here"));
-    assert!(indexed.contains("next: try broader terms with ctx search --term"));
+    assert!(indexed.contains("next: try broader terms with ctx search --term \"<term>\""));
 
     let term_only = ctx(&temp)
         .args(["search", "--term", "term-only-no-results"])

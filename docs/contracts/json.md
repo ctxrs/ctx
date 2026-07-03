@@ -256,7 +256,7 @@ external publication.
 - `error`, present when refresh failed but results were still served.
 
 `suggested_next_commands` can include `ctx show event`, `ctx show session`,
-`ctx search ... --session <ctx-session-id>`, `ctx locate event`, and
+`ctx search "<query>" --session <ctx-session-id>`, `ctx locate event`, and
 `ctx locate session` command strings when the required ctx IDs are known.
 
 When ctx can identify the active Codex provider session through

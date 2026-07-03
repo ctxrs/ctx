@@ -91,6 +91,13 @@ export interface SearchOptions {
   includeCurrentSession?: boolean;
 }
 
+export type SearchIntentOptions = SearchOptions & (
+  | { query: string }
+  | { term: string | string[] }
+  | { terms: [string, ...string[]] }
+  | { file: string }
+);
+
 export interface ShowEventOptions {
   before?: number;
   after?: number;
@@ -408,8 +415,8 @@ export declare class LocalAgentHistoryClient {
   sources(): Promise<SourcesEnvelope>;
   import(options?: ImportOptions): Promise<ImportEnvelope<"import">>;
   sync(options?: ImportOptions): Promise<ImportEnvelope<"sync">>;
-  search(query?: string, options?: SearchOptions): Promise<SearchEnvelope>;
-  search(options?: SearchOptions): Promise<SearchEnvelope>;
+  search(query: string, options?: Omit<SearchOptions, "query">): Promise<SearchEnvelope>;
+  search(options: SearchIntentOptions): Promise<SearchEnvelope>;
   showEvent(id: string, options?: ShowEventOptions): Promise<ShowEventEnvelope>;
   showSession(id: string, options?: Omit<ShowSessionOptions, "id">): Promise<ShowSessionEnvelope>;
   showSession(options: ShowSessionOptions): Promise<ShowSessionEnvelope>;

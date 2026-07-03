@@ -178,6 +178,18 @@ test("builds search flags and normalizes nested CLI search output", async () => 
   ]);
 });
 
+test("rejects search without query, term, or file before invoking CLI", async () => {
+  const { client, calls } = mockClient(() => {
+    throw new Error("runner should not be called");
+  });
+
+  await assert.rejects(() => client.search(), CtxValidationError);
+  await assert.rejects(() => client.search({ refresh: "off", limit: 5 }), CtxValidationError);
+  await assert.rejects(() => client.search("   "), CtxValidationError);
+
+  assert.equal(calls.length, 0);
+});
+
 test("wraps show and locate commands by ctx id and provider session id", async () => {
   const { client, calls } = mockClient(() => "{}");
 

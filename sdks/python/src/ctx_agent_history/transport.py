@@ -40,6 +40,7 @@ from .types import (
     StatusResponse,
     SyncResponse,
 )
+from .validation import validate_search_intent
 
 
 class AgentHistoryTransport(Protocol):
@@ -235,6 +236,7 @@ class LocalCliAdapter:
         refresh: Optional[str] = None,
         include_current_session: bool = False,
     ) -> SearchResponse:
+        validate_search_intent(query=query, terms=terms, file=file)
         args = ["search", "--json"]
         if query is not None:
             args.append(query)

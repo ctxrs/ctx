@@ -12,6 +12,7 @@ internal static class Program
             ("builds local CLI operation arguments", BuildsOperationArguments),
             ("normalizes setup init status", NormalizesSetupInitStatus),
             ("builds search flags", BuildsSearchFlags),
+            ("rejects search without intent", RejectsSearchWithoutIntent),
             ("wraps show and locate commands", WrapsShowAndLocate),
             ("reports versioning metadata", ReportsVersioning),
             ("uses agent-history-v1 error codes", UsesAgentHistoryV1ErrorCodes),
@@ -127,6 +128,25 @@ internal static class Program
         Equal("off", response.Search.Freshness!.Mode ?? "");
     }
 
+    private static async Task RejectsSearchWithoutIntent()
+    {
+        var transport = new RecordingTransport("""{"schema_version":1,"results":[]}""");
+        var client = new AgentHistoryClient(transport);
+
+        await ThrowsAsync<CtxAgentHistoryValidationException>(() => client.SearchAsync());
+        await ThrowsAsync<CtxAgentHistoryValidationException>(() => client.SearchAsync(new SearchOptions
+        {
+            Refresh = "off",
+            Limit = 5
+        }));
+        await ThrowsAsync<CtxAgentHistoryValidationException>(() => client.SearchAsync(new SearchOptions
+        {
+            Query = "   "
+        }));
+
+        Equal(0, transport.Calls.Count);
+    }
+
     private static async Task WrapsShowAndLocate()
     {
         var transport = new RecordingTransport("""{"schema_version":1,"events":[],"source":{"path":"/tmp/source.jsonl"},"ctx_session_id":"session-1","provider":"codex"}""");
@@ -227,7 +247,7 @@ internal static class Program
                     }
                     break;
                 case "search":
-                    _ = (await ClientFor(node["search"]).SearchAsync()).Search.Results;
+                    _ = (await ClientFor(node["search"]).SearchAsync(new SearchOptions { Query = "fixture search" })).Search.Results;
                     break;
                 case "showEvent":
                     _ = (await ClientFor(node["event"]).ShowEventAsync("event-1")).Event.Events;
