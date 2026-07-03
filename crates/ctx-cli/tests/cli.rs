@@ -2204,6 +2204,21 @@ fn write_fake_ctx_binary(path: &Path, version: &str) -> Vec<u8> {
 }
 
 #[cfg(unix)]
+fn write_hanging_ctx_binary(path: &Path) {
+    fs::write(
+        path,
+        "#!/bin/sh\n\
+if [ -n \"${CTX_SHADOW_MARKER:-}\" ]; then\n\
+  touch \"$CTX_SHADOW_MARKER\"\n\
+fi\n\
+sleep 5\n\
+printf 'ctx 0.1.0\\n'\n",
+    )
+    .unwrap();
+    make_file_executable(path);
+}
+
+#[cfg(unix)]
 fn make_file_executable(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let mut permissions = fs::metadata(path).unwrap().permissions();
@@ -2382,17 +2397,113 @@ fn upgrade_status_reports_path_shadowing() {
         status["path"]["entries"][0]["path"],
         shadow_ctx.display().to_string()
     );
-    assert_eq!(status["path"]["entries"][0]["version"], "ctx 0.9.0");
+    assert!(status["path"]["entries"][0]["version"].is_null());
     assert!(status["warnings"]
         .as_array()
         .unwrap()
         .iter()
         .any(|warning| { warning.as_str().unwrap().contains("PATH resolves ctx to") }));
-    assert!(status["warnings"]
-        .as_array()
+}
+
+#[cfg(unix)]
+#[test]
+fn upgrade_commands_do_not_execute_hanging_shadow_path_ctx() {
+    for args in [
+        ["upgrade", "status", "--json"].as_slice(),
+        ["upgrade", "check", "--json"].as_slice(),
+        ["upgrade", "--json"].as_slice(),
+    ] {
+        let temp = tempdir();
+        let release = fake_release(&temp, "9.9.9");
+        let shadow_dir = temp.path().join("shadow-bin");
+        fs::create_dir_all(&shadow_dir).unwrap();
+        let shadow_ctx = shadow_dir.join("ctx");
+        write_hanging_ctx_binary(&shadow_ctx);
+        let marker = temp.path().join("shadow-ran");
+        let managed_dir = release.target.parent().unwrap();
+        let path = std::env::join_paths([shadow_dir.as_path(), managed_dir]).unwrap();
+
+        let started = Instant::now();
+        let mut command = ctx(&temp);
+        command
+            .args(args)
+            .env("PATH", &path)
+            .env("CTX_SHADOW_MARKER", &marker);
+        let output = json_output(fake_release_env(&mut command, &release));
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "ctx {args:?} should not wait for shadow PATH binaries; elapsed {elapsed:?}"
+        );
+        assert_eq!(
+            output["path"]["entries"][0]["path"],
+            shadow_ctx.display().to_string()
+        );
+        assert!(
+            output["path"]["entries"][0]["version"].is_null(),
+            "shadow ctx versions should not be probed"
+        );
+        assert!(
+            !marker.exists(),
+            "PATH shadow ctx should not have been executed"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn upgrade_recovers_stale_lock_for_dead_pid() {
+    let temp = tempdir();
+    let release = fake_release(&temp, "9.9.9");
+    let mut child = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("exit 0")
+        .spawn()
+        .unwrap();
+    let stale_pid = child.id();
+    child.wait().unwrap();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .unwrap()
-        .iter()
-        .any(|warning| { warning.as_str().unwrap().contains("reports ctx 0.9.0") }));
+        .as_secs();
+    fs::write(
+        temp.path().join("upgrade.lock"),
+        format!("{stale_pid} {}\n", now.saturating_sub(60)),
+    )
+    .unwrap();
+
+    let dry_run = json_output(fake_release_env(
+        ctx(&temp).args(["upgrade", "--dry-run", "--json"]),
+        &release,
+    ));
+
+    assert_eq!(dry_run["status"], "dry_run");
+    assert!(!temp.path().join("upgrade.lock").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn upgrade_lock_still_rejects_active_pid() {
+    let temp = tempdir();
+    let release = fake_release(&temp, "9.9.9");
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    fs::write(
+        temp.path().join("upgrade.lock"),
+        format!("{} {now}\n", std::process::id()),
+    )
+    .unwrap();
+
+    let stderr = failure_stderr(fake_release_env(
+        ctx(&temp).args(["upgrade", "--dry-run"]),
+        &release,
+    ));
+
+    assert!(stderr.contains("ctx upgrade lock is held"), "{stderr}");
+    assert!(temp.path().join("upgrade.lock").exists());
 }
 
 #[cfg(unix)]

@@ -1,10 +1,12 @@
 use std::{
     collections::BTreeMap,
     env, fs,
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    sync::mpsc,
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -19,6 +21,9 @@ use crate::{config::AppConfig, net};
 const STATE_FILE: &str = "upgrade-state.json";
 const LOCK_FILE: &str = "upgrade.lock";
 const LOG_FILE: &str = "logs/upgrade.log";
+const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const VERSION_PROBE_OUTPUT_LIMIT: usize = 4096;
+const STALE_UPGRADE_LOCK_AFTER: Duration = Duration::from_secs(30 * 60);
 const DEFAULT_METADATA_PUBLIC_KEY_PEM: &str = r#"-----BEGIN RSA PUBLIC KEY-----
 MIIBigKCAYEAyBPNIx3H/NwWlN9CPHY5kOEe9kQEshOJEMpv3Atq086H1FWqliTm
 3BCWiO4s/89wNMn11Pla2JetCWNiWsbxm3BIxCd1o6cq8y9ur6Zk1RGOQBLQgqhF
@@ -797,19 +802,12 @@ fn apply_artifact(plan: &UpgradePlan, bytes: &[u8]) -> Result<ApplyResult> {
 }
 
 fn verify_staged_version(staged: &Path, expected_version: &str) -> Result<()> {
-    let output = Command::new(staged)
-        .arg("--version")
-        .stdin(Stdio::null())
-        .output()
+    let version = ctx_binary_version(staged)
         .with_context(|| format!("run staged ctx {}", staged.display()))?;
-    if !output.status.success() {
-        return Err(anyhow!("staged ctx --version failed"));
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    if !stdout.contains(expected_version) {
+    if !version.contains(expected_version) {
         return Err(anyhow!(
             "staged ctx version mismatch: expected {expected_version}, got {}",
-            stdout.trim()
+            version.trim()
         ));
     }
     Ok(())
@@ -1091,7 +1089,7 @@ fn path_diagnostics(current_exe: &Path, current_version: &str) -> PathDiagnostic
         }
         let current = path_identity(&candidate) == current_identity;
         entries.push(PathDiagnosticEntry {
-            version: ctx_binary_version(&candidate).ok(),
+            version: current.then(|| format!("ctx {current_version}")),
             path: candidate,
             current,
         });
@@ -1143,16 +1141,108 @@ fn same_path(left: &Path, right: &Path) -> bool {
 }
 
 fn ctx_binary_version(path: &Path) -> Result<String> {
-    let output = Command::new(path)
-        .arg("--version")
-        .stdin(Stdio::null())
-        .output()
-        .with_context(|| format!("run {} --version", path.display()))?;
+    let output = run_ctx_version_command(path)?;
     if !output.status.success() {
         return Err(anyhow!("{} --version failed", path.display()));
     }
+    if output.truncated {
+        return Err(anyhow!(
+            "{} --version output exceeded {} bytes",
+            path.display(),
+            VERSION_PROBE_OUTPUT_LIMIT
+        ));
+    }
     let stdout = String::from_utf8_lossy(&output.stdout);
     Ok(stdout.lines().next().unwrap_or_default().trim().to_owned())
+}
+
+struct VersionCommandOutput {
+    status: std::process::ExitStatus,
+    stdout: Vec<u8>,
+    truncated: bool,
+}
+
+fn run_ctx_version_command(path: &Path) -> Result<VersionCommandOutput> {
+    let mut child = Command::new(path)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("run {} --version", path.display()))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("capture {} --version output", path.display()))?;
+    let (output_tx, output_rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = output_tx.send(read_capped_output(stdout, VERSION_PROBE_OUTPUT_LIMIT));
+    });
+    let started = Instant::now();
+    let mut status = None;
+    let mut output = None;
+    loop {
+        if status.is_none() {
+            status = child
+                .try_wait()
+                .with_context(|| format!("wait for {} --version", path.display()))?;
+        }
+        if output.is_none() {
+            match output_rx.try_recv() {
+                Ok(result) => {
+                    output =
+                        Some(result.with_context(|| {
+                            format!("read {} --version output", path.display())
+                        })?);
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return Err(anyhow!(
+                        "reader thread stopped for {} --version",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        match (status.take(), output.take()) {
+            (Some(status), Some((stdout, truncated))) => {
+                return Ok(VersionCommandOutput {
+                    status,
+                    stdout,
+                    truncated,
+                });
+            }
+            (next_status, next_output) => {
+                status = next_status;
+                output = next_output;
+            }
+        }
+        if started.elapsed() >= VERSION_PROBE_TIMEOUT {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(anyhow!(
+                "{} --version timed out after {}ms",
+                path.display(),
+                VERSION_PROBE_TIMEOUT.as_millis()
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn read_capped_output(mut reader: impl Read, limit: usize) -> std::io::Result<(Vec<u8>, bool)> {
+    let mut output = Vec::new();
+    let mut buffer = [0_u8; 1024];
+    while output.len() < limit {
+        let remaining = limit - output.len();
+        let max_read = remaining.min(buffer.len());
+        let read = reader.read(&mut buffer[..max_read])?;
+        if read == 0 {
+            return Ok((output, false));
+        }
+        output.extend_from_slice(&buffer[..read]);
+    }
+    Ok((output, true))
 }
 
 fn write_state_checked(data_root: &Path, plan: &UpgradePlan, status: &str) -> Result<()> {
@@ -1223,21 +1313,148 @@ impl UpgradeLock {
     fn acquire(data_root: &Path) -> Result<Self> {
         fs::create_dir_all(data_root)?;
         let path = data_root.join(LOCK_FILE);
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(mut file) => {
-                writeln!(file, "{} {}", std::process::id(), now_unix_s())?;
-                Ok(Self { path })
+        for _ in 0..2 {
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut file) => {
+                    writeln!(file, "{} {}", std::process::id(), now_unix_s())?;
+                    return Ok(Self { path });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if stale_upgrade_lock_reason(&path).is_some() {
+                        match fs::remove_file(&path) {
+                            Ok(()) => continue,
+                            Err(remove_error)
+                                if remove_error.kind() == std::io::ErrorKind::NotFound =>
+                            {
+                                continue;
+                            }
+                            Err(remove_error) => {
+                                return Err(anyhow!(
+                                    "ctx upgrade lock is stale but could not be removed at {}: {remove_error}",
+                                    path.display()
+                                ));
+                            }
+                        }
+                    }
+                    return Err(anyhow!(
+                        "ctx upgrade lock is held at {}: {error}",
+                        path.display()
+                    ));
+                }
+                Err(error) => {
+                    return Err(anyhow!(
+                        "ctx upgrade lock is held at {}: {error}",
+                        path.display()
+                    ));
+                }
             }
-            Err(error) => Err(anyhow!(
-                "ctx upgrade lock is held at {}: {error}",
-                path.display()
-            )),
+        }
+        Err(anyhow!(
+            "ctx upgrade lock could not be acquired at {}",
+            path.display()
+        ))
+    }
+}
+
+fn stale_upgrade_lock_reason(path: &Path) -> Option<String> {
+    let contents = fs::read_to_string(path).ok();
+    let (pid, created_at) = contents
+        .as_deref()
+        .map(parse_upgrade_lock)
+        .unwrap_or((None, None));
+    if let Some(pid) = pid {
+        match process_state(pid) {
+            ProcessState::Running => return None,
+            ProcessState::NotRunning => {
+                return Some(format!(
+                    "recorded upgrade process {pid} is no longer running"
+                ));
+            }
+            ProcessState::Unknown => {}
         }
     }
+    if lock_age_seconds(path, created_at)
+        .is_some_and(|age| age >= STALE_UPGRADE_LOCK_AFTER.as_secs())
+    {
+        return Some(format!(
+            "upgrade lock is older than {} seconds",
+            STALE_UPGRADE_LOCK_AFTER.as_secs()
+        ));
+    }
+    None
+}
+
+fn parse_upgrade_lock(contents: &str) -> (Option<u32>, Option<u64>) {
+    let mut fields = contents.split_whitespace();
+    let pid = fields.next().and_then(|value| value.parse::<u32>().ok());
+    let created_at = fields.next().and_then(|value| value.parse::<u64>().ok());
+    (pid, created_at)
+}
+
+fn lock_age_seconds(path: &Path, created_at: Option<u64>) -> Option<u64> {
+    if let Some(created_at) = created_at {
+        return Some(now_unix_s().saturating_sub(created_at));
+    }
+    fs::metadata(path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|modified| modified.elapsed().ok())
+        .map(|age| age.as_secs())
+}
+
+enum ProcessState {
+    Running,
+    NotRunning,
+    Unknown,
+}
+
+#[cfg(unix)]
+fn process_state(pid: u32) -> ProcessState {
+    if pid == 0 {
+        return ProcessState::NotRunning;
+    }
+    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if result == 0 {
+        return ProcessState::Running;
+    }
+    match last_errno() {
+        Some(libc::ESRCH) => ProcessState::NotRunning,
+        Some(libc::EPERM) => ProcessState::Running,
+        _ => ProcessState::Unknown,
+    }
+}
+
+#[cfg(not(unix))]
+fn process_state(_pid: u32) -> ProcessState {
+    ProcessState::Unknown
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn last_errno() -> Option<i32> {
+    Some(unsafe { *libc::__errno_location() })
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
+fn last_errno() -> Option<i32> {
+    Some(unsafe { *libc::__error() })
+}
+
+#[cfg(all(
+    unix,
+    not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd"
+    ))
+))]
+fn last_errno() -> Option<i32> {
+    None
 }
 
 impl Drop for UpgradeLock {
