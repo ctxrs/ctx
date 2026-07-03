@@ -1087,7 +1087,7 @@ impl ProviderCaptureAdapter for CodexHistoryJsonlAdapter {
                             role: Some(EventRole::User),
                             occurred_at,
                             fidelity: Fidelity::SummaryOnly,
-                            redaction_state: RedactionState::SafePreview,
+                            redaction_state: RedactionState::LocalPreview,
                             idempotency_key: Some(format!(
                                 "provider-event:{}:{}:{}",
                                 CaptureProvider::Codex.as_str(),
@@ -4918,7 +4918,7 @@ fn codex_session_event(
                 .get("payload")
                 .and_then(codex_json_text)
                 .unwrap_or_else(|| "context compacted".to_owned());
-            let (text, truncated) = codex_safe_preview(&text, CODEX_MAX_TEXT_CHARS);
+            let (text, truncated) = codex_local_preview(&text, CODEX_MAX_TEXT_CHARS);
             Some(codex_provider_event(
                 line_number,
                 occurred_at,
@@ -5061,7 +5061,7 @@ fn codex_tool_call_event(
                 format!("{tool_name}: {arguments_preview}")
             }
         });
-    let (text, text_truncated) = codex_safe_preview(&text, CODEX_MAX_METADATA_TEXT_CHARS);
+    let (text, text_truncated) = codex_local_preview(&text, CODEX_MAX_METADATA_TEXT_CHARS);
 
     if let Some(call_id) = call_id {
         call_contexts.insert(
@@ -5152,7 +5152,7 @@ fn codex_tool_output_event(
     };
     let (output_preview, output_truncated) = if keep_preview {
         output_text_ref
-            .map(|text| codex_safe_preview(text, preview_limit))
+            .map(|text| codex_local_preview(text, preview_limit))
             .unwrap_or_else(|| (String::new(), false))
     } else {
         (String::new(), output_bytes > 0)
@@ -5187,7 +5187,7 @@ fn codex_tool_output_event(
             format!("{tool_name} output{command}: {status}{duration}, output_bytes={output_bytes}{timeout}{preview}")
         }
     };
-    let (text, text_truncated) = codex_safe_preview(&text, CODEX_MAX_OUTPUT_PREVIEW_CHARS);
+    let (text, text_truncated) = codex_local_preview(&text, CODEX_MAX_OUTPUT_PREVIEW_CHARS);
 
     Some(codex_provider_event(
         line_number,
@@ -5244,7 +5244,7 @@ fn codex_reasoning_event(
                 .and_then(Value::as_str)
                 .map(str::to_owned)
         })?;
-    let (summary, truncated) = codex_safe_preview(&summary, CODEX_MAX_TEXT_CHARS);
+    let (summary, truncated) = codex_local_preview(&summary, CODEX_MAX_TEXT_CHARS);
     Some(codex_provider_event(
         line_number,
         occurred_at,
@@ -5319,7 +5319,7 @@ fn codex_provider_event(
         role,
         occurred_at,
         fidelity: Fidelity::Imported,
-        redaction_state: RedactionState::SafePreview,
+        redaction_state: RedactionState::LocalPreview,
         idempotency_key: Some(format!("provider-event:codex-session:{line_number}")),
         artifacts: Vec::new(),
         payload,
@@ -5335,7 +5335,7 @@ fn codex_lifecycle_body(payload: &Value, msg_type: &str) -> Value {
         .or_else(|| payload.get("stderr"))
         .and_then(codex_json_text)
         .unwrap_or_else(|| format!("Codex lifecycle: {msg_type}"));
-    let (text, truncated) = codex_safe_preview(&preview, CODEX_MAX_METADATA_TEXT_CHARS);
+    let (text, truncated) = codex_local_preview(&preview, CODEX_MAX_METADATA_TEXT_CHARS);
     json!({
         "text": text,
         "event_msg_type": msg_type,
@@ -5373,7 +5373,7 @@ fn codex_command_preview(tool_name: &str, argument_value: Option<&Value>) -> Opt
         .or_else(|| parsed.get("shell_command"))
         .and_then(Value::as_str)
         .or_else(|| value.as_str())?;
-    Some(codex_safe_preview(command, CODEX_MAX_METADATA_TEXT_CHARS).0)
+    Some(codex_local_preview(command, CODEX_MAX_METADATA_TEXT_CHARS).0)
 }
 
 fn codex_value_preview(value: &Value, max_chars: usize) -> (String, bool) {
@@ -5382,10 +5382,10 @@ fn codex_value_preview(value: &Value, max_chars: usize) -> (String, bool) {
         Value::Null => String::new(),
         _ => serde_json::to_string(value).unwrap_or_else(|_| value.to_string()),
     };
-    codex_safe_preview(&rendered, max_chars)
+    codex_local_preview(&rendered, max_chars)
 }
 
-fn codex_safe_preview(value: &str, max_chars: usize) -> (String, bool) {
+fn codex_local_preview(value: &str, max_chars: usize) -> (String, bool) {
     capped_text(value, max_chars)
 }
 
@@ -5521,7 +5521,7 @@ fn capped_text(value: &str, max_chars: usize) -> (String, bool) {
     (out, truncated)
 }
 
-fn provider_safe_preview(value: &str, max_chars: usize) -> (String, bool) {
+fn provider_local_preview(value: &str, max_chars: usize) -> (String, bool) {
     capped_text(value, max_chars)
 }
 
@@ -6213,7 +6213,7 @@ fn claude_event(
             String::new()
         }
     });
-    let (text, truncated) = provider_safe_preview(&text, PROVIDER_MAX_TEXT_CHARS);
+    let (text, truncated) = provider_local_preview(&text, PROVIDER_MAX_TEXT_CHARS);
 
     Some(ProviderEventEnvelope {
         provider_event_index: (line_number - 1) as u64,
@@ -6223,7 +6223,7 @@ fn claude_event(
         role,
         occurred_at,
         fidelity: Fidelity::Imported,
-        redaction_state: RedactionState::SafePreview,
+        redaction_state: RedactionState::LocalPreview,
         idempotency_key: value
             .get("uuid")
             .and_then(Value::as_str)
@@ -6292,12 +6292,12 @@ fn provider_capped_json(value: &Value, max_chars: usize) -> Value {
     match value {
         Value::Null => Value::Null,
         Value::String(text) => {
-            let (text, truncated) = provider_safe_preview(text, max_chars);
+            let (text, truncated) = provider_local_preview(text, max_chars);
             json!({ "text": text, "truncated": truncated })
         }
         _ => {
             let rendered = serde_json::to_string(value).unwrap_or_else(|_| value.to_string());
-            let (json_text, truncated) = provider_safe_preview(&rendered, max_chars);
+            let (json_text, truncated) = provider_local_preview(&rendered, max_chars);
             json!({ "json": json_text, "truncated": truncated })
         }
     }
@@ -6306,7 +6306,7 @@ fn provider_capped_json(value: &Value, max_chars: usize) -> Value {
 fn provider_capped_json_value(value: &Value, max_string_chars: usize) -> Value {
     match value {
         Value::String(text) => {
-            let (text, truncated) = provider_safe_preview(text, max_string_chars);
+            let (text, truncated) = provider_local_preview(text, max_string_chars);
             if truncated {
                 json!({ "text": text, "truncated": true })
             } else {
@@ -6539,7 +6539,7 @@ struct NativeEventDraft {
 }
 
 fn native_event(draft: NativeEventDraft) -> ProviderEventEnvelope {
-    let (text, truncated) = provider_safe_preview(&draft.text, PROVIDER_MAX_TEXT_CHARS);
+    let (text, truncated) = provider_local_preview(&draft.text, PROVIDER_MAX_TEXT_CHARS);
     ProviderEventEnvelope {
         provider_event_index: draft.provider_event_index,
         provider_event_hash: draft.provider_event_hash,
@@ -6548,7 +6548,7 @@ fn native_event(draft: NativeEventDraft) -> ProviderEventEnvelope {
         role: draft.role,
         occurred_at: draft.occurred_at,
         fidelity: Fidelity::Imported,
-        redaction_state: RedactionState::SafePreview,
+        redaction_state: RedactionState::LocalPreview,
         idempotency_key: Some(format!(
             "provider-event:{}:{}:{}",
             draft.provider.as_str(),
@@ -8664,7 +8664,7 @@ fn opencode_event(
     let event_type = opencode_event_type(&row.entry_type, data);
     let role = Some(provider_role(Some(&row.entry_type)));
     let text = opencode_event_text(&row.entry_type, data, event_type);
-    let (text, truncated) = provider_safe_preview(&text, PROVIDER_MAX_TEXT_CHARS);
+    let (text, truncated) = provider_local_preview(&text, PROVIDER_MAX_TEXT_CHARS);
     ProviderEventEnvelope {
         provider_event_index: row.seq.max(0) as u64,
         provider_event_hash: Some(row.id.clone()),
@@ -8676,7 +8676,7 @@ fn opencode_event(
         role,
         occurred_at,
         fidelity: Fidelity::Imported,
-        redaction_state: RedactionState::SafePreview,
+        redaction_state: RedactionState::LocalPreview,
         idempotency_key: Some(format!(
             "provider-event:opencode:{}:{}",
             row.session_id, row.id
@@ -9187,7 +9187,7 @@ fn native_jsonl_event(
     let entry_type = native_jsonl_entry_type(provider, value);
     let role = native_jsonl_role(provider, value);
     let text = native_jsonl_event_text(provider, value, event_type, &entry_type);
-    let (text, truncated) = provider_safe_preview(&text, PROVIDER_MAX_TEXT_CHARS);
+    let (text, truncated) = provider_local_preview(&text, PROVIDER_MAX_TEXT_CHARS);
     let event_id = native_jsonl_event_id(provider, value, line_number);
     let tool_calls = if provider == CaptureProvider::Antigravity {
         value
@@ -9205,7 +9205,7 @@ fn native_jsonl_event(
         role: Some(role),
         occurred_at,
         fidelity: Fidelity::Imported,
-        redaction_state: RedactionState::SafePreview,
+        redaction_state: RedactionState::LocalPreview,
         idempotency_key: Some(format!(
             "provider-event:{}:{source_format}:{event_id}",
             provider.as_str()
@@ -9630,7 +9630,7 @@ fn pi_session_event(entry: &Value, line_number: usize) -> ProviderEventEnvelope 
         role,
         occurred_at,
         fidelity: Fidelity::Imported,
-        redaction_state: RedactionState::SafePreview,
+        redaction_state: RedactionState::LocalPreview,
         idempotency_key: Some(format!("provider-event:pi:{line_number}")),
         artifacts: Vec::new(),
         payload: json!({
@@ -10395,7 +10395,7 @@ fn fixture_line_to_capture(
             role: event.role,
             occurred_at: event.occurred_at,
             fidelity,
-            redaction_state: RedactionState::SafePreview,
+            redaction_state: RedactionState::LocalPreview,
             idempotency_key: Some(format!(
                 "provider-event:{}:{}:{}",
                 fixture.provider.as_str(),
@@ -10422,7 +10422,7 @@ fn effective_event_redaction_state(
         RedactionState::Redacted => RedactionState::Redacted,
         RedactionState::Raw if !sanitizer_redacted => RedactionState::Raw,
         _ if sanitizer_redacted => RedactionState::Redacted,
-        _ => RedactionState::SafePreview,
+        _ => RedactionState::LocalPreview,
     }
 }
 
@@ -11609,7 +11609,7 @@ mod tests {
         let session_id = provider_session_uuid(CaptureProvider::Pi, "pi-session-1");
         let events = store.events_for_session(session_id).unwrap();
         assert_eq!(events.len(), 2);
-        assert_eq!(events[1].redaction_state, RedactionState::SafePreview);
+        assert_eq!(events[1].redaction_state, RedactionState::LocalPreview);
         assert!(events[1]
             .sync
             .metadata
@@ -12413,7 +12413,7 @@ mod tests {
             role: Some(EventRole::Assistant),
             occurred_at: "2026-06-24T01:00:00Z".parse().unwrap(),
             fidelity: Fidelity::Imported,
-            redaction_state: RedactionState::SafePreview,
+            redaction_state: RedactionState::LocalPreview,
             idempotency_key: None,
             artifacts: Vec::new(),
             payload: serde_json::json!({}),
@@ -12482,7 +12482,7 @@ mod tests {
             role: Some(EventRole::Assistant),
             occurred_at: "2026-06-24T01:00:00Z".parse().unwrap(),
             fidelity: Fidelity::Imported,
-            redaction_state: RedactionState::SafePreview,
+            redaction_state: RedactionState::LocalPreview,
             idempotency_key: None,
             artifacts: Vec::new(),
             payload: serde_json::json!({}),

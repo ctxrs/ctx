@@ -163,6 +163,13 @@ Writes nothing and returns:
 `occurred_at`, `source`, `cursor`, `text` or `preview`, and
 `redaction_state`.
 
+`redaction_state` values describe local payload handling, not whether a row is
+safe to publish. In particular, `safe_preview` is legacy contract spelling for a
+local searchable preview: the text may be truncated or projected from provider
+payloads, but it can still include absolute paths, token-shaped strings, command
+output, and other private transcript content. Treat `safe_preview` output as
+private unless a user separately reviews and redacts it.
+
 ## Locate
 
 ```bash

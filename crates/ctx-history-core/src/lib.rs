@@ -148,13 +148,26 @@ text_enum! {
 }
 
 text_enum! {
+    /// Payload handling state.
+    ///
+    /// The serialized value `safe_preview` is legacy contract spelling for a
+    /// local searchable preview. It is not a promise that output is share-safe.
     pub enum RedactionState {
         Raw => "raw",
         Redacted => "redacted",
-        SafePreview => "safe_preview",
+        LocalPreview => "safe_preview",
         Withheld => "withheld",
     }
-    default SafePreview
+    default LocalPreview
+}
+
+impl RedactionState {
+    /// Compatibility alias for the legacy Rust API name.
+    ///
+    /// New code should prefer `LocalPreview`, which better matches the local
+    /// search contract while preserving the serialized `safe_preview` value.
+    #[allow(non_upper_case_globals)]
+    pub const SafePreview: Self = Self::LocalPreview;
 }
 
 text_enum! {
@@ -1481,7 +1494,7 @@ mod tests {
         assert_eq!(Fidelity::default(), Fidelity::Partial);
         assert_eq!(SyncState::default(), SyncState::LocalOnly);
         assert_eq!(Confidence::default(), Confidence::Unknown);
-        assert_eq!(RedactionState::default(), RedactionState::SafePreview);
+        assert_eq!(RedactionState::default(), RedactionState::LocalPreview);
         assert_eq!(
             serde_json::from_str::<CaptureProvider>("\"copilot_cli\"").unwrap(),
             CaptureProvider::CopilotCli
@@ -1509,6 +1522,20 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(outbox.sync_state, SyncState::Pending);
+    }
+
+    #[test]
+    fn safe_preview_is_legacy_local_preview_spelling() {
+        assert_eq!(RedactionState::LocalPreview.as_str(), "safe_preview");
+        assert_eq!(
+            "safe_preview".parse::<RedactionState>().unwrap(),
+            RedactionState::LocalPreview
+        );
+        assert_eq!(
+            serde_json::to_string(&RedactionState::LocalPreview).unwrap(),
+            "\"safe_preview\""
+        );
+        assert_eq!(RedactionState::SafePreview, RedactionState::LocalPreview);
     }
 
     #[test]

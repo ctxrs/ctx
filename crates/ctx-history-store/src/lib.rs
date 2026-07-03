@@ -973,6 +973,8 @@ CREATE INDEX IF NOT EXISTS idx_local_workspaces_vcs_workspace_id ON local_worksp
 CREATE INDEX IF NOT EXISTS idx_audit_log_source_id ON audit_log(source_id);
 "#;
 
+// `safe_preview_text` is legacy schema naming. It stores local searchable
+// preview text and must not be interpreted as share-safe redaction.
 const FTS_TABLES_SQL: &str = r#"
 CREATE VIRTUAL TABLE IF NOT EXISTS ctx_history_search USING fts5(
     record_id UNINDEXED,
@@ -6045,8 +6047,8 @@ mod archive_validation_tests {
             blob_hash,
             byte_size,
             media_type: Some("text/markdown".into()),
-            preview_text: Some("synthetic public-safe blob".into()),
-            redaction_state: RedactionState::SafePreview,
+            preview_text: Some("synthetic local preview blob".into()),
+            redaction_state: RedactionState::LocalPreview,
             timestamps: EntityTimestamps {
                 created_at: fixed_time(),
                 updated_at: fixed_time(),
@@ -7509,6 +7511,36 @@ mod search_order_tests {
             .with_timezone(&Utc)
     }
 
+    fn sync_metadata() -> SyncMetadata {
+        SyncMetadata {
+            visibility: Visibility::LocalOnly,
+            fidelity: Fidelity::Imported,
+            sync_state: SyncState::LocalOnly,
+            sync_version: 0,
+            deleted_at: None,
+            metadata: serde_json::json!({}),
+        }
+    }
+
+    fn local_preview_event(seq: u64, text: &str, redaction_state: RedactionState) -> Event {
+        Event {
+            id: new_id(),
+            seq,
+            history_record_id: None,
+            session_id: None,
+            run_id: None,
+            event_type: EventType::Message,
+            role: Some(EventRole::User),
+            occurred_at: fixed_time(),
+            capture_source_id: None,
+            payload: serde_json::json!({ "text": text }),
+            payload_blob_id: None,
+            dedupe_key: None,
+            redaction_state,
+            sync: sync_metadata(),
+        }
+    }
+
     #[test]
     fn indexed_history_item_count_uses_sessions_and_events() {
         let temp = tempdir();
@@ -7655,6 +7687,46 @@ mod search_order_tests {
         assert!(store.search_records("---", 10).unwrap().is_empty());
         assert!(store.search_records("___", 10).unwrap().is_empty());
         assert!(store.search_records_page("", 10, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn event_search_local_preview_preserves_private_text_but_raw_is_withheld() {
+        let temp = tempdir();
+        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let local_event = local_preview_event(
+            1,
+            "cwd=/home/example/private token=ghp_1234567890abcdef",
+            RedactionState::LocalPreview,
+        );
+        let raw_event = local_preview_event(
+            2,
+            "raw cwd=/home/example/private token=ghp_1234567890abcdef",
+            RedactionState::Raw,
+        );
+
+        store.upsert_event(&local_event).unwrap();
+        store.upsert_event(&raw_event).unwrap();
+
+        let local_preview: String = store
+            .conn
+            .query_row(
+                "SELECT safe_preview_text FROM event_search WHERE event_id = ?1",
+                [local_event.id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(local_preview.contains("/home/example/private"));
+        assert!(local_preview.contains("ghp_1234567890abcdef"));
+
+        let raw_preview: String = store
+            .conn
+            .query_row(
+                "SELECT safe_preview_text FROM event_search WHERE event_id = ?1",
+                [raw_event.id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(raw_preview, "raw event payload withheld");
     }
 
     #[test]
@@ -8838,7 +8910,7 @@ mod catalog_tests {
                 payload: serde_json::json!({"text": "migration source reference"}),
                 payload_blob_id: None,
                 dedupe_key: None,
-                redaction_state: RedactionState::SafePreview,
+                redaction_state: RedactionState::LocalPreview,
                 sync: sync_metadata(),
             };
             event_id = event.id;

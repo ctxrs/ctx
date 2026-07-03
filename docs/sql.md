@@ -61,7 +61,7 @@ are implementation details and can change between versions.
 | `role` | Event role such as `user`, `assistant`, or `tool`, when known. |
 | `occurred_at_ms` | Unix epoch milliseconds. |
 | `payload_json` | Local private event payload. |
-| `redaction_state` | Payload redaction/preview state. |
+| `redaction_state` | Local payload handling state. `safe_preview` is legacy spelling for a local searchable preview, not share-safe redaction. |
 | `fidelity` | Import fidelity. |
 | `cwd`, `source_path` | Captured source context, when known. |
 
