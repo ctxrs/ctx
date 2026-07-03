@@ -19,6 +19,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 const PLUGIN_MANIFEST_FILE: &str = "ctx-history-plugin.json";
+const MAX_PLUGIN_MANIFEST_BYTES: usize = 1024 * 1024;
 const DEFAULT_PLUGIN_TIMEOUT_SECONDS: u64 = 300;
 const MAX_PLUGIN_STDOUT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_PLUGIN_STDERR_BYTES: usize = 256 * 1024;
@@ -548,8 +549,7 @@ fn cleanup_cursor_file(path: Option<&PathBuf>) {
 }
 
 fn read_plugin_manifest(path: &Path) -> Result<Vec<HistorySourcePluginSource>> {
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("read history source plugin manifest {}", path.display()))?;
+    let raw = read_plugin_manifest_text(path)?;
     let manifest: HistorySourcePluginManifest = serde_json::from_str(&raw)
         .with_context(|| format!("parse history source plugin manifest {}", path.display()))?;
     validate_plugin_id("plugin name", &manifest.name)?;
@@ -610,6 +610,27 @@ fn read_plugin_manifest(path: &Path) -> Result<Vec<HistorySourcePluginSource>> {
         });
     }
     Ok(sources)
+}
+
+fn read_plugin_manifest_text(path: &Path) -> Result<String> {
+    let file = fs::File::open(path)
+        .with_context(|| format!("read history source plugin manifest {}", path.display()))?;
+    let mut bytes = Vec::new();
+    file.take((MAX_PLUGIN_MANIFEST_BYTES as u64).saturating_add(1))
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read history source plugin manifest {}", path.display()))?;
+    if bytes.len() > MAX_PLUGIN_MANIFEST_BYTES {
+        return Err(anyhow!(
+            "history source plugin manifest {} exceeds max bytes ({MAX_PLUGIN_MANIFEST_BYTES})",
+            path.display()
+        ));
+    }
+    String::from_utf8(bytes).with_context(|| {
+        format!(
+            "history source plugin manifest {} is not UTF-8",
+            path.display()
+        )
+    })
 }
 
 fn plugin_manifest_paths(data_root: &Path) -> Vec<PathBuf> {

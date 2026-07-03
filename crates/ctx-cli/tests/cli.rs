@@ -1256,6 +1256,36 @@ fn invalid_installed_history_source_plugin_is_listed_as_invalid() {
 }
 
 #[test]
+fn oversized_installed_history_source_plugin_is_listed_as_invalid() {
+    let temp = tempdir();
+    let plugin_root = temp.path().join("history-plugins");
+    let bad_dir = plugin_root.join("oversized");
+    fs::create_dir_all(&bad_dir).unwrap();
+    fs::write(
+        bad_dir.join("ctx-history-plugin.json"),
+        vec![b' '; 2 * 1024 * 1024],
+    )
+    .unwrap();
+
+    let sources = json_output(
+        ctx(&temp)
+            .env("CTX_HISTORY_PLUGIN_PATH", &plugin_root)
+            .args(["sources", "--json"]),
+    );
+    let invalid = sources["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| source["kind"] == "history_source_plugin" && source["status"] == "invalid")
+        .unwrap();
+    assert_eq!(invalid["importable"], false);
+    assert!(invalid["error"]
+        .as_str()
+        .unwrap()
+        .contains("exceeds max bytes"));
+}
+
+#[test]
 fn invalid_installed_history_source_plugin_does_not_block_valid_import() {
     let temp = tempdir();
     let plugin_root = temp.path().join("history-plugins");
