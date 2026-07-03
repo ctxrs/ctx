@@ -839,6 +839,47 @@ fn setup_writes_day_one_config_contract_without_overwriting_existing_config() {
 }
 
 #[test]
+fn malformed_present_config_fails_before_setup_and_analytics_side_effects() {
+    let temp = tempdir();
+    let state = temp.path().join("state");
+    let events_path = temp.path().join("analytics.jsonl");
+    fs::write(
+        temp.path().join("config.toml"),
+        "[analytics]\nenabled = flase\n",
+    )
+    .unwrap();
+
+    ctx(&temp)
+        .arg("setup")
+        .env("XDG_STATE_HOME", &state)
+        .env("LOCALAPPDATA", &state)
+        .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("analytics.enabled").and(predicate::str::contains("boolean")),
+        );
+
+    assert!(
+        !temp.path().join("work.sqlite").exists(),
+        "setup must not create the store after config load fails"
+    );
+    assert!(
+        !events_path.exists(),
+        "analytics endpoint should not be touched after config load fails"
+    );
+    assert!(
+        !temp.path().join("install.json").exists(),
+        "analytics install identity should not be created after config load fails"
+    );
+    assert!(
+        !expected_device_path(temp.path(), &state).exists(),
+        "analytics device identity should not be created after config load fails"
+    );
+}
+
+#[test]
 fn setup_catalog_only_catalogs_codex_sessions_without_import() {
     let temp = tempdir();
     let sessions = temp

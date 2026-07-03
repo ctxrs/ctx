@@ -1,12 +1,12 @@
 use std::{
     collections::BTreeMap,
     env, fs,
-    io::Write,
+    io::{self, Write},
     path::{Path, PathBuf},
     time::Duration,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 
 pub const CONFIG_FILE: &str = "config.toml";
 
@@ -51,38 +51,50 @@ impl AppConfig {
     pub fn load(data_root: &Path) -> Result<Self> {
         let mut config = Self::default();
         let path = data_root.join(CONFIG_FILE);
-        if path.exists() {
-            let text =
-                fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-            let parsed = parse_toml_subset(&text);
-            config.apply_values(&parsed);
+        match fs::read_to_string(&path) {
+            Ok(text) => {
+                let parsed = parse_toml_subset(&text)
+                    .with_context(|| format!("parse {}", path.display()))?;
+                config
+                    .apply_values(&parsed)
+                    .with_context(|| format!("load {}", path.display()))?;
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
         }
         config.apply_env();
         Ok(config)
     }
 
-    fn apply_values(&mut self, values: &BTreeMap<String, String>) {
-        if let Some(enabled) = parse_bool(values.get("analytics.enabled")) {
-            self.analytics.enabled = enabled;
+    fn apply_values(&mut self, values: &BTreeMap<String, ConfigValue>) -> Result<()> {
+        for (key, value) in values {
+            match key.as_str() {
+                "analytics.enabled" => {
+                    self.analytics.enabled = parse_config_bool(key, value)?;
+                }
+                "analytics.endpoint" => {
+                    self.analytics.endpoint = parse_non_empty_string(key, value)?;
+                }
+                "upgrade.auto" => {
+                    self.upgrade.auto = parse_upgrade_auto(value)?;
+                }
+                "upgrade.channel" => {
+                    self.upgrade.channel = parse_non_empty_string(key, value)?;
+                }
+                "upgrade.interval_hours" => {
+                    let hours = parse_config_u64(key, value)?;
+                    self.upgrade.interval = Duration::from_secs(hours.saturating_mul(60 * 60));
+                }
+                "upgrade.interval_seconds" => {
+                    self.upgrade.interval = Duration::from_secs(parse_config_u64(key, value)?);
+                }
+                "upgrade.functions_base" => {
+                    self.upgrade.functions_base = parse_non_empty_string(key, value)?;
+                }
+                _ => bail!("unknown config key `{key}` at line {}", value.line),
+            }
         }
-        if let Some(endpoint) = parse_string(values.get("analytics.endpoint")) {
-            self.analytics.endpoint = endpoint;
-        }
-        if let Some(auto) = parse_string(values.get("upgrade.auto")) {
-            self.upgrade.auto = auto;
-        }
-        if let Some(channel) = parse_string(values.get("upgrade.channel")) {
-            self.upgrade.channel = channel;
-        }
-        if let Some(hours) = parse_u64(values.get("upgrade.interval_hours")) {
-            self.upgrade.interval = Duration::from_secs(hours.saturating_mul(60 * 60));
-        }
-        if let Some(seconds) = parse_u64(values.get("upgrade.interval_seconds")) {
-            self.upgrade.interval = Duration::from_secs(seconds);
-        }
-        if let Some(functions_base) = parse_string(values.get("upgrade.functions_base")) {
-            self.upgrade.functions_base = functions_base;
-        }
+        Ok(())
     }
 
     fn apply_env(&mut self) {
@@ -144,54 +156,134 @@ interval_hours = 24\n",
     Ok(())
 }
 
-fn parse_toml_subset(text: &str) -> BTreeMap<String, String> {
+#[derive(Debug, Clone)]
+struct ConfigValue {
+    raw: String,
+    line: usize,
+}
+
+fn parse_toml_subset(text: &str) -> Result<BTreeMap<String, ConfigValue>> {
     let mut section = String::new();
     let mut values = BTreeMap::new();
-    for raw_line in text.lines() {
-        let line = raw_line.split('#').next().unwrap_or_default().trim();
+    for (index, raw_line) in text.lines().enumerate() {
+        let line_number = index + 1;
+        let line = strip_comment(raw_line).trim();
         if line.is_empty() {
             continue;
         }
-        if line.starts_with('[') && line.ends_with(']') {
-            section = line
-                .trim_start_matches('[')
-                .trim_end_matches(']')
-                .trim()
-                .to_owned();
+        if line.starts_with('[') {
+            if !line.ends_with(']') {
+                bail!("invalid config section header at line {line_number}: {line}");
+            }
+            section = line[1..line.len() - 1].trim().to_owned();
+            if section.is_empty() {
+                bail!("empty config section header at line {line_number}");
+            }
             continue;
         }
         let Some((key, value)) = line.split_once('=') else {
-            continue;
+            bail!("invalid config line {line_number}: expected `[section]` or `key = value`");
         };
         let key = key.trim();
         if key.is_empty() {
-            continue;
+            bail!("empty config key at line {line_number}");
         }
         let full_key = if section.is_empty() {
             key.to_owned()
         } else {
             format!("{section}.{key}")
         };
-        values.insert(
-            full_key,
-            value.trim().trim_end_matches(',').trim().to_owned(),
-        );
+        let value = ConfigValue {
+            raw: value.trim().to_owned(),
+            line: line_number,
+        };
+        if let Some(previous) = values.insert(full_key.clone(), value) {
+            bail!(
+                "duplicate config key `{full_key}` at line {line_number}; first set at line {}",
+                previous.line
+            );
+        }
     }
-    values
+    Ok(values)
 }
 
-fn parse_string(value: Option<&String>) -> Option<String> {
+fn strip_comment(line: &str) -> &str {
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut escaped = false;
+    for (index, ch) in line.char_indices() {
+        if in_double_quote {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match ch {
+                '\\' => escaped = true,
+                '"' => in_double_quote = false,
+                _ => {}
+            }
+            continue;
+        }
+        if in_single_quote {
+            if ch == '\'' {
+                in_single_quote = false;
+            }
+            continue;
+        }
+        match ch {
+            '#' => return &line[..index],
+            '"' => in_double_quote = true,
+            '\'' => in_single_quote = true,
+            _ => {}
+        }
+    }
+    line
+}
+
+fn parse_non_empty_string(key: &str, value: &ConfigValue) -> Result<String> {
+    let parsed = parse_config_string(key, value)?;
+    if parsed.trim().is_empty() {
+        bail!("{key} at line {} must not be empty", value.line);
+    }
+    Ok(parsed)
+}
+
+fn parse_config_string(key: &str, value: &ConfigValue) -> Result<String> {
+    let raw = value.raw.trim();
+    if raw.len() >= 2
+        && ((raw.starts_with('"') && raw.ends_with('"'))
+            || (raw.starts_with('\'') && raw.ends_with('\'')))
+    {
+        return Ok(raw[1..raw.len() - 1].to_owned());
+    }
+    bail!("{key} at line {} must be a quoted string", value.line);
+}
+
+fn parse_config_bool(key: &str, value: &ConfigValue) -> Result<bool> {
+    match value.raw.trim() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => bail!("{key} at line {} must be a boolean", value.line),
+    }
+}
+
+fn parse_config_u64(key: &str, value: &ConfigValue) -> Result<u64> {
     value
-        .map(|value| value.trim().trim_matches('"').trim_matches('\'').to_owned())
-        .filter(|value| !value.is_empty())
+        .raw
+        .trim()
+        .parse::<u64>()
+        .with_context(|| format!("{key} at line {} must be an unsigned integer", value.line))
 }
 
-fn parse_bool(value: Option<&String>) -> Option<bool> {
-    value.and_then(|value| parse_bool_value(value))
-}
-
-fn parse_u64(value: Option<&String>) -> Option<u64> {
-    value.and_then(|value| value.trim().trim_matches('"').parse::<u64>().ok())
+fn parse_upgrade_auto(value: &ConfigValue) -> Result<String> {
+    let auto = parse_non_empty_string("upgrade.auto", value)?;
+    match auto.to_ascii_lowercase().as_str() {
+        "apply" | "off" => Ok(auto.to_ascii_lowercase()),
+        _ => bail!(
+            "upgrade.auto at line {} must be either \"apply\" or \"off\"",
+            value.line
+        ),
+    }
 }
 
 fn parse_bool_value(value: &str) -> Option<bool> {
@@ -228,7 +320,8 @@ auto = "off"
 channel = "beta"
 interval_seconds = 60
 "#,
-        );
+        )
+        .unwrap();
         let mut config = AppConfig::default();
         assert_eq!(
             config.analytics.endpoint,
@@ -236,10 +329,133 @@ interval_seconds = 60
         );
         assert!(config.analytics.enabled);
         assert_eq!(config.upgrade.auto, "apply");
-        config.apply_values(&values);
+        config.apply_values(&values).unwrap();
         assert!(!config.analytics.enabled);
         assert_eq!(config.upgrade.auto, "off");
         assert_eq!(config.upgrade.channel, "beta");
         assert_eq!(config.upgrade.interval, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn load_without_config_file_uses_defaults() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let config = AppConfig::load(temp.path()).unwrap();
+
+        assert!(config.analytics.enabled);
+        assert_eq!(config.upgrade.auto, "apply");
+        assert_eq!(config.upgrade.channel, "stable");
+        assert_eq!(config.upgrade.interval, Duration::from_secs(24 * 60 * 60));
+    }
+
+    #[test]
+    fn load_valid_config_file_applies_values() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join(CONFIG_FILE),
+            r#"
+[analytics]
+enabled = false
+endpoint = "file:///tmp/ctx-analytics.jsonl"
+
+[upgrade]
+auto = "off"
+channel = "beta"
+interval_hours = 2
+functions_base = "https://example.test/functions/v1"
+"#,
+        )
+        .unwrap();
+
+        let config = AppConfig::load(temp.path()).unwrap();
+
+        assert!(!config.analytics.enabled);
+        assert_eq!(config.analytics.endpoint, "file:///tmp/ctx-analytics.jsonl");
+        assert_eq!(config.upgrade.auto, "off");
+        assert_eq!(config.upgrade.channel, "beta");
+        assert_eq!(config.upgrade.interval, Duration::from_secs(2 * 60 * 60));
+        assert_eq!(
+            config.upgrade.functions_base,
+            "https://example.test/functions/v1"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_config_booleans() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join(CONFIG_FILE),
+            "[analytics]\nenabled = flase\n",
+        )
+        .unwrap();
+
+        let error = format!("{:#}", AppConfig::load(temp.path()).unwrap_err());
+
+        assert!(error.contains("analytics.enabled"), "{error}");
+        assert!(error.contains("boolean"), "{error}");
+    }
+
+    #[test]
+    fn rejects_invalid_upgrade_auto_values() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join(CONFIG_FILE),
+            "[upgrade]\nauto = \"offf\"\n",
+        )
+        .unwrap();
+
+        let error = format!("{:#}", AppConfig::load(temp.path()).unwrap_err());
+
+        assert!(error.contains("upgrade.auto"), "{error}");
+        assert!(error.contains("\"apply\" or \"off\""), "{error}");
+    }
+
+    #[test]
+    fn rejects_unquoted_upgrade_auto_values() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join(CONFIG_FILE), "[upgrade]\nauto = offf\n").unwrap();
+
+        let error = format!("{:#}", AppConfig::load(temp.path()).unwrap_err());
+
+        assert!(error.contains("upgrade.auto"), "{error}");
+        assert!(error.contains("quoted string"), "{error}");
+    }
+
+    #[test]
+    fn rejects_invalid_config_numbers() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join(CONFIG_FILE),
+            "[upgrade]\ninterval_seconds = nope\n",
+        )
+        .unwrap();
+
+        let error = format!("{:#}", AppConfig::load(temp.path()).unwrap_err());
+
+        assert!(error.contains("upgrade.interval_seconds"), "{error}");
+        assert!(error.contains("unsigned integer"), "{error}");
+    }
+
+    #[test]
+    fn rejects_malformed_config_lines() {
+        let error = parse_toml_subset("[upgrade]\nthis is not valid\n").unwrap_err();
+        let error = error.to_string();
+
+        assert!(error.contains("invalid config line 2"), "{error}");
+    }
+
+    #[test]
+    fn rejects_unknown_config_keys() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join(CONFIG_FILE),
+            "[analytics]\nenabld = false\n",
+        )
+        .unwrap();
+
+        let error = format!("{:#}", AppConfig::load(temp.path()).unwrap_err());
+
+        assert!(error.contains("unknown config key"), "{error}");
+        assert!(error.contains("analytics.enabld"), "{error}");
     }
 }
