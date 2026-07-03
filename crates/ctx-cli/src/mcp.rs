@@ -27,9 +27,11 @@ use super::{
 
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const MCP_MAX_LINE_BYTES: usize = 1024 * 1024;
+const MCP_MAX_SESSION_EVENTS: usize = 200;
 
 enum McpInputLine {
     Line(String),
+    InvalidUtf8,
     TooLarge,
 }
 
@@ -73,6 +75,12 @@ fn serve_stdio(data_root: PathBuf) -> Result<()> {
                 }
                 handle_line(line, &data_root, &mut initialized)
             }
+            McpInputLine::InvalidUtf8 => Some(error_response(
+                Value::Null,
+                -32700,
+                "Parse error",
+                Some(json!({ "error": "MCP message is not valid UTF-8" })),
+            )),
             McpInputLine::TooLarge => Some(error_response(
                 Value::Null,
                 -32700,
@@ -121,10 +129,10 @@ fn read_mcp_input_line(reader: &mut impl BufRead) -> Result<Option<McpInputLine>
         reader.consume(bytes_to_consume);
     }
 
-    Ok(Some(McpInputLine::Line(
-        String::from_utf8(buffer)
-            .map_err(|err| anyhow!("read MCP JSON-RPC line as UTF-8: {err}"))?,
-    )))
+    Ok(Some(match String::from_utf8(buffer) {
+        Ok(line) => McpInputLine::Line(line),
+        Err(_) => McpInputLine::InvalidUtf8,
+    }))
 }
 
 fn discard_until_newline(reader: &mut impl BufRead) -> Result<()> {
@@ -497,14 +505,24 @@ fn tool_show_session(arguments: &Value, data_root: &Path) -> Result<Value> {
     let session_id = required_uuid(arguments, "ctx_session_id")?;
     let mode = optional_transcript_mode(arguments, "mode")?.unwrap_or(TranscriptMode::Lite);
     let session = store.get_session(session_id)?;
-    let events = store.events_for_session(session.id)?;
-    Ok(session_transcript_json(
-        &store,
-        &session,
-        &events,
-        mode,
-        OutputFormat::Json,
-    ))
+    let mut events = store.events_for_session_limited(session.id, MCP_MAX_SESSION_EVENTS + 1)?;
+    let truncated = events.len() > MCP_MAX_SESSION_EVENTS;
+    if truncated {
+        events.truncate(MCP_MAX_SESSION_EVENTS);
+    }
+    let mut value = session_transcript_json(&store, &session, &events, mode, OutputFormat::Json);
+    if truncated {
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "truncated".to_owned(),
+                json!({
+                    "events": true,
+                    "max_events": MCP_MAX_SESSION_EVENTS,
+                }),
+            );
+        }
+    }
+    Ok(value)
 }
 
 fn tool_show_event(arguments: &Value, data_root: &Path) -> Result<Value> {
