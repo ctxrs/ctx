@@ -6693,6 +6693,16 @@ fn open_provider_sqlite_readonly(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
+fn provider_nonnegative_i64_to_u64(value: i64, field: &'static str) -> Result<u64> {
+    u64::try_from(value).map_err(|_| {
+        CaptureError::InvalidPayload(format!("{field} must be nonnegative, got {value}"))
+    })
+}
+
+fn provider_line_from_index(index: u64) -> usize {
+    index.min(usize::MAX as u64) as usize
+}
+
 fn provider_timestamp_seconds(value: Option<f64>, fallback: DateTime<Utc>) -> DateTime<Utc> {
     let Some(value) = value else {
         return fallback;
@@ -7246,15 +7256,24 @@ fn normalize_hermes_sqlite(
     let mut result = ProviderNormalizationResult::default();
 
     for row in messages {
+        let provider_event_index =
+            match provider_nonnegative_i64_to_u64(row.id, "Hermes message id") {
+                Ok(value) => value,
+                Err(err) => {
+                    push_provider_import_failure(&mut result.summary, 0, err.to_string());
+                    continue;
+                }
+            };
+        let line = provider_line_from_index(provider_event_index);
         let Some(session) = sessions_by_id.get(&row.session_id) else {
-            result.summary.failed += 1;
-            result.summary.failures.push(ProviderImportFailure {
-                line: row.id.max(0) as usize,
-                error: format!(
+            push_provider_import_failure(
+                &mut result.summary,
+                line,
+                format!(
                     "Hermes message {} references missing session {}",
                     row.id, row.session_id
                 ),
-            });
+            );
             continue;
         };
         let provider_session_id = session.id.clone();
@@ -7276,7 +7295,7 @@ fn normalize_hermes_sqlite(
             provider: CaptureProvider::Hermes,
             source_format: HERMES_SQLITE_SOURCE_FORMAT,
             provider_session_id: provider_session_id.clone(),
-            provider_event_index: row.id.max(0) as u64,
+            provider_event_index,
             provider_event_hash: Some(format!("message:{}", row.id)),
             cursor: format!("messages:id:{}", row.id),
             event_type,
@@ -7309,7 +7328,7 @@ fn normalize_hermes_sqlite(
             }),
         });
         result.captures.push((
-            row.id.max(0) as usize,
+            line,
             native_provider_capture(
                 NativeSessionDraft {
                     provider: CaptureProvider::Hermes,
@@ -7609,6 +7628,17 @@ fn normalize_nanoclaw_project(
             )
         });
         for message in messages {
+            let seq = match message
+                .seq
+                .map(|seq| provider_nonnegative_i64_to_u64(seq, "NanoClaw message seq"))
+                .transpose()
+            {
+                Ok(seq) => seq,
+                Err(err) => {
+                    push_provider_import_failure(&mut result.summary, 0, err.to_string());
+                    continue;
+                }
+            };
             let provider_session_id = format!("{}/{}", session.agent_group_id, session.id);
             let occurred_at = provider_timestamp_millis(message.timestamp, context.imported_at);
             let started_at = provider_timestamp_millis(session.created_at, occurred_at);
@@ -7623,7 +7653,7 @@ fn normalize_nanoclaw_project(
                     message.kind.as_deref().unwrap_or(message.source)
                 )
             });
-            let event_index = nanoclaw_event_index(&message);
+            let event_index = nanoclaw_event_index(&message, seq);
             let role = if message.source == "inbound" {
                 Some(EventRole::User)
             } else {
@@ -7738,15 +7768,15 @@ fn nanoclaw_project_root(path: &Path) -> Result<PathBuf> {
     })
 }
 
-fn nanoclaw_event_index(message: &NanoClawMessageRow) -> u64 {
-    if let Some(seq) = message.seq {
+fn nanoclaw_event_index(message: &NanoClawMessageRow, seq: Option<u64>) -> u64 {
+    if let Some(seq) = seq {
         let source_bucket = if message.source == "outbound" {
             500_000
         } else {
             0
         };
         let row_bucket = fnv1a64(format!("{}:{}", message.source, message.id).as_bytes()) % 500_000;
-        return (seq.max(0) as u64)
+        return seq
             .saturating_mul(1_000_000)
             .saturating_add(source_bucket)
             .saturating_add(row_bucket);
@@ -8560,6 +8590,16 @@ fn normalize_astrbot_sqlite(
     let mut checkpoint_sessions = BTreeMap::<String, String>::new();
 
     for conversation in &conversations {
+        let conversation_line = match provider_nonnegative_i64_to_u64(
+            conversation.row_id,
+            "AstrBot conversation row id",
+        ) {
+            Ok(value) => provider_line_from_index(value),
+            Err(err) => {
+                push_provider_import_failure(&mut result.summary, 0, err.to_string());
+                continue;
+            }
+        };
         let provider_session_id = astrbot_provider_session_id(conversation);
         let started_at = provider_timestamp_millis(conversation.created_at, context.imported_at);
         let ended_at = conversation
@@ -8636,7 +8676,7 @@ fn normalize_astrbot_sqlite(
                 }),
             });
             result.captures.push((
-                conversation.row_id.max(0) as usize,
+                conversation_line,
                 astrbot_capture(
                     AstrBotCaptureDraft {
                         conversation,
@@ -8660,6 +8700,14 @@ fn normalize_astrbot_sqlite(
         .map(|conversation| (astrbot_provider_session_id(conversation), conversation))
         .collect::<BTreeMap<_, _>>();
     for message in platform_messages {
+        let message_id =
+            match provider_nonnegative_i64_to_u64(message.id, "AstrBot platform message id") {
+                Ok(value) => value,
+                Err(err) => {
+                    push_provider_import_failure(&mut result.summary, 0, err.to_string());
+                    continue;
+                }
+            };
         let provider_session_id = message
             .llm_checkpoint_id
             .as_ref()
@@ -8689,7 +8737,7 @@ fn normalize_astrbot_sqlite(
         } else {
             Some(EventRole::Assistant)
         };
-        let event_index = 1_000_000u64.saturating_add(message.id.max(0) as u64);
+        let event_index = 1_000_000u64.saturating_add(message_id);
         let event = native_event(NativeEventDraft {
             provider: CaptureProvider::AstrBot,
             source_format: ASTRBOT_SQLITE_SOURCE_FORMAT,
@@ -9028,25 +9076,34 @@ fn normalize_opencode_sqlite(
     let raw_source_path = path.display().to_string();
 
     for row in messages {
+        let provider_event_index =
+            match provider_nonnegative_i64_to_u64(row.seq, "OpenCode session_message seq") {
+                Ok(value) => value,
+                Err(err) => {
+                    push_provider_import_failure(&mut result.summary, 0, err.to_string());
+                    continue;
+                }
+            };
+        let line = provider_line_from_index(provider_event_index);
         let Some(session) = sessions_by_id.get(&row.session_id) else {
-            result.summary.failed += 1;
-            result.summary.failures.push(ProviderImportFailure {
-                line: row.seq.max(0) as usize,
-                error: format!(
+            push_provider_import_failure(
+                &mut result.summary,
+                line,
+                format!(
                     "OpenCode session_message {} references missing session {}",
                     row.id, row.session_id
                 ),
-            });
+            );
             continue;
         };
         let data: Value = match serde_json::from_str(&row.data) {
             Ok(data) => data,
             Err(err) => {
-                result.summary.failed += 1;
-                result.summary.failures.push(ProviderImportFailure {
-                    line: row.seq.max(0) as usize,
-                    error: format!("invalid JSON in session_message {}: {err}", row.id),
-                });
+                push_provider_import_failure(
+                    &mut result.summary,
+                    line,
+                    format!("invalid JSON in session_message {}: {err}", row.id),
+                );
                 continue;
             }
         };
@@ -9057,7 +9114,7 @@ fn normalize_opencode_sqlite(
             .get(&session.id)
             .copied()
             .unwrap_or(occurred_at);
-        let event = opencode_event(&row, &data, occurred_at);
+        let event = opencode_event(&row, &data, occurred_at, provider_event_index);
         result
             .files_touched
             .extend(provider_file_touches_from_raw_value(
@@ -9067,11 +9124,11 @@ fn normalize_opencode_sqlite(
                 Some(raw_source_path.as_str()),
                 &data,
                 &event,
-                row.seq.max(0) as usize,
+                line,
             ));
         let is_subagent = session.parent_id.is_some();
         result.captures.push((
-            row.seq.max(0) as usize,
+            line,
             ProviderCaptureEnvelope {
                 schema_version: PROVIDER_CAPTURE_ENVELOPE_SCHEMA_VERSION,
                 provider: CaptureProvider::OpenCode,
@@ -9465,13 +9522,14 @@ fn opencode_event(
     row: &OpenCodeMessageRow,
     data: &Value,
     occurred_at: DateTime<Utc>,
+    provider_event_index: u64,
 ) -> ProviderEventEnvelope {
     let event_type = opencode_event_type(&row.entry_type, data);
     let role = Some(provider_role(Some(&row.entry_type)));
     let text = opencode_event_text(&row.entry_type, data, event_type);
     let (text, truncated) = provider_local_preview(&text, PROVIDER_MAX_TEXT_CHARS);
     ProviderEventEnvelope {
-        provider_event_index: row.seq.max(0) as u64,
+        provider_event_index,
         provider_event_hash: Some(row.id.clone()),
         cursor: Some(format!(
             "session_message:{}:seq:{}",
@@ -13936,6 +13994,43 @@ mod tests {
             Some(2)
         );
         assert_ne!(events[0].id, events[1].id);
+    }
+
+    #[test]
+    fn native_opencode_rejects_negative_session_message_seq() {
+        let temp = tempdir();
+        let fixture = write_opencode_smoke_db(&temp, false);
+        let conn = Connection::open(&fixture).unwrap();
+        conn.execute(
+            "update session_message set seq = -1 where id = 'msg-user'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let summary = import_opencode_sqlite(
+            &fixture,
+            &mut store,
+            OpenCodeSqliteImportOptions {
+                allow_partial_failures: true,
+                ..OpenCodeSqliteImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.failed, 1);
+        assert!(summary.failures[0]
+            .error
+            .contains("OpenCode session_message seq must be nonnegative"));
+        assert_eq!(summary.imported_events, 2);
+        let session_id = provider_session_uuid(CaptureProvider::OpenCode, "opencode-root");
+        let events = store.events_for_session(session_id).unwrap();
+        assert!(events.iter().all(|event| {
+            event.payload["body"]["session_message_seq"]
+                .as_i64()
+                .is_some_and(|seq| seq >= 0)
+        }));
     }
 
     #[test]
