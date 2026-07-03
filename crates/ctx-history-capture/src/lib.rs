@@ -1375,68 +1375,105 @@ impl ProviderCaptureAdapter for PiSessionJsonlAdapter {
         path: &Path,
         context: &ProviderAdapterContext,
     ) -> Result<ProviderNormalizationResult> {
-        ensure_regular_provider_transcript_file(path)?;
-        let file = File::open(path)?;
-        let reader = BufReader::new(file);
-        let mut result = ProviderNormalizationResult::default();
-        let mut header = None;
+        normalize_pi_session_jsonl_path(path, context)
+    }
+}
 
-        for (index, line) in reader.lines().enumerate() {
-            let line_number = index + 1;
-            let line = line?;
-            if line.trim().is_empty() {
+fn normalize_pi_session_jsonl_path(
+    path: &Path,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    if fs::symlink_metadata(path)?.file_type().is_file() {
+        return normalize_pi_session_jsonl_file(path, context);
+    }
+
+    let mut paths = Vec::new();
+    collect_jsonl_paths(path, &mut paths)?;
+    paths.sort();
+    if paths.is_empty() {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: native_jsonl_missing_reason(CaptureProvider::Pi),
+        });
+    }
+
+    let mut merged = ProviderNormalizationResult::default();
+    for path in paths {
+        let mut file_context = context.clone();
+        file_context.source_path = Some(path.clone());
+        let mut result = normalize_pi_session_jsonl_file(&path, &file_context)?;
+        merged.summary.merge(result.summary);
+        merged.captures.append(&mut result.captures);
+        merged.files_touched.append(&mut result.files_touched);
+    }
+    Ok(merged)
+}
+
+fn normalize_pi_session_jsonl_file(
+    path: &Path,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    ensure_regular_provider_transcript_file(path)?;
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    let mut result = ProviderNormalizationResult::default();
+    let mut header = None;
+
+    for (index, line) in reader.lines().enumerate() {
+        let line_number = index + 1;
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let value: Value = match serde_json::from_str(&line) {
+            Ok(value) => value,
+            Err(err) => {
+                result.summary.failed += 1;
+                result.summary.failures.push(ProviderImportFailure {
+                    line: line_number,
+                    error: err.to_string(),
+                });
                 continue;
             }
-
-            let value: Value = match serde_json::from_str(&line) {
-                Ok(value) => value,
+        };
+        let entry_type = value
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        if entry_type == "session" {
+            match pi_session_header(value) {
+                Ok(parsed) => {
+                    let capture = pi_session_capture(&parsed, None, line_number, context);
+                    header = Some(parsed);
+                    result.captures.push((line_number, capture));
+                }
                 Err(err) => {
                     result.summary.failed += 1;
                     result.summary.failures.push(ProviderImportFailure {
                         line: line_number,
                         error: err.to_string(),
                     });
-                    continue;
                 }
-            };
-            let entry_type = value
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            if entry_type == "session" {
-                match pi_session_header(value) {
-                    Ok(parsed) => {
-                        let capture = pi_session_capture(&parsed, None, line_number, context);
-                        header = Some(parsed);
-                        result.captures.push((line_number, capture));
-                    }
-                    Err(err) => {
-                        result.summary.failed += 1;
-                        result.summary.failures.push(ProviderImportFailure {
-                            line: line_number,
-                            error: err.to_string(),
-                        });
-                    }
-                }
-                continue;
             }
-
-            let Some(header) = header.as_ref() else {
-                result.summary.failed += 1;
-                result.summary.failures.push(ProviderImportFailure {
-                    line: line_number,
-                    error: "pi session entry appeared before session header".to_owned(),
-                });
-                continue;
-            };
-            result.captures.push((
-                line_number,
-                pi_session_capture(header, Some(value), line_number, context),
-            ));
+            continue;
         }
 
-        Ok(result)
+        let Some(header) = header.as_ref() else {
+            result.summary.failed += 1;
+            result.summary.failures.push(ProviderImportFailure {
+                line: line_number,
+                error: "pi session entry appeared before session header".to_owned(),
+            });
+            continue;
+        };
+        result.captures.push((
+            line_number,
+            pi_session_capture(header, Some(value), line_number, context),
+        ));
     }
+
+    Ok(result)
 }
 
 impl ProviderCaptureAdapter for ClaudeProjectsJsonlAdapter {
@@ -8877,6 +8914,7 @@ fn normalize_jsonl_tree(
 
 fn native_jsonl_missing_reason(provider: CaptureProvider) -> &'static str {
     match provider {
+        CaptureProvider::Pi => "no Pi session JSONL files found",
         CaptureProvider::Antigravity => {
             "no Antigravity transcript JSONL files found under brain/*/.system_generated/logs"
         }
@@ -9614,7 +9652,7 @@ fn pi_session_capture(
     line_number: usize,
     context: &ProviderAdapterContext,
 ) -> ProviderCaptureEnvelope {
-    let event = entry.map(|entry| pi_session_event(&entry, line_number));
+    let event = entry.map(|entry| pi_session_event(header, &entry, line_number));
     let cursor = event.as_ref().and_then(|event| {
         event.cursor.as_ref().map(|cursor| ProviderCursorRange {
             before: None,
@@ -9680,7 +9718,11 @@ fn pi_session_capture(
     }
 }
 
-fn pi_session_event(entry: &Value, line_number: usize) -> ProviderEventEnvelope {
+fn pi_session_event(
+    header: &PiSessionHeader,
+    entry: &Value,
+    line_number: usize,
+) -> ProviderEventEnvelope {
     let entry_type = entry
         .get("type")
         .and_then(Value::as_str)
@@ -9708,7 +9750,7 @@ fn pi_session_event(entry: &Value, line_number: usize) -> ProviderEventEnvelope 
         occurred_at,
         fidelity: Fidelity::Imported,
         redaction_state: RedactionState::LocalPreview,
-        idempotency_key: Some(format!("provider-event:pi:{line_number}")),
+        idempotency_key: Some(format!("provider-event:pi:{}:{line_number}", header.id)),
         artifacts: Vec::new(),
         payload: json!({
             "entry_type": entry_type,
@@ -11955,6 +11997,64 @@ mod tests {
         assert!(events[3].payload.to_string().contains("cargo test"));
         assert!(events[3].payload.to_string().contains("fixture-secret"));
         assert!(!events[3].payload.to_string().contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn pi_session_import_replays_default_session_directory_tree() {
+        let temp = tempdir();
+        let root = temp.path().join(".pi/agent/sessions/--workspace--");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("2026-06-24T12-00-00-000Z_pi-dir-alpha.jsonl"),
+            concat!(
+                "{\"type\":\"session\",\"version\":3,\"id\":\"pi-dir-alpha\",\"timestamp\":\"2026-06-24T12:00:00Z\",\"cwd\":\"/workspace\"}\n",
+                "{\"type\":\"message\",\"id\":\"pi-dir-alpha-user\",\"timestamp\":\"2026-06-24T12:00:01Z\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"alpha directory import\"}]}}\n",
+            ),
+        )
+        .unwrap();
+        fs::write(
+            root.join("2026-06-24T12-01-00-000Z_pi-dir-beta.jsonl"),
+            concat!(
+                "{\"type\":\"session\",\"version\":3,\"id\":\"pi-dir-beta\",\"timestamp\":\"2026-06-24T12:01:00Z\",\"cwd\":\"/workspace\"}\n",
+                "{\"type\":\"message\",\"id\":\"pi-dir-beta-user\",\"timestamp\":\"2026-06-24T12:01:01Z\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"beta directory import\"}]}}\n",
+            ),
+        )
+        .unwrap();
+        let sessions_root = temp.path().join(".pi/agent/sessions");
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let first = import_pi_session_jsonl(
+            &sessions_root,
+            &mut store,
+            PiSessionImportOptions {
+                source_path: Some(sessions_root.clone()),
+                imported_at: "2026-06-24T16:00:00Z".parse().unwrap(),
+                ..PiSessionImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(first.failed, 0, "{:?}", first.failures);
+        assert_eq!(first.imported_sessions, 2);
+        assert_eq!(first.imported_events, 2);
+
+        let second = import_pi_session_jsonl(
+            &sessions_root,
+            &mut store,
+            PiSessionImportOptions {
+                source_path: Some(sessions_root.clone()),
+                imported_at: "2026-06-24T16:00:00Z".parse().unwrap(),
+                ..PiSessionImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(second.failed, 0, "{:?}", second.failures);
+        assert_eq!(second.imported_events, 0);
+        assert_eq!(second.skipped_events, 2);
+
+        let alpha = provider_session_uuid(CaptureProvider::Pi, "pi-dir-alpha");
+        let beta = provider_session_uuid(CaptureProvider::Pi, "pi-dir-beta");
+        assert_eq!(store.events_for_session(alpha).unwrap().len(), 1);
+        assert_eq!(store.events_for_session(beta).unwrap().len(), 1);
     }
 
     #[test]

@@ -61,7 +61,7 @@ you want to repair, re-run, resume, or pass an explicit path:
 
 ```bash
 ctx import --provider codex --path ~/.codex/sessions
-ctx import --provider pi --path ~/.pi/sessions.jsonl
+ctx import --provider pi --path ~/.pi/agent/sessions
 ctx import --provider cursor --path ~/.cursor/projects
 ctx import --provider hermes --path ~/.hermes/state.db
 ctx import --provider nanoclaw --path /path/to/nanoclaw-project
