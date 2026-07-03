@@ -89,6 +89,8 @@ enum CommandRoot {
     Import(ImportArgs),
     #[command(about = "Show an indexed session transcript or event")]
     Show(ShowArgs),
+    #[command(about = "Generate a local report from indexed session artifacts")]
+    Report(ReportArgs),
     #[command(about = "Locate provider/source metadata for an indexed session or event")]
     Locate(LocateArgs),
     #[command(about = "Search indexed agent history")]
@@ -168,6 +170,33 @@ struct ImportArgs {
 struct ShowArgs {
     #[command(subcommand)]
     target: ShowTarget,
+}
+
+#[derive(Debug, Args)]
+struct ReportArgs {
+    #[command(subcommand)]
+    target: ReportTarget,
+}
+
+#[derive(Debug, Subcommand)]
+enum ReportTarget {
+    #[command(about = "Generate a report for one indexed session")]
+    Session(ReportSessionArgs),
+}
+
+#[derive(Debug, Args)]
+struct ReportSessionArgs {
+    #[arg(help = "ctx session id or unambiguous id prefix")]
+    id: String,
+    #[arg(long, value_enum, default_value_t = ReportFormat::Markdown)]
+    format: ReportFormat,
+    #[arg(
+        long,
+        help = "Include the lite transcript in the report; this may expose private prompt or transcript text"
+    )]
+    include_transcript: bool,
+    #[arg(long)]
+    out: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -515,6 +544,7 @@ impl CommandRoot {
             Self::Sources(_) => "sources",
             Self::Import(_) => "import",
             Self::Show(_) => "show",
+            Self::Report(_) => "report",
             Self::Locate(_) => "locate",
             Self::Search(_) => "search",
             Self::Sql(_) => "sql",
@@ -540,6 +570,7 @@ impl CommandRoot {
             Self::Sources(args) => args.json,
             Self::Import(args) => args.json,
             Self::Show(args) => args.json_output(),
+            Self::Report(args) => args.json_output(),
             Self::Locate(args) => args.json_output(),
             Self::Search(args) => args.json,
             Self::Sql(args) => args.json_output(),
@@ -563,6 +594,14 @@ impl ShowArgs {
         match &self.target {
             ShowTarget::Session(args) => args.json || args.format == OutputFormat::Json,
             ShowTarget::Event(args) => args.json || args.format == OutputFormat::Json,
+        }
+    }
+}
+
+impl ReportArgs {
+    fn json_output(&self) -> bool {
+        match &self.target {
+            ReportTarget::Session(args) => args.format == ReportFormat::Json,
         }
     }
 }
@@ -619,6 +658,13 @@ enum OutputFormat {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ReportFormat {
+    Markdown,
+    Html,
+    Json,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum LocateFormat {
     Text,
     Json,
@@ -648,6 +694,16 @@ impl OutputFormat {
             Self::Markdown => "markdown",
             Self::Json => "json",
             Self::Jsonl => "jsonl",
+        }
+    }
+}
+
+impl ReportFormat {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Markdown => "markdown",
+            Self::Html => "html",
+            Self::Json => "json",
         }
     }
 }
@@ -1398,6 +1454,7 @@ fn main() -> Result<()> {
         }
         CommandRoot::Import(args) => run_import(args, data_root.clone(), &mut analytics_properties),
         CommandRoot::Show(args) => run_show(args, data_root.clone(), &mut analytics_properties),
+        CommandRoot::Report(args) => run_report(args, data_root.clone(), &mut analytics_properties),
         CommandRoot::Locate(args) => run_locate(args, data_root.clone(), &mut analytics_properties),
         CommandRoot::Search(args) => run_search(args, data_root.clone(), &mut analytics_properties),
         CommandRoot::Sql(args) => run_sql(args, data_root.clone()),
@@ -1494,6 +1551,18 @@ fn command_analytics_properties(command: &CommandRoot) -> AnalyticsProperties {
                     "window_bucket",
                     args.window.unwrap_or(args.before.max(args.after)) as u64,
                 );
+            }
+        },
+        CommandRoot::Report(args) => match &args.target {
+            ReportTarget::Session(args) => {
+                analytics::insert_str(&mut properties, "target_kind", "session");
+                analytics::insert_str(&mut properties, "output_format", args.format.as_str());
+                analytics::insert_bool(
+                    &mut properties,
+                    "include_transcript",
+                    args.include_transcript,
+                );
+                analytics::insert_bool(&mut properties, "writes_out_file", args.out.is_some());
             }
         },
         CommandRoot::Locate(args) => match &args.target {
@@ -2992,6 +3061,34 @@ fn run_show(
     Ok(())
 }
 
+fn run_report(
+    args: ReportArgs,
+    data_root: PathBuf,
+    analytics_properties: &mut AnalyticsProperties,
+) -> Result<()> {
+    let store = Store::open(database_path(data_root))?;
+    match args.target {
+        ReportTarget::Session(args) => {
+            let session = resolve_session_by_id_text(&store, &args.id)?;
+            let events = store.events_for_session(session.id)?;
+            analytics::insert_count_bucket(
+                analytics_properties,
+                "events_returned_bucket",
+                events.len() as u64,
+            );
+            write_rendered_report_session(
+                &store,
+                &session,
+                &events,
+                args.format,
+                args.include_transcript,
+                args.out,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn event_preview(event: &Event) -> String {
     let preview = ctx_history_search::event_preview_text(event);
     if preview.trim().is_empty() {
@@ -3145,6 +3242,32 @@ fn write_rendered_events(
     write_output(body, out)
 }
 
+fn write_rendered_report_session(
+    store: &Store,
+    session: &Session,
+    events: &[Event],
+    format: ReportFormat,
+    include_transcript: bool,
+    out: Option<PathBuf>,
+) -> Result<()> {
+    let body = match format {
+        ReportFormat::Markdown => {
+            render_report_session_markdown(store, session, events, include_transcript)
+        }
+        ReportFormat::Html => {
+            render_report_session_html(store, session, events, include_transcript)
+        }
+        ReportFormat::Json => serde_json::to_string_pretty(&report_session_json(
+            store,
+            session,
+            events,
+            format,
+            include_transcript,
+        ))?,
+    };
+    write_output(body, out)
+}
+
 fn write_output(body: String, out: Option<PathBuf>) -> Result<()> {
     if let Some(out) = out {
         if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
@@ -3158,6 +3281,11 @@ fn write_output(body: String, out: Option<PathBuf>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+struct ReportEventSignal<'a> {
+    event: &'a Event,
+    text: String,
 }
 
 fn selected_transcript_events(events: &[Event], mode: TranscriptMode) -> Vec<&Event> {
@@ -3307,6 +3435,562 @@ fn render_session_markdown(
         out.push('\n');
     }
     out
+}
+
+fn render_report_session_markdown(
+    store: &Store,
+    session: &Session,
+    events: &[Event],
+    include_transcript: bool,
+) -> String {
+    let transcript_events = selected_transcript_events(events, TranscriptMode::Lite);
+    let command_signals = report_command_signals(events);
+    let test_signals = report_test_signals(events);
+    let failure_signals = report_failure_signals(events);
+    let title = report_session_title(session);
+    let mut out = String::new();
+    out.push_str(&format!(
+        "# ctx session report: {}\n\n",
+        escape_markdown_text(&title)
+    ));
+    out.push_str("## Session\n\n");
+    push_report_markdown_field(&mut out, "ctx_session_id", &session.id.to_string());
+    push_report_markdown_field(&mut out, "provider", session.provider.as_str());
+    if let Some(provider_session_id) = &session.external_session_id {
+        push_report_markdown_field(&mut out, "provider_session_id", provider_session_id);
+    }
+    push_report_markdown_field(&mut out, "status", session.status.as_str());
+    push_report_markdown_field(&mut out, "agent_type", session.agent_type.as_str());
+    push_report_markdown_field(&mut out, "started_at", &session.started_at.to_rfc3339());
+    if let Some(ended_at) = &session.ended_at {
+        push_report_markdown_field(&mut out, "ended_at", &ended_at.to_rfc3339());
+    }
+    if let Some(source) = source_json_for(store, session.capture_source_id) {
+        push_optional_report_markdown_json_field(
+            &mut out,
+            &source,
+            "source_format",
+            "source_format",
+        );
+        if let Some(exists) = source.get("exists").and_then(|value| value.as_bool()) {
+            push_report_markdown_field(&mut out, "source_exists", &exists.to_string());
+        }
+    }
+
+    out.push_str("\n## Activity\n\n");
+    push_report_markdown_field(&mut out, "events", &events.len().to_string());
+    push_report_markdown_field(
+        &mut out,
+        "lite_transcript_events",
+        &transcript_events.len().to_string(),
+    );
+    push_report_markdown_field(
+        &mut out,
+        "command_signals",
+        &command_signals.len().to_string(),
+    );
+    push_report_markdown_field(&mut out, "test_signals", &test_signals.len().to_string());
+    push_report_markdown_field(
+        &mut out,
+        "failure_signals",
+        &failure_signals.len().to_string(),
+    );
+
+    push_report_signals_markdown(&mut out, "Commands", &command_signals, include_transcript);
+    push_report_signals_markdown(&mut out, "Tests", &test_signals, include_transcript);
+    push_report_signals_markdown(&mut out, "Failures", &failure_signals, include_transcript);
+
+    out.push_str("\n## Lite Transcript\n\n");
+    if !include_transcript {
+        out.push_str(
+            "Transcript text is not included by default. Re-run with `--include-transcript` for local-only review.\n",
+        );
+    } else if transcript_events.is_empty() {
+        out.push_str("No lite transcript events were available.\n");
+    } else {
+        for event in transcript_events {
+            let heading = event
+                .role
+                .map(|role| role.as_str())
+                .unwrap_or(event.event_type.as_str());
+            out.push_str(&format!(
+                "### {} - {} - {}\n\n",
+                heading,
+                event.event_type.as_str(),
+                event.occurred_at
+            ));
+            out.push_str(&format!(
+                "ctx_event_id: {}\n\n",
+                escape_markdown_text(&event.id.to_string())
+            ));
+            push_indented_markdown_block(&mut out, &event_content(event));
+            out.push('\n');
+        }
+    }
+    out
+}
+
+fn render_report_session_html(
+    store: &Store,
+    session: &Session,
+    events: &[Event],
+    include_transcript: bool,
+) -> String {
+    let transcript_events = selected_transcript_events(events, TranscriptMode::Lite);
+    let command_signals = report_command_signals(events);
+    let test_signals = report_test_signals(events);
+    let failure_signals = report_failure_signals(events);
+    let title = report_session_title(session);
+    let mut out = String::new();
+    out.push_str("<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n");
+    out.push_str(&format!(
+        "<title>{}</title>\n",
+        escape_html(&format!("ctx session report: {title}"))
+    ));
+    out.push_str("<style>body{font-family:system-ui,sans-serif;line-height:1.45;max-width:960px;margin:40px auto;padding:0 20px;color:#1f2933}code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}pre{white-space:pre-wrap;background:#f6f8fa;padding:12px;border:1px solid #d0d7de;border-radius:6px}dt{font-weight:600}dd{margin:0 0 6px 0}section{margin-top:28px}li{margin:8px 0}</style>\n");
+    out.push_str("</head>\n<body>\n");
+    out.push_str(&format!(
+        "<h1>ctx session report: {}</h1>\n",
+        escape_html(&title)
+    ));
+    out.push_str("<section><h2>Session</h2><dl>\n");
+    push_report_html_field(&mut out, "ctx_session_id", &session.id.to_string());
+    push_report_html_field(&mut out, "provider", session.provider.as_str());
+    if let Some(provider_session_id) = &session.external_session_id {
+        push_report_html_field(&mut out, "provider_session_id", provider_session_id);
+    }
+    push_report_html_field(&mut out, "status", session.status.as_str());
+    push_report_html_field(&mut out, "agent_type", session.agent_type.as_str());
+    push_report_html_field(&mut out, "started_at", &session.started_at.to_rfc3339());
+    if let Some(ended_at) = &session.ended_at {
+        push_report_html_field(&mut out, "ended_at", &ended_at.to_rfc3339());
+    }
+    if let Some(source) = source_json_for(store, session.capture_source_id) {
+        push_optional_report_html_json_field(&mut out, &source, "source_format", "source_format");
+        if let Some(exists) = source.get("exists").and_then(|value| value.as_bool()) {
+            push_report_html_field(&mut out, "source_exists", &exists.to_string());
+        }
+    }
+    out.push_str("</dl></section>\n");
+
+    out.push_str("<section><h2>Activity</h2><dl>\n");
+    push_report_html_field(&mut out, "events", &events.len().to_string());
+    push_report_html_field(
+        &mut out,
+        "lite_transcript_events",
+        &transcript_events.len().to_string(),
+    );
+    push_report_html_field(
+        &mut out,
+        "command_signals",
+        &command_signals.len().to_string(),
+    );
+    push_report_html_field(&mut out, "test_signals", &test_signals.len().to_string());
+    push_report_html_field(
+        &mut out,
+        "failure_signals",
+        &failure_signals.len().to_string(),
+    );
+    out.push_str("</dl></section>\n");
+
+    push_report_signals_html(&mut out, "Commands", &command_signals, include_transcript);
+    push_report_signals_html(&mut out, "Tests", &test_signals, include_transcript);
+    push_report_signals_html(&mut out, "Failures", &failure_signals, include_transcript);
+
+    out.push_str("<section><h2>Lite Transcript</h2>\n");
+    if !include_transcript {
+        out.push_str("<p>Transcript text is not included by default. Re-run with <code>--include-transcript</code> for local-only review.</p>\n");
+    } else if transcript_events.is_empty() {
+        out.push_str("<p>No lite transcript events were available.</p>\n");
+    } else {
+        for event in transcript_events {
+            let heading = event
+                .role
+                .map(|role| role.as_str())
+                .unwrap_or(event.event_type.as_str());
+            out.push_str(&format!(
+                "<article><h3>{} - {} - {}</h3><p>ctx_event_id: <code>{}</code></p><pre>{}</pre></article>\n",
+                escape_html(heading),
+                escape_html(event.event_type.as_str()),
+                escape_html(&event.occurred_at.to_string()),
+                escape_html(&event.id.to_string()),
+                escape_html(&event_content(event))
+            ));
+        }
+    }
+    out.push_str("</section>\n</body>\n</html>\n");
+    out
+}
+
+fn report_session_json(
+    store: &Store,
+    session: &Session,
+    events: &[Event],
+    format: ReportFormat,
+    include_transcript: bool,
+) -> Value {
+    let transcript_events = selected_transcript_events(events, TranscriptMode::Lite);
+    let command_signals = report_command_signals(events);
+    let test_signals = report_test_signals(events);
+    let failure_signals = report_failure_signals(events);
+    compact_json(json!({
+        "schema_version": 1,
+        "target": "session",
+        "item_type": "session_report",
+        "format": format.as_str(),
+        "title": format!("ctx session report: {}", report_session_title(session)),
+        "ctx_session_id": session.id,
+        "provider": session.provider,
+        "provider_session_id": session.external_session_id,
+        "session": report_session_summary_json(session),
+        "source": report_source_json_for(store, session.capture_source_id),
+        "activity": {
+            "events": events.len(),
+            "lite_transcript_events": transcript_events.len(),
+            "transcript_included": include_transcript,
+            "command_signals": command_signals.len(),
+            "test_signals": test_signals.len(),
+            "failure_signals": failure_signals.len(),
+        },
+        "commands": command_signals
+            .iter()
+            .map(|signal| {
+                if include_transcript {
+                    report_signal_json(signal)
+                } else {
+                    report_signal_summary_json(signal)
+                }
+            })
+            .collect::<Vec<_>>(),
+        "tests": test_signals
+            .iter()
+            .map(|signal| {
+                if include_transcript {
+                    report_signal_json(signal)
+                } else {
+                    report_signal_summary_json(signal)
+                }
+            })
+            .collect::<Vec<_>>(),
+        "failures": failure_signals
+            .iter()
+            .map(|signal| {
+                if include_transcript {
+                    report_signal_json(signal)
+                } else {
+                    report_signal_summary_json(signal)
+                }
+            })
+            .collect::<Vec<_>>(),
+        "transcript": include_transcript.then(|| {
+            transcript_events
+                .into_iter()
+                .map(report_transcript_event_json)
+                .collect::<Vec<_>>()
+        }),
+    }))
+}
+
+fn report_session_summary_json(session: &Session) -> Value {
+    compact_json(json!({
+        "id": session.id,
+        "item_id": session.id,
+        "item_type": "session",
+        "provider": session.provider,
+        "external_session_id": session.external_session_id,
+        "agent_type": session.agent_type,
+        "role": session.role_hint,
+        "is_primary": session.is_primary,
+        "status": session.status,
+        "started_at": session.started_at,
+        "ended_at": session.ended_at,
+        "source_id": session.capture_source_id,
+    }))
+}
+
+fn report_source_json_for(store: &Store, source_id: Option<Uuid>) -> Option<Value> {
+    let source = source_json_for(store, source_id)?;
+    Some(compact_json(json!({
+        "source_id": source.get("source_id").cloned(),
+        "provider": source.get("provider").cloned(),
+        "provider_session_id": source.get("provider_session_id").cloned(),
+        "exists": source.get("exists").cloned(),
+        "started_at": source.get("started_at").cloned(),
+        "ended_at": source.get("ended_at").cloned(),
+        "source_format": source.get("source_format").cloned(),
+    })))
+}
+
+fn report_transcript_event_json(event: &Event) -> Value {
+    compact_json(json!({
+        "ctx_event_id": event.id,
+        "item_id": event.id,
+        "item_type": "event",
+        "ctx_session_id": event.session_id,
+        "sequence": event.seq,
+        "event_type": event.event_type,
+        "role": event.role,
+        "occurred_at": event.occurred_at,
+        "preview": event_preview(event),
+        "text": event_content(event),
+        "redaction_state": event.redaction_state,
+    }))
+}
+
+fn report_signal_json(signal: &ReportEventSignal<'_>) -> Value {
+    compact_json(json!({
+        "ctx_event_id": signal.event.id,
+        "event_type": signal.event.event_type,
+        "role": signal.event.role,
+        "occurred_at": signal.event.occurred_at,
+        "text": signal.text,
+    }))
+}
+
+fn report_signal_summary_json(signal: &ReportEventSignal<'_>) -> Value {
+    compact_json(json!({
+        "ctx_event_id": signal.event.id,
+        "event_type": signal.event.event_type,
+        "role": signal.event.role,
+        "occurred_at": signal.event.occurred_at,
+    }))
+}
+
+fn report_session_title(session: &Session) -> String {
+    let label = session
+        .external_session_id
+        .clone()
+        .unwrap_or_else(|| session.id.to_string());
+    format!("{} session {label}", session.provider)
+}
+
+fn report_command_signals(events: &[Event]) -> Vec<ReportEventSignal<'_>> {
+    report_signals(events, is_command_signal)
+}
+
+fn report_test_signals(events: &[Event]) -> Vec<ReportEventSignal<'_>> {
+    report_signals(events, is_test_signal)
+}
+
+fn report_failure_signals(events: &[Event]) -> Vec<ReportEventSignal<'_>> {
+    report_signals(events, is_failure_signal)
+}
+
+fn report_signals(
+    events: &[Event],
+    predicate: fn(&Event, &str) -> bool,
+) -> Vec<ReportEventSignal<'_>> {
+    events
+        .iter()
+        .filter_map(|event| {
+            let text = report_event_signal_text(event);
+            predicate(event, &text).then_some(ReportEventSignal { event, text })
+        })
+        .take(20)
+        .collect()
+}
+
+fn report_event_signal_text(event: &Event) -> String {
+    if let Some(command) = json_str_by_key(&event.payload, "command") {
+        return ctx_history_search::display_snippet(command, 1_000);
+    }
+    ctx_history_search::display_snippet(&event_content(event), 1_000)
+}
+
+fn is_command_signal(event: &Event, _text: &str) -> bool {
+    matches!(
+        event.event_type,
+        EventType::CommandStarted | EventType::CommandOutput | EventType::CommandFinished
+    ) || json_str_by_key(&event.payload, "command").is_some()
+}
+
+fn is_test_signal(_event: &Event, text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    [
+        "cargo test",
+        "npm test",
+        "pnpm test",
+        "yarn test",
+        "pytest",
+        "go test",
+        "unit test",
+        "tests passed",
+        "test failed",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn is_failure_signal(event: &Event, text: &str) -> bool {
+    if json_i64_by_key(&event.payload, "exit_code").is_some_and(|exit_code| exit_code != 0) {
+        return true;
+    }
+    let lower = text.to_ascii_lowercase();
+    [
+        "failed",
+        "failure",
+        "error",
+        "panic",
+        "exit code 1",
+        "exit code 101",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn json_str_by_key<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+    match value {
+        Value::Object(object) => {
+            if let Some(text) = object.get(key).and_then(|value| value.as_str()) {
+                return Some(text);
+            }
+            object
+                .values()
+                .find_map(|value| json_str_by_key(value, key))
+        }
+        Value::Array(values) => values.iter().find_map(|value| json_str_by_key(value, key)),
+        _ => None,
+    }
+}
+
+fn json_i64_by_key(value: &Value, key: &str) -> Option<i64> {
+    match value {
+        Value::Object(object) => {
+            if let Some(number) = object.get(key).and_then(|value| value.as_i64()) {
+                return Some(number);
+            }
+            object
+                .values()
+                .find_map(|value| json_i64_by_key(value, key))
+        }
+        Value::Array(values) => values.iter().find_map(|value| json_i64_by_key(value, key)),
+        _ => None,
+    }
+}
+
+fn push_report_markdown_field(out: &mut String, key: &str, value: &str) {
+    out.push_str(&format!("- {key}: {}\n", escape_markdown_text(value)));
+}
+
+fn push_optional_report_markdown_json_field(
+    out: &mut String,
+    source: &Value,
+    label: &str,
+    key: &str,
+) {
+    if let Some(value) = source.get(key).and_then(|value| value.as_str()) {
+        push_report_markdown_field(out, label, value);
+    }
+}
+
+fn push_report_signals_markdown(
+    out: &mut String,
+    title: &str,
+    signals: &[ReportEventSignal<'_>],
+    include_text: bool,
+) {
+    out.push_str(&format!("\n## {title}\n\n"));
+    if signals.is_empty() {
+        out.push_str("No signals were available.\n");
+        return;
+    }
+    if !include_text {
+        out.push_str(
+            "Signal text is not included by default. Re-run with `--include-transcript` for local-only review.\n",
+        );
+        return;
+    }
+    for signal in signals {
+        out.push_str(&format!(
+            "- `{}` `{}` `{}`\n",
+            signal.event.occurred_at,
+            signal.event.event_type.as_str(),
+            signal.event.id
+        ));
+        push_indented_markdown_block(out, &signal.text);
+    }
+}
+
+fn push_indented_markdown_block(out: &mut String, text: &str) {
+    for line in text.lines() {
+        out.push_str("    ");
+        out.push_str(line);
+        out.push('\n');
+    }
+}
+
+fn escape_markdown_text(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\n' | '\r' => escaped.push(' '),
+            '\\' | '`' | '*' | '_' | '{' | '}' | '[' | ']' | '(' | ')' | '#' | '+' | '!' | '|'
+            | '<' | '>' => {
+                escaped.push('\\');
+                escaped.push(ch);
+            }
+            _ if ch.is_control() => {}
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn push_report_html_field(out: &mut String, key: &str, value: &str) {
+    out.push_str(&format!(
+        "<dt>{}</dt><dd><code>{}</code></dd>\n",
+        escape_html(key),
+        escape_html(value)
+    ));
+}
+
+fn push_optional_report_html_json_field(out: &mut String, source: &Value, label: &str, key: &str) {
+    if let Some(value) = source.get(key).and_then(|value| value.as_str()) {
+        push_report_html_field(out, label, value);
+    }
+}
+
+fn push_report_signals_html(
+    out: &mut String,
+    title: &str,
+    signals: &[ReportEventSignal<'_>],
+    include_text: bool,
+) {
+    out.push_str(&format!("<section><h2>{}</h2>\n", escape_html(title)));
+    if signals.is_empty() {
+        out.push_str("<p>No signals were available.</p>\n</section>\n");
+        return;
+    }
+    if !include_text {
+        out.push_str("<p>Signal text is not included by default. Re-run with <code>--include-transcript</code> for local-only review.</p>\n</section>\n");
+        return;
+    }
+    out.push_str("<ul>\n");
+    for signal in signals {
+        out.push_str(&format!(
+            "<li><code>{}</code> <code>{}</code> <code>{}</code><pre>{}</pre></li>\n",
+            escape_html(&signal.event.occurred_at.to_string()),
+            escape_html(signal.event.event_type.as_str()),
+            escape_html(&signal.event.id.to_string()),
+            escape_html(&signal.text)
+        ));
+    }
+    out.push_str("</ul>\n</section>\n");
+}
+
+fn escape_html(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 fn push_session_header(
@@ -6443,7 +7127,10 @@ fn home_dir() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{catalog_import_checkpoint_matches, sha256_file_prefix_hex, shell_quote_arg};
+    use super::{
+        catalog_import_checkpoint_matches, escape_markdown_text, sha256_file_prefix_hex,
+        shell_quote_arg,
+    };
     use std::{fs, io::Write};
     use tempfile::tempdir;
 
@@ -6453,6 +7140,14 @@ mod tests {
         assert_eq!(
             shell_quote_arg("$(touch /tmp/ctx-owned)'s"),
             "'$(touch /tmp/ctx-owned)'\\''s'"
+        );
+    }
+
+    #[test]
+    fn report_markdown_text_escape_neutralizes_markup() {
+        assert_eq!(
+            escape_markdown_text("evil [link](https://example.invalid) # heading `code`\nnext"),
+            "evil \\[link\\]\\(https://example.invalid\\) \\# heading \\`code\\` next"
         );
     }
 

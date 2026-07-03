@@ -3410,6 +3410,58 @@ fn fresh_home_search_mvp_flow() {
         json_output(ctx(&temp).args(["show", "session", &ctx_session_id[..8], "--format", "json"]));
     assert_eq!(show_session_prefix["session"]["item_id"], ctx_session_id);
 
+    let report_markdown = ctx(&temp)
+        .args(["report", "session", &ctx_session_id])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report_markdown = String::from_utf8(report_markdown).unwrap();
+    assert!(report_markdown.contains("# ctx session report:"));
+    assert!(report_markdown.contains("## Session"));
+    assert!(report_markdown.contains("## Lite Transcript"));
+    assert!(report_markdown.contains(&ctx_session_id));
+    assert!(report_markdown.contains("provider_session_id"));
+    assert!(report_markdown.contains("Transcript text is not included by default"));
+    assert!(
+        report_markdown.contains("Signal text is not included by default")
+            || report_markdown.contains("No signals were available")
+    );
+    assert!(!report_markdown.contains("Fix the onboarding bug"));
+    assert!(!report_markdown.contains("all onboarding tests passed"));
+    assert!(!report_markdown.contains("source_path"));
+    assert!(!report_markdown.contains("cwd"));
+    assert!(!report_markdown.contains("/repo/app"));
+
+    let report_with_transcript = ctx(&temp)
+        .args(["report", "session", &ctx_session_id, "--include-transcript"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report_with_transcript = String::from_utf8(report_with_transcript).unwrap();
+    assert!(report_with_transcript.contains("Fix the onboarding bug"));
+
+    let report_json = json_output(ctx(&temp).args([
+        "report",
+        "session",
+        &ctx_session_id[..8],
+        "--format",
+        "json",
+    ]));
+    assert_eq!(report_json["schema_version"], 1);
+    assert_eq!(report_json["item_type"], "session_report");
+    assert_eq!(report_json["format"], "json");
+    assert_eq!(report_json["session"]["item_id"], ctx_session_id);
+    assert!(report_json["activity"]["events"].as_u64().unwrap() > 0);
+    assert_eq!(report_json["activity"]["transcript_included"], false);
+    assert!(report_json["transcript"].is_null());
+    assert!(report_json["tests"][0]["text"].is_null());
+    assert!(report_json["source"]["path"].is_null());
+    assert!(report_json["source"]["cwd"].is_null());
+
     let show_session_full = json_output(ctx(&temp).args([
         "show",
         "session",
@@ -3477,6 +3529,32 @@ fn fresh_home_search_mvp_flow() {
         exported_full.contains("- mode: `full`"),
         "show session --mode full --out should remain explicit"
     );
+
+    let report_html_path = temp.path().join("session-report.html");
+    ctx(&temp)
+        .args([
+            "report",
+            "session",
+            &ctx_session_id,
+            "--format",
+            "html",
+            "--out",
+            report_html_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let report_html = fs::read_to_string(&report_html_path).unwrap();
+    assert!(report_html.contains("<!doctype html>"));
+    assert!(report_html.contains("ctx session report:"));
+    assert!(report_html.contains(&ctx_session_id));
+    assert!(report_html.contains("Transcript text is not included by default"));
+    assert!(
+        report_html.contains("Signal text is not included by default")
+            || report_html.contains("No signals were available")
+    );
+    assert!(!report_html.contains("Fix the onboarding bug"));
+    assert!(!report_html.contains("all onboarding tests passed"));
+    assert!(!report_html.contains("/repo/app"));
 
     let status = json_output(ctx(&temp).args(["status", "--json"]));
     assert_eq!(status["schema_version"], 1);
