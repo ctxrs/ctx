@@ -28,6 +28,26 @@ fn ctx(temp: &TempDir) -> Command {
     command
 }
 
+fn initialize_empty_store(temp: &TempDir) {
+    fs::create_dir_all(temp.path().join(".codex").join("sessions")).unwrap();
+    ctx(temp)
+        .args(["setup", "--catalog-only", "--progress", "none"])
+        .assert()
+        .success();
+}
+
+fn initialize_empty_store_with_env(temp: &TempDir, data_root: &Path, home: &Path, state: &Path) {
+    fs::create_dir_all(home.join(".codex").join("sessions")).unwrap();
+    ctx(temp)
+        .args(["setup", "--catalog-only", "--progress", "none"])
+        .env("CTX_DATA_ROOT", data_root)
+        .env("HOME", home)
+        .env("XDG_STATE_HOME", state)
+        .env("LOCALAPPDATA", state)
+        .assert()
+        .success();
+}
+
 fn provider_history_fixture(name: &str) -> String {
     materialized_fixture("provider-history", name)
 }
@@ -1858,6 +1878,8 @@ fn provider_help_matches_implemented_importers() {
 #[test]
 fn provider_json_names_are_accepted_as_cli_filter_aliases() {
     let temp = tempdir();
+    initialize_empty_store(&temp);
+
     for (provider, expected) in [
         ("copilot_cli", "copilot_cli"),
         ("factory_ai_droid", "factory_ai_droid"),
@@ -2973,6 +2995,7 @@ fn analytics_payloads_omit_sensitive_command_data() {
     let data_root = temp.path().join("ctx-data");
     let events_path = temp.path().join("analytics.jsonl");
     fs::create_dir_all(&home).unwrap();
+    initialize_empty_store_with_env(&temp, &data_root, &home, &state);
     let private_query =
         "prompt text /home/alice/private/acme-secret repo@example.com host.internal 192.0.2.44";
 
