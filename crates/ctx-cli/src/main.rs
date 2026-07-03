@@ -6428,7 +6428,12 @@ fn parse_since_filter(value: &str) -> Result<chrono::DateTime<Utc>> {
         let days: i64 = days
             .parse()
             .with_context(|| format!("invalid --since day window: {value}"))?;
-        return Ok(utc_now() - Duration::days(days));
+        let duration =
+            Duration::try_days(days).ok_or_else(|| anyhow!("invalid --since day window: {value}: value too large"))?;
+        let since = utc_now()
+            .checked_sub_signed(duration)
+            .ok_or_else(|| anyhow!("invalid --since day window: {value}: value too large"))?;
+        return Ok(since);
     }
     Ok(chrono::DateTime::parse_from_rfc3339(trimmed)
         .with_context(|| format!("invalid --since value: {value}"))?
@@ -6457,7 +6462,7 @@ fn home_dir() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{catalog_import_checkpoint_matches, sha256_file_prefix_hex, shell_quote_arg};
+    use super::{catalog_import_checkpoint_matches, parse_since_filter, sha256_file_prefix_hex, shell_quote_arg};
     use std::{fs, io::Write};
     use tempfile::tempdir;
 
@@ -6467,6 +6472,16 @@ mod tests {
         assert_eq!(
             shell_quote_arg("$(touch /tmp/ctx-owned)'s"),
             "'$(touch /tmp/ctx-owned)'\\''s'"
+        );
+    }
+
+    #[test]
+    fn parse_since_filter_rejects_large_day_window() {
+        let err = parse_since_filter("500000000d").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("invalid --since day window"),
+            "expected error about invalid day window, got: {msg}"
         );
     }
 
