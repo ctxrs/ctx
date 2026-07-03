@@ -54,7 +54,7 @@ that support it.
 
 Search filters narrow both human output and JSON:
 
-- `--provider codex|pi|claude|opencode|openclaw|hermes|nanoclaw|astrbot|antigravity|gemini|cursor|copilot-cli|factory-ai-droid`;
+- `--provider codex|pi|claude|opencode|openclaw|hermes|nanoclaw|astrbot|shelley|antigravity|gemini|cursor|copilot-cli|factory-ai-droid`;
 - `--history-source <plugin/source-or-provider_key/source_id>`, for custom
   history imports;
 - `--provider-key <key>`, `--source-id <id>`, and
@@ -79,7 +79,7 @@ Search filters narrow both human output and JSON:
 CLI provider filters use the kebab-case names above. JSON output and stable SQL
 views use provider IDs in ctx output; multiword provider IDs may be snake_case,
 such as `copilot_cli` or `factory_ai_droid`, while compact IDs such as
-`openclaw`, `nanoclaw`, and `astrbot` stay compact.
+`openclaw`, `nanoclaw`, `astrbot`, and `shelley` stay compact.
 
 `--since` accepts RFC 3339 timestamps such as `2026-06-01T00:00:00Z` or a day
 window such as `30d`.

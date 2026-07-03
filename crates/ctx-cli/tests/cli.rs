@@ -1752,12 +1752,14 @@ fn sources_lists_personal_agent_provider_defaults() {
     install_default_openclaw_fixture(&temp, "openclaw-sources-oracle");
     install_default_hermes_fixture(&temp, "hermes-sources-oracle");
     install_default_astrbot_fixture(&temp, "astrbot-sources-oracle");
+    install_default_shelley_fixture(&temp, "shelley-sources-oracle");
 
     let sources = json_output(ctx(&temp).args(["sources", "--json"]));
     for (provider, source_format, import_support, native_import) in [
         ("openclaw", "openclaw_session_jsonl_tree", "native", true),
         ("hermes", "hermes_state_sqlite", "native", true),
         ("astrbot", "astrbot_data_v4_sqlite", "preview", false),
+        ("shelley", "shelley_sqlite", "native", true),
     ] {
         let source = sources["sources"]
             .as_array()
@@ -1773,6 +1775,31 @@ fn sources_lists_personal_agent_provider_defaults() {
         assert_eq!(source["importable"], true);
         assert!(source["unsupported_reason"].is_null());
     }
+}
+
+#[test]
+fn sources_discovers_shelley_db_env_override() {
+    let temp = tempdir();
+    let db_path = temp.path().join("custom-shelley.db");
+    fs::write(&db_path, b"sqlite fixture marker").unwrap();
+
+    let sources = json_output(
+        ctx(&temp)
+            .env("SHELLEY_DB", &db_path)
+            .args(["sources", "--json"]),
+    );
+    let source = sources["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| {
+            source["provider"] == "shelley" && source["path"] == db_path.to_str().unwrap()
+        })
+        .unwrap_or_else(|| panic!("missing Shelley source in {sources:#}"));
+    assert_eq!(source["source_format"], "shelley_sqlite");
+    assert_eq!(source["status"], "available");
+    assert_eq!(source["import_support"], "native");
+    assert_eq!(source["path"], db_path.to_str().unwrap());
 }
 
 #[test]
@@ -2041,7 +2068,7 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
             vec![
                 "Usage: ctx import",
                 "--provider <PROVIDER>",
-                "[possible values: codex, pi, claude, opencode, antigravity, gemini, cursor, copilot-cli, factory-ai-droid, openclaw, hermes, nanoclaw, astrbot]",
+                "[possible values: codex, pi, claude, opencode, antigravity, gemini, cursor, copilot-cli, factory-ai-droid, openclaw, hermes, nanoclaw, astrbot, shelley]",
                 "--path <PATH>",
                 "--format <FORMAT>",
                 "--resume",
@@ -5154,6 +5181,7 @@ fn search_refresh_auto_imports_discovered_top_provider_sources() {
         ("cursor", "cursor", install_default_cursor_fixture),
         ("openclaw", "openclaw", install_default_openclaw_fixture),
         ("hermes", "hermes", install_default_hermes_fixture),
+        ("shelley", "shelley", install_default_shelley_fixture),
     ] {
         let temp = tempdir();
         let query = format!("{stored_provider}-default-refresh-oracle");
@@ -5520,6 +5548,12 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
             "astrbot_data_v4_sqlite",
             write_native_astrbot_fixture,
         ),
+        (
+            "shelley",
+            "shelley",
+            "shelley_sqlite",
+            write_native_shelley_fixture,
+        ),
     ] {
         let temp = tempdir();
         let query = format!("{stored_provider}-native-cli-oracle");
@@ -5608,6 +5642,12 @@ fn personal_agent_provider_imports_are_idempotent_and_incremental() {
             "astrbot",
             write_native_astrbot_fixture,
             append_native_astrbot_event,
+        ),
+        (
+            "shelley",
+            "shelley",
+            write_native_shelley_fixture,
+            append_native_shelley_event,
         ),
     ] {
         let temp = tempdir();
@@ -5723,6 +5763,13 @@ fn install_default_astrbot_fixture(temp: &TempDir, query: &str) {
     let target = temp.path().join(".astrbot/data");
     fs::create_dir_all(&target).unwrap();
     fs::copy(source, target.join("data_v4.db")).unwrap();
+}
+
+fn install_default_shelley_fixture(temp: &TempDir, query: &str) {
+    let source = PathBuf::from(write_native_shelley_fixture(temp, query));
+    let target = temp.path().join(".config/shelley");
+    fs::create_dir_all(&target).unwrap();
+    fs::copy(source, target.join("shelley.db")).unwrap();
 }
 
 fn write_native_claude_fixture(temp: &TempDir, query: &str) -> String {
@@ -6232,6 +6279,82 @@ fn write_native_astrbot_fixture(temp: &TempDir, query: &str) -> String {
     path.to_str().unwrap().to_owned()
 }
 
+fn write_native_shelley_fixture(temp: &TempDir, query: &str) -> String {
+    let path = temp.path().join("native-shelley.db");
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "create table conversations (
+            conversation_id text primary key,
+            slug text,
+            user_initiated boolean not null default true,
+            created_at datetime not null default current_timestamp,
+            updated_at datetime not null default current_timestamp,
+            cwd text,
+            archived boolean not null default false,
+            parent_conversation_id text,
+            model text,
+            conversation_options text not null default '{}',
+            current_generation integer not null default 1,
+            agent_working boolean not null default false,
+            tags text not null default '[]',
+            is_draft boolean not null default false,
+            draft text not null default ''
+        );
+        create table messages (
+            message_id text primary key,
+            conversation_id text not null,
+            sequence_id integer not null,
+            type text not null,
+            llm_data text,
+            user_data text,
+            usage_data text,
+            created_at datetime not null default current_timestamp,
+            display_data text,
+            excluded_from_context boolean not null default false,
+            generation integer not null default 1,
+            llm_api_url text,
+            model_name text,
+            forked_from_message_id text
+        );",
+    )
+    .unwrap();
+    conn.execute(
+        "insert into conversations values (
+            'shelley-cli-native', 'native shelley', 1, '2026-06-24 12:00:00',
+            '2026-06-24 12:00:01', '/workspace', 0, null, 'claude-opus-4-7',
+            '{}', 1, 0, '[]', 0, ''
+        )",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "insert into messages (
+            message_id, conversation_id, sequence_id, type, user_data, created_at
+        ) values (
+            'shelley-cli-native-user', 'shelley-cli-native', 1, 'user', ?1,
+            '2026-06-24 12:00:01'
+        )",
+        [json!({"Content": [{"Type": 2, "Text": query}]}).to_string()],
+    )
+    .unwrap();
+    conn.execute(
+        "insert into messages (
+            message_id, conversation_id, sequence_id, type, llm_data, usage_data,
+            created_at, llm_api_url, model_name
+        ) values (
+            'shelley-cli-native-agent', 'shelley-cli-native', 2, 'agent', ?1, ?2,
+            '2026-06-24 12:00:02', 'https://api.anthropic.com/v1/messages',
+            'claude-opus-4-7'
+        )",
+        [
+            json!({"Content": [{"Type": 2, "Text": "native Shelley import ok"}]}).to_string(),
+            json!({"input_tokens": 12, "output_tokens": 8, "cost_usd": 0.001}).to_string(),
+        ],
+    )
+    .unwrap();
+    path.to_str().unwrap().to_owned()
+}
+
 fn append_native_openclaw_event(path: &str, query: &str) {
     let transcript =
         Path::new(path).join("agents/personal-agent/sessions/openclaw-cli-native.jsonl");
@@ -6296,6 +6419,20 @@ fn append_native_astrbot_event(path: &str, query: &str) {
     conn.execute(
         "update conversations set content = ?1, updated_at = 1782259203000 where id = 1",
         [content.to_string()],
+    )
+    .unwrap();
+}
+
+fn append_native_shelley_event(path: &str, query: &str) {
+    let conn = Connection::open(path).unwrap();
+    conn.execute(
+        "insert into messages (
+            message_id, conversation_id, sequence_id, type, user_data, created_at
+        ) values (
+            'shelley-cli-native-user-2', 'shelley-cli-native', 3, 'user', ?1,
+            '2026-06-24 12:00:03'
+        )",
+        [json!({"Content": [{"Type": 2, "Text": query}]}).to_string()],
     )
     .unwrap();
 }
@@ -6377,6 +6514,7 @@ fn personal_agent_sqlite_imports_report_corrupt_databases() {
     for (provider, path) in [
         ("hermes", "corrupt-hermes-state.db"),
         ("astrbot", "corrupt-astrbot-data_v4.db"),
+        ("shelley", "corrupt-shelley.db"),
     ] {
         let temp = tempdir();
         let db_path = temp.path().join(path);
@@ -6438,6 +6576,7 @@ fn native_provider_cli_requires_existing_history_or_explicit_path() {
         ("hermes", "no importable hermes history found"),
         ("nanoclaw", "no importable nanoclaw history found"),
         ("astrbot", "no importable astrbot history found"),
+        ("shelley", "no importable shelley history found"),
     ] {
         let temp = tempdir();
         let stderr =

@@ -36,7 +36,7 @@ use ctx_history_capture::{
     import_custom_history_jsonl_v1_reader, import_factory_ai_droid_sessions,
     import_gemini_cli_history, import_hermes_sqlite, import_nanoclaw_project,
     import_openclaw_history, import_opencode_sqlite, import_pi_session_jsonl,
-    provider_source_for_path, provider_source_spec, stable_capture_uuid,
+    import_shelley_sqlite, provider_source_for_path, provider_source_spec, stable_capture_uuid,
     validate_custom_history_jsonl_v1, validate_custom_history_jsonl_v1_reader,
     AntigravityCliImportOptions, AstrBotSqliteImportOptions, CatalogSummary,
     ClaudeProjectsImportOptions, CodexEventImportMode, CodexHistoryImportOptions,
@@ -46,6 +46,7 @@ use ctx_history_capture::{
     GeminiCliImportOptions, HermesSqliteImportOptions, NanoClawImportOptions,
     OpenClawImportOptions, OpenCodeSqliteImportOptions, PiSessionImportOptions,
     ProviderImportSummary, ProviderImportSupport, ProviderSource, ProviderSourceStatus,
+    ShelleySqliteImportOptions,
 };
 use ctx_history_core::{
     database_path, default_data_root, utc_now, CaptureProvider, ContextCitation,
@@ -681,6 +682,7 @@ enum NativeProviderArg {
     NanoClaw,
     #[value(name = "astrbot", alias = "astr-bot", alias = "astr_bot")]
     AstrBot,
+    Shelley,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -711,6 +713,7 @@ enum ProviderArg {
     NanoClaw,
     #[value(name = "astrbot", alias = "astr-bot", alias = "astr_bot")]
     AstrBot,
+    Shelley,
     Custom,
 }
 
@@ -752,6 +755,7 @@ impl NativeProviderArg {
             Self::Hermes => CaptureProvider::Hermes,
             Self::NanoClaw => CaptureProvider::NanoClaw,
             Self::AstrBot => CaptureProvider::AstrBot,
+            Self::Shelley => CaptureProvider::Shelley,
         }
     }
 }
@@ -772,6 +776,7 @@ impl ProviderArg {
             Self::Hermes => CaptureProvider::Hermes,
             Self::NanoClaw => CaptureProvider::NanoClaw,
             Self::AstrBot => CaptureProvider::AstrBot,
+            Self::Shelley => CaptureProvider::Shelley,
             Self::Custom => CaptureProvider::Custom,
         }
     }
@@ -791,6 +796,7 @@ impl ProviderArg {
             Self::Hermes => "hermes",
             Self::NanoClaw => "nanoclaw",
             Self::AstrBot => "astrbot",
+            Self::Shelley => "shelley",
             Self::Custom => "custom",
         }
     }
@@ -5505,6 +5511,17 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
+        CaptureProvider::Shelley => import_shelley_sqlite(
+            &source.path,
+            store,
+            ShelleySqliteImportOptions {
+                source_path: Some(source.path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: true,
+                ..ShelleySqliteImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
         CaptureProvider::Gemini => import_gemini_cli_history(
             &source.path,
             store,
@@ -5668,6 +5685,7 @@ fn source_uses_import_file_manifest(source: &SourceInfo) -> bool {
             | "hermes_state_sqlite"
             | "nanoclaw_project"
             | "astrbot_data_v4_sqlite"
+            | "shelley_sqlite"
     )
 }
 

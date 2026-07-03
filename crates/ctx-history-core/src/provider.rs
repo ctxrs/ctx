@@ -59,6 +59,7 @@ pub enum ProviderId {
     NanoClaw,
     #[serde(rename = "astrbot", alias = "astr_bot")]
     AstrBot,
+    Shelley,
     Goose,
     #[serde(rename = "openhands")]
     OpenHands,
@@ -76,7 +77,7 @@ pub enum ProviderId {
 }
 
 impl ProviderId {
-    pub const ALL: [Self; 31] = [
+    pub const ALL: [Self; 32] = [
         Self::Codex,
         Self::ClaudeCode,
         Self::ClaudeCliCrp,
@@ -95,6 +96,7 @@ impl ProviderId {
         Self::Hermes,
         Self::NanoClaw,
         Self::AstrBot,
+        Self::Shelley,
         Self::Goose,
         Self::OpenHands,
         Self::Cagent,
@@ -416,6 +418,7 @@ mod tests {
             ProviderId::OpenCode,
             ProviderId::OpenClaw,
             ProviderId::Pi,
+            ProviderId::Shelley,
         ]
         .into_iter()
         .collect::<BTreeSet<_>>();

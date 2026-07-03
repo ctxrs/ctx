@@ -10,7 +10,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use ctx_history_core::{
     inbox_dir as core_inbox_dir, new_id, utc_now, AgentType, CaptureEnvelope, CaptureProvider,
     CaptureSource, CaptureSourceDescriptor, CaptureSourceKind, Confidence,
@@ -538,6 +538,27 @@ impl Default for AstrBotSqliteImportOptions {
 }
 
 #[derive(Debug, Clone)]
+pub struct ShelleySqliteImportOptions {
+    pub machine_id: String,
+    pub source_path: Option<PathBuf>,
+    pub imported_at: DateTime<Utc>,
+    pub history_record_id: Option<Uuid>,
+    pub allow_partial_failures: bool,
+}
+
+impl Default for ShelleySqliteImportOptions {
+    fn default() -> Self {
+        Self {
+            machine_id: default_machine_id(),
+            source_path: None,
+            imported_at: utc_now(),
+            history_record_id: None,
+            allow_partial_failures: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct AntigravityCliImportOptions {
     pub machine_id: String,
     pub source_path: Option<PathBuf>,
@@ -857,6 +878,9 @@ pub struct NanoClawProjectAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AstrBotSqliteAdapter;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ShelleySqliteAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AntigravityCliJsonlAdapter;
@@ -1599,6 +1623,24 @@ impl ProviderCaptureAdapter for AstrBotSqliteAdapter {
         context: &ProviderAdapterContext,
     ) -> Result<ProviderNormalizationResult> {
         normalize_astrbot_sqlite(path, context)
+    }
+}
+
+impl ProviderCaptureAdapter for ShelleySqliteAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Shelley
+    }
+
+    fn source_format(&self) -> &str {
+        SHELLEY_SQLITE_SOURCE_FORMAT
+    }
+
+    fn normalize_path(
+        &self,
+        path: &Path,
+        context: &ProviderAdapterContext,
+    ) -> Result<ProviderNormalizationResult> {
+        normalize_shelley_sqlite(path, context)
     }
 }
 
@@ -3569,6 +3611,40 @@ pub fn import_astrbot_sqlite(
     )
 }
 
+pub fn import_shelley_sqlite(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: ShelleySqliteImportOptions,
+) -> Result<ProviderImportSummary> {
+    let path = path.as_ref();
+    let source_path = options
+        .source_path
+        .clone()
+        .unwrap_or_else(|| path.to_path_buf());
+    let normalization = ShelleySqliteAdapter.normalize_path(
+        path,
+        &ProviderAdapterContext {
+            machine_id: options.machine_id,
+            source_path: Some(source_path),
+            imported_at: options.imported_at,
+            tool_output_mode: CodexToolOutputMode::Full,
+            event_mode: CodexEventImportMode::Rich,
+            include_notices: true,
+        },
+    )?;
+    import_normalized_provider_captures(
+        store,
+        normalization,
+        NormalizedProviderImportOptions {
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+            persist_cursors: true,
+            wrap_transaction: true,
+            fast_event_inserts: true,
+        },
+    )
+}
+
 pub fn import_antigravity_cli_history(
     path: impl AsRef<Path>,
     store: &mut Store,
@@ -3725,6 +3801,7 @@ const OPENCLAW_SOURCE_FORMAT: &str = "openclaw_session_jsonl_tree";
 const HERMES_SQLITE_SOURCE_FORMAT: &str = "hermes_state_sqlite";
 const NANOCLAW_SOURCE_FORMAT: &str = "nanoclaw_project";
 const ASTRBOT_SQLITE_SOURCE_FORMAT: &str = "astrbot_data_v4_sqlite";
+const SHELLEY_SQLITE_SOURCE_FORMAT: &str = "shelley_sqlite";
 const ANTIGRAVITY_CLI_SOURCE_FORMAT: &str = "antigravity_cli_transcript_jsonl_tree";
 const GEMINI_CLI_SOURCE_FORMAT: &str = "gemini_cli_chat_recording_jsonl";
 const CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT: &str = "cursor_agent_transcript_jsonl";
@@ -6486,6 +6563,45 @@ struct OpenCodeMessageRow {
     data: String,
 }
 
+#[derive(Debug, Clone)]
+struct ShelleyConversationRow {
+    conversation_id: String,
+    slug: Option<String>,
+    user_initiated: bool,
+    created_at: Option<String>,
+    updated_at: Option<String>,
+    cwd: Option<String>,
+    archived: bool,
+    parent_conversation_id: Option<String>,
+    model: Option<String>,
+    conversation_options: Option<String>,
+    current_generation: Option<i64>,
+    agent_working: bool,
+    tags: Option<String>,
+    is_draft: bool,
+    draft: Option<String>,
+    queued_messages: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ShelleyMessageRow {
+    rowid: i64,
+    message_id: String,
+    conversation_id: String,
+    sequence_id: i64,
+    entry_type: String,
+    llm_data: Option<String>,
+    user_data: Option<String>,
+    usage_data: Option<String>,
+    created_at: Option<String>,
+    display_data: Option<String>,
+    excluded_from_context: bool,
+    generation: Option<i64>,
+    llm_api_url: Option<String>,
+    model_name: Option<String>,
+    forked_from_message_id: Option<String>,
+}
+
 struct NativeSessionDraft {
     provider: CaptureProvider,
     source_format: &'static str,
@@ -7819,6 +7935,588 @@ fn nanoclaw_outbound_messages(path: &Path) -> Result<Vec<NanoClawMessageRow>> {
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
         .map_err(CaptureError::from)
+}
+
+fn normalize_shelley_sqlite(
+    path: &Path,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    let conn = open_provider_sqlite_readonly(path)?;
+    let user_version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let schema_fingerprint = opencode_schema_fingerprint(&conn)?;
+    let conversations = shelley_conversations(&conn)?;
+    let messages = shelley_messages(&conn)?;
+    let conversations_by_id = conversations
+        .iter()
+        .map(|conversation| (conversation.conversation_id.clone(), conversation))
+        .collect::<BTreeMap<_, _>>();
+    let mut seen_message_conversations = BTreeSet::new();
+    let raw_source_path = path.display().to_string();
+    let mut result = ProviderNormalizationResult::default();
+
+    for message in messages {
+        let Some(conversation) = conversations_by_id.get(&message.conversation_id) else {
+            result.summary.failed += 1;
+            result.summary.failures.push(ProviderImportFailure {
+                line: message.sequence_id.max(0) as usize,
+                error: format!(
+                    "Shelley message {} references missing conversation {}",
+                    message.message_id, message.conversation_id
+                ),
+            });
+            continue;
+        };
+        seen_message_conversations.insert(message.conversation_id.clone());
+        let started_at = shelley_timestamp(conversation.created_at.as_deref(), context.imported_at);
+        let ended_at = conversation
+            .updated_at
+            .as_deref()
+            .map(|timestamp| shelley_timestamp(Some(timestamp), context.imported_at));
+        let occurred_at = shelley_timestamp(message.created_at.as_deref(), started_at);
+        let body = shelley_message_body(&message);
+        let text = shelley_message_text(&message, &body)
+            .unwrap_or_else(|| format!("Shelley {} message", message.entry_type));
+        let event_type = shelley_event_type(&message, &body);
+        let role = shelley_event_role(&message.entry_type);
+        let event = native_event(NativeEventDraft {
+            provider: CaptureProvider::Shelley,
+            source_format: SHELLEY_SQLITE_SOURCE_FORMAT,
+            provider_session_id: conversation.conversation_id.clone(),
+            provider_event_index: shelley_event_index(&message),
+            provider_event_hash: Some(message.message_id.clone()),
+            cursor: format!(
+                "conversation:{}:sequence:{}:message:{}",
+                message.conversation_id, message.sequence_id, message.message_id
+            ),
+            event_type,
+            role,
+            occurred_at,
+            text,
+            body,
+            metadata: json!({
+                "source": "shelley_messages",
+                "source_format": SHELLEY_SQLITE_SOURCE_FORMAT,
+                "message_id": message.message_id,
+                "conversation_id": message.conversation_id,
+                "sequence_id": message.sequence_id,
+                "rowid": message.rowid,
+                "message_type": message.entry_type,
+                "generation": message.generation,
+                "excluded_from_context": message.excluded_from_context,
+                "usage": message.usage_data.as_deref().map(provider_json_text),
+                "llm_api_url": message.llm_api_url,
+                "model_name": message.model_name,
+                "forked_from_message_id": message.forked_from_message_id,
+            }),
+        });
+        result.captures.push((
+            message.rowid.max(0) as usize,
+            shelley_capture(
+                ShelleyCaptureDraft {
+                    conversation,
+                    started_at,
+                    ended_at,
+                    raw_source_path: &raw_source_path,
+                    user_version,
+                    schema_fingerprint: &schema_fingerprint,
+                    event: Some(event),
+                },
+                context,
+            ),
+        ));
+    }
+
+    for conversation in conversations {
+        if seen_message_conversations.contains(&conversation.conversation_id) {
+            continue;
+        }
+        let started_at = shelley_timestamp(conversation.created_at.as_deref(), context.imported_at);
+        let ended_at = conversation
+            .updated_at
+            .as_deref()
+            .map(|timestamp| shelley_timestamp(Some(timestamp), context.imported_at));
+        result.captures.push((
+            0,
+            shelley_capture(
+                ShelleyCaptureDraft {
+                    conversation: &conversation,
+                    started_at,
+                    ended_at,
+                    raw_source_path: &raw_source_path,
+                    user_version,
+                    schema_fingerprint: &schema_fingerprint,
+                    event: None,
+                },
+                context,
+            ),
+        ));
+    }
+
+    Ok(result)
+}
+
+struct ShelleyCaptureDraft<'a> {
+    conversation: &'a ShelleyConversationRow,
+    started_at: DateTime<Utc>,
+    ended_at: Option<DateTime<Utc>>,
+    raw_source_path: &'a str,
+    user_version: i64,
+    schema_fingerprint: &'a str,
+    event: Option<ProviderEventEnvelope>,
+}
+
+fn shelley_capture(
+    draft: ShelleyCaptureDraft<'_>,
+    context: &ProviderAdapterContext,
+) -> ProviderCaptureEnvelope {
+    let ShelleyCaptureDraft {
+        conversation,
+        started_at,
+        ended_at,
+        raw_source_path,
+        user_version,
+        schema_fingerprint,
+        event,
+    } = draft;
+    let is_subagent = conversation.parent_conversation_id.is_some() || !conversation.user_initiated;
+    let conversation_options = conversation
+        .conversation_options
+        .as_deref()
+        .map(provider_json_text)
+        .unwrap_or(Value::Null);
+    let tags = conversation
+        .tags
+        .as_deref()
+        .map(provider_json_text)
+        .unwrap_or(Value::Null);
+    let queued_messages = conversation
+        .queued_messages
+        .as_deref()
+        .map(provider_json_text)
+        .unwrap_or(Value::Null);
+    native_provider_capture(
+        NativeSessionDraft {
+            provider: CaptureProvider::Shelley,
+            source_format: SHELLEY_SQLITE_SOURCE_FORMAT,
+            provider_session_id: conversation.conversation_id.clone(),
+            parent_provider_session_id: conversation.parent_conversation_id.clone(),
+            root_provider_session_id: conversation.parent_conversation_id.clone(),
+            external_agent_id: None,
+            agent_type: if is_subagent {
+                AgentType::Subagent
+            } else {
+                AgentType::Primary
+            },
+            role_hint: Some(if is_subagent { "subagent" } else { "primary" }.to_owned()),
+            is_primary: !is_subagent,
+            started_at,
+            ended_at,
+            cwd: conversation.cwd.clone(),
+            fidelity: Fidelity::Imported,
+            raw_source_path: raw_source_path.to_owned(),
+            trust: ProviderSourceTrust::ProviderNative,
+            source_metadata: json!({
+                "adapter": SHELLEY_SQLITE_SOURCE_FORMAT,
+                "sqlite_user_version": user_version,
+                "schema_fingerprint": schema_fingerprint,
+                "source_path": raw_source_path,
+            }),
+            session_metadata: json!({
+                "source_format": SHELLEY_SQLITE_SOURCE_FORMAT,
+                "conversation_id": conversation.conversation_id,
+                "slug": conversation.slug,
+                "title": conversation.slug,
+                "user_initiated": conversation.user_initiated,
+                "archived": conversation.archived,
+                "parent_conversation_id": conversation.parent_conversation_id,
+                "model": conversation.model,
+                "conversation_options": conversation_options,
+                "current_generation": conversation.current_generation,
+                "agent_working": conversation.agent_working,
+                "tags": tags,
+                "is_draft": conversation.is_draft,
+                "draft": conversation.draft,
+                "queued_messages": queued_messages,
+            }),
+        },
+        context,
+        event,
+    )
+}
+
+fn shelley_conversations(conn: &Connection) -> Result<Vec<ShelleyConversationRow>> {
+    if !sqlite_table_exists(conn, "conversations")? {
+        return Err(CaptureError::InvalidPayload(
+            "Shelley shelley.db is missing required conversations table".into(),
+        ));
+    }
+    let columns = sqlite_table_columns(conn, "conversations")?;
+    ensure_sqlite_table_columns(
+        &columns,
+        "Shelley conversations table",
+        &["conversation_id"],
+    )?;
+    let slug = optional_column_expr(&columns, "slug", "NULL");
+    let user_initiated = optional_column_expr(&columns, "user_initiated", "1");
+    let created_at = optional_column_expr(&columns, "created_at", "NULL");
+    let updated_at = optional_column_expr(&columns, "updated_at", "NULL");
+    let cwd = optional_column_expr(&columns, "cwd", "NULL");
+    let archived = optional_column_expr(&columns, "archived", "0");
+    let parent_conversation_id = optional_column_expr(&columns, "parent_conversation_id", "NULL");
+    let model = optional_column_expr(&columns, "model", "NULL");
+    let conversation_options = optional_column_expr(&columns, "conversation_options", "NULL");
+    let current_generation = optional_column_expr(&columns, "current_generation", "NULL");
+    let agent_working = optional_column_expr(&columns, "agent_working", "0");
+    let tags = optional_column_expr(&columns, "tags", "NULL");
+    let is_draft = optional_column_expr(&columns, "is_draft", "0");
+    let draft = optional_column_expr(&columns, "draft", "NULL");
+    let queued_messages = optional_column_expr(&columns, "queued_messages", "NULL");
+    let sql = format!(
+        "select conversation_id, {slug}, {user_initiated}, {created_at}, {updated_at}, \
+         {cwd}, {archived}, {parent_conversation_id}, {model}, {conversation_options}, \
+         {current_generation}, {agent_working}, {tags}, {is_draft}, {draft}, \
+         {queued_messages} \
+         from conversations order by {created_at}, conversation_id"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok(ShelleyConversationRow {
+            conversation_id: row.get(0)?,
+            slug: row.get(1)?,
+            user_initiated: sqlite_bool(row.get::<_, Option<i64>>(2)?),
+            created_at: row.get(3)?,
+            updated_at: row.get(4)?,
+            cwd: row.get(5)?,
+            archived: sqlite_bool(row.get::<_, Option<i64>>(6)?),
+            parent_conversation_id: row.get(7)?,
+            model: row.get(8)?,
+            conversation_options: row.get(9)?,
+            current_generation: row.get(10)?,
+            agent_working: sqlite_bool(row.get::<_, Option<i64>>(11)?),
+            tags: row.get(12)?,
+            is_draft: sqlite_bool(row.get::<_, Option<i64>>(13)?),
+            draft: row.get(14)?,
+            queued_messages: row.get(15)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(CaptureError::from)
+}
+
+fn shelley_messages(conn: &Connection) -> Result<Vec<ShelleyMessageRow>> {
+    if !sqlite_table_exists(conn, "messages")? {
+        return Err(CaptureError::InvalidPayload(
+            "Shelley shelley.db is missing required messages table".into(),
+        ));
+    }
+    let columns = sqlite_table_columns(conn, "messages")?;
+    ensure_sqlite_table_columns(
+        &columns,
+        "Shelley messages table",
+        &["message_id", "conversation_id", "type"],
+    )?;
+    let sequence_id = optional_column_expr(&columns, "sequence_id", "rowid");
+    let llm_data = optional_column_expr(&columns, "llm_data", "NULL");
+    let user_data = optional_column_expr(&columns, "user_data", "NULL");
+    let usage_data = optional_column_expr(&columns, "usage_data", "NULL");
+    let created_at = optional_column_expr(&columns, "created_at", "NULL");
+    let display_data = optional_column_expr(&columns, "display_data", "NULL");
+    let excluded_from_context = optional_column_expr(&columns, "excluded_from_context", "0");
+    let generation = optional_column_expr(&columns, "generation", "NULL");
+    let llm_api_url = optional_column_expr(&columns, "llm_api_url", "NULL");
+    let model_name = optional_column_expr(&columns, "model_name", "NULL");
+    let forked_from_message_id = optional_column_expr(&columns, "forked_from_message_id", "NULL");
+    let sql = format!(
+        "select rowid, message_id, conversation_id, {sequence_id}, type, {llm_data}, \
+         {user_data}, {usage_data}, {created_at}, {display_data}, \
+         {excluded_from_context}, {generation}, {llm_api_url}, {model_name}, \
+         {forked_from_message_id} from messages order by conversation_id, {sequence_id}, rowid"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok(ShelleyMessageRow {
+            rowid: row.get(0)?,
+            message_id: row.get(1)?,
+            conversation_id: row.get(2)?,
+            sequence_id: row.get(3)?,
+            entry_type: row.get(4)?,
+            llm_data: row.get(5)?,
+            user_data: row.get(6)?,
+            usage_data: row.get(7)?,
+            created_at: row.get(8)?,
+            display_data: row.get(9)?,
+            excluded_from_context: sqlite_bool(row.get::<_, Option<i64>>(10)?),
+            generation: row.get(11)?,
+            llm_api_url: row.get(12)?,
+            model_name: row.get(13)?,
+            forked_from_message_id: row.get(14)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(CaptureError::from)
+}
+
+fn sqlite_bool(value: Option<i64>) -> bool {
+    value.unwrap_or(0) != 0
+}
+
+fn shelley_timestamp(raw: Option<&str>, fallback: DateTime<Utc>) -> DateTime<Utc> {
+    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return fallback;
+    };
+    parse_rfc3339_utc(raw)
+        .or_else(|| {
+            NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S%.f")
+                .ok()
+                .map(|naive| DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc))
+        })
+        .unwrap_or(fallback)
+}
+
+fn shelley_message_body(message: &ShelleyMessageRow) -> Value {
+    json!({
+        "message_id": message.message_id,
+        "conversation_id": message.conversation_id,
+        "sequence_id": message.sequence_id,
+        "type": message.entry_type,
+        "llm_data": message.llm_data.as_deref().map(provider_json_text),
+        "user_data": message.user_data.as_deref().map(provider_json_text),
+        "display_data": message.display_data.as_deref().map(provider_json_text),
+        "usage_data": message.usage_data.as_deref().map(provider_json_text),
+    })
+}
+
+fn shelley_message_text(message: &ShelleyMessageRow, body: &Value) -> Option<String> {
+    let mut parts = Vec::new();
+    for pointer in ["/user_data", "/llm_data", "/display_data"] {
+        if let Some(text) = body.pointer(pointer).and_then(shelley_value_text) {
+            parts.push(text);
+        }
+    }
+    if parts.is_empty() && message.entry_type == "system" {
+        Some("Shelley system message".to_owned())
+    } else if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n"))
+    }
+}
+
+fn shelley_event_role(entry_type: &str) -> Option<EventRole> {
+    Some(match entry_type {
+        "user" => EventRole::User,
+        "agent" | "assistant" => EventRole::Assistant,
+        "tool" => EventRole::Tool,
+        "system" | "error" | "gitinfo" | "warning" | "modelchange" => EventRole::System,
+        _ => EventRole::Unknown,
+    })
+}
+
+fn shelley_event_type(message: &ShelleyMessageRow, body: &Value) -> EventType {
+    match message.entry_type.as_str() {
+        "tool" => EventType::ToolOutput,
+        "gitinfo" => EventType::VcsChange,
+        "system" | "error" | "warning" | "modelchange" => EventType::Notice,
+        "agent" | "assistant" if shelley_value_has_tool_use(body) => EventType::ToolCall,
+        "user" | "agent" | "assistant" if shelley_value_has_tool_result(body) => {
+            EventType::ToolOutput
+        }
+        "user" | "agent" | "assistant" => EventType::Message,
+        _ => EventType::Notice,
+    }
+}
+
+fn shelley_event_index(message: &ShelleyMessageRow) -> u64 {
+    let sequence = message.sequence_id.max(0) as u64;
+    let bucket = text_id_index(
+        &format!("{}:{}", message.conversation_id, message.message_id),
+        4_096,
+    );
+    sequence.saturating_mul(4_096).saturating_add(bucket)
+}
+
+fn shelley_value_has_tool_use(value: &Value) -> bool {
+    match value {
+        Value::Array(items) => items.iter().any(shelley_value_has_tool_use),
+        Value::Object(object) => {
+            let content_type = shelley_content_type(value);
+            matches!(
+                content_type.as_deref(),
+                Some("tool_use" | "server_tool_use")
+            ) || object.values().any(shelley_value_has_tool_use)
+        }
+        _ => false,
+    }
+}
+
+fn shelley_value_has_tool_result(value: &Value) -> bool {
+    match value {
+        Value::Array(items) => items.iter().any(shelley_value_has_tool_result),
+        Value::Object(object) => {
+            let content_type = shelley_content_type(value);
+            matches!(
+                content_type.as_deref(),
+                Some("tool_result" | "web_search_tool_result" | "web_search_result")
+            ) || object.values().any(shelley_value_has_tool_result)
+        }
+        _ => false,
+    }
+}
+
+fn shelley_value_text(value: &Value) -> Option<String> {
+    let mut parts = Vec::new();
+    shelley_collect_text(value, &mut parts);
+    (!parts.is_empty()).then(|| parts.join("\n"))
+}
+
+fn shelley_collect_text(value: &Value, parts: &mut Vec<String>) {
+    match value {
+        Value::String(text) => shelley_push_text(parts, text),
+        Value::Array(items) => {
+            for item in items {
+                if shelley_text_budget_remaining(parts) == 0 {
+                    break;
+                }
+                shelley_collect_text(item, parts);
+            }
+        }
+        Value::Object(object) => {
+            if let Some(kind) = shelley_content_type(value) {
+                let handled = match kind.as_str() {
+                    "text" => {
+                        if let Some(text) = object.get("Text").and_then(Value::as_str) {
+                            shelley_push_text(parts, text);
+                        }
+                        true
+                    }
+                    "thinking" | "redacted_thinking" => {
+                        if let Some(text) = object.get("Thinking").and_then(Value::as_str) {
+                            shelley_push_text(parts, text);
+                        }
+                        true
+                    }
+                    "tool_use" | "server_tool_use" => {
+                        let name = object
+                            .get("ToolName")
+                            .and_then(Value::as_str)
+                            .unwrap_or("tool");
+                        shelley_push_text(parts, &format!("tool call: {name}"));
+                        if let Some(input) = object.get("ToolInput") {
+                            if !input.is_null() {
+                                let input = provider_capped_json(input, PROVIDER_MAX_PREVIEW_CHARS);
+                                shelley_push_text(parts, &format!("tool input: {input}"));
+                            }
+                        }
+                        true
+                    }
+                    "tool_result" | "web_search_tool_result" => {
+                        shelley_push_text(parts, "tool result");
+                        if let Some(results) = object.get("ToolResult") {
+                            shelley_collect_text(results, parts);
+                        }
+                        if let Some(display) = object.get("Display") {
+                            shelley_collect_text(display, parts);
+                        }
+                        true
+                    }
+                    "web_search_result" => {
+                        for key in ["Title", "URL", "PageAge"] {
+                            if let Some(text) = object.get(key).and_then(Value::as_str) {
+                                shelley_push_text(parts, text);
+                            }
+                        }
+                        true
+                    }
+                    _ => false,
+                };
+                if handled {
+                    return;
+                }
+            }
+
+            for key in [
+                "Text",
+                "text",
+                "Thinking",
+                "thinking",
+                "content",
+                "Content",
+                "output",
+                "Output",
+                "summary",
+                "Summary",
+                "message",
+                "Message",
+                "error",
+                "Error",
+                "LLMContent",
+                "ToolResult",
+                "Display",
+            ] {
+                if shelley_text_budget_remaining(parts) == 0 {
+                    break;
+                }
+                if let Some(child) = object.get(key) {
+                    shelley_collect_text(child, parts);
+                }
+            }
+        }
+        Value::Number(_) | Value::Bool(_) | Value::Null => {}
+    }
+}
+
+fn shelley_push_text(parts: &mut Vec<String>, text: &str) {
+    let text = text.trim();
+    if !text.is_empty() {
+        let remaining = shelley_text_budget_remaining(parts);
+        if remaining == 0 {
+            return;
+        }
+        let separator_budget = usize::from(!parts.is_empty());
+        if remaining <= separator_budget {
+            return;
+        }
+        let (text, _) = capped_text(text, remaining - separator_budget);
+        parts.push(text);
+    }
+}
+
+fn shelley_text_budget_remaining(parts: &[String]) -> usize {
+    let used = parts.iter().map(|part| part.chars().count()).sum::<usize>()
+        + parts.len().saturating_sub(1);
+    (PROVIDER_MAX_TEXT_CHARS + 1).saturating_sub(used)
+}
+
+fn shelley_content_type(value: &Value) -> Option<String> {
+    let raw = value.get("Type")?;
+    if let Some(text) = raw.as_str() {
+        let normalized = text.trim().to_ascii_lowercase();
+        return match normalized.as_str() {
+            "contenttypetext" => Some("text".to_owned()),
+            "contenttypethinking" => Some("thinking".to_owned()),
+            "contenttyperedactedthinking" => Some("redacted_thinking".to_owned()),
+            "contenttypetooluse" => Some("tool_use".to_owned()),
+            "contenttypetoolresult" => Some("tool_result".to_owned()),
+            "contenttypeservertooluse" => Some("server_tool_use".to_owned()),
+            "contenttypewebsearchtoolresult" => Some("web_search_tool_result".to_owned()),
+            "contenttypewebsearchresult" => Some("web_search_result".to_owned()),
+            _ => Some(normalized),
+        };
+    }
+    raw.as_i64().and_then(|kind| {
+        match kind {
+            2 => Some("text"),
+            3 => Some("thinking"),
+            4 => Some("redacted_thinking"),
+            5 => Some("tool_use"),
+            6 => Some("tool_result"),
+            7 => Some("server_tool_use"),
+            8 => Some("web_search_tool_result"),
+            9 => Some("web_search_result"),
+            _ => None,
+        }
+        .map(str::to_owned)
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -13318,6 +14016,297 @@ mod tests {
     }
 
     #[test]
+    fn native_shelley_imports_sessions_messages_metadata_and_citations() {
+        let temp = tempdir();
+        let fixture = write_shelley_smoke_db(&temp);
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let summary = import_shelley_sqlite(
+            &fixture,
+            &mut store,
+            ShelleySqliteImportOptions {
+                machine_id: "test-machine".into(),
+                source_path: Some(fixture.clone()),
+                imported_at: DateTime::parse_from_rfc3339("2026-06-24T12:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                allow_partial_failures: true,
+                ..ShelleySqliteImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+        assert_eq!(summary.imported_sessions, 3);
+        assert_eq!(summary.imported_events, 4);
+        assert_eq!(summary.imported_edges, 1);
+
+        let parent_id = provider_session_uuid(CaptureProvider::Shelley, "shelley-root");
+        let child_id = provider_session_uuid(CaptureProvider::Shelley, "shelley-child");
+        assert_eq!(
+            store.get_session(child_id).unwrap().parent_session_id,
+            Some(parent_id)
+        );
+        assert!(store
+            .get_session(parent_id)
+            .unwrap()
+            .sync
+            .metadata
+            .to_string()
+            .contains("queued oracle"));
+
+        let source = store
+            .capture_source_by_external_session(CaptureProvider::Shelley, "shelley-root")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            source.descriptor.raw_source_path.as_deref(),
+            fixture.to_str()
+        );
+        assert_eq!(source.descriptor.provider, CaptureProvider::Shelley);
+
+        let events = store.events_for_session(parent_id).unwrap();
+        assert_eq!(events.len(), 3);
+        let agent_event = events
+            .iter()
+            .find(|event| {
+                event.sync.metadata["metadata"]["message_id"].as_str() == Some("msg-agent")
+            })
+            .expect("Shelley agent event imported");
+        let tool_result_event = events
+            .iter()
+            .find(|event| {
+                event.sync.metadata["metadata"]["message_id"].as_str() == Some("msg-tool-result")
+            })
+            .expect("Shelley tool-result event imported");
+        assert_eq!(agent_event.event_type, EventType::ToolCall);
+        assert_eq!(tool_result_event.event_type, EventType::ToolOutput);
+        let rendered = serde_json::to_string(&events).unwrap();
+        assert!(rendered.contains("shelley search oracle"));
+        assert!(rendered.contains("thinking through the search"));
+        assert!(rendered.contains("tool call: bash"));
+        assert!(rendered.contains("tool output oracle"));
+        assert!(rendered.contains("claude-opus-4-7"));
+        assert!(rendered.contains("https://api.anthropic.com/v1/messages"));
+        let user_event = events
+            .iter()
+            .find(|event| {
+                event.sync.metadata["metadata"]["message_id"].as_str() == Some("msg-user")
+            })
+            .expect("Shelley user event imported");
+        assert!(user_event
+            .sync
+            .metadata
+            .to_string()
+            .contains("conversation:shelley-root:sequence:1:message:msg-user"));
+
+        let cursor = store
+            .get_sync_cursor(
+                None,
+                "test-machine",
+                &provider_cursor_stream(CaptureProvider::Shelley, SHELLEY_SQLITE_SOURCE_FORMAT),
+            )
+            .unwrap()
+            .unwrap();
+        assert!(cursor
+            .cursor
+            .contains("conversation:shelley-root:sequence:3:message:msg-tool-result"));
+    }
+
+    #[test]
+    fn native_shelley_reimport_is_idempotent() {
+        let temp = tempdir();
+        let fixture = write_shelley_smoke_db(&temp);
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let first = import_shelley_sqlite(
+            &fixture,
+            &mut store,
+            ShelleySqliteImportOptions {
+                allow_partial_failures: true,
+                ..ShelleySqliteImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(first.imported_events, 4);
+
+        let second = import_shelley_sqlite(
+            &fixture,
+            &mut store,
+            ShelleySqliteImportOptions {
+                allow_partial_failures: true,
+                ..ShelleySqliteImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(second.failed, 0, "{:?}", second.failures);
+        assert_eq!(second.imported_sessions, 0);
+        assert_eq!(second.imported_events, 0);
+        assert_eq!(second.imported_edges, 0);
+        assert_eq!(second.skipped_sessions, 3);
+        assert_eq!(second.skipped_events, 4);
+        assert_eq!(second.skipped_edges, 1);
+    }
+
+    #[test]
+    fn native_shelley_handles_duplicate_sequences_and_nonchat_rows() {
+        let temp = tempdir();
+        let fixture = write_shelley_adversarial_db(&temp);
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let summary = import_shelley_sqlite(
+            &fixture,
+            &mut store,
+            ShelleySqliteImportOptions {
+                allow_partial_failures: true,
+                ..ShelleySqliteImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+        assert_eq!(summary.imported_sessions, 1);
+        assert_eq!(summary.imported_events, 5);
+
+        let session_id = provider_session_uuid(CaptureProvider::Shelley, "shelley-adversarial");
+        let events = store.events_for_session(session_id).unwrap();
+        assert_eq!(events.len(), 5);
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.id)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            5
+        );
+        let rendered = serde_json::to_string(&events).unwrap();
+        assert!(rendered.contains("duplicate sequence first"));
+        assert!(rendered.contains("duplicate sequence second"));
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == EventType::VcsChange));
+        assert!(events
+            .iter()
+            .any(
+                |event| event.sync.metadata["metadata"]["message_type"].as_str() == Some("warning")
+            ));
+
+        let large = events
+            .iter()
+            .find(|event| {
+                event.sync.metadata["metadata"]["message_id"].as_str() == Some("msg-large")
+            })
+            .expect("large Shelley event imported");
+        assert_eq!(large.payload["body"]["truncated"].as_bool(), Some(true));
+        assert!(
+            large.payload["body"]["text"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .count()
+                <= PROVIDER_MAX_TEXT_CHARS
+        );
+    }
+
+    #[test]
+    fn native_shelley_text_extraction_is_not_duplicate_or_unbounded() {
+        let text = shelley_value_text(&json!({
+            "Content": [
+                {"Type": 2, "Text": "once"}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(text, "once");
+
+        let huge = "x".repeat(PROVIDER_MAX_TEXT_CHARS + 200);
+        let text = shelley_value_text(&json!({
+            "Content": [
+                {"Type": 2, "Text": huge},
+                {"Type": 2, "Text": "after cap"}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(text.chars().count(), PROVIDER_MAX_TEXT_CHARS + 1);
+        assert!(!text.contains("after cap"));
+    }
+
+    #[test]
+    fn native_shelley_event_index_uses_stable_message_identity() {
+        let message = ShelleyMessageRow {
+            rowid: 1,
+            message_id: "msg-stable".to_owned(),
+            conversation_id: "conv-stable".to_owned(),
+            sequence_id: 42,
+            entry_type: "user".to_owned(),
+            llm_data: None,
+            user_data: None,
+            usage_data: None,
+            created_at: None,
+            display_data: None,
+            excluded_from_context: false,
+            generation: None,
+            llm_api_url: None,
+            model_name: None,
+            forked_from_message_id: None,
+        };
+        let mut moved_row = message.clone();
+        moved_row.rowid = 999;
+        let mut duplicate_sequence = message.clone();
+        duplicate_sequence.message_id = "msg-stable-other".to_owned();
+
+        assert_eq!(
+            shelley_event_index(&message),
+            shelley_event_index(&moved_row)
+        );
+        assert_ne!(
+            shelley_event_index(&message),
+            shelley_event_index(&duplicate_sequence)
+        );
+    }
+
+    #[test]
+    fn native_shelley_reports_malformed_and_corrupt_db() {
+        let temp = tempdir();
+        let malformed = write_shelley_malformed_db(&temp);
+        let corrupt = temp.path().join("corrupt-shelley.db");
+        fs::write(&corrupt, b"not sqlite").unwrap();
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let err = import_shelley_sqlite(
+            &malformed,
+            &mut store,
+            ShelleySqliteImportOptions::default(),
+        )
+        .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Shelley messages table missing required column(s): type"));
+
+        let err =
+            import_shelley_sqlite(&corrupt, &mut store, ShelleySqliteImportOptions::default())
+                .unwrap_err();
+        assert!(err.to_string().contains("not a database"));
+    }
+
+    #[test]
+    fn provider_sources_discovers_shelley_default_db() {
+        let temp = tempdir();
+        let db = temp.path().join(".config/shelley/shelley.db");
+        fs::create_dir_all(db.parent().unwrap()).unwrap();
+        fs::write(&db, b"not inspected by source probe").unwrap();
+
+        let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Shelley);
+        let source = sources
+            .iter()
+            .find(|source| source.source_format == SHELLEY_SQLITE_SOURCE_FORMAT)
+            .unwrap_or_else(|| panic!("missing Shelley source in {sources:#?}"));
+        assert_eq!(source.provider, CaptureProvider::Shelley);
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+        assert_eq!(source.import_support, ProviderImportSupport::Native);
+        assert_eq!(source.path, db);
+    }
+
+    #[test]
     fn native_jsonl_tree_imports_gemini_droid_and_copilot_smokes() {
         let temp = tempdir();
         let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
@@ -13624,6 +14613,253 @@ mod tests {
             "insert into message values ('future-message-1', 'future-root', 1782259200000,
                 1782259200000)",
             [],
+        )
+        .unwrap();
+        path
+    }
+
+    fn write_shelley_smoke_db(temp: &TempDir) -> PathBuf {
+        let path = temp.path().join("shelley.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "create table conversations (
+                conversation_id text primary key,
+                slug text,
+                user_initiated boolean not null default true,
+                created_at datetime not null default current_timestamp,
+                updated_at datetime not null default current_timestamp,
+                cwd text,
+                archived boolean not null default false,
+                parent_conversation_id text,
+                model text,
+                conversation_options text not null default '{}',
+                current_generation integer not null default 1,
+                agent_working boolean not null default false,
+                tags text not null default '[]',
+                is_draft boolean not null default false,
+                draft text not null default '',
+                queued_messages text not null default '[]'
+            );
+            create table messages (
+                message_id text primary key,
+                conversation_id text not null,
+                sequence_id integer not null,
+                type text not null,
+                llm_data text,
+                user_data text,
+                usage_data text,
+                created_at datetime not null default current_timestamp,
+                display_data text,
+                excluded_from_context boolean not null default false,
+                generation integer not null default 1,
+                llm_api_url text,
+                model_name text,
+                forked_from_message_id text
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "insert into conversations values (
+                'shelley-root', 'root-slug', 1, '2026-06-24 12:00:00',
+                '2026-06-24 12:05:00', '/workspace/shelley', 0, null,
+                'claude-opus-4-7', ?1, 2, 0, ?2, 0, '', ?3
+            )",
+            [
+                r#"{"thinking_level":"high","subagent_backend":"shelley"}"#,
+                r#"["native","ctx"]"#,
+                r#"[{"id":"queued-1","llm":{"Content":[{"Type":2,"Text":"queued oracle"}]},"created_at":"2026-06-24T12:00:04Z","model":"claude-opus-4-7"}]"#,
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "insert into conversations values (
+                'shelley-child', 'child-slug', 0, '2026-06-24 12:01:00',
+                '2026-06-24 12:02:00', '/workspace/shelley', 0, 'shelley-root',
+                'claude-sonnet-4-5', '{}', 1, 0, '[]', 0, '', '[]'
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "insert into conversations values (
+                'shelley-draft', 'old-draft', 1, '2026-06-24 11:00:00',
+                '2026-06-24 11:01:00', '/workspace/archive', 1, null,
+                null, '{}', 1, 0, '[]', 1, 'draft body', '[]'
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "insert into messages (
+                message_id, conversation_id, sequence_id, type, user_data, created_at
+            ) values ('msg-user', 'shelley-root', 1, 'user', ?1, '2026-06-24 12:00:01')",
+            [json!({
+                "Content": [
+                    {"Type": 2, "Text": "please run shelley search oracle"}
+                ]
+            })
+            .to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "insert into messages (
+                message_id, conversation_id, sequence_id, type, llm_data, usage_data,
+                created_at, generation, llm_api_url, model_name
+            ) values (
+                'msg-agent', 'shelley-root', 2, 'agent', ?1, ?2,
+                '2026-06-24 12:00:02', 2, 'https://api.anthropic.com/v1/messages',
+                'claude-opus-4-7'
+            )",
+            [
+                json!({
+                    "Role": 1,
+                    "Content": [
+                        {"Type": 3, "Thinking": "thinking through the search"},
+                        {"Type": 2, "Text": "I will inspect the source."},
+                        {"Type": 5, "ID": "toolu_1", "ToolName": "bash", "ToolInput": {"command": "rg shelley"}}
+                    ],
+                    "EndOfTurn": false
+                })
+                .to_string(),
+                json!({
+                    "input_tokens": 100,
+                    "cache_read_input_tokens": 25,
+                    "output_tokens": 40,
+                    "cost_usd": 0.0123,
+                    "model": "claude-opus-4-7",
+                    "url": "https://api.anthropic.com/v1/messages"
+                })
+                .to_string(),
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "insert into messages (
+                message_id, conversation_id, sequence_id, type, user_data, display_data,
+                created_at, forked_from_message_id
+            ) values (
+                'msg-tool-result', 'shelley-root', 3, 'user', ?1, ?2,
+                '2026-06-24 12:00:03', 'source-msg-tool-result'
+            )",
+            [
+                json!({
+                    "Role": 0,
+                    "Content": [
+                        {"Type": 6, "ToolUseID": "toolu_1", "ToolResult": [{"Type": 2, "Text": "tool output oracle"}]}
+                    ]
+                })
+                .to_string(),
+                json!({"stdout": "tool output oracle", "exit_code": 0}).to_string(),
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "insert into messages (
+                message_id, conversation_id, sequence_id, type, llm_data, created_at
+            ) values ('msg-child', 'shelley-child', 1, 'agent', ?1, '2026-06-24 12:01:01')",
+            [json!({
+                "Content": [
+                    {"Type": 2, "Text": "subagent result from Shelley"}
+                ]
+            })
+            .to_string()],
+        )
+        .unwrap();
+        path
+    }
+
+    fn write_shelley_adversarial_db(temp: &TempDir) -> PathBuf {
+        let path = temp.path().join("shelley-adversarial.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "create table conversations (
+                conversation_id text primary key,
+                slug text,
+                user_initiated boolean not null default true,
+                created_at datetime not null default current_timestamp,
+                updated_at datetime not null default current_timestamp,
+                cwd text,
+                archived boolean not null default false,
+                parent_conversation_id text,
+                model text,
+                conversation_options text not null default '{}',
+                current_generation integer not null default 1,
+                agent_working boolean not null default false,
+                tags text not null default '[]',
+                is_draft boolean not null default false,
+                draft text not null default '',
+                queued_messages text not null default '[]'
+            );
+            create table messages (
+                message_id text primary key,
+                conversation_id text not null,
+                sequence_id integer not null,
+                type text not null,
+                llm_data text,
+                user_data text,
+                usage_data text,
+                created_at datetime not null default current_timestamp,
+                display_data text,
+                excluded_from_context boolean not null default false,
+                generation integer not null default 1,
+                llm_api_url text,
+                model_name text,
+                forked_from_message_id text
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "insert into conversations values (
+                'shelley-adversarial', 'adversarial', 1, '2026-06-24 12:00:00',
+                '2026-06-24 12:05:00', '/workspace/shelley', 0, null,
+                'claude-opus-4-7', '{}', 1, 0, '[]', 0, '', '[]'
+            )",
+            [],
+        )
+        .unwrap();
+        for (message_id, sequence_id, message_type, text) in [
+            ("msg-dup-a", 1, "user", "duplicate sequence first"),
+            ("msg-dup-b", 1, "user", "duplicate sequence second"),
+            ("msg-git", 2, "gitinfo", "commit abc touched shelley.rs"),
+            ("msg-warning", 3, "warning", "warning message for Shelley"),
+        ] {
+            conn.execute(
+                "insert into messages (
+                    message_id, conversation_id, sequence_id, type, user_data, created_at
+                ) values (?1, 'shelley-adversarial', ?2, ?3, ?4, '2026-06-24 12:00:01')",
+                rusqlite::params![
+                    message_id,
+                    sequence_id,
+                    message_type,
+                    json!({"Content": [{"Type": 2, "Text": text}]}).to_string(),
+                ],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "insert into messages (
+                message_id, conversation_id, sequence_id, type, llm_data, created_at
+            ) values ('msg-large', 'shelley-adversarial', 4, 'agent', ?1, '2026-06-24 12:00:04')",
+            [json!({
+                "Content": [
+                    {"Type": 2, "Text": "x".repeat(PROVIDER_MAX_TEXT_CHARS + 200)}
+                ]
+            })
+            .to_string()],
+        )
+        .unwrap();
+        path
+    }
+
+    fn write_shelley_malformed_db(temp: &TempDir) -> PathBuf {
+        let path = temp.path().join("shelley-malformed.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "create table conversations (conversation_id text primary key);
+             create table messages (
+                message_id text primary key,
+                conversation_id text not null
+             );",
         )
         .unwrap();
         path

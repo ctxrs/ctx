@@ -66,6 +66,7 @@ ctx import --provider cursor --path ~/.cursor/projects
 ctx import --provider hermes --path ~/.hermes/state.db
 ctx import --provider nanoclaw --path /path/to/nanoclaw-project
 ctx import --provider astrbot --path /path/to/data/data_v4.db
+ctx import --provider shelley --path ~/.config/shelley/shelley.db
 ```
 
 Preview providers such as NanoClaw and AstrBot are explicit-import only. Use

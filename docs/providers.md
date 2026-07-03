@@ -22,6 +22,8 @@ The current CLI imports local history for:
 - AstrBot local SQLite history from `ASTRBOT_ROOT/data/data_v4.db`,
   `~/.astrbot/data/data_v4.db`, or a project `data/data_v4.db` when imported
   explicitly;
+- Shelley SQLite history from `SHELLEY_DB`, `~/.config/shelley/shelley.db`, or
+  an explicit Shelley DB path;
 - Antigravity transcript JSONL mirrors under
   `~/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript_full.jsonl`
   or `transcript.jsonl`;
@@ -49,10 +51,10 @@ ctx sources --json
 ```
 
 CLI provider flags use names such as `openclaw`, `hermes`, `nanoclaw`,
-`astrbot`, `copilot-cli`, and `factory-ai-droid`.
+`astrbot`, `shelley`, `copilot-cli`, and `factory-ai-droid`.
 Structured JSON and stable SQL views use provider IDs in ctx output; multiword IDs may be
 snake_case, such as `copilot_cli` or `factory_ai_droid`, while compact native
-IDs such as `openclaw`, `nanoclaw`, and `astrbot` stay compact.
+IDs such as `openclaw`, `nanoclaw`, `astrbot`, and `shelley` stay compact.
 
 `ctx sources --json` reports each known provider source with `import_support`
 and `importable` fields. A native source is marked available/importable only

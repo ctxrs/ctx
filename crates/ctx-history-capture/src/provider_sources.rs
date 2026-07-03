@@ -184,6 +184,12 @@ const ASTRBOT_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     source_kind: ProviderSourceKind::NativeHistory,
 }];
 
+const SHELLEY_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
+    path_components: &[".config", "shelley", "shelley.db"],
+    source_format: "shelley_sqlite",
+    source_kind: ProviderSourceKind::NativeHistory,
+}];
+
 const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
     ProviderSourceSpec {
         provider: CaptureProvider::Codex,
@@ -315,6 +321,16 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         redaction_boundary: ProviderRedactionBoundary::BeforeExport,
         unsupported_reason: None,
     },
+    ProviderSourceSpec {
+        provider: CaptureProvider::Shelley,
+        display_name: "Shelley",
+        default_locations: SHELLEY_DEFAULTS,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
 ];
 
 pub fn provider_source_specs() -> &'static [ProviderSourceSpec] {
@@ -417,6 +433,16 @@ fn discover_provider_sources_for_spec(
                 ));
             }
         }
+        CaptureProvider::Shelley => {
+            if let Some(path) = env_path("SHELLEY_DB") {
+                sources.push(provider_source_from_parts(
+                    spec,
+                    path,
+                    "shelley_sqlite",
+                    ProviderSourceKind::NativeHistory,
+                ));
+            }
+        }
         _ => {}
     }
 
@@ -502,6 +528,7 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::Hermes => "hermes_state_sqlite",
         CaptureProvider::NanoClaw => "nanoclaw_project",
         CaptureProvider::AstrBot => "astrbot_data_v4_sqlite",
+        CaptureProvider::Shelley => "shelley_sqlite",
         _ => "unsupported",
     };
     let explicit_import_support = spec.import_support;
@@ -614,6 +641,7 @@ fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
             Some("path exists but no NanoClaw data/v2.db and data/v2-sessions store was found")
         }
         CaptureProvider::AstrBot => Some("path exists but no AstrBot data/data_v4.db was found"),
+        CaptureProvider::Shelley => Some("path exists but no Shelley SQLite database was found"),
         _ => None,
     }
 }
@@ -692,6 +720,9 @@ fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::AstrBot => {
             Some("path exists but the AstrBot data database could not be read; check permissions")
         }
+        CaptureProvider::Shelley => {
+            Some("path exists but the Shelley database could not be read; check permissions")
+        }
         _ => None,
     }
 }
@@ -713,6 +744,7 @@ fn default_location_import_probe(
         CaptureProvider::Hermes => path_is_file_probe(path),
         CaptureProvider::NanoClaw => has_nanoclaw_project(path),
         CaptureProvider::AstrBot => path_is_file_probe(path),
+        CaptureProvider::Shelley => path_is_file_probe(path),
         CaptureProvider::Antigravity => has_jsonl_file_under_matching(path, 10_000, |candidate| {
             matches!(
                 candidate.file_name().and_then(|name| name.to_str()),
@@ -1071,6 +1103,17 @@ mod tests {
         );
         assert!(astrbot_source.import_support.is_importable());
         assert!(!astrbot_source.import_support.is_auto_importable());
+
+        let shelley = temp.path().join(".config/shelley");
+        std::fs::create_dir_all(&shelley).unwrap();
+        std::fs::write(shelley.join("shelley.db"), b"sqlite fixture marker").unwrap();
+        let shelley_source = discover_provider_sources(temp.path())
+            .into_iter()
+            .find(|source| source.provider == CaptureProvider::Shelley)
+            .unwrap();
+        assert_eq!(shelley_source.status, ProviderSourceStatus::Available);
+        assert_eq!(shelley_source.import_support, ProviderImportSupport::Native);
+        assert!(shelley_source.import_support.is_auto_importable());
     }
 
     #[test]

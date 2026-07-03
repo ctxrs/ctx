@@ -602,6 +602,7 @@ fn provider_names() -> Vec<&'static str> {
         ProviderArg::Hermes.cli_name(),
         ProviderArg::NanoClaw.cli_name(),
         ProviderArg::AstrBot.cli_name(),
+        ProviderArg::Shelley.cli_name(),
         ProviderArg::Custom.cli_name(),
     ];
     names.sort_unstable();
@@ -687,6 +688,7 @@ fn optional_provider(arguments: &Value, key: &str) -> Result<Option<ProviderArg>
         "hermes" => Ok(Some(ProviderArg::Hermes)),
         "nanoclaw" => Ok(Some(ProviderArg::NanoClaw)),
         "astrbot" => Ok(Some(ProviderArg::AstrBot)),
+        "shelley" => Ok(Some(ProviderArg::Shelley)),
         "custom" => Ok(Some(ProviderArg::Custom)),
         _ => Err(anyhow!(
             "provider must be one of {}",

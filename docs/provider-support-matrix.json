@@ -435,6 +435,62 @@
       ]
     },
     {
+      "id": "shelley",
+      "display_name": "Shelley",
+      "priority": "p1",
+      "status": "local_import_when_supported",
+      "capture_provider": "shelley",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "shelley_sqlite",
+          "fidelity": "imported",
+          "proof": [
+            "ctx sources",
+            "ctx import --provider shelley",
+            "ctx import --provider shelley --path <shelley.db>"
+          ],
+          "notes": [
+            "Reads Shelley SQLite history from SHELLEY_DB or ~/.config/shelley/shelley.db using a read-only SQLite connection.",
+            "Normalizes conversations as sessions and messages as events with stable conversation/sequence/message cursors.",
+            "Indexes text from Shelley user/agent/tool JSON, including thinking, tool calls, and tool results when present."
+          ]
+        }
+      ],
+      "history_locations": [
+        "SHELLEY_DB",
+        "~/.config/shelley/shelley.db"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": true,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": true,
+        "command_output": false,
+        "files_touched": false,
+        "artifacts": false,
+        "model_identity": true,
+        "costs": true,
+        "token_usage": true,
+        "parent_child_session_edges": true
+      },
+      "redaction_notes": [
+        "Reads the provider SQLite database read-only; imported conversation text, tool output, cwd, model, usage, and local source paths remain in the local ctx index."
+      ],
+      "blockers": [
+        "Full GA needs ongoing validation against upstream Shelley schema drift."
+      ],
+      "public_docs": "docs/providers.md",
+      "fixture_paths": [],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs"
+      ]
+    },
+    {
       "id": "antigravity_cli",
       "display_name": "Antigravity",
       "priority": "p1",
