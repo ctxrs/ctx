@@ -21,6 +21,9 @@ use crate::{config::AppConfig, net};
 const STATE_FILE: &str = "upgrade-state.json";
 const LOCK_FILE: &str = "upgrade.lock";
 const LOG_FILE: &str = "logs/upgrade.log";
+const RELEASE_METADATA_MAX_BYTES: usize = 1024 * 1024;
+const RELEASE_METADATA_SIGNATURE_MAX_BYTES: usize = 64 * 1024;
+const RELEASE_ARTIFACT_MAX_BYTES: usize = 128 * 1024 * 1024;
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const VERSION_PROBE_OUTPUT_LIMIT: usize = 4096;
 const STALE_UPGRADE_LOCK_AFTER: Duration = Duration::from_secs(30 * 60);
@@ -380,7 +383,7 @@ fn apply_upgrade(
             warnings,
         });
     }
-    let bytes = net::get_bytes(&plan.artifact_url)
+    let bytes = net::get_bytes_limited(&plan.artifact_url, RELEASE_ARTIFACT_MAX_BYTES)
         .with_context(|| format!("download {}", plan.artifact_url))?;
     verify_artifact_sha(&bytes, &plan.artifact_sha256)?;
     let apply_result = apply_artifact(&plan, &bytes)?;
@@ -444,10 +447,11 @@ fn build_upgrade_plan(
     warnings.extend(path.warnings.clone());
     let metadata_url = metadata_url(config, &channel);
     let signature_url = metadata_signature_url(&metadata_url);
-    let metadata_bytes = net::get_bytes(&metadata_url)
+    let metadata_bytes = net::get_bytes_limited(&metadata_url, RELEASE_METADATA_MAX_BYTES)
         .with_context(|| format!("download release metadata {metadata_url}"))?;
-    let signature_bytes = net::get_bytes(&signature_url)
-        .with_context(|| format!("download release metadata signature {signature_url}"))?;
+    let signature_bytes =
+        net::get_bytes_limited(&signature_url, RELEASE_METADATA_SIGNATURE_MAX_BYTES)
+            .with_context(|| format!("download release metadata signature {signature_url}"))?;
     verify_metadata_signature(&metadata_bytes, &signature_bytes)?;
     let metadata = parse_release_metadata(&metadata_bytes, &platform, &channel)?;
     let artifact_url = format!(

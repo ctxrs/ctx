@@ -27,20 +27,33 @@ pub fn post_json(endpoint: &str, body: &[u8]) -> Result<()> {
         .map_err(|err| anyhow!("POST {endpoint}: {err}"))
 }
 
-pub fn get_bytes(endpoint: &str) -> Result<Vec<u8>> {
+pub fn get_bytes_limited(endpoint: &str, max_bytes: usize) -> Result<Vec<u8>> {
     if let Some(path) = file_url_path(endpoint)? {
-        return fs::read(&path).with_context(|| format!("read {}", path.display()));
+        let file = fs::File::open(&path).with_context(|| format!("read {}", path.display()))?;
+        return read_limited(file, max_bytes, &format!("read {}", path.display()));
     }
     require_https_or_localhost(endpoint)?;
     let response = ureq::get(endpoint)
         .timeout(std::time::Duration::from_secs(20))
         .call()
         .map_err(|err| anyhow!("GET {endpoint}: {err}"))?;
-    let mut reader = response.into_reader();
+    read_limited(
+        response.into_reader(),
+        max_bytes,
+        &format!("GET {endpoint}"),
+    )
+}
+
+fn read_limited(mut reader: impl Read, max_bytes: usize, label: &str) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     reader
+        .by_ref()
+        .take((max_bytes as u64).saturating_add(1))
         .read_to_end(&mut bytes)
-        .map_err(|err| anyhow!("read GET {endpoint}: {err}"))?;
+        .map_err(|err| anyhow!("{label}: {err}"))?;
+    if bytes.len() > max_bytes {
+        return Err(anyhow!("{label} exceeds max bytes ({max_bytes})"));
+    }
     Ok(bytes)
 }
 
@@ -108,5 +121,14 @@ mod tests {
         require_https_or_localhost("http://[::1]:8080/events").unwrap();
         assert!(require_https_or_localhost("http://example.com/events").is_err());
         assert!(require_https_or_localhost("http://example.com@localhost/events").is_err());
+    }
+
+    #[test]
+    fn get_bytes_limited_rejects_oversized_file_urls() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("oversized.bin");
+        fs::write(&path, b"12345").unwrap();
+        let err = get_bytes_limited(&format!("file://{}", path.display()), 4).unwrap_err();
+        assert!(err.to_string().contains("exceeds max bytes (4)"));
     }
 }
