@@ -1,6 +1,6 @@
 [package]
 name = "ctx-history-core"
-version = "0.18.0"
+version = "0.19.0"
 description = "Internal core types for ctx local agent history indexing"
 edition.workspace = true
 license.workspace = true
