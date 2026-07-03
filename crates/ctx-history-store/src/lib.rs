@@ -2524,6 +2524,14 @@ impl Store {
         )
     }
 
+    pub fn provider_source_event_dedupe_key(
+        source_id: Uuid,
+        provider_index: u64,
+        payload_hash: &str,
+    ) -> String {
+        format!("provider-source:{source_id}:{provider_index}:{payload_hash}")
+    }
+
     pub fn upsert_event(&self, event: &Event) -> Result<Uuid> {
         let event_id = if let Some(dedupe_key) = &event.dedupe_key {
             reject_provider_event_hash_conflict(&self.conn, dedupe_key)?;
@@ -3067,6 +3075,18 @@ impl Store {
             ],
         )?;
         Ok(())
+    }
+
+    pub fn file_touched_exists(&self, id: Uuid) -> Result<bool> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT 1 FROM files_touched WHERE id = ?1",
+                params![id.to_string()],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
     }
 
     fn list_files_touched(&self) -> Result<Vec<FileTouched>> {
@@ -5300,12 +5320,10 @@ fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
 }
 
 fn reject_provider_event_hash_conflict(conn: &Connection, dedupe_key: &str) -> Result<()> {
-    let Some((provider, external_session_id, provider_index, _new_hash)) =
-        parse_provider_event_dedupe_key(dedupe_key)
-    else {
+    let Some(parsed) = parse_provider_event_dedupe_key(dedupe_key) else {
         return Ok(());
     };
-    let prefix = provider_event_dedupe_key_prefix(&provider, &external_session_id, provider_index);
+    let prefix = provider_event_dedupe_key_prefix(&parsed);
     let upper_bound = provider_event_dedupe_key_upper_bound(&prefix);
     let mut stmt = conn.prepare(
         "SELECT dedupe_key FROM events
@@ -5317,12 +5335,10 @@ fn reject_provider_event_hash_conflict(conn: &Connection, dedupe_key: &str) -> R
 }
 
 fn reject_provider_event_hash_conflict_tx(tx: &Transaction<'_>, dedupe_key: &str) -> Result<()> {
-    let Some((provider, external_session_id, provider_index, _new_hash)) =
-        parse_provider_event_dedupe_key(dedupe_key)
-    else {
+    let Some(parsed) = parse_provider_event_dedupe_key(dedupe_key) else {
         return Ok(());
     };
-    let prefix = provider_event_dedupe_key_prefix(&provider, &external_session_id, provider_index);
+    let prefix = provider_event_dedupe_key_prefix(&parsed);
     let upper_bound = provider_event_dedupe_key_upper_bound(&prefix);
     let mut stmt = tx.prepare(
         "SELECT dedupe_key FROM events
@@ -5337,41 +5353,56 @@ fn reject_provider_event_hash_conflict_from_rows(
     dedupe_key: &str,
     rows: rusqlite::MappedRows<'_, impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<String>>,
 ) -> Result<()> {
-    let Some((provider, external_session_id, provider_index, new_hash)) =
-        parse_provider_event_dedupe_key(dedupe_key)
-    else {
+    let Some(incoming) = parse_provider_event_dedupe_key(dedupe_key) else {
         return Ok(());
     };
     for row in rows {
         let existing_key = row?;
-        let Some((existing_provider, existing_session_id, existing_index, existing_hash)) =
-            parse_provider_event_dedupe_key(&existing_key)
-        else {
+        let Some(existing) = parse_provider_event_dedupe_key(&existing_key) else {
             continue;
         };
-        if existing_provider == provider
-            && existing_session_id == external_session_id
-            && existing_index == provider_index
-            && existing_hash != new_hash
+        if existing.has_same_event_identity(&incoming)
+            && existing.payload_hash != incoming.payload_hash
         {
             return Err(StoreError::ProviderEventConflict {
-                provider,
-                external_session_id,
-                provider_index,
-                existing_hash,
-                new_hash,
+                provider: incoming.provider,
+                external_session_id: incoming.external_session_id,
+                provider_index: incoming.provider_index,
+                existing_hash: existing.payload_hash,
+                new_hash: incoming.payload_hash,
             });
         }
     }
     Ok(())
 }
 
-fn provider_event_dedupe_key_prefix(
-    provider: &str,
-    external_session_id: &str,
+#[derive(Debug, Clone)]
+struct ParsedProviderEventDedupeKey {
+    provider: String,
+    external_session_id: String,
+    source_id: Option<String>,
     provider_index: u64,
-) -> String {
-    format!("provider:{provider}:{external_session_id}:{provider_index}:")
+    payload_hash: String,
+}
+
+impl ParsedProviderEventDedupeKey {
+    fn has_same_event_identity(&self, other: &Self) -> bool {
+        self.provider == other.provider
+            && self.external_session_id == other.external_session_id
+            && self.source_id == other.source_id
+            && self.provider_index == other.provider_index
+    }
+}
+
+fn provider_event_dedupe_key_prefix(parsed: &ParsedProviderEventDedupeKey) -> String {
+    if let Some(source_id) = &parsed.source_id {
+        format!("provider-source:{source_id}:{}:", parsed.provider_index)
+    } else {
+        format!(
+            "provider:{}:{}:{}:",
+            parsed.provider, parsed.external_session_id, parsed.provider_index
+        )
+    }
 }
 
 fn provider_event_dedupe_key_upper_bound(prefix: &str) -> String {
@@ -5380,7 +5411,24 @@ fn provider_event_dedupe_key_upper_bound(prefix: &str) -> String {
     upper_bound
 }
 
-fn parse_provider_event_dedupe_key(dedupe_key: &str) -> Option<(String, String, u64, String)> {
+fn parse_provider_event_dedupe_key(dedupe_key: &str) -> Option<ParsedProviderEventDedupeKey> {
+    if let Some(rest) = dedupe_key.strip_prefix("provider-source:") {
+        let mut parts = rest.splitn(3, ':');
+        let source_id = parts.next()?.to_owned();
+        let provider_index = parts.next()?.parse().ok()?;
+        let payload_hash = parts.next()?.to_owned();
+        if source_id.is_empty() || payload_hash.is_empty() {
+            return None;
+        }
+        return Some(ParsedProviderEventDedupeKey {
+            provider: "provider-source".to_owned(),
+            external_session_id: source_id.clone(),
+            source_id: Some(source_id),
+            provider_index,
+            payload_hash,
+        });
+    }
+
     let mut parts = dedupe_key.splitn(5, ':');
     let prefix = parts.next()?;
     if prefix != "provider" {
@@ -5393,7 +5441,13 @@ fn parse_provider_event_dedupe_key(dedupe_key: &str) -> Option<(String, String, 
     if provider.is_empty() || external_session_id.is_empty() || payload_hash.is_empty() {
         None
     } else {
-        Some((provider, external_session_id, provider_index, payload_hash))
+        Some(ParsedProviderEventDedupeKey {
+            provider,
+            external_session_id,
+            source_id: None,
+            provider_index,
+            payload_hash,
+        })
     }
 }
 
@@ -5608,18 +5662,6 @@ fn reject_rich_import_conflicts(
             "capture_source",
             source.id,
         )?;
-        if let Some(external_session_id) = &source.descriptor.external_session_id {
-            reject_entity_conflict(
-                existing_capture_source_by_external_session(
-                    tx,
-                    source.descriptor.provider,
-                    external_session_id,
-                )?,
-                source,
-                "capture_source",
-                source.id,
-            )?;
-        }
     }
     for workspace in &archive.vcs_workspaces {
         reject_entity_conflict(
@@ -5740,7 +5782,8 @@ fn reject_rich_import_conflicts(
 
 fn reject_archive_event_internal_conflicts(archive: &SessionHistoryArchive) -> Result<()> {
     let mut seen_seq: HashMap<u64, &Event> = HashMap::new();
-    let mut seen_provider_events: HashMap<(String, String, u64), String> = HashMap::new();
+    let mut seen_provider_events: HashMap<(String, String, Option<String>, u64), String> =
+        HashMap::new();
 
     for event in &archive.events {
         if let Some(existing) = seen_seq.insert(event.seq, event) {
@@ -5755,24 +5798,27 @@ fn reject_archive_event_internal_conflicts(archive: &SessionHistoryArchive) -> R
         let Some(dedupe_key) = &event.dedupe_key else {
             continue;
         };
-        let Some((provider, external_session_id, provider_index, payload_hash)) =
-            parse_provider_event_dedupe_key(dedupe_key)
-        else {
+        let Some(parsed) = parse_provider_event_dedupe_key(dedupe_key) else {
             continue;
         };
-        let key = (provider, external_session_id, provider_index);
+        let key = (
+            parsed.provider,
+            parsed.external_session_id,
+            parsed.source_id,
+            parsed.provider_index,
+        );
         if let Some(existing_hash) = seen_provider_events.get(&key) {
-            if existing_hash != &payload_hash {
+            if existing_hash != &parsed.payload_hash {
                 return Err(StoreError::ProviderEventConflict {
                     provider: key.0,
                     external_session_id: key.1,
-                    provider_index: key.2,
+                    provider_index: key.3,
                     existing_hash: existing_hash.clone(),
-                    new_hash: payload_hash,
+                    new_hash: parsed.payload_hash,
                 });
             }
         } else {
-            seen_provider_events.insert(key, payload_hash);
+            seen_provider_events.insert(key, parsed.payload_hash);
         }
     }
 
@@ -5797,20 +5843,6 @@ fn existing_capture_source_by_id(tx: &Transaction<'_>, id: Uuid) -> Result<Optio
     tx.query_row(
         "SELECT id, kind, provider, machine_id, process_id, cwd, raw_source_path, external_session_id, started_at_ms, ended_at_ms, fidelity, visibility, sync_state, sync_version, metadata_json FROM capture_sources WHERE id = ?1",
         params![id.to_string()],
-        capture_source_from_row,
-    )
-    .optional()
-    .map_err(StoreError::from)
-}
-
-fn existing_capture_source_by_external_session(
-    tx: &Transaction<'_>,
-    provider: CaptureProvider,
-    external_session_id: &str,
-) -> Result<Option<CaptureSource>> {
-    tx.query_row(
-        "SELECT id, kind, provider, machine_id, process_id, cwd, raw_source_path, external_session_id, started_at_ms, ended_at_ms, fidelity, visibility, sync_state, sync_version, metadata_json FROM capture_sources WHERE provider = ?1 AND external_session_id = ?2 ORDER BY started_at_ms DESC LIMIT 1",
-        params![provider.as_str(), external_session_id],
         capture_source_from_row,
     )
     .optional()
@@ -8864,6 +8896,73 @@ mod catalog_tests {
             .unwrap();
         assert_eq!(source_count, 3);
         assert_eq!(catalog_count, 3);
+    }
+
+    #[test]
+    fn archive_import_allows_multiple_capture_sources_for_same_provider_session() {
+        let temp = tempdir();
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let external_session_id = "provider-session-1";
+        let first_source = provider_archive_source(
+            "018f45d0-0000-7000-8000-000000080001",
+            external_session_id,
+            "/tmp/provider/first.jsonl",
+        );
+        let second_source = provider_archive_source(
+            "018f45d0-0000-7000-8000-000000080002",
+            external_session_id,
+            "/tmp/provider/second.jsonl",
+        );
+
+        store
+            .import_archive(&archive_with_source(first_source.clone()), false)
+            .unwrap();
+        store
+            .import_archive(&archive_with_source(second_source.clone()), false)
+            .unwrap();
+
+        let sources = store.list_capture_sources().unwrap();
+        assert_eq!(sources.len(), 2);
+        assert_eq!(
+            sources
+                .iter()
+                .map(|source| source.id)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([first_source.id, second_source.id])
+        );
+        assert!(sources
+            .iter()
+            .all(|source| source.descriptor.external_session_id.as_deref()
+                == Some(external_session_id)));
+    }
+
+    fn archive_with_source(source: CaptureSource) -> SessionHistoryArchive {
+        SessionHistoryArchive {
+            capture_sources: vec![source],
+            ..SessionHistoryArchive::default()
+        }
+    }
+
+    fn provider_archive_source(
+        id: &str,
+        external_session_id: &str,
+        raw_source_path: &str,
+    ) -> CaptureSource {
+        CaptureSource {
+            id: Uuid::parse_str(id).unwrap(),
+            descriptor: CaptureSourceDescriptor {
+                kind: ctx_history_core::CaptureSourceKind::ProviderImport,
+                provider: CaptureProvider::Claude,
+                machine_id: "test-machine".to_owned(),
+                process_id: None,
+                cwd: Some("/repo".to_owned()),
+                raw_source_path: Some(raw_source_path.to_owned()),
+                external_session_id: Some(external_session_id.to_owned()),
+            },
+            started_at: fixed_time(),
+            ended_at: None,
+            sync: sync_metadata(),
+        }
     }
 
     #[test]

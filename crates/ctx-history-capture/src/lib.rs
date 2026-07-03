@@ -797,6 +797,8 @@ pub struct ProviderFileTouchedEnvelope {
     pub provider_touch_index: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_event_index: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_source_path: Option<String>,
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub change_kind: Option<FileChangeKind>,
@@ -1134,6 +1136,10 @@ impl ProviderCaptureAdapter for CodexSessionJsonlAdapter {
         let mut result = ProviderNormalizationResult::default();
         let mut header = None;
         let mut call_contexts: BTreeMap<String, CodexToolCallContext> = BTreeMap::new();
+        let raw_source_path = context
+            .source_path
+            .as_ref()
+            .map(|path| path.display().to_string());
 
         let mut line_number = 0usize;
         let mut line = Vec::new();
@@ -1212,11 +1218,14 @@ impl ProviderCaptureAdapter for CodexSessionJsonlAdapter {
             let mut line_capture = codex_session_line_capture(
                 header,
                 &value,
-                line_number,
-                occurred_at,
                 &mut call_contexts,
-                context.tool_output_mode,
-                context.event_mode,
+                CodexSessionLineContext {
+                    line_number,
+                    occurred_at,
+                    tool_output_mode: context.tool_output_mode,
+                    event_mode: context.event_mode,
+                    raw_source_path: raw_source_path.as_deref(),
+                },
             );
             if let Some(event) = line_capture.event.take() {
                 if !context.include_notices && event.event_type == EventType::Notice {
@@ -2081,6 +2090,10 @@ pub fn import_codex_session_jsonl_tail(
         wrap_transaction: false,
         fast_event_inserts: true,
     };
+    let raw_source_path = context
+        .source_path
+        .as_ref()
+        .map(|path| path.display().to_string());
 
     report_codex_import_progress(
         &options,
@@ -2182,11 +2195,14 @@ pub fn import_codex_session_jsonl_tail(
             let mut line_capture = codex_session_line_capture(
                 &header,
                 &value,
-                line_number,
-                occurred_at,
                 &mut call_contexts,
-                options.tool_output_mode,
-                options.event_mode,
+                CodexSessionLineContext {
+                    line_number,
+                    occurred_at,
+                    tool_output_mode: options.tool_output_mode,
+                    event_mode: options.event_mode,
+                    raw_source_path: raw_source_path.as_deref(),
+                },
             );
             if let Some(event) = line_capture.event.take() {
                 if !options.include_notices && event.event_type == EventType::Notice {
@@ -2200,6 +2216,7 @@ pub fn import_codex_session_jsonl_tail(
                         options.history_record_id,
                         line_number,
                         context.imported_at,
+                        raw_source_path.as_deref(),
                     )?);
                 }
             }
@@ -2624,6 +2641,10 @@ fn import_codex_session_path_fast(
         wrap_transaction: false,
         fast_event_inserts: true,
     };
+    let raw_source_path = context
+        .source_path
+        .as_ref()
+        .map(|path| path.display().to_string());
 
     let mut header = None;
     let mut call_contexts: BTreeMap<String, CodexToolCallContext> = BTreeMap::new();
@@ -2720,11 +2741,14 @@ fn import_codex_session_path_fast(
         let mut line_capture = codex_session_line_capture(
             header,
             &value,
-            line_number,
-            occurred_at,
             &mut call_contexts,
-            options.tool_output_mode,
-            options.event_mode,
+            CodexSessionLineContext {
+                line_number,
+                occurred_at,
+                tool_output_mode: options.tool_output_mode,
+                event_mode: options.event_mode,
+                raw_source_path: raw_source_path.as_deref(),
+            },
         );
         if let Some(event) = line_capture.event.take() {
             if !options.include_notices && event.event_type == EventType::Notice {
@@ -2738,6 +2762,7 @@ fn import_codex_session_path_fast(
                     options.history_record_id,
                     line_number,
                     context.imported_at,
+                    raw_source_path.as_deref(),
                 )?;
                 summary.merge(line_summary);
             }
@@ -2756,36 +2781,45 @@ fn import_codex_provider_event_fast(
     history_record_id: Option<Uuid>,
     line_number: usize,
     imported_at: DateTime<Utc>,
+    raw_source_path: Option<&str>,
 ) -> Result<ProviderImportSummary> {
     let mut summary = ProviderImportSummary::default();
     let provider = CaptureProvider::Codex;
     let session_id = provider_session_uuid(provider, &header.id);
-    let source_id = provider_source_uuid(provider, &header.id);
+    let source_id = provider_scoped_source_uuid(
+        provider,
+        &header.id,
+        CODEX_SESSION_SOURCE_FORMAT,
+        raw_source_path,
+    );
     let (payload, redacted_payload) = sanitize_value(event.payload.clone());
     let (event_metadata, redacted_metadata) = sanitize_value(event.metadata.clone());
     let event_hash = event
         .provider_event_hash
         .clone()
         .unwrap_or(compute_payload_hash(&payload)?);
-    let dedupe_key = Store::provider_event_dedupe_key(
+    let event_identity = provider_event_import_identity(
+        store,
         provider,
         &header.id,
+        source_id,
         event.provider_event_index,
         &event_hash,
-    );
+    )?;
     let command_run = provider_command_run_from_event(ProviderCommandRunInput {
         provider,
         provider_session_id: &header.id,
         session_id,
         source_id,
+        run_source_id: event_identity.run_source_id,
         history_record_id,
         event,
         payload: &payload,
         event_hash: &event_hash,
     });
     let normalized_event = Event {
-        id: provider_event_uuid(provider, &header.id, event.provider_event_index),
-        seq: provider_event_seq(provider, &header.id, event.provider_event_index),
+        id: event_identity.id,
+        seq: event_identity.seq,
         history_record_id,
         session_id: Some(session_id),
         run_id: command_run.as_ref().map(|run| run.id),
@@ -2803,7 +2837,7 @@ fn import_codex_provider_event_fast(
             "body": payload,
         }),
         payload_blob_id: None,
-        dedupe_key: Some(dedupe_key),
+        dedupe_key: Some(event_identity.dedupe_key),
         redaction_state: effective_event_redaction_state(
             event.redaction_state,
             redacted_payload || redacted_metadata,
@@ -3684,6 +3718,8 @@ struct CustomHistoryJsonlV1SourceCursorImport {
 struct CustomHistoryJsonlV1EdgeImport {
     provider_key: String,
     source_id: String,
+    source_format: String,
+    raw_source_path: Option<String>,
     from_provider_session_id: String,
     to_provider_session_id: String,
     edge_id: Option<String>,
@@ -3965,7 +4001,7 @@ fn normalize_custom_history_jsonl_v1_reader(
             .1;
         result.files_touched.push((
             line_number,
-            custom_history_file_touch_envelope(source, &file_touch),
+            custom_history_file_touch_envelope(source, &file_touch, context),
         ));
     }
 
@@ -3977,7 +4013,7 @@ fn normalize_custom_history_jsonl_v1_reader(
             .1;
         custom_edges.push((
             line_number,
-            custom_history_edge_import(source, &edge, context.imported_at),
+            custom_history_edge_import(source, &edge, context),
         ));
     }
 
@@ -4237,12 +4273,7 @@ fn custom_history_session_capture(
                 .clone()
                 .unwrap_or_else(|| context.machine_id.clone()),
             observed_at: source.observed_at.unwrap_or(context.imported_at),
-            raw_source_path: source.raw_source_path.clone().or_else(|| {
-                context
-                    .source_path
-                    .as_ref()
-                    .map(|path| path.display().to_string())
-            }),
+            raw_source_path: custom_history_effective_raw_source_path(source, context),
             raw_retention: source.raw_retention,
             redaction_boundary: source.redaction_boundary,
             trust: match source.trust {
@@ -4353,6 +4384,7 @@ fn custom_history_event_envelope(
 fn custom_history_file_touch_envelope(
     source: &CtxHistoryJsonlSourceRecord,
     file_touch: &CtxHistoryJsonlFileTouchRecord,
+    context: &ProviderAdapterContext,
 ) -> ProviderFileTouchedEnvelope {
     ProviderFileTouchedEnvelope {
         provider: CaptureProvider::Custom,
@@ -4363,6 +4395,7 @@ fn custom_history_file_touch_envelope(
         ),
         provider_touch_index: file_touch.touch_index,
         provider_event_index: file_touch.event_index,
+        raw_source_path: custom_history_effective_raw_source_path(source, context),
         path: file_touch.path.clone(),
         change_kind: file_touch.change_kind,
         old_path: file_touch.old_path.clone(),
@@ -4384,11 +4417,13 @@ fn custom_history_file_touch_envelope(
 fn custom_history_edge_import(
     source: &CtxHistoryJsonlSourceRecord,
     edge: &CtxHistoryJsonlEdgeRecord,
-    imported_at: DateTime<Utc>,
+    context: &ProviderAdapterContext,
 ) -> CustomHistoryJsonlV1EdgeImport {
     CustomHistoryJsonlV1EdgeImport {
         provider_key: source.provider_key.clone(),
         source_id: source.source_id.clone(),
+        source_format: source.source_format.clone(),
+        raw_source_path: custom_history_effective_raw_source_path(source, context),
         from_provider_session_id: custom_history_internal_session_id(
             &source.provider_key,
             &source.source_id,
@@ -4402,7 +4437,7 @@ fn custom_history_edge_import(
         edge_id: edge.edge_id.clone(),
         edge_type: edge.edge_type,
         confidence: edge.confidence,
-        occurred_at: edge.occurred_at.unwrap_or(imported_at),
+        occurred_at: edge.occurred_at.unwrap_or(context.imported_at),
         fidelity: edge.fidelity,
         metadata: custom_history_metadata(
             edge.metadata.clone(),
@@ -4415,6 +4450,18 @@ fn custom_history_edge_import(
             }),
         ),
     }
+}
+
+fn custom_history_effective_raw_source_path(
+    source: &CtxHistoryJsonlSourceRecord,
+    context: &ProviderAdapterContext,
+) -> Option<String> {
+    source.raw_source_path.clone().or_else(|| {
+        context
+            .source_path
+            .as_ref()
+            .map(|path| path.display().to_string())
+    })
 }
 
 fn custom_history_internal_session_id(
@@ -4538,7 +4585,12 @@ fn import_custom_history_edges(
             provider_session_uuid(CaptureProvider::Custom, &edge.from_provider_session_id);
         let to_session_id =
             provider_session_uuid(CaptureProvider::Custom, &edge.to_provider_session_id);
-        let source_id = provider_source_uuid(CaptureProvider::Custom, &edge.to_provider_session_id);
+        let source_id = provider_scoped_source_uuid(
+            CaptureProvider::Custom,
+            &edge.to_provider_session_id,
+            &edge.source_format,
+            edge.raw_source_path.as_deref(),
+        );
         let mut exists_cache = BTreeMap::<Uuid, bool>::new();
         if !provider_session_exists_cached(store, from_session_id, &mut exists_cache)?
             || !provider_session_exists_cached(store, to_session_id, &mut exists_cache)?
@@ -4833,15 +4885,27 @@ fn codex_session_capture(
     }
 }
 
+struct CodexSessionLineContext<'a> {
+    line_number: usize,
+    occurred_at: DateTime<Utc>,
+    tool_output_mode: CodexToolOutputMode,
+    event_mode: CodexEventImportMode,
+    raw_source_path: Option<&'a str>,
+}
+
 fn codex_session_line_capture(
     header: &CodexSessionHeader,
     value: &Value,
-    line_number: usize,
-    occurred_at: DateTime<Utc>,
     call_contexts: &mut BTreeMap<String, CodexToolCallContext>,
-    tool_output_mode: CodexToolOutputMode,
-    event_mode: CodexEventImportMode,
+    context: CodexSessionLineContext<'_>,
 ) -> CodexSessionLineCapture {
+    let CodexSessionLineContext {
+        line_number,
+        occurred_at,
+        tool_output_mode,
+        event_mode,
+        raw_source_path,
+    } = context;
     let event = codex_session_event(
         value,
         line_number,
@@ -4865,6 +4929,7 @@ fn codex_session_line_capture(
             provider: CaptureProvider::Codex,
             provider_session_id: &header.id,
             source_format: CODEX_SESSION_SOURCE_FORMAT,
+            raw_source_path,
             occurred_at,
             provider_event_index: event.as_ref().map(|event| event.provider_event_index),
             provider_touch_base_index: (line_number as u64) << 16,
@@ -5538,6 +5603,7 @@ fn provider_file_touches_from_event(
     provider: CaptureProvider,
     provider_session_id: &str,
     source_format: &str,
+    raw_source_path: Option<&str>,
     event: &ProviderEventEnvelope,
     line_number: usize,
 ) -> Vec<(usize, ProviderFileTouchedEnvelope)> {
@@ -5562,6 +5628,7 @@ fn provider_file_touches_from_event(
             provider,
             provider_session_id,
             source_format,
+            raw_source_path,
             occurred_at: event.occurred_at,
             provider_event_index: Some(event.provider_event_index),
             provider_touch_base_index: event.provider_event_index << 16,
@@ -5575,6 +5642,7 @@ fn provider_file_touches_from_raw_value(
     provider: CaptureProvider,
     provider_session_id: &str,
     source_format: &str,
+    raw_source_path: Option<&str>,
     raw_value: &Value,
     event: &ProviderEventEnvelope,
     line_number: usize,
@@ -5600,6 +5668,7 @@ fn provider_file_touches_from_raw_value(
             provider,
             provider_session_id,
             source_format,
+            raw_source_path,
             occurred_at: event.occurred_at,
             provider_event_index: Some(event.provider_event_index),
             provider_touch_base_index: event.provider_event_index << 16,
@@ -5617,6 +5686,7 @@ struct ProviderFileTouchEnvelopeContext<'a> {
     provider: CaptureProvider,
     provider_session_id: &'a str,
     source_format: &'a str,
+    raw_source_path: Option<&'a str>,
     occurred_at: DateTime<Utc>,
     provider_event_index: Option<u64>,
     provider_touch_base_index: u64,
@@ -5646,6 +5716,7 @@ fn provider_file_touch_envelopes(
                 provider_session_id: context.provider_session_id.to_owned(),
                 provider_touch_index,
                 provider_event_index: context.provider_event_index,
+                raw_source_path: context.raw_source_path.map(str::to_owned),
                 path: draft.path,
                 change_kind: draft.change_kind,
                 old_path: draft.old_path,
@@ -6069,6 +6140,7 @@ fn normalize_claude_projects_jsonl_file(
         .get("gitBranch")
         .and_then(Value::as_str)
         .map(str::to_owned);
+    let raw_source_path = path.display().to_string();
 
     for (line_number, value, occurred_at) in rows {
         let event = claude_event(&value, line_number, occurred_at);
@@ -6079,6 +6151,7 @@ fn normalize_claude_projects_jsonl_file(
                     CaptureProvider::Claude,
                     &provider_session_id,
                     CLAUDE_PROJECTS_SOURCE_FORMAT,
+                    Some(raw_source_path.as_str()),
                     &value,
                     event,
                     line_number,
@@ -6093,7 +6166,7 @@ fn normalize_claude_projects_jsonl_file(
                     source_format: CLAUDE_PROJECTS_SOURCE_FORMAT.to_owned(),
                     machine_id: context.machine_id.clone(),
                     observed_at: context.imported_at,
-                    raw_source_path: Some(path.display().to_string()),
+                    raw_source_path: Some(raw_source_path.clone()),
                     raw_retention: ProviderRawRetention::PathReference,
                     redaction_boundary: ProviderRedactionBoundary::BeforeExport,
                     trust: ProviderSourceTrust::ProviderNative,
@@ -6115,7 +6188,7 @@ fn normalize_claude_projects_jsonl_file(
                     metadata: json!({
                         "adapter": CLAUDE_PROJECTS_SOURCE_FORMAT,
                         "native_session_id": native_session_id,
-                        "source_path": path.display().to_string(),
+                        "source_path": raw_source_path.clone(),
                     }),
                 },
                 session: ProviderSessionEnvelope {
@@ -8222,6 +8295,7 @@ fn normalize_opencode_sqlite(
         .into_iter()
         .map(|session| (session.id.clone(), session))
         .collect::<BTreeMap<_, _>>();
+    let raw_source_path = path.display().to_string();
 
     for row in messages {
         let Some(session) = sessions_by_id.get(&row.session_id) else {
@@ -8260,6 +8334,7 @@ fn normalize_opencode_sqlite(
                 CaptureProvider::OpenCode,
                 &session.id,
                 OPENCODE_SQLITE_SOURCE_FORMAT,
+                Some(raw_source_path.as_str()),
                 &data,
                 &event,
                 row.seq.max(0) as usize,
@@ -8274,7 +8349,7 @@ fn normalize_opencode_sqlite(
                     source_format: OPENCODE_SQLITE_SOURCE_FORMAT.to_owned(),
                     machine_id: context.machine_id.clone(),
                     observed_at: context.imported_at,
-                    raw_source_path: Some(path.display().to_string()),
+                    raw_source_path: Some(raw_source_path.clone()),
                     raw_retention: ProviderRawRetention::PathReference,
                     redaction_boundary: ProviderRedactionBoundary::BeforeExport,
                     trust: ProviderSourceTrust::ProviderNative,
@@ -8925,6 +9000,7 @@ fn normalize_native_jsonl_session_file(
         .unwrap_or(context.imported_at);
     let cwd = native_jsonl_header_cwd(provider, &header);
     let is_subagent = parent_provider_session_id.is_some() || agent_type == AgentType::Subagent;
+    let raw_source_path = path.display().to_string();
 
     for (line_number, value) in rows {
         let occurred_at = native_jsonl_timestamp(&value).unwrap_or(started_at);
@@ -8936,6 +9012,7 @@ fn normalize_native_jsonl_session_file(
                     provider,
                     &provider_session_id,
                     source_format,
+                    Some(raw_source_path.as_str()),
                     &value,
                     event,
                     line_number,
@@ -8950,7 +9027,7 @@ fn normalize_native_jsonl_session_file(
                     source_format: source_format.to_owned(),
                     machine_id: context.machine_id.clone(),
                     observed_at: context.imported_at,
-                    raw_source_path: Some(path.display().to_string()),
+                    raw_source_path: Some(raw_source_path.clone()),
                     raw_retention: ProviderRawRetention::PathReference,
                     redaction_boundary: ProviderRedactionBoundary::BeforeExport,
                     trust: ProviderSourceTrust::ProviderNative,
@@ -8970,7 +9047,7 @@ fn normalize_native_jsonl_session_file(
                     metadata: json!({
                         "adapter": source_format,
                         "native_session_id": native_session_id,
-                        "source_path": path.display().to_string(),
+                        "source_path": raw_source_path.clone(),
                     }),
                 },
                 session: ProviderSessionEnvelope {
@@ -9777,6 +9854,7 @@ fn import_provider_capture_lines(
                 capture.provider,
                 &capture.session.provider_session_id,
                 &capture.source.source_format,
+                capture.source.raw_source_path.as_deref(),
                 event,
                 *line_number,
             ));
@@ -9840,16 +9918,31 @@ fn import_provider_file_touched_line(
     options: &NormalizedProviderImportOptions,
 ) -> Result<()> {
     let session_id = provider_session_uuid(file.provider, &file.provider_session_id);
-    let source_id = provider_source_uuid(file.provider, &file.provider_session_id);
-    let event_id = file
-        .provider_event_index
-        .map(|index| provider_event_uuid(file.provider, &file.provider_session_id, index));
-    let touched = FileTouched {
-        id: provider_file_touch_uuid(
+    let source_id = provider_scoped_source_uuid(
+        file.provider,
+        &file.provider_session_id,
+        &file.source_format,
+        file.raw_source_path.as_deref(),
+    );
+    let event_id = match file.provider_event_index {
+        Some(index) => provider_file_touch_event_id(
+            store,
             file.provider,
             &file.provider_session_id,
-            file.provider_touch_index,
-        ),
+            source_id,
+            index,
+        )?,
+        None => None,
+    };
+    let touch_id = provider_file_touch_import_id(
+        store,
+        file.provider,
+        &file.provider_session_id,
+        source_id,
+        file.provider_touch_index,
+    )?;
+    let touched = FileTouched {
+        id: touch_id,
         history_record_id: options.history_record_id,
         run_id: None,
         event_id,
@@ -9868,6 +9961,8 @@ fn import_provider_file_touched_line(
                 "provider_session_id": file.provider_session_id,
                 "provider_touch_index": file.provider_touch_index,
                 "provider_event_index": file.provider_event_index,
+                "raw_source_path": file.raw_source_path,
+                "source_id": source_id,
                 "source_format": file.source_format,
                 "metadata": file.metadata,
                 "session_id": session_id,
@@ -9923,7 +10018,13 @@ fn import_provider_capture_line(
     let source = &capture.source;
     let imported_at = source.observed_at;
     let session_id = provider_session_uuid(provider, &session.provider_session_id);
-    let source_id = provider_source_uuid(provider, &session.provider_session_id);
+    let source_identity_key = provider_scoped_source_identity_key(
+        provider,
+        &session.provider_session_id,
+        &source.source_format,
+        source.raw_source_path.as_deref(),
+    );
+    let source_id = stable_capture_uuid(&source_identity_key, "source");
     let requested_parent_session_id = session
         .parent_provider_session_id
         .as_ref()
@@ -9978,6 +10079,7 @@ fn import_provider_capture_line(
                 "fixture_line": line_number,
                 "imported_at": imported_at,
                 "source_idempotency_key": source.idempotency_key,
+                "source_identity_key": source_identity_key,
                 "source_metadata": source_metadata,
                 "session_metadata": session_metadata,
             }),
@@ -10104,33 +10206,28 @@ fn import_provider_capture_line(
             .provider_event_hash
             .clone()
             .unwrap_or(compute_payload_hash(&payload)?);
-        let dedupe_key = Store::provider_event_dedupe_key(
+        let event_identity = provider_event_import_identity(
+            store,
             provider,
             &session.provider_session_id,
+            source_id,
             event.provider_event_index,
             &event_hash,
-        );
+        )?;
         let command_run = provider_command_run_from_event(ProviderCommandRunInput {
             provider,
             provider_session_id: &session.provider_session_id,
             session_id,
             source_id,
+            run_source_id: event_identity.run_source_id,
             history_record_id: options.history_record_id,
             event,
             payload: &payload,
             event_hash: &event_hash,
         });
         let normalized_event = Event {
-            id: provider_event_uuid(
-                provider,
-                &session.provider_session_id,
-                event.provider_event_index,
-            ),
-            seq: provider_event_seq(
-                provider,
-                &session.provider_session_id,
-                event.provider_event_index,
-            ),
+            id: event_identity.id,
+            seq: event_identity.seq,
             history_record_id: options.history_record_id,
             session_id: Some(session_id),
             run_id: command_run.as_ref().map(|run| run.id),
@@ -10148,7 +10245,7 @@ fn import_provider_capture_line(
                 "body": payload,
             }),
             payload_blob_id: None,
-            dedupe_key: Some(dedupe_key.clone()),
+            dedupe_key: Some(event_identity.dedupe_key.clone()),
             redaction_state: effective_event_redaction_state(
                 event.redaction_state,
                 redacted_payload || redacted_metadata,
@@ -10175,7 +10272,7 @@ fn import_provider_capture_line(
             }
             !store.insert_event_if_absent(&normalized_event)?
         } else {
-            let was_present = provider_event_exists(store, &dedupe_key)?;
+            let was_present = provider_event_exists(store, &event_identity.dedupe_key)?;
             if let Some(run) = &command_run {
                 store.upsert_run(run)?;
             }
@@ -10781,6 +10878,130 @@ fn provider_event_exists(store: &Store, dedupe_key: &str) -> Result<bool> {
     }
 }
 
+#[derive(Clone)]
+struct ProviderEventImportIdentity {
+    id: Uuid,
+    seq: u64,
+    dedupe_key: String,
+    run_source_id: Option<Uuid>,
+}
+
+fn provider_event_import_identity(
+    store: &Store,
+    provider: CaptureProvider,
+    provider_session_id: &str,
+    source_id: Uuid,
+    provider_event_index: u64,
+    event_hash: &str,
+) -> Result<ProviderEventImportIdentity> {
+    let source_identity =
+        provider_source_event_import_identity(source_id, provider_event_index, event_hash);
+    if provider_event_exists(store, &source_identity.dedupe_key)?
+        || provider_event_id_exists(store, source_identity.id)?
+    {
+        return Ok(source_identity);
+    }
+
+    let legacy_identity = provider_legacy_event_import_identity(
+        provider,
+        provider_session_id,
+        provider_event_index,
+        event_hash,
+    );
+    if provider_event_exists(store, &legacy_identity.dedupe_key)?
+        || provider_event_id_exists(store, legacy_identity.id)?
+    {
+        Ok(legacy_identity)
+    } else {
+        Ok(source_identity)
+    }
+}
+
+fn provider_source_event_import_identity(
+    source_id: Uuid,
+    provider_event_index: u64,
+    event_hash: &str,
+) -> ProviderEventImportIdentity {
+    ProviderEventImportIdentity {
+        id: provider_source_event_uuid(source_id, provider_event_index),
+        seq: provider_source_event_seq(source_id, provider_event_index),
+        dedupe_key: Store::provider_source_event_dedupe_key(
+            source_id,
+            provider_event_index,
+            event_hash,
+        ),
+        run_source_id: Some(source_id),
+    }
+}
+
+fn provider_legacy_event_import_identity(
+    provider: CaptureProvider,
+    provider_session_id: &str,
+    provider_event_index: u64,
+    event_hash: &str,
+) -> ProviderEventImportIdentity {
+    ProviderEventImportIdentity {
+        id: provider_event_uuid(provider, provider_session_id, provider_event_index),
+        seq: provider_event_seq(provider, provider_session_id, provider_event_index),
+        dedupe_key: Store::provider_event_dedupe_key(
+            provider,
+            provider_session_id,
+            provider_event_index,
+            event_hash,
+        ),
+        run_source_id: None,
+    }
+}
+
+fn provider_file_touch_event_id(
+    store: &Store,
+    provider: CaptureProvider,
+    provider_session_id: &str,
+    source_id: Uuid,
+    provider_event_index: u64,
+) -> Result<Option<Uuid>> {
+    let source_event_id = provider_source_event_uuid(source_id, provider_event_index);
+    if provider_event_id_exists(store, source_event_id)? {
+        return Ok(Some(source_event_id));
+    }
+
+    let legacy_event_id = provider_event_uuid(provider, provider_session_id, provider_event_index);
+    if provider_event_id_exists(store, legacy_event_id)? {
+        Ok(Some(legacy_event_id))
+    } else {
+        Ok(None)
+    }
+}
+
+fn provider_file_touch_import_id(
+    store: &Store,
+    provider: CaptureProvider,
+    provider_session_id: &str,
+    source_id: Uuid,
+    provider_touch_index: u64,
+) -> Result<Uuid> {
+    let source_touch_id = provider_source_file_touch_uuid(source_id, provider_touch_index);
+    if store.file_touched_exists(source_touch_id)? {
+        return Ok(source_touch_id);
+    }
+
+    let legacy_touch_id =
+        provider_file_touch_uuid(provider, provider_session_id, provider_touch_index);
+    if store.file_touched_exists(legacy_touch_id)? {
+        Ok(legacy_touch_id)
+    } else {
+        Ok(source_touch_id)
+    }
+}
+
+fn provider_event_id_exists(store: &Store, id: Uuid) -> Result<bool> {
+    match store.get_event(id) {
+        Ok(_) => Ok(true),
+        Err(StoreError::NotFound(_)) => Ok(false),
+        Err(err) => Err(CaptureError::Store(err)),
+    }
+}
+
 fn provider_session_exists(store: &Store, session_id: Uuid) -> Result<bool> {
     match store.get_session(session_id) {
         Ok(_) => Ok(true),
@@ -10807,6 +11028,7 @@ struct ProviderCommandRunInput<'a> {
     provider_session_id: &'a str,
     session_id: Uuid,
     source_id: Uuid,
+    run_source_id: Option<Uuid>,
     history_record_id: Option<Uuid>,
     event: &'a ProviderEventEnvelope,
     payload: &'a Value,
@@ -10819,6 +11041,7 @@ fn provider_command_run_from_event(input: ProviderCommandRunInput<'_>) -> Option
         provider_session_id,
         session_id,
         source_id,
+        run_source_id,
         history_record_id,
         event,
         payload,
@@ -10844,7 +11067,9 @@ fn provider_command_run_from_event(input: ProviderCommandRunInput<'_>) -> Option
         })
         .unwrap_or(event.occurred_at);
     Some(Run {
-        id: provider_run_uuid(provider, provider_session_id, key),
+        id: run_source_id
+            .map(|source_id| provider_source_run_uuid(source_id, key))
+            .unwrap_or_else(|| provider_run_uuid(provider, provider_session_id, key)),
         history_record_id,
         session_id: Some(session_id),
         run_type: RunType::Command,
@@ -10889,11 +11114,45 @@ fn provider_command_run_status(payload: &Value) -> RunStatus {
     }
 }
 
+#[cfg(test)]
 fn provider_source_uuid(provider: CaptureProvider, provider_session_id: &str) -> Uuid {
     stable_capture_uuid(
         &format!("provider:{}:{provider_session_id}", provider.as_str()),
         "source",
     )
+}
+
+fn provider_scoped_source_uuid(
+    provider: CaptureProvider,
+    provider_session_id: &str,
+    source_format: &str,
+    raw_source_path: Option<&str>,
+) -> Uuid {
+    stable_capture_uuid(
+        &provider_scoped_source_identity_key(
+            provider,
+            provider_session_id,
+            source_format,
+            raw_source_path,
+        ),
+        "source",
+    )
+}
+
+fn provider_scoped_source_identity_key(
+    provider: CaptureProvider,
+    provider_session_id: &str,
+    source_format: &str,
+    raw_source_path: Option<&str>,
+) -> String {
+    serde_json::to_string(&(
+        "provider-source-v2",
+        provider.as_str(),
+        provider_session_id,
+        source_format,
+        raw_source_path,
+    ))
+    .expect("provider source identity key should serialize")
 }
 
 fn provider_session_uuid(provider: CaptureProvider, provider_session_id: &str) -> Uuid {
@@ -10913,6 +11172,10 @@ fn provider_run_uuid(provider: CaptureProvider, provider_session_id: &str, run_k
     )
 }
 
+fn provider_source_run_uuid(source_id: Uuid, run_key: &str) -> Uuid {
+    stable_capture_uuid(&format!("provider-source:{source_id}:run:{run_key}"), "run")
+}
+
 fn provider_event_uuid(
     provider: CaptureProvider,
     provider_session_id: &str,
@@ -10923,6 +11186,23 @@ fn provider_event_uuid(
             "provider:{}:{provider_session_id}:{provider_event_index}",
             provider.as_str()
         ),
+        "event",
+    )
+}
+
+fn provider_event_seq(
+    provider: CaptureProvider,
+    provider_session_id: &str,
+    provider_event_index: u64,
+) -> u64 {
+    let session_key = format!("provider:{}:{provider_session_id}", provider.as_str());
+    ((fnv1a64(session_key.as_bytes()) & 0x0000_07ff_ffff_ffff) << 20)
+        | (provider_event_index & 0x000f_ffff)
+}
+
+fn provider_source_event_uuid(source_id: Uuid, provider_event_index: u64) -> Uuid {
+    stable_capture_uuid(
+        &format!("provider-source:{source_id}:event:{provider_event_index}"),
         "event",
     )
 }
@@ -10941,14 +11221,17 @@ fn provider_file_touch_uuid(
     )
 }
 
-fn provider_event_seq(
-    provider: CaptureProvider,
-    provider_session_id: &str,
-    provider_event_index: u64,
-) -> u64 {
-    let session_key = format!("provider:{}:{provider_session_id}", provider.as_str());
-    ((fnv1a64(session_key.as_bytes()) & 0x0000_07ff_ffff_ffff) << 20)
-        | (provider_event_index & 0x000f_ffff)
+fn provider_source_file_touch_uuid(source_id: Uuid, provider_touch_index: u64) -> Uuid {
+    stable_capture_uuid(
+        &format!("provider-source:{source_id}:file-touch:{provider_touch_index}"),
+        "file-touch",
+    )
+}
+
+fn provider_source_event_seq(source_id: Uuid, provider_event_index: u64) -> u64 {
+    let source_key = source_id.to_string();
+    ((fnv1a64(source_key.as_bytes()) & 0x0000_0000_7fff_ffff) << 32)
+        | (provider_event_index & 0xffff_ffff)
 }
 
 fn provider_edge_uuid(
@@ -12447,6 +12730,7 @@ mod tests {
             CaptureProvider::Antigravity,
             "agy-session",
             ANTIGRAVITY_CLI_SOURCE_FORMAT,
+            None,
             &antigravity,
             &event,
             1,
@@ -12455,6 +12739,7 @@ mod tests {
             CaptureProvider::Cursor,
             "cursor-session",
             CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT,
+            None,
             &cursor,
             &event,
             1,
@@ -12559,6 +12844,7 @@ mod tests {
                 provider,
                 "provider-session",
                 source_format,
+                None,
                 &raw,
                 &event,
                 1,
@@ -13567,6 +13853,432 @@ mod tests {
         assert!(source.sync.metadata["source_idempotency_key"]
             .as_str()
             .is_some());
+    }
+
+    #[test]
+    fn provider_import_scopes_provenance_by_source_format_and_path() {
+        let temp = tempdir();
+        let shared_path = temp
+            .path()
+            .join("shared-source.jsonl")
+            .display()
+            .to_string();
+        assert_provider_source_collision_is_distinct(
+            "provider_format_a",
+            &shared_path,
+            "provider_format_b",
+            &shared_path,
+        );
+
+        let first_path = temp.path().join("first-source.jsonl").display().to_string();
+        let second_path = temp
+            .path()
+            .join("second-source.jsonl")
+            .display()
+            .to_string();
+        assert_provider_source_collision_is_distinct(
+            "provider_format",
+            &first_path,
+            "provider_format",
+            &second_path,
+        );
+    }
+
+    #[test]
+    fn provider_import_reuses_existing_legacy_provider_event_identity() {
+        let temp = tempdir();
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let provider = CaptureProvider::Claude;
+        let provider_session_id = "legacy-provider-session";
+        let source_format = "provider_format";
+        let raw_source_path = temp
+            .path()
+            .join("legacy-source.jsonl")
+            .display()
+            .to_string();
+        let occurred_at = DateTime::parse_from_rfc3339("2026-06-23T17:00:01Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let legacy_source_id = provider_source_uuid(provider, provider_session_id);
+        let new_source_id = provider_scoped_source_uuid(
+            provider,
+            provider_session_id,
+            source_format,
+            Some(&raw_source_path),
+        );
+        let session_id = provider_session_uuid(provider, provider_session_id);
+        let legacy_event_id = provider_event_uuid(provider, provider_session_id, 0);
+        let legacy_touch_id = provider_file_touch_uuid(provider, provider_session_id, 0);
+        let event_hash =
+            compute_payload_hash(&json!({"text": "same provider event payload"})).unwrap();
+        assert_ne!(legacy_source_id, new_source_id);
+
+        store
+            .upsert_capture_source(&CaptureSource {
+                id: legacy_source_id,
+                descriptor: CaptureSourceDescriptor {
+                    kind: CaptureSourceKind::ProviderImport,
+                    provider,
+                    machine_id: "test-machine".to_owned(),
+                    process_id: None,
+                    cwd: Some("/workspace/example".to_owned()),
+                    raw_source_path: None,
+                    external_session_id: Some(provider_session_id.to_owned()),
+                },
+                started_at: occurred_at,
+                ended_at: None,
+                sync: provider_sync_metadata(Fidelity::Imported, json!({"legacy": true})),
+            })
+            .unwrap();
+        store
+            .upsert_session(&Session {
+                id: session_id,
+                history_record_id: None,
+                parent_session_id: None,
+                root_session_id: None,
+                capture_source_id: Some(legacy_source_id),
+                provider,
+                external_session_id: Some(provider_session_id.to_owned()),
+                external_agent_id: None,
+                agent_type: AgentType::Primary,
+                role_hint: Some("primary".to_owned()),
+                is_primary: true,
+                status: SessionStatus::Imported,
+                transcript_blob_id: None,
+                started_at: occurred_at,
+                ended_at: None,
+                timestamps: timestamps(occurred_at),
+                sync: provider_sync_metadata(Fidelity::Imported, json!({"legacy": true})),
+            })
+            .unwrap();
+        store
+            .upsert_event(&Event {
+                id: legacy_event_id,
+                seq: provider_event_seq(provider, provider_session_id, 0),
+                history_record_id: None,
+                session_id: Some(session_id),
+                run_id: None,
+                event_type: EventType::Message,
+                role: Some(EventRole::User),
+                occurred_at,
+                capture_source_id: Some(legacy_source_id),
+                payload: json!({"body": {"text": "same provider event payload"}}),
+                payload_blob_id: None,
+                dedupe_key: Some(Store::provider_event_dedupe_key(
+                    provider,
+                    provider_session_id,
+                    0,
+                    &event_hash,
+                )),
+                redaction_state: RedactionState::LocalPreview,
+                sync: provider_sync_metadata(Fidelity::Imported, json!({"legacy": true})),
+            })
+            .unwrap();
+        store
+            .upsert_file_touched(&FileTouched {
+                id: legacy_touch_id,
+                history_record_id: None,
+                run_id: None,
+                event_id: Some(legacy_event_id),
+                vcs_workspace_id: None,
+                path: "src/lib.rs".to_owned(),
+                change_kind: Some(FileChangeKind::Modified),
+                old_path: None,
+                line_count_delta: Some(1),
+                confidence: Confidence::Explicit,
+                timestamps: timestamps(occurred_at),
+                source_id: Some(legacy_source_id),
+                sync: provider_sync_metadata(Fidelity::Imported, json!({"legacy": true})),
+            })
+            .unwrap();
+
+        let normalization = ProviderNormalizationResult {
+            summary: ProviderImportSummary::default(),
+            captures: vec![(
+                1,
+                provider_collision_capture(
+                    provider,
+                    provider_session_id,
+                    source_format,
+                    &raw_source_path,
+                    occurred_at,
+                ),
+            )],
+            files_touched: vec![(
+                1,
+                provider_collision_file_touch(
+                    provider,
+                    provider_session_id,
+                    source_format,
+                    &raw_source_path,
+                    occurred_at,
+                ),
+            )],
+        };
+
+        let summary = import_normalized_provider_captures(
+            &mut store,
+            normalization,
+            NormalizedProviderImportOptions::default(),
+        )
+        .unwrap();
+
+        assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+        assert_eq!(summary.skipped_events, 1);
+        let events = store.events_for_session(session_id).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, legacy_event_id);
+        assert_eq!(events[0].capture_source_id, Some(legacy_source_id));
+
+        let archive = store.export_archive().unwrap();
+        assert_eq!(archive.files_touched.len(), 1);
+        assert_eq!(archive.files_touched[0].id, legacy_touch_id);
+        assert_eq!(archive.files_touched[0].event_id, Some(legacy_event_id));
+        assert_eq!(archive.files_touched[0].source_id, Some(new_source_id));
+    }
+
+    #[test]
+    fn provider_source_event_seq_keeps_large_provider_indices_distinct() {
+        let source_id = Uuid::parse_str("018fe2e4-2266-7000-8000-000000000001").unwrap();
+
+        assert_ne!(
+            provider_source_event_seq(source_id, 0),
+            provider_source_event_seq(source_id, 1_048_576)
+        );
+        assert_eq!(
+            provider_source_event_seq(source_id, 1_048_576) & 0xffff_ffff,
+            1_048_576
+        );
+    }
+
+    fn assert_provider_source_collision_is_distinct(
+        first_source_format: &str,
+        first_source_path: &str,
+        second_source_format: &str,
+        second_source_path: &str,
+    ) {
+        let temp = tempdir();
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let provider = CaptureProvider::Claude;
+        let provider_session_id = "shared-provider-session";
+        let occurred_at = DateTime::parse_from_rfc3339("2026-06-23T17:00:01Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let first_source_id = provider_scoped_source_uuid(
+            provider,
+            provider_session_id,
+            first_source_format,
+            Some(first_source_path),
+        );
+        let second_source_id = provider_scoped_source_uuid(
+            provider,
+            provider_session_id,
+            second_source_format,
+            Some(second_source_path),
+        );
+        assert_ne!(first_source_id, second_source_id);
+
+        let normalization = ProviderNormalizationResult {
+            summary: ProviderImportSummary::default(),
+            captures: vec![
+                (
+                    1,
+                    provider_collision_capture(
+                        provider,
+                        provider_session_id,
+                        first_source_format,
+                        first_source_path,
+                        occurred_at,
+                    ),
+                ),
+                (
+                    2,
+                    provider_collision_capture(
+                        provider,
+                        provider_session_id,
+                        second_source_format,
+                        second_source_path,
+                        occurred_at,
+                    ),
+                ),
+            ],
+            files_touched: vec![
+                (
+                    1,
+                    provider_collision_file_touch(
+                        provider,
+                        provider_session_id,
+                        first_source_format,
+                        first_source_path,
+                        occurred_at,
+                    ),
+                ),
+                (
+                    2,
+                    provider_collision_file_touch(
+                        provider,
+                        provider_session_id,
+                        second_source_format,
+                        second_source_path,
+                        occurred_at,
+                    ),
+                ),
+            ],
+        };
+
+        let summary = import_normalized_provider_captures(
+            &mut store,
+            normalization,
+            NormalizedProviderImportOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+        assert_eq!(summary.imported_events, 2);
+        assert_eq!(store.capture_source_count().unwrap(), 2);
+
+        let first_source = store.get_capture_source(first_source_id).unwrap();
+        let second_source = store.get_capture_source(second_source_id).unwrap();
+        assert_eq!(
+            first_source.descriptor.raw_source_path.as_deref(),
+            Some(first_source_path)
+        );
+        assert_eq!(
+            first_source.sync.metadata["source_format"].as_str(),
+            Some(first_source_format)
+        );
+        assert_eq!(
+            second_source.descriptor.raw_source_path.as_deref(),
+            Some(second_source_path)
+        );
+        assert_eq!(
+            second_source.sync.metadata["source_format"].as_str(),
+            Some(second_source_format)
+        );
+
+        let session_id = provider_session_uuid(provider, provider_session_id);
+        let event_source_ids = store
+            .events_for_session(session_id)
+            .unwrap()
+            .into_iter()
+            .map(|event| event.capture_source_id.unwrap())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            event_source_ids,
+            BTreeSet::from([first_source_id, second_source_id])
+        );
+
+        let archive = store.export_archive().unwrap();
+        assert_eq!(archive.files_touched.len(), 2);
+        let touched_source_ids = archive
+            .files_touched
+            .iter()
+            .map(|file| file.source_id.unwrap())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            touched_source_ids,
+            BTreeSet::from([first_source_id, second_source_id])
+        );
+        for file in archive.files_touched {
+            let source_id = file.source_id.unwrap();
+            assert_eq!(
+                file.event_id,
+                Some(provider_source_event_uuid(source_id, 0))
+            );
+        }
+    }
+
+    fn provider_collision_capture(
+        provider: CaptureProvider,
+        provider_session_id: &str,
+        source_format: &str,
+        raw_source_path: &str,
+        occurred_at: DateTime<Utc>,
+    ) -> ProviderCaptureEnvelope {
+        ProviderCaptureEnvelope {
+            schema_version: PROVIDER_CAPTURE_ENVELOPE_SCHEMA_VERSION,
+            provider,
+            source: ProviderSourceEnvelope {
+                source_format: source_format.to_owned(),
+                machine_id: "test-machine".to_owned(),
+                observed_at: occurred_at,
+                raw_source_path: Some(raw_source_path.to_owned()),
+                raw_retention: ProviderRawRetention::PathReference,
+                redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+                trust: ProviderSourceTrust::ProviderExport,
+                fidelity: Fidelity::Imported,
+                cursor: None,
+                idempotency_key: Some(format!(
+                    "provider-source:{}:{}:{}",
+                    provider.as_str(),
+                    source_format,
+                    provider_session_id
+                )),
+                metadata: json!({}),
+            },
+            session: ProviderSessionEnvelope {
+                provider_session_id: provider_session_id.to_owned(),
+                parent_provider_session_id: None,
+                root_provider_session_id: None,
+                external_agent_id: None,
+                agent_type: AgentType::Primary,
+                role_hint: Some("primary".to_owned()),
+                is_primary: true,
+                status: SessionStatus::Imported,
+                started_at: occurred_at,
+                ended_at: None,
+                cwd: Some("/workspace/example".to_owned()),
+                fidelity: Fidelity::Imported,
+                idempotency_key: Some(format!(
+                    "provider-session:{}:{}",
+                    provider.as_str(),
+                    provider_session_id
+                )),
+                artifacts: Vec::new(),
+                metadata: json!({}),
+            },
+            event: Some(ProviderEventEnvelope {
+                provider_event_index: 0,
+                provider_event_hash: None,
+                cursor: None,
+                event_type: EventType::Message,
+                role: Some(EventRole::User),
+                occurred_at,
+                fidelity: Fidelity::Imported,
+                redaction_state: RedactionState::LocalPreview,
+                idempotency_key: Some(format!(
+                    "provider-event:{}:{}:0",
+                    provider.as_str(),
+                    provider_session_id
+                )),
+                artifacts: Vec::new(),
+                payload: json!({"text": "same provider event payload"}),
+                metadata: json!({}),
+            }),
+        }
+    }
+
+    fn provider_collision_file_touch(
+        provider: CaptureProvider,
+        provider_session_id: &str,
+        source_format: &str,
+        raw_source_path: &str,
+        occurred_at: DateTime<Utc>,
+    ) -> ProviderFileTouchedEnvelope {
+        ProviderFileTouchedEnvelope {
+            provider,
+            provider_session_id: provider_session_id.to_owned(),
+            provider_touch_index: 0,
+            provider_event_index: Some(0),
+            raw_source_path: Some(raw_source_path.to_owned()),
+            path: "src/lib.rs".to_owned(),
+            change_kind: Some(FileChangeKind::Modified),
+            old_path: None,
+            line_count_delta: Some(1),
+            confidence: Confidence::Explicit,
+            occurred_at,
+            source_format: source_format.to_owned(),
+            metadata: json!({}),
+        }
     }
 
     #[test]
