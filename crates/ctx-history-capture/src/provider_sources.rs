@@ -854,16 +854,17 @@ fn has_jsonl_file_under_matching(
     }
 
     let mut visited = 0usize;
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
+    let mut stack = vec![(root.to_path_buf(), true)];
+    while let Some((dir, is_root)) = stack.pop() {
         let entries = match std::fs::read_dir(&dir) {
             Ok(entries) => entries,
-            Err(_) => return BoundedProbe::IoError,
+            Err(_) if is_root => return BoundedProbe::IoError,
+            Err(_) => continue,
         };
         for entry in entries {
             let entry = match entry {
                 Ok(entry) => entry,
-                Err(_) => return BoundedProbe::IoError,
+                Err(_) => continue,
             };
             visited = visited.saturating_add(1);
             if visited > max_entries {
@@ -872,10 +873,10 @@ fn has_jsonl_file_under_matching(
             let path = entry.path();
             let file_type = match entry.file_type() {
                 Ok(file_type) => file_type,
-                Err(_) => return BoundedProbe::IoError,
+                Err(_) => continue,
             };
             if file_type.is_dir() {
-                stack.push(path);
+                stack.push((path, false));
             } else if file_type.is_file()
                 && path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
                 && matches_path(&path)
@@ -1117,6 +1118,40 @@ mod tests {
             .unsupported_reason
             .unwrap()
             .contains("could not be read"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn default_source_probe_skips_unreadable_child_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join(".codex/sessions");
+        let readable = sessions.join("readable");
+        let unreadable = sessions.join("unreadable");
+        std::fs::create_dir_all(&readable).unwrap();
+        std::fs::create_dir_all(&unreadable).unwrap();
+        std::fs::write(readable.join("session.jsonl"), "{}\n").unwrap();
+
+        let original_permissions = std::fs::metadata(&unreadable).unwrap().permissions();
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        if std::fs::read_dir(&unreadable).is_ok() {
+            std::fs::set_permissions(&unreadable, original_permissions).unwrap();
+            return;
+        }
+
+        let source = discover_provider_sources(temp.path())
+            .into_iter()
+            .find(|source| {
+                source.provider == CaptureProvider::Codex
+                    && source.source_format == "codex_session_jsonl_tree"
+            });
+        std::fs::set_permissions(&unreadable, original_permissions).unwrap();
+
+        let source = source.unwrap();
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+        assert_eq!(source.unsupported_reason, None);
     }
 
     fn assert_source_status(
