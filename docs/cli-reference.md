@@ -57,7 +57,7 @@ machine. Current rows include:
 
 - Codex session trees at `~/.codex/sessions`;
 - Codex prompt history at `~/.codex/history.jsonl`;
-- Pi session JSONL at `~/.pi/sessions.jsonl`;
+- Pi session JSONL files under `~/.pi/agent/sessions`;
 - native rows for supported Antigravity, Claude, OpenCode, OpenClaw, Hermes,
   Gemini, Cursor, Copilot CLI, and Factory AI Droid local history locations;
 - preview rows for NanoClaw project roots and AstrBot SQLite history when those
@@ -94,7 +94,7 @@ ctx import --provider cursor
 ctx import --provider copilot-cli
 ctx import --provider factory-ai-droid
 ctx import --provider codex --path ~/.codex/sessions
-ctx import --provider pi --path ~/.pi/sessions.jsonl
+ctx import --provider pi --path ~/.pi/agent/sessions
 ctx import --format ctx-history-jsonl-v1 --path ./history.jsonl
 ctx import --history-source example-agent/default
 ctx import --history-source-manifest ./ctx-history-plugin.json

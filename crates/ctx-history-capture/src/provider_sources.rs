@@ -105,7 +105,7 @@ const CODEX_DEFAULTS: &[ProviderDefaultLocation] = &[
 ];
 
 const PI_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".pi", "sessions.jsonl"],
+    path_components: &[".pi", "agent", "sessions"],
     source_format: "pi_session_jsonl",
     source_kind: ProviderSourceKind::NativeHistory,
 }];
@@ -586,7 +586,7 @@ fn provider_source_from_location(
 fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
     match provider {
         CaptureProvider::Codex => Some("path exists but no Codex JSONL sessions were found"),
-        CaptureProvider::Pi => Some("path exists but no Pi session JSONL file was found"),
+        CaptureProvider::Pi => Some("path exists but no Pi session JSONL files were found"),
         CaptureProvider::Claude => {
             Some("path exists but no Claude project JSONL transcripts were found")
         }
@@ -623,6 +623,9 @@ fn unknown_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::Codex => {
             Some("path exists but the Codex session transcript probe hit its scan budget")
         }
+        CaptureProvider::Pi => {
+            Some("path exists but the Pi session transcript probe hit its scan budget")
+        }
         CaptureProvider::Claude => {
             Some("path exists but the Claude transcript probe hit its scan budget")
         }
@@ -654,7 +657,7 @@ fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'static str> {
             Some("path exists but Codex session transcripts could not be read; check permissions")
         }
         CaptureProvider::Pi => {
-            Some("path exists but the Pi session file could not be read; check permissions")
+            Some("path exists but Pi session transcripts could not be read; check permissions")
         }
         CaptureProvider::Claude => {
             Some("path exists but Claude project transcripts could not be read; check permissions")
@@ -703,7 +706,7 @@ fn default_location_import_probe(
             path_is_file_probe(path)
         }
         CaptureProvider::Codex => has_jsonl_file_under_matching(path, 10_000, |_| true),
-        CaptureProvider::Pi => path_is_file_probe(path),
+        CaptureProvider::Pi => has_jsonl_file_under_matching(path, 10_000, |_| true),
         CaptureProvider::OpenCode => path_is_file_probe(path),
         CaptureProvider::Claude => has_jsonl_file_under_matching(path, 10_000, |_| true),
         CaptureProvider::OpenClaw => has_openclaw_session_jsonl(path, 10_000),
@@ -956,6 +959,21 @@ mod tests {
     #[test]
     fn native_provider_default_discovery_uses_importer_specific_file_predicates() {
         let temp = tempfile::tempdir().unwrap();
+
+        let pi = temp.path().join(".pi/agent/sessions");
+        std::fs::create_dir_all(pi.join("--workspace--")).unwrap();
+        assert_source_status(
+            temp.path(),
+            CaptureProvider::Pi,
+            ProviderSourceStatus::Empty,
+        );
+        std::fs::write(pi.join("--workspace--/session.jsonl"), "{}\n").unwrap();
+        let pi_source = discover_provider_sources(temp.path())
+            .into_iter()
+            .find(|source| source.provider == CaptureProvider::Pi)
+            .unwrap();
+        assert_eq!(pi_source.status, ProviderSourceStatus::Available);
+        assert_eq!(pi_source.path, temp.path().join(".pi/agent/sessions"));
 
         let antigravity = temp.path().join(".gemini/antigravity-cli/brain");
         std::fs::create_dir_all(antigravity.join("session/.system_generated/logs")).unwrap();

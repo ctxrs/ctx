@@ -1678,11 +1678,11 @@ fn import_all_discovers_and_imports_providers_together() {
         Path::new(&provider_history_fixture("codex-sessions")),
         &temp.path().join(".codex").join("sessions"),
     );
-    let pi_home = temp.path().join(".pi");
+    let pi_home = temp.path().join(".pi/agent/sessions/--workspace-example--");
     fs::create_dir_all(&pi_home).unwrap();
     fs::copy(
         provider_history_fixture("pi-session.jsonl"),
-        pi_home.join("sessions.jsonl"),
+        pi_home.join("2026-06-24T12-00-00-000Z_pi-session-docs-1.jsonl"),
     )
     .unwrap();
 
@@ -5665,29 +5665,40 @@ fn install_default_claude_fixture(temp: &TempDir, query: &str) {
     copy_dir_all(&source, &temp.path().join(".claude").join("projects"));
 }
 
-fn install_default_pi_fixture(temp: &TempDir, query: &str) {
-    let root = temp.path().join(".pi");
-    fs::create_dir_all(&root).unwrap();
+fn write_pi_session_jsonl(path: &Path, id: &str, query: &str) {
     fs::write(
-        root.join("sessions.jsonl"),
+        path,
         format!(
             "{}\n{}\n",
             json!({
                 "type": "session",
                 "version": 3,
-                "id": "pi-default-refresh",
+                "id": id,
                 "timestamp": "2026-06-24T12:00:00.000Z",
                 "cwd": "/workspace"
             }),
             json!({
                 "type": "message",
-                "id": "pi-default-refresh-user",
+                "id": format!("{id}-user"),
                 "timestamp": "2026-06-24T12:00:01.000Z",
-                "message": {"role": "user", "content": query}
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": query}]
+                }
             })
         ),
     )
     .unwrap();
+}
+
+fn install_default_pi_fixture(temp: &TempDir, query: &str) {
+    let root = temp.path().join(".pi/agent/sessions/--workspace--");
+    fs::create_dir_all(&root).unwrap();
+    write_pi_session_jsonl(
+        &root.join("2026-06-24T12-00-00-000Z_pi-default-refresh.jsonl"),
+        "pi-default-refresh",
+        query,
+    );
 }
 
 fn install_default_cursor_fixture(temp: &TempDir, query: &str) {
@@ -6649,26 +6660,41 @@ fn file_only_search_returns_touched_file_matches() {
 }
 
 #[test]
-fn pi_cli_rejects_directory_import_path() {
+fn pi_cli_imports_directory_tree_path() {
     let temp = tempdir();
     let path = temp.path().join("pi-sessions-dir");
-    fs::create_dir_all(&path).unwrap();
+    let project = path.join("--workspace--");
+    fs::create_dir_all(&project).unwrap();
+    write_pi_session_jsonl(
+        &project.join("2026-06-24T12-00-00-000Z_pi-dir-alpha.jsonl"),
+        "pi-dir-alpha",
+        "pi directory alpha oracle",
+    );
+    write_pi_session_jsonl(
+        &project.join("2026-06-24T12-01-00-000Z_pi-dir-beta.jsonl"),
+        "pi-dir-beta",
+        "pi directory beta oracle",
+    );
 
-    ctx(&temp)
-        .args([
-            "import",
-            "--provider",
-            "pi",
-            "--path",
-            path.to_str().unwrap(),
-            "--json",
-        ])
-        .assert()
-        .failure()
-        .stderr(
-            predicate::str::contains("no importable pi history files")
-                .and(predicate::str::contains(path.to_str().unwrap())),
-        );
+    let imported = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "pi",
+        "--path",
+        path.to_str().unwrap(),
+        "--json",
+    ]));
+    assert_eq!(imported["totals"]["imported_sessions"], 2);
+    assert_eq!(imported["totals"]["imported_events"], 2);
+
+    let search = json_output(ctx(&temp).args([
+        "search",
+        "pi directory beta oracle",
+        "--provider",
+        "pi",
+        "--json",
+    ]));
+    assert_search_provider_oracle(&search, "pi", "pi directory beta oracle", 1, "message");
 }
 
 #[test]
@@ -6688,7 +6714,7 @@ fn pi_cli_rejects_wrong_file_import_path() {
         .assert()
         .failure()
         .stderr(
-            predicate::str::contains("no importable pi history files")
+            predicate::str::contains("no importable pi history files found")
                 .and(predicate::str::contains(path.to_str().unwrap())),
         );
 }

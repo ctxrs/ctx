@@ -87,12 +87,13 @@
             "ctx import --provider pi"
           ],
           "notes": [
-            "Reads ~/.pi/sessions.jsonl when that file exists and matches the supported JSONL format."
+            "Reads Pi session JSONL files under ~/.pi/agent/sessions, including per-cwd session directories produced by current Pi releases.",
+            "An explicit Pi session JSONL file path remains supported with ctx import --provider pi --path."
           ]
         }
       ],
       "history_locations": [
-        "~/.pi/sessions.jsonl"
+        "~/.pi/agent/sessions"
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,

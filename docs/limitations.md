@@ -7,8 +7,9 @@ shipped.
 ## Provider Coverage
 
 - Codex local import is supported for documented local JSONL sources.
-- Pi local import is supported only when a matching local `sessions.jsonl` file
-  exists.
+- Pi local import is supported when matching local session JSONL files exist
+  under `~/.pi/agent/sessions`, or when an explicit Pi session JSONL file is
+  passed with `--path`.
 - Antigravity, Claude, OpenCode, OpenClaw, Hermes, Gemini, Cursor, Copilot CLI,
   and Factory AI Droid local import is supported only when their documented
   local history paths exist and match the supported native formats in the
