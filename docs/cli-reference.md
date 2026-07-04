@@ -120,6 +120,8 @@ ctx import --provider hermes
 ctx import --provider nanoclaw --path /path/to/nanoclaw-project
 ctx import --provider astrbot --path /path/to/data/data_v4.db
 ctx import --provider shelley --path ~/.config/shelley/shelley.db
+ctx import --provider continue --path ~/.continue/sessions
+ctx import --provider openhands --path ~/.openhands
 ctx import --provider gemini
 ctx import --provider cursor
 ctx import --provider copilot-cli
@@ -282,7 +284,7 @@ optimized for agent reading; use `--verbose` for expanded text diagnostics.
 
 Filters:
 
-- `--provider codex|pi|claude|opencode|openclaw|hermes|nanoclaw|astrbot|shelley|antigravity|gemini|cursor|copilot-cli|factory-ai-droid|custom`;
+- `--provider codex|pi|claude|opencode|openclaw|hermes|nanoclaw|astrbot|shelley|continue|openhands|antigravity|gemini|cursor|copilot-cli|factory-ai-droid|custom`;
 - `--workspace <name-or-path>`, substring match over stored workspace, cwd,
   source path, or repository-name text;
 - `--since <rfc3339-or-days>d`, for example `2026-06-01T00:00:00Z` or `30d`;
@@ -302,7 +304,7 @@ Filters:
 CLI provider filters use kebab-case names. JSON output and stable SQL views use
 provider IDs in ctx output; multiword IDs may be snake_case, such as
 `copilot_cli` or `factory_ai_droid`, while compact IDs such as `openclaw`,
-`nanoclaw`, `astrbot`, and `shelley` stay compact.
+`nanoclaw`, `astrbot`, `shelley`, `continue`, and `openhands` stay compact.
 
 `search` reads discovered native provider files and runs enabled auto
 history-source plugin commands for pre-search refresh, then queries SQLite. It

@@ -35,22 +35,23 @@ use ctx_history_capture::{
     catalog_codex_session_tree, discover_provider_sources, discover_provider_sources_for_provider,
     import_antigravity_cli_history, import_astrbot_sqlite, import_claude_projects_jsonl_tree,
     import_codex_history_jsonl, import_codex_session_jsonl, import_codex_session_jsonl_tail,
-    import_codex_session_paths, import_codex_session_tree, import_copilot_cli_session_events,
-    import_cursor_native_history, import_custom_history_jsonl_v1,
-    import_custom_history_jsonl_v1_reader, import_factory_ai_droid_sessions,
-    import_gemini_cli_history, import_hermes_sqlite, import_nanoclaw_project,
-    import_openclaw_history, import_opencode_sqlite, import_pi_session_jsonl,
-    import_shelley_sqlite, provider_source_for_path, provider_source_spec, stable_capture_uuid,
+    import_codex_session_paths, import_codex_session_tree, import_continue_cli_sessions,
+    import_copilot_cli_session_events, import_cursor_native_history,
+    import_custom_history_jsonl_v1, import_custom_history_jsonl_v1_reader,
+    import_factory_ai_droid_sessions, import_gemini_cli_history, import_hermes_sqlite,
+    import_nanoclaw_project, import_openclaw_history, import_opencode_sqlite,
+    import_openhands_file_events, import_pi_session_jsonl, import_shelley_sqlite,
+    provider_source_for_path, provider_source_spec, stable_capture_uuid,
     validate_custom_history_jsonl_v1, validate_custom_history_jsonl_v1_reader,
     AntigravityCliImportOptions, AstrBotSqliteImportOptions, CatalogSummary,
     ClaudeProjectsImportOptions, CodexEventImportMode, CodexHistoryImportOptions,
     CodexSessionCatalogOptions, CodexSessionImportOptions, CodexSessionImportProgress,
-    CodexSessionImportProgressCallback, CodexToolOutputMode, CopilotCliImportOptions,
-    CursorNativeImportOptions, CustomHistoryJsonlV1ImportOptions, FactoryAiDroidImportOptions,
-    GeminiCliImportOptions, HermesSqliteImportOptions, NanoClawImportOptions,
-    OpenClawImportOptions, OpenCodeSqliteImportOptions, PiSessionImportOptions,
-    ProviderImportSummary, ProviderImportSupport, ProviderSource, ProviderSourceStatus,
-    ShelleySqliteImportOptions,
+    CodexSessionImportProgressCallback, CodexToolOutputMode, ContinueCliImportOptions,
+    CopilotCliImportOptions, CursorNativeImportOptions, CustomHistoryJsonlV1ImportOptions,
+    FactoryAiDroidImportOptions, GeminiCliImportOptions, HermesSqliteImportOptions,
+    NanoClawImportOptions, OpenClawImportOptions, OpenCodeSqliteImportOptions,
+    OpenHandsImportOptions, PiSessionImportOptions, ProviderImportSummary, ProviderImportSupport,
+    ProviderSource, ProviderSourceStatus, ShelleySqliteImportOptions,
 };
 use ctx_history_core::{
     database_path, default_data_root, utc_now, CaptureProvider, ContextCitation,
@@ -693,6 +694,10 @@ enum NativeProviderArg {
     #[value(name = "astrbot", alias = "astr-bot", alias = "astr_bot")]
     AstrBot,
     Shelley,
+    #[value(alias = "continue-cli")]
+    Continue,
+    #[value(name = "openhands", alias = "open-hands", alias = "open_hands")]
+    OpenHands,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -724,6 +729,10 @@ enum ProviderArg {
     #[value(name = "astrbot", alias = "astr-bot", alias = "astr_bot")]
     AstrBot,
     Shelley,
+    #[value(alias = "continue-cli")]
+    Continue,
+    #[value(name = "openhands", alias = "open-hands", alias = "open_hands")]
+    OpenHands,
     Custom,
 }
 
@@ -766,6 +775,8 @@ impl NativeProviderArg {
             Self::NanoClaw => CaptureProvider::NanoClaw,
             Self::AstrBot => CaptureProvider::AstrBot,
             Self::Shelley => CaptureProvider::Shelley,
+            Self::Continue => CaptureProvider::Continue,
+            Self::OpenHands => CaptureProvider::OpenHands,
         }
     }
 }
@@ -787,6 +798,8 @@ impl ProviderArg {
             Self::NanoClaw => CaptureProvider::NanoClaw,
             Self::AstrBot => CaptureProvider::AstrBot,
             Self::Shelley => CaptureProvider::Shelley,
+            Self::Continue => CaptureProvider::Continue,
+            Self::OpenHands => CaptureProvider::OpenHands,
             Self::Custom => CaptureProvider::Custom,
         }
     }
@@ -807,6 +820,8 @@ impl ProviderArg {
             Self::NanoClaw => "nanoclaw",
             Self::AstrBot => "astrbot",
             Self::Shelley => "shelley",
+            Self::Continue => "continue",
+            Self::OpenHands => "openhands",
             Self::Custom => "custom",
         }
     }
@@ -5586,6 +5601,28 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
+        CaptureProvider::Continue => import_continue_cli_sessions(
+            &source.path,
+            store,
+            ContinueCliImportOptions {
+                source_path: Some(source.path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: true,
+                ..ContinueCliImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
+        CaptureProvider::OpenHands => import_openhands_file_events(
+            &source.path,
+            store,
+            OpenHandsImportOptions {
+                source_path: Some(source.path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: true,
+                ..OpenHandsImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
         CaptureProvider::Gemini => import_gemini_cli_history(
             &source.path,
             store,
@@ -5746,6 +5783,7 @@ fn source_uses_import_file_manifest(source: &SourceInfo) -> bool {
         source.source_format,
         "codex_session_jsonl_tree"
             | "openclaw_session_jsonl_tree"
+            | "openhands_file_events"
             | "hermes_state_sqlite"
             | "nanoclaw_project"
             | "astrbot_data_v4_sqlite"
@@ -5856,6 +5894,10 @@ fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bool {
                 && path
                     .components()
                     .any(|component| component.as_os_str() == "agent-transcripts")
+        }
+        CaptureProvider::Continue => {
+            path.extension().and_then(|ext| ext.to_str()) == Some("json")
+                && path.file_name().and_then(|name| name.to_str()) != Some("sessions.json")
         }
         _ => path.extension().and_then(|ext| ext.to_str()) == Some("jsonl"),
     }
@@ -6112,6 +6154,7 @@ fn source_uses_incremental_event_search(source: &SourceInfo) -> bool {
             | CaptureProvider::Gemini
             | CaptureProvider::CopilotCli
             | CaptureProvider::FactoryAiDroid
+            | CaptureProvider::Continue
     )
 }
 

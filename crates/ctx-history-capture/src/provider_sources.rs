@@ -198,6 +198,18 @@ const SHELLEY_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     source_kind: ProviderSourceKind::NativeHistory,
 }];
 
+const CONTINUE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
+    path_components: &[".continue", "sessions"],
+    source_format: "continue_cli_sessions_json",
+    source_kind: ProviderSourceKind::NativeHistory,
+}];
+
+const OPENHANDS_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
+    path_components: &[".openhands"],
+    source_format: "openhands_file_events",
+    source_kind: ProviderSourceKind::NativeHistory,
+}];
+
 const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
     ProviderSourceSpec {
         provider: CaptureProvider::Codex,
@@ -339,6 +351,26 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         redaction_boundary: ProviderRedactionBoundary::BeforeExport,
         unsupported_reason: None,
     },
+    ProviderSourceSpec {
+        provider: CaptureProvider::Continue,
+        display_name: "Continue",
+        default_locations: CONTINUE_DEFAULTS,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
+    ProviderSourceSpec {
+        provider: CaptureProvider::OpenHands,
+        display_name: "OpenHands",
+        default_locations: OPENHANDS_DEFAULTS,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
 ];
 
 pub fn provider_source_specs() -> &'static [ProviderSourceSpec] {
@@ -450,6 +482,34 @@ fn discover_provider_sources_for_spec(
                     spec,
                     path,
                     "shelley_sqlite",
+                    ProviderSourceKind::NativeHistory,
+                ));
+            }
+        }
+        CaptureProvider::Continue => {
+            if let Some(path) = env_path("CONTINUE_GLOBAL_DIR") {
+                sources.push(provider_source_from_parts(
+                    spec,
+                    path.join("sessions"),
+                    "continue_cli_sessions_json",
+                    ProviderSourceKind::NativeHistory,
+                ));
+            }
+        }
+        CaptureProvider::OpenHands => {
+            if let Some(path) = env_path("OH_PERSISTENCE_DIR") {
+                sources.push(provider_source_from_parts(
+                    spec,
+                    path,
+                    "openhands_file_events",
+                    ProviderSourceKind::NativeHistory,
+                ));
+            }
+            if let Some(path) = env_path("FILE_STORE_PATH") {
+                sources.push(provider_source_from_parts(
+                    spec,
+                    path,
+                    "openhands_file_events",
                     ProviderSourceKind::NativeHistory,
                 ));
             }
@@ -634,6 +694,8 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::NanoClaw => "nanoclaw_project",
         CaptureProvider::AstrBot => "astrbot_data_v4_sqlite",
         CaptureProvider::Shelley => "shelley_sqlite",
+        CaptureProvider::Continue => "continue_cli_sessions_json",
+        CaptureProvider::OpenHands => "openhands_file_events",
         _ => "unsupported",
     };
     let explicit_import_support = spec.import_support;
@@ -747,6 +809,12 @@ fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         }
         CaptureProvider::AstrBot => Some("path exists but no AstrBot data/data_v4.db was found"),
         CaptureProvider::Shelley => Some("path exists but no Shelley SQLite database was found"),
+        CaptureProvider::Continue => {
+            Some("path exists but no Continue CLI session JSON files were found")
+        }
+        CaptureProvider::OpenHands => {
+            Some("path exists but no OpenHands v1_conversations event JSON files were found")
+        }
         _ => None,
     }
 }
@@ -776,6 +844,12 @@ fn unknown_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         }
         CaptureProvider::FactoryAiDroid => {
             Some("path exists but the Factory AI Droid transcript probe hit its scan budget")
+        }
+        CaptureProvider::Continue => {
+            Some("path exists but the Continue CLI session probe hit its scan budget")
+        }
+        CaptureProvider::OpenHands => {
+            Some("path exists but the OpenHands event JSON probe hit its scan budget")
         }
         CaptureProvider::OpenClaw => {
             Some("path exists but the OpenClaw transcript probe hit its scan budget")
@@ -828,6 +902,12 @@ fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::Shelley => {
             Some("path exists but the Shelley database could not be read; check permissions")
         }
+        CaptureProvider::Continue => {
+            Some("path exists but Continue CLI sessions could not be read; check permissions")
+        }
+        CaptureProvider::OpenHands => {
+            Some("path exists but OpenHands event JSON files could not be read; check permissions")
+        }
         _ => None,
     }
 }
@@ -850,6 +930,10 @@ fn default_location_import_probe(
         CaptureProvider::NanoClaw => has_nanoclaw_project(path),
         CaptureProvider::AstrBot => path_is_file_probe(path),
         CaptureProvider::Shelley => path_is_file_probe(path),
+        CaptureProvider::Continue => has_json_file_under_matching(path, 10_000, |candidate| {
+            candidate.file_name().and_then(|name| name.to_str()) != Some("sessions.json")
+        }),
+        CaptureProvider::OpenHands => has_openhands_event_json(path, 10_000),
         CaptureProvider::Antigravity => has_jsonl_file_under_matching(path, 10_000, |candidate| {
             matches!(
                 candidate.file_name().and_then(|name| name.to_str()),
@@ -906,6 +990,12 @@ fn has_openclaw_session_jsonl(root: &Path, max_entries: usize) -> BoundedProbe {
     }
     has_jsonl_file_under_matching(root, max_entries, |path| {
         path_has_component(path, "sessions")
+    })
+}
+
+fn has_openhands_event_json(root: &Path, max_entries: usize) -> BoundedProbe {
+    has_json_file_under_matching(root, max_entries, |path| {
+        path_has_component(path, "v1_conversations")
     })
 }
 
@@ -978,9 +1068,26 @@ fn has_jsonl_file_under_matching(
     max_entries: usize,
     matches_path: impl Fn(&Path) -> bool,
 ) -> BoundedProbe {
+    has_file_with_extension_under_matching(root, "jsonl", max_entries, matches_path)
+}
+
+fn has_json_file_under_matching(
+    root: &Path,
+    max_entries: usize,
+    matches_path: impl Fn(&Path) -> bool,
+) -> BoundedProbe {
+    has_file_with_extension_under_matching(root, "json", max_entries, matches_path)
+}
+
+fn has_file_with_extension_under_matching(
+    root: &Path,
+    extension: &str,
+    max_entries: usize,
+    matches_path: impl Fn(&Path) -> bool,
+) -> BoundedProbe {
     match path_metadata_probe(root) {
         PathProbe::File => {
-            return if root.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
+            return if root.extension().and_then(|ext| ext.to_str()) == Some(extension)
                 && matches_path(root)
             {
                 BoundedProbe::Found
@@ -1018,7 +1125,7 @@ fn has_jsonl_file_under_matching(
             if file_type.is_dir() {
                 stack.push((path, false));
             } else if file_type.is_file()
-                && path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
+                && path.extension().and_then(|ext| ext.to_str()) == Some(extension)
                 && matches_path(&path)
             {
                 return BoundedProbe::Found;
@@ -1266,6 +1373,68 @@ mod tests {
         assert_eq!(shelley_source.status, ProviderSourceStatus::Available);
         assert_eq!(shelley_source.import_support, ProviderImportSupport::Native);
         assert!(shelley_source.import_support.is_auto_importable());
+
+        let continue_sessions = temp.path().join(".continue/sessions");
+        std::fs::create_dir_all(&continue_sessions).unwrap();
+        std::fs::write(continue_sessions.join("sessions.json"), "[]\n").unwrap();
+        assert_source_status(
+            temp.path(),
+            CaptureProvider::Continue,
+            ProviderSourceStatus::Empty,
+        );
+        std::fs::write(continue_sessions.join("session.json"), "{}\n").unwrap();
+        let continue_source = discover_provider_sources(temp.path())
+            .into_iter()
+            .find(|source| source.provider == CaptureProvider::Continue)
+            .unwrap();
+        assert_eq!(continue_source.status, ProviderSourceStatus::Available);
+        assert_eq!(continue_source.source_format, "continue_cli_sessions_json");
+        assert_eq!(
+            continue_source.import_support,
+            ProviderImportSupport::Native
+        );
+        assert!(continue_source.import_support.is_auto_importable());
+
+        let openhands = temp.path().join(".openhands/local-user");
+        std::fs::create_dir_all(&openhands).unwrap();
+        assert_source_status(
+            temp.path(),
+            CaptureProvider::OpenHands,
+            ProviderSourceStatus::Empty,
+        );
+        let openhands_events = openhands.join("v1_conversations/12345678123456781234567812345678");
+        std::fs::create_dir_all(&openhands_events).unwrap();
+        std::fs::write(
+            openhands_events.join("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"),
+            "{}\n",
+        )
+        .unwrap();
+        assert_source_status(
+            temp.path(),
+            CaptureProvider::OpenHands,
+            ProviderSourceStatus::Available,
+        );
+    }
+
+    #[test]
+    fn continue_discovery_uses_global_dir_env_sessions_subdir() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let continue_home = temp.path().join("continue-home");
+        let sessions = continue_home.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(sessions.join("session.json"), "{}\n").unwrap();
+        let _global_dir = EnvGuard::set("CONTINUE_GLOBAL_DIR", continue_home.as_os_str());
+
+        let sources = discover_provider_sources(temp.path());
+        let source = sources
+            .iter()
+            .find(|source| source.provider == CaptureProvider::Continue && source.path == sessions)
+            .unwrap();
+
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+        assert_eq!(source.source_format, "continue_cli_sessions_json");
+        assert_eq!(source.import_support, ProviderImportSupport::Native);
     }
 
     #[test]

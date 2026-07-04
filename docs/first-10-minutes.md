@@ -73,6 +73,8 @@ ctx import --provider hermes --path ~/.hermes/state.db
 ctx import --provider nanoclaw --path /path/to/nanoclaw-project
 ctx import --provider astrbot --path /path/to/data/data_v4.db
 ctx import --provider shelley --path ~/.config/shelley/shelley.db
+ctx import --provider continue --path ~/.continue/sessions
+ctx import --provider openhands --path ~/.openhands
 ```
 
 Preview providers such as NanoClaw and AstrBot are explicit-import only. Use
