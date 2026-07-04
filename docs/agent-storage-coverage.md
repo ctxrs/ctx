@@ -32,7 +32,8 @@ rows.
 - `Cline/Roo task JSON`: native `cline` and `roo` coverage share one task JSON
   importer for file-backed task directories.
 - `JSONL CLI event logs`: already covers Codex, Claude Code, OpenClaw,
-  Antigravity CLI, Gemini CLI, Pi, Factory Droid, and Copilot CLI-shaped logs.
+  Antigravity CLI, Gemini CLI, Pi, Factory Droid, Copilot CLI-shaped logs, and
+  Autohand Code sessions.
 - `CLI session JSON`: covers Continue CLI `sessions/*.json` files with
   `sessions.json` metadata.
 - `filesystem event JSON`: covers OpenHands event JSON under
@@ -53,7 +54,7 @@ rows.
 | `antigravity` | `candidate-family` | `VS Code/Electron storage` | npx `~/.gemini/antigravity`; no ctx provider for IDE id | IDE history is not proven equivalent to CLI brain transcripts. |
 | `antigravity-cli` | `native-auto` | `JSONL CLI event logs` | ctx `antigravity_cli_transcript_jsonl_tree`; npx `~/.gemini/antigravity-cli` | - |
 | `astrbot` | `native-preview` | `generic sqlite messages` | ctx `astrbot_data_v4_sqlite`; npx `~/.astrbot` | Preview explicit import only; full per-platform transcript coverage remains unproven. |
-| `autohand-code` | `candidate-family` | `JSONL CLI event logs` | npx `AUTOHAND_HOME` or `~/.autohand`; no ctx provider | Need native transcript schema proof. |
+| `autohand-code` | `native-auto` | `JSONL CLI event logs` | ctx `autohand_code_sessions_jsonl`; npx `AUTOHAND_HOME` or `~/.autohand` | - |
 | `augment` | `candidate-family` | `VS Code/Electron storage` | npx `~/.augment`; no ctx provider | Need local app storage or export contract proof. |
 | `bob` | `unknown` | `unknown native history` | npx `~/.bob`; no ctx provider | Need native history storage research before claiming import support. |
 | `claude-code` | `native-auto` | `JSONL CLI event logs` | ctx `claude_projects_jsonl_tree`; npx `~/.claude` | - |

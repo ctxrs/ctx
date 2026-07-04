@@ -1186,6 +1186,60 @@
       ]
     },
     {
+      "id": "autohand_code",
+      "display_name": "Autohand Code",
+      "priority": "p1",
+      "status": "local_import_when_supported",
+      "capture_provider": "autohand_code",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "autohand_code_sessions_jsonl",
+          "fidelity": "imported",
+          "proof": [
+            "ctx sources",
+            "ctx import --provider autohand-code"
+          ],
+          "notes": [
+            "Reads Autohand Code sessions under AUTOHAND_HOME/sessions or ~/.autohand/sessions when each session directory contains metadata.json plus conversation.jsonl.",
+            "Native source discovery marks Autohand Code available only when a conversation.jsonl file has sibling metadata.json."
+          ]
+        }
+      ],
+      "history_locations": [
+        "AUTOHAND_HOME/sessions/*/{metadata.json,conversation.jsonl}",
+        "~/.autohand/sessions/*/{metadata.json,conversation.jsonl}"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": true,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": true,
+        "command_output": false,
+        "files_touched": true,
+        "artifacts": false,
+        "model_identity": true,
+        "costs": false,
+        "token_usage": false,
+        "parent_child_session_edges": true
+      },
+      "blockers": [
+        "Imports Autohand's current message JSONL fields; token/cost telemetry and any future non-message sidecar files are not claimed."
+      ],
+      "public_docs": "docs/provider-support.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/autohand-code"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs"
+      ]
+    },
+    {
       "id": "cline",
       "display_name": "Cline",
       "priority": "p1",

@@ -53,6 +53,9 @@ The current CLI imports local history for:
   `QWEN_HOME/projects`, or `~/.qwen/projects`;
 - Kimi Code CLI wire JSONL records under `KIMI_CODE_HOME` or `~/.kimi-code`
   session trees;
+- Autohand Code session JSONL records under `AUTOHAND_HOME/sessions` or
+  `~/.autohand/sessions`, where each session has `metadata.json` and
+  `conversation.jsonl`;
 - Cline task JSON directories under `CLINE_DATA_DIR`, `CLINE_DIR/data`,
   `~/.cline/data`, or common VS Code globalStorage folders;
 - Roo Code task JSON directories under `roo-cline.customStoragePath`, common
@@ -83,13 +86,13 @@ ctx sources --json
 CLI provider flags use names such as `kilo`, `crush`, `goose`, `dexto`,
 `openclaw`, `hermes`,
 `nanoclaw`, `astrbot`, `shelley`, `continue`, `openhands`, `copilot-cli`,
-`factory-ai-droid`, `qwen-code`, `kimi-code-cli`, `cline`, and
+`factory-ai-droid`, `qwen-code`, `kimi-code-cli`, `autohand-code`, `cline`, and
 `roo`/`roo-code`.
 Structured JSON and stable SQL views use provider IDs in ctx output; multiword IDs may be
-snake_case, such as `copilot_cli`, `factory_ai_droid`, `qwen_code`, or
-`kimi_code_cli`, while compact native IDs such as `kilo`, `openclaw`,
-`crush`, `goose`, `dexto`, `nanoclaw`, `astrbot`, `shelley`, `continue`, and
-`openhands` stay compact. Roo Code is reported as `roo_code`.
+snake_case, such as `copilot_cli`, `factory_ai_droid`, `qwen_code`,
+`kimi_code_cli`, or `autohand_code`, while compact native IDs such as `kilo`,
+`openclaw`, `crush`, `goose`, `dexto`, `nanoclaw`, `astrbot`, `shelley`,
+`continue`, and `openhands` stay compact. Roo Code is reported as `roo_code`.
 
 `ctx sources --json` reports each known provider source with `import_support`
 and `importable` fields. A native source is marked available/importable only

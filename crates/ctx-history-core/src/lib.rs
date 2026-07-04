@@ -194,6 +194,7 @@ text_enum! {
         FactoryAiDroid => "factory_ai_droid",
         QwenCode => "qwen_code",
         KimiCodeCli => "kimi_code_cli",
+        AutohandCode => "autohand_code",
         OpenClaw => "openclaw",
         Hermes => "hermes",
         NanoClaw => "nanoclaw",
@@ -1525,6 +1526,10 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<CaptureProvider>("\"kimi_code_cli\"").unwrap(),
             CaptureProvider::KimiCodeCli
+        );
+        assert_eq!(
+            serde_json::from_str::<CaptureProvider>("\"autohand_code\"").unwrap(),
+            CaptureProvider::AutohandCode
         );
 
         let sync: SyncMetadata = serde_json::from_value(json!({})).unwrap();
