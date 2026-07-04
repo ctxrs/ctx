@@ -39,7 +39,7 @@ use ctx_history_capture::{
     import_copilot_cli_session_events, import_cursor_native_history,
     import_custom_history_jsonl_v1, import_custom_history_jsonl_v1_reader,
     import_factory_ai_droid_sessions, import_gemini_cli_history, import_hermes_sqlite,
-    import_nanoclaw_project, import_openclaw_history, import_opencode_sqlite,
+    import_kilo_sqlite, import_nanoclaw_project, import_openclaw_history, import_opencode_sqlite,
     import_openhands_file_events, import_pi_session_jsonl, import_shelley_sqlite,
     provider_source_for_path, provider_source_spec, stable_capture_uuid,
     validate_custom_history_jsonl_v1, validate_custom_history_jsonl_v1_reader,
@@ -49,9 +49,10 @@ use ctx_history_capture::{
     CodexSessionImportProgressCallback, CodexToolOutputMode, ContinueCliImportOptions,
     CopilotCliImportOptions, CursorNativeImportOptions, CustomHistoryJsonlV1ImportOptions,
     FactoryAiDroidImportOptions, GeminiCliImportOptions, HermesSqliteImportOptions,
-    NanoClawImportOptions, OpenClawImportOptions, OpenCodeSqliteImportOptions,
-    OpenHandsImportOptions, PiSessionImportOptions, ProviderImportSummary, ProviderImportSupport,
-    ProviderSource, ProviderSourceStatus, ShelleySqliteImportOptions,
+    KiloSqliteImportOptions, NanoClawImportOptions, OpenClawImportOptions,
+    OpenCodeSqliteImportOptions, OpenHandsImportOptions, PiSessionImportOptions,
+    ProviderImportSummary, ProviderImportSupport, ProviderSource, ProviderSourceStatus,
+    ShelleySqliteImportOptions,
 };
 use ctx_history_core::{
     database_path, default_data_root, utc_now, CaptureProvider, ContextCitation,
@@ -673,6 +674,13 @@ enum NativeProviderArg {
     Claude,
     #[value(name = "opencode", alias = "open-code")]
     OpenCode,
+    #[value(
+        name = "kilo",
+        alias = "kilo-code",
+        alias = "kilo_code",
+        alias = "kilocode"
+    )]
+    Kilo,
     #[value(alias = "antigravity-cli")]
     Antigravity,
     #[value(alias = "gemini-cli")]
@@ -708,6 +716,13 @@ enum ProviderArg {
     Claude,
     #[value(name = "opencode", alias = "open-code")]
     OpenCode,
+    #[value(
+        name = "kilo",
+        alias = "kilo-code",
+        alias = "kilo_code",
+        alias = "kilocode"
+    )]
+    Kilo,
     #[value(alias = "antigravity-cli")]
     Antigravity,
     #[value(alias = "gemini-cli")]
@@ -765,6 +780,7 @@ impl NativeProviderArg {
             Self::Pi => CaptureProvider::Pi,
             Self::Claude => CaptureProvider::Claude,
             Self::OpenCode => CaptureProvider::OpenCode,
+            Self::Kilo => CaptureProvider::Kilo,
             Self::Antigravity => CaptureProvider::Antigravity,
             Self::Gemini => CaptureProvider::Gemini,
             Self::Cursor => CaptureProvider::Cursor,
@@ -788,6 +804,7 @@ impl ProviderArg {
             Self::Pi => CaptureProvider::Pi,
             Self::Claude => CaptureProvider::Claude,
             Self::OpenCode => CaptureProvider::OpenCode,
+            Self::Kilo => CaptureProvider::Kilo,
             Self::Antigravity => CaptureProvider::Antigravity,
             Self::Gemini => CaptureProvider::Gemini,
             Self::Cursor => CaptureProvider::Cursor,
@@ -810,6 +827,7 @@ impl ProviderArg {
             Self::Pi => "pi",
             Self::Claude => "claude",
             Self::OpenCode => "opencode",
+            Self::Kilo => "kilo",
             Self::Antigravity => "antigravity",
             Self::Gemini => "gemini",
             Self::Cursor => "cursor",
@@ -5546,6 +5564,17 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
+        CaptureProvider::Kilo => import_kilo_sqlite(
+            &source.path,
+            store,
+            KiloSqliteImportOptions {
+                source_path: Some(source.path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: true,
+                ..KiloSqliteImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
         CaptureProvider::OpenClaw => import_openclaw_history(
             &source.path,
             store,
@@ -5875,7 +5904,7 @@ fn collect_source_import_paths(source: &SourceInfo) -> Result<Vec<PathBuf>> {
 
 fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bool {
     match source.provider {
-        CaptureProvider::OpenCode => path == source.path,
+        CaptureProvider::OpenCode | CaptureProvider::Kilo => path == source.path,
         CaptureProvider::CopilotCli => {
             path.file_name().and_then(|name| name.to_str()) == Some("events.jsonl")
         }
@@ -6150,6 +6179,7 @@ fn source_uses_incremental_event_search(source: &SourceInfo) -> bool {
             | CaptureProvider::Pi
             | CaptureProvider::Cursor
             | CaptureProvider::OpenCode
+            | CaptureProvider::Kilo
             | CaptureProvider::Antigravity
             | CaptureProvider::Gemini
             | CaptureProvider::CopilotCli

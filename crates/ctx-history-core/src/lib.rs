@@ -186,6 +186,7 @@ text_enum! {
         Claude => "claude",
         Pi => "pi",
         OpenCode => "opencode",
+        Kilo => "kilo",
         Antigravity => "antigravity",
         Gemini => "gemini",
         Cursor => "cursor",
@@ -1505,6 +1506,10 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<CaptureProvider>("\"factory_ai_droid\"").unwrap(),
             CaptureProvider::FactoryAiDroid
+        );
+        assert_eq!(
+            serde_json::from_str::<CaptureProvider>("\"kilo\"").unwrap(),
+            CaptureProvider::Kilo
         );
 
         let sync: SyncMetadata = serde_json::from_value(json!({})).unwrap();

@@ -414,6 +414,7 @@ mod tests {
             ProviderId::FactoryAiDroid,
             ProviderId::GeminiCli,
             ProviderId::Hermes,
+            ProviderId::Kilo,
             ProviderId::NanoClaw,
             ProviderId::OpenCode,
             ProviderId::OpenClaw,

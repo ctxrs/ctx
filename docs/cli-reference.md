@@ -88,7 +88,7 @@ machine. Current rows include:
 - Codex session trees at `~/.codex/sessions`;
 - Codex prompt history at `~/.codex/history.jsonl`;
 - Pi session JSONL files under `~/.pi/agent/sessions`;
-- native rows for supported Antigravity, Claude, OpenCode, OpenClaw, Hermes,
+- native rows for supported Antigravity, Claude, OpenCode, Kilo Code, OpenClaw, Hermes,
   Gemini, Cursor, Copilot CLI, and Factory AI Droid local history locations;
 - preview rows for NanoClaw project roots and AstrBot SQLite history when those
   paths are discoverable;
@@ -284,7 +284,7 @@ optimized for agent reading; use `--verbose` for expanded text diagnostics.
 
 Filters:
 
-- `--provider codex|pi|claude|opencode|openclaw|hermes|nanoclaw|astrbot|shelley|continue|openhands|antigravity|gemini|cursor|copilot-cli|factory-ai-droid|custom`;
+- `--provider codex|pi|claude|opencode|kilo|openclaw|hermes|nanoclaw|astrbot|shelley|continue|openhands|antigravity|gemini|cursor|copilot-cli|factory-ai-droid|custom`;
 - `--workspace <name-or-path>`, substring match over stored workspace, cwd,
   source path, or repository-name text;
 - `--since <rfc3339-or-days>d`, for example `2026-06-01T00:00:00Z` or `30d`;

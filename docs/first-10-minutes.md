@@ -48,7 +48,7 @@ ctx sources --json
 ```
 
 Expect rows for supported local import providers such as Codex, Pi,
-Antigravity, Claude, OpenCode, OpenClaw, Hermes, Gemini, Cursor, Copilot CLI,
+Antigravity, Claude, OpenCode, Kilo Code, OpenClaw, Hermes, Gemini, Cursor, Copilot CLI,
 and Factory AI Droid. NanoClaw and AstrBot can appear as preview rows when ctx
 can discover their local project or SQLite paths. A row with `exists: false`
 means ctx knows the default path but did not find local history there. A JSON
