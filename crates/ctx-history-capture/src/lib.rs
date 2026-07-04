@@ -6875,6 +6875,14 @@ fn provider_timestamp_millis(value: Option<i64>, fallback: DateTime<Utc>) -> Dat
         .unwrap_or(fallback)
 }
 
+fn provider_required_timestamp_millis(value: i64, field: &'static str) -> Result<DateTime<Utc>> {
+    DateTime::<Utc>::from_timestamp_millis(value).ok_or_else(|| {
+        CaptureError::InvalidPayload(format!(
+            "{field} is outside representable timestamp range: {value}"
+        ))
+    })
+}
+
 fn provider_timestamp_value(value: Option<&Value>, fallback: DateTime<Utc>) -> DateTime<Utc> {
     match value {
         Some(Value::String(raw)) => parse_rfc3339_utc(raw)
@@ -9232,15 +9240,16 @@ fn normalize_opencode_sqlite(
     let sessions = opencode_sessions(&conn)?;
     let messages = opencode_session_messages(&conn)?;
     let mut result = ProviderNormalizationResult::default();
-    let session_started = sessions
-        .iter()
-        .map(|session| {
-            (
-                session.id.clone(),
-                timestamp_millis_utc(session.time_created, context.imported_at),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
+    let mut session_started = BTreeMap::new();
+    for session in &sessions {
+        session_started.insert(
+            session.id.clone(),
+            provider_required_timestamp_millis(
+                session.time_created,
+                "OpenCode session time_created",
+            )?,
+        );
+    }
     let sessions_by_id = sessions
         .into_iter()
         .map(|session| (session.id.clone(), session))
@@ -9279,9 +9288,23 @@ fn normalize_opencode_sqlite(
                 continue;
             }
         };
-        let occurred_at = opencode_event_time(&data)
-            .or_else(|| Some(timestamp_millis_utc(row.time_created, context.imported_at)))
-            .unwrap_or(context.imported_at);
+        let occurred_at = match opencode_event_time(&data) {
+            Ok(Some(time)) => time,
+            Ok(None) => match provider_required_timestamp_millis(
+                row.time_created,
+                "OpenCode session_message time_created",
+            ) {
+                Ok(time) => time,
+                Err(err) => {
+                    push_provider_import_failure(&mut result.summary, line, err.to_string());
+                    continue;
+                }
+            },
+            Err(err) => {
+                push_provider_import_failure(&mut result.summary, line, err.to_string());
+                continue;
+            }
+        };
         let started_at = session_started
             .get(&session.id)
             .copied()
@@ -9788,14 +9811,16 @@ fn opencode_content_has_tool(data: &Value) -> bool {
         .unwrap_or(false)
 }
 
-fn opencode_event_time(data: &Value) -> Option<DateTime<Utc>> {
-    data.pointer("/time/created")
-        .and_then(Value::as_i64)
-        .and_then(DateTime::<Utc>::from_timestamp_millis)
-}
-
-fn timestamp_millis_utc(millis: i64, fallback: DateTime<Utc>) -> DateTime<Utc> {
-    DateTime::<Utc>::from_timestamp_millis(millis).unwrap_or(fallback)
+fn opencode_event_time(data: &Value) -> Result<Option<DateTime<Utc>>> {
+    let Some(value) = data.pointer("/time/created") else {
+        return Ok(None);
+    };
+    let millis = value.as_i64().ok_or_else(|| {
+        CaptureError::InvalidPayload(
+            "OpenCode event time.created must be integer millis".to_owned(),
+        )
+    })?;
+    provider_required_timestamp_millis(millis, "OpenCode event time.created").map(Some)
 }
 
 fn parse_json_object_string(value: Option<&str>) -> Value {
@@ -14450,6 +14475,37 @@ mod tests {
                 .as_i64()
                 .is_some_and(|seq| seq >= 0)
         }));
+    }
+
+    #[test]
+    fn native_opencode_rejects_out_of_range_message_timestamp() {
+        let temp = tempdir();
+        let fixture = write_opencode_smoke_db(&temp, false);
+        let conn = Connection::open(&fixture).unwrap();
+        let data_without_payload_time = json!({"text": "bad timestamp fallback"}).to_string();
+        conn.execute(
+            "update session_message set time_created = ?1, data = ?2 where id = 'msg-user'",
+            rusqlite::params![i64::MAX, data_without_payload_time],
+        )
+        .unwrap();
+        drop(conn);
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let summary = import_opencode_sqlite(
+            &fixture,
+            &mut store,
+            OpenCodeSqliteImportOptions {
+                allow_partial_failures: true,
+                ..OpenCodeSqliteImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.failed, 1);
+        assert!(summary.failures[0]
+            .error
+            .contains("OpenCode session_message time_created"));
+        assert_eq!(summary.imported_events, 2);
     }
 
     #[test]
