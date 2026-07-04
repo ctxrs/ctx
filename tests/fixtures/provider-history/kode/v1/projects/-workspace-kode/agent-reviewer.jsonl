@@ -1,0 +1,2 @@
+{"type":"user","uuid":"kode-agent-u1","parentUuid":"kode-a2","sessionId":"kode-session-1","timestamp":"2026-07-04T12:01:00Z","cwd":"/workspace/kode","isSidechain":true,"agentId":"reviewer","message":{"role":"user","content":[{"type":"text","text":"kode sidechain oracle prompt"}]}}
+{"type":"assistant","uuid":"kode-agent-a1","parentUuid":"kode-agent-u1","sessionId":"kode-session-1","timestamp":"2026-07-04T12:01:01Z","cwd":"/workspace/kode","isSidechain":true,"agentId":"reviewer","message":{"role":"assistant","content":[{"type":"text","text":"Sidechain reviewer result."}]}}

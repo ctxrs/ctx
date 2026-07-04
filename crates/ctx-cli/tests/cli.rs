@@ -1907,6 +1907,14 @@ fn qwen_and_kimi_default_sources_import_search_and_reimport() {
         Path::new(&provider_history_fixture("reasonix/v0.53.2/sessions")),
         &temp.path().join(".reasonix").join("sessions"),
     );
+    copy_dir_all(
+        Path::new(&provider_history_fixture("kode/v1/projects")),
+        &temp.path().join(".kode").join("projects"),
+    );
+    copy_dir_all(
+        Path::new(&provider_history_fixture("neovate/v1/projects")),
+        &temp.path().join(".neovate").join("projects"),
+    );
 
     let sources = json_output(ctx(&temp).args(["sources", "--json"]));
     for (provider, source_format) in [
@@ -1917,6 +1925,8 @@ fn qwen_and_kimi_default_sources_import_search_and_reimport() {
         ("mistral_vibe", "mistral_vibe_session_jsonl_tree"),
         ("mux", "mux_session_jsonl_tree"),
         ("reasonix", "reasonix_session_jsonl_tree"),
+        ("kode", "kode_session_jsonl_tree"),
+        ("neovate", "neovate_session_jsonl_tree"),
     ] {
         let source = sources["sources"]
             .as_array()
@@ -1955,6 +1965,8 @@ fn qwen_and_kimi_default_sources_import_search_and_reimport() {
         ),
         ("mux", "mux", "mux jsonl oracle prompt", 6),
         ("reasonix", "reasonix", "reasonix jsonl oracle prompt", 12),
+        ("kode", "kode", "kode jsonl oracle prompt", 10),
+        ("neovate", "neovate", "neovate jsonl oracle prompt", 5),
     ] {
         let first = json_output(ctx(&temp).args([
             "import",
@@ -2011,6 +2023,8 @@ fn sources_lists_personal_agent_provider_defaults() {
     install_default_mistral_vibe_fixture(&temp, "mistral-vibe-sources-oracle");
     install_default_mux_fixture(&temp, "mux-sources-oracle");
     install_default_reasonix_fixture(&temp, "reasonix-sources-oracle");
+    install_default_kode_fixture(&temp, "kode-sources-oracle");
+    install_default_neovate_fixture(&temp, "neovate-sources-oracle");
 
     let sources = json_output(ctx(&temp).args(["sources", "--json"]));
     for (provider, source_format, import_support, native_import) in [
@@ -2037,6 +2051,8 @@ fn sources_lists_personal_agent_provider_defaults() {
         ),
         ("mux", "mux_session_jsonl_tree", "native", true),
         ("reasonix", "reasonix_session_jsonl_tree", "native", true),
+        ("kode", "kode_session_jsonl_tree", "native", true),
+        ("neovate", "neovate_session_jsonl_tree", "native", true),
     ] {
         let source = sources["sources"]
             .as_array()
@@ -2300,6 +2316,8 @@ fn provider_help_matches_implemented_importers() {
         "mistral-vibe",
         "mux",
         "reasonix",
+        "kode",
+        "neovate",
     ] {
         assert!(help.contains(value), "provider {value} missing in\n{help}");
     }
@@ -2328,6 +2346,8 @@ fn provider_json_names_are_accepted_as_cli_filter_aliases() {
         ("mux", "mux"),
         ("reasonix", "reasonix"),
         ("deepseek-reasonix", "reasonix"),
+        ("shareai_kode", "kode"),
+        ("neovate_code", "neovate"),
         ("open_claw", "openclaw"),
         ("nano_claw", "nanoclaw"),
         ("astr_bot", "astrbot"),
@@ -2450,7 +2470,7 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
             vec![
                 "Usage: ctx import",
                 "--provider <PROVIDER>",
-                "[possible values: codex, pi, claude, opencode, kilo, kiro-cli, crush, goose, antigravity, gemini, cursor, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, forgecode, mistral-vibe, mux, reasonix, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto, codebuddy, aider-desk]",
+                "[possible values: codex, pi, claude, opencode, kilo, kiro-cli, crush, goose, antigravity, gemini, cursor, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, forgecode, mistral-vibe, mux, reasonix, kode, neovate, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto, codebuddy, aider-desk]",
                 "--path <PATH>",
                 "--format <FORMAT>",
                 "--resume",
@@ -4522,6 +4542,8 @@ fn mcp_status_and_tools_list_are_read_only_without_initialized_store() {
     assert!(providers.iter().any(|provider| provider == "mistral_vibe"));
     assert!(providers.iter().any(|provider| provider == "mux"));
     assert!(providers.iter().any(|provider| provider == "reasonix"));
+    assert!(providers.iter().any(|provider| provider == "kode"));
+    assert!(providers.iter().any(|provider| provider == "neovate"));
     assert!(providers.iter().any(|provider| provider == "cline"));
     assert!(providers.iter().any(|provider| provider == "roo"));
     assert!(providers.iter().any(|provider| provider == "roo_code"));
@@ -5858,6 +5880,8 @@ fn search_refresh_auto_imports_discovered_top_provider_sources() {
         ("continue", "continue", install_default_continue_fixture),
         ("openhands", "openhands", install_default_openhands_fixture),
         ("reasonix", "reasonix", install_default_reasonix_fixture),
+        ("kode", "kode", install_default_kode_fixture),
+        ("neovate", "neovate", install_default_neovate_fixture),
     ] {
         let temp = tempdir();
         let query = format!("{stored_provider}-default-refresh-oracle");
@@ -6254,6 +6278,18 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
             "reasonix",
             "reasonix_session_jsonl_tree",
             write_native_reasonix_fixture,
+        ),
+        (
+            "kode",
+            "kode",
+            "kode_session_jsonl_tree",
+            write_native_kode_fixture,
+        ),
+        (
+            "neovate",
+            "neovate",
+            "neovate_session_jsonl_tree",
+            write_native_neovate_fixture,
         ),
         (
             "codebuddy",
@@ -6701,6 +6737,16 @@ fn install_default_mux_fixture(temp: &TempDir, query: &str) {
 fn install_default_reasonix_fixture(temp: &TempDir, query: &str) {
     let source = PathBuf::from(write_native_reasonix_fixture(temp, query));
     copy_dir_all(&source, &temp.path().join(".reasonix").join("sessions"));
+}
+
+fn install_default_kode_fixture(temp: &TempDir, query: &str) {
+    let source = PathBuf::from(write_native_kode_fixture(temp, query));
+    copy_dir_all(&source, &temp.path().join(".kode").join("projects"));
+}
+
+fn install_default_neovate_fixture(temp: &TempDir, query: &str) {
+    let source = PathBuf::from(write_native_neovate_fixture(temp, query));
+    copy_dir_all(&source, &temp.path().join(".neovate").join("projects"));
 }
 
 fn install_default_openhands_fixture(temp: &TempDir, query: &str) {
@@ -7196,6 +7242,133 @@ fn write_native_reasonix_fixture(temp: &TempDir, query: &str) -> String {
     .unwrap();
     temp.path()
         .join("native-reasonix/sessions")
+        .to_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn write_native_kode_fixture(temp: &TempDir, query: &str) -> String {
+    let project = temp.path().join("native-kode/projects/sanitized-workspace");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        project.join("kode-cli-native.jsonl"),
+        format!(
+            "{}\n{}\n{}\n",
+            json!({
+                "uuid": "kode-cli-native-user",
+                "parentUuid": null,
+                "sessionId": "kode-cli-native",
+                "timestamp": "2026-07-04T17:00:00Z",
+                "type": "user",
+                "cwd": "/workspace/kode",
+                "version": "2.2.1",
+                "message": {"role": "user", "content": [{"type": "text", "text": query}]}
+            }),
+            json!({
+                "uuid": "kode-cli-native-assistant",
+                "parentUuid": "kode-cli-native-user",
+                "sessionId": "kode-cli-native",
+                "timestamp": "2026-07-04T17:00:01Z",
+                "type": "assistant",
+                "cwd": "/workspace/kode",
+                "message": {"role": "assistant", "content": [
+                    {"type": "text", "text": "kode native import ok"},
+                    {"type": "tool_use", "id": "tool-kode-cli", "name": "Write", "input": {"path": "src/kode_cli_native.txt", "content": "proof"}}
+                ]}
+            }),
+            json!({
+                "uuid": "kode-cli-native-tool",
+                "parentUuid": "kode-cli-native-assistant",
+                "sessionId": "kode-cli-native",
+                "timestamp": "2026-07-04T17:00:02Z",
+                "type": "user",
+                "cwd": "/workspace/kode",
+                "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tool-kode-cli", "content": "wrote src/kode_cli_native.txt"}]},
+                "toolUseResult": {"tool": "Write", "path": "src/kode_cli_native.txt", "output": "ok"}
+            })
+        ),
+    )
+    .unwrap();
+    fs::write(
+        project.join("agent-reviewer.jsonl"),
+        format!(
+            "{}\n",
+            json!({
+                "uuid": "kode-cli-agent-user",
+                "parentUuid": "kode-cli-native-assistant",
+                "sessionId": "kode-cli-native",
+                "timestamp": "2026-07-04T17:01:00Z",
+                "type": "user",
+                "cwd": "/workspace/kode",
+                "isSidechain": true,
+                "agentId": "reviewer",
+                "message": {"role": "user", "content": [{"type": "text", "text": "kode cli sidechain"}]}
+            })
+        ),
+    )
+    .unwrap();
+    temp.path()
+        .join("native-kode/projects")
+        .to_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn write_native_neovate_fixture(temp: &TempDir, query: &str) -> String {
+    let project = temp
+        .path()
+        .join("native-neovate/projects/sanitized-workspace");
+    fs::create_dir_all(project.join("requests")).unwrap();
+    fs::create_dir_all(project.join("file-history")).unwrap();
+    fs::write(
+        project.join("neovate-cli-native.jsonl"),
+        format!(
+            "{}\n{}\n{}\n",
+            json!({
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "text", "text": query}],
+                "uuid": "neovate-cli-native-user",
+                "parentUuid": null,
+                "timestamp": "2026-07-04T18:00:00Z",
+                "sessionId": "neovate-cli-native"
+            }),
+            json!({
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "neovate native import ok"},
+                    {"type": "tool_use", "id": "tool-neovate-cli", "name": "Write", "input": {"path": "src/neovate_cli_native.txt", "content": "proof"}}
+                ],
+                "uuid": "neovate-cli-native-assistant",
+                "parentUuid": "neovate-cli-native-user",
+                "timestamp": "2026-07-04T18:00:01Z",
+                "sessionId": "neovate-cli-native"
+            }),
+            json!({
+                "type": "message",
+                "role": "tool",
+                "content": [{"type": "tool_result", "tool_use_id": "tool-neovate-cli", "content": "wrote src/neovate_cli_native.txt", "path": "src/neovate_cli_native.txt"}],
+                "uuid": "neovate-cli-native-tool",
+                "parentUuid": "neovate-cli-native-assistant",
+                "timestamp": "2026-07-04T18:00:02Z",
+                "sessionId": "neovate-cli-native"
+            })
+        ),
+    )
+    .unwrap();
+    fs::write(
+        project.join("requests/request-only.jsonl"),
+        "{\"type\":\"request\",\"body\":{\"prompt\":\"neovate request-only sidecar\"}}\n",
+    )
+    .unwrap();
+    fs::write(
+        project.join("file-history/snapshot.jsonl"),
+        "{\"type\":\"file-history-snapshot\",\"content\":\"neovate file-history sidecar\"}\n",
+    )
+    .unwrap();
+    temp.path()
+        .join("native-neovate/projects")
         .to_str()
         .unwrap()
         .to_owned()
@@ -8614,6 +8787,8 @@ fn native_provider_cli_requires_existing_history_or_explicit_path() {
         ("mistral-vibe", "no importable mistral_vibe history found"),
         ("mux", "no importable mux history found"),
         ("reasonix", "no importable reasonix history found"),
+        ("kode", "no importable kode history found"),
+        ("neovate", "no importable neovate history found"),
         ("cline", "no importable cline history found"),
         ("roo", "no importable roo_code history found"),
     ] {

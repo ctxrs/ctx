@@ -99,6 +99,44 @@ IDE/application storage imports.
   `ctx` imports the resumable project `session-*.jsonl` transcripts as
   `iflow_cli_session_jsonl_tree`.
 
+## Kode
+
+- Source evidence: `@shareai-lab/kode@2.2.1` declares repository
+  `shareAI-lab/kode`.
+- Bundle path evidence: `dist/chunk-HGY32KZM.js` builds project history under
+  `<kode-base>/projects/<sanitized-cwd>/<sessionId>.jsonl`, using
+  `cwd.replace(/[^a-zA-Z0-9]/g, "-")` for the project directory.
+- Sidechain evidence: the same bundle writes agent logs as
+  `agent-<agentId>.jsonl` in the project directory and appends records with
+  JSONL serialization.
+- Config evidence: `dist/chunk-4OKQLS3L.js` resolves `KODE_CONFIG_DIR`, then
+  `CLAUDE_CONFIG_DIR`, then `~/.kode`; the legacy global config file is
+  commonly `~/.kode.json`.
+- Schema evidence: Kode records include `type`, `uuid`, `parentUuid`,
+  `sessionId`, `cwd`, `timestamp`, `message`, optional `toolUseResult`,
+  `isSidechain`, and `agentId`; helper code also appends `summary`,
+  `custom-title`, `tag`, and `file-history-snapshot` rows.
+- `ctx` imports this shape as `kode_session_jsonl_tree`, including
+  `agent-<id>.jsonl` sidechains as child sessions.
+
+## Neovate
+
+- Source evidence: `@neovate/code@0.28.5` declares repository
+  `neovateai/neovate-code`.
+- Type evidence: `dist/index.d.ts` defines `NormalizedMessage` as a message with
+  `type: "message"`, `timestamp`, `uuid`, `parentUuid`, and optional metadata,
+  and defines `Paths` with `globalConfigDir`, `globalProjectDir`,
+  `projectConfigDir`, `fileHistoryDir`, and `getSessionLogPath`.
+- Bundle path evidence: `dist/index.mjs` stores global projects under
+  `~/.neovate/projects/<sanitized-cwd>`, resolves normal session IDs to
+  `<globalProjectDir>/<sessionId>.jsonl`, and keeps file-history sidecars under
+  `<globalProjectDir>/file-history`.
+- Logger evidence: the bundled JSONL logger appends normalized message rows and
+  snapshot rows; the request logger writes request logs under
+  `<globalProjectDir>/requests/<requestId>.jsonl`.
+- `ctx` imports this shape as `neovate_session_jsonl_tree` and excludes
+  `requests/` and `file-history/` JSONL sidecars from primary session import.
+
 ## ForgeCode
 
 - Source evidence: Forge repository commit

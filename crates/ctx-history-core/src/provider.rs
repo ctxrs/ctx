@@ -100,6 +100,15 @@ pub enum ProviderId {
     Mux,
     #[serde(rename = "reasonix", alias = "deepseek-reasonix")]
     Reasonix,
+    #[serde(
+        rename = "kode",
+        alias = "shareai-kode",
+        alias = "shareai_kode",
+        alias = "shareai_lab_kode"
+    )]
+    Kode,
+    #[serde(rename = "neovate", alias = "neovate-code", alias = "neovate_code")]
+    Neovate,
     #[serde(rename = "kimi_code_cli", alias = "kimi", alias = "kimi-code-cli")]
     KimiCodeCli,
     Aider,
@@ -112,7 +121,7 @@ pub enum ProviderId {
 }
 
 impl ProviderId {
-    pub const ALL: [Self; 46] = [
+    pub const ALL: [Self; 48] = [
         Self::Codex,
         Self::ClaudeCode,
         Self::ClaudeCliCrp,
@@ -151,6 +160,8 @@ impl ProviderId {
         Self::MistralVibe,
         Self::Mux,
         Self::Reasonix,
+        Self::Kode,
+        Self::Neovate,
         Self::KimiCodeCli,
         Self::Aider,
         Self::ClineRoo,
@@ -477,8 +488,10 @@ mod tests {
             ProviderId::Hermes,
             ProviderId::Kilo,
             ProviderId::KiroCli,
+            ProviderId::Kode,
             ProviderId::KimiCodeCli,
             ProviderId::NanoClaw,
+            ProviderId::Neovate,
             ProviderId::OpenCode,
             ProviderId::OpenClaw,
             ProviderId::OpenHands,

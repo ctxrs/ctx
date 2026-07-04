@@ -1,0 +1,3 @@
+{"type":"user","uuid":"kode-bad-u1","parentUuid":null,"sessionId":"kode-malformed-1","timestamp":"2026-07-04T12:10:00Z","cwd":"/workspace/kode","message":{"role":"user","content":[{"type":"text","text":"kode malformed oracle prompt"}]}}
+{"type":"assistant","uuid":"kode-bad-a1","parentUuid":"kode-bad-u1","sessionId":"kode-malformed-1","timestamp":"2026-07-04T12:10:01Z","cwd":"/workspace/kode","message":{"role":"assistant","content":[{"type":"text","text":"this row is fine"}]}}
+{"type":"assistant","uuid":"kode-bad-a2","parentUuid":"kode-bad-a1","sessionId":"kode-malformed-1"
