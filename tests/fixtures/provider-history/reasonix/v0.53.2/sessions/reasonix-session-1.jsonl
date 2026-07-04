@@ -1,0 +1,5 @@
+{"role":"system","content":"Reasonix fixture system context"}
+{"role":"user","content":"reasonix jsonl oracle prompt"}
+{"role":"assistant","content":"reasonix jsonl oracle answer","reasoning_content":"short sanitized reasoning summary","tool_calls":[{"id":"call-reasonix-write","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"src/reasonix_oracle.txt\",\"content\":\"proof\"}"}}]}
+{"role":"tool","tool_call_id":"call-reasonix-write","name":"write_file","content":"wrote src/reasonix_oracle.txt"}
+{"role":"assistant","content":"done with reasonix jsonl oracle"}

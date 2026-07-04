@@ -1718,6 +1718,71 @@
       ]
     },
     {
+      "id": "reasonix",
+      "display_name": "Reasonix",
+      "priority": "p1",
+      "status": "local_import_when_supported",
+      "capture_provider": "reasonix",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "reasonix_session_jsonl_tree",
+          "fidelity": "imported",
+          "proof": [
+            "ctx sources",
+            "ctx import --provider reasonix",
+            "cargo test -p ctx-history-capture native_reasonix_fixture_imports_searches_reimports_and_sidecars"
+          ],
+          "notes": [
+            "Reads Reasonix session JSONL files under ~/.reasonix/sessions or an explicit sessions tree/transcript file.",
+            "Merges adjacent .events.jsonl, .meta.json, .pending.json, and .plan.json sidecars when present."
+          ]
+        }
+      ],
+      "history_locations": [
+        "~/.reasonix/sessions/*.jsonl",
+        "~/.reasonix/sessions/*.events.jsonl",
+        "~/.reasonix/sessions/*.meta.json",
+        "~/.reasonix/sessions/*.pending.json",
+        "~/.reasonix/sessions/*.plan.json"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": false,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": true,
+        "command_output": false,
+        "files_touched": true,
+        "artifacts": false,
+        "model_identity": true,
+        "costs": true,
+        "token_usage": true,
+        "parent_child_session_edges": false
+      },
+      "redaction_notes": [
+        "Raw provider paths are retained only as local source metadata for citations.",
+        "Usage and cost fields are numeric metadata; raw sidecar/session JSON is retained only in capped local previews."
+      ],
+      "blockers": [
+        "Importer is based on esengine/DeepSeek-Reasonix tag v0.53.2 and sanitized JSONL fixtures; future schema changes may need adapter updates.",
+        "Base session ChatMessage rows do not include timestamps, so ctx uses event/transcript timestamps when available and otherwise falls back to the import timestamp."
+      ],
+      "public_docs": "docs/provider-support.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/reasonix/v0.53.2/sessions",
+        "tests/fixtures/provider-history/reasonix/v0.53.2/transcripts/reasonix-explicit-transcript.jsonl"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs",
+        "tests/fixtures/provider-history/reasonix/v0.53.2"
+      ]
+    },
+    {
       "id": "cline",
       "display_name": "Cline",
       "priority": "p1",

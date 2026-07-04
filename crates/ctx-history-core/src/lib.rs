@@ -201,6 +201,7 @@ text_enum! {
         ForgeCode => "forgecode",
         MistralVibe => "mistral_vibe",
         Mux => "mux",
+        Reasonix => "reasonix",
         OpenClaw => "openclaw",
         Hermes => "hermes",
         NanoClaw => "nanoclaw",
@@ -1562,6 +1563,10 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<CaptureProvider>("\"mux\"").unwrap(),
             CaptureProvider::Mux
+        );
+        assert_eq!(
+            serde_json::from_str::<CaptureProvider>("\"reasonix\"").unwrap(),
+            CaptureProvider::Reasonix
         );
 
         let sync: SyncMetadata = serde_json::from_value(json!({})).unwrap();

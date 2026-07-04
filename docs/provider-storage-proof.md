@@ -180,6 +180,30 @@ IDE/application storage imports.
   schema-backed by the source anchors in
   `tests/fixtures/provider-history/mux/v0.27.0/README.md`.
 
+## Reasonix
+
+- Source evidence: `reasonix@0.53.2` resolves to `esengine/DeepSeek-Reasonix`
+  tag `v0.53.2` (`b307987c0bb86ebee80b0d058ed92de75419ad8e`).
+- Path evidence: `src/memory/session.ts` defines session files under
+  `~/.reasonix/sessions/<sanitizeName(session)>.jsonl`.
+- Sidecar evidence: the same module defines `.events.jsonl`, `.meta.json`,
+  `.pending.json`, `.plan.json`, and `.jsonl.bak` as known session sidecars,
+  and rename/delete operations move those sidecars with the base JSONL.
+- Session evidence: `src/types.ts` defines `ChatMessage` rows with `role`,
+  `content`, tool-call fields, and `reasoning_content`; `session.ts` appends
+  those messages as JSONL and loads parsed records that have `role`.
+- Event evidence: `src/adapters/event-sink-jsonl.ts` appends typed events to
+  `<session>.events.jsonl`; `src/core/events.ts` defines user/model/tool/file,
+  plan, usage, cost, and error event fields.
+- Transcript evidence: `src/transcript/log.ts` defines an explicit transcript
+  JSONL format with `_meta`, `turn`, `role`, `content`, tool, error, usage,
+  and cost fields.
+- `ctx` imports this shape as `reasonix_session_jsonl_tree`, reading base
+  session JSONL plus adjacent event/meta/pending/plan sidecars read-only.
+- Caveat: base session `ChatMessage` rows do not carry timestamps, so ctx uses
+  event/transcript timestamps when present and otherwise falls back to the
+  deterministic import timestamp.
+
 ## OpenHands
 
 - Source evidence: OpenHands `get_default_persistence_dir()` checks

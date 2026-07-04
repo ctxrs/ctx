@@ -45,8 +45,8 @@ use ctx_history_capture::{
     import_kimi_code_cli_history, import_kiro_sqlite, import_mistral_vibe_history,
     import_mux_history, import_nanoclaw_project, import_openclaw_history, import_opencode_sqlite,
     import_openhands_file_events, import_pi_session_jsonl, import_qwen_code_history,
-    import_roo_task_json_history, import_shelley_sqlite, import_zed_threads_sqlite,
-    provider_source_for_path, provider_source_spec, stable_capture_uuid,
+    import_reasonix_history, import_roo_task_json_history, import_shelley_sqlite,
+    import_zed_threads_sqlite, provider_source_for_path, provider_source_spec, stable_capture_uuid,
     validate_custom_history_jsonl_v1, validate_custom_history_jsonl_v1_reader,
     AiderDeskImportOptions, AntigravityCliImportOptions, AstrBotSqliteImportOptions,
     AutohandCodeImportOptions, CatalogSummary, ClaudeProjectsImportOptions,
@@ -61,8 +61,8 @@ use ctx_history_capture::{
     MistralVibeImportOptions, MuxImportOptions, NanoClawImportOptions, OpenClawImportOptions,
     OpenCodeSqliteImportOptions, OpenHandsImportOptions, PiSessionImportOptions,
     ProviderImportSummary, ProviderImportSupport, ProviderSource, ProviderSourceStatus,
-    QwenCodeImportOptions, RooTaskJsonImportOptions, ShelleySqliteImportOptions,
-    ZedThreadsSqliteImportOptions,
+    QwenCodeImportOptions, ReasonixImportOptions, RooTaskJsonImportOptions,
+    ShelleySqliteImportOptions, ZedThreadsSqliteImportOptions,
 };
 use ctx_history_core::{
     database_path, default_data_root, utc_now, CaptureProvider, ContextCitation,
@@ -732,6 +732,8 @@ enum NativeProviderArg {
     )]
     MistralVibe,
     Mux,
+    #[value(name = "reasonix", alias = "deepseek-reasonix")]
+    Reasonix,
     #[value(name = "openclaw", alias = "open-claw", alias = "open_claw")]
     OpenClaw,
     Hermes,
@@ -810,6 +812,8 @@ enum ProviderArg {
     )]
     MistralVibe,
     Mux,
+    #[value(name = "reasonix", alias = "deepseek-reasonix")]
+    Reasonix,
     #[value(name = "openclaw", alias = "open-claw", alias = "open_claw")]
     OpenClaw,
     Hermes,
@@ -879,6 +883,7 @@ impl NativeProviderArg {
             Self::ForgeCode => CaptureProvider::ForgeCode,
             Self::MistralVibe => CaptureProvider::MistralVibe,
             Self::Mux => CaptureProvider::Mux,
+            Self::Reasonix => CaptureProvider::Reasonix,
             Self::OpenClaw => CaptureProvider::OpenClaw,
             Self::Hermes => CaptureProvider::Hermes,
             Self::NanoClaw => CaptureProvider::NanoClaw,
@@ -939,6 +944,7 @@ impl ProviderArg {
             Self::ForgeCode => CaptureProvider::ForgeCode,
             Self::MistralVibe => CaptureProvider::MistralVibe,
             Self::Mux => CaptureProvider::Mux,
+            Self::Reasonix => CaptureProvider::Reasonix,
             Self::OpenClaw => CaptureProvider::OpenClaw,
             Self::Hermes => CaptureProvider::Hermes,
             Self::NanoClaw => CaptureProvider::NanoClaw,
@@ -978,6 +984,7 @@ impl ProviderArg {
             Self::ForgeCode => "forgecode",
             Self::MistralVibe => "mistral-vibe",
             Self::Mux => "mux",
+            Self::Reasonix => "reasonix",
             Self::OpenClaw => "openclaw",
             Self::Hermes => "hermes",
             Self::NanoClaw => "nanoclaw",
@@ -5834,6 +5841,17 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
+        CaptureProvider::Reasonix => import_reasonix_history(
+            &source.path,
+            store,
+            ReasonixImportOptions {
+                source_path: Some(source.path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: true,
+                ..ReasonixImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
         CaptureProvider::OpenClaw => import_openclaw_history(
             &source.path,
             store,
@@ -6166,6 +6184,7 @@ fn source_uses_import_file_manifest(source: &SourceInfo) -> bool {
             | "shelley_sqlite"
             | "cline_task_directory_json"
             | "roo_task_directory_json"
+            | "reasonix_session_jsonl_tree"
             | "codebuddy_history_json"
     )
 }
@@ -6273,6 +6292,19 @@ fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bool {
                     path.file_name().and_then(|name| name.to_str()),
                     Some("chat.jsonl" | "partial.json")
                 ) && path.starts_with(&source.path))
+        }
+        CaptureProvider::Reasonix => {
+            path == source.path
+                || (path.starts_with(&source.path)
+                    && path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| {
+                            (name.ends_with(".jsonl") && !name.ends_with(".jsonl.bak"))
+                                || name.ends_with(".meta.json")
+                                || name.ends_with(".pending.json")
+                                || name.ends_with(".plan.json")
+                        }))
         }
         CaptureProvider::CopilotCli => {
             path.file_name().and_then(|name| name.to_str()) == Some("events.jsonl")
@@ -6597,6 +6629,7 @@ fn source_uses_incremental_event_search(source: &SourceInfo) -> bool {
             | CaptureProvider::ForgeCode
             | CaptureProvider::MistralVibe
             | CaptureProvider::Mux
+            | CaptureProvider::Reasonix
             | CaptureProvider::Cline
             | CaptureProvider::RooCode
             | CaptureProvider::CodeBuddy

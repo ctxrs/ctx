@@ -252,6 +252,12 @@ const MUX_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     source_kind: ProviderSourceKind::NativeHistory,
 }];
 
+const REASONIX_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
+    path_components: &[".reasonix", "sessions"],
+    source_format: "reasonix_session_jsonl_tree",
+    source_kind: ProviderSourceKind::NativeHistory,
+}];
+
 const OPENCLAW_DEFAULTS: &[ProviderDefaultLocation] = &[
     ProviderDefaultLocation {
         path_components: &[".openclaw"],
@@ -593,6 +599,16 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         provider: CaptureProvider::Mux,
         display_name: "Mux",
         default_locations: MUX_DEFAULTS,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
+    ProviderSourceSpec {
+        provider: CaptureProvider::Reasonix,
+        display_name: "Reasonix",
+        default_locations: REASONIX_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         raw_retention: ProviderRawRetention::PathReference,
@@ -1465,6 +1481,8 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::MistralVibe => "mistral_vibe_session_jsonl",
         CaptureProvider::Mux if path.is_dir() => "mux_session_jsonl_tree",
         CaptureProvider::Mux => "mux_session_jsonl",
+        CaptureProvider::Reasonix if path.is_dir() => "reasonix_session_jsonl_tree",
+        CaptureProvider::Reasonix => "reasonix_session_jsonl",
         CaptureProvider::OpenClaw => "openclaw_session_jsonl_tree",
         CaptureProvider::Hermes => "hermes_state_sqlite",
         CaptureProvider::NanoClaw => "nanoclaw_project",
@@ -1608,6 +1626,9 @@ fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::Mux => {
             Some("path exists but no Mux chat.jsonl or partial.json session files were found")
         }
+        CaptureProvider::Reasonix => {
+            Some("path exists but no Reasonix session JSONL files were found")
+        }
         CaptureProvider::OpenClaw => {
             Some("path exists but no OpenClaw agent session JSONL files were found")
         }
@@ -1680,6 +1701,13 @@ fn unknown_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         }
         CaptureProvider::IflowCli => {
             Some("path exists but the iFlow CLI session probe hit its scan budget")
+        }
+        CaptureProvider::MistralVibe => {
+            Some("path exists but the Mistral Vibe session probe hit its scan budget")
+        }
+        CaptureProvider::Mux => Some("path exists but the Mux session probe hit its scan budget"),
+        CaptureProvider::Reasonix => {
+            Some("path exists but the Reasonix session probe hit its scan budget")
         }
         CaptureProvider::OpenClaw => {
             Some("path exists but the OpenClaw transcript probe hit its scan budget")
@@ -1764,6 +1792,9 @@ fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'static str> {
         }
         CaptureProvider::Mux => {
             Some("path exists but Mux session files could not be read; check permissions")
+        }
+        CaptureProvider::Reasonix => {
+            Some("path exists but Reasonix session files could not be read; check permissions")
         }
         CaptureProvider::OpenClaw => Some(
             "path exists but OpenClaw session transcripts could not be read; check permissions",
@@ -1874,6 +1905,12 @@ fn default_location_import_probe(
                     .is_some_and(|parent| parent.join("meta.json").is_file())
         }),
         CaptureProvider::Mux => has_mux_session_files(path, 10_000),
+        CaptureProvider::Reasonix => has_jsonl_file_under_matching(path, 10_000, |candidate| {
+            candidate
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".jsonl") && !name.ends_with(".events.jsonl"))
+        }),
         CaptureProvider::Cline => has_task_json_file_under_matching(path, 10_000, |name| {
             matches!(
                 name,
@@ -2920,6 +2957,33 @@ mod tests {
     }
 
     #[test]
+    fn reasonix_discovery_uses_default_sessions() {
+        let temp = tempfile::tempdir().unwrap();
+        let default_sessions = temp.path().join(".reasonix/sessions");
+        std::fs::create_dir_all(&default_sessions).unwrap();
+        std::fs::write(
+            default_sessions.join("reasonix-discovery.events.jsonl"),
+            "{}\n",
+        )
+        .unwrap();
+        let empty_source =
+            discover_provider_sources_for_provider(temp.path(), CaptureProvider::Reasonix)
+                .into_iter()
+                .find(|source| source.path == default_sessions)
+                .unwrap();
+        assert_eq!(empty_source.status, ProviderSourceStatus::Empty);
+
+        write_reasonix_discovery_session(&default_sessions);
+        let source = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Reasonix)
+            .into_iter()
+            .find(|source| source.path == default_sessions)
+            .unwrap();
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+        assert_eq!(source.source_format, "reasonix_session_jsonl_tree");
+        assert_eq!(source.import_support, ProviderImportSupport::Native);
+    }
+
+    #[test]
     fn crush_discovery_uses_global_config_data_directory() {
         let _lock = ENV_LOCK.lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
@@ -3248,6 +3312,15 @@ mod tests {
         std::fs::write(
             session.join("chat.jsonl"),
             r#"{"id":"msg-mux-discovery","role":"user","parts":[{"type":"text","text":"mux discovery"}],"metadata":{"historySequence":0},"workspaceId":"mux-discovery"}"#,
+        )
+        .unwrap();
+    }
+
+    fn write_reasonix_discovery_session(sessions: &Path) {
+        std::fs::create_dir_all(sessions).unwrap();
+        std::fs::write(
+            sessions.join("reasonix-discovery.jsonl"),
+            r#"{"role":"user","content":"reasonix discovery"}"#,
         )
         .unwrap();
     }

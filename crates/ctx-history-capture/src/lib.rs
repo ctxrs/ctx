@@ -1028,6 +1028,27 @@ impl Default for MuxImportOptions {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ReasonixImportOptions {
+    pub machine_id: String,
+    pub source_path: Option<PathBuf>,
+    pub imported_at: DateTime<Utc>,
+    pub history_record_id: Option<Uuid>,
+    pub allow_partial_failures: bool,
+}
+
+impl Default for ReasonixImportOptions {
+    fn default() -> Self {
+        Self {
+            machine_id: default_machine_id(),
+            source_path: None,
+            imported_at: utc_now(),
+            history_record_id: None,
+            allow_partial_failures: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderFixtureLine {
     pub provider: CaptureProvider,
@@ -1318,6 +1339,9 @@ pub struct MistralVibeJsonlAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MuxJsonlAdapter;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ReasonixJsonlAdapter;
 
 impl ProviderCaptureAdapter for ProviderFixtureJsonlAdapter {
     fn provider(&self) -> CaptureProvider {
@@ -2541,6 +2565,24 @@ impl ProviderCaptureAdapter for MuxJsonlAdapter {
         context: &ProviderAdapterContext,
     ) -> Result<ProviderNormalizationResult> {
         normalize_mux_sessions(path, context)
+    }
+}
+
+impl ProviderCaptureAdapter for ReasonixJsonlAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Reasonix
+    }
+
+    fn source_format(&self) -> &str {
+        REASONIX_SOURCE_FORMAT
+    }
+
+    fn normalize_path(
+        &self,
+        path: &Path,
+        context: &ProviderAdapterContext,
+    ) -> Result<ProviderNormalizationResult> {
+        normalize_reasonix_sessions(path, context)
     }
 }
 
@@ -5103,6 +5145,25 @@ pub fn import_mux_history(
     )
 }
 
+pub fn import_reasonix_history(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: ReasonixImportOptions,
+) -> Result<ProviderImportSummary> {
+    import_native_jsonl_tree(
+        store,
+        NativeJsonlTreeImport {
+            path: path.as_ref(),
+            machine_id: options.machine_id,
+            source_path: options.source_path,
+            imported_at: options.imported_at,
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+        },
+        ReasonixJsonlAdapter,
+    )
+}
+
 struct NativeJsonlTreeImport<'a> {
     path: &'a Path,
     machine_id: String,
@@ -5189,6 +5250,7 @@ const IFLOW_CLI_SOURCE_FORMAT: &str = "iflow_cli_session_jsonl";
 const FORGECODE_SQLITE_SOURCE_FORMAT: &str = "forgecode_sqlite";
 const MISTRAL_VIBE_SOURCE_FORMAT: &str = "mistral_vibe_session_jsonl";
 const MUX_SOURCE_FORMAT: &str = "mux_session_jsonl";
+const REASONIX_SOURCE_FORMAT: &str = "reasonix_session_jsonl";
 const CODEX_MAX_TEXT_CHARS: usize = 16_000;
 const CODEX_MAX_METADATA_TEXT_CHARS: usize = 4_000;
 const CODEX_MAX_OUTPUT_PREVIEW_CHARS: usize = 4_000;
@@ -14598,6 +14660,7 @@ fn native_jsonl_missing_reason(provider: CaptureProvider) -> &'static str {
             "no Mistral Vibe meta.json/messages.jsonl session directories found"
         }
         CaptureProvider::Mux => "no Mux chat.jsonl or partial.json session files found",
+        CaptureProvider::Reasonix => "no Reasonix session JSONL files found",
         _ => "no native provider JSONL transcripts found",
     }
 }
@@ -19266,6 +19329,897 @@ fn mux_source_primary_path(source: &MuxSessionSource) -> &Path {
 }
 
 #[derive(Debug, Clone)]
+struct ReasonixSessionSource {
+    session_path: PathBuf,
+    events_path: Option<PathBuf>,
+    meta_path: Option<PathBuf>,
+    pending_path: Option<PathBuf>,
+    plan_path: Option<PathBuf>,
+}
+
+fn normalize_reasonix_sessions(
+    path: &Path,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    let mut session_sources = Vec::new();
+    collect_reasonix_session_sources(path, &mut session_sources)?;
+    session_sources.sort_by(|left, right| left.session_path.cmp(&right.session_path));
+    session_sources.dedup_by(|left, right| left.session_path == right.session_path);
+    if session_sources.is_empty() {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: native_jsonl_missing_reason(CaptureProvider::Reasonix),
+        });
+    }
+
+    let mut merged = ProviderNormalizationResult::default();
+    for source in session_sources {
+        let mut result = normalize_reasonix_session_source(&source, context)?;
+        merged.summary.merge(result.summary);
+        merged.captures.append(&mut result.captures);
+        merged.files_touched.append(&mut result.files_touched);
+    }
+    Ok(merged)
+}
+
+fn collect_reasonix_session_sources(
+    root: &Path,
+    sessions: &mut Vec<ReasonixSessionSource>,
+) -> Result<()> {
+    let metadata = fs::symlink_metadata(root)?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: root.to_path_buf(),
+            reason: "symlinked provider transcript roots are rejected",
+        });
+    }
+    ensure_provider_path_parents_are_not_symlinks(root)?;
+    if file_type.is_file() {
+        ensure_regular_provider_transcript_file(root)?;
+        if reasonix_is_primary_session_jsonl(root) {
+            sessions.push(reasonix_session_source_from_path(root)?);
+        } else if reasonix_is_events_sidecar(root) {
+            if let Some(session_path) = reasonix_session_path_from_events_sidecar(root) {
+                if session_path.is_file() {
+                    sessions.push(reasonix_session_source_from_path(&session_path)?);
+                }
+            }
+        }
+        return Ok(());
+    }
+    if !file_type.is_dir() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            collect_reasonix_session_sources(&path, sessions)?;
+        } else if file_type.is_file() && reasonix_is_primary_session_jsonl(&path) {
+            sessions.push(reasonix_session_source_from_path(&path)?);
+        }
+    }
+    Ok(())
+}
+
+fn reasonix_session_source_from_path(path: &Path) -> Result<ReasonixSessionSource> {
+    ensure_regular_provider_transcript_file(path)?;
+    Ok(ReasonixSessionSource {
+        session_path: path.to_path_buf(),
+        events_path: reasonix_optional_sidecar(path, ".events.jsonl")?,
+        meta_path: reasonix_optional_sidecar(path, ".meta.json")?,
+        pending_path: reasonix_optional_sidecar(path, ".pending.json")?,
+        plan_path: reasonix_optional_sidecar(path, ".plan.json")?,
+    })
+}
+
+fn reasonix_optional_sidecar(session_path: &Path, suffix: &str) -> Result<Option<PathBuf>> {
+    let Some(path) = reasonix_sidecar_path(session_path, suffix) else {
+        return Ok(None);
+    };
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            ensure_regular_provider_transcript_file(&path)?;
+            Ok(Some(path))
+        }
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(CaptureError::InvalidProviderTranscriptPath {
+                path,
+                reason: "symlinked provider transcript files are rejected",
+            })
+        }
+        Ok(_) => Ok(None),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(CaptureError::Io(err)),
+    }
+}
+
+fn reasonix_sidecar_path(session_path: &Path, suffix: &str) -> Option<PathBuf> {
+    let file_name = session_path.file_name()?.to_str()?;
+    let base = file_name.strip_suffix(".jsonl")?;
+    let mut path = session_path.to_path_buf();
+    path.set_file_name(format!("{base}{suffix}"));
+    Some(path)
+}
+
+fn reasonix_is_primary_session_jsonl(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".jsonl") && !name.ends_with(".events.jsonl"))
+}
+
+fn reasonix_is_events_sidecar(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".events.jsonl"))
+}
+
+fn reasonix_session_path_from_events_sidecar(path: &Path) -> Option<PathBuf> {
+    let file_name = path.file_name()?.to_str()?;
+    let base = file_name.strip_suffix(".events.jsonl")?;
+    let mut session = path.to_path_buf();
+    session.set_file_name(format!("{base}.jsonl"));
+    Some(session)
+}
+
+fn normalize_reasonix_session_source(
+    source: &ReasonixSessionSource,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    let mut result = ProviderNormalizationResult::default();
+    let meta = read_reasonix_json_sidecar(
+        source.meta_path.as_deref(),
+        "Reasonix meta.json",
+        &mut result.summary,
+    );
+    let pending = read_reasonix_json_sidecar(
+        source.pending_path.as_deref(),
+        "Reasonix pending.json",
+        &mut result.summary,
+    );
+    let plan = read_reasonix_json_sidecar(
+        source.plan_path.as_deref(),
+        "Reasonix plan.json",
+        &mut result.summary,
+    );
+    let (rows, transcript_meta) =
+        read_reasonix_session_jsonl(&source.session_path, &mut result.summary)?;
+    let sidecar_events = if let Some(events_path) = &source.events_path {
+        read_reasonix_events_jsonl(events_path, &mut result.summary)?
+    } else {
+        Vec::new()
+    };
+
+    let provider_session_id = source
+        .session_path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
+            path: source.session_path.clone(),
+            reason: "Reasonix session file is missing a session id",
+        })?;
+    let started_at = reasonix_transcript_meta_timestamp(&transcript_meta, "startedAt")
+        .or_else(|| rows.iter().find_map(|(_, value)| reasonix_timestamp(value)))
+        .or_else(|| {
+            sidecar_events
+                .iter()
+                .find_map(|(_, value)| reasonix_timestamp(value))
+        })
+        .unwrap_or(context.imported_at);
+    let ended_at = rows
+        .iter()
+        .filter_map(|(_, value)| reasonix_timestamp(value))
+        .chain(
+            sidecar_events
+                .iter()
+                .filter_map(|(_, value)| reasonix_timestamp(value)),
+        )
+        .max()
+        .filter(|time| *time > started_at);
+    let cwd = reasonix_metadata_string(&meta, "workspace");
+    let raw_source_path = source.session_path.display().to_string();
+
+    if rows.is_empty() && sidecar_events.is_empty() {
+        result.captures.push((
+            0,
+            reasonix_capture(
+                ReasonixCaptureDraft {
+                    provider_session_id: provider_session_id.clone(),
+                    started_at,
+                    ended_at,
+                    cwd,
+                    source,
+                    meta: &meta,
+                    pending: &pending,
+                    plan: &plan,
+                    transcript_meta: &transcript_meta,
+                    event: None,
+                },
+                context,
+            ),
+        ));
+        return Ok(result);
+    }
+
+    for (line_number, value) in rows {
+        let occurred_at = reasonix_timestamp(&value).unwrap_or(started_at);
+        let event = reasonix_session_event(
+            &provider_session_id,
+            line_number,
+            &value,
+            occurred_at,
+            &source.session_path,
+        );
+        result
+            .files_touched
+            .extend(reasonix_file_touches_from_raw_value(
+                &provider_session_id,
+                Some(raw_source_path.as_str()),
+                &value,
+                &event,
+                line_number,
+            ));
+        result.captures.push((
+            line_number,
+            reasonix_capture(
+                ReasonixCaptureDraft {
+                    provider_session_id: provider_session_id.clone(),
+                    started_at,
+                    ended_at,
+                    cwd: cwd.clone(),
+                    source,
+                    meta: &meta,
+                    pending: &pending,
+                    plan: &plan,
+                    transcript_meta: &transcript_meta,
+                    event: Some(event),
+                },
+                context,
+            ),
+        ));
+    }
+
+    for (line_number, value) in sidecar_events {
+        let occurred_at = reasonix_timestamp(&value).unwrap_or(started_at);
+        let event = reasonix_sidecar_event(
+            &provider_session_id,
+            line_number,
+            &value,
+            occurred_at,
+            source
+                .events_path
+                .as_deref()
+                .unwrap_or(&source.session_path),
+        );
+        result
+            .files_touched
+            .extend(reasonix_file_touches_from_raw_value(
+                &provider_session_id,
+                Some(raw_source_path.as_str()),
+                &value,
+                &event,
+                line_number,
+            ));
+        result.captures.push((
+            line_number,
+            reasonix_capture(
+                ReasonixCaptureDraft {
+                    provider_session_id: provider_session_id.clone(),
+                    started_at,
+                    ended_at,
+                    cwd: cwd.clone(),
+                    source,
+                    meta: &meta,
+                    pending: &pending,
+                    plan: &plan,
+                    transcript_meta: &transcript_meta,
+                    event: Some(event),
+                },
+                context,
+            ),
+        ));
+    }
+
+    Ok(result)
+}
+
+fn read_reasonix_session_jsonl(
+    path: &Path,
+    summary: &mut ProviderImportSummary,
+) -> Result<(Vec<(usize, Value)>, Value)> {
+    let file = File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+    let mut line_number = 0usize;
+    let mut rows = Vec::new();
+    let mut transcript_meta = Value::Null;
+
+    while read_provider_jsonl_line(&mut reader, &mut line)? {
+        line_number += 1;
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let value: Value = match serde_json::from_slice(&line) {
+            Ok(value) => value,
+            Err(err) => {
+                push_provider_import_failure(
+                    summary,
+                    line_number,
+                    format!("malformed JSONL: {err}"),
+                );
+                continue;
+            }
+        };
+        match value.get("role").and_then(Value::as_str) {
+            Some("_meta") => {
+                transcript_meta = value.get("meta").cloned().unwrap_or(Value::Null);
+            }
+            Some(_) => rows.push((line_number, value)),
+            None => push_provider_import_failure(
+                summary,
+                line_number,
+                "Reasonix session JSONL record missing role".to_owned(),
+            ),
+        }
+    }
+
+    Ok((rows, transcript_meta))
+}
+
+fn read_reasonix_events_jsonl(
+    path: &Path,
+    summary: &mut ProviderImportSummary,
+) -> Result<Vec<(usize, Value)>> {
+    let file = File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+    let mut line_number = 0usize;
+    let mut rows = Vec::new();
+
+    while read_provider_jsonl_line(&mut reader, &mut line)? {
+        line_number += 1;
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let value: Value = match serde_json::from_slice(&line) {
+            Ok(value) => value,
+            Err(err) => {
+                push_provider_import_failure(
+                    summary,
+                    line_number,
+                    format!("malformed Reasonix events JSONL: {err}"),
+                );
+                continue;
+            }
+        };
+        if value.get("type").and_then(Value::as_str).is_some() {
+            rows.push((line_number, value));
+        } else {
+            push_provider_import_failure(
+                summary,
+                line_number,
+                "Reasonix events JSONL record missing type".to_owned(),
+            );
+        }
+    }
+
+    Ok(rows)
+}
+
+fn read_reasonix_json_sidecar(
+    path: Option<&Path>,
+    label: &str,
+    summary: &mut ProviderImportSummary,
+) -> Value {
+    let Some(path) = path else {
+        return Value::Null;
+    };
+    match read_text_file_limited(path, MAX_PROVIDER_JSONL_LINE_BYTES, label) {
+        Ok(raw) => match serde_json::from_str::<Value>(&raw) {
+            Ok(value) => value,
+            Err(err) => {
+                push_provider_import_failure(summary, 0, format!("invalid {label}: {err}"));
+                Value::Null
+            }
+        },
+        Err(err) => {
+            push_provider_import_failure(summary, 0, format!("could not read {label}: {err}"));
+            Value::Null
+        }
+    }
+}
+
+struct ReasonixCaptureDraft<'a> {
+    provider_session_id: String,
+    started_at: DateTime<Utc>,
+    ended_at: Option<DateTime<Utc>>,
+    cwd: Option<String>,
+    source: &'a ReasonixSessionSource,
+    meta: &'a Value,
+    pending: &'a Value,
+    plan: &'a Value,
+    transcript_meta: &'a Value,
+    event: Option<ProviderEventEnvelope>,
+}
+
+fn reasonix_capture(
+    draft: ReasonixCaptureDraft<'_>,
+    context: &ProviderAdapterContext,
+) -> ProviderCaptureEnvelope {
+    native_provider_capture(
+        NativeSessionDraft {
+            provider: CaptureProvider::Reasonix,
+            source_format: REASONIX_SOURCE_FORMAT,
+            provider_session_id: draft.provider_session_id.clone(),
+            parent_provider_session_id: None,
+            root_provider_session_id: None,
+            external_agent_id: None,
+            agent_type: AgentType::Primary,
+            role_hint: Some("primary".to_owned()),
+            is_primary: true,
+            started_at: draft.started_at,
+            ended_at: draft.ended_at,
+            cwd: draft.cwd,
+            fidelity: Fidelity::Imported,
+            raw_source_path: draft.source.session_path.display().to_string(),
+            trust: ProviderSourceTrust::ProviderNative,
+            source_metadata: json!({
+                "adapter": REASONIX_SOURCE_FORMAT,
+                "source_path": draft.source.session_path.display().to_string(),
+                "events_path": draft.source.events_path.as_ref().map(|path| path.display().to_string()),
+                "meta_path": draft.source.meta_path.as_ref().map(|path| path.display().to_string()),
+                "pending_path": draft.source.pending_path.as_ref().map(|path| path.display().to_string()),
+                "plan_path": draft.source.plan_path.as_ref().map(|path| path.display().to_string()),
+            }),
+            session_metadata: json!({
+                "source_format": REASONIX_SOURCE_FORMAT,
+                "provider": CaptureProvider::Reasonix.as_str(),
+                "session_id": draft.provider_session_id,
+                "branch": reasonix_metadata_string(draft.meta, "branch"),
+                "summary": reasonix_metadata_string(draft.meta, "summary"),
+                "turn_count": draft.meta.get("turnCount").and_then(Value::as_u64),
+                "workspace": reasonix_metadata_string(draft.meta, "workspace"),
+                "total_cost_usd": draft.meta.get("totalCostUsd").and_then(Value::as_f64),
+                "balance_currency": reasonix_metadata_string(draft.meta, "balanceCurrency"),
+                "cache_hit_tokens": draft.meta.get("cacheHitTokens").and_then(Value::as_u64),
+                "cache_miss_tokens": draft.meta.get("cacheMissTokens").and_then(Value::as_u64),
+                "total_completion_tokens": draft.meta.get("totalCompletionTokens").and_then(Value::as_u64),
+                "last_prompt_tokens": draft.meta.get("lastPromptTokens").and_then(Value::as_u64),
+                "auto_title_generated": draft.meta.get("autoTitleGenerated").and_then(Value::as_bool),
+                "transcript_meta": provider_capped_json_value(draft.transcript_meta, PROVIDER_MAX_PREVIEW_CHARS),
+                "pending": provider_capped_json_value(draft.pending, PROVIDER_MAX_PREVIEW_CHARS),
+                "plan": provider_capped_json_value(draft.plan, PROVIDER_MAX_PREVIEW_CHARS),
+            }),
+        },
+        context,
+        draft.event,
+    )
+}
+
+fn reasonix_session_event(
+    provider_session_id: &str,
+    line_number: usize,
+    value: &Value,
+    occurred_at: DateTime<Utc>,
+    path: &Path,
+) -> ProviderEventEnvelope {
+    let role = value
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let event_type = reasonix_session_event_type(role, value);
+    native_event(NativeEventDraft {
+        provider: CaptureProvider::Reasonix,
+        source_format: REASONIX_SOURCE_FORMAT,
+        provider_session_id: provider_session_id.to_owned(),
+        provider_event_index: (line_number - 1) as u64,
+        provider_event_hash: Some(reasonix_session_event_id(value, line_number, role)),
+        cursor: format!("{}:line:{line_number}", path.display()),
+        event_type,
+        role: Some(reasonix_session_role(role)),
+        occurred_at,
+        text: reasonix_session_event_text(role, value, event_type),
+        body: value.clone(),
+        metadata: json!({
+            "source": REASONIX_SOURCE_FORMAT,
+            "source_format": REASONIX_SOURCE_FORMAT,
+            "line": line_number,
+            "record_kind": if reasonix_is_transcript_record(value) { "transcript" } else { "chat_message" },
+            "role": role,
+            "turn": value.get("turn").and_then(Value::as_u64),
+            "name": value.get("name").and_then(Value::as_str),
+            "tool": value.get("tool").and_then(Value::as_str),
+            "tool_call_id": value.get("tool_call_id").and_then(Value::as_str),
+            "model": value.get("model").cloned(),
+            "usage": value.get("usage").map(|usage| provider_capped_json_value(usage, PROVIDER_MAX_PREVIEW_CHARS)),
+            "cost_usd": value.get("cost").or_else(|| value.get("costUsd")).and_then(Value::as_f64),
+            "prefix_hash": value.get("prefixHash").and_then(Value::as_str),
+            "tool_calls": value.get("tool_calls").map(|calls| provider_capped_json_value(calls, PROVIDER_MAX_PREVIEW_CHARS)),
+            "error": value.get("error").and_then(Value::as_str),
+        }),
+    })
+}
+
+fn reasonix_sidecar_event(
+    provider_session_id: &str,
+    line_number: usize,
+    value: &Value,
+    occurred_at: DateTime<Utc>,
+    path: &Path,
+) -> ProviderEventEnvelope {
+    let event_type_name = value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let event_type = reasonix_sidecar_event_type(event_type_name, value);
+    native_event(NativeEventDraft {
+        provider: CaptureProvider::Reasonix,
+        source_format: REASONIX_SOURCE_FORMAT,
+        provider_session_id: provider_session_id.to_owned(),
+        provider_event_index: 1_000_000 + (line_number - 1) as u64,
+        provider_event_hash: Some(reasonix_sidecar_event_id(
+            value,
+            line_number,
+            event_type_name,
+        )),
+        cursor: format!("{}:line:{line_number}", path.display()),
+        event_type,
+        role: Some(reasonix_sidecar_role(event_type_name, event_type)),
+        occurred_at,
+        text: reasonix_sidecar_event_text(event_type_name, value, event_type),
+        body: value.clone(),
+        metadata: json!({
+            "source": "reasonix_events_jsonl",
+            "source_format": REASONIX_SOURCE_FORMAT,
+            "line": line_number,
+            "event_type": event_type_name,
+            "turn": value.get("turn").and_then(Value::as_u64),
+            "call_id": value.get("callId").and_then(Value::as_str),
+            "name": value.get("name").and_then(Value::as_str),
+            "model": value.get("model").cloned(),
+            "usage": value.get("usage").map(|usage| provider_capped_json_value(usage, PROVIDER_MAX_PREVIEW_CHARS)),
+            "cost_usd": value.get("costUsd").or_else(|| value.get("cost")).and_then(Value::as_f64),
+            "prefix_hash": value.get("prefixHash").and_then(Value::as_str),
+            "tool_calls": value.get("toolCalls").map(|calls| provider_capped_json_value(calls, PROVIDER_MAX_PREVIEW_CHARS)),
+        }),
+    })
+}
+
+fn reasonix_session_event_type(role: &str, value: &Value) -> EventType {
+    if role == "tool" || value.get("tool_call_id").is_some() {
+        EventType::ToolOutput
+    } else if role == "error" || value.get("error").is_some() {
+        EventType::Notice
+    } else if role == "done" {
+        EventType::Summary
+    } else if value
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .is_some_and(|calls| !calls.is_empty())
+    {
+        EventType::ToolCall
+    } else if role == "system" {
+        EventType::Notice
+    } else {
+        EventType::Message
+    }
+}
+
+fn reasonix_sidecar_event_type(event_type: &str, value: &Value) -> EventType {
+    match event_type {
+        "user.message" | "model.final" => {
+            if value
+                .get("toolCalls")
+                .and_then(Value::as_array)
+                .is_some_and(|calls| !calls.is_empty())
+            {
+                EventType::ToolCall
+            } else {
+                EventType::Message
+            }
+        }
+        "tool.intent"
+        | "tool.call"
+        | "tool.preparing"
+        | "tool.dispatched"
+        | "tool.confirm.allow"
+        | "tool.confirm.deny"
+        | "tool.confirm.always_allow" => EventType::ToolCall,
+        "tool.result" | "tool.denied" => EventType::ToolOutput,
+        "effect.file.touched" => EventType::FileTouched,
+        "plan.submitted"
+        | "plan.step.completed"
+        | "checkpoint.created"
+        | "checkpoint.restored"
+        | "session.compacted" => EventType::Summary,
+        _ => EventType::Notice,
+    }
+}
+
+fn reasonix_session_role(role: &str) -> EventRole {
+    if role.starts_with("assistant") {
+        EventRole::Assistant
+    } else {
+        provider_role(Some(role))
+    }
+}
+
+fn reasonix_sidecar_role(event_type: &str, ctx_event_type: EventType) -> EventRole {
+    match event_type {
+        "user.message" => EventRole::User,
+        "model.final" | "model.turn.started" => EventRole::Assistant,
+        event if event.starts_with("tool.") => EventRole::Tool,
+        _ if ctx_event_type == EventType::FileTouched => EventRole::System,
+        _ => EventRole::System,
+    }
+}
+
+fn reasonix_session_event_text(role: &str, value: &Value, event_type: EventType) -> String {
+    let mut parts = Vec::new();
+    if let Some(content) = value
+        .get("content")
+        .and_then(provider_value_text)
+        .filter(|text| !text.trim().is_empty())
+    {
+        parts.push(content);
+    }
+    if let Some(reasoning) = value
+        .get("reasoning_content")
+        .and_then(provider_value_text)
+        .filter(|text| !text.trim().is_empty())
+    {
+        parts.push(format!("reasoning: {reasoning}"));
+    }
+    if let Some(tools) = value.get("tool_calls").and_then(reasonix_tool_calls_text) {
+        parts.push(tools);
+    }
+    if !parts.is_empty() {
+        return parts.join("\n");
+    }
+    value
+        .get("tool")
+        .or_else(|| value.get("name"))
+        .and_then(Value::as_str)
+        .map(|name| match event_type {
+            EventType::ToolOutput => format!("tool result: {name}"),
+            EventType::ToolCall => format!("tool call: {name}"),
+            _ => name.to_owned(),
+        })
+        .or_else(|| {
+            value
+                .get("error")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| format!("Reasonix {role} message"))
+}
+
+fn reasonix_sidecar_event_text(
+    event_type: &str,
+    value: &Value,
+    ctx_event_type: EventType,
+) -> String {
+    match event_type {
+        "user.message" => value
+            .get("text")
+            .and_then(provider_value_text)
+            .unwrap_or_else(|| "Reasonix user message".to_owned()),
+        "model.final" => {
+            let mut parts = Vec::new();
+            if let Some(content) = value.get("content").and_then(provider_value_text) {
+                parts.push(content);
+            }
+            if let Some(reasoning) = value.get("reasoningContent").and_then(provider_value_text) {
+                parts.push(format!("reasoning: {reasoning}"));
+            }
+            if let Some(tools) = value.get("toolCalls").and_then(reasonix_tool_calls_text) {
+                parts.push(tools);
+            }
+            if parts.is_empty() {
+                "Reasonix model final".to_owned()
+            } else {
+                parts.join("\n")
+            }
+        }
+        "tool.intent" | "tool.call" | "tool.preparing" | "tool.dispatched" => value
+            .get("name")
+            .and_then(Value::as_str)
+            .map(|name| format!("tool call: {name}"))
+            .unwrap_or_else(|| event_type.to_owned()),
+        "tool.result" | "tool.denied" => value
+            .get("output")
+            .or_else(|| value.get("reason"))
+            .and_then(provider_value_text)
+            .unwrap_or_else(|| event_type.to_owned()),
+        "effect.file.touched" => {
+            let path = value
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown file");
+            let mode = value.get("mode").and_then(Value::as_str).unwrap_or("touch");
+            format!("{mode}: {path}")
+        }
+        "plan.submitted" => value
+            .get("body")
+            .and_then(provider_value_text)
+            .or_else(|| value.get("steps").and_then(provider_value_text))
+            .unwrap_or_else(|| "Reasonix plan submitted".to_owned()),
+        "error" => value
+            .get("message")
+            .and_then(provider_value_text)
+            .unwrap_or_else(|| "Reasonix error".to_owned()),
+        "warning" | "status" => value
+            .get("text")
+            .or_else(|| value.get("message"))
+            .and_then(provider_value_text)
+            .unwrap_or_else(|| event_type.to_owned()),
+        _ if ctx_event_type == EventType::Summary => value
+            .get("body")
+            .or_else(|| value.get("title"))
+            .or_else(|| value.get("message"))
+            .and_then(provider_value_text)
+            .unwrap_or_else(|| event_type.to_owned()),
+        _ => event_type.to_owned(),
+    }
+}
+
+fn reasonix_tool_calls_text(value: &Value) -> Option<String> {
+    let calls = value.as_array()?;
+    let names = calls
+        .iter()
+        .filter_map(|call| {
+            call.pointer("/function/name")
+                .or_else(|| call.get("name"))
+                .or_else(|| call.get("id"))
+                .and_then(Value::as_str)
+                .filter(|name| !name.trim().is_empty())
+        })
+        .collect::<Vec<_>>();
+    if names.is_empty() {
+        Some("tool calls".to_owned())
+    } else {
+        Some(format!("tool calls: {}", names.join(", ")))
+    }
+}
+
+fn reasonix_session_event_id(value: &Value, line_number: usize, role: &str) -> String {
+    value
+        .get("id")
+        .or_else(|| value.get("message_id"))
+        .or_else(|| value.get("tool_call_id"))
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("{role}:line-{line_number}"))
+}
+
+fn reasonix_sidecar_event_id(value: &Value, line_number: usize, event_type: &str) -> String {
+    value
+        .get("id")
+        .or_else(|| value.get("callId"))
+        .and_then(|id| match id {
+            Value::String(raw) => Some(raw.clone()),
+            Value::Number(number) => Some(number.to_string()),
+            _ => None,
+        })
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or_else(|| format!("{event_type}:line-{line_number}"))
+}
+
+fn reasonix_timestamp(value: &Value) -> Option<DateTime<Utc>> {
+    value
+        .get("ts")
+        .or_else(|| value.get("timestamp"))
+        .and_then(Value::as_str)
+        .and_then(parse_rfc3339_utc)
+}
+
+fn reasonix_transcript_meta_timestamp(value: &Value, field: &str) -> Option<DateTime<Utc>> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .and_then(parse_rfc3339_utc)
+}
+
+fn reasonix_metadata_string(value: &Value, field: &str) -> Option<String> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|raw| !raw.trim().is_empty())
+        .map(str::to_owned)
+}
+
+fn reasonix_is_transcript_record(value: &Value) -> bool {
+    value.get("ts").and_then(Value::as_str).is_some()
+        && value.get("turn").and_then(Value::as_u64).is_some()
+        && value.get("content").and_then(Value::as_str).is_some()
+}
+
+fn reasonix_file_touches_from_raw_value(
+    provider_session_id: &str,
+    raw_source_path: Option<&str>,
+    raw_value: &Value,
+    event: &ProviderEventEnvelope,
+    line_number: usize,
+) -> Vec<(usize, ProviderFileTouchedEnvelope)> {
+    if !matches!(
+        event.event_type,
+        EventType::ToolCall
+            | EventType::ToolOutput
+            | EventType::CommandOutput
+            | EventType::FileTouched
+    ) {
+        return Vec::new();
+    }
+
+    let mut drafts = Vec::new();
+    let supports_structured = event_type_supports_structured_file_touches(event.event_type)
+        || event.event_type == EventType::ToolOutput;
+    collect_patch_file_touches(raw_value, &mut drafts);
+    if drafts.is_empty() && supports_structured {
+        collect_structured_file_touches(raw_value, &mut drafts);
+    }
+    if drafts.is_empty() {
+        let mut embedded = Vec::new();
+        reasonix_collect_embedded_json_args(raw_value, &mut embedded);
+        for value in embedded {
+            collect_patch_file_touches(&value, &mut drafts);
+            if supports_structured {
+                collect_structured_file_touches(&value, &mut drafts);
+            }
+        }
+    }
+
+    provider_file_touch_envelopes(
+        ProviderFileTouchEnvelopeContext {
+            provider: CaptureProvider::Reasonix,
+            provider_session_id,
+            source_format: REASONIX_SOURCE_FORMAT,
+            raw_source_path,
+            occurred_at: event.occurred_at,
+            provider_event_index: Some(event.provider_event_index),
+            provider_touch_base_index: event.provider_event_index << 16,
+            line_number,
+        },
+        drafts,
+    )
+}
+
+fn reasonix_collect_embedded_json_args(value: &Value, out: &mut Vec<Value>) {
+    match value {
+        Value::Object(object) => {
+            for key in ["args", "arguments"] {
+                if let Some(raw) = object.get(key).and_then(Value::as_str) {
+                    if let Ok(parsed) = serde_json::from_str::<Value>(raw) {
+                        out.push(parsed);
+                    }
+                }
+            }
+            if let Some(raw) = value.pointer("/function/arguments").and_then(Value::as_str) {
+                if let Ok(parsed) = serde_json::from_str::<Value>(raw) {
+                    out.push(parsed);
+                }
+            }
+            for child in object.values() {
+                reasonix_collect_embedded_json_args(child, out);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                reasonix_collect_embedded_json_args(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[derive(Debug, Clone)]
+
 struct AutohandSessionSource {
     session_dir: PathBuf,
     metadata_path: PathBuf,
