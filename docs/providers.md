@@ -42,6 +42,9 @@ The current CLI imports local history for:
   explicitly;
 - Shelley SQLite history from `SHELLEY_DB`, `~/.config/shelley/shelley.db`, or
   an explicit Shelley DB path;
+- Terramind/Nucleus SQLite history from `$XDG_CONFIG_HOME/Nucleus/data/agents.db`,
+  `~/.config/Nucleus/data/agents.db`, platform app-data equivalents, or an
+  explicit `agents.db`;
 - Continue CLI sessions from `CONTINUE_GLOBAL_DIR/sessions`,
   `~/.continue/sessions`, or an explicit Continue sessions path;
 - OpenHands event JSON under `OH_PERSISTENCE_DIR`, legacy `FILE_STORE_PATH`,
@@ -113,15 +116,15 @@ CLI provider flags use names such as `kilo`, `crush`, `goose`, `dexto`,
 `nanoclaw`, `astrbot`, `shelley`, `continue`, `openhands`, `copilot-cli`,
 `factory-ai-droid`, `qwen-code`, `kimi-code-cli`, `autohand-code`,
 `kiro-cli`, `iflow-cli`, `forgecode`, `mistral-vibe`, `mux`, `reasonix`,
-`kode`, `neovate`, `zed`, `codebuddy`, `aider-desk`, `cline`, and
+`kode`, `neovate`, `terramind`, `zed`, `codebuddy`, `aider-desk`, `cline`, and
 `roo`/`roo-code`.
 Structured JSON and stable SQL views use provider IDs in ctx output; multiword IDs may be
 snake_case, such as `copilot_cli`, `factory_ai_droid`, `qwen_code`,
 `kimi_code_cli`, `autohand_code`, `kiro_cli`, `iflow_cli`, or
 `mistral_vibe`; Aider Desk is reported as `aider_desk`, while compact native
 IDs such as `kilo`, `openclaw`, `crush`, `goose`, `dexto`, `mux`,
-`reasonix`, `kode`, `neovate`, `zed`, `codebuddy`, `forgecode`, `nanoclaw`,
-`astrbot`, `shelley`, `continue`, and `openhands` stay compact. Roo Code is
+`reasonix`, `kode`, `neovate`, `terramind`, `zed`, `codebuddy`, `forgecode`,
+`nanoclaw`, `astrbot`, `shelley`, `continue`, and `openhands` stay compact. Roo Code is
 reported as `roo_code`.
 
 `ctx sources --json` reports each known provider source with `import_support`

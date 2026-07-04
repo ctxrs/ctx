@@ -47,23 +47,24 @@ use ctx_history_capture::{
     import_neovate_history, import_openclaw_history, import_opencode_sqlite,
     import_openhands_file_events, import_pi_session_jsonl, import_qwen_code_history,
     import_reasonix_history, import_roo_task_json_history, import_shelley_sqlite,
-    import_zed_threads_sqlite, provider_source_for_path, provider_source_spec, stable_capture_uuid,
-    validate_custom_history_jsonl_v1, validate_custom_history_jsonl_v1_reader,
-    AiderDeskImportOptions, AntigravityCliImportOptions, AstrBotSqliteImportOptions,
-    AutohandCodeImportOptions, CatalogSummary, ClaudeProjectsImportOptions,
-    ClineTaskJsonImportOptions, CodeBuddyImportOptions, CodexEventImportMode,
-    CodexHistoryImportOptions, CodexSessionCatalogOptions, CodexSessionImportOptions,
-    CodexSessionImportProgress, CodexSessionImportProgressCallback, CodexToolOutputMode,
-    ContinueCliImportOptions, CopilotCliImportOptions, CrushSqliteImportOptions,
-    CursorNativeImportOptions, CustomHistoryJsonlV1ImportOptions, DextoSqliteImportOptions,
-    FactoryAiDroidImportOptions, ForgeCodeSqliteImportOptions, GeminiCliImportOptions,
-    GooseSessionsSqliteImportOptions, HermesSqliteImportOptions, IflowCliImportOptions,
-    KiloSqliteImportOptions, KimiCodeCliImportOptions, KiroSqliteImportOptions, KodeImportOptions,
-    MistralVibeImportOptions, MuxImportOptions, NanoClawImportOptions, NeovateImportOptions,
-    OpenClawImportOptions, OpenCodeSqliteImportOptions, OpenHandsImportOptions,
-    PiSessionImportOptions, ProviderImportSummary, ProviderImportSupport, ProviderSource,
-    ProviderSourceStatus, QwenCodeImportOptions, ReasonixImportOptions, RooTaskJsonImportOptions,
-    ShelleySqliteImportOptions, ZedThreadsSqliteImportOptions,
+    import_terramind_sqlite, import_zed_threads_sqlite, provider_source_for_path,
+    provider_source_spec, stable_capture_uuid, validate_custom_history_jsonl_v1,
+    validate_custom_history_jsonl_v1_reader, AiderDeskImportOptions, AntigravityCliImportOptions,
+    AstrBotSqliteImportOptions, AutohandCodeImportOptions, CatalogSummary,
+    ClaudeProjectsImportOptions, ClineTaskJsonImportOptions, CodeBuddyImportOptions,
+    CodexEventImportMode, CodexHistoryImportOptions, CodexSessionCatalogOptions,
+    CodexSessionImportOptions, CodexSessionImportProgress, CodexSessionImportProgressCallback,
+    CodexToolOutputMode, ContinueCliImportOptions, CopilotCliImportOptions,
+    CrushSqliteImportOptions, CursorNativeImportOptions, CustomHistoryJsonlV1ImportOptions,
+    DextoSqliteImportOptions, FactoryAiDroidImportOptions, ForgeCodeSqliteImportOptions,
+    GeminiCliImportOptions, GooseSessionsSqliteImportOptions, HermesSqliteImportOptions,
+    IflowCliImportOptions, KiloSqliteImportOptions, KimiCodeCliImportOptions,
+    KiroSqliteImportOptions, KodeImportOptions, MistralVibeImportOptions, MuxImportOptions,
+    NanoClawImportOptions, NeovateImportOptions, OpenClawImportOptions,
+    OpenCodeSqliteImportOptions, OpenHandsImportOptions, PiSessionImportOptions,
+    ProviderImportSummary, ProviderImportSupport, ProviderSource, ProviderSourceStatus,
+    QwenCodeImportOptions, ReasonixImportOptions, RooTaskJsonImportOptions,
+    ShelleySqliteImportOptions, TerramindSqliteImportOptions, ZedThreadsSqliteImportOptions,
 };
 use ctx_history_core::{
     database_path, default_data_root, utc_now, CaptureProvider, ContextCitation,
@@ -745,6 +746,7 @@ enum NativeProviderArg {
     Kode,
     #[value(name = "neovate", alias = "neovate-code", alias = "neovate_code")]
     Neovate,
+    Terramind,
     #[value(name = "openclaw", alias = "open-claw", alias = "open_claw")]
     OpenClaw,
     Hermes,
@@ -835,6 +837,7 @@ enum ProviderArg {
     Kode,
     #[value(name = "neovate", alias = "neovate-code", alias = "neovate_code")]
     Neovate,
+    Terramind,
     #[value(name = "openclaw", alias = "open-claw", alias = "open_claw")]
     OpenClaw,
     Hermes,
@@ -907,6 +910,7 @@ impl NativeProviderArg {
             Self::Reasonix => CaptureProvider::Reasonix,
             Self::Kode => CaptureProvider::Kode,
             Self::Neovate => CaptureProvider::Neovate,
+            Self::Terramind => CaptureProvider::Terramind,
             Self::OpenClaw => CaptureProvider::OpenClaw,
             Self::Hermes => CaptureProvider::Hermes,
             Self::NanoClaw => CaptureProvider::NanoClaw,
@@ -970,6 +974,7 @@ impl ProviderArg {
             Self::Reasonix => CaptureProvider::Reasonix,
             Self::Kode => CaptureProvider::Kode,
             Self::Neovate => CaptureProvider::Neovate,
+            Self::Terramind => CaptureProvider::Terramind,
             Self::OpenClaw => CaptureProvider::OpenClaw,
             Self::Hermes => CaptureProvider::Hermes,
             Self::NanoClaw => CaptureProvider::NanoClaw,
@@ -1012,6 +1017,7 @@ impl ProviderArg {
             Self::Reasonix => "reasonix",
             Self::Kode => "kode",
             Self::Neovate => "neovate",
+            Self::Terramind => "terramind",
             Self::OpenClaw => "openclaw",
             Self::Hermes => "hermes",
             Self::NanoClaw => "nanoclaw",
@@ -6110,6 +6116,17 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
+        CaptureProvider::Terramind => import_terramind_sqlite(
+            &source.path,
+            store,
+            TerramindSqliteImportOptions {
+                source_path: Some(source.path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: true,
+                ..TerramindSqliteImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
         CaptureProvider::Antigravity => import_antigravity_cli_history(
             &source.path,
             store,
@@ -6326,6 +6343,7 @@ fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bool {
         | CaptureProvider::Kilo
         | CaptureProvider::KiroCli
         | CaptureProvider::ForgeCode
+        | CaptureProvider::Terramind
         | CaptureProvider::Crush
         | CaptureProvider::Goose
         | CaptureProvider::Dexto
@@ -6705,6 +6723,7 @@ fn source_uses_incremental_event_search(source: &SourceInfo) -> bool {
             | CaptureProvider::MistralVibe
             | CaptureProvider::Mux
             | CaptureProvider::Reasonix
+            | CaptureProvider::Terramind
             | CaptureProvider::Cline
             | CaptureProvider::RooCode
             | CaptureProvider::CodeBuddy

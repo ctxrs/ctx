@@ -204,6 +204,7 @@ text_enum! {
         Reasonix => "reasonix",
         Kode => "kode",
         Neovate => "neovate",
+        Terramind => "terramind",
         OpenClaw => "openclaw",
         Hermes => "hermes",
         NanoClaw => "nanoclaw",
@@ -1553,6 +1554,10 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<CaptureProvider>("\"forgecode\"").unwrap(),
             CaptureProvider::ForgeCode
+        );
+        assert_eq!(
+            serde_json::from_str::<CaptureProvider>("\"terramind\"").unwrap(),
+            CaptureProvider::Terramind
         );
         assert_eq!(
             serde_json::from_str::<CaptureProvider>("\"mistral_vibe\"").unwrap(),

@@ -270,6 +270,30 @@ const REASONIX_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation 
     source_kind: ProviderSourceKind::NativeHistory,
 }];
 
+const TERRAMIND_DEFAULTS: &[ProviderDefaultLocation] = &[
+    ProviderDefaultLocation {
+        path_components: &[".config", "Nucleus", "data", "agents.db"],
+        source_format: "terramind_agents_sqlite",
+        source_kind: ProviderSourceKind::NativeHistory,
+    },
+    ProviderDefaultLocation {
+        path_components: &[
+            "Library",
+            "Application Support",
+            "Nucleus",
+            "data",
+            "agents.db",
+        ],
+        source_format: "terramind_agents_sqlite",
+        source_kind: ProviderSourceKind::NativeHistory,
+    },
+    ProviderDefaultLocation {
+        path_components: &["AppData", "Roaming", "Nucleus", "data", "agents.db"],
+        source_format: "terramind_agents_sqlite",
+        source_kind: ProviderSourceKind::NativeHistory,
+    },
+];
+
 const OPENCLAW_DEFAULTS: &[ProviderDefaultLocation] = &[
     ProviderDefaultLocation {
         path_components: &[".openclaw"],
@@ -648,6 +672,16 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         unsupported_reason: None,
     },
     ProviderSourceSpec {
+        provider: CaptureProvider::Terramind,
+        display_name: "Terramind",
+        default_locations: TERRAMIND_DEFAULTS,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
+    ProviderSourceSpec {
         provider: CaptureProvider::OpenClaw,
         display_name: "OpenClaw",
         default_locations: OPENCLAW_DEFAULTS,
@@ -999,6 +1033,41 @@ fn discover_provider_sources_for_spec(
                     "mux_session_jsonl_tree",
                     ProviderSourceKind::NativeHistory,
                 ));
+            }
+        }
+        CaptureProvider::Terramind => {
+            if let Some(path) = env_path("XDG_CONFIG_HOME") {
+                sources.push(terramind_db_source(
+                    spec,
+                    path.join("Nucleus").join("data").join("agents.db"),
+                ));
+            }
+            if let Some(path) = env_path("APPDATA") {
+                sources.push(terramind_db_source(
+                    spec,
+                    path.join("Nucleus").join("data").join("agents.db"),
+                ));
+            }
+            if env::var_os("NUCLEUS_DEV").is_some() {
+                sources.push(terramind_db_source(
+                    spec,
+                    home.join(".config")
+                        .join("Nucleus Dev")
+                        .join("data")
+                        .join("agents.db"),
+                ));
+                if let Some(path) = env_path("XDG_CONFIG_HOME") {
+                    sources.push(terramind_db_source(
+                        spec,
+                        path.join("Nucleus Dev").join("data").join("agents.db"),
+                    ));
+                }
+                if let Some(path) = env_path("APPDATA") {
+                    sources.push(terramind_db_source(
+                        spec,
+                        path.join("Nucleus Dev").join("data").join("agents.db"),
+                    ));
+                }
             }
         }
         CaptureProvider::NanoClaw => {
@@ -1356,6 +1425,15 @@ fn goose_db_source(spec: &ProviderSourceSpec, path: PathBuf) -> ProviderSource {
     )
 }
 
+fn terramind_db_source(spec: &ProviderSourceSpec, path: PathBuf) -> ProviderSource {
+    provider_source_from_parts(
+        spec,
+        path,
+        "terramind_agents_sqlite",
+        ProviderSourceKind::NativeHistory,
+    )
+}
+
 fn crush_config_paths(home: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if let Some(path) = env_path("CRUSH_GLOBAL_CONFIG") {
@@ -1531,6 +1609,7 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::Mux => "mux_session_jsonl",
         CaptureProvider::Reasonix if path.is_dir() => "reasonix_session_jsonl_tree",
         CaptureProvider::Reasonix => "reasonix_session_jsonl",
+        CaptureProvider::Terramind => "terramind_agents_sqlite",
         CaptureProvider::OpenClaw => "openclaw_session_jsonl_tree",
         CaptureProvider::Hermes => "hermes_state_sqlite",
         CaptureProvider::NanoClaw => "nanoclaw_project",
@@ -1682,6 +1761,9 @@ fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         }
         CaptureProvider::Reasonix => {
             Some("path exists but no Reasonix session JSONL files were found")
+        }
+        CaptureProvider::Terramind => {
+            Some("path exists but no Terramind agents.db chat tables were found")
         }
         CaptureProvider::OpenClaw => {
             Some("path exists but no OpenClaw agent session JSONL files were found")
@@ -1850,6 +1932,9 @@ fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::Reasonix => {
             Some("path exists but Reasonix session files could not be read; check permissions")
         }
+        CaptureProvider::Terramind => {
+            Some("path exists but the Terramind agents database could not be read; check permissions")
+        }
         CaptureProvider::OpenClaw => Some(
             "path exists but OpenClaw session transcripts could not be read; check permissions",
         ),
@@ -1973,6 +2058,7 @@ fn default_location_import_probe(
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.ends_with(".jsonl") && !name.ends_with(".events.jsonl"))
         }),
+        CaptureProvider::Terramind => has_terramind_chat_tables(path),
         CaptureProvider::Cline => has_task_json_file_under_matching(path, 10_000, |name| {
             matches!(
                 name,
@@ -2032,6 +2118,28 @@ fn has_forgecode_conversations_table(path: &Path) -> BoundedProbe {
         )
     }) {
         Ok(count) if count > 0 => BoundedProbe::Found,
+        Ok(_) => BoundedProbe::NotFound,
+        Err(_) => BoundedProbe::IoError,
+    }
+}
+
+fn has_terramind_chat_tables(path: &Path) -> BoundedProbe {
+    match path_is_file_probe(path) {
+        BoundedProbe::Found => {}
+        other => return other,
+    }
+    match Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .and_then(|conn| {
+        conn.query_row(
+            "select count(*) from sqlite_schema where type = 'table' and name in ('projects', 'chats', 'sub_chats')",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+    }) {
+        Ok(3) => BoundedProbe::Found,
         Ok(_) => BoundedProbe::NotFound,
         Err(_) => BoundedProbe::IoError,
     }
