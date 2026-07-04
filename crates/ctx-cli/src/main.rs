@@ -40,20 +40,21 @@ use ctx_history_capture::{
     import_copilot_cli_session_events, import_crush_sqlite, import_cursor_native_history,
     import_custom_history_jsonl_v1, import_custom_history_jsonl_v1_reader, import_dexto_sqlite,
     import_factory_ai_droid_sessions, import_gemini_cli_history, import_goose_sessions_sqlite,
-    import_hermes_sqlite, import_kilo_sqlite, import_kimi_code_cli_history, import_kiro_sqlite,
-    import_nanoclaw_project, import_openclaw_history, import_opencode_sqlite,
-    import_openhands_file_events, import_pi_session_jsonl, import_qwen_code_history,
-    import_roo_task_json_history, import_shelley_sqlite, import_zed_threads_sqlite,
-    provider_source_for_path, provider_source_spec, stable_capture_uuid,
-    validate_custom_history_jsonl_v1, validate_custom_history_jsonl_v1_reader,
-    AntigravityCliImportOptions, AstrBotSqliteImportOptions, AutohandCodeImportOptions,
-    CatalogSummary, ClaudeProjectsImportOptions, ClineTaskJsonImportOptions,
-    CodeBuddyImportOptions, CodexEventImportMode, CodexHistoryImportOptions,
-    CodexSessionCatalogOptions, CodexSessionImportOptions, CodexSessionImportProgress,
-    CodexSessionImportProgressCallback, CodexToolOutputMode, ContinueCliImportOptions,
-    CopilotCliImportOptions, CrushSqliteImportOptions, CursorNativeImportOptions,
-    CustomHistoryJsonlV1ImportOptions, DextoSqliteImportOptions, FactoryAiDroidImportOptions,
-    GeminiCliImportOptions, GooseSessionsSqliteImportOptions, HermesSqliteImportOptions,
+    import_hermes_sqlite, import_iflow_cli_history, import_kilo_sqlite,
+    import_kimi_code_cli_history, import_kiro_sqlite, import_nanoclaw_project,
+    import_openclaw_history, import_opencode_sqlite, import_openhands_file_events,
+    import_pi_session_jsonl, import_qwen_code_history, import_roo_task_json_history,
+    import_shelley_sqlite, import_zed_threads_sqlite, provider_source_for_path,
+    provider_source_spec, stable_capture_uuid, validate_custom_history_jsonl_v1,
+    validate_custom_history_jsonl_v1_reader, AntigravityCliImportOptions,
+    AstrBotSqliteImportOptions, AutohandCodeImportOptions, CatalogSummary,
+    ClaudeProjectsImportOptions, ClineTaskJsonImportOptions, CodeBuddyImportOptions,
+    CodexEventImportMode, CodexHistoryImportOptions, CodexSessionCatalogOptions,
+    CodexSessionImportOptions, CodexSessionImportProgress, CodexSessionImportProgressCallback,
+    CodexToolOutputMode, ContinueCliImportOptions, CopilotCliImportOptions,
+    CrushSqliteImportOptions, CursorNativeImportOptions, CustomHistoryJsonlV1ImportOptions,
+    DextoSqliteImportOptions, FactoryAiDroidImportOptions, GeminiCliImportOptions,
+    GooseSessionsSqliteImportOptions, HermesSqliteImportOptions, IflowCliImportOptions,
     KiloSqliteImportOptions, KimiCodeCliImportOptions, KiroSqliteImportOptions,
     NanoClawImportOptions, OpenClawImportOptions, OpenCodeSqliteImportOptions,
     OpenHandsImportOptions, PiSessionImportOptions, ProviderImportSummary, ProviderImportSupport,
@@ -711,6 +712,8 @@ enum NativeProviderArg {
     KimiCodeCli,
     #[value(name = "autohand-code", alias = "autohand", alias = "autohand_code")]
     AutohandCode,
+    #[value(name = "iflow-cli", alias = "iflow", alias = "iflow_cli")]
+    IflowCli,
     #[value(name = "openclaw", alias = "open-claw", alias = "open_claw")]
     OpenClaw,
     Hermes,
@@ -770,6 +773,8 @@ enum ProviderArg {
     KimiCodeCli,
     #[value(name = "autohand-code", alias = "autohand", alias = "autohand_code")]
     AutohandCode,
+    #[value(name = "iflow-cli", alias = "iflow", alias = "iflow_cli")]
+    IflowCli,
     #[value(name = "openclaw", alias = "open-claw", alias = "open_claw")]
     OpenClaw,
     Hermes,
@@ -833,6 +838,7 @@ impl NativeProviderArg {
             Self::QwenCode => CaptureProvider::QwenCode,
             Self::KimiCodeCli => CaptureProvider::KimiCodeCli,
             Self::AutohandCode => CaptureProvider::AutohandCode,
+            Self::IflowCli => CaptureProvider::IflowCli,
             Self::OpenClaw => CaptureProvider::OpenClaw,
             Self::Hermes => CaptureProvider::Hermes,
             Self::NanoClaw => CaptureProvider::NanoClaw,
@@ -888,6 +894,7 @@ impl ProviderArg {
             Self::QwenCode => CaptureProvider::QwenCode,
             Self::KimiCodeCli => CaptureProvider::KimiCodeCli,
             Self::AutohandCode => CaptureProvider::AutohandCode,
+            Self::IflowCli => CaptureProvider::IflowCli,
             Self::OpenClaw => CaptureProvider::OpenClaw,
             Self::Hermes => CaptureProvider::Hermes,
             Self::NanoClaw => CaptureProvider::NanoClaw,
@@ -922,6 +929,7 @@ impl ProviderArg {
             Self::QwenCode => "qwen-code",
             Self::KimiCodeCli => "kimi-code-cli",
             Self::AutohandCode => "autohand-code",
+            Self::IflowCli => "iflow-cli",
             Self::OpenClaw => "openclaw",
             Self::Hermes => "hermes",
             Self::NanoClaw => "nanoclaw",
@@ -5931,6 +5939,17 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
+        CaptureProvider::IflowCli => import_iflow_cli_history(
+            &source.path,
+            store,
+            IflowCliImportOptions {
+                source_path: Some(source.path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: true,
+                ..IflowCliImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
         CaptureProvider::Antigravity => import_antigravity_cli_history(
             &source.path,
             store,
@@ -6196,6 +6215,10 @@ fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bool {
                     .parent()
                     .is_some_and(|parent| parent.join("metadata.json").is_file())
         }
+        CaptureProvider::IflowCli => path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("session-") && name.ends_with(".jsonl")),
         _ => path.extension().and_then(|ext| ext.to_str()) == Some("jsonl"),
     }
 }
@@ -6460,6 +6483,7 @@ fn source_uses_incremental_event_search(source: &SourceInfo) -> bool {
             | CaptureProvider::QwenCode
             | CaptureProvider::KimiCodeCli
             | CaptureProvider::AutohandCode
+            | CaptureProvider::IflowCli
             | CaptureProvider::Cline
             | CaptureProvider::RooCode
             | CaptureProvider::CodeBuddy

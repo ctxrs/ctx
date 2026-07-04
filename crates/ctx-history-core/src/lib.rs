@@ -197,6 +197,7 @@ text_enum! {
         QwenCode => "qwen_code",
         KimiCodeCli => "kimi_code_cli",
         AutohandCode => "autohand_code",
+        IflowCli => "iflow_cli",
         OpenClaw => "openclaw",
         Hermes => "hermes",
         NanoClaw => "nanoclaw",
@@ -1537,6 +1538,10 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<CaptureProvider>("\"autohand_code\"").unwrap(),
             CaptureProvider::AutohandCode
+        );
+        assert_eq!(
+            serde_json::from_str::<CaptureProvider>("\"iflow_cli\"").unwrap(),
+            CaptureProvider::IflowCli
         );
 
         let sync: SyncMetadata = serde_json::from_value(json!({})).unwrap();

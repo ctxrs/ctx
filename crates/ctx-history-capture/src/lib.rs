@@ -923,6 +923,27 @@ impl Default for AutohandCodeImportOptions {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct IflowCliImportOptions {
+    pub machine_id: String,
+    pub source_path: Option<PathBuf>,
+    pub imported_at: DateTime<Utc>,
+    pub history_record_id: Option<Uuid>,
+    pub allow_partial_failures: bool,
+}
+
+impl Default for IflowCliImportOptions {
+    fn default() -> Self {
+        Self {
+            machine_id: default_machine_id(),
+            source_path: None,
+            imported_at: utc_now(),
+            history_record_id: None,
+            allow_partial_failures: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderFixtureLine {
     pub provider: CaptureProvider,
@@ -1198,6 +1219,9 @@ pub struct KimiCodeCliWireJsonlAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AutohandCodeSessionsJsonlAdapter;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct IflowCliJsonlAdapter;
 
 impl ProviderCaptureAdapter for ProviderFixtureJsonlAdapter {
     fn provider(&self) -> CaptureProvider {
@@ -2326,6 +2350,29 @@ impl ProviderCaptureAdapter for AutohandCodeSessionsJsonlAdapter {
         context: &ProviderAdapterContext,
     ) -> Result<ProviderNormalizationResult> {
         normalize_autohand_code_sessions(path, context)
+    }
+}
+
+impl ProviderCaptureAdapter for IflowCliJsonlAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::IflowCli
+    }
+
+    fn source_format(&self) -> &str {
+        IFLOW_CLI_SOURCE_FORMAT
+    }
+
+    fn normalize_path(
+        &self,
+        path: &Path,
+        context: &ProviderAdapterContext,
+    ) -> Result<ProviderNormalizationResult> {
+        normalize_jsonl_tree(
+            path,
+            context,
+            CaptureProvider::IflowCli,
+            IFLOW_CLI_SOURCE_FORMAT,
+        )
     }
 }
 
@@ -4761,6 +4808,25 @@ pub fn import_autohand_code_sessions(
     )
 }
 
+pub fn import_iflow_cli_history(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: IflowCliImportOptions,
+) -> Result<ProviderImportSummary> {
+    import_native_jsonl_tree(
+        store,
+        NativeJsonlTreeImport {
+            path: path.as_ref(),
+            machine_id: options.machine_id,
+            source_path: options.source_path,
+            imported_at: options.imported_at,
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+        },
+        IflowCliJsonlAdapter,
+    )
+}
+
 struct NativeJsonlTreeImport<'a> {
     path: &'a Path,
     machine_id: String,
@@ -4842,6 +4908,7 @@ const COPILOT_CLI_SOURCE_FORMAT: &str = "copilot_cli_session_events_jsonl";
 const QWEN_CODE_SOURCE_FORMAT: &str = "qwen_code_chat_jsonl";
 const KIMI_CODE_CLI_SOURCE_FORMAT: &str = "kimi_code_cli_wire_jsonl";
 const AUTOHAND_CODE_SOURCE_FORMAT: &str = "autohand_code_sessions_jsonl";
+const IFLOW_CLI_SOURCE_FORMAT: &str = "iflow_cli_session_jsonl";
 const CODEX_MAX_TEXT_CHARS: usize = 16_000;
 const CODEX_MAX_METADATA_TEXT_CHARS: usize = 4_000;
 const CODEX_MAX_OUTPUT_PREVIEW_CHARS: usize = 4_000;
@@ -6962,7 +7029,10 @@ fn provider_file_touches_from_raw_value(
 
     let mut drafts = Vec::new();
     collect_patch_file_touches(raw_value, &mut drafts);
-    if drafts.is_empty() && event_type_supports_structured_file_touches(event.event_type) {
+    if drafts.is_empty()
+        && (event_type_supports_structured_file_touches(event.event_type)
+            || (provider == CaptureProvider::IflowCli && event.event_type == EventType::ToolOutput))
+    {
         collect_structured_file_touches(raw_value, &mut drafts);
     }
 
@@ -13882,6 +13952,9 @@ fn native_jsonl_missing_reason(provider: CaptureProvider) -> &'static str {
         CaptureProvider::QwenCode => "no Qwen Code chat JSONL transcripts found under chats",
         CaptureProvider::KimiCodeCli => "no Kimi Code CLI wire.jsonl transcripts found",
         CaptureProvider::AutohandCode => "no Autohand Code session conversation.jsonl files found",
+        CaptureProvider::IflowCli => {
+            "no iFlow CLI session-*.jsonl transcripts found under projects"
+        }
         _ => "no native provider JSONL transcripts found",
     }
 }
@@ -13906,6 +13979,10 @@ fn provider_jsonl_path_is_native(provider: CaptureProvider, path: &Path) -> bool
         CaptureProvider::QwenCode => path
             .components()
             .any(|component| component.as_os_str() == "chats"),
+        CaptureProvider::IflowCli => path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("session-") && name.ends_with(".jsonl")),
         CaptureProvider::KimiCodeCli => {
             path.file_name().and_then(|name| name.to_str()) == Some("wire.jsonl")
                 && path
@@ -16081,6 +16158,7 @@ fn native_jsonl_header_session_id(provider: CaptureProvider, value: &Value) -> O
         .then(|| value.pointer("/data/sessionId").and_then(Value::as_str))
         .flatten(),
         CaptureProvider::QwenCode => value.get("sessionId").and_then(Value::as_str),
+        CaptureProvider::IflowCli => value.get("sessionId").and_then(Value::as_str),
         CaptureProvider::Cursor => (value.get("role").is_some()
             || value.get("event").is_some()
             || value.get("message").is_some())
@@ -16114,6 +16192,7 @@ fn native_jsonl_header_cwd(provider: CaptureProvider, value: &Value) -> Option<S
         CaptureProvider::FactoryAiDroid => value.get("cwd").and_then(Value::as_str),
         CaptureProvider::CopilotCli => value.pointer("/data/context/cwd").and_then(Value::as_str),
         CaptureProvider::QwenCode => value.get("cwd").and_then(Value::as_str),
+        CaptureProvider::IflowCli => value.get("cwd").and_then(Value::as_str),
         _ => None,
     }
     .filter(|cwd| !cwd.trim().is_empty())
@@ -16297,7 +16376,7 @@ fn native_jsonl_event(
             "entry_type": entry_type,
             "status": value.get("status").and_then(Value::as_str),
             "model": native_jsonl_model(provider, value),
-            "tokens": value.get("tokens").or_else(|| value.get("usageMetadata")).cloned(),
+            "tokens": native_jsonl_tokens(provider, value),
         }),
     })
 }
@@ -16418,6 +16497,35 @@ fn native_jsonl_event_type(provider: CaptureProvider, value: &Value) -> EventTyp
             _ if value.get("toolCallResult").is_some() => EventType::ToolOutput,
             _ => EventType::Notice,
         },
+        CaptureProvider::IflowCli => {
+            if value
+                .get("isCompactSummary")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                EventType::Summary
+            } else if value
+                .get("isMeta")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                EventType::Notice
+            } else {
+                match value.get("type").and_then(Value::as_str) {
+                    Some("user" | "assistant") if native_jsonl_content_has(value, "tool_use") => {
+                        EventType::ToolCall
+                    }
+                    Some("tool_result" | "tool" | "tool_use_result") => EventType::ToolOutput,
+                    Some("user" | "assistant") if value.get("toolUseResult").is_some() => {
+                        EventType::ToolOutput
+                    }
+                    Some("user" | "assistant") => EventType::Message,
+                    Some("system") => EventType::Notice,
+                    _ if value.get("toolUseResult").is_some() => EventType::ToolOutput,
+                    _ => EventType::Notice,
+                }
+            }
+        }
         _ => EventType::Notice,
     }
 }
@@ -16454,6 +16562,12 @@ fn native_jsonl_role(provider: CaptureProvider, value: &Value) -> EventRole {
                 .and_then(Value::as_str),
         ),
         CaptureProvider::QwenCode => provider_role(
+            value
+                .pointer("/message/role")
+                .or_else(|| value.get("type"))
+                .and_then(Value::as_str),
+        ),
+        CaptureProvider::IflowCli => provider_role(
             value
                 .pointer("/message/role")
                 .or_else(|| value.get("type"))
@@ -16542,6 +16656,13 @@ fn native_jsonl_event_text(
             .or_else(|| value.get("toolCallResult").and_then(provider_value_text))
             .or_else(|| value.get("content").and_then(provider_value_text))
             .unwrap_or_else(|| format!("Qwen Code event: {entry_type}")),
+        CaptureProvider::IflowCli => value
+            .pointer("/message/content")
+            .or_else(|| value.get("message"))
+            .and_then(provider_value_text)
+            .or_else(|| value.get("toolUseResult").and_then(provider_value_text))
+            .or_else(|| value.get("content").and_then(provider_value_text))
+            .unwrap_or_else(|| format!("iFlow CLI event: {entry_type}")),
         _ if event_type == EventType::Notice => format!("Provider event: {entry_type}"),
         _ => serde_json::to_string(value).unwrap_or_else(|_| entry_type.to_owned()),
     }
@@ -16560,7 +16681,26 @@ fn native_jsonl_model(provider: CaptureProvider, value: &Value) -> Option<Value>
             .get("model")
             .cloned()
             .or_else(|| value.pointer("/message/model").cloned()),
+        CaptureProvider::IflowCli => value
+            .get("model")
+            .cloned()
+            .or_else(|| value.pointer("/message/model").cloned()),
         _ => None,
+    }
+}
+
+fn native_jsonl_tokens(provider: CaptureProvider, value: &Value) -> Option<Value> {
+    match provider {
+        CaptureProvider::IflowCli => value
+            .pointer("/message/usage")
+            .cloned()
+            .or_else(|| value.get("usage").cloned())
+            .or_else(|| value.get("usageMetadata").cloned())
+            .or_else(|| value.get("tokens").cloned()),
+        _ => value
+            .get("tokens")
+            .or_else(|| value.get("usageMetadata"))
+            .cloned(),
     }
 }
 
@@ -23332,7 +23472,7 @@ mod tests {
     }
 
     #[test]
-    fn native_jsonl_tree_imports_qwen_and_kimi_smokes_are_idempotent() {
+    fn native_jsonl_tree_imports_qwen_kimi_iflow_and_autohand_smokes_are_idempotent() {
         let temp = tempdir();
         let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
 
@@ -23379,6 +23519,68 @@ mod tests {
         assert_eq!(qwen_second.failed, 0, "{:?}", qwen_second.failures);
         assert_eq!(qwen_second.imported_sessions, 0);
         assert_eq!(qwen_second.imported_events, 0);
+
+        let iflow = provider_history_fixture("iflow-cli/.iflow/projects");
+        let iflow_summary = import_iflow_cli_history(
+            &iflow,
+            &mut store,
+            IflowCliImportOptions {
+                allow_partial_failures: true,
+                ..IflowCliImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(iflow_summary.failed, 0, "{:?}", iflow_summary.failures);
+        assert_eq!(iflow_summary.imported_sessions, 1);
+        assert_eq!(iflow_summary.imported_events, 5);
+
+        let iflow_events = store
+            .events_for_session(provider_session_uuid(
+                CaptureProvider::IflowCli,
+                "iflow-session-1",
+            ))
+            .unwrap();
+        assert_eq!(iflow_events.len(), 5);
+        assert!(iflow_events
+            .iter()
+            .any(|event| event.event_type == EventType::ToolCall));
+        assert!(iflow_events
+            .iter()
+            .any(|event| event.event_type == EventType::ToolOutput));
+        assert!(iflow_events
+            .iter()
+            .any(|event| event.event_type == EventType::Summary));
+        assert!(iflow_events
+            .iter()
+            .any(|event| event.event_type == EventType::Notice));
+        let iflow_rendered = serde_json::to_string(&iflow_events).unwrap();
+        assert!(iflow_rendered.contains("iflow jsonl oracle prompt"));
+        assert!(iflow_rendered.contains("src/iflow_oracle.txt"));
+        assert!(iflow_rendered.contains("kimi-k2"));
+        assert!(store
+            .search_event_hits("iflow jsonl oracle", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::IflowCli)));
+        assert!(store
+            .export_archive()
+            .unwrap()
+            .files_touched
+            .iter()
+            .any(|file| file.path == "src/iflow_oracle.txt"));
+
+        let iflow_second = import_iflow_cli_history(
+            &iflow,
+            &mut store,
+            IflowCliImportOptions {
+                allow_partial_failures: true,
+                ..IflowCliImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(iflow_second.failed, 0, "{:?}", iflow_second.failures);
+        assert_eq!(iflow_second.imported_sessions, 0);
+        assert_eq!(iflow_second.imported_events, 0);
 
         let kimi = write_kimi_smoke_fixture(&temp);
         let kimi_summary = import_kimi_code_cli_history(
@@ -23481,6 +23683,33 @@ mod tests {
         assert_eq!(autohand_second.failed, 0, "{:?}", autohand_second.failures);
         assert_eq!(autohand_second.imported_sessions, 0);
         assert_eq!(autohand_second.imported_events, 0);
+    }
+
+    #[test]
+    fn native_iflow_reports_malformed_jsonl_partially() {
+        let temp = tempdir();
+        let fixture = provider_history_fixture("iflow-cli/malformed/projects");
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let summary = import_iflow_cli_history(
+            &fixture,
+            &mut store,
+            IflowCliImportOptions {
+                allow_partial_failures: true,
+                ..IflowCliImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.failed, 1, "{:?}", summary.failures);
+        assert_eq!(summary.imported_sessions, 1);
+        assert_eq!(summary.imported_events, 1);
+        assert!(summary.failures[0].error.contains("malformed JSONL"));
+        assert!(store
+            .search_event_hits("iflow after malformed oracle", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::IflowCli)));
     }
 
     #[test]

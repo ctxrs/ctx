@@ -64,6 +64,20 @@ IDE/application storage imports.
   files read-only. Schema confidence is based on WayLog plus sanitized fixtures,
   not official CodeBuddy documentation.
 
+## iFlow CLI
+
+- Source evidence: the `iflow-ai-iflow-cli-0.5.19.tgz` bundle resolves
+  `IFLOW_HOME` first and otherwise falls back to the user's `.iflow` directory.
+- Bundle storage helpers build project history paths under
+  `<iflow-home>/projects/<sanitized-project-path>/session-<uuid>.jsonl`.
+- Bundle JSONL record construction includes fields observed in sanitized
+  fixtures: `uuid`, `parentUuid`, `sessionId`, `timestamp`, `type`,
+  `message.role`, `message.content`, `cwd`, `gitBranch`, `toolUseResult`,
+  `isCompactSummary`, `compressionInfo`, and `isMeta`.
+- Supplemental checkpoint files under `.iflow/tmp` are treated as non-canonical;
+  `ctx` imports the resumable project `session-*.jsonl` transcripts as
+  `iflow_cli_session_jsonl_tree`.
+
 ## OpenHands
 
 - Source evidence: OpenHands `get_default_persistence_dir()` checks

@@ -1889,12 +1889,17 @@ fn qwen_and_kimi_default_sources_import_search_and_reimport() {
         Path::new(&provider_history_fixture("autohand-code/sessions")),
         &temp.path().join(".autohand").join("sessions"),
     );
+    copy_dir_all(
+        Path::new(&provider_history_fixture("iflow-cli/.iflow")),
+        &temp.path().join(".iflow"),
+    );
 
     let sources = json_output(ctx(&temp).args(["sources", "--json"]));
     for (provider, source_format) in [
         ("qwen_code", "qwen_code_chat_jsonl_tree"),
         ("kimi_code_cli", "kimi_code_cli_wire_jsonl_tree"),
         ("autohand_code", "autohand_code_sessions_jsonl"),
+        ("iflow_cli", "iflow_cli_session_jsonl_tree"),
     ] {
         let source = sources["sources"]
             .as_array()
@@ -1924,6 +1929,7 @@ fn qwen_and_kimi_default_sources_import_search_and_reimport() {
             "autohand jsonl oracle prompt",
             5,
         ),
+        ("iflow-cli", "iflow_cli", "iflow jsonl oracle prompt", 5),
     ] {
         let first = json_output(ctx(&temp).args([
             "import",
@@ -1975,6 +1981,7 @@ fn sources_lists_personal_agent_provider_defaults() {
     install_default_shelley_fixture(&temp, "shelley-sources-oracle");
     install_default_continue_fixture(&temp, "continue-sources-oracle");
     install_default_autohand_fixture(&temp, "autohand-sources-oracle");
+    install_default_iflow_fixture(&temp, "iflow-sources-oracle");
 
     let sources = json_output(ctx(&temp).args(["sources", "--json"]));
     for (provider, source_format, import_support, native_import) in [
@@ -1991,6 +1998,7 @@ fn sources_lists_personal_agent_provider_defaults() {
             "native",
             true,
         ),
+        ("iflow_cli", "iflow_cli_session_jsonl_tree", "native", true),
     ] {
         let source = sources["sources"]
             .as_array()
@@ -2199,6 +2207,7 @@ fn provider_help_matches_implemented_importers() {
         "qwen-code",
         "kimi-code-cli",
         "autohand-code",
+        "iflow-cli",
     ] {
         assert!(help.contains(value), "provider {value} missing in\n{help}");
     }
@@ -2217,6 +2226,7 @@ fn provider_json_names_are_accepted_as_cli_filter_aliases() {
         ("kimi_code_cli", "kimi_code_cli"),
         ("autohand_code", "autohand_code"),
         ("code_buddy", "codebuddy"),
+        ("iflow_cli", "iflow_cli"),
         ("open_claw", "openclaw"),
         ("nano_claw", "nanoclaw"),
         ("astr_bot", "astrbot"),
@@ -2339,7 +2349,7 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
             vec![
                 "Usage: ctx import",
                 "--provider <PROVIDER>",
-                "[possible values: codex, pi, claude, opencode, kilo, crush, goose, antigravity, gemini, cursor, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto, codebuddy]",
+                "[possible values: codex, pi, claude, opencode, kilo, kiro-cli, crush, goose, antigravity, gemini, cursor, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto, codebuddy]",
                 "--path <PATH>",
                 "--format <FORMAT>",
                 "--resume",
@@ -4398,6 +4408,10 @@ fn mcp_status_and_tools_list_are_read_only_without_initialized_store() {
     assert!(providers.iter().any(|provider| provider == "kimi_code_cli"));
     assert!(providers.iter().any(|provider| provider == "autohand-code"));
     assert!(providers.iter().any(|provider| provider == "autohand_code"));
+    assert!(providers.iter().any(|provider| provider == "kiro-cli"));
+    assert!(providers.iter().any(|provider| provider == "kiro_cli"));
+    assert!(providers.iter().any(|provider| provider == "iflow-cli"));
+    assert!(providers.iter().any(|provider| provider == "iflow_cli"));
     assert!(providers.iter().any(|provider| provider == "codebuddy"));
     assert!(providers.iter().any(|provider| provider == "zed"));
     assert!(providers.iter().any(|provider| provider == "cline"));
@@ -6103,6 +6117,12 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
             write_native_autohand_fixture,
         ),
         (
+            "iflow-cli",
+            "iflow_cli",
+            "iflow_cli_session_jsonl_tree",
+            write_native_iflow_fixture,
+        ),
+        (
             "codebuddy",
             "codebuddy",
             "codebuddy_history_json",
@@ -6503,6 +6523,11 @@ fn install_default_continue_fixture(temp: &TempDir, query: &str) {
 fn install_default_autohand_fixture(temp: &TempDir, query: &str) {
     let source = PathBuf::from(write_native_autohand_fixture(temp, query));
     copy_dir_all(&source, &temp.path().join(".autohand").join("sessions"));
+}
+
+fn install_default_iflow_fixture(temp: &TempDir, query: &str) {
+    let source = PathBuf::from(write_native_iflow_fixture(temp, query));
+    copy_dir_all(&source, &temp.path().join(".iflow").join("projects"));
 }
 
 fn install_default_openhands_fixture(temp: &TempDir, query: &str) {
@@ -7218,6 +7243,88 @@ fn write_native_codebuddy_fixture(temp: &TempDir, query: &str) -> String {
     root.to_str().unwrap().to_owned()
 }
 
+fn write_native_iflow_fixture(temp: &TempDir, query: &str) -> String {
+    let projects = temp
+        .path()
+        .join("native-iflow/.iflow/projects/sanitized-workspace");
+    fs::create_dir_all(&projects).unwrap();
+    fs::write(
+        projects.join("session-iflow-cli-native.jsonl"),
+        format!(
+            "{}\n{}\n{}\n{}\n{}\n",
+            json!({
+                "uuid": "iflow-cli-native-user",
+                "parentUuid": null,
+                "sessionId": "iflow-cli-native",
+                "timestamp": "2026-07-04T15:00:00Z",
+                "type": "user",
+                "userType": "external",
+                "message": {"role": "user", "content": query},
+                "cwd": "/workspace/iflow",
+                "gitBranch": "main",
+                "version": "0.5.19"
+            }),
+            json!({
+                "uuid": "iflow-cli-native-assistant",
+                "parentUuid": "iflow-cli-native-user",
+                "sessionId": "iflow-cli-native",
+                "timestamp": "2026-07-04T15:00:01Z",
+                "type": "assistant",
+                "userType": "external",
+                "message": {
+                    "id": "msg-iflow-cli-native",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "native iFlow import ok"},
+                        {"type": "tool_use", "id": "tool-1", "name": "Write", "input": {"path": "src/iflow_cli_native.txt", "content": "proof"}}
+                    ],
+                    "model": "kimi-k2",
+                    "usage": {"input_tokens": 11, "output_tokens": 13}
+                }
+            }),
+            json!({
+                "uuid": "iflow-cli-native-tool",
+                "parentUuid": "iflow-cli-native-assistant",
+                "sessionId": "iflow-cli-native",
+                "timestamp": "2026-07-04T15:00:02Z",
+                "type": "user",
+                "userType": "external",
+                "message": {"role": "user", "content": [{"tool_use_id": "tool-1", "type": "tool_result", "content": "wrote src/iflow_cli_native.txt"}]},
+                "cwd": "/workspace/iflow",
+                "gitBranch": "main",
+                "version": "0.5.19",
+                "toolUseResult": {"toolName": "Write", "status": "success", "timestamp": 1783177202000i64, "path": "src/iflow_cli_native.txt", "output": "ok"}
+            }),
+            json!({
+                "uuid": "iflow-cli-native-summary",
+                "parentUuid": "iflow-cli-native-tool",
+                "sessionId": "iflow-cli-native",
+                "timestamp": "2026-07-04T15:00:03Z",
+                "type": "user",
+                "message": {"role": "user", "content": "native iFlow summary"},
+                "isCompactSummary": true,
+                "compressionInfo": {"originalTokenCount": 1200, "compressedTokenCount": 120}
+            }),
+            json!({
+                "uuid": "iflow-cli-native-meta",
+                "parentUuid": "iflow-cli-native-summary",
+                "sessionId": "iflow-cli-native",
+                "timestamp": "2026-07-04T15:00:04Z",
+                "type": "user",
+                "message": {"role": "user", "content": "native iFlow meta"},
+                "isMeta": true
+            })
+        ),
+    )
+    .unwrap();
+    temp.path()
+        .join("native-iflow/.iflow/projects")
+        .to_str()
+        .unwrap()
+        .to_owned()
+}
+
 fn write_native_openclaw_fixture(temp: &TempDir, query: &str) -> String {
     let root = temp.path().join("native-openclaw");
     let sessions = root.join("agents/personal-agent/sessions");
@@ -7885,6 +7992,7 @@ fn native_provider_cli_requires_existing_history_or_explicit_path() {
         ("astrbot", "no importable astrbot history found"),
         ("shelley", "no importable shelley history found"),
         ("codebuddy", "no importable codebuddy history found"),
+        ("iflow-cli", "no importable iflow_cli history found"),
         ("cline", "no importable cline history found"),
         ("roo", "no importable roo_code history found"),
     ] {
