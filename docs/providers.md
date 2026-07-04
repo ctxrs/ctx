@@ -49,6 +49,8 @@ The current CLI imports local history for:
 - Gemini CLI chat JSONL records under `~/.gemini/tmp/**/chats/**/*.jsonl`;
 - Cursor CLI agent transcript JSONL files under
   `~/.cursor/projects/**/agent-transcripts/**/*.jsonl`;
+- Zed agent thread SQLite DBs at `$XDG_DATA_HOME/zed/threads/threads.db` or
+  `~/.local/share/zed/threads/threads.db`;
 - Copilot CLI session event logs named `events.jsonl` under
   `~/.copilot/session-state`;
 - Factory AI Droid session JSONL files under `~/.factory/sessions`;
@@ -89,14 +91,15 @@ ctx sources --json
 CLI provider flags use names such as `kilo`, `crush`, `goose`, `dexto`,
 `openclaw`, `hermes`,
 `nanoclaw`, `astrbot`, `shelley`, `continue`, `openhands`, `copilot-cli`,
-`factory-ai-droid`, `qwen-code`, `kimi-code-cli`, `autohand-code`, `codebuddy`, `cline`, and
+`factory-ai-droid`, `qwen-code`, `kimi-code-cli`, `autohand-code`, `zed`,
+`codebuddy`, `cline`, and
 `roo`/`roo-code`.
 Structured JSON and stable SQL views use provider IDs in ctx output; multiword IDs may be
-snake_case, such as `copilot_cli`, `factory_ai_droid`, `qwen_code`, or
-`kimi_code_cli` or `autohand_code`, while compact native IDs such as `kilo`,
-`openclaw`, `crush`, `goose`, `dexto`, `codebuddy`, `nanoclaw`, `astrbot`,
-`shelley`, `continue`, and `openhands` stay compact. Roo Code is reported as
-`roo_code`.
+snake_case, such as `copilot_cli`, `factory_ai_droid`, `qwen_code`,
+`kimi_code_cli`, or `autohand_code`, while compact native IDs such as `kilo`,
+`openclaw`, `crush`, `goose`, `dexto`, `zed`, `codebuddy`, `nanoclaw`,
+`astrbot`, `shelley`, `continue`, and `openhands` stay compact. Roo Code is
+reported as `roo_code`.
 
 `ctx sources --json` reports each known provider source with `import_support`
 and `importable` fields. A native source is marked available/importable only

@@ -10,8 +10,9 @@ shipped.
 - Pi local import is supported when matching local session JSONL files exist
   under `~/.pi/agent/sessions`, or when an explicit Pi session JSONL file is
   passed with `--path`.
-- Antigravity, Claude, OpenCode, Kilo Code, OpenClaw, Hermes, Gemini, Cursor, Copilot CLI,
-  and Factory AI Droid local import is supported only when their documented
+- Antigravity, Claude, OpenCode, Kilo Code, OpenClaw, Hermes, Gemini, Cursor,
+  Zed, Copilot CLI, Factory AI Droid, and Autohand Code local import is
+  supported only when their documented
   local history paths exist and match the supported native formats in the
   provider matrix.
 - NanoClaw and AstrBot local import are preview/manual-path support. They are

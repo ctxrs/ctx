@@ -88,8 +88,9 @@ machine. Current rows include:
 - Codex session trees at `~/.codex/sessions`;
 - Codex prompt history at `~/.codex/history.jsonl`;
 - Pi session JSONL files under `~/.pi/agent/sessions`;
-- native rows for supported Antigravity, Claude, OpenCode, Kilo Code, OpenClaw, Hermes,
-  Gemini, Cursor, Copilot CLI, and Factory AI Droid local history locations;
+- native rows for supported Antigravity, Claude, OpenCode, Kilo Code, OpenClaw,
+  Hermes, Gemini, Cursor, Zed, Copilot CLI, Factory AI Droid, Qwen Code,
+  Kimi Code CLI, Autohand Code, Cline, and Roo Code local history locations;
 - preview rows for NanoClaw project roots and AstrBot SQLite history when those
   paths are discoverable;
 - local history-source plugin manifests under `$CTX_DATA_ROOT/plugins` or
@@ -124,8 +125,10 @@ ctx import --provider continue --path ~/.continue/sessions
 ctx import --provider openhands --path ~/.openhands
 ctx import --provider gemini
 ctx import --provider cursor
+ctx import --provider zed
 ctx import --provider copilot-cli
 ctx import --provider factory-ai-droid
+ctx import --provider autohand-code
 ctx import --provider codebuddy
 ctx import --provider codex --path ~/.codex/sessions
 ctx import --provider pi --path ~/.pi/agent/sessions
@@ -285,7 +288,7 @@ optimized for agent reading; use `--verbose` for expanded text diagnostics.
 
 Filters:
 
-- `--provider codex|pi|claude|opencode|kilo|openclaw|hermes|nanoclaw|astrbot|shelley|continue|openhands|antigravity|gemini|cursor|copilot-cli|factory-ai-droid|qwen-code|kimi-code-cli|autohand-code|codebuddy|custom`;
+- `--provider codex|pi|claude|opencode|kilo|crush|goose|dexto|openclaw|hermes|nanoclaw|astrbot|shelley|continue|openhands|antigravity|gemini|cursor|zed|copilot-cli|factory-ai-droid|qwen-code|kimi-code-cli|autohand-code|codebuddy|cline|roo|custom`;
 - `--workspace <name-or-path>`, substring match over stored workspace, cwd,
   source path, or repository-name text;
 - `--since <rfc3339-or-days>d`, for example `2026-06-01T00:00:00Z` or `30d`;

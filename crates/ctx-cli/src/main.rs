@@ -43,21 +43,22 @@ use ctx_history_capture::{
     import_hermes_sqlite, import_kilo_sqlite, import_kimi_code_cli_history,
     import_nanoclaw_project, import_openclaw_history, import_opencode_sqlite,
     import_openhands_file_events, import_pi_session_jsonl, import_qwen_code_history,
-    import_roo_task_json_history, import_shelley_sqlite, provider_source_for_path,
-    provider_source_spec, stable_capture_uuid, validate_custom_history_jsonl_v1,
-    validate_custom_history_jsonl_v1_reader, AntigravityCliImportOptions,
-    AstrBotSqliteImportOptions, AutohandCodeImportOptions, CatalogSummary,
-    ClaudeProjectsImportOptions, ClineTaskJsonImportOptions, CodeBuddyImportOptions,
-    CodexEventImportMode, CodexHistoryImportOptions, CodexSessionCatalogOptions,
-    CodexSessionImportOptions, CodexSessionImportProgress, CodexSessionImportProgressCallback,
-    CodexToolOutputMode, ContinueCliImportOptions, CopilotCliImportOptions,
-    CrushSqliteImportOptions, CursorNativeImportOptions, CustomHistoryJsonlV1ImportOptions,
-    DextoSqliteImportOptions, FactoryAiDroidImportOptions, GeminiCliImportOptions,
-    GooseSessionsSqliteImportOptions, HermesSqliteImportOptions, KiloSqliteImportOptions,
-    KimiCodeCliImportOptions, NanoClawImportOptions, OpenClawImportOptions,
-    OpenCodeSqliteImportOptions, OpenHandsImportOptions, PiSessionImportOptions,
-    ProviderImportSummary, ProviderImportSupport, ProviderSource, ProviderSourceStatus,
-    QwenCodeImportOptions, RooTaskJsonImportOptions, ShelleySqliteImportOptions,
+    import_roo_task_json_history, import_shelley_sqlite, import_zed_threads_sqlite,
+    provider_source_for_path, provider_source_spec, stable_capture_uuid,
+    validate_custom_history_jsonl_v1, validate_custom_history_jsonl_v1_reader,
+    AntigravityCliImportOptions, AstrBotSqliteImportOptions, AutohandCodeImportOptions,
+    CatalogSummary, ClaudeProjectsImportOptions, ClineTaskJsonImportOptions,
+    CodeBuddyImportOptions, CodexEventImportMode, CodexHistoryImportOptions,
+    CodexSessionCatalogOptions, CodexSessionImportOptions, CodexSessionImportProgress,
+    CodexSessionImportProgressCallback, CodexToolOutputMode, ContinueCliImportOptions,
+    CopilotCliImportOptions, CrushSqliteImportOptions, CursorNativeImportOptions,
+    CustomHistoryJsonlV1ImportOptions, DextoSqliteImportOptions, FactoryAiDroidImportOptions,
+    GeminiCliImportOptions, GooseSessionsSqliteImportOptions, HermesSqliteImportOptions,
+    KiloSqliteImportOptions, KimiCodeCliImportOptions, NanoClawImportOptions,
+    OpenClawImportOptions, OpenCodeSqliteImportOptions, OpenHandsImportOptions,
+    PiSessionImportOptions, ProviderImportSummary, ProviderImportSupport, ProviderSource,
+    ProviderSourceStatus, QwenCodeImportOptions, RooTaskJsonImportOptions,
+    ShelleySqliteImportOptions, ZedThreadsSqliteImportOptions,
 };
 use ctx_history_core::{
     database_path, default_data_root, utc_now, CaptureProvider, ContextCitation,
@@ -693,6 +694,7 @@ enum NativeProviderArg {
     #[value(alias = "gemini-cli")]
     Gemini,
     Cursor,
+    Zed,
     #[value(alias = "copilot", alias = "copilot_cli")]
     CopilotCli,
     #[value(
@@ -749,6 +751,7 @@ enum ProviderArg {
     #[value(alias = "gemini-cli")]
     Gemini,
     Cursor,
+    Zed,
     #[value(alias = "copilot", alias = "copilot_cli")]
     CopilotCli,
     #[value(
@@ -819,6 +822,7 @@ impl NativeProviderArg {
             Self::Antigravity => CaptureProvider::Antigravity,
             Self::Gemini => CaptureProvider::Gemini,
             Self::Cursor => CaptureProvider::Cursor,
+            Self::Zed => CaptureProvider::Zed,
             Self::CopilotCli => CaptureProvider::CopilotCli,
             Self::FactoryAiDroid => CaptureProvider::FactoryAiDroid,
             Self::QwenCode => CaptureProvider::QwenCode,
@@ -872,6 +876,7 @@ impl ProviderArg {
             Self::Antigravity => CaptureProvider::Antigravity,
             Self::Gemini => CaptureProvider::Gemini,
             Self::Cursor => CaptureProvider::Cursor,
+            Self::Zed => CaptureProvider::Zed,
             Self::CopilotCli => CaptureProvider::CopilotCli,
             Self::FactoryAiDroid => CaptureProvider::FactoryAiDroid,
             Self::QwenCode => CaptureProvider::QwenCode,
@@ -904,6 +909,7 @@ impl ProviderArg {
             Self::Antigravity => "antigravity",
             Self::Gemini => "gemini",
             Self::Cursor => "cursor",
+            Self::Zed => "zed",
             Self::CopilotCli => "copilot-cli",
             Self::FactoryAiDroid => "factory-ai-droid",
             Self::QwenCode => "qwen-code",
@@ -5841,6 +5847,17 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
+        CaptureProvider::Zed => import_zed_threads_sqlite(
+            &source.path,
+            store,
+            ZedThreadsSqliteImportOptions {
+                source_path: Some(source.path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: true,
+                ..ZedThreadsSqliteImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
         CaptureProvider::CopilotCli => import_copilot_cli_session_events(
             &source.path,
             store,
@@ -6111,7 +6128,8 @@ fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bool {
         | CaptureProvider::Kilo
         | CaptureProvider::Crush
         | CaptureProvider::Goose
-        | CaptureProvider::Dexto => path == source.path,
+        | CaptureProvider::Dexto
+        | CaptureProvider::Zed => path == source.path,
         CaptureProvider::CopilotCli => {
             path.file_name().and_then(|name| name.to_str()) == Some("events.jsonl")
         }

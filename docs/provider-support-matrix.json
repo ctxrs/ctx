@@ -1053,6 +1053,62 @@
       ]
     },
     {
+      "id": "zed",
+      "display_name": "Zed",
+      "priority": "p1",
+      "status": "local_import_when_supported",
+      "capture_provider": "zed",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "zed_threads_sqlite",
+          "fidelity": "imported",
+          "proof": [
+            "ctx sources",
+            "ctx import --provider zed"
+          ],
+          "notes": [
+            "Reads Zed agent threads from $XDG_DATA_HOME/zed/threads/threads.db or ~/.local/share/zed/threads/threads.db using a read-only SQLite connection.",
+            "threads.data is zstd-compressed DbThread JSON per zed-industries/zed commit e3b73c6b30cdc09e820823fe44542b89850d4be1.",
+            "DbThread messages do not carry per-message timestamps; ctx uses the thread updated_at for imported event timestamps."
+          ]
+        }
+      ],
+      "history_locations": [
+        "$XDG_DATA_HOME/zed/threads/threads.db",
+        "~/.local/share/zed/threads/threads.db"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": true,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": true,
+        "command_output": false,
+        "files_touched": true,
+        "artifacts": false,
+        "model_identity": true,
+        "costs": false,
+        "token_usage": true,
+        "parent_child_session_edges": true
+      },
+      "blockers": [
+        "Schema confidence is anchored to zed-industries/zed commit e3b73c6b30cdc09e820823fe44542b89850d4be1 and the current DbThread version; future Zed schema changes may need adapter updates.",
+        "Per-message timestamps are not present in DbThread messages, so event timestamps are thread-level updated_at values."
+      ],
+      "public_docs": "docs/provider-support.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/zed/v1/threads.db"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs"
+      ]
+    },
+    {
       "id": "copilot_cli",
       "display_name": "Copilot CLI",
       "priority": "p1",

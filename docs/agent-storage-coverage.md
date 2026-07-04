@@ -21,7 +21,7 @@ Status meanings:
 - `install-target`: npx target is an aggregate or project skill target, not a
   proven history-producing agent.
 
-Result on this integration branch: 20 `native-auto`, 2 `native-preview`, 22
+Result on this integration branch: 23 `native-auto`, 2 `native-preview`, 19
 `candidate-family`, 10 `webapp-boundary`, 16 `unknown`, and 2 `install-target`
 rows.
 
@@ -40,8 +40,9 @@ rows.
   `<persistence>/<user_id>/v1_conversations`.
 - `generic sqlite messages`: already covers Crush, Goose, Hermes, Dexto
   explicit imports, the AstrBot preview importer, and ctx-native Shelley.
-- `VS Code/Electron storage`: Cursor is covered through a known transcript tree;
-  other IDE-like tools need storage discovery before reuse.
+- `VS Code/Electron storage`: Cursor is covered through a known transcript tree,
+  and Zed is covered through its agent `threads.db`; other IDE-like tools need
+  storage discovery before reuse.
 - `webapp/object-store boundary`: prefer explicit exporters or
   `ctx-history-jsonl-v1` history-source plugins over speculative native readers.
 
@@ -114,7 +115,7 @@ rows.
 | `trae-cn` | `candidate-family` | `VS Code/Electron storage` | npx `~/.trae-cn`; no ctx provider | Need local app storage or export contract proof. |
 | `warp` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.warp`; no ctx provider | Terminal app history may be account or app-store backed; needs explicit export proof. |
 | `windsurf` | `candidate-family` | `VS Code/Electron storage` | npx `~/.codeium/windsurf`; no ctx provider | Need local app storage or export contract proof. |
-| `zed` | `candidate-family` | `VS Code/Electron storage` | npx Zed config dirs; no ctx provider | Desktop IDE storage needs proof before reusing Cursor-style importers. |
+| `zed` | `native-auto` | `VS Code/Electron storage` | ctx `zed_threads_sqlite`; npx `$XDG_DATA_HOME/zed` or `~/.local/share/zed` | Per-message timestamps are unavailable; ctx uses thread `updated_at`. |
 | `zencoder` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.zencoder`; no ctx provider | No proven stable local transcript boundary; prefer exporter or plugin. |
 | `zenflow` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.zencoder`; no ctx provider | Shares Zencoder skill home but no proven local history contract. |
 | `pochi` | `candidate-family` | `VS Code/Electron storage` | npx `~/.pochi`; no ctx provider | Need local app storage or export contract proof. |

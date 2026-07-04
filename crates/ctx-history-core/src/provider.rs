@@ -49,6 +49,7 @@ pub enum ProviderId {
     Gemini,
     CopilotCli,
     Copilot,
+    Zed,
     FactoryAiDroid,
     FactoryDroid,
     DroidFactoryAi,
@@ -89,7 +90,7 @@ pub enum ProviderId {
 }
 
 impl ProviderId {
-    pub const ALL: [Self; 39] = [
+    pub const ALL: [Self; 40] = [
         Self::Codex,
         Self::ClaudeCode,
         Self::ClaudeCliCrp,
@@ -101,6 +102,7 @@ impl ProviderId {
         Self::Gemini,
         Self::CopilotCli,
         Self::Copilot,
+        Self::Zed,
         Self::FactoryAiDroid,
         Self::FactoryDroid,
         Self::DroidFactoryAi,
@@ -430,6 +432,7 @@ mod tests {
             ProviderId::ClaudeCode,
             ProviderId::Cline,
             ProviderId::Codex,
+            ProviderId::CodeBuddy,
             ProviderId::Continue,
             ProviderId::Crush,
             ProviderId::Cursor,
@@ -449,6 +452,7 @@ mod tests {
             ProviderId::QwenCode,
             ProviderId::RooCode,
             ProviderId::Shelley,
+            ProviderId::Zed,
         ]
         .into_iter()
         .collect::<BTreeSet<_>>();
