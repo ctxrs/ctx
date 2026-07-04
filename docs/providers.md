@@ -71,6 +71,9 @@ The current CLI imports local history for:
 - Mistral Vibe session directories under `VIBE_HOME/logs/session` or
   `~/.vibe/logs/session`, where each session has `meta.json` and
   `messages.jsonl`;
+- Mux session transcripts under `MUX_ROOT/sessions` or `~/.mux/sessions`,
+  where each workspace directory has `chat.jsonl` and optional `partial.json`
+  plus archived subagent transcripts;
 - Cline task JSON directories under `CLINE_DATA_DIR`, `CLINE_DIR/data`,
   `~/.cline/data`, or common VS Code globalStorage folders;
 - Roo Code task JSON directories under `roo-cline.customStoragePath`, common
@@ -102,13 +105,13 @@ CLI provider flags use names such as `kilo`, `crush`, `goose`, `dexto`,
 `openclaw`, `hermes`,
 `nanoclaw`, `astrbot`, `shelley`, `continue`, `openhands`, `copilot-cli`,
 `factory-ai-droid`, `qwen-code`, `kimi-code-cli`, `autohand-code`,
-`kiro-cli`, `iflow-cli`, `forgecode`, `mistral-vibe`, `zed`, `codebuddy`,
-`aider-desk`, `cline`, and `roo`/`roo-code`.
+`kiro-cli`, `iflow-cli`, `forgecode`, `mistral-vibe`, `mux`, `zed`,
+`codebuddy`, `aider-desk`, `cline`, and `roo`/`roo-code`.
 Structured JSON and stable SQL views use provider IDs in ctx output; multiword IDs may be
 snake_case, such as `copilot_cli`, `factory_ai_droid`, `qwen_code`,
 `kimi_code_cli`, `autohand_code`, `kiro_cli`, `iflow_cli`, or
 `mistral_vibe`; Aider Desk is reported as `aider_desk`, while compact native
-IDs such as `kilo`, `openclaw`, `crush`, `goose`, `dexto`, `zed`,
+IDs such as `kilo`, `openclaw`, `crush`, `goose`, `dexto`, `mux`, `zed`,
 `codebuddy`, `forgecode`, `nanoclaw`, `astrbot`, `shelley`, `continue`, and
 `openhands` stay compact. Roo Code is reported as `roo_code`.
 

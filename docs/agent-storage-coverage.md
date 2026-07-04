@@ -21,7 +21,7 @@ Status meanings:
 - `install-target`: npx target is an aggregate or project skill target, not a
   proven history-producing agent.
 
-Result on this integration branch: 28 `native-auto`, 2 `native-preview`, 21
+Result on this integration branch: 29 `native-auto`, 2 `native-preview`, 20
 `candidate-family`, 9 `webapp-boundary`, 10 `unknown`, and 2 `install-target`
 rows.
 
@@ -33,7 +33,7 @@ rows.
   importer for file-backed task directories.
 - `JSONL CLI event logs`: already covers Codex, Claude Code, OpenClaw,
   Antigravity CLI, Gemini CLI, Pi, Factory Droid, Copilot CLI-shaped logs, and
-  Autohand Code, iFlow CLI, and Mistral Vibe sessions.
+  Autohand Code, iFlow CLI, Mistral Vibe sessions, and Mux sessions.
 - `CLI session JSON`: covers Continue CLI `sessions/*.json` files with
   `sessions.json` metadata.
 - `project task JSON`: covers Aider Desk project-local task directories such as
@@ -103,7 +103,7 @@ rows.
 | `mcpjam` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.mcpjam`; no ctx provider | UI or account-backed activity should use exporter or plugin until local storage is proven. |
 | `mistral-vibe` | `native-auto` | `JSONL CLI event logs` | ctx `mistral_vibe_session_jsonl_tree`; npx `VIBE_HOME` or `~/.vibe` | - |
 | `moxby` | `unknown` | `unknown native history` | npx `~/.moxby`; no ctx provider | Need native history storage research before claiming import support. |
-| `mux` | `candidate-family` | `JSONL CLI event logs` | npx `~/.mux`; no ctx provider; `coder/mux` stores workspace `chat.jsonl` under `MUX_ROOT` or `~/.mux` sessions | Need sanitized chat/partial/subagent fixtures and a read-only session scanner. |
+| `mux` | `native-auto` | `JSONL CLI event logs` | ctx `mux_session_jsonl_tree`; npx `MUX_ROOT` or `~/.mux` | - |
 | `neovate` | `candidate-family` | `JSONL CLI event logs` | npx `~/.neovate`; no ctx provider; `@neovate/code` stores project session JSONL under `~/.neovate/projects` | Need package-aligned fixture data and request/file-history sidecar policy before implementing native import. |
 | `opencode` | `native-auto` | `opencode sqlite family` | ctx `opencode_sqlite`; npx `~/.config/opencode` | - |
 | `openhands` | `native-auto` | `filesystem event JSON` | ctx `openhands_file_events`; npx `~/.openhands` | - |

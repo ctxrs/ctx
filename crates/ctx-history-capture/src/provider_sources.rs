@@ -246,6 +246,12 @@ const MISTRAL_VIBE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocat
     source_kind: ProviderSourceKind::NativeHistory,
 }];
 
+const MUX_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
+    path_components: &[".mux", "sessions"],
+    source_format: "mux_session_jsonl_tree",
+    source_kind: ProviderSourceKind::NativeHistory,
+}];
+
 const OPENCLAW_DEFAULTS: &[ProviderDefaultLocation] = &[
     ProviderDefaultLocation {
         path_components: &[".openclaw"],
@@ -584,6 +590,16 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         unsupported_reason: None,
     },
     ProviderSourceSpec {
+        provider: CaptureProvider::Mux,
+        display_name: "Mux",
+        default_locations: MUX_DEFAULTS,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
+    ProviderSourceSpec {
         provider: CaptureProvider::OpenClaw,
         display_name: "OpenClaw",
         default_locations: OPENCLAW_DEFAULTS,
@@ -911,6 +927,16 @@ fn discover_provider_sources_for_spec(
                     spec,
                     path.join("logs").join("session"),
                     "mistral_vibe_session_jsonl_tree",
+                    ProviderSourceKind::NativeHistory,
+                ));
+            }
+        }
+        CaptureProvider::Mux => {
+            if let Some(path) = env_path_resolved("MUX_ROOT", home) {
+                sources.push(provider_source_from_parts(
+                    spec,
+                    path.join("sessions"),
+                    "mux_session_jsonl_tree",
                     ProviderSourceKind::NativeHistory,
                 ));
             }
@@ -1437,6 +1463,8 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::ForgeCode => "forgecode_sqlite",
         CaptureProvider::MistralVibe if path.is_dir() => "mistral_vibe_session_jsonl_tree",
         CaptureProvider::MistralVibe => "mistral_vibe_session_jsonl",
+        CaptureProvider::Mux if path.is_dir() => "mux_session_jsonl_tree",
+        CaptureProvider::Mux => "mux_session_jsonl",
         CaptureProvider::OpenClaw => "openclaw_session_jsonl_tree",
         CaptureProvider::Hermes => "hermes_state_sqlite",
         CaptureProvider::NanoClaw => "nanoclaw_project",
@@ -1576,6 +1604,9 @@ fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         }
         CaptureProvider::MistralVibe => {
             Some("path exists but no Mistral Vibe meta.json/messages.jsonl session directories were found")
+        }
+        CaptureProvider::Mux => {
+            Some("path exists but no Mux chat.jsonl or partial.json session files were found")
         }
         CaptureProvider::OpenClaw => {
             Some("path exists but no OpenClaw agent session JSONL files were found")
@@ -1731,6 +1762,9 @@ fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::MistralVibe => {
             Some("path exists but Mistral Vibe session files could not be read; check permissions")
         }
+        CaptureProvider::Mux => {
+            Some("path exists but Mux session files could not be read; check permissions")
+        }
         CaptureProvider::OpenClaw => Some(
             "path exists but OpenClaw session transcripts could not be read; check permissions",
         ),
@@ -1839,6 +1873,7 @@ fn default_location_import_probe(
                     .parent()
                     .is_some_and(|parent| parent.join("meta.json").is_file())
         }),
+        CaptureProvider::Mux => has_mux_session_files(path, 10_000),
         CaptureProvider::Cline => has_task_json_file_under_matching(path, 10_000, |name| {
             matches!(
                 name,
@@ -1927,6 +1962,18 @@ fn has_openclaw_session_jsonl(root: &Path, max_entries: usize) -> BoundedProbe {
     has_jsonl_file_under_matching(root, max_entries, |path| {
         path_has_component(path, "sessions")
     })
+}
+
+fn has_mux_session_files(root: &Path, max_entries: usize) -> BoundedProbe {
+    match has_jsonl_file_under_matching(root, max_entries, |candidate| {
+        candidate.file_name().and_then(|name| name.to_str()) == Some("chat.jsonl")
+    }) {
+        BoundedProbe::Found => BoundedProbe::Found,
+        BoundedProbe::IoError => BoundedProbe::IoError,
+        _ => has_json_file_under_matching(root, max_entries, |candidate| {
+            candidate.file_name().and_then(|name| name.to_str()) == Some("partial.json")
+        }),
+    }
 }
 
 fn has_openhands_event_json(root: &Path, max_entries: usize) -> BoundedProbe {
@@ -2839,6 +2886,40 @@ mod tests {
     }
 
     #[test]
+    fn mux_discovery_uses_default_and_mux_root_sessions() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::remove("MUX_ROOT");
+
+        let default_sessions = temp.path().join(".mux/sessions");
+        std::fs::create_dir_all(&default_sessions).unwrap();
+        let empty_source =
+            discover_provider_sources_for_provider(temp.path(), CaptureProvider::Mux)
+                .into_iter()
+                .find(|source| source.path == default_sessions)
+                .unwrap();
+        assert_eq!(empty_source.status, ProviderSourceStatus::Empty);
+
+        write_mux_discovery_session(&default_sessions);
+        let source = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Mux)
+            .into_iter()
+            .find(|source| source.path == default_sessions)
+            .unwrap();
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+        assert_eq!(source.source_format, "mux_session_jsonl_tree");
+        assert_eq!(source.import_support, ProviderImportSupport::Native);
+
+        let custom_home = temp.path().join("custom-mux");
+        let custom_sessions = custom_home.join("sessions");
+        write_mux_discovery_session(&custom_sessions);
+        let _home = EnvGuard::set("MUX_ROOT", custom_home.as_os_str());
+        let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Mux);
+        assert!(sources.iter().any(|source| {
+            source.path == custom_sessions && source.status == ProviderSourceStatus::Available
+        }));
+    }
+
+    #[test]
     fn crush_discovery_uses_global_config_data_directory() {
         let _lock = ENV_LOCK.lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
@@ -3159,6 +3240,16 @@ mod tests {
         )
         .unwrap();
         std::fs::write(session.join("messages.jsonl"), "{}\n").unwrap();
+    }
+
+    fn write_mux_discovery_session(sessions: &Path) {
+        let session = sessions.join("mux-discovery");
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::write(
+            session.join("chat.jsonl"),
+            r#"{"id":"msg-mux-discovery","role":"user","parts":[{"type":"text","text":"mux discovery"}],"metadata":{"historySequence":0},"workspaceId":"mux-discovery"}"#,
+        )
+        .unwrap();
     }
 
     fn write_task_json_discovery_task(root: &Path, task_id: &str, file_name: &str) {
