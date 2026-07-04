@@ -39,8 +39,9 @@ use ctx_history_capture::{
     import_copilot_cli_session_events, import_cursor_native_history,
     import_custom_history_jsonl_v1, import_custom_history_jsonl_v1_reader,
     import_factory_ai_droid_sessions, import_gemini_cli_history, import_hermes_sqlite,
-    import_kilo_sqlite, import_nanoclaw_project, import_openclaw_history, import_opencode_sqlite,
-    import_openhands_file_events, import_pi_session_jsonl, import_shelley_sqlite,
+    import_kilo_sqlite, import_kimi_code_cli_history, import_nanoclaw_project,
+    import_openclaw_history, import_opencode_sqlite, import_openhands_file_events,
+    import_pi_session_jsonl, import_qwen_code_history, import_shelley_sqlite,
     provider_source_for_path, provider_source_spec, stable_capture_uuid,
     validate_custom_history_jsonl_v1, validate_custom_history_jsonl_v1_reader,
     AntigravityCliImportOptions, AstrBotSqliteImportOptions, CatalogSummary,
@@ -49,10 +50,10 @@ use ctx_history_capture::{
     CodexSessionImportProgressCallback, CodexToolOutputMode, ContinueCliImportOptions,
     CopilotCliImportOptions, CursorNativeImportOptions, CustomHistoryJsonlV1ImportOptions,
     FactoryAiDroidImportOptions, GeminiCliImportOptions, HermesSqliteImportOptions,
-    KiloSqliteImportOptions, NanoClawImportOptions, OpenClawImportOptions,
-    OpenCodeSqliteImportOptions, OpenHandsImportOptions, PiSessionImportOptions,
-    ProviderImportSummary, ProviderImportSupport, ProviderSource, ProviderSourceStatus,
-    ShelleySqliteImportOptions,
+    KiloSqliteImportOptions, KimiCodeCliImportOptions, NanoClawImportOptions,
+    OpenClawImportOptions, OpenCodeSqliteImportOptions, OpenHandsImportOptions,
+    PiSessionImportOptions, ProviderImportSummary, ProviderImportSupport, ProviderSource,
+    ProviderSourceStatus, QwenCodeImportOptions, ShelleySqliteImportOptions,
 };
 use ctx_history_core::{
     database_path, default_data_root, utc_now, CaptureProvider, ContextCitation,
@@ -694,6 +695,10 @@ enum NativeProviderArg {
         alias = "factory_ai_droid"
     )]
     FactoryAiDroid,
+    #[value(name = "qwen-code", alias = "qwen", alias = "qwen_code")]
+    QwenCode,
+    #[value(name = "kimi-code-cli", alias = "kimi", alias = "kimi_code_cli")]
+    KimiCodeCli,
     #[value(name = "openclaw", alias = "open-claw", alias = "open_claw")]
     OpenClaw,
     Hermes,
@@ -736,6 +741,10 @@ enum ProviderArg {
         alias = "factory_ai_droid"
     )]
     FactoryAiDroid,
+    #[value(name = "qwen-code", alias = "qwen", alias = "qwen_code")]
+    QwenCode,
+    #[value(name = "kimi-code-cli", alias = "kimi", alias = "kimi_code_cli")]
+    KimiCodeCli,
     #[value(name = "openclaw", alias = "open-claw", alias = "open_claw")]
     OpenClaw,
     Hermes,
@@ -786,6 +795,8 @@ impl NativeProviderArg {
             Self::Cursor => CaptureProvider::Cursor,
             Self::CopilotCli => CaptureProvider::CopilotCli,
             Self::FactoryAiDroid => CaptureProvider::FactoryAiDroid,
+            Self::QwenCode => CaptureProvider::QwenCode,
+            Self::KimiCodeCli => CaptureProvider::KimiCodeCli,
             Self::OpenClaw => CaptureProvider::OpenClaw,
             Self::Hermes => CaptureProvider::Hermes,
             Self::NanoClaw => CaptureProvider::NanoClaw,
@@ -810,6 +821,8 @@ impl ProviderArg {
             Self::Cursor => CaptureProvider::Cursor,
             Self::CopilotCli => CaptureProvider::CopilotCli,
             Self::FactoryAiDroid => CaptureProvider::FactoryAiDroid,
+            Self::QwenCode => CaptureProvider::QwenCode,
+            Self::KimiCodeCli => CaptureProvider::KimiCodeCli,
             Self::OpenClaw => CaptureProvider::OpenClaw,
             Self::Hermes => CaptureProvider::Hermes,
             Self::NanoClaw => CaptureProvider::NanoClaw,
@@ -833,6 +846,8 @@ impl ProviderArg {
             Self::Cursor => "cursor",
             Self::CopilotCli => "copilot-cli",
             Self::FactoryAiDroid => "factory-ai-droid",
+            Self::QwenCode => "qwen-code",
+            Self::KimiCodeCli => "kimi-code-cli",
             Self::OpenClaw => "openclaw",
             Self::Hermes => "hermes",
             Self::NanoClaw => "nanoclaw",
@@ -5696,6 +5711,28 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
+        CaptureProvider::QwenCode => import_qwen_code_history(
+            &source.path,
+            store,
+            QwenCodeImportOptions {
+                source_path: Some(source.path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: true,
+                ..QwenCodeImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
+        CaptureProvider::KimiCodeCli => import_kimi_code_cli_history(
+            &source.path,
+            store,
+            KimiCodeCliImportOptions {
+                source_path: Some(source.path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: true,
+                ..KimiCodeCliImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
         CaptureProvider::Antigravity => import_antigravity_cli_history(
             &source.path,
             store,
@@ -5927,6 +5964,18 @@ fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bool {
         CaptureProvider::Continue => {
             path.extension().and_then(|ext| ext.to_str()) == Some("json")
                 && path.file_name().and_then(|name| name.to_str()) != Some("sessions.json")
+        }
+        CaptureProvider::QwenCode => {
+            path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
+                && path
+                    .components()
+                    .any(|component| component.as_os_str() == "chats")
+        }
+        CaptureProvider::KimiCodeCli => {
+            path.file_name().and_then(|name| name.to_str()) == Some("wire.jsonl")
+                && path
+                    .components()
+                    .any(|component| component.as_os_str() == "agents")
         }
         _ => path.extension().and_then(|ext| ext.to_str()) == Some("jsonl"),
     }
@@ -6185,6 +6234,8 @@ fn source_uses_incremental_event_search(source: &SourceInfo) -> bool {
             | CaptureProvider::CopilotCli
             | CaptureProvider::FactoryAiDroid
             | CaptureProvider::Continue
+            | CaptureProvider::QwenCode
+            | CaptureProvider::KimiCodeCli
     )
 }
 

@@ -900,6 +900,113 @@
         "crates/ctx-cli/tests/cli.rs",
         "crates/ctx-history-capture/src/lib.rs"
       ]
+    },
+    {
+      "id": "qwen_code",
+      "display_name": "Qwen Code",
+      "priority": "p1",
+      "status": "local_import_when_supported",
+      "capture_provider": "qwen_code",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "qwen_code_chat_jsonl_tree",
+          "fidelity": "imported",
+          "proof": [
+            "ctx sources",
+            "ctx import --provider qwen-code"
+          ],
+          "notes": [
+            "Reads Qwen Code chat JSONL files under QWEN_RUNTIME_DIR/projects, QWEN_HOME/projects, or ~/.qwen/projects.",
+            "Native source discovery marks Qwen Code available only when JSONL files exist under a chats path."
+          ]
+        }
+      ],
+      "history_locations": [
+        "QWEN_RUNTIME_DIR/projects/*/chats/*.jsonl",
+        "QWEN_HOME/projects/*/chats/*.jsonl",
+        "~/.qwen/projects/*/chats/*.jsonl"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": false,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": true,
+        "command_output": false,
+        "files_touched": true,
+        "artifacts": false,
+        "model_identity": true,
+        "costs": false,
+        "token_usage": true,
+        "parent_child_session_edges": false
+      },
+      "blockers": [],
+      "public_docs": "docs/provider-support.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/qwen-code"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs"
+      ]
+    },
+    {
+      "id": "kimi_code_cli",
+      "display_name": "Kimi Code CLI",
+      "priority": "p1",
+      "status": "local_import_when_supported",
+      "capture_provider": "kimi_code_cli",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "kimi_code_cli_wire_jsonl_tree",
+          "fidelity": "imported",
+          "proof": [
+            "ctx sources",
+            "ctx import --provider kimi-code-cli"
+          ],
+          "notes": [
+            "Reads Kimi Code CLI agents/*/wire.jsonl files plus adjacent state.json and session_index.jsonl metadata under KIMI_CODE_HOME or ~/.kimi-code.",
+            "Native source discovery marks Kimi Code CLI available only when agent wire.jsonl files exist."
+          ]
+        }
+      ],
+      "history_locations": [
+        "KIMI_CODE_HOME/session_index.jsonl",
+        "KIMI_CODE_HOME/sessions/*/*/agents/*/wire.jsonl",
+        "~/.kimi-code/session_index.jsonl",
+        "~/.kimi-code/sessions/*/*/agents/*/wire.jsonl"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": true,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": true,
+        "command_output": false,
+        "files_touched": true,
+        "artifacts": false,
+        "model_identity": true,
+        "costs": false,
+        "token_usage": true,
+        "parent_child_session_edges": true
+      },
+      "blockers": [],
+      "public_docs": "docs/provider-support.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/kimi-code-cli"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs"
+      ]
     }
   ]
 }
