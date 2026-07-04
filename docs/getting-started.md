@@ -72,8 +72,9 @@ ctx sources --json
 ```
 
 `sources` checks known provider locations on the current machine. Today it
-reports supported Codex, Pi, Antigravity, Claude, OpenCode, Kilo Code, Gemini, Cursor,
-Copilot CLI, and Factory AI Droid local history paths. JSON rows include
+reports supported Codex, Pi, Antigravity, Claude, OpenCode, Kilo Code, Gemini,
+Cursor, Zed, Copilot CLI, Factory AI Droid, and Autohand Code local history
+paths. JSON rows include
 `status` and `importable`; `status: "empty"` means the default location exists
 but no provider-specific transcript files were found there, and
 `status: "unknown"` means the bounded transcript probe hit its scan budget.
@@ -85,6 +86,7 @@ ctx import --all
 ctx import --provider codex
 ctx import --provider pi
 ctx import --provider cursor
+ctx import --provider zed
 ctx import --provider codex --path ~/.codex/sessions
 ctx import --resume --json
 ```

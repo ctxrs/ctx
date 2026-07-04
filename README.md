@@ -98,6 +98,7 @@ Support means ctx can discover or read that harness's persisted local history an
 | Claude Code | Supported |
 | Codex | Supported |
 | Cursor | Supported |
+| Zed | Supported |
 | Pi | Supported |
 | OpenCode | Supported |
 | Antigravity / Gemini CLI | Supported |

@@ -41,6 +41,7 @@ is:
 | Antigravity | `local_import_when_supported` | Antigravity `transcript_full.jsonl` or `transcript.jsonl` files under `~/.gemini/antigravity-cli/brain`, or an explicit Antigravity transcript JSONL tree. | Static local-history fixture smoke. |
 | Gemini | `local_import_when_supported` | Gemini chat JSONL files under `~/.gemini/tmp/**/chats`, or an explicit Gemini CLI history tree. | Static local-history fixture smoke. |
 | Cursor | `local_import_when_supported` | Cursor agent transcript JSONL files under `~/.cursor/projects/**/agent-transcripts`, or an explicit Cursor agent transcript path. | Static local-history fixture smoke. |
+| Zed | `local_import_when_supported` | Zed agent threads SQLite DB at `$XDG_DATA_HOME/zed/threads/threads.db`, `~/.local/share/zed/threads/threads.db`, or an explicit Zed `threads.db` path. | Static local-history fixture smoke; imports zstd-compressed Zed `DbThread` messages from `threads.data`. |
 | Copilot CLI | `local_import_when_supported` | Copilot CLI `events.jsonl` files under `~/.copilot/session-state`, or an explicit Copilot CLI session-state tree. | Static local-history fixture smoke. |
 | Factory AI Droid | `local_import_when_supported` | `~/.factory/sessions` or an explicit Factory AI Droid sessions tree. | Static local-history fixture smoke. |
 | Qwen Code | `local_import_when_supported` | Qwen Code chat JSONL files under `QWEN_RUNTIME_DIR/projects`, `QWEN_HOME/projects`, `~/.qwen/projects`, or an explicit Qwen Code projects/chats tree. | Static local-history fixture smoke. |

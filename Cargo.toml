@@ -39,3 +39,4 @@ tempfile = "3.10"
 thiserror = "1.0"
 url = "2.5"
 uuid = { version = "1.10", features = ["serde", "v4", "v7"] }
+zstd = "0.13"

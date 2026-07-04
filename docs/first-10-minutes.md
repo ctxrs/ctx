@@ -48,9 +48,10 @@ ctx sources --json
 ```
 
 Expect rows for supported local import providers such as Codex, Pi,
-Antigravity, Claude, OpenCode, Kilo Code, OpenClaw, Hermes, Gemini, Cursor, Copilot CLI,
-and Factory AI Droid. NanoClaw and AstrBot can appear as preview rows when ctx
-can discover their local project or SQLite paths. A row with `exists: false`
+Antigravity, Claude, OpenCode, Kilo Code, OpenClaw, Hermes, Gemini, Cursor,
+Zed, Copilot CLI, Factory AI Droid, and Autohand Code. NanoClaw and AstrBot can
+appear as preview rows when ctx can discover their local project or SQLite
+paths. A row with `exists: false`
 means ctx knows the default path but did not find local history there. A JSON
 row with `status: "empty"` means the path exists but no provider-specific
 transcript files were found. A row with `status: "unknown"` means the bounded
@@ -69,6 +70,7 @@ you want to repair, re-run, resume, or pass an explicit path:
 ctx import --provider codex --path ~/.codex/sessions
 ctx import --provider pi --path ~/.pi/agent/sessions
 ctx import --provider cursor --path ~/.cursor/projects
+ctx import --provider zed --path ~/.local/share/zed/threads/threads.db
 ctx import --provider hermes --path ~/.hermes/state.db
 ctx import --provider nanoclaw --path /path/to/nanoclaw-project
 ctx import --provider astrbot --path /path/to/data/data_v4.db

@@ -2187,6 +2187,7 @@ fn provider_help_matches_implemented_importers() {
         "antigravity",
         "gemini",
         "cursor",
+        "zed",
         "copilot-cli",
         "factory-ai-droid",
         "continue",
@@ -2336,7 +2337,7 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
             vec![
                 "Usage: ctx import",
                 "--provider <PROVIDER>",
-                "[possible values: codex, pi, claude, opencode, kilo, crush, goose, antigravity, gemini, cursor, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto, codebuddy]",
+                "[possible values: codex, pi, claude, opencode, kilo, crush, goose, antigravity, gemini, cursor, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto, codebuddy]",
                 "--path <PATH>",
                 "--format <FORMAT>",
                 "--resume",
@@ -4396,6 +4397,7 @@ fn mcp_status_and_tools_list_are_read_only_without_initialized_store() {
     assert!(providers.iter().any(|provider| provider == "autohand-code"));
     assert!(providers.iter().any(|provider| provider == "autohand_code"));
     assert!(providers.iter().any(|provider| provider == "codebuddy"));
+    assert!(providers.iter().any(|provider| provider == "zed"));
     assert!(providers.iter().any(|provider| provider == "cline"));
     assert!(providers.iter().any(|provider| provider == "roo"));
     assert!(providers.iter().any(|provider| provider == "roo_code"));
@@ -6206,6 +6208,15 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
 fn sqlite_cli_imports_crush_goose_and_dexto_and_searches() {
     for (cli_provider, stored_provider, source_format, fixture, query, sessions, events) in [
         (
+            "zed",
+            "zed",
+            "zed_threads_sqlite",
+            "zed/v1/threads.db",
+            "zed sqlite oracle",
+            2,
+            5,
+        ),
+        (
             "crush",
             "crush",
             "crush_sqlite",
@@ -7770,6 +7781,7 @@ fn native_provider_cli_requires_existing_history_or_explicit_path() {
         ("antigravity", "no importable antigravity history found"),
         ("gemini", "no importable gemini history found"),
         ("cursor", "no importable cursor history found"),
+        ("zed", "no importable zed history found"),
         ("copilot-cli", "no importable copilot_cli history found"),
         (
             "factory-ai-droid",

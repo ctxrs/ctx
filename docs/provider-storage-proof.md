@@ -52,15 +52,24 @@ IDE/application storage imports.
 
 ## Zed
 
-- Source evidence: Zed persists agent threads in SQLite at
-  `<Zed data dir>/threads/threads.db`.
+- Source evidence: zed-industries/zed commit
+  `e3b73c6b30cdc09e820823fe44542b89850d4be1`.
+- `crates/agent/src/db.rs` creates the agent thread database at
+  `<Zed data dir>/threads/threads.db`, creates and migrates the `threads`
+  table, and saves `SerializedThread { thread: DbThread, version }` into
+  `threads.data` with `data_type = 'zstd'`.
 - Table shape observed in source:
   `threads(id, summary, updated_at, data_type, data, parent_id, folder_paths, folder_paths_order, created_at)`.
-- The `data` column is zstd-compressed JSON for `DbThread`, including messages,
-  summaries, token usage, model/profile metadata, and draft prompt state.
-- `ZED_STATELESS` disables persistent DB use.
-- Gap: native import needs a zstd decoder dependency plus a stable fixture for
-  compressed `DbThread` JSON. This pass did not add that dependency.
+- `crates/agent/src/db.rs` loads both current `zstd` rows and legacy `json`
+  rows; ctx mirrors that behavior and caps decompressed JSON size.
+- `crates/agent/src/thread.rs` defines the externally tagged `DbThread.messages`
+  variants (`User`, `Agent`, `Resume`, `Compaction`) and agent/user content
+  variants used by the importer.
+- `crates/paths/src/paths.rs` resolves the Linux data dir through
+  `$XDG_DATA_HOME/zed` or `~/.local/share/zed`.
+- `ctx` imports this shape as `zed_threads_sqlite`.
+- Caveat: `DbThread` messages do not carry per-message timestamps, so ctx uses
+  thread-level `updated_at` for imported event timestamps.
 
 ## Void
 
