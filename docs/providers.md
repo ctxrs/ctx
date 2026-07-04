@@ -28,6 +28,9 @@ The current CLI imports local history for:
 - CodeBuddy JSON history under `~/.codebuddy`,
   `~/Library/Application Support/CodeBuddyExtension/Data`,
   `%LOCALAPPDATA%/CodeBuddyExtension`, or an explicit CodeBuddy history root;
+- Aider Desk project task context files under `.aider-desk/tasks/<taskId>`,
+  `AIDER_DESK_DIR/tasks/<taskId>`, or an explicit task, tasks, context file, or
+  project root;
 - OpenClaw session JSONL trees under `OPENCLAW_STATE_DIR`, `~/.openclaw`,
   legacy `~/.clawdbot`, or legacy `~/.moltbot`;
 - Hermes Agent SQLite history under `HERMES_HOME/state.db` or
@@ -100,14 +103,14 @@ CLI provider flags use names such as `kilo`, `crush`, `goose`, `dexto`,
 `nanoclaw`, `astrbot`, `shelley`, `continue`, `openhands`, `copilot-cli`,
 `factory-ai-droid`, `qwen-code`, `kimi-code-cli`, `autohand-code`,
 `kiro-cli`, `iflow-cli`, `forgecode`, `mistral-vibe`, `zed`, `codebuddy`,
-`cline`, and `roo`/`roo-code`.
+`aider-desk`, `cline`, and `roo`/`roo-code`.
 Structured JSON and stable SQL views use provider IDs in ctx output; multiword IDs may be
 snake_case, such as `copilot_cli`, `factory_ai_droid`, `qwen_code`,
 `kimi_code_cli`, `autohand_code`, `kiro_cli`, `iflow_cli`, or
-`mistral_vibe`, while compact native IDs such as `kilo`, `openclaw`, `crush`,
-`goose`, `dexto`, `zed`, `codebuddy`, `forgecode`, `nanoclaw`, `astrbot`,
-`shelley`, `continue`, and `openhands` stay compact. Roo Code is reported as
-`roo_code`.
+`mistral_vibe`; Aider Desk is reported as `aider_desk`, while compact native
+IDs such as `kilo`, `openclaw`, `crush`, `goose`, `dexto`, `zed`,
+`codebuddy`, `forgecode`, `nanoclaw`, `astrbot`, `shelley`, `continue`, and
+`openhands` stay compact. Roo Code is reported as `roo_code`.
 
 `ctx sources --json` reports each known provider source with `import_support`
 and `importable` fields. A native source is marked available/importable only

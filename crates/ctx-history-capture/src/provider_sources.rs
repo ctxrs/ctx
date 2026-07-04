@@ -380,6 +380,8 @@ const CODEBUDDY_DEFAULTS: &[ProviderDefaultLocation] = &[
     },
 ];
 
+const AIDER_DESK_DEFAULTS: &[ProviderDefaultLocation] = &[];
+
 const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
     ProviderSourceSpec {
         provider: CaptureProvider::Codex,
@@ -691,6 +693,16 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         redaction_boundary: ProviderRedactionBoundary::BeforeExport,
         unsupported_reason: None,
     },
+    ProviderSourceSpec {
+        provider: CaptureProvider::AiderDesk,
+        display_name: "Aider Desk",
+        default_locations: AIDER_DESK_DEFAULTS,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
 ];
 
 pub fn provider_source_specs() -> &'static [ProviderSourceSpec] {
@@ -986,6 +998,22 @@ fn discover_provider_sources_for_spec(
                     spec,
                     path.join("CodeBuddyExtension"),
                     "codebuddy_history_json",
+                    ProviderSourceKind::NativeHistory,
+                ));
+            }
+        }
+        CaptureProvider::AiderDesk => {
+            let aider_dir = env::var_os("AIDER_DESK_DIR")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(".aider-desk"));
+            for root in current_dir_ancestors_with(|candidate| {
+                candidate.join(&aider_dir).join("tasks").is_dir()
+            }) {
+                sources.push(provider_source_from_parts(
+                    spec,
+                    root.join(&aider_dir).join("tasks"),
+                    "aider_desk_task_context_json",
                     ProviderSourceKind::NativeHistory,
                 ));
             }
@@ -1420,6 +1448,7 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::RooCode => "roo_task_directory_json",
         CaptureProvider::Dexto => "dexto_sqlite",
         CaptureProvider::CodeBuddy => "codebuddy_history_json",
+        CaptureProvider::AiderDesk => "aider_desk_task_context_json",
         _ => "unsupported",
     };
     let explicit_import_support = spec.import_support;
@@ -1569,6 +1598,9 @@ fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::CodeBuddy => {
             Some("path exists but no CodeBuddy history sessions were found")
         }
+        CaptureProvider::AiderDesk => {
+            Some("path exists but no Aider Desk task context.json files were found")
+        }
         _ => None,
     }
 }
@@ -1629,6 +1661,9 @@ fn unknown_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         }
         CaptureProvider::CodeBuddy => {
             Some("path exists but the CodeBuddy history probe hit its scan budget")
+        }
+        CaptureProvider::AiderDesk => {
+            Some("path exists but the Aider Desk task context probe hit its scan budget")
         }
         _ => None,
     }
@@ -1729,6 +1764,9 @@ fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::CodeBuddy => Some(
             "path exists but CodeBuddy history JSON files could not be read; check permissions",
         ),
+        CaptureProvider::AiderDesk => Some(
+            "path exists but Aider Desk task context JSON files could not be read; check permissions",
+        ),
         _ => None,
     }
 }
@@ -1821,6 +1859,9 @@ fn default_location_import_probe(
             )
         }),
         CaptureProvider::CodeBuddy => has_codebuddy_history_json(path, 10_000),
+        CaptureProvider::AiderDesk => {
+            has_task_json_file_under_matching(path, 10_000, |name| name == "context.json")
+        }
         CaptureProvider::Shell
         | CaptureProvider::Git
         | CaptureProvider::Jj
@@ -2130,6 +2171,24 @@ mod tests {
             } else {
                 env::remove_var(self.name);
             }
+        }
+    }
+
+    struct CwdGuard {
+        original: PathBuf,
+    }
+
+    impl CwdGuard {
+        fn set(path: &Path) -> Self {
+            let original = env::current_dir().unwrap();
+            env::set_current_dir(path).unwrap();
+            Self { original }
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            env::set_current_dir(&self.original).unwrap();
         }
     }
 
@@ -2677,6 +2736,34 @@ mod tests {
             .unwrap_or_else(|| panic!("missing CodeBuddy LOCALAPPDATA source in {sources:#?}"));
 
         assert_eq!(source.status, ProviderSourceStatus::Available);
+        assert_eq!(source.import_support, ProviderImportSupport::Native);
+    }
+
+    #[test]
+    fn aider_desk_discovery_uses_current_project_tasks_root() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        let task = project.join(".aider-desk/tasks/aider-task-1");
+        std::fs::create_dir_all(&task).unwrap();
+        std::fs::write(
+            task.join("context.json"),
+            r#"{"version":2,"contextMessages":[],"contextFiles":[]}"#,
+        )
+        .unwrap();
+        let _aider_dir = EnvGuard::remove("AIDER_DESK_DIR");
+        let _cwd = CwdGuard::set(&project);
+
+        let sources =
+            discover_provider_sources_for_provider(temp.path(), CaptureProvider::AiderDesk);
+        let expected = project.join(".aider-desk/tasks");
+        let source = sources
+            .iter()
+            .find(|source| source.provider == CaptureProvider::AiderDesk && source.path == expected)
+            .unwrap_or_else(|| panic!("missing Aider Desk cwd source in {sources:#?}"));
+
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+        assert_eq!(source.source_format, "aider_desk_task_context_json");
         assert_eq!(source.import_support, ProviderImportSupport::Native);
     }
 
