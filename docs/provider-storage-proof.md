@@ -64,6 +64,27 @@ IDE/application storage imports.
   files read-only. Schema confidence is based on WayLog plus sanitized fixtures,
   not official CodeBuddy documentation.
 
+## Aider Desk
+
+- Source evidence: Aider Desk repository commit
+  `01ad9d3ab75998fbc79c6decca5896ba6ef294aa`.
+- Path evidence: `src/main/constants.ts` defines `AIDER_DESK_DIR` as
+  `process.env.AIDER_DESK_DIR || ".aider-desk"` and derives
+  `AIDER_DESK_TASKS_DIR` as `<aider-dir>/tasks`.
+- Runtime evidence: `src/main/task/context-manager.ts` persists task context to
+  `<project>/<AIDER_DESK_DIR>/tasks/<taskId>/context.json`.
+- Type evidence: `packages/common/src/types/context.ts` defines
+  `ContextMessage` roles, content parts including `text`, `image`, `file`,
+  `reasoning`, `tool-call`, and `tool-result`, plus usage and prompt-context
+  metadata.
+- Type evidence: `packages/common/src/types/common.ts` defines `TaskContext`
+  with `contextMessages` and `contextFiles`; the V1-to-V2 migration normalizes
+  older tool-call arguments/results into the current input/output shape.
+- `ctx` imports this shape as `aider_desk_task_context_json`, using read-only
+  cwd/ancestor discovery only when a project has task context files.
+- Caveat: ctx imports task context snapshots and optional task settings, not the
+  Aider Desk application usage database.
+
 ## iFlow CLI
 
 - Source evidence: the `iflow-ai-iflow-cli-0.5.19.tgz` bundle resolves

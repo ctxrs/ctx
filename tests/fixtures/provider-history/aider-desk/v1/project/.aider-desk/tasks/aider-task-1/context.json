@@ -1,0 +1,88 @@
+{
+  "version": 2,
+  "contextMessages": [
+    {
+      "id": "aider-msg-user-1",
+      "role": "user",
+      "timestamp": 1783198800000,
+      "content": "aider desk oracle prompt",
+      "promptContext": {
+        "id": "prompt-aider-1"
+      }
+    },
+    {
+      "id": "aider-msg-assistant-1",
+      "role": "assistant",
+      "timestamp": 1783198801000,
+      "content": [
+        {
+          "type": "text",
+          "text": "I will inspect the fixture file."
+        },
+        {
+          "type": "tool-call",
+          "toolCallId": "call-aider-read",
+          "toolName": "aider---read_file",
+          "input": {
+            "path": "src/aider_oracle.rs"
+          }
+        }
+      ],
+      "usageReport": {
+        "model": "openrouter/test-model",
+        "sentTokens": 11,
+        "receivedTokens": 22,
+        "messageCost": 0,
+        "agentTotalCost": 0
+      },
+      "promptContext": {
+        "id": "prompt-aider-1"
+      }
+    },
+    {
+      "id": "aider-msg-tool-1",
+      "role": "tool",
+      "timestamp": 1783198802000,
+      "content": [
+        {
+          "type": "tool-result",
+          "toolCallId": "call-aider-read",
+          "toolName": "aider---read_file",
+          "output": {
+            "type": "text",
+            "value": "src/aider_oracle.rs contains the oracle marker"
+          }
+        }
+      ],
+      "promptContext": {
+        "id": "prompt-aider-1"
+      }
+    },
+    {
+      "id": "aider-msg-assistant-2",
+      "role": "assistant",
+      "timestamp": 1783198803000,
+      "content": [
+        {
+          "type": "text",
+          "text": "Aider Desk native import ok"
+        }
+      ],
+      "editedFiles": [
+        "src/aider_oracle.rs"
+      ],
+      "commitHash": "abcdef1234567890"
+    }
+  ],
+  "contextFiles": [
+    {
+      "path": "src/aider_oracle.rs",
+      "readOnly": false
+    },
+    {
+      "path": ".aider-desk/rules/platform.md",
+      "readOnly": true,
+      "source": "project-rule"
+    }
+  ]
+}

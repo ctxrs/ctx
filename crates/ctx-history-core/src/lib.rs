@@ -213,6 +213,7 @@ text_enum! {
         Goose => "goose",
         Dexto => "dexto",
         CodeBuddy => "codebuddy",
+        AiderDesk => "aider_desk",
         Shell => "shell",
         Git => "git",
         Jj => "jj",
@@ -1552,6 +1553,10 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<CaptureProvider>("\"mistral_vibe\"").unwrap(),
             CaptureProvider::MistralVibe
+        );
+        assert_eq!(
+            serde_json::from_str::<CaptureProvider>("\"aider_desk\"").unwrap(),
+            CaptureProvider::AiderDesk
         );
 
         let sync: SyncMetadata = serde_json::from_value(json!({})).unwrap();

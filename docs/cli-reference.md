@@ -137,6 +137,7 @@ ctx import --provider kimi-code-cli
 ctx import --provider autohand-code
 ctx import --provider iflow-cli
 ctx import --provider codebuddy
+ctx import --provider aider-desk
 ctx import --provider codex --path ~/.codex/sessions
 ctx import --provider pi --path ~/.pi/agent/sessions
 ctx import --format ctx-history-jsonl-v1 --path ./history.jsonl
@@ -295,7 +296,7 @@ optimized for agent reading; use `--verbose` for expanded text diagnostics.
 
 Filters:
 
-- `--provider codex|pi|claude|opencode|kilo|kiro-cli|forgecode|mistral-vibe|crush|goose|dexto|openclaw|hermes|nanoclaw|astrbot|shelley|continue|openhands|antigravity|gemini|cursor|zed|copilot-cli|factory-ai-droid|qwen-code|kimi-code-cli|autohand-code|iflow-cli|codebuddy|cline|roo|custom`;
+- `--provider codex|pi|claude|opencode|kilo|kiro-cli|forgecode|mistral-vibe|crush|goose|dexto|openclaw|hermes|nanoclaw|astrbot|shelley|continue|openhands|antigravity|gemini|cursor|zed|copilot-cli|factory-ai-droid|qwen-code|kimi-code-cli|autohand-code|iflow-cli|codebuddy|aider-desk|cline|roo|custom`;
 - `--workspace <name-or-path>`, substring match over stored workspace, cwd,
   source path, or repository-name text;
 - `--since <rfc3339-or-days>d`, for example `2026-06-01T00:00:00Z` or `30d`;
@@ -315,9 +316,9 @@ Filters:
 CLI provider filters use kebab-case names. JSON output and stable SQL views use
 provider IDs in ctx output; multiword IDs may be snake_case, such as
 `copilot_cli`, `factory_ai_droid`, `qwen_code`, `kimi_code_cli`,
-`autohand_code`, `kiro_cli`, `iflow_cli`, or `mistral_vibe`, while compact IDs
-such as `forgecode`, `openclaw`, `nanoclaw`, `astrbot`, `shelley`,
-`continue`, and `openhands` stay compact.
+`autohand_code`, `kiro_cli`, `iflow_cli`, `mistral_vibe`, or `aider_desk`,
+while compact IDs such as `forgecode`, `openclaw`, `nanoclaw`, `astrbot`,
+`shelley`, `continue`, and `openhands` stay compact.
 
 `search` reads discovered native provider files and runs enabled auto
 history-source plugin commands for pre-search refresh, then queries SQLite. It

@@ -582,6 +582,72 @@
       ]
     },
     {
+      "id": "aider_desk",
+      "display_name": "Aider Desk",
+      "priority": "p1",
+      "status": "local_import_when_supported",
+      "capture_provider": "aider_desk",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "aider_desk_task_context_json",
+          "fidelity": "imported",
+          "proof": [
+            "hotovo/aider-desk@01ad9d3ab75998fbc79c6decca5896ba6ef294aa src/main/constants.ts",
+            "hotovo/aider-desk@01ad9d3ab75998fbc79c6decca5896ba6ef294aa src/main/task/context-manager.ts",
+            "hotovo/aider-desk@01ad9d3ab75998fbc79c6decca5896ba6ef294aa packages/common/src/types/context.ts",
+            "ctx sources",
+            "ctx import --provider aider-desk",
+            "cargo test -p ctx-history-capture native_aider_desk_fixture_imports_searches_and_reimports"
+          ],
+          "notes": [
+            "Reads project-local Aider Desk task directories containing context.json and optional settings.json under .aider-desk/tasks/<taskId>.",
+            "Default discovery walks cwd ancestors and only reports Aider Desk when the current project has an AIDER_DESK_DIR/tasks or .aider-desk/tasks tree.",
+            "Normalizes contextMessages user, assistant, tool-call, and tool-result parts while retaining capped native JSON metadata for attachments and unrecognized fields."
+          ]
+        }
+      ],
+      "history_locations": [
+        "AIDER_DESK_DIR/tasks/*/context.json",
+        ".aider-desk/tasks/*/context.json",
+        ".aider-desk/tasks/*/settings.json"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": true,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": true,
+        "command_output": false,
+        "files_touched": true,
+        "artifacts": false,
+        "model_identity": true,
+        "costs": false,
+        "token_usage": true,
+        "parent_child_session_edges": true
+      },
+      "redaction_notes": [
+        "Reads project-local provider JSON files read-only; imported message text, model hints, local source paths, and cwd metadata remain in the local ctx index.",
+        "Image/file parts and unrecognized provider fields are retained only as capped native JSON metadata."
+      ],
+      "blockers": [
+        "Importer is based on hotovo/aider-desk commit 01ad9d3ab75998fbc79c6decca5896ba6ef294aa and sanitized fixtures; future schema changes may need adapter updates.",
+        "ctx imports task context snapshots and optional task settings, not the application usage database."
+      ],
+      "public_docs": "docs/provider-support.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/aider-desk/v1/project/.aider-desk/tasks/aider-task-1"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs",
+        "tests/fixtures/provider-history/aider-desk/v1/project/.aider-desk/tasks/aider-task-1/context.json"
+      ]
+    },
+    {
       "id": "openclaw",
       "display_name": "OpenClaw",
       "priority": "p1",

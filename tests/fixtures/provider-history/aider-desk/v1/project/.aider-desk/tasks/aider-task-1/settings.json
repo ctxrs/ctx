@@ -1,0 +1,14 @@
+{
+  "id": "aider-task-1",
+  "baseDir": "/workspace/aider-desk-native",
+  "name": "Aider Desk oracle task",
+  "archived": false,
+  "aiderTotalCost": 0,
+  "agentTotalCost": 0,
+  "mainModel": "openrouter/test-model",
+  "currentMode": "agent",
+  "weakModelLocked": false,
+  "parentId": null,
+  "state": "COMPLETED",
+  "agentProfileId": "aider-agent-profile"
+}

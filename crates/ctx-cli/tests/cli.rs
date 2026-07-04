@@ -2275,6 +2275,7 @@ fn provider_help_matches_implemented_importers() {
         "openhands",
         "dexto",
         "codebuddy",
+        "aider-desk",
         "qwen-code",
         "kimi-code-cli",
         "autohand-code",
@@ -2299,6 +2300,8 @@ fn provider_json_names_are_accepted_as_cli_filter_aliases() {
         ("kimi_code_cli", "kimi_code_cli"),
         ("autohand_code", "autohand_code"),
         ("code_buddy", "codebuddy"),
+        ("aider_desk", "aider_desk"),
+        ("aiderdesk", "aider_desk"),
         ("iflow_cli", "iflow_cli"),
         ("forge", "forgecode"),
         ("forge_code", "forgecode"),
@@ -2426,7 +2429,7 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
             vec![
                 "Usage: ctx import",
                 "--provider <PROVIDER>",
-                "[possible values: codex, pi, claude, opencode, kilo, kiro-cli, crush, goose, antigravity, gemini, cursor, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, forgecode, mistral-vibe, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto, codebuddy]",
+                "[possible values: codex, pi, claude, opencode, kilo, kiro-cli, crush, goose, antigravity, gemini, cursor, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, forgecode, mistral-vibe, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto, codebuddy, aider-desk]",
                 "--path <PATH>",
                 "--format <FORMAT>",
                 "--resume",
@@ -4490,6 +4493,8 @@ fn mcp_status_and_tools_list_are_read_only_without_initialized_store() {
     assert!(providers.iter().any(|provider| provider == "iflow-cli"));
     assert!(providers.iter().any(|provider| provider == "iflow_cli"));
     assert!(providers.iter().any(|provider| provider == "codebuddy"));
+    assert!(providers.iter().any(|provider| provider == "aider-desk"));
+    assert!(providers.iter().any(|provider| provider == "aider_desk"));
     assert!(providers.iter().any(|provider| provider == "zed"));
     assert!(providers.iter().any(|provider| provider == "forgecode"));
     assert!(providers.iter().any(|provider| provider == "mistral-vibe"));
@@ -6221,6 +6226,12 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
             write_native_codebuddy_fixture,
         ),
         (
+            "aider-desk",
+            "aider_desk",
+            "aider_desk_task_context_json",
+            write_native_aider_desk_fixture,
+        ),
+        (
             "openclaw",
             "openclaw",
             "openclaw_session_jsonl_tree",
@@ -7057,6 +7068,92 @@ fn write_native_mistral_vibe_fixture(temp: &TempDir, query: &str) -> String {
     .unwrap();
     temp.path()
         .join("native-mistral-vibe/logs/session")
+        .to_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn write_native_aider_desk_fixture(temp: &TempDir, query: &str) -> String {
+    let task = temp
+        .path()
+        .join("native-aider-desk/project/.aider-desk/tasks/aider-task-cli");
+    fs::create_dir_all(&task).unwrap();
+    fs::write(
+        task.join("settings.json"),
+        json!({
+            "id": "aider-task-cli",
+            "baseDir": "/workspace/aider-desk",
+            "createdAt": "2026-07-04T17:00:00Z",
+            "updatedAt": "2026-07-04T17:00:04Z",
+            "agentProfileId": "default",
+            "model": "openai/gpt-5-mini"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        task.join("context.json"),
+        json!({
+            "version": 2,
+            "contextFiles": [{
+                "path": "src/aider_desk_native.rs",
+                "content": "previous content",
+                "type": "text"
+            }],
+            "contextMessages": [
+                {
+                    "id": "msg-aider-cli-user",
+                    "role": "user",
+                    "timestamp": "2026-07-04T17:00:01Z",
+                    "content": [{"type": "text", "text": query}]
+                },
+                {
+                    "id": "msg-aider-cli-assistant-tool",
+                    "role": "assistant",
+                    "timestamp": "2026-07-04T17:00:02Z",
+                    "content": [
+                        {"type": "text", "text": "aider desk native import ok"},
+                        {
+                            "type": "tool-call",
+                            "toolName": "aider---write_file",
+                            "input": {
+                                "path": "src/aider_desk_native.rs",
+                                "content": "proof"
+                            }
+                        }
+                    ],
+                    "usageReport": {
+                        "sentTokens": 11,
+                        "receivedTokens": 13,
+                        "messageCost": 0.0,
+                        "agentTotalCost": 0.0
+                    }
+                },
+                {
+                    "id": "msg-aider-cli-tool-result",
+                    "role": "tool",
+                    "timestamp": "2026-07-04T17:00:03Z",
+                    "content": [{
+                        "type": "tool-result",
+                        "toolName": "aider---write_file",
+                        "output": "wrote src/aider_desk_native.rs"
+                    }]
+                },
+                {
+                    "id": "msg-aider-cli-assistant-final",
+                    "role": "assistant",
+                    "timestamp": "2026-07-04T17:00:04Z",
+                    "content": [{"type": "text", "text": "Aider Desk import finished"}],
+                    "editedFiles": ["src/aider_desk_native.rs"],
+                    "commitHash": "3333333333333333333333333333333333333333"
+                }
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    temp.path()
+        .join("native-aider-desk/project/.aider-desk/tasks")
         .to_str()
         .unwrap()
         .to_owned()
@@ -8268,6 +8365,7 @@ fn native_provider_cli_requires_existing_history_or_explicit_path() {
         ("astrbot", "no importable astrbot history found"),
         ("shelley", "no importable shelley history found"),
         ("codebuddy", "no importable codebuddy history found"),
+        ("aider-desk", "no importable aider_desk history found"),
         ("iflow-cli", "no importable iflow_cli history found"),
         ("mistral-vibe", "no importable mistral_vibe history found"),
         ("cline", "no importable cline history found"),
@@ -8279,7 +8377,7 @@ fn native_provider_cli_requires_existing_history_or_explicit_path() {
 
         assert!(stderr.contains(expected_blocker), "{stderr}");
         assert!(stderr.contains("use `ctx sources`"), "{stderr}");
-        if cli_provider == "nanoclaw" {
+        if matches!(cli_provider, "nanoclaw" | "aider-desk") {
             assert!(
                 stderr.contains("no default paths are registered for this provider"),
                 "{stderr}"

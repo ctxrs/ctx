@@ -21,7 +21,7 @@ Status meanings:
 - `install-target`: npx target is an aggregate or project skill target, not a
   proven history-producing agent.
 
-Result on this integration branch: 27 `native-auto`, 2 `native-preview`, 22
+Result on this integration branch: 28 `native-auto`, 2 `native-preview`, 21
 `candidate-family`, 9 `webapp-boundary`, 10 `unknown`, and 2 `install-target`
 rows.
 
@@ -36,8 +36,9 @@ rows.
   Autohand Code, iFlow CLI, and Mistral Vibe sessions.
 - `CLI session JSON`: covers Continue CLI `sessions/*.json` files with
   `sessions.json` metadata.
-- `project task JSON`: candidate family for project-local task directories such
-  as Aider Desk's `.aider-desk/tasks/<taskId>/context.json`.
+- `project task JSON`: covers Aider Desk project-local task directories such as
+  `.aider-desk/tasks/<taskId>/context.json`; related task-directory tools can
+  reuse this scanner once storage proof and fixtures exist.
 - `filesystem event JSON`: covers OpenHands event JSON under
   `<persistence>/<user_id>/v1_conversations`.
 - `generic sqlite messages`: already covers Crush, Goose, Hermes, Kiro CLI,
@@ -57,7 +58,7 @@ rows.
 
 | npx skills agent id | ctx storage ingestion status | schema family | evidence source | blocked reason / gap |
 | --- | --- | --- | --- | --- |
-| `aider-desk` | `candidate-family` | `project task JSON` | npx `~/.aider-desk`; no ctx provider; source proof shows project `.aider-desk/tasks/<taskId>/context.json` task context files | Need project scanner design, sanitized fixture data, and idempotent context import before claiming support. |
+| `aider-desk` | `native-auto` | `project task JSON` | ctx `aider_desk_task_context_json`; npx `~/.aider-desk`; source proof shows project `.aider-desk/tasks/<taskId>/context.json` task context files | - |
 | `amp` | `candidate-family` | `JSONL CLI event logs` | npx `~/.config/amp`; no ctx provider | Need transcript location and schema proof. |
 | `antigravity` | `candidate-family` | `VS Code/Electron storage` | npx `~/.gemini/antigravity`; no ctx provider for IDE id | IDE history is not proven equivalent to CLI brain transcripts. |
 | `antigravity-cli` | `native-auto` | `JSONL CLI event logs` | ctx `antigravity_cli_transcript_jsonl_tree`; npx `~/.gemini/antigravity-cli` | - |
