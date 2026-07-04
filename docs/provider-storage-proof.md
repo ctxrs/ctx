@@ -242,6 +242,30 @@ IDE/application storage imports.
   event/transcript timestamps when present and otherwise falls back to the
   deterministic import timestamp.
 
+## Terramind
+
+- Source evidence: `npm view terramind@0.2.91` reports repository
+  `terramind-io/ide`, homepage `https://terramind.com`, and CLI bin
+  `terramind.cjs`.
+- Path evidence: the published `terramind-0.2.91.tgz` bundle resolves the CLI
+  app data root through `getCliUserDataPath()` using the app name `Nucleus`
+  (`Nucleus Dev` when `NUCLEUS_DEV` is set), then `getDatabasePath()` appends
+  `data/agents.db`. On Linux that is `$XDG_CONFIG_HOME/Nucleus/data/agents.db`
+  or `~/.config/Nucleus/data/agents.db`; macOS uses
+  `~/Library/Application Support/Nucleus/data/agents.db`; Windows uses
+  `%APPDATA%/Nucleus/data/agents.db`.
+- Schema evidence: the bundled Drizzle schema and migrations create
+  `projects`, `chats`, `sub_chats`, and `tool_outputs`; `sub_chats.messages`
+  is JSON text, and `tool_outputs.full_output` stores split large tool output.
+- Runtime evidence: bundled runner code parses and stringifies
+  `sub_chats.messages` JSON arrays and stores large tool outputs through the
+  `tool_outputs` table.
+- `ctx` imports this shape as `terramind_agents_sqlite`, using read-only SQLite
+  discovery only when the `projects`, `chats`, and `sub_chats` tables exist.
+- Caveat: a temporary-home `npx terramind@0.2.91 list --chats` probe did not
+  complete without interactive setup, so the fixture is a sanitized SQLite DB
+  built from the package-backed schema rather than a live-generated chat.
+
 ## OpenHands
 
 - Source evidence: OpenHands `get_default_persistence_dir()` checks

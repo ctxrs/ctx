@@ -544,6 +544,7 @@ impl Default for OpenCodeSqliteImportOptions {
 
 pub type KiloSqliteImportOptions = OpenCodeSqliteImportOptions;
 pub type KiroSqliteImportOptions = OpenCodeSqliteImportOptions;
+pub type TerramindSqliteImportOptions = OpenCodeSqliteImportOptions;
 
 #[derive(Debug, Clone)]
 pub struct ForgeCodeSqliteImportOptions {
@@ -1390,6 +1391,9 @@ pub struct MuxJsonlAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ReasonixJsonlAdapter;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TerramindSqliteAdapter;
 
 impl ProviderCaptureAdapter for ProviderFixtureJsonlAdapter {
     fn provider(&self) -> CaptureProvider {
@@ -2672,6 +2676,24 @@ impl ProviderCaptureAdapter for ReasonixJsonlAdapter {
         context: &ProviderAdapterContext,
     ) -> Result<ProviderNormalizationResult> {
         normalize_reasonix_sessions(path, context)
+    }
+}
+
+impl ProviderCaptureAdapter for TerramindSqliteAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Terramind
+    }
+
+    fn source_format(&self) -> &str {
+        TERRAMIND_SQLITE_SOURCE_FORMAT
+    }
+
+    fn normalize_path(
+        &self,
+        path: &Path,
+        context: &ProviderAdapterContext,
+    ) -> Result<ProviderNormalizationResult> {
+        normalize_terramind_sqlite(path, context)
     }
 }
 
@@ -4752,6 +4774,41 @@ pub fn import_forgecode_sqlite(
     )
 }
 
+pub fn import_terramind_sqlite(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: TerramindSqliteImportOptions,
+) -> Result<ProviderImportSummary> {
+    let path = path.as_ref();
+    let source_path = options
+        .source_path
+        .clone()
+        .unwrap_or_else(|| path.to_path_buf());
+    let normalization = TerramindSqliteAdapter.normalize_path(
+        path,
+        &ProviderAdapterContext {
+            machine_id: options.machine_id,
+            source_path: Some(source_path),
+            imported_at: options.imported_at,
+            tool_output_mode: CodexToolOutputMode::Full,
+            event_mode: CodexEventImportMode::Rich,
+            include_notices: true,
+        },
+    )?;
+
+    import_normalized_provider_captures(
+        store,
+        normalization,
+        NormalizedProviderImportOptions {
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+            persist_cursors: true,
+            wrap_transaction: true,
+            fast_event_inserts: true,
+        },
+    )
+}
+
 pub fn import_nanoclaw_project(
     path: impl AsRef<Path>,
     store: &mut Store,
@@ -5380,6 +5437,7 @@ const FORGECODE_SQLITE_SOURCE_FORMAT: &str = "forgecode_sqlite";
 const MISTRAL_VIBE_SOURCE_FORMAT: &str = "mistral_vibe_session_jsonl";
 const MUX_SOURCE_FORMAT: &str = "mux_session_jsonl";
 const REASONIX_SOURCE_FORMAT: &str = "reasonix_session_jsonl";
+const TERRAMIND_SQLITE_SOURCE_FORMAT: &str = "terramind_agents_sqlite";
 const CODEX_MAX_TEXT_CHARS: usize = 16_000;
 const CODEX_MAX_METADATA_TEXT_CHARS: usize = 4_000;
 const CODEX_MAX_OUTPUT_PREVIEW_CHARS: usize = 4_000;
@@ -10176,6 +10234,65 @@ struct ShelleyMessageRow {
     llm_api_url: Option<String>,
     model_name: Option<String>,
     forked_from_message_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct TerramindProjectRow {
+    id: String,
+    name: String,
+    path: String,
+    created_at: Option<i64>,
+    updated_at: Option<i64>,
+    git_remote_url: Option<String>,
+    git_provider: Option<String>,
+    git_owner: Option<String>,
+    git_repo: Option<String>,
+    is_playground: bool,
+    is_preview: bool,
+}
+
+#[derive(Debug, Clone)]
+struct TerramindChatRow {
+    id: String,
+    name: Option<String>,
+    project_id: String,
+    created_at: Option<i64>,
+    updated_at: Option<i64>,
+    archived_at: Option<i64>,
+    worktree_path: Option<String>,
+    branch: Option<String>,
+    base_branch: Option<String>,
+    pr_url: Option<String>,
+    pr_number: Option<i64>,
+    source: Option<String>,
+    pinned_at: Option<i64>,
+    deleted_at: Option<i64>,
+    user_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct TerramindSubChatRow {
+    id: String,
+    name: Option<String>,
+    chat_id: String,
+    session_id: Option<String>,
+    stream_id: Option<String>,
+    mode: String,
+    messages: String,
+    execution_env: Option<String>,
+    created_at: Option<i64>,
+    updated_at: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+struct TerramindToolOutputRow {
+    rowid: i64,
+    id: String,
+    sub_chat_id: String,
+    message_id: String,
+    tool_call_id: String,
+    full_output: String,
+    created_at: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -17212,6 +17329,848 @@ fn forgecode_json_i64(value: &Value) -> Option<i64> {
 
 fn forgecode_timestamp(raw: Option<&str>, fallback: DateTime<Utc>) -> DateTime<Utc> {
     goose_timestamp(raw, fallback)
+}
+
+fn normalize_terramind_sqlite(
+    path: &Path,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    let conn = open_provider_sqlite_readonly(path)?;
+    let user_version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let schema_fingerprint = opencode_schema_fingerprint(&conn)?;
+    let projects = terramind_projects(&conn)?;
+    let chats = terramind_chats(&conn)?;
+    let sub_chats = terramind_sub_chats(&conn)?;
+    let tool_outputs = terramind_tool_outputs(&conn)?;
+    let projects_by_id = projects
+        .iter()
+        .map(|project| (project.id.clone(), project))
+        .collect::<BTreeMap<_, _>>();
+    let chats_by_id = chats
+        .iter()
+        .map(|chat| (chat.id.clone(), chat))
+        .collect::<BTreeMap<_, _>>();
+    let mut tool_outputs_by_sub_chat = BTreeMap::<String, Vec<TerramindToolOutputRow>>::new();
+    for output in tool_outputs {
+        tool_outputs_by_sub_chat
+            .entry(output.sub_chat_id.clone())
+            .or_default()
+            .push(output);
+    }
+    for outputs in tool_outputs_by_sub_chat.values_mut() {
+        outputs.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.rowid.cmp(&right.rowid))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+    }
+
+    let raw_source_path = path.display().to_string();
+    let mut result = ProviderNormalizationResult::default();
+
+    for sub_chat in sub_chats {
+        let line = provider_line_from_index(text_id_index(&sub_chat.id, 1));
+        let Some(chat) = chats_by_id.get(&sub_chat.chat_id) else {
+            push_provider_import_failure(
+                &mut result.summary,
+                line,
+                format!(
+                    "Terramind sub_chat {} references missing chat {}",
+                    sub_chat.id, sub_chat.chat_id
+                ),
+            );
+            continue;
+        };
+        let Some(project) = projects_by_id.get(&chat.project_id) else {
+            push_provider_import_failure(
+                &mut result.summary,
+                line,
+                format!(
+                    "Terramind chat {} references missing project {}",
+                    chat.id, chat.project_id
+                ),
+            );
+            continue;
+        };
+
+        let started_at = terramind_timestamp(
+            sub_chat
+                .created_at
+                .or(chat.created_at)
+                .or(project.created_at),
+            context.imported_at,
+        );
+        let ended_at = sub_chat
+            .updated_at
+            .or(chat.updated_at)
+            .or(project.updated_at)
+            .map(|timestamp| terramind_timestamp(Some(timestamp), started_at));
+        let messages = match serde_json::from_str::<Value>(&sub_chat.messages) {
+            Ok(Value::Array(messages)) => messages,
+            Ok(other) => {
+                push_provider_import_failure(
+                    &mut result.summary,
+                    line,
+                    format!(
+                        "Terramind sub_chats.messages for {} is {}, expected array",
+                        sub_chat.id,
+                        provider_json_type(&other)
+                    ),
+                );
+                Vec::new()
+            }
+            Err(err) => {
+                push_provider_import_failure(
+                    &mut result.summary,
+                    line,
+                    format!(
+                        "invalid JSON in Terramind sub_chats.messages {}: {err}",
+                        sub_chat.id
+                    ),
+                );
+                Vec::new()
+            }
+        };
+
+        let mut emitted_events = false;
+        for (index, message) in messages.iter().enumerate() {
+            let provider_event_index = terramind_message_event_index(message, index);
+            let occurred_at = terramind_message_timestamp(
+                message,
+                started_at + Duration::milliseconds(i64::try_from(index).unwrap_or(i64::MAX)),
+            );
+            let event = terramind_message_event(
+                &sub_chat,
+                message,
+                index,
+                provider_event_index,
+                occurred_at,
+            );
+            let line = provider_line_from_index(provider_event_index);
+            result
+                .files_touched
+                .extend(provider_file_touches_from_raw_value(
+                    CaptureProvider::Terramind,
+                    &sub_chat.id,
+                    TERRAMIND_SQLITE_SOURCE_FORMAT,
+                    Some(raw_source_path.as_str()),
+                    message,
+                    &event,
+                    line,
+                ));
+            result.captures.push((
+                line,
+                terramind_capture(
+                    TerramindCaptureDraft {
+                        project,
+                        chat,
+                        sub_chat: &sub_chat,
+                        started_at,
+                        ended_at,
+                        raw_source_path: &raw_source_path,
+                        user_version,
+                        schema_fingerprint: &schema_fingerprint,
+                        message_count: messages.len(),
+                        tool_output_count: tool_outputs_by_sub_chat
+                            .get(&sub_chat.id)
+                            .map(Vec::len)
+                            .unwrap_or(0),
+                        event: Some(event),
+                    },
+                    context,
+                ),
+            ));
+            emitted_events = true;
+        }
+
+        if let Some(outputs) = tool_outputs_by_sub_chat.get(&sub_chat.id) {
+            for (index, output) in outputs.iter().enumerate() {
+                let provider_event_index = terramind_tool_output_event_index(output, index);
+                let occurred_at =
+                    terramind_timestamp(output.created_at, ended_at.unwrap_or(started_at));
+                let event = terramind_tool_output_event(
+                    &sub_chat,
+                    output,
+                    index,
+                    provider_event_index,
+                    occurred_at,
+                );
+                let line = provider_line_from_index(provider_event_index);
+                result
+                    .files_touched
+                    .extend(provider_file_touches_from_raw_value(
+                        CaptureProvider::Terramind,
+                        &sub_chat.id,
+                        TERRAMIND_SQLITE_SOURCE_FORMAT,
+                        Some(raw_source_path.as_str()),
+                        &event.payload,
+                        &event,
+                        line,
+                    ));
+                result.captures.push((
+                    line,
+                    terramind_capture(
+                        TerramindCaptureDraft {
+                            project,
+                            chat,
+                            sub_chat: &sub_chat,
+                            started_at,
+                            ended_at,
+                            raw_source_path: &raw_source_path,
+                            user_version,
+                            schema_fingerprint: &schema_fingerprint,
+                            message_count: messages.len(),
+                            tool_output_count: outputs.len(),
+                            event: Some(event),
+                        },
+                        context,
+                    ),
+                ));
+                emitted_events = true;
+            }
+        }
+
+        if !emitted_events {
+            result.captures.push((
+                line,
+                terramind_capture(
+                    TerramindCaptureDraft {
+                        project,
+                        chat,
+                        sub_chat: &sub_chat,
+                        started_at,
+                        ended_at,
+                        raw_source_path: &raw_source_path,
+                        user_version,
+                        schema_fingerprint: &schema_fingerprint,
+                        message_count: 0,
+                        tool_output_count: 0,
+                        event: None,
+                    },
+                    context,
+                ),
+            ));
+        }
+    }
+
+    Ok(result)
+}
+
+struct TerramindCaptureDraft<'a> {
+    project: &'a TerramindProjectRow,
+    chat: &'a TerramindChatRow,
+    sub_chat: &'a TerramindSubChatRow,
+    started_at: DateTime<Utc>,
+    ended_at: Option<DateTime<Utc>>,
+    raw_source_path: &'a str,
+    user_version: i64,
+    schema_fingerprint: &'a str,
+    message_count: usize,
+    tool_output_count: usize,
+    event: Option<ProviderEventEnvelope>,
+}
+
+fn terramind_capture(
+    draft: TerramindCaptureDraft<'_>,
+    context: &ProviderAdapterContext,
+) -> ProviderCaptureEnvelope {
+    let TerramindCaptureDraft {
+        project,
+        chat,
+        sub_chat,
+        started_at,
+        ended_at,
+        raw_source_path,
+        user_version,
+        schema_fingerprint,
+        message_count,
+        tool_output_count,
+        event,
+    } = draft;
+    let is_cloud = sub_chat.execution_env.as_deref() == Some("cloud");
+    native_provider_capture(
+        NativeSessionDraft {
+            provider: CaptureProvider::Terramind,
+            source_format: TERRAMIND_SQLITE_SOURCE_FORMAT,
+            provider_session_id: sub_chat.id.clone(),
+            parent_provider_session_id: None,
+            root_provider_session_id: None,
+            external_agent_id: terramind_session_model(event.as_ref())
+                .or_else(|| sub_chat.session_id.clone()),
+            agent_type: if is_cloud {
+                AgentType::Subagent
+            } else {
+                AgentType::Primary
+            },
+            role_hint: Some(sub_chat.mode.clone()),
+            is_primary: !is_cloud,
+            started_at,
+            ended_at,
+            cwd: chat
+                .worktree_path
+                .clone()
+                .or_else(|| Some(project.path.clone())),
+            fidelity: Fidelity::Imported,
+            raw_source_path: raw_source_path.to_owned(),
+            trust: ProviderSourceTrust::ProviderNative,
+            source_metadata: json!({
+                "adapter": TERRAMIND_SQLITE_SOURCE_FORMAT,
+                "sqlite_user_version": user_version,
+                "schema_fingerprint": schema_fingerprint,
+                "source_path": raw_source_path,
+                "package": "terramind@0.2.91",
+                "package_repository": "https://github.com/terramind-io/ide",
+                "schema_anchors": [
+                    "terramind.cjs src/main/lib/db/schema/index.ts projects/chats/sub_chats/tool_outputs",
+                    "migrations/0000_mixed_blur.sql",
+                    "migrations/meta/0035_snapshot.json"
+                ],
+            }),
+            session_metadata: json!({
+                "source_format": TERRAMIND_SQLITE_SOURCE_FORMAT,
+                "project_id": project.id,
+                "project_name": project.name,
+                "project_path": project.path,
+                "project_git_remote_url": project.git_remote_url,
+                "project_git_provider": project.git_provider,
+                "project_git_owner": project.git_owner,
+                "project_git_repo": project.git_repo,
+                "project_is_playground": project.is_playground,
+                "project_is_preview": project.is_preview,
+                "chat_id": chat.id,
+                "chat_name": chat.name,
+                "chat_source": chat.source,
+                "chat_archived_at": chat.archived_at,
+                "chat_deleted_at": chat.deleted_at,
+                "chat_pinned_at": chat.pinned_at,
+                "chat_worktree_path": chat.worktree_path,
+                "chat_branch": chat.branch,
+                "chat_base_branch": chat.base_branch,
+                "chat_pr_url": chat.pr_url,
+                "chat_pr_number": chat.pr_number,
+                "chat_user_id": chat.user_id,
+                "sub_chat_id": sub_chat.id,
+                "sub_chat_name": sub_chat.name,
+                "sub_chat_session_id": sub_chat.session_id,
+                "sub_chat_stream_id": sub_chat.stream_id,
+                "mode": sub_chat.mode,
+                "execution_env": sub_chat.execution_env,
+                "message_count": message_count,
+                "tool_output_count": tool_output_count,
+                "limitations": [
+                    "Terramind sub_chats.messages is a mutable JSON snapshot; event timestamps fall back to deterministic sequence offsets when per-message timestamps are absent",
+                    "tool_outputs rows are imported as separate tool_output events so stripped large outputs remain searchable",
+                    "cloud execution_env sub-chats are marked as subagent sessions, but Terramind does not expose an explicit parent-child session edge in this schema"
+                ],
+            }),
+        },
+        context,
+        event,
+    )
+}
+
+fn terramind_projects(conn: &Connection) -> Result<Vec<TerramindProjectRow>> {
+    if !sqlite_table_exists(conn, "projects")? {
+        return Err(CaptureError::InvalidPayload(
+            "Terramind agents.db is missing required projects table".into(),
+        ));
+    }
+    let columns = sqlite_table_columns(conn, "projects")?;
+    ensure_sqlite_table_columns(
+        &columns,
+        "Terramind projects table",
+        &["id", "name", "path"],
+    )?;
+    let created_at = optional_column_expr(&columns, "created_at", "NULL");
+    let updated_at = optional_column_expr(&columns, "updated_at", "NULL");
+    let git_remote_url = optional_column_expr(&columns, "git_remote_url", "NULL");
+    let git_provider = optional_column_expr(&columns, "git_provider", "NULL");
+    let git_owner = optional_column_expr(&columns, "git_owner", "NULL");
+    let git_repo = optional_column_expr(&columns, "git_repo", "NULL");
+    let is_playground = optional_column_expr(&columns, "is_playground", "0");
+    let is_preview = optional_column_expr(&columns, "is_preview", "0");
+    let sql = format!(
+        "select id, name, path, {created_at}, {updated_at}, {git_remote_url}, \
+         {git_provider}, {git_owner}, {git_repo}, {is_playground}, {is_preview} \
+         from projects order by {updated_at}, id"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok(TerramindProjectRow {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            path: row.get(2)?,
+            created_at: row.get(3)?,
+            updated_at: row.get(4)?,
+            git_remote_url: row.get(5)?,
+            git_provider: row.get(6)?,
+            git_owner: row.get(7)?,
+            git_repo: row.get(8)?,
+            is_playground: sqlite_bool(row.get::<_, Option<i64>>(9)?),
+            is_preview: sqlite_bool(row.get::<_, Option<i64>>(10)?),
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(CaptureError::from)
+}
+
+fn terramind_chats(conn: &Connection) -> Result<Vec<TerramindChatRow>> {
+    if !sqlite_table_exists(conn, "chats")? {
+        return Err(CaptureError::InvalidPayload(
+            "Terramind agents.db is missing required chats table".into(),
+        ));
+    }
+    let columns = sqlite_table_columns(conn, "chats")?;
+    ensure_sqlite_table_columns(&columns, "Terramind chats table", &["id", "project_id"])?;
+    let name = optional_column_expr(&columns, "name", "NULL");
+    let created_at = optional_column_expr(&columns, "created_at", "NULL");
+    let updated_at = optional_column_expr(&columns, "updated_at", "NULL");
+    let archived_at = optional_column_expr(&columns, "archived_at", "NULL");
+    let worktree_path = optional_column_expr(&columns, "worktree_path", "NULL");
+    let branch = optional_column_expr(&columns, "branch", "NULL");
+    let base_branch = optional_column_expr(&columns, "base_branch", "NULL");
+    let pr_url = optional_column_expr(&columns, "pr_url", "NULL");
+    let pr_number = optional_column_expr(&columns, "pr_number", "NULL");
+    let source = optional_column_expr(&columns, "source", "NULL");
+    let pinned_at = optional_column_expr(&columns, "pinned_at", "NULL");
+    let deleted_at = optional_column_expr(&columns, "deleted_at", "NULL");
+    let user_id = optional_column_expr(&columns, "user_id", "NULL");
+    let sql = format!(
+        "select id, {name}, project_id, {created_at}, {updated_at}, {archived_at}, \
+         {worktree_path}, {branch}, {base_branch}, {pr_url}, {pr_number}, {source}, \
+         {pinned_at}, {deleted_at}, {user_id} from chats order by {updated_at}, id"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok(TerramindChatRow {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            project_id: row.get(2)?,
+            created_at: row.get(3)?,
+            updated_at: row.get(4)?,
+            archived_at: row.get(5)?,
+            worktree_path: row.get(6)?,
+            branch: row.get(7)?,
+            base_branch: row.get(8)?,
+            pr_url: row.get(9)?,
+            pr_number: row.get(10)?,
+            source: row.get(11)?,
+            pinned_at: row.get(12)?,
+            deleted_at: row.get(13)?,
+            user_id: row.get(14)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(CaptureError::from)
+}
+
+fn terramind_sub_chats(conn: &Connection) -> Result<Vec<TerramindSubChatRow>> {
+    if !sqlite_table_exists(conn, "sub_chats")? {
+        return Err(CaptureError::InvalidPayload(
+            "Terramind agents.db is missing required sub_chats table".into(),
+        ));
+    }
+    let columns = sqlite_table_columns(conn, "sub_chats")?;
+    ensure_sqlite_table_columns(
+        &columns,
+        "Terramind sub_chats table",
+        &["id", "chat_id", "messages"],
+    )?;
+    let name = optional_column_expr(&columns, "name", "NULL");
+    let session_id = optional_column_expr(&columns, "session_id", "NULL");
+    let stream_id = optional_column_expr(&columns, "stream_id", "NULL");
+    let mode = optional_column_expr(&columns, "mode", "'agent'");
+    let execution_env = optional_column_expr(&columns, "execution_env", "NULL");
+    let created_at = optional_column_expr(&columns, "created_at", "NULL");
+    let updated_at = optional_column_expr(&columns, "updated_at", "NULL");
+    let sql = format!(
+        "select id, {name}, chat_id, {session_id}, {stream_id}, {mode}, messages, \
+         {execution_env}, {created_at}, {updated_at} from sub_chats order by {updated_at}, id"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok(TerramindSubChatRow {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            chat_id: row.get(2)?,
+            session_id: row.get(3)?,
+            stream_id: row.get(4)?,
+            mode: row.get(5)?,
+            messages: row.get(6)?,
+            execution_env: row.get(7)?,
+            created_at: row.get(8)?,
+            updated_at: row.get(9)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(CaptureError::from)
+}
+
+fn terramind_tool_outputs(conn: &Connection) -> Result<Vec<TerramindToolOutputRow>> {
+    if !sqlite_table_exists(conn, "tool_outputs")? {
+        return Ok(Vec::new());
+    }
+    let columns = sqlite_table_columns(conn, "tool_outputs")?;
+    ensure_sqlite_table_columns(
+        &columns,
+        "Terramind tool_outputs table",
+        &[
+            "id",
+            "sub_chat_id",
+            "message_id",
+            "tool_call_id",
+            "full_output",
+        ],
+    )?;
+    let created_at = optional_column_expr(&columns, "created_at", "NULL");
+    let sql = format!(
+        "select rowid, id, sub_chat_id, message_id, tool_call_id, full_output, {created_at} \
+         from tool_outputs order by sub_chat_id, {created_at}, rowid"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok(TerramindToolOutputRow {
+            rowid: row.get(0)?,
+            id: row.get(1)?,
+            sub_chat_id: row.get(2)?,
+            message_id: row.get(3)?,
+            tool_call_id: row.get(4)?,
+            full_output: row.get(5)?,
+            created_at: row.get(6)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(CaptureError::from)
+}
+
+fn terramind_message_event(
+    sub_chat: &TerramindSubChatRow,
+    message: &Value,
+    index: usize,
+    provider_event_index: u64,
+    occurred_at: DateTime<Utc>,
+) -> ProviderEventEnvelope {
+    let role_text = message
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let event_type = terramind_message_event_type(message, role_text);
+    let text = terramind_message_text(message, event_type)
+        .unwrap_or_else(|| format!("Terramind {role_text} message"));
+    let message_id = terramind_message_id(message, index);
+    native_event(NativeEventDraft {
+        provider: CaptureProvider::Terramind,
+        source_format: TERRAMIND_SQLITE_SOURCE_FORMAT,
+        provider_session_id: sub_chat.id.clone(),
+        provider_event_index,
+        provider_event_hash: compute_payload_hash(message).ok(),
+        cursor: format!("sub_chat:{}:message:{}:{}", sub_chat.id, index, message_id),
+        event_type,
+        role: Some(provider_role(Some(role_text))),
+        occurred_at,
+        text,
+        body: json!({
+            "message_index": index,
+            "message_id": message_id,
+            "message": message,
+        }),
+        metadata: json!({
+            "source": "terramind_sub_chats_messages",
+            "source_format": TERRAMIND_SQLITE_SOURCE_FORMAT,
+            "sub_chat_id": sub_chat.id,
+            "message_index": index,
+            "message_id": message_id,
+            "role": role_text,
+            "model": terramind_message_model(message),
+        }),
+    })
+}
+
+fn terramind_tool_output_event(
+    sub_chat: &TerramindSubChatRow,
+    output: &TerramindToolOutputRow,
+    index: usize,
+    provider_event_index: u64,
+    occurred_at: DateTime<Utc>,
+) -> ProviderEventEnvelope {
+    let parsed_output = provider_json_text(&output.full_output);
+    let text = provider_value_text(&parsed_output).unwrap_or_else(|| {
+        let (text, _) = provider_local_preview(&output.full_output, PROVIDER_MAX_TEXT_CHARS);
+        text
+    });
+    native_event(NativeEventDraft {
+        provider: CaptureProvider::Terramind,
+        source_format: TERRAMIND_SQLITE_SOURCE_FORMAT,
+        provider_session_id: sub_chat.id.clone(),
+        provider_event_index,
+        provider_event_hash: Some(output.id.clone()),
+        cursor: format!(
+            "sub_chat:{}:tool_output:{}:{}",
+            sub_chat.id, index, output.id
+        ),
+        event_type: EventType::ToolOutput,
+        role: Some(EventRole::Tool),
+        occurred_at,
+        text,
+        body: json!({
+            "tool_output_index": index,
+            "tool_output_id": output.id,
+            "message_id": output.message_id,
+            "tool_call_id": output.tool_call_id,
+            "full_output": parsed_output,
+            "created_at": output.created_at,
+        }),
+        metadata: json!({
+            "source": "terramind_tool_outputs",
+            "source_format": TERRAMIND_SQLITE_SOURCE_FORMAT,
+            "sub_chat_id": sub_chat.id,
+            "tool_output_id": output.id,
+            "message_id": output.message_id,
+            "tool_call_id": output.tool_call_id,
+            "rowid": output.rowid,
+        }),
+    })
+}
+
+fn terramind_message_event_index(message: &Value, index: usize) -> u64 {
+    let seed = terramind_message_id(message, index);
+    (index as u64)
+        .saturating_add(1)
+        .saturating_mul(4_096)
+        .saturating_add(text_id_index(&seed, 0) % 4_096)
+}
+
+fn terramind_tool_output_event_index(output: &TerramindToolOutputRow, index: usize) -> u64 {
+    0x0200_0000_0000_u64
+        .saturating_add((index as u64).saturating_mul(4_096))
+        .saturating_add(text_id_index(&output.id, 0) % 4_096)
+}
+
+fn terramind_message_id(message: &Value, index: usize) -> String {
+    message
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("message-{index}"))
+}
+
+fn terramind_message_timestamp(message: &Value, fallback: DateTime<Utc>) -> DateTime<Utc> {
+    for pointer in [
+        "/createdAt",
+        "/created_at",
+        "/timestamp",
+        "/metadata/createdAt",
+        "/metadata/created_at",
+        "/metadata/timestamp",
+    ] {
+        if let Some(value) = message.pointer(pointer) {
+            return provider_timestamp_value(Some(value), fallback);
+        }
+    }
+    fallback
+}
+
+fn terramind_timestamp(value: Option<i64>, fallback: DateTime<Utc>) -> DateTime<Utc> {
+    provider_timestamp_seconds(value.map(|value| value as f64), fallback)
+}
+
+fn terramind_message_model(message: &Value) -> Option<String> {
+    message
+        .pointer("/metadata/model")
+        .or_else(|| message.get("model"))
+        .and_then(provider_value_text)
+}
+
+fn terramind_session_model(event: Option<&ProviderEventEnvelope>) -> Option<String> {
+    event.and_then(|event| {
+        event
+            .metadata
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    })
+}
+
+fn terramind_message_event_type(message: &Value, role: &str) -> EventType {
+    let has_tool_call = terramind_message_has_tool_call(message);
+    if role == "tool" || (terramind_message_has_tool_output(message) && !has_tool_call) {
+        EventType::ToolOutput
+    } else if has_tool_call {
+        EventType::ToolCall
+    } else if matches!(role, "user" | "assistant" | "system") {
+        EventType::Message
+    } else {
+        EventType::Notice
+    }
+}
+
+fn terramind_message_has_tool_call(value: &Value) -> bool {
+    match value {
+        Value::Array(items) => items.iter().any(terramind_message_has_tool_call),
+        Value::Object(object) => {
+            if let Some(kind) = object.get("type").and_then(Value::as_str) {
+                if kind.starts_with("tool-")
+                    || matches!(
+                        kind,
+                        "tool_call"
+                            | "tool-call"
+                            | "toolCall"
+                            | "tool-invocation"
+                            | "function_call"
+                    )
+                {
+                    return true;
+                }
+            }
+            object
+                .get("toolCalls")
+                .or_else(|| object.get("tool_calls"))
+                .and_then(Value::as_array)
+                .is_some_and(|calls| !calls.is_empty())
+                || object.values().any(terramind_message_has_tool_call)
+        }
+        _ => false,
+    }
+}
+
+fn terramind_message_has_tool_output(value: &Value) -> bool {
+    match value {
+        Value::Array(items) => items.iter().any(terramind_message_has_tool_output),
+        Value::Object(object) => {
+            let kind = object.get("type").and_then(Value::as_str);
+            let state = object.get("state").and_then(Value::as_str);
+            if matches!(kind, Some("tool_result" | "tool-result" | "toolResponse"))
+                || matches!(state, Some("output-available"))
+            {
+                return true;
+            }
+            object.contains_key("toolResult")
+                || object.contains_key("tool_result")
+                || object.contains_key("output")
+                || object.values().any(terramind_message_has_tool_output)
+        }
+        _ => false,
+    }
+}
+
+fn terramind_message_text(message: &Value, event_type: EventType) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(content) = message.get("content").and_then(provider_value_text) {
+        terramind_push_text(&mut parts, &content);
+    }
+    if let Some(message_parts) = message.get("parts").and_then(Value::as_array) {
+        for part in message_parts {
+            terramind_collect_part_text(part, &mut parts);
+        }
+    }
+    if parts.is_empty() {
+        for key in ["text", "message", "summary", "reasoning"] {
+            if let Some(text) = message.get(key).and_then(provider_value_text) {
+                terramind_push_text(&mut parts, &text);
+            }
+        }
+    }
+    if parts.is_empty() && event_type == EventType::ToolCall {
+        Some("Terramind tool call".to_owned())
+    } else if parts.is_empty() && event_type == EventType::ToolOutput {
+        Some("Terramind tool output".to_owned())
+    } else if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n"))
+    }
+}
+
+fn terramind_collect_part_text(part: &Value, parts: &mut Vec<String>) {
+    let kind = part.get("type").and_then(Value::as_str).unwrap_or("");
+    match kind {
+        "text" => {
+            if let Some(text) = part.get("text").and_then(Value::as_str) {
+                terramind_push_text(parts, text);
+            }
+        }
+        "reasoning" | "thinking" => {
+            if let Some(text) = part
+                .get("text")
+                .or_else(|| part.get("reasoning"))
+                .or_else(|| part.get("content"))
+                .and_then(Value::as_str)
+            {
+                terramind_push_text(parts, text);
+            }
+        }
+        _ if kind.starts_with("tool-")
+            || matches!(
+                kind,
+                "tool_call" | "tool-call" | "toolCall" | "tool-invocation" | "function_call"
+            ) =>
+        {
+            let name = part
+                .get("toolName")
+                .or_else(|| part.get("tool_name"))
+                .or_else(|| part.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or("tool");
+            terramind_push_text(parts, &format!("tool call: {name}"));
+            if let Some(call_id) = part
+                .get("toolCallId")
+                .or_else(|| part.get("tool_call_id"))
+                .or_else(|| part.get("id"))
+                .and_then(Value::as_str)
+            {
+                terramind_push_text(parts, &format!("tool call id: {call_id}"));
+            }
+            for key in ["input", "args", "arguments"] {
+                if let Some(input) = part.get(key).and_then(provider_value_text) {
+                    terramind_push_text(parts, &format!("tool input: {input}"));
+                    break;
+                }
+            }
+            for key in ["output", "result", "toolResult", "tool_result"] {
+                if let Some(output) = part.get(key).and_then(provider_value_text) {
+                    terramind_push_text(parts, &format!("tool output: {output}"));
+                    break;
+                }
+            }
+        }
+        _ => {
+            if let Some(text) = provider_value_text(part) {
+                terramind_push_text(parts, &text);
+            }
+        }
+    }
+}
+
+fn terramind_push_text(parts: &mut Vec<String>, text: &str) {
+    let text = text.trim();
+    if text.is_empty() {
+        return;
+    }
+    let used = parts.iter().map(|part| part.chars().count()).sum::<usize>()
+        + parts.len().saturating_sub(1);
+    let remaining = PROVIDER_MAX_TEXT_CHARS.saturating_sub(used);
+    if remaining == 0 {
+        return;
+    }
+    let separator_budget = usize::from(!parts.is_empty());
+    if remaining <= separator_budget {
+        return;
+    }
+    let (text, _) = capped_text(text, remaining - separator_budget);
+    parts.push(text);
+}
+
+fn provider_json_type(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -27745,6 +28704,151 @@ mod tests {
             .unwrap()
             .iter()
             .any(|hit| hit.provider == Some(CaptureProvider::Kode)));
+    }
+
+    #[test]
+    fn native_terramind_fixture_imports_searches_reimports_and_tool_outputs() {
+        let temp = tempdir();
+        let fixture = provider_history_fixture("terramind/v1/agents.db");
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let source = provider_source_for_path(CaptureProvider::Terramind, fixture.clone());
+        assert_eq!(source.source_format, TERRAMIND_SQLITE_SOURCE_FORMAT);
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+
+        let first = import_terramind_sqlite(
+            &fixture,
+            &mut store,
+            TerramindSqliteImportOptions {
+                machine_id: "test-machine".into(),
+                source_path: Some(fixture.clone()),
+                imported_at: DateTime::parse_from_rfc3339("2026-06-24T12:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                allow_partial_failures: true,
+                ..TerramindSqliteImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(first.failed, 0, "{:?}", first.failures);
+        assert_eq!(first.imported_sessions, 1);
+        assert_eq!(first.imported_events, 4);
+        let session_id = provider_session_uuid(CaptureProvider::Terramind, "tm-sub-main");
+        let session = store.get_session(session_id).unwrap();
+        assert_eq!(session.provider, CaptureProvider::Terramind);
+        let source = store
+            .capture_source_by_external_session(CaptureProvider::Terramind, "tm-sub-main")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            source.descriptor.cwd.as_deref(),
+            Some("/workspace/terramind")
+        );
+        let events = store.events_for_session(session_id).unwrap();
+        assert_eq!(events.len(), 4);
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == EventType::ToolCall));
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == EventType::ToolOutput));
+        assert!(store
+            .search_event_hits("terramind sqlite oracle", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::Terramind)));
+        assert!(store
+            .search_event_hits("terramind large tool output oracle", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::Terramind)));
+
+        let second = import_terramind_sqlite(
+            &fixture,
+            &mut store,
+            TerramindSqliteImportOptions {
+                source_path: Some(fixture.clone()),
+                allow_partial_failures: true,
+                ..TerramindSqliteImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(second.failed, 0, "{:?}", second.failures);
+        assert_eq!(second.imported_sessions, 0);
+        assert_eq!(second.imported_events, 0);
+        assert_eq!(second.skipped_sessions, 1);
+        assert_eq!(second.skipped_events, 4);
+    }
+
+    #[test]
+    fn provider_sources_discovers_terramind_default_db() {
+        let temp = tempdir();
+        let db = temp.path().join(".config/Nucleus/data/agents.db");
+        fs::create_dir_all(db.parent().unwrap()).unwrap();
+        fs::copy(provider_history_fixture("terramind/v1/agents.db"), &db).unwrap();
+
+        let sources =
+            discover_provider_sources_for_provider(temp.path(), CaptureProvider::Terramind);
+        let source = sources
+            .iter()
+            .find(|source| source.source_format == TERRAMIND_SQLITE_SOURCE_FORMAT)
+            .unwrap_or_else(|| panic!("missing Terramind source in {sources:#?}"));
+        assert_eq!(source.provider, CaptureProvider::Terramind);
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+        assert_eq!(source.import_support, ProviderImportSupport::Native);
+        assert_eq!(source.path, db);
+    }
+
+    #[test]
+    fn native_terramind_reports_missing_table_and_corrupt_db() {
+        let temp = tempdir();
+        let missing_table = temp.path().join("missing-terramind.db");
+        let conn = Connection::open(&missing_table).unwrap();
+        conn.execute_batch("CREATE TABLE unrelated (id INTEGER PRIMARY KEY);")
+            .unwrap();
+        drop(conn);
+        let corrupt = temp.path().join("corrupt-terramind.db");
+        fs::write(&corrupt, b"not sqlite").unwrap();
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let err = import_terramind_sqlite(
+            &missing_table,
+            &mut store,
+            TerramindSqliteImportOptions::default(),
+        )
+        .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Terramind agents.db is missing required projects table"));
+
+        let err = import_terramind_sqlite(
+            &corrupt,
+            &mut store,
+            TerramindSqliteImportOptions::default(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not a database"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_terramind_rejects_symlinked_sqlite() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir();
+        let fixture = provider_history_fixture("terramind/v1/agents.db");
+        let link = temp.path().join("linked-terramind.db");
+        symlink(&fixture, &link).unwrap();
+
+        let err =
+            normalize_terramind_sqlite(&link, &ProviderAdapterContext::default()).unwrap_err();
+        assert!(matches!(
+            err,
+            CaptureError::InvalidProviderTranscriptPath { path, reason }
+                if path.ends_with("linked-terramind.db")
+                    && reason == "symlinked provider transcript files are rejected"
+        ));
     }
 
     #[test]

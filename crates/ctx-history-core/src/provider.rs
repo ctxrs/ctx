@@ -109,6 +109,7 @@ pub enum ProviderId {
     Kode,
     #[serde(rename = "neovate", alias = "neovate-code", alias = "neovate_code")]
     Neovate,
+    Terramind,
     #[serde(rename = "kimi_code_cli", alias = "kimi", alias = "kimi-code-cli")]
     KimiCodeCli,
     Aider,
@@ -121,7 +122,7 @@ pub enum ProviderId {
 }
 
 impl ProviderId {
-    pub const ALL: [Self; 48] = [
+    pub const ALL: [Self; 49] = [
         Self::Codex,
         Self::ClaudeCode,
         Self::ClaudeCliCrp,
@@ -162,6 +163,7 @@ impl ProviderId {
         Self::Reasonix,
         Self::Kode,
         Self::Neovate,
+        Self::Terramind,
         Self::KimiCodeCli,
         Self::Aider,
         Self::ClineRoo,
@@ -483,6 +485,7 @@ mod tests {
             ProviderId::MistralVibe,
             ProviderId::Mux,
             ProviderId::Reasonix,
+            ProviderId::Terramind,
             ProviderId::GeminiCli,
             ProviderId::Goose,
             ProviderId::Hermes,
