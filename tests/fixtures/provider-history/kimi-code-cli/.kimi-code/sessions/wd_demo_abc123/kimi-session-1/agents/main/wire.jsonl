@@ -1,0 +1,6 @@
+{"type":"metadata","protocol_version":"1.4","created_at":1783170000000}
+{"type":"turn.prompt","time":1783170001000,"input":[{"type":"text","text":"kimi jsonl oracle prompt"}],"origin":{"kind":"user"}}
+{"type":"context.append_message","time":1783170002000,"message":{"role":"assistant","content":[{"type":"text","text":"kimi jsonl oracle answer"}]}}
+{"type":"context.append_loop_event","time":1783170003000,"event":{"type":"tool.call","toolName":"Write","input":{"path":"src/kimi_oracle.txt","content":"proof"}}}
+{"type":"context.append_loop_event","time":1783170004000,"event":{"type":"tool.result","toolName":"Write","output":"wrote src/kimi_oracle.txt"}}
+{"type":"usage.record","time":1783170005000,"model":"kimi-k2","usage":{"input_tokens":11,"output_tokens":13}}

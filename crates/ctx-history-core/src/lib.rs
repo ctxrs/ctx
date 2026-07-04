@@ -192,6 +192,8 @@ text_enum! {
         Cursor => "cursor",
         CopilotCli => "copilot_cli",
         FactoryAiDroid => "factory_ai_droid",
+        QwenCode => "qwen_code",
+        KimiCodeCli => "kimi_code_cli",
         OpenClaw => "openclaw",
         Hermes => "hermes",
         NanoClaw => "nanoclaw",
@@ -1510,6 +1512,14 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<CaptureProvider>("\"kilo\"").unwrap(),
             CaptureProvider::Kilo
+        );
+        assert_eq!(
+            serde_json::from_str::<CaptureProvider>("\"qwen_code\"").unwrap(),
+            CaptureProvider::QwenCode
+        );
+        assert_eq!(
+            serde_json::from_str::<CaptureProvider>("\"kimi_code_cli\"").unwrap(),
+            CaptureProvider::KimiCodeCli
         );
 
         let sync: SyncMetadata = serde_json::from_value(json!({})).unwrap();

@@ -64,9 +64,11 @@ pub enum ProviderId {
     #[serde(rename = "openhands")]
     OpenHands,
     Cagent,
-    Qwen,
+    #[serde(rename = "qwen_code", alias = "qwen", alias = "qwen-code")]
+    QwenCode,
     Mistral,
-    Kimi,
+    #[serde(rename = "kimi_code_cli", alias = "kimi", alias = "kimi-code-cli")]
+    KimiCodeCli,
     Aider,
     ClineRoo,
     ContinueCody,
@@ -100,9 +102,9 @@ impl ProviderId {
         Self::Goose,
         Self::OpenHands,
         Self::Cagent,
-        Self::Qwen,
+        Self::QwenCode,
         Self::Mistral,
-        Self::Kimi,
+        Self::KimiCodeCli,
         Self::Aider,
         Self::ClineRoo,
         Self::ContinueCody,
@@ -415,10 +417,12 @@ mod tests {
             ProviderId::GeminiCli,
             ProviderId::Hermes,
             ProviderId::Kilo,
+            ProviderId::KimiCodeCli,
             ProviderId::NanoClaw,
             ProviderId::OpenCode,
             ProviderId::OpenClaw,
             ProviderId::Pi,
+            ProviderId::QwenCode,
             ProviderId::Shelley,
         ]
         .into_iter()

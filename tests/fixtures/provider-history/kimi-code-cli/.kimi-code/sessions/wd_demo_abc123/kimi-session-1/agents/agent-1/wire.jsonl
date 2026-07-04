@@ -1,0 +1,3 @@
+{"type":"metadata","protocol_version":"1.4","created_at":1783170006000}
+{"type":"turn.prompt","time":1783170007000,"input":[{"type":"text","text":"child inspect"}]}
+{"type":"context.append_message","time":1783170008000,"message":{"role":"assistant","content":[{"type":"text","text":"child done"}]}}

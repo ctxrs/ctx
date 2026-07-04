@@ -712,6 +712,48 @@ impl Default for CursorNativeImportOptions {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct QwenCodeImportOptions {
+    pub machine_id: String,
+    pub source_path: Option<PathBuf>,
+    pub imported_at: DateTime<Utc>,
+    pub history_record_id: Option<Uuid>,
+    pub allow_partial_failures: bool,
+}
+
+impl Default for QwenCodeImportOptions {
+    fn default() -> Self {
+        Self {
+            machine_id: default_machine_id(),
+            source_path: None,
+            imported_at: utc_now(),
+            history_record_id: None,
+            allow_partial_failures: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct KimiCodeCliImportOptions {
+    pub machine_id: String,
+    pub source_path: Option<PathBuf>,
+    pub imported_at: DateTime<Utc>,
+    pub history_record_id: Option<Uuid>,
+    pub allow_partial_failures: bool,
+}
+
+impl Default for KimiCodeCliImportOptions {
+    fn default() -> Self {
+        Self {
+            machine_id: default_machine_id(),
+            source_path: None,
+            imported_at: utc_now(),
+            history_record_id: None,
+            allow_partial_failures: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderFixtureLine {
     pub provider: CaptureProvider,
@@ -954,6 +996,12 @@ pub struct FactoryAiDroidJsonlAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CopilotCliSessionEventsAdapter;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct QwenCodeJsonlAdapter;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct KimiCodeCliWireJsonlAdapter;
 
 impl ProviderCaptureAdapter for ProviderFixtureJsonlAdapter {
     fn provider(&self) -> CaptureProvider {
@@ -1879,6 +1927,47 @@ impl ProviderCaptureAdapter for CopilotCliSessionEventsAdapter {
             CaptureProvider::CopilotCli,
             COPILOT_CLI_SOURCE_FORMAT,
         )
+    }
+}
+
+impl ProviderCaptureAdapter for QwenCodeJsonlAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::QwenCode
+    }
+
+    fn source_format(&self) -> &str {
+        QWEN_CODE_SOURCE_FORMAT
+    }
+
+    fn normalize_path(
+        &self,
+        path: &Path,
+        context: &ProviderAdapterContext,
+    ) -> Result<ProviderNormalizationResult> {
+        normalize_jsonl_tree(
+            path,
+            context,
+            CaptureProvider::QwenCode,
+            QWEN_CODE_SOURCE_FORMAT,
+        )
+    }
+}
+
+impl ProviderCaptureAdapter for KimiCodeCliWireJsonlAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::KimiCodeCli
+    }
+
+    fn source_format(&self) -> &str {
+        KIMI_CODE_CLI_SOURCE_FORMAT
+    }
+
+    fn normalize_path(
+        &self,
+        path: &Path,
+        context: &ProviderAdapterContext,
+    ) -> Result<ProviderNormalizationResult> {
+        normalize_kimi_code_cli_history(path, context)
     }
 }
 
@@ -3979,6 +4068,44 @@ pub fn import_copilot_cli_session_events(
     )
 }
 
+pub fn import_qwen_code_history(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: QwenCodeImportOptions,
+) -> Result<ProviderImportSummary> {
+    import_native_jsonl_tree(
+        store,
+        NativeJsonlTreeImport {
+            path: path.as_ref(),
+            machine_id: options.machine_id,
+            source_path: options.source_path,
+            imported_at: options.imported_at,
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+        },
+        QwenCodeJsonlAdapter,
+    )
+}
+
+pub fn import_kimi_code_cli_history(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: KimiCodeCliImportOptions,
+) -> Result<ProviderImportSummary> {
+    import_native_jsonl_tree(
+        store,
+        NativeJsonlTreeImport {
+            path: path.as_ref(),
+            machine_id: options.machine_id,
+            source_path: options.source_path,
+            imported_at: options.imported_at,
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+        },
+        KimiCodeCliWireJsonlAdapter,
+    )
+}
+
 struct NativeJsonlTreeImport<'a> {
     path: &'a Path,
     machine_id: String,
@@ -4049,6 +4176,8 @@ const GEMINI_CLI_SOURCE_FORMAT: &str = "gemini_cli_chat_recording_jsonl";
 const CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT: &str = "cursor_agent_transcript_jsonl";
 const FACTORY_DROID_SOURCE_FORMAT: &str = "factory_ai_droid_sessions_jsonl";
 const COPILOT_CLI_SOURCE_FORMAT: &str = "copilot_cli_session_events_jsonl";
+const QWEN_CODE_SOURCE_FORMAT: &str = "qwen_code_chat_jsonl";
+const KIMI_CODE_CLI_SOURCE_FORMAT: &str = "kimi_code_cli_wire_jsonl";
 const CODEX_MAX_TEXT_CHARS: usize = 16_000;
 const CODEX_MAX_METADATA_TEXT_CHARS: usize = 4_000;
 const CODEX_MAX_OUTPUT_PREVIEW_CHARS: usize = 4_000;
@@ -10997,6 +11126,8 @@ fn native_jsonl_missing_reason(provider: CaptureProvider) -> &'static str {
         }
         CaptureProvider::CopilotCli => "no Copilot CLI session events.jsonl transcripts found",
         CaptureProvider::FactoryAiDroid => "no Factory AI Droid session JSONL transcripts found",
+        CaptureProvider::QwenCode => "no Qwen Code chat JSONL transcripts found under chats",
+        CaptureProvider::KimiCodeCli => "no Kimi Code CLI wire.jsonl transcripts found",
         _ => "no native provider JSONL transcripts found",
     }
 }
@@ -11017,6 +11148,15 @@ fn provider_jsonl_path_is_native(provider: CaptureProvider, path: &Path) -> bool
             .any(|component| component.as_os_str() == "agent-transcripts"),
         CaptureProvider::CopilotCli => {
             path.file_name().and_then(|name| name.to_str()) == Some("events.jsonl")
+        }
+        CaptureProvider::QwenCode => path
+            .components()
+            .any(|component| component.as_os_str() == "chats"),
+        CaptureProvider::KimiCodeCli => {
+            path.file_name().and_then(|name| name.to_str()) == Some("wire.jsonl")
+                && path
+                    .components()
+                    .any(|component| component.as_os_str() == "agents")
         }
         _ => true,
     }
@@ -11212,6 +11352,7 @@ fn native_jsonl_header_session_id(provider: CaptureProvider, value: &Value) -> O
             == Some("session.start"))
         .then(|| value.pointer("/data/sessionId").and_then(Value::as_str))
         .flatten(),
+        CaptureProvider::QwenCode => value.get("sessionId").and_then(Value::as_str),
         CaptureProvider::Cursor => (value.get("role").is_some()
             || value.get("event").is_some()
             || value.get("message").is_some())
@@ -11244,6 +11385,7 @@ fn native_jsonl_header_cwd(provider: CaptureProvider, value: &Value) -> Option<S
             .and_then(Value::as_str),
         CaptureProvider::FactoryAiDroid => value.get("cwd").and_then(Value::as_str),
         CaptureProvider::CopilotCli => value.pointer("/data/context/cwd").and_then(Value::as_str),
+        CaptureProvider::QwenCode => value.get("cwd").and_then(Value::as_str),
         _ => None,
     }
     .filter(|cwd| !cwd.trim().is_empty())
@@ -11427,7 +11569,7 @@ fn native_jsonl_event(
             "entry_type": entry_type,
             "status": value.get("status").and_then(Value::as_str),
             "model": native_jsonl_model(provider, value),
-            "tokens": value.get("tokens").cloned(),
+            "tokens": value.get("tokens").or_else(|| value.get("usageMetadata")).cloned(),
         }),
     })
 }
@@ -11538,6 +11680,16 @@ fn native_jsonl_event_type(provider: CaptureProvider, value: &Value) -> EventTyp
                 }
             }
         }
+        CaptureProvider::QwenCode => match value.get("type").and_then(Value::as_str) {
+            Some("user" | "assistant") if native_jsonl_content_has(value, "tool_use") => {
+                EventType::ToolCall
+            }
+            Some("tool_result") => EventType::ToolOutput,
+            Some("user" | "assistant") => EventType::Message,
+            Some("system") => EventType::Notice,
+            _ if value.get("toolCallResult").is_some() => EventType::ToolOutput,
+            _ => EventType::Notice,
+        },
         _ => EventType::Notice,
     }
 }
@@ -11571,6 +11723,12 @@ fn native_jsonl_role(provider: CaptureProvider, value: &Value) -> EventRole {
             value
                 .get("role")
                 .or_else(|| value.pointer("/message/role"))
+                .and_then(Value::as_str),
+        ),
+        CaptureProvider::QwenCode => provider_role(
+            value
+                .pointer("/message/role")
+                .or_else(|| value.get("type"))
                 .and_then(Value::as_str),
         ),
         _ => EventRole::Unknown,
@@ -11649,6 +11807,13 @@ fn native_jsonl_event_text(
             .and_then(provider_value_text)
             .or_else(|| value.get("text").and_then(Value::as_str).map(str::to_owned))
             .unwrap_or_else(|| format!("Cursor event: {entry_type}")),
+        CaptureProvider::QwenCode => value
+            .pointer("/message/content")
+            .or_else(|| value.get("message"))
+            .and_then(provider_value_text)
+            .or_else(|| value.get("toolCallResult").and_then(provider_value_text))
+            .or_else(|| value.get("content").and_then(provider_value_text))
+            .unwrap_or_else(|| format!("Qwen Code event: {entry_type}")),
         _ if event_type == EventType::Notice => format!("Provider event: {entry_type}"),
         _ => serde_json::to_string(value).unwrap_or_else(|_| entry_type.to_owned()),
     }
@@ -11663,6 +11828,10 @@ fn native_jsonl_model(provider: CaptureProvider, value: &Value) -> Option<Value>
             .cloned()
             .or_else(|| value.pointer("/metadata/model").cloned()),
         CaptureProvider::CopilotCli => value.pointer("/data/selectedModel").cloned(),
+        CaptureProvider::QwenCode => value
+            .get("model")
+            .cloned()
+            .or_else(|| value.pointer("/message/model").cloned()),
         _ => None,
     }
 }
@@ -11698,6 +11867,553 @@ fn native_jsonl_content_has(value: &Value, expected: &str) -> bool {
                 .any(|block| block.get("type").and_then(Value::as_str) == Some(expected))
         })
         .unwrap_or(false)
+}
+
+#[derive(Debug, Clone)]
+struct KimiSessionIndexEntry {
+    session_id: String,
+    session_dir: Option<String>,
+    work_dir: Option<String>,
+}
+
+fn normalize_kimi_code_cli_history(
+    path: &Path,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    let mut paths = Vec::new();
+    collect_jsonl_paths(path, &mut paths)?;
+    paths.retain(|candidate| {
+        candidate.file_name().and_then(|name| name.to_str()) == Some("wire.jsonl")
+            && provider_path_has_component(candidate, "agents")
+    });
+    paths.sort();
+    if paths.is_empty() {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: native_jsonl_missing_reason(CaptureProvider::KimiCodeCli),
+        });
+    }
+
+    let index = kimi_session_index(path);
+    let mut merged = ProviderNormalizationResult::default();
+    for wire_path in paths {
+        let mut result = normalize_kimi_wire_jsonl_file(&wire_path, context, &index)?;
+        merged.summary.merge(result.summary);
+        merged.captures.append(&mut result.captures);
+        merged.files_touched.append(&mut result.files_touched);
+    }
+    Ok(merged)
+}
+
+fn normalize_kimi_wire_jsonl_file(
+    path: &Path,
+    context: &ProviderAdapterContext,
+    index: &BTreeMap<String, KimiSessionIndexEntry>,
+) -> Result<ProviderNormalizationResult> {
+    ensure_regular_provider_transcript_file(path)?;
+    let file = File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let mut result = ProviderNormalizationResult::default();
+    let mut rows = Vec::new();
+    let mut line = Vec::new();
+    let mut line_number = 0usize;
+
+    while read_provider_jsonl_line(&mut reader, &mut line)? {
+        line_number += 1;
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let value: Value = match serde_json::from_slice(&line) {
+            Ok(value) => value,
+            Err(err) => {
+                push_provider_import_failure(
+                    &mut result.summary,
+                    line_number,
+                    format!("malformed JSONL: {err}"),
+                );
+                continue;
+            }
+        };
+        rows.push((line_number, value));
+    }
+
+    let Some((session_dir, agent_id, session_id)) = kimi_wire_path_parts(path) else {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "Kimi Code CLI wire path must be sessions/<workDirKey>/<sessionId>/agents/<agentId>/wire.jsonl",
+        });
+    };
+    let state = read_kimi_state(&session_dir);
+    let index_entry = index.get(&session_id);
+    let metadata_created_at = rows
+        .iter()
+        .find(|(_, value)| value.get("type").and_then(Value::as_str) == Some("metadata"))
+        .and_then(|(_, value)| value.get("created_at"))
+        .and_then(Value::as_i64)
+        .and_then(DateTime::<Utc>::from_timestamp_millis);
+    let first_row_time = rows
+        .iter()
+        .find_map(|(_, value)| kimi_record_timestamp(value, context.imported_at));
+    let started_at = kimi_state_timestamp(&state, &["createdAt", "created_at"])
+        .or(metadata_created_at)
+        .or(first_row_time)
+        .unwrap_or(context.imported_at);
+    let ended_at = kimi_state_timestamp(&state, &["updatedAt", "updated_at"]);
+    let raw_source_path = path.display().to_string();
+    let agent_state = state
+        .get("agents")
+        .and_then(|agents| agents.get(&agent_id))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let (provider_session_id, parent_provider_session_id, root_provider_session_id, agent_type) =
+        kimi_provider_session_ids(&session_id, &agent_id, &agent_state);
+    let cwd = index_entry
+        .and_then(|entry| entry.work_dir.clone())
+        .or_else(|| {
+            state
+                .get("workDir")
+                .or_else(|| state.get("cwd"))
+                .and_then(Value::as_str)
+                .filter(|cwd| !cwd.trim().is_empty())
+                .map(str::to_owned)
+        });
+
+    result.captures.push((
+        0,
+        kimi_capture(
+            KimiCaptureDraft {
+                provider_session_id: &provider_session_id,
+                parent_provider_session_id: parent_provider_session_id.clone(),
+                root_provider_session_id: root_provider_session_id.clone(),
+                agent_id: &agent_id,
+                agent_type,
+                started_at,
+                ended_at,
+                cwd: cwd.clone(),
+                path,
+                state: &state,
+                index_entry,
+                agent_state: &agent_state,
+                event: None,
+            },
+            context,
+        ),
+    ));
+
+    for (line_number, value) in rows {
+        if value.get("type").and_then(Value::as_str) == Some("metadata") {
+            continue;
+        }
+        let occurred_at = kimi_record_timestamp(&value, started_at).unwrap_or(started_at);
+        let event = kimi_event(&provider_session_id, line_number, &value, occurred_at, path);
+        result
+            .files_touched
+            .extend(provider_file_touches_from_raw_value(
+                CaptureProvider::KimiCodeCli,
+                &provider_session_id,
+                KIMI_CODE_CLI_SOURCE_FORMAT,
+                Some(raw_source_path.as_str()),
+                &value,
+                &event,
+                line_number,
+            ));
+        result.captures.push((
+            line_number,
+            kimi_capture(
+                KimiCaptureDraft {
+                    provider_session_id: &provider_session_id,
+                    parent_provider_session_id: parent_provider_session_id.clone(),
+                    root_provider_session_id: root_provider_session_id.clone(),
+                    agent_id: &agent_id,
+                    agent_type,
+                    started_at,
+                    ended_at,
+                    cwd: cwd.clone(),
+                    path,
+                    state: &state,
+                    index_entry,
+                    agent_state: &agent_state,
+                    event: Some(event),
+                },
+                context,
+            ),
+        ));
+    }
+
+    Ok(result)
+}
+
+struct KimiCaptureDraft<'a> {
+    provider_session_id: &'a str,
+    parent_provider_session_id: Option<String>,
+    root_provider_session_id: Option<String>,
+    agent_id: &'a str,
+    agent_type: AgentType,
+    started_at: DateTime<Utc>,
+    ended_at: Option<DateTime<Utc>>,
+    cwd: Option<String>,
+    path: &'a Path,
+    state: &'a Value,
+    index_entry: Option<&'a KimiSessionIndexEntry>,
+    agent_state: &'a Value,
+    event: Option<ProviderEventEnvelope>,
+}
+
+fn kimi_capture(
+    draft: KimiCaptureDraft<'_>,
+    context: &ProviderAdapterContext,
+) -> ProviderCaptureEnvelope {
+    native_provider_capture(
+        NativeSessionDraft {
+            provider: CaptureProvider::KimiCodeCli,
+            source_format: KIMI_CODE_CLI_SOURCE_FORMAT,
+            provider_session_id: draft.provider_session_id.to_owned(),
+            parent_provider_session_id: draft.parent_provider_session_id,
+            root_provider_session_id: draft.root_provider_session_id,
+            external_agent_id: Some(draft.agent_id.to_owned()),
+            agent_type: draft.agent_type,
+            role_hint: Some(if draft.agent_id == "main" {
+                "main".to_owned()
+            } else {
+                "subagent".to_owned()
+            }),
+            is_primary: draft.agent_id == "main",
+            started_at: draft.started_at,
+            ended_at: draft.ended_at,
+            cwd: draft.cwd,
+            fidelity: Fidelity::Imported,
+            raw_source_path: draft.path.display().to_string(),
+            trust: ProviderSourceTrust::ProviderNative,
+            source_metadata: json!({
+                "adapter": KIMI_CODE_CLI_SOURCE_FORMAT,
+                "source_path": draft.path.display().to_string(),
+                "session_index": draft.index_entry.map(kimi_session_index_metadata),
+            }),
+            session_metadata: json!({
+                "source_format": KIMI_CODE_CLI_SOURCE_FORMAT,
+                "agent_id": draft.agent_id,
+                "state": provider_capped_json(draft.state, PROVIDER_MAX_PREVIEW_CHARS),
+                "agent_state": provider_capped_json(draft.agent_state, PROVIDER_MAX_PREVIEW_CHARS),
+                "title": draft.state.get("title").or_else(|| draft.state.get("customTitle")).and_then(Value::as_str),
+                "last_prompt": draft.state.get("lastPrompt").and_then(Value::as_str),
+                "archived": draft.state.get("archived").and_then(Value::as_bool),
+            }),
+        },
+        context,
+        draft.event,
+    )
+}
+
+fn kimi_event(
+    provider_session_id: &str,
+    line_number: usize,
+    value: &Value,
+    occurred_at: DateTime<Utc>,
+    path: &Path,
+) -> ProviderEventEnvelope {
+    let record_type = value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let event_type = kimi_event_type(record_type, value);
+    let role = kimi_event_role(record_type, value, event_type);
+    let text = kimi_event_text(record_type, value, event_type);
+    native_event(NativeEventDraft {
+        provider: CaptureProvider::KimiCodeCli,
+        source_format: KIMI_CODE_CLI_SOURCE_FORMAT,
+        provider_session_id: provider_session_id.to_owned(),
+        provider_event_index: (line_number - 1) as u64,
+        provider_event_hash: Some(format!(
+            "{}:{}",
+            record_type,
+            value
+                .get("time")
+                .and_then(Value::as_i64)
+                .map(|time| time.to_string())
+                .unwrap_or_else(|| line_number.to_string())
+        )),
+        cursor: format!("{}:line:{line_number}", path.display()),
+        event_type,
+        role: Some(role),
+        occurred_at,
+        text,
+        body: value.clone(),
+        metadata: json!({
+            "source": "kimi_code_cli_wire_jsonl",
+            "source_format": KIMI_CODE_CLI_SOURCE_FORMAT,
+            "line": line_number,
+            "record_type": record_type,
+            "model": value.get("model").cloned(),
+            "usage": value.get("usage").cloned(),
+        }),
+    })
+}
+
+fn kimi_event_type(record_type: &str, value: &Value) -> EventType {
+    match record_type {
+        "turn.prompt" | "turn.steer" | "context.append_message" => EventType::Message,
+        "context.append_loop_event" => {
+            let loop_type = value.pointer("/event/type").and_then(Value::as_str);
+            match loop_type {
+                Some(kind) if kind.contains("tool.call") || kind.contains("tool.start") => {
+                    EventType::ToolCall
+                }
+                Some(kind) if kind.contains("tool.result") || kind.contains("tool.finish") => {
+                    EventType::ToolOutput
+                }
+                Some(kind) if kind.contains("message") => EventType::Message,
+                _ if value.pointer("/event/toolName").is_some()
+                    || value.pointer("/event/tool_name").is_some() =>
+                {
+                    EventType::ToolCall
+                }
+                _ => EventType::Notice,
+            }
+        }
+        "usage.record" | "context.apply_compaction" | "full_compaction.complete" => {
+            EventType::Summary
+        }
+        _ => EventType::Notice,
+    }
+}
+
+fn kimi_event_role(record_type: &str, value: &Value, event_type: EventType) -> EventRole {
+    match record_type {
+        "turn.prompt" | "turn.steer" => EventRole::User,
+        "context.append_message" => provider_role(
+            value
+                .pointer("/message/role")
+                .or_else(|| value.pointer("/message/source"))
+                .and_then(Value::as_str),
+        ),
+        "context.append_loop_event"
+            if matches!(event_type, EventType::ToolCall | EventType::ToolOutput) =>
+        {
+            EventRole::Tool
+        }
+        "context.append_loop_event" => provider_role(
+            value
+                .pointer("/event/role")
+                .or_else(|| value.pointer("/event/source"))
+                .and_then(Value::as_str),
+        ),
+        _ => EventRole::System,
+    }
+}
+
+fn kimi_event_text(record_type: &str, value: &Value, event_type: EventType) -> String {
+    match record_type {
+        "turn.prompt" | "turn.steer" => value
+            .get("input")
+            .and_then(provider_value_text)
+            .unwrap_or_else(|| format!("Kimi Code CLI {record_type}")),
+        "context.append_message" => value
+            .pointer("/message/content")
+            .or_else(|| value.get("message"))
+            .and_then(provider_value_text)
+            .unwrap_or_else(|| "Kimi Code CLI message".to_owned()),
+        "context.append_loop_event" => value
+            .pointer("/event/content")
+            .or_else(|| value.pointer("/event/text"))
+            .or_else(|| value.pointer("/event/output"))
+            .or_else(|| value.pointer("/event/result"))
+            .or_else(|| value.pointer("/event/message"))
+            .and_then(provider_value_text)
+            .or_else(|| {
+                value
+                    .pointer("/event/toolName")
+                    .or_else(|| value.pointer("/event/tool_name"))
+                    .and_then(Value::as_str)
+                    .map(|tool| match event_type {
+                        EventType::ToolOutput => format!("tool result: {tool}"),
+                        EventType::ToolCall => format!("tool call: {tool}"),
+                        _ => format!("tool: {tool}"),
+                    })
+            })
+            .unwrap_or_else(|| format!("Kimi Code CLI {record_type}")),
+        "usage.record" => value
+            .get("model")
+            .and_then(Value::as_str)
+            .map(|model| format!("usage record: {model}"))
+            .unwrap_or_else(|| "usage record".to_owned()),
+        "tools.set_active_tools" => value
+            .get("names")
+            .and_then(Value::as_array)
+            .map(|names| {
+                let names = names
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("active tools: {names}")
+            })
+            .unwrap_or_else(|| "active tools updated".to_owned()),
+        "permission.set_mode" => value
+            .get("mode")
+            .and_then(Value::as_str)
+            .map(|mode| format!("permission mode: {mode}"))
+            .unwrap_or_else(|| "permission mode updated".to_owned()),
+        _ => format!("Kimi Code CLI {record_type}"),
+    }
+}
+
+fn kimi_record_timestamp(value: &Value, fallback: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    value
+        .get("time")
+        .and_then(Value::as_i64)
+        .and_then(DateTime::<Utc>::from_timestamp_millis)
+        .or_else(|| {
+            value
+                .get("timestamp")
+                .and_then(|timestamp| match timestamp {
+                    Value::String(raw) => parse_rfc3339_utc(raw),
+                    Value::Number(number) => number
+                        .as_f64()
+                        .and_then(provider_timestamp_seconds_to_datetime),
+                    _ => None,
+                })
+        })
+        .or_else(|| {
+            value
+                .get("created_at")
+                .and_then(Value::as_i64)
+                .and_then(DateTime::<Utc>::from_timestamp_millis)
+        })
+        .or(Some(fallback))
+}
+
+fn kimi_state_timestamp(value: &Value, fields: &[&str]) -> Option<DateTime<Utc>> {
+    fields.iter().find_map(|field| {
+        value.get(*field).and_then(|timestamp| match timestamp {
+            Value::String(raw) => parse_rfc3339_utc(raw).or_else(|| {
+                raw.parse::<f64>()
+                    .ok()
+                    .and_then(provider_timestamp_seconds_to_datetime)
+            }),
+            Value::Number(number) => number
+                .as_f64()
+                .and_then(provider_timestamp_seconds_to_datetime),
+            _ => None,
+        })
+    })
+}
+
+fn kimi_provider_session_ids(
+    session_id: &str,
+    agent_id: &str,
+    agent_state: &Value,
+) -> (String, Option<String>, Option<String>, AgentType) {
+    if agent_id == "main" {
+        return (session_id.to_owned(), None, None, AgentType::Primary);
+    }
+    let provider_session_id = format!("{session_id}/agents/{agent_id}");
+    let parent = agent_state
+        .get("parentAgentId")
+        .or_else(|| agent_state.get("parent_agent_id"))
+        .and_then(Value::as_str)
+        .filter(|parent| !parent.trim().is_empty())
+        .map(|parent| {
+            if parent == "main" {
+                session_id.to_owned()
+            } else {
+                format!("{session_id}/agents/{parent}")
+            }
+        })
+        .or_else(|| Some(session_id.to_owned()));
+    (
+        provider_session_id,
+        parent,
+        Some(session_id.to_owned()),
+        AgentType::Subagent,
+    )
+}
+
+fn kimi_wire_path_parts(path: &Path) -> Option<(PathBuf, String, String)> {
+    let agent_dir = path.parent()?;
+    let agent_id = agent_dir.file_name()?.to_str()?.to_owned();
+    let agents_dir = agent_dir.parent()?;
+    if agents_dir.file_name().and_then(|name| name.to_str()) != Some("agents") {
+        return None;
+    }
+    let session_dir = agents_dir.parent()?.to_path_buf();
+    let session_id = session_dir.file_name()?.to_str()?.to_owned();
+    Some((session_dir, agent_id, session_id))
+}
+
+fn read_kimi_state(session_dir: &Path) -> Value {
+    read_text_file_limited(
+        &session_dir.join("state.json"),
+        MAX_PROVIDER_JSONL_LINE_BYTES,
+        "Kimi Code CLI state.json",
+    )
+    .ok()
+    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+    .unwrap_or(Value::Null)
+}
+
+fn kimi_session_index(path: &Path) -> BTreeMap<String, KimiSessionIndexEntry> {
+    let mut current = if path.is_file() {
+        path.parent().map(Path::to_path_buf)
+    } else {
+        Some(path.to_path_buf())
+    };
+    while let Some(dir) = current {
+        let index_path = dir.join("session_index.jsonl");
+        if index_path.is_file() {
+            return read_kimi_session_index(&index_path);
+        }
+        current = dir.parent().map(Path::to_path_buf);
+    }
+    BTreeMap::new()
+}
+
+fn read_kimi_session_index(path: &Path) -> BTreeMap<String, KimiSessionIndexEntry> {
+    let Ok(text) = read_text_file_limited(
+        path,
+        MAX_PROVIDER_JSONL_LINE_BYTES,
+        "Kimi Code CLI session_index.jsonl",
+    ) else {
+        return BTreeMap::new();
+    };
+    let mut entries = BTreeMap::new();
+    for line in text.lines() {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some(session_id) = value
+            .get("sessionId")
+            .or_else(|| value.get("session_id"))
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+        else {
+            continue;
+        };
+        entries.insert(
+            session_id.to_owned(),
+            KimiSessionIndexEntry {
+                session_id: session_id.to_owned(),
+                session_dir: value
+                    .get("sessionDir")
+                    .or_else(|| value.get("session_dir"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                work_dir: value
+                    .get("workDir")
+                    .or_else(|| value.get("work_dir"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+            },
+        );
+    }
+    entries
+}
+
+fn kimi_session_index_metadata(entry: &KimiSessionIndexEntry) -> Value {
+    json!({
+        "session_id": entry.session_id,
+        "session_dir": entry.session_dir,
+        "work_dir": entry.work_dir,
+    })
 }
 
 fn pi_session_header(value: Value) -> Result<PiSessionHeader> {
@@ -16800,6 +17516,110 @@ mod tests {
     }
 
     #[test]
+    fn native_jsonl_tree_imports_qwen_and_kimi_smokes_are_idempotent() {
+        let temp = tempdir();
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let qwen = write_qwen_smoke_fixture(&temp);
+        let qwen_summary = import_qwen_code_history(
+            &qwen,
+            &mut store,
+            QwenCodeImportOptions {
+                allow_partial_failures: true,
+                ..QwenCodeImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(qwen_summary.failed, 0, "{:?}", qwen_summary.failures);
+        assert_eq!(qwen_summary.imported_sessions, 1);
+        assert_eq!(qwen_summary.imported_events, 3);
+
+        let qwen_events = store
+            .events_for_session(provider_session_uuid(
+                CaptureProvider::QwenCode,
+                "qwen-smoke",
+            ))
+            .unwrap();
+        assert_eq!(qwen_events.len(), 3);
+        assert!(qwen_events
+            .iter()
+            .any(|event| event.event_type == EventType::ToolCall));
+        assert!(qwen_events
+            .iter()
+            .any(|event| event.event_type == EventType::ToolOutput));
+        let qwen_rendered = serde_json::to_string(&qwen_events).unwrap();
+        assert!(qwen_rendered.contains("qwen jsonl oracle prompt"));
+        assert!(qwen_rendered.contains("src/qwen_oracle.txt"));
+
+        let qwen_second = import_qwen_code_history(
+            &qwen,
+            &mut store,
+            QwenCodeImportOptions {
+                allow_partial_failures: true,
+                ..QwenCodeImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(qwen_second.failed, 0, "{:?}", qwen_second.failures);
+        assert_eq!(qwen_second.imported_sessions, 0);
+        assert_eq!(qwen_second.imported_events, 0);
+
+        let kimi = write_kimi_smoke_fixture(&temp);
+        let kimi_summary = import_kimi_code_cli_history(
+            &kimi,
+            &mut store,
+            KimiCodeCliImportOptions {
+                allow_partial_failures: true,
+                ..KimiCodeCliImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(kimi_summary.failed, 0, "{:?}", kimi_summary.failures);
+        assert_eq!(kimi_summary.imported_sessions, 2);
+        assert_eq!(kimi_summary.imported_events, 7);
+        assert_eq!(kimi_summary.imported_edges, 1);
+
+        let kimi_events = store
+            .events_for_session(provider_session_uuid(
+                CaptureProvider::KimiCodeCli,
+                "kimi-smoke",
+            ))
+            .unwrap();
+        assert_eq!(kimi_events.len(), 5);
+        assert!(kimi_events
+            .iter()
+            .any(|event| event.event_type == EventType::ToolCall));
+        assert!(kimi_events
+            .iter()
+            .any(|event| event.event_type == EventType::ToolOutput));
+        let kimi_rendered = serde_json::to_string(&kimi_events).unwrap();
+        assert!(kimi_rendered.contains("kimi jsonl oracle prompt"));
+        assert!(kimi_rendered.contains("src/kimi_oracle.txt"));
+
+        let kimi_child =
+            provider_session_uuid(CaptureProvider::KimiCodeCli, "kimi-smoke/agents/agent-1");
+        let kimi_parent = provider_session_uuid(CaptureProvider::KimiCodeCli, "kimi-smoke");
+        assert_eq!(
+            store.get_session(kimi_child).unwrap().parent_session_id,
+            Some(kimi_parent)
+        );
+
+        let kimi_second = import_kimi_code_cli_history(
+            &kimi,
+            &mut store,
+            KimiCodeCliImportOptions {
+                allow_partial_failures: true,
+                ..KimiCodeCliImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(kimi_second.failed, 0, "{:?}", kimi_second.failures);
+        assert_eq!(kimi_second.imported_sessions, 0);
+        assert_eq!(kimi_second.imported_events, 0);
+        assert_eq!(kimi_second.imported_edges, 0);
+    }
+
+    #[test]
     fn native_jsonl_tree_skips_headerless_native_files() {
         let temp = tempdir();
         let root = temp.path().join("gemini/.gemini/tmp/project/chats");
@@ -17508,6 +18328,79 @@ mod tests {
         )
         .unwrap();
         temp.path().join("copilot/session-state")
+    }
+
+    fn write_qwen_smoke_fixture(temp: &TempDir) -> PathBuf {
+        let chats = temp.path().join("qwen/.qwen/projects/workspace/chats");
+        fs::create_dir_all(&chats).unwrap();
+        fs::write(
+            chats.join("qwen-smoke.jsonl"),
+            concat!(
+                "{\"uuid\":\"qwen-1\",\"parentUuid\":null,\"sessionId\":\"qwen-smoke\",\"timestamp\":\"2026-07-04T12:00:00Z\",\"type\":\"user\",\"cwd\":\"/workspace/qwen\",\"version\":\"test\",\"gitBranch\":\"main\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"qwen jsonl oracle prompt\"}]},\"model\":\"qwen3-coder\"}\n",
+                "{\"uuid\":\"qwen-2\",\"parentUuid\":\"qwen-1\",\"sessionId\":\"qwen-smoke\",\"timestamp\":\"2026-07-04T12:00:01Z\",\"type\":\"assistant\",\"cwd\":\"/workspace/qwen\",\"version\":\"test\",\"gitBranch\":\"main\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"qwen jsonl oracle answer\"},{\"type\":\"tool_use\",\"id\":\"tool-1\",\"name\":\"Write\",\"input\":{\"path\":\"src/qwen_oracle.txt\",\"content\":\"proof\"}}]},\"usageMetadata\":{\"inputTokens\":5,\"outputTokens\":7},\"model\":\"qwen3-coder\"}\n",
+                "{\"uuid\":\"qwen-3\",\"parentUuid\":\"qwen-2\",\"sessionId\":\"qwen-smoke\",\"timestamp\":\"2026-07-04T12:00:02Z\",\"type\":\"tool_result\",\"cwd\":\"/workspace/qwen\",\"version\":\"test\",\"gitBranch\":\"main\",\"message\":{\"role\":\"tool\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"tool-1\",\"content\":\"wrote src/qwen_oracle.txt\"}]},\"toolCallResult\":{\"tool\":\"Write\",\"path\":\"src/qwen_oracle.txt\",\"output\":\"ok\"},\"model\":\"qwen3-coder\"}\n",
+            ),
+        )
+        .unwrap();
+        temp.path().join("qwen/.qwen/projects")
+    }
+
+    fn write_kimi_smoke_fixture(temp: &TempDir) -> PathBuf {
+        let home = temp.path().join("kimi/.kimi-code");
+        let session = home.join("sessions/wd_demo_abc123/kimi-smoke");
+        let main = session.join("agents/main");
+        let child = session.join("agents/agent-1");
+        fs::create_dir_all(&main).unwrap();
+        fs::create_dir_all(&child).unwrap();
+        fs::write(
+            home.join("session_index.jsonl"),
+            format!(
+                "{}\n",
+                json!({
+                    "sessionId": "kimi-smoke",
+                    "sessionDir": session.display().to_string(),
+                    "workDir": "/workspace/kimi"
+                })
+            ),
+        )
+        .unwrap();
+        fs::write(
+            session.join("state.json"),
+            json!({
+                "createdAt": "2026-07-04T13:00:00Z",
+                "updatedAt": "2026-07-04T13:00:05Z",
+                "title": "Kimi JSONL oracle",
+                "lastPrompt": "kimi jsonl oracle prompt",
+                "agents": {
+                    "main": {"homedir": "/fixture/agents/main", "type": "main", "parentAgentId": null},
+                    "agent-1": {"homedir": "/fixture/agents/agent-1", "type": "coder", "parentAgentId": "main"}
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            main.join("wire.jsonl"),
+            concat!(
+                "{\"type\":\"metadata\",\"protocol_version\":\"1.4\",\"created_at\":1783170000000}\n",
+                "{\"type\":\"turn.prompt\",\"time\":1783170001000,\"input\":[{\"type\":\"text\",\"text\":\"kimi jsonl oracle prompt\"}],\"origin\":{\"kind\":\"user\"}}\n",
+                "{\"type\":\"context.append_message\",\"time\":1783170002000,\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"kimi jsonl oracle answer\"}]}}\n",
+                "{\"type\":\"context.append_loop_event\",\"time\":1783170003000,\"event\":{\"type\":\"tool.call\",\"toolName\":\"Write\",\"input\":{\"path\":\"src/kimi_oracle.txt\",\"content\":\"proof\"}}}\n",
+                "{\"type\":\"context.append_loop_event\",\"time\":1783170004000,\"event\":{\"type\":\"tool.result\",\"toolName\":\"Write\",\"output\":\"wrote src/kimi_oracle.txt\"}}\n",
+                "{\"type\":\"usage.record\",\"time\":1783170005000,\"model\":\"kimi-k2\",\"usage\":{\"input_tokens\":11,\"output_tokens\":13}}\n",
+            ),
+        )
+        .unwrap();
+        fs::write(
+            child.join("wire.jsonl"),
+            concat!(
+                "{\"type\":\"metadata\",\"protocol_version\":\"1.4\",\"created_at\":1783170006000}\n",
+                "{\"type\":\"turn.prompt\",\"time\":1783170007000,\"input\":[{\"type\":\"text\",\"text\":\"child inspect\"}]}\n",
+                "{\"type\":\"context.append_message\",\"time\":1783170008000,\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"child done\"}]}}\n",
+            ),
+        )
+        .unwrap();
+        home
     }
 
     #[test]

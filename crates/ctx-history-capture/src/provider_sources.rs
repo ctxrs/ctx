@@ -166,6 +166,18 @@ const FACTORY_DROID_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLoca
     source_kind: ProviderSourceKind::NativeHistory,
 }];
 
+const QWEN_CODE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
+    path_components: &[".qwen", "projects"],
+    source_format: "qwen_code_chat_jsonl_tree",
+    source_kind: ProviderSourceKind::NativeHistory,
+}];
+
+const KIMI_CODE_CLI_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
+    path_components: &[".kimi-code"],
+    source_format: "kimi_code_cli_wire_jsonl_tree",
+    source_kind: ProviderSourceKind::NativeHistory,
+}];
+
 const OPENCLAW_DEFAULTS: &[ProviderDefaultLocation] = &[
     ProviderDefaultLocation {
         path_components: &[".openclaw"],
@@ -318,6 +330,26 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         unsupported_reason: None,
     },
     ProviderSourceSpec {
+        provider: CaptureProvider::QwenCode,
+        display_name: "Qwen Code",
+        default_locations: QWEN_CODE_DEFAULTS,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
+    ProviderSourceSpec {
+        provider: CaptureProvider::KimiCodeCli,
+        display_name: "Kimi Code CLI",
+        default_locations: KIMI_CODE_CLI_DEFAULTS,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
+    ProviderSourceSpec {
         provider: CaptureProvider::OpenClaw,
         display_name: "OpenClaw",
         default_locations: OPENCLAW_DEFAULTS,
@@ -459,6 +491,34 @@ fn discover_provider_sources_for_spec(
                     spec,
                     path.join("state.db"),
                     "hermes_state_sqlite",
+                    ProviderSourceKind::NativeHistory,
+                ));
+            }
+        }
+        CaptureProvider::QwenCode => {
+            if let Some(path) = env_path_resolved("QWEN_RUNTIME_DIR", home) {
+                sources.push(provider_source_from_parts(
+                    spec,
+                    path.join("projects"),
+                    "qwen_code_chat_jsonl_tree",
+                    ProviderSourceKind::NativeHistory,
+                ));
+            }
+            if let Some(path) = env_path_resolved("QWEN_HOME", home) {
+                sources.push(provider_source_from_parts(
+                    spec,
+                    path.join("projects"),
+                    "qwen_code_chat_jsonl_tree",
+                    ProviderSourceKind::NativeHistory,
+                ));
+            }
+        }
+        CaptureProvider::KimiCodeCli => {
+            if let Some(path) = env_path_resolved("KIMI_CODE_HOME", home) {
+                sources.push(provider_source_from_parts(
+                    spec,
+                    path,
+                    "kimi_code_cli_wire_jsonl_tree",
                     ProviderSourceKind::NativeHistory,
                 ));
             }
@@ -695,10 +755,21 @@ fn env_path(name: &str) -> Option<PathBuf> {
 fn env_path_with_home(name: &str, home: &Path) -> Option<PathBuf> {
     env::var_os(name)
         .filter(|value| !value.is_empty())
-        .map(|value| resolve_pi_config_path(&value.to_string_lossy(), home, home))
+        .map(|value| resolve_home_relative_path(&value.to_string_lossy(), home, home))
+}
+
+fn env_path_resolved(name: &str, home: &Path) -> Option<PathBuf> {
+    let relative_base = env::current_dir().unwrap_or_else(|_| home.to_path_buf());
+    env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(|value| resolve_home_relative_path(&value.to_string_lossy(), home, &relative_base))
 }
 
 fn resolve_pi_config_path(value: &str, home: &Path, relative_base: &Path) -> PathBuf {
+    resolve_home_relative_path(value, home, relative_base)
+}
+
+fn resolve_home_relative_path(value: &str, home: &Path, relative_base: &Path) -> PathBuf {
     let trimmed = value.trim();
     if trimmed == "~" {
         return home.to_path_buf();
@@ -784,6 +855,10 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::Cursor => "cursor_agent_transcript_jsonl_tree",
         CaptureProvider::CopilotCli => "copilot_cli_session_events_jsonl",
         CaptureProvider::FactoryAiDroid => "factory_ai_droid_sessions_jsonl",
+        CaptureProvider::QwenCode if path.is_dir() => "qwen_code_chat_jsonl_tree",
+        CaptureProvider::QwenCode => "qwen_code_chat_jsonl",
+        CaptureProvider::KimiCodeCli if path.is_dir() => "kimi_code_cli_wire_jsonl_tree",
+        CaptureProvider::KimiCodeCli => "kimi_code_cli_wire_jsonl",
         CaptureProvider::OpenClaw => "openclaw_session_jsonl_tree",
         CaptureProvider::Hermes => "hermes_state_sqlite",
         CaptureProvider::NanoClaw => "nanoclaw_project",
@@ -896,6 +971,12 @@ fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::FactoryAiDroid => {
             Some("path exists but no Factory AI Droid session JSONL files were found")
         }
+        CaptureProvider::QwenCode => {
+            Some("path exists but no Qwen Code chat JSONL files were found under projects/*/chats")
+        }
+        CaptureProvider::KimiCodeCli => {
+            Some("path exists but no Kimi Code CLI agents/*/wire.jsonl files were found")
+        }
         CaptureProvider::OpenClaw => {
             Some("path exists but no OpenClaw agent session JSONL files were found")
         }
@@ -947,6 +1028,12 @@ fn unknown_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::OpenHands => {
             Some("path exists but the OpenHands event JSON probe hit its scan budget")
         }
+        CaptureProvider::QwenCode => {
+            Some("path exists but the Qwen Code chat transcript probe hit its scan budget")
+        }
+        CaptureProvider::KimiCodeCli => {
+            Some("path exists but the Kimi Code CLI wire transcript probe hit its scan budget")
+        }
         CaptureProvider::OpenClaw => {
             Some("path exists but the OpenClaw transcript probe hit its scan budget")
         }
@@ -986,6 +1073,12 @@ fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::FactoryAiDroid => {
             Some("path exists but Factory AI Droid sessions could not be read; check permissions")
         }
+        CaptureProvider::QwenCode => {
+            Some("path exists but Qwen Code chat transcripts could not be read; check permissions")
+        }
+        CaptureProvider::KimiCodeCli => Some(
+            "path exists but Kimi Code CLI wire transcripts could not be read; check permissions",
+        ),
         CaptureProvider::OpenClaw => Some(
             "path exists but OpenClaw session transcripts could not be read; check permissions",
         ),
@@ -1048,6 +1141,13 @@ fn default_location_import_probe(
             candidate.file_name().and_then(|name| name.to_str()) == Some("events.jsonl")
         }),
         CaptureProvider::FactoryAiDroid => has_jsonl_file_under_matching(path, 10_000, |_| true),
+        CaptureProvider::QwenCode => has_jsonl_file_under_matching(path, 10_000, |candidate| {
+            path_has_component(candidate, "chats")
+        }),
+        CaptureProvider::KimiCodeCli => has_jsonl_file_under_matching(path, 10_000, |candidate| {
+            candidate.file_name().and_then(|name| name.to_str()) == Some("wire.jsonl")
+                && path_has_component(candidate, "agents")
+        }),
         CaptureProvider::Shell
         | CaptureProvider::Git
         | CaptureProvider::Jj
@@ -1424,6 +1524,36 @@ mod tests {
             ProviderSourceStatus::Available,
         );
 
+        let qwen = temp.path().join(".qwen/projects/project/chats");
+        std::fs::create_dir_all(&qwen).unwrap();
+        assert_source_status(
+            temp.path(),
+            CaptureProvider::QwenCode,
+            ProviderSourceStatus::Empty,
+        );
+        std::fs::write(qwen.join("session.jsonl"), "{}\n").unwrap();
+        assert_source_status(
+            temp.path(),
+            CaptureProvider::QwenCode,
+            ProviderSourceStatus::Available,
+        );
+
+        let kimi = temp
+            .path()
+            .join(".kimi-code/sessions/wd_project_abc123/kimi-session/agents/main");
+        std::fs::create_dir_all(&kimi).unwrap();
+        assert_source_status(
+            temp.path(),
+            CaptureProvider::KimiCodeCli,
+            ProviderSourceStatus::Empty,
+        );
+        std::fs::write(kimi.join("wire.jsonl"), "{}\n").unwrap();
+        assert_source_status(
+            temp.path(),
+            CaptureProvider::KimiCodeCli,
+            ProviderSourceStatus::Available,
+        );
+
         let openclaw = temp.path().join(".openclaw/agents/personal/sessions");
         std::fs::create_dir_all(&openclaw).unwrap();
         assert_source_status(
@@ -1598,6 +1728,47 @@ mod tests {
     }
 
     #[test]
+    fn qwen_discovery_uses_runtime_and_home_env_overrides() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = temp.path().join("qwen-runtime");
+        write_qwen_discovery_chat(&runtime.join("projects"));
+        let qwen_home = temp.path().join("qwen-home");
+        write_qwen_discovery_chat(&qwen_home.join("projects"));
+        let _runtime = EnvGuard::set("QWEN_RUNTIME_DIR", runtime.as_os_str());
+        let _home = EnvGuard::set("QWEN_HOME", qwen_home.as_os_str());
+
+        let sources = discover_provider_sources(temp.path());
+        for path in [runtime.join("projects"), qwen_home.join("projects")] {
+            let source = sources
+                .iter()
+                .find(|source| source.provider == CaptureProvider::QwenCode && source.path == path)
+                .unwrap_or_else(|| panic!("missing Qwen Code source for {path:?}: {sources:#?}"));
+            assert_eq!(source.status, ProviderSourceStatus::Available);
+            assert_eq!(source.import_support, ProviderImportSupport::Native);
+        }
+    }
+
+    #[test]
+    fn kimi_discovery_uses_home_env_override() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let kimi_home = temp.path().join("kimi-home");
+        write_kimi_discovery_wire(&kimi_home);
+        let _home = EnvGuard::set("KIMI_CODE_HOME", kimi_home.as_os_str());
+
+        let sources = discover_provider_sources(temp.path());
+        let source = sources
+            .iter()
+            .find(|source| {
+                source.provider == CaptureProvider::KimiCodeCli && source.path == kimi_home
+            })
+            .unwrap_or_else(|| panic!("missing Kimi Code CLI source in {sources:#?}"));
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+        assert_eq!(source.import_support, ProviderImportSupport::Native);
+    }
+
+    #[test]
     fn pi_discovery_uses_env_session_dir() {
         let _lock = ENV_LOCK.lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
@@ -1767,6 +1938,18 @@ mod tests {
             "{}\n",
         )
         .unwrap();
+    }
+
+    fn write_qwen_discovery_chat(projects: &Path) {
+        let chats = projects.join("project/chats");
+        std::fs::create_dir_all(&chats).unwrap();
+        std::fs::write(chats.join("qwen-discovery.jsonl"), "{}\n").unwrap();
+    }
+
+    fn write_kimi_discovery_wire(home: &Path) {
+        let agent = home.join("sessions/wd_project_abc123/kimi-session/agents/main");
+        std::fs::create_dir_all(&agent).unwrap();
+        std::fs::write(agent.join("wire.jsonl"), "{}\n").unwrap();
     }
 
     fn assert_source_status(

@@ -39,7 +39,11 @@ The current CLI imports local history for:
   `~/.cursor/projects/**/agent-transcripts/**/*.jsonl`;
 - Copilot CLI session event logs named `events.jsonl` under
   `~/.copilot/session-state`;
-- Factory AI Droid session JSONL files under `~/.factory/sessions`.
+- Factory AI Droid session JSONL files under `~/.factory/sessions`;
+- Qwen Code chat JSONL files under `QWEN_RUNTIME_DIR/projects`,
+  `QWEN_HOME/projects`, or `~/.qwen/projects`;
+- Kimi Code CLI wire JSONL records under `KIMI_CODE_HOME` or `~/.kimi-code`
+  session trees.
 
 These are built-in provider adapters for native local history. The custom
 history format is separate: `ctx import --format ctx-history-jsonl-v1 --path
@@ -63,12 +67,12 @@ ctx sources --json
 ```
 
 CLI provider flags use names such as `kilo`, `openclaw`, `hermes`,
-`nanoclaw`, `astrbot`, `shelley`, `continue`, `openhands`, `copilot-cli`, and
-`factory-ai-droid`.
+`nanoclaw`, `astrbot`, `shelley`, `continue`, `openhands`, `copilot-cli`,
+`factory-ai-droid`, `qwen-code`, and `kimi-code-cli`.
 Structured JSON and stable SQL views use provider IDs in ctx output; multiword IDs may be
-snake_case, such as `copilot_cli` or `factory_ai_droid`, while compact native
-IDs such as `kilo`, `openclaw`, `nanoclaw`, `astrbot`, `shelley`,
-`continue`, and `openhands` stay compact.
+snake_case, such as `copilot_cli`, `factory_ai_droid`, `qwen_code`, or
+`kimi_code_cli`, while compact native IDs such as `kilo`, `openclaw`,
+`nanoclaw`, `astrbot`, `shelley`, `continue`, and `openhands` stay compact.
 
 `ctx sources --json` reports each known provider source with `import_support`
 and `importable` fields. A native source is marked available/importable only
