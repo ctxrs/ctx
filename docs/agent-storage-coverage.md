@@ -21,7 +21,7 @@ Status meanings:
 - `install-target`: npx target is an aggregate or project skill target, not a
   proven history-producing agent.
 
-Result on this integration branch: 34 `native-auto`, 2 `native-preview`, 15
+Result on this integration branch: 35 `native-auto`, 2 `native-preview`, 14
 `candidate-family`, 9 `webapp-boundary`, 10 `unknown`, and 2 `install-target`
 rows.
 
@@ -80,7 +80,7 @@ rows.
 | `cortex` | `unknown` | `unknown native history` | npx `~/.snowflake/cortex`; no ctx provider | Need native history storage research before claiming import support. |
 | `crush` | `native-auto` | `generic sqlite messages` | ctx `crush_sqlite`; npx `~/.config/crush` | - |
 | `cursor` | `native-auto` | `VS Code/Electron storage` | ctx `cursor_agent_transcript_jsonl_tree`; npx `~/.cursor` | - |
-| `deepagents` | `candidate-family` | `LangGraph checkpoint SQLite` | npx `~/.deepagents`; no ctx provider; official local state evidence points to `~/.deepagents/.state/sessions.db` and `history.jsonl` | Need LangGraph checkpoint/writes decoder, real fixture generation, and privacy review for state sidecars. |
+| `deepagents` | `native-auto` | `LangGraph checkpoint SQLite` | ctx `deepagents_sessions_sqlite`; npx `~/.deepagents`; official local state evidence points to `~/.deepagents/.state/sessions.db` and `history.jsonl` | Imports decoded root `writes.messages` chat messages only; `history.jsonl` and arbitrary checkpoint state blobs are not indexed. |
 | `devin` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.config/devin`; no ctx provider | Hosted-agent history should use an explicit export path such as ATIF when available; no local conversation DB is proven. |
 | `dexto` | `native-preview` | `generic sqlite messages` | ctx `dexto_sqlite`; npx `~/.dexto` | Preview explicit import only; no proven default discovery path yet. |
 | `droid` | `native-auto` | `JSONL CLI event logs` | ctx `factory_ai_droid_sessions_jsonl`; npx `~/.factory` | - |

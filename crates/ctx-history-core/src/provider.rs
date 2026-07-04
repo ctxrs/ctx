@@ -91,6 +91,8 @@ pub enum ProviderId {
         alias = "forge_code"
     )]
     ForgeCode,
+    #[serde(rename = "deepagents", alias = "deep-agents", alias = "dcode")]
+    DeepAgents,
     #[serde(
         rename = "mistral_vibe",
         alias = "mistral-vibe",
@@ -123,7 +125,7 @@ pub enum ProviderId {
 }
 
 impl ProviderId {
-    pub const ALL: [Self; 50] = [
+    pub const ALL: [Self; 51] = [
         Self::Codex,
         Self::ClaudeCode,
         Self::ClaudeCliCrp,
@@ -160,6 +162,7 @@ impl ProviderId {
         Self::KiroCli,
         Self::IflowCli,
         Self::ForgeCode,
+        Self::DeepAgents,
         Self::MistralVibe,
         Self::Mux,
         Self::Reasonix,
@@ -484,6 +487,7 @@ mod tests {
             ProviderId::Dexto,
             ProviderId::FactoryAiDroid,
             ProviderId::ForgeCode,
+            ProviderId::DeepAgents,
             ProviderId::MistralVibe,
             ProviderId::Mux,
             ProviderId::Reasonix,

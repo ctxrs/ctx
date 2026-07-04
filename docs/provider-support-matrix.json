@@ -1659,6 +1659,63 @@
       ]
     },
     {
+      "id": "deepagents",
+      "display_name": "Deep Agents",
+      "priority": "p1",
+      "status": "local_import_when_supported",
+      "capture_provider": "deepagents",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "deepagents_sessions_sqlite",
+          "fidelity": "partial",
+          "proof": [
+            "ctx sources",
+            "ctx import --provider deepagents",
+            "cargo test -p ctx-history-capture native_deepagents_fixture_imports_searches_and_reimports"
+          ],
+          "notes": [
+            "Reads Deep Agents Code LangGraph checkpoint SQLite databases from ~/.deepagents/.state/sessions.db or an explicit sessions.db path when checkpoints and writes tables exist.",
+            "Normalizes decoded chat messages only from root writes.channel = 'messages'; checkpoint state blobs and history.jsonl input history are not indexed by this adapter."
+          ]
+        }
+      ],
+      "history_locations": [
+        "~/.deepagents/.state/sessions.db"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": false,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": false,
+        "tool_output": true,
+        "command_output": false,
+        "files_touched": false,
+        "artifacts": false,
+        "model_identity": true,
+        "costs": false,
+        "token_usage": false,
+        "parent_child_session_edges": false
+      },
+      "blockers": [
+        "Importer is based on official Deep Agents Code data-location docs, deepagents-code source at commit bf5e551399565136e35628e046e0ad6cede6df3f, LangGraph AsyncSqliteSaver schema proof, and sanitized LangGraph fixture data.",
+        "The importer intentionally skips arbitrary checkpoint state blobs because they may contain private agent state beyond chat messages."
+      ],
+      "public_docs": "docs/provider-support.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/deepagents/v1/sessions.db"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs",
+        "crates/ctx-history-store/src/lib.rs",
+        "tests/fixtures/provider-history/deepagents/v1/sessions.db"
+      ]
+    },
+    {
       "id": "mistral_vibe",
       "display_name": "Mistral Vibe",
       "priority": "p1",

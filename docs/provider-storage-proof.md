@@ -188,6 +188,33 @@ IDE/application storage imports.
   indexes for event cursors and retains capped raw context/metrics JSON for DTO
   fields that are not explicitly normalized yet.
 
+## Deep Agents
+
+- Official docs evidence: Deep Agents Code data-location docs list sessions at
+  `~/.deepagents/.state/sessions.db` as a read/write SQLite checkpoint database
+  and input history at `~/.deepagents/.state/history.jsonl` as JSON lines.
+- Source evidence: Deep Agents Code repository commit
+  `bf5e551399565136e35628e046e0ad6cede6df3f`.
+- Path evidence: `libs/code/deepagents_code/model_config.py` defines
+  `DEFAULT_CONFIG_DIR` as `~/.deepagents` and `DEFAULT_STATE_DIR` as
+  `~/.deepagents/.state`.
+- Checkpointer evidence: `libs/code/deepagents_code/sessions.py` resolves
+  `sessions.db` under `DEFAULT_STATE_DIR` and opens it with
+  `AsyncSqliteSaver.from_conn_string`.
+- Schema evidence: `langgraph-checkpoint-sqlite` `AsyncSqliteSaver.setup`
+  creates `checkpoints(thread_id, checkpoint_ns, checkpoint_id,
+  parent_checkpoint_id, type, checkpoint, metadata)` and
+  `writes(thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type,
+  value)`.
+- Fixture evidence: `tests/fixtures/provider-history/deepagents/v1/sessions.db`
+  was generated with `AsyncSqliteSaver` and sanitized LangChain messages, without
+  API credentials.
+- `ctx` imports this shape as `deepagents_sessions_sqlite`, using read-only
+  discovery only when both `checkpoints` and `writes` tables exist.
+- Caveat: ctx indexes decoded chat messages only from root
+  `writes.channel = 'messages'`; it does not index checkpoint state blobs or the
+  separate `history.jsonl` input-history file.
+
 ## Mistral Vibe
 
 - Source evidence: Mistral Vibe repository commit

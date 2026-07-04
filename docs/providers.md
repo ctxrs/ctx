@@ -76,6 +76,9 @@ The current CLI imports local history for:
   `~/.iflow/projects`, where project directories contain `session-*.jsonl`;
 - ForgeCode conversation SQLite history from `FORGE_CONFIG/.forge.db`, legacy
   `~/forge/.forge.db`, `~/.forge/.forge.db`, or an explicit ForgeCode DB path;
+- Deep Agents LangGraph checkpoint SQLite history from
+  `~/.deepagents/.state/sessions.db` or an explicit Deep Agents `sessions.db`
+  path;
 - Mistral Vibe session directories under `VIBE_HOME/logs/session` or
   `~/.vibe/logs/session`, where each session has `meta.json` and
   `messages.jsonl`;
@@ -120,16 +123,17 @@ CLI provider flags use names such as `kilo`, `crush`, `goose`, `dexto`,
 `openclaw`, `hermes`,
 `nanoclaw`, `astrbot`, `shelley`, `continue`, `openhands`, `copilot-cli`,
 `factory-ai-droid`, `qwen-code`, `kimi-code-cli`, `autohand-code`,
-`kiro-cli`, `iflow-cli`, `forgecode`, `mistral-vibe`, `mux`, `reasonix`,
-`kode`, `neovate`, `terramind`, `zed`, `lingma`, `codebuddy`, `aider-desk`, `cline`, and
-`roo`/`roo-code`.
+`kiro-cli`, `iflow-cli`, `forgecode`, `deepagents`, `mistral-vibe`, `mux`,
+`reasonix`, `kode`, `neovate`, `terramind`, `zed`, `lingma`, `codebuddy`,
+`aider-desk`, `cline`, and `roo`/`roo-code`.
 Structured JSON and stable SQL views use provider IDs in ctx output; multiword IDs may be
 snake_case, such as `copilot_cli`, `factory_ai_droid`, `qwen_code`,
 `kimi_code_cli`, `autohand_code`, `kiro_cli`, `iflow_cli`, or
 `mistral_vibe`; Aider Desk is reported as `aider_desk`, while compact native
-IDs such as `kilo`, `openclaw`, `crush`, `goose`, `dexto`, `mux`,
-`reasonix`, `kode`, `neovate`, `terramind`, `zed`, `lingma`, `codebuddy`, `forgecode`,
-`nanoclaw`, `astrbot`, `shelley`, `continue`, and `openhands` stay compact. Roo Code is
+IDs such as `kilo`, `openclaw`, `crush`, `goose`, `dexto`, `mux`, `reasonix`,
+`kode`, `neovate`, `terramind`, `zed`, `lingma`, `codebuddy`, `forgecode`,
+`deepagents`, `nanoclaw`, `astrbot`, `shelley`, `continue`, and `openhands`
+stay compact. Roo Code is
 reported as `roo_code`.
 
 `ctx sources --json` reports each known provider source with `import_support`

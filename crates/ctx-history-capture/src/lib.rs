@@ -25,6 +25,7 @@ use ctx_history_core::{
     CTX_HISTORY_JSONL_V1_SCHEMA_VERSION, PROVIDER_CAPTURE_ENVELOPE_SCHEMA_VERSION,
 };
 use ctx_history_store::{CatalogSession, Store, StoreError};
+use rmpv::{decode::read_value as read_msgpack_value, Value as MsgpackValue};
 use rusqlite::{limits::Limit, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -556,6 +557,27 @@ pub struct ForgeCodeSqliteImportOptions {
 }
 
 impl Default for ForgeCodeSqliteImportOptions {
+    fn default() -> Self {
+        Self {
+            machine_id: default_machine_id(),
+            source_path: None,
+            imported_at: utc_now(),
+            history_record_id: None,
+            allow_partial_failures: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DeepAgentsSqliteImportOptions {
+    pub machine_id: String,
+    pub source_path: Option<PathBuf>,
+    pub imported_at: DateTime<Utc>,
+    pub history_record_id: Option<Uuid>,
+    pub allow_partial_failures: bool,
+}
+
+impl Default for DeepAgentsSqliteImportOptions {
     fn default() -> Self {
         Self {
             machine_id: default_machine_id(),
@@ -1406,6 +1428,9 @@ pub struct NeovateJsonlAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ForgeCodeSqliteAdapter;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DeepAgentsSqliteAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MistralVibeJsonlAdapter;
@@ -2664,6 +2689,24 @@ impl ProviderCaptureAdapter for ForgeCodeSqliteAdapter {
         context: &ProviderAdapterContext,
     ) -> Result<ProviderNormalizationResult> {
         normalize_forgecode_sqlite(path, context)
+    }
+}
+
+impl ProviderCaptureAdapter for DeepAgentsSqliteAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::DeepAgents
+    }
+
+    fn source_format(&self) -> &str {
+        DEEPAGENTS_SQLITE_SOURCE_FORMAT
+    }
+
+    fn normalize_path(
+        &self,
+        path: &Path,
+        context: &ProviderAdapterContext,
+    ) -> Result<ProviderNormalizationResult> {
+        normalize_deepagents_sqlite(path, context)
     }
 }
 
@@ -4851,6 +4894,41 @@ pub fn import_terramind_sqlite(
     )
 }
 
+pub fn import_deepagents_sqlite(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: DeepAgentsSqliteImportOptions,
+) -> Result<ProviderImportSummary> {
+    let path = path.as_ref();
+    let source_path = options
+        .source_path
+        .clone()
+        .unwrap_or_else(|| path.to_path_buf());
+    let normalization = DeepAgentsSqliteAdapter.normalize_path(
+        path,
+        &ProviderAdapterContext {
+            machine_id: options.machine_id,
+            source_path: Some(source_path),
+            imported_at: options.imported_at,
+            tool_output_mode: CodexToolOutputMode::Full,
+            event_mode: CodexEventImportMode::Rich,
+            include_notices: true,
+        },
+    )?;
+
+    import_normalized_provider_captures(
+        store,
+        normalization,
+        NormalizedProviderImportOptions {
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+            persist_cursors: true,
+            wrap_transaction: true,
+            fast_event_inserts: true,
+        },
+    )
+}
+
 pub fn import_nanoclaw_project(
     path: impl AsRef<Path>,
     store: &mut Store,
@@ -5511,6 +5589,7 @@ const IFLOW_CLI_SOURCE_FORMAT: &str = "iflow_cli_session_jsonl";
 const KODE_SOURCE_FORMAT: &str = "kode_session_jsonl";
 const NEOVATE_SOURCE_FORMAT: &str = "neovate_session_jsonl";
 const FORGECODE_SQLITE_SOURCE_FORMAT: &str = "forgecode_sqlite";
+const DEEPAGENTS_SQLITE_SOURCE_FORMAT: &str = "deepagents_sessions_sqlite";
 const MISTRAL_VIBE_SOURCE_FORMAT: &str = "mistral_vibe_session_jsonl";
 const MUX_SOURCE_FORMAT: &str = "mux_session_jsonl";
 const REASONIX_SOURCE_FORMAT: &str = "reasonix_session_jsonl";
@@ -10610,6 +10689,575 @@ fn native_event(draft: NativeEventDraft) -> ProviderEventEnvelope {
         }),
         metadata: draft.metadata,
     }
+}
+
+#[derive(Debug, Clone)]
+struct DeepAgentsThread {
+    thread_id: String,
+    agent_name: Option<String>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    latest_checkpoint_id: Option<String>,
+    git_branch: Option<String>,
+    cwd: Option<String>,
+    checkpoint_times: BTreeMap<String, DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone)]
+struct DeepAgentsWriteRow {
+    thread_id: String,
+    checkpoint_id: String,
+    task_id: String,
+    idx: i64,
+    value_type: Option<String>,
+    value: Vec<u8>,
+    row_number: u64,
+}
+
+#[derive(Debug, Clone)]
+struct DeepAgentsMessage {
+    role: EventRole,
+    message_type: String,
+    message_class: Option<String>,
+    message_id: Option<String>,
+    text: String,
+}
+
+#[derive(Debug, Clone)]
+struct DeepAgentsEventDraft {
+    thread_id: String,
+    provider_event_index: u64,
+    cursor: String,
+    occurred_at: DateTime<Utc>,
+    message: DeepAgentsMessage,
+    checkpoint_id: String,
+    task_id: String,
+    write_idx: i64,
+    message_offset: usize,
+}
+
+fn normalize_deepagents_sqlite(
+    path: &Path,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    let conn = open_provider_sqlite_readonly(path)?;
+    if !sqlite_table_exists(&conn, "checkpoints")? {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "Deep Agents sessions.db is missing required checkpoints table",
+        });
+    }
+    if !sqlite_table_exists(&conn, "writes")? {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "Deep Agents sessions.db is missing required writes table",
+        });
+    }
+
+    let checkpoint_columns = sqlite_table_columns(&conn, "checkpoints")?;
+    ensure_sqlite_table_columns(
+        &checkpoint_columns,
+        "Deep Agents checkpoints table",
+        &[
+            "thread_id",
+            "checkpoint_ns",
+            "checkpoint_id",
+            "checkpoint",
+            "metadata",
+        ],
+    )?;
+    let write_columns = sqlite_table_columns(&conn, "writes")?;
+    ensure_sqlite_table_columns(
+        &write_columns,
+        "Deep Agents writes table",
+        &[
+            "thread_id",
+            "checkpoint_ns",
+            "checkpoint_id",
+            "task_id",
+            "idx",
+            "channel",
+            "type",
+            "value",
+        ],
+    )?;
+
+    let user_version = conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?;
+    let schema_fingerprint = opencode_schema_fingerprint(&conn)?;
+    let threads = deepagents_threads(&conn, context)?;
+    let write_rows = deepagents_message_write_rows(&conn)?;
+    let mut result = ProviderNormalizationResult::default();
+    let events_by_thread = deepagents_events_by_thread(write_rows, &threads, &mut result)?;
+    let raw_source_path = context
+        .source_path
+        .as_ref()
+        .map(|path| path.display().to_string());
+
+    for thread in threads.values() {
+        let events = events_by_thread.get(&thread.thread_id);
+        if let Some(events) = events {
+            for event in events {
+                let line = provider_line_from_index(event.provider_event_index);
+                result.captures.push((
+                    line,
+                    deepagents_capture(
+                        thread,
+                        Some(event),
+                        context,
+                        raw_source_path.clone(),
+                        user_version,
+                        &schema_fingerprint,
+                    ),
+                ));
+            }
+        } else {
+            result.captures.push((
+                0,
+                deepagents_capture(
+                    thread,
+                    None,
+                    context,
+                    raw_source_path.clone(),
+                    user_version,
+                    &schema_fingerprint,
+                ),
+            ));
+        }
+    }
+
+    Ok(result)
+}
+
+fn deepagents_threads(
+    conn: &Connection,
+    context: &ProviderAdapterContext,
+) -> Result<BTreeMap<String, DeepAgentsThread>> {
+    let mut stmt = conn.prepare(
+        "select thread_id, checkpoint_id, metadata \
+         from checkpoints \
+         where checkpoint_ns = '' \
+         order by thread_id, checkpoint_id",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<Vec<u8>>>(2)?,
+        ))
+    })?;
+    let mut threads = BTreeMap::<String, DeepAgentsThread>::new();
+    for row in rows {
+        let (thread_id, checkpoint_id, metadata_blob) = row?;
+        let metadata = deepagents_metadata_json(metadata_blob.as_deref());
+        let updated_at =
+            deepagents_metadata_time(&metadata, "updated_at").unwrap_or(context.imported_at);
+        let entry = threads
+            .entry(thread_id.clone())
+            .or_insert_with(|| DeepAgentsThread {
+                thread_id: thread_id.clone(),
+                agent_name: deepagents_metadata_string(&metadata, "agent_name"),
+                created_at: updated_at,
+                updated_at,
+                latest_checkpoint_id: Some(checkpoint_id.clone()),
+                git_branch: deepagents_metadata_string(&metadata, "git_branch"),
+                cwd: deepagents_metadata_string(&metadata, "cwd"),
+                checkpoint_times: BTreeMap::new(),
+            });
+        if updated_at < entry.created_at {
+            entry.created_at = updated_at;
+        }
+        if updated_at >= entry.updated_at {
+            entry.updated_at = updated_at;
+            entry.latest_checkpoint_id = Some(checkpoint_id.clone());
+            entry.agent_name = deepagents_metadata_string(&metadata, "agent_name")
+                .or_else(|| entry.agent_name.clone());
+            entry.git_branch = deepagents_metadata_string(&metadata, "git_branch")
+                .or_else(|| entry.git_branch.clone());
+            entry.cwd = deepagents_metadata_string(&metadata, "cwd").or_else(|| entry.cwd.clone());
+        }
+        entry.checkpoint_times.insert(checkpoint_id, updated_at);
+    }
+    Ok(threads)
+}
+
+fn deepagents_message_write_rows(conn: &Connection) -> Result<Vec<DeepAgentsWriteRow>> {
+    let mut stmt = conn.prepare(
+        "select thread_id, checkpoint_id, task_id, idx, type, value \
+         from writes \
+         where checkpoint_ns = '' and channel = 'messages' \
+         order by thread_id, checkpoint_id, task_id, idx",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(DeepAgentsWriteRow {
+            thread_id: row.get(0)?,
+            checkpoint_id: row.get(1)?,
+            task_id: row.get(2)?,
+            idx: row.get(3)?,
+            value_type: row.get(4)?,
+            value: row.get(5)?,
+            row_number: 0,
+        })
+    })?;
+    let mut out = Vec::new();
+    for (index, row) in rows.enumerate() {
+        let mut row = row?;
+        row.row_number = u64::try_from(index + 1).unwrap_or(u64::MAX);
+        out.push(row);
+    }
+    Ok(out)
+}
+
+fn deepagents_events_by_thread(
+    rows: Vec<DeepAgentsWriteRow>,
+    threads: &BTreeMap<String, DeepAgentsThread>,
+    result: &mut ProviderNormalizationResult,
+) -> Result<BTreeMap<String, Vec<DeepAgentsEventDraft>>> {
+    let mut events = BTreeMap::<String, Vec<DeepAgentsEventDraft>>::new();
+    let mut next_index = BTreeMap::<String, u64>::new();
+    let mut seen_message_ids = BTreeMap::<String, BTreeSet<String>>::new();
+
+    for row in rows {
+        let Some(thread) = threads.get(&row.thread_id) else {
+            result.summary.failed += 1;
+            result.summary.failures.push(ProviderImportFailure {
+                line: provider_line_from_index(row.row_number),
+                error: format!(
+                    "Deep Agents writes row references unknown thread_id {}",
+                    row.thread_id
+                ),
+            });
+            continue;
+        };
+        let decoded = match deepagents_messages_from_blob(row.value_type.as_deref(), &row.value) {
+            Ok(messages) => messages,
+            Err(err) => {
+                result.summary.failed += 1;
+                result.summary.failures.push(ProviderImportFailure {
+                    line: provider_line_from_index(row.row_number),
+                    error: err.to_string(),
+                });
+                continue;
+            }
+        };
+        for (message_offset, message) in decoded.into_iter().enumerate() {
+            if let Some(message_id) = &message.message_id {
+                let seen = seen_message_ids.entry(row.thread_id.clone()).or_default();
+                if !seen.insert(message_id.clone()) {
+                    continue;
+                }
+            }
+            let provider_event_index = next_index
+                .entry(row.thread_id.clone())
+                .and_modify(|index| *index += 1)
+                .or_insert(1);
+            let occurred_at = thread
+                .checkpoint_times
+                .get(&row.checkpoint_id)
+                .copied()
+                .unwrap_or(thread.updated_at);
+            let cursor = format!(
+                "thread:{}:checkpoint:{}:task:{}:write:{}:message:{}",
+                row.thread_id, row.checkpoint_id, row.task_id, row.idx, message_offset
+            );
+            events
+                .entry(row.thread_id.clone())
+                .or_default()
+                .push(DeepAgentsEventDraft {
+                    thread_id: row.thread_id.clone(),
+                    provider_event_index: *provider_event_index,
+                    cursor,
+                    occurred_at,
+                    message,
+                    checkpoint_id: row.checkpoint_id.clone(),
+                    task_id: row.task_id.clone(),
+                    write_idx: row.idx,
+                    message_offset,
+                });
+        }
+    }
+
+    Ok(events)
+}
+
+fn deepagents_capture(
+    thread: &DeepAgentsThread,
+    event: Option<&DeepAgentsEventDraft>,
+    context: &ProviderAdapterContext,
+    raw_source_path: Option<String>,
+    sqlite_user_version: i64,
+    schema_fingerprint: &str,
+) -> ProviderCaptureEnvelope {
+    let observed_at = event
+        .map(|event| event.occurred_at)
+        .unwrap_or(thread.updated_at);
+    let cursor = event.map(|event| event.cursor.clone()).or_else(|| {
+        thread
+            .latest_checkpoint_id
+            .as_ref()
+            .map(|checkpoint_id| format!("thread:{}:checkpoint:{checkpoint_id}", thread.thread_id))
+    });
+    ProviderCaptureEnvelope {
+        schema_version: PROVIDER_CAPTURE_ENVELOPE_SCHEMA_VERSION,
+        provider: CaptureProvider::DeepAgents,
+        source: ProviderSourceEnvelope {
+            source_format: DEEPAGENTS_SQLITE_SOURCE_FORMAT.to_owned(),
+            machine_id: context.machine_id.clone(),
+            observed_at,
+            raw_source_path,
+            raw_retention: ProviderRawRetention::PathReference,
+            redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+            trust: ProviderSourceTrust::ProviderNative,
+            fidelity: Fidelity::Imported,
+            cursor: cursor.clone().map(|cursor| ProviderCursorRange {
+                before: None,
+                after: Some(ProviderCursorCheckpoint {
+                    stream: provider_cursor_stream(
+                        CaptureProvider::DeepAgents,
+                        DEEPAGENTS_SQLITE_SOURCE_FORMAT,
+                    ),
+                    cursor,
+                    observed_at,
+                }),
+            }),
+            idempotency_key: Some(format!(
+                "provider-source:deepagents:{DEEPAGENTS_SQLITE_SOURCE_FORMAT}:{}",
+                thread.thread_id
+            )),
+            metadata: json!({
+                "adapter": DEEPAGENTS_SQLITE_SOURCE_FORMAT,
+                "sqlite_user_version": sqlite_user_version,
+                "schema_fingerprint": schema_fingerprint,
+                "message_import_policy": "root writes.messages only; checkpoint state blobs are not indexed",
+            }),
+        },
+        session: ProviderSessionEnvelope {
+            provider_session_id: thread.thread_id.clone(),
+            parent_provider_session_id: None,
+            root_provider_session_id: None,
+            external_agent_id: thread.agent_name.clone(),
+            agent_type: AgentType::Primary,
+            role_hint: thread
+                .agent_name
+                .clone()
+                .or_else(|| Some("agent".to_owned())),
+            is_primary: true,
+            status: SessionStatus::Imported,
+            started_at: thread.created_at,
+            ended_at: Some(thread.updated_at),
+            cwd: thread.cwd.clone(),
+            fidelity: Fidelity::Imported,
+            idempotency_key: Some(format!("provider-session:deepagents:{}", thread.thread_id)),
+            artifacts: Vec::new(),
+            metadata: json!({
+                "source_format": DEEPAGENTS_SQLITE_SOURCE_FORMAT,
+                "agent_name": thread.agent_name,
+                "git_branch": thread.git_branch,
+                "latest_checkpoint_id": thread.latest_checkpoint_id,
+                "storage": "LangGraph AsyncSqliteSaver checkpoints/writes",
+            }),
+        },
+        event: event.map(deepagents_event),
+    }
+}
+
+fn deepagents_event(event: &DeepAgentsEventDraft) -> ProviderEventEnvelope {
+    let event_type = if event.message.role == EventRole::Tool {
+        EventType::ToolOutput
+    } else {
+        EventType::Message
+    };
+    native_event(NativeEventDraft {
+        provider: CaptureProvider::DeepAgents,
+        source_format: DEEPAGENTS_SQLITE_SOURCE_FORMAT,
+        provider_session_id: event.thread_id.clone(),
+        provider_event_index: event.provider_event_index,
+        provider_event_hash: Some(event.cursor.clone()),
+        cursor: event.cursor.clone(),
+        event_type,
+        role: Some(event.message.role),
+        occurred_at: event.occurred_at,
+        text: event.message.text.clone(),
+        body: json!({
+            "message_type": event.message.message_type,
+            "message_class": event.message.message_class,
+            "message_id": event.message.message_id,
+            "checkpoint_id": event.checkpoint_id,
+            "task_id": event.task_id,
+            "write_idx": event.write_idx,
+            "message_offset": event.message_offset,
+        }),
+        metadata: json!({
+            "source": DEEPAGENTS_SQLITE_SOURCE_FORMAT,
+            "source_format": DEEPAGENTS_SQLITE_SOURCE_FORMAT,
+            "checkpoint_id": event.checkpoint_id,
+            "task_id": event.task_id,
+            "write_idx": event.write_idx,
+            "message_offset": event.message_offset,
+            "message_type": event.message.message_type,
+            "message_class": event.message.message_class,
+            "message_id": event.message.message_id,
+            "privacy": "decoded from writes.messages only",
+        }),
+    })
+}
+
+fn deepagents_messages_from_blob(
+    value_type: Option<&str>,
+    value: &[u8],
+) -> Result<Vec<DeepAgentsMessage>> {
+    match value_type {
+        Some("msgpack") => {
+            let decoded = deepagents_decode_msgpack(value)?;
+            Ok(deepagents_messages_from_msgpack_value(&decoded))
+        }
+        Some(other) => Err(CaptureError::InvalidPayload(format!(
+            "unsupported Deep Agents writes.messages value type {other:?}"
+        ))),
+        None => Err(CaptureError::InvalidPayload(
+            "Deep Agents writes.messages row has no value type".to_owned(),
+        )),
+    }
+}
+
+fn deepagents_decode_msgpack(value: &[u8]) -> Result<MsgpackValue> {
+    let mut cursor = std::io::Cursor::new(value);
+    read_msgpack_value(&mut cursor).map_err(|err| {
+        CaptureError::InvalidPayload(format!("invalid Deep Agents msgpack payload: {err}"))
+    })
+}
+
+fn deepagents_messages_from_msgpack_value(value: &MsgpackValue) -> Vec<DeepAgentsMessage> {
+    match value {
+        MsgpackValue::Array(items) => items
+            .iter()
+            .filter_map(deepagents_message_from_msgpack_value)
+            .collect(),
+        _ => deepagents_message_from_msgpack_value(value)
+            .into_iter()
+            .collect(),
+    }
+}
+
+fn deepagents_message_from_msgpack_value(value: &MsgpackValue) -> Option<DeepAgentsMessage> {
+    match value {
+        MsgpackValue::Map(fields) => deepagents_message_from_fields(fields, None),
+        MsgpackValue::Ext(5, payload) => {
+            let decoded = deepagents_decode_msgpack(payload).ok()?;
+            let MsgpackValue::Array(items) = decoded else {
+                return None;
+            };
+            let class_name = items.get(1).and_then(msgpack_string);
+            let fields = match items.get(2)? {
+                MsgpackValue::Map(fields) => fields,
+                _ => return None,
+            };
+            deepagents_message_from_fields(fields, class_name)
+        }
+        _ => None,
+    }
+}
+
+fn deepagents_message_from_fields(
+    fields: &[(MsgpackValue, MsgpackValue)],
+    class_name: Option<String>,
+) -> Option<DeepAgentsMessage> {
+    let message_type = msgpack_map_string(fields, "type")
+        .or_else(|| msgpack_map_string(fields, "role"))
+        .or_else(|| class_name.clone())
+        .unwrap_or_else(|| "unknown".to_owned());
+    let role = deepagents_message_role(&message_type, class_name.as_deref())?;
+    if role == EventRole::System {
+        return None;
+    }
+    let content = msgpack_map_get(fields, "content")?;
+    let text = deepagents_content_text(content)?;
+    if text.trim().is_empty() || text.starts_with("[SYSTEM]") {
+        return None;
+    }
+    Some(DeepAgentsMessage {
+        role,
+        message_type,
+        message_class: class_name,
+        message_id: msgpack_map_string(fields, "id"),
+        text,
+    })
+}
+
+fn deepagents_message_role(message_type: &str, class_name: Option<&str>) -> Option<EventRole> {
+    let lowered = message_type.to_ascii_lowercase();
+    match lowered.as_str() {
+        "human" | "user" => Some(EventRole::User),
+        "ai" | "assistant" => Some(EventRole::Assistant),
+        "tool" => Some(EventRole::Tool),
+        "system" => Some(EventRole::System),
+        _ => match class_name.unwrap_or_default() {
+            "HumanMessage" => Some(EventRole::User),
+            "AIMessage" => Some(EventRole::Assistant),
+            "ToolMessage" => Some(EventRole::Tool),
+            "SystemMessage" => Some(EventRole::System),
+            _ => None,
+        },
+    }
+}
+
+fn deepagents_content_text(value: &MsgpackValue) -> Option<String> {
+    if let Some(text) = msgpack_string(value) {
+        return Some(text);
+    }
+    if let MsgpackValue::Array(items) = value {
+        let parts = items
+            .iter()
+            .filter_map(|item| match item {
+                MsgpackValue::Map(fields) => msgpack_map_string(fields, "text"),
+                _ => msgpack_string(item),
+            })
+            .collect::<Vec<_>>();
+        let joined = parts.join(" ").trim().to_owned();
+        if !joined.is_empty() {
+            return Some(joined);
+        }
+    }
+    None
+}
+
+fn msgpack_map_get<'a>(
+    fields: &'a [(MsgpackValue, MsgpackValue)],
+    key: &str,
+) -> Option<&'a MsgpackValue> {
+    fields.iter().find_map(|(field_key, field_value)| {
+        (msgpack_string(field_key).as_deref() == Some(key)).then_some(field_value)
+    })
+}
+
+fn msgpack_map_string(fields: &[(MsgpackValue, MsgpackValue)], key: &str) -> Option<String> {
+    msgpack_map_get(fields, key).and_then(msgpack_string)
+}
+
+fn msgpack_string(value: &MsgpackValue) -> Option<String> {
+    match value {
+        MsgpackValue::String(text) => text.as_str().map(str::to_owned),
+        _ => None,
+    }
+}
+
+fn deepagents_metadata_json(blob: Option<&[u8]>) -> Value {
+    blob.and_then(|blob| serde_json::from_slice::<Value>(blob).ok())
+        .unwrap_or_else(|| json!({}))
+}
+
+fn deepagents_metadata_string(metadata: &Value, key: &str) -> Option<String> {
+    metadata
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned)
+}
+
+fn deepagents_metadata_time(metadata: &Value, key: &str) -> Option<DateTime<Utc>> {
+    metadata
+        .get(key)
+        .and_then(Value::as_str)
+        .and_then(parse_rfc3339_utc)
 }
 
 fn openclaw_agent_id(path: &Path) -> Option<String> {
@@ -28920,6 +29568,131 @@ mod tests {
             )
             .unwrap();
         assert_eq!(file_touch_count_after, file_touch_count);
+    }
+
+    #[test]
+    fn native_deepagents_fixture_imports_searches_and_reimports() {
+        let temp = tempdir();
+        let fixture = provider_history_fixture("deepagents/v1/sessions.db");
+        let store_path = temp.path().join("work.sqlite");
+        let mut store = Store::open(&store_path).unwrap();
+
+        let source = provider_source_for_path(CaptureProvider::DeepAgents, fixture.clone());
+        assert_eq!(source.source_format, DEEPAGENTS_SQLITE_SOURCE_FORMAT);
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+
+        let first = import_deepagents_sqlite(
+            &fixture,
+            &mut store,
+            DeepAgentsSqliteImportOptions {
+                machine_id: "test-machine".into(),
+                source_path: Some(fixture.clone()),
+                imported_at: DateTime::parse_from_rfc3339("2026-07-04T19:30:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                allow_partial_failures: true,
+                ..DeepAgentsSqliteImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(first.failed, 0, "{:?}", first.failures);
+        assert_eq!(first.imported_sessions, 1);
+        assert_eq!(first.imported_events, 3);
+        let session_id =
+            provider_session_uuid(CaptureProvider::DeepAgents, "deepagents-fixture-thread");
+        let events = store.events_for_session(session_id).unwrap();
+        assert_eq!(events.len(), 3);
+        assert!(events
+            .iter()
+            .any(|event| event.role == Some(EventRole::User)));
+        assert!(events
+            .iter()
+            .any(|event| event.role == Some(EventRole::Assistant)));
+        assert!(events
+            .iter()
+            .any(|event| event.role == Some(EventRole::Tool)));
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == EventType::ToolOutput));
+        assert!(events.iter().all(|event| {
+            event
+                .sync
+                .metadata
+                .to_string()
+                .contains("decoded from writes.messages only")
+        }));
+        assert!(store
+            .search_event_hits("deepagents fixture oracle", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::DeepAgents)));
+
+        let source_metadata: String = Connection::open(&store_path)
+            .unwrap()
+            .query_row(
+                "SELECT metadata_json FROM capture_sources WHERE provider = 'deepagents'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(source_metadata.contains("checkpoint state blobs are not indexed"));
+
+        let second = import_deepagents_sqlite(
+            &fixture,
+            &mut store,
+            DeepAgentsSqliteImportOptions {
+                source_path: Some(fixture.clone()),
+                allow_partial_failures: true,
+                ..DeepAgentsSqliteImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(second.failed, 0, "{:?}", second.failures);
+        assert_eq!(second.imported_sessions, 0);
+        assert_eq!(second.imported_events, 0);
+        assert_eq!(second.skipped_sessions, 1);
+        assert_eq!(second.skipped_events, 3);
+    }
+
+    #[test]
+    fn native_deepagents_reports_malformed_writes_and_corrupt_db() {
+        let temp = tempdir();
+        let fixture = provider_history_fixture("deepagents/v1/sessions.db");
+        let malformed = temp.path().join("malformed-deepagents.db");
+        fs::copy(&fixture, &malformed).unwrap();
+        Connection::open(&malformed)
+            .unwrap()
+            .execute("UPDATE writes SET value = x'd9'", [])
+            .unwrap();
+        let corrupt = temp.path().join("corrupt-deepagents.db");
+        fs::write(&corrupt, b"not sqlite").unwrap();
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let summary = import_deepagents_sqlite(
+            &malformed,
+            &mut store,
+            DeepAgentsSqliteImportOptions {
+                source_path: Some(malformed.clone()),
+                allow_partial_failures: true,
+                ..DeepAgentsSqliteImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(summary.failed, 1, "{:?}", summary.failures);
+        assert!(summary.failures[0]
+            .error
+            .contains("invalid Deep Agents msgpack payload"));
+        assert_eq!(summary.imported_sessions, 1);
+        assert_eq!(summary.imported_events, 0);
+
+        let err = import_deepagents_sqlite(
+            &corrupt,
+            &mut store,
+            DeepAgentsSqliteImportOptions::default(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not a database"));
     }
 
     #[test]

@@ -279,6 +279,12 @@ const NEOVATE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
 
 const FORGECODE_DEFAULTS: &[ProviderDefaultLocation] = &[];
 
+const DEEPAGENTS_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
+    path_components: &[".deepagents", ".state", "sessions.db"],
+    source_format: "deepagents_sessions_sqlite",
+    source_kind: ProviderSourceKind::NativeHistory,
+}];
+
 const MISTRAL_VIBE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     path_components: &[".vibe", "logs", "session"],
     source_format: "mistral_vibe_session_jsonl_tree",
@@ -662,6 +668,16 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         provider: CaptureProvider::ForgeCode,
         display_name: "ForgeCode",
         default_locations: FORGECODE_DEFAULTS,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
+    ProviderSourceSpec {
+        provider: CaptureProvider::DeepAgents,
+        display_name: "Deep Agents",
+        default_locations: DEEPAGENTS_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         raw_retention: ProviderRawRetention::PathReference,
@@ -1640,6 +1656,7 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::Neovate if path.is_dir() => "neovate_session_jsonl_tree",
         CaptureProvider::Neovate => "neovate_session_jsonl",
         CaptureProvider::ForgeCode => "forgecode_sqlite",
+        CaptureProvider::DeepAgents => "deepagents_sessions_sqlite",
         CaptureProvider::MistralVibe if path.is_dir() => "mistral_vibe_session_jsonl_tree",
         CaptureProvider::MistralVibe => "mistral_vibe_session_jsonl",
         CaptureProvider::Mux if path.is_dir() => "mux_session_jsonl_tree",
@@ -1791,6 +1808,9 @@ fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::ForgeCode => {
             Some("path exists but no ForgeCode conversations table was found")
         }
+        CaptureProvider::DeepAgents => {
+            Some("path exists but no Deep Agents checkpoints/writes tables were found")
+        }
         CaptureProvider::MistralVibe => {
             Some("path exists but no Mistral Vibe meta.json/messages.jsonl session directories were found")
         }
@@ -1901,6 +1921,9 @@ fn unknown_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::AiderDesk => {
             Some("path exists but the Aider Desk task context probe hit its scan budget")
         }
+        CaptureProvider::DeepAgents => {
+            Some("path exists but the Deep Agents database could not be fully probed")
+        }
         _ => None,
     }
 }
@@ -1963,6 +1986,9 @@ fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'static str> {
         }
         CaptureProvider::ForgeCode => {
             Some("path exists but the ForgeCode database could not be read; check permissions")
+        }
+        CaptureProvider::DeepAgents => {
+            Some("path exists but the Deep Agents database could not be read; check permissions")
         }
         CaptureProvider::MistralVibe => {
             Some("path exists but Mistral Vibe session files could not be read; check permissions")
@@ -2089,6 +2115,7 @@ fn default_location_import_probe(
                 && !path_has_component(candidate, "file-history")
         }),
         CaptureProvider::ForgeCode => has_forgecode_conversations_table(path),
+        CaptureProvider::DeepAgents => has_deepagents_checkpoint_tables(path),
         CaptureProvider::MistralVibe => has_jsonl_file_under_matching(path, 10_000, |candidate| {
             candidate.file_name().and_then(|name| name.to_str()) == Some("messages.jsonl")
                 && candidate
@@ -2209,6 +2236,29 @@ fn has_lingma_chat_record_table(path: &Path) -> BoundedProbe {
         )
     }) {
         Ok(count) if count >= 7 => BoundedProbe::Found,
+        Ok(_) => BoundedProbe::NotFound,
+        Err(_) => BoundedProbe::IoError,
+    }
+}
+
+fn has_deepagents_checkpoint_tables(path: &Path) -> BoundedProbe {
+    match path_is_file_probe(path) {
+        BoundedProbe::Found => {}
+        other => return other,
+    }
+    match Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .and_then(|conn| {
+        conn.query_row(
+            "select count(*) from sqlite_schema \
+             where type = 'table' and name in ('checkpoints', 'writes')",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+    }) {
+        Ok(2) => BoundedProbe::Found,
         Ok(_) => BoundedProbe::NotFound,
         Err(_) => BoundedProbe::IoError,
     }
@@ -3311,6 +3361,42 @@ mod tests {
     }
 
     #[test]
+    fn deepagents_discovery_uses_default_sessions_db() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join(".deepagents/.state/sessions.db");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+
+        let empty_source =
+            discover_provider_sources_for_provider(temp.path(), CaptureProvider::DeepAgents)
+                .into_iter()
+                .find(|source| source.path == db)
+                .unwrap();
+        assert_eq!(empty_source.status, ProviderSourceStatus::Missing);
+
+        std::fs::write(&db, b"not sqlite").unwrap();
+        let unreadable_source =
+            discover_provider_sources_for_provider(temp.path(), CaptureProvider::DeepAgents)
+                .into_iter()
+                .find(|source| source.path == db)
+                .unwrap();
+        assert_eq!(unreadable_source.status, ProviderSourceStatus::Unknown);
+
+        std::fs::copy(
+            shared_provider_history_fixture("deepagents/v1/sessions.db"),
+            &db,
+        )
+        .unwrap();
+        let source =
+            discover_provider_sources_for_provider(temp.path(), CaptureProvider::DeepAgents)
+                .into_iter()
+                .find(|source| source.path == db)
+                .unwrap();
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+        assert_eq!(source.source_format, "deepagents_sessions_sqlite");
+        assert_eq!(source.import_support, ProviderImportSupport::Native);
+    }
+
+    #[test]
     fn crush_discovery_uses_global_config_data_directory() {
         let _lock = ENV_LOCK.lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
@@ -3680,6 +3766,13 @@ mod tests {
             r#"{"role":"user","content":"reasonix discovery"}"#,
         )
         .unwrap();
+    }
+
+    fn shared_provider_history_fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("tests/fixtures/provider-history")
+            .join(name)
     }
 
     fn write_task_json_discovery_task(root: &Path, task_id: &str, file_name: &str) {

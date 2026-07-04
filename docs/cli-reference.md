@@ -89,9 +89,9 @@ machine. Current rows include:
 - Codex prompt history at `~/.codex/history.jsonl`;
 - Pi session JSONL files under `~/.pi/agent/sessions`;
 - native rows for supported Antigravity, Claude, OpenCode, Kilo Code,
-  ForgeCode, OpenClaw, Hermes, Gemini, Cursor, Zed, Kiro CLI, Copilot CLI,
-  Factory AI Droid, Qwen Code, Kimi Code CLI, Autohand Code, iFlow CLI,
-  CodeBuddy, Cline, and Roo Code local history locations;
+  ForgeCode, Deep Agents, OpenClaw, Hermes, Gemini, Cursor, Zed, Kiro CLI,
+  Copilot CLI, Factory AI Droid, Qwen Code, Kimi Code CLI, Autohand Code,
+  iFlow CLI, CodeBuddy, Cline, and Roo Code local history locations;
 - preview rows for NanoClaw project roots and AstrBot SQLite history when those
   paths are discoverable;
 - local history-source plugin manifests under `$CTX_DATA_ROOT/plugins` or
@@ -118,6 +118,7 @@ ctx import --provider antigravity
 ctx import --provider claude
 ctx import --provider opencode
 ctx import --provider forgecode
+ctx import --provider deepagents
 ctx import --provider mistral-vibe
 ctx import --provider mux
 ctx import --provider reasonix
@@ -302,7 +303,7 @@ optimized for agent reading; use `--verbose` for expanded text diagnostics.
 
 Filters:
 
-- `--provider codex|pi|claude|opencode|kilo|kiro-cli|forgecode|mistral-vibe|mux|reasonix|kode|neovate|terramind|crush|goose|dexto|lingma|openclaw|hermes|nanoclaw|astrbot|shelley|continue|openhands|antigravity|gemini|cursor|zed|copilot-cli|factory-ai-droid|qwen-code|kimi-code-cli|autohand-code|iflow-cli|codebuddy|aider-desk|cline|roo|custom`;
+- `--provider codex|pi|claude|opencode|kilo|kiro-cli|forgecode|deepagents|mistral-vibe|mux|reasonix|kode|neovate|terramind|crush|goose|dexto|lingma|openclaw|hermes|nanoclaw|astrbot|shelley|continue|openhands|antigravity|gemini|cursor|zed|copilot-cli|factory-ai-droid|qwen-code|kimi-code-cli|autohand-code|iflow-cli|codebuddy|aider-desk|cline|roo|custom`;
 - `--workspace <name-or-path>`, substring match over stored workspace, cwd,
   source path, or repository-name text;
 - `--since <rfc3339-or-days>d`, for example `2026-06-01T00:00:00Z` or `30d`;
@@ -323,9 +324,9 @@ CLI provider filters use kebab-case names. JSON output and stable SQL views use
 provider IDs in ctx output; multiword IDs may be snake_case, such as
 `copilot_cli`, `factory_ai_droid`, `qwen_code`, `kimi_code_cli`,
 `autohand_code`, `kiro_cli`, `iflow_cli`, `mistral_vibe`, or `aider_desk`,
-while compact IDs such as `forgecode`, `mux`, `reasonix`, `kode`, `neovate`,
-`terramind`, `openclaw`, `nanoclaw`, `astrbot`, `shelley`, `continue`, and
-`openhands` stay compact.
+while compact IDs such as `forgecode`, `deepagents`, `mux`, `reasonix`, `kode`,
+`neovate`, `terramind`, `openclaw`, `nanoclaw`, `astrbot`, `shelley`,
+`continue`, and `openhands` stay compact.
 
 `search` reads discovered native provider files and runs enabled auto
 history-source plugin commands for pre-search refresh, then queries SQLite. It

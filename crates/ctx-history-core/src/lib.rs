@@ -199,6 +199,7 @@ text_enum! {
         AutohandCode => "autohand_code",
         IflowCli => "iflow_cli",
         ForgeCode => "forgecode",
+        DeepAgents => "deepagents",
         MistralVibe => "mistral_vibe",
         Mux => "mux",
         Reasonix => "reasonix",
