@@ -458,6 +458,8 @@ impl Default for OpenCodeSqliteImportOptions {
     }
 }
 
+pub type KiloSqliteImportOptions = OpenCodeSqliteImportOptions;
+
 #[derive(Debug, Clone)]
 pub struct OpenClawImportOptions {
     pub machine_id: String,
@@ -913,6 +915,9 @@ pub struct ClaudeProjectsJsonlAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OpenCodeSqliteAdapter;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct KiloSqliteAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OpenClawJsonlAdapter;
@@ -1613,7 +1618,26 @@ impl ProviderCaptureAdapter for OpenCodeSqliteAdapter {
         context: &ProviderAdapterContext,
     ) -> Result<ProviderNormalizationResult> {
         ensure_regular_provider_transcript_file(path)?;
-        normalize_opencode_sqlite(path, context)
+        normalize_opencode_sqlite(path, context, &OPENCODE_SQLITE_DIALECT)
+    }
+}
+
+impl ProviderCaptureAdapter for KiloSqliteAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Kilo
+    }
+
+    fn source_format(&self) -> &str {
+        KILO_SQLITE_SOURCE_FORMAT
+    }
+
+    fn normalize_path(
+        &self,
+        path: &Path,
+        context: &ProviderAdapterContext,
+    ) -> Result<ProviderNormalizationResult> {
+        ensure_regular_provider_transcript_file(path)?;
+        normalize_opencode_sqlite(path, context, &KILO_SQLITE_DIALECT)
     }
 }
 
@@ -3602,6 +3626,41 @@ pub fn import_opencode_sqlite(
     )
 }
 
+pub fn import_kilo_sqlite(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: KiloSqliteImportOptions,
+) -> Result<ProviderImportSummary> {
+    let path = path.as_ref();
+    let source_path = options
+        .source_path
+        .clone()
+        .unwrap_or_else(|| path.to_path_buf());
+    let normalization = KiloSqliteAdapter.normalize_path(
+        path,
+        &ProviderAdapterContext {
+            machine_id: options.machine_id,
+            source_path: Some(source_path),
+            imported_at: options.imported_at,
+            tool_output_mode: CodexToolOutputMode::Full,
+            event_mode: CodexEventImportMode::Rich,
+            include_notices: true,
+        },
+    )?;
+
+    import_normalized_provider_captures(
+        store,
+        normalization,
+        NormalizedProviderImportOptions {
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+            persist_cursors: true,
+            wrap_transaction: true,
+            fast_event_inserts: true,
+        },
+    )
+}
+
 pub fn import_openclaw_history(
     path: impl AsRef<Path>,
     store: &mut Store,
@@ -3977,6 +4036,7 @@ pub fn import_normalized_provider_captures(
 const CODEX_SESSION_SOURCE_FORMAT: &str = "codex_session_jsonl";
 const CLAUDE_PROJECTS_SOURCE_FORMAT: &str = "claude_projects_jsonl_tree";
 const OPENCODE_SQLITE_SOURCE_FORMAT: &str = "opencode_sqlite";
+const KILO_SQLITE_SOURCE_FORMAT: &str = "kilo_sqlite";
 const OPENCLAW_SOURCE_FORMAT: &str = "openclaw_session_jsonl_tree";
 const HERMES_SQLITE_SOURCE_FORMAT: &str = "hermes_state_sqlite";
 const NANOCLAW_SOURCE_FORMAT: &str = "nanoclaw_project";
@@ -3996,6 +4056,37 @@ const PROVIDER_MAX_TEXT_CHARS: usize = 16_000;
 const PROVIDER_MAX_PREVIEW_CHARS: usize = 4_000;
 const CODEX_FAST_IMPORT_TRANSACTION_FILES: usize = 512;
 const CODEX_FAST_IMPORT_PASSIVE_CHECKPOINT_MIN_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy)]
+struct OpenCodeSqliteDialect {
+    provider: CaptureProvider,
+    display_name: &'static str,
+    source_format: &'static str,
+    session_time_created_field: &'static str,
+    session_message_seq_field: &'static str,
+    session_message_time_created_field: &'static str,
+    event_time_created_field: &'static str,
+}
+
+const OPENCODE_SQLITE_DIALECT: OpenCodeSqliteDialect = OpenCodeSqliteDialect {
+    provider: CaptureProvider::OpenCode,
+    display_name: "OpenCode",
+    source_format: OPENCODE_SQLITE_SOURCE_FORMAT,
+    session_time_created_field: "OpenCode session time_created",
+    session_message_seq_field: "OpenCode session_message seq",
+    session_message_time_created_field: "OpenCode session_message time_created",
+    event_time_created_field: "OpenCode event time.created",
+};
+
+const KILO_SQLITE_DIALECT: OpenCodeSqliteDialect = OpenCodeSqliteDialect {
+    provider: CaptureProvider::Kilo,
+    display_name: "Kilo",
+    source_format: KILO_SQLITE_SOURCE_FORMAT,
+    session_time_created_field: "Kilo session time_created",
+    session_message_seq_field: "Kilo session_message seq",
+    session_message_time_created_field: "Kilo session_message time_created",
+    event_time_created_field: "Kilo event time.created",
+};
 
 #[derive(Debug, Clone, Default)]
 struct CustomHistoryJsonlV1NormalizationResult {
@@ -9828,14 +9919,15 @@ fn continue_tool_states_text(value: &Value) -> Option<String> {
 fn normalize_opencode_sqlite(
     path: &Path,
     context: &ProviderAdapterContext,
+    dialect: &OpenCodeSqliteDialect,
 ) -> Result<ProviderNormalizationResult> {
     let conn = open_provider_sqlite_readonly(path)?;
     let user_version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
     let schema_fingerprint = opencode_schema_fingerprint(&conn)?;
     let legacy_message_rows = opencode_count(&conn, "message").unwrap_or(0);
     let legacy_part_rows = opencode_count(&conn, "part").unwrap_or(0);
-    let sessions = opencode_sessions(&conn)?;
-    let messages = opencode_session_messages(&conn)?;
+    let sessions = opencode_sessions(&conn, dialect)?;
+    let messages = opencode_session_messages(&conn, dialect)?;
     let mut result = ProviderNormalizationResult::default();
     let mut session_started = BTreeMap::new();
     for session in &sessions {
@@ -9843,7 +9935,7 @@ fn normalize_opencode_sqlite(
             session.id.clone(),
             provider_required_timestamp_millis(
                 session.time_created,
-                "OpenCode session time_created",
+                dialect.session_time_created_field,
             )?,
         );
     }
@@ -9855,7 +9947,7 @@ fn normalize_opencode_sqlite(
 
     for row in messages {
         let provider_event_index =
-            match provider_nonnegative_i64_to_u64(row.seq, "OpenCode session_message seq") {
+            match provider_nonnegative_i64_to_u64(row.seq, dialect.session_message_seq_field) {
                 Ok(value) => value,
                 Err(err) => {
                     push_provider_import_failure(&mut result.summary, 0, err.to_string());
@@ -9868,8 +9960,8 @@ fn normalize_opencode_sqlite(
                 &mut result.summary,
                 line,
                 format!(
-                    "OpenCode session_message {} references missing session {}",
-                    row.id, row.session_id
+                    "{} session_message {} references missing session {}",
+                    dialect.display_name, row.id, row.session_id
                 ),
             );
             continue;
@@ -9885,11 +9977,11 @@ fn normalize_opencode_sqlite(
                 continue;
             }
         };
-        let occurred_at = match opencode_event_time(&data) {
+        let occurred_at = match opencode_event_time(&data, dialect) {
             Ok(Some(time)) => time,
             Ok(None) => match provider_required_timestamp_millis(
                 row.time_created,
-                "OpenCode session_message time_created",
+                dialect.session_message_time_created_field,
             ) {
                 Ok(time) => time,
                 Err(err) => {
@@ -9906,13 +9998,13 @@ fn normalize_opencode_sqlite(
             .get(&session.id)
             .copied()
             .unwrap_or(occurred_at);
-        let event = opencode_event(&row, &data, occurred_at, provider_event_index);
+        let event = opencode_event(&row, &data, occurred_at, provider_event_index, dialect);
         result
             .files_touched
             .extend(provider_file_touches_from_raw_value(
-                CaptureProvider::OpenCode,
+                dialect.provider,
                 &session.id,
-                OPENCODE_SQLITE_SOURCE_FORMAT,
+                dialect.source_format,
                 Some(raw_source_path.as_str()),
                 &data,
                 &event,
@@ -9923,9 +10015,9 @@ fn normalize_opencode_sqlite(
             line,
             ProviderCaptureEnvelope {
                 schema_version: PROVIDER_CAPTURE_ENVELOPE_SCHEMA_VERSION,
-                provider: CaptureProvider::OpenCode,
+                provider: dialect.provider,
                 source: ProviderSourceEnvelope {
-                    source_format: OPENCODE_SQLITE_SOURCE_FORMAT.to_owned(),
+                    source_format: dialect.source_format.to_owned(),
                     machine_id: context.machine_id.clone(),
                     observed_at: context.imported_at,
                     raw_source_path: Some(raw_source_path.clone()),
@@ -9937,19 +10029,21 @@ fn normalize_opencode_sqlite(
                         before: None,
                         after: Some(ProviderCursorCheckpoint {
                             stream: provider_cursor_stream(
-                                CaptureProvider::OpenCode,
-                                OPENCODE_SQLITE_SOURCE_FORMAT,
+                                dialect.provider,
+                                dialect.source_format,
                             ),
                             cursor: format!("session_message:{}:seq:{}", row.session_id, row.seq),
                             observed_at: occurred_at,
                         }),
                     }),
                     idempotency_key: Some(format!(
-                        "provider-source:opencode:{OPENCODE_SQLITE_SOURCE_FORMAT}:{}",
+                        "provider-source:{}:{}:{}",
+                        dialect.provider.as_str(),
+                        dialect.source_format,
                         session.id
                     )),
                     metadata: json!({
-                        "adapter": OPENCODE_SQLITE_SOURCE_FORMAT,
+                        "adapter": dialect.source_format,
                         "sqlite_user_version": user_version,
                         "schema_fingerprint": schema_fingerprint,
                         "legacy_message_rows": legacy_message_rows,
@@ -9976,10 +10070,14 @@ fn normalize_opencode_sqlite(
                     ended_at: None,
                     cwd: Some(session.directory.clone()),
                     fidelity: Fidelity::Imported,
-                    idempotency_key: Some(format!("provider-session:opencode:{}", session.id)),
+                    idempotency_key: Some(format!(
+                        "provider-session:{}:{}",
+                        dialect.provider.as_str(),
+                        session.id
+                    )),
                     artifacts: Vec::new(),
                     metadata: json!({
-                        "source_format": OPENCODE_SQLITE_SOURCE_FORMAT,
+                        "source_format": dialect.source_format,
                         "title": session.title,
                         "model": parse_json_object_string(session.model.as_deref()),
                         "agent": session.agent,
@@ -10006,14 +10104,25 @@ fn normalize_opencode_sqlite(
     Ok(result)
 }
 
-fn opencode_sessions(conn: &Connection) -> Result<Vec<OpenCodeSessionRow>> {
+fn opencode_sessions(
+    conn: &Connection,
+    dialect: &OpenCodeSqliteDialect,
+) -> Result<Vec<OpenCodeSessionRow>> {
     if !sqlite_table_exists(conn, "session")? {
         return Err(CaptureError::InvalidPayload(
-            "OpenCode SQLite database is missing required session table".into(),
+            format!(
+                "{} SQLite database is missing required session table",
+                dialect.display_name
+            )
+            .into(),
         ));
     }
     let columns = sqlite_table_columns(conn, "session")?;
-    ensure_sqlite_table_columns(&columns, "OpenCode SQLite session table", &["id"])?;
+    ensure_sqlite_table_columns(
+        &columns,
+        &format!("{} SQLite session table", dialect.display_name),
+        &["id"],
+    )?;
     let parent_id = optional_column_expr(&columns, "parent_id", "NULL");
     let title = optional_column_expr(
         &columns,
@@ -10062,30 +10171,36 @@ fn opencode_sessions(conn: &Connection) -> Result<Vec<OpenCodeSessionRow>> {
         .map_err(CaptureError::from)
 }
 
-fn opencode_session_messages(conn: &Connection) -> Result<Vec<OpenCodeMessageRow>> {
+fn opencode_session_messages(
+    conn: &Connection,
+    dialect: &OpenCodeSqliteDialect,
+) -> Result<Vec<OpenCodeMessageRow>> {
     if sqlite_table_exists(conn, "session_message")? {
-        let rows = opencode_session_message_rows(conn)?;
+        let rows = opencode_session_message_rows(conn, dialect)?;
         if !rows.is_empty() {
             return Ok(rows);
         }
     }
     if sqlite_table_exists(conn, "session_entry")? {
-        let rows = opencode_session_entry_rows(conn)?;
+        let rows = opencode_session_entry_rows(conn, dialect)?;
         if !rows.is_empty() {
             return Ok(rows);
         }
     }
     if sqlite_table_exists(conn, "message")? {
-        return opencode_message_rows(conn);
+        return opencode_message_rows(conn, dialect);
     }
     Ok(Vec::new())
 }
 
-fn opencode_session_message_rows(conn: &Connection) -> Result<Vec<OpenCodeMessageRow>> {
+fn opencode_session_message_rows(
+    conn: &Connection,
+    dialect: &OpenCodeSqliteDialect,
+) -> Result<Vec<OpenCodeMessageRow>> {
     let columns = sqlite_table_columns(conn, "session_message")?;
     ensure_sqlite_table_columns(
         &columns,
-        "OpenCode SQLite session_message table",
+        &format!("{} SQLite session_message table", dialect.display_name),
         &["id", "session_id", "data"],
     )?;
     let entry_type = optional_column_expr(&columns, "type", "'message'");
@@ -10134,11 +10249,14 @@ fn opencode_session_message_rows(conn: &Connection) -> Result<Vec<OpenCodeMessag
     Ok(messages)
 }
 
-fn opencode_session_entry_rows(conn: &Connection) -> Result<Vec<OpenCodeMessageRow>> {
+fn opencode_session_entry_rows(
+    conn: &Connection,
+    dialect: &OpenCodeSqliteDialect,
+) -> Result<Vec<OpenCodeMessageRow>> {
     let columns = sqlite_table_columns(conn, "session_entry")?;
     ensure_sqlite_table_columns(
         &columns,
-        "OpenCode SQLite session_entry table",
+        &format!("{} SQLite session_entry table", dialect.display_name),
         &[
             "id",
             "session_id",
@@ -10180,11 +10298,14 @@ fn opencode_session_entry_rows(conn: &Connection) -> Result<Vec<OpenCodeMessageR
     Ok(messages)
 }
 
-fn opencode_message_rows(conn: &Connection) -> Result<Vec<OpenCodeMessageRow>> {
+fn opencode_message_rows(
+    conn: &Connection,
+    dialect: &OpenCodeSqliteDialect,
+) -> Result<Vec<OpenCodeMessageRow>> {
     let columns = sqlite_table_columns(conn, "message")?;
     ensure_sqlite_table_columns(
         &columns,
-        "OpenCode SQLite message table",
+        &format!("{} SQLite message table", dialect.display_name),
         &["id", "session_id", "time_created", "time_updated", "data"],
     )?;
     let mut stmt = conn.prepare(
@@ -10315,10 +10436,11 @@ fn opencode_event(
     data: &Value,
     occurred_at: DateTime<Utc>,
     provider_event_index: u64,
+    dialect: &OpenCodeSqliteDialect,
 ) -> ProviderEventEnvelope {
     let event_type = opencode_event_type(&row.entry_type, data);
     let role = Some(provider_role(Some(&row.entry_type)));
-    let text = opencode_event_text(&row.entry_type, data, event_type);
+    let text = opencode_event_text(&row.entry_type, data, event_type, dialect);
     let (text, truncated) = provider_local_preview(&text, PROVIDER_MAX_TEXT_CHARS);
     ProviderEventEnvelope {
         provider_event_index,
@@ -10333,8 +10455,10 @@ fn opencode_event(
         fidelity: Fidelity::Imported,
         redaction_state: RedactionState::LocalPreview,
         idempotency_key: Some(format!(
-            "provider-event:opencode:{}:{}",
-            row.session_id, row.id
+            "provider-event:{}:{}:{}",
+            dialect.provider.as_str(),
+            row.session_id,
+            row.id
         )),
         artifacts: Vec::new(),
         payload: json!({
@@ -10346,8 +10470,8 @@ fn opencode_event(
             "body": provider_capped_json(data, PROVIDER_MAX_PREVIEW_CHARS),
         }),
         metadata: json!({
-            "source": "opencode_sqlite",
-            "source_format": OPENCODE_SQLITE_SOURCE_FORMAT,
+            "source": dialect.source_format,
+            "source_format": dialect.source_format,
             "session_message_id": row.id,
             "session_message_seq": row.seq,
             "time_created": row.time_created,
@@ -10370,7 +10494,12 @@ fn opencode_event_type(entry_type: &str, data: &Value) -> EventType {
     }
 }
 
-fn opencode_event_text(entry_type: &str, data: &Value, event_type: EventType) -> String {
+fn opencode_event_text(
+    entry_type: &str,
+    data: &Value,
+    event_type: EventType,
+    dialect: &OpenCodeSqliteDialect,
+) -> String {
     if let Some(text) = data.get("text").and_then(Value::as_str) {
         return text.to_owned();
     }
@@ -10388,7 +10517,7 @@ fn opencode_event_text(entry_type: &str, data: &Value, event_type: EventType) ->
         }
     }
     if event_type == EventType::Notice {
-        format!("OpenCode event: {entry_type}")
+        format!("{} event: {entry_type}", dialect.display_name)
     } else {
         serde_json::to_string(data).unwrap_or_else(|_| entry_type.to_owned())
     }
@@ -10408,16 +10537,20 @@ fn opencode_content_has_tool(data: &Value) -> bool {
         .unwrap_or(false)
 }
 
-fn opencode_event_time(data: &Value) -> Result<Option<DateTime<Utc>>> {
+fn opencode_event_time(
+    data: &Value,
+    dialect: &OpenCodeSqliteDialect,
+) -> Result<Option<DateTime<Utc>>> {
     let Some(value) = data.pointer("/time/created") else {
         return Ok(None);
     };
     let millis = value.as_i64().ok_or_else(|| {
-        CaptureError::InvalidPayload(
-            "OpenCode event time.created must be integer millis".to_owned(),
-        )
+        CaptureError::InvalidPayload(format!(
+            "{} event time.created must be integer millis",
+            dialect.display_name
+        ))
     })?;
-    provider_required_timestamp_millis(millis, "OpenCode event time.created").map(Some)
+    provider_required_timestamp_millis(millis, dialect.event_time_created_field).map(Some)
 }
 
 fn parse_json_object_string(value: Option<&str>) -> Value {
@@ -15936,6 +16069,66 @@ mod tests {
     }
 
     #[test]
+    fn native_kilo_imports_opencode_derived_sqlite_fixture_idempotently() {
+        let temp = tempdir();
+        let fixture = provider_history_fixture("kilo/kilo.db");
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let first = import_kilo_sqlite(
+            &fixture,
+            &mut store,
+            KiloSqliteImportOptions {
+                machine_id: "test-machine".into(),
+                source_path: Some(fixture.clone()),
+                imported_at: DateTime::parse_from_rfc3339("2026-07-04T12:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                allow_partial_failures: true,
+                ..KiloSqliteImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(first.failed, 0, "{:?}", first.failures);
+        assert_eq!(first.imported_sessions, 1);
+        assert_eq!(first.imported_events, 2);
+
+        let session_id = provider_session_uuid(CaptureProvider::Kilo, "kilo-root");
+        let session = store.get_session(session_id).unwrap();
+        assert_eq!(session.provider, CaptureProvider::Kilo);
+        let events = store.events_for_session(session_id).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[0].sync.metadata["source_format"].as_str(),
+            Some(KILO_SQLITE_SOURCE_FORMAT)
+        );
+        assert_eq!(
+            events[0].payload["body"]["session_message_seq"].as_i64(),
+            Some(1)
+        );
+        assert_eq!(
+            events[1].payload["body"]["session_message_seq"].as_i64(),
+            Some(2)
+        );
+
+        let second = import_kilo_sqlite(
+            &fixture,
+            &mut store,
+            KiloSqliteImportOptions {
+                source_path: Some(fixture.clone()),
+                allow_partial_failures: true,
+                ..KiloSqliteImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(second.failed, 0, "{:?}", second.failures);
+        assert_eq!(second.imported_sessions, 0);
+        assert_eq!(second.imported_events, 0);
+        assert_eq!(second.skipped_sessions, 1);
+        assert_eq!(second.skipped_events, 2);
+    }
+
+    #[test]
     fn native_hermes_rejects_out_of_range_message_timestamp() {
         let temp = tempdir();
         let fixture = write_hermes_smoke_db(&temp);
@@ -15975,7 +16168,12 @@ mod tests {
         let link = temp.path().join("linked-opencode.db");
         symlink(&fixture, &link).unwrap();
 
-        let err = normalize_opencode_sqlite(&link, &ProviderAdapterContext::default()).unwrap_err();
+        let err = normalize_opencode_sqlite(
+            &link,
+            &ProviderAdapterContext::default(),
+            &OPENCODE_SQLITE_DIALECT,
+        )
+        .unwrap_err();
         assert!(matches!(
             err,
             CaptureError::InvalidProviderTranscriptPath { path, reason }

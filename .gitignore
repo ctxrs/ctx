@@ -4,6 +4,7 @@
 *.db
 *.sqlite
 *.sqlite3
+!tests/fixtures/provider-history/kilo/kilo.db
 
 # SDK build artifacts
 /sdks/dotnet/**/bin/
