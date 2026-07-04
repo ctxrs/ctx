@@ -201,6 +201,8 @@ text_enum! {
         Shelley => "shelley",
         Continue => "continue",
         OpenHands => "openhands",
+        Cline => "cline",
+        RooCode => "roo_code",
         Shell => "shell",
         Git => "git",
         Jj => "jj",

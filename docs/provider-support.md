@@ -41,6 +41,8 @@ is:
 | Factory AI Droid | `local_import_when_supported` | `~/.factory/sessions` or an explicit Factory AI Droid sessions tree. | Static local-history fixture smoke. |
 | Qwen Code | `local_import_when_supported` | Qwen Code chat JSONL files under `QWEN_RUNTIME_DIR/projects`, `QWEN_HOME/projects`, `~/.qwen/projects`, or an explicit Qwen Code projects/chats tree. | Static local-history fixture smoke. |
 | Kimi Code CLI | `local_import_when_supported` | Kimi Code CLI `session_index.jsonl` and `sessions/*/*/agents/*/wire.jsonl` files under `KIMI_CODE_HOME`, `~/.kimi-code`, or an explicit Kimi Code home/session tree. | Static local-history fixture smoke. |
+| Cline | `local_import_when_supported` | `CLINE_DATA_DIR`, `CLINE_DIR/data`, `~/.cline/data`, common VS Code globalStorage task folders, or an explicit Cline data/task path. | Static local-history fixture smoke; VS Code state databases are not parsed. |
+| Roo Code | `local_import_when_supported` | `roo-cline.customStoragePath`, common VS Code globalStorage task folders for `RooVeterinaryInc.roo-cline`, or an explicit Roo task storage path. | Static local-history fixture smoke; VS Code state databases are not parsed. |
 
 `ctx sources --json` uses `import_support: "preview"` and `native_import:
 false` for preview sources such as NanoClaw and AstrBot. Those paths can be

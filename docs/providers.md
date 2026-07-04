@@ -43,7 +43,12 @@ The current CLI imports local history for:
 - Qwen Code chat JSONL files under `QWEN_RUNTIME_DIR/projects`,
   `QWEN_HOME/projects`, or `~/.qwen/projects`;
 - Kimi Code CLI wire JSONL records under `KIMI_CODE_HOME` or `~/.kimi-code`
-  session trees.
+  session trees;
+- Cline task JSON directories under `CLINE_DATA_DIR`, `CLINE_DIR/data`,
+  `~/.cline/data`, or common VS Code globalStorage folders;
+- Roo Code task JSON directories under `roo-cline.customStoragePath`, common
+  VS Code globalStorage folders for `RooVeterinaryInc.roo-cline`, or an
+  explicit path.
 
 These are built-in provider adapters for native local history. The custom
 history format is separate: `ctx import --format ctx-history-jsonl-v1 --path
@@ -68,11 +73,13 @@ ctx sources --json
 
 CLI provider flags use names such as `kilo`, `openclaw`, `hermes`,
 `nanoclaw`, `astrbot`, `shelley`, `continue`, `openhands`, `copilot-cli`,
-`factory-ai-droid`, `qwen-code`, and `kimi-code-cli`.
+`factory-ai-droid`, `qwen-code`, `kimi-code-cli`, `cline`, and
+`roo`/`roo-code`.
 Structured JSON and stable SQL views use provider IDs in ctx output; multiword IDs may be
 snake_case, such as `copilot_cli`, `factory_ai_droid`, `qwen_code`, or
 `kimi_code_cli`, while compact native IDs such as `kilo`, `openclaw`,
 `nanoclaw`, `astrbot`, `shelley`, `continue`, and `openhands` stay compact.
+Roo Code is reported as `roo_code`.
 
 `ctx sources --json` reports each known provider source with `import_support`
 and `importable` fields. A native source is marked available/importable only
@@ -118,6 +125,17 @@ Provider imports should be:
 Custom history imports follow the same read-only and idempotent principles, but
 their compatibility contract is the `ctx-history-jsonl-v1` schema rather than a
 provider-owned native transcript format.
+
+## Cline And Roo Code Notes
+
+Cline and Roo Code import support reads file-backed task directories, not VS
+Code's private extension state databases. The importer looks for task folders
+containing files such as `api_conversation_history.json`, `ui_messages.json`,
+`task_metadata.json`, `history_item.json`, `_index.json`, and Roo's fallback
+`claude_messages.json`. Common VS Code globalStorage paths are probed only when
+those task files are present. Legacy installations that still keep task data
+only inside VS Code state need an upstream/exported file-backed task directory
+or an explicit `--path` once those files exist.
 
 ## Fidelity
 

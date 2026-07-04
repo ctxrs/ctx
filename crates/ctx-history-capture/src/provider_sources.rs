@@ -228,6 +228,72 @@ const OPENHANDS_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation
     source_kind: ProviderSourceKind::NativeHistory,
 }];
 
+const CLINE_DEFAULTS: &[ProviderDefaultLocation] = &[
+    ProviderDefaultLocation {
+        path_components: &[".cline", "data"],
+        source_format: "cline_task_directory_json",
+        source_kind: ProviderSourceKind::NativeHistory,
+    },
+    ProviderDefaultLocation {
+        path_components: &[
+            ".config",
+            "Code",
+            "User",
+            "globalStorage",
+            "saoudrizwan.claude-dev",
+        ],
+        source_format: "cline_task_directory_json",
+        source_kind: ProviderSourceKind::NativeHistory,
+    },
+    ProviderDefaultLocation {
+        path_components: &[
+            ".config",
+            "Code - Insiders",
+            "User",
+            "globalStorage",
+            "saoudrizwan.claude-dev",
+        ],
+        source_format: "cline_task_directory_json",
+        source_kind: ProviderSourceKind::NativeHistory,
+    },
+];
+
+const ROO_DEFAULTS: &[ProviderDefaultLocation] = &[
+    ProviderDefaultLocation {
+        path_components: &[
+            ".config",
+            "Code",
+            "User",
+            "globalStorage",
+            "rooveterinaryinc.roo-cline",
+        ],
+        source_format: "roo_task_directory_json",
+        source_kind: ProviderSourceKind::NativeHistory,
+    },
+    ProviderDefaultLocation {
+        path_components: &[
+            ".config",
+            "Code",
+            "User",
+            "globalStorage",
+            "RooVeterinaryInc.roo-cline",
+        ],
+        source_format: "roo_task_directory_json",
+        source_kind: ProviderSourceKind::NativeHistory,
+    },
+    ProviderDefaultLocation {
+        path_components: &[
+            ".config",
+            "Code - Insiders",
+            "User",
+            "globalStorage",
+            "rooveterinaryinc.roo-cline",
+        ],
+        source_format: "roo_task_directory_json",
+        source_kind: ProviderSourceKind::NativeHistory,
+    },
+];
+
 const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
     ProviderSourceSpec {
         provider: CaptureProvider::Codex,
@@ -419,6 +485,26 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         redaction_boundary: ProviderRedactionBoundary::BeforeExport,
         unsupported_reason: None,
     },
+    ProviderSourceSpec {
+        provider: CaptureProvider::Cline,
+        display_name: "Cline",
+        default_locations: CLINE_DEFAULTS,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
+    ProviderSourceSpec {
+        provider: CaptureProvider::RooCode,
+        display_name: "Roo Code",
+        default_locations: ROO_DEFAULTS,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
 ];
 
 pub fn provider_source_specs() -> &'static [ProviderSourceSpec] {
@@ -594,6 +680,12 @@ fn discover_provider_sources_for_spec(
                 ));
             }
         }
+        CaptureProvider::Cline => {
+            sources.extend(discover_cline_task_json_sources(home, spec));
+        }
+        CaptureProvider::RooCode => {
+            sources.extend(discover_roo_task_json_sources(home, spec));
+        }
         _ => {}
     }
 
@@ -672,6 +764,83 @@ fn env_truthy(name: &str) -> bool {
     env::var(name)
         .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true"))
         .unwrap_or(false)
+}
+
+fn discover_cline_task_json_sources(home: &Path, spec: &ProviderSourceSpec) -> Vec<ProviderSource> {
+    let mut sources = Vec::new();
+    if let Some(path) = env_path_with_home("CLINE_DATA_DIR", home) {
+        sources.push(task_json_source(spec, path));
+    }
+    if let Some(path) = env_path_with_home("CLINE_DIR", home) {
+        sources.push(task_json_source(spec, path.join("data")));
+    }
+    if let Some(path) = env_path_with_home("CLINE_SESSION_DATA_DIR", home) {
+        sources.push(task_json_source(spec, path.clone()));
+        if let Some(parent) = path.parent() {
+            sources.push(task_json_source(spec, parent.to_path_buf()));
+        }
+    }
+    if let Some(path) = env_path_with_home("CLINE_DB_DATA_DIR", home) {
+        if let Some(parent) = path.parent() {
+            sources.push(task_json_source(spec, parent.to_path_buf()));
+        } else {
+            sources.push(task_json_source(spec, path));
+        }
+    }
+    sources
+}
+
+fn discover_roo_task_json_sources(home: &Path, spec: &ProviderSourceSpec) -> Vec<ProviderSource> {
+    let mut sources = Vec::new();
+    for env_name in ["ROO_CODE_DATA_DIR", "ROO_DATA_DIR", "ROO_CLINE_DATA_DIR"] {
+        if let Some(path) = env_path_with_home(env_name, home) {
+            sources.push(task_json_source(spec, path));
+        }
+    }
+    for settings_path in vscode_settings_paths(home) {
+        if let Some(path) = roo_custom_storage_path(&settings_path, home) {
+            sources.push(task_json_source(spec, path));
+        }
+    }
+    sources
+}
+
+fn task_json_source(spec: &ProviderSourceSpec, path: PathBuf) -> ProviderSource {
+    provider_source_from_parts(
+        spec,
+        path,
+        match spec.provider {
+            CaptureProvider::RooCode => "roo_task_directory_json",
+            _ => "cline_task_directory_json",
+        },
+        ProviderSourceKind::NativeHistory,
+    )
+}
+
+fn vscode_settings_paths(home: &Path) -> Vec<PathBuf> {
+    let mut paths = vec![
+        home.join(".config/Code/User/settings.json"),
+        home.join(".config/Code - Insiders/User/settings.json"),
+        home.join(".vscode-server/data/User/settings.json"),
+        home.join(".vscode-server-insiders/data/User/settings.json"),
+    ];
+    if let Some(appdata) = env_path("APPDATA") {
+        paths.push(appdata.join("Code/User/settings.json"));
+        paths.push(appdata.join("Code - Insiders/User/settings.json"));
+    }
+    paths
+}
+
+fn roo_custom_storage_path(settings_path: &Path, home: &Path) -> Option<PathBuf> {
+    let settings = fs::read_to_string(settings_path).ok()?;
+    let value: Value = serde_json::from_str(&settings).ok()?;
+    let path = value
+        .get("roo-cline.customStoragePath")
+        .or_else(|| value.pointer("/roo-cline/customStoragePath"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())?;
+    let relative_base = settings_path.parent().unwrap_or(home);
+    Some(resolve_pi_config_path(path, home, relative_base))
 }
 
 fn discover_pi_custom_session_sources(
@@ -866,6 +1035,8 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::Shelley => "shelley_sqlite",
         CaptureProvider::Continue => "continue_cli_sessions_json",
         CaptureProvider::OpenHands => "openhands_file_events",
+        CaptureProvider::Cline => "cline_task_directory_json",
+        CaptureProvider::RooCode => "roo_task_directory_json",
         _ => "unsupported",
     };
     let explicit_import_support = spec.import_support;
@@ -992,6 +1163,8 @@ fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::OpenHands => {
             Some("path exists but no OpenHands v1_conversations event JSON files were found")
         }
+        CaptureProvider::Cline => Some("path exists but no Cline task JSON files were found"),
+        CaptureProvider::RooCode => Some("path exists but no Roo Code task JSON files were found"),
         _ => None,
     }
 }
@@ -1036,6 +1209,12 @@ fn unknown_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         }
         CaptureProvider::OpenClaw => {
             Some("path exists but the OpenClaw transcript probe hit its scan budget")
+        }
+        CaptureProvider::Cline => {
+            Some("path exists but the Cline task JSON probe hit its scan budget")
+        }
+        CaptureProvider::RooCode => {
+            Some("path exists but the Roo Code task JSON probe hit its scan budget")
         }
         _ => None,
     }
@@ -1100,6 +1279,12 @@ fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::OpenHands => {
             Some("path exists but OpenHands event JSON files could not be read; check permissions")
         }
+        CaptureProvider::Cline => {
+            Some("path exists but Cline task JSON files could not be read; check permissions")
+        }
+        CaptureProvider::RooCode => {
+            Some("path exists but Roo Code task JSON files could not be read; check permissions")
+        }
         _ => None,
     }
 }
@@ -1147,6 +1332,25 @@ fn default_location_import_probe(
         CaptureProvider::KimiCodeCli => has_jsonl_file_under_matching(path, 10_000, |candidate| {
             candidate.file_name().and_then(|name| name.to_str()) == Some("wire.jsonl")
                 && path_has_component(candidate, "agents")
+        }),
+        CaptureProvider::Cline => has_task_json_file_under_matching(path, 10_000, |name| {
+            matches!(
+                name,
+                "api_conversation_history.json"
+                    | "ui_messages.json"
+                    | "context_history.json"
+                    | "task_metadata.json"
+            )
+        }),
+        CaptureProvider::RooCode => has_task_json_file_under_matching(path, 10_000, |name| {
+            matches!(
+                name,
+                "api_conversation_history.json"
+                    | "ui_messages.json"
+                    | "history_item.json"
+                    | "_index.json"
+                    | "claude_messages.json"
+            )
         }),
         CaptureProvider::Shell
         | CaptureProvider::Git
@@ -1327,6 +1531,61 @@ fn has_file_with_extension_under_matching(
             } else if file_type.is_file()
                 && path.extension().and_then(|ext| ext.to_str()) == Some(extension)
                 && matches_path(&path)
+            {
+                return BoundedProbe::Found;
+            }
+        }
+    }
+    BoundedProbe::NotFound
+}
+
+fn has_task_json_file_under_matching(
+    root: &Path,
+    max_entries: usize,
+    matches_name: impl Fn(&str) -> bool,
+) -> BoundedProbe {
+    match path_metadata_probe(root) {
+        PathProbe::File => {
+            return BoundedProbe::from_bool(
+                root.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| matches_name(name)),
+            );
+        }
+        PathProbe::Dir => {}
+        PathProbe::Missing | PathProbe::Other => return BoundedProbe::NotFound,
+        PathProbe::IoError => return BoundedProbe::IoError,
+    }
+
+    let mut visited = 0usize;
+    let mut stack = vec![(root.to_path_buf(), true)];
+    while let Some((dir, is_root)) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) if is_root => return BoundedProbe::IoError,
+            Err(_) => continue,
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => continue,
+            };
+            visited = visited.saturating_add(1);
+            if visited > max_entries {
+                return BoundedProbe::BudgetExhausted;
+            }
+            let path = entry.path();
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(_) => continue,
+            };
+            if file_type.is_dir() {
+                stack.push((path, false));
+            } else if file_type.is_file()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| matches_name(name))
             {
                 return BoundedProbe::Found;
             }
@@ -1644,6 +1903,26 @@ mod tests {
             CaptureProvider::OpenHands,
             ProviderSourceStatus::Available,
         );
+
+        let cline = temp.path().join(".cline/data/tasks/cline-discovery");
+        std::fs::create_dir_all(&cline).unwrap();
+        std::fs::write(cline.join("api_conversation_history.json"), "[]").unwrap();
+        assert_source_status(
+            temp.path(),
+            CaptureProvider::Cline,
+            ProviderSourceStatus::Available,
+        );
+
+        let roo = temp
+            .path()
+            .join(".config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks/roo-discovery");
+        std::fs::create_dir_all(&roo).unwrap();
+        std::fs::write(roo.join("history_item.json"), "{}").unwrap();
+        assert_source_status(
+            temp.path(),
+            CaptureProvider::RooCode,
+            ProviderSourceStatus::Available,
+        );
     }
 
     #[test]
@@ -1832,6 +2111,54 @@ mod tests {
     }
 
     #[test]
+    fn cline_discovery_uses_env_data_dirs() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let custom = temp.path().join("custom-cline-data");
+        write_task_json_discovery_task(&custom, "cline-env-task", "api_conversation_history.json");
+        let _data_dir = EnvGuard::set("CLINE_DATA_DIR", custom.as_os_str());
+        let _cline_dir = EnvGuard::remove("CLINE_DIR");
+        let _session_dir = EnvGuard::remove("CLINE_SESSION_DATA_DIR");
+        let _db_dir = EnvGuard::remove("CLINE_DB_DATA_DIR");
+
+        let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Cline);
+        let source = sources
+            .iter()
+            .find(|source| source.provider == CaptureProvider::Cline && source.path == custom)
+            .unwrap();
+
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+        assert_eq!(source.import_support, ProviderImportSupport::Native);
+    }
+
+    #[test]
+    fn roo_discovery_uses_custom_storage_setting() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let custom = temp.path().join("roo-custom-storage");
+        write_task_json_discovery_task(&custom, "roo-custom-task", "history_item.json");
+        let settings = temp.path().join(".config/Code/User/settings.json");
+        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        std::fs::write(
+            &settings,
+            r#"{"roo-cline.customStoragePath":"~/roo-custom-storage"}"#,
+        )
+        .unwrap();
+        let _roo_code = EnvGuard::remove("ROO_CODE_DATA_DIR");
+        let _roo = EnvGuard::remove("ROO_DATA_DIR");
+        let _roo_cline = EnvGuard::remove("ROO_CLINE_DATA_DIR");
+
+        let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::RooCode);
+        let source = sources
+            .iter()
+            .find(|source| source.provider == CaptureProvider::RooCode && source.path == custom)
+            .unwrap();
+
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+        assert_eq!(source.import_support, ProviderImportSupport::Native);
+    }
+
+    #[test]
     fn bounded_probe_reports_budget_exhausted_source_as_unknown() {
         let temp = tempfile::tempdir().unwrap();
         let claude = temp.path().join(".claude/projects");
@@ -1950,6 +2277,12 @@ mod tests {
         let agent = home.join("sessions/wd_project_abc123/kimi-session/agents/main");
         std::fs::create_dir_all(&agent).unwrap();
         std::fs::write(agent.join("wire.jsonl"), "{}\n").unwrap();
+    }
+
+    fn write_task_json_discovery_task(root: &Path, task_id: &str, file_name: &str) {
+        let task = root.join("tasks").join(task_id);
+        std::fs::create_dir_all(&task).unwrap();
+        std::fs::write(task.join(file_name), "[]").unwrap();
     }
 
     fn assert_source_status(

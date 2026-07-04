@@ -34,26 +34,27 @@ use config::{AppConfig, CONFIG_FILE};
 use ctx_history_capture::{
     catalog_codex_session_tree, discover_provider_sources, discover_provider_sources_for_provider,
     import_antigravity_cli_history, import_astrbot_sqlite, import_claude_projects_jsonl_tree,
-    import_codex_history_jsonl, import_codex_session_jsonl, import_codex_session_jsonl_tail,
-    import_codex_session_paths, import_codex_session_tree, import_continue_cli_sessions,
-    import_copilot_cli_session_events, import_cursor_native_history,
+    import_cline_task_json_history, import_codex_history_jsonl, import_codex_session_jsonl,
+    import_codex_session_jsonl_tail, import_codex_session_paths, import_codex_session_tree,
+    import_continue_cli_sessions, import_copilot_cli_session_events, import_cursor_native_history,
     import_custom_history_jsonl_v1, import_custom_history_jsonl_v1_reader,
     import_factory_ai_droid_sessions, import_gemini_cli_history, import_hermes_sqlite,
     import_kilo_sqlite, import_kimi_code_cli_history, import_nanoclaw_project,
     import_openclaw_history, import_opencode_sqlite, import_openhands_file_events,
-    import_pi_session_jsonl, import_qwen_code_history, import_shelley_sqlite,
-    provider_source_for_path, provider_source_spec, stable_capture_uuid,
+    import_pi_session_jsonl, import_qwen_code_history, import_roo_task_json_history,
+    import_shelley_sqlite, provider_source_for_path, provider_source_spec, stable_capture_uuid,
     validate_custom_history_jsonl_v1, validate_custom_history_jsonl_v1_reader,
     AntigravityCliImportOptions, AstrBotSqliteImportOptions, CatalogSummary,
-    ClaudeProjectsImportOptions, CodexEventImportMode, CodexHistoryImportOptions,
-    CodexSessionCatalogOptions, CodexSessionImportOptions, CodexSessionImportProgress,
-    CodexSessionImportProgressCallback, CodexToolOutputMode, ContinueCliImportOptions,
-    CopilotCliImportOptions, CursorNativeImportOptions, CustomHistoryJsonlV1ImportOptions,
-    FactoryAiDroidImportOptions, GeminiCliImportOptions, HermesSqliteImportOptions,
-    KiloSqliteImportOptions, KimiCodeCliImportOptions, NanoClawImportOptions,
-    OpenClawImportOptions, OpenCodeSqliteImportOptions, OpenHandsImportOptions,
-    PiSessionImportOptions, ProviderImportSummary, ProviderImportSupport, ProviderSource,
-    ProviderSourceStatus, QwenCodeImportOptions, ShelleySqliteImportOptions,
+    ClaudeProjectsImportOptions, ClineTaskJsonImportOptions, CodexEventImportMode,
+    CodexHistoryImportOptions, CodexSessionCatalogOptions, CodexSessionImportOptions,
+    CodexSessionImportProgress, CodexSessionImportProgressCallback, CodexToolOutputMode,
+    ContinueCliImportOptions, CopilotCliImportOptions, CursorNativeImportOptions,
+    CustomHistoryJsonlV1ImportOptions, FactoryAiDroidImportOptions, GeminiCliImportOptions,
+    HermesSqliteImportOptions, KiloSqliteImportOptions, KimiCodeCliImportOptions,
+    NanoClawImportOptions, OpenClawImportOptions, OpenCodeSqliteImportOptions,
+    OpenHandsImportOptions, PiSessionImportOptions, ProviderImportSummary, ProviderImportSupport,
+    ProviderSource, ProviderSourceStatus, QwenCodeImportOptions, RooTaskJsonImportOptions,
+    ShelleySqliteImportOptions,
 };
 use ctx_history_core::{
     database_path, default_data_root, utc_now, CaptureProvider, ContextCitation,
@@ -711,6 +712,9 @@ enum NativeProviderArg {
     Continue,
     #[value(name = "openhands", alias = "open-hands", alias = "open_hands")]
     OpenHands,
+    Cline,
+    #[value(name = "roo", alias = "roo-code", alias = "roo_code")]
+    RooCode,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -757,6 +761,9 @@ enum ProviderArg {
     Continue,
     #[value(name = "openhands", alias = "open-hands", alias = "open_hands")]
     OpenHands,
+    Cline,
+    #[value(name = "roo", alias = "roo-code", alias = "roo_code")]
+    RooCode,
     Custom,
 }
 
@@ -804,6 +811,8 @@ impl NativeProviderArg {
             Self::Shelley => CaptureProvider::Shelley,
             Self::Continue => CaptureProvider::Continue,
             Self::OpenHands => CaptureProvider::OpenHands,
+            Self::Cline => CaptureProvider::Cline,
+            Self::RooCode => CaptureProvider::RooCode,
         }
     }
 }
@@ -830,6 +839,8 @@ impl ProviderArg {
             Self::Shelley => CaptureProvider::Shelley,
             Self::Continue => CaptureProvider::Continue,
             Self::OpenHands => CaptureProvider::OpenHands,
+            Self::Cline => CaptureProvider::Cline,
+            Self::RooCode => CaptureProvider::RooCode,
             Self::Custom => CaptureProvider::Custom,
         }
     }
@@ -855,6 +866,8 @@ impl ProviderArg {
             Self::Shelley => "shelley",
             Self::Continue => "continue",
             Self::OpenHands => "openhands",
+            Self::Cline => "cline",
+            Self::RooCode => "roo",
             Self::Custom => "custom",
         }
     }
@@ -871,6 +884,9 @@ struct ImportTotals {
     imported_sessions: usize,
     imported_events: usize,
     imported_edges: usize,
+    skipped_sessions: usize,
+    skipped_events: usize,
+    skipped_edges: usize,
     skipped: usize,
     failed: usize,
 }
@@ -922,6 +938,9 @@ impl ImportTotals {
         self.imported_sessions += summary.imported_sessions;
         self.imported_events += summary.imported_events;
         self.imported_edges += summary.imported_edges;
+        self.skipped_sessions += summary.skipped_sessions;
+        self.skipped_events += summary.skipped_events;
+        self.skipped_edges += summary.skipped_edges;
         self.skipped += summary.skipped;
         self.failed += summary.failed;
     }
@@ -2713,6 +2732,9 @@ fn import_totals_json(totals: &ImportTotals) -> Value {
         "imported_sessions": totals.imported_sessions,
         "imported_events": totals.imported_events,
         "imported_edges": totals.imported_edges,
+        "skipped_sessions": totals.skipped_sessions,
+        "skipped_events": totals.skipped_events,
+        "skipped_edges": totals.skipped_edges,
         "skipped": totals.skipped,
         "failed": totals.failed,
     })
@@ -2726,6 +2748,9 @@ fn print_import_report_human(report: &ImportReport) {
     println!("imported_sessions: {}", report.totals.imported_sessions);
     println!("imported_events: {}", report.totals.imported_events);
     println!("imported_edges: {}", report.totals.imported_edges);
+    println!("skipped_sessions: {}", report.totals.skipped_sessions);
+    println!("skipped_events: {}", report.totals.skipped_events);
+    println!("skipped_edges: {}", report.totals.skipped_edges);
     println!("skipped: {}", report.totals.skipped);
     println!("failed: {}", report.totals.failed);
     println!("resume: {}", report.resume);
@@ -2803,6 +2828,9 @@ fn source_import_json(
         "imported_sessions": summary.imported_sessions,
         "imported_events": summary.imported_events,
         "imported_edges": summary.imported_edges,
+        "skipped_sessions": summary.skipped_sessions,
+        "skipped_events": summary.skipped_events,
+        "skipped_edges": summary.skipped_edges,
         "skipped": summary.skipped,
         "failed": summary.failed,
         "failures": provider_failures_json(summary),
@@ -2826,6 +2854,9 @@ fn custom_format_import_json(
         "imported_sessions": summary.imported_sessions,
         "imported_events": summary.imported_events,
         "imported_edges": summary.imported_edges,
+        "skipped_sessions": summary.skipped_sessions,
+        "skipped_events": summary.skipped_events,
+        "skipped_edges": summary.skipped_edges,
         "skipped": summary.skipped,
         "failed": summary.failed,
         "failures": provider_failures_json(summary),
@@ -2852,6 +2883,9 @@ fn history_source_plugin_import_json(
         "imported_sessions": summary.imported_sessions,
         "imported_events": summary.imported_events,
         "imported_edges": summary.imported_edges,
+        "skipped_sessions": summary.skipped_sessions,
+        "skipped_events": summary.skipped_events,
+        "skipped_edges": summary.skipped_edges,
         "skipped": summary.skipped,
         "failed": summary.failed,
         "failures": provider_failures_json(summary),
@@ -5568,6 +5602,28 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
+        CaptureProvider::Cline => import_cline_task_json_history(
+            &source.path,
+            store,
+            ClineTaskJsonImportOptions {
+                source_path: Some(source.path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: true,
+                ..ClineTaskJsonImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
+        CaptureProvider::RooCode => import_roo_task_json_history(
+            &source.path,
+            store,
+            RooTaskJsonImportOptions {
+                source_path: Some(source.path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: true,
+                ..RooTaskJsonImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
         CaptureProvider::OpenCode => import_opencode_sqlite(
             &source.path,
             store,
@@ -5854,6 +5910,8 @@ fn source_uses_import_file_manifest(source: &SourceInfo) -> bool {
             | "nanoclaw_project"
             | "astrbot_data_v4_sqlite"
             | "shelley_sqlite"
+            | "cline_task_directory_json"
+            | "roo_task_directory_json"
     )
 }
 
@@ -6236,6 +6294,8 @@ fn source_uses_incremental_event_search(source: &SourceInfo) -> bool {
             | CaptureProvider::Continue
             | CaptureProvider::QwenCode
             | CaptureProvider::KimiCodeCli
+            | CaptureProvider::Cline
+            | CaptureProvider::RooCode
     )
 }
 

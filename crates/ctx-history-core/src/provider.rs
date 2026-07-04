@@ -60,7 +60,11 @@ pub enum ProviderId {
     #[serde(rename = "astrbot", alias = "astr_bot")]
     AstrBot,
     Shelley,
+    Cline,
+    #[serde(rename = "roo_code", alias = "roo", alias = "roo-code")]
+    RooCode,
     Goose,
+    Continue,
     #[serde(rename = "openhands")]
     OpenHands,
     Cagent,
@@ -79,7 +83,7 @@ pub enum ProviderId {
 }
 
 impl ProviderId {
-    pub const ALL: [Self; 32] = [
+    pub const ALL: [Self; 35] = [
         Self::Codex,
         Self::ClaudeCode,
         Self::ClaudeCliCrp,
@@ -99,7 +103,10 @@ impl ProviderId {
         Self::NanoClaw,
         Self::AstrBot,
         Self::Shelley,
+        Self::Cline,
+        Self::RooCode,
         Self::Goose,
+        Self::Continue,
         Self::OpenHands,
         Self::Cagent,
         Self::QwenCode,
@@ -410,7 +417,9 @@ mod tests {
             ProviderId::AntigravityCli,
             ProviderId::AstrBot,
             ProviderId::ClaudeCode,
+            ProviderId::Cline,
             ProviderId::Codex,
+            ProviderId::Continue,
             ProviderId::Cursor,
             ProviderId::CopilotCli,
             ProviderId::FactoryAiDroid,
@@ -421,8 +430,10 @@ mod tests {
             ProviderId::NanoClaw,
             ProviderId::OpenCode,
             ProviderId::OpenClaw,
+            ProviderId::OpenHands,
             ProviderId::Pi,
             ProviderId::QwenCode,
+            ProviderId::RooCode,
             ProviderId::Shelley,
         ]
         .into_iter()
