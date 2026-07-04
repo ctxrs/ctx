@@ -126,6 +126,7 @@ ctx import --provider gemini
 ctx import --provider cursor
 ctx import --provider copilot-cli
 ctx import --provider factory-ai-droid
+ctx import --provider codebuddy
 ctx import --provider codex --path ~/.codex/sessions
 ctx import --provider pi --path ~/.pi/agent/sessions
 ctx import --format ctx-history-jsonl-v1 --path ./history.jsonl
@@ -284,7 +285,7 @@ optimized for agent reading; use `--verbose` for expanded text diagnostics.
 
 Filters:
 
-- `--provider codex|pi|claude|opencode|kilo|openclaw|hermes|nanoclaw|astrbot|shelley|continue|openhands|antigravity|gemini|cursor|copilot-cli|factory-ai-droid|custom`;
+- `--provider codex|pi|claude|opencode|kilo|openclaw|hermes|nanoclaw|astrbot|shelley|continue|openhands|antigravity|gemini|cursor|copilot-cli|factory-ai-droid|qwen-code|kimi-code-cli|autohand-code|codebuddy|custom`;
 - `--workspace <name-or-path>`, substring match over stored workspace, cwd,
   source path, or repository-name text;
 - `--since <rfc3339-or-days>d`, for example `2026-06-01T00:00:00Z` or `30d`;

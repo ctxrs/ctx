@@ -67,6 +67,8 @@ pub enum ProviderId {
     Crush,
     Goose,
     Dexto,
+    #[serde(rename = "codebuddy", alias = "code_buddy", alias = "code-buddy")]
+    CodeBuddy,
     #[serde(rename = "openhands")]
     OpenHands,
     Cagent,
@@ -87,7 +89,7 @@ pub enum ProviderId {
 }
 
 impl ProviderId {
-    pub const ALL: [Self; 38] = [
+    pub const ALL: [Self; 39] = [
         Self::Codex,
         Self::ClaudeCode,
         Self::ClaudeCliCrp,
@@ -113,6 +115,7 @@ impl ProviderId {
         Self::Crush,
         Self::Goose,
         Self::Dexto,
+        Self::CodeBuddy,
         Self::OpenHands,
         Self::Cagent,
         Self::QwenCode,

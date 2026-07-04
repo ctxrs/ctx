@@ -1,0 +1,19 @@
+{
+  "conversations": [
+    {
+      "id": "session-alpha",
+      "type": "chat",
+      "name": "CodeBuddy fixture alpha",
+      "createdAt": "2026-07-04T14:00:00Z",
+      "lastMessageAt": "2026-07-04T14:02:00Z"
+    },
+    {
+      "id": "session-beta",
+      "type": "chat",
+      "name": "CodeBuddy fixture beta",
+      "createdAt": "2026-07-04T15:00:00Z",
+      "lastMessageAt": "2026-07-04T15:00:30Z"
+    }
+  ],
+  "current": "session-alpha"
+}

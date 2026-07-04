@@ -1,0 +1,5 @@
+{
+  "id": "msg-assistant-1",
+  "role": "assistant",
+  "message": "{\"content\":\"CodeBuddy oracle answer mentions a deterministic search proof.\",\"model\":\"codebuddy-fixture-model\",\"createdAt\":\"2026-07-04T14:02:00Z\"}"
+}

@@ -207,6 +207,7 @@ text_enum! {
         Crush => "crush",
         Goose => "goose",
         Dexto => "dexto",
+        CodeBuddy => "codebuddy",
         Shell => "shell",
         Git => "git",
         Jj => "jj",

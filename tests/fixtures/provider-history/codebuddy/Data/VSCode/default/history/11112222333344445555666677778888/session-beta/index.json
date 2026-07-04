@@ -1,0 +1,9 @@
+{
+  "messages": [
+    {
+      "id": "msg-user-plain",
+      "role": "user",
+      "type": "message"
+    }
+  ]
+}

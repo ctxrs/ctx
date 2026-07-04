@@ -1,0 +1,5 @@
+{
+  "id": "msg-user-1",
+  "role": "user",
+  "message": "{\"content\":[{\"type\":\"text\",\"text\":\"<project_context>redacted workspace context</project_context><user_query>codebuddy oracle prompt update src/codebuddy_fixture.rs</user_query>\"}],\"model\":\"codebuddy-fixture-model\",\"createdAt\":\"2026-07-04T14:01:00Z\"}"
+}
