@@ -196,6 +196,8 @@ text_enum! {
         NanoClaw => "nanoclaw",
         AstrBot => "astrbot",
         Shelley => "shelley",
+        Continue => "continue",
+        OpenHands => "openhands",
         Shell => "shell",
         Git => "git",
         Jj => "jj",

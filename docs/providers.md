@@ -25,6 +25,10 @@ The current CLI imports local history for:
   explicitly;
 - Shelley SQLite history from `SHELLEY_DB`, `~/.config/shelley/shelley.db`, or
   an explicit Shelley DB path;
+- Continue CLI sessions from `CONTINUE_GLOBAL_DIR/sessions`,
+  `~/.continue/sessions`, or an explicit Continue sessions path;
+- OpenHands event JSON under `OH_PERSISTENCE_DIR`, legacy `FILE_STORE_PATH`,
+  `~/.openhands`, or an explicit persistence root;
 - Antigravity transcript JSONL mirrors under
   `~/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript_full.jsonl`
   or `transcript.jsonl`;
@@ -44,6 +48,11 @@ preserving the exporter's `provider_key`, `source_id`, and `session_id` as
 metadata and ID namespace components. File imports are not auto-discovered;
 local plugin manifests are listed by `ctx sources`.
 
+For the pinned npx skills target set, see
+[`agent-storage-coverage.md`](agent-storage-coverage.md). That ledger maps each
+npx agent id to native ctx import support, reusable storage family, and current
+gap.
+
 Use `ctx sources` for the truth on the current machine:
 
 ```bash
@@ -52,10 +61,12 @@ ctx sources --json
 ```
 
 CLI provider flags use names such as `openclaw`, `hermes`, `nanoclaw`,
-`astrbot`, `shelley`, `copilot-cli`, and `factory-ai-droid`.
+`astrbot`, `shelley`, `continue`, `openhands`, `copilot-cli`, and
+`factory-ai-droid`.
 Structured JSON and stable SQL views use provider IDs in ctx output; multiword IDs may be
 snake_case, such as `copilot_cli` or `factory_ai_droid`, while compact native
-IDs such as `openclaw`, `nanoclaw`, `astrbot`, and `shelley` stay compact.
+IDs such as `openclaw`, `nanoclaw`, `astrbot`, `shelley`, `continue`, and
+`openhands` stay compact.
 
 `ctx sources --json` reports each known provider source with `import_support`
 and `importable` fields. A native source is marked available/importable only
