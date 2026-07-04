@@ -688,6 +688,8 @@ fn provider_names() -> Vec<&'static str> {
         ProviderArg::Claude.cli_name(),
         ProviderArg::OpenCode.cli_name(),
         ProviderArg::Kilo.cli_name(),
+        ProviderArg::Crush.cli_name(),
+        ProviderArg::Goose.cli_name(),
         ProviderArg::Antigravity.cli_name(),
         ProviderArg::Gemini.cli_name(),
         ProviderArg::Cursor.cli_name(),
@@ -706,6 +708,7 @@ fn provider_names() -> Vec<&'static str> {
         ProviderArg::Shelley.cli_name(),
         ProviderArg::Continue.cli_name(),
         ProviderArg::OpenHands.cli_name(),
+        ProviderArg::Dexto.cli_name(),
         ProviderArg::Custom.cli_name(),
     ];
     names.sort_unstable();
@@ -783,6 +786,8 @@ fn optional_provider(arguments: &Value, key: &str) -> Result<Option<ProviderArg>
         "claude" => Ok(Some(ProviderArg::Claude)),
         "opencode" => Ok(Some(ProviderArg::OpenCode)),
         "kilo" | "kilo-code" | "kilo_code" | "kilocode" => Ok(Some(ProviderArg::Kilo)),
+        "crush" => Ok(Some(ProviderArg::Crush)),
+        "goose" => Ok(Some(ProviderArg::Goose)),
         "antigravity" => Ok(Some(ProviderArg::Antigravity)),
         "gemini" => Ok(Some(ProviderArg::Gemini)),
         "cursor" => Ok(Some(ProviderArg::Cursor)),
@@ -797,6 +802,7 @@ fn optional_provider(arguments: &Value, key: &str) -> Result<Option<ProviderArg>
         "shelley" => Ok(Some(ProviderArg::Shelley)),
         "continue" | "continue-cli" => Ok(Some(ProviderArg::Continue)),
         "openhands" | "open-hands" | "open_hands" => Ok(Some(ProviderArg::OpenHands)),
+        "dexto" => Ok(Some(ProviderArg::Dexto)),
         "custom" => Ok(Some(ProviderArg::Custom)),
         _ => Err(anyhow!(
             "provider must be one of {}",

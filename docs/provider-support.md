@@ -27,6 +27,9 @@ is:
 | Claude | `local_import_when_supported` | `~/.claude/projects` or an explicit Claude projects JSONL tree. | Static local-history fixture smoke. |
 | OpenCode | `local_import_when_supported` | `~/.local/share/opencode/opencode.db` or an explicit OpenCode SQLite DB. | Static local-history fixture smoke. |
 | Kilo Code | `local_import_when_supported` | `KILO_DB`, `$XDG_DATA_HOME/kilo/kilo.db`, `~/.local/share/kilo/kilo.db`, channel `kilo-*.db`, or an explicit Kilo SQLite DB. | Static local-history fixture smoke. |
+| Crush | `local_import_when_supported` | `CRUSH_GLOBAL_DATA/crush.db`, `$XDG_DATA_HOME/crush/crush.db`, `~/.local/share/crush/crush.db`, configured `data_directory`, project `.crush/crush.db`, or an explicit Crush SQLite DB. | Static local-history fixture smoke. |
+| Goose | `local_import_when_supported` | `GOOSE_PATH_ROOT/data/sessions/sessions.db`, `$XDG_DATA_HOME/goose/sessions/sessions.db`, `$XDG_DATA_HOME/Block/goose/sessions/sessions.db`, defaults under `~/.local/share`, or an explicit Goose sessions SQLite DB. | Static local-history fixture smoke. |
+| Dexto | `local_import_when_supported` | Explicit Dexto SQLite DB path. | Static local-history fixture smoke; default discovery remains intentionally unclaimed. |
 | OpenClaw | `local_import_when_supported` | `OPENCLAW_STATE_DIR`, `~/.openclaw`, legacy `~/.clawdbot`/`~/.moltbot`, or an explicit OpenClaw state tree. | Static local-history fixture smoke; beta storage-contract notes in the matrix. |
 | Hermes Agent | `local_import_when_supported` | `HERMES_HOME/state.db`, `~/.hermes/state.db`, or an explicit Hermes SQLite DB. | Static local-history fixture smoke. |
 | NanoClaw | `local_import_when_supported` | Preview/manual import from a NanoClaw project root or `data/v2.db`; cwd/ancestor discovery only. | Static local-history fixture smoke; excluded from `ctx import --all` and pre-search refresh until promoted. |

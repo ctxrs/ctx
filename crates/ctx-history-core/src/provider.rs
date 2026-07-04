@@ -63,8 +63,10 @@ pub enum ProviderId {
     Cline,
     #[serde(rename = "roo_code", alias = "roo", alias = "roo-code")]
     RooCode,
-    Goose,
     Continue,
+    Crush,
+    Goose,
+    Dexto,
     #[serde(rename = "openhands")]
     OpenHands,
     Cagent,
@@ -83,7 +85,7 @@ pub enum ProviderId {
 }
 
 impl ProviderId {
-    pub const ALL: [Self; 35] = [
+    pub const ALL: [Self; 37] = [
         Self::Codex,
         Self::ClaudeCode,
         Self::ClaudeCliCrp,
@@ -105,8 +107,10 @@ impl ProviderId {
         Self::Shelley,
         Self::Cline,
         Self::RooCode,
-        Self::Goose,
         Self::Continue,
+        Self::Crush,
+        Self::Goose,
+        Self::Dexto,
         Self::OpenHands,
         Self::Cagent,
         Self::QwenCode,
@@ -420,10 +424,13 @@ mod tests {
             ProviderId::Cline,
             ProviderId::Codex,
             ProviderId::Continue,
+            ProviderId::Crush,
             ProviderId::Cursor,
             ProviderId::CopilotCli,
+            ProviderId::Dexto,
             ProviderId::FactoryAiDroid,
             ProviderId::GeminiCli,
+            ProviderId::Goose,
             ProviderId::Hermes,
             ProviderId::Kilo,
             ProviderId::KimiCodeCli,

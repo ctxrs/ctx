@@ -16,6 +16,15 @@ The current CLI imports local history for:
 - OpenCode SQLite history under `~/.local/share/opencode/opencode.db`;
 - Kilo Code SQLite history from `KILO_DB`, `$XDG_DATA_HOME/kilo/kilo.db`,
   `~/.local/share/kilo/kilo.db`, or Kilo channel DBs named `kilo-*.db`;
+- Crush SQLite history from `CRUSH_GLOBAL_DATA/crush.db`,
+  `$XDG_DATA_HOME/crush/crush.db`, `~/.local/share/crush/crush.db`,
+  configured `data_directory` values, project `.crush/crush.db`, or an
+  explicit Crush DB path;
+- Goose sessions SQLite history from `GOOSE_PATH_ROOT/data/sessions/sessions.db`,
+  `$XDG_DATA_HOME/goose/sessions/sessions.db`,
+  `$XDG_DATA_HOME/Block/goose/sessions/sessions.db`, matching defaults under
+  `~/.local/share`, or an explicit Goose sessions DB path;
+- Dexto SQLite history from an explicit Dexto DB path;
 - OpenClaw session JSONL trees under `OPENCLAW_STATE_DIR`, `~/.openclaw`,
   legacy `~/.clawdbot`, or legacy `~/.moltbot`;
 - Hermes Agent SQLite history under `HERMES_HOME/state.db` or
@@ -71,15 +80,16 @@ ctx sources
 ctx sources --json
 ```
 
-CLI provider flags use names such as `kilo`, `openclaw`, `hermes`,
+CLI provider flags use names such as `kilo`, `crush`, `goose`, `dexto`,
+`openclaw`, `hermes`,
 `nanoclaw`, `astrbot`, `shelley`, `continue`, `openhands`, `copilot-cli`,
 `factory-ai-droid`, `qwen-code`, `kimi-code-cli`, `cline`, and
 `roo`/`roo-code`.
 Structured JSON and stable SQL views use provider IDs in ctx output; multiword IDs may be
 snake_case, such as `copilot_cli`, `factory_ai_droid`, `qwen_code`, or
 `kimi_code_cli`, while compact native IDs such as `kilo`, `openclaw`,
-`nanoclaw`, `astrbot`, `shelley`, `continue`, and `openhands` stay compact.
-Roo Code is reported as `roo_code`.
+`crush`, `goose`, `dexto`, `nanoclaw`, `astrbot`, `shelley`, `continue`, and
+`openhands` stay compact. Roo Code is reported as `roo_code`.
 
 `ctx sources --json` reports each known provider source with `import_support`
 and `importable` fields. A native source is marked available/importable only

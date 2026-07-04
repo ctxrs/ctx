@@ -21,8 +21,8 @@ Status meanings:
 - `install-target`: npx target is an aggregate or project skill target, not a
   proven history-producing agent.
 
-Result on this integration branch: 18 `native-auto`, 1 `native-preview`, 24
-`candidate-family`, 10 `webapp-boundary`, 17 `unknown`, and 2 `install-target`
+Result on this integration branch: 20 `native-auto`, 2 `native-preview`, 22
+`candidate-family`, 10 `webapp-boundary`, 16 `unknown`, and 2 `install-target`
 rows.
 
 ## Shared Families
@@ -37,8 +37,8 @@ rows.
   `sessions.json` metadata.
 - `filesystem event JSON`: covers OpenHands event JSON under
   `<persistence>/<user_id>/v1_conversations`.
-- `generic sqlite messages`: already covers Hermes and the AstrBot preview
-  importer, and is also the right comparison point for ctx-native Shelley.
+- `generic sqlite messages`: already covers Crush, Goose, Hermes, Dexto
+  explicit imports, the AstrBot preview importer, and ctx-native Shelley.
 - `VS Code/Electron storage`: Cursor is covered through a known transcript tree;
   other IDE-like tools need storage discovery before reuse.
 - `webapp/object-store boundary`: prefer explicit exporters or
@@ -67,18 +67,18 @@ rows.
 | `command-code` | `unknown` | `unknown native history` | npx `~/.commandcode`; no ctx provider | Need native history storage research before claiming import support. |
 | `continue` | `native-auto` | `CLI session JSON` | ctx `continue_cli_sessions_json`; npx project or home `.continue` | - |
 | `cortex` | `unknown` | `unknown native history` | npx `~/.snowflake/cortex`; no ctx provider | Need native history storage research before claiming import support. |
-| `crush` | `unknown` | `unknown native history` | npx `~/.config/crush`; no ctx provider | Need native history storage research before assigning a reusable family. |
+| `crush` | `native-auto` | `generic sqlite messages` | ctx `crush_sqlite`; npx `~/.config/crush` | - |
 | `cursor` | `native-auto` | `VS Code/Electron storage` | ctx `cursor_agent_transcript_jsonl_tree`; npx `~/.cursor` | - |
 | `deepagents` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.deepagents`; no ctx provider | No proven stable local transcript boundary; prefer exporter or plugin. |
 | `devin` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.config/devin`; no ctx provider | Terminal skill target is not enough to prove local hosted-agent history. |
-| `dexto` | `candidate-family` | `JSONL CLI event logs` | npx `~/.dexto`; no ctx provider | Need transcript location and schema proof. |
+| `dexto` | `native-preview` | `generic sqlite messages` | ctx `dexto_sqlite`; npx `~/.dexto` | Preview explicit import only; no proven default discovery path yet. |
 | `droid` | `native-auto` | `JSONL CLI event logs` | ctx `factory_ai_droid_sessions_jsonl`; npx `~/.factory` | - |
 | `eve` | `unknown` | `unknown native history` | npx project `agent`; no ctx provider | Project skill layout does not prove a local history schema. |
 | `firebender` | `candidate-family` | `VS Code/Electron storage` | npx `~/.firebender`; no ctx provider | Need local app storage or export contract proof. |
 | `forgecode` | `candidate-family` | `JSONL CLI event logs` | npx `~/.forge`; no ctx provider | Need transcript location and schema proof before implementation. |
 | `gemini-cli` | `native-auto` | `JSONL CLI event logs` | ctx `gemini_cli_chat_recording_jsonl`; npx `~/.gemini` | - |
 | `github-copilot` | `native-auto` | `JSONL CLI event logs` | ctx `copilot_cli_session_events_jsonl`; npx `~/.copilot` | Coverage is for Copilot CLI session-state logs, not editor or web history. |
-| `goose` | `candidate-family` | `JSONL CLI event logs` | npx `~/.config/goose`; no ctx provider | Need transcript location and schema proof. |
+| `goose` | `native-auto` | `generic sqlite messages` | ctx `goose_sessions_sqlite`; npx `~/.config/goose` | - |
 | `hermes-agent` | `native-auto` | `generic sqlite messages` | ctx `hermes_state_sqlite`; npx `HERMES_HOME` | - |
 | `inference-sh` | `unknown` | `unknown native history` | npx `~/.inferencesh`; no ctx provider | Need native history storage research before claiming import support. |
 | `iflow-cli` | `candidate-family` | `JSONL CLI event logs` | npx `~/.iflow`; no ctx provider | Need transcript location and schema proof. |
