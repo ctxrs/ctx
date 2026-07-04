@@ -136,6 +136,34 @@ const KILO_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     source_kind: ProviderSourceKind::NativeHistory,
 }];
 
+const CRUSH_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
+    path_components: &[".local", "share", "crush", "crush.db"],
+    source_format: "crush_sqlite",
+    source_kind: ProviderSourceKind::NativeHistory,
+}];
+
+const GOOSE_DEFAULTS: &[ProviderDefaultLocation] = &[
+    ProviderDefaultLocation {
+        path_components: &[".local", "share", "goose", "sessions", "sessions.db"],
+        source_format: "goose_sessions_sqlite",
+        source_kind: ProviderSourceKind::NativeHistory,
+    },
+    ProviderDefaultLocation {
+        path_components: &[
+            ".local",
+            "share",
+            "Block",
+            "goose",
+            "sessions",
+            "sessions.db",
+        ],
+        source_format: "goose_sessions_sqlite",
+        source_kind: ProviderSourceKind::NativeHistory,
+    },
+];
+
+const DEXTO_DEFAULTS: &[ProviderDefaultLocation] = &[];
+
 const ANTIGRAVITY_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     path_components: &[".gemini", "antigravity-cli", "brain"],
     source_format: "antigravity_cli_transcript_jsonl_tree",
@@ -346,6 +374,26 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         unsupported_reason: None,
     },
     ProviderSourceSpec {
+        provider: CaptureProvider::Crush,
+        display_name: "Crush",
+        default_locations: CRUSH_DEFAULTS,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
+    ProviderSourceSpec {
+        provider: CaptureProvider::Goose,
+        display_name: "Goose",
+        default_locations: GOOSE_DEFAULTS,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
+    ProviderSourceSpec {
         provider: CaptureProvider::Antigravity,
         display_name: "Antigravity",
         default_locations: ANTIGRAVITY_DEFAULTS,
@@ -505,6 +553,16 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         redaction_boundary: ProviderRedactionBoundary::BeforeExport,
         unsupported_reason: None,
     },
+    ProviderSourceSpec {
+        provider: CaptureProvider::Dexto,
+        display_name: "Dexto",
+        default_locations: DEXTO_DEFAULTS,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
 ];
 
 pub fn provider_source_specs() -> &'static [ProviderSourceSpec] {
@@ -570,6 +628,61 @@ fn discover_provider_sources_for_spec(
         }
         CaptureProvider::Pi => {
             sources.extend(discover_pi_custom_session_sources(home, spec));
+        }
+        CaptureProvider::Crush => {
+            if let Some(path) = env_path("CRUSH_GLOBAL_DATA") {
+                sources.push(crush_db_source(spec, path.join("crush.db")));
+            }
+            if let Some(path) = env_path("XDG_DATA_HOME") {
+                sources.push(crush_db_source(spec, path.join("crush").join("crush.db")));
+            }
+            for config_path in crush_config_paths(home) {
+                if let Some(data_dir) = crush_config_data_dir(&config_path, home) {
+                    let relative_base = config_path
+                        .parent()
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(|| home.to_path_buf());
+                    let data_dir =
+                        resolve_pi_config_path(&data_dir.to_string_lossy(), home, &relative_base);
+                    sources.push(crush_db_source(spec, data_dir.join("crush.db")));
+                }
+            }
+            for root in current_dir_ancestors_with(|candidate| {
+                candidate.join(".crush").join("crush.db").is_file()
+                    || candidate.join("crush.json").is_file()
+                    || candidate.join(".crush.json").is_file()
+            }) {
+                sources.push(crush_db_source(spec, root.join(".crush").join("crush.db")));
+                for config_name in ["crush.json", ".crush.json"] {
+                    let config_path = root.join(config_name);
+                    if let Some(data_dir) = crush_config_data_dir(&config_path, home) {
+                        let data_dir =
+                            resolve_pi_config_path(&data_dir.to_string_lossy(), home, &root);
+                        sources.push(crush_db_source(spec, data_dir.join("crush.db")));
+                    }
+                }
+            }
+        }
+        CaptureProvider::Goose => {
+            if let Some(path) = env_path("GOOSE_PATH_ROOT") {
+                sources.push(goose_db_source(
+                    spec,
+                    path.join("data").join("sessions").join("sessions.db"),
+                ));
+            }
+            if let Some(path) = env_path("XDG_DATA_HOME") {
+                sources.push(goose_db_source(
+                    spec,
+                    path.join("goose").join("sessions").join("sessions.db"),
+                ));
+                sources.push(goose_db_source(
+                    spec,
+                    path.join("Block")
+                        .join("goose")
+                        .join("sessions")
+                        .join("sessions.db"),
+                ));
+            }
         }
         CaptureProvider::Hermes => {
             if let Some(path) = env_path("HERMES_HOME") {
@@ -897,6 +1010,50 @@ fn pi_session_source(spec: &ProviderSourceSpec, path: PathBuf) -> ProviderSource
     )
 }
 
+fn crush_db_source(spec: &ProviderSourceSpec, path: PathBuf) -> ProviderSource {
+    provider_source_from_parts(
+        spec,
+        path,
+        "crush_sqlite",
+        ProviderSourceKind::NativeHistory,
+    )
+}
+
+fn goose_db_source(spec: &ProviderSourceSpec, path: PathBuf) -> ProviderSource {
+    provider_source_from_parts(
+        spec,
+        path,
+        "goose_sessions_sqlite",
+        ProviderSourceKind::NativeHistory,
+    )
+}
+
+fn crush_config_paths(home: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(path) = env_path("CRUSH_GLOBAL_CONFIG") {
+        paths.push(path);
+    }
+    paths.push(home.join(".config").join("crush").join("crush.json"));
+    paths
+}
+
+fn crush_config_data_dir(config_path: &Path, home: &Path) -> Option<PathBuf> {
+    let text = fs::read_to_string(config_path).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    let raw = value
+        .pointer("/options/data_directory")
+        .or_else(|| value.pointer("/options/dataDirectory"))
+        .or_else(|| value.get("data_directory"))
+        .or_else(|| value.get("dataDirectory"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())?;
+    let relative_base = config_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| home.to_path_buf());
+    Some(resolve_pi_config_path(raw, home, &relative_base))
+}
+
 fn pi_agent_dir(home: &Path) -> PathBuf {
     env_path_with_home("PI_CODING_AGENT_DIR", home).unwrap_or_else(|| home.join(".pi/agent"))
 }
@@ -1014,6 +1171,8 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::Claude => "claude_projects_jsonl_tree",
         CaptureProvider::OpenCode => "opencode_sqlite",
         CaptureProvider::Kilo => "kilo_sqlite",
+        CaptureProvider::Crush => "crush_sqlite",
+        CaptureProvider::Goose => "goose_sessions_sqlite",
         CaptureProvider::Antigravity => "antigravity_cli_transcript_jsonl_tree",
         CaptureProvider::Gemini => "gemini_cli_chat_recording_jsonl",
         CaptureProvider::Cursor
@@ -1037,6 +1196,7 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::OpenHands => "openhands_file_events",
         CaptureProvider::Cline => "cline_task_directory_json",
         CaptureProvider::RooCode => "roo_task_directory_json",
+        CaptureProvider::Dexto => "dexto_sqlite",
         _ => "unsupported",
     };
     let explicit_import_support = spec.import_support;
@@ -1127,6 +1287,10 @@ fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         }
         CaptureProvider::OpenCode => Some("path exists but no OpenCode SQLite database was found"),
         CaptureProvider::Kilo => Some("path exists but no Kilo SQLite database was found"),
+        CaptureProvider::Crush => Some("path exists but no Crush SQLite database was found"),
+        CaptureProvider::Goose => {
+            Some("path exists but no Goose sessions SQLite database was found")
+        }
         CaptureProvider::Antigravity => {
             Some("path exists but no Antigravity transcript JSONL files were found")
         }
@@ -1165,6 +1329,7 @@ fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         }
         CaptureProvider::Cline => Some("path exists but no Cline task JSON files were found"),
         CaptureProvider::RooCode => Some("path exists but no Roo Code task JSON files were found"),
+        CaptureProvider::Dexto => Some("path exists but no Dexto SQLite database was found"),
         _ => None,
     }
 }
@@ -1237,6 +1402,12 @@ fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::Kilo => {
             Some("path exists but the Kilo database could not be read; check permissions")
         }
+        CaptureProvider::Crush => {
+            Some("path exists but the Crush database could not be read; check permissions")
+        }
+        CaptureProvider::Goose => {
+            Some("path exists but the Goose sessions database could not be read; check permissions")
+        }
         CaptureProvider::Antigravity => {
             Some("path exists but Antigravity transcripts could not be read; check permissions")
         }
@@ -1285,6 +1456,9 @@ fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::RooCode => {
             Some("path exists but Roo Code task JSON files could not be read; check permissions")
         }
+        CaptureProvider::Dexto => {
+            Some("path exists but the Dexto database could not be read; check permissions")
+        }
         _ => None,
     }
 }
@@ -1302,6 +1476,8 @@ fn default_location_import_probe(
         CaptureProvider::Pi => has_jsonl_file_under_matching(path, 10_000, |_| true),
         CaptureProvider::OpenCode => path_is_file_probe(path),
         CaptureProvider::Kilo => path_is_file_probe(path),
+        CaptureProvider::Crush => path_is_file_probe(path),
+        CaptureProvider::Goose => path_is_file_probe(path),
         CaptureProvider::Claude => has_jsonl_file_under_matching(path, 10_000, |_| true),
         CaptureProvider::OpenClaw => has_openclaw_session_jsonl(path, 10_000),
         CaptureProvider::Hermes => path_is_file_probe(path),
@@ -1312,6 +1488,7 @@ fn default_location_import_probe(
             candidate.file_name().and_then(|name| name.to_str()) != Some("sessions.json")
         }),
         CaptureProvider::OpenHands => has_openhands_event_json(path, 10_000),
+        CaptureProvider::Dexto => path_is_file_probe(path),
         CaptureProvider::Antigravity => has_jsonl_file_under_matching(path, 10_000, |candidate| {
             matches!(
                 candidate.file_name().and_then(|name| name.to_str()),
@@ -2044,6 +2221,87 @@ mod tests {
             })
             .unwrap_or_else(|| panic!("missing Kimi Code CLI source in {sources:#?}"));
         assert_eq!(source.status, ProviderSourceStatus::Available);
+        let crush = temp.path().join(".local/share/crush");
+        std::fs::create_dir_all(&crush).unwrap();
+        std::fs::write(crush.join("crush.db"), b"sqlite fixture marker").unwrap();
+        let crush_source = discover_provider_sources(temp.path())
+            .into_iter()
+            .find(|source| source.provider == CaptureProvider::Crush)
+            .unwrap();
+        assert_eq!(crush_source.status, ProviderSourceStatus::Available);
+        assert_eq!(crush_source.source_format, "crush_sqlite");
+
+        let goose = temp.path().join(".local/share/goose/sessions");
+        std::fs::create_dir_all(&goose).unwrap();
+        std::fs::write(goose.join("sessions.db"), b"sqlite fixture marker").unwrap();
+        let goose_source = discover_provider_sources(temp.path())
+            .into_iter()
+            .find(|source| source.provider == CaptureProvider::Goose)
+            .unwrap();
+        assert_eq!(goose_source.status, ProviderSourceStatus::Available);
+        assert_eq!(goose_source.source_format, "goose_sessions_sqlite");
+    }
+
+    #[test]
+    fn crush_discovery_uses_global_config_data_directory() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("crush.json");
+        let data_dir = temp.path().join("custom-crush-data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(data_dir.join("crush.db"), b"sqlite fixture marker").unwrap();
+        std::fs::write(
+            &config,
+            format!(
+                "{{\"options\":{{\"data_directory\":\"{}\"}}}}",
+                data_dir.display()
+            ),
+        )
+        .unwrap();
+        let _config = EnvGuard::set("CRUSH_GLOBAL_CONFIG", &config);
+        let _data = EnvGuard::remove("CRUSH_GLOBAL_DATA");
+
+        let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Crush);
+        let source = sources
+            .iter()
+            .find(|source| source.path == data_dir.join("crush.db"))
+            .unwrap_or_else(|| panic!("missing Crush config source in {sources:#?}"));
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+        assert_eq!(source.source_format, "crush_sqlite");
+    }
+
+    #[test]
+    fn goose_discovery_uses_path_root_data_sessions_db() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("goose-root");
+        let sessions = root.join("data/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(sessions.join("sessions.db"), b"sqlite fixture marker").unwrap();
+        let _path_root = EnvGuard::set("GOOSE_PATH_ROOT", &root);
+
+        let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Goose);
+        let source = sources
+            .iter()
+            .find(|source| source.path == sessions.join("sessions.db"))
+            .unwrap_or_else(|| panic!("missing Goose path-root source in {sources:#?}"));
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+        assert_eq!(source.source_format, "goose_sessions_sqlite");
+    }
+
+    #[test]
+    fn dexto_discovery_is_explicit_path_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("dexto.db");
+        std::fs::write(&db, b"sqlite fixture marker").unwrap();
+
+        let discovered =
+            discover_provider_sources_for_provider(temp.path(), CaptureProvider::Dexto);
+        assert!(discovered.is_empty(), "{discovered:#?}");
+        let source = provider_source_for_path(CaptureProvider::Dexto, db.clone());
+        assert_eq!(source.path, db);
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+        assert_eq!(source.source_format, "dexto_sqlite");
         assert_eq!(source.import_support, ProviderImportSupport::Native);
     }
 

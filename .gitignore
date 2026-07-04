@@ -5,6 +5,9 @@
 *.sqlite
 *.sqlite3
 !tests/fixtures/provider-history/kilo/kilo.db
+!tests/fixtures/provider-history/crush/v1/crush.db
+!tests/fixtures/provider-history/goose/v14/sessions.db
+!tests/fixtures/provider-history/dexto/v1/dexto.db
 
 # SDK build artifacts
 /sdks/dotnet/**/bin/

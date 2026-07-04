@@ -503,6 +503,48 @@ impl Default for OpenCodeSqliteImportOptions {
 pub type KiloSqliteImportOptions = OpenCodeSqliteImportOptions;
 
 #[derive(Debug, Clone)]
+pub struct CrushSqliteImportOptions {
+    pub machine_id: String,
+    pub source_path: Option<PathBuf>,
+    pub imported_at: DateTime<Utc>,
+    pub history_record_id: Option<Uuid>,
+    pub allow_partial_failures: bool,
+}
+
+impl Default for CrushSqliteImportOptions {
+    fn default() -> Self {
+        Self {
+            machine_id: default_machine_id(),
+            source_path: None,
+            imported_at: utc_now(),
+            history_record_id: None,
+            allow_partial_failures: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GooseSessionsSqliteImportOptions {
+    pub machine_id: String,
+    pub source_path: Option<PathBuf>,
+    pub imported_at: DateTime<Utc>,
+    pub history_record_id: Option<Uuid>,
+    pub allow_partial_failures: bool,
+}
+
+impl Default for GooseSessionsSqliteImportOptions {
+    fn default() -> Self {
+        Self {
+            machine_id: default_machine_id(),
+            source_path: None,
+            imported_at: utc_now(),
+            history_record_id: None,
+            allow_partial_failures: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct OpenClawImportOptions {
     pub machine_id: String,
     pub source_path: Option<PathBuf>,
@@ -638,6 +680,27 @@ pub struct OpenHandsImportOptions {
 }
 
 impl Default for OpenHandsImportOptions {
+    fn default() -> Self {
+        Self {
+            machine_id: default_machine_id(),
+            source_path: None,
+            imported_at: utc_now(),
+            history_record_id: None,
+            allow_partial_failures: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DextoSqliteImportOptions {
+    pub machine_id: String,
+    pub source_path: Option<PathBuf>,
+    pub imported_at: DateTime<Utc>,
+    pub history_record_id: Option<Uuid>,
+    pub allow_partial_failures: bool,
+}
+
+impl Default for DextoSqliteImportOptions {
     fn default() -> Self {
         Self {
             machine_id: default_machine_id(),
@@ -1010,6 +1073,12 @@ pub struct OpenCodeSqliteAdapter;
 pub struct KiloSqliteAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
+pub struct CrushSqliteAdapter;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GooseSessionsSqliteAdapter;
+
+#[derive(Debug, Clone, Copy, Default)]
 pub struct OpenClawJsonlAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -1029,6 +1098,9 @@ pub struct ContinueCliSessionsAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OpenHandsFileEventsAdapter;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DextoSqliteAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AntigravityCliJsonlAdapter;
@@ -1773,6 +1845,42 @@ impl ProviderCaptureAdapter for KiloSqliteAdapter {
     }
 }
 
+impl ProviderCaptureAdapter for CrushSqliteAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Crush
+    }
+
+    fn source_format(&self) -> &str {
+        CRUSH_SQLITE_SOURCE_FORMAT
+    }
+
+    fn normalize_path(
+        &self,
+        path: &Path,
+        context: &ProviderAdapterContext,
+    ) -> Result<ProviderNormalizationResult> {
+        normalize_crush_sqlite(path, context)
+    }
+}
+
+impl ProviderCaptureAdapter for GooseSessionsSqliteAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Goose
+    }
+
+    fn source_format(&self) -> &str {
+        GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT
+    }
+
+    fn normalize_path(
+        &self,
+        path: &Path,
+        context: &ProviderAdapterContext,
+    ) -> Result<ProviderNormalizationResult> {
+        normalize_goose_sessions_sqlite(path, context)
+    }
+}
+
 impl ProviderCaptureAdapter for OpenClawJsonlAdapter {
     fn provider(&self) -> CaptureProvider {
         CaptureProvider::OpenClaw
@@ -1878,6 +1986,24 @@ impl ProviderCaptureAdapter for ContinueCliSessionsAdapter {
         context: &ProviderAdapterContext,
     ) -> Result<ProviderNormalizationResult> {
         normalize_continue_cli_sessions(path, context)
+    }
+}
+
+impl ProviderCaptureAdapter for DextoSqliteAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Dexto
+    }
+
+    fn source_format(&self) -> &str {
+        DEXTO_SQLITE_SOURCE_FORMAT
+    }
+
+    fn normalize_path(
+        &self,
+        path: &Path,
+        context: &ProviderAdapterContext,
+    ) -> Result<ProviderNormalizationResult> {
+        normalize_dexto_sqlite(path, context)
     }
 }
 
@@ -3834,17 +3960,17 @@ pub fn import_roo_task_json_history(
     )
 }
 
-pub fn import_opencode_sqlite(
+pub fn import_crush_sqlite(
     path: impl AsRef<Path>,
     store: &mut Store,
-    options: OpenCodeSqliteImportOptions,
+    options: CrushSqliteImportOptions,
 ) -> Result<ProviderImportSummary> {
     let path = path.as_ref();
     let source_path = options
         .source_path
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
-    let normalization = OpenCodeSqliteAdapter.normalize_path(
+    let normalization = CrushSqliteAdapter.normalize_path(
         path,
         &ProviderAdapterContext {
             machine_id: options.machine_id,
@@ -3869,17 +3995,17 @@ pub fn import_opencode_sqlite(
     )
 }
 
-pub fn import_kilo_sqlite(
+pub fn import_goose_sessions_sqlite(
     path: impl AsRef<Path>,
     store: &mut Store,
-    options: KiloSqliteImportOptions,
+    options: GooseSessionsSqliteImportOptions,
 ) -> Result<ProviderImportSummary> {
     let path = path.as_ref();
     let source_path = options
         .source_path
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
-    let normalization = KiloSqliteAdapter.normalize_path(
+    let normalization = GooseSessionsSqliteAdapter.normalize_path(
         path,
         &ProviderAdapterContext {
             machine_id: options.machine_id,
@@ -3944,6 +4070,76 @@ pub fn import_hermes_sqlite(
             include_notices: true,
         },
     )?;
+    import_normalized_provider_captures(
+        store,
+        normalization,
+        NormalizedProviderImportOptions {
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+            persist_cursors: true,
+            wrap_transaction: true,
+            fast_event_inserts: true,
+        },
+    )
+}
+
+pub fn import_opencode_sqlite(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: OpenCodeSqliteImportOptions,
+) -> Result<ProviderImportSummary> {
+    let path = path.as_ref();
+    let source_path = options
+        .source_path
+        .clone()
+        .unwrap_or_else(|| path.to_path_buf());
+    let normalization = OpenCodeSqliteAdapter.normalize_path(
+        path,
+        &ProviderAdapterContext {
+            machine_id: options.machine_id,
+            source_path: Some(source_path),
+            imported_at: options.imported_at,
+            tool_output_mode: CodexToolOutputMode::Full,
+            event_mode: CodexEventImportMode::Rich,
+            include_notices: true,
+        },
+    )?;
+
+    import_normalized_provider_captures(
+        store,
+        normalization,
+        NormalizedProviderImportOptions {
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+            persist_cursors: true,
+            wrap_transaction: true,
+            fast_event_inserts: true,
+        },
+    )
+}
+
+pub fn import_kilo_sqlite(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: KiloSqliteImportOptions,
+) -> Result<ProviderImportSummary> {
+    let path = path.as_ref();
+    let source_path = options
+        .source_path
+        .clone()
+        .unwrap_or_else(|| path.to_path_buf());
+    let normalization = KiloSqliteAdapter.normalize_path(
+        path,
+        &ProviderAdapterContext {
+            machine_id: options.machine_id,
+            source_path: Some(source_path),
+            imported_at: options.imported_at,
+            tool_output_mode: CodexToolOutputMode::Full,
+            event_mode: CodexEventImportMode::Rich,
+            include_notices: true,
+        },
+    )?;
+
     import_normalized_provider_captures(
         store,
         normalization,
@@ -4104,6 +4300,40 @@ pub fn import_openhands_file_events(
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
     let normalization = OpenHandsFileEventsAdapter.normalize_path(
+        path,
+        &ProviderAdapterContext {
+            machine_id: options.machine_id,
+            source_path: Some(source_path),
+            imported_at: options.imported_at,
+            tool_output_mode: CodexToolOutputMode::Full,
+            event_mode: CodexEventImportMode::Rich,
+            include_notices: true,
+        },
+    )?;
+    import_normalized_provider_captures(
+        store,
+        normalization,
+        NormalizedProviderImportOptions {
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+            persist_cursors: true,
+            wrap_transaction: true,
+            fast_event_inserts: true,
+        },
+    )
+}
+
+pub fn import_dexto_sqlite(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: DextoSqliteImportOptions,
+) -> Result<ProviderImportSummary> {
+    let path = path.as_ref();
+    let source_path = options
+        .source_path
+        .clone()
+        .unwrap_or_else(|| path.to_path_buf());
+    let normalization = DextoSqliteAdapter.normalize_path(
         path,
         &ProviderAdapterContext {
             machine_id: options.machine_id,
@@ -4320,6 +4550,8 @@ const CLINE_TASK_JSON_SOURCE_FORMAT: &str = "cline_task_directory_json";
 const ROO_TASK_JSON_SOURCE_FORMAT: &str = "roo_task_directory_json";
 const OPENCODE_SQLITE_SOURCE_FORMAT: &str = "opencode_sqlite";
 const KILO_SQLITE_SOURCE_FORMAT: &str = "kilo_sqlite";
+const CRUSH_SQLITE_SOURCE_FORMAT: &str = "crush_sqlite";
+const GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT: &str = "goose_sessions_sqlite";
 const OPENCLAW_SOURCE_FORMAT: &str = "openclaw_session_jsonl_tree";
 const HERMES_SQLITE_SOURCE_FORMAT: &str = "hermes_state_sqlite";
 const NANOCLAW_SOURCE_FORMAT: &str = "nanoclaw_project";
@@ -4327,6 +4559,7 @@ const ASTRBOT_SQLITE_SOURCE_FORMAT: &str = "astrbot_data_v4_sqlite";
 const SHELLEY_SQLITE_SOURCE_FORMAT: &str = "shelley_sqlite";
 const CONTINUE_CLI_SOURCE_FORMAT: &str = "continue_cli_sessions_json";
 const OPENHANDS_FILE_EVENTS_SOURCE_FORMAT: &str = "openhands_file_events";
+const DEXTO_SQLITE_SOURCE_FORMAT: &str = "dexto_sqlite";
 const ANTIGRAVITY_CLI_SOURCE_FORMAT: &str = "antigravity_cli_transcript_jsonl_tree";
 const GEMINI_CLI_SOURCE_FORMAT: &str = "gemini_cli_chat_recording_jsonl";
 const CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT: &str = "cursor_agent_transcript_jsonl";
@@ -12373,6 +12606,1507 @@ fn normalize_native_jsonl_session_file(
     Ok(result)
 }
 
+#[derive(Debug, Clone)]
+struct CrushSessionRow {
+    id: String,
+    parent_session_id: Option<String>,
+    title: Option<String>,
+    created_at: Option<i64>,
+    updated_at: Option<i64>,
+    prompt_tokens: Option<i64>,
+    completion_tokens: Option<i64>,
+    cost: Option<f64>,
+    summary_message_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CrushMessageRow {
+    rowid: i64,
+    id: String,
+    session_id: String,
+    role: String,
+    parts: String,
+    created_at: Option<i64>,
+    updated_at: Option<i64>,
+    provider: Option<String>,
+    model: Option<String>,
+    is_summary_message: bool,
+}
+
+#[derive(Debug, Clone)]
+struct CrushFileRow {
+    rowid: i64,
+    session_id: Option<String>,
+    path: String,
+    version: Option<String>,
+    created_at: Option<i64>,
+    updated_at: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+struct CrushReadFileRow {
+    rowid: i64,
+    session_id: String,
+    path: String,
+    read_at: Option<i64>,
+}
+
+fn normalize_crush_sqlite(
+    path: &Path,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    let conn = open_provider_sqlite_readonly(path)?;
+    let user_version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let schema_fingerprint = opencode_schema_fingerprint(&conn)?;
+    let sessions = crush_sessions(&conn)?;
+    let messages = crush_messages(&conn)?;
+    let files = crush_files(&conn)?;
+    let read_files = crush_read_files(&conn)?;
+    let sessions_by_id = sessions
+        .iter()
+        .map(|session| (session.id.clone(), session.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let mut seen_message_sessions = BTreeSet::new();
+    let mut result = ProviderNormalizationResult::default();
+    let raw_source_path = path.display().to_string();
+
+    for message in messages {
+        let provider_event_index = crush_event_index(&message);
+        let line = provider_line_from_index(provider_event_index);
+        let Some(session) = sessions_by_id.get(&message.session_id) else {
+            push_provider_import_failure(
+                &mut result.summary,
+                line,
+                format!(
+                    "Crush message {} references missing session {}",
+                    message.id, message.session_id
+                ),
+            );
+            continue;
+        };
+        let parts: Value = match serde_json::from_str(&message.parts) {
+            Ok(parts) => parts,
+            Err(err) => {
+                push_provider_import_failure(
+                    &mut result.summary,
+                    line,
+                    format!("invalid JSON in Crush message {} parts: {err}", message.id),
+                );
+                continue;
+            }
+        };
+        seen_message_sessions.insert(message.session_id.clone());
+        let started_at = provider_timestamp_millis(session.created_at, context.imported_at);
+        let occurred_at = provider_timestamp_millis(message.created_at, started_at);
+        let ended_at = session
+            .updated_at
+            .map(|timestamp| provider_timestamp_millis(Some(timestamp), occurred_at));
+        let event_type = crush_event_type(&message, &parts);
+        let text =
+            crush_parts_text(&parts).unwrap_or_else(|| format!("Crush {} message", message.role));
+        let event = native_event(NativeEventDraft {
+            provider: CaptureProvider::Crush,
+            source_format: CRUSH_SQLITE_SOURCE_FORMAT,
+            provider_session_id: message.session_id.clone(),
+            provider_event_index,
+            provider_event_hash: Some(message.id.clone()),
+            cursor: format!(
+                "session:{}:message:{}:rowid:{}",
+                message.session_id, message.id, message.rowid
+            ),
+            event_type,
+            role: Some(provider_role(Some(&message.role))),
+            occurred_at,
+            text,
+            body: json!({
+                "message_id": message.id,
+                "role": message.role,
+                "parts": parts,
+                "provider": message.provider,
+                "model": message.model,
+                "is_summary_message": message.is_summary_message,
+                "created_at": message.created_at,
+                "updated_at": message.updated_at,
+            }),
+            metadata: json!({
+                "source": "crush_messages",
+                "source_format": CRUSH_SQLITE_SOURCE_FORMAT,
+                "message_id": message.id,
+                "session_id": message.session_id,
+                "rowid": message.rowid,
+                "provider": message.provider,
+                "model": message.model,
+            }),
+        });
+        result
+            .files_touched
+            .extend(provider_file_touches_from_raw_value(
+                CaptureProvider::Crush,
+                &session.id,
+                CRUSH_SQLITE_SOURCE_FORMAT,
+                Some(raw_source_path.as_str()),
+                &event.payload,
+                &event,
+                line,
+            ));
+        result.captures.push((
+            line,
+            crush_capture(
+                session,
+                CrushCaptureContext {
+                    started_at,
+                    ended_at,
+                    raw_source_path: &raw_source_path,
+                    user_version,
+                    schema_fingerprint: &schema_fingerprint,
+                    event: Some(event),
+                },
+                context,
+            ),
+        ));
+    }
+
+    for session in &sessions {
+        if seen_message_sessions.contains(&session.id) {
+            continue;
+        }
+        let started_at = provider_timestamp_millis(session.created_at, context.imported_at);
+        let ended_at = session
+            .updated_at
+            .map(|timestamp| provider_timestamp_millis(Some(timestamp), started_at));
+        result.captures.push((
+            0,
+            crush_capture(
+                session,
+                CrushCaptureContext {
+                    started_at,
+                    ended_at,
+                    raw_source_path: &raw_source_path,
+                    user_version,
+                    schema_fingerprint: &schema_fingerprint,
+                    event: None,
+                },
+                context,
+            ),
+        ));
+    }
+
+    result.files_touched.extend(crush_file_touches(
+        files,
+        read_files,
+        &sessions_by_id,
+        &raw_source_path,
+        context.imported_at,
+    ));
+    Ok(result)
+}
+
+struct CrushCaptureContext<'a> {
+    started_at: DateTime<Utc>,
+    ended_at: Option<DateTime<Utc>>,
+    raw_source_path: &'a str,
+    user_version: i64,
+    schema_fingerprint: &'a str,
+    event: Option<ProviderEventEnvelope>,
+}
+
+fn crush_capture(
+    session: &CrushSessionRow,
+    draft: CrushCaptureContext<'_>,
+    context: &ProviderAdapterContext,
+) -> ProviderCaptureEnvelope {
+    let is_subagent = session.parent_session_id.is_some();
+    native_provider_capture(
+        NativeSessionDraft {
+            provider: CaptureProvider::Crush,
+            source_format: CRUSH_SQLITE_SOURCE_FORMAT,
+            provider_session_id: session.id.clone(),
+            parent_provider_session_id: session.parent_session_id.clone(),
+            root_provider_session_id: session.parent_session_id.clone(),
+            external_agent_id: None,
+            agent_type: if is_subagent {
+                AgentType::Subagent
+            } else {
+                AgentType::Primary
+            },
+            role_hint: Some(if is_subagent { "subagent" } else { "primary" }.to_owned()),
+            is_primary: !is_subagent,
+            started_at: draft.started_at,
+            ended_at: draft.ended_at,
+            cwd: None,
+            fidelity: Fidelity::Imported,
+            raw_source_path: draft.raw_source_path.to_owned(),
+            trust: ProviderSourceTrust::ProviderNative,
+            source_metadata: json!({
+                "adapter": CRUSH_SQLITE_SOURCE_FORMAT,
+                "sqlite_user_version": draft.user_version,
+                "schema_fingerprint": draft.schema_fingerprint,
+                "source_path": draft.raw_source_path,
+                "upstream_tables": ["sessions", "messages", "files", "read_files"],
+            }),
+            session_metadata: json!({
+                "source_format": CRUSH_SQLITE_SOURCE_FORMAT,
+                "session_id": session.id,
+                "title": session.title,
+                "parent_session_id": session.parent_session_id,
+                "summary_message_id": session.summary_message_id,
+                "tokens": {
+                    "prompt": session.prompt_tokens,
+                    "completion": session.completion_tokens,
+                },
+                "cost": session.cost,
+                "created_at": session.created_at,
+                "updated_at": session.updated_at,
+            }),
+        },
+        context,
+        draft.event,
+    )
+}
+
+fn crush_sessions(conn: &Connection) -> Result<Vec<CrushSessionRow>> {
+    if !sqlite_table_exists(conn, "sessions")? {
+        return Err(CaptureError::InvalidPayload(
+            "Crush crush.db is missing required sessions table".into(),
+        ));
+    }
+    let columns = sqlite_table_columns(conn, "sessions")?;
+    ensure_sqlite_table_columns(&columns, "Crush sessions table", &["id"])?;
+    let parent_session_id = optional_column_expr(&columns, "parent_session_id", "NULL");
+    let title = optional_column_expr(&columns, "title", "NULL");
+    let created_at = optional_column_expr(&columns, "created_at", "NULL");
+    let updated_at = optional_column_expr(&columns, "updated_at", "NULL");
+    let prompt_tokens = optional_column_expr(&columns, "prompt_tokens", "NULL");
+    let completion_tokens = optional_column_expr(&columns, "completion_tokens", "NULL");
+    let cost = optional_column_expr(&columns, "cost", "NULL");
+    let summary_message_id = optional_column_expr(&columns, "summary_message_id", "NULL");
+    let order_by = if columns.contains("created_at") {
+        "created_at, id"
+    } else {
+        "id"
+    };
+    let sql = format!(
+        "select CAST(id AS TEXT), {parent_session_id}, {title}, {created_at}, {updated_at}, \
+         {prompt_tokens}, {completion_tokens}, {cost}, {summary_message_id} \
+         from sessions order by {order_by}"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok(CrushSessionRow {
+            id: row.get(0)?,
+            parent_session_id: row.get(1)?,
+            title: row.get(2)?,
+            created_at: row.get(3)?,
+            updated_at: row.get(4)?,
+            prompt_tokens: row.get(5)?,
+            completion_tokens: row.get(6)?,
+            cost: row.get(7)?,
+            summary_message_id: row.get(8)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(CaptureError::from)
+}
+
+fn crush_messages(conn: &Connection) -> Result<Vec<CrushMessageRow>> {
+    if !sqlite_table_exists(conn, "messages")? {
+        return Err(CaptureError::InvalidPayload(
+            "Crush crush.db is missing required messages table".into(),
+        ));
+    }
+    let columns = sqlite_table_columns(conn, "messages")?;
+    ensure_sqlite_table_columns(
+        &columns,
+        "Crush messages table",
+        &["id", "session_id", "role", "parts"],
+    )?;
+    let created_at = optional_column_expr(&columns, "created_at", "NULL");
+    let updated_at = optional_column_expr(&columns, "updated_at", "NULL");
+    let provider = optional_column_expr(&columns, "provider", "NULL");
+    let model = optional_column_expr(&columns, "model", "NULL");
+    let is_summary_message = optional_column_expr(&columns, "is_summary_message", "0");
+    let order_by = if columns.contains("created_at") {
+        "session_id, created_at, rowid"
+    } else {
+        "session_id, rowid"
+    };
+    let sql = format!(
+        "select rowid, CAST(id AS TEXT), CAST(session_id AS TEXT), role, parts, \
+         {created_at}, {updated_at}, {provider}, {model}, {is_summary_message} \
+         from messages order by {order_by}"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok(CrushMessageRow {
+            rowid: row.get(0)?,
+            id: row.get(1)?,
+            session_id: row.get(2)?,
+            role: row.get(3)?,
+            parts: row.get(4)?,
+            created_at: row.get(5)?,
+            updated_at: row.get(6)?,
+            provider: row.get(7)?,
+            model: row.get(8)?,
+            is_summary_message: sqlite_bool(row.get::<_, Option<i64>>(9)?),
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(CaptureError::from)
+}
+
+fn crush_files(conn: &Connection) -> Result<Vec<CrushFileRow>> {
+    if !sqlite_table_exists(conn, "files")? {
+        return Ok(Vec::new());
+    }
+    let columns = sqlite_table_columns(conn, "files")?;
+    ensure_sqlite_table_columns(&columns, "Crush files table", &["path"])?;
+    let session_id = optional_column_expr(&columns, "session_id", "NULL");
+    let version = optional_column_expr(&columns, "version", "NULL");
+    let created_at = optional_column_expr(&columns, "created_at", "NULL");
+    let updated_at = optional_column_expr(&columns, "updated_at", "NULL");
+    let sql = format!(
+        "select rowid, {session_id}, path, {version}, {created_at}, {updated_at} \
+         from files order by rowid"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok(CrushFileRow {
+            rowid: row.get(0)?,
+            session_id: row.get(1)?,
+            path: row.get(2)?,
+            version: row.get(3)?,
+            created_at: row.get(4)?,
+            updated_at: row.get(5)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(CaptureError::from)
+}
+
+fn crush_read_files(conn: &Connection) -> Result<Vec<CrushReadFileRow>> {
+    if !sqlite_table_exists(conn, "read_files")? {
+        return Ok(Vec::new());
+    }
+    let columns = sqlite_table_columns(conn, "read_files")?;
+    ensure_sqlite_table_columns(&columns, "Crush read_files table", &["session_id", "path"])?;
+    let read_at = optional_column_expr(&columns, "read_at", "NULL");
+    let sql = format!(
+        "select rowid, CAST(session_id AS TEXT), path, {read_at} from read_files order by rowid"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok(CrushReadFileRow {
+            rowid: row.get(0)?,
+            session_id: row.get(1)?,
+            path: row.get(2)?,
+            read_at: row.get(3)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(CaptureError::from)
+}
+
+fn crush_file_touches(
+    files: Vec<CrushFileRow>,
+    read_files: Vec<CrushReadFileRow>,
+    sessions_by_id: &BTreeMap<String, CrushSessionRow>,
+    raw_source_path: &str,
+    fallback: DateTime<Utc>,
+) -> Vec<(usize, ProviderFileTouchedEnvelope)> {
+    let mut touches = Vec::new();
+    for row in files {
+        let Some(session_id) = row
+            .session_id
+            .as_ref()
+            .filter(|session_id| sessions_by_id.contains_key(*session_id))
+        else {
+            continue;
+        };
+        let occurred_at = provider_timestamp_millis(row.updated_at.or(row.created_at), fallback);
+        let touch_index = 0x0100_0000_0000_u64.saturating_add(row.rowid.max(0) as u64);
+        touches.push((
+            provider_line_from_index(touch_index),
+            ProviderFileTouchedEnvelope {
+                provider: CaptureProvider::Crush,
+                provider_session_id: session_id.clone(),
+                provider_touch_index: touch_index,
+                provider_event_index: None,
+                raw_source_path: Some(raw_source_path.to_owned()),
+                path: row.path,
+                change_kind: Some(FileChangeKind::Modified),
+                old_path: None,
+                line_count_delta: None,
+                confidence: Confidence::Explicit,
+                occurred_at,
+                source_format: CRUSH_SQLITE_SOURCE_FORMAT.to_owned(),
+                metadata: json!({
+                    "source": "crush_files",
+                    "rowid": row.rowid,
+                    "version": row.version,
+                    "created_at": row.created_at,
+                    "updated_at": row.updated_at,
+                }),
+            },
+        ));
+    }
+    for row in read_files {
+        if !sessions_by_id.contains_key(&row.session_id) {
+            continue;
+        }
+        let occurred_at =
+            provider_timestamp_seconds(row.read_at.map(|value| value as f64), fallback);
+        let touch_index = 0x0200_0000_0000_u64.saturating_add(row.rowid.max(0) as u64);
+        touches.push((
+            provider_line_from_index(touch_index),
+            ProviderFileTouchedEnvelope {
+                provider: CaptureProvider::Crush,
+                provider_session_id: row.session_id,
+                provider_touch_index: touch_index,
+                provider_event_index: None,
+                raw_source_path: Some(raw_source_path.to_owned()),
+                path: row.path,
+                change_kind: Some(FileChangeKind::Read),
+                old_path: None,
+                line_count_delta: None,
+                confidence: Confidence::Explicit,
+                occurred_at,
+                source_format: CRUSH_SQLITE_SOURCE_FORMAT.to_owned(),
+                metadata: json!({
+                    "source": "crush_read_files",
+                    "rowid": row.rowid,
+                    "read_at": row.read_at,
+                }),
+            },
+        ));
+    }
+    touches
+}
+
+fn crush_event_index(message: &CrushMessageRow) -> u64 {
+    let base = message
+        .created_at
+        .or(message.updated_at)
+        .unwrap_or(message.rowid)
+        .max(0) as u64;
+    base.saturating_mul(4_096)
+        .saturating_add(text_id_index(&message.id, 0) % 4_096)
+}
+
+fn crush_event_type(message: &CrushMessageRow, parts: &Value) -> EventType {
+    if message.is_summary_message {
+        return EventType::Summary;
+    }
+    if crush_parts_have_type(parts, "shell_command") {
+        EventType::CommandOutput
+    } else if crush_parts_have_type(parts, "tool_result") || message.role == "tool" {
+        EventType::ToolOutput
+    } else if crush_parts_have_type(parts, "tool_call") {
+        EventType::ToolCall
+    } else {
+        EventType::Message
+    }
+}
+
+fn crush_parts_have_type(parts: &Value, expected: &str) -> bool {
+    parts.as_array().is_some_and(|items| {
+        items
+            .iter()
+            .any(|item| item.get("type").and_then(Value::as_str) == Some(expected))
+    })
+}
+
+fn crush_parts_text(parts: &Value) -> Option<String> {
+    let mut text = Vec::new();
+    if let Some(items) = parts.as_array() {
+        for item in items {
+            let kind = item.get("type").and_then(Value::as_str).unwrap_or("part");
+            let data = item.get("data").unwrap_or(item);
+            match kind {
+                "text" => push_json_text(&mut text, data.get("text").unwrap_or(data)),
+                "reasoning" => {
+                    push_json_text(
+                        &mut text,
+                        data.get("thinking")
+                            .or_else(|| data.get("text"))
+                            .unwrap_or(data),
+                    );
+                }
+                "tool_call" => {
+                    let name = data.get("name").and_then(Value::as_str).unwrap_or("tool");
+                    text.push(format!("tool call: {name}"));
+                    if let Some(input) = data.get("input").and_then(provider_value_text) {
+                        text.push(format!("tool input: {input}"));
+                    }
+                }
+                "tool_result" => {
+                    let name = data.get("name").and_then(Value::as_str).unwrap_or("tool");
+                    text.push(format!("tool result: {name}"));
+                    for key in ["content", "data", "output"] {
+                        if let Some(value) = data.get(key).and_then(provider_value_text) {
+                            text.push(value);
+                            break;
+                        }
+                    }
+                }
+                "shell_command" => {
+                    if let Some(command) = data.get("command").and_then(Value::as_str) {
+                        text.push(command.to_owned());
+                    }
+                    if let Some(output) = data.get("output").and_then(Value::as_str) {
+                        text.push(output.to_owned());
+                    }
+                }
+                "finish" => {
+                    if let Some(reason) = data.get("reason").and_then(Value::as_str) {
+                        text.push(format!("finish: {reason}"));
+                    }
+                }
+                _ => push_json_text(&mut text, data),
+            }
+            if text.iter().map(|part| part.chars().count()).sum::<usize>()
+                >= PROVIDER_MAX_TEXT_CHARS
+            {
+                break;
+            }
+        }
+    } else {
+        push_json_text(&mut text, parts);
+    }
+    (!text.is_empty()).then(|| text.join("\n"))
+}
+
+fn push_json_text(parts: &mut Vec<String>, value: &Value) {
+    if let Some(text) = provider_value_text(value).filter(|text| !text.trim().is_empty()) {
+        parts.push(text);
+    }
+}
+
+#[derive(Debug, Clone)]
+struct GooseSessionRow {
+    id: String,
+    name: Option<String>,
+    description: Option<String>,
+    user_set_name: bool,
+    session_type: Option<String>,
+    working_dir: Option<String>,
+    created_at: Option<String>,
+    updated_at: Option<String>,
+    extension_data: Option<String>,
+    total_tokens: Option<i64>,
+    input_tokens: Option<i64>,
+    output_tokens: Option<i64>,
+    accumulated_total_tokens: Option<i64>,
+    accumulated_input_tokens: Option<i64>,
+    accumulated_output_tokens: Option<i64>,
+    accumulated_cost: Option<f64>,
+    provider_name: Option<String>,
+    model_config_json: Option<String>,
+    goose_mode: Option<String>,
+    archived_at: Option<String>,
+    project_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct GooseMessageRow {
+    rowid: i64,
+    id: i64,
+    message_id: Option<String>,
+    session_id: String,
+    role: String,
+    content_json: String,
+    created_timestamp: Option<i64>,
+    timestamp: Option<String>,
+    tokens: Option<String>,
+    metadata_json: Option<String>,
+}
+
+fn normalize_goose_sessions_sqlite(
+    path: &Path,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    let conn = open_provider_sqlite_readonly(path)?;
+    let user_version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let schema_fingerprint = opencode_schema_fingerprint(&conn)?;
+    let schema_version = goose_schema_version(&conn)?;
+    let sessions = goose_sessions(&conn)?;
+    let messages = goose_messages(&conn)?;
+    let sessions_by_id = sessions
+        .iter()
+        .map(|session| (session.id.clone(), session.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let raw_source_path = path.display().to_string();
+    let mut seen_message_sessions = BTreeSet::new();
+    let mut result = ProviderNormalizationResult::default();
+
+    for message in messages {
+        let provider_event_index = goose_event_index(&message);
+        let line = provider_line_from_index(provider_event_index);
+        let Some(session) = sessions_by_id.get(&message.session_id) else {
+            push_provider_import_failure(
+                &mut result.summary,
+                line,
+                format!(
+                    "Goose message {} references missing session {}",
+                    goose_message_identity(&message),
+                    message.session_id
+                ),
+            );
+            continue;
+        };
+        let content: Value = match serde_json::from_str(&message.content_json) {
+            Ok(content) => content,
+            Err(err) => {
+                push_provider_import_failure(
+                    &mut result.summary,
+                    line,
+                    format!(
+                        "invalid JSON in Goose message {} content_json: {err}",
+                        goose_message_identity(&message)
+                    ),
+                );
+                continue;
+            }
+        };
+        let metadata = message
+            .metadata_json
+            .as_deref()
+            .map(provider_json_text)
+            .unwrap_or(Value::Null);
+        seen_message_sessions.insert(message.session_id.clone());
+        let started_at = goose_timestamp(session.created_at.as_deref(), context.imported_at);
+        let occurred_at = goose_message_timestamp(&message, started_at);
+        let ended_at = session
+            .updated_at
+            .as_deref()
+            .map(|timestamp| goose_timestamp(Some(timestamp), occurred_at));
+        let event_type = goose_event_type(&message.role, &content);
+        let text = goose_content_text(&content)
+            .unwrap_or_else(|| format!("Goose {} message", message.role));
+        let event = native_event(NativeEventDraft {
+            provider: CaptureProvider::Goose,
+            source_format: GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT,
+            provider_session_id: message.session_id.clone(),
+            provider_event_index,
+            provider_event_hash: Some(goose_message_identity(&message)),
+            cursor: format!(
+                "session:{}:message:{}:rowid:{}",
+                message.session_id,
+                goose_message_identity(&message),
+                message.rowid
+            ),
+            event_type,
+            role: Some(provider_role(Some(&message.role))),
+            occurred_at,
+            text,
+            body: json!({
+                "message_id": message.message_id,
+                "row_id": message.id,
+                "role": message.role,
+                "content": content,
+                "metadata": metadata,
+                "tokens": message.tokens.as_deref().map(provider_json_text),
+                "created_timestamp": message.created_timestamp,
+                "timestamp": message.timestamp,
+            }),
+            metadata: json!({
+                "source": "goose_messages",
+                "source_format": GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT,
+                "message_id": message.message_id,
+                "row_id": message.id,
+                "session_id": message.session_id,
+                "rowid": message.rowid,
+            }),
+        });
+        result
+            .files_touched
+            .extend(provider_file_touches_from_raw_value(
+                CaptureProvider::Goose,
+                &session.id,
+                GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT,
+                Some(raw_source_path.as_str()),
+                &event.payload,
+                &event,
+                line,
+            ));
+        result.captures.push((
+            line,
+            goose_capture(
+                session,
+                GooseCaptureContext {
+                    started_at,
+                    ended_at,
+                    raw_source_path: &raw_source_path,
+                    user_version,
+                    schema_version,
+                    schema_fingerprint: &schema_fingerprint,
+                    event: Some(event),
+                },
+                context,
+            ),
+        ));
+    }
+
+    for session in &sessions {
+        if seen_message_sessions.contains(&session.id) {
+            continue;
+        }
+        let started_at = goose_timestamp(session.created_at.as_deref(), context.imported_at);
+        let ended_at = session
+            .updated_at
+            .as_deref()
+            .map(|timestamp| goose_timestamp(Some(timestamp), started_at));
+        result.captures.push((
+            0,
+            goose_capture(
+                session,
+                GooseCaptureContext {
+                    started_at,
+                    ended_at,
+                    raw_source_path: &raw_source_path,
+                    user_version,
+                    schema_version,
+                    schema_fingerprint: &schema_fingerprint,
+                    event: None,
+                },
+                context,
+            ),
+        ));
+    }
+    Ok(result)
+}
+
+struct GooseCaptureContext<'a> {
+    started_at: DateTime<Utc>,
+    ended_at: Option<DateTime<Utc>>,
+    raw_source_path: &'a str,
+    user_version: i64,
+    schema_version: Option<i64>,
+    schema_fingerprint: &'a str,
+    event: Option<ProviderEventEnvelope>,
+}
+
+fn goose_capture(
+    session: &GooseSessionRow,
+    draft: GooseCaptureContext<'_>,
+    context: &ProviderAdapterContext,
+) -> ProviderCaptureEnvelope {
+    native_provider_capture(
+        NativeSessionDraft {
+            provider: CaptureProvider::Goose,
+            source_format: GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT,
+            provider_session_id: session.id.clone(),
+            parent_provider_session_id: None,
+            root_provider_session_id: None,
+            external_agent_id: session.provider_name.clone(),
+            agent_type: AgentType::Primary,
+            role_hint: session
+                .session_type
+                .clone()
+                .or_else(|| Some("primary".to_owned())),
+            is_primary: true,
+            started_at: draft.started_at,
+            ended_at: draft.ended_at,
+            cwd: session.working_dir.clone(),
+            fidelity: Fidelity::Imported,
+            raw_source_path: draft.raw_source_path.to_owned(),
+            trust: ProviderSourceTrust::ProviderNative,
+            source_metadata: json!({
+                "adapter": GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT,
+                "sqlite_user_version": draft.user_version,
+                "goose_schema_version": draft.schema_version,
+                "schema_fingerprint": draft.schema_fingerprint,
+                "source_path": draft.raw_source_path,
+            }),
+            session_metadata: json!({
+                "source_format": GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT,
+                "session_id": session.id,
+                "name": session.name,
+                "description": session.description,
+                "user_set_name": session.user_set_name,
+                "session_type": session.session_type,
+                "extension_data": session.extension_data.as_deref().map(provider_json_text),
+                "provider_name": session.provider_name,
+                "model_config": session.model_config_json.as_deref().map(provider_json_text),
+                "goose_mode": session.goose_mode,
+                "archived_at": session.archived_at,
+                "project_id": session.project_id,
+                "tokens": {
+                    "total": session.total_tokens,
+                    "input": session.input_tokens,
+                    "output": session.output_tokens,
+                    "accumulated_total": session.accumulated_total_tokens,
+                    "accumulated_input": session.accumulated_input_tokens,
+                    "accumulated_output": session.accumulated_output_tokens,
+                },
+                "accumulated_cost": session.accumulated_cost,
+            }),
+        },
+        context,
+        draft.event,
+    )
+}
+
+fn goose_schema_version(conn: &Connection) -> Result<Option<i64>> {
+    if !sqlite_table_exists(conn, "schema_version")? {
+        return Ok(None);
+    }
+    let columns = sqlite_table_columns(conn, "schema_version")?;
+    let version_column = if columns.contains("version") {
+        "version"
+    } else if columns.contains("id") {
+        "id"
+    } else {
+        return Ok(None);
+    };
+    let sql = format!("select max({version_column}) from schema_version");
+    conn.query_row(&sql, [], |row| row.get::<_, Option<i64>>(0))
+        .map_err(CaptureError::from)
+}
+
+fn goose_sessions(conn: &Connection) -> Result<Vec<GooseSessionRow>> {
+    if !sqlite_table_exists(conn, "sessions")? {
+        return Err(CaptureError::InvalidPayload(
+            "Goose sessions.db is missing required sessions table".into(),
+        ));
+    }
+    let columns = sqlite_table_columns(conn, "sessions")?;
+    ensure_sqlite_table_columns(&columns, "Goose sessions table", &["id"])?;
+    let name = optional_column_expr(&columns, "name", "NULL");
+    let description = optional_column_expr(&columns, "description", "NULL");
+    let user_set_name = optional_column_expr(&columns, "user_set_name", "0");
+    let session_type = optional_column_expr(&columns, "session_type", "NULL");
+    let working_dir = optional_column_expr(&columns, "working_dir", "NULL");
+    let created_at = optional_column_expr(&columns, "created_at", "NULL");
+    let updated_at = optional_column_expr(&columns, "updated_at", "NULL");
+    let extension_data = optional_column_expr(&columns, "extension_data", "NULL");
+    let total_tokens = optional_column_expr(&columns, "total_tokens", "NULL");
+    let input_tokens = optional_column_expr(&columns, "input_tokens", "NULL");
+    let output_tokens = optional_column_expr(&columns, "output_tokens", "NULL");
+    let accumulated_total_tokens =
+        optional_column_expr(&columns, "accumulated_total_tokens", "NULL");
+    let accumulated_input_tokens =
+        optional_column_expr(&columns, "accumulated_input_tokens", "NULL");
+    let accumulated_output_tokens =
+        optional_column_expr(&columns, "accumulated_output_tokens", "NULL");
+    let accumulated_cost = optional_column_expr(&columns, "accumulated_cost", "NULL");
+    let provider_name = optional_column_expr(&columns, "provider_name", "NULL");
+    let model_config_json = optional_column_expr(&columns, "model_config_json", "NULL");
+    let goose_mode = optional_column_expr(&columns, "goose_mode", "NULL");
+    let archived_at = optional_column_expr(&columns, "archived_at", "NULL");
+    let project_id = optional_column_expr(&columns, "project_id", "NULL");
+    let order_by = if columns.contains("created_at") {
+        "created_at, id"
+    } else {
+        "id"
+    };
+    let sql = format!(
+        "select CAST(id AS TEXT), {name}, {description}, {user_set_name}, {session_type}, \
+         {working_dir}, {created_at}, {updated_at}, {extension_data}, {total_tokens}, \
+         {input_tokens}, {output_tokens}, {accumulated_total_tokens}, \
+         {accumulated_input_tokens}, {accumulated_output_tokens}, {accumulated_cost}, \
+         {provider_name}, {model_config_json}, {goose_mode}, {archived_at}, {project_id} \
+         from sessions order by {order_by}"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok(GooseSessionRow {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            description: row.get(2)?,
+            user_set_name: sqlite_bool(row.get::<_, Option<i64>>(3)?),
+            session_type: row.get(4)?,
+            working_dir: row.get(5)?,
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
+            extension_data: row.get(8)?,
+            total_tokens: row.get(9)?,
+            input_tokens: row.get(10)?,
+            output_tokens: row.get(11)?,
+            accumulated_total_tokens: row.get(12)?,
+            accumulated_input_tokens: row.get(13)?,
+            accumulated_output_tokens: row.get(14)?,
+            accumulated_cost: row.get(15)?,
+            provider_name: row.get(16)?,
+            model_config_json: row.get(17)?,
+            goose_mode: row.get(18)?,
+            archived_at: row.get(19)?,
+            project_id: row.get(20)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(CaptureError::from)
+}
+
+fn goose_messages(conn: &Connection) -> Result<Vec<GooseMessageRow>> {
+    if !sqlite_table_exists(conn, "messages")? {
+        return Err(CaptureError::InvalidPayload(
+            "Goose sessions.db is missing required messages table".into(),
+        ));
+    }
+    let columns = sqlite_table_columns(conn, "messages")?;
+    ensure_sqlite_table_columns(
+        &columns,
+        "Goose messages table",
+        &["session_id", "role", "content_json"],
+    )?;
+    let id = if columns.contains("id") {
+        "id"
+    } else {
+        "rowid"
+    };
+    let message_id = optional_column_expr(&columns, "message_id", "NULL");
+    let created_timestamp = optional_column_expr(&columns, "created_timestamp", "NULL");
+    let timestamp = optional_column_expr(&columns, "timestamp", "NULL");
+    let tokens = if columns.contains("tokens") {
+        "CAST(tokens AS TEXT)"
+    } else {
+        "NULL"
+    };
+    let metadata_json = optional_column_expr(&columns, "metadata_json", "NULL");
+    let order_by = if columns.contains("created_timestamp") {
+        "session_id, created_timestamp, rowid"
+    } else {
+        "session_id, rowid"
+    };
+    let sql = format!(
+        "select rowid, {id}, {message_id}, CAST(session_id AS TEXT), role, content_json, \
+         {created_timestamp}, {timestamp}, {tokens}, {metadata_json} \
+         from messages order by {order_by}"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok(GooseMessageRow {
+            rowid: row.get(0)?,
+            id: row.get(1)?,
+            message_id: row.get(2)?,
+            session_id: row.get(3)?,
+            role: row.get(4)?,
+            content_json: row.get(5)?,
+            created_timestamp: row.get(6)?,
+            timestamp: row.get(7)?,
+            tokens: row.get(8)?,
+            metadata_json: row.get(9)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(CaptureError::from)
+}
+
+fn goose_event_index(message: &GooseMessageRow) -> u64 {
+    let base = message.created_timestamp.unwrap_or(message.rowid).max(0) as u64;
+    base.saturating_mul(4_096)
+        .saturating_add(text_id_index(&goose_message_identity(message), 0) % 4_096)
+}
+
+fn goose_message_identity(message: &GooseMessageRow) -> String {
+    message
+        .message_id
+        .clone()
+        .unwrap_or_else(|| format!("row-{}", message.id))
+}
+
+fn goose_message_timestamp(message: &GooseMessageRow, fallback: DateTime<Utc>) -> DateTime<Utc> {
+    if let Some(timestamp) = message.created_timestamp {
+        return provider_timestamp_seconds(Some(timestamp as f64), fallback);
+    }
+    goose_timestamp(message.timestamp.as_deref(), fallback)
+}
+
+fn goose_timestamp(raw: Option<&str>, fallback: DateTime<Utc>) -> DateTime<Utc> {
+    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return fallback;
+    };
+    parse_rfc3339_utc(raw)
+        .or_else(|| {
+            NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S%.f")
+                .ok()
+                .map(|naive| DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc))
+        })
+        .or_else(|| {
+            raw.parse::<f64>()
+                .ok()
+                .map(|timestamp| provider_timestamp_seconds(Some(timestamp), fallback))
+        })
+        .unwrap_or(fallback)
+}
+
+fn goose_event_type(role: &str, content: &Value) -> EventType {
+    if goose_content_has_type(content, "toolResponse") {
+        EventType::ToolOutput
+    } else if goose_content_has_type(content, "toolRequest")
+        || goose_content_has_type(content, "frontendToolRequest")
+    {
+        EventType::ToolCall
+    } else if matches!(role, "user" | "assistant" | "system") {
+        EventType::Message
+    } else {
+        EventType::Notice
+    }
+}
+
+fn goose_content_has_type(content: &Value, expected: &str) -> bool {
+    match content {
+        Value::Array(items) => items
+            .iter()
+            .any(|item| goose_content_has_type(item, expected)),
+        Value::Object(object) => {
+            object
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| kind == expected)
+                || object
+                    .values()
+                    .any(|value| goose_content_has_type(value, expected))
+        }
+        _ => false,
+    }
+}
+
+fn goose_content_text(content: &Value) -> Option<String> {
+    let mut parts = Vec::new();
+    goose_collect_text(content, &mut parts);
+    (!parts.is_empty()).then(|| parts.join("\n"))
+}
+
+fn goose_collect_text(value: &Value, parts: &mut Vec<String>) {
+    match value {
+        Value::String(text) => parts.push(text.clone()),
+        Value::Array(items) => {
+            for item in items {
+                goose_collect_text(item, parts);
+                if parts.iter().map(|part| part.chars().count()).sum::<usize>()
+                    >= PROVIDER_MAX_TEXT_CHARS
+                {
+                    break;
+                }
+            }
+        }
+        Value::Object(object) => {
+            let kind = object.get("type").and_then(Value::as_str);
+            match kind {
+                Some("text") => {
+                    if let Some(text) = object.get("text").and_then(Value::as_str) {
+                        parts.push(text.to_owned());
+                    }
+                }
+                Some("thinking") => {
+                    if let Some(text) = object.get("thinking").and_then(Value::as_str) {
+                        parts.push(text.to_owned());
+                    }
+                }
+                Some("redactedThinking") => {
+                    parts.push("redacted thinking".to_owned());
+                }
+                Some("toolRequest") | Some("frontendToolRequest") => {
+                    let call = object.get("toolCall").unwrap_or(value);
+                    let name = call
+                        .get("name")
+                        .or_else(|| object.get("name"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("tool");
+                    parts.push(format!("tool call: {name}"));
+                    if let Some(input) = call
+                        .get("arguments")
+                        .or_else(|| call.get("input"))
+                        .and_then(provider_value_text)
+                    {
+                        parts.push(format!("tool input: {input}"));
+                    }
+                }
+                Some("toolResponse") => {
+                    parts.push("tool response".to_owned());
+                    for key in ["toolResult", "content", "result"] {
+                        if let Some(text) = object.get(key).and_then(provider_value_text) {
+                            parts.push(text);
+                            break;
+                        }
+                    }
+                }
+                Some("toolConfirmationRequest") => {
+                    parts.push("tool confirmation request".to_owned());
+                }
+                Some("systemNotification") | Some("actionRequired") => {
+                    for key in ["message", "text", "content"] {
+                        if let Some(text) = object.get(key).and_then(provider_value_text) {
+                            parts.push(text);
+                            break;
+                        }
+                    }
+                }
+                _ => {
+                    for key in ["text", "content", "message"] {
+                        if let Some(text) = object.get(key).and_then(provider_value_text) {
+                            parts.push(text);
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        Value::Number(_) | Value::Bool(_) => parts.push(value.to_string()),
+        Value::Null => {}
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DextoSessionRow {
+    id: String,
+    raw: Option<Value>,
+    created_at: Option<String>,
+    updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct DextoMessageRow {
+    session_id: String,
+    sequence: i64,
+    raw: String,
+    created_at: Option<String>,
+}
+
+fn normalize_dexto_sqlite(
+    path: &Path,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    let conn = open_provider_sqlite_readonly(path)?;
+    let user_version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let schema_fingerprint = opencode_schema_fingerprint(&conn)?;
+    let mut sessions = dexto_sessions(&conn)?;
+    let messages = dexto_messages(&conn)?;
+    for session_id in messages.iter().map(|message| message.session_id.clone()) {
+        sessions
+            .entry(session_id.clone())
+            .or_insert(DextoSessionRow {
+                id: session_id,
+                raw: None,
+                created_at: None,
+                updated_at: None,
+            });
+    }
+    let raw_source_path = path.display().to_string();
+    let mut seen_message_sessions = BTreeSet::new();
+    let mut result = ProviderNormalizationResult::default();
+
+    for message in messages {
+        let provider_event_index =
+            match provider_nonnegative_i64_to_u64(message.sequence, "Dexto message sequence") {
+                Ok(sequence) => sequence,
+                Err(err) => {
+                    push_provider_import_failure(&mut result.summary, 0, err.to_string());
+                    continue;
+                }
+            };
+        let line = provider_line_from_index(provider_event_index);
+        let Some(session) = sessions.get(&message.session_id) else {
+            continue;
+        };
+        let value: Value = match serde_json::from_str(&message.raw) {
+            Ok(value) => value,
+            Err(err) => {
+                push_provider_import_failure(
+                    &mut result.summary,
+                    line,
+                    format!(
+                        "invalid JSON in Dexto messages:{} sequence {}: {err}",
+                        message.session_id, message.sequence
+                    ),
+                );
+                continue;
+            }
+        };
+        seen_message_sessions.insert(message.session_id.clone());
+        let started_at = dexto_session_started_at(session, context.imported_at);
+        let occurred_at = provider_timestamp_value(
+            value
+                .get("createdAt")
+                .or_else(|| value.get("created_at"))
+                .or_else(|| value.get("timestamp"))
+                .or_else(|| value.get("time")),
+            dexto_timestamp(message.created_at.as_deref(), started_at),
+        );
+        let ended_at = dexto_session_ended_at(session, occurred_at);
+        let role = value
+            .get("role")
+            .or_else(|| value.get("type"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let event_type = dexto_event_type(role, &value);
+        let text = dexto_message_text(&value).unwrap_or_else(|| format!("Dexto {role} message"));
+        let message_id = value
+            .get("id")
+            .or_else(|| value.get("messageId"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("sequence-{}", message.sequence));
+        let event = native_event(NativeEventDraft {
+            provider: CaptureProvider::Dexto,
+            source_format: DEXTO_SQLITE_SOURCE_FORMAT,
+            provider_session_id: message.session_id.clone(),
+            provider_event_index,
+            provider_event_hash: Some(message_id.clone()),
+            cursor: format!(
+                "messages:{}:sequence:{}",
+                message.session_id, message.sequence
+            ),
+            event_type,
+            role: Some(provider_role(Some(role))),
+            occurred_at,
+            text,
+            body: json!({
+                "message_id": message_id,
+                "sequence": message.sequence,
+                "message": value,
+                "created_at": message.created_at,
+            }),
+            metadata: json!({
+                "source": "dexto_list_store",
+                "source_format": DEXTO_SQLITE_SOURCE_FORMAT,
+                "session_id": message.session_id,
+                "sequence": message.sequence,
+                "message_id": message_id,
+                "path_semantics": "explicit SQLite path only; Dexto default data directory was not inferred from the researched clone",
+            }),
+        });
+        result
+            .files_touched
+            .extend(provider_file_touches_from_raw_value(
+                CaptureProvider::Dexto,
+                &session.id,
+                DEXTO_SQLITE_SOURCE_FORMAT,
+                Some(raw_source_path.as_str()),
+                &event.payload,
+                &event,
+                line,
+            ));
+        result.captures.push((
+            line,
+            dexto_capture(
+                session,
+                DextoCaptureContext {
+                    started_at,
+                    ended_at,
+                    raw_source_path: &raw_source_path,
+                    user_version,
+                    schema_fingerprint: &schema_fingerprint,
+                    event: Some(event),
+                },
+                context,
+            ),
+        ));
+    }
+
+    for session in sessions.values() {
+        if seen_message_sessions.contains(&session.id) {
+            continue;
+        }
+        let started_at = dexto_session_started_at(session, context.imported_at);
+        let ended_at = dexto_session_ended_at(session, started_at);
+        result.captures.push((
+            0,
+            dexto_capture(
+                session,
+                DextoCaptureContext {
+                    started_at,
+                    ended_at,
+                    raw_source_path: &raw_source_path,
+                    user_version,
+                    schema_fingerprint: &schema_fingerprint,
+                    event: None,
+                },
+                context,
+            ),
+        ));
+    }
+
+    Ok(result)
+}
+
+struct DextoCaptureContext<'a> {
+    started_at: DateTime<Utc>,
+    ended_at: Option<DateTime<Utc>>,
+    raw_source_path: &'a str,
+    user_version: i64,
+    schema_fingerprint: &'a str,
+    event: Option<ProviderEventEnvelope>,
+}
+
+fn dexto_capture(
+    session: &DextoSessionRow,
+    draft: DextoCaptureContext<'_>,
+    context: &ProviderAdapterContext,
+) -> ProviderCaptureEnvelope {
+    let raw = session.raw.clone().unwrap_or(Value::Null);
+    native_provider_capture(
+        NativeSessionDraft {
+            provider: CaptureProvider::Dexto,
+            source_format: DEXTO_SQLITE_SOURCE_FORMAT,
+            provider_session_id: session.id.clone(),
+            parent_provider_session_id: raw
+                .get("parentSessionId")
+                .or_else(|| raw.get("parent_session_id"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            root_provider_session_id: raw
+                .get("parentSessionId")
+                .or_else(|| raw.get("parent_session_id"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            external_agent_id: raw
+                .get("userId")
+                .or_else(|| raw.get("user_id"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            agent_type: AgentType::Primary,
+            role_hint: Some("primary".to_owned()),
+            is_primary: true,
+            started_at: draft.started_at,
+            ended_at: draft.ended_at,
+            cwd: None,
+            fidelity: Fidelity::Imported,
+            raw_source_path: draft.raw_source_path.to_owned(),
+            trust: ProviderSourceTrust::ProviderNative,
+            source_metadata: json!({
+                "adapter": DEXTO_SQLITE_SOURCE_FORMAT,
+                "sqlite_user_version": draft.user_version,
+                "schema_fingerprint": draft.schema_fingerprint,
+                "source_path": draft.raw_source_path,
+                "path_semantics": "explicit SQLite path only; Dexto default data directory was not inferred from the researched clone",
+            }),
+            session_metadata: json!({
+                "source_format": DEXTO_SQLITE_SOURCE_FORMAT,
+                "session_id": session.id,
+                "session": provider_capped_json_value(&raw, PROVIDER_MAX_PREVIEW_CHARS),
+            }),
+        },
+        context,
+        draft.event,
+    )
+}
+
+fn dexto_sessions(conn: &Connection) -> Result<BTreeMap<String, DextoSessionRow>> {
+    if !sqlite_table_exists(conn, "kv_store")? {
+        return Err(CaptureError::InvalidPayload(
+            "Dexto SQLite database is missing required kv_store table".into(),
+        ));
+    }
+    let columns = sqlite_table_columns(conn, "kv_store")?;
+    ensure_sqlite_table_columns(&columns, "Dexto kv_store table", &["key", "value"])?;
+    let created_at = optional_column_expr(&columns, "created_at", "NULL");
+    let updated_at = optional_column_expr(&columns, "updated_at", "NULL");
+    let sql = format!(
+        "select key, value, {created_at}, {updated_at} from kv_store \
+         where key like 'session:%' order by key"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| {
+        let key: String = row.get(0)?;
+        let value: String = row.get(1)?;
+        let id = key.strip_prefix("session:").unwrap_or(&key).to_owned();
+        Ok(DextoSessionRow {
+            id,
+            raw: serde_json::from_str(&value).ok(),
+            created_at: row.get(2)?,
+            updated_at: row.get(3)?,
+        })
+    })?;
+    let rows = rows
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(CaptureError::from)?;
+    Ok(rows
+        .into_iter()
+        .map(|session| (session.id.clone(), session))
+        .collect())
+}
+
+fn dexto_messages(conn: &Connection) -> Result<Vec<DextoMessageRow>> {
+    if !sqlite_table_exists(conn, "list_store")? {
+        return Err(CaptureError::InvalidPayload(
+            "Dexto SQLite database is missing required list_store table".into(),
+        ));
+    }
+    let columns = sqlite_table_columns(conn, "list_store")?;
+    ensure_sqlite_table_columns(
+        &columns,
+        "Dexto list_store table",
+        &["key", "value", "sequence"],
+    )?;
+    let created_at = optional_column_expr(&columns, "created_at", "NULL");
+    let sql = format!(
+        "select key, value, sequence, {created_at} from list_store \
+         where key like 'messages:%' order by key, sequence"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| {
+        let key: String = row.get(0)?;
+        Ok(DextoMessageRow {
+            session_id: key.strip_prefix("messages:").unwrap_or(&key).to_owned(),
+            raw: row.get(1)?,
+            sequence: row.get(2)?,
+            created_at: row.get(3)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(CaptureError::from)
+}
+
+fn dexto_session_started_at(session: &DextoSessionRow, fallback: DateTime<Utc>) -> DateTime<Utc> {
+    provider_timestamp_value(
+        session
+            .raw
+            .as_ref()
+            .and_then(|raw| raw.get("createdAt").or_else(|| raw.get("created_at"))),
+        dexto_timestamp(session.created_at.as_deref(), fallback),
+    )
+}
+
+fn dexto_session_ended_at(
+    session: &DextoSessionRow,
+    fallback: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    Some(provider_timestamp_value(
+        session
+            .raw
+            .as_ref()
+            .and_then(|raw| raw.get("lastActivity").or_else(|| raw.get("last_activity"))),
+        dexto_timestamp(session.updated_at.as_deref(), fallback),
+    ))
+}
+
+fn dexto_timestamp(raw: Option<&str>, fallback: DateTime<Utc>) -> DateTime<Utc> {
+    goose_timestamp(raw, fallback)
+}
+
+fn dexto_event_type(role: &str, value: &Value) -> EventType {
+    if role == "tool" || json_has_any_key(value, &["toolResult", "tool_result"]) {
+        EventType::ToolOutput
+    } else if json_has_any_key(value, &["toolCalls", "tool_calls", "toolCall", "tool_call"]) {
+        EventType::ToolCall
+    } else if matches!(role, "user" | "assistant" | "system") {
+        EventType::Message
+    } else {
+        EventType::Notice
+    }
+}
+
+fn dexto_message_text(value: &Value) -> Option<String> {
+    value
+        .get("content")
+        .or_else(|| value.get("text"))
+        .or_else(|| value.get("message"))
+        .and_then(provider_value_text)
+        .or_else(|| provider_value_text(value))
+}
+
+fn json_has_any_key(value: &Value, keys: &[&str]) -> bool {
+    match value {
+        Value::Object(object) => object.iter().any(|(key, value)| {
+            keys.iter().any(|expected| key == expected) || json_has_any_key(value, keys)
+        }),
+        Value::Array(items) => items.iter().any(|item| json_has_any_key(item, keys)),
+        _ => false,
+    }
+}
+
 fn native_jsonl_header_session_id(provider: CaptureProvider, value: &Value) -> Option<String> {
     match provider {
         CaptureProvider::Gemini => value.get("sessionId").and_then(Value::as_str),
@@ -18613,6 +20347,194 @@ mod tests {
         assert_eq!(source.status, ProviderSourceStatus::Available);
         assert_eq!(source.import_support, ProviderImportSupport::Native);
         assert_eq!(source.path, db);
+    }
+
+    #[test]
+    fn native_crush_fixture_imports_searches_and_reimports() {
+        let temp = tempdir();
+        let fixture = provider_history_fixture("crush/v1/crush.db");
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let first = import_crush_sqlite(
+            &fixture,
+            &mut store,
+            CrushSqliteImportOptions {
+                machine_id: "test-machine".into(),
+                source_path: Some(fixture.clone()),
+                imported_at: DateTime::parse_from_rfc3339("2026-06-24T12:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                allow_partial_failures: true,
+                ..CrushSqliteImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(first.failed, 0, "{:?}", first.failures);
+        assert_eq!(first.imported_sessions, 2);
+        assert_eq!(first.imported_events, 4);
+        assert_eq!(first.imported_edges, 1);
+        let parent_id = provider_session_uuid(CaptureProvider::Crush, "crush-root");
+        let child_id = provider_session_uuid(CaptureProvider::Crush, "crush-child");
+        assert_eq!(
+            store.get_session(child_id).unwrap().parent_session_id,
+            Some(parent_id)
+        );
+        let events = store.events_for_session(parent_id).unwrap();
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == EventType::ToolCall));
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == EventType::Summary));
+        assert!(store
+            .search_event_hits("crush oracle", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::Crush)));
+        let source = provider_source_for_path(CaptureProvider::Crush, fixture.clone());
+        assert_eq!(source.source_format, CRUSH_SQLITE_SOURCE_FORMAT);
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+
+        let second = import_crush_sqlite(
+            &fixture,
+            &mut store,
+            CrushSqliteImportOptions {
+                allow_partial_failures: true,
+                ..CrushSqliteImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(second.failed, 0, "{:?}", second.failures);
+        assert_eq!(second.imported_sessions, 0);
+        assert_eq!(second.imported_events, 0);
+        assert_eq!(second.imported_edges, 0);
+        assert_eq!(second.skipped_sessions, 2);
+        assert_eq!(second.skipped_events, 4);
+        assert_eq!(second.skipped_edges, 1);
+    }
+
+    #[test]
+    fn native_goose_fixture_imports_searches_and_reimports() {
+        let temp = tempdir();
+        let fixture = provider_history_fixture("goose/v14/sessions.db");
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let first = import_goose_sessions_sqlite(
+            &fixture,
+            &mut store,
+            GooseSessionsSqliteImportOptions {
+                machine_id: "test-machine".into(),
+                source_path: Some(fixture.clone()),
+                imported_at: DateTime::parse_from_rfc3339("2026-06-24T12:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                allow_partial_failures: true,
+                ..GooseSessionsSqliteImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(first.failed, 0, "{:?}", first.failures);
+        assert_eq!(first.imported_sessions, 1);
+        assert_eq!(first.imported_events, 3);
+        let session_id = provider_session_uuid(CaptureProvider::Goose, "goose-root");
+        store.get_session(session_id).unwrap();
+        let source = store
+            .capture_source_by_external_session(CaptureProvider::Goose, "goose-root")
+            .unwrap()
+            .unwrap();
+        assert_eq!(source.descriptor.cwd.as_deref(), Some("/workspace/goose"));
+        assert!(source
+            .sync
+            .metadata
+            .to_string()
+            .contains("\"goose_schema_version\":14"));
+        let events = store.events_for_session(session_id).unwrap();
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == EventType::ToolCall));
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == EventType::ToolOutput));
+        assert!(store
+            .search_event_hits("goose oracle", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::Goose)));
+
+        let second = import_goose_sessions_sqlite(
+            &fixture,
+            &mut store,
+            GooseSessionsSqliteImportOptions {
+                allow_partial_failures: true,
+                ..GooseSessionsSqliteImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(second.failed, 0, "{:?}", second.failures);
+        assert_eq!(second.imported_sessions, 0);
+        assert_eq!(second.imported_events, 0);
+        assert_eq!(second.skipped_sessions, 1);
+        assert_eq!(second.skipped_events, 3);
+    }
+
+    #[test]
+    fn native_dexto_fixture_imports_searches_and_reimports_with_explicit_path() {
+        let temp = tempdir();
+        let fixture = provider_history_fixture("dexto/v1/dexto.db");
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let source = provider_source_for_path(CaptureProvider::Dexto, fixture.clone());
+        assert_eq!(source.source_format, DEXTO_SQLITE_SOURCE_FORMAT);
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+
+        let first = import_dexto_sqlite(
+            &fixture,
+            &mut store,
+            DextoSqliteImportOptions {
+                machine_id: "test-machine".into(),
+                source_path: Some(fixture.clone()),
+                imported_at: DateTime::parse_from_rfc3339("2026-06-24T12:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                allow_partial_failures: true,
+                ..DextoSqliteImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(first.failed, 0, "{:?}", first.failures);
+        assert_eq!(first.imported_sessions, 1);
+        assert_eq!(first.imported_events, 3);
+        let session_id = provider_session_uuid(CaptureProvider::Dexto, "dexto-root");
+        let events = store.events_for_session(session_id).unwrap();
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == EventType::ToolCall));
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == EventType::ToolOutput));
+        assert!(store
+            .search_event_hits("dexto oracle", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::Dexto)));
+
+        let second = import_dexto_sqlite(
+            &fixture,
+            &mut store,
+            DextoSqliteImportOptions {
+                allow_partial_failures: true,
+                ..DextoSqliteImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(second.failed, 0, "{:?}", second.failures);
+        assert_eq!(second.imported_sessions, 0);
+        assert_eq!(second.imported_events, 0);
+        assert_eq!(second.skipped_sessions, 1);
+        assert_eq!(second.skipped_events, 3);
     }
 
     #[test]

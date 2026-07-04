@@ -36,9 +36,10 @@ use ctx_history_capture::{
     import_antigravity_cli_history, import_astrbot_sqlite, import_claude_projects_jsonl_tree,
     import_cline_task_json_history, import_codex_history_jsonl, import_codex_session_jsonl,
     import_codex_session_jsonl_tail, import_codex_session_paths, import_codex_session_tree,
-    import_continue_cli_sessions, import_copilot_cli_session_events, import_cursor_native_history,
-    import_custom_history_jsonl_v1, import_custom_history_jsonl_v1_reader,
-    import_factory_ai_droid_sessions, import_gemini_cli_history, import_hermes_sqlite,
+    import_continue_cli_sessions, import_copilot_cli_session_events, import_crush_sqlite,
+    import_cursor_native_history, import_custom_history_jsonl_v1,
+    import_custom_history_jsonl_v1_reader, import_dexto_sqlite, import_factory_ai_droid_sessions,
+    import_gemini_cli_history, import_goose_sessions_sqlite, import_hermes_sqlite,
     import_kilo_sqlite, import_kimi_code_cli_history, import_nanoclaw_project,
     import_openclaw_history, import_opencode_sqlite, import_openhands_file_events,
     import_pi_session_jsonl, import_qwen_code_history, import_roo_task_json_history,
@@ -48,8 +49,9 @@ use ctx_history_capture::{
     ClaudeProjectsImportOptions, ClineTaskJsonImportOptions, CodexEventImportMode,
     CodexHistoryImportOptions, CodexSessionCatalogOptions, CodexSessionImportOptions,
     CodexSessionImportProgress, CodexSessionImportProgressCallback, CodexToolOutputMode,
-    ContinueCliImportOptions, CopilotCliImportOptions, CursorNativeImportOptions,
-    CustomHistoryJsonlV1ImportOptions, FactoryAiDroidImportOptions, GeminiCliImportOptions,
+    ContinueCliImportOptions, CopilotCliImportOptions, CrushSqliteImportOptions,
+    CursorNativeImportOptions, CustomHistoryJsonlV1ImportOptions, DextoSqliteImportOptions,
+    FactoryAiDroidImportOptions, GeminiCliImportOptions, GooseSessionsSqliteImportOptions,
     HermesSqliteImportOptions, KiloSqliteImportOptions, KimiCodeCliImportOptions,
     NanoClawImportOptions, OpenClawImportOptions, OpenCodeSqliteImportOptions,
     OpenHandsImportOptions, PiSessionImportOptions, ProviderImportSummary, ProviderImportSupport,
@@ -683,6 +685,8 @@ enum NativeProviderArg {
         alias = "kilocode"
     )]
     Kilo,
+    Crush,
+    Goose,
     #[value(alias = "antigravity-cli")]
     Antigravity,
     #[value(alias = "gemini-cli")]
@@ -715,6 +719,7 @@ enum NativeProviderArg {
     Cline,
     #[value(name = "roo", alias = "roo-code", alias = "roo_code")]
     RooCode,
+    Dexto,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -732,6 +737,8 @@ enum ProviderArg {
         alias = "kilocode"
     )]
     Kilo,
+    Crush,
+    Goose,
     #[value(alias = "antigravity-cli")]
     Antigravity,
     #[value(alias = "gemini-cli")]
@@ -764,6 +771,7 @@ enum ProviderArg {
     Cline,
     #[value(name = "roo", alias = "roo-code", alias = "roo_code")]
     RooCode,
+    Dexto,
     Custom,
 }
 
@@ -797,6 +805,8 @@ impl NativeProviderArg {
             Self::Claude => CaptureProvider::Claude,
             Self::OpenCode => CaptureProvider::OpenCode,
             Self::Kilo => CaptureProvider::Kilo,
+            Self::Crush => CaptureProvider::Crush,
+            Self::Goose => CaptureProvider::Goose,
             Self::Antigravity => CaptureProvider::Antigravity,
             Self::Gemini => CaptureProvider::Gemini,
             Self::Cursor => CaptureProvider::Cursor,
@@ -813,6 +823,7 @@ impl NativeProviderArg {
             Self::OpenHands => CaptureProvider::OpenHands,
             Self::Cline => CaptureProvider::Cline,
             Self::RooCode => CaptureProvider::RooCode,
+            Self::Dexto => CaptureProvider::Dexto,
         }
     }
 }
@@ -825,6 +836,8 @@ impl ProviderArg {
             Self::Claude => CaptureProvider::Claude,
             Self::OpenCode => CaptureProvider::OpenCode,
             Self::Kilo => CaptureProvider::Kilo,
+            Self::Crush => CaptureProvider::Crush,
+            Self::Goose => CaptureProvider::Goose,
             Self::Antigravity => CaptureProvider::Antigravity,
             Self::Gemini => CaptureProvider::Gemini,
             Self::Cursor => CaptureProvider::Cursor,
@@ -841,6 +854,7 @@ impl ProviderArg {
             Self::OpenHands => CaptureProvider::OpenHands,
             Self::Cline => CaptureProvider::Cline,
             Self::RooCode => CaptureProvider::RooCode,
+            Self::Dexto => CaptureProvider::Dexto,
             Self::Custom => CaptureProvider::Custom,
         }
     }
@@ -852,6 +866,8 @@ impl ProviderArg {
             Self::Claude => "claude",
             Self::OpenCode => "opencode",
             Self::Kilo => "kilo",
+            Self::Crush => "crush",
+            Self::Goose => "goose",
             Self::Antigravity => "antigravity",
             Self::Gemini => "gemini",
             Self::Cursor => "cursor",
@@ -868,6 +884,7 @@ impl ProviderArg {
             Self::OpenHands => "openhands",
             Self::Cline => "cline",
             Self::RooCode => "roo",
+            Self::Dexto => "dexto",
             Self::Custom => "custom",
         }
     }
@@ -5646,6 +5663,28 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
+        CaptureProvider::Crush => import_crush_sqlite(
+            &source.path,
+            store,
+            CrushSqliteImportOptions {
+                source_path: Some(source.path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: true,
+                ..CrushSqliteImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
+        CaptureProvider::Goose => import_goose_sessions_sqlite(
+            &source.path,
+            store,
+            GooseSessionsSqliteImportOptions {
+                source_path: Some(source.path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: true,
+                ..GooseSessionsSqliteImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
         CaptureProvider::OpenClaw => import_openclaw_history(
             &source.path,
             store,
@@ -5720,6 +5759,17 @@ fn import_one_source_inner(
                 history_record_id: Some(record_id),
                 allow_partial_failures: true,
                 ..OpenHandsImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
+        CaptureProvider::Dexto => import_dexto_sqlite(
+            &source.path,
+            store,
+            DextoSqliteImportOptions {
+                source_path: Some(source.path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: true,
+                ..DextoSqliteImportOptions::default()
             },
         )
         .map_err(anyhow::Error::from),
@@ -5999,7 +6049,11 @@ fn collect_source_import_paths(source: &SourceInfo) -> Result<Vec<PathBuf>> {
 
 fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bool {
     match source.provider {
-        CaptureProvider::OpenCode | CaptureProvider::Kilo => path == source.path,
+        CaptureProvider::OpenCode
+        | CaptureProvider::Kilo
+        | CaptureProvider::Crush
+        | CaptureProvider::Goose
+        | CaptureProvider::Dexto => path == source.path,
         CaptureProvider::CopilotCli => {
             path.file_name().and_then(|name| name.to_str()) == Some("events.jsonl")
         }
@@ -6287,6 +6341,9 @@ fn source_uses_incremental_event_search(source: &SourceInfo) -> bool {
             | CaptureProvider::Cursor
             | CaptureProvider::OpenCode
             | CaptureProvider::Kilo
+            | CaptureProvider::Crush
+            | CaptureProvider::Goose
+            | CaptureProvider::Dexto
             | CaptureProvider::Antigravity
             | CaptureProvider::Gemini
             | CaptureProvider::CopilotCli
