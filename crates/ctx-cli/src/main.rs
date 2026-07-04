@@ -43,7 +43,7 @@ use ctx_history_capture::{
     import_forgecode_sqlite, import_gemini_cli_history, import_goose_sessions_sqlite,
     import_hermes_sqlite, import_iflow_cli_history, import_kilo_sqlite,
     import_kimi_code_cli_history, import_kiro_sqlite, import_mistral_vibe_history,
-    import_nanoclaw_project, import_openclaw_history, import_opencode_sqlite,
+    import_mux_history, import_nanoclaw_project, import_openclaw_history, import_opencode_sqlite,
     import_openhands_file_events, import_pi_session_jsonl, import_qwen_code_history,
     import_roo_task_json_history, import_shelley_sqlite, import_zed_threads_sqlite,
     provider_source_for_path, provider_source_spec, stable_capture_uuid,
@@ -58,7 +58,7 @@ use ctx_history_capture::{
     FactoryAiDroidImportOptions, ForgeCodeSqliteImportOptions, GeminiCliImportOptions,
     GooseSessionsSqliteImportOptions, HermesSqliteImportOptions, IflowCliImportOptions,
     KiloSqliteImportOptions, KimiCodeCliImportOptions, KiroSqliteImportOptions,
-    MistralVibeImportOptions, NanoClawImportOptions, OpenClawImportOptions,
+    MistralVibeImportOptions, MuxImportOptions, NanoClawImportOptions, OpenClawImportOptions,
     OpenCodeSqliteImportOptions, OpenHandsImportOptions, PiSessionImportOptions,
     ProviderImportSummary, ProviderImportSupport, ProviderSource, ProviderSourceStatus,
     QwenCodeImportOptions, RooTaskJsonImportOptions, ShelleySqliteImportOptions,
@@ -731,6 +731,7 @@ enum NativeProviderArg {
         alias = "mistral_vibe"
     )]
     MistralVibe,
+    Mux,
     #[value(name = "openclaw", alias = "open-claw", alias = "open_claw")]
     OpenClaw,
     Hermes,
@@ -808,6 +809,7 @@ enum ProviderArg {
         alias = "mistral_vibe"
     )]
     MistralVibe,
+    Mux,
     #[value(name = "openclaw", alias = "open-claw", alias = "open_claw")]
     OpenClaw,
     Hermes,
@@ -876,6 +878,7 @@ impl NativeProviderArg {
             Self::IflowCli => CaptureProvider::IflowCli,
             Self::ForgeCode => CaptureProvider::ForgeCode,
             Self::MistralVibe => CaptureProvider::MistralVibe,
+            Self::Mux => CaptureProvider::Mux,
             Self::OpenClaw => CaptureProvider::OpenClaw,
             Self::Hermes => CaptureProvider::Hermes,
             Self::NanoClaw => CaptureProvider::NanoClaw,
@@ -935,6 +938,7 @@ impl ProviderArg {
             Self::IflowCli => CaptureProvider::IflowCli,
             Self::ForgeCode => CaptureProvider::ForgeCode,
             Self::MistralVibe => CaptureProvider::MistralVibe,
+            Self::Mux => CaptureProvider::Mux,
             Self::OpenClaw => CaptureProvider::OpenClaw,
             Self::Hermes => CaptureProvider::Hermes,
             Self::NanoClaw => CaptureProvider::NanoClaw,
@@ -973,6 +977,7 @@ impl ProviderArg {
             Self::IflowCli => "iflow-cli",
             Self::ForgeCode => "forgecode",
             Self::MistralVibe => "mistral-vibe",
+            Self::Mux => "mux",
             Self::OpenClaw => "openclaw",
             Self::Hermes => "hermes",
             Self::NanoClaw => "nanoclaw",
@@ -6027,6 +6032,17 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
+        CaptureProvider::Mux => import_mux_history(
+            &source.path,
+            store,
+            MuxImportOptions {
+                source_path: Some(source.path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: true,
+                ..MuxImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
         CaptureProvider::Antigravity => import_antigravity_cli_history(
             &source.path,
             store,
@@ -6250,6 +6266,13 @@ fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bool {
             path == source.path
                 || (path.file_name().and_then(|name| name.to_str()) == Some("messages.jsonl")
                     && path.starts_with(&source.path))
+        }
+        CaptureProvider::Mux => {
+            path == source.path
+                || (matches!(
+                    path.file_name().and_then(|name| name.to_str()),
+                    Some("chat.jsonl" | "partial.json")
+                ) && path.starts_with(&source.path))
         }
         CaptureProvider::CopilotCli => {
             path.file_name().and_then(|name| name.to_str()) == Some("events.jsonl")
@@ -6573,6 +6596,7 @@ fn source_uses_incremental_event_search(source: &SourceInfo) -> bool {
             | CaptureProvider::IflowCli
             | CaptureProvider::ForgeCode
             | CaptureProvider::MistralVibe
+            | CaptureProvider::Mux
             | CaptureProvider::Cline
             | CaptureProvider::RooCode
             | CaptureProvider::CodeBuddy

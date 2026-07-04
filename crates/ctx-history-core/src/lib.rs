@@ -200,6 +200,7 @@ text_enum! {
         IflowCli => "iflow_cli",
         ForgeCode => "forgecode",
         MistralVibe => "mistral_vibe",
+        Mux => "mux",
         OpenClaw => "openclaw",
         Hermes => "hermes",
         NanoClaw => "nanoclaw",
@@ -1557,6 +1558,10 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<CaptureProvider>("\"aider_desk\"").unwrap(),
             CaptureProvider::AiderDesk
+        );
+        assert_eq!(
+            serde_json::from_str::<CaptureProvider>("\"mux\"").unwrap(),
+            CaptureProvider::Mux
         );
 
         let sync: SyncMetadata = serde_json::from_value(json!({})).unwrap();

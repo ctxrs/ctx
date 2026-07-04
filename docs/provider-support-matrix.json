@@ -1656,6 +1656,68 @@
       ]
     },
     {
+      "id": "mux",
+      "display_name": "Mux",
+      "priority": "p1",
+      "status": "local_import_when_supported",
+      "capture_provider": "mux",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "mux_session_jsonl_tree",
+          "fidelity": "imported",
+          "proof": [
+            "ctx sources",
+            "ctx import --provider mux",
+            "cargo test -p ctx-history-capture native_mux_fixture_imports_searches_reimports_and_subagents"
+          ],
+          "notes": [
+            "Reads Mux session directories containing chat.jsonl and optional partial.json under MUX_ROOT/sessions, ~/.mux/sessions, or an explicit sessions/session path.",
+            "Normalizes MuxMessage parts for user/assistant/system messages, dynamic-tool calls and outputs, staged partial messages, token/model metadata, and archived subagent transcripts."
+          ]
+        }
+      ],
+      "history_locations": [
+        "MUX_ROOT/sessions/*/chat.jsonl",
+        "MUX_ROOT/sessions/*/partial.json",
+        "~/.mux/sessions/*/chat.jsonl",
+        "~/.mux/sessions/*/partial.json",
+        "~/.mux/sessions/*/subagent-transcripts/*/chat.jsonl"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": true,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": true,
+        "command_output": false,
+        "files_touched": true,
+        "artifacts": false,
+        "model_identity": true,
+        "costs": false,
+        "token_usage": true,
+        "parent_child_session_edges": true
+      },
+      "blockers": [
+        "Importer is based on coder/mux tag v0.27.0 and sanitized chat/partial/subagent fixtures; future schema changes may need adapter updates.",
+        "The checked-in fixture is sanitized because producing a real Mux transcript requires model/auth setup."
+      ],
+      "public_docs": "docs/provider-support.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/mux/v0.27.0/sessions",
+        "tests/fixtures/provider-history/mux/malformed/sessions"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs",
+        "tests/fixtures/provider-history/mux/v0.27.0",
+        "tests/fixtures/provider-history/mux/malformed"
+      ]
+    },
+    {
       "id": "cline",
       "display_name": "Cline",
       "priority": "p1",

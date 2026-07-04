@@ -1899,6 +1899,10 @@ fn qwen_and_kimi_default_sources_import_search_and_reimport() {
         Path::new(&provider_history_fixture("mistral-vibe/v1/logs/session")),
         &temp.path().join(".vibe").join("logs").join("session"),
     );
+    copy_dir_all(
+        Path::new(&provider_history_fixture("mux/v0.27.0/sessions")),
+        &temp.path().join(".mux").join("sessions"),
+    );
 
     let sources = json_output(ctx(&temp).args(["sources", "--json"]));
     for (provider, source_format) in [
@@ -1907,6 +1911,7 @@ fn qwen_and_kimi_default_sources_import_search_and_reimport() {
         ("autohand_code", "autohand_code_sessions_jsonl"),
         ("iflow_cli", "iflow_cli_session_jsonl_tree"),
         ("mistral_vibe", "mistral_vibe_session_jsonl_tree"),
+        ("mux", "mux_session_jsonl_tree"),
     ] {
         let source = sources["sources"]
             .as_array()
@@ -1943,6 +1948,7 @@ fn qwen_and_kimi_default_sources_import_search_and_reimport() {
             "mistral vibe oracle prompt",
             4,
         ),
+        ("mux", "mux", "mux jsonl oracle prompt", 6),
     ] {
         let first = json_output(ctx(&temp).args([
             "import",
@@ -1997,6 +2003,7 @@ fn sources_lists_personal_agent_provider_defaults() {
     install_default_iflow_fixture(&temp, "iflow-sources-oracle");
     install_default_forgecode_fixture(&temp, "forgecode-sources-oracle");
     install_default_mistral_vibe_fixture(&temp, "mistral-vibe-sources-oracle");
+    install_default_mux_fixture(&temp, "mux-sources-oracle");
 
     let sources = json_output(ctx(&temp).args(["sources", "--json"]));
     for (provider, source_format, import_support, native_import) in [
@@ -2021,6 +2028,7 @@ fn sources_lists_personal_agent_provider_defaults() {
             "native",
             true,
         ),
+        ("mux", "mux_session_jsonl_tree", "native", true),
     ] {
         let source = sources["sources"]
             .as_array()
@@ -2282,6 +2290,7 @@ fn provider_help_matches_implemented_importers() {
         "iflow-cli",
         "forgecode",
         "mistral-vibe",
+        "mux",
     ] {
         assert!(help.contains(value), "provider {value} missing in\n{help}");
     }
@@ -2307,6 +2316,7 @@ fn provider_json_names_are_accepted_as_cli_filter_aliases() {
         ("forge_code", "forgecode"),
         ("mistral_vibe", "mistral_vibe"),
         ("vibe", "mistral_vibe"),
+        ("mux", "mux"),
         ("open_claw", "openclaw"),
         ("nano_claw", "nanoclaw"),
         ("astr_bot", "astrbot"),
@@ -2429,7 +2439,7 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
             vec![
                 "Usage: ctx import",
                 "--provider <PROVIDER>",
-                "[possible values: codex, pi, claude, opencode, kilo, kiro-cli, crush, goose, antigravity, gemini, cursor, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, forgecode, mistral-vibe, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto, codebuddy, aider-desk]",
+                "[possible values: codex, pi, claude, opencode, kilo, kiro-cli, crush, goose, antigravity, gemini, cursor, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, forgecode, mistral-vibe, mux, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto, codebuddy, aider-desk]",
                 "--path <PATH>",
                 "--format <FORMAT>",
                 "--resume",
@@ -4499,6 +4509,7 @@ fn mcp_status_and_tools_list_are_read_only_without_initialized_store() {
     assert!(providers.iter().any(|provider| provider == "forgecode"));
     assert!(providers.iter().any(|provider| provider == "mistral-vibe"));
     assert!(providers.iter().any(|provider| provider == "mistral_vibe"));
+    assert!(providers.iter().any(|provider| provider == "mux"));
     assert!(providers.iter().any(|provider| provider == "cline"));
     assert!(providers.iter().any(|provider| provider == "roo"));
     assert!(providers.iter().any(|provider| provider == "roo_code"));
@@ -6220,6 +6231,12 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
             write_native_mistral_vibe_fixture,
         ),
         (
+            "mux",
+            "mux",
+            "mux_session_jsonl_tree",
+            write_native_mux_fixture,
+        ),
+        (
             "codebuddy",
             "codebuddy",
             "codebuddy_history_json",
@@ -6655,6 +6672,11 @@ fn install_default_mistral_vibe_fixture(temp: &TempDir, query: &str) {
         &source,
         &temp.path().join(".vibe").join("logs").join("session"),
     );
+}
+
+fn install_default_mux_fixture(temp: &TempDir, query: &str) {
+    let source = PathBuf::from(write_native_mux_fixture(temp, query));
+    copy_dir_all(&source, &temp.path().join(".mux").join("sessions"));
 }
 
 fn install_default_openhands_fixture(temp: &TempDir, query: &str) {
@@ -7157,6 +7179,122 @@ fn write_native_aider_desk_fixture(temp: &TempDir, query: &str) -> String {
         .to_str()
         .unwrap()
         .to_owned()
+}
+
+fn write_native_mux_fixture(temp: &TempDir, query: &str) -> String {
+    let root = temp.path().join("native-mux/sessions");
+    let session_dir = root.join("mux-cli-native");
+    let child_dir = session_dir
+        .join("subagent-transcripts")
+        .join("mux-cli-child");
+    fs::create_dir_all(&child_dir).unwrap();
+    fs::write(
+        session_dir.join("metadata.json"),
+        json!({
+            "workspaceId": "mux-cli-native",
+            "projectPath": "/workspace/mux",
+            "model": "gpt-5-test"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        session_dir.join("chat.jsonl"),
+        format!(
+            "{}\n{}\n{}\n",
+            json!({
+                "id": "msg-mux-cli-user",
+                "role": "user",
+                "parts": [{"type": "text", "text": query, "timestamp": 1783180800000_i64}],
+                "createdAt": "2026-07-04T16:00:00.000Z",
+                "metadata": {"historySequence": 0, "timestamp": 1783180800000_i64, "model": "gpt-5-test"},
+                "workspaceId": "mux-cli-native"
+            }),
+            json!({
+                "id": "msg-mux-cli-tool-call",
+                "role": "assistant",
+                "parts": [
+                    {"type": "text", "text": "mux cli native import ok", "timestamp": 1783180801000_i64},
+                    {
+                        "type": "dynamic-tool",
+                        "toolCallId": "call-mux-cli",
+                        "toolName": "file_write",
+                        "input": {"path": "src/mux_native.rs", "content": "proof"},
+                        "state": "input-available",
+                        "timestamp": 1783180801000_i64
+                    }
+                ],
+                "createdAt": "2026-07-04T16:00:01.000Z",
+                "metadata": {"historySequence": 1, "timestamp": 1783180801000_i64, "model": "gpt-5-test"},
+                "workspaceId": "mux-cli-native"
+            }),
+            json!({
+                "id": "msg-mux-cli-tool-output",
+                "role": "assistant",
+                "parts": [{
+                    "type": "dynamic-tool",
+                    "toolCallId": "call-mux-cli",
+                    "toolName": "file_write",
+                    "input": {"path": "src/mux_native.rs", "content": "proof"},
+                    "state": "output-available",
+                    "output": {"path": "src/mux_native.rs", "ok": true},
+                    "timestamp": 1783180802000_i64
+                }],
+                "createdAt": "2026-07-04T16:00:02.000Z",
+                "metadata": {"historySequence": 2, "timestamp": 1783180802000_i64, "model": "gpt-5-test"},
+                "workspaceId": "mux-cli-native"
+            })
+        ),
+    )
+    .unwrap();
+    fs::write(
+        session_dir.join("partial.json"),
+        json!({
+            "id": "msg-mux-cli-partial",
+            "role": "assistant",
+            "parts": [{"type": "text", "text": "mux cli partial searchable", "timestamp": 1783180803000_i64}],
+            "createdAt": "2026-07-04T16:00:03.000Z",
+            "metadata": {"historySequence": 3, "timestamp": 1783180803000_i64, "model": "gpt-5-test", "partial": true},
+            "workspaceId": "mux-cli-native"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        child_dir.join("metadata.json"),
+        json!({
+            "childTaskId": "mux-cli-child",
+            "parentWorkspaceId": "mux-cli-native",
+            "projectPath": "/workspace/mux",
+            "model": "gpt-5-test"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        child_dir.join("chat.jsonl"),
+        format!(
+            "{}\n{}\n",
+            json!({
+                "id": "msg-mux-cli-child-user",
+                "role": "user",
+                "parts": [{"type": "text", "text": "mux child prompt", "timestamp": 1783180804000_i64}],
+                "createdAt": "2026-07-04T16:00:04.000Z",
+                "metadata": {"historySequence": 0, "timestamp": 1783180804000_i64, "model": "gpt-5-test"},
+                "workspaceId": "mux-cli-child"
+            }),
+            json!({
+                "id": "msg-mux-cli-child-assistant",
+                "role": "assistant",
+                "parts": [{"type": "text", "text": "mux child finished", "timestamp": 1783180805000_i64}],
+                "createdAt": "2026-07-04T16:00:05.000Z",
+                "metadata": {"historySequence": 1, "timestamp": 1783180805000_i64, "model": "gpt-5-test"},
+                "workspaceId": "mux-cli-child"
+            })
+        ),
+    )
+    .unwrap();
+    root.to_str().unwrap().to_owned()
 }
 
 fn write_native_gemini_fixture(temp: &TempDir, query: &str) -> String {
@@ -8368,6 +8506,7 @@ fn native_provider_cli_requires_existing_history_or_explicit_path() {
         ("aider-desk", "no importable aider_desk history found"),
         ("iflow-cli", "no importable iflow_cli history found"),
         ("mistral-vibe", "no importable mistral_vibe history found"),
+        ("mux", "no importable mux history found"),
         ("cline", "no importable cline history found"),
         ("roo", "no importable roo_code history found"),
     ] {

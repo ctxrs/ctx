@@ -97,6 +97,7 @@ pub enum ProviderId {
         alias = "vibe"
     )]
     MistralVibe,
+    Mux,
     #[serde(rename = "kimi_code_cli", alias = "kimi", alias = "kimi-code-cli")]
     KimiCodeCli,
     Aider,
@@ -146,6 +147,7 @@ impl ProviderId {
         Self::IflowCli,
         Self::ForgeCode,
         Self::MistralVibe,
+        Self::Mux,
         Self::KimiCodeCli,
         Self::Aider,
         Self::ClineRoo,
@@ -465,6 +467,7 @@ mod tests {
             ProviderId::FactoryAiDroid,
             ProviderId::ForgeCode,
             ProviderId::MistralVibe,
+            ProviderId::Mux,
             ProviderId::GeminiCli,
             ProviderId::Goose,
             ProviderId::Hermes,
