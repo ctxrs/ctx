@@ -39,6 +39,8 @@ is:
 | Cursor | `local_import_when_supported` | Cursor agent transcript JSONL files under `~/.cursor/projects/**/agent-transcripts`, or an explicit Cursor agent transcript path. | Static local-history fixture smoke. |
 | Copilot CLI | `local_import_when_supported` | Copilot CLI `events.jsonl` files under `~/.copilot/session-state`, or an explicit Copilot CLI session-state tree. | Static local-history fixture smoke. |
 | Factory AI Droid | `local_import_when_supported` | `~/.factory/sessions` or an explicit Factory AI Droid sessions tree. | Static local-history fixture smoke. |
+| Qwen Code | `local_import_when_supported` | Qwen Code chat JSONL files under `QWEN_RUNTIME_DIR/projects`, `QWEN_HOME/projects`, `~/.qwen/projects`, or an explicit Qwen Code projects/chats tree. | Static local-history fixture smoke. |
+| Kimi Code CLI | `local_import_when_supported` | Kimi Code CLI `session_index.jsonl` and `sessions/*/*/agents/*/wire.jsonl` files under `KIMI_CODE_HOME`, `~/.kimi-code`, or an explicit Kimi Code home/session tree. | Static local-history fixture smoke. |
 
 `ctx sources --json` uses `import_support: "preview"` and `native_import:
 false` for preview sources such as NanoClaw and AstrBot. Those paths can be

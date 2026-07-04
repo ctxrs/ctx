@@ -483,7 +483,7 @@ const CREATE_TABLES_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS capture_sources (
     id TEXT PRIMARY KEY NOT NULL,
     kind TEXT NOT NULL CHECK (kind IN ('provider_import', 'provider_hook', 'direct_cli', 'manual')),
-    provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'kilo', 'antigravity', 'gemini', 'cursor', 'copilot_cli', 'factory_ai_droid', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
+    provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'kilo', 'antigravity', 'gemini', 'cursor', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
     machine_id TEXT NOT NULL,
     process_id INTEGER,
     cwd TEXT,
@@ -500,7 +500,7 @@ CREATE TABLE IF NOT EXISTS capture_sources (
 
 CREATE TABLE IF NOT EXISTS catalog_sessions (
     source_path TEXT PRIMARY KEY NOT NULL,
-    provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'kilo', 'antigravity', 'gemini', 'cursor', 'copilot_cli', 'factory_ai_droid', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
+    provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'kilo', 'antigravity', 'gemini', 'cursor', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
     source_format TEXT NOT NULL,
     source_root TEXT NOT NULL,
     external_session_id TEXT,
@@ -529,7 +529,7 @@ CREATE TABLE IF NOT EXISTS catalog_sessions (
 );
 
 CREATE TABLE IF NOT EXISTS source_import_files (
-    provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'kilo', 'antigravity', 'gemini', 'cursor', 'copilot_cli', 'factory_ai_droid', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
+    provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'kilo', 'antigravity', 'gemini', 'cursor', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
     source_format TEXT NOT NULL,
     source_root TEXT NOT NULL,
     source_path TEXT NOT NULL,
@@ -5302,7 +5302,7 @@ fn rebuild_capture_sources_provider_check(conn: &Connection) -> Result<()> {
         CREATE TABLE capture_sources_new (
             id TEXT PRIMARY KEY NOT NULL,
             kind TEXT NOT NULL CHECK (kind IN ('provider_import', 'provider_hook', 'direct_cli', 'manual')),
-            provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'kilo', 'antigravity', 'gemini', 'cursor', 'copilot_cli', 'factory_ai_droid', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
+            provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'kilo', 'antigravity', 'gemini', 'cursor', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
             machine_id TEXT NOT NULL,
             process_id INTEGER,
             cwd TEXT,
@@ -5350,7 +5350,7 @@ fn rebuild_catalog_sessions_provider_check(conn: &Connection) -> Result<()> {
         DROP TABLE IF EXISTS catalog_sessions_new;
         CREATE TABLE catalog_sessions_new (
             source_path TEXT PRIMARY KEY NOT NULL,
-            provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'kilo', 'antigravity', 'gemini', 'cursor', 'copilot_cli', 'factory_ai_droid', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
+            provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'kilo', 'antigravity', 'gemini', 'cursor', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
             source_format TEXT NOT NULL,
             source_root TEXT NOT NULL,
             external_session_id TEXT,
@@ -5405,7 +5405,7 @@ fn rebuild_source_import_files_provider_check(conn: &Connection) -> Result<()> {
         r#"
         DROP TABLE IF EXISTS source_import_files_new;
         CREATE TABLE source_import_files_new (
-            provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'kilo', 'antigravity', 'gemini', 'cursor', 'copilot_cli', 'factory_ai_droid', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
+            provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'kilo', 'antigravity', 'gemini', 'cursor', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
             source_format TEXT NOT NULL,
             source_root TEXT NOT NULL,
             source_path TEXT NOT NULL,
@@ -9262,6 +9262,8 @@ mod catalog_tests {
             ("factory_ai_droid", "factory_ai_droid_sessions_jsonl"),
             ("continue", "continue_cli_sessions_json"),
             ("openhands", "openhands_file_events"),
+            ("qwen_code", "qwen_code_chat_jsonl"),
+            ("kimi_code_cli", "kimi_code_cli_wire_jsonl"),
             ("custom", "ctx_history_jsonl_v1"),
         ] {
             assert!(
@@ -9295,7 +9297,7 @@ mod catalog_tests {
         let source_count: i64 = store
             .conn
             .query_row(
-                "SELECT COUNT(*) FROM capture_sources WHERE provider IN ('kilo', 'copilot_cli', 'factory_ai_droid', 'continue', 'openhands', 'custom')",
+                "SELECT COUNT(*) FROM capture_sources WHERE provider IN ('kilo', 'copilot_cli', 'factory_ai_droid', 'continue', 'openhands', 'qwen_code', 'kimi_code_cli', 'custom')",
                 [],
                 |row| row.get(0),
             )
@@ -9303,13 +9305,13 @@ mod catalog_tests {
         let catalog_count: i64 = store
             .conn
             .query_row(
-                "SELECT COUNT(*) FROM catalog_sessions WHERE provider IN ('kilo', 'copilot_cli', 'factory_ai_droid', 'continue', 'openhands', 'custom')",
+                "SELECT COUNT(*) FROM catalog_sessions WHERE provider IN ('kilo', 'copilot_cli', 'factory_ai_droid', 'continue', 'openhands', 'qwen_code', 'kimi_code_cli', 'custom')",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(source_count, 6);
-        assert_eq!(catalog_count, 6);
+        assert_eq!(source_count, 8);
+        assert_eq!(catalog_count, 8);
     }
 
     #[test]
@@ -9464,6 +9466,69 @@ mod catalog_tests {
                 )
                 .unwrap();
             assert_eq!(exists, 1, "missing rebuilt index {index}");
+        }
+    }
+
+    #[test]
+    fn schema_v16_adds_qwen_and_kimi_provider_checks() {
+        let temp = tempdir();
+        let path = temp.path().join("work.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            let legacy_sql = CREATE_TABLES_SQL.replace(", 'qwen_code', 'kimi_code_cli'", "");
+            conn.execute_batch(&legacy_sql).unwrap();
+            conn.execute_batch(INDEXES_SQL).unwrap();
+            conn.execute_batch("PRAGMA user_version = 15;").unwrap();
+        }
+
+        let store = Store::open(&path).unwrap();
+        let version: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+
+        for (provider, source_format) in [
+            ("qwen_code", "qwen_code_chat_jsonl"),
+            ("kimi_code_cli", "kimi_code_cli_wire_jsonl"),
+        ] {
+            store
+                .conn
+                .execute(
+                    r#"
+                    INSERT INTO capture_sources
+                    (id, kind, provider, machine_id, started_at_ms, fidelity)
+                    VALUES (?1, 'provider_import', ?2, 'test-machine', 0, 'imported')
+                    "#,
+                    params![new_id().to_string(), provider],
+                )
+                .unwrap();
+            store
+                .conn
+                .execute(
+                    r#"
+                    INSERT INTO catalog_sessions
+                    (source_path, provider, source_format, source_root, agent_type, file_size_bytes, file_modified_at_ms, cataloged_at_ms)
+                    VALUES (?1, ?2, ?3, '/tmp/provider', 'primary', 1, 0, 0)
+                    "#,
+                    params![format!("/tmp/provider/{provider}.jsonl"), provider, source_format],
+                )
+                .unwrap();
+            store
+                .conn
+                .execute(
+                    r#"
+                    INSERT INTO source_import_files
+                    (provider, source_format, source_root, source_path, file_size_bytes, file_modified_at_ms, observed_at_ms)
+                    VALUES (?1, ?2, '/tmp/provider', ?3, 1, 0, 0)
+                    "#,
+                    params![
+                        provider,
+                        source_format,
+                        format!("/tmp/provider/{provider}.jsonl")
+                    ],
+                )
+                .unwrap();
         }
     }
 }

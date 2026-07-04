@@ -1,0 +1,1 @@
+{"createdAt":"2026-07-04T13:00:00Z","updatedAt":"2026-07-04T13:00:05Z","title":"Kimi JSONL oracle","lastPrompt":"kimi jsonl oracle prompt","agents":{"main":{"homedir":"/fixture/agents/main","type":"main","parentAgentId":null},"agent-1":{"homedir":"/fixture/agents/agent-1","type":"coder","parentAgentId":"main"}},"custom":{}}

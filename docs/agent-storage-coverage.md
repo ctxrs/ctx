@@ -21,7 +21,7 @@ Status meanings:
 - `install-target`: npx target is an aggregate or project skill target, not a
   proven history-producing agent.
 
-Result on this integration branch: 14 `native-auto`, 1 `native-preview`, 28
+Result on this integration branch: 16 `native-auto`, 1 `native-preview`, 26
 `candidate-family`, 10 `webapp-boundary`, 17 `unknown`, and 2 `install-target`
 rows.
 
@@ -85,7 +85,7 @@ rows.
 | `jazz` | `unknown` | `unknown native history` | npx project or home `.jazz`; no ctx provider | Need native history storage research before claiming import support. |
 | `junie` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.junie`; no ctx provider | IDE-managed history boundary needs a verified local export or plugin. |
 | `kilo` | `native-auto` | `opencode sqlite family` | ctx `kilo_sqlite`; npx `~/.kilocode` | - |
-| `kimi-code-cli` | `candidate-family` | `JSONL CLI event logs` | npx `~/.kimi-code` or `~/.kimi`; no ctx provider | Need transcript location and schema proof. |
+| `kimi-code-cli` | `native-auto` | `JSONL CLI event logs` | ctx `kimi_code_cli_wire_jsonl_tree`; npx `~/.kimi-code` or `~/.kimi` | - |
 | `kiro-cli` | `candidate-family` | `JSONL CLI event logs` | npx `~/.kiro`; no ctx provider | Need transcript location and schema proof. |
 | `kode` | `unknown` | `unknown native history` | npx `~/.kode`; no ctx provider | Need native history storage research before claiming import support. |
 | `lingma` | `candidate-family` | `VS Code/Electron storage` | npx `~/.lingma`; no ctx provider | Need local app storage or export contract proof. |
@@ -101,7 +101,7 @@ rows.
 | `pi` | `native-auto` | `JSONL CLI event logs` | ctx `pi_session_jsonl`; npx `~/.pi/agent` | - |
 | `qoder` | `candidate-family` | `VS Code/Electron storage` | npx `~/.qoder`; no ctx provider | Need local app storage or export contract proof. |
 | `qoder-cn` | `candidate-family` | `VS Code/Electron storage` | npx `~/.qoder-cn`; no ctx provider | Need local app storage or export contract proof. |
-| `qwen-code` | `candidate-family` | `JSONL CLI event logs` | npx `~/.qwen`; no ctx provider | Need transcript location and schema proof. |
+| `qwen-code` | `native-auto` | `JSONL CLI event logs` | ctx `qwen_code_chat_jsonl_tree`; npx `~/.qwen` | - |
 | `replit` | `webapp-boundary` | `webapp/object-store boundary` | npx project `.replit`; no ctx provider | Project marker is not a local agent history contract. |
 | `reasonix` | `unknown` | `unknown native history` | npx `~/.reasonix`; no ctx provider | Need native history storage research before claiming import support. |
 | `roo` | `candidate-family` | `Cline/Roo task JSON` | npx `~/.roo`; no ctx provider | Build one verified task JSON importer for Cline/Roo-family tools. |

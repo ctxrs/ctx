@@ -1875,6 +1875,85 @@ fn import_all_skips_empty_gemini_source() {
 }
 
 #[test]
+fn qwen_and_kimi_default_sources_import_search_and_reimport() {
+    let temp = tempdir();
+    copy_dir_all(
+        Path::new(&provider_history_fixture("qwen-code/.qwen")),
+        &temp.path().join(".qwen"),
+    );
+    copy_dir_all(
+        Path::new(&provider_history_fixture("kimi-code-cli/.kimi-code")),
+        &temp.path().join(".kimi-code"),
+    );
+
+    let sources = json_output(ctx(&temp).args(["sources", "--json"]));
+    for (provider, source_format) in [
+        ("qwen_code", "qwen_code_chat_jsonl_tree"),
+        ("kimi_code_cli", "kimi_code_cli_wire_jsonl_tree"),
+    ] {
+        let source = sources["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|source| {
+                source["provider"] == provider && source["source_format"] == source_format
+            })
+            .unwrap_or_else(|| panic!("missing {provider} source in {sources:#}"));
+        assert_eq!(source["status"], "available");
+        assert_eq!(source["import_support"], "native");
+        assert_eq!(source["native_import"], true);
+        assert_eq!(source["importable"], true);
+    }
+
+    for (cli_provider, stored_provider, query, minimum_events) in [
+        ("qwen-code", "qwen_code", "qwen jsonl oracle prompt", 3),
+        (
+            "kimi-code-cli",
+            "kimi_code_cli",
+            "kimi jsonl oracle prompt",
+            7,
+        ),
+    ] {
+        let first = json_output(ctx(&temp).args([
+            "import",
+            "--provider",
+            cli_provider,
+            "--json",
+            "--progress",
+            "none",
+        ]));
+        assert_eq!(first["totals"]["failed"], 0);
+        assert_eq!(first["totals"]["imported_sources"], 1);
+        assert!(
+            first["totals"]["imported_events"].as_u64().unwrap() >= minimum_events,
+            "{first:#}"
+        );
+
+        let search = json_output(ctx(&temp).args([
+            "search",
+            query,
+            "--provider",
+            cli_provider,
+            "--refresh",
+            "off",
+            "--json",
+        ]));
+        assert_search_provider_oracle(&search, stored_provider, query, 1, "message");
+
+        let second = json_output(ctx(&temp).args([
+            "import",
+            "--provider",
+            cli_provider,
+            "--json",
+            "--progress",
+            "none",
+        ]));
+        assert_eq!(second["totals"]["failed"], 0);
+        assert_eq!(second["totals"]["imported_events"], 0);
+    }
+}
+
+#[test]
 fn sources_lists_personal_agent_provider_defaults() {
     let temp = tempdir();
     install_default_openclaw_fixture(&temp, "openclaw-sources-oracle");
@@ -2092,6 +2171,8 @@ fn provider_help_matches_implemented_importers() {
         "factory-ai-droid",
         "continue",
         "openhands",
+        "qwen-code",
+        "kimi-code-cli",
     ] {
         assert!(help.contains(value), "provider {value} missing in\n{help}");
     }
@@ -2106,6 +2187,8 @@ fn provider_json_names_are_accepted_as_cli_filter_aliases() {
         ("copilot_cli", "copilot_cli"),
         ("factory_ai_droid", "factory_ai_droid"),
         ("kilo_code", "kilo"),
+        ("qwen_code", "qwen_code"),
+        ("kimi_code_cli", "kimi_code_cli"),
         ("open_claw", "openclaw"),
         ("nano_claw", "nanoclaw"),
         ("astr_bot", "astrbot"),
@@ -2228,7 +2311,7 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
             vec![
                 "Usage: ctx import",
                 "--provider <PROVIDER>",
-                "[possible values: codex, pi, claude, opencode, kilo, antigravity, gemini, cursor, copilot-cli, factory-ai-droid, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands]",
+                "[possible values: codex, pi, claude, opencode, kilo, antigravity, gemini, cursor, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands]",
                 "--path <PATH>",
                 "--format <FORMAT>",
                 "--resume",
@@ -4281,6 +4364,10 @@ fn mcp_status_and_tools_list_are_read_only_without_initialized_store() {
         .unwrap();
     assert!(providers.iter().any(|provider| provider == "copilot-cli"));
     assert!(providers.iter().any(|provider| provider == "copilot_cli"));
+    assert!(providers.iter().any(|provider| provider == "qwen-code"));
+    assert!(providers.iter().any(|provider| provider == "qwen_code"));
+    assert!(providers.iter().any(|provider| provider == "kimi-code-cli"));
+    assert!(providers.iter().any(|provider| provider == "kimi_code_cli"));
 
     let status = &responses[2]["result"]["structuredContent"];
     assert_eq!(status["schema_version"], 1);
@@ -5938,6 +6025,18 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
             write_native_factory_droid_fixture,
         ),
         (
+            "qwen-code",
+            "qwen_code",
+            "qwen_code_chat_jsonl_tree",
+            write_native_qwen_fixture,
+        ),
+        (
+            "kimi-code-cli",
+            "kimi_code_cli",
+            "kimi_code_cli_wire_jsonl_tree",
+            write_native_kimi_fixture,
+        ),
+        (
             "openclaw",
             "openclaw",
             "openclaw_session_jsonl_tree",
@@ -6612,6 +6711,128 @@ fn write_native_factory_droid_fixture(temp: &TempDir, query: &str) -> String {
         .to_str()
         .unwrap()
         .to_owned()
+}
+
+fn write_native_qwen_fixture(temp: &TempDir, query: &str) -> String {
+    let chats = temp
+        .path()
+        .join("native-qwen/.qwen/projects/workspace-qwen/chats");
+    fs::create_dir_all(&chats).unwrap();
+    fs::write(
+        chats.join("qwen-cli-native.jsonl"),
+        format!(
+            "{}\n{}\n{}\n",
+            json!({
+                "uuid": "qwen-cli-native-user",
+                "parentUuid": null,
+                "sessionId": "qwen-cli-native",
+                "timestamp": "2026-07-04T12:00:00Z",
+                "type": "user",
+                "cwd": "/workspace/qwen",
+                "version": "test",
+                "gitBranch": "main",
+                "message": {"role": "user", "content": [{"type": "text", "text": query}]},
+                "model": "qwen3-coder"
+            }),
+            json!({
+                "uuid": "qwen-cli-native-assistant",
+                "parentUuid": "qwen-cli-native-user",
+                "sessionId": "qwen-cli-native",
+                "timestamp": "2026-07-04T12:00:01Z",
+                "type": "assistant",
+                "cwd": "/workspace/qwen",
+                "version": "test",
+                "gitBranch": "main",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "native Qwen import ok"},
+                        {"type": "tool_use", "id": "tool-1", "name": "Write", "input": {"path": "src/qwen_cli_native.txt", "content": "proof"}}
+                    ]
+                },
+                "usageMetadata": {"inputTokens": 5, "outputTokens": 7},
+                "model": "qwen3-coder"
+            }),
+            json!({
+                "uuid": "qwen-cli-native-tool",
+                "parentUuid": "qwen-cli-native-assistant",
+                "sessionId": "qwen-cli-native",
+                "timestamp": "2026-07-04T12:00:02Z",
+                "type": "tool_result",
+                "cwd": "/workspace/qwen",
+                "version": "test",
+                "gitBranch": "main",
+                "message": {"role": "tool", "content": [{"type": "tool_result", "tool_use_id": "tool-1", "content": "wrote src/qwen_cli_native.txt"}]},
+                "toolCallResult": {"tool": "Write", "path": "src/qwen_cli_native.txt", "output": "ok"},
+                "model": "qwen3-coder"
+            })
+        ),
+    )
+    .unwrap();
+    temp.path()
+        .join("native-qwen/.qwen/projects")
+        .to_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn write_native_kimi_fixture(temp: &TempDir, query: &str) -> String {
+    let home = temp.path().join("native-kimi/.kimi-code");
+    let session = home.join("sessions/wd_demo_abc123/kimi-cli-native");
+    let main = session.join("agents/main");
+    let child = session.join("agents/agent-1");
+    fs::create_dir_all(&main).unwrap();
+    fs::create_dir_all(&child).unwrap();
+    fs::write(
+        home.join("session_index.jsonl"),
+        format!(
+            "{}\n",
+            json!({
+                "sessionId": "kimi-cli-native",
+                "sessionDir": session.display().to_string(),
+                "workDir": "/workspace/kimi"
+            })
+        ),
+    )
+    .unwrap();
+    fs::write(
+        session.join("state.json"),
+        json!({
+            "createdAt": "2026-07-04T13:00:00Z",
+            "updatedAt": "2026-07-04T13:00:05Z",
+            "title": "Kimi native CLI",
+            "lastPrompt": query,
+            "agents": {
+                "main": {"homedir": "/fixture/agents/main", "type": "main", "parentAgentId": null},
+                "agent-1": {"homedir": "/fixture/agents/agent-1", "type": "coder", "parentAgentId": "main"}
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        main.join("wire.jsonl"),
+        format!(
+            "{}\n{}\n{}\n{}\n{}\n{}\n",
+            json!({"type": "metadata", "protocol_version": "1.4", "created_at": 1783170000000i64}),
+            json!({"type": "turn.prompt", "time": 1783170001000i64, "input": [{"type": "text", "text": query}], "origin": {"kind": "user"}}),
+            json!({"type": "context.append_message", "time": 1783170002000i64, "message": {"role": "assistant", "content": [{"type": "text", "text": "native Kimi import ok"}]}}),
+            json!({"type": "context.append_loop_event", "time": 1783170003000i64, "event": {"type": "tool.call", "toolName": "Write", "input": {"path": "src/kimi_cli_native.txt", "content": "proof"}}}),
+            json!({"type": "context.append_loop_event", "time": 1783170004000i64, "event": {"type": "tool.result", "toolName": "Write", "output": "wrote src/kimi_cli_native.txt"}}),
+            json!({"type": "usage.record", "time": 1783170005000i64, "model": "kimi-k2", "usage": {"input_tokens": 11, "output_tokens": 13}})
+        ),
+    )
+    .unwrap();
+    fs::write(
+        child.join("wire.jsonl"),
+        concat!(
+            "{\"type\":\"metadata\",\"protocol_version\":\"1.4\",\"created_at\":1783170006000}\n",
+            "{\"type\":\"turn.prompt\",\"time\":1783170007000,\"input\":[{\"type\":\"text\",\"text\":\"child inspect\"}]}\n",
+            "{\"type\":\"context.append_message\",\"time\":1783170008000,\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"child done\"}]}}\n",
+        ),
+    )
+    .unwrap();
+    home.to_str().unwrap().to_owned()
 }
 
 fn write_native_openclaw_fixture(temp: &TempDir, query: &str) -> String {
