@@ -493,6 +493,117 @@
       ]
     },
     {
+      "id": "continue",
+      "display_name": "Continue",
+      "priority": "p1",
+      "status": "local_import_when_supported",
+      "capture_provider": "continue",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "continue_cli_sessions_json",
+          "fidelity": "imported",
+          "proof": [
+            "ctx sources",
+            "ctx import --provider continue",
+            "ctx import --provider continue --path <sessions>"
+          ],
+          "notes": [
+            "Reads Continue CLI session JSON files from CONTINUE_GLOBAL_DIR/sessions or ~/.continue/sessions.",
+            "Uses sessions.json as optional metadata and imports each session JSON history item as a stable event.",
+            "Indexes message content, context item text, tool call names/status, and tool output previews when present."
+          ]
+        }
+      ],
+      "history_locations": [
+        "CONTINUE_GLOBAL_DIR/sessions",
+        "~/.continue/sessions"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": false,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": true,
+        "command_output": false,
+        "files_touched": true,
+        "artifacts": false,
+        "model_identity": true,
+        "costs": true,
+        "token_usage": true,
+        "parent_child_session_edges": false
+      },
+      "redaction_notes": [
+        "Reads provider JSON files read-only; imported message text, tool output previews, cwd, usage, and local source paths remain in the local ctx index."
+      ],
+      "blockers": [
+        "Coverage is for Continue CLI sessions/*.json history, not editor webview-only state."
+      ],
+      "public_docs": "docs/providers.md",
+      "fixture_paths": [],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs"
+      ]
+    },
+    {
+      "id": "openhands",
+      "display_name": "OpenHands",
+      "priority": "p1",
+      "status": "local_import_when_supported",
+      "capture_provider": "openhands",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "openhands_file_events",
+          "fidelity": "imported",
+          "proof": [
+            "ctx sources",
+            "ctx import --provider openhands",
+            "cargo test -p ctx native_provider_cli_flow_imports_new_supported_provider_paths"
+          ],
+          "notes": [
+            "Reads OpenHands filesystem event JSON under <persistence>/<user_id>/v1_conversations/<conversation-id-hex>/*.json.",
+            "Discovery checks OH_PERSISTENCE_DIR, legacy FILE_STORE_PATH, and ~/.openhands.",
+            "The SQLite metadata database openhands.db is not required for local OSS event import."
+          ]
+        }
+      ],
+      "history_locations": [
+        "OH_PERSISTENCE_DIR/<user_id>/v1_conversations/<conversation-id-hex>/*.json",
+        "FILE_STORE_PATH/<user_id>/v1_conversations/<conversation-id-hex>/*.json",
+        "~/.openhands/<user_id>/v1_conversations/<conversation-id-hex>/*.json"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": false,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": true,
+        "command_output": true,
+        "files_touched": true,
+        "artifacts": false,
+        "model_identity": false,
+        "costs": false,
+        "token_usage": false,
+        "parent_child_session_edges": false
+      },
+      "redaction_notes": [
+        "Reads provider JSON files read-only; imported message text, tool output previews, cwd, and local source paths remain in the local ctx index."
+      ],
+      "blockers": [],
+      "public_docs": "docs/provider-support.md",
+      "fixture_paths": [],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs"
+      ]
+    },
+    {
       "id": "antigravity_cli",
       "display_name": "Antigravity",
       "priority": "p1",

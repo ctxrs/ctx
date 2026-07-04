@@ -1879,6 +1879,7 @@ fn sources_lists_personal_agent_provider_defaults() {
     install_default_hermes_fixture(&temp, "hermes-sources-oracle");
     install_default_astrbot_fixture(&temp, "astrbot-sources-oracle");
     install_default_shelley_fixture(&temp, "shelley-sources-oracle");
+    install_default_continue_fixture(&temp, "continue-sources-oracle");
 
     let sources = json_output(ctx(&temp).args(["sources", "--json"]));
     for (provider, source_format, import_support, native_import) in [
@@ -1886,6 +1887,7 @@ fn sources_lists_personal_agent_provider_defaults() {
         ("hermes", "hermes_state_sqlite", "native", true),
         ("astrbot", "astrbot_data_v4_sqlite", "preview", false),
         ("shelley", "shelley_sqlite", "native", true),
+        ("continue", "continue_cli_sessions_json", "native", true),
     ] {
         let source = sources["sources"]
             .as_array()
@@ -2083,6 +2085,8 @@ fn provider_help_matches_implemented_importers() {
         "cursor",
         "copilot-cli",
         "factory-ai-droid",
+        "continue",
+        "openhands",
     ] {
         assert!(help.contains(value), "provider {value} missing in\n{help}");
     }
@@ -2099,6 +2103,7 @@ fn provider_json_names_are_accepted_as_cli_filter_aliases() {
         ("open_claw", "openclaw"),
         ("nano_claw", "nanoclaw"),
         ("astr_bot", "astrbot"),
+        ("open_hands", "openhands"),
     ] {
         let search = json_output(ctx(&temp).args([
             "search",
@@ -2217,7 +2222,7 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
             vec![
                 "Usage: ctx import",
                 "--provider <PROVIDER>",
-                "[possible values: codex, pi, claude, opencode, antigravity, gemini, cursor, copilot-cli, factory-ai-droid, openclaw, hermes, nanoclaw, astrbot, shelley]",
+                "[possible values: codex, pi, claude, opencode, antigravity, gemini, cursor, copilot-cli, factory-ai-droid, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands]",
                 "--path <PATH>",
                 "--format <FORMAT>",
                 "--resume",
@@ -5580,6 +5585,8 @@ fn search_refresh_auto_imports_discovered_top_provider_sources() {
         ("openclaw", "openclaw", install_default_openclaw_fixture),
         ("hermes", "hermes", install_default_hermes_fixture),
         ("shelley", "shelley", install_default_shelley_fixture),
+        ("continue", "continue", install_default_continue_fixture),
+        ("openhands", "openhands", install_default_openhands_fixture),
     ] {
         let temp = tempdir();
         let query = format!("{stored_provider}-default-refresh-oracle");
@@ -5952,6 +5959,18 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
             "shelley_sqlite",
             write_native_shelley_fixture,
         ),
+        (
+            "continue",
+            "continue",
+            "continue_cli_sessions_json",
+            write_native_continue_fixture,
+        ),
+        (
+            "openhands",
+            "openhands",
+            "openhands_file_events",
+            write_native_openhands_fixture,
+        ),
     ] {
         let temp = tempdir();
         let query = format!("{stored_provider}-native-cli-oracle");
@@ -6170,6 +6189,24 @@ fn install_default_shelley_fixture(temp: &TempDir, query: &str) {
     fs::copy(source, target.join("shelley.db")).unwrap();
 }
 
+fn install_default_continue_fixture(temp: &TempDir, query: &str) {
+    let source = PathBuf::from(write_native_continue_fixture(temp, query));
+    let target = temp.path().join(".continue").join("sessions");
+    fs::create_dir_all(&target).unwrap();
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if path.is_file() {
+            fs::copy(&path, target.join(path.file_name().unwrap())).unwrap();
+        }
+    }
+}
+
+fn install_default_openhands_fixture(temp: &TempDir, query: &str) {
+    let source = PathBuf::from(write_native_openhands_fixture(temp, query));
+    copy_dir_all(&source, &temp.path().join(".openhands"));
+}
+
 fn write_native_claude_fixture(temp: &TempDir, query: &str) -> String {
     let root = temp.path().join("native-claude/projects/-workspace");
     fs::create_dir_all(&root).unwrap();
@@ -6321,6 +6358,90 @@ fn write_native_cursor_fixture(temp: &TempDir, query: &str) -> String {
     .unwrap();
     temp.path()
         .join("native-cursor/projects")
+        .to_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn write_native_openhands_fixture(temp: &TempDir, query: &str) -> String {
+    let conversation = temp
+        .path()
+        .join("native-openhands/local-user/v1_conversations/12345678123456781234567812345678");
+    fs::create_dir_all(&conversation).unwrap();
+    fs::write(
+        conversation.join("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"),
+        serde_json::to_string_pretty(&json!({
+            "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "timestamp": "2026-06-24T12:00:00Z",
+            "source": "user",
+            "llm_message": {
+                "role": "user",
+                "content": [{"type": "text", "text": query}]
+            },
+            "activated_microagents": [],
+            "extended_content": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        conversation.join("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.json"),
+        serde_json::to_string_pretty(&json!({
+            "id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "timestamp": "2026-06-24T12:00:01Z",
+            "source": "agent",
+            "action": {
+                "kind": "FileEditorAction",
+                "command": "str_replace",
+                "path": "openhands-cli-native-oracle.txt",
+                "file_text": null,
+                "old_str": "old",
+                "new_str": "new",
+                "insert_line": null,
+                "view_range": null
+            },
+            "tool_name": "FileEditor",
+            "tool_call_id": "call-openhands-file",
+            "tool_call": {
+                "id": "call-openhands-file",
+                "type": "function",
+                "function": {
+                    "name": "FileEditor",
+                    "arguments": "{\"command\":\"str_replace\"}"
+                }
+            },
+            "llm_response_id": "response-openhands-file",
+            "security_risk": "LOW",
+            "thought": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        conversation.join("cccccccccccccccccccccccccccccccc.json"),
+        serde_json::to_string_pretty(&json!({
+            "id": "cccccccccccccccccccccccccccccccc",
+            "timestamp": "2026-06-24T12:00:02Z",
+            "source": "environment",
+            "observation": {
+                "kind": "FileEditorObservation",
+                "command": "str_replace",
+                "output": "Edited openhands-cli-native-oracle.txt",
+                "path": "openhands-cli-native-oracle.txt",
+                "prev_exist": true,
+                "old_content": "old",
+                "new_content": "new",
+                "error": null
+            },
+            "tool_name": "FileEditor",
+            "tool_call_id": "call-openhands-file",
+            "action_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    temp.path()
+        .join("native-openhands")
         .to_str()
         .unwrap()
         .to_owned()
@@ -6751,6 +6872,88 @@ fn write_native_shelley_fixture(temp: &TempDir, query: &str) -> String {
     )
     .unwrap();
     path.to_str().unwrap().to_owned()
+}
+
+fn write_native_continue_fixture(temp: &TempDir, query: &str) -> String {
+    let root = temp.path().join("native-continue/sessions");
+    fs::create_dir_all(&root).unwrap();
+    let session_id = "continue-cli-native";
+    fs::write(
+        root.join("sessions.json"),
+        serde_json::to_string_pretty(&json!([
+            {
+                "sessionId": session_id,
+                "title": "native continue",
+                "dateCreated": "2026-06-24T12:00:00Z",
+                "workspaceDirectory": "/workspace",
+                "messageCount": 1
+            }
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        root.join(format!("{session_id}.json")),
+        serde_json::to_string_pretty(&json!({
+            "sessionId": session_id,
+            "title": "native continue",
+            "workspaceDirectory": "/workspace",
+            "history": [
+                {
+                    "id": "continue-cli-native-user",
+                    "timestamp": "2026-06-24T12:00:01Z",
+                    "message": {
+                        "role": "user",
+                        "content": query
+                    },
+                    "contextItems": [
+                        {
+                            "name": "fixture.rs",
+                            "content": "Continue context item marker"
+                        }
+                    ],
+                    "editorState": query
+                },
+                {
+                    "id": "continue-cli-native-assistant",
+                    "timestamp": "2026-06-24T12:00:02Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": "native Continue import ok"
+                    },
+                    "toolCallStates": [
+                        {
+                            "toolCallId": "tool-continue-read",
+                            "toolCall": {
+                                "id": "tool-continue-read",
+                                "type": "function",
+                                "function": {
+                                    "name": "readFile",
+                                    "arguments": "{\"filepath\":\"fixture.rs\"}"
+                                }
+                            },
+                            "status": "done",
+                            "output": [
+                                {
+                                    "name": "Result",
+                                    "description": "",
+                                    "content": "Continue tool output marker"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ],
+            "usage": {
+                "totalCost": 0,
+                "promptTokens": 12,
+                "completionTokens": 8
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    root.to_str().unwrap().to_owned()
 }
 
 fn append_native_openclaw_event(path: &str, query: &str) {
