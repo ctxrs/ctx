@@ -130,6 +130,12 @@ const OPENCODE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation 
     source_kind: ProviderSourceKind::NativeHistory,
 }];
 
+const KILO_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
+    path_components: &[".local", "share", "kilo", "kilo.db"],
+    source_format: "kilo_sqlite",
+    source_kind: ProviderSourceKind::NativeHistory,
+}];
+
 const ANTIGRAVITY_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     path_components: &[".gemini", "antigravity-cli", "brain"],
     source_format: "antigravity_cli_transcript_jsonl_tree",
@@ -245,6 +251,16 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         provider: CaptureProvider::OpenCode,
         display_name: "OpenCode",
         default_locations: OPENCODE_DEFAULTS,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
+    ProviderSourceSpec {
+        provider: CaptureProvider::Kilo,
+        display_name: "Kilo Code",
+        default_locations: KILO_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         raw_retention: ProviderRawRetention::PathReference,
@@ -407,6 +423,10 @@ fn discover_provider_sources_for_spec(
     home: &Path,
     spec: &ProviderSourceSpec,
 ) -> Vec<ProviderSource> {
+    if spec.provider == CaptureProvider::Kilo {
+        return discover_kilo_sources(home, spec);
+    }
+
     let mut sources = spec
         .default_locations
         .iter()
@@ -518,6 +538,80 @@ fn discover_provider_sources_for_spec(
     }
 
     sources
+}
+
+fn discover_kilo_sources(home: &Path, spec: &ProviderSourceSpec) -> Vec<ProviderSource> {
+    if let Some(raw) = env::var_os("KILO_DB").filter(|value| !value.is_empty()) {
+        if raw.to_string_lossy().trim() == ":memory:" {
+            return Vec::new();
+        }
+        return vec![provider_source_from_parts(
+            spec,
+            resolve_kilo_db_path(PathBuf::from(raw), home),
+            "kilo_sqlite",
+            ProviderSourceKind::NativeHistory,
+        )];
+    }
+
+    let data_dir = kilo_data_dir(home);
+    let mut sources = vec![provider_source_from_parts(
+        spec,
+        data_dir.join("kilo.db"),
+        "kilo_sqlite",
+        ProviderSourceKind::NativeHistory,
+    )];
+
+    if !env_truthy("KILO_DISABLE_CHANNEL_DB") {
+        sources.extend(kilo_channel_db_paths(&data_dir).into_iter().map(|path| {
+            provider_source_from_parts(spec, path, "kilo_sqlite", ProviderSourceKind::NativeHistory)
+        }));
+    }
+
+    sources
+}
+
+fn resolve_kilo_db_path(path: PathBuf, home: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path
+    } else {
+        kilo_data_dir(home).join(path)
+    }
+}
+
+fn kilo_data_dir(home: &Path) -> PathBuf {
+    env_path("XDG_DATA_HOME")
+        .unwrap_or_else(|| home.join(".local").join("share"))
+        .join("kilo")
+}
+
+fn kilo_channel_db_paths(data_dir: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let Ok(entries) = fs::read_dir(data_dir) else {
+        return paths;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !entry
+            .file_type()
+            .map_or(false, |file_type| file_type.is_file())
+        {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if name.starts_with("kilo-") && name.ends_with(".db") {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    paths
+}
+
+fn env_truthy(name: &str) -> bool {
+    env::var(name)
+        .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true"))
+        .unwrap_or(false)
 }
 
 fn discover_pi_custom_session_sources(
@@ -679,6 +773,7 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::Pi => "pi_session_jsonl",
         CaptureProvider::Claude => "claude_projects_jsonl_tree",
         CaptureProvider::OpenCode => "opencode_sqlite",
+        CaptureProvider::Kilo => "kilo_sqlite",
         CaptureProvider::Antigravity => "antigravity_cli_transcript_jsonl_tree",
         CaptureProvider::Gemini => "gemini_cli_chat_recording_jsonl",
         CaptureProvider::Cursor
@@ -785,6 +880,7 @@ fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
             Some("path exists but no Claude project JSONL transcripts were found")
         }
         CaptureProvider::OpenCode => Some("path exists but no OpenCode SQLite database was found"),
+        CaptureProvider::Kilo => Some("path exists but no Kilo SQLite database was found"),
         CaptureProvider::Antigravity => {
             Some("path exists but no Antigravity transcript JSONL files were found")
         }
@@ -872,6 +968,9 @@ fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::OpenCode => {
             Some("path exists but the OpenCode database could not be read; check permissions")
         }
+        CaptureProvider::Kilo => {
+            Some("path exists but the Kilo database could not be read; check permissions")
+        }
         CaptureProvider::Antigravity => {
             Some("path exists but Antigravity transcripts could not be read; check permissions")
         }
@@ -924,6 +1023,7 @@ fn default_location_import_probe(
         CaptureProvider::Codex => has_jsonl_file_under_matching(path, 10_000, |_| true),
         CaptureProvider::Pi => has_jsonl_file_under_matching(path, 10_000, |_| true),
         CaptureProvider::OpenCode => path_is_file_probe(path),
+        CaptureProvider::Kilo => path_is_file_probe(path),
         CaptureProvider::Claude => has_jsonl_file_under_matching(path, 10_000, |_| true),
         CaptureProvider::OpenClaw => has_openclaw_session_jsonl(path, 10_000),
         CaptureProvider::Hermes => path_is_file_probe(path),
@@ -1435,6 +1535,66 @@ mod tests {
         assert_eq!(source.status, ProviderSourceStatus::Available);
         assert_eq!(source.source_format, "continue_cli_sessions_json");
         assert_eq!(source.import_support, ProviderImportSupport::Native);
+    }
+
+    #[test]
+    fn kilo_discovery_uses_xdg_kilo_db_env_override_and_channel_dbs() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _kilo_db = EnvGuard::remove("KILO_DB");
+        let _xdg_data = EnvGuard::remove("XDG_DATA_HOME");
+        let _config_dir = EnvGuard::remove("KILO_CONFIG_DIR");
+        let _disable_channel = EnvGuard::remove("KILO_DISABLE_CHANNEL_DB");
+
+        let data_dir = temp.path().join(".local/share/kilo");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(data_dir.join("kilo.db"), b"sqlite fixture marker").unwrap();
+        std::fs::write(data_dir.join("kilo-dev.db"), b"sqlite fixture marker").unwrap();
+        std::fs::write(data_dir.join("opencode-dev.db"), b"ignored").unwrap();
+
+        let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Kilo);
+        assert_eq!(
+            sources
+                .iter()
+                .map(|source| source.path.clone())
+                .collect::<Vec<_>>(),
+            vec![data_dir.join("kilo.db"), data_dir.join("kilo-dev.db")]
+        );
+        assert!(sources
+            .iter()
+            .all(|source| source.status == ProviderSourceStatus::Available));
+
+        let xdg_data = temp.path().join("xdg-data");
+        let xdg_kilo = xdg_data.join("kilo");
+        std::fs::create_dir_all(&xdg_kilo).unwrap();
+        std::fs::write(xdg_kilo.join("kilo.db"), b"sqlite fixture marker").unwrap();
+        let _xdg_data_set = EnvGuard::set("XDG_DATA_HOME", xdg_data.as_os_str());
+        let _config_dir_set = EnvGuard::set("KILO_CONFIG_DIR", temp.path().join("config"));
+
+        let xdg_sources =
+            discover_provider_sources_for_provider(temp.path(), CaptureProvider::Kilo);
+        assert_eq!(xdg_sources[0].path, xdg_kilo.join("kilo.db"));
+        assert_ne!(
+            xdg_sources[0].path,
+            temp.path().join("config").join("kilo.db")
+        );
+
+        let _relative_db = EnvGuard::set("KILO_DB", "relative-kilo.db");
+        std::fs::write(xdg_kilo.join("relative-kilo.db"), b"sqlite fixture marker").unwrap();
+        let relative_sources =
+            discover_provider_sources_for_provider(temp.path(), CaptureProvider::Kilo);
+        assert_eq!(relative_sources.len(), 1);
+        assert_eq!(relative_sources[0].path, xdg_kilo.join("relative-kilo.db"));
+        assert_eq!(relative_sources[0].status, ProviderSourceStatus::Available);
+
+        let absolute_db = temp.path().join("absolute-kilo.db");
+        std::fs::write(&absolute_db, b"sqlite fixture marker").unwrap();
+        let _absolute_db = EnvGuard::set("KILO_DB", absolute_db.as_os_str());
+        let absolute_sources =
+            discover_provider_sources_for_provider(temp.path(), CaptureProvider::Kilo);
+        assert_eq!(absolute_sources.len(), 1);
+        assert_eq!(absolute_sources[0].path, absolute_db);
+        assert_eq!(absolute_sources[0].status, ProviderSourceStatus::Available);
     }
 
     #[test]

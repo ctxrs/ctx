@@ -43,6 +43,8 @@ fn apply_hermetic_env(command: &mut Command, temp: &TempDir) {
     command.env_remove("HERMES_HOME");
     command.env_remove("ASTRBOT_ROOT");
     command.env_remove("SHELLEY_DB");
+    command.env_remove("KILO_DB");
+    command.env_remove("XDG_DATA_HOME");
 }
 
 fn copied_ctx_binary(temp: &TempDir) -> PathBuf {
@@ -1877,6 +1879,7 @@ fn sources_lists_personal_agent_provider_defaults() {
     let temp = tempdir();
     install_default_openclaw_fixture(&temp, "openclaw-sources-oracle");
     install_default_hermes_fixture(&temp, "hermes-sources-oracle");
+    install_default_kilo_fixture(&temp, "kilo-sources-oracle");
     install_default_astrbot_fixture(&temp, "astrbot-sources-oracle");
     install_default_shelley_fixture(&temp, "shelley-sources-oracle");
     install_default_continue_fixture(&temp, "continue-sources-oracle");
@@ -1885,6 +1888,7 @@ fn sources_lists_personal_agent_provider_defaults() {
     for (provider, source_format, import_support, native_import) in [
         ("openclaw", "openclaw_session_jsonl_tree", "native", true),
         ("hermes", "hermes_state_sqlite", "native", true),
+        ("kilo", "kilo_sqlite", "native", true),
         ("astrbot", "astrbot_data_v4_sqlite", "preview", false),
         ("shelley", "shelley_sqlite", "native", true),
         ("continue", "continue_cli_sessions_json", "native", true),
@@ -2076,6 +2080,7 @@ fn provider_help_matches_implemented_importers() {
         "pi",
         "claude",
         "opencode",
+        "kilo",
         "openclaw",
         "hermes",
         "nanoclaw",
@@ -2100,6 +2105,7 @@ fn provider_json_names_are_accepted_as_cli_filter_aliases() {
     for (provider, expected) in [
         ("copilot_cli", "copilot_cli"),
         ("factory_ai_droid", "factory_ai_droid"),
+        ("kilo_code", "kilo"),
         ("open_claw", "openclaw"),
         ("nano_claw", "nanoclaw"),
         ("astr_bot", "astrbot"),
@@ -2222,7 +2228,7 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
             vec![
                 "Usage: ctx import",
                 "--provider <PROVIDER>",
-                "[possible values: codex, pi, claude, opencode, antigravity, gemini, cursor, copilot-cli, factory-ai-droid, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands]",
+                "[possible values: codex, pi, claude, opencode, kilo, antigravity, gemini, cursor, copilot-cli, factory-ai-droid, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands]",
                 "--path <PATH>",
                 "--format <FORMAT>",
                 "--resume",
@@ -5584,6 +5590,7 @@ fn search_refresh_auto_imports_discovered_top_provider_sources() {
         ("cursor", "cursor", install_default_cursor_fixture),
         ("openclaw", "openclaw", install_default_openclaw_fixture),
         ("hermes", "hermes", install_default_hermes_fixture),
+        ("kilo", "kilo", install_default_kilo_fixture),
         ("shelley", "shelley", install_default_shelley_fixture),
         ("continue", "continue", install_default_continue_fixture),
         ("openhands", "openhands", install_default_openhands_fixture),
@@ -5905,6 +5912,7 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
             "opencode_sqlite",
             write_native_opencode_fixture,
         ),
+        ("kilo", "kilo", "kilo_sqlite", write_native_kilo_fixture),
         (
             "gemini",
             "gemini",
@@ -6175,6 +6183,13 @@ fn install_default_hermes_fixture(temp: &TempDir, query: &str) {
     fs::copy(source, target.join("state.db")).unwrap();
 }
 
+fn install_default_kilo_fixture(temp: &TempDir, query: &str) {
+    let source = PathBuf::from(write_native_kilo_fixture(temp, query));
+    let target = temp.path().join(".local/share/kilo");
+    fs::create_dir_all(&target).unwrap();
+    fs::copy(source, target.join("kilo.db")).unwrap();
+}
+
 fn install_default_astrbot_fixture(temp: &TempDir, query: &str) {
     let source = PathBuf::from(write_native_astrbot_fixture(temp, query));
     let target = temp.path().join(".astrbot/data");
@@ -6299,6 +6314,91 @@ fn write_native_opencode_fixture(temp: &TempDir, query: &str) -> String {
             "opencode-cli-native-user",
             "opencode-cli-native",
             &format!(r#"{{"role":"user","time":{{"created":1782259200000}},"text":"{query}"}}"#),
+        ],
+    )
+    .unwrap();
+    path.to_str().unwrap().to_owned()
+}
+
+fn write_native_kilo_fixture(temp: &TempDir, query: &str) -> String {
+    let path = temp.path().join("native-kilo.db");
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "create table session (
+            id text primary key,
+            project_id text not null,
+            parent_id text,
+            slug text not null,
+            directory text not null,
+            title text not null,
+            version text not null,
+            model text,
+            agent text,
+            cost real not null default 0,
+            tokens_input integer not null default 0,
+            tokens_output integer not null default 0,
+            tokens_reasoning integer not null default 0,
+            tokens_cache_read integer not null default 0,
+            tokens_cache_write integer not null default 0,
+            time_created integer not null,
+            time_updated integer not null
+        );
+        create table session_message (
+            id text primary key,
+            session_id text not null,
+            type text not null,
+            time_created integer not null,
+            time_updated integer not null,
+            data text not null
+        );
+        create table message (
+            id text primary key,
+            session_id text not null,
+            time_created integer not null,
+            time_updated integer not null,
+            data text not null
+        );
+        create table part (
+            id text primary key,
+            message_id text not null,
+            session_id text not null,
+            time_created integer not null,
+            time_updated integer not null,
+            data text not null
+        );
+        create table todo (
+            session_id text not null,
+            content text not null,
+            status text not null,
+            priority text not null,
+            position integer not null,
+            time_created integer not null,
+            time_updated integer not null
+        );
+        create table permission (
+            project_id text primary key,
+            time_created integer not null,
+            time_updated integer not null,
+            data text not null
+        );",
+    )
+    .unwrap();
+    conn.execute(
+        "insert into session (
+            id, project_id, parent_id, slug, directory, title, version, model, agent,
+            time_created, time_updated
+        ) values (?1, 'project-1', null, 'native', '/workspace', 'native', '0.8.0',
+            '{\"id\":\"kilo-auto/free\",\"providerID\":\"kilo\"}', 'build',
+            1782259200000, 1782259200000)",
+        ["kilo-cli-native"],
+    )
+    .unwrap();
+    conn.execute(
+        "insert into session_message values (?1, ?2, 'user', 1782259200000, 1782259200000, ?3)",
+        [
+            "kilo-cli-native-user",
+            "kilo-cli-native",
+            &format!(r#"{{"time":{{"created":1782259200000}},"text":"{query}"}}"#),
         ],
     )
     .unwrap();
@@ -7165,6 +7265,7 @@ fn native_provider_cli_requires_existing_history_or_explicit_path() {
     for (cli_provider, expected_blocker) in [
         ("claude", "no importable claude history found"),
         ("opencode", "no importable opencode history found"),
+        ("kilo", "no importable kilo history found"),
         ("antigravity", "no importable antigravity history found"),
         ("gemini", "no importable gemini history found"),
         ("cursor", "no importable cursor history found"),

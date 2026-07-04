@@ -21,16 +21,16 @@ Status meanings:
 - `install-target`: npx target is an aggregate or project skill target, not a
   proven history-producing agent.
 
-Result on this integration branch: 13 `native-auto`, 1 `native-preview`, 29
+Result on this integration branch: 14 `native-auto`, 1 `native-preview`, 28
 `candidate-family`, 10 `webapp-boundary`, 17 `unknown`, and 2 `install-target`
 rows.
 
 ## Shared Families
 
-- `opencode sqlite family`: native `opencode` coverage is the reusable SQLite
-  baseline for OpenCode-style message/session tables.
-- `Cline/Roo task JSON`: `cline`, `roo`, and `kilo` should share one task JSON
-  importer once their current local task shape is verified.
+- `opencode sqlite family`: native `opencode` and `kilo` coverage share the
+  reusable SQLite baseline for OpenCode-style message/session tables.
+- `Cline/Roo task JSON`: `cline` and `roo` should share one task JSON importer
+  once their current local task shape is verified.
 - `JSONL CLI event logs`: already covers Codex, Claude Code, OpenClaw,
   Antigravity CLI, Gemini CLI, Pi, Factory Droid, and Copilot CLI-shaped logs.
 - `CLI session JSON`: covers Continue CLI `sessions/*.json` files with
@@ -84,7 +84,7 @@ rows.
 | `iflow-cli` | `candidate-family` | `JSONL CLI event logs` | npx `~/.iflow`; no ctx provider | Need transcript location and schema proof. |
 | `jazz` | `unknown` | `unknown native history` | npx project or home `.jazz`; no ctx provider | Need native history storage research before claiming import support. |
 | `junie` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.junie`; no ctx provider | IDE-managed history boundary needs a verified local export or plugin. |
-| `kilo` | `candidate-family` | `Cline/Roo task JSON` | npx `~/.kilocode`; no ctx provider | Build with the Cline/Roo task JSON importer after schema proof. |
+| `kilo` | `native-auto` | `opencode sqlite family` | ctx `kilo_sqlite`; npx `~/.kilocode` | - |
 | `kimi-code-cli` | `candidate-family` | `JSONL CLI event logs` | npx `~/.kimi-code` or `~/.kimi`; no ctx provider | Need transcript location and schema proof. |
 | `kiro-cli` | `candidate-family` | `JSONL CLI event logs` | npx `~/.kiro`; no ctx provider | Need transcript location and schema proof. |
 | `kode` | `unknown` | `unknown native history` | npx `~/.kode`; no ctx provider | Need native history storage research before claiming import support. |

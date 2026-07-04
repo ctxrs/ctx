@@ -14,6 +14,8 @@ The current CLI imports local history for:
   (Oh My Pi fork);
 - Claude Code project JSONL transcripts under `~/.claude/projects`;
 - OpenCode SQLite history under `~/.local/share/opencode/opencode.db`;
+- Kilo Code SQLite history from `KILO_DB`, `$XDG_DATA_HOME/kilo/kilo.db`,
+  `~/.local/share/kilo/kilo.db`, or Kilo channel DBs named `kilo-*.db`;
 - OpenClaw session JSONL trees under `OPENCLAW_STATE_DIR`, `~/.openclaw`,
   legacy `~/.clawdbot`, or legacy `~/.moltbot`;
 - Hermes Agent SQLite history under `HERMES_HOME/state.db` or
@@ -60,13 +62,13 @@ ctx sources
 ctx sources --json
 ```
 
-CLI provider flags use names such as `openclaw`, `hermes`, `nanoclaw`,
-`astrbot`, `shelley`, `continue`, `openhands`, `copilot-cli`, and
+CLI provider flags use names such as `kilo`, `openclaw`, `hermes`,
+`nanoclaw`, `astrbot`, `shelley`, `continue`, `openhands`, `copilot-cli`, and
 `factory-ai-droid`.
 Structured JSON and stable SQL views use provider IDs in ctx output; multiword IDs may be
 snake_case, such as `copilot_cli` or `factory_ai_droid`, while compact native
-IDs such as `openclaw`, `nanoclaw`, `astrbot`, `shelley`, `continue`, and
-`openhands` stay compact.
+IDs such as `kilo`, `openclaw`, `nanoclaw`, `astrbot`, `shelley`,
+`continue`, and `openhands` stay compact.
 
 `ctx sources --json` reports each known provider source with `import_support`
 and `importable` fields. A native source is marked available/importable only
