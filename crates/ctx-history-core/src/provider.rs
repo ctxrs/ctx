@@ -72,6 +72,8 @@ pub enum ProviderId {
     Cagent,
     #[serde(rename = "qwen_code", alias = "qwen", alias = "qwen-code")]
     QwenCode,
+    #[serde(rename = "autohand_code", alias = "autohand", alias = "autohand-code")]
+    AutohandCode,
     Mistral,
     #[serde(rename = "kimi_code_cli", alias = "kimi", alias = "kimi-code-cli")]
     KimiCodeCli,
@@ -85,7 +87,7 @@ pub enum ProviderId {
 }
 
 impl ProviderId {
-    pub const ALL: [Self; 37] = [
+    pub const ALL: [Self; 38] = [
         Self::Codex,
         Self::ClaudeCode,
         Self::ClaudeCliCrp,
@@ -114,6 +116,7 @@ impl ProviderId {
         Self::OpenHands,
         Self::Cagent,
         Self::QwenCode,
+        Self::AutohandCode,
         Self::Mistral,
         Self::KimiCodeCli,
         Self::Aider,
@@ -420,6 +423,7 @@ mod tests {
         let expected = [
             ProviderId::AntigravityCli,
             ProviderId::AstrBot,
+            ProviderId::AutohandCode,
             ProviderId::ClaudeCode,
             ProviderId::Cline,
             ProviderId::Codex,

@@ -3,6 +3,24 @@
 These notes capture providers that were researched while adding native
 IDE/application storage imports.
 
+## Autohand Code
+
+- Source evidence: upstream `src/constants.ts` defines `AUTOHAND_HOME` as the
+  overrideable base directory with a default of `~/.autohand`, and
+  `AUTOHAND_PATHS.sessions` as `AUTOHAND_HOME/sessions`.
+- `src/session/SessionManager.ts` creates each session directory, writes
+  `metadata.json`, appends messages to `conversation.jsonl`, loads the same
+  JSONL file, and maintains `sessions/index.json`.
+- `src/session/types.ts` defines `SessionMetadata` fields including
+  `sessionId`, `createdAt`, `lastActiveAt`, `projectPath`, `projectName`,
+  `model`, `messageCount`, `status`, `client`, `importedFrom`, and `branch`.
+- `src/session/types.ts` defines `SessionMessage` as JSONL records with
+  `role`, `content`, `timestamp`, optional `toolCalls`, `name`,
+  `tool_call_id`, and `_meta`.
+- `tests/session/SessionManager.test.ts` asserts that created sessions contain
+  both `metadata.json` and `conversation.jsonl`.
+- `ctx` imports this shape as `autohand_code_sessions_jsonl`.
+
 ## OpenHands
 
 - Source evidence: OpenHands `get_default_persistence_dir()` checks

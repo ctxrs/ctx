@@ -1,0 +1,5 @@
+{"role":"user","content":"autohand jsonl oracle prompt","timestamp":"2026-07-01T12:00:01.000Z"}
+{"role":"assistant","content":"I will inspect src/autohand_oracle.txt before editing.","timestamp":"2026-07-01T12:00:02.000Z","toolCalls":[{"id":"call-read","type":"function","name":"read_file","arguments":{"path":"src/autohand_oracle.txt"}}]}
+{"role":"tool","name":"read_file","tool_call_id":"call-read","content":"src/autohand_oracle.txt contains sanitized fixture text","timestamp":"2026-07-01T12:00:03.000Z"}
+{"role":"assistant","content":"Autohand JSONL oracle ready.","timestamp":"2026-07-01T12:00:04.000Z"}
+{"role":"system","content":"Session completed","timestamp":"2026-07-01T12:00:05.000Z"}

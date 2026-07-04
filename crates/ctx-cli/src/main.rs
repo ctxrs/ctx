@@ -33,11 +33,11 @@ use analytics::{AnalyticsEvent, AnalyticsProperties};
 use config::{AppConfig, CONFIG_FILE};
 use ctx_history_capture::{
     catalog_codex_session_tree, discover_provider_sources, discover_provider_sources_for_provider,
-    import_antigravity_cli_history, import_astrbot_sqlite, import_claude_projects_jsonl_tree,
-    import_cline_task_json_history, import_codex_history_jsonl, import_codex_session_jsonl,
-    import_codex_session_jsonl_tail, import_codex_session_paths, import_codex_session_tree,
-    import_continue_cli_sessions, import_copilot_cli_session_events, import_crush_sqlite,
-    import_cursor_native_history, import_custom_history_jsonl_v1,
+    import_antigravity_cli_history, import_astrbot_sqlite, import_autohand_code_sessions,
+    import_claude_projects_jsonl_tree, import_cline_task_json_history, import_codex_history_jsonl,
+    import_codex_session_jsonl, import_codex_session_jsonl_tail, import_codex_session_paths,
+    import_codex_session_tree, import_continue_cli_sessions, import_copilot_cli_session_events,
+    import_crush_sqlite, import_cursor_native_history, import_custom_history_jsonl_v1,
     import_custom_history_jsonl_v1_reader, import_dexto_sqlite, import_factory_ai_droid_sessions,
     import_gemini_cli_history, import_goose_sessions_sqlite, import_hermes_sqlite,
     import_kilo_sqlite, import_kimi_code_cli_history, import_nanoclaw_project,
@@ -45,8 +45,8 @@ use ctx_history_capture::{
     import_pi_session_jsonl, import_qwen_code_history, import_roo_task_json_history,
     import_shelley_sqlite, provider_source_for_path, provider_source_spec, stable_capture_uuid,
     validate_custom_history_jsonl_v1, validate_custom_history_jsonl_v1_reader,
-    AntigravityCliImportOptions, AstrBotSqliteImportOptions, CatalogSummary,
-    ClaudeProjectsImportOptions, ClineTaskJsonImportOptions, CodexEventImportMode,
+    AntigravityCliImportOptions, AstrBotSqliteImportOptions, AutohandCodeImportOptions,
+    CatalogSummary, ClaudeProjectsImportOptions, ClineTaskJsonImportOptions, CodexEventImportMode,
     CodexHistoryImportOptions, CodexSessionCatalogOptions, CodexSessionImportOptions,
     CodexSessionImportProgress, CodexSessionImportProgressCallback, CodexToolOutputMode,
     ContinueCliImportOptions, CopilotCliImportOptions, CrushSqliteImportOptions,
@@ -704,6 +704,8 @@ enum NativeProviderArg {
     QwenCode,
     #[value(name = "kimi-code-cli", alias = "kimi", alias = "kimi_code_cli")]
     KimiCodeCli,
+    #[value(name = "autohand-code", alias = "autohand", alias = "autohand_code")]
+    AutohandCode,
     #[value(name = "openclaw", alias = "open-claw", alias = "open_claw")]
     OpenClaw,
     Hermes,
@@ -756,6 +758,8 @@ enum ProviderArg {
     QwenCode,
     #[value(name = "kimi-code-cli", alias = "kimi", alias = "kimi_code_cli")]
     KimiCodeCli,
+    #[value(name = "autohand-code", alias = "autohand", alias = "autohand_code")]
+    AutohandCode,
     #[value(name = "openclaw", alias = "open-claw", alias = "open_claw")]
     OpenClaw,
     Hermes,
@@ -814,6 +818,7 @@ impl NativeProviderArg {
             Self::FactoryAiDroid => CaptureProvider::FactoryAiDroid,
             Self::QwenCode => CaptureProvider::QwenCode,
             Self::KimiCodeCli => CaptureProvider::KimiCodeCli,
+            Self::AutohandCode => CaptureProvider::AutohandCode,
             Self::OpenClaw => CaptureProvider::OpenClaw,
             Self::Hermes => CaptureProvider::Hermes,
             Self::NanoClaw => CaptureProvider::NanoClaw,
@@ -865,6 +870,7 @@ impl ProviderArg {
             Self::FactoryAiDroid => CaptureProvider::FactoryAiDroid,
             Self::QwenCode => CaptureProvider::QwenCode,
             Self::KimiCodeCli => CaptureProvider::KimiCodeCli,
+            Self::AutohandCode => CaptureProvider::AutohandCode,
             Self::OpenClaw => CaptureProvider::OpenClaw,
             Self::Hermes => CaptureProvider::Hermes,
             Self::NanoClaw => CaptureProvider::NanoClaw,
@@ -895,6 +901,7 @@ impl ProviderArg {
             Self::FactoryAiDroid => "factory-ai-droid",
             Self::QwenCode => "qwen-code",
             Self::KimiCodeCli => "kimi-code-cli",
+            Self::AutohandCode => "autohand-code",
             Self::OpenClaw => "openclaw",
             Self::Hermes => "hermes",
             Self::NanoClaw => "nanoclaw",
@@ -5859,6 +5866,17 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
+        CaptureProvider::AutohandCode => import_autohand_code_sessions(
+            &source.path,
+            store,
+            AutohandCodeImportOptions {
+                source_path: Some(source.path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: true,
+                ..AutohandCodeImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
         CaptureProvider::Antigravity => import_antigravity_cli_history(
             &source.path,
             store,
@@ -6108,6 +6126,12 @@ fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bool {
                 && path
                     .components()
                     .any(|component| component.as_os_str() == "agents")
+        }
+        CaptureProvider::AutohandCode => {
+            path.file_name().and_then(|name| name.to_str()) == Some("conversation.jsonl")
+                && path
+                    .parent()
+                    .is_some_and(|parent| parent.join("metadata.json").is_file())
         }
         _ => path.extension().and_then(|ext| ext.to_str()) == Some("jsonl"),
     }
@@ -6371,6 +6395,7 @@ fn source_uses_incremental_event_search(source: &SourceInfo) -> bool {
             | CaptureProvider::Continue
             | CaptureProvider::QwenCode
             | CaptureProvider::KimiCodeCli
+            | CaptureProvider::AutohandCode
             | CaptureProvider::Cline
             | CaptureProvider::RooCode
     )

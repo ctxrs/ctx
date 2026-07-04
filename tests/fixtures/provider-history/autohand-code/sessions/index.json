@@ -1,0 +1,14 @@
+{
+  "sessions": [
+    {
+      "id": "autohand-session-1",
+      "projectPath": "/workspace/autohand-demo",
+      "createdAt": "2026-07-01T12:00:00.000Z"
+    }
+  ],
+  "byProject": {
+    "/workspace/autohand-demo": [
+      "autohand-session-1"
+    ]
+  }
+}

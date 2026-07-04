@@ -206,6 +206,12 @@ const KIMI_CODE_CLI_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLoca
     source_kind: ProviderSourceKind::NativeHistory,
 }];
 
+const AUTOHAND_CODE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
+    path_components: &[".autohand", "sessions"],
+    source_format: "autohand_code_sessions_jsonl",
+    source_kind: ProviderSourceKind::NativeHistory,
+}];
+
 const OPENCLAW_DEFAULTS: &[ProviderDefaultLocation] = &[
     ProviderDefaultLocation {
         path_components: &[".openclaw"],
@@ -457,6 +463,16 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         provider: CaptureProvider::KimiCodeCli,
         display_name: "Kimi Code CLI",
         default_locations: KIMI_CODE_CLI_DEFAULTS,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
+    ProviderSourceSpec {
+        provider: CaptureProvider::AutohandCode,
+        display_name: "Autohand Code",
+        default_locations: AUTOHAND_CODE_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         raw_retention: ProviderRawRetention::PathReference,
@@ -718,6 +734,16 @@ fn discover_provider_sources_for_spec(
                     spec,
                     path,
                     "kimi_code_cli_wire_jsonl_tree",
+                    ProviderSourceKind::NativeHistory,
+                ));
+            }
+        }
+        CaptureProvider::AutohandCode => {
+            if let Some(path) = env_path_resolved("AUTOHAND_HOME", home) {
+                sources.push(provider_source_from_parts(
+                    spec,
+                    path.join("sessions"),
+                    "autohand_code_sessions_jsonl",
                     ProviderSourceKind::NativeHistory,
                 ));
             }
@@ -1187,6 +1213,7 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::QwenCode => "qwen_code_chat_jsonl",
         CaptureProvider::KimiCodeCli if path.is_dir() => "kimi_code_cli_wire_jsonl_tree",
         CaptureProvider::KimiCodeCli => "kimi_code_cli_wire_jsonl",
+        CaptureProvider::AutohandCode => "autohand_code_sessions_jsonl",
         CaptureProvider::OpenClaw => "openclaw_session_jsonl_tree",
         CaptureProvider::Hermes => "hermes_state_sqlite",
         CaptureProvider::NanoClaw => "nanoclaw_project",
@@ -1312,6 +1339,9 @@ fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::KimiCodeCli => {
             Some("path exists but no Kimi Code CLI agents/*/wire.jsonl files were found")
         }
+        CaptureProvider::AutohandCode => {
+            Some("path exists but no Autohand Code session conversation.jsonl files were found")
+        }
         CaptureProvider::OpenClaw => {
             Some("path exists but no OpenClaw agent session JSONL files were found")
         }
@@ -1372,6 +1402,9 @@ fn unknown_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::KimiCodeCli => {
             Some("path exists but the Kimi Code CLI wire transcript probe hit its scan budget")
         }
+        CaptureProvider::AutohandCode => {
+            Some("path exists but the Autohand Code session probe hit its scan budget")
+        }
         CaptureProvider::OpenClaw => {
             Some("path exists but the OpenClaw transcript probe hit its scan budget")
         }
@@ -1428,6 +1461,9 @@ fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'static str> {
         }
         CaptureProvider::KimiCodeCli => Some(
             "path exists but Kimi Code CLI wire transcripts could not be read; check permissions",
+        ),
+        CaptureProvider::AutohandCode => Some(
+            "path exists but Autohand Code session transcripts could not be read; check permissions",
         ),
         CaptureProvider::OpenClaw => Some(
             "path exists but OpenClaw session transcripts could not be read; check permissions",
@@ -1509,6 +1545,12 @@ fn default_location_import_probe(
         CaptureProvider::KimiCodeCli => has_jsonl_file_under_matching(path, 10_000, |candidate| {
             candidate.file_name().and_then(|name| name.to_str()) == Some("wire.jsonl")
                 && path_has_component(candidate, "agents")
+        }),
+        CaptureProvider::AutohandCode => has_jsonl_file_under_matching(path, 10_000, |candidate| {
+            candidate.file_name().and_then(|name| name.to_str()) == Some("conversation.jsonl")
+                && candidate
+                    .parent()
+                    .is_some_and(|parent| parent.join("metadata.json").is_file())
         }),
         CaptureProvider::Cline => has_task_json_file_under_matching(path, 10_000, |name| {
             matches!(
@@ -2243,6 +2285,42 @@ mod tests {
     }
 
     #[test]
+    fn autohand_code_discovery_uses_default_and_home_env_sessions() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::remove("AUTOHAND_HOME");
+
+        let default_sessions = temp.path().join(".autohand/sessions");
+        std::fs::create_dir_all(&default_sessions).unwrap();
+        let empty_source =
+            discover_provider_sources_for_provider(temp.path(), CaptureProvider::AutohandCode)
+                .into_iter()
+                .find(|source| source.path == default_sessions)
+                .unwrap();
+        assert_eq!(empty_source.status, ProviderSourceStatus::Empty);
+
+        write_autohand_discovery_session(&default_sessions);
+        let source =
+            discover_provider_sources_for_provider(temp.path(), CaptureProvider::AutohandCode)
+                .into_iter()
+                .find(|source| source.path == default_sessions)
+                .unwrap();
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+        assert_eq!(source.source_format, "autohand_code_sessions_jsonl");
+        assert_eq!(source.import_support, ProviderImportSupport::Native);
+
+        let custom_home = temp.path().join("custom-autohand");
+        let custom_sessions = custom_home.join("sessions");
+        write_autohand_discovery_session(&custom_sessions);
+        let _home = EnvGuard::set("AUTOHAND_HOME", custom_home.as_os_str());
+        let sources =
+            discover_provider_sources_for_provider(temp.path(), CaptureProvider::AutohandCode);
+        assert!(sources.iter().any(|source| {
+            source.path == custom_sessions && source.status == ProviderSourceStatus::Available
+        }));
+    }
+
+    #[test]
     fn crush_discovery_uses_global_config_data_directory() {
         let _lock = ENV_LOCK.lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
@@ -2535,6 +2613,17 @@ mod tests {
         let agent = home.join("sessions/wd_project_abc123/kimi-session/agents/main");
         std::fs::create_dir_all(&agent).unwrap();
         std::fs::write(agent.join("wire.jsonl"), "{}\n").unwrap();
+    }
+
+    fn write_autohand_discovery_session(sessions: &Path) {
+        let session = sessions.join("autohand-discovery");
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::write(
+            session.join("metadata.json"),
+            r#"{"sessionId":"autohand-discovery","createdAt":"2026-07-01T12:00:00Z","lastActiveAt":"2026-07-01T12:00:01Z","projectPath":"/workspace","projectName":"workspace","model":"fixture","messageCount":1,"status":"completed"}"#,
+        )
+        .unwrap();
+        std::fs::write(session.join("conversation.jsonl"), "{}\n").unwrap();
     }
 
     fn write_task_json_discovery_task(root: &Path, task_id: &str, file_name: &str) {

@@ -1,0 +1,15 @@
+{
+  "sessionId": "autohand-session-1",
+  "createdAt": "2026-07-01T12:00:00.000Z",
+  "lastActiveAt": "2026-07-01T12:00:05.000Z",
+  "closedAt": "2026-07-01T12:00:05.000Z",
+  "projectPath": "/workspace/autohand-demo",
+  "projectName": "autohand-demo",
+  "model": "openai/gpt-5-mini",
+  "messageCount": 5,
+  "summary": "Sanitized Autohand JSONL fixture",
+  "status": "completed",
+  "type": "interactive",
+  "client": "terminal",
+  "clientVersion": "fixture"
+}

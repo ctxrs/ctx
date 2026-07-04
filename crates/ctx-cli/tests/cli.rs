@@ -1885,11 +1885,16 @@ fn qwen_and_kimi_default_sources_import_search_and_reimport() {
         Path::new(&provider_history_fixture("kimi-code-cli/.kimi-code")),
         &temp.path().join(".kimi-code"),
     );
+    copy_dir_all(
+        Path::new(&provider_history_fixture("autohand-code/sessions")),
+        &temp.path().join(".autohand").join("sessions"),
+    );
 
     let sources = json_output(ctx(&temp).args(["sources", "--json"]));
     for (provider, source_format) in [
         ("qwen_code", "qwen_code_chat_jsonl_tree"),
         ("kimi_code_cli", "kimi_code_cli_wire_jsonl_tree"),
+        ("autohand_code", "autohand_code_sessions_jsonl"),
     ] {
         let source = sources["sources"]
             .as_array()
@@ -1912,6 +1917,12 @@ fn qwen_and_kimi_default_sources_import_search_and_reimport() {
             "kimi_code_cli",
             "kimi jsonl oracle prompt",
             7,
+        ),
+        (
+            "autohand-code",
+            "autohand_code",
+            "autohand jsonl oracle prompt",
+            5,
         ),
     ] {
         let first = json_output(ctx(&temp).args([
@@ -1962,6 +1973,7 @@ fn sources_lists_personal_agent_provider_defaults() {
     install_default_astrbot_fixture(&temp, "astrbot-sources-oracle");
     install_default_shelley_fixture(&temp, "shelley-sources-oracle");
     install_default_continue_fixture(&temp, "continue-sources-oracle");
+    install_default_autohand_fixture(&temp, "autohand-sources-oracle");
 
     let sources = json_output(ctx(&temp).args(["sources", "--json"]));
     for (provider, source_format, import_support, native_import) in [
@@ -1971,6 +1983,12 @@ fn sources_lists_personal_agent_provider_defaults() {
         ("astrbot", "astrbot_data_v4_sqlite", "preview", false),
         ("shelley", "shelley_sqlite", "native", true),
         ("continue", "continue_cli_sessions_json", "native", true),
+        (
+            "autohand_code",
+            "autohand_code_sessions_jsonl",
+            "native",
+            true,
+        ),
     ] {
         let source = sources["sources"]
             .as_array()
@@ -2176,6 +2194,7 @@ fn provider_help_matches_implemented_importers() {
         "dexto",
         "qwen-code",
         "kimi-code-cli",
+        "autohand-code",
     ] {
         assert!(help.contains(value), "provider {value} missing in\n{help}");
     }
@@ -2192,6 +2211,7 @@ fn provider_json_names_are_accepted_as_cli_filter_aliases() {
         ("kilo_code", "kilo"),
         ("qwen_code", "qwen_code"),
         ("kimi_code_cli", "kimi_code_cli"),
+        ("autohand_code", "autohand_code"),
         ("open_claw", "openclaw"),
         ("nano_claw", "nanoclaw"),
         ("astr_bot", "astrbot"),
@@ -2314,7 +2334,7 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
             vec![
                 "Usage: ctx import",
                 "--provider <PROVIDER>",
-                "[possible values: codex, pi, claude, opencode, kilo, crush, goose, antigravity, gemini, cursor, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto]",
+                "[possible values: codex, pi, claude, opencode, kilo, crush, goose, antigravity, gemini, cursor, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto]",
                 "--path <PATH>",
                 "--format <FORMAT>",
                 "--resume",
@@ -4371,6 +4391,8 @@ fn mcp_status_and_tools_list_are_read_only_without_initialized_store() {
     assert!(providers.iter().any(|provider| provider == "qwen_code"));
     assert!(providers.iter().any(|provider| provider == "kimi-code-cli"));
     assert!(providers.iter().any(|provider| provider == "kimi_code_cli"));
+    assert!(providers.iter().any(|provider| provider == "autohand-code"));
+    assert!(providers.iter().any(|provider| provider == "autohand_code"));
     assert!(providers.iter().any(|provider| provider == "cline"));
     assert!(providers.iter().any(|provider| provider == "roo"));
     assert!(providers.iter().any(|provider| provider == "roo_code"));
@@ -6062,6 +6084,12 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
             write_native_kimi_fixture,
         ),
         (
+            "autohand-code",
+            "autohand_code",
+            "autohand_code_sessions_jsonl",
+            write_native_autohand_fixture,
+        ),
+        (
             "openclaw",
             "openclaw",
             "openclaw_session_jsonl_tree",
@@ -6426,6 +6454,11 @@ fn install_default_continue_fixture(temp: &TempDir, query: &str) {
             fs::copy(&path, target.join(path.file_name().unwrap())).unwrap();
         }
     }
+}
+
+fn install_default_autohand_fixture(temp: &TempDir, query: &str) {
+    let source = PathBuf::from(write_native_autohand_fixture(temp, query));
+    copy_dir_all(&source, &temp.path().join(".autohand").join("sessions"));
 }
 
 fn install_default_openhands_fixture(temp: &TempDir, query: &str) {
@@ -6945,6 +6978,71 @@ fn write_native_kimi_fixture(temp: &TempDir, query: &str) -> String {
     )
     .unwrap();
     home.to_str().unwrap().to_owned()
+}
+
+fn write_native_autohand_fixture(temp: &TempDir, query: &str) -> String {
+    let sessions = temp.path().join("native-autohand/.autohand/sessions");
+    let session = sessions.join("autohand-cli-native");
+    fs::create_dir_all(&session).unwrap();
+    fs::write(
+        sessions.join("index.json"),
+        json!({
+            "sessions": [{
+                "id": "autohand-cli-native",
+                "projectPath": "/workspace/autohand",
+                "createdAt": "2026-07-04T14:00:00Z"
+            }],
+            "byProject": {"/workspace/autohand": ["autohand-cli-native"]}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        session.join("metadata.json"),
+        json!({
+            "sessionId": "autohand-cli-native",
+            "createdAt": "2026-07-04T14:00:00Z",
+            "lastActiveAt": "2026-07-04T14:00:04Z",
+            "closedAt": "2026-07-04T14:00:04Z",
+            "projectPath": "/workspace/autohand",
+            "projectName": "autohand",
+            "model": "openai/gpt-5-mini",
+            "messageCount": 4,
+            "summary": "Autohand native CLI fixture",
+            "status": "completed",
+            "client": "terminal"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        session.join("conversation.jsonl"),
+        format!(
+            "{}\n{}\n{}\n{}\n",
+            json!({"role": "user", "content": query, "timestamp": "2026-07-04T14:00:01Z"}),
+            json!({
+                "role": "assistant",
+                "content": "native Autohand import ok",
+                "timestamp": "2026-07-04T14:00:02Z",
+                "toolCalls": [{
+                    "id": "tool-1",
+                    "type": "function",
+                    "name": "write_file",
+                    "arguments": {"path": "src/autohand_cli_native.txt", "content": "proof"}
+                }]
+            }),
+            json!({
+                "role": "tool",
+                "name": "write_file",
+                "tool_call_id": "tool-1",
+                "content": "wrote src/autohand_cli_native.txt",
+                "timestamp": "2026-07-04T14:00:03Z"
+            }),
+            json!({"role": "assistant", "content": "done", "timestamp": "2026-07-04T14:00:04Z"})
+        ),
+    )
+    .unwrap();
+    sessions.to_str().unwrap().to_owned()
 }
 
 fn write_native_openclaw_fixture(temp: &TempDir, query: &str) -> String {

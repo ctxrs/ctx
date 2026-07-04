@@ -859,6 +859,27 @@ impl Default for KimiCodeCliImportOptions {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct AutohandCodeImportOptions {
+    pub machine_id: String,
+    pub source_path: Option<PathBuf>,
+    pub imported_at: DateTime<Utc>,
+    pub history_record_id: Option<Uuid>,
+    pub allow_partial_failures: bool,
+}
+
+impl Default for AutohandCodeImportOptions {
+    fn default() -> Self {
+        Self {
+            machine_id: default_machine_id(),
+            source_path: None,
+            imported_at: utc_now(),
+            history_record_id: None,
+            allow_partial_failures: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderFixtureLine {
     pub provider: CaptureProvider,
@@ -1122,6 +1143,9 @@ pub struct QwenCodeJsonlAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct KimiCodeCliWireJsonlAdapter;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AutohandCodeSessionsJsonlAdapter;
 
 impl ProviderCaptureAdapter for ProviderFixtureJsonlAdapter {
     fn provider(&self) -> CaptureProvider {
@@ -2178,6 +2202,24 @@ impl ProviderCaptureAdapter for KimiCodeCliWireJsonlAdapter {
         context: &ProviderAdapterContext,
     ) -> Result<ProviderNormalizationResult> {
         normalize_kimi_code_cli_history(path, context)
+    }
+}
+
+impl ProviderCaptureAdapter for AutohandCodeSessionsJsonlAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::AutohandCode
+    }
+
+    fn source_format(&self) -> &str {
+        AUTOHAND_CODE_SOURCE_FORMAT
+    }
+
+    fn normalize_path(
+        &self,
+        path: &Path,
+        context: &ProviderAdapterContext,
+    ) -> Result<ProviderNormalizationResult> {
+        normalize_autohand_code_sessions(path, context)
     }
 }
 
@@ -4490,6 +4532,25 @@ pub fn import_kimi_code_cli_history(
     )
 }
 
+pub fn import_autohand_code_sessions(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: AutohandCodeImportOptions,
+) -> Result<ProviderImportSummary> {
+    import_native_jsonl_tree(
+        store,
+        NativeJsonlTreeImport {
+            path: path.as_ref(),
+            machine_id: options.machine_id,
+            source_path: options.source_path,
+            imported_at: options.imported_at,
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+        },
+        AutohandCodeSessionsJsonlAdapter,
+    )
+}
+
 struct NativeJsonlTreeImport<'a> {
     path: &'a Path,
     machine_id: String,
@@ -4567,6 +4628,7 @@ const FACTORY_DROID_SOURCE_FORMAT: &str = "factory_ai_droid_sessions_jsonl";
 const COPILOT_CLI_SOURCE_FORMAT: &str = "copilot_cli_session_events_jsonl";
 const QWEN_CODE_SOURCE_FORMAT: &str = "qwen_code_chat_jsonl";
 const KIMI_CODE_CLI_SOURCE_FORMAT: &str = "kimi_code_cli_wire_jsonl";
+const AUTOHAND_CODE_SOURCE_FORMAT: &str = "autohand_code_sessions_jsonl";
 const CODEX_MAX_TEXT_CHARS: usize = 16_000;
 const CODEX_MAX_METADATA_TEXT_CHARS: usize = 4_000;
 const CODEX_MAX_OUTPUT_PREVIEW_CHARS: usize = 4_000;
@@ -12393,6 +12455,7 @@ fn native_jsonl_missing_reason(provider: CaptureProvider) -> &'static str {
         CaptureProvider::FactoryAiDroid => "no Factory AI Droid session JSONL transcripts found",
         CaptureProvider::QwenCode => "no Qwen Code chat JSONL transcripts found under chats",
         CaptureProvider::KimiCodeCli => "no Kimi Code CLI wire.jsonl transcripts found",
+        CaptureProvider::AutohandCode => "no Autohand Code session conversation.jsonl files found",
         _ => "no native provider JSONL transcripts found",
     }
 }
@@ -14598,6 +14661,491 @@ fn native_jsonl_model(provider: CaptureProvider, value: &Value) -> Option<Value>
             .get("model")
             .cloned()
             .or_else(|| value.pointer("/message/model").cloned()),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct AutohandSessionSource {
+    session_dir: PathBuf,
+    metadata_path: PathBuf,
+    conversation_path: PathBuf,
+}
+
+fn normalize_autohand_code_sessions(
+    path: &Path,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    let mut session_sources = Vec::new();
+    collect_autohand_session_sources(path, &mut session_sources)?;
+    session_sources.sort_by(|left, right| left.conversation_path.cmp(&right.conversation_path));
+    session_sources.dedup_by(|left, right| left.conversation_path == right.conversation_path);
+    if session_sources.is_empty() {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: native_jsonl_missing_reason(CaptureProvider::AutohandCode),
+        });
+    }
+
+    let mut merged = ProviderNormalizationResult::default();
+    for source in session_sources {
+        let mut result = normalize_autohand_session_source(&source, context)?;
+        merged.summary.merge(result.summary);
+        merged.captures.append(&mut result.captures);
+        merged.files_touched.append(&mut result.files_touched);
+    }
+    Ok(merged)
+}
+
+fn collect_autohand_session_sources(
+    root: &Path,
+    sessions: &mut Vec<AutohandSessionSource>,
+) -> Result<()> {
+    let metadata = fs::symlink_metadata(root)?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: root.to_path_buf(),
+            reason: "symlinked provider transcript roots are rejected",
+        });
+    }
+    ensure_provider_path_parents_are_not_symlinks(root)?;
+    if file_type.is_file() {
+        ensure_regular_provider_transcript_file(root)?;
+        if root.file_name().and_then(|name| name.to_str()) == Some("conversation.jsonl") {
+            if let Some(session_dir) = root.parent() {
+                if let Some(source) = autohand_session_source_from_dir(session_dir)? {
+                    sessions.push(source);
+                }
+            }
+        }
+        return Ok(());
+    }
+    if !file_type.is_dir() {
+        return Ok(());
+    }
+
+    if let Some(source) = autohand_session_source_from_dir(root)? {
+        sessions.push(source);
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            collect_autohand_session_sources(&path, sessions)?;
+        }
+    }
+    Ok(())
+}
+
+fn autohand_session_source_from_dir(dir: &Path) -> Result<Option<AutohandSessionSource>> {
+    let metadata_path = dir.join("metadata.json");
+    let conversation_path = dir.join("conversation.jsonl");
+    if !metadata_path.is_file() || !conversation_path.is_file() {
+        return Ok(None);
+    }
+    ensure_regular_provider_transcript_file(&metadata_path)?;
+    ensure_regular_provider_transcript_file(&conversation_path)?;
+    Ok(Some(AutohandSessionSource {
+        session_dir: dir.to_path_buf(),
+        metadata_path,
+        conversation_path,
+    }))
+}
+
+fn normalize_autohand_session_source(
+    source: &AutohandSessionSource,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    let mut result = ProviderNormalizationResult::default();
+    let metadata = read_autohand_metadata(&source.metadata_path, &mut result.summary);
+    let mut rows = Vec::new();
+    let file = File::open(&source.conversation_path)?;
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+    let mut line_number = 0usize;
+
+    while read_provider_jsonl_line(&mut reader, &mut line)? {
+        line_number += 1;
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let value: Value = match serde_json::from_slice(&line) {
+            Ok(value) => value,
+            Err(err) => {
+                push_provider_import_failure(
+                    &mut result.summary,
+                    line_number,
+                    format!("malformed JSONL: {err}"),
+                );
+                continue;
+            }
+        };
+        rows.push((line_number, value));
+    }
+
+    let provider_session_id = autohand_metadata_string(&metadata, "sessionId")
+        .or_else(|| {
+            source
+                .session_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.trim().is_empty())
+                .map(str::to_owned)
+        })
+        .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
+            path: source.session_dir.clone(),
+            reason: "Autohand Code session directory is missing a session id",
+        })?;
+    let first_row_time = rows
+        .iter()
+        .find_map(|(_, value)| autohand_timestamp(value.get("timestamp")));
+    let started_at = autohand_metadata_timestamp(&metadata, "createdAt")
+        .or(first_row_time)
+        .unwrap_or(context.imported_at);
+    let status = autohand_metadata_string(&metadata, "status");
+    let ended_at = autohand_metadata_timestamp(&metadata, "closedAt").or_else(|| {
+        status
+            .as_deref()
+            .filter(|status| *status != "active")
+            .and_then(|_| autohand_metadata_timestamp(&metadata, "lastActiveAt"))
+    });
+    let cwd = autohand_metadata_string(&metadata, "projectPath");
+    let model = autohand_metadata_string(&metadata, "model");
+    let parent_provider_session_id = autohand_metadata_pointer_string(
+        &metadata,
+        &[
+            "/branch/sourceSessionId",
+            "/importedFrom/originalId",
+            "/parentSessionId",
+            "/parent_session_id",
+        ],
+    );
+    let root_provider_session_id =
+        autohand_metadata_pointer_string(&metadata, &["/branch/rootSessionId", "/rootSessionId"])
+            .or_else(|| parent_provider_session_id.clone());
+    let agent_type = if parent_provider_session_id.is_some() {
+        AgentType::Subagent
+    } else {
+        AgentType::Primary
+    };
+    let role_hint = if parent_provider_session_id.is_some() {
+        "branch"
+    } else {
+        "primary"
+    };
+    let raw_source_path = source.conversation_path.display().to_string();
+
+    if rows.is_empty() {
+        result.captures.push((
+            0,
+            autohand_capture(
+                AutohandCaptureDraft {
+                    provider_session_id: provider_session_id.clone(),
+                    parent_provider_session_id,
+                    root_provider_session_id,
+                    external_agent_id: autohand_metadata_string(&metadata, "client"),
+                    agent_type,
+                    role_hint: role_hint.to_owned(),
+                    is_primary: agent_type == AgentType::Primary,
+                    started_at,
+                    ended_at,
+                    cwd,
+                    metadata: &metadata,
+                    source,
+                    event: None,
+                },
+                context,
+            ),
+        ));
+        return Ok(result);
+    }
+
+    for (line_number, value) in rows {
+        let occurred_at = autohand_timestamp(value.get("timestamp")).unwrap_or(started_at);
+        let event = autohand_event(
+            &provider_session_id,
+            line_number,
+            &value,
+            occurred_at,
+            &source.conversation_path,
+            model.as_deref(),
+        );
+        result
+            .files_touched
+            .extend(provider_file_touches_from_raw_value(
+                CaptureProvider::AutohandCode,
+                &provider_session_id,
+                AUTOHAND_CODE_SOURCE_FORMAT,
+                Some(raw_source_path.as_str()),
+                &value,
+                &event,
+                line_number,
+            ));
+        result.captures.push((
+            line_number,
+            autohand_capture(
+                AutohandCaptureDraft {
+                    provider_session_id: provider_session_id.clone(),
+                    parent_provider_session_id: parent_provider_session_id.clone(),
+                    root_provider_session_id: root_provider_session_id.clone(),
+                    external_agent_id: autohand_metadata_string(&metadata, "client"),
+                    agent_type,
+                    role_hint: role_hint.to_owned(),
+                    is_primary: agent_type == AgentType::Primary,
+                    started_at,
+                    ended_at,
+                    cwd: cwd.clone(),
+                    metadata: &metadata,
+                    source,
+                    event: Some(event),
+                },
+                context,
+            ),
+        ));
+    }
+
+    Ok(result)
+}
+
+struct AutohandCaptureDraft<'a> {
+    provider_session_id: String,
+    parent_provider_session_id: Option<String>,
+    root_provider_session_id: Option<String>,
+    external_agent_id: Option<String>,
+    agent_type: AgentType,
+    role_hint: String,
+    is_primary: bool,
+    started_at: DateTime<Utc>,
+    ended_at: Option<DateTime<Utc>>,
+    cwd: Option<String>,
+    metadata: &'a Value,
+    source: &'a AutohandSessionSource,
+    event: Option<ProviderEventEnvelope>,
+}
+
+fn autohand_capture(
+    draft: AutohandCaptureDraft<'_>,
+    context: &ProviderAdapterContext,
+) -> ProviderCaptureEnvelope {
+    native_provider_capture(
+        NativeSessionDraft {
+            provider: CaptureProvider::AutohandCode,
+            source_format: AUTOHAND_CODE_SOURCE_FORMAT,
+            provider_session_id: draft.provider_session_id.clone(),
+            parent_provider_session_id: draft.parent_provider_session_id,
+            root_provider_session_id: draft.root_provider_session_id,
+            external_agent_id: draft.external_agent_id,
+            agent_type: draft.agent_type,
+            role_hint: Some(draft.role_hint),
+            is_primary: draft.is_primary,
+            started_at: draft.started_at,
+            ended_at: draft.ended_at,
+            cwd: draft.cwd,
+            fidelity: Fidelity::Imported,
+            raw_source_path: draft.source.conversation_path.display().to_string(),
+            trust: ProviderSourceTrust::ProviderNative,
+            source_metadata: json!({
+                "adapter": AUTOHAND_CODE_SOURCE_FORMAT,
+                "source_path": draft.source.conversation_path.display().to_string(),
+                "metadata_path": draft.source.metadata_path.display().to_string(),
+                "session_dir": draft.source.session_dir.display().to_string(),
+            }),
+            session_metadata: json!({
+                "source_format": AUTOHAND_CODE_SOURCE_FORMAT,
+                "provider": CaptureProvider::AutohandCode.as_str(),
+                "session_id": draft.provider_session_id,
+                "project_name": autohand_metadata_string(draft.metadata, "projectName"),
+                "model": autohand_metadata_string(draft.metadata, "model"),
+                "message_count": draft.metadata.get("messageCount").and_then(Value::as_u64),
+                "status": autohand_metadata_string(draft.metadata, "status"),
+                "summary": autohand_metadata_string(draft.metadata, "summary"),
+                "session_type": autohand_metadata_string(draft.metadata, "type"),
+                "automode_prompt": autohand_metadata_string(draft.metadata, "automodePrompt"),
+                "automode_iterations": draft.metadata.get("automodeIterations").and_then(Value::as_u64),
+                "client": autohand_metadata_string(draft.metadata, "client"),
+                "client_version": autohand_metadata_string(draft.metadata, "clientVersion"),
+                "imported_from": draft.metadata.get("importedFrom").cloned(),
+                "branch": draft.metadata.get("branch").cloned(),
+            }),
+        },
+        context,
+        draft.event,
+    )
+}
+
+fn autohand_event(
+    provider_session_id: &str,
+    line_number: usize,
+    value: &Value,
+    occurred_at: DateTime<Utc>,
+    path: &Path,
+    model: Option<&str>,
+) -> ProviderEventEnvelope {
+    let role = value
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let event_type = autohand_event_type(role, value);
+    native_event(NativeEventDraft {
+        provider: CaptureProvider::AutohandCode,
+        source_format: AUTOHAND_CODE_SOURCE_FORMAT,
+        provider_session_id: provider_session_id.to_owned(),
+        provider_event_index: (line_number - 1) as u64,
+        provider_event_hash: Some(autohand_event_id(value, line_number, role)),
+        cursor: format!("{}:line:{line_number}", path.display()),
+        event_type,
+        role: Some(provider_role(Some(role))),
+        occurred_at,
+        text: autohand_event_text(role, value, event_type),
+        body: value.clone(),
+        metadata: json!({
+            "source": AUTOHAND_CODE_SOURCE_FORMAT,
+            "source_format": AUTOHAND_CODE_SOURCE_FORMAT,
+            "line": line_number,
+            "role": role,
+            "model": model,
+            "message_id": value.pointer("/_meta/id").or_else(|| value.get("id")).and_then(Value::as_str),
+            "tool_call_id": value.get("tool_call_id").and_then(Value::as_str),
+            "name": value.get("name").and_then(Value::as_str),
+            "tool_calls": value.get("toolCalls").map(|calls| provider_capped_json_value(calls, PROVIDER_MAX_PREVIEW_CHARS)),
+        }),
+    })
+}
+
+fn autohand_event_type(role: &str, value: &Value) -> EventType {
+    if role == "tool" || value.get("tool_call_id").is_some() {
+        EventType::ToolOutput
+    } else if value
+        .get("toolCalls")
+        .and_then(Value::as_array)
+        .is_some_and(|calls| !calls.is_empty())
+    {
+        EventType::ToolCall
+    } else if role == "system" {
+        EventType::Notice
+    } else {
+        EventType::Message
+    }
+}
+
+fn autohand_event_text(role: &str, value: &Value, event_type: EventType) -> String {
+    value
+        .get("content")
+        .and_then(provider_value_text)
+        .filter(|text| !text.trim().is_empty())
+        .or_else(|| autohand_tool_calls_text(value))
+        .or_else(|| {
+            value
+                .get("name")
+                .and_then(Value::as_str)
+                .map(|name| match event_type {
+                    EventType::ToolOutput => format!("tool result: {name}"),
+                    EventType::ToolCall => format!("tool call: {name}"),
+                    _ => name.to_owned(),
+                })
+        })
+        .unwrap_or_else(|| format!("Autohand Code {role} message"))
+}
+
+fn autohand_tool_calls_text(value: &Value) -> Option<String> {
+    let calls = value.get("toolCalls")?;
+    let Some(items) = calls.as_array() else {
+        return provider_value_text(calls).map(|text| format!("tool calls: {text}"));
+    };
+    let names = items
+        .iter()
+        .filter_map(|call| {
+            call.get("name")
+                .or_else(|| call.pointer("/function/name"))
+                .or_else(|| call.get("tool"))
+                .or_else(|| call.get("id"))
+                .and_then(Value::as_str)
+        })
+        .collect::<Vec<_>>();
+    if names.is_empty() {
+        Some("tool calls".to_owned())
+    } else {
+        Some(format!("tool calls: {}", names.join(", ")))
+    }
+}
+
+fn autohand_event_id(value: &Value, line_number: usize, role: &str) -> String {
+    value
+        .pointer("/_meta/id")
+        .or_else(|| value.get("id"))
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("{role}:line-{line_number}"))
+}
+
+fn read_autohand_metadata(path: &Path, summary: &mut ProviderImportSummary) -> Value {
+    match read_text_file_limited(
+        path,
+        MAX_PROVIDER_JSONL_LINE_BYTES,
+        "Autohand Code metadata.json",
+    ) {
+        Ok(raw) => match serde_json::from_str::<Value>(&raw) {
+            Ok(value) if value.is_object() => value,
+            Ok(_) => {
+                push_provider_import_failure(
+                    summary,
+                    0,
+                    "Autohand Code metadata.json must contain a JSON object".to_owned(),
+                );
+                Value::Null
+            }
+            Err(err) => {
+                push_provider_import_failure(
+                    summary,
+                    0,
+                    format!("invalid Autohand Code metadata.json: {err}"),
+                );
+                Value::Null
+            }
+        },
+        Err(err) => {
+            push_provider_import_failure(
+                summary,
+                0,
+                format!("could not read Autohand Code metadata.json: {err}"),
+            );
+            Value::Null
+        }
+    }
+}
+
+fn autohand_metadata_string(value: &Value, field: &str) -> Option<String> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|raw| !raw.trim().is_empty())
+        .map(str::to_owned)
+}
+
+fn autohand_metadata_pointer_string(value: &Value, pointers: &[&str]) -> Option<String> {
+    pointers.iter().find_map(|pointer| {
+        value
+            .pointer(pointer)
+            .and_then(Value::as_str)
+            .filter(|raw| !raw.trim().is_empty())
+            .map(str::to_owned)
+    })
+}
+
+fn autohand_metadata_timestamp(value: &Value, field: &str) -> Option<DateTime<Utc>> {
+    autohand_timestamp(value.get(field))
+}
+
+fn autohand_timestamp(value: Option<&Value>) -> Option<DateTime<Utc>> {
+    match value {
+        Some(Value::String(raw)) => parse_rfc3339_utc(raw),
+        Some(Value::Number(number)) => number
+            .as_f64()
+            .and_then(provider_timestamp_seconds_to_datetime),
         _ => None,
     }
 }
@@ -20687,6 +21235,54 @@ mod tests {
         assert_eq!(kimi_second.imported_sessions, 0);
         assert_eq!(kimi_second.imported_events, 0);
         assert_eq!(kimi_second.imported_edges, 0);
+
+        let autohand = provider_history_fixture("autohand-code/sessions");
+        let autohand_summary = import_autohand_code_sessions(
+            &autohand,
+            &mut store,
+            AutohandCodeImportOptions {
+                allow_partial_failures: true,
+                ..AutohandCodeImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            autohand_summary.failed, 0,
+            "{:?}",
+            autohand_summary.failures
+        );
+        assert_eq!(autohand_summary.imported_sessions, 1);
+        assert_eq!(autohand_summary.imported_events, 5);
+
+        let autohand_events = store
+            .events_for_session(provider_session_uuid(
+                CaptureProvider::AutohandCode,
+                "autohand-session-1",
+            ))
+            .unwrap();
+        assert_eq!(autohand_events.len(), 5);
+        assert!(autohand_events
+            .iter()
+            .any(|event| event.event_type == EventType::ToolCall));
+        assert!(autohand_events
+            .iter()
+            .any(|event| event.event_type == EventType::ToolOutput));
+        let autohand_rendered = serde_json::to_string(&autohand_events).unwrap();
+        assert!(autohand_rendered.contains("autohand jsonl oracle prompt"));
+        assert!(autohand_rendered.contains("src/autohand_oracle.txt"));
+
+        let autohand_second = import_autohand_code_sessions(
+            &autohand,
+            &mut store,
+            AutohandCodeImportOptions {
+                allow_partial_failures: true,
+                ..AutohandCodeImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(autohand_second.failed, 0, "{:?}", autohand_second.failures);
+        assert_eq!(autohand_second.imported_sessions, 0);
+        assert_eq!(autohand_second.imported_events, 0);
     }
 
     #[test]
