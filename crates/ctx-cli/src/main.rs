@@ -40,7 +40,7 @@ use ctx_history_capture::{
     import_copilot_cli_session_events, import_crush_sqlite, import_cursor_native_history,
     import_custom_history_jsonl_v1, import_custom_history_jsonl_v1_reader, import_dexto_sqlite,
     import_factory_ai_droid_sessions, import_gemini_cli_history, import_goose_sessions_sqlite,
-    import_hermes_sqlite, import_kilo_sqlite, import_kimi_code_cli_history,
+    import_hermes_sqlite, import_kilo_sqlite, import_kimi_code_cli_history, import_kiro_sqlite,
     import_nanoclaw_project, import_openclaw_history, import_opencode_sqlite,
     import_openhands_file_events, import_pi_session_jsonl, import_qwen_code_history,
     import_roo_task_json_history, import_shelley_sqlite, import_zed_threads_sqlite,
@@ -54,10 +54,10 @@ use ctx_history_capture::{
     CopilotCliImportOptions, CrushSqliteImportOptions, CursorNativeImportOptions,
     CustomHistoryJsonlV1ImportOptions, DextoSqliteImportOptions, FactoryAiDroidImportOptions,
     GeminiCliImportOptions, GooseSessionsSqliteImportOptions, HermesSqliteImportOptions,
-    KiloSqliteImportOptions, KimiCodeCliImportOptions, NanoClawImportOptions,
-    OpenClawImportOptions, OpenCodeSqliteImportOptions, OpenHandsImportOptions,
-    PiSessionImportOptions, ProviderImportSummary, ProviderImportSupport, ProviderSource,
-    ProviderSourceStatus, QwenCodeImportOptions, RooTaskJsonImportOptions,
+    KiloSqliteImportOptions, KimiCodeCliImportOptions, KiroSqliteImportOptions,
+    NanoClawImportOptions, OpenClawImportOptions, OpenCodeSqliteImportOptions,
+    OpenHandsImportOptions, PiSessionImportOptions, ProviderImportSummary, ProviderImportSupport,
+    ProviderSource, ProviderSourceStatus, QwenCodeImportOptions, RooTaskJsonImportOptions,
     ShelleySqliteImportOptions, ZedThreadsSqliteImportOptions,
 };
 use ctx_history_core::{
@@ -687,6 +687,8 @@ enum NativeProviderArg {
         alias = "kilocode"
     )]
     Kilo,
+    #[value(name = "kiro-cli", alias = "kiro", alias = "kiro_cli")]
+    KiroCli,
     Crush,
     Goose,
     #[value(alias = "antigravity-cli")]
@@ -744,6 +746,8 @@ enum ProviderArg {
         alias = "kilocode"
     )]
     Kilo,
+    #[value(name = "kiro-cli", alias = "kiro", alias = "kiro_cli")]
+    KiroCli,
     Crush,
     Goose,
     #[value(alias = "antigravity-cli")]
@@ -817,6 +821,7 @@ impl NativeProviderArg {
             Self::Claude => CaptureProvider::Claude,
             Self::OpenCode => CaptureProvider::OpenCode,
             Self::Kilo => CaptureProvider::Kilo,
+            Self::KiroCli => CaptureProvider::KiroCli,
             Self::Crush => CaptureProvider::Crush,
             Self::Goose => CaptureProvider::Goose,
             Self::Antigravity => CaptureProvider::Antigravity,
@@ -871,6 +876,7 @@ impl ProviderArg {
             Self::Claude => CaptureProvider::Claude,
             Self::OpenCode => CaptureProvider::OpenCode,
             Self::Kilo => CaptureProvider::Kilo,
+            Self::KiroCli => CaptureProvider::KiroCli,
             Self::Crush => CaptureProvider::Crush,
             Self::Goose => CaptureProvider::Goose,
             Self::Antigravity => CaptureProvider::Antigravity,
@@ -904,6 +910,7 @@ impl ProviderArg {
             Self::Claude => "claude",
             Self::OpenCode => "opencode",
             Self::Kilo => "kilo",
+            Self::KiroCli => "kiro-cli",
             Self::Crush => "crush",
             Self::Goose => "goose",
             Self::Antigravity => "antigravity",
@@ -5715,6 +5722,17 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
+        CaptureProvider::KiroCli => import_kiro_sqlite(
+            &source.path,
+            store,
+            KiroSqliteImportOptions {
+                source_path: Some(source.path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: true,
+                ..KiroSqliteImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
         CaptureProvider::Crush => import_crush_sqlite(
             &source.path,
             store,
@@ -6126,6 +6144,7 @@ fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bool {
     match source.provider {
         CaptureProvider::OpenCode
         | CaptureProvider::Kilo
+        | CaptureProvider::KiroCli
         | CaptureProvider::Crush
         | CaptureProvider::Goose
         | CaptureProvider::Dexto
@@ -6429,6 +6448,7 @@ fn source_uses_incremental_event_search(source: &SourceInfo) -> bool {
             | CaptureProvider::Cursor
             | CaptureProvider::OpenCode
             | CaptureProvider::Kilo
+            | CaptureProvider::KiroCli
             | CaptureProvider::Crush
             | CaptureProvider::Goose
             | CaptureProvider::Dexto

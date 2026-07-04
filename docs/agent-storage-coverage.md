@@ -21,7 +21,7 @@ Status meanings:
 - `install-target`: npx target is an aggregate or project skill target, not a
   proven history-producing agent.
 
-Result on this integration branch: 23 `native-auto`, 2 `native-preview`, 19
+Result on this integration branch: 24 `native-auto`, 2 `native-preview`, 18
 `candidate-family`, 10 `webapp-boundary`, 16 `unknown`, and 2 `install-target`
 rows.
 
@@ -38,11 +38,12 @@ rows.
   `sessions.json` metadata.
 - `filesystem event JSON`: covers OpenHands event JSON under
   `<persistence>/<user_id>/v1_conversations`.
-- `generic sqlite messages`: already covers Crush, Goose, Hermes, Dexto
-  explicit imports, the AstrBot preview importer, and ctx-native Shelley.
+- `generic sqlite messages`: already covers Crush, Goose, Hermes, Kiro CLI,
+  Dexto explicit imports, the AstrBot preview importer, and ctx-native Shelley.
 - `VS Code/Electron storage`: Cursor is covered through a known transcript tree,
-  and Zed is covered through its agent `threads.db`; other IDE-like tools need
-  storage discovery before reuse.
+  CodeBuddy is covered through its file-backed history JSON, and Zed is covered
+  through its agent `threads.db`; other IDE-like tools need storage discovery
+  before reuse.
 - `webapp/object-store boundary`: prefer explicit exporters or
   `ctx-history-jsonl-v1` history-source plugins over speculative native readers.
 
@@ -88,7 +89,7 @@ rows.
 | `junie` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.junie`; no ctx provider | IDE-managed history boundary needs a verified local export or plugin. |
 | `kilo` | `native-auto` | `opencode sqlite family` | ctx `kilo_sqlite`; npx `~/.kilocode` | - |
 | `kimi-code-cli` | `native-auto` | `JSONL CLI event logs` | ctx `kimi_code_cli_wire_jsonl_tree`; npx `~/.kimi-code` or `~/.kimi` | - |
-| `kiro-cli` | `candidate-family` | `JSONL CLI event logs` | npx `~/.kiro`; no ctx provider | Need transcript location and schema proof. |
+| `kiro-cli` | `native-auto` | `generic sqlite messages` | ctx `kiro_cli_sqlite`; npx `~/.kiro` | SQLite import covers the proven `conversations_v2`/`conversations` DB at the Kiro CLI data dir; newer `~/.kiro/sessions/cli` event logs are not imported yet. |
 | `kode` | `unknown` | `unknown native history` | npx `~/.kode`; no ctx provider | Need native history storage research before claiming import support. |
 | `lingma` | `candidate-family` | `VS Code/Electron storage` | npx `~/.lingma`; no ctx provider | Need local app storage or export contract proof. |
 | `loaf` | `unknown` | `unknown native history` | npx `~/.loaf`; no ctx provider | Need native history storage research before claiming import support. |

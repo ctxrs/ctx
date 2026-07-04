@@ -3,6 +3,31 @@
 These notes capture providers that were researched while adding native
 IDE/application storage imports.
 
+## Kiro CLI
+
+- Source evidence: official Kiro CLI docs state chat sessions are auto-saved
+  after every conversation turn, keyed by directory path, with UUID session IDs,
+  and stored in a local SQLite database under the Kiro CLI home area.
+- Source evidence: official Kiro CLI configuration docs state `KIRO_HOME`
+  overrides `~/.kiro` for agents, prompts, skills, steering, settings, and
+  sessions; this proves the home override for Kiro-managed session files, but
+  not a separate SQLite DB override.
+- Direct binary proof: running the official Kiro CLI 2.10.0 Linux binary with a
+  temporary `HOME`, `XDG_DATA_HOME`, and `KIRO_HOME` created
+  `$XDG_DATA_HOME/kiro-cli/data.sqlite3` and `KIRO_HOME/settings/cli.json`.
+- Direct DB proof from that generated DB: tables include `conversations`,
+  `conversations_v2`, `history`, `auth_kv`, `state`, `migrations`, and
+  `extracted_kas_versions`; `conversations_v2` columns are `key`,
+  `conversation_id`, `value`, `created_at`, and `updated_at`, with primary key
+  `(key, conversation_id)`.
+- Payload proof: upstream issue reports query `json_extract(value, '$.history')`
+  against `conversations_v2`, and the `kiro-history` package parser reads
+  `value.history[]` entries with `user.content.Prompt.prompt`,
+  `assistant.Response.content`, and `assistant.ToolUse.{content,tool_uses}`.
+- Gap: a recent upstream issue and third-party tooling also point to newer
+  `~/.kiro/sessions/cli` JSON/JSONL event logs. This pass imports only the
+  proven SQLite DB format as `kiro_cli_sqlite`.
+
 ## Autohand Code
 
 - Source evidence: upstream `src/constants.ts` defines `AUTOHAND_HOME` as the

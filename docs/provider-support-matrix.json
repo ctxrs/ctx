@@ -281,6 +281,67 @@
       ]
     },
     {
+      "id": "kiro_cli",
+      "display_name": "Kiro CLI",
+      "priority": "p1",
+      "status": "local_import_when_supported",
+      "capture_provider": "kiro_cli",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "kiro_cli_sqlite",
+          "fidelity": "imported",
+          "proof": [
+            "ctx sources",
+            "ctx import --provider kiro-cli"
+          ],
+          "notes": [
+            "Reads Kiro CLI SQLite history from data.sqlite3 using a read-only connection.",
+            "The official 2.10.0 Linux binary created $XDG_DATA_HOME/kiro-cli/data.sqlite3 with conversations_v2(key, conversation_id, value, created_at, updated_at) and conversations(key, value).",
+            "Conversation payload parsing covers value.history[] entries with user Prompt text, assistant Response text, and assistant ToolUse content/tool_uses."
+          ]
+        }
+      ],
+      "history_locations": [
+        "$XDG_DATA_HOME/kiro-cli/data.sqlite3",
+        "~/.local/share/kiro-cli/data.sqlite3",
+        "~/Library/Application Support/kiro-cli/data.sqlite3"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": false,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": false,
+        "command_output": false,
+        "files_touched": true,
+        "artifacts": false,
+        "model_identity": false,
+        "costs": false,
+        "token_usage": false,
+        "parent_child_session_edges": false
+      },
+      "redaction_notes": [
+        "Reads the provider SQLite database read-only; imported prompts, assistant text, tool-use arguments, cwd/directory keys, local source paths, and searchable previews remain in the local ctx index.",
+        "KIRO_HOME is documented for Kiro-managed session/settings homes, but this importer does not infer a SQLite DB path from KIRO_HOME."
+      ],
+      "blockers": [
+        "Does not import the newer ~/.kiro/sessions/cli JSON/JSONL event-log format observed in recent Kiro CLI reports.",
+        "Windows Kiro CLI SQLite path was not proven for this pass."
+      ],
+      "public_docs": "docs/provider-support.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/kiro-cli/v2/data.sqlite3"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs"
+      ]
+    },
+    {
       "id": "crush",
       "display_name": "Crush",
       "priority": "p1",

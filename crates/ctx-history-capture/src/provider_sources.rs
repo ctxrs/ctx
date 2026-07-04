@@ -136,6 +136,19 @@ const KILO_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     source_kind: ProviderSourceKind::NativeHistory,
 }];
 
+const KIRO_DEFAULTS: &[ProviderDefaultLocation] = &[
+    ProviderDefaultLocation {
+        path_components: &[".local", "share", "kiro-cli", "data.sqlite3"],
+        source_format: "kiro_cli_sqlite",
+        source_kind: ProviderSourceKind::NativeHistory,
+    },
+    ProviderDefaultLocation {
+        path_components: &["Library", "Application Support", "kiro-cli", "data.sqlite3"],
+        source_format: "kiro_cli_sqlite",
+        source_kind: ProviderSourceKind::NativeHistory,
+    },
+];
+
 const CRUSH_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     path_components: &[".local", "share", "crush", "crush.db"],
     source_format: "crush_sqlite",
@@ -397,6 +410,16 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         provider: CaptureProvider::Kilo,
         display_name: "Kilo Code",
         default_locations: KILO_DEFAULTS,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
+    ProviderSourceSpec {
+        provider: CaptureProvider::KiroCli,
+        display_name: "Kiro CLI",
+        default_locations: KIRO_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         raw_retention: ProviderRawRetention::PathReference,
@@ -721,6 +744,16 @@ fn discover_provider_sources_for_spec(
                         sources.push(crush_db_source(spec, data_dir.join("crush.db")));
                     }
                 }
+            }
+        }
+        CaptureProvider::KiroCli => {
+            if let Some(path) = env_path("XDG_DATA_HOME") {
+                sources.push(provider_source_from_parts(
+                    spec,
+                    path.join("kiro-cli").join("data.sqlite3"),
+                    "kiro_cli_sqlite",
+                    ProviderSourceKind::NativeHistory,
+                ));
             }
         }
         CaptureProvider::Goose => {
@@ -1261,6 +1294,7 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::Claude => "claude_projects_jsonl_tree",
         CaptureProvider::OpenCode => "opencode_sqlite",
         CaptureProvider::Kilo => "kilo_sqlite",
+        CaptureProvider::KiroCli => "kiro_cli_sqlite",
         CaptureProvider::Crush => "crush_sqlite",
         CaptureProvider::Goose => "goose_sessions_sqlite",
         CaptureProvider::Antigravity => "antigravity_cli_transcript_jsonl_tree",
@@ -1509,6 +1543,9 @@ fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::Kilo => {
             Some("path exists but the Kilo database could not be read; check permissions")
         }
+        CaptureProvider::KiroCli => {
+            Some("path exists but the Kiro CLI database could not be read; check permissions")
+        }
         CaptureProvider::Crush => {
             Some("path exists but the Crush database could not be read; check permissions")
         }
@@ -1592,6 +1629,7 @@ fn default_location_import_probe(
         CaptureProvider::Pi => has_jsonl_file_under_matching(path, 10_000, |_| true),
         CaptureProvider::OpenCode => path_is_file_probe(path),
         CaptureProvider::Kilo => path_is_file_probe(path),
+        CaptureProvider::KiroCli => path_is_file_probe(path),
         CaptureProvider::Crush => path_is_file_probe(path),
         CaptureProvider::Goose => path_is_file_probe(path),
         CaptureProvider::Claude => has_jsonl_file_under_matching(path, 10_000, |_| true),

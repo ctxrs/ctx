@@ -187,6 +187,7 @@ text_enum! {
         Pi => "pi",
         OpenCode => "opencode",
         Kilo => "kilo",
+        KiroCli => "kiro_cli",
         Antigravity => "antigravity",
         Gemini => "gemini",
         Cursor => "cursor",
@@ -1520,6 +1521,10 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<CaptureProvider>("\"kilo\"").unwrap(),
             CaptureProvider::Kilo
+        );
+        assert_eq!(
+            serde_json::from_str::<CaptureProvider>("\"kiro_cli\"").unwrap(),
+            CaptureProvider::KiroCli
         );
         assert_eq!(
             serde_json::from_str::<CaptureProvider>("\"qwen_code\"").unwrap(),

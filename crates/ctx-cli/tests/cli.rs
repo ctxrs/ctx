@@ -1970,6 +1970,7 @@ fn sources_lists_personal_agent_provider_defaults() {
     install_default_openclaw_fixture(&temp, "openclaw-sources-oracle");
     install_default_hermes_fixture(&temp, "hermes-sources-oracle");
     install_default_kilo_fixture(&temp, "kilo-sources-oracle");
+    install_default_kiro_fixture(&temp, "kiro-sources-oracle");
     install_default_astrbot_fixture(&temp, "astrbot-sources-oracle");
     install_default_shelley_fixture(&temp, "shelley-sources-oracle");
     install_default_continue_fixture(&temp, "continue-sources-oracle");
@@ -1980,6 +1981,7 @@ fn sources_lists_personal_agent_provider_defaults() {
         ("openclaw", "openclaw_session_jsonl_tree", "native", true),
         ("hermes", "hermes_state_sqlite", "native", true),
         ("kilo", "kilo_sqlite", "native", true),
+        ("kiro_cli", "kiro_cli_sqlite", "native", true),
         ("astrbot", "astrbot_data_v4_sqlite", "preview", false),
         ("shelley", "shelley_sqlite", "native", true),
         ("continue", "continue_cli_sessions_json", "native", true),
@@ -6053,6 +6055,12 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
         ),
         ("kilo", "kilo", "kilo_sqlite", write_native_kilo_fixture),
         (
+            "kiro-cli",
+            "kiro_cli",
+            "kiro_cli_sqlite",
+            write_native_kiro_fixture,
+        ),
+        (
             "gemini",
             "gemini",
             "gemini_cli_chat_recording_jsonl",
@@ -6205,7 +6213,7 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
 }
 
 #[test]
-fn sqlite_cli_imports_crush_goose_and_dexto_and_searches() {
+fn sqlite_cli_imports_crush_goose_dexto_and_kiro_and_searches() {
     for (cli_provider, stored_provider, source_format, fixture, query, sessions, events) in [
         (
             "zed",
@@ -6240,6 +6248,15 @@ fn sqlite_cli_imports_crush_goose_and_dexto_and_searches() {
             "dexto_sqlite",
             "dexto/v1/dexto.db",
             "dexto oracle",
+            1,
+            3,
+        ),
+        (
+            "kiro-cli",
+            "kiro_cli",
+            "kiro_cli_sqlite",
+            "kiro-cli/v2/data.sqlite3",
+            "kiro oracle",
             1,
             3,
         ),
@@ -6282,7 +6299,7 @@ fn sqlite_cli_imports_crush_goose_and_dexto_and_searches() {
         assert_eq!(located["source"]["source_format"], source_format);
         assert!(located["source"]["path"]
             .as_str()
-            .is_some_and(|path| path.ends_with(".db")));
+            .is_some_and(|path| path.ends_with(".db") || path.ends_with(".sqlite3")));
 
         let second = json_output(ctx(&temp).args([
             "import",
@@ -6447,6 +6464,13 @@ fn install_default_kilo_fixture(temp: &TempDir, query: &str) {
     let target = temp.path().join(".local/share/kilo");
     fs::create_dir_all(&target).unwrap();
     fs::copy(source, target.join("kilo.db")).unwrap();
+}
+
+fn install_default_kiro_fixture(temp: &TempDir, query: &str) {
+    let source = PathBuf::from(write_native_kiro_fixture(temp, query));
+    let target = temp.path().join(".local/share/kiro-cli");
+    fs::create_dir_all(&target).unwrap();
+    fs::copy(source, target.join("data.sqlite3")).unwrap();
 }
 
 fn install_default_astrbot_fixture(temp: &TempDir, query: &str) {
@@ -6664,6 +6688,74 @@ fn write_native_kilo_fixture(temp: &TempDir, query: &str) -> String {
             "kilo-cli-native",
             &format!(r#"{{"time":{{"created":1782259200000}},"text":"{query}"}}"#),
         ],
+    )
+    .unwrap();
+    path.to_str().unwrap().to_owned()
+}
+
+fn write_native_kiro_fixture(temp: &TempDir, query: &str) -> String {
+    let path = temp.path().join("native-kiro.sqlite3");
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "create table conversations (
+            key text primary key,
+            value text
+        );
+        create table conversations_v2 (
+            key text not null,
+            conversation_id text not null,
+            value text not null,
+            created_at integer not null,
+            updated_at integer not null,
+            primary key (key, conversation_id)
+        );
+        create index idx_conversations_v2_key_updated on conversations_v2(key, updated_at desc);
+        create index idx_conversations_v2_updated_at on conversations_v2(updated_at desc);",
+    )
+    .unwrap();
+    let value = json!({
+        "conversation_id": "kiro-cli-native",
+        "history": [
+            {
+                "user": {
+                    "timestamp": "2026-06-25T20:10:00Z",
+                    "content": {
+                        "Prompt": {
+                            "prompt": query,
+                        },
+                    },
+                },
+                "assistant": {
+                    "timestamp": "2026-06-25T20:10:03Z",
+                    "Response": {
+                        "content": format!("Kiro CLI response for {query}"),
+                    },
+                },
+            },
+            {
+                "assistant": {
+                    "timestamp": "2026-06-25T20:10:05Z",
+                    "ToolUse": {
+                        "content": "Inspecting Kiro CLI fixture state.",
+                        "tool_uses": [
+                            {
+                                "id": "toolu_kiro_cli_native_1",
+                                "name": "grep",
+                                "args": {
+                                    "pattern": query,
+                                    "path": "/workspace/kiro-cli-native",
+                                },
+                            },
+                        ],
+                    },
+                },
+            },
+        ],
+    });
+    conn.execute(
+        "insert into conversations_v2 (key, conversation_id, value, created_at, updated_at)
+         values ('/workspace/kiro-cli-native', 'kiro-cli-native', ?1, 1782418200000, 1782418205000)",
+        [value.to_string()],
     )
     .unwrap();
     path.to_str().unwrap().to_owned()
