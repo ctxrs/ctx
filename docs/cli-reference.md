@@ -89,8 +89,9 @@ machine. Current rows include:
 - Codex prompt history at `~/.codex/history.jsonl`;
 - Pi session JSONL files under `~/.pi/agent/sessions`;
 - native rows for supported Antigravity, Claude, OpenCode, Kilo Code, OpenClaw,
-  Hermes, Gemini, Cursor, Zed, Copilot CLI, Factory AI Droid, Qwen Code,
-  Kimi Code CLI, Autohand Code, Cline, and Roo Code local history locations;
+  Hermes, Gemini, Cursor, Zed, Kiro CLI, Copilot CLI, Factory AI Droid, Qwen
+  Code, Kimi Code CLI, Autohand Code, iFlow CLI, CodeBuddy, Cline, and Roo Code
+  local history locations;
 - preview rows for NanoClaw project roots and AstrBot SQLite history when those
   paths are discoverable;
 - local history-source plugin manifests under `$CTX_DATA_ROOT/plugins` or
@@ -126,9 +127,13 @@ ctx import --provider openhands --path ~/.openhands
 ctx import --provider gemini
 ctx import --provider cursor
 ctx import --provider zed
+ctx import --provider kiro-cli
 ctx import --provider copilot-cli
 ctx import --provider factory-ai-droid
+ctx import --provider qwen-code
+ctx import --provider kimi-code-cli
 ctx import --provider autohand-code
+ctx import --provider iflow-cli
 ctx import --provider codebuddy
 ctx import --provider codex --path ~/.codex/sessions
 ctx import --provider pi --path ~/.pi/agent/sessions
@@ -288,7 +293,7 @@ optimized for agent reading; use `--verbose` for expanded text diagnostics.
 
 Filters:
 
-- `--provider codex|pi|claude|opencode|kilo|crush|goose|dexto|openclaw|hermes|nanoclaw|astrbot|shelley|continue|openhands|antigravity|gemini|cursor|zed|copilot-cli|factory-ai-droid|qwen-code|kimi-code-cli|autohand-code|codebuddy|cline|roo|custom`;
+- `--provider codex|pi|claude|opencode|kilo|kiro-cli|crush|goose|dexto|openclaw|hermes|nanoclaw|astrbot|shelley|continue|openhands|antigravity|gemini|cursor|zed|copilot-cli|factory-ai-droid|qwen-code|kimi-code-cli|autohand-code|iflow-cli|codebuddy|cline|roo|custom`;
 - `--workspace <name-or-path>`, substring match over stored workspace, cwd,
   source path, or repository-name text;
 - `--since <rfc3339-or-days>d`, for example `2026-06-01T00:00:00Z` or `30d`;
@@ -307,7 +312,8 @@ Filters:
 
 CLI provider filters use kebab-case names. JSON output and stable SQL views use
 provider IDs in ctx output; multiword IDs may be snake_case, such as
-`copilot_cli` or `factory_ai_droid`, while compact IDs such as `openclaw`,
+`copilot_cli`, `factory_ai_droid`, `qwen_code`, `kimi_code_cli`,
+`autohand_code`, or `iflow_cli`, while compact IDs such as `openclaw`,
 `nanoclaw`, `astrbot`, `shelley`, `continue`, and `openhands` stay compact.
 
 `search` reads discovered native provider files and runs enabled auto
