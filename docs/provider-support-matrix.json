@@ -1007,6 +1007,125 @@
         "crates/ctx-history-capture/src/lib.rs",
         "crates/ctx-history-capture/src/provider_sources.rs"
       ]
+    },
+    {
+      "id": "cline",
+      "display_name": "Cline",
+      "priority": "p1",
+      "status": "local_import_when_supported",
+      "capture_provider": "cline",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "cline_task_directory_json",
+          "fidelity": "imported",
+          "proof": [
+            "ctx sources",
+            "ctx import --provider cline"
+          ],
+          "notes": [
+            "Reads Cline task directories containing api_conversation_history.json, ui_messages.json, context_history.json, or task_metadata.json.",
+            "Discovery covers CLINE_DATA_DIR, CLINE_DIR/data, CLINE_SESSION_DATA_DIR sibling data roots, CLINE_DB_DATA_DIR sibling data roots, ~/.cline/data, and common VS Code globalStorage folders."
+          ]
+        }
+      ],
+      "history_locations": [
+        "CLINE_DATA_DIR/tasks/*/{api_conversation_history.json,ui_messages.json,context_history.json,task_metadata.json}",
+        "CLINE_DIR/data/tasks/*/{api_conversation_history.json,ui_messages.json,context_history.json,task_metadata.json}",
+        "~/.cline/data/tasks/*/{api_conversation_history.json,ui_messages.json,context_history.json,task_metadata.json}",
+        "~/.config/Code/User/globalStorage/saoudrizwan.claude-dev/tasks/*/{api_conversation_history.json,ui_messages.json,context_history.json,task_metadata.json}"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": false,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": true,
+        "command_output": false,
+        "files_touched": true,
+        "artifacts": false,
+        "model_identity": true,
+        "costs": false,
+        "token_usage": true,
+        "parent_child_session_edges": false
+      },
+      "redaction_notes": [
+        "Reads local task JSON files read-only; imported text remains in the local ctx index.",
+        "Raw provider paths are retained only as local source metadata for citations."
+      ],
+      "blockers": [
+        "VS Code private extension state databases are not parsed; file-backed task directories are required."
+      ],
+      "public_docs": "docs/providers.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/cline/data"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs"
+      ]
+    },
+    {
+      "id": "roo_code",
+      "display_name": "Roo Code",
+      "priority": "p1",
+      "status": "local_import_when_supported",
+      "capture_provider": "roo_code",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "roo_task_directory_json",
+          "fidelity": "imported",
+          "proof": [
+            "ctx sources",
+            "ctx import --provider roo"
+          ],
+          "notes": [
+            "Reads Roo Code task directories containing api_conversation_history.json, ui_messages.json, history_item.json, _index.json, or claude_messages.json.",
+            "Discovery covers roo-cline.customStoragePath from VS Code settings, common VS Code globalStorage folders for RooVeterinaryInc.roo-cline, ROO_CODE_DATA_DIR, ROO_DATA_DIR, ROO_CLINE_DATA_DIR, and explicit paths."
+          ]
+        }
+      ],
+      "history_locations": [
+        "roo-cline.customStoragePath/tasks/*/{api_conversation_history.json,ui_messages.json,history_item.json,_index.json,claude_messages.json}",
+        "~/.config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks/*/{api_conversation_history.json,ui_messages.json,history_item.json,_index.json,claude_messages.json}",
+        "ROO_CODE_DATA_DIR/tasks/*/{api_conversation_history.json,ui_messages.json,history_item.json,_index.json,claude_messages.json}"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": false,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": true,
+        "command_output": false,
+        "files_touched": true,
+        "artifacts": false,
+        "model_identity": true,
+        "costs": false,
+        "token_usage": true,
+        "parent_child_session_edges": false
+      },
+      "redaction_notes": [
+        "Reads local task JSON files read-only; imported text remains in the local ctx index.",
+        "Raw provider paths are retained only as local source metadata for citations."
+      ],
+      "blockers": [
+        "VS Code private extension state databases are not parsed; file-backed task directories are required."
+      ],
+      "public_docs": "docs/providers.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/roo/storage"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs"
+      ]
     }
   ]
 }

@@ -1,0 +1,30 @@
+[
+  {
+    "role": "user",
+    "content": [
+      {
+        "type": "text",
+        "text": "Write a short parser note for Cline task JSON support."
+      }
+    ]
+  },
+  {
+    "role": "assistant",
+    "content": [
+      {
+        "type": "text",
+        "text": "I will create the note now."
+      },
+      {
+        "type": "tool_use",
+        "id": "toolu_cline_fixture",
+        "name": "write_to_file",
+        "input": {
+          "path": "docs/cline-task-json.md",
+          "content": "Cline task JSON fixture proof."
+        }
+      }
+    ],
+    "model": "claude-sonnet-4"
+  }
+]

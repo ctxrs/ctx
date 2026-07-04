@@ -1,0 +1,6 @@
+{
+  "id": "roo-fallback-task",
+  "task": "Use the Roo fallback Claude messages file.",
+  "ts": 1782810600000,
+  "cwd": "/workspace/roo-fixture"
+}

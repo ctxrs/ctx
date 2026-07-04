@@ -21,7 +21,7 @@ Status meanings:
 - `install-target`: npx target is an aggregate or project skill target, not a
   proven history-producing agent.
 
-Result on this integration branch: 16 `native-auto`, 1 `native-preview`, 26
+Result on this integration branch: 18 `native-auto`, 1 `native-preview`, 24
 `candidate-family`, 10 `webapp-boundary`, 17 `unknown`, and 2 `install-target`
 rows.
 
@@ -29,8 +29,8 @@ rows.
 
 - `opencode sqlite family`: native `opencode` and `kilo` coverage share the
   reusable SQLite baseline for OpenCode-style message/session tables.
-- `Cline/Roo task JSON`: `cline` and `roo` should share one task JSON importer
-  once their current local task shape is verified.
+- `Cline/Roo task JSON`: native `cline` and `roo` coverage share one task JSON
+  importer for file-backed task directories.
 - `JSONL CLI event logs`: already covers Codex, Claude Code, OpenClaw,
   Antigravity CLI, Gemini CLI, Pi, Factory Droid, and Copilot CLI-shaped logs.
 - `CLI session JSON`: covers Continue CLI `sessions/*.json` files with
@@ -58,7 +58,7 @@ rows.
 | `bob` | `unknown` | `unknown native history` | npx `~/.bob`; no ctx provider | Need native history storage research before claiming import support. |
 | `claude-code` | `native-auto` | `JSONL CLI event logs` | ctx `claude_projects_jsonl_tree`; npx `~/.claude` | - |
 | `openclaw` | `native-auto` | `JSONL CLI event logs` | ctx `openclaw_session_jsonl_tree`; npx `~/.openclaw` or legacy homes | Provider matrix still notes GA schema-stability validation. |
-| `cline` | `candidate-family` | `Cline/Roo task JSON` | npx `~/.cline`; no ctx provider | Build one verified task JSON importer for Cline/Roo-family tools. |
+| `cline` | `native-auto` | `Cline/Roo task JSON` | ctx `cline_task_directory_json`; npx `~/.cline` | - |
 | `codearts-agent` | `candidate-family` | `VS Code/Electron storage` | npx `~/.codeartsdoer`; no ctx provider | Need app storage proof before adapting IDE-family importers. |
 | `codebuddy` | `candidate-family` | `VS Code/Electron storage` | npx project or home `.codebuddy`; no ctx provider | Need app storage proof before adapting IDE-family importers. |
 | `codemaker` | `unknown` | `unknown native history` | npx `~/.codemaker`; no ctx provider | Need native history storage research before claiming import support. |
@@ -104,7 +104,7 @@ rows.
 | `qwen-code` | `native-auto` | `JSONL CLI event logs` | ctx `qwen_code_chat_jsonl_tree`; npx `~/.qwen` | - |
 | `replit` | `webapp-boundary` | `webapp/object-store boundary` | npx project `.replit`; no ctx provider | Project marker is not a local agent history contract. |
 | `reasonix` | `unknown` | `unknown native history` | npx `~/.reasonix`; no ctx provider | Need native history storage research before claiming import support. |
-| `roo` | `candidate-family` | `Cline/Roo task JSON` | npx `~/.roo`; no ctx provider | Build one verified task JSON importer for Cline/Roo-family tools. |
+| `roo` | `native-auto` | `Cline/Roo task JSON` | ctx `roo_task_directory_json`; npx `~/.roo` | - |
 | `rovodev` | `candidate-family` | `JSONL CLI event logs` | npx `~/.rovodev`; no ctx provider | Need transcript location and schema proof. |
 | `tabnine-cli` | `candidate-family` | `JSONL CLI event logs` | npx `~/.tabnine`; no ctx provider | Need transcript location and schema proof. |
 | `terramind` | `unknown` | `unknown native history` | npx `~/.terramind`; no ctx provider | Need native history storage research before claiming import support. |

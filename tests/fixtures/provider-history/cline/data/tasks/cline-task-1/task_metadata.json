@@ -1,0 +1,13 @@
+{
+  "taskId": "cline-task-1",
+  "createdAt": "2026-06-30T12:00:00Z",
+  "lastModified": "2026-06-30T12:00:05Z",
+  "modelInfo": {
+    "id": "claude-sonnet-4",
+    "provider": "anthropic"
+  },
+  "tokensUsed": {
+    "input": 120,
+    "output": 80
+  }
+}

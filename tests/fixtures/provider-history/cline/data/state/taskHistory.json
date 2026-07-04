@@ -1,0 +1,11 @@
+[
+  {
+    "id": "cline-task-1",
+    "ts": 1782810000000,
+    "task": "Create the fixture parser note",
+    "cwdOnTaskInitialization": "/workspace/cline-fixture",
+    "tokensIn": 120,
+    "tokensOut": 80,
+    "totalCost": 0.02
+  }
+]

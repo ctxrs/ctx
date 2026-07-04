@@ -1,0 +1,8 @@
+{
+  "id": "roo-task-1",
+  "task": "Add a Roo Code task JSON import smoke test.",
+  "ts": 1782810300000,
+  "cwd": "/workspace/roo-fixture",
+  "tokensIn": 90,
+  "tokensOut": 70
+}

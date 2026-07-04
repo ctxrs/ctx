@@ -2311,7 +2311,7 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
             vec![
                 "Usage: ctx import",
                 "--provider <PROVIDER>",
-                "[possible values: codex, pi, claude, opencode, kilo, antigravity, gemini, cursor, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands]",
+                "[possible values: codex, pi, claude, opencode, kilo, antigravity, gemini, cursor, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo]",
                 "--path <PATH>",
                 "--format <FORMAT>",
                 "--resume",
@@ -7500,6 +7500,8 @@ fn native_provider_cli_requires_existing_history_or_explicit_path() {
         ("nanoclaw", "no importable nanoclaw history found"),
         ("astrbot", "no importable astrbot history found"),
         ("shelley", "no importable shelley history found"),
+        ("cline", "no importable cline history found"),
+        ("roo", "no importable roo_code history found"),
     ] {
         let temp = tempdir();
         let stderr =
@@ -7517,6 +7519,68 @@ fn native_provider_cli_requires_existing_history_or_explicit_path() {
             assert!(stderr.contains(temp.path().to_str().unwrap()), "{stderr}");
         }
     }
+}
+
+#[test]
+fn task_json_cli_imports_cline_and_roo_and_searches() {
+    let temp = tempdir();
+    let cline = provider_history_fixture("cline/data");
+
+    let imported =
+        json_output(ctx(&temp).args(["import", "--provider", "cline", "--path", &cline, "--json"]));
+    assert_eq!(imported["schema_version"], 1);
+    assert_eq!(imported["sources"][0]["provider"], "cline");
+    assert_eq!(
+        imported["sources"][0]["source_format"],
+        "cline_task_directory_json"
+    );
+    assert_eq!(imported["totals"]["imported_sessions"], 1);
+    assert_eq!(imported["totals"]["imported_events"], 3);
+    assert_eq!(imported["totals"]["failed"], 0);
+
+    let second =
+        json_output(ctx(&temp).args(["import", "--provider", "cline", "--path", &cline, "--json"]));
+    assert_eq!(second["totals"]["imported_sessions"], 0);
+    assert_eq!(second["totals"]["imported_events"], 0);
+    assert_eq!(second["totals"]["skipped_events"], 3);
+
+    let search =
+        json_output(ctx(&temp).args(["search", "parser note", "--provider", "cline", "--json"]));
+    let results = search["results"].as_array().unwrap();
+    assert!(!results.is_empty(), "{search:#}");
+    assert!(results.iter().all(|result| result["provider"] == "cline"));
+
+    let roo = provider_history_fixture("roo/storage");
+    let imported = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "roo-code",
+        "--path",
+        &roo,
+        "--json",
+    ]));
+    assert_eq!(imported["schema_version"], 1);
+    assert_eq!(imported["sources"][0]["provider"], "roo_code");
+    assert_eq!(
+        imported["sources"][0]["source_format"],
+        "roo_task_directory_json"
+    );
+    assert_eq!(imported["totals"]["imported_sessions"], 2);
+    assert_eq!(imported["totals"]["imported_events"], 5);
+    assert_eq!(imported["totals"]["failed"], 0);
+
+    let search = json_output(ctx(&temp).args([
+        "search",
+        "fallback claude_messages",
+        "--provider",
+        "roo",
+        "--json",
+    ]));
+    let results = search["results"].as_array().unwrap();
+    assert!(!results.is_empty(), "{search:#}");
+    assert!(results
+        .iter()
+        .all(|result| result["provider"] == "roo_code"));
 }
 
 #[test]
