@@ -42,8 +42,9 @@ use ctx_history_capture::{
     import_custom_history_jsonl_v1_reader, import_dexto_sqlite, import_factory_ai_droid_sessions,
     import_forgecode_sqlite, import_gemini_cli_history, import_goose_sessions_sqlite,
     import_hermes_sqlite, import_iflow_cli_history, import_kilo_sqlite,
-    import_kimi_code_cli_history, import_kiro_sqlite, import_mistral_vibe_history,
-    import_mux_history, import_nanoclaw_project, import_openclaw_history, import_opencode_sqlite,
+    import_kimi_code_cli_history, import_kiro_sqlite, import_kode_history,
+    import_mistral_vibe_history, import_mux_history, import_nanoclaw_project,
+    import_neovate_history, import_openclaw_history, import_opencode_sqlite,
     import_openhands_file_events, import_pi_session_jsonl, import_qwen_code_history,
     import_reasonix_history, import_roo_task_json_history, import_shelley_sqlite,
     import_zed_threads_sqlite, provider_source_for_path, provider_source_spec, stable_capture_uuid,
@@ -57,11 +58,11 @@ use ctx_history_capture::{
     CursorNativeImportOptions, CustomHistoryJsonlV1ImportOptions, DextoSqliteImportOptions,
     FactoryAiDroidImportOptions, ForgeCodeSqliteImportOptions, GeminiCliImportOptions,
     GooseSessionsSqliteImportOptions, HermesSqliteImportOptions, IflowCliImportOptions,
-    KiloSqliteImportOptions, KimiCodeCliImportOptions, KiroSqliteImportOptions,
-    MistralVibeImportOptions, MuxImportOptions, NanoClawImportOptions, OpenClawImportOptions,
-    OpenCodeSqliteImportOptions, OpenHandsImportOptions, PiSessionImportOptions,
-    ProviderImportSummary, ProviderImportSupport, ProviderSource, ProviderSourceStatus,
-    QwenCodeImportOptions, ReasonixImportOptions, RooTaskJsonImportOptions,
+    KiloSqliteImportOptions, KimiCodeCliImportOptions, KiroSqliteImportOptions, KodeImportOptions,
+    MistralVibeImportOptions, MuxImportOptions, NanoClawImportOptions, NeovateImportOptions,
+    OpenClawImportOptions, OpenCodeSqliteImportOptions, OpenHandsImportOptions,
+    PiSessionImportOptions, ProviderImportSummary, ProviderImportSupport, ProviderSource,
+    ProviderSourceStatus, QwenCodeImportOptions, ReasonixImportOptions, RooTaskJsonImportOptions,
     ShelleySqliteImportOptions, ZedThreadsSqliteImportOptions,
 };
 use ctx_history_core::{
@@ -734,6 +735,16 @@ enum NativeProviderArg {
     Mux,
     #[value(name = "reasonix", alias = "deepseek-reasonix")]
     Reasonix,
+    #[value(
+        name = "kode",
+        alias = "shareai-kode",
+        alias = "shareai_kode",
+        alias = "shareai-lab-kode",
+        alias = "shareai_lab_kode"
+    )]
+    Kode,
+    #[value(name = "neovate", alias = "neovate-code", alias = "neovate_code")]
+    Neovate,
     #[value(name = "openclaw", alias = "open-claw", alias = "open_claw")]
     OpenClaw,
     Hermes,
@@ -814,6 +825,16 @@ enum ProviderArg {
     Mux,
     #[value(name = "reasonix", alias = "deepseek-reasonix")]
     Reasonix,
+    #[value(
+        name = "kode",
+        alias = "shareai-kode",
+        alias = "shareai_kode",
+        alias = "shareai-lab-kode",
+        alias = "shareai_lab_kode"
+    )]
+    Kode,
+    #[value(name = "neovate", alias = "neovate-code", alias = "neovate_code")]
+    Neovate,
     #[value(name = "openclaw", alias = "open-claw", alias = "open_claw")]
     OpenClaw,
     Hermes,
@@ -884,6 +905,8 @@ impl NativeProviderArg {
             Self::MistralVibe => CaptureProvider::MistralVibe,
             Self::Mux => CaptureProvider::Mux,
             Self::Reasonix => CaptureProvider::Reasonix,
+            Self::Kode => CaptureProvider::Kode,
+            Self::Neovate => CaptureProvider::Neovate,
             Self::OpenClaw => CaptureProvider::OpenClaw,
             Self::Hermes => CaptureProvider::Hermes,
             Self::NanoClaw => CaptureProvider::NanoClaw,
@@ -945,6 +968,8 @@ impl ProviderArg {
             Self::MistralVibe => CaptureProvider::MistralVibe,
             Self::Mux => CaptureProvider::Mux,
             Self::Reasonix => CaptureProvider::Reasonix,
+            Self::Kode => CaptureProvider::Kode,
+            Self::Neovate => CaptureProvider::Neovate,
             Self::OpenClaw => CaptureProvider::OpenClaw,
             Self::Hermes => CaptureProvider::Hermes,
             Self::NanoClaw => CaptureProvider::NanoClaw,
@@ -985,6 +1010,8 @@ impl ProviderArg {
             Self::MistralVibe => "mistral-vibe",
             Self::Mux => "mux",
             Self::Reasonix => "reasonix",
+            Self::Kode => "kode",
+            Self::Neovate => "neovate",
             Self::OpenClaw => "openclaw",
             Self::Hermes => "hermes",
             Self::NanoClaw => "nanoclaw",
@@ -6039,6 +6066,28 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
+        CaptureProvider::Kode => import_kode_history(
+            &source.path,
+            store,
+            KodeImportOptions {
+                source_path: Some(source.path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: true,
+                ..KodeImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
+        CaptureProvider::Neovate => import_neovate_history(
+            &source.path,
+            store,
+            NeovateImportOptions {
+                source_path: Some(source.path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: true,
+                ..NeovateImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
         CaptureProvider::MistralVibe => import_mistral_vibe_history(
             &source.path,
             store,
@@ -6361,6 +6410,30 @@ fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bool {
             .file_name()
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.starts_with("session-") && name.ends_with(".jsonl")),
+        CaptureProvider::Kode => {
+            path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
+                && path
+                    .components()
+                    .any(|component| component.as_os_str() == "projects")
+                && !path.components().any(|component| {
+                    matches!(
+                        component.as_os_str().to_str(),
+                        Some("requests" | "file-history")
+                    )
+                })
+        }
+        CaptureProvider::Neovate => {
+            path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
+                && path
+                    .components()
+                    .any(|component| component.as_os_str() == "projects")
+                && !path.components().any(|component| {
+                    matches!(
+                        component.as_os_str().to_str(),
+                        Some("requests" | "file-history")
+                    )
+                })
+        }
         _ => path.extension().and_then(|ext| ext.to_str()) == Some("jsonl"),
     }
 }
@@ -6626,6 +6699,8 @@ fn source_uses_incremental_event_search(source: &SourceInfo) -> bool {
             | CaptureProvider::KimiCodeCli
             | CaptureProvider::AutohandCode
             | CaptureProvider::IflowCli
+            | CaptureProvider::Kode
+            | CaptureProvider::Neovate
             | CaptureProvider::ForgeCode
             | CaptureProvider::MistralVibe
             | CaptureProvider::Mux

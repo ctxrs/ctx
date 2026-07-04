@@ -987,6 +987,48 @@ impl Default for IflowCliImportOptions {
 }
 
 #[derive(Debug, Clone)]
+pub struct KodeImportOptions {
+    pub machine_id: String,
+    pub source_path: Option<PathBuf>,
+    pub imported_at: DateTime<Utc>,
+    pub history_record_id: Option<Uuid>,
+    pub allow_partial_failures: bool,
+}
+
+impl Default for KodeImportOptions {
+    fn default() -> Self {
+        Self {
+            machine_id: default_machine_id(),
+            source_path: None,
+            imported_at: utc_now(),
+            history_record_id: None,
+            allow_partial_failures: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct NeovateImportOptions {
+    pub machine_id: String,
+    pub source_path: Option<PathBuf>,
+    pub imported_at: DateTime<Utc>,
+    pub history_record_id: Option<Uuid>,
+    pub allow_partial_failures: bool,
+}
+
+impl Default for NeovateImportOptions {
+    fn default() -> Self {
+        Self {
+            machine_id: default_machine_id(),
+            source_path: None,
+            imported_at: utc_now(),
+            history_record_id: None,
+            allow_partial_failures: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct MistralVibeImportOptions {
     pub machine_id: String,
     pub source_path: Option<PathBuf>,
@@ -1330,6 +1372,12 @@ pub struct AutohandCodeSessionsJsonlAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct IflowCliJsonlAdapter;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct KodeJsonlAdapter;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NeovateJsonlAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ForgeCodeSqliteAdapter;
@@ -2510,6 +2558,47 @@ impl ProviderCaptureAdapter for IflowCliJsonlAdapter {
             context,
             CaptureProvider::IflowCli,
             IFLOW_CLI_SOURCE_FORMAT,
+        )
+    }
+}
+
+impl ProviderCaptureAdapter for KodeJsonlAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Kode
+    }
+
+    fn source_format(&self) -> &str {
+        KODE_SOURCE_FORMAT
+    }
+
+    fn normalize_path(
+        &self,
+        path: &Path,
+        context: &ProviderAdapterContext,
+    ) -> Result<ProviderNormalizationResult> {
+        normalize_jsonl_tree(path, context, CaptureProvider::Kode, KODE_SOURCE_FORMAT)
+    }
+}
+
+impl ProviderCaptureAdapter for NeovateJsonlAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Neovate
+    }
+
+    fn source_format(&self) -> &str {
+        NEOVATE_SOURCE_FORMAT
+    }
+
+    fn normalize_path(
+        &self,
+        path: &Path,
+        context: &ProviderAdapterContext,
+    ) -> Result<ProviderNormalizationResult> {
+        normalize_jsonl_tree(
+            path,
+            context,
+            CaptureProvider::Neovate,
+            NEOVATE_SOURCE_FORMAT,
         )
     }
 }
@@ -5107,6 +5196,44 @@ pub fn import_iflow_cli_history(
     )
 }
 
+pub fn import_kode_history(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: KodeImportOptions,
+) -> Result<ProviderImportSummary> {
+    import_native_jsonl_tree(
+        store,
+        NativeJsonlTreeImport {
+            path: path.as_ref(),
+            machine_id: options.machine_id,
+            source_path: options.source_path,
+            imported_at: options.imported_at,
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+        },
+        KodeJsonlAdapter,
+    )
+}
+
+pub fn import_neovate_history(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: NeovateImportOptions,
+) -> Result<ProviderImportSummary> {
+    import_native_jsonl_tree(
+        store,
+        NativeJsonlTreeImport {
+            path: path.as_ref(),
+            machine_id: options.machine_id,
+            source_path: options.source_path,
+            imported_at: options.imported_at,
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+        },
+        NeovateJsonlAdapter,
+    )
+}
+
 pub fn import_mistral_vibe_history(
     path: impl AsRef<Path>,
     store: &mut Store,
@@ -5247,6 +5374,8 @@ const QWEN_CODE_SOURCE_FORMAT: &str = "qwen_code_chat_jsonl";
 const KIMI_CODE_CLI_SOURCE_FORMAT: &str = "kimi_code_cli_wire_jsonl";
 const AUTOHAND_CODE_SOURCE_FORMAT: &str = "autohand_code_sessions_jsonl";
 const IFLOW_CLI_SOURCE_FORMAT: &str = "iflow_cli_session_jsonl";
+const KODE_SOURCE_FORMAT: &str = "kode_session_jsonl";
+const NEOVATE_SOURCE_FORMAT: &str = "neovate_session_jsonl";
 const FORGECODE_SQLITE_SOURCE_FORMAT: &str = "forgecode_sqlite";
 const MISTRAL_VIBE_SOURCE_FORMAT: &str = "mistral_vibe_session_jsonl";
 const MUX_SOURCE_FORMAT: &str = "mux_session_jsonl";
@@ -7373,7 +7502,10 @@ fn provider_file_touches_from_raw_value(
     collect_patch_file_touches(raw_value, &mut drafts);
     if drafts.is_empty()
         && (event_type_supports_structured_file_touches(event.event_type)
-            || (provider == CaptureProvider::IflowCli && event.event_type == EventType::ToolOutput))
+            || (matches!(
+                provider,
+                CaptureProvider::IflowCli | CaptureProvider::Kode | CaptureProvider::Neovate
+            ) && event.event_type == EventType::ToolOutput))
     {
         collect_structured_file_touches(raw_value, &mut drafts);
     }
@@ -14656,6 +14788,8 @@ fn native_jsonl_missing_reason(provider: CaptureProvider) -> &'static str {
         CaptureProvider::IflowCli => {
             "no iFlow CLI session-*.jsonl transcripts found under projects"
         }
+        CaptureProvider::Kode => "no Kode session JSONL transcripts found under projects",
+        CaptureProvider::Neovate => "no Neovate session JSONL transcripts found under projects",
         CaptureProvider::MistralVibe => {
             "no Mistral Vibe meta.json/messages.jsonl session directories found"
         }
@@ -14689,6 +14823,26 @@ fn provider_jsonl_path_is_native(provider: CaptureProvider, path: &Path) -> bool
             .file_name()
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.starts_with("session-") && name.ends_with(".jsonl")),
+        CaptureProvider::Kode => {
+            path.components()
+                .any(|component| component.as_os_str() == "projects")
+                && !path.components().any(|component| {
+                    matches!(
+                        component.as_os_str().to_str(),
+                        Some("requests" | "file-history")
+                    )
+                })
+        }
+        CaptureProvider::Neovate => {
+            path.components()
+                .any(|component| component.as_os_str() == "projects")
+                && !path.components().any(|component| {
+                    matches!(
+                        component.as_os_str().to_str(),
+                        Some("requests" | "file-history")
+                    )
+                })
+        }
         CaptureProvider::KimiCodeCli => {
             path.file_name().and_then(|name| name.to_str()) == Some("wire.jsonl")
                 && path
@@ -17556,6 +17710,8 @@ fn native_jsonl_header_session_id(provider: CaptureProvider, value: &Value) -> O
         .flatten(),
         CaptureProvider::QwenCode => value.get("sessionId").and_then(Value::as_str),
         CaptureProvider::IflowCli => value.get("sessionId").and_then(Value::as_str),
+        CaptureProvider::Kode => value.get("sessionId").and_then(Value::as_str),
+        CaptureProvider::Neovate => value.get("sessionId").and_then(Value::as_str),
         CaptureProvider::Cursor => (value.get("role").is_some()
             || value.get("event").is_some()
             || value.get("message").is_some())
@@ -17590,6 +17746,8 @@ fn native_jsonl_header_cwd(provider: CaptureProvider, value: &Value) -> Option<S
         CaptureProvider::CopilotCli => value.pointer("/data/context/cwd").and_then(Value::as_str),
         CaptureProvider::QwenCode => value.get("cwd").and_then(Value::as_str),
         CaptureProvider::IflowCli => value.get("cwd").and_then(Value::as_str),
+        CaptureProvider::Kode => value.get("cwd").and_then(Value::as_str),
+        CaptureProvider::Neovate => value.get("cwd").and_then(Value::as_str),
         _ => None,
     }
     .filter(|cwd| !cwd.trim().is_empty())
@@ -17650,6 +17808,66 @@ fn native_jsonl_path_session(
                 .unwrap_or(native_session_id)
                 .to_owned();
             (session, None, None, AgentType::Primary)
+        }
+        CaptureProvider::Kode => {
+            let file_agent_id = path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .and_then(|stem| stem.strip_prefix("agent-"))
+                .filter(|id| !id.trim().is_empty())
+                .map(str::to_owned);
+            let header_agent_id = header
+                .get("agentId")
+                .and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+                .map(str::to_owned);
+            let is_sidechain = file_agent_id.is_some()
+                || header
+                    .get("isSidechain")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+            if is_sidechain {
+                let agent_id = file_agent_id
+                    .or(header_agent_id)
+                    .unwrap_or_else(|| "unknown".to_owned());
+                return (
+                    format!("{native_session_id}/agents/{agent_id}"),
+                    Some(native_session_id.to_owned()),
+                    Some(agent_id),
+                    AgentType::Subagent,
+                );
+            }
+            (
+                native_session_id.to_owned(),
+                None,
+                header_agent_id,
+                AgentType::Primary,
+            )
+        }
+        CaptureProvider::Neovate => {
+            let parent = header
+                .pointer("/metadata/parentSessionId")
+                .or_else(|| header.get("parentSessionId"))
+                .and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+                .map(str::to_owned);
+            let external_agent_id = header
+                .pointer("/metadata/agentId")
+                .or_else(|| header.get("agentId"))
+                .and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+                .map(str::to_owned);
+            let agent_type = if parent.is_some() || native_session_id.starts_with("agent-") {
+                AgentType::Subagent
+            } else {
+                AgentType::Primary
+            };
+            (
+                native_session_id.to_owned(),
+                parent,
+                external_agent_id,
+                agent_type,
+            )
         }
         _ => (native_session_id.to_owned(), None, None, AgentType::Primary),
     }
@@ -17782,6 +18000,22 @@ fn native_jsonl_event_id(provider: CaptureProvider, value: &Value, line_number: 
     if provider == CaptureProvider::Antigravity {
         if let Some(step_index) = value.get("step_index").and_then(Value::as_u64) {
             return format!("step-{step_index}");
+        }
+    }
+    if matches!(provider, CaptureProvider::Kode | CaptureProvider::Neovate) {
+        if let Some(id) = value
+            .get("id")
+            .or_else(|| value.get("uuid"))
+            .and_then(Value::as_str)
+        {
+            return id.to_owned();
+        }
+        if let Some(message_id) = value.get("messageId").and_then(Value::as_str) {
+            let entry_type = value
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("message");
+            return format!("{entry_type}:{message_id}");
         }
     }
     value
@@ -17923,6 +18157,50 @@ fn native_jsonl_event_type(provider: CaptureProvider, value: &Value) -> EventTyp
                 }
             }
         }
+        CaptureProvider::Kode => match value.get("type").and_then(Value::as_str) {
+            Some("summary") => EventType::Summary,
+            Some("custom-title" | "tag" | "file-history-snapshot") => EventType::Notice,
+            Some("user" | "assistant")
+                if value.get("toolUseResult").is_some()
+                    || native_jsonl_content_has(value, "tool_result") =>
+            {
+                EventType::ToolOutput
+            }
+            Some("user" | "assistant") if native_jsonl_content_has(value, "tool_use") => {
+                EventType::ToolCall
+            }
+            Some("tool_result" | "tool" | "tool_use_result") => EventType::ToolOutput,
+            Some("user" | "assistant") => EventType::Message,
+            Some("system") => EventType::Notice,
+            _ if value.get("toolUseResult").is_some() => EventType::ToolOutput,
+            _ => EventType::Notice,
+        },
+        CaptureProvider::Neovate => {
+            if native_jsonl_content_has(value, "tool_result")
+                || value.get("role").and_then(Value::as_str) == Some("tool")
+            {
+                EventType::ToolOutput
+            } else if native_jsonl_content_has(value, "tool_use")
+                || value
+                    .get("tool_calls")
+                    .and_then(Value::as_array)
+                    .is_some_and(|calls| !calls.is_empty())
+            {
+                EventType::ToolCall
+            } else {
+                match (
+                    value.get("type").and_then(Value::as_str),
+                    value.get("role").and_then(Value::as_str),
+                ) {
+                    (Some("message"), Some("system")) => EventType::Notice,
+                    (Some("message"), Some("user" | "assistant")) => EventType::Message,
+                    (Some("message"), _) => EventType::Message,
+                    (Some("summary"), _) => EventType::Summary,
+                    (Some("snapshot" | "file-history-snapshot"), _) => EventType::Notice,
+                    _ => EventType::Notice,
+                }
+            }
+        }
         _ => EventType::Notice,
     }
 }
@@ -17968,6 +18246,19 @@ fn native_jsonl_role(provider: CaptureProvider, value: &Value) -> EventRole {
             value
                 .pointer("/message/role")
                 .or_else(|| value.get("type"))
+                .and_then(Value::as_str),
+        ),
+        CaptureProvider::Kode => provider_role(
+            value
+                .pointer("/message/role")
+                .or_else(|| value.get("role"))
+                .or_else(|| value.get("type"))
+                .and_then(Value::as_str),
+        ),
+        CaptureProvider::Neovate => provider_role(
+            value
+                .get("role")
+                .or_else(|| value.pointer("/message/role"))
                 .and_then(Value::as_str),
         ),
         _ => EventRole::Unknown,
@@ -18060,6 +18351,25 @@ fn native_jsonl_event_text(
             .or_else(|| value.get("toolUseResult").and_then(provider_value_text))
             .or_else(|| value.get("content").and_then(provider_value_text))
             .unwrap_or_else(|| format!("iFlow CLI event: {entry_type}")),
+        CaptureProvider::Kode => value
+            .pointer("/message/content")
+            .or_else(|| value.get("message"))
+            .and_then(provider_value_text)
+            .or_else(|| value.get("toolUseResult").and_then(provider_value_text))
+            .or_else(|| value.get("summary").and_then(provider_value_text))
+            .or_else(|| value.get("customTitle").and_then(provider_value_text))
+            .or_else(|| value.get("tag").and_then(provider_value_text))
+            .or_else(|| value.get("snapshot").and_then(provider_value_text))
+            .or_else(|| value.get("content").and_then(provider_value_text))
+            .unwrap_or_else(|| format!("Kode event: {entry_type}")),
+        CaptureProvider::Neovate => value
+            .get("content")
+            .or_else(|| value.pointer("/message/content"))
+            .and_then(provider_value_text)
+            .or_else(|| value.get("summary").and_then(provider_value_text))
+            .or_else(|| value.get("snapshot").and_then(provider_value_text))
+            .or_else(|| value.get("metadata").and_then(provider_value_text))
+            .unwrap_or_else(|| format!("Neovate event: {entry_type}")),
         _ if event_type == EventType::Notice => format!("Provider event: {entry_type}"),
         _ => serde_json::to_string(value).unwrap_or_else(|_| entry_type.to_owned()),
     }
@@ -18082,13 +18392,21 @@ fn native_jsonl_model(provider: CaptureProvider, value: &Value) -> Option<Value>
             .get("model")
             .cloned()
             .or_else(|| value.pointer("/message/model").cloned()),
+        CaptureProvider::Kode => value
+            .get("model")
+            .cloned()
+            .or_else(|| value.pointer("/message/model").cloned()),
+        CaptureProvider::Neovate => value
+            .get("model")
+            .cloned()
+            .or_else(|| value.pointer("/metadata/model").cloned()),
         _ => None,
     }
 }
 
 fn native_jsonl_tokens(provider: CaptureProvider, value: &Value) -> Option<Value> {
     match provider {
-        CaptureProvider::IflowCli => value
+        CaptureProvider::IflowCli | CaptureProvider::Kode | CaptureProvider::Neovate => value
             .pointer("/message/usage")
             .cloned()
             .or_else(|| value.get("usage").cloned())
@@ -27268,6 +27586,165 @@ mod tests {
             .unwrap()
             .iter()
             .any(|hit| hit.provider == Some(CaptureProvider::Mux)));
+    }
+
+    #[test]
+    fn native_kode_and_neovate_fixtures_import_search_reimport_and_filter_sidecars() {
+        let temp = tempdir();
+        let store_path = temp.path().join("work.sqlite");
+        let mut store = Store::open(&store_path).unwrap();
+        let kode_fixture = provider_history_fixture("kode/v1");
+        let neovate_fixture = provider_history_fixture("neovate/v1");
+
+        let kode_source = provider_source_for_path(CaptureProvider::Kode, kode_fixture.clone());
+        assert_eq!(kode_source.source_format, "kode_session_jsonl_tree");
+        assert_eq!(kode_source.status, ProviderSourceStatus::Available);
+
+        let kode_first = import_kode_history(
+            &kode_fixture,
+            &mut store,
+            KodeImportOptions {
+                machine_id: "test-machine".into(),
+                source_path: Some(kode_fixture.clone()),
+                imported_at: DateTime::parse_from_rfc3339("2026-07-04T12:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                allow_partial_failures: true,
+                ..KodeImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(kode_first.failed, 0, "{:?}", kode_first.failures);
+        assert_eq!(kode_first.imported_sessions, 2);
+        assert_eq!(kode_first.imported_events, 10);
+        assert_eq!(kode_first.imported_edges, 1);
+        let kode_parent = provider_session_uuid(CaptureProvider::Kode, "kode-session-1");
+        let kode_sidechain =
+            provider_session_uuid(CaptureProvider::Kode, "kode-session-1/agents/reviewer");
+        assert_eq!(
+            store.get_session(kode_sidechain).unwrap().parent_session_id,
+            Some(kode_parent)
+        );
+        assert!(store
+            .events_for_session(kode_parent)
+            .unwrap()
+            .iter()
+            .any(|event| event.event_type == EventType::Summary));
+        assert!(store
+            .search_event_hits("kode sidechain oracle", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::Kode)));
+        assert!(store
+            .export_archive()
+            .unwrap()
+            .files_touched
+            .iter()
+            .any(|file| file.path == "src/kode_oracle.txt"));
+
+        let kode_second = import_kode_history(
+            &kode_fixture,
+            &mut store,
+            KodeImportOptions {
+                source_path: Some(kode_fixture.clone()),
+                allow_partial_failures: true,
+                ..KodeImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(kode_second.failed, 0, "{:?}", kode_second.failures);
+        assert_eq!(kode_second.imported_sessions, 0);
+        assert_eq!(kode_second.imported_events, 0);
+        assert_eq!(kode_second.imported_edges, 0);
+        assert_eq!(kode_second.skipped_sessions, 2);
+        assert_eq!(kode_second.skipped_events, 10);
+        assert_eq!(kode_second.skipped_edges, 1);
+
+        let neovate_source =
+            provider_source_for_path(CaptureProvider::Neovate, neovate_fixture.clone());
+        assert_eq!(neovate_source.source_format, "neovate_session_jsonl_tree");
+        assert_eq!(neovate_source.status, ProviderSourceStatus::Available);
+
+        let neovate_first = import_neovate_history(
+            &neovate_fixture,
+            &mut store,
+            NeovateImportOptions {
+                machine_id: "test-machine".into(),
+                source_path: Some(neovate_fixture.clone()),
+                imported_at: DateTime::parse_from_rfc3339("2026-07-04T13:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                allow_partial_failures: true,
+                ..NeovateImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(neovate_first.failed, 0, "{:?}", neovate_first.failures);
+        assert_eq!(neovate_first.imported_sessions, 1);
+        assert_eq!(neovate_first.imported_events, 5);
+        assert!(store
+            .search_event_hits("neovate jsonl oracle", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::Neovate)));
+        assert!(store
+            .search_event_hits("neovate request log should not be imported", 10)
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .export_archive()
+            .unwrap()
+            .files_touched
+            .iter()
+            .any(|file| file.path == "src/neovate_oracle.txt"));
+
+        let neovate_second = import_neovate_history(
+            &neovate_fixture,
+            &mut store,
+            NeovateImportOptions {
+                source_path: Some(neovate_fixture.clone()),
+                allow_partial_failures: true,
+                ..NeovateImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(neovate_second.failed, 0, "{:?}", neovate_second.failures);
+        assert_eq!(neovate_second.imported_sessions, 0);
+        assert_eq!(neovate_second.imported_events, 0);
+        assert_eq!(neovate_second.skipped_sessions, 1);
+        assert_eq!(neovate_second.skipped_events, 5);
+    }
+
+    #[test]
+    fn native_kode_reports_malformed_jsonl_and_imports_valid_rows_when_allowed() {
+        let temp = tempdir();
+        let fixture = provider_history_fixture("kode/malformed");
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let summary = import_kode_history(
+            &fixture,
+            &mut store,
+            KodeImportOptions {
+                allow_partial_failures: true,
+                ..KodeImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.failed, 1, "{:?}", summary.failures);
+        assert_eq!(summary.imported_sessions, 1);
+        assert_eq!(summary.imported_events, 2);
+        assert!(summary
+            .failures
+            .iter()
+            .any(|failure| failure.error.contains("malformed JSONL")));
+        assert!(store
+            .search_event_hits("kode malformed oracle", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::Kode)));
     }
 
     #[test]

@@ -1783,6 +1783,122 @@
       ]
     },
     {
+      "id": "kode",
+      "display_name": "Kode",
+      "priority": "p1",
+      "status": "local_import_when_supported",
+      "capture_provider": "kode",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "kode_session_jsonl_tree",
+          "fidelity": "imported",
+          "proof": [
+            "ctx sources",
+            "ctx import --provider kode",
+            "cargo test -p ctx-history-capture native_kode_and_neovate_fixtures_import_search_reimport_and_filter_sidecars"
+          ],
+          "notes": [
+            "Reads Kode project JSONL transcripts under KODE_CONFIG_DIR/projects, CLAUDE_CONFIG_DIR/projects, ~/.kode/projects, or an explicit projects tree.",
+            "Imports primary <sessionId>.jsonl rows plus agent-<id>.jsonl sidechains as child sessions, normalizing user/assistant messages, summaries, titles, tags, snapshots, tool calls, tool output, and touched-file paths."
+          ]
+        }
+      ],
+      "history_locations": [
+        "KODE_CONFIG_DIR/projects/*/*.jsonl",
+        "CLAUDE_CONFIG_DIR/projects/*/*.jsonl",
+        "~/.kode/projects/*/*.jsonl"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": true,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": true,
+        "command_output": false,
+        "files_touched": true,
+        "artifacts": false,
+        "model_identity": true,
+        "costs": false,
+        "token_usage": true,
+        "parent_child_session_edges": true
+      },
+      "blockers": [
+        "Importer is based on @shareai-lab/kode 2.2.1 source evidence and sanitized fixtures; future package schema changes may need adapter updates.",
+        "agent-<id>.jsonl sidechain parentage is inferred from the file name plus row sessionId because Kode sidechain rows retain the parent sessionId."
+      ],
+      "public_docs": "docs/provider-support.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/kode/v1/projects",
+        "tests/fixtures/provider-history/kode/malformed/projects"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs",
+        "tests/fixtures/provider-history/kode/v1/projects",
+        "tests/fixtures/provider-history/kode/malformed/projects"
+      ]
+    },
+    {
+      "id": "neovate",
+      "display_name": "Neovate",
+      "priority": "p1",
+      "status": "local_import_when_supported",
+      "capture_provider": "neovate",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "neovate_session_jsonl_tree",
+          "fidelity": "imported",
+          "proof": [
+            "ctx sources",
+            "ctx import --provider neovate",
+            "cargo test -p ctx-history-capture native_kode_and_neovate_fixtures_import_search_reimport_and_filter_sidecars"
+          ],
+          "notes": [
+            "Reads Neovate project session JSONL transcripts under ~/.neovate/projects or an explicit projects tree.",
+            "Imports type:\"message\" rows plus snapshot rows while intentionally excluding project requests/ and file-history/ JSONL sidecars from session import."
+          ]
+        }
+      ],
+      "history_locations": [
+        "~/.neovate/projects/*/*.jsonl"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": true,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": true,
+        "command_output": false,
+        "files_touched": true,
+        "artifacts": false,
+        "model_identity": true,
+        "costs": false,
+        "token_usage": true,
+        "parent_child_session_edges": true
+      },
+      "blockers": [
+        "Importer is based on @neovate/code 0.28.5 type declarations and bundled storage-path code plus sanitized fixtures; future package schema changes may need adapter updates.",
+        "Request logs under requests/ and file-history snapshots are sidecars, not primary session transcripts, and are not imported as sessions."
+      ],
+      "public_docs": "docs/provider-support.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/neovate/v1/projects"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs",
+        "tests/fixtures/provider-history/neovate/v1/projects"
+      ]
+    },
+    {
       "id": "cline",
       "display_name": "Cline",
       "priority": "p1",

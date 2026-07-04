@@ -238,6 +238,18 @@ const IFLOW_CLI_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation
     source_kind: ProviderSourceKind::NativeHistory,
 }];
 
+const KODE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
+    path_components: &[".kode", "projects"],
+    source_format: "kode_session_jsonl_tree",
+    source_kind: ProviderSourceKind::NativeHistory,
+}];
+
+const NEOVATE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
+    path_components: &[".neovate", "projects"],
+    source_format: "neovate_session_jsonl_tree",
+    source_kind: ProviderSourceKind::NativeHistory,
+}];
+
 const FORGECODE_DEFAULTS: &[ProviderDefaultLocation] = &[];
 
 const MISTRAL_VIBE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
@@ -569,6 +581,26 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         provider: CaptureProvider::IflowCli,
         display_name: "iFlow CLI",
         default_locations: IFLOW_CLI_DEFAULTS,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
+    ProviderSourceSpec {
+        provider: CaptureProvider::Kode,
+        display_name: "Kode",
+        default_locations: KODE_DEFAULTS,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
+    ProviderSourceSpec {
+        provider: CaptureProvider::Neovate,
+        display_name: "Neovate",
+        default_locations: NEOVATE_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         raw_retention: ProviderRawRetention::PathReference,
@@ -935,6 +967,18 @@ fn discover_provider_sources_for_spec(
                     "iflow_cli_session_jsonl_tree",
                     ProviderSourceKind::NativeHistory,
                 ));
+            }
+        }
+        CaptureProvider::Kode => {
+            for env_name in ["KODE_CONFIG_DIR", "CLAUDE_CONFIG_DIR"] {
+                if let Some(path) = env_path_resolved(env_name, home) {
+                    sources.push(provider_source_from_parts(
+                        spec,
+                        path.join("projects"),
+                        "kode_session_jsonl_tree",
+                        ProviderSourceKind::NativeHistory,
+                    ));
+                }
             }
         }
         CaptureProvider::MistralVibe => {
@@ -1476,6 +1520,10 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::AutohandCode => "autohand_code_sessions_jsonl",
         CaptureProvider::IflowCli if path.is_dir() => "iflow_cli_session_jsonl_tree",
         CaptureProvider::IflowCli => "iflow_cli_session_jsonl",
+        CaptureProvider::Kode if path.is_dir() => "kode_session_jsonl_tree",
+        CaptureProvider::Kode => "kode_session_jsonl",
+        CaptureProvider::Neovate if path.is_dir() => "neovate_session_jsonl_tree",
+        CaptureProvider::Neovate => "neovate_session_jsonl",
         CaptureProvider::ForgeCode => "forgecode_sqlite",
         CaptureProvider::MistralVibe if path.is_dir() => "mistral_vibe_session_jsonl_tree",
         CaptureProvider::MistralVibe => "mistral_vibe_session_jsonl",
@@ -1616,6 +1664,12 @@ fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         }
         CaptureProvider::IflowCli => {
             Some("path exists but no iFlow CLI session-*.jsonl files were found under projects")
+        }
+        CaptureProvider::Kode => {
+            Some("path exists but no Kode session JSONL files were found under projects")
+        }
+        CaptureProvider::Neovate => {
+            Some("path exists but no Neovate session JSONL files were found under projects")
         }
         CaptureProvider::ForgeCode => {
             Some("path exists but no ForgeCode conversations table was found")
@@ -1896,6 +1950,14 @@ fn default_location_import_probe(
                 .file_name()
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.starts_with("session-") && name.ends_with(".jsonl"))
+        }),
+        CaptureProvider::Kode => has_jsonl_file_under_matching(path, 10_000, |candidate| {
+            !path_has_component(candidate, "requests")
+                && !path_has_component(candidate, "file-history")
+        }),
+        CaptureProvider::Neovate => has_jsonl_file_under_matching(path, 10_000, |candidate| {
+            !path_has_component(candidate, "requests")
+                && !path_has_component(candidate, "file-history")
         }),
         CaptureProvider::ForgeCode => has_forgecode_conversations_table(path),
         CaptureProvider::MistralVibe => has_jsonl_file_under_matching(path, 10_000, |candidate| {
@@ -2458,6 +2520,37 @@ mod tests {
             ProviderSourceStatus::Available,
         );
 
+        let kode = temp.path().join(".kode/projects/-workspace-kode");
+        std::fs::create_dir_all(&kode).unwrap();
+        assert_source_status(
+            temp.path(),
+            CaptureProvider::Kode,
+            ProviderSourceStatus::Empty,
+        );
+        std::fs::write(kode.join("kode-session.jsonl"), "{}\n").unwrap();
+        assert_source_status(
+            temp.path(),
+            CaptureProvider::Kode,
+            ProviderSourceStatus::Available,
+        );
+
+        let neovate = temp.path().join(".neovate/projects/-workspace-neovate");
+        std::fs::create_dir_all(neovate.join("requests")).unwrap();
+        std::fs::create_dir_all(neovate.join("file-history")).unwrap();
+        std::fs::write(neovate.join("requests/request.jsonl"), "{}\n").unwrap();
+        std::fs::write(neovate.join("file-history/snapshot.jsonl"), "{}\n").unwrap();
+        assert_source_status(
+            temp.path(),
+            CaptureProvider::Neovate,
+            ProviderSourceStatus::Empty,
+        );
+        std::fs::write(neovate.join("neovate-session.jsonl"), "{}\n").unwrap();
+        assert_source_status(
+            temp.path(),
+            CaptureProvider::Neovate,
+            ProviderSourceStatus::Available,
+        );
+
         let kimi = temp
             .path()
             .join(".kimi-code/sessions/wd_project_abc123/kimi-session/agents/main");
@@ -2887,6 +2980,63 @@ mod tests {
     }
 
     #[test]
+    fn kode_and_neovate_discovery_use_default_and_env_project_roots() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _kode_config = EnvGuard::remove("KODE_CONFIG_DIR");
+        let _claude_config = EnvGuard::remove("CLAUDE_CONFIG_DIR");
+
+        let default_kode_projects = temp.path().join(".kode/projects");
+        write_generic_project_jsonl(&default_kode_projects, "kode-session.jsonl");
+        let source = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Kode)
+            .into_iter()
+            .find(|source| source.path == default_kode_projects)
+            .unwrap();
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+        assert_eq!(source.source_format, "kode_session_jsonl_tree");
+        assert_eq!(source.import_support, ProviderImportSupport::Native);
+
+        let custom_kode = temp.path().join("custom-kode");
+        let custom_kode_projects = custom_kode.join("projects");
+        write_generic_project_jsonl(&custom_kode_projects, "custom-kode.jsonl");
+        let _kode_config = EnvGuard::set("KODE_CONFIG_DIR", custom_kode.as_os_str());
+        let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Kode);
+        assert!(sources.iter().any(|source| {
+            source.path == custom_kode_projects && source.status == ProviderSourceStatus::Available
+        }));
+
+        let claude_config = temp.path().join("claude-config-for-kode");
+        let claude_projects = claude_config.join("projects");
+        write_generic_project_jsonl(&claude_projects, "claude-fallback.jsonl");
+        let _claude_config = EnvGuard::set("CLAUDE_CONFIG_DIR", claude_config.as_os_str());
+        let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Kode);
+        assert!(sources.iter().any(|source| {
+            source.path == claude_projects && source.status == ProviderSourceStatus::Available
+        }));
+
+        let neovate_projects = temp.path().join(".neovate/projects");
+        let project = neovate_projects.join("-workspace-neovate");
+        std::fs::create_dir_all(project.join("requests")).unwrap();
+        std::fs::create_dir_all(project.join("file-history")).unwrap();
+        std::fs::write(project.join("requests/request-only.jsonl"), "{}\n").unwrap();
+        std::fs::write(project.join("file-history/snapshot.jsonl"), "{}\n").unwrap();
+        let source = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Neovate)
+            .into_iter()
+            .find(|source| source.path == neovate_projects)
+            .unwrap();
+        assert_eq!(source.status, ProviderSourceStatus::Empty);
+
+        std::fs::write(project.join("neovate-session.jsonl"), "{}\n").unwrap();
+        let source = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Neovate)
+            .into_iter()
+            .find(|source| source.path == neovate_projects)
+            .unwrap();
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+        assert_eq!(source.source_format, "neovate_session_jsonl_tree");
+        assert_eq!(source.import_support, ProviderImportSupport::Native);
+    }
+
+    #[test]
     fn mistral_vibe_discovery_uses_default_and_home_env_sessions() {
         let _lock = ENV_LOCK.lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
@@ -3293,6 +3443,12 @@ mod tests {
         let project = projects.join("sanitized-workspace");
         std::fs::create_dir_all(&project).unwrap();
         std::fs::write(project.join("session-iflow-discovery.jsonl"), "{}\n").unwrap();
+    }
+
+    fn write_generic_project_jsonl(projects: &Path, file_name: &str) {
+        let project = projects.join("sanitized-workspace");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join(file_name), "{}\n").unwrap();
     }
 
     fn write_mistral_vibe_discovery_session(sessions: &Path) {
