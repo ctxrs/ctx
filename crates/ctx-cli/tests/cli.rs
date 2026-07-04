@@ -4371,6 +4371,9 @@ fn mcp_status_and_tools_list_are_read_only_without_initialized_store() {
     assert!(providers.iter().any(|provider| provider == "qwen_code"));
     assert!(providers.iter().any(|provider| provider == "kimi-code-cli"));
     assert!(providers.iter().any(|provider| provider == "kimi_code_cli"));
+    assert!(providers.iter().any(|provider| provider == "cline"));
+    assert!(providers.iter().any(|provider| provider == "roo"));
+    assert!(providers.iter().any(|provider| provider == "roo_code"));
 
     let status = &responses[2]["result"]["structuredContent"];
     assert_eq!(status["schema_version"], 1);
@@ -4744,6 +4747,19 @@ fn mcp_search_requires_query_term_or_file_without_opening_store() {
                     }
                 }
             }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": "search-provider-alias",
+                "method": "tools/call",
+                "params": {
+                    "name": "search",
+                    "arguments": {
+                        "query": "provider alias probe",
+                        "provider": "roo_code",
+                        "limit": 5
+                    }
+                }
+            }),
         ],
     );
 
@@ -4753,6 +4769,12 @@ fn mcp_search_requires_query_term_or_file_without_opening_store() {
         .as_str()
         .unwrap()
         .contains("search needs a query or file"));
+    let alias_result = &responses[2]["result"];
+    assert_eq!(alias_result["isError"], true);
+    assert!(alias_result["structuredContent"]["error"]
+        .as_str()
+        .unwrap()
+        .contains("ctx store is not initialized"));
     assert!(
         !temp.path().join("work.sqlite").exists(),
         "invalid MCP search should fail before opening the ctx store"
