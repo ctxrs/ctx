@@ -1,0 +1,3 @@
+{"id":"msg-mux-malformed-user-1","role":"user","parts":[{"type":"text","text":"mux after malformed oracle","timestamp":1783180900000}],"createdAt":"2026-07-04T16:01:40.000Z","metadata":{"historySequence":0,"timestamp":1783180900000},"workspaceId":"mux-malformed"}
+{"id":"msg-mux-malformed-bad","role":"assistant","parts":[{"type":"text","text":"unterminated"}
+{"id":"msg-mux-malformed-assistant-1","role":"assistant","parts":[{"type":"text","text":"mux valid after malformed line","timestamp":1783180901000}],"createdAt":"2026-07-04T16:01:41.000Z","metadata":{"historySequence":1,"timestamp":1783180901000},"workspaceId":"mux-malformed"}

@@ -151,6 +151,35 @@ IDE/application storage imports.
   uses row timestamps when available and otherwise falls back to deterministic
   session/import timestamps.
 
+## Mux
+
+- Source evidence: `coder/mux` tag `v0.27.0`, commit
+  `2658ea088d00d4186e8614d04a411a0d2a24aa10`.
+- Path evidence: `src/common/constants/paths.ts` resolves `MUX_ROOT` first and
+  otherwise defaults to `~/.mux`; sessions are under
+  `<mux-root>/sessions/<workspaceId>/chat.jsonl`.
+- Runtime evidence: `src/node/services/historyService.ts` defines
+  `CHAT_FILE = "chat.jsonl"` and `PARTIAL_FILE = "partial.json"`, writes each
+  message as a JSONL row with `workspaceId`, and stages in-progress messages in
+  `partial.json`.
+- Type evidence: `src/common/orpc/schemas/message.ts` defines `MuxMessage` with
+  `id`, `role`, `parts[]`, optional `createdAt`, and rich `metadata` including
+  `historySequence`, `timestamp`, `model`, `usage`, `providerMetadata`,
+  `muxMetadata`, and `partial`.
+- Merge evidence: Mux merges `partial.json` by `metadata.historySequence`,
+  replacing an existing row only when the partial has more `parts`; otherwise it
+  appends or inserts by sequence.
+- Subagent evidence: archived child transcripts live under parent session
+  directories in `subagent-transcripts/<childTaskId>/chat.jsonl`, with optional
+  `partial.json` and `subagent-transcripts.json` index metadata.
+- `ctx` imports this shape as `mux_session_jsonl_tree`, using read-only
+  discovery for `chat.jsonl` and optional `partial.json` under `MUX_ROOT` or
+  `~/.mux/sessions`.
+- Caveat: the checked-in fixture is sanitized rather than runtime-generated
+  because producing a real Mux chat requires model/auth setup; the fixture is
+  schema-backed by the source anchors in
+  `tests/fixtures/provider-history/mux/v0.27.0/README.md`.
+
 ## OpenHands
 
 - Source evidence: OpenHands `get_default_persistence_dir()` checks
