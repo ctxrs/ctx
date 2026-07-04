@@ -15,6 +15,9 @@ metadata. On Windows, use `irm https://ctx.rs/install.ps1 | iex`.
 The install script installs `ctx` and runs `ctx setup` so discovered local
 history is indexed before it exits. Use `sh -s -- --no-setup` on Unix, or set
 `CTX_INSTALL_NO_SETUP=1` on Windows, for install-only CI or packaging flows.
+The Unix installer places the binary in `~/.local/bin` by default. If your
+shell cannot find `ctx` after installation, run `~/.local/bin/ctx` directly or
+add `~/.local/bin` to your `PATH`.
 
 When working from source, use `cargo build -p ctx` or
 `cargo install --path crates/ctx-cli`.

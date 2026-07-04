@@ -136,6 +136,22 @@ validate_safe_value() {
   esac
 }
 
+warn_if_bin_dir_not_on_path() {
+  local needle="${bin_dir%/}"
+  local entry
+  local -a path_entries
+
+  IFS=: read -r -a path_entries <<< "${PATH:-}"
+  for entry in "${path_entries[@]}"; do
+    if [[ "${entry%/}" == "${needle}" ]]; then
+      return 0
+    fi
+  done
+
+  printf 'note: %s is not on PATH; use %s or add %s to PATH\n' \
+    "${bin_dir}" "${install_path}" "${bin_dir}" >&2
+}
+
 sha256_file() {
   local path="$1"
 
@@ -303,6 +319,7 @@ fi
 mkdir -p "${bin_dir}"
 install -m 0755 "${download_path}" "${install_path}"
 printf 'installed ctx to %s\n' "${install_path}"
+warn_if_bin_dir_not_on_path
 
 write_install_marker "${install_path}.install.json" "${metadata_source}" "${source_commit}" "${published_at}"
 printf 'wrote ctx managed install marker to %s\n' "${install_path}.install.json"

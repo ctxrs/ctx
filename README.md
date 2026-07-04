@@ -17,6 +17,10 @@ ctx indexes those logs into SQLite on your machine, then gives current and futur
 curl -fsSL https://ctx.rs/install | sh
 ```
 
+The Unix installer places the binary in `~/.local/bin` by default. If your
+shell cannot find `ctx` after installation, run `~/.local/bin/ctx` directly or
+add `~/.local/bin` to your `PATH`.
+
 Optional but recommended for agent sessions:
 
 ```bash
