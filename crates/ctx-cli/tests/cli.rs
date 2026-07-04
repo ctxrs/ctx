@@ -2025,6 +2025,7 @@ fn sources_lists_personal_agent_provider_defaults() {
     install_default_reasonix_fixture(&temp, "reasonix-sources-oracle");
     install_default_kode_fixture(&temp, "kode-sources-oracle");
     install_default_neovate_fixture(&temp, "neovate-sources-oracle");
+    install_default_terramind_fixture(&temp, "terramind-sources-oracle");
 
     let sources = json_output(ctx(&temp).args(["sources", "--json"]));
     for (provider, source_format, import_support, native_import) in [
@@ -2053,6 +2054,7 @@ fn sources_lists_personal_agent_provider_defaults() {
         ("reasonix", "reasonix_session_jsonl_tree", "native", true),
         ("kode", "kode_session_jsonl_tree", "native", true),
         ("neovate", "neovate_session_jsonl_tree", "native", true),
+        ("terramind", "terramind_agents_sqlite", "native", true),
     ] {
         let source = sources["sources"]
             .as_array()
@@ -2165,6 +2167,35 @@ fn sources_discovers_forgecode_env_and_legacy_db() {
     assert_eq!(source["status"], "available");
     assert_eq!(source["source_format"], "forgecode_sqlite");
     assert_eq!(source["path"], legacy_db.to_str().unwrap());
+}
+
+#[test]
+fn sources_discovers_terramind_xdg_config_home_db() {
+    let temp = tempdir();
+    let fixture = PathBuf::from(write_native_terramind_fixture(
+        &temp,
+        "terramind-xdg-sources-oracle",
+    ));
+    let xdg_config = temp.path().join("xdg-config");
+    let db = xdg_config.join("Nucleus").join("data").join("agents.db");
+    fs::create_dir_all(db.parent().unwrap()).unwrap();
+    fs::copy(fixture, &db).unwrap();
+
+    let sources = json_output(
+        ctx(&temp)
+            .env("XDG_CONFIG_HOME", &xdg_config)
+            .args(["sources", "--json"]),
+    );
+    let source = sources["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| source["provider"] == "terramind" && source["path"] == db.to_str().unwrap())
+        .unwrap_or_else(|| panic!("missing Terramind XDG source in {sources:#}"));
+    assert_eq!(source["status"], "available");
+    assert_eq!(source["source_format"], "terramind_agents_sqlite");
+    assert_eq!(source["import_support"], "native");
+    assert_eq!(source["native_import"], true);
 }
 
 #[test]
@@ -2318,6 +2349,7 @@ fn provider_help_matches_implemented_importers() {
         "reasonix",
         "kode",
         "neovate",
+        "terramind",
     ] {
         assert!(help.contains(value), "provider {value} missing in\n{help}");
     }
@@ -2470,7 +2502,7 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
             vec![
                 "Usage: ctx import",
                 "--provider <PROVIDER>",
-                "[possible values: codex, pi, claude, opencode, kilo, kiro-cli, crush, goose, antigravity, gemini, cursor, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, forgecode, mistral-vibe, mux, reasonix, kode, neovate, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto, codebuddy, aider-desk]",
+                "[possible values: codex, pi, claude, opencode, kilo, kiro-cli, crush, goose, antigravity, gemini, cursor, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, forgecode, mistral-vibe, mux, reasonix, kode, neovate, terramind, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto, codebuddy, aider-desk]",
                 "--path <PATH>",
                 "--format <FORMAT>",
                 "--resume",
@@ -4544,6 +4576,7 @@ fn mcp_status_and_tools_list_are_read_only_without_initialized_store() {
     assert!(providers.iter().any(|provider| provider == "reasonix"));
     assert!(providers.iter().any(|provider| provider == "kode"));
     assert!(providers.iter().any(|provider| provider == "neovate"));
+    assert!(providers.iter().any(|provider| provider == "terramind"));
     assert!(providers.iter().any(|provider| provider == "cline"));
     assert!(providers.iter().any(|provider| provider == "roo"));
     assert!(providers.iter().any(|provider| provider == "roo_code"));
@@ -5876,6 +5909,7 @@ fn search_refresh_auto_imports_discovered_top_provider_sources() {
         ("openclaw", "openclaw", install_default_openclaw_fixture),
         ("hermes", "hermes", install_default_hermes_fixture),
         ("kilo", "kilo", install_default_kilo_fixture),
+        ("terramind", "terramind", install_default_terramind_fixture),
         ("shelley", "shelley", install_default_shelley_fixture),
         ("continue", "continue", install_default_continue_fixture),
         ("openhands", "openhands", install_default_openhands_fixture),
@@ -6292,6 +6326,12 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
             write_native_neovate_fixture,
         ),
         (
+            "terramind",
+            "terramind",
+            "terramind_agents_sqlite",
+            write_native_terramind_fixture,
+        ),
+        (
             "codebuddy",
             "codebuddy",
             "codebuddy_history_json",
@@ -6463,6 +6503,15 @@ fn sqlite_cli_imports_crush_goose_dexto_and_kiro_and_searches() {
             "forgecode oracle",
             1,
             3,
+        ),
+        (
+            "terramind",
+            "terramind",
+            "terramind_agents_sqlite",
+            "terramind/v1/agents.db",
+            "terramind sqlite oracle",
+            1,
+            4,
         ),
     ] {
         let temp = tempdir();
@@ -6747,6 +6796,13 @@ fn install_default_kode_fixture(temp: &TempDir, query: &str) {
 fn install_default_neovate_fixture(temp: &TempDir, query: &str) {
     let source = PathBuf::from(write_native_neovate_fixture(temp, query));
     copy_dir_all(&source, &temp.path().join(".neovate").join("projects"));
+}
+
+fn install_default_terramind_fixture(temp: &TempDir, query: &str) {
+    let source = PathBuf::from(write_native_terramind_fixture(temp, query));
+    let target = temp.path().join(".config").join("Nucleus").join("data");
+    fs::create_dir_all(&target).unwrap();
+    fs::copy(source, target.join("agents.db")).unwrap();
 }
 
 fn install_default_openhands_fixture(temp: &TempDir, query: &str) {
@@ -7574,6 +7630,44 @@ fn write_native_mux_fixture(temp: &TempDir, query: &str) -> String {
     )
     .unwrap();
     root.to_str().unwrap().to_owned()
+}
+
+fn write_native_terramind_fixture(temp: &TempDir, query: &str) -> String {
+    let path = temp.path().join("native-terramind-agents.db");
+    fs::copy(provider_history_fixture("terramind/v1/agents.db"), &path).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    let messages: String = conn
+        .query_row(
+            "SELECT messages FROM sub_chats WHERE id = 'tm-sub-main'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let messages = messages
+        .replace("terramind sqlite oracle", query)
+        .replace("terramind final oracle", query);
+    conn.execute(
+        "UPDATE sub_chats SET messages = ?1 WHERE id = 'tm-sub-main'",
+        [&messages],
+    )
+    .unwrap();
+    let output: String = conn
+        .query_row(
+            "SELECT full_output FROM tool_outputs WHERE id = 'tm-tool-output-large'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let output = output.replace(
+        "terramind large tool output oracle",
+        &format!("{query} split tool output oracle"),
+    );
+    conn.execute(
+        "UPDATE tool_outputs SET full_output = ?1 WHERE id = 'tm-tool-output-large'",
+        [&output],
+    )
+    .unwrap();
+    path.to_str().unwrap().to_owned()
 }
 
 fn write_native_gemini_fixture(temp: &TempDir, query: &str) -> String {
@@ -8717,6 +8811,7 @@ fn personal_agent_sqlite_imports_report_corrupt_databases() {
         ("hermes", "corrupt-hermes-state.db"),
         ("astrbot", "corrupt-astrbot-data_v4.db"),
         ("shelley", "corrupt-shelley.db"),
+        ("terramind", "corrupt-terramind-agents.db"),
     ] {
         let temp = tempdir();
         let db_path = temp.path().join(path);
@@ -8789,6 +8884,7 @@ fn native_provider_cli_requires_existing_history_or_explicit_path() {
         ("reasonix", "no importable reasonix history found"),
         ("kode", "no importable kode history found"),
         ("neovate", "no importable neovate history found"),
+        ("terramind", "no importable terramind history found"),
         ("cline", "no importable cline history found"),
         ("roo", "no importable roo_code history found"),
     ] {

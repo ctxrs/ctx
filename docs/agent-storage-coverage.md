@@ -21,7 +21,7 @@ Status meanings:
 - `install-target`: npx target is an aggregate or project skill target, not a
   proven history-producing agent.
 
-Result on this integration branch: 32 `native-auto`, 2 `native-preview`, 17
+Result on this integration branch: 33 `native-auto`, 2 `native-preview`, 16
 `candidate-family`, 9 `webapp-boundary`, 10 `unknown`, and 2 `install-target`
 rows.
 
@@ -42,7 +42,8 @@ rows.
 - `filesystem event JSON`: covers OpenHands event JSON under
   `<persistence>/<user_id>/v1_conversations`.
 - `generic sqlite messages`: already covers Crush, Goose, Hermes, Kiro CLI,
-  Dexto explicit imports, the AstrBot preview importer, and ctx-native Shelley.
+  Dexto explicit imports, Terramind/Nucleus `agents.db`, the AstrBot preview
+  importer, and ctx-native Shelley.
 - `Forge conversation SQLite`: covers ForgeCode's `.forge.db` conversation
   snapshots with JSON context/metrics DTOs.
 - `LangGraph checkpoint SQLite`: candidate family for LangGraph-style
@@ -117,7 +118,7 @@ rows.
 | `roo` | `native-auto` | `Cline/Roo task JSON` | ctx `roo_task_directory_json`; npx `~/.roo` | - |
 | `rovodev` | `candidate-family` | `JSONL CLI event logs` | npx `~/.rovodev`; no ctx provider | Need transcript location and schema proof. |
 | `tabnine-cli` | `candidate-family` | `JSONL CLI event logs` | npx `~/.tabnine`; no ctx provider | Need transcript location and schema proof. |
-| `terramind` | `candidate-family` | `generic sqlite messages` | npx `~/.terramind`; no ctx provider; package evidence points to `~/.terramind/agents.db` with chats and sub_chats message JSON | Need SQLite fixture generation, tool-output side table mapping, and schema drift tests. |
+| `terramind` | `native-auto` | `generic sqlite messages` | ctx `terramind_agents_sqlite`; npx package `terramind@0.2.91` resolves Nucleus app data to `$XDG_CONFIG_HOME/Nucleus/data/agents.db`, `~/.config/Nucleus/data/agents.db`, macOS `~/Library/Application Support/Nucleus/data/agents.db`, or Windows `%APPDATA%/Nucleus/data/agents.db` | Fixture is source-backed from the published package schema because a no-auth `npx terramind@0.2.91 list --chats` probe did not complete. |
 | `tinycloud` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.tinycloud`; no ctx provider | No proven stable local transcript boundary; prefer exporter or plugin. |
 | `trae` | `candidate-family` | `VS Code/Electron storage` | npx `~/.trae`; no ctx provider | Need local app storage or export contract proof. |
 | `trae-cn` | `candidate-family` | `VS Code/Electron storage` | npx `~/.trae-cn`; no ctx provider | Need local app storage or export contract proof. |
