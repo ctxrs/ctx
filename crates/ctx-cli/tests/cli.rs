@@ -2192,6 +2192,7 @@ fn provider_help_matches_implemented_importers() {
         "continue",
         "openhands",
         "dexto",
+        "codebuddy",
         "qwen-code",
         "kimi-code-cli",
         "autohand-code",
@@ -2212,6 +2213,7 @@ fn provider_json_names_are_accepted_as_cli_filter_aliases() {
         ("qwen_code", "qwen_code"),
         ("kimi_code_cli", "kimi_code_cli"),
         ("autohand_code", "autohand_code"),
+        ("code_buddy", "codebuddy"),
         ("open_claw", "openclaw"),
         ("nano_claw", "nanoclaw"),
         ("astr_bot", "astrbot"),
@@ -2334,7 +2336,7 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
             vec![
                 "Usage: ctx import",
                 "--provider <PROVIDER>",
-                "[possible values: codex, pi, claude, opencode, kilo, crush, goose, antigravity, gemini, cursor, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto]",
+                "[possible values: codex, pi, claude, opencode, kilo, crush, goose, antigravity, gemini, cursor, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto, codebuddy]",
                 "--path <PATH>",
                 "--format <FORMAT>",
                 "--resume",
@@ -4393,6 +4395,7 @@ fn mcp_status_and_tools_list_are_read_only_without_initialized_store() {
     assert!(providers.iter().any(|provider| provider == "kimi_code_cli"));
     assert!(providers.iter().any(|provider| provider == "autohand-code"));
     assert!(providers.iter().any(|provider| provider == "autohand_code"));
+    assert!(providers.iter().any(|provider| provider == "codebuddy"));
     assert!(providers.iter().any(|provider| provider == "cline"));
     assert!(providers.iter().any(|provider| provider == "roo"));
     assert!(providers.iter().any(|provider| provider == "roo_code"));
@@ -6090,6 +6093,12 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
             write_native_autohand_fixture,
         ),
         (
+            "codebuddy",
+            "codebuddy",
+            "codebuddy_history_json",
+            write_native_codebuddy_fixture,
+        ),
+        (
             "openclaw",
             "openclaw",
             "openclaw_session_jsonl_tree",
@@ -7045,6 +7054,67 @@ fn write_native_autohand_fixture(temp: &TempDir, query: &str) -> String {
     sessions.to_str().unwrap().to_owned()
 }
 
+fn write_native_codebuddy_fixture(temp: &TempDir, query: &str) -> String {
+    let root = temp.path().join("native-codebuddy/CodeBuddyExtension");
+    let project = root.join("Data/VSCode/default/history/11112222333344445555666677778888");
+    let session = project.join("session-cli");
+    let messages = session.join("messages");
+    fs::create_dir_all(&messages).unwrap();
+    fs::write(
+        project.join("index.json"),
+        json!({
+            "conversations": [{
+                "id": "session-cli",
+                "type": "chat",
+                "name": "CodeBuddy CLI fixture",
+                "createdAt": "2026-07-04T14:00:00Z",
+                "lastMessageAt": "2026-07-04T14:00:02Z"
+            }],
+            "current": "session-cli"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        session.join("index.json"),
+        json!({
+            "messages": [
+                {"id": "msg-user", "role": "user", "type": "message"},
+                {"id": "msg-assistant", "role": "assistant", "type": "message"}
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        messages.join("msg-user.json"),
+        json!({
+            "id": "msg-user",
+            "role": "user",
+            "message": json!({
+                "content": [{"type": "text", "text": query}],
+                "createdAt": "2026-07-04T14:00:01Z"
+            }).to_string()
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        messages.join("msg-assistant.json"),
+        json!({
+            "id": "msg-assistant",
+            "role": "assistant",
+            "message": json!({
+                "content": "CodeBuddy CLI native import ok",
+                "createdAt": "2026-07-04T14:00:02Z"
+            }).to_string()
+        })
+        .to_string(),
+    )
+    .unwrap();
+    root.to_str().unwrap().to_owned()
+}
+
 fn write_native_openclaw_fixture(temp: &TempDir, query: &str) -> String {
     let root = temp.path().join("native-openclaw");
     let sessions = root.join("agents/personal-agent/sessions");
@@ -7710,6 +7780,7 @@ fn native_provider_cli_requires_existing_history_or_explicit_path() {
         ("nanoclaw", "no importable nanoclaw history found"),
         ("astrbot", "no importable astrbot history found"),
         ("shelley", "no importable shelley history found"),
+        ("codebuddy", "no importable codebuddy history found"),
         ("cline", "no importable cline history found"),
         ("roo", "no importable roo_code history found"),
     ] {

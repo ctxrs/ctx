@@ -1,0 +1,14 @@
+{
+  "messages": [
+    {
+      "id": "msg-user-1",
+      "role": "user",
+      "type": "message"
+    },
+    {
+      "id": "msg-assistant-1",
+      "role": "assistant",
+      "type": "message"
+    }
+  ]
+}

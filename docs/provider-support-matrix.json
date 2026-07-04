@@ -458,6 +458,69 @@
       ]
     },
     {
+      "id": "codebuddy",
+      "display_name": "CodeBuddy",
+      "priority": "p1",
+      "status": "local_import_when_supported",
+      "capture_provider": "codebuddy",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "codebuddy_history_json",
+          "fidelity": "imported",
+          "proof": [
+            "WayLog shayne-snap/WayLog@6939033b7a39326fbdc249e28e6aa12461db1f09 src/services/readers/codebuddy-reader.ts",
+            "ctx sources",
+            "ctx import --provider codebuddy"
+          ],
+          "notes": [
+            "Reads CodeBuddy JSON history under recursive history/<md5(projectPath)> project directories.",
+            "Session index.json lists messages; message bodies are read from messages/*.json and may contain stringified JSON.",
+            "Discovery checks ~/.codebuddy, ~/Library/Application Support/CodeBuddyExtension/Data, and LOCALAPPDATA/CodeBuddyExtension."
+          ]
+        }
+      ],
+      "history_locations": [
+        "~/.codebuddy",
+        "~/Library/Application Support/CodeBuddyExtension/Data",
+        "%LOCALAPPDATA%/CodeBuddyExtension",
+        "*/history/<md5(projectPath)>/<session>/index.json",
+        "*/history/<md5(projectPath)>/<session>/messages/*.json"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": false,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": false,
+        "tool_output": false,
+        "command_output": false,
+        "files_touched": false,
+        "artifacts": false,
+        "model_identity": true,
+        "costs": false,
+        "token_usage": false,
+        "parent_child_session_edges": false
+      },
+      "redaction_notes": [
+        "Reads provider JSON files read-only; imported message text, model hints, and local source paths remain in the local ctx index.",
+        "CodeBuddy context wrapper tags such as project_context and user_info are removed from the searchable preview."
+      ],
+      "blockers": [
+        "Schema proof comes from the WayLog reader and sanitized fixtures rather than official CodeBuddy documentation; continue validating against real-world schema drift."
+      ],
+      "public_docs": "docs/providers.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/codebuddy"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs"
+      ]
+    },
+    {
       "id": "openclaw",
       "display_name": "OpenClaw",
       "priority": "p1",

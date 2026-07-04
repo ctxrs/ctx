@@ -34,29 +34,30 @@ use config::{AppConfig, CONFIG_FILE};
 use ctx_history_capture::{
     catalog_codex_session_tree, discover_provider_sources, discover_provider_sources_for_provider,
     import_antigravity_cli_history, import_astrbot_sqlite, import_autohand_code_sessions,
-    import_claude_projects_jsonl_tree, import_cline_task_json_history, import_codex_history_jsonl,
-    import_codex_session_jsonl, import_codex_session_jsonl_tail, import_codex_session_paths,
-    import_codex_session_tree, import_continue_cli_sessions, import_copilot_cli_session_events,
-    import_crush_sqlite, import_cursor_native_history, import_custom_history_jsonl_v1,
-    import_custom_history_jsonl_v1_reader, import_dexto_sqlite, import_factory_ai_droid_sessions,
-    import_gemini_cli_history, import_goose_sessions_sqlite, import_hermes_sqlite,
-    import_kilo_sqlite, import_kimi_code_cli_history, import_nanoclaw_project,
-    import_openclaw_history, import_opencode_sqlite, import_openhands_file_events,
-    import_pi_session_jsonl, import_qwen_code_history, import_roo_task_json_history,
-    import_shelley_sqlite, provider_source_for_path, provider_source_spec, stable_capture_uuid,
-    validate_custom_history_jsonl_v1, validate_custom_history_jsonl_v1_reader,
-    AntigravityCliImportOptions, AstrBotSqliteImportOptions, AutohandCodeImportOptions,
-    CatalogSummary, ClaudeProjectsImportOptions, ClineTaskJsonImportOptions, CodexEventImportMode,
-    CodexHistoryImportOptions, CodexSessionCatalogOptions, CodexSessionImportOptions,
-    CodexSessionImportProgress, CodexSessionImportProgressCallback, CodexToolOutputMode,
-    ContinueCliImportOptions, CopilotCliImportOptions, CrushSqliteImportOptions,
-    CursorNativeImportOptions, CustomHistoryJsonlV1ImportOptions, DextoSqliteImportOptions,
-    FactoryAiDroidImportOptions, GeminiCliImportOptions, GooseSessionsSqliteImportOptions,
-    HermesSqliteImportOptions, KiloSqliteImportOptions, KimiCodeCliImportOptions,
-    NanoClawImportOptions, OpenClawImportOptions, OpenCodeSqliteImportOptions,
-    OpenHandsImportOptions, PiSessionImportOptions, ProviderImportSummary, ProviderImportSupport,
-    ProviderSource, ProviderSourceStatus, QwenCodeImportOptions, RooTaskJsonImportOptions,
-    ShelleySqliteImportOptions,
+    import_claude_projects_jsonl_tree, import_cline_task_json_history, import_codebuddy_history,
+    import_codex_history_jsonl, import_codex_session_jsonl, import_codex_session_jsonl_tail,
+    import_codex_session_paths, import_codex_session_tree, import_continue_cli_sessions,
+    import_copilot_cli_session_events, import_crush_sqlite, import_cursor_native_history,
+    import_custom_history_jsonl_v1, import_custom_history_jsonl_v1_reader, import_dexto_sqlite,
+    import_factory_ai_droid_sessions, import_gemini_cli_history, import_goose_sessions_sqlite,
+    import_hermes_sqlite, import_kilo_sqlite, import_kimi_code_cli_history,
+    import_nanoclaw_project, import_openclaw_history, import_opencode_sqlite,
+    import_openhands_file_events, import_pi_session_jsonl, import_qwen_code_history,
+    import_roo_task_json_history, import_shelley_sqlite, provider_source_for_path,
+    provider_source_spec, stable_capture_uuid, validate_custom_history_jsonl_v1,
+    validate_custom_history_jsonl_v1_reader, AntigravityCliImportOptions,
+    AstrBotSqliteImportOptions, AutohandCodeImportOptions, CatalogSummary,
+    ClaudeProjectsImportOptions, ClineTaskJsonImportOptions, CodeBuddyImportOptions,
+    CodexEventImportMode, CodexHistoryImportOptions, CodexSessionCatalogOptions,
+    CodexSessionImportOptions, CodexSessionImportProgress, CodexSessionImportProgressCallback,
+    CodexToolOutputMode, ContinueCliImportOptions, CopilotCliImportOptions,
+    CrushSqliteImportOptions, CursorNativeImportOptions, CustomHistoryJsonlV1ImportOptions,
+    DextoSqliteImportOptions, FactoryAiDroidImportOptions, GeminiCliImportOptions,
+    GooseSessionsSqliteImportOptions, HermesSqliteImportOptions, KiloSqliteImportOptions,
+    KimiCodeCliImportOptions, NanoClawImportOptions, OpenClawImportOptions,
+    OpenCodeSqliteImportOptions, OpenHandsImportOptions, PiSessionImportOptions,
+    ProviderImportSummary, ProviderImportSupport, ProviderSource, ProviderSourceStatus,
+    QwenCodeImportOptions, RooTaskJsonImportOptions, ShelleySqliteImportOptions,
 };
 use ctx_history_core::{
     database_path, default_data_root, utc_now, CaptureProvider, ContextCitation,
@@ -722,6 +723,8 @@ enum NativeProviderArg {
     #[value(name = "roo", alias = "roo-code", alias = "roo_code")]
     RooCode,
     Dexto,
+    #[value(name = "codebuddy", alias = "code-buddy", alias = "code_buddy")]
+    CodeBuddy,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -776,6 +779,8 @@ enum ProviderArg {
     #[value(name = "roo", alias = "roo-code", alias = "roo_code")]
     RooCode,
     Dexto,
+    #[value(name = "codebuddy", alias = "code-buddy", alias = "code_buddy")]
+    CodeBuddy,
     Custom,
 }
 
@@ -829,6 +834,7 @@ impl NativeProviderArg {
             Self::Cline => CaptureProvider::Cline,
             Self::RooCode => CaptureProvider::RooCode,
             Self::Dexto => CaptureProvider::Dexto,
+            Self::CodeBuddy => CaptureProvider::CodeBuddy,
         }
     }
 }
@@ -881,6 +887,7 @@ impl ProviderArg {
             Self::Cline => CaptureProvider::Cline,
             Self::RooCode => CaptureProvider::RooCode,
             Self::Dexto => CaptureProvider::Dexto,
+            Self::CodeBuddy => CaptureProvider::CodeBuddy,
             Self::Custom => CaptureProvider::Custom,
         }
     }
@@ -912,6 +919,7 @@ impl ProviderArg {
             Self::Cline => "cline",
             Self::RooCode => "roo",
             Self::Dexto => "dexto",
+            Self::CodeBuddy => "codebuddy",
             Self::Custom => "custom",
         }
     }
@@ -5668,6 +5676,17 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
+        CaptureProvider::CodeBuddy => import_codebuddy_history(
+            &source.path,
+            store,
+            CodeBuddyImportOptions {
+                source_path: Some(source.path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: true,
+                ..CodeBuddyImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
         CaptureProvider::OpenCode => import_opencode_sqlite(
             &source.path,
             store,
@@ -6000,6 +6019,7 @@ fn source_uses_import_file_manifest(source: &SourceInfo) -> bool {
             | "shelley_sqlite"
             | "cline_task_directory_json"
             | "roo_task_directory_json"
+            | "codebuddy_history_json"
     )
 }
 
@@ -6120,6 +6140,12 @@ fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bool {
                 && path
                     .components()
                     .any(|component| component.as_os_str() == "chats")
+        }
+        CaptureProvider::CodeBuddy => {
+            path.extension().and_then(|ext| ext.to_str()) == Some("json")
+                && path
+                    .components()
+                    .any(|component| component.as_os_str() == "history")
         }
         CaptureProvider::KimiCodeCli => {
             path.file_name().and_then(|name| name.to_str()) == Some("wire.jsonl")
@@ -6398,6 +6424,7 @@ fn source_uses_incremental_event_search(source: &SourceInfo) -> bool {
             | CaptureProvider::AutohandCode
             | CaptureProvider::Cline
             | CaptureProvider::RooCode
+            | CaptureProvider::CodeBuddy
     )
 }
 

@@ -328,6 +328,24 @@ const ROO_DEFAULTS: &[ProviderDefaultLocation] = &[
     },
 ];
 
+const CODEBUDDY_DEFAULTS: &[ProviderDefaultLocation] = &[
+    ProviderDefaultLocation {
+        path_components: &[".codebuddy"],
+        source_format: "codebuddy_history_json",
+        source_kind: ProviderSourceKind::NativeHistory,
+    },
+    ProviderDefaultLocation {
+        path_components: &[
+            "Library",
+            "Application Support",
+            "CodeBuddyExtension",
+            "Data",
+        ],
+        source_format: "codebuddy_history_json",
+        source_kind: ProviderSourceKind::NativeHistory,
+    },
+];
+
 const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
     ProviderSourceSpec {
         provider: CaptureProvider::Codex,
@@ -579,6 +597,16 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         redaction_boundary: ProviderRedactionBoundary::BeforeExport,
         unsupported_reason: None,
     },
+    ProviderSourceSpec {
+        provider: CaptureProvider::CodeBuddy,
+        display_name: "CodeBuddy",
+        default_locations: CODEBUDDY_DEFAULTS,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
 ];
 
 pub fn provider_source_specs() -> &'static [ProviderSourceSpec] {
@@ -824,6 +852,16 @@ fn discover_provider_sources_for_spec(
         }
         CaptureProvider::RooCode => {
             sources.extend(discover_roo_task_json_sources(home, spec));
+        }
+        CaptureProvider::CodeBuddy => {
+            if let Some(path) = env_path("LOCALAPPDATA") {
+                sources.push(provider_source_from_parts(
+                    spec,
+                    path.join("CodeBuddyExtension"),
+                    "codebuddy_history_json",
+                    ProviderSourceKind::NativeHistory,
+                ));
+            }
         }
         _ => {}
     }
@@ -1224,6 +1262,7 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::Cline => "cline_task_directory_json",
         CaptureProvider::RooCode => "roo_task_directory_json",
         CaptureProvider::Dexto => "dexto_sqlite",
+        CaptureProvider::CodeBuddy => "codebuddy_history_json",
         _ => "unsupported",
     };
     let explicit_import_support = spec.import_support;
@@ -1360,6 +1399,9 @@ fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::Cline => Some("path exists but no Cline task JSON files were found"),
         CaptureProvider::RooCode => Some("path exists but no Roo Code task JSON files were found"),
         CaptureProvider::Dexto => Some("path exists but no Dexto SQLite database was found"),
+        CaptureProvider::CodeBuddy => {
+            Some("path exists but no CodeBuddy history sessions were found")
+        }
         _ => None,
     }
 }
@@ -1413,6 +1455,9 @@ fn unknown_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         }
         CaptureProvider::RooCode => {
             Some("path exists but the Roo Code task JSON probe hit its scan budget")
+        }
+        CaptureProvider::CodeBuddy => {
+            Some("path exists but the CodeBuddy history probe hit its scan budget")
         }
         _ => None,
     }
@@ -1495,6 +1540,9 @@ fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::Dexto => {
             Some("path exists but the Dexto database could not be read; check permissions")
         }
+        CaptureProvider::CodeBuddy => Some(
+            "path exists but CodeBuddy history JSON files could not be read; check permissions",
+        ),
         _ => None,
     }
 }
@@ -1571,6 +1619,7 @@ fn default_location_import_probe(
                     | "claude_messages.json"
             )
         }),
+        CaptureProvider::CodeBuddy => has_codebuddy_history_json(path, 10_000),
         CaptureProvider::Shell
         | CaptureProvider::Git
         | CaptureProvider::Jj
@@ -1619,6 +1668,13 @@ fn has_openclaw_session_jsonl(root: &Path, max_entries: usize) -> BoundedProbe {
 fn has_openhands_event_json(root: &Path, max_entries: usize) -> BoundedProbe {
     has_json_file_under_matching(root, max_entries, |path| {
         path_has_component(path, "v1_conversations")
+    })
+}
+
+fn has_codebuddy_history_json(root: &Path, max_entries: usize) -> BoundedProbe {
+    has_json_file_under_matching(root, max_entries, |path| {
+        path.file_name().and_then(|name| name.to_str()) == Some("index.json")
+            && path_has_component(path, "history")
     })
 }
 
@@ -2032,6 +2088,33 @@ mod tests {
             ProviderSourceStatus::Available,
         );
 
+        let codebuddy = temp.path().join(".codebuddy");
+        std::fs::create_dir_all(&codebuddy).unwrap();
+        assert_source_status(
+            temp.path(),
+            CaptureProvider::CodeBuddy,
+            ProviderSourceStatus::Empty,
+        );
+        let codebuddy_session = codebuddy.join(
+            "Data/VSCode/default/history/11112222333344445555666677778888/session-alpha/messages",
+        );
+        std::fs::create_dir_all(&codebuddy_session).unwrap();
+        std::fs::write(
+            codebuddy_session.parent().unwrap().join("index.json"),
+            r#"{"messages":[{"id":"msg-1","role":"user"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            codebuddy_session.join("msg-1.json"),
+            r#"{"message":"hello"}"#,
+        )
+        .unwrap();
+        assert_source_status(
+            temp.path(),
+            CaptureProvider::CodeBuddy,
+            ProviderSourceStatus::Available,
+        );
+
         let openclaw = temp.path().join(".openclaw/agents/personal/sessions");
         std::fs::create_dir_all(&openclaw).unwrap();
         assert_source_status(
@@ -2318,6 +2401,40 @@ mod tests {
         assert!(sources.iter().any(|source| {
             source.path == custom_sessions && source.status == ProviderSourceStatus::Available
         }));
+    }
+
+    #[test]
+    fn codebuddy_discovery_uses_localappdata_override() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let local_app_data = temp.path().join("local-app-data");
+        let codebuddy = local_app_data.join("CodeBuddyExtension");
+        let session = codebuddy
+            .join("CodeBuddyIDE/default/history/11112222333344445555666677778888/session-alpha");
+        std::fs::create_dir_all(session.join("messages")).unwrap();
+        std::fs::write(
+            session.join("index.json"),
+            r#"{"messages":[{"id":"msg-1","role":"user"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            session.join("messages/msg-1.json"),
+            r#"{"message":"hello"}"#,
+        )
+        .unwrap();
+        let _local_app_data = EnvGuard::set("LOCALAPPDATA", local_app_data.as_os_str());
+
+        let sources =
+            discover_provider_sources_for_provider(temp.path(), CaptureProvider::CodeBuddy);
+        let source = sources
+            .iter()
+            .find(|source| {
+                source.provider == CaptureProvider::CodeBuddy && source.path == codebuddy
+            })
+            .unwrap_or_else(|| panic!("missing CodeBuddy LOCALAPPDATA source in {sources:#?}"));
+
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+        assert_eq!(source.import_support, ProviderImportSupport::Native);
     }
 
     #[test]

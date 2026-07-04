@@ -21,6 +21,24 @@ IDE/application storage imports.
   both `metadata.json` and `conversation.jsonl`.
 - `ctx` imports this shape as `autohand_code_sessions_jsonl`.
 
+## CodeBuddy
+
+- Source evidence: WayLog `shayne-snap/WayLog` commit
+  `6939033b7a39326fbdc249e28e6aa12461db1f09`,
+  `src/services/readers/codebuddy-reader.ts` and
+  `src/utils/platform-paths.ts`.
+- Default storage roots are `~/Library/Application Support/CodeBuddyExtension/Data`
+  on macOS, `%LOCALAPPDATA%/CodeBuddyExtension` on Windows, and `~/.codebuddy`
+  on Linux.
+- The reader recursively finds directories named `history`; project folders are
+  keyed by `md5(projectPath)`, project `index.json` lists conversations, session
+  `index.json` lists message IDs, and `messages/<id>.json` stores each message.
+- Message `message` fields may be stringified JSON; text content can be a string
+  or an array of `{type:"text", text}` blocks.
+- `ctx` imports this shape as `codebuddy_history_json` and keeps the provider
+  files read-only. Schema confidence is based on WayLog plus sanitized fixtures,
+  not official CodeBuddy documentation.
+
 ## OpenHands
 
 - Source evidence: OpenHands `get_default_persistence_dir()` checks

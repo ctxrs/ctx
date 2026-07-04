@@ -61,7 +61,7 @@ rows.
 | `openclaw` | `native-auto` | `JSONL CLI event logs` | ctx `openclaw_session_jsonl_tree`; npx `~/.openclaw` or legacy homes | Provider matrix still notes GA schema-stability validation. |
 | `cline` | `native-auto` | `Cline/Roo task JSON` | ctx `cline_task_directory_json`; npx `~/.cline` | - |
 | `codearts-agent` | `candidate-family` | `VS Code/Electron storage` | npx `~/.codeartsdoer`; no ctx provider | Need app storage proof before adapting IDE-family importers. |
-| `codebuddy` | `candidate-family` | `VS Code/Electron storage` | npx project or home `.codebuddy`; no ctx provider | Need app storage proof before adapting IDE-family importers. |
+| `codebuddy` | `native-auto` | `VS Code/Electron storage` | ctx `codebuddy_history_json`; npx project or home `.codebuddy` | Schema proof from WayLog `shayne-snap/WayLog@6939033b7a39326fbdc249e28e6aa12461db1f09`; continue validating schema drift. |
 | `codemaker` | `unknown` | `unknown native history` | npx `~/.codemaker`; no ctx provider | Need native history storage research before claiming import support. |
 | `codestudio` | `candidate-family` | `VS Code/Electron storage` | npx `~/.codestudio`; no ctx provider | Need app storage proof before adapting IDE-family importers. |
 | `codex` | `native-auto` | `JSONL CLI event logs` | ctx `codex_session_jsonl_tree` and `codex_history_jsonl`; npx `CODEX_HOME` | - |
