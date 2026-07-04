@@ -79,6 +79,8 @@ pub enum ProviderId {
     AutohandCode,
     #[serde(rename = "kiro_cli", alias = "kiro", alias = "kiro-cli")]
     KiroCli,
+    #[serde(rename = "iflow_cli", alias = "iflow", alias = "iflow-cli")]
+    IflowCli,
     Mistral,
     #[serde(rename = "kimi_code_cli", alias = "kimi", alias = "kimi-code-cli")]
     KimiCodeCli,
@@ -92,7 +94,7 @@ pub enum ProviderId {
 }
 
 impl ProviderId {
-    pub const ALL: [Self; 41] = [
+    pub const ALL: [Self; 42] = [
         Self::Codex,
         Self::ClaudeCode,
         Self::ClaudeCliCrp,
@@ -125,6 +127,7 @@ impl ProviderId {
         Self::QwenCode,
         Self::AutohandCode,
         Self::KiroCli,
+        Self::IflowCli,
         Self::Mistral,
         Self::KimiCodeCli,
         Self::Aider,
@@ -455,6 +458,7 @@ mod tests {
             ProviderId::Pi,
             ProviderId::QwenCode,
             ProviderId::RooCode,
+            ProviderId::IflowCli,
             ProviderId::Shelley,
             ProviderId::Zed,
         ]

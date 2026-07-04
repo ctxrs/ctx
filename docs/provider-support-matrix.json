@@ -1420,6 +1420,61 @@
       ]
     },
     {
+      "id": "iflow_cli",
+      "display_name": "iFlow CLI",
+      "priority": "p1",
+      "status": "local_import_when_supported",
+      "capture_provider": "iflow_cli",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "iflow_cli_session_jsonl_tree",
+          "fidelity": "imported",
+          "proof": [
+            "ctx sources",
+            "ctx import --provider iflow-cli"
+          ],
+          "notes": [
+            "Reads iFlow CLI session JSONL transcripts under IFLOW_HOME/projects or ~/.iflow/projects.",
+            "Native source discovery marks iFlow CLI available only when session-*.jsonl files exist under a projects tree; supplemental tmp checkpoints are not imported."
+          ]
+        }
+      ],
+      "history_locations": [
+        "IFLOW_HOME/projects/*/session-*.jsonl",
+        "~/.iflow/projects/*/session-*.jsonl"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": false,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": true,
+        "command_output": false,
+        "files_touched": true,
+        "artifacts": false,
+        "model_identity": true,
+        "costs": false,
+        "token_usage": true,
+        "parent_child_session_edges": false
+      },
+      "blockers": [
+        "Importer is based on the current minified iFlow CLI bundle and sanitized JSONL fixtures; future schema changes may need adapter updates.",
+        "Supplemental ~/.iflow/tmp checkpoints are intentionally skipped because projects/session-*.jsonl is the canonical resumable history path."
+      ],
+      "public_docs": "docs/provider-support.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/iflow-cli"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs"
+      ]
+    },
+    {
       "id": "cline",
       "display_name": "Cline",
       "priority": "p1",

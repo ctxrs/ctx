@@ -1,0 +1,2 @@
+{"uuid":"iflow-malformed-1","parentUuid":null,"sessionId":"iflow-malformed","timestamp":"2026-07-04T15:10:00Z","type":"user","message":{"role":"user","content":"iflow after malformed oracle"},"cwd":"/workspace/iflow","gitBranch":"main","version":"0.5.19"}
+{"uuid":"iflow-malformed-2","parentUuid":"iflow-malformed-1","sessionId":"iflow-malformed","timestamp":"2026-07-04T15:10:01Z","type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"partial"}]

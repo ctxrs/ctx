@@ -21,7 +21,7 @@ Status meanings:
 - `install-target`: npx target is an aggregate or project skill target, not a
   proven history-producing agent.
 
-Result on this integration branch: 24 `native-auto`, 2 `native-preview`, 18
+Result on this integration branch: 25 `native-auto`, 2 `native-preview`, 17
 `candidate-family`, 10 `webapp-boundary`, 16 `unknown`, and 2 `install-target`
 rows.
 
@@ -33,7 +33,7 @@ rows.
   importer for file-backed task directories.
 - `JSONL CLI event logs`: already covers Codex, Claude Code, OpenClaw,
   Antigravity CLI, Gemini CLI, Pi, Factory Droid, Copilot CLI-shaped logs, and
-  Autohand Code sessions.
+  Autohand Code and iFlow CLI sessions.
 - `CLI session JSON`: covers Continue CLI `sessions/*.json` files with
   `sessions.json` metadata.
 - `filesystem event JSON`: covers OpenHands event JSON under
@@ -84,7 +84,7 @@ rows.
 | `goose` | `native-auto` | `generic sqlite messages` | ctx `goose_sessions_sqlite`; npx `~/.config/goose` | - |
 | `hermes-agent` | `native-auto` | `generic sqlite messages` | ctx `hermes_state_sqlite`; npx `HERMES_HOME` | - |
 | `inference-sh` | `unknown` | `unknown native history` | npx `~/.inferencesh`; no ctx provider | Need native history storage research before claiming import support. |
-| `iflow-cli` | `candidate-family` | `JSONL CLI event logs` | npx `~/.iflow`; no ctx provider | Need transcript location and schema proof. |
+| `iflow-cli` | `native-auto` | `JSONL CLI event logs` | ctx `iflow_cli_session_jsonl_tree`; npx `IFLOW_HOME` or `~/.iflow` | - |
 | `jazz` | `unknown` | `unknown native history` | npx project or home `.jazz`; no ctx provider | Need native history storage research before claiming import support. |
 | `junie` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.junie`; no ctx provider | IDE-managed history boundary needs a verified local export or plugin. |
 | `kilo` | `native-auto` | `opencode sqlite family` | ctx `kilo_sqlite`; npx `~/.kilocode` | - |
