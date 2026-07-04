@@ -45,6 +45,7 @@ fn apply_hermetic_env(command: &mut Command, temp: &TempDir) {
     command.env_remove("SHELLEY_DB");
     command.env_remove("KILO_DB");
     command.env_remove("FORGE_CONFIG");
+    command.env_remove("VIBE_HOME");
     command.env_remove("XDG_DATA_HOME");
 }
 
@@ -1894,6 +1895,10 @@ fn qwen_and_kimi_default_sources_import_search_and_reimport() {
         Path::new(&provider_history_fixture("iflow-cli/.iflow")),
         &temp.path().join(".iflow"),
     );
+    copy_dir_all(
+        Path::new(&provider_history_fixture("mistral-vibe/v1/logs/session")),
+        &temp.path().join(".vibe").join("logs").join("session"),
+    );
 
     let sources = json_output(ctx(&temp).args(["sources", "--json"]));
     for (provider, source_format) in [
@@ -1901,6 +1906,7 @@ fn qwen_and_kimi_default_sources_import_search_and_reimport() {
         ("kimi_code_cli", "kimi_code_cli_wire_jsonl_tree"),
         ("autohand_code", "autohand_code_sessions_jsonl"),
         ("iflow_cli", "iflow_cli_session_jsonl_tree"),
+        ("mistral_vibe", "mistral_vibe_session_jsonl_tree"),
     ] {
         let source = sources["sources"]
             .as_array()
@@ -1931,6 +1937,12 @@ fn qwen_and_kimi_default_sources_import_search_and_reimport() {
             5,
         ),
         ("iflow-cli", "iflow_cli", "iflow jsonl oracle prompt", 5),
+        (
+            "mistral-vibe",
+            "mistral_vibe",
+            "mistral vibe oracle prompt",
+            4,
+        ),
     ] {
         let first = json_output(ctx(&temp).args([
             "import",
@@ -1984,6 +1996,7 @@ fn sources_lists_personal_agent_provider_defaults() {
     install_default_autohand_fixture(&temp, "autohand-sources-oracle");
     install_default_iflow_fixture(&temp, "iflow-sources-oracle");
     install_default_forgecode_fixture(&temp, "forgecode-sources-oracle");
+    install_default_mistral_vibe_fixture(&temp, "mistral-vibe-sources-oracle");
 
     let sources = json_output(ctx(&temp).args(["sources", "--json"]));
     for (provider, source_format, import_support, native_import) in [
@@ -2002,6 +2015,12 @@ fn sources_lists_personal_agent_provider_defaults() {
         ),
         ("iflow_cli", "iflow_cli_session_jsonl_tree", "native", true),
         ("forgecode", "forgecode_sqlite", "native", true),
+        (
+            "mistral_vibe",
+            "mistral_vibe_session_jsonl_tree",
+            "native",
+            true,
+        ),
     ] {
         let source = sources["sources"]
             .as_array()
@@ -2261,6 +2280,7 @@ fn provider_help_matches_implemented_importers() {
         "autohand-code",
         "iflow-cli",
         "forgecode",
+        "mistral-vibe",
     ] {
         assert!(help.contains(value), "provider {value} missing in\n{help}");
     }
@@ -2282,6 +2302,8 @@ fn provider_json_names_are_accepted_as_cli_filter_aliases() {
         ("iflow_cli", "iflow_cli"),
         ("forge", "forgecode"),
         ("forge_code", "forgecode"),
+        ("mistral_vibe", "mistral_vibe"),
+        ("vibe", "mistral_vibe"),
         ("open_claw", "openclaw"),
         ("nano_claw", "nanoclaw"),
         ("astr_bot", "astrbot"),
@@ -2404,7 +2426,7 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
             vec![
                 "Usage: ctx import",
                 "--provider <PROVIDER>",
-                "[possible values: codex, pi, claude, opencode, kilo, kiro-cli, crush, goose, antigravity, gemini, cursor, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, forgecode, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto, codebuddy]",
+                "[possible values: codex, pi, claude, opencode, kilo, kiro-cli, crush, goose, antigravity, gemini, cursor, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, forgecode, mistral-vibe, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto, codebuddy]",
                 "--path <PATH>",
                 "--format <FORMAT>",
                 "--resume",
@@ -4470,6 +4492,8 @@ fn mcp_status_and_tools_list_are_read_only_without_initialized_store() {
     assert!(providers.iter().any(|provider| provider == "codebuddy"));
     assert!(providers.iter().any(|provider| provider == "zed"));
     assert!(providers.iter().any(|provider| provider == "forgecode"));
+    assert!(providers.iter().any(|provider| provider == "mistral-vibe"));
+    assert!(providers.iter().any(|provider| provider == "mistral_vibe"));
     assert!(providers.iter().any(|provider| provider == "cline"));
     assert!(providers.iter().any(|provider| provider == "roo"));
     assert!(providers.iter().any(|provider| provider == "roo_code"));
@@ -6185,6 +6209,12 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
             write_native_forgecode_fixture,
         ),
         (
+            "mistral-vibe",
+            "mistral_vibe",
+            "mistral_vibe_session_jsonl_tree",
+            write_native_mistral_vibe_fixture,
+        ),
+        (
             "codebuddy",
             "codebuddy",
             "codebuddy_history_json",
@@ -6608,6 +6638,14 @@ fn install_default_forgecode_fixture(temp: &TempDir, query: &str) {
     fs::copy(source, target.join(".forge.db")).unwrap();
 }
 
+fn install_default_mistral_vibe_fixture(temp: &TempDir, query: &str) {
+    let source = PathBuf::from(write_native_mistral_vibe_fixture(temp, query));
+    copy_dir_all(
+        &source,
+        &temp.path().join(".vibe").join("logs").join("session"),
+    );
+}
+
 fn install_default_openhands_fixture(temp: &TempDir, query: &str) {
     let source = PathBuf::from(write_native_openhands_fixture(temp, query));
     copy_dir_all(&source, &temp.path().join(".openhands"));
@@ -6953,6 +6991,75 @@ fn write_native_forgecode_fixture(temp: &TempDir, query: &str) -> String {
     )
     .unwrap();
     path.to_str().unwrap().to_owned()
+}
+
+fn write_native_mistral_vibe_fixture(temp: &TempDir, query: &str) -> String {
+    let session_dir = temp
+        .path()
+        .join("native-mistral-vibe/logs/session/session_20260704_160000_vibecli");
+    fs::create_dir_all(&session_dir).unwrap();
+    fs::write(
+        session_dir.join("meta.json"),
+        json!({
+            "session_id": "mistral-vibe-cli-native",
+            "parent_session_id": null,
+            "start_time": "2026-07-04T16:00:00Z",
+            "end_time": "2026-07-04T16:00:03Z",
+            "git_commit": "2222222222222222222222222222222222222222",
+            "git_branch": "main",
+            "environment": {"working_directory": "/workspace/mistral-vibe"},
+            "username": "fixture-user",
+            "loops": [],
+            "title": "Mistral Vibe CLI native",
+            "title_source": "auto",
+            "total_messages": 4,
+            "stats": {"total_tokens": 64, "total_cost": 0.0},
+            "agent_profile": {"name": "default", "overrides": {}}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        session_dir.join("messages.jsonl"),
+        format!(
+            "{}\n{}\n{}\n{}\n",
+            json!({
+                "role": "user",
+                "content": query,
+                "message_id": "msg-mistral-vibe-user"
+            }),
+            json!({
+                "role": "assistant",
+                "content": "mistral vibe native import ok",
+                "message_id": "msg-mistral-vibe-tool",
+                "tool_calls": [{
+                    "id": "call-mistral-vibe-cli",
+                    "type": "function",
+                    "function": {
+                        "name": "write_file",
+                        "arguments": "{\"path\":\"src/mistral_vibe_native.rs\",\"content\":\"proof\"}"
+                    }
+                }]
+            }),
+            json!({
+                "role": "tool",
+                "content": "wrote src/mistral_vibe_native.rs",
+                "tool_call_id": "call-mistral-vibe-cli",
+                "name": "write_file"
+            }),
+            json!({
+                "role": "assistant",
+                "content": "Mistral Vibe import finished",
+                "message_id": "msg-mistral-vibe-final"
+            })
+        ),
+    )
+    .unwrap();
+    temp.path()
+        .join("native-mistral-vibe/logs/session")
+        .to_str()
+        .unwrap()
+        .to_owned()
 }
 
 fn write_native_gemini_fixture(temp: &TempDir, query: &str) -> String {
@@ -8162,6 +8269,7 @@ fn native_provider_cli_requires_existing_history_or_explicit_path() {
         ("shelley", "no importable shelley history found"),
         ("codebuddy", "no importable codebuddy history found"),
         ("iflow-cli", "no importable iflow_cli history found"),
+        ("mistral-vibe", "no importable mistral_vibe history found"),
         ("cline", "no importable cline history found"),
         ("roo", "no importable roo_code history found"),
     ] {
