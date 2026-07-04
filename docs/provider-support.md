@@ -49,6 +49,7 @@ is:
 | Kimi Code CLI | `local_import_when_supported` | Kimi Code CLI `session_index.jsonl` and `sessions/*/*/agents/*/wire.jsonl` files under `KIMI_CODE_HOME`, `~/.kimi-code`, or an explicit Kimi Code home/session tree. | Static local-history fixture smoke. |
 | Autohand Code | `local_import_when_supported` | Autohand Code session directories containing `metadata.json` and `conversation.jsonl` under `AUTOHAND_HOME/sessions`, `~/.autohand/sessions`, or an explicit sessions tree. | Static local-history fixture smoke. |
 | iFlow CLI | `local_import_when_supported` | iFlow CLI `session-*.jsonl` transcripts under `IFLOW_HOME/projects`, `~/.iflow/projects`, or an explicit projects tree. | Static local-history fixture smoke; supplemental tmp checkpoints are not imported. |
+| ForgeCode | `local_import_when_supported` | `FORGE_CONFIG/.forge.db`, legacy `~/forge/.forge.db`, `~/.forge/.forge.db`, or an explicit ForgeCode SQLite DB. | Static local-history fixture smoke; imports conversation context JSON and metrics file touches. |
 | Cline | `local_import_when_supported` | `CLINE_DATA_DIR`, `CLINE_DIR/data`, `~/.cline/data`, common VS Code globalStorage task folders, or an explicit Cline data/task path. | Static local-history fixture smoke; VS Code state databases are not parsed. |
 | Roo Code | `local_import_when_supported` | `roo-cline.customStoragePath`, common VS Code globalStorage task folders for `RooVeterinaryInc.roo-cline`, or an explicit Roo task storage path. | Static local-history fixture smoke; VS Code state databases are not parsed. |
 

@@ -6,6 +6,7 @@ use std::{
 };
 
 use ctx_history_core::{CaptureProvider, ProviderRawRetention, ProviderRedactionBoundary};
+use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -236,6 +237,8 @@ const IFLOW_CLI_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation
     source_format: "iflow_cli_session_jsonl_tree",
     source_kind: ProviderSourceKind::NativeHistory,
 }];
+
+const FORGECODE_DEFAULTS: &[ProviderDefaultLocation] = &[];
 
 const OPENCLAW_DEFAULTS: &[ProviderDefaultLocation] = &[
     ProviderDefaultLocation {
@@ -553,6 +556,16 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         unsupported_reason: None,
     },
     ProviderSourceSpec {
+        provider: CaptureProvider::ForgeCode,
+        display_name: "ForgeCode",
+        default_locations: FORGECODE_DEFAULTS,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
+    ProviderSourceSpec {
         provider: CaptureProvider::OpenClaw,
         display_name: "OpenClaw",
         default_locations: OPENCLAW_DEFAULTS,
@@ -700,6 +713,9 @@ fn discover_provider_sources_for_spec(
 ) -> Vec<ProviderSource> {
     if spec.provider == CaptureProvider::Kilo {
         return discover_kilo_sources(home, spec);
+    }
+    if spec.provider == CaptureProvider::ForgeCode {
+        return discover_forgecode_sources(home, spec);
     }
 
     let mut sources = spec
@@ -952,6 +968,29 @@ fn discover_provider_sources_for_spec(
     }
 
     sources
+}
+
+fn discover_forgecode_sources(home: &Path, spec: &ProviderSourceSpec) -> Vec<ProviderSource> {
+    if let Some(path) = env_path_with_home("FORGE_CONFIG", home) {
+        return vec![forgecode_db_source(spec, path.join(".forge.db"))];
+    }
+
+    let legacy = home.join("forge");
+    let base = if legacy.try_exists().unwrap_or(false) {
+        legacy
+    } else {
+        home.join(".forge")
+    };
+    vec![forgecode_db_source(spec, base.join(".forge.db"))]
+}
+
+fn forgecode_db_source(spec: &ProviderSourceSpec, path: PathBuf) -> ProviderSource {
+    provider_source_from_parts(
+        spec,
+        path,
+        "forgecode_sqlite",
+        ProviderSourceKind::NativeHistory,
+    )
 }
 
 fn discover_kilo_sources(home: &Path, spec: &ProviderSourceSpec) -> Vec<ProviderSource> {
@@ -1341,6 +1380,7 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::AutohandCode => "autohand_code_sessions_jsonl",
         CaptureProvider::IflowCli if path.is_dir() => "iflow_cli_session_jsonl_tree",
         CaptureProvider::IflowCli => "iflow_cli_session_jsonl",
+        CaptureProvider::ForgeCode => "forgecode_sqlite",
         CaptureProvider::OpenClaw => "openclaw_session_jsonl_tree",
         CaptureProvider::Hermes => "hermes_state_sqlite",
         CaptureProvider::NanoClaw => "nanoclaw_project",
@@ -1473,6 +1513,9 @@ fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         }
         CaptureProvider::IflowCli => {
             Some("path exists but no iFlow CLI session-*.jsonl files were found under projects")
+        }
+        CaptureProvider::ForgeCode => {
+            Some("path exists but no ForgeCode conversations table was found")
         }
         CaptureProvider::OpenClaw => {
             Some("path exists but no OpenClaw agent session JSONL files were found")
@@ -1616,6 +1659,9 @@ fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::IflowCli => {
             Some("path exists but iFlow CLI session transcripts could not be read; check permissions")
         }
+        CaptureProvider::ForgeCode => {
+            Some("path exists but the ForgeCode database could not be read; check permissions")
+        }
         CaptureProvider::OpenClaw => Some(
             "path exists but OpenClaw session transcripts could not be read; check permissions",
         ),
@@ -1714,6 +1760,7 @@ fn default_location_import_probe(
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.starts_with("session-") && name.ends_with(".jsonl"))
         }),
+        CaptureProvider::ForgeCode => has_forgecode_conversations_table(path),
         CaptureProvider::Cline => has_task_json_file_under_matching(path, 10_000, |name| {
             matches!(
                 name,
@@ -1751,6 +1798,28 @@ fn has_gemini_chat_jsonl(root: &Path, max_entries: usize) -> BoundedProbe {
         _ => return BoundedProbe::NotFound,
     }
     has_jsonl_file_under_matching(&tmp, max_entries, |path| path_has_component(path, "chats"))
+}
+
+fn has_forgecode_conversations_table(path: &Path) -> BoundedProbe {
+    match path_is_file_probe(path) {
+        BoundedProbe::Found => {}
+        other => return other,
+    }
+    match Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .and_then(|conn| {
+        conn.query_row(
+            "select count(*) from sqlite_schema where type = 'table' and name = 'conversations'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+    }) {
+        Ok(count) if count > 0 => BoundedProbe::Found,
+        Ok(_) => BoundedProbe::NotFound,
+        Err(_) => BoundedProbe::IoError,
+    }
 }
 
 fn has_openclaw_session_jsonl(root: &Path, max_entries: usize) -> BoundedProbe {
