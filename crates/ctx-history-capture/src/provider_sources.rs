@@ -240,6 +240,12 @@ const IFLOW_CLI_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation
 
 const FORGECODE_DEFAULTS: &[ProviderDefaultLocation] = &[];
 
+const MISTRAL_VIBE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
+    path_components: &[".vibe", "logs", "session"],
+    source_format: "mistral_vibe_session_jsonl_tree",
+    source_kind: ProviderSourceKind::NativeHistory,
+}];
+
 const OPENCLAW_DEFAULTS: &[ProviderDefaultLocation] = &[
     ProviderDefaultLocation {
         path_components: &[".openclaw"],
@@ -566,6 +572,16 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         unsupported_reason: None,
     },
     ProviderSourceSpec {
+        provider: CaptureProvider::MistralVibe,
+        display_name: "Mistral Vibe",
+        default_locations: MISTRAL_VIBE_DEFAULTS,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
+    ProviderSourceSpec {
         provider: CaptureProvider::OpenClaw,
         display_name: "OpenClaw",
         default_locations: OPENCLAW_DEFAULTS,
@@ -873,6 +889,16 @@ fn discover_provider_sources_for_spec(
                     spec,
                     path.join("projects"),
                     "iflow_cli_session_jsonl_tree",
+                    ProviderSourceKind::NativeHistory,
+                ));
+            }
+        }
+        CaptureProvider::MistralVibe => {
+            if let Some(path) = env_path_resolved("VIBE_HOME", home) {
+                sources.push(provider_source_from_parts(
+                    spec,
+                    path.join("logs").join("session"),
+                    "mistral_vibe_session_jsonl_tree",
                     ProviderSourceKind::NativeHistory,
                 ));
             }
@@ -1381,6 +1407,8 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::IflowCli if path.is_dir() => "iflow_cli_session_jsonl_tree",
         CaptureProvider::IflowCli => "iflow_cli_session_jsonl",
         CaptureProvider::ForgeCode => "forgecode_sqlite",
+        CaptureProvider::MistralVibe if path.is_dir() => "mistral_vibe_session_jsonl_tree",
+        CaptureProvider::MistralVibe => "mistral_vibe_session_jsonl",
         CaptureProvider::OpenClaw => "openclaw_session_jsonl_tree",
         CaptureProvider::Hermes => "hermes_state_sqlite",
         CaptureProvider::NanoClaw => "nanoclaw_project",
@@ -1516,6 +1544,9 @@ fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         }
         CaptureProvider::ForgeCode => {
             Some("path exists but no ForgeCode conversations table was found")
+        }
+        CaptureProvider::MistralVibe => {
+            Some("path exists but no Mistral Vibe meta.json/messages.jsonl session directories were found")
         }
         CaptureProvider::OpenClaw => {
             Some("path exists but no OpenClaw agent session JSONL files were found")
@@ -1662,6 +1693,9 @@ fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::ForgeCode => {
             Some("path exists but the ForgeCode database could not be read; check permissions")
         }
+        CaptureProvider::MistralVibe => {
+            Some("path exists but Mistral Vibe session files could not be read; check permissions")
+        }
         CaptureProvider::OpenClaw => Some(
             "path exists but OpenClaw session transcripts could not be read; check permissions",
         ),
@@ -1761,6 +1795,12 @@ fn default_location_import_probe(
                 .is_some_and(|name| name.starts_with("session-") && name.ends_with(".jsonl"))
         }),
         CaptureProvider::ForgeCode => has_forgecode_conversations_table(path),
+        CaptureProvider::MistralVibe => has_jsonl_file_under_matching(path, 10_000, |candidate| {
+            candidate.file_name().and_then(|name| name.to_str()) == Some("messages.jsonl")
+                && candidate
+                    .parent()
+                    .is_some_and(|parent| parent.join("meta.json").is_file())
+        }),
         CaptureProvider::Cline => has_task_json_file_under_matching(path, 10_000, |name| {
             matches!(
                 name,
@@ -2676,6 +2716,42 @@ mod tests {
     }
 
     #[test]
+    fn mistral_vibe_discovery_uses_default_and_home_env_sessions() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::remove("VIBE_HOME");
+
+        let default_sessions = temp.path().join(".vibe/logs/session");
+        std::fs::create_dir_all(&default_sessions).unwrap();
+        let empty_source =
+            discover_provider_sources_for_provider(temp.path(), CaptureProvider::MistralVibe)
+                .into_iter()
+                .find(|source| source.path == default_sessions)
+                .unwrap();
+        assert_eq!(empty_source.status, ProviderSourceStatus::Empty);
+
+        write_mistral_vibe_discovery_session(&default_sessions);
+        let source =
+            discover_provider_sources_for_provider(temp.path(), CaptureProvider::MistralVibe)
+                .into_iter()
+                .find(|source| source.path == default_sessions)
+                .unwrap();
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+        assert_eq!(source.source_format, "mistral_vibe_session_jsonl_tree");
+        assert_eq!(source.import_support, ProviderImportSupport::Native);
+
+        let custom_home = temp.path().join("custom-vibe");
+        let custom_sessions = custom_home.join("logs/session");
+        write_mistral_vibe_discovery_session(&custom_sessions);
+        let _home = EnvGuard::set("VIBE_HOME", custom_home.as_os_str());
+        let sources =
+            discover_provider_sources_for_provider(temp.path(), CaptureProvider::MistralVibe);
+        assert!(sources.iter().any(|source| {
+            source.path == custom_sessions && source.status == ProviderSourceStatus::Available
+        }));
+    }
+
+    #[test]
     fn crush_discovery_uses_global_config_data_directory() {
         let _lock = ENV_LOCK.lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
@@ -2985,6 +3061,17 @@ mod tests {
         let project = projects.join("sanitized-workspace");
         std::fs::create_dir_all(&project).unwrap();
         std::fs::write(project.join("session-iflow-discovery.jsonl"), "{}\n").unwrap();
+    }
+
+    fn write_mistral_vibe_discovery_session(sessions: &Path) {
+        let session = sessions.join("session_20260704_120000_vibe1234");
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::write(
+            session.join("meta.json"),
+            r#"{"session_id":"mistral-vibe-discovery","start_time":"2026-07-04T12:00:00Z","end_time":null,"git_commit":null,"git_branch":null,"environment":{"working_directory":"/workspace"},"username":"fixture"}"#,
+        )
+        .unwrap();
+        std::fs::write(session.join("messages.jsonl"), "{}\n").unwrap();
     }
 
     fn write_task_json_discovery_task(root: &Path, task_id: &str, file_name: &str) {
