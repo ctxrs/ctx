@@ -682,37 +682,7 @@ fn object_schema(properties: Value, required: Vec<&str>) -> Value {
 }
 
 fn provider_names() -> Vec<&'static str> {
-    let mut names = vec![
-        ProviderArg::Codex.cli_name(),
-        ProviderArg::Pi.cli_name(),
-        ProviderArg::Claude.cli_name(),
-        ProviderArg::OpenCode.cli_name(),
-        ProviderArg::Kilo.cli_name(),
-        ProviderArg::Crush.cli_name(),
-        ProviderArg::Goose.cli_name(),
-        ProviderArg::Antigravity.cli_name(),
-        ProviderArg::Gemini.cli_name(),
-        ProviderArg::Cursor.cli_name(),
-        ProviderArg::CopilotCli.cli_name(),
-        "copilot_cli",
-        ProviderArg::FactoryAiDroid.cli_name(),
-        "factory_ai_droid",
-        ProviderArg::QwenCode.cli_name(),
-        "qwen_code",
-        ProviderArg::KimiCodeCli.cli_name(),
-        "kimi_code_cli",
-        ProviderArg::OpenClaw.cli_name(),
-        ProviderArg::Hermes.cli_name(),
-        ProviderArg::NanoClaw.cli_name(),
-        ProviderArg::AstrBot.cli_name(),
-        ProviderArg::Shelley.cli_name(),
-        ProviderArg::Continue.cli_name(),
-        ProviderArg::OpenHands.cli_name(),
-        ProviderArg::Dexto.cli_name(),
-        ProviderArg::Custom.cli_name(),
-    ];
-    names.sort_unstable();
-    names
+    ProviderArg::mcp_names()
 }
 
 fn event_type_names() -> Vec<&'static str> {
@@ -780,35 +750,9 @@ fn optional_provider(arguments: &Value, key: &str) -> Result<Option<ProviderArg>
     let Some(provider) = optional_string(arguments, key)? else {
         return Ok(None);
     };
-    match provider.as_str() {
-        "codex" => Ok(Some(ProviderArg::Codex)),
-        "pi" => Ok(Some(ProviderArg::Pi)),
-        "claude" => Ok(Some(ProviderArg::Claude)),
-        "opencode" => Ok(Some(ProviderArg::OpenCode)),
-        "kilo" | "kilo-code" | "kilo_code" | "kilocode" => Ok(Some(ProviderArg::Kilo)),
-        "crush" => Ok(Some(ProviderArg::Crush)),
-        "goose" => Ok(Some(ProviderArg::Goose)),
-        "antigravity" => Ok(Some(ProviderArg::Antigravity)),
-        "gemini" => Ok(Some(ProviderArg::Gemini)),
-        "cursor" => Ok(Some(ProviderArg::Cursor)),
-        "copilot-cli" | "copilot_cli" => Ok(Some(ProviderArg::CopilotCli)),
-        "factory-ai-droid" | "factory_ai_droid" => Ok(Some(ProviderArg::FactoryAiDroid)),
-        "qwen-code" | "qwen_code" => Ok(Some(ProviderArg::QwenCode)),
-        "kimi-code-cli" | "kimi_code_cli" => Ok(Some(ProviderArg::KimiCodeCli)),
-        "openclaw" => Ok(Some(ProviderArg::OpenClaw)),
-        "hermes" => Ok(Some(ProviderArg::Hermes)),
-        "nanoclaw" => Ok(Some(ProviderArg::NanoClaw)),
-        "astrbot" => Ok(Some(ProviderArg::AstrBot)),
-        "shelley" => Ok(Some(ProviderArg::Shelley)),
-        "continue" | "continue-cli" => Ok(Some(ProviderArg::Continue)),
-        "openhands" | "open-hands" | "open_hands" => Ok(Some(ProviderArg::OpenHands)),
-        "dexto" => Ok(Some(ProviderArg::Dexto)),
-        "custom" => Ok(Some(ProviderArg::Custom)),
-        _ => Err(anyhow!(
-            "provider must be one of {}",
-            provider_names().join(", ")
-        )),
-    }
+    ProviderArg::parse_name(&provider)
+        .map(Some)
+        .ok_or_else(|| anyhow!("provider must be one of {}", provider_names().join(", ")))
 }
 
 fn validate_argument_keys(arguments: &Value, allowed: &[&str]) -> std::result::Result<(), Value> {

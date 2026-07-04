@@ -829,6 +829,26 @@ impl NativeProviderArg {
 }
 
 impl ProviderArg {
+    pub(crate) fn parse_name(value: &str) -> Option<Self> {
+        Self::from_str(value, false).ok()
+    }
+
+    pub(crate) fn mcp_names() -> Vec<&'static str> {
+        let mut names = Vec::new();
+        for provider in Self::value_variants() {
+            let cli_name = provider.cli_name();
+            if !names.contains(&cli_name) {
+                names.push(cli_name);
+            }
+            let storage_name = provider.capture_provider().as_str();
+            if !names.contains(&storage_name) {
+                names.push(storage_name);
+            }
+        }
+        names.sort_unstable();
+        names
+    }
+
     fn capture_provider(self) -> CaptureProvider {
         match self {
             Self::Codex => CaptureProvider::Codex,
