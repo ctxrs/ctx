@@ -98,6 +98,8 @@ pub enum ProviderId {
     )]
     MistralVibe,
     Mux,
+    #[serde(rename = "reasonix", alias = "deepseek-reasonix")]
+    Reasonix,
     #[serde(rename = "kimi_code_cli", alias = "kimi", alias = "kimi-code-cli")]
     KimiCodeCli,
     Aider,
@@ -110,7 +112,7 @@ pub enum ProviderId {
 }
 
 impl ProviderId {
-    pub const ALL: [Self; 44] = [
+    pub const ALL: [Self; 46] = [
         Self::Codex,
         Self::ClaudeCode,
         Self::ClaudeCliCrp,
@@ -148,6 +150,7 @@ impl ProviderId {
         Self::ForgeCode,
         Self::MistralVibe,
         Self::Mux,
+        Self::Reasonix,
         Self::KimiCodeCli,
         Self::Aider,
         Self::ClineRoo,
@@ -468,6 +471,7 @@ mod tests {
             ProviderId::ForgeCode,
             ProviderId::MistralVibe,
             ProviderId::Mux,
+            ProviderId::Reasonix,
             ProviderId::GeminiCli,
             ProviderId::Goose,
             ProviderId::Hermes,

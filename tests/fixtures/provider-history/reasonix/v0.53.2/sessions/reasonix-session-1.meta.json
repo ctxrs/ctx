@@ -1,0 +1,13 @@
+{
+  "branch": "main",
+  "summary": "Sanitized Reasonix JSONL fixture",
+  "totalCostUsd": 0.000123,
+  "turnCount": 1,
+  "workspace": "/workspace/reasonix",
+  "balanceCurrency": "USD",
+  "cacheHitTokens": 20,
+  "cacheMissTokens": 22,
+  "totalCompletionTokens": 7,
+  "lastPromptTokens": 42,
+  "autoTitleGenerated": true
+}

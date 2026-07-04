@@ -21,7 +21,7 @@ Status meanings:
 - `install-target`: npx target is an aggregate or project skill target, not a
   proven history-producing agent.
 
-Result on this integration branch: 29 `native-auto`, 2 `native-preview`, 20
+Result on this integration branch: 30 `native-auto`, 2 `native-preview`, 19
 `candidate-family`, 9 `webapp-boundary`, 10 `unknown`, and 2 `install-target`
 rows.
 
@@ -33,7 +33,7 @@ rows.
   importer for file-backed task directories.
 - `JSONL CLI event logs`: already covers Codex, Claude Code, OpenClaw,
   Antigravity CLI, Gemini CLI, Pi, Factory Droid, Copilot CLI-shaped logs, and
-  Autohand Code, iFlow CLI, Mistral Vibe sessions, and Mux sessions.
+  Autohand Code, iFlow CLI, Mistral Vibe, Mux, and Reasonix sessions.
 - `CLI session JSON`: covers Continue CLI `sessions/*.json` files with
   `sessions.json` metadata.
 - `project task JSON`: covers Aider Desk project-local task directories such as
@@ -113,7 +113,7 @@ rows.
 | `qoder-cn` | `candidate-family` | `VS Code/Electron storage` | npx `~/.qoder-cn`; no ctx provider | Need local app storage or export contract proof. |
 | `qwen-code` | `native-auto` | `JSONL CLI event logs` | ctx `qwen_code_chat_jsonl_tree`; npx `~/.qwen` | - |
 | `replit` | `webapp-boundary` | `webapp/object-store boundary` | npx project `.replit`; no ctx provider | Project marker is not a local agent history contract. |
-| `reasonix` | `candidate-family` | `JSONL CLI event logs` | npx `~/.reasonix`; no ctx provider; `reasonix` stores session JSONL plus events/meta/plan sidecars under `~/.reasonix/sessions` | Need sidecar merge semantics, malformed fixture coverage, and cost/token field privacy review. |
+| `reasonix` | `native-auto` | `JSONL CLI event logs` | ctx `reasonix_session_jsonl_tree`; npx `~/.reasonix/sessions`; package `reasonix@0.53.2` | - |
 | `roo` | `native-auto` | `Cline/Roo task JSON` | ctx `roo_task_directory_json`; npx `~/.roo` | - |
 | `rovodev` | `candidate-family` | `JSONL CLI event logs` | npx `~/.rovodev`; no ctx provider | Need transcript location and schema proof. |
 | `tabnine-cli` | `candidate-family` | `JSONL CLI event logs` | npx `~/.tabnine`; no ctx provider | Need transcript location and schema proof. |

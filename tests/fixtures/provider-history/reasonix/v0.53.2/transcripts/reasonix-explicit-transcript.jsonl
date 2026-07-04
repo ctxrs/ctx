@@ -1,0 +1,4 @@
+{"role":"_meta","meta":{"version":1,"source":"reasonix chat","model":"deepseek-v4-flash","task":"sanitized fixture","mode":"code","startedAt":"2026-07-04T12:10:00.000Z"}}
+{"ts":"2026-07-04T12:10:01.000Z","turn":1,"role":"user","content":"reasonix transcript oracle prompt"}
+{"ts":"2026-07-04T12:10:02.000Z","turn":1,"role":"assistant_final","content":"reasonix transcript oracle answer","usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14,"prompt_cache_hit_tokens":6,"prompt_cache_miss_tokens":4},"cost":0.000034,"model":"deepseek-v4-flash","prefixHash":"fixture-prefix"}
+{"ts":"2026-07-04T12:10:03.000Z","turn":1,"role":"tool","content":"wrote src/reasonix_transcript.txt","tool":"write_file","args":"{\"path\":\"src/reasonix_transcript.txt\",\"content\":\"proof\"}"}

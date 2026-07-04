@@ -1903,6 +1903,10 @@ fn qwen_and_kimi_default_sources_import_search_and_reimport() {
         Path::new(&provider_history_fixture("mux/v0.27.0/sessions")),
         &temp.path().join(".mux").join("sessions"),
     );
+    copy_dir_all(
+        Path::new(&provider_history_fixture("reasonix/v0.53.2/sessions")),
+        &temp.path().join(".reasonix").join("sessions"),
+    );
 
     let sources = json_output(ctx(&temp).args(["sources", "--json"]));
     for (provider, source_format) in [
@@ -1912,6 +1916,7 @@ fn qwen_and_kimi_default_sources_import_search_and_reimport() {
         ("iflow_cli", "iflow_cli_session_jsonl_tree"),
         ("mistral_vibe", "mistral_vibe_session_jsonl_tree"),
         ("mux", "mux_session_jsonl_tree"),
+        ("reasonix", "reasonix_session_jsonl_tree"),
     ] {
         let source = sources["sources"]
             .as_array()
@@ -1949,6 +1954,7 @@ fn qwen_and_kimi_default_sources_import_search_and_reimport() {
             4,
         ),
         ("mux", "mux", "mux jsonl oracle prompt", 6),
+        ("reasonix", "reasonix", "reasonix jsonl oracle prompt", 12),
     ] {
         let first = json_output(ctx(&temp).args([
             "import",
@@ -2004,6 +2010,7 @@ fn sources_lists_personal_agent_provider_defaults() {
     install_default_forgecode_fixture(&temp, "forgecode-sources-oracle");
     install_default_mistral_vibe_fixture(&temp, "mistral-vibe-sources-oracle");
     install_default_mux_fixture(&temp, "mux-sources-oracle");
+    install_default_reasonix_fixture(&temp, "reasonix-sources-oracle");
 
     let sources = json_output(ctx(&temp).args(["sources", "--json"]));
     for (provider, source_format, import_support, native_import) in [
@@ -2029,6 +2036,7 @@ fn sources_lists_personal_agent_provider_defaults() {
             true,
         ),
         ("mux", "mux_session_jsonl_tree", "native", true),
+        ("reasonix", "reasonix_session_jsonl_tree", "native", true),
     ] {
         let source = sources["sources"]
             .as_array()
@@ -2291,6 +2299,7 @@ fn provider_help_matches_implemented_importers() {
         "forgecode",
         "mistral-vibe",
         "mux",
+        "reasonix",
     ] {
         assert!(help.contains(value), "provider {value} missing in\n{help}");
     }
@@ -2317,6 +2326,8 @@ fn provider_json_names_are_accepted_as_cli_filter_aliases() {
         ("mistral_vibe", "mistral_vibe"),
         ("vibe", "mistral_vibe"),
         ("mux", "mux"),
+        ("reasonix", "reasonix"),
+        ("deepseek-reasonix", "reasonix"),
         ("open_claw", "openclaw"),
         ("nano_claw", "nanoclaw"),
         ("astr_bot", "astrbot"),
@@ -2439,7 +2450,7 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
             vec![
                 "Usage: ctx import",
                 "--provider <PROVIDER>",
-                "[possible values: codex, pi, claude, opencode, kilo, kiro-cli, crush, goose, antigravity, gemini, cursor, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, forgecode, mistral-vibe, mux, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto, codebuddy, aider-desk]",
+                "[possible values: codex, pi, claude, opencode, kilo, kiro-cli, crush, goose, antigravity, gemini, cursor, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, forgecode, mistral-vibe, mux, reasonix, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto, codebuddy, aider-desk]",
                 "--path <PATH>",
                 "--format <FORMAT>",
                 "--resume",
@@ -4510,6 +4521,7 @@ fn mcp_status_and_tools_list_are_read_only_without_initialized_store() {
     assert!(providers.iter().any(|provider| provider == "mistral-vibe"));
     assert!(providers.iter().any(|provider| provider == "mistral_vibe"));
     assert!(providers.iter().any(|provider| provider == "mux"));
+    assert!(providers.iter().any(|provider| provider == "reasonix"));
     assert!(providers.iter().any(|provider| provider == "cline"));
     assert!(providers.iter().any(|provider| provider == "roo"));
     assert!(providers.iter().any(|provider| provider == "roo_code"));
@@ -5845,6 +5857,7 @@ fn search_refresh_auto_imports_discovered_top_provider_sources() {
         ("shelley", "shelley", install_default_shelley_fixture),
         ("continue", "continue", install_default_continue_fixture),
         ("openhands", "openhands", install_default_openhands_fixture),
+        ("reasonix", "reasonix", install_default_reasonix_fixture),
     ] {
         let temp = tempdir();
         let query = format!("{stored_provider}-default-refresh-oracle");
@@ -6235,6 +6248,12 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
             "mux",
             "mux_session_jsonl_tree",
             write_native_mux_fixture,
+        ),
+        (
+            "reasonix",
+            "reasonix",
+            "reasonix_session_jsonl_tree",
+            write_native_reasonix_fixture,
         ),
         (
             "codebuddy",
@@ -6679,6 +6698,11 @@ fn install_default_mux_fixture(temp: &TempDir, query: &str) {
     copy_dir_all(&source, &temp.path().join(".mux").join("sessions"));
 }
 
+fn install_default_reasonix_fixture(temp: &TempDir, query: &str) {
+    let source = PathBuf::from(write_native_reasonix_fixture(temp, query));
+    copy_dir_all(&source, &temp.path().join(".reasonix").join("sessions"));
+}
+
 fn install_default_openhands_fixture(temp: &TempDir, query: &str) {
     let source = PathBuf::from(write_native_openhands_fixture(temp, query));
     copy_dir_all(&source, &temp.path().join(".openhands"));
@@ -7090,6 +7114,88 @@ fn write_native_mistral_vibe_fixture(temp: &TempDir, query: &str) -> String {
     .unwrap();
     temp.path()
         .join("native-mistral-vibe/logs/session")
+        .to_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn write_native_reasonix_fixture(temp: &TempDir, query: &str) -> String {
+    let sessions = temp.path().join("native-reasonix/sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(
+        sessions.join("reasonix-cli-native.jsonl"),
+        format!(
+            "{}\n{}\n{}\n{}\n",
+            json!({"role":"user","content":query}),
+            json!({
+                "role": "assistant",
+                "content": "reasonix native import ok",
+                "tool_calls": [{
+                    "id": "call-reasonix-cli",
+                    "type": "function",
+                    "function": {
+                        "name": "write_file",
+                        "arguments": "{\"path\":\"src/reasonix_native.rs\",\"content\":\"proof\"}"
+                    }
+                }]
+            }),
+            json!({
+                "role": "tool",
+                "content": "wrote src/reasonix_native.rs",
+                "tool_call_id": "call-reasonix-cli",
+                "name": "write_file"
+            }),
+            json!({"role":"assistant","content":"Reasonix import finished"})
+        ),
+    )
+    .unwrap();
+    fs::write(
+        sessions.join("reasonix-cli-native.events.jsonl"),
+        format!(
+            "{}\n{}\n{}\n",
+            json!({
+                "ts": "2026-07-04T16:10:00Z",
+                "turn": 1,
+                "type": "user.message",
+                "content": query
+            }),
+            json!({
+                "ts": "2026-07-04T16:10:01Z",
+                "turn": 1,
+                "type": "effect.file.touched",
+                "path": "src/reasonix_native.rs",
+                "mode": "edit",
+                "bytes": 5
+            }),
+            json!({
+                "ts": "2026-07-04T16:10:02Z",
+                "turn": 1,
+                "type": "model.final",
+                "content": "Reasonix import finished",
+                "toolCalls": [],
+                "usage": {"prompt_tokens": 9, "completion_tokens": 4, "total_tokens": 13},
+                "costUsd": 0.00001
+            })
+        ),
+    )
+    .unwrap();
+    fs::write(
+        sessions.join("reasonix-cli-native.meta.json"),
+        json!({
+            "branch": "main",
+            "summary": "Reasonix CLI native",
+            "totalCostUsd": 0.00001,
+            "turnCount": 1,
+            "workspace": "/workspace/reasonix-cli",
+            "balanceCurrency": "USD",
+            "cacheHitTokens": 1,
+            "cacheMissTokens": 8,
+        })
+        .to_string(),
+    )
+    .unwrap();
+    temp.path()
+        .join("native-reasonix/sessions")
         .to_str()
         .unwrap()
         .to_owned()
@@ -8507,6 +8613,7 @@ fn native_provider_cli_requires_existing_history_or_explicit_path() {
         ("iflow-cli", "no importable iflow_cli history found"),
         ("mistral-vibe", "no importable mistral_vibe history found"),
         ("mux", "no importable mux history found"),
+        ("reasonix", "no importable reasonix history found"),
         ("cline", "no importable cline history found"),
         ("roo", "no importable roo_code history found"),
     ] {

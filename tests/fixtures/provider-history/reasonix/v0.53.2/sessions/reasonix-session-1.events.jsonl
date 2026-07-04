@@ -1,0 +1,7 @@
+{"id":1,"ts":"2026-07-04T12:00:00.000Z","turn":1,"type":"session.opened","name":"reasonix-session-1","resumedFromTurn":0}
+{"id":2,"ts":"2026-07-04T12:00:01.000Z","turn":1,"type":"user.message","text":"reasonix jsonl oracle prompt"}
+{"id":3,"ts":"2026-07-04T12:00:02.000Z","turn":1,"type":"model.turn.started","model":"deepseek-v4-flash","reasoningEffort":"max","prefixHash":"fixture-prefix"}
+{"id":4,"ts":"2026-07-04T12:00:03.000Z","turn":1,"type":"tool.intent","callId":"call-reasonix-write","name":"write_file","args":"{\"path\":\"src/reasonix_oracle.txt\",\"content\":\"proof\"}"}
+{"id":5,"ts":"2026-07-04T12:00:04.000Z","turn":1,"type":"effect.file.touched","path":"src/reasonix_oracle.txt","mode":"edit","bytes":5}
+{"id":6,"ts":"2026-07-04T12:00:05.000Z","turn":1,"type":"tool.result","callId":"call-reasonix-write","ok":true,"output":"wrote src/reasonix_oracle.txt","durationMs":12}
+{"id":7,"ts":"2026-07-04T12:00:06.000Z","turn":1,"type":"model.final","content":"reasonix jsonl oracle answer","toolCalls":[],"usage":{"prompt_tokens":42,"completion_tokens":7,"total_tokens":49,"prompt_cache_hit_tokens":20,"prompt_cache_miss_tokens":22},"costUsd":0.000123}

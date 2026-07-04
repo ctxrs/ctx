@@ -1,0 +1,10 @@
+{
+  "title": "Reasonix fixture plan",
+  "steps": [
+    {
+      "id": "step-1",
+      "title": "Write oracle",
+      "status": "done"
+    }
+  ]
+}
