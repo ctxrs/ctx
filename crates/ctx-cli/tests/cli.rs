@@ -2026,6 +2026,7 @@ fn sources_lists_personal_agent_provider_defaults() {
     install_default_kode_fixture(&temp, "kode-sources-oracle");
     install_default_neovate_fixture(&temp, "neovate-sources-oracle");
     install_default_terramind_fixture(&temp, "terramind-sources-oracle");
+    install_default_lingma_fixture(&temp, "lingma-sources-oracle");
 
     let sources = json_output(ctx(&temp).args(["sources", "--json"]));
     for (provider, source_format, import_support, native_import) in [
@@ -2055,6 +2056,7 @@ fn sources_lists_personal_agent_provider_defaults() {
         ("kode", "kode_session_jsonl_tree", "native", true),
         ("neovate", "neovate_session_jsonl_tree", "native", true),
         ("terramind", "terramind_agents_sqlite", "native", true),
+        ("lingma", "lingma_sqlite", "native", true),
     ] {
         let source = sources["sources"]
             .as_array()
@@ -2337,6 +2339,7 @@ fn provider_help_matches_implemented_importers() {
         "continue",
         "openhands",
         "dexto",
+        "lingma",
         "codebuddy",
         "aider-desk",
         "qwen-code",
@@ -2502,7 +2505,7 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
             vec![
                 "Usage: ctx import",
                 "--provider <PROVIDER>",
-                "[possible values: codex, pi, claude, opencode, kilo, kiro-cli, crush, goose, antigravity, gemini, cursor, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, forgecode, mistral-vibe, mux, reasonix, kode, neovate, terramind, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto, codebuddy, aider-desk]",
+                "[possible values: codex, pi, claude, opencode, kilo, kiro-cli, crush, goose, antigravity, gemini, cursor, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, forgecode, mistral-vibe, mux, reasonix, kode, neovate, terramind, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto, lingma, codebuddy, aider-desk]",
                 "--path <PATH>",
                 "--format <FORMAT>",
                 "--resume",
@@ -4565,6 +4568,7 @@ fn mcp_status_and_tools_list_are_read_only_without_initialized_store() {
     assert!(providers.iter().any(|provider| provider == "kiro_cli"));
     assert!(providers.iter().any(|provider| provider == "iflow-cli"));
     assert!(providers.iter().any(|provider| provider == "iflow_cli"));
+    assert!(providers.iter().any(|provider| provider == "lingma"));
     assert!(providers.iter().any(|provider| provider == "codebuddy"));
     assert!(providers.iter().any(|provider| provider == "aider-desk"));
     assert!(providers.iter().any(|provider| provider == "aider_desk"));
@@ -5916,6 +5920,7 @@ fn search_refresh_auto_imports_discovered_top_provider_sources() {
         ("reasonix", "reasonix", install_default_reasonix_fixture),
         ("kode", "kode", install_default_kode_fixture),
         ("neovate", "neovate", install_default_neovate_fixture),
+        ("lingma", "lingma", install_default_lingma_fixture),
     ] {
         let temp = tempdir();
         let query = format!("{stored_provider}-default-refresh-oracle");
@@ -6332,6 +6337,12 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
             write_native_terramind_fixture,
         ),
         (
+            "lingma",
+            "lingma",
+            "lingma_sqlite",
+            write_native_lingma_fixture,
+        ),
+        (
             "codebuddy",
             "codebuddy",
             "codebuddy_history_json",
@@ -6445,6 +6456,38 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
         assert_eq!(second["totals"]["failed"], 0);
         assert_eq!(second["totals"]["imported_events"], 0);
     }
+}
+
+#[test]
+fn lingma_cli_default_source_imports_home_local_db() {
+    let temp = tempdir();
+    let query = "lingma-default-import-oracle";
+    install_default_lingma_fixture(&temp, query);
+
+    let sources = json_output(ctx(&temp).args(["sources", "--json"]));
+    let source = sources["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| source["provider"] == "lingma")
+        .unwrap_or_else(|| panic!("missing Lingma source in {sources:#}"));
+    assert_eq!(source["source_format"], "lingma_sqlite");
+    assert_eq!(source["status"], "available");
+    assert_eq!(source["importable"], true);
+
+    let imported = json_output(ctx(&temp).args(["import", "--provider", "lingma", "--json"]));
+    assert_eq!(imported["sources"][0]["provider"], "lingma");
+    assert_eq!(imported["sources"][0]["source_format"], "lingma_sqlite");
+    assert_eq!(imported["totals"]["failed"], 0);
+    assert_eq!(imported["totals"]["imported_sessions"], 1);
+    assert_eq!(imported["totals"]["imported_events"], 2);
+
+    let search = json_output(ctx(&temp).args(["search", query, "--provider", "lingma", "--json"]));
+    assert_search_provider_oracle(&search, "lingma", query, 1, "message");
+
+    let second = json_output(ctx(&temp).args(["import", "--provider", "lingma", "--json"]));
+    assert_eq!(second["totals"]["failed"], 0);
+    assert_eq!(second["totals"]["imported_events"], 0);
 }
 
 #[test]
@@ -6803,6 +6846,13 @@ fn install_default_terramind_fixture(temp: &TempDir, query: &str) {
     let target = temp.path().join(".config").join("Nucleus").join("data");
     fs::create_dir_all(&target).unwrap();
     fs::copy(source, target.join("agents.db")).unwrap();
+}
+
+fn install_default_lingma_fixture(temp: &TempDir, query: &str) {
+    let target = temp
+        .path()
+        .join(".lingma/vscode/sharedClientCache/cache/db/local.db");
+    write_lingma_sqlite_fixture(&target, query);
 }
 
 fn install_default_openhands_fixture(temp: &TempDir, query: &str) {
@@ -8127,6 +8177,48 @@ fn write_native_codebuddy_fixture(temp: &TempDir, query: &str) -> String {
     root.to_str().unwrap().to_owned()
 }
 
+fn write_native_lingma_fixture(temp: &TempDir, query: &str) -> String {
+    let db = temp.path().join("native-lingma/local.db");
+    write_lingma_sqlite_fixture(&db, query);
+    db.to_str().unwrap().to_owned()
+}
+
+fn write_lingma_sqlite_fixture(path: &Path, query: &str) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let conn = Connection::open(path).unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TABLE chat_record (
+            session_id TEXT NOT NULL,
+            request_id TEXT,
+            chat_prompt TEXT,
+            summary TEXT,
+            error_result TEXT,
+            gmt_create INTEGER,
+            extra TEXT
+        );
+        "#,
+    )
+    .unwrap();
+    conn.execute(
+        r#"
+        INSERT INTO chat_record
+            (session_id, request_id, chat_prompt, summary, error_result, gmt_create, extra)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "#,
+        params![
+            "lingma-cli-session",
+            "lingma-cli-request",
+            query,
+            "Lingma CLI assistant summary import ok",
+            "{}",
+            1_783_166_400_000_i64,
+            json!({"model": "lingma-cli-fixture"}).to_string(),
+        ],
+    )
+    .unwrap();
+}
+
 fn write_native_iflow_fixture(temp: &TempDir, query: &str) -> String {
     let projects = temp
         .path()
@@ -8812,6 +8904,7 @@ fn personal_agent_sqlite_imports_report_corrupt_databases() {
         ("astrbot", "corrupt-astrbot-data_v4.db"),
         ("shelley", "corrupt-shelley.db"),
         ("terramind", "corrupt-terramind-agents.db"),
+        ("lingma", "corrupt-lingma-local.db"),
     ] {
         let temp = tempdir();
         let db_path = temp.path().join(path);
@@ -8876,6 +8969,7 @@ fn native_provider_cli_requires_existing_history_or_explicit_path() {
         ("nanoclaw", "no importable nanoclaw history found"),
         ("astrbot", "no importable astrbot history found"),
         ("shelley", "no importable shelley history found"),
+        ("lingma", "no importable lingma history found"),
         ("codebuddy", "no importable codebuddy history found"),
         ("aider-desk", "no importable aider_desk history found"),
         ("iflow-cli", "no importable iflow_cli history found"),

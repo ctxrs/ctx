@@ -519,6 +519,66 @@
       ]
     },
     {
+      "id": "lingma",
+      "display_name": "Lingma",
+      "priority": "p1",
+      "status": "local_import_when_supported",
+      "capture_provider": "lingma",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "lingma_sqlite",
+          "fidelity": "partial",
+          "proof": [
+            "WayLog shayne-snap/WayLog@6939033b7a39326fbdc249e28e6aa12461db1f09 src/services/readers/lingma-reader.ts",
+            "ctx sources",
+            "ctx import --provider lingma"
+          ],
+          "notes": [
+            "Reads Lingma chat_record rows from ~/.lingma/vscode/sharedClientCache/cache/db/local.db and the vscode-insiders variant.",
+            "Imports chat_prompt as user prompts and summary/error_result as assistant summary/notice content; original assistant answers may be encrypted, transformed, or unavailable.",
+            "Qoder CN is the renamed Lingma product line in Alibaba public docs, but ctx does not alias qoder-cn without source-backed proof of the same local DB path and schema."
+          ]
+        }
+      ],
+      "history_locations": [
+        "~/.lingma/vscode/sharedClientCache/cache/db/local.db",
+        "~/.lingma/vscode-insiders/sharedClientCache/cache/db/local.db"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": false,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": false,
+        "tool_output": false,
+        "command_output": false,
+        "files_touched": false,
+        "artifacts": false,
+        "model_identity": false,
+        "costs": false,
+        "token_usage": false,
+        "parent_child_session_edges": false
+      },
+      "redaction_notes": [
+        "Reads the provider SQLite database read-only; imported prompt text, summaries/errors, extra JSON, and local source paths remain in the local ctx index.",
+        "Assistant content is summary/error_result only and may be incomplete."
+      ],
+      "blockers": [
+        "No qoder-cn provider alias is shipped because source-backed proof for a Qoder CN local DB path/schema was not found."
+      ],
+      "public_docs": "docs/providers.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/lingma"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs"
+      ]
+    },
+    {
       "id": "codebuddy",
       "display_name": "CodeBuddy",
       "priority": "p1",
