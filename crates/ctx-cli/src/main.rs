@@ -42,7 +42,7 @@ use ctx_history_capture::{
     import_custom_history_jsonl_v1_reader, import_dexto_sqlite, import_factory_ai_droid_sessions,
     import_forgecode_sqlite, import_gemini_cli_history, import_goose_sessions_sqlite,
     import_hermes_sqlite, import_iflow_cli_history, import_kilo_sqlite,
-    import_kimi_code_cli_history, import_kiro_sqlite, import_kode_history,
+    import_kimi_code_cli_history, import_kiro_sqlite, import_kode_history, import_lingma_sqlite,
     import_mistral_vibe_history, import_mux_history, import_nanoclaw_project,
     import_neovate_history, import_openclaw_history, import_opencode_sqlite,
     import_openhands_file_events, import_pi_session_jsonl, import_qwen_code_history,
@@ -59,11 +59,11 @@ use ctx_history_capture::{
     DextoSqliteImportOptions, FactoryAiDroidImportOptions, ForgeCodeSqliteImportOptions,
     GeminiCliImportOptions, GooseSessionsSqliteImportOptions, HermesSqliteImportOptions,
     IflowCliImportOptions, KiloSqliteImportOptions, KimiCodeCliImportOptions,
-    KiroSqliteImportOptions, KodeImportOptions, MistralVibeImportOptions, MuxImportOptions,
-    NanoClawImportOptions, NeovateImportOptions, OpenClawImportOptions,
-    OpenCodeSqliteImportOptions, OpenHandsImportOptions, PiSessionImportOptions,
-    ProviderImportSummary, ProviderImportSupport, ProviderSource, ProviderSourceStatus,
-    QwenCodeImportOptions, ReasonixImportOptions, RooTaskJsonImportOptions,
+    KiroSqliteImportOptions, KodeImportOptions, LingmaSqliteImportOptions,
+    MistralVibeImportOptions, MuxImportOptions, NanoClawImportOptions, NeovateImportOptions,
+    OpenClawImportOptions, OpenCodeSqliteImportOptions, OpenHandsImportOptions,
+    PiSessionImportOptions, ProviderImportSummary, ProviderImportSupport, ProviderSource,
+    ProviderSourceStatus, QwenCodeImportOptions, ReasonixImportOptions, RooTaskJsonImportOptions,
     ShelleySqliteImportOptions, TerramindSqliteImportOptions, ZedThreadsSqliteImportOptions,
 };
 use ctx_history_core::{
@@ -763,6 +763,7 @@ enum NativeProviderArg {
     #[value(name = "roo", alias = "roo-code", alias = "roo_code")]
     RooCode,
     Dexto,
+    Lingma,
     #[value(name = "codebuddy", alias = "code-buddy", alias = "code_buddy")]
     CodeBuddy,
     #[value(name = "aider-desk", alias = "aider_desk", alias = "aiderdesk")]
@@ -854,6 +855,7 @@ enum ProviderArg {
     #[value(name = "roo", alias = "roo-code", alias = "roo_code")]
     RooCode,
     Dexto,
+    Lingma,
     #[value(name = "codebuddy", alias = "code-buddy", alias = "code_buddy")]
     CodeBuddy,
     #[value(name = "aider-desk", alias = "aider_desk", alias = "aiderdesk")]
@@ -921,6 +923,7 @@ impl NativeProviderArg {
             Self::Cline => CaptureProvider::Cline,
             Self::RooCode => CaptureProvider::RooCode,
             Self::Dexto => CaptureProvider::Dexto,
+            Self::Lingma => CaptureProvider::Lingma,
             Self::CodeBuddy => CaptureProvider::CodeBuddy,
             Self::AiderDesk => CaptureProvider::AiderDesk,
         }
@@ -985,6 +988,7 @@ impl ProviderArg {
             Self::Cline => CaptureProvider::Cline,
             Self::RooCode => CaptureProvider::RooCode,
             Self::Dexto => CaptureProvider::Dexto,
+            Self::Lingma => CaptureProvider::Lingma,
             Self::CodeBuddy => CaptureProvider::CodeBuddy,
             Self::AiderDesk => CaptureProvider::AiderDesk,
             Self::Custom => CaptureProvider::Custom,
@@ -1028,6 +1032,7 @@ impl ProviderArg {
             Self::Cline => "cline",
             Self::RooCode => "roo",
             Self::Dexto => "dexto",
+            Self::Lingma => "lingma",
             Self::CodeBuddy => "codebuddy",
             Self::AiderDesk => "aider-desk",
             Self::Custom => "custom",
@@ -5973,6 +5978,17 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
+        CaptureProvider::Lingma => import_lingma_sqlite(
+            &source.path,
+            store,
+            LingmaSqliteImportOptions {
+                source_path: Some(source.path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: true,
+                ..LingmaSqliteImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
         CaptureProvider::Gemini => import_gemini_cli_history(
             &source.path,
             store,
@@ -6347,6 +6363,7 @@ fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bool {
         | CaptureProvider::Crush
         | CaptureProvider::Goose
         | CaptureProvider::Dexto
+        | CaptureProvider::Lingma
         | CaptureProvider::Zed => path == source.path,
         CaptureProvider::MistralVibe => {
             path == source.path

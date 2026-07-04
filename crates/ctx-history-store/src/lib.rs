@@ -484,7 +484,9 @@ CREATE TABLE IF NOT EXISTS capture_sources (
     id TEXT PRIMARY KEY NOT NULL,
     kind TEXT NOT NULL CHECK (kind IN ('provider_import', 'provider_hook', 'direct_cli', 'manual')),
 
-    provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'cursor', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'iflow_cli', 'forgecode', 'mistral_vibe', 'mux', 'reasonix', 'kode', 'neovate', 'terramind', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'dexto', 'codebuddy', 'aider_desk', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
+
+    provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'cursor', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'iflow_cli', 'forgecode', 'mistral_vibe', 'mux', 'reasonix', 'kode', 'neovate', 'terramind', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'dexto', 'lingma', 'codebuddy', 'aider_desk', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
+
 
     machine_id TEXT NOT NULL,
     process_id INTEGER,
@@ -503,7 +505,9 @@ CREATE TABLE IF NOT EXISTS capture_sources (
 CREATE TABLE IF NOT EXISTS catalog_sessions (
     source_path TEXT PRIMARY KEY NOT NULL,
 
-    provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'cursor', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'iflow_cli', 'forgecode', 'mistral_vibe', 'mux', 'reasonix', 'kode', 'neovate', 'terramind', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'dexto', 'codebuddy', 'aider_desk', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
+
+    provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'cursor', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'iflow_cli', 'forgecode', 'mistral_vibe', 'mux', 'reasonix', 'kode', 'neovate', 'terramind', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'dexto', 'lingma', 'codebuddy', 'aider_desk', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
+
 
     source_format TEXT NOT NULL,
     source_root TEXT NOT NULL,
@@ -534,7 +538,9 @@ CREATE TABLE IF NOT EXISTS catalog_sessions (
 
 CREATE TABLE IF NOT EXISTS source_import_files (
 
-    provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'cursor', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'iflow_cli', 'forgecode', 'mistral_vibe', 'mux', 'reasonix', 'kode', 'neovate', 'terramind', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'dexto', 'codebuddy', 'aider_desk', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
+
+    provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'cursor', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'iflow_cli', 'forgecode', 'mistral_vibe', 'mux', 'reasonix', 'kode', 'neovate', 'terramind', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'dexto', 'lingma', 'codebuddy', 'aider_desk', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
+
 
     source_format TEXT NOT NULL,
     source_root TEXT NOT NULL,
@@ -5629,7 +5635,9 @@ fn rebuild_capture_sources_provider_check(conn: &Connection) -> Result<()> {
             id TEXT PRIMARY KEY NOT NULL,
             kind TEXT NOT NULL CHECK (kind IN ('provider_import', 'provider_hook', 'direct_cli', 'manual')),
 
-    provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'cursor', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'iflow_cli', 'forgecode', 'mistral_vibe', 'mux', 'reasonix', 'kode', 'neovate', 'terramind', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'dexto', 'codebuddy', 'aider_desk', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
+
+    provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'cursor', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'iflow_cli', 'forgecode', 'mistral_vibe', 'mux', 'reasonix', 'kode', 'neovate', 'terramind', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'dexto', 'lingma', 'codebuddy', 'aider_desk', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
+
 
             machine_id TEXT NOT NULL,
             process_id INTEGER,
@@ -5679,7 +5687,9 @@ fn rebuild_catalog_sessions_provider_check(conn: &Connection) -> Result<()> {
         CREATE TABLE catalog_sessions_new (
             source_path TEXT PRIMARY KEY NOT NULL,
 
-    provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'cursor', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'iflow_cli', 'forgecode', 'mistral_vibe', 'mux', 'reasonix', 'kode', 'neovate', 'terramind', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'dexto', 'codebuddy', 'aider_desk', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
+
+    provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'cursor', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'iflow_cli', 'forgecode', 'mistral_vibe', 'mux', 'reasonix', 'kode', 'neovate', 'terramind', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'dexto', 'lingma', 'codebuddy', 'aider_desk', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
+
 
             source_format TEXT NOT NULL,
             source_root TEXT NOT NULL,
@@ -5736,7 +5746,9 @@ fn rebuild_source_import_files_provider_check(conn: &Connection) -> Result<()> {
         DROP TABLE IF EXISTS source_import_files_new;
         CREATE TABLE source_import_files_new (
 
-    provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'cursor', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'iflow_cli', 'forgecode', 'mistral_vibe', 'mux', 'reasonix', 'kode', 'neovate', 'terramind', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'dexto', 'codebuddy', 'aider_desk', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
+
+    provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'cursor', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'iflow_cli', 'forgecode', 'mistral_vibe', 'mux', 'reasonix', 'kode', 'neovate', 'terramind', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'dexto', 'lingma', 'codebuddy', 'aider_desk', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
+
 
             source_format TEXT NOT NULL,
             source_root TEXT NOT NULL,
@@ -9593,6 +9605,7 @@ mod catalog_tests {
             ("crush", "crush_sqlite"),
             ("goose", "goose_sessions_sqlite"),
             ("dexto", "dexto_sqlite"),
+            ("lingma", "lingma_sqlite"),
             ("copilot_cli", "copilot_cli_session_events_jsonl"),
             ("factory_ai_droid", "factory_ai_droid_sessions_jsonl"),
             ("continue", "continue_cli_sessions_json"),
@@ -9645,7 +9658,7 @@ mod catalog_tests {
         let source_count: i64 = store
             .conn
             .query_row(
-                "SELECT COUNT(*) FROM capture_sources WHERE provider IN ('kilo', 'crush', 'goose', 'dexto', 'copilot_cli', 'factory_ai_droid', 'continue', 'openhands', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'kiro_cli', 'iflow_cli', 'forgecode', 'mistral_vibe', 'mux', 'reasonix', 'kode', 'neovate', 'terramind', 'codebuddy', 'aider_desk', 'zed', 'custom')",
+                "SELECT COUNT(*) FROM capture_sources WHERE provider IN ('kilo', 'crush', 'goose', 'dexto', 'lingma', 'copilot_cli', 'factory_ai_droid', 'continue', 'openhands', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'kiro_cli', 'iflow_cli', 'forgecode', 'mistral_vibe', 'mux', 'reasonix', 'kode', 'neovate', 'terramind', 'codebuddy', 'aider_desk', 'zed', 'custom')",
                 [],
                 |row| row.get(0),
             )
@@ -9653,13 +9666,13 @@ mod catalog_tests {
         let catalog_count: i64 = store
             .conn
             .query_row(
-                "SELECT COUNT(*) FROM catalog_sessions WHERE provider IN ('kilo', 'crush', 'goose', 'dexto', 'copilot_cli', 'factory_ai_droid', 'continue', 'openhands', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'kiro_cli', 'iflow_cli', 'forgecode', 'mistral_vibe', 'mux', 'reasonix', 'kode', 'neovate', 'terramind', 'codebuddy', 'aider_desk', 'zed', 'custom')",
+                "SELECT COUNT(*) FROM catalog_sessions WHERE provider IN ('kilo', 'crush', 'goose', 'dexto', 'lingma', 'copilot_cli', 'factory_ai_droid', 'continue', 'openhands', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'kiro_cli', 'iflow_cli', 'forgecode', 'mistral_vibe', 'mux', 'reasonix', 'kode', 'neovate', 'terramind', 'codebuddy', 'aider_desk', 'zed', 'custom')",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(source_count, 24);
-        assert_eq!(catalog_count, 24);
+        assert_eq!(source_count, 25);
+        assert_eq!(catalog_count, 25);
     }
 
     #[test]
@@ -10219,7 +10232,7 @@ mod catalog_tests {
     }
 
     #[test]
-    fn schema_v24_adds_aider_desk_mux_reasonix_kode_neovate_and_terramind_provider_checks() {
+    fn schema_v24_adds_aider_desk_mux_reasonix_kode_neovate_terramind_and_lingma_provider_checks() {
         let temp = tempdir();
         let path = temp.path().join("work.sqlite");
         {
@@ -10230,7 +10243,8 @@ mod catalog_tests {
                 .replace(", 'reasonix'", "")
                 .replace(", 'kode'", "")
                 .replace(", 'neovate'", "")
-                .replace(", 'terramind'", "");
+                .replace(", 'terramind'", "")
+                .replace(", 'lingma'", "");
             conn.execute_batch(&legacy_sql).unwrap();
             conn.execute_batch(INDEXES_SQL).unwrap();
             conn.execute_batch("PRAGMA user_version = 23;").unwrap();
@@ -10250,6 +10264,7 @@ mod catalog_tests {
             "kode",
             "neovate",
             "terramind",
+            "lingma",
         ] {
             store
                 .conn
@@ -10301,6 +10316,12 @@ mod catalog_tests {
                 "terramind_agents_sqlite",
                 "/tmp/Nucleus/data",
             ),
+            (
+                "/tmp/lingma/local.db",
+                "lingma",
+                "lingma_sqlite",
+                "/tmp/lingma/local.db",
+            ),
         ] {
             store
                 .conn
@@ -10351,6 +10372,12 @@ mod catalog_tests {
                 "terramind_agents_sqlite",
                 "/tmp/Nucleus/data",
                 "/tmp/Nucleus/data/agents.db",
+            ),
+            (
+                "lingma",
+                "lingma_sqlite",
+                "/tmp/lingma/local.db",
+                "/tmp/lingma/local.db",
             ),
         ] {
             store

@@ -217,6 +217,7 @@ text_enum! {
         Crush => "crush",
         Goose => "goose",
         Dexto => "dexto",
+        Lingma => "lingma",
         CodeBuddy => "codebuddy",
         AiderDesk => "aider_desk",
         Shell => "shell",
@@ -1582,6 +1583,10 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<CaptureProvider>("\"neovate\"").unwrap(),
             CaptureProvider::Neovate
+        );
+        assert_eq!(
+            serde_json::from_str::<CaptureProvider>("\"lingma\"").unwrap(),
+            CaptureProvider::Lingma
         );
 
         let sync: SyncMetadata = serde_json::from_value(json!({})).unwrap();

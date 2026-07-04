@@ -21,7 +21,7 @@ Status meanings:
 - `install-target`: npx target is an aggregate or project skill target, not a
   proven history-producing agent.
 
-Result on this integration branch: 33 `native-auto`, 2 `native-preview`, 16
+Result on this integration branch: 34 `native-auto`, 2 `native-preview`, 15
 `candidate-family`, 9 `webapp-boundary`, 10 `unknown`, and 2 `install-target`
 rows.
 
@@ -99,7 +99,7 @@ rows.
 | `kimi-code-cli` | `native-auto` | `JSONL CLI event logs` | ctx `kimi_code_cli_wire_jsonl_tree`; npx `~/.kimi-code` or `~/.kimi` | - |
 | `kiro-cli` | `native-auto` | `generic sqlite messages` | ctx `kiro_cli_sqlite`; npx `~/.kiro` | SQLite import covers the proven `conversations_v2`/`conversations` DB at the Kiro CLI data dir; newer `~/.kiro/sessions/cli` event logs are not imported yet. |
 | `kode` | `native-auto` | `JSONL CLI event logs` | ctx `kode_session_jsonl_tree`; npx `~/.kode`; `@shareai-lab/kode` stores project JSONL sessions under `KODE_CONFIG_DIR`, `CLAUDE_CONFIG_DIR`, or `~/.kode` | - |
-| `lingma` | `candidate-family` | `VS Code/Electron storage` | npx `~/.lingma`; no ctx provider | Need local app storage or export contract proof. |
+| `lingma` | `native-auto` | `VS Code/Electron storage` | ctx `lingma_sqlite`; npx `~/.lingma` | Schema proof from WayLog `shayne-snap/WayLog@6939033b7a39326fbdc249e28e6aa12461db1f09`; imports `chat_prompt` plus assistant `summary`/`error_result`, which may be partial. Qoder CN is documented by Alibaba as the renamed Lingma product line, but no `qoder-cn` alias is shipped without source-backed DB contract proof. |
 | `loaf` | `unknown` | `unknown native history` | npx `~/.loaf`; no ctx provider | Need native history storage research before claiming import support. |
 | `mcpjam` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.mcpjam`; no ctx provider | UI or account-backed activity should use exporter or plugin until local storage is proven. |
 | `mistral-vibe` | `native-auto` | `JSONL CLI event logs` | ctx `mistral_vibe_session_jsonl_tree`; npx `VIBE_HOME` or `~/.vibe` | - |
@@ -110,8 +110,8 @@ rows.
 | `openhands` | `native-auto` | `filesystem event JSON` | ctx `openhands_file_events`; npx `~/.openhands` | - |
 | `ona` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.ona`; no ctx provider | No proven stable local transcript boundary; prefer exporter or plugin. |
 | `pi` | `native-auto` | `JSONL CLI event logs` | ctx `pi_session_jsonl`; npx `~/.pi/agent` | - |
-| `qoder` | `candidate-family` | `VS Code/Electron storage` | npx `~/.qoder`; no ctx provider | Need local app storage or export contract proof. |
-| `qoder-cn` | `candidate-family` | `VS Code/Electron storage` | npx `~/.qoder-cn`; no ctx provider | Need local app storage or export contract proof. |
+| `qoder` | `candidate-family` | `VS Code/Electron storage` | npx `~/.qoder`; no ctx provider | Need local app storage or export contract proof; Lingma/Qoder CN rename evidence does not prove this separate home path. |
+| `qoder-cn` | `candidate-family` | `VS Code/Electron storage` | npx `~/.qoder-cn`; no ctx provider | Alibaba docs identify Qoder CN as the renamed Lingma product line, but ctx needs source-backed proof that Qoder CN still uses the same local DB path/schema before adding an alias. |
 | `qwen-code` | `native-auto` | `JSONL CLI event logs` | ctx `qwen_code_chat_jsonl_tree`; npx `~/.qwen` | - |
 | `replit` | `webapp-boundary` | `webapp/object-store boundary` | npx project `.replit`; no ctx provider | Project marker is not a local agent history contract. |
 | `reasonix` | `native-auto` | `JSONL CLI event logs` | ctx `reasonix_session_jsonl_tree`; npx `~/.reasonix/sessions`; package `reasonix@0.53.2` | - |

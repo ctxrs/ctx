@@ -141,6 +141,7 @@ ctx import --provider qwen-code
 ctx import --provider kimi-code-cli
 ctx import --provider autohand-code
 ctx import --provider iflow-cli
+ctx import --provider lingma
 ctx import --provider codebuddy
 ctx import --provider aider-desk
 ctx import --provider codex --path ~/.codex/sessions
@@ -301,7 +302,7 @@ optimized for agent reading; use `--verbose` for expanded text diagnostics.
 
 Filters:
 
-- `--provider codex|pi|claude|opencode|kilo|kiro-cli|forgecode|mistral-vibe|mux|reasonix|kode|neovate|terramind|crush|goose|dexto|openclaw|hermes|nanoclaw|astrbot|shelley|continue|openhands|antigravity|gemini|cursor|zed|copilot-cli|factory-ai-droid|qwen-code|kimi-code-cli|autohand-code|iflow-cli|codebuddy|aider-desk|cline|roo|custom`;
+- `--provider codex|pi|claude|opencode|kilo|kiro-cli|forgecode|mistral-vibe|mux|reasonix|kode|neovate|terramind|crush|goose|dexto|lingma|openclaw|hermes|nanoclaw|astrbot|shelley|continue|openhands|antigravity|gemini|cursor|zed|copilot-cli|factory-ai-droid|qwen-code|kimi-code-cli|autohand-code|iflow-cli|codebuddy|aider-desk|cline|roo|custom`;
 - `--workspace <name-or-path>`, substring match over stored workspace, cwd,
   source path, or repository-name text;
 - `--since <rfc3339-or-days>d`, for example `2026-06-01T00:00:00Z` or `30d`;

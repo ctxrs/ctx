@@ -778,6 +778,27 @@ impl Default for DextoSqliteImportOptions {
 }
 
 #[derive(Debug, Clone)]
+pub struct LingmaSqliteImportOptions {
+    pub machine_id: String,
+    pub source_path: Option<PathBuf>,
+    pub imported_at: DateTime<Utc>,
+    pub history_record_id: Option<Uuid>,
+    pub allow_partial_failures: bool,
+}
+
+impl Default for LingmaSqliteImportOptions {
+    fn default() -> Self {
+        Self {
+            machine_id: default_machine_id(),
+            source_path: None,
+            imported_at: utc_now(),
+            history_record_id: None,
+            allow_partial_failures: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct AntigravityCliImportOptions {
     pub machine_id: String,
     pub source_path: Option<PathBuf>,
@@ -1343,6 +1364,9 @@ pub struct OpenHandsFileEventsAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DextoSqliteAdapter;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LingmaSqliteAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AntigravityCliJsonlAdapter;
@@ -2330,6 +2354,24 @@ impl ProviderCaptureAdapter for DextoSqliteAdapter {
         context: &ProviderAdapterContext,
     ) -> Result<ProviderNormalizationResult> {
         normalize_dexto_sqlite(path, context)
+    }
+}
+
+impl ProviderCaptureAdapter for LingmaSqliteAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Lingma
+    }
+
+    fn source_format(&self) -> &str {
+        LINGMA_SQLITE_SOURCE_FORMAT
+    }
+
+    fn normalize_path(
+        &self,
+        path: &Path,
+        context: &ProviderAdapterContext,
+    ) -> Result<ProviderNormalizationResult> {
+        normalize_lingma_sqlite(path, context)
     }
 }
 
@@ -5139,6 +5181,40 @@ pub fn import_zed_threads_sqlite(
     )
 }
 
+pub fn import_lingma_sqlite(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: LingmaSqliteImportOptions,
+) -> Result<ProviderImportSummary> {
+    let path = path.as_ref();
+    let source_path = options
+        .source_path
+        .clone()
+        .unwrap_or_else(|| path.to_path_buf());
+    let normalization = LingmaSqliteAdapter.normalize_path(
+        path,
+        &ProviderAdapterContext {
+            machine_id: options.machine_id,
+            source_path: Some(source_path),
+            imported_at: options.imported_at,
+            tool_output_mode: CodexToolOutputMode::Full,
+            event_mode: CodexEventImportMode::Rich,
+            include_notices: true,
+        },
+    )?;
+    import_normalized_provider_captures(
+        store,
+        normalization,
+        NormalizedProviderImportOptions {
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+            persist_cursors: true,
+            wrap_transaction: true,
+            fast_event_inserts: true,
+        },
+    )
+}
+
 pub fn import_factory_ai_droid_sessions(
     path: impl AsRef<Path>,
     store: &mut Store,
@@ -5421,6 +5497,7 @@ const SHELLEY_SQLITE_SOURCE_FORMAT: &str = "shelley_sqlite";
 const CONTINUE_CLI_SOURCE_FORMAT: &str = "continue_cli_sessions_json";
 const OPENHANDS_FILE_EVENTS_SOURCE_FORMAT: &str = "openhands_file_events";
 const DEXTO_SQLITE_SOURCE_FORMAT: &str = "dexto_sqlite";
+const LINGMA_SQLITE_SOURCE_FORMAT: &str = "lingma_sqlite";
 const ANTIGRAVITY_CLI_SOURCE_FORMAT: &str = "antigravity_cli_transcript_jsonl_tree";
 const GEMINI_CLI_SOURCE_FORMAT: &str = "gemini_cli_chat_recording_jsonl";
 const CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT: &str = "cursor_agent_transcript_jsonl";
@@ -16641,6 +16718,364 @@ fn dexto_message_text(value: &Value) -> Option<String> {
 }
 
 #[derive(Debug, Clone)]
+struct LingmaChatRecordRow {
+    rowid: i64,
+    session_id: String,
+    request_id: Option<String>,
+    chat_prompt: String,
+    summary: Option<String>,
+    error_result: Option<String>,
+    gmt_create: Option<i64>,
+    extra: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct LingmaSessionInfo {
+    id: String,
+    title: String,
+    started_at: DateTime<Utc>,
+    ended_at: Option<DateTime<Utc>>,
+    row_count: usize,
+}
+
+fn normalize_lingma_sqlite(
+    path: &Path,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    let conn = open_provider_sqlite_readonly(path)?;
+    let user_version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let schema_fingerprint = opencode_schema_fingerprint(&conn)?;
+    let rows = lingma_chat_records(&conn)?;
+    let raw_source_path = path.display().to_string();
+    let sessions = lingma_session_infos(&rows, context.imported_at);
+    let mut result = ProviderNormalizationResult::default();
+
+    for row in rows {
+        let Some(session) = sessions.get(&row.session_id) else {
+            continue;
+        };
+        let occurred_at = lingma_timestamp(row.gmt_create, context.imported_at);
+        let base_index = lingma_event_base_index(&row);
+        let user_event = lingma_event(
+            &row,
+            LingmaEventDraft {
+                provider_event_index: base_index,
+                role: EventRole::User,
+                event_type: EventType::Message,
+                occurred_at,
+                text: row.chat_prompt.clone(),
+                body_kind: "chat_prompt",
+                fidelity: Fidelity::Imported,
+            },
+        );
+        result.captures.push((
+            provider_line_from_index(base_index),
+            lingma_capture(
+                session,
+                LingmaCaptureContext {
+                    raw_source_path: &raw_source_path,
+                    user_version,
+                    schema_fingerprint: &schema_fingerprint,
+                    event: Some(user_event),
+                },
+                context,
+            ),
+        ));
+
+        if let Some((assistant_text, body_kind, event_type)) = lingma_assistant_text(&row) {
+            let assistant_index = base_index.saturating_add(1);
+            let assistant_event = lingma_event(
+                &row,
+                LingmaEventDraft {
+                    provider_event_index: assistant_index,
+                    role: EventRole::Assistant,
+                    event_type,
+                    occurred_at: occurred_at
+                        .checked_add_signed(Duration::milliseconds(100))
+                        .unwrap_or(occurred_at),
+                    text: assistant_text,
+                    body_kind,
+                    fidelity: Fidelity::SummaryOnly,
+                },
+            );
+            result.captures.push((
+                provider_line_from_index(assistant_index),
+                lingma_capture(
+                    session,
+                    LingmaCaptureContext {
+                        raw_source_path: &raw_source_path,
+                        user_version,
+                        schema_fingerprint: &schema_fingerprint,
+                        event: Some(assistant_event),
+                    },
+                    context,
+                ),
+            ));
+        }
+    }
+
+    Ok(result)
+}
+
+struct LingmaCaptureContext<'a> {
+    raw_source_path: &'a str,
+    user_version: i64,
+    schema_fingerprint: &'a str,
+    event: Option<ProviderEventEnvelope>,
+}
+
+fn lingma_capture(
+    session: &LingmaSessionInfo,
+    draft: LingmaCaptureContext<'_>,
+    context: &ProviderAdapterContext,
+) -> ProviderCaptureEnvelope {
+    native_provider_capture(
+        NativeSessionDraft {
+            provider: CaptureProvider::Lingma,
+            source_format: LINGMA_SQLITE_SOURCE_FORMAT,
+            provider_session_id: session.id.clone(),
+            parent_provider_session_id: None,
+            root_provider_session_id: None,
+            external_agent_id: None,
+            agent_type: AgentType::Primary,
+            role_hint: Some("primary".to_owned()),
+            is_primary: true,
+            started_at: session.started_at,
+            ended_at: session.ended_at,
+            cwd: None,
+            fidelity: Fidelity::Partial,
+            raw_source_path: draft.raw_source_path.to_owned(),
+            trust: ProviderSourceTrust::ProviderNative,
+            source_metadata: json!({
+                "adapter": LINGMA_SQLITE_SOURCE_FORMAT,
+                "sqlite_user_version": draft.user_version,
+                "schema_fingerprint": draft.schema_fingerprint,
+                "source_path": draft.raw_source_path,
+                "source_table": "chat_record",
+                "source_fidelity": "user prompts plus assistant summaries/errors",
+                "assistant_content_caveat": "WayLog labels Lingma as summaries-only; original assistant answers may be encrypted, transformed, or unavailable in this DB."
+            }),
+            session_metadata: json!({
+                "source_format": LINGMA_SQLITE_SOURCE_FORMAT,
+                "session_id": session.id,
+                "title": session.title,
+                "row_count": session.row_count,
+                "source_table": "chat_record",
+                "source_fidelity": "partial",
+                "assistant_content_caveat": "assistant events imported from summary/error_result, not guaranteed full assistant message bodies"
+            }),
+        },
+        context,
+        draft.event,
+    )
+}
+
+struct LingmaEventDraft {
+    provider_event_index: u64,
+    role: EventRole,
+    event_type: EventType,
+    occurred_at: DateTime<Utc>,
+    text: String,
+    body_kind: &'static str,
+    fidelity: Fidelity,
+}
+
+fn lingma_event(row: &LingmaChatRecordRow, draft: LingmaEventDraft) -> ProviderEventEnvelope {
+    let (text, truncated) = provider_local_preview(&draft.text, PROVIDER_MAX_TEXT_CHARS);
+    let role_name = match draft.role {
+        EventRole::User => "user",
+        EventRole::Assistant => "assistant",
+        EventRole::System => "system",
+        EventRole::Tool => "tool",
+        EventRole::Unknown => "unknown",
+    };
+    ProviderEventEnvelope {
+        provider_event_index: draft.provider_event_index,
+        provider_event_hash: Some(format!(
+            "{}:{}:{role_name}",
+            row.session_id,
+            lingma_request_identity(row)
+        )),
+        cursor: Some(format!(
+            "chat_record:{}:rowid:{}:{role_name}",
+            row.session_id, row.rowid
+        )),
+        event_type: draft.event_type,
+        role: Some(draft.role),
+        occurred_at: draft.occurred_at,
+        fidelity: draft.fidelity,
+        redaction_state: RedactionState::LocalPreview,
+        idempotency_key: Some(format!(
+            "provider-event:{}:{}:{}",
+            CaptureProvider::Lingma.as_str(),
+            row.session_id,
+            draft.provider_event_index
+        )),
+        artifacts: Vec::new(),
+        payload: json!({
+            "text": text,
+            "truncated": truncated,
+            "source_format": LINGMA_SQLITE_SOURCE_FORMAT,
+            "body": provider_capped_json(
+                &json!({
+                    "rowid": row.rowid,
+                    "session_id": row.session_id,
+                    "request_id": row.request_id,
+                    "role": role_name,
+                    "body_kind": draft.body_kind,
+                    "chat_prompt": row.chat_prompt,
+                    "summary": row.summary,
+                    "error_result": row.error_result,
+                    "gmt_create": row.gmt_create,
+                    "extra": row.extra.as_deref().map(provider_json_text),
+                }),
+                PROVIDER_MAX_PREVIEW_CHARS,
+            ),
+        }),
+        metadata: json!({
+            "source": "lingma_chat_record",
+            "source_format": LINGMA_SQLITE_SOURCE_FORMAT,
+            "rowid": row.rowid,
+            "session_id": row.session_id,
+            "request_id": row.request_id,
+            "body_kind": draft.body_kind,
+            "gmt_create": row.gmt_create,
+            "content_fidelity": if draft.fidelity == Fidelity::SummaryOnly { "summary_only" } else { "imported" },
+            "assistant_content_caveat": if draft.role == EventRole::Assistant {
+                Some("summary/error_result only; original assistant body may be encrypted or unavailable")
+            } else {
+                None
+            },
+        }),
+    }
+}
+
+fn lingma_chat_records(conn: &Connection) -> Result<Vec<LingmaChatRecordRow>> {
+    if !sqlite_table_exists(conn, "chat_record")? {
+        return Err(CaptureError::InvalidPayload(
+            "Lingma local.db is missing required chat_record table".into(),
+        ));
+    }
+    let columns = sqlite_table_columns(conn, "chat_record")?;
+    ensure_sqlite_table_columns(
+        &columns,
+        "Lingma chat_record table",
+        &[
+            "session_id",
+            "request_id",
+            "chat_prompt",
+            "summary",
+            "error_result",
+            "gmt_create",
+            "extra",
+        ],
+    )?;
+    let mut stmt = conn.prepare(
+        "select rowid, CAST(session_id AS TEXT), CAST(request_id AS TEXT), \
+         CAST(chat_prompt AS TEXT), CAST(summary AS TEXT), CAST(error_result AS TEXT), \
+         CAST(gmt_create AS INTEGER), CAST(extra AS TEXT) \
+         from chat_record \
+         where chat_prompt is not null and trim(CAST(chat_prompt AS TEXT)) != '' \
+         order by CAST(gmt_create AS INTEGER), rowid",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(LingmaChatRecordRow {
+            rowid: row.get(0)?,
+            session_id: row.get(1)?,
+            request_id: row.get(2)?,
+            chat_prompt: row.get(3)?,
+            summary: row.get(4)?,
+            error_result: row.get(5)?,
+            gmt_create: row.get(6)?,
+            extra: row.get(7)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(CaptureError::from)
+}
+
+fn lingma_session_infos(
+    rows: &[LingmaChatRecordRow],
+    fallback: DateTime<Utc>,
+) -> BTreeMap<String, LingmaSessionInfo> {
+    let mut sessions = BTreeMap::<String, LingmaSessionInfo>::new();
+    for row in rows {
+        let occurred_at = lingma_timestamp(row.gmt_create, fallback);
+        sessions
+            .entry(row.session_id.clone())
+            .and_modify(|session| {
+                if occurred_at < session.started_at {
+                    session.started_at = occurred_at;
+                }
+                let row_end = occurred_at
+                    .checked_add_signed(Duration::milliseconds(100))
+                    .unwrap_or(occurred_at);
+                session.ended_at = Some(session.ended_at.unwrap_or(row_end).max(row_end));
+                session.row_count = session.row_count.saturating_add(1);
+            })
+            .or_insert_with(|| LingmaSessionInfo {
+                id: row.session_id.clone(),
+                title: lingma_title(&row.chat_prompt),
+                started_at: occurred_at,
+                ended_at: occurred_at.checked_add_signed(Duration::milliseconds(100)),
+                row_count: 1,
+            });
+    }
+    sessions
+}
+
+fn lingma_event_base_index(row: &LingmaChatRecordRow) -> u64 {
+    let rowid = u64::try_from(row.rowid).unwrap_or_else(|_| text_id_index(&row.session_id, 0));
+    rowid.saturating_sub(1).saturating_mul(2)
+}
+
+fn lingma_timestamp(raw: Option<i64>, fallback: DateTime<Utc>) -> DateTime<Utc> {
+    raw.map(|timestamp| provider_timestamp_seconds(Some(timestamp as f64), fallback))
+        .unwrap_or(fallback)
+}
+
+fn lingma_title(prompt: &str) -> String {
+    let trimmed = prompt.trim();
+    let title = trimmed.chars().take(50).collect::<String>();
+    if title.is_empty() {
+        "Lingma chat".to_owned()
+    } else {
+        title
+    }
+}
+
+fn lingma_assistant_text(row: &LingmaChatRecordRow) -> Option<(String, &'static str, EventType)> {
+    if let Some(summary) = row
+        .summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        return Some((summary.to_owned(), "summary", EventType::Message));
+    }
+    row.error_result
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty() && *text != "{}")
+        .map(|error| {
+            (
+                format!("Lingma error result: {error}"),
+                "error_result",
+                EventType::Notice,
+            )
+        })
+}
+
+fn lingma_request_identity(row: &LingmaChatRecordRow) -> String {
+    row.request_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("rowid-{}", row.rowid))
+}
+
+#[derive(Debug, Clone)]
 struct ForgeCodeConversationRow {
     rowid: i64,
     conversation_id: String,
@@ -27161,6 +27596,117 @@ mod tests {
         assert_eq!(second.imported_events, 0);
         assert_eq!(second.skipped_sessions, 1);
         assert_eq!(second.skipped_events, 4);
+    }
+
+    #[test]
+    fn native_lingma_fixture_imports_searches_and_reimports() {
+        let temp = tempdir();
+        let fixture = provider_history_fixture("lingma/v1/local.db");
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let source = provider_source_for_path(CaptureProvider::Lingma, fixture.clone());
+        assert_eq!(source.source_format, LINGMA_SQLITE_SOURCE_FORMAT);
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+
+        let first = import_lingma_sqlite(
+            &fixture,
+            &mut store,
+            LingmaSqliteImportOptions {
+                machine_id: "test-machine".into(),
+                source_path: Some(fixture.clone()),
+                imported_at: DateTime::parse_from_rfc3339("2026-07-04T16:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                allow_partial_failures: true,
+                ..LingmaSqliteImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(first.failed, 0, "{:?}", first.failures);
+        assert_eq!(first.imported_sessions, 2);
+        assert_eq!(first.imported_events, 6);
+
+        let alpha = provider_session_uuid(CaptureProvider::Lingma, "lingma-session-1");
+        let events = store.events_for_session(alpha).unwrap();
+        assert_eq!(events.len(), 4);
+        assert_eq!(events[0].role, Some(EventRole::User));
+        assert_eq!(events[1].role, Some(EventRole::Assistant));
+        assert_eq!(events[1].sync.fidelity, Fidelity::SummaryOnly);
+        let rendered = serde_json::to_string(&events).unwrap();
+        assert!(rendered.contains("lingma oracle prompt update"));
+        assert!(rendered.contains("src/lingma_fixture.rs"));
+        assert!(rendered.contains("Lingma summary oracle answer"));
+        assert!(rendered.contains("summary_only"));
+        assert!(rendered.contains("assistant_content_caveat"));
+        assert!(store
+            .search_event_hits("Lingma summary oracle", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::Lingma)));
+        assert!(store
+            .search_event_hits("lingma oracle prompt update", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::Lingma)));
+
+        let error_session = provider_session_uuid(CaptureProvider::Lingma, "lingma-session-2");
+        let error_events = store.events_for_session(error_session).unwrap();
+        assert_eq!(error_events.len(), 2);
+        assert_eq!(error_events[1].event_type, EventType::Notice);
+        assert!(serde_json::to_string(&error_events)
+            .unwrap()
+            .contains("sanitized Lingma error"));
+
+        let second = import_lingma_sqlite(
+            &fixture,
+            &mut store,
+            LingmaSqliteImportOptions {
+                allow_partial_failures: true,
+                ..LingmaSqliteImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(second.failed, 0, "{:?}", second.failures);
+        assert_eq!(second.imported_sessions, 0);
+        assert_eq!(second.imported_events, 0);
+        assert_eq!(second.skipped_sessions, 2);
+        assert_eq!(second.skipped_events, 6);
+    }
+
+    #[test]
+    fn native_lingma_import_reports_corrupt_sqlite() {
+        let temp = tempdir();
+        let db = temp.path().join("corrupt-lingma.db");
+        fs::write(&db, b"not sqlite").unwrap();
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let err = import_lingma_sqlite(&db, &mut store, LingmaSqliteImportOptions::default())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("not a database") || err.contains("sqlite"),
+            "{err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_lingma_normalizer_rejects_symlinked_sqlite() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir();
+        let fixture = provider_history_fixture("lingma/v1/local.db");
+        let link = temp.path().join("linked-lingma.db");
+        symlink(&fixture, &link).unwrap();
+
+        let err = normalize_lingma_sqlite(&link, &ProviderAdapterContext::default()).unwrap_err();
+        assert!(matches!(
+            err,
+            CaptureError::InvalidProviderTranscriptPath { path, reason }
+                if path.ends_with("linked-lingma.db")
+                    && reason == "symlinked provider transcript files are rejected"
+        ));
     }
 
     #[test]

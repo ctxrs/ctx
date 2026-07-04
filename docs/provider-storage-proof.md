@@ -85,6 +85,30 @@ IDE/application storage imports.
 - Caveat: ctx imports task context snapshots and optional task settings, not the
   Aider Desk application usage database.
 
+## Lingma
+
+- Source evidence: WayLog `shayne-snap/WayLog` commit
+  `6939033b7a39326fbdc249e28e6aa12461db1f09`,
+  `src/services/readers/lingma-reader.ts`
+  (`https://raw.githubusercontent.com/shayne-snap/WayLog/6939033b7a39326fbdc249e28e6aa12461db1f09/src/services/readers/lingma-reader.ts`).
+- Default storage paths proven by that reader are
+  `~/.lingma/vscode/sharedClientCache/cache/db/local.db` and
+  `~/.lingma/vscode-insiders/sharedClientCache/cache/db/local.db`.
+- The reader queries SQLite table
+  `chat_record(session_id, request_id, chat_prompt, summary, error_result,
+  gmt_create, extra)` where `chat_prompt` is nonempty.
+- WayLog labels the Lingma reader summaries-only and notes original answers may
+  be encrypted. `ctx` therefore imports user `chat_prompt` values plus assistant
+  `summary` or meaningful `error_result` values with partial/summary-only
+  fidelity, not as full assistant transcripts.
+- Alibaba public docs say Qoder CN is the renamed Lingma product line. This
+  supports documenting product overlap, but it does not prove a Qoder CN local
+  DB path or identical schema, so `ctx` does not ship a `qoder-cn` alias.
+  Source anchors:
+  `https://www.alibabacloud.com/help/zh/lingma/product-overview/introduction-of-lingma`
+  and
+  `https://www.alibabacloud.com/help/en/lingma/product-overview/qoder-cn-update-log`.
+
 ## iFlow CLI
 
 - Source evidence: the `iflow-ai-iflow-cli-0.5.19.tgz` bundle resolves
