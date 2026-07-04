@@ -23,7 +23,7 @@ is:
 | Provider | Status | Public import path | Public smoke |
 | --- | --- | --- | --- |
 | Codex | `local_import` | `~/.codex/sessions`, `~/.codex/history.jsonl`, or an explicit Codex path. | Static local-history fixture smoke. |
-| Pi | `local_import_when_supported` | `~/.pi/agent/sessions` or an explicit Pi session JSONL path. | Static local-history fixture smoke. |
+| Pi | `local_import_when_supported` | `~/.pi/agent/sessions`, `~/.omp/agent/sessions` (Oh My Pi fork), or an explicit Pi session JSONL path. | Static local-history fixture smoke. |
 | Claude | `local_import_when_supported` | `~/.claude/projects` or an explicit Claude projects JSONL tree. | Static local-history fixture smoke. |
 | OpenCode | `local_import_when_supported` | `~/.local/share/opencode/opencode.db` or an explicit OpenCode SQLite DB. | Static local-history fixture smoke. |
 | OpenClaw | `local_import_when_supported` | `OPENCLAW_STATE_DIR`, `~/.openclaw`, legacy `~/.clawdbot`/`~/.moltbot`, or an explicit OpenClaw state tree. | Static local-history fixture smoke; beta storage-contract notes in the matrix. |

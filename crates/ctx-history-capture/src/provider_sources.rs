@@ -105,11 +105,18 @@ const CODEX_DEFAULTS: &[ProviderDefaultLocation] = &[
     },
 ];
 
-const PI_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".pi", "agent", "sessions"],
-    source_format: "pi_session_jsonl",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
+const PI_DEFAULTS: &[ProviderDefaultLocation] = &[
+    ProviderDefaultLocation {
+        path_components: &[".pi", "agent", "sessions"],
+        source_format: "pi_session_jsonl",
+        source_kind: ProviderSourceKind::NativeHistory,
+    },
+    ProviderDefaultLocation {
+        path_components: &[".omp", "agent", "sessions"],
+        source_format: "pi_session_jsonl",
+        source_kind: ProviderSourceKind::NativeHistory,
+    },
+];
 
 const CLAUDE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     path_components: &[".claude", "projects"],
@@ -1136,6 +1143,21 @@ mod tests {
             .unwrap();
         assert_eq!(pi_source.status, ProviderSourceStatus::Available);
         assert_eq!(pi_source.path, temp.path().join(".pi/agent/sessions"));
+
+        let omp = temp.path().join(".omp/agent/sessions");
+        std::fs::create_dir_all(omp.join("--workspace--")).unwrap();
+        let omp_source = discover_provider_sources(temp.path())
+            .into_iter()
+            .find(|source| source.provider == CaptureProvider::Pi && source.path == omp)
+            .unwrap();
+        assert_eq!(omp_source.status, ProviderSourceStatus::Empty);
+        assert_eq!(omp_source.source_format, "pi_session_jsonl");
+        std::fs::write(omp.join("--workspace--/session.jsonl"), "{}\n").unwrap();
+        let omp_source = discover_provider_sources(temp.path())
+            .into_iter()
+            .find(|source| source.provider == CaptureProvider::Pi && source.path == omp)
+            .unwrap();
+        assert_eq!(omp_source.status, ProviderSourceStatus::Available);
 
         let antigravity = temp.path().join(".gemini/antigravity-cli/brain");
         std::fs::create_dir_all(antigravity.join("session/.system_generated/logs")).unwrap();

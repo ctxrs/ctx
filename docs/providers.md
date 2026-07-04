@@ -10,7 +10,8 @@ The current CLI imports local history for:
 
 - Codex session JSONL trees under `~/.codex/sessions`;
 - Codex `~/.codex/history.jsonl`;
-- Pi session JSONL files under `~/.pi/agent/sessions`;
+- Pi session JSONL files under `~/.pi/agent/sessions` or `~/.omp/agent/sessions`
+  (Oh My Pi fork);
 - Claude Code project JSONL transcripts under `~/.claude/projects`;
 - OpenCode SQLite history under `~/.local/share/opencode/opencode.db`;
 - OpenClaw session JSONL trees under `OPENCLAW_STATE_DIR`, `~/.openclaw`,

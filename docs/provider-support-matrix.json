@@ -88,12 +88,14 @@
           ],
           "notes": [
             "Reads Pi session JSONL files under ~/.pi/agent/sessions, including per-cwd session directories produced by current Pi releases.",
-            "An explicit Pi session JSONL file path remains supported with ctx import --provider pi --path."
+            "An explicit Pi session JSONL file path remains supported with ctx import --provider pi --path.",
+            "Also reads ~/.omp/agent/sessions from Oh My Pi (OMP), a Pi fork, using the identical pi_session_jsonl format."
           ]
         }
       ],
       "history_locations": [
-        "~/.pi/agent/sessions"
+        "~/.pi/agent/sessions",
+        "~/.omp/agent/sessions"
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
