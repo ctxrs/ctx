@@ -87,6 +87,26 @@ ctx upgrade check
 
 Source builds and package-manager installs remain unmanaged and do not self-upgrade.
 
+### Building from source
+
+If you prefer to compile `ctx` locally, please note that the project relies on a bundled SQLite database. This means a C/C++ compiler is strictly required during the build process to compile the underlying C code.
+
+**Windows Prerequisites:**
+Windows does not come with a C compiler by default. If you run `cargo build` without one, you will encounter `link.exe not found` or `gcc.exe not found` errors. 
+
+To fix this, you must install the [Microsoft C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/):
+1. Download and run the Visual Studio Build Tools installer.
+2. Select the **"Desktop development with C++"** workload.
+3. Complete the installation and restart your terminal.
+
+```mermaid
+graph LR
+    A[cargo build] --> B{C++ Compiler installed?}
+    B -- Yes --> C[Compiles SQLite C code]
+    B -- No --> D[Fails: link.exe / gcc.exe missing]
+    C --> E[Builds ctx binary successfully]
+```
+
 For the full pipeline, see [How ctx works](https://ctx.rs/concepts/how-it-works). For a quick first run, see [Quickstart](https://ctx.rs/first-search).
 
 ## Supported agent histories
