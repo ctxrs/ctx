@@ -1,0 +1,4 @@
+{"role":"user","content":"mistral vibe oracle prompt","message_id":"msg-vibe-user"}
+{"role":"assistant","content":"I will inspect the file.","message_id":"msg-vibe-assistant-tool","tool_calls":[{"id":"call-vibe-read","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"src/vibe_native.rs\"}"}}]}
+{"role":"tool","content":"read src/vibe_native.rs","tool_call_id":"call-vibe-read","name":"read_file"}
+{"role":"assistant","content":"mistral vibe native import ok; touched src/vibe_native.rs","message_id":"msg-vibe-assistant-final"}

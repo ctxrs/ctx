@@ -965,6 +965,27 @@ impl Default for IflowCliImportOptions {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct MistralVibeImportOptions {
+    pub machine_id: String,
+    pub source_path: Option<PathBuf>,
+    pub imported_at: DateTime<Utc>,
+    pub history_record_id: Option<Uuid>,
+    pub allow_partial_failures: bool,
+}
+
+impl Default for MistralVibeImportOptions {
+    fn default() -> Self {
+        Self {
+            machine_id: default_machine_id(),
+            source_path: None,
+            imported_at: utc_now(),
+            history_record_id: None,
+            allow_partial_failures: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderFixtureLine {
     pub provider: CaptureProvider,
@@ -1246,6 +1267,9 @@ pub struct IflowCliJsonlAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ForgeCodeSqliteAdapter;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MistralVibeJsonlAdapter;
 
 impl ProviderCaptureAdapter for ProviderFixtureJsonlAdapter {
     fn provider(&self) -> CaptureProvider {
@@ -2415,6 +2439,24 @@ impl ProviderCaptureAdapter for ForgeCodeSqliteAdapter {
         context: &ProviderAdapterContext,
     ) -> Result<ProviderNormalizationResult> {
         normalize_forgecode_sqlite(path, context)
+    }
+}
+
+impl ProviderCaptureAdapter for MistralVibeJsonlAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::MistralVibe
+    }
+
+    fn source_format(&self) -> &str {
+        MISTRAL_VIBE_SOURCE_FORMAT
+    }
+
+    fn normalize_path(
+        &self,
+        path: &Path,
+        context: &ProviderAdapterContext,
+    ) -> Result<ProviderNormalizationResult> {
+        normalize_mistral_vibe_sessions(path, context)
     }
 }
 
@@ -4904,6 +4946,25 @@ pub fn import_iflow_cli_history(
     )
 }
 
+pub fn import_mistral_vibe_history(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: MistralVibeImportOptions,
+) -> Result<ProviderImportSummary> {
+    import_native_jsonl_tree(
+        store,
+        NativeJsonlTreeImport {
+            path: path.as_ref(),
+            machine_id: options.machine_id,
+            source_path: options.source_path,
+            imported_at: options.imported_at,
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+        },
+        MistralVibeJsonlAdapter,
+    )
+}
+
 struct NativeJsonlTreeImport<'a> {
     path: &'a Path,
     machine_id: String,
@@ -4987,6 +5048,7 @@ const KIMI_CODE_CLI_SOURCE_FORMAT: &str = "kimi_code_cli_wire_jsonl";
 const AUTOHAND_CODE_SOURCE_FORMAT: &str = "autohand_code_sessions_jsonl";
 const IFLOW_CLI_SOURCE_FORMAT: &str = "iflow_cli_session_jsonl";
 const FORGECODE_SQLITE_SOURCE_FORMAT: &str = "forgecode_sqlite";
+const MISTRAL_VIBE_SOURCE_FORMAT: &str = "mistral_vibe_session_jsonl";
 const CODEX_MAX_TEXT_CHARS: usize = 16_000;
 const CODEX_MAX_METADATA_TEXT_CHARS: usize = 4_000;
 const CODEX_MAX_OUTPUT_PREVIEW_CHARS: usize = 4_000;
@@ -14033,6 +14095,9 @@ fn native_jsonl_missing_reason(provider: CaptureProvider) -> &'static str {
         CaptureProvider::IflowCli => {
             "no iFlow CLI session-*.jsonl transcripts found under projects"
         }
+        CaptureProvider::MistralVibe => {
+            "no Mistral Vibe meta.json/messages.jsonl session directories found"
+        }
         _ => "no native provider JSONL transcripts found",
     }
 }
@@ -17471,6 +17536,466 @@ fn native_jsonl_tokens(provider: CaptureProvider, value: &Value) -> Option<Value
             .or_else(|| value.get("usageMetadata"))
             .cloned(),
     }
+}
+
+#[derive(Debug, Clone)]
+struct MistralVibeSessionSource {
+    session_dir: PathBuf,
+    metadata_path: PathBuf,
+    messages_path: PathBuf,
+}
+
+fn normalize_mistral_vibe_sessions(
+    path: &Path,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    let mut session_sources = Vec::new();
+    collect_mistral_vibe_session_sources(path, &mut session_sources)?;
+    session_sources.sort_by(|left, right| left.messages_path.cmp(&right.messages_path));
+    session_sources.dedup_by(|left, right| left.messages_path == right.messages_path);
+    if session_sources.is_empty() {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: native_jsonl_missing_reason(CaptureProvider::MistralVibe),
+        });
+    }
+
+    let mut merged = ProviderNormalizationResult::default();
+    for source in session_sources {
+        let mut result = normalize_mistral_vibe_session_source(&source, context)?;
+        merged.summary.merge(result.summary);
+        merged.captures.append(&mut result.captures);
+        merged.files_touched.append(&mut result.files_touched);
+    }
+    Ok(merged)
+}
+
+fn collect_mistral_vibe_session_sources(
+    root: &Path,
+    sessions: &mut Vec<MistralVibeSessionSource>,
+) -> Result<()> {
+    let metadata = fs::symlink_metadata(root)?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: root.to_path_buf(),
+            reason: "symlinked provider transcript roots are rejected",
+        });
+    }
+    ensure_provider_path_parents_are_not_symlinks(root)?;
+    if file_type.is_file() {
+        ensure_regular_provider_transcript_file(root)?;
+        if root.file_name().and_then(|name| name.to_str()) == Some("messages.jsonl") {
+            if let Some(session_dir) = root.parent() {
+                if let Some(source) = mistral_vibe_session_source_from_dir(session_dir)? {
+                    sessions.push(source);
+                }
+            }
+        }
+        return Ok(());
+    }
+    if !file_type.is_dir() {
+        return Ok(());
+    }
+
+    if let Some(source) = mistral_vibe_session_source_from_dir(root)? {
+        sessions.push(source);
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            collect_mistral_vibe_session_sources(&path, sessions)?;
+        }
+    }
+    Ok(())
+}
+
+fn mistral_vibe_session_source_from_dir(dir: &Path) -> Result<Option<MistralVibeSessionSource>> {
+    let metadata_path = dir.join("meta.json");
+    let messages_path = dir.join("messages.jsonl");
+    if !metadata_path.is_file() || !messages_path.is_file() {
+        return Ok(None);
+    }
+    ensure_regular_provider_transcript_file(&metadata_path)?;
+    ensure_regular_provider_transcript_file(&messages_path)?;
+    Ok(Some(MistralVibeSessionSource {
+        session_dir: dir.to_path_buf(),
+        metadata_path,
+        messages_path,
+    }))
+}
+
+fn normalize_mistral_vibe_session_source(
+    source: &MistralVibeSessionSource,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    let mut result = ProviderNormalizationResult::default();
+    let metadata = read_mistral_vibe_metadata(&source.metadata_path, &mut result.summary);
+    let mut rows = Vec::new();
+    let file = File::open(&source.messages_path)?;
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+    let mut line_number = 0usize;
+
+    while read_provider_jsonl_line(&mut reader, &mut line)? {
+        line_number += 1;
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let value: Value = match serde_json::from_slice(&line) {
+            Ok(value) => value,
+            Err(err) => {
+                push_provider_import_failure(
+                    &mut result.summary,
+                    line_number,
+                    format!("malformed JSONL: {err}"),
+                );
+                continue;
+            }
+        };
+        rows.push((line_number, value));
+    }
+
+    let provider_session_id = mistral_vibe_metadata_string(&metadata, "session_id")
+        .or_else(|| {
+            source
+                .session_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.trim().is_empty())
+                .map(str::to_owned)
+        })
+        .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
+            path: source.session_dir.clone(),
+            reason: "Mistral Vibe session directory is missing a session id",
+        })?;
+    let started_at = mistral_vibe_metadata_timestamp(&metadata, "start_time")
+        .or_else(|| {
+            rows.iter()
+                .find_map(|(_, value)| native_jsonl_timestamp(value))
+        })
+        .unwrap_or(context.imported_at);
+    let ended_at = mistral_vibe_metadata_timestamp(&metadata, "end_time");
+    let cwd = mistral_vibe_metadata_pointer_string(&metadata, &["/environment/working_directory"]);
+    let parent_provider_session_id = mistral_vibe_metadata_string(&metadata, "parent_session_id");
+    let agent_type = if parent_provider_session_id.is_some() {
+        AgentType::Subagent
+    } else {
+        AgentType::Primary
+    };
+    let role_hint = if parent_provider_session_id.is_some() {
+        "subagent"
+    } else {
+        "primary"
+    };
+    let raw_source_path = source.messages_path.display().to_string();
+
+    if rows.is_empty() {
+        result.captures.push((
+            0,
+            mistral_vibe_capture(
+                MistralVibeCaptureDraft {
+                    provider_session_id,
+                    parent_provider_session_id,
+                    agent_type,
+                    role_hint: role_hint.to_owned(),
+                    is_primary: agent_type == AgentType::Primary,
+                    started_at,
+                    ended_at,
+                    cwd,
+                    metadata: &metadata,
+                    source,
+                    event: None,
+                },
+                context,
+            ),
+        ));
+        return Ok(result);
+    }
+
+    for (line_number, value) in rows {
+        let occurred_at = native_jsonl_timestamp(&value).unwrap_or(started_at);
+        let event = mistral_vibe_event(
+            &provider_session_id,
+            line_number,
+            &value,
+            occurred_at,
+            &source.messages_path,
+            &metadata,
+        );
+        result
+            .files_touched
+            .extend(provider_file_touches_from_raw_value(
+                CaptureProvider::MistralVibe,
+                &provider_session_id,
+                MISTRAL_VIBE_SOURCE_FORMAT,
+                Some(raw_source_path.as_str()),
+                &value,
+                &event,
+                line_number,
+            ));
+        result.captures.push((
+            line_number,
+            mistral_vibe_capture(
+                MistralVibeCaptureDraft {
+                    provider_session_id: provider_session_id.clone(),
+                    parent_provider_session_id: parent_provider_session_id.clone(),
+                    agent_type,
+                    role_hint: role_hint.to_owned(),
+                    is_primary: agent_type == AgentType::Primary,
+                    started_at,
+                    ended_at,
+                    cwd: cwd.clone(),
+                    metadata: &metadata,
+                    source,
+                    event: Some(event),
+                },
+                context,
+            ),
+        ));
+    }
+
+    Ok(result)
+}
+
+struct MistralVibeCaptureDraft<'a> {
+    provider_session_id: String,
+    parent_provider_session_id: Option<String>,
+    agent_type: AgentType,
+    role_hint: String,
+    is_primary: bool,
+    started_at: DateTime<Utc>,
+    ended_at: Option<DateTime<Utc>>,
+    cwd: Option<String>,
+    metadata: &'a Value,
+    source: &'a MistralVibeSessionSource,
+    event: Option<ProviderEventEnvelope>,
+}
+
+fn mistral_vibe_capture(
+    draft: MistralVibeCaptureDraft<'_>,
+    context: &ProviderAdapterContext,
+) -> ProviderCaptureEnvelope {
+    native_provider_capture(
+        NativeSessionDraft {
+            provider: CaptureProvider::MistralVibe,
+            source_format: MISTRAL_VIBE_SOURCE_FORMAT,
+            provider_session_id: draft.provider_session_id.clone(),
+            parent_provider_session_id: draft.parent_provider_session_id.clone(),
+            root_provider_session_id: draft.parent_provider_session_id.clone(),
+            external_agent_id: mistral_vibe_metadata_pointer_string(
+                draft.metadata,
+                &["/agent_profile/name"],
+            ),
+            agent_type: draft.agent_type,
+            role_hint: Some(draft.role_hint),
+            is_primary: draft.is_primary,
+            started_at: draft.started_at,
+            ended_at: draft.ended_at,
+            cwd: draft.cwd,
+            fidelity: Fidelity::Imported,
+            raw_source_path: draft.source.messages_path.display().to_string(),
+            trust: ProviderSourceTrust::ProviderNative,
+            source_metadata: json!({
+                "adapter": MISTRAL_VIBE_SOURCE_FORMAT,
+                "source_path": draft.source.messages_path.display().to_string(),
+                "metadata_path": draft.source.metadata_path.display().to_string(),
+                "session_dir": draft.source.session_dir.display().to_string(),
+            }),
+            session_metadata: json!({
+                "source_format": MISTRAL_VIBE_SOURCE_FORMAT,
+                "provider": CaptureProvider::MistralVibe.as_str(),
+                "session_id": draft.provider_session_id,
+                "title": mistral_vibe_metadata_string(draft.metadata, "title"),
+                "title_source": mistral_vibe_metadata_string(draft.metadata, "title_source"),
+                "git_branch": mistral_vibe_metadata_string(draft.metadata, "git_branch"),
+                "git_commit": mistral_vibe_metadata_string(draft.metadata, "git_commit"),
+                "total_messages": draft.metadata.get("total_messages").and_then(Value::as_u64),
+                "agent_profile": draft.metadata.get("agent_profile").cloned(),
+                "stats": draft.metadata.get("stats").cloned(),
+                "loops": draft.metadata.get("loops").cloned(),
+                "experiments": draft.metadata.get("experiments").cloned(),
+            }),
+        },
+        context,
+        draft.event,
+    )
+}
+
+fn mistral_vibe_event(
+    provider_session_id: &str,
+    line_number: usize,
+    value: &Value,
+    occurred_at: DateTime<Utc>,
+    path: &Path,
+    metadata: &Value,
+) -> ProviderEventEnvelope {
+    let role = value
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let event_type = mistral_vibe_event_type(role, value);
+    native_event(NativeEventDraft {
+        provider: CaptureProvider::MistralVibe,
+        source_format: MISTRAL_VIBE_SOURCE_FORMAT,
+        provider_session_id: provider_session_id.to_owned(),
+        provider_event_index: (line_number - 1) as u64,
+        provider_event_hash: Some(mistral_vibe_event_id(value, line_number, role)),
+        cursor: format!("{}:line:{line_number}", path.display()),
+        event_type,
+        role: Some(provider_role(Some(role))),
+        occurred_at,
+        text: mistral_vibe_event_text(role, value, event_type),
+        body: value.clone(),
+        metadata: json!({
+            "source": MISTRAL_VIBE_SOURCE_FORMAT,
+            "source_format": MISTRAL_VIBE_SOURCE_FORMAT,
+            "line": line_number,
+            "role": role,
+            "message_id": value.get("message_id").and_then(Value::as_str),
+            "reasoning_message_id": value.get("reasoning_message_id").and_then(Value::as_str),
+            "tool_call_id": value.get("tool_call_id").and_then(Value::as_str),
+            "name": value.get("name").and_then(Value::as_str),
+            "tool_calls": value.get("tool_calls").map(|calls| provider_capped_json_value(calls, PROVIDER_MAX_PREVIEW_CHARS)),
+            "images": value.get("images").map(|images| provider_capped_json_value(images, PROVIDER_MAX_PREVIEW_CHARS)),
+            "agent_profile": metadata.pointer("/agent_profile/name").and_then(Value::as_str),
+        }),
+    })
+}
+
+fn mistral_vibe_event_type(role: &str, value: &Value) -> EventType {
+    if role == "tool" || value.get("tool_call_id").is_some() {
+        EventType::ToolOutput
+    } else if value
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .is_some_and(|calls| !calls.is_empty())
+    {
+        EventType::ToolCall
+    } else if role == "system" {
+        EventType::Notice
+    } else {
+        EventType::Message
+    }
+}
+
+fn mistral_vibe_event_text(role: &str, value: &Value, event_type: EventType) -> String {
+    let mut parts = Vec::new();
+    if let Some(content) = value.get("content").and_then(provider_value_text) {
+        parts.push(content);
+    }
+    if let Some(reasoning) = value.get("reasoning_content").and_then(provider_value_text) {
+        parts.push(reasoning);
+    }
+    if let Some(tool_calls) = value
+        .get("tool_calls")
+        .and_then(mistral_vibe_tool_calls_text)
+    {
+        parts.push(tool_calls);
+    }
+    if let Some(images) = value.get("images").and_then(provider_value_text) {
+        parts.push(images);
+    }
+    if !parts.is_empty() {
+        return parts.join("\n");
+    }
+    match event_type {
+        EventType::ToolOutput => format!("Mistral Vibe {role} output"),
+        EventType::ToolCall => format!("Mistral Vibe {role} tool call"),
+        _ => format!("Mistral Vibe {role} message"),
+    }
+}
+
+fn mistral_vibe_tool_calls_text(value: &Value) -> Option<String> {
+    let calls = value.as_array()?;
+    let names = calls
+        .iter()
+        .filter_map(|call| {
+            call.pointer("/function/name")
+                .or_else(|| call.get("name"))
+                .and_then(Value::as_str)
+                .filter(|name| !name.trim().is_empty())
+        })
+        .collect::<Vec<_>>();
+    if names.is_empty() {
+        Some(provider_value_text(value)?)
+    } else {
+        Some(format!("tool calls: {}", names.join(", ")))
+    }
+}
+
+fn mistral_vibe_event_id(value: &Value, line_number: usize, role: &str) -> String {
+    value
+        .get("message_id")
+        .or_else(|| value.get("tool_call_id"))
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("{role}:line-{line_number}"))
+}
+
+fn read_mistral_vibe_metadata(path: &Path, summary: &mut ProviderImportSummary) -> Value {
+    match read_text_file_limited(
+        path,
+        MAX_PROVIDER_JSONL_LINE_BYTES,
+        "Mistral Vibe meta.json",
+    ) {
+        Ok(raw) => match serde_json::from_str::<Value>(&raw) {
+            Ok(value) if value.is_object() => value,
+            Ok(_) => {
+                push_provider_import_failure(
+                    summary,
+                    0,
+                    "Mistral Vibe meta.json must contain a JSON object".to_owned(),
+                );
+                Value::Null
+            }
+            Err(err) => {
+                push_provider_import_failure(
+                    summary,
+                    0,
+                    format!("invalid Mistral Vibe meta.json: {err}"),
+                );
+                Value::Null
+            }
+        },
+        Err(err) => {
+            push_provider_import_failure(
+                summary,
+                0,
+                format!("could not read Mistral Vibe meta.json: {err}"),
+            );
+            Value::Null
+        }
+    }
+}
+
+fn mistral_vibe_metadata_string(value: &Value, field: &str) -> Option<String> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|raw| !raw.trim().is_empty())
+        .map(str::to_owned)
+}
+
+fn mistral_vibe_metadata_pointer_string(value: &Value, pointers: &[&str]) -> Option<String> {
+    pointers.iter().find_map(|pointer| {
+        value
+            .pointer(pointer)
+            .and_then(Value::as_str)
+            .filter(|raw| !raw.trim().is_empty())
+            .map(str::to_owned)
+    })
+}
+
+fn mistral_vibe_metadata_timestamp(value: &Value, field: &str) -> Option<DateTime<Utc>> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .and_then(parse_rfc3339_utc)
 }
 
 #[derive(Debug, Clone)]
@@ -24287,6 +24812,66 @@ mod tests {
             )
             .unwrap();
         assert_eq!(file_touch_count_after, file_touch_count);
+    }
+
+    #[test]
+    fn native_mistral_vibe_fixture_imports_searches_and_reimports() {
+        let temp = tempdir();
+        let fixture = provider_history_fixture("mistral-vibe/v1/logs/session");
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let source = provider_source_for_path(CaptureProvider::MistralVibe, fixture.clone());
+        assert_eq!(source.source_format, "mistral_vibe_session_jsonl_tree");
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+
+        let first = import_mistral_vibe_history(
+            &fixture,
+            &mut store,
+            MistralVibeImportOptions {
+                machine_id: "test-machine".into(),
+                source_path: Some(fixture.clone()),
+                imported_at: DateTime::parse_from_rfc3339("2026-07-04T19:05:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                allow_partial_failures: true,
+                ..MistralVibeImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(first.failed, 0, "{:?}", first.failures);
+        assert_eq!(first.imported_sessions, 1);
+        assert_eq!(first.imported_events, 4);
+        let session_id = provider_session_uuid(CaptureProvider::MistralVibe, "mistral-vibe-native");
+        let events = store.events_for_session(session_id).unwrap();
+        assert_eq!(events.len(), 4);
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == EventType::ToolCall));
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == EventType::ToolOutput));
+        assert!(store
+            .search_event_hits("mistral vibe oracle", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::MistralVibe)));
+
+        let second = import_mistral_vibe_history(
+            &fixture,
+            &mut store,
+            MistralVibeImportOptions {
+                source_path: Some(fixture.clone()),
+                allow_partial_failures: true,
+                ..MistralVibeImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(second.failed, 0, "{:?}", second.failures);
+        assert_eq!(second.imported_sessions, 0);
+        assert_eq!(second.imported_events, 0);
+        assert_eq!(second.skipped_sessions, 1);
+        assert_eq!(second.skipped_events, 4);
     }
 
     #[test]

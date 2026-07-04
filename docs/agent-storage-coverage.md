@@ -21,8 +21,8 @@ Status meanings:
 - `install-target`: npx target is an aggregate or project skill target, not a
   proven history-producing agent.
 
-Result on this integration branch: 26 `native-auto`, 2 `native-preview`, 16
-`candidate-family`, 10 `webapp-boundary`, 16 `unknown`, and 2 `install-target`
+Result on this integration branch: 27 `native-auto`, 2 `native-preview`, 22
+`candidate-family`, 9 `webapp-boundary`, 10 `unknown`, and 2 `install-target`
 rows.
 
 ## Shared Families
@@ -33,15 +33,19 @@ rows.
   importer for file-backed task directories.
 - `JSONL CLI event logs`: already covers Codex, Claude Code, OpenClaw,
   Antigravity CLI, Gemini CLI, Pi, Factory Droid, Copilot CLI-shaped logs, and
-  Autohand Code and iFlow CLI sessions.
+  Autohand Code, iFlow CLI, and Mistral Vibe sessions.
 - `CLI session JSON`: covers Continue CLI `sessions/*.json` files with
   `sessions.json` metadata.
+- `project task JSON`: candidate family for project-local task directories such
+  as Aider Desk's `.aider-desk/tasks/<taskId>/context.json`.
 - `filesystem event JSON`: covers OpenHands event JSON under
   `<persistence>/<user_id>/v1_conversations`.
 - `generic sqlite messages`: already covers Crush, Goose, Hermes, Kiro CLI,
   Dexto explicit imports, the AstrBot preview importer, and ctx-native Shelley.
 - `Forge conversation SQLite`: covers ForgeCode's `.forge.db` conversation
   snapshots with JSON context/metrics DTOs.
+- `LangGraph checkpoint SQLite`: candidate family for LangGraph-style
+  checkpoint databases plus JSONL history sidecars.
 - `VS Code/Electron storage`: Cursor is covered through a known transcript tree,
   CodeBuddy is covered through its file-backed history JSON, and Zed is covered
   through its agent `threads.db`; other IDE-like tools need storage discovery
@@ -53,7 +57,7 @@ rows.
 
 | npx skills agent id | ctx storage ingestion status | schema family | evidence source | blocked reason / gap |
 | --- | --- | --- | --- | --- |
-| `aider-desk` | `unknown` | `unknown native history` | npx `~/.aider-desk`; no ctx provider | Need native history storage research before claiming import support. |
+| `aider-desk` | `candidate-family` | `project task JSON` | npx `~/.aider-desk`; no ctx provider; source proof shows project `.aider-desk/tasks/<taskId>/context.json` task context files | Need project scanner design, sanitized fixture data, and idempotent context import before claiming support. |
 | `amp` | `candidate-family` | `JSONL CLI event logs` | npx `~/.config/amp`; no ctx provider | Need transcript location and schema proof. |
 | `antigravity` | `candidate-family` | `VS Code/Electron storage` | npx `~/.gemini/antigravity`; no ctx provider for IDE id | IDE history is not proven equivalent to CLI brain transcripts. |
 | `antigravity-cli` | `native-auto` | `JSONL CLI event logs` | ctx `antigravity_cli_transcript_jsonl_tree`; npx `~/.gemini/antigravity-cli` | - |
@@ -74,8 +78,8 @@ rows.
 | `cortex` | `unknown` | `unknown native history` | npx `~/.snowflake/cortex`; no ctx provider | Need native history storage research before claiming import support. |
 | `crush` | `native-auto` | `generic sqlite messages` | ctx `crush_sqlite`; npx `~/.config/crush` | - |
 | `cursor` | `native-auto` | `VS Code/Electron storage` | ctx `cursor_agent_transcript_jsonl_tree`; npx `~/.cursor` | - |
-| `deepagents` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.deepagents`; no ctx provider | No proven stable local transcript boundary; prefer exporter or plugin. |
-| `devin` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.config/devin`; no ctx provider | Terminal skill target is not enough to prove local hosted-agent history. |
+| `deepagents` | `candidate-family` | `LangGraph checkpoint SQLite` | npx `~/.deepagents`; no ctx provider; official local state evidence points to `~/.deepagents/.state/sessions.db` and `history.jsonl` | Need LangGraph checkpoint/writes decoder, real fixture generation, and privacy review for state sidecars. |
+| `devin` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.config/devin`; no ctx provider | Hosted-agent history should use an explicit export path such as ATIF when available; no local conversation DB is proven. |
 | `dexto` | `native-preview` | `generic sqlite messages` | ctx `dexto_sqlite`; npx `~/.dexto` | Preview explicit import only; no proven default discovery path yet. |
 | `droid` | `native-auto` | `JSONL CLI event logs` | ctx `factory_ai_droid_sessions_jsonl`; npx `~/.factory` | - |
 | `eve` | `unknown` | `unknown native history` | npx project `agent`; no ctx provider | Project skill layout does not prove a local history schema. |
@@ -92,14 +96,14 @@ rows.
 | `kilo` | `native-auto` | `opencode sqlite family` | ctx `kilo_sqlite`; npx `~/.kilocode` | - |
 | `kimi-code-cli` | `native-auto` | `JSONL CLI event logs` | ctx `kimi_code_cli_wire_jsonl_tree`; npx `~/.kimi-code` or `~/.kimi` | - |
 | `kiro-cli` | `native-auto` | `generic sqlite messages` | ctx `kiro_cli_sqlite`; npx `~/.kiro` | SQLite import covers the proven `conversations_v2`/`conversations` DB at the Kiro CLI data dir; newer `~/.kiro/sessions/cli` event logs are not imported yet. |
-| `kode` | `unknown` | `unknown native history` | npx `~/.kode`; no ctx provider | Need native history storage research before claiming import support. |
+| `kode` | `candidate-family` | `JSONL CLI event logs` | npx `~/.kode`; no ctx provider; `@shareai-lab/kode` stores project JSONL sessions under `KODE_CONFIG_DIR` or `~/.kode` | Need package-aligned fixture data and sidechain handling before implementing native import. |
 | `lingma` | `candidate-family` | `VS Code/Electron storage` | npx `~/.lingma`; no ctx provider | Need local app storage or export contract proof. |
 | `loaf` | `unknown` | `unknown native history` | npx `~/.loaf`; no ctx provider | Need native history storage research before claiming import support. |
 | `mcpjam` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.mcpjam`; no ctx provider | UI or account-backed activity should use exporter or plugin until local storage is proven. |
-| `mistral-vibe` | `candidate-family` | `JSONL CLI event logs` | npx `VIBE_HOME`; no ctx provider | Need transcript location and schema proof. |
+| `mistral-vibe` | `native-auto` | `JSONL CLI event logs` | ctx `mistral_vibe_session_jsonl_tree`; npx `VIBE_HOME` or `~/.vibe` | - |
 | `moxby` | `unknown` | `unknown native history` | npx `~/.moxby`; no ctx provider | Need native history storage research before claiming import support. |
-| `mux` | `unknown` | `unknown native history` | npx `~/.mux`; no ctx provider | Need native history storage research before claiming import support. |
-| `neovate` | `unknown` | `unknown native history` | npx `~/.neovate`; no ctx provider | Need native history storage research before claiming import support. |
+| `mux` | `candidate-family` | `JSONL CLI event logs` | npx `~/.mux`; no ctx provider; `coder/mux` stores workspace `chat.jsonl` under `MUX_ROOT` or `~/.mux` sessions | Need sanitized chat/partial/subagent fixtures and a read-only session scanner. |
+| `neovate` | `candidate-family` | `JSONL CLI event logs` | npx `~/.neovate`; no ctx provider; `@neovate/code` stores project session JSONL under `~/.neovate/projects` | Need package-aligned fixture data and request/file-history sidecar policy before implementing native import. |
 | `opencode` | `native-auto` | `opencode sqlite family` | ctx `opencode_sqlite`; npx `~/.config/opencode` | - |
 | `openhands` | `native-auto` | `filesystem event JSON` | ctx `openhands_file_events`; npx `~/.openhands` | - |
 | `ona` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.ona`; no ctx provider | No proven stable local transcript boundary; prefer exporter or plugin. |
@@ -108,19 +112,19 @@ rows.
 | `qoder-cn` | `candidate-family` | `VS Code/Electron storage` | npx `~/.qoder-cn`; no ctx provider | Need local app storage or export contract proof. |
 | `qwen-code` | `native-auto` | `JSONL CLI event logs` | ctx `qwen_code_chat_jsonl_tree`; npx `~/.qwen` | - |
 | `replit` | `webapp-boundary` | `webapp/object-store boundary` | npx project `.replit`; no ctx provider | Project marker is not a local agent history contract. |
-| `reasonix` | `unknown` | `unknown native history` | npx `~/.reasonix`; no ctx provider | Need native history storage research before claiming import support. |
+| `reasonix` | `candidate-family` | `JSONL CLI event logs` | npx `~/.reasonix`; no ctx provider; `reasonix` stores session JSONL plus events/meta/plan sidecars under `~/.reasonix/sessions` | Need sidecar merge semantics, malformed fixture coverage, and cost/token field privacy review. |
 | `roo` | `native-auto` | `Cline/Roo task JSON` | ctx `roo_task_directory_json`; npx `~/.roo` | - |
 | `rovodev` | `candidate-family` | `JSONL CLI event logs` | npx `~/.rovodev`; no ctx provider | Need transcript location and schema proof. |
 | `tabnine-cli` | `candidate-family` | `JSONL CLI event logs` | npx `~/.tabnine`; no ctx provider | Need transcript location and schema proof. |
-| `terramind` | `unknown` | `unknown native history` | npx `~/.terramind`; no ctx provider | Need native history storage research before claiming import support. |
+| `terramind` | `candidate-family` | `generic sqlite messages` | npx `~/.terramind`; no ctx provider; package evidence points to `~/.terramind/agents.db` with chats and sub_chats message JSON | Need SQLite fixture generation, tool-output side table mapping, and schema drift tests. |
 | `tinycloud` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.tinycloud`; no ctx provider | No proven stable local transcript boundary; prefer exporter or plugin. |
 | `trae` | `candidate-family` | `VS Code/Electron storage` | npx `~/.trae`; no ctx provider | Need local app storage or export contract proof. |
 | `trae-cn` | `candidate-family` | `VS Code/Electron storage` | npx `~/.trae-cn`; no ctx provider | Need local app storage or export contract proof. |
-| `warp` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.warp`; no ctx provider | Terminal app history may be account or app-store backed; needs explicit export proof. |
+| `warp` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.warp`; no ctx provider | Skill/config target is not a local transcript contract; native support needs explicit export or local DB proof. |
 | `windsurf` | `candidate-family` | `VS Code/Electron storage` | npx `~/.codeium/windsurf`; no ctx provider | Need local app storage or export contract proof. |
 | `zed` | `native-auto` | `VS Code/Electron storage` | ctx `zed_threads_sqlite`; npx `$XDG_DATA_HOME/zed` or `~/.local/share/zed` | Per-message timestamps are unavailable; ctx uses thread `updated_at`. |
-| `zencoder` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.zencoder`; no ctx provider | No proven stable local transcript boundary; prefer exporter or plugin. |
-| `zenflow` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.zencoder`; no ctx provider | Shares Zencoder skill home but no proven local history contract. |
+| `zencoder` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.zencoder`; no ctx provider | Skill home evidence is not a transcript schema; prefer exporter, plugin, or underlying provider imports. |
+| `zenflow` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.zencoder`; no ctx provider | Shares Zencoder skill home but no proven local history contract; prefer exporter or underlying provider imports. |
 | `pochi` | `candidate-family` | `VS Code/Electron storage` | npx `~/.pochi`; no ctx provider | Need local app storage or export contract proof. |
 | `promptscript` | `install-target` | `agent skills aggregate` | npx project `.promptscript` or `promptscript.yaml`; no ctx provider | Project skill target only; use custom history JSONL if it emits runs. |
 | `adal` | `unknown` | `unknown native history` | npx `~/.adal`; no ctx provider | Need native history storage research before claiming import support. |

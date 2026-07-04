@@ -105,6 +105,31 @@ IDE/application storage imports.
   indexes for event cursors and retains capped raw context/metrics JSON for DTO
   fields that are not explicitly normalized yet.
 
+## Mistral Vibe
+
+- Source evidence: Mistral Vibe repository commit
+  `474a0e4055b210a60c39ed0c89458d904b7f6a7b`.
+- Path evidence: `vibe/core/paths/_vibe_home.py` resolves `VIBE_HOME` first
+  and otherwise defaults to `~/.vibe`; its session log directory is
+  `VIBE_HOME/logs/session`.
+- Configuration evidence: `vibe/core/config/models.py` defines
+  `SessionLoggingConfig.save_dir`, defaulting to the session log directory and
+  expanding configured paths.
+- Runtime evidence: `vibe/core/session/session_logger.py` creates session
+  directories named from a session prefix, timestamp, and short id, writes
+  `meta.json`, and appends transcript rows to `messages.jsonl`.
+- Loader evidence: `vibe/core/session/session_loader.py` treats `meta.json` and
+  `messages.jsonl` as the required files for a loadable saved session.
+- Type evidence: `vibe/core/types.py` defines session metadata plus LLM message
+  fields including role, content, reasoning content, tool calls, tool call id,
+  message id, images, and usage-adjacent metadata.
+- `ctx` imports this shape as `mistral_vibe_session_jsonl_tree`, using
+  read-only discovery only when a session directory contains both required
+  files.
+- Caveat: message rows do not consistently include per-row timestamps, so ctx
+  uses row timestamps when available and otherwise falls back to deterministic
+  session/import timestamps.
+
 ## OpenHands
 
 - Source evidence: OpenHands `get_default_persistence_dir()` checks

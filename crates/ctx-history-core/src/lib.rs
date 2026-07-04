@@ -199,6 +199,7 @@ text_enum! {
         AutohandCode => "autohand_code",
         IflowCli => "iflow_cli",
         ForgeCode => "forgecode",
+        MistralVibe => "mistral_vibe",
         OpenClaw => "openclaw",
         Hermes => "hermes",
         NanoClaw => "nanoclaw",
@@ -1547,6 +1548,10 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<CaptureProvider>("\"forgecode\"").unwrap(),
             CaptureProvider::ForgeCode
+        );
+        assert_eq!(
+            serde_json::from_str::<CaptureProvider>("\"mistral_vibe\"").unwrap(),
+            CaptureProvider::MistralVibe
         );
 
         let sync: SyncMetadata = serde_json::from_value(json!({})).unwrap();

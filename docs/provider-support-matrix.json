@@ -1533,6 +1533,63 @@
       ]
     },
     {
+      "id": "mistral_vibe",
+      "display_name": "Mistral Vibe",
+      "priority": "p1",
+      "status": "local_import_when_supported",
+      "capture_provider": "mistral_vibe",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "mistral_vibe_session_jsonl_tree",
+          "fidelity": "imported",
+          "proof": [
+            "ctx sources",
+            "ctx import --provider mistral-vibe",
+            "cargo test -p ctx-history-capture native_mistral_vibe_fixture_imports_searches_and_reimports"
+          ],
+          "notes": [
+            "Reads Mistral Vibe session directories containing meta.json and messages.jsonl under VIBE_HOME/logs/session, ~/.vibe/logs/session, or an explicit session/log root.",
+            "Normalizes user, assistant, system, tool-call, and tool-output messages from Vibe JSONL while retaining capped metadata from meta.json and individual message rows."
+          ]
+        }
+      ],
+      "history_locations": [
+        "VIBE_HOME/logs/session/*/{meta.json,messages.jsonl}",
+        "~/.vibe/logs/session/*/{meta.json,messages.jsonl}"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": true,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": true,
+        "command_output": false,
+        "files_touched": true,
+        "artifacts": false,
+        "model_identity": true,
+        "costs": false,
+        "token_usage": false,
+        "parent_child_session_edges": true
+      },
+      "blockers": [
+        "Importer is based on mistralai/mistral-vibe commit 474a0e4055b210a60c39ed0c89458d904b7f6a7b and sanitized JSONL fixtures; future schema changes may need adapter updates.",
+        "The public Vibe session log carries message timestamps inconsistently, so ctx falls back to deterministic import/session timestamps when a row does not expose one."
+      ],
+      "public_docs": "docs/provider-support.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/mistral-vibe/v1/logs/session"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs",
+        "tests/fixtures/provider-history/mistral-vibe/v1/logs/session"
+      ]
+    },
+    {
       "id": "cline",
       "display_name": "Cline",
       "priority": "p1",

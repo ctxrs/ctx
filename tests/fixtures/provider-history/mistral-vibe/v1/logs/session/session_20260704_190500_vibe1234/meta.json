@@ -1,0 +1,24 @@
+{
+  "session_id": "mistral-vibe-native",
+  "parent_session_id": null,
+  "start_time": "2026-07-04T19:05:00+00:00",
+  "end_time": "2026-07-04T19:06:00+00:00",
+  "git_commit": "1111111111111111111111111111111111111111",
+  "git_branch": "main",
+  "environment": {
+    "working_directory": "/workspace/mistral-vibe-native"
+  },
+  "username": "fixture-user",
+  "loops": [],
+  "title": "mistral vibe oracle",
+  "title_source": "auto",
+  "total_messages": 4,
+  "stats": {
+    "total_tokens": 42,
+    "total_cost": 0.0
+  },
+  "agent_profile": {
+    "name": "default",
+    "overrides": {}
+  }
+}
