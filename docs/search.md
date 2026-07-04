@@ -54,7 +54,7 @@ that support it.
 
 Search filters narrow both human output and JSON:
 
-- `--provider codex|pi|claude|opencode|kilo|kiro-cli|forgecode|mistral-vibe|mux|reasonix|kode|neovate|terramind|crush|goose|dexto|lingma|openclaw|hermes|nanoclaw|astrbot|shelley|continue|openhands|antigravity|gemini|cursor|zed|copilot-cli|factory-ai-droid|qwen-code|kimi-code-cli|autohand-code|iflow-cli|codebuddy|aider-desk|cline|roo`;
+- `--provider codex|pi|claude|opencode|kilo|kiro-cli|forgecode|deepagents|mistral-vibe|mux|reasonix|kode|neovate|terramind|crush|goose|dexto|lingma|openclaw|hermes|nanoclaw|astrbot|shelley|continue|openhands|antigravity|gemini|cursor|zed|copilot-cli|factory-ai-droid|qwen-code|kimi-code-cli|autohand-code|iflow-cli|codebuddy|aider-desk|cline|roo`;
 - `--history-source <plugin/source-or-provider_key/source_id>`, for custom
   history imports;
 - `--provider-key <key>`, `--source-id <id>`, and
@@ -80,9 +80,9 @@ CLI provider filters use the kebab-case names above. JSON output and stable SQL
 views use provider IDs in ctx output; multiword provider IDs may be snake_case,
 such as `copilot_cli`, `factory_ai_droid`, `qwen_code`, `kimi_code_cli`,
 `autohand_code`, `kiro_cli`, `iflow_cli`, `mistral_vibe`, or `aider_desk`,
-while compact IDs such as `forgecode`, `mux`, `reasonix`, `kode`, `neovate`,
-`terramind`, `openclaw`, `nanoclaw`, `astrbot`, `shelley`, `continue`, and
-`openhands` stay compact.
+while compact IDs such as `forgecode`, `deepagents`, `mux`, `reasonix`, `kode`,
+`neovate`, `terramind`, `openclaw`, `nanoclaw`, `astrbot`, `shelley`,
+`continue`, and `openhands` stay compact.
 
 `--since` accepts RFC 3339 timestamps such as `2026-06-01T00:00:00Z` or a day
 window such as `30d`.
