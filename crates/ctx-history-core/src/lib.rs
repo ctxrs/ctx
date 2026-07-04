@@ -202,6 +202,8 @@ text_enum! {
         MistralVibe => "mistral_vibe",
         Mux => "mux",
         Reasonix => "reasonix",
+        Kode => "kode",
+        Neovate => "neovate",
         OpenClaw => "openclaw",
         Hermes => "hermes",
         NanoClaw => "nanoclaw",
@@ -1567,6 +1569,14 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<CaptureProvider>("\"reasonix\"").unwrap(),
             CaptureProvider::Reasonix
+        );
+        assert_eq!(
+            serde_json::from_str::<CaptureProvider>("\"kode\"").unwrap(),
+            CaptureProvider::Kode
+        );
+        assert_eq!(
+            serde_json::from_str::<CaptureProvider>("\"neovate\"").unwrap(),
+            CaptureProvider::Neovate
         );
 
         let sync: SyncMetadata = serde_json::from_value(json!({})).unwrap();
