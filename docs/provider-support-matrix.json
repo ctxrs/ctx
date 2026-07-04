@@ -1475,6 +1475,64 @@
       ]
     },
     {
+      "id": "forgecode",
+      "display_name": "ForgeCode",
+      "priority": "p1",
+      "status": "local_import_when_supported",
+      "capture_provider": "forgecode",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "forgecode_sqlite",
+          "fidelity": "imported",
+          "proof": [
+            "ctx sources",
+            "ctx import --provider forgecode",
+            "cargo test -p ctx-history-capture native_forgecode_fixture_imports_searches_reimports_and_file_metrics"
+          ],
+          "notes": [
+            "Reads ForgeCode conversation snapshots from FORGE_CONFIG/.forge.db, legacy ~/forge/.forge.db, or ~/.forge/.forge.db when the SQLite conversations table exists.",
+            "Normalizes context JSON messages, tool calls, tool results, image placeholders, usage metadata, and metrics file touches while retaining capped raw context and metrics JSON."
+          ]
+        }
+      ],
+      "history_locations": [
+        "FORGE_CONFIG/.forge.db",
+        "~/forge/.forge.db",
+        "~/.forge/.forge.db"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": false,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": true,
+        "command_output": false,
+        "files_touched": true,
+        "artifacts": false,
+        "model_identity": true,
+        "costs": false,
+        "token_usage": true,
+        "parent_child_session_edges": false
+      },
+      "blockers": [
+        "ForgeCode stores the conversation as a mutable context JSON snapshot, so message cursors use the message array index rather than upstream stable message ids.",
+        "The importer recognizes the DTO fields present in Forge repository migrations and conversation records, but future unrecognized DTO fields are retained as capped raw metadata until explicitly mapped."
+      ],
+      "public_docs": "docs/provider-support.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/forgecode/v1/forge.db"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs",
+        "tests/fixtures/provider-history/forgecode/v1/forge.db"
+      ]
+    },
+    {
       "id": "cline",
       "display_name": "Cline",
       "priority": "p1",

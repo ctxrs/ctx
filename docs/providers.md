@@ -63,6 +63,8 @@ The current CLI imports local history for:
   `conversation.jsonl`;
 - iFlow CLI session JSONL transcripts under `IFLOW_HOME/projects` or
   `~/.iflow/projects`, where project directories contain `session-*.jsonl`;
+- ForgeCode conversation SQLite history from `FORGE_CONFIG/.forge.db`, legacy
+  `~/forge/.forge.db`, `~/.forge/.forge.db`, or an explicit ForgeCode DB path;
 - Cline task JSON directories under `CLINE_DATA_DIR`, `CLINE_DIR/data`,
   `~/.cline/data`, or common VS Code globalStorage folders;
 - Roo Code task JSON directories under `roo-cline.customStoragePath`, common
@@ -94,13 +96,14 @@ CLI provider flags use names such as `kilo`, `crush`, `goose`, `dexto`,
 `openclaw`, `hermes`,
 `nanoclaw`, `astrbot`, `shelley`, `continue`, `openhands`, `copilot-cli`,
 `factory-ai-droid`, `qwen-code`, `kimi-code-cli`, `autohand-code`,
-`kiro-cli`, `iflow-cli`, `zed`, `codebuddy`, `cline`, and `roo`/`roo-code`.
+`kiro-cli`, `iflow-cli`, `forgecode`, `zed`, `codebuddy`, `cline`, and
+`roo`/`roo-code`.
 Structured JSON and stable SQL views use provider IDs in ctx output; multiword IDs may be
 snake_case, such as `copilot_cli`, `factory_ai_droid`, `qwen_code`,
 `kimi_code_cli`, `autohand_code`, `kiro_cli`, or `iflow_cli`, while compact
 native IDs such as `kilo`, `openclaw`, `crush`, `goose`, `dexto`, `zed`,
-`codebuddy`, `nanoclaw`, `astrbot`, `shelley`, `continue`, and `openhands` stay
-compact. Roo Code is reported as `roo_code`.
+`codebuddy`, `forgecode`, `nanoclaw`, `astrbot`, `shelley`, `continue`, and
+`openhands` stay compact. Roo Code is reported as `roo_code`.
 
 `ctx sources --json` reports each known provider source with `import_support`
 and `importable` fields. A native source is marked available/importable only

@@ -21,7 +21,7 @@ Status meanings:
 - `install-target`: npx target is an aggregate or project skill target, not a
   proven history-producing agent.
 
-Result on this integration branch: 25 `native-auto`, 2 `native-preview`, 17
+Result on this integration branch: 26 `native-auto`, 2 `native-preview`, 16
 `candidate-family`, 10 `webapp-boundary`, 16 `unknown`, and 2 `install-target`
 rows.
 
@@ -40,6 +40,8 @@ rows.
   `<persistence>/<user_id>/v1_conversations`.
 - `generic sqlite messages`: already covers Crush, Goose, Hermes, Kiro CLI,
   Dexto explicit imports, the AstrBot preview importer, and ctx-native Shelley.
+- `Forge conversation SQLite`: covers ForgeCode's `.forge.db` conversation
+  snapshots with JSON context/metrics DTOs.
 - `VS Code/Electron storage`: Cursor is covered through a known transcript tree,
   CodeBuddy is covered through its file-backed history JSON, and Zed is covered
   through its agent `threads.db`; other IDE-like tools need storage discovery
@@ -78,7 +80,7 @@ rows.
 | `droid` | `native-auto` | `JSONL CLI event logs` | ctx `factory_ai_droid_sessions_jsonl`; npx `~/.factory` | - |
 | `eve` | `unknown` | `unknown native history` | npx project `agent`; no ctx provider | Project skill layout does not prove a local history schema. |
 | `firebender` | `candidate-family` | `VS Code/Electron storage` | npx `~/.firebender`; no ctx provider | Need local app storage or export contract proof. |
-| `forgecode` | `candidate-family` | `JSONL CLI event logs` | npx `~/.forge`; no ctx provider | Need transcript location and schema proof before implementation. |
+| `forgecode` | `native-auto` | `Forge conversation SQLite` | ctx `forgecode_sqlite`; npx `FORGE_CONFIG`, legacy `~/forge`, or `~/.forge` | - |
 | `gemini-cli` | `native-auto` | `JSONL CLI event logs` | ctx `gemini_cli_chat_recording_jsonl`; npx `~/.gemini` | - |
 | `github-copilot` | `native-auto` | `JSONL CLI event logs` | ctx `copilot_cli_session_events_jsonl`; npx `~/.copilot` | Coverage is for Copilot CLI session-state logs, not editor or web history. |
 | `goose` | `native-auto` | `generic sqlite messages` | ctx `goose_sessions_sqlite`; npx `~/.config/goose` | - |

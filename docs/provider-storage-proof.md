@@ -78,6 +78,33 @@ IDE/application storage imports.
   `ctx` imports the resumable project `session-*.jsonl` transcripts as
   `iflow_cli_session_jsonl_tree`.
 
+## ForgeCode
+
+- Source evidence: Forge repository commit
+  `b06194fef8ee7bdad9a5cc3a4e30fa4f761deb51`.
+- Database evidence:
+  `crates/forge_repo/src/database/migrations/2025-09-12-065405_create_conversations_table/up.sql`
+  creates `conversations(conversation_id, title, workspace_id, context,
+  created_at, updated_at)`, and
+  `crates/forge_repo/src/database/migrations/2025-10-16-000000_add_metrics_to_conversations/up.sql`
+  adds `metrics`.
+- DTO evidence:
+  `crates/forge_repo/src/conversation/conversation_record.rs` serializes
+  `context` as the conversation DTO with text, tool, and image message variants,
+  tool calls/results, usage, tool metadata, and generation options.
+- Metrics evidence: the same DTO file serializes `metrics` with
+  `files_changed` and `files_accessed`, including line deltas, tool name, and
+  content hash where available.
+- Location evidence: ForgeCode uses `FORGE_CONFIG` as the base directory when
+  set, otherwise legacy `~/forge` when present, otherwise `~/.forge`; the
+  conversation DB is `<base>/.forge.db`.
+- `ctx` imports this shape as `forgecode_sqlite`, using read-only SQLite
+  discovery only when the `conversations` table exists.
+- Caveat: ForgeCode stores conversation messages as a mutable context JSON
+  snapshot rather than append-only message rows, so ctx uses message array
+  indexes for event cursors and retains capped raw context/metrics JSON for DTO
+  fields that are not explicitly normalized yet.
+
 ## OpenHands
 
 - Source evidence: OpenHands `get_default_persistence_dir()` checks

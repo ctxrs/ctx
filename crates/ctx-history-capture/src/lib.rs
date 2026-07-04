@@ -10,7 +10,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, Duration, NaiveDateTime, Utc};
 use ctx_history_core::{
     inbox_dir as core_inbox_dir, new_id, utc_now, AgentType, CaptureEnvelope, CaptureProvider,
     CaptureSource, CaptureSourceDescriptor, CaptureSourceKind, Confidence,
@@ -523,6 +523,27 @@ impl Default for OpenCodeSqliteImportOptions {
 
 pub type KiloSqliteImportOptions = OpenCodeSqliteImportOptions;
 pub type KiroSqliteImportOptions = OpenCodeSqliteImportOptions;
+
+#[derive(Debug, Clone)]
+pub struct ForgeCodeSqliteImportOptions {
+    pub machine_id: String,
+    pub source_path: Option<PathBuf>,
+    pub imported_at: DateTime<Utc>,
+    pub history_record_id: Option<Uuid>,
+    pub allow_partial_failures: bool,
+}
+
+impl Default for ForgeCodeSqliteImportOptions {
+    fn default() -> Self {
+        Self {
+            machine_id: default_machine_id(),
+            source_path: None,
+            imported_at: utc_now(),
+            history_record_id: None,
+            allow_partial_failures: false,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct CrushSqliteImportOptions {
@@ -1222,6 +1243,9 @@ pub struct AutohandCodeSessionsJsonlAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct IflowCliJsonlAdapter;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ForgeCodeSqliteAdapter;
 
 impl ProviderCaptureAdapter for ProviderFixtureJsonlAdapter {
     fn provider(&self) -> CaptureProvider {
@@ -2373,6 +2397,24 @@ impl ProviderCaptureAdapter for IflowCliJsonlAdapter {
             CaptureProvider::IflowCli,
             IFLOW_CLI_SOURCE_FORMAT,
         )
+    }
+}
+
+impl ProviderCaptureAdapter for ForgeCodeSqliteAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::ForgeCode
+    }
+
+    fn source_format(&self) -> &str {
+        FORGECODE_SQLITE_SOURCE_FORMAT
+    }
+
+    fn normalize_path(
+        &self,
+        path: &Path,
+        context: &ProviderAdapterContext,
+    ) -> Result<ProviderNormalizationResult> {
+        normalize_forgecode_sqlite(path, context)
     }
 }
 
@@ -4383,6 +4425,41 @@ pub fn import_kilo_sqlite(
     )
 }
 
+pub fn import_forgecode_sqlite(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: ForgeCodeSqliteImportOptions,
+) -> Result<ProviderImportSummary> {
+    let path = path.as_ref();
+    let source_path = options
+        .source_path
+        .clone()
+        .unwrap_or_else(|| path.to_path_buf());
+    let normalization = ForgeCodeSqliteAdapter.normalize_path(
+        path,
+        &ProviderAdapterContext {
+            machine_id: options.machine_id,
+            source_path: Some(source_path),
+            imported_at: options.imported_at,
+            tool_output_mode: CodexToolOutputMode::Full,
+            event_mode: CodexEventImportMode::Rich,
+            include_notices: true,
+        },
+    )?;
+
+    import_normalized_provider_captures(
+        store,
+        normalization,
+        NormalizedProviderImportOptions {
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+            persist_cursors: true,
+            wrap_transaction: true,
+            fast_event_inserts: true,
+        },
+    )
+}
+
 pub fn import_nanoclaw_project(
     path: impl AsRef<Path>,
     store: &mut Store,
@@ -4909,6 +4986,7 @@ const QWEN_CODE_SOURCE_FORMAT: &str = "qwen_code_chat_jsonl";
 const KIMI_CODE_CLI_SOURCE_FORMAT: &str = "kimi_code_cli_wire_jsonl";
 const AUTOHAND_CODE_SOURCE_FORMAT: &str = "autohand_code_sessions_jsonl";
 const IFLOW_CLI_SOURCE_FORMAT: &str = "iflow_cli_session_jsonl";
+const FORGECODE_SQLITE_SOURCE_FORMAT: &str = "forgecode_sqlite";
 const CODEX_MAX_TEXT_CHARS: usize = 16_000;
 const CODEX_MAX_METADATA_TEXT_CHARS: usize = 4_000;
 const CODEX_MAX_OUTPUT_PREVIEW_CHARS: usize = 4_000;
@@ -15664,6 +15742,697 @@ fn dexto_message_text(value: &Value) -> Option<String> {
 }
 
 #[derive(Debug, Clone)]
+struct ForgeCodeConversationRow {
+    rowid: i64,
+    conversation_id: String,
+    title: Option<String>,
+    workspace_id: i64,
+    context: Option<String>,
+    created_at: String,
+    updated_at: Option<String>,
+    metrics: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ForgeCodeMessageParts<'a> {
+    variant: &'static str,
+    body: &'a Value,
+    usage: Option<&'a Value>,
+}
+
+struct ForgeCodeCaptureContext<'a> {
+    started_at: DateTime<Utc>,
+    ended_at: Option<DateTime<Utc>>,
+    raw_source_path: &'a str,
+    user_version: i64,
+    schema_fingerprint: &'a str,
+    context_value: Option<&'a Value>,
+    metrics_value: Option<&'a Value>,
+    event: Option<ProviderEventEnvelope>,
+}
+
+fn normalize_forgecode_sqlite(
+    path: &Path,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    let conn = open_provider_sqlite_readonly(path)?;
+    let user_version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let schema_fingerprint = opencode_schema_fingerprint(&conn)?;
+    let conversations = forgecode_conversations(&conn)?;
+    let raw_source_path = path.display().to_string();
+    let mut result = ProviderNormalizationResult::default();
+
+    for row in conversations {
+        let row_line = provider_line_from_index(row.rowid.max(0) as u64);
+        let started_at = forgecode_timestamp(Some(&row.created_at), context.imported_at);
+        let ended_at = row
+            .updated_at
+            .as_deref()
+            .map(|raw| forgecode_timestamp(Some(raw), started_at));
+
+        let context_value = match row.context.as_deref().filter(|raw| !raw.trim().is_empty()) {
+            Some(raw) => match serde_json::from_str::<Value>(raw) {
+                Ok(value) => Some(value),
+                Err(err) => {
+                    push_provider_import_failure(
+                        &mut result.summary,
+                        row_line,
+                        format!(
+                            "invalid JSON in ForgeCode conversations.context {}: {err}",
+                            row.conversation_id
+                        ),
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
+        let metrics_value = match row.metrics.as_deref().filter(|raw| !raw.trim().is_empty()) {
+            Some(raw) => match serde_json::from_str::<Value>(raw) {
+                Ok(value) => Some(value),
+                Err(err) => {
+                    push_provider_import_failure(
+                        &mut result.summary,
+                        row_line,
+                        format!(
+                            "invalid JSON in ForgeCode conversations.metrics {}: {err}",
+                            row.conversation_id
+                        ),
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
+
+        if let Some(metrics) = metrics_value.as_ref() {
+            result.files_touched.extend(forgecode_metric_file_touches(
+                &row,
+                metrics,
+                &raw_source_path,
+                ended_at.unwrap_or(started_at),
+            ));
+        }
+
+        let mut emitted_events = false;
+        if let Some(messages) = context_value
+            .as_ref()
+            .and_then(|value| value.get("messages"))
+            .and_then(Value::as_array)
+        {
+            for (index, entry) in messages.iter().enumerate() {
+                let provider_event_index = (index as u64).saturating_add(1);
+                let occurred_at =
+                    started_at + Duration::milliseconds(i64::try_from(index).unwrap_or(i64::MAX));
+                let event = forgecode_event(&row, entry, provider_event_index, occurred_at);
+                let line = provider_line_from_index(provider_event_index);
+                result
+                    .files_touched
+                    .extend(provider_file_touches_from_raw_value(
+                        CaptureProvider::ForgeCode,
+                        &row.conversation_id,
+                        FORGECODE_SQLITE_SOURCE_FORMAT,
+                        Some(raw_source_path.as_str()),
+                        entry,
+                        &event,
+                        line,
+                    ));
+                result.captures.push((
+                    line,
+                    forgecode_capture(
+                        &row,
+                        ForgeCodeCaptureContext {
+                            started_at,
+                            ended_at,
+                            raw_source_path: &raw_source_path,
+                            user_version,
+                            schema_fingerprint: &schema_fingerprint,
+                            context_value: context_value.as_ref(),
+                            metrics_value: metrics_value.as_ref(),
+                            event: Some(event),
+                        },
+                        context,
+                    ),
+                ));
+                emitted_events = true;
+            }
+        }
+
+        if !emitted_events {
+            result.captures.push((
+                row_line,
+                forgecode_capture(
+                    &row,
+                    ForgeCodeCaptureContext {
+                        started_at,
+                        ended_at,
+                        raw_source_path: &raw_source_path,
+                        user_version,
+                        schema_fingerprint: &schema_fingerprint,
+                        context_value: context_value.as_ref(),
+                        metrics_value: metrics_value.as_ref(),
+                        event: None,
+                    },
+                    context,
+                ),
+            ));
+        }
+    }
+
+    Ok(result)
+}
+
+fn forgecode_conversations(conn: &Connection) -> Result<Vec<ForgeCodeConversationRow>> {
+    if !sqlite_table_exists(conn, "conversations")? {
+        return Err(CaptureError::InvalidPayload(
+            "ForgeCode .forge.db is missing required conversations table".into(),
+        ));
+    }
+    let columns = sqlite_table_columns(conn, "conversations")?;
+    ensure_sqlite_table_columns(
+        &columns,
+        "ForgeCode conversations table",
+        &["conversation_id", "workspace_id", "created_at"],
+    )?;
+    let title = optional_column_expr(&columns, "title", "NULL");
+    let context = optional_column_expr(&columns, "context", "NULL");
+    let updated_at = optional_column_expr(&columns, "updated_at", "NULL");
+    let metrics = optional_column_expr(&columns, "metrics", "NULL");
+    let order_by = if columns.contains("updated_at") {
+        "COALESCE(updated_at, created_at), conversation_id"
+    } else {
+        "created_at, conversation_id"
+    };
+    let sql = format!(
+        "select rowid, CAST(conversation_id AS TEXT), {title}, workspace_id, {context}, \
+         CAST(created_at AS TEXT), CAST({updated_at} AS TEXT), {metrics} \
+         from conversations order by {order_by}"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok(ForgeCodeConversationRow {
+            rowid: row.get(0)?,
+            conversation_id: row.get(1)?,
+            title: row.get(2)?,
+            workspace_id: row.get(3)?,
+            context: row.get(4)?,
+            created_at: row.get(5)?,
+            updated_at: row.get(6)?,
+            metrics: row.get(7)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(CaptureError::from)
+}
+
+fn forgecode_capture(
+    row: &ForgeCodeConversationRow,
+    draft: ForgeCodeCaptureContext<'_>,
+    context: &ProviderAdapterContext,
+) -> ProviderCaptureEnvelope {
+    let context_message_count = draft
+        .context_value
+        .and_then(|value| value.get("messages"))
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    native_provider_capture(
+        NativeSessionDraft {
+            provider: CaptureProvider::ForgeCode,
+            source_format: FORGECODE_SQLITE_SOURCE_FORMAT,
+            provider_session_id: row.conversation_id.clone(),
+            parent_provider_session_id: None,
+            root_provider_session_id: None,
+            external_agent_id: draft
+                .context_value
+                .and_then(|value| value.get("initiator"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            agent_type: AgentType::Primary,
+            role_hint: Some("primary".to_owned()),
+            is_primary: true,
+            started_at: draft.started_at,
+            ended_at: draft.ended_at,
+            cwd: None,
+            fidelity: Fidelity::Imported,
+            raw_source_path: draft.raw_source_path.to_owned(),
+            trust: ProviderSourceTrust::ProviderNative,
+            source_metadata: json!({
+                "adapter": FORGECODE_SQLITE_SOURCE_FORMAT,
+                "sqlite_user_version": draft.user_version,
+                "schema_fingerprint": draft.schema_fingerprint,
+                "source_path": draft.raw_source_path,
+                "upstream_tables": ["conversations"],
+                "upstream_schema_anchor": "crates/forge_repo/src/database/migrations/2025-09-12-065405_create_conversations_table/up.sql",
+                "upstream_dto_anchor": "crates/forge_repo/src/conversation/conversation_record.rs",
+            }),
+            session_metadata: json!({
+                "source_format": FORGECODE_SQLITE_SOURCE_FORMAT,
+                "conversation_id": row.conversation_id,
+                "title": row.title,
+                "workspace_id": row.workspace_id,
+                "created_at": row.created_at,
+                "updated_at": row.updated_at,
+                "context_conversation_id": draft.context_value
+                    .and_then(|value| value.get("conversation_id"))
+                    .and_then(Value::as_str),
+                "initiator": draft.context_value
+                    .and_then(|value| value.get("initiator"))
+                    .and_then(Value::as_str),
+                "context_message_count": context_message_count,
+                "tools_count": draft.context_value
+                    .and_then(|value| value.get("tools"))
+                    .and_then(Value::as_array)
+                    .map(Vec::len),
+                "tool_choice": draft.context_value
+                    .and_then(|value| value.get("tool_choice"))
+                    .map(|value| provider_capped_json_value(value, PROVIDER_MAX_PREVIEW_CHARS)),
+                "context": draft.context_value
+                    .map(|value| provider_capped_json_value(value, PROVIDER_MAX_PREVIEW_CHARS)),
+                "metrics": draft.metrics_value
+                    .map(|value| provider_capped_json_value(value, PROVIDER_MAX_PREVIEW_CHARS)),
+                "limitations": [
+                    "ForgeCode stores conversation messages as a context JSON snapshot; message cursors use array index because the DTO does not expose stable message ids",
+                    "recognized text, tool call, tool result, image, usage, and metrics fields are normalized; unrecognized DTO fields are retained as capped raw JSON metadata",
+                    "workspace_id is retained, but the current Forge schema does not keep a workspace path after the workspace table was dropped"
+                ],
+            }),
+        },
+        context,
+        draft.event,
+    )
+}
+
+fn forgecode_event(
+    row: &ForgeCodeConversationRow,
+    entry: &Value,
+    provider_event_index: u64,
+    occurred_at: DateTime<Utc>,
+) -> ProviderEventEnvelope {
+    let parts = forgecode_message_parts(entry);
+    let event_type = forgecode_event_type(parts);
+    let role = forgecode_event_role(parts);
+    let text = forgecode_message_text(parts, event_type);
+    let message_hash = compute_payload_hash(entry).ok();
+    native_event(NativeEventDraft {
+        provider: CaptureProvider::ForgeCode,
+        source_format: FORGECODE_SQLITE_SOURCE_FORMAT,
+        provider_session_id: row.conversation_id.clone(),
+        provider_event_index,
+        provider_event_hash: message_hash,
+        cursor: format!(
+            "conversation:{}:message:{}",
+            row.conversation_id, provider_event_index
+        ),
+        event_type,
+        role,
+        occurred_at,
+        text,
+        body: json!({
+            "message_index": provider_event_index,
+            "message_variant": parts.variant,
+            "message": entry,
+            "usage": parts.usage,
+        }),
+        metadata: json!({
+            "source": "forgecode_conversations",
+            "source_format": FORGECODE_SQLITE_SOURCE_FORMAT,
+            "conversation_id": row.conversation_id,
+            "message_index": provider_event_index,
+            "message_variant": parts.variant,
+            "role": forgecode_role_text(parts),
+            "model": forgecode_text_body(parts)
+                .and_then(|body| body.get("model"))
+                .and_then(provider_value_text),
+            "usage": parts.usage
+                .map(|value| provider_capped_json_value(value, PROVIDER_MAX_PREVIEW_CHARS)),
+        }),
+    })
+}
+
+fn forgecode_message_parts(entry: &Value) -> ForgeCodeMessageParts<'_> {
+    let message = entry.get("message").unwrap_or(entry);
+    let usage = entry.get("usage");
+    if let Some((variant, body)) = forgecode_message_variant(message) {
+        return ForgeCodeMessageParts {
+            variant,
+            body,
+            usage,
+        };
+    }
+    ForgeCodeMessageParts {
+        variant: "unknown",
+        body: message,
+        usage,
+    }
+}
+
+fn forgecode_message_variant(value: &Value) -> Option<(&'static str, &Value)> {
+    let Value::Object(object) = value else {
+        return None;
+    };
+    object
+        .iter()
+        .find_map(|(key, value)| match normalized_key(key).as_str() {
+            "text" => Some(("text", value)),
+            "tool" => Some(("tool", value)),
+            "image" => Some(("image", value)),
+            _ => None,
+        })
+}
+
+fn forgecode_event_type(parts: ForgeCodeMessageParts<'_>) -> EventType {
+    match parts.variant {
+        "text" if forgecode_text_has_tool_calls(parts.body) => EventType::ToolCall,
+        "text" => EventType::Message,
+        "tool" => EventType::ToolOutput,
+        "image" => EventType::Artifact,
+        _ => EventType::Notice,
+    }
+}
+
+fn forgecode_event_role(parts: ForgeCodeMessageParts<'_>) -> Option<EventRole> {
+    match parts.variant {
+        "text" => forgecode_role_text(parts).map(|role| provider_role(Some(&role))),
+        "tool" => Some(EventRole::Tool),
+        "image" => Some(EventRole::Unknown),
+        _ => None,
+    }
+}
+
+fn forgecode_role_text(parts: ForgeCodeMessageParts<'_>) -> Option<String> {
+    forgecode_text_body(parts)
+        .and_then(|body| body.get("role"))
+        .and_then(Value::as_str)
+        .map(|role| role.to_ascii_lowercase())
+}
+
+fn forgecode_text_body(parts: ForgeCodeMessageParts<'_>) -> Option<&Value> {
+    (parts.variant == "text").then_some(parts.body)
+}
+
+fn forgecode_text_has_tool_calls(body: &Value) -> bool {
+    body.get("tool_calls")
+        .or_else(|| body.get("toolCalls"))
+        .and_then(Value::as_array)
+        .is_some_and(|calls| !calls.is_empty())
+}
+
+fn forgecode_message_text(parts: ForgeCodeMessageParts<'_>, event_type: EventType) -> String {
+    match parts.variant {
+        "text" => forgecode_text_message_text(parts.body, event_type),
+        "tool" => forgecode_tool_result_text(parts.body),
+        "image" => forgecode_image_text(parts.body),
+        _ => {
+            provider_value_text(parts.body).unwrap_or_else(|| "ForgeCode conversation event".into())
+        }
+    }
+}
+
+fn forgecode_text_message_text(body: &Value, event_type: EventType) -> String {
+    let mut parts = Vec::new();
+    if let Some(content) = body
+        .get("content")
+        .and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+    {
+        parts.push(content.to_owned());
+    }
+    if let Some(tool_text) = body
+        .get("tool_calls")
+        .or_else(|| body.get("toolCalls"))
+        .and_then(forgecode_tool_calls_text)
+    {
+        parts.push(tool_text);
+    }
+    if parts.is_empty() {
+        if let Some(raw_content) = body.get("raw_content").and_then(provider_value_text) {
+            parts.push(raw_content);
+        }
+    }
+    if parts.is_empty() {
+        let role = body
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        parts.push(if event_type == EventType::ToolCall {
+            format!("ForgeCode {role} tool call")
+        } else {
+            format!("ForgeCode {role} message")
+        });
+    }
+    parts.join("\n")
+}
+
+fn forgecode_tool_calls_text(value: &Value) -> Option<String> {
+    let calls = value.as_array()?;
+    let mut parts = Vec::new();
+    for call in calls {
+        let name = call
+            .get("name")
+            .and_then(forgecode_scalar_text)
+            .unwrap_or_else(|| "tool".to_owned());
+        parts.push(format!("tool call: {name}"));
+        if let Some(call_id) = call.get("call_id").and_then(forgecode_scalar_text) {
+            parts.push(format!("tool call id: {call_id}"));
+        }
+        if let Some(arguments) = call
+            .get("arguments")
+            .and_then(provider_value_text)
+            .filter(|text| !text.trim().is_empty())
+        {
+            parts.push(format!("tool input: {arguments}"));
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("\n"))
+}
+
+fn forgecode_tool_result_text(body: &Value) -> String {
+    let name = body
+        .get("name")
+        .and_then(forgecode_scalar_text)
+        .unwrap_or_else(|| "tool".to_owned());
+    let mut parts = vec![format!("tool result: {name}")];
+    if let Some(call_id) = body.get("call_id").and_then(forgecode_scalar_text) {
+        parts.push(format!("tool call id: {call_id}"));
+    }
+    if body
+        .pointer("/output/is_error")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        parts.push("tool error".to_owned());
+    }
+    if let Some(values) = body.pointer("/output/values").and_then(Value::as_array) {
+        for value in values {
+            if let Some(text) = forgecode_tool_value_text(value) {
+                parts.push(text);
+            }
+        }
+    }
+    parts.join("\n")
+}
+
+fn forgecode_tool_value_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Object(object) => {
+            for (key, child) in object {
+                match normalized_key(key).as_str() {
+                    "text" | "markdown" => return child.as_str().map(str::to_owned),
+                    "ai" => {
+                        return child
+                            .get("value")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                            .or_else(|| provider_value_text(child));
+                    }
+                    "image" => return Some(forgecode_image_text(child)),
+                    "filediff" => {
+                        let path = child
+                            .get("path")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown");
+                        return Some(format!("[File diff: {path}]"));
+                    }
+                    "pair" => {
+                        if let Some(items) = child.as_array() {
+                            return items.first().and_then(forgecode_tool_value_text);
+                        }
+                    }
+                    "empty" => return None,
+                    _ => {}
+                }
+            }
+            provider_value_text(value)
+        }
+        Value::Array(items) => {
+            let parts = items
+                .iter()
+                .filter_map(forgecode_tool_value_text)
+                .collect::<Vec<_>>();
+            (!parts.is_empty()).then(|| parts.join("\n"))
+        }
+        Value::Number(_) | Value::Bool(_) => Some(value.to_string()),
+        Value::Null => None,
+    }
+}
+
+fn forgecode_image_text(body: &Value) -> String {
+    let mime_type = body
+        .get("mime_type")
+        .or_else(|| body.get("mimeType"))
+        .and_then(Value::as_str)
+        .unwrap_or("image");
+    let url = body
+        .get("url")
+        .and_then(Value::as_str)
+        .filter(|url| !url.trim().is_empty());
+    match url {
+        Some(url) => format!("ForgeCode image: {mime_type} {url}"),
+        None => format!("ForgeCode image: {mime_type}"),
+    }
+}
+
+fn forgecode_scalar_text(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| provider_value_text(value))
+}
+
+fn forgecode_metric_file_touches(
+    row: &ForgeCodeConversationRow,
+    metrics: &Value,
+    raw_source_path: &str,
+    fallback: DateTime<Utc>,
+) -> Vec<(usize, ProviderFileTouchedEnvelope)> {
+    let occurred_at = metrics
+        .get("started_at")
+        .map(|value| provider_timestamp_value(Some(value), fallback))
+        .unwrap_or(fallback);
+    let mut touches = Vec::new();
+    let mut seen = BTreeSet::<(String, &'static str)>::new();
+
+    if let Some(files_changed) = metrics.get("files_changed").and_then(Value::as_object) {
+        let mut entries = files_changed.iter().collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.0.cmp(right.0));
+        for (path, operation_value) in entries {
+            let Some(operation) = forgecode_metric_operation(operation_value) else {
+                continue;
+            };
+            let tool = operation
+                .get("tool")
+                .and_then(Value::as_str)
+                .unwrap_or("write");
+            let change_kind = forgecode_metric_change_kind(tool);
+            if !seen.insert((path.clone(), change_kind.as_str())) {
+                continue;
+            }
+            let lines_added = operation.get("lines_added").and_then(forgecode_json_i64);
+            let lines_removed = operation.get("lines_removed").and_then(forgecode_json_i64);
+            let line_count_delta = match (lines_added, lines_removed) {
+                (Some(added), Some(removed)) => Some(added.saturating_sub(removed)),
+                (Some(added), None) => Some(added),
+                (None, Some(removed)) => Some(removed.saturating_neg()),
+                _ => None,
+            };
+            let touch_index = 0x0400_0000_0000_u64.saturating_add(touches.len() as u64);
+            touches.push((
+                provider_line_from_index(touch_index),
+                ProviderFileTouchedEnvelope {
+                    provider: CaptureProvider::ForgeCode,
+                    provider_session_id: row.conversation_id.clone(),
+                    provider_touch_index: touch_index,
+                    provider_event_index: None,
+                    raw_source_path: Some(raw_source_path.to_owned()),
+                    path: path.clone(),
+                    change_kind: Some(change_kind),
+                    old_path: None,
+                    line_count_delta,
+                    confidence: Confidence::Explicit,
+                    occurred_at,
+                    source_format: FORGECODE_SQLITE_SOURCE_FORMAT.to_owned(),
+                    metadata: json!({
+                        "source": "forgecode_metrics_files_changed",
+                        "tool": tool,
+                        "lines_added": lines_added,
+                        "lines_removed": lines_removed,
+                        "content_hash": operation.get("content_hash").and_then(Value::as_str),
+                    }),
+                },
+            ));
+        }
+    }
+
+    if let Some(files_accessed) = metrics.get("files_accessed").and_then(Value::as_array) {
+        let mut paths = files_accessed
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|path| !path.trim().is_empty())
+            .collect::<Vec<_>>();
+        paths.sort_unstable();
+        paths.dedup();
+        for path in paths {
+            if !seen.insert((path.to_owned(), FileChangeKind::Read.as_str())) {
+                continue;
+            }
+            let touch_index = 0x0500_0000_0000_u64.saturating_add(touches.len() as u64);
+            touches.push((
+                provider_line_from_index(touch_index),
+                ProviderFileTouchedEnvelope {
+                    provider: CaptureProvider::ForgeCode,
+                    provider_session_id: row.conversation_id.clone(),
+                    provider_touch_index: touch_index,
+                    provider_event_index: None,
+                    raw_source_path: Some(raw_source_path.to_owned()),
+                    path: path.to_owned(),
+                    change_kind: Some(FileChangeKind::Read),
+                    old_path: None,
+                    line_count_delta: None,
+                    confidence: Confidence::Explicit,
+                    occurred_at,
+                    source_format: FORGECODE_SQLITE_SOURCE_FORMAT.to_owned(),
+                    metadata: json!({
+                        "source": "forgecode_metrics_files_accessed",
+                    }),
+                },
+            ));
+        }
+    }
+
+    touches
+}
+
+fn forgecode_metric_operation(value: &Value) -> Option<&Value> {
+    match value {
+        Value::Object(_) => Some(value),
+        Value::Array(items) => items.iter().rev().find(|item| item.is_object()),
+        _ => None,
+    }
+}
+
+fn forgecode_metric_change_kind(tool: &str) -> FileChangeKind {
+    match tool.to_ascii_lowercase().as_str() {
+        "read" => FileChangeKind::Read,
+        "patch" | "edit" | "update" | "write" => FileChangeKind::Modified,
+        "delete" | "remove" => FileChangeKind::Deleted,
+        "create" | "add" => FileChangeKind::Created,
+        _ => FileChangeKind::Unknown,
+    }
+}
+
+fn forgecode_json_i64(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
+}
+
+fn forgecode_timestamp(raw: Option<&str>, fallback: DateTime<Utc>) -> DateTime<Utc> {
+    goose_timestamp(raw, fallback)
+}
+
+#[derive(Debug, Clone)]
 struct KiroConversationRow {
     table: &'static str,
     rowid: i64,
@@ -21884,6 +22653,24 @@ mod tests {
                 }),
                 "src/droid_file.rs",
             ),
+            (
+                CaptureProvider::ForgeCode,
+                FORGECODE_SQLITE_SOURCE_FORMAT,
+                serde_json::json!({
+                    "message": {
+                        "text": {
+                            "tool_calls": [{
+                                "name": "write",
+                                "arguments": {
+                                    "path": "src/forge_file.rs",
+                                    "content": "proof"
+                                }
+                            }]
+                        }
+                    }
+                }),
+                "src/forge_file.rs",
+            ),
         ] {
             let touches = provider_file_touches_from_raw_value(
                 provider,
@@ -23424,6 +24211,117 @@ mod tests {
     }
 
     #[test]
+    fn native_forgecode_fixture_imports_searches_reimports_and_file_metrics() {
+        let temp = tempdir();
+        let fixture = provider_history_fixture("forgecode/v1/forge.db");
+        let store_path = temp.path().join("work.sqlite");
+        let mut store = Store::open(&store_path).unwrap();
+
+        let source = provider_source_for_path(CaptureProvider::ForgeCode, fixture.clone());
+        assert_eq!(source.source_format, FORGECODE_SQLITE_SOURCE_FORMAT);
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+
+        let first = import_forgecode_sqlite(
+            &fixture,
+            &mut store,
+            ForgeCodeSqliteImportOptions {
+                machine_id: "test-machine".into(),
+                source_path: Some(fixture.clone()),
+                imported_at: DateTime::parse_from_rfc3339("2026-06-24T12:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                allow_partial_failures: true,
+                ..ForgeCodeSqliteImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(first.failed, 0, "{:?}", first.failures);
+        assert_eq!(first.imported_sessions, 1);
+        assert_eq!(first.imported_events, 3);
+        let session_id = provider_session_uuid(CaptureProvider::ForgeCode, "forge-root");
+        let events = store.events_for_session(session_id).unwrap();
+        assert_eq!(events.len(), 3);
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == EventType::ToolCall));
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == EventType::ToolOutput));
+        assert!(store
+            .search_event_hits("forgecode oracle", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::ForgeCode)));
+        let file_touch_count: i64 = Connection::open(&store_path)
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM ctx_files_touched WHERE provider = 'forgecode'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(file_touch_count, 4);
+
+        let second = import_forgecode_sqlite(
+            &fixture,
+            &mut store,
+            ForgeCodeSqliteImportOptions {
+                source_path: Some(fixture.clone()),
+                allow_partial_failures: true,
+                ..ForgeCodeSqliteImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(second.failed, 0, "{:?}", second.failures);
+        assert_eq!(second.imported_sessions, 0);
+        assert_eq!(second.imported_events, 0);
+        assert_eq!(second.skipped_sessions, 1);
+        assert_eq!(second.skipped_events, 3);
+        let file_touch_count_after: i64 = Connection::open(&store_path)
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM ctx_files_touched WHERE provider = 'forgecode'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(file_touch_count_after, file_touch_count);
+    }
+
+    #[test]
+    fn native_forgecode_reports_missing_table_and_corrupt_db() {
+        let temp = tempdir();
+        let missing_table = temp.path().join("missing-forge.db");
+        let conn = Connection::open(&missing_table).unwrap();
+        conn.execute_batch("CREATE TABLE unrelated (id INTEGER PRIMARY KEY);")
+            .unwrap();
+        drop(conn);
+        let corrupt = temp.path().join("corrupt-forge.db");
+        fs::write(&corrupt, b"not sqlite").unwrap();
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let err = import_forgecode_sqlite(
+            &missing_table,
+            &mut store,
+            ForgeCodeSqliteImportOptions::default(),
+        )
+        .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("ForgeCode .forge.db is missing required conversations table"));
+
+        let err = import_forgecode_sqlite(
+            &corrupt,
+            &mut store,
+            ForgeCodeSqliteImportOptions::default(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not a database"));
+    }
+
+    #[test]
+
     fn native_jsonl_tree_imports_gemini_droid_and_copilot_smokes() {
         let temp = tempdir();
         let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();

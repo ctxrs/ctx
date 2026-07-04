@@ -18,9 +18,9 @@ PROVIDER_MATRIX_PATH = REPO_ROOT / "docs" / "provider-support-matrix.json"
 UPSTREAM_PACKAGE = "skills@1.5.14"
 UPSTREAM_COMMIT = "2adcfe5a4cce0ce5f4d5547a997b2a161ec5d127"
 EXPECTED_COUNTS = {
-    "native-auto": 25,
+    "native-auto": 26,
     "native-preview": 2,
-    "candidate-family": 17,
+    "candidate-family": 16,
     "webapp-boundary": 10,
     "unknown": 16,
     "install-target": 2,
@@ -32,6 +32,7 @@ REQUIRED_SCHEMA_FAMILIES = {
     "JSONL CLI event logs",
     "filesystem event JSON",
     "generic sqlite messages",
+    "Forge conversation SQLite",
     "VS Code/Electron storage",
     "webapp/object-store boundary",
 }
