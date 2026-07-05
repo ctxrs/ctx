@@ -85,6 +85,7 @@ pub enum ProviderId {
     Dexto,
     #[serde(rename = "lingma", alias = "qoder-cn", alias = "qoder_cn")]
     Lingma,
+    Qoder,
     Pochi,
     #[serde(rename = "warp")]
     Warp,
@@ -164,7 +165,7 @@ pub enum ProviderId {
 }
 
 impl ProviderId {
-    pub const ALL: [Self; 64] = [
+    pub const ALL: [Self; 65] = [
         Self::Codex,
         Self::ClaudeCode,
         Self::ClaudeCliCrp,
@@ -194,6 +195,7 @@ impl ProviderId {
         Self::Goose,
         Self::Dexto,
         Self::Lingma,
+        Self::Qoder,
         Self::Pochi,
         Self::Warp,
         Self::CodeBuddy,
@@ -559,6 +561,7 @@ mod tests {
             ProviderId::Kode,
             ProviderId::KimiCodeCli,
             ProviderId::Lingma,
+            ProviderId::Qoder,
             ProviderId::Pochi,
             ProviderId::Warp,
             ProviderId::Auggie,

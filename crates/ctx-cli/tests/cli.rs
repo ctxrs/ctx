@@ -1915,6 +1915,10 @@ fn qwen_and_kimi_default_sources_import_search_and_reimport() {
         Path::new(&provider_history_fixture("neovate/v1/projects")),
         &temp.path().join(".neovate").join("projects"),
     );
+    copy_dir_all(
+        Path::new(&provider_history_fixture("qoder/projects")),
+        &temp.path().join(".qoder").join("projects"),
+    );
 
     let sources = json_output(ctx(&temp).args(["sources", "--json"]));
     for (provider, source_format) in [
@@ -1927,6 +1931,7 @@ fn qwen_and_kimi_default_sources_import_search_and_reimport() {
         ("reasonix", "reasonix_session_jsonl_tree"),
         ("kode", "kode_session_jsonl_tree"),
         ("neovate", "neovate_session_jsonl_tree"),
+        ("qoder", "qoder_transcript_jsonl_tree"),
     ] {
         let source = sources["sources"]
             .as_array()
@@ -1967,6 +1972,7 @@ fn qwen_and_kimi_default_sources_import_search_and_reimport() {
         ("reasonix", "reasonix", "reasonix jsonl oracle prompt", 12),
         ("kode", "kode", "kode jsonl oracle prompt", 10),
         ("neovate", "neovate", "neovate jsonl oracle prompt", 5),
+        ("qoder", "qoder", "qoder jsonl oracle prompt", 7),
     ] {
         let first = json_output(ctx(&temp).args([
             "import",
@@ -2027,6 +2033,7 @@ fn sources_lists_personal_agent_provider_defaults() {
     install_default_neovate_fixture(&temp, "neovate-sources-oracle");
     install_default_terramind_fixture(&temp, "terramind-sources-oracle");
     install_default_lingma_fixture(&temp, "lingma-sources-oracle");
+    install_default_qoder_fixture(&temp, "qoder-sources-oracle");
     install_default_auggie_fixture(&temp, "auggie-sources-oracle");
 
     let sources = json_output(ctx(&temp).args(["sources", "--json"]));
@@ -2058,6 +2065,7 @@ fn sources_lists_personal_agent_provider_defaults() {
         ("neovate", "neovate_session_jsonl_tree", "native", true),
         ("terramind", "terramind_agents_sqlite", "native", true),
         ("lingma", "lingma_sqlite", "native", true),
+        ("qoder", "qoder_transcript_jsonl_tree", "native", true),
         ("auggie", "auggie_session_json", "native", true),
     ] {
         let source = sources["sources"]
@@ -2397,6 +2405,7 @@ fn provider_help_matches_implemented_importers() {
         "openhands",
         "dexto",
         "lingma",
+        "qoder",
         "codebuddy",
         "aider-desk",
         "amp",
@@ -2453,6 +2462,7 @@ fn provider_json_names_are_accepted_as_cli_filter_aliases() {
         ("neovate_code", "neovate"),
         ("qoder-cn", "lingma"),
         ("qoder_cn", "lingma"),
+        ("qoder", "qoder"),
         ("open_claw", "openclaw"),
         ("nano_claw", "nanoclaw"),
         ("astr_bot", "astrbot"),
@@ -2577,7 +2587,7 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
             vec![
                 "Usage: ctx import",
                 "--provider <PROVIDER>",
-                "[possible values: codex, pi, claude, opencode, openloaf, kilo, kiro-cli, crush, goose, antigravity, gemini, cursor, windsurf, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, jazz, auggie, devin, eve, firebender, forgecode, deepagents, mistral-vibe, mux, reasonix, kode, neovate, command-code, terramind, rovodev, cortex-code, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto, lingma, pochi, warp, codebuddy, aider-desk, amp, trae]",
+                "[possible values: codex, pi, claude, opencode, openloaf, kilo, kiro-cli, crush, goose, antigravity, gemini, cursor, windsurf, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, jazz, auggie, devin, eve, firebender, forgecode, deepagents, mistral-vibe, mux, reasonix, kode, neovate, command-code, terramind, rovodev, cortex-code, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto, lingma, qoder, pochi, warp, codebuddy, aider-desk, amp, trae]",
                 "--path <PATH>",
                 "--format <FORMAT>",
                 "--resume",
@@ -6007,6 +6017,7 @@ fn search_refresh_auto_imports_discovered_top_provider_sources() {
             install_default_cortex_code_fixture,
         ),
         ("lingma", "lingma", install_default_lingma_fixture),
+        ("qoder", "qoder", install_default_qoder_fixture),
     ] {
         let temp = tempdir();
         let query = format!("{stored_provider}-default-refresh-oracle");
@@ -7339,6 +7350,11 @@ fn install_default_cursor_fixture(temp: &TempDir, query: &str) {
 fn install_default_windsurf_fixture(temp: &TempDir, query: &str) {
     let source = PathBuf::from(write_native_windsurf_fixture(temp, query));
     copy_dir_all(&source, &temp.path().join(".windsurf").join("transcripts"));
+}
+
+fn install_default_qoder_fixture(temp: &TempDir, query: &str) {
+    let source = PathBuf::from(write_native_qoder_fixture(temp, query));
+    copy_dir_all(&source, &temp.path().join(".qoder").join("projects"));
 }
 
 fn install_default_openclaw_fixture(temp: &TempDir, query: &str) {
@@ -8846,6 +8862,88 @@ fn write_native_windsurf_fixture(temp: &TempDir, query: &str) -> String {
     )
     .unwrap();
     root.to_str().unwrap().to_owned()
+}
+
+fn write_native_qoder_fixture(temp: &TempDir, query: &str) -> String {
+    let root = temp
+        .path()
+        .join("native-qoder/projects/sanitized-workspace/transcript");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        root.join("qoder-cli-native.jsonl"),
+        format!(
+            "{}\n{}\n{}\n{}\n{}\n",
+            json!({
+                "type": "session_meta",
+                "sessionId": "qoder-cli-native",
+                "uuid": "qoder-cli-meta",
+                "timestamp": "2026-07-01T12:00:00Z",
+                "cwd": "/workspace/qoder-cli",
+                "data": {
+                    "meta_type": "session_info",
+                    "content": {"mode": "agent", "session_type": "assistant"}
+                }
+            }),
+            json!({
+                "type": "user",
+                "sessionId": "qoder-cli-native",
+                "uuid": "qoder-cli-user",
+                "timestamp": "2026-07-01T12:00:01Z",
+                "cwd": "/workspace/qoder-cli",
+                "message": {"role": "user", "content": query}
+            }),
+            json!({
+                "type": "assistant",
+                "sessionId": "qoder-cli-native",
+                "uuid": "qoder-cli-assistant",
+                "timestamp": "2026-07-01T12:00:02Z",
+                "cwd": "/workspace/qoder-cli",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "qoder native import ok"}]
+                }
+            }),
+            json!({
+                "type": "assistant",
+                "sessionId": "qoder-cli-native",
+                "uuid": "qoder-cli-tool",
+                "timestamp": "2026-07-01T12:00:03Z",
+                "cwd": "/workspace/qoder-cli",
+                "message": {
+                    "role": "assistant",
+                    "content": [{
+                        "type": "tool_use",
+                        "id": "call-qoder-cli-read",
+                        "name": "read_file",
+                        "input": {"file_path": "src/qoder_cli_native.py"}
+                    }]
+                }
+            }),
+            json!({
+                "type": "user",
+                "sessionId": "qoder-cli-native",
+                "uuid": "qoder-cli-tool-result",
+                "timestamp": "2026-07-01T12:00:04Z",
+                "cwd": "/workspace/qoder-cli",
+                "message": {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "call-qoder-cli-read",
+                        "content": "native qoder fixture result",
+                        "is_error": false
+                    }]
+                },
+                "toolUseResult": "native qoder fixture result"
+            })
+        ),
+    )
+    .unwrap();
+    temp.path()
+        .join("native-qoder/projects")
+        .to_str()
+        .unwrap()
+        .to_owned()
 }
 
 fn write_native_openhands_fixture(temp: &TempDir, query: &str) -> String {

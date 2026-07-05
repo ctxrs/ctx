@@ -113,6 +113,65 @@ IDE/application storage imports.
   and
   `https://www.alibabacloud.com/help/en/lingma/product-overview/qoder-cn-update-log`.
 
+## Qoder
+
+- Source evidence: official Qoder Hooks docs define the Transcript file format
+  and state that the transcript is an automatically generated session log at
+  `~/.qoder/projects/<project>/transcript/<session-id>.jsonl`, with one JSON
+  object per line and complete session interaction records.
+- Schema evidence: those docs define common line fields `type`, `sessionId`,
+  `uuid`, `timestamp`, `cwd`, `message`, and `data`; documented record types
+  are `session_meta`, `user`, `assistant`, and `progress`.
+- Message evidence: documented user records include plain string prompts and
+  `tool_result` content blocks with `toolUseResult`; documented assistant
+  records include `text` and `tool_use` content blocks with tool `name`,
+  `input`, and `id`.
+- Extraction evidence: the docs publish `jq` examples for user questions,
+  assistant text replies, tool calls, failed tool results, session mode, and
+  hook trigger records from the same transcript file.
+- `ctx` imports this shape as `qoder_transcript_jsonl_tree`, using read-only
+  discovery under `~/.qoder/projects` or explicit transcript
+  file/directory/project paths.
+- Caveat: ctx imports only the official transcript JSONL tree. It does not parse
+  Qoder VS Code/Electron state databases, message indexes, or encrypted
+  application logs. Qoder CN remains covered separately as a Lingma alias.
+- Source anchor: `https://docs.qoder.com/extensions/hooks`.
+
+## CodeArts Agent
+
+- Source evidence: the current Visual Studio Marketplace page for
+  `HuaweiCloud.vscode-codebot` identifies CodeArts Agent as a VS Code extension
+  and documents editor/chat features such as R&D Q&A, slash commands, chat-panel
+  shortcuts, and selected-code actions.
+- Gap: that public page proves an IDE-like agent surface, not a local transcript
+  path or stable schema. No public source-backed file contract was found for
+  `~/.codeartsdoer`, VS Code `globalStorage`, `workspaceStorage`, state DB keys,
+  chat snapshots, or local CodeArts Agent APIs.
+- Decision: no native importer is claimed. The `codearts-agent` npx target
+  remains `candidate-family` until a stable local transcript schema, official
+  exporter, or sanitized real fixture can be verified without account-specific
+  data or secrets.
+- Source anchor:
+  `https://marketplace.visualstudio.com/items?itemName=HuaweiCloud.vscode-codebot`.
+
+## Code Studio
+
+- Source evidence: Syncfusion Code Studio docs describe an AI-powered IDE with
+  Ask, Edit, Agent, Plan, checkpoint, hooks, custom agents, and Agent Skills
+  features.
+- Configuration evidence: current user settings docs prove agent, instruction,
+  hook, and skill locations including `.codestudio/agents`,
+  `~/.codestudio/agents`, `.codestudio/skills`, and `~/.codestudio/skills`.
+- Gap: those docs prove configuration and skill discovery paths only. They do
+  not identify a local chat transcript file, database, export format, or stable
+  schema under `~/.codestudio`.
+- Decision: no native importer is claimed. The `codestudio` npx target remains
+  `candidate-family` until a source-backed transcript path/schema or exporter is
+  available.
+- Source anchors:
+  `https://help.syncfusion.com/code-studio/getting-started/overview` and
+  `https://help.syncfusion.com/code-studio/reference/configure-properties/usersettings`.
+
 ## iFlow CLI
 
 - Source evidence: the `iflow-ai-iflow-cli-0.5.19.tgz` bundle resolves
