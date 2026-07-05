@@ -203,7 +203,6 @@ text_enum! {
         IflowCli => "iflow_cli",
         Jazz => "jazz",
         Auggie => "auggie",
-        Devin => "devin",
         Eve => "eve",
         Junie => "junie",
         Firebender => "firebender",
@@ -238,7 +237,6 @@ text_enum! {
         CortexCode => "cortex_code",
         CodeBuddy => "codebuddy",
         AiderDesk => "aider_desk",
-        Amp => "amp",
         Trae => "trae",
         TinyCloud => "tinycloud",
         CodeArtsAgent => "codearts_agent",
@@ -1631,10 +1629,6 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<CaptureProvider>("\"lingma\"").unwrap(),
             CaptureProvider::Lingma
-        );
-        assert_eq!(
-            serde_json::from_str::<CaptureProvider>("\"amp\"").unwrap(),
-            CaptureProvider::Amp
         );
         assert_eq!(
             serde_json::from_str::<CaptureProvider>("\"bob\"").unwrap(),

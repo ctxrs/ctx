@@ -54,7 +54,7 @@ that support it.
 
 Search filters narrow both human output and JSON:
 
-- `--provider codex|pi|claude|opencode|codearts-agent|zencoder|kilo|kiro-cli|forgecode|deepagents|mistral-vibe|mux|reasonix|kode|neovate|junie|tinycloud|codestudio|terramind|crush|goose|dexto|lingma|warp|openclaw|hermes|nanoclaw|astrbot|shelley|continue|openhands|antigravity|gemini|cursor|windsurf|zed|copilot-cli|factory-ai-droid|qwen-code|kimi-code-cli|autohand-code|iflow-cli|codebuddy|aider-desk|amp|cline|roo`;
+- `--provider codex|pi|claude|opencode|codearts-agent|zencoder|kilo|kiro-cli|forgecode|deepagents|mistral-vibe|mux|reasonix|kode|neovate|junie|tinycloud|codestudio|terramind|crush|goose|dexto|lingma|warp|openclaw|hermes|nanoclaw|astrbot|shelley|continue|openhands|antigravity|gemini|cursor|windsurf|zed|copilot-cli|factory-ai-droid|qwen-code|kimi-code-cli|autohand-code|iflow-cli|codebuddy|aider-desk|cline|roo`;
 - `--history-source <plugin/source-or-provider_key/source_id>`, for custom
   history imports;
 - `--provider-key <key>`, `--source-id <id>`, and
@@ -124,10 +124,9 @@ sources or already-cataloged indexes, `auto` serves current results without a
 foreground catch-up scan; use `--refresh strict` or `ctx import --all` when you
 need a full catch-up before querying. `off` skips the pre-search refresh and
 never runs plugin commands. `strict` fails the search if the refresh cannot run
-or import successfully. Explicit export sources such as Amp and Devin, preview
-native sources such as NanoClaw and AstrBot, plus search-only sources without
-native import support, are searched from the existing index until they are
-explicitly imported through a supported path.
+or import successfully. Preview native sources such as NanoClaw and AstrBot,
+plus search-only sources without native import support, are searched from the
+existing index until they are explicitly imported through a supported path.
 
 Use `--refresh off` for a strictly read-only search over the existing ctx index.
 This avoids provider imports, plugin execution, and updates to the ctx SQLite

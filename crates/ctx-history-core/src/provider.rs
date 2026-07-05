@@ -180,18 +180,16 @@ pub enum ProviderId {
     ContinueCody,
     #[serde(rename = "auggie", alias = "augment", alias = "augment-code")]
     Auggie,
-    Devin,
     Eve,
     Junie,
     Kilo,
     SweAgent,
-    Amp,
     #[serde(rename = "tinycloud", alias = "tiny_cloud", alias = "tiny-cloud")]
     TinyCloud,
 }
 
 impl ProviderId {
-    pub const ALL: [Self; 72] = [
+    pub const ALL: [Self; 70] = [
         Self::Codex,
         Self::ClaudeCode,
         Self::ClaudeCliCrp,
@@ -257,12 +255,10 @@ impl ProviderId {
         Self::ClineRoo,
         Self::ContinueCody,
         Self::Auggie,
-        Self::Devin,
         Self::Eve,
         Self::Junie,
         Self::Kilo,
         Self::SweAgent,
-        Self::Amp,
         Self::TinyCloud,
     ];
 }
@@ -560,7 +556,6 @@ mod tests {
             .collect::<BTreeSet<_>>();
         let expected = [
             ProviderId::AntigravityCli,
-            ProviderId::Amp,
             ProviderId::AstrBot,
             ProviderId::AutohandCode,
             ProviderId::Auggie,
@@ -580,7 +575,6 @@ mod tests {
             ProviderId::Cursor,
             ProviderId::Windsurf,
             ProviderId::CopilotCli,
-            ProviderId::Devin,
             ProviderId::Dexto,
             ProviderId::FactoryAiDroid,
             ProviderId::Firebender,
