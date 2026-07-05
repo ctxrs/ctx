@@ -778,6 +778,74 @@
       ]
     },
     {
+      "id": "amp",
+      "display_name": "Amp",
+      "priority": "p1",
+      "status": "local_import_when_supported",
+      "capture_provider": "amp",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "amp_threads_export_json",
+          "fidelity": "imported",
+          "proof": [
+            "@ampcode/cli@0.0.1783181941-g187572 `amp threads export --help` says it exports a thread as JSON and outputs the full thread payload",
+            "@ampcode/cli@0.0.1783181941-g187572 bundled export handler calls threadRemote.getThread(threadIDOrURL) and JSON.stringify(thread)",
+            "@ampcode/cli@0.0.1783181941-g187572 markdown renderer reads title, id, created, agentMode, messages, roles, text, tool_use, tool_result, summary, and manual_bash_invocation blocks",
+            "ctx import --provider amp --path <amp threads export JSON>",
+            "cargo test -p ctx-history-capture native_amp_threads_export_imports_explicit_json_searches_and_reimports"
+          ],
+          "notes": [
+            "Reads only explicit JSON emitted by amp threads export <threadIDOrURL>.",
+            "No default locations are registered for Amp; ctx does not crawl $XDG_CACHE_HOME/amp/logs/cli.log because the CLI help/source identify it as an operational log path, not durable transcript history.",
+            "Normalizes visible text, tool_use, tool_result, summary, and manual_bash_invocation blocks; thinking and redacted_thinking blocks are intentionally skipped."
+          ]
+        }
+      ],
+      "history_locations": [
+        "explicit amp threads export JSON file"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": false,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": true,
+        "command_output": true,
+        "files_touched": true,
+        "artifacts": false,
+        "model_identity": false,
+        "costs": false,
+        "token_usage": false,
+        "parent_child_session_edges": false
+      },
+      "redaction_notes": [
+        "Reads an explicit user-supplied Amp export file read-only; imported message text, local source paths, and export source path remain in the local ctx index.",
+        "thinking and redacted_thinking content blocks are skipped and not stored in adjacent event bodies."
+      ],
+      "blockers": [
+        "Importer is anchored to @ampcode/cli package version 0.0.1783181941-g187572 export/markdown handlers and a redacted fixture; a public stable JSON schema is not otherwise documented.",
+        "No default auto-discovery is claimed until Amp proves durable local transcript storage distinct from operational logs."
+      ],
+      "public_docs": "docs/provider-support.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/amp/threads-export/redacted-thread.json"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs",
+        "tests/fixtures/provider-history/amp/threads-export/redacted-thread.json"
+      ],
+      "metadata": {
+        "default_auto_discovery": false,
+        "import_support": "preview",
+        "source_command": "amp threads export"
+      }
+    },
+    {
       "id": "openclaw",
       "display_name": "OpenClaw",
       "priority": "p1",

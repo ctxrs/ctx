@@ -36,6 +36,9 @@ The current CLI imports local history for:
 - Aider Desk project task context files under `.aider-desk/tasks/<taskId>`,
   `AIDER_DESK_DIR/tasks/<taskId>`, or an explicit task, tasks, context file, or
   project root;
+- Amp thread export JSON files produced by `amp threads export <threadIDOrURL>`
+  and passed explicitly with `ctx import --provider amp --path <file>`; ctx does
+  not auto-discover Amp paths or crawl `$XDG_CACHE_HOME/amp/logs/cli.log`;
 - OpenClaw session JSONL trees under `OPENCLAW_STATE_DIR`, `~/.openclaw`,
   legacy `~/.clawdbot`, or legacy `~/.moltbot`;
 - Hermes Agent SQLite history under `HERMES_HOME/state.db` or
@@ -128,13 +131,13 @@ CLI provider flags use names such as `kilo`, `crush`, `goose`, `dexto`,
 `factory-ai-droid`, `qwen-code`, `kimi-code-cli`, `autohand-code`,
 `kiro-cli`, `iflow-cli`, `eve`, `forgecode`, `deepagents`, `mistral-vibe`, `mux`,
 `reasonix`, `kode`, `neovate`, `terramind`, `zed`, `lingma`, `codebuddy`,
-`aider-desk`, `cline`, and `roo`/`roo-code`.
+`aider-desk`, `amp`, `cline`, and `roo`/`roo-code`.
 Structured JSON and stable SQL views use provider IDs in ctx output; multiword IDs may be
 snake_case, such as `copilot_cli`, `factory_ai_droid`, `qwen_code`,
 `kimi_code_cli`, `autohand_code`, `kiro_cli`, `iflow_cli`, or
 `mistral_vibe`; Aider Desk is reported as `aider_desk`, while compact native
 IDs such as `kilo`, `openclaw`, `crush`, `goose`, `dexto`, `mux`, `reasonix`,
-`kode`, `neovate`, `terramind`, `zed`, `lingma`, `codebuddy`, `forgecode`,
+`kode`, `neovate`, `terramind`, `zed`, `lingma`, `codebuddy`, `amp`, `forgecode`,
 `deepagents`, `nanoclaw`, `astrbot`, `shelley`, `continue`, and `openhands`
 stay compact. Roo Code is
 reported as `roo_code`.
@@ -144,7 +147,8 @@ and `importable` fields. A native source is marked available/importable only
 when provider-specific transcript files exist. Sources with `import_support:
 "preview"` are explicit-import preview paths: use `ctx import --provider
 nanoclaw` or `ctx import --provider astrbot` when discovery finds the desired
-source, or add `--path` to target a specific source before searching it. They
+source, or add `--path` to target a specific source such as an Amp export JSON
+before searching it. They
 are intentionally excluded from `ctx import --all` and pre-search refresh until
 promoted. Sources with
 `status: "unknown"` hit the bounded transcript probe budget before proving
