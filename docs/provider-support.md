@@ -33,6 +33,7 @@ is:
 | Dexto | `local_import_when_supported` | Explicit Dexto SQLite DB path. | Static local-history fixture smoke; default discovery remains intentionally unclaimed. |
 | Lingma | `local_import_when_supported` | `~/.lingma/vscode/sharedClientCache/cache/db/local.db`, `~/.lingma/vscode-insiders/sharedClientCache/cache/db/local.db`, or an explicit Lingma `local.db`. | Static local-history fixture smoke; schema proof comes from WayLog and official Qoder CN VSIX/package path evidence. Assistant content is summary/error_result only and may be partial. `qoder-cn` is accepted as an alias for the same Lingma `local.db`; separate `.qodercn`/`.qoder-cn` paths remain unclaimed. |
 | Pochi | `local_import_when_supported` | Preview import from synced LiveStore state DBs under `~/.pochi/storage`, an explicit `state*.db` SQLite file, or a directory containing those files. | Static local-history fixture smoke; default discovery is limited to `~/.pochi/storage` when filesystem sync has produced `state*.db`; no `config.jsonc` parsing or VS Code OPFS import is claimed. |
+| Warp | `local_import_when_supported` | Preview manual import from a Warp Terminal `warp.sqlite` file. | Static schema-backed SQLite fixture smoke; use `ctx import --provider warp` for a discovered documented Linux/macOS path or `ctx import --provider warp --path <warp.sqlite>`. Default auto-import/search refresh, Windows `%LOCALAPPDATA%` discovery, cloud sync, Oz/cloud conversations, browser IndexedDB, Markdown exports, and Warp Drive/team data are not claimed. |
 | CodeBuddy | `local_import_when_supported` | `~/.codebuddy`, `~/Library/Application Support/CodeBuddyExtension/Data`, `%LOCALAPPDATA%/CodeBuddyExtension`, or an explicit CodeBuddy history root. | Static local-history fixture smoke; schema proof comes from WayLog and sanitized fixtures. |
 | Aider Desk | `local_import_when_supported` | Project-local `.aider-desk/tasks/<taskId>/context.json`, `AIDER_DESK_DIR/tasks/<taskId>/context.json`, or an explicit task, tasks, context file, or project root. | Static local-history fixture smoke; cwd/ancestor discovery only reports projects that already have task context files. |
 | Amp | `local_import_when_supported` | Explicit JSON emitted by `amp threads export <threadIDOrURL>` and imported with `ctx import --provider amp --path <file>`. | Static redacted export fixture smoke; no default discovery is registered, and `$XDG_CACHE_HOME/amp/logs/cli.log` is not crawled. |
@@ -78,7 +79,7 @@ is:
 `ctx sources --json` uses `import_support: "preview"` and `native_import:
 false` for preview sources/importers such as NanoClaw, AstrBot, Pochi,
 Windsurf, Amp explicit exports, Devin ATIF exports, and Trae explicit state
-databases. Those paths can be
+databases, and Warp SQLite databases. Those paths can be
 imported explicitly with `ctx import --provider ...` when discovery finds them,
 or with `ctx import --provider ... --path ...` for a specific path. They are not
 swept up by `ctx import --all` or the default pre-search refresh.

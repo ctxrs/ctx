@@ -193,6 +193,27 @@ const DEXTO_DEFAULTS: &[ProviderDefaultLocation] = &[];
 
 const POCHI_DEFAULTS: &[ProviderDefaultLocation] = &[];
 
+const WARP_DEFAULTS: &[ProviderDefaultLocation] = &[
+    ProviderDefaultLocation {
+        path_components: &[".local", "state", "warp-terminal", "warp.sqlite"],
+        source_format: "warp_sqlite",
+        source_kind: ProviderSourceKind::NativeHistory,
+    },
+    ProviderDefaultLocation {
+        path_components: &[
+            "Library",
+            "Group Containers",
+            "2BBY89MBSN.dev.warp",
+            "Library",
+            "Application Support",
+            "dev.warp.Warp-Stable",
+            "warp.sqlite",
+        ],
+        source_format: "warp_sqlite",
+        source_kind: ProviderSourceKind::NativeHistory,
+    },
+];
+
 const LINGMA_DEFAULTS: &[ProviderDefaultLocation] = &[
     ProviderDefaultLocation {
         path_components: &[
@@ -1006,6 +1027,16 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         provider: CaptureProvider::Pochi,
         display_name: "Pochi",
         default_locations: POCHI_DEFAULTS,
+        import_support: ProviderImportSupport::Preview,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
+    ProviderSourceSpec {
+        provider: CaptureProvider::Warp,
+        display_name: "Warp",
+        default_locations: WARP_DEFAULTS,
         import_support: ProviderImportSupport::Preview,
         catalog_support: ProviderCatalogSupport::None,
         raw_retention: ProviderRawRetention::PathReference,
@@ -1955,6 +1986,7 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::Lingma => "lingma_sqlite",
         CaptureProvider::Trae => "trae_state_vscdb",
         CaptureProvider::Pochi => "pochi_livestore_state_sqlite",
+        CaptureProvider::Warp => "warp_sqlite",
         CaptureProvider::CortexCode if path.is_dir() => "cortex_code_conversations_json",
         CaptureProvider::CortexCode => {
             if path
@@ -2161,6 +2193,7 @@ fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::Pochi => {
             Some("path exists but no Pochi LiveStore state SQLite database was found")
         }
+        CaptureProvider::Warp => Some("path exists but no Warp SQLite database was found"),
         CaptureProvider::CortexCode => {
             Some("path exists but no Cortex Code session JSON or history JSONL files were found")
         }
@@ -2543,6 +2576,7 @@ fn default_location_import_probe(
             )
         }),
         CaptureProvider::Lingma => has_lingma_chat_record_table(path),
+        CaptureProvider::Warp => path_is_file_probe(path),
         CaptureProvider::CortexCode => has_cortex_code_session_files(path, 10_000),
         CaptureProvider::CodeBuddy => has_codebuddy_history_json(path, 10_000),
         CaptureProvider::AiderDesk => {

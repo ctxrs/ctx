@@ -19,9 +19,9 @@ UPSTREAM_PACKAGE = "skills@1.5.14"
 UPSTREAM_COMMIT = "2adcfe5a4cce0ce5f4d5547a997b2a161ec5d127"
 EXPECTED_COUNTS = {
     "native-auto": 45,
-    "native-preview": 7,
+    "native-preview": 8,
     "candidate-family": 4,
-    "webapp-boundary": 8,
+    "webapp-boundary": 7,
     "unknown": 6,
     "install-target": 2,
 }
@@ -37,6 +37,7 @@ REQUIRED_SCHEMA_FAMILIES = {
     "Forge conversation SQLite",
     "LangGraph checkpoint SQLite",
     "LiveStore SQLite state DB",
+    "Warp restoration SQLite",
     "Workflow local-world streams",
     "per-agent history JSON",
     "explicit ATIF export JSON",
