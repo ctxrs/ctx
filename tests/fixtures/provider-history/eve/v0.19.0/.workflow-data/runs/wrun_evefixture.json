@@ -1,0 +1,12 @@
+{
+  "runId": "wrun_evefixture",
+  "status": "completed",
+  "workflowName": "eve.workflowEntry",
+  "createdAt": "2026-07-05T00:00:00.000Z",
+  "startedAt": "2026-07-05T00:00:00.000Z",
+  "completedAt": "2026-07-05T00:00:05.000Z",
+  "attributes": {
+    "eve.sessionId": "wrun_evefixture",
+    "eve.fixture": true
+  }
+}

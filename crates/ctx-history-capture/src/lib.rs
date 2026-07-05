@@ -10,6 +10,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use chrono::{DateTime, Duration, NaiveDateTime, Utc};
 use ctx_history_core::{
     inbox_dir as core_inbox_dir, new_id, utc_now, AgentType, CaptureEnvelope, CaptureProvider,
@@ -532,6 +533,27 @@ pub struct AuggieImportOptions {
 }
 
 impl Default for AuggieImportOptions {
+    fn default() -> Self {
+        Self {
+            machine_id: default_machine_id(),
+            source_path: None,
+            imported_at: utc_now(),
+            history_record_id: None,
+            allow_partial_failures: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EveImportOptions {
+    pub machine_id: String,
+    pub source_path: Option<PathBuf>,
+    pub imported_at: DateTime<Utc>,
+    pub history_record_id: Option<Uuid>,
+    pub allow_partial_failures: bool,
+}
+
+impl Default for EveImportOptions {
     fn default() -> Self {
         Self {
             machine_id: default_machine_id(),
@@ -1541,6 +1563,9 @@ pub struct AiderDeskContextJsonAdapter;
 pub struct AuggieSessionJsonAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
+pub struct EveWorkflowDataAdapter;
+
+#[derive(Debug, Clone, Copy, Default)]
 pub struct FirebenderSqliteAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -2395,6 +2420,24 @@ impl ProviderCaptureAdapter for AuggieSessionJsonAdapter {
         context: &ProviderAdapterContext,
     ) -> Result<ProviderNormalizationResult> {
         normalize_auggie_sessions(path, context)
+    }
+}
+
+impl ProviderCaptureAdapter for EveWorkflowDataAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Eve
+    }
+
+    fn source_format(&self) -> &str {
+        EVE_WORKFLOW_DATA_SOURCE_FORMAT
+    }
+
+    fn normalize_path(
+        &self,
+        path: &Path,
+        context: &ProviderAdapterContext,
+    ) -> Result<ProviderNormalizationResult> {
+        normalize_eve_workflow_data(path, context)
     }
 }
 
@@ -5177,6 +5220,41 @@ pub fn import_auggie_history(
     )
 }
 
+pub fn import_eve_history(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: EveImportOptions,
+) -> Result<ProviderImportSummary> {
+    let path = path.as_ref();
+    let source_path = options
+        .source_path
+        .clone()
+        .unwrap_or_else(|| path.to_path_buf());
+    let normalization = EveWorkflowDataAdapter.normalize_path(
+        path,
+        &ProviderAdapterContext {
+            machine_id: options.machine_id,
+            source_path: Some(source_path),
+            imported_at: options.imported_at,
+            tool_output_mode: CodexToolOutputMode::Full,
+            event_mode: CodexEventImportMode::Rich,
+            include_notices: true,
+        },
+    )?;
+
+    import_normalized_provider_captures(
+        store,
+        normalization,
+        NormalizedProviderImportOptions {
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+            persist_cursors: true,
+            wrap_transaction: true,
+            fast_event_inserts: true,
+        },
+    )
+}
+
 pub fn import_firebender_sqlite(
     path: impl AsRef<Path>,
     store: &mut Store,
@@ -6214,6 +6292,7 @@ const ROO_TASK_JSON_SOURCE_FORMAT: &str = "roo_task_directory_json";
 const CODEBUDDY_SOURCE_FORMAT: &str = "codebuddy_history_json";
 const AIDER_DESK_SOURCE_FORMAT: &str = "aider_desk_task_context_json";
 const AUGGIE_SESSION_JSON_SOURCE_FORMAT: &str = "auggie_session_json";
+const EVE_WORKFLOW_DATA_SOURCE_FORMAT: &str = "eve_workflow_data_streams";
 const FIREBENDER_SQLITE_SOURCE_FORMAT: &str = "firebender_chat_history_sqlite";
 const OPENCODE_SQLITE_SOURCE_FORMAT: &str = "opencode_sqlite";
 const KILO_SQLITE_SOURCE_FORMAT: &str = "kilo_sqlite";
@@ -11017,6 +11096,611 @@ fn firebender_capture(
         },
         context,
         event,
+    )
+}
+
+#[derive(Debug, Clone)]
+struct EveStreamEventRow {
+    source_index: usize,
+    stream_name: String,
+    chunk_path: PathBuf,
+    chunk_index: usize,
+    event_index_in_chunk: usize,
+    value: Value,
+}
+
+fn normalize_eve_workflow_data(
+    path: &Path,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    let data_dir = eve_workflow_data_dir(path)?;
+    let stream_maps = eve_stream_run_files(&data_dir)?;
+    if stream_maps.is_empty() {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: data_dir,
+            reason: "Eve .workflow-data is missing streams/runs/*.json",
+        });
+    }
+
+    let mut merged = ProviderNormalizationResult::default();
+    for (run_ordinal, stream_map_path) in stream_maps.iter().enumerate() {
+        match normalize_eve_stream_run(&data_dir, stream_map_path, context, run_ordinal) {
+            Ok(mut result) => {
+                merged.summary.merge(result.summary);
+                merged.captures.append(&mut result.captures);
+                merged.files_touched.append(&mut result.files_touched);
+            }
+            Err(err) => {
+                merged.summary.failed += 1;
+                merged.summary.failures.push(ProviderImportFailure {
+                    line: run_ordinal.saturating_add(1),
+                    error: err.to_string(),
+                });
+            }
+        }
+    }
+
+    if merged.captures.is_empty() && merged.summary.failed == 0 {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: data_dir,
+            reason: "Eve .workflow-data contains no readable default session streams",
+        });
+    }
+
+    Ok(merged)
+}
+
+fn normalize_eve_stream_run(
+    data_dir: &Path,
+    stream_map_path: &Path,
+    context: &ProviderAdapterContext,
+    run_ordinal: usize,
+) -> Result<ProviderNormalizationResult> {
+    let run_id = eve_run_id_from_stream_map_path(stream_map_path)?;
+    let stream_map = read_provider_json_file(stream_map_path, "Eve stream map JSON")?;
+    let streams = stream_map
+        .get("streams")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            CaptureError::InvalidPayload("Eve stream map JSON is missing streams array".to_owned())
+        })?;
+    let default_stream = eve_default_stream_name(&run_id);
+    if !streams
+        .iter()
+        .filter_map(Value::as_str)
+        .any(|stream| stream == default_stream)
+    {
+        return Ok(ProviderNormalizationResult::default());
+    }
+
+    let mut summary = ProviderImportSummary::default();
+    let rows = eve_stream_event_rows(data_dir, &run_id, &default_stream, &mut summary)?;
+    let run_metadata = eve_run_metadata(data_dir, &run_id, &mut summary);
+    let started_at = provider_timestamp_from_fields(
+        &run_metadata,
+        &["startedAt", "started_at", "createdAt", "created_at"],
+    )
+    .or_else(|| rows.iter().find_map(|row| eve_event_time(&row.value)))
+    .unwrap_or(context.imported_at);
+    let ended_at = provider_timestamp_from_fields(
+        &run_metadata,
+        &["completedAt", "completed_at", "updatedAt", "updated_at"],
+    )
+    .or_else(|| rows.iter().rev().find_map(|row| eve_event_time(&row.value)));
+    let runtime = rows
+        .iter()
+        .find(|row| eve_event_type(&row.value) == Some("session.started"))
+        .and_then(|row| row.value.pointer("/data/runtime"));
+    let raw_source_path = data_dir.display().to_string();
+    let run_path = data_dir.join("runs").join(format!("{run_id}.json"));
+    let chunks_dir = data_dir.join("streams").join("chunks");
+    let source_metadata = json!({
+        "adapter": EVE_WORKFLOW_DATA_SOURCE_FORMAT,
+        "source_path": raw_source_path,
+        "stream_map_path": stream_map_path.display().to_string(),
+        "run_path": run_path.display().to_string(),
+        "chunks_dir": chunks_dir.display().to_string(),
+        "upstream_schema_anchor": {
+            "package": "eve@0.19.0",
+            "docs": "docs/concepts/execution-model-and-durability.md",
+            "workflow_local": "@workflow/world-local@5.0.0-beta.22 stores runs, stream maps, and chunks under .workflow-data"
+        },
+    });
+    let session_metadata = json!({
+        "source_format": EVE_WORKFLOW_DATA_SOURCE_FORMAT,
+        "provider": CaptureProvider::Eve.as_str(),
+        "session_id": run_id,
+        "stream_name": default_stream,
+        "stream_event_count": rows.len(),
+        "workflow_name": provider_string_field(&run_metadata, &["workflowName", "workflow_name"]),
+        "status": provider_string_field(&run_metadata, &["status"]),
+        "deployment_id": provider_string_field(&run_metadata, &["deploymentId", "deployment_id"]),
+        "runtime": runtime.map(|value| provider_capped_json_value(value, PROVIDER_MAX_PREVIEW_CHARS)),
+        "attributes": run_metadata
+            .get("attributes")
+            .map(|value| provider_capped_json_value(value, PROVIDER_MAX_PREVIEW_CHARS)),
+        "limitations": [
+            "ctx imports replayed Eve message stream events from the default workflow stream",
+            "incremental message/reasoning deltas are skipped when completed events are present to avoid duplicate transcript text",
+            "encrypted or non-devalue Workflow stream chunks are not decoded by the native importer"
+        ],
+    });
+    let base_draft = NativeSessionDraft {
+        provider: CaptureProvider::Eve,
+        source_format: EVE_WORKFLOW_DATA_SOURCE_FORMAT,
+        provider_session_id: run_id.clone(),
+        parent_provider_session_id: None,
+        root_provider_session_id: None,
+        external_agent_id: runtime
+            .and_then(|value| provider_string_field(value, &["agentId", "agent_id"])),
+        agent_type: AgentType::Primary,
+        role_hint: Some("primary".to_owned()),
+        is_primary: true,
+        started_at,
+        ended_at,
+        cwd: None,
+        fidelity: Fidelity::Imported,
+        raw_source_path: raw_source_path.clone(),
+        trust: ProviderSourceTrust::ProviderNative,
+        source_metadata,
+        session_metadata,
+    };
+
+    let mut result = ProviderNormalizationResult {
+        summary,
+        ..ProviderNormalizationResult::default()
+    };
+    let mut provider_event_index = 0u64;
+    for row in &rows {
+        let Some(event) = eve_provider_event(&run_id, provider_event_index, row, started_at) else {
+            continue;
+        };
+        result.captures.push((
+            run_ordinal
+                .saturating_mul(100_000)
+                .saturating_add(row.source_index),
+            native_provider_capture(base_draft.clone(), context, Some(event)),
+        ));
+        provider_event_index = provider_event_index.saturating_add(1);
+    }
+
+    if result.captures.is_empty() {
+        result.captures.push((
+            run_ordinal.saturating_mul(100_000),
+            native_provider_capture(base_draft, context, None),
+        ));
+    }
+
+    Ok(result)
+}
+
+fn eve_workflow_data_dir(path: &Path) -> Result<PathBuf> {
+    let candidates = [path.to_path_buf(), path.join(".workflow-data")];
+    for candidate in candidates {
+        if candidate.join("streams").join("runs").is_dir()
+            && candidate.join("streams").join("chunks").is_dir()
+        {
+            ensure_provider_transcript_root_dir(&candidate)?;
+            return Ok(candidate);
+        }
+    }
+    Err(CaptureError::InvalidProviderTranscriptPath {
+        path: path.to_path_buf(),
+        reason: "expected Eve .workflow-data directory with streams/runs and streams/chunks",
+    })
+}
+
+fn ensure_provider_transcript_root_dir(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "symlinked provider transcript roots are rejected",
+        });
+    }
+    if !file_type.is_dir() {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "provider transcript roots must be directories",
+        });
+    }
+    ensure_provider_path_parents_are_not_symlinks(path)?;
+    Ok(())
+}
+
+fn eve_stream_run_files(data_dir: &Path) -> Result<Vec<PathBuf>> {
+    let runs_dir = data_dir.join("streams").join("runs");
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(runs_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_file()
+            && path.extension().and_then(|ext| ext.to_str()) == Some("json")
+        {
+            ensure_regular_provider_transcript_file(&path)?;
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+fn eve_run_id_from_stream_map_path(path: &Path) -> Result<String> {
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "Eve stream map filename is not valid UTF-8",
+        })?;
+    let run_id = stem.split('.').next().unwrap_or(stem);
+    if run_id.is_empty() {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "Eve stream map filename is missing run id",
+        });
+    }
+    Ok(run_id.to_owned())
+}
+
+fn eve_default_stream_name(run_id: &str) -> String {
+    if let Some(rest) = run_id.strip_prefix("wrun_") {
+        format!("strm_{rest}_user")
+    } else {
+        format!("strm_{run_id}_user")
+    }
+}
+
+fn eve_stream_event_rows(
+    data_dir: &Path,
+    run_id: &str,
+    stream_name: &str,
+    summary: &mut ProviderImportSummary,
+) -> Result<Vec<EveStreamEventRow>> {
+    let chunk_paths = eve_stream_chunk_paths(data_dir, stream_name)?;
+    let mut rows = Vec::new();
+    for (chunk_index, chunk_path) in chunk_paths.iter().enumerate() {
+        match eve_events_from_chunk(chunk_path) {
+            Ok(events) => {
+                for (event_index_in_chunk, value) in events.into_iter().enumerate() {
+                    rows.push(EveStreamEventRow {
+                        source_index: rows.len().saturating_add(1),
+                        stream_name: stream_name.to_owned(),
+                        chunk_path: chunk_path.clone(),
+                        chunk_index,
+                        event_index_in_chunk,
+                        value,
+                    });
+                }
+            }
+            Err(err) => push_provider_import_failure(
+                summary,
+                chunk_index.saturating_add(1),
+                format!(
+                    "invalid Eve stream chunk for run {run_id} at {}: {err}",
+                    chunk_path.display()
+                ),
+            ),
+        }
+    }
+    Ok(rows)
+}
+
+fn eve_stream_chunk_paths(data_dir: &Path, stream_name: &str) -> Result<Vec<PathBuf>> {
+    let chunks_dir = data_dir.join("streams").join("chunks");
+    let prefix = format!("{stream_name}-");
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(chunks_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if !file_type.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if name.starts_with(&prefix) && name.ends_with(".bin") {
+            ensure_regular_provider_transcript_file(&path)?;
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+fn eve_events_from_chunk(path: &Path) -> Result<Vec<Value>> {
+    let bytes = fs::read(path)?;
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let payload = match bytes[0] {
+        1 => return Ok(Vec::new()),
+        0 => &bytes[1..],
+        _ => bytes.as_slice(),
+    };
+    eve_decode_workflow_stream_payload(payload)
+}
+
+fn eve_decode_workflow_stream_payload(payload: &[u8]) -> Result<Vec<Value>> {
+    if payload
+        .first()
+        .is_some_and(|byte| *byte == b'{' || *byte == b'[')
+    {
+        return eve_parse_ndjson_payload(payload);
+    }
+
+    let mut offset = 0usize;
+    let mut events = Vec::new();
+    while offset < payload.len() {
+        if payload.len().saturating_sub(offset) < 4 {
+            return Err(CaptureError::InvalidPayload(
+                "Eve Workflow stream frame is missing length prefix".to_owned(),
+            ));
+        }
+        let frame_len = u32::from_be_bytes([
+            payload[offset],
+            payload[offset + 1],
+            payload[offset + 2],
+            payload[offset + 3],
+        ]) as usize;
+        offset += 4;
+        if frame_len > payload.len().saturating_sub(offset) {
+            return Err(CaptureError::InvalidPayload(format!(
+                "Eve Workflow stream frame length {frame_len} exceeds remaining bytes"
+            )));
+        }
+        events.extend(eve_decode_workflow_frame(
+            &payload[offset..offset + frame_len],
+        )?);
+        offset += frame_len;
+    }
+    Ok(events)
+}
+
+fn eve_decode_workflow_frame(frame: &[u8]) -> Result<Vec<Value>> {
+    if let Some(serialized) = frame.strip_prefix(b"devl") {
+        let value: Value = serde_json::from_slice(serialized)?;
+        let Some(bytes) = eve_devalue_uint8array_bytes(&value)? else {
+            return Ok(Vec::new());
+        };
+        return eve_parse_ndjson_payload(&bytes);
+    }
+    if frame
+        .first()
+        .is_some_and(|byte| *byte == b'{' || *byte == b'[')
+    {
+        return eve_parse_ndjson_payload(frame);
+    }
+    Err(CaptureError::InvalidPayload(
+        "unsupported Eve Workflow stream serialization format".to_owned(),
+    ))
+}
+
+fn eve_devalue_uint8array_bytes(value: &Value) -> Result<Option<Vec<u8>>> {
+    let Some(items) = value.as_array() else {
+        return Ok(None);
+    };
+    let Some(tag) = items.first().and_then(Value::as_array) else {
+        return Ok(None);
+    };
+    if tag.first().and_then(Value::as_str) != Some("Uint8Array") {
+        return Ok(None);
+    }
+    let Some(index) = tag.get(1).and_then(Value::as_u64) else {
+        return Ok(None);
+    };
+    let Some(encoded) = items.get(index as usize).and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    BASE64_STANDARD.decode(encoded).map(Some).map_err(|err| {
+        CaptureError::InvalidPayload(format!("invalid Eve Uint8Array base64: {err}"))
+    })
+}
+
+fn eve_parse_ndjson_payload(bytes: &[u8]) -> Result<Vec<Value>> {
+    let text = std::str::from_utf8(bytes).map_err(|err| {
+        CaptureError::InvalidPayload(format!("Eve stream payload is not UTF-8 NDJSON: {err}"))
+    })?;
+    let mut events = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value: Value = serde_json::from_str(trimmed)?;
+        if value.is_object() {
+            events.push(value);
+        }
+    }
+    Ok(events)
+}
+
+fn eve_run_metadata(data_dir: &Path, run_id: &str, summary: &mut ProviderImportSummary) -> Value {
+    let run_path = data_dir.join("runs").join(format!("{run_id}.json"));
+    match read_provider_json_file(&run_path, "Eve run JSON") {
+        Ok(value) => value,
+        Err(CaptureError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => json!({}),
+        Err(err) => {
+            push_provider_import_failure(
+                summary,
+                0,
+                format!("invalid Eve run metadata {}: {err}", run_path.display()),
+            );
+            json!({})
+        }
+    }
+}
+
+fn eve_provider_event(
+    provider_session_id: &str,
+    provider_event_index: u64,
+    row: &EveStreamEventRow,
+    fallback_start: DateTime<Utc>,
+) -> Option<ProviderEventEnvelope> {
+    let event_type_text = eve_event_type(&row.value)?;
+    let data = row.value.get("data").unwrap_or(&Value::Null);
+    let (event_type, role, text) = eve_project_event_text(event_type_text, data)?;
+    let occurred_at = eve_event_time(&row.value).unwrap_or_else(|| {
+        fallback_start + Duration::milliseconds(provider_event_index.min(i64::MAX as u64) as i64)
+    });
+    let event_hash = eve_event_hash(event_type_text, data, row);
+    Some(native_event(NativeEventDraft {
+        provider: CaptureProvider::Eve,
+        source_format: EVE_WORKFLOW_DATA_SOURCE_FORMAT,
+        provider_session_id: provider_session_id.to_owned(),
+        provider_event_index,
+        provider_event_hash: Some(event_hash),
+        cursor: format!(
+            "stream:{}:chunk:{}:event:{}",
+            row.stream_name,
+            row.chunk_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("unknown"),
+            row.event_index_in_chunk
+        ),
+        event_type,
+        role,
+        occurred_at,
+        text,
+        body: row.value.clone(),
+        metadata: json!({
+            "source": "eve_message_stream",
+            "source_format": EVE_WORKFLOW_DATA_SOURCE_FORMAT,
+            "stream_name": row.stream_name,
+            "chunk_index": row.chunk_index,
+            "event_index_in_chunk": row.event_index_in_chunk,
+            "event_type": event_type_text,
+            "turn_id": data.get("turnId").and_then(Value::as_str),
+            "sequence": data.get("sequence").and_then(Value::as_u64),
+            "step_index": data.get("stepIndex").and_then(Value::as_u64),
+            "status": data.get("status").and_then(Value::as_str),
+            "finish_reason": data.get("finishReason").and_then(Value::as_str),
+        }),
+    }))
+}
+
+fn eve_event_type(value: &Value) -> Option<&str> {
+    value.get("type").and_then(Value::as_str)
+}
+
+fn eve_event_time(value: &Value) -> Option<DateTime<Utc>> {
+    value
+        .pointer("/meta/at")
+        .and_then(Value::as_str)
+        .and_then(parse_rfc3339_utc)
+}
+
+fn eve_project_event_text(
+    event_type: &str,
+    data: &Value,
+) -> Option<(EventType, Option<EventRole>, String)> {
+    match event_type {
+        "message.received" => provider_string_field(data, &["message"])
+            .map(|text| (EventType::Message, Some(EventRole::User), text)),
+        "message.completed" => provider_string_field(data, &["message"])
+            .map(|text| (EventType::Message, Some(EventRole::Assistant), text)),
+        "reasoning.completed" => provider_string_field(data, &["reasoning"])
+            .map(|text| (EventType::Summary, Some(EventRole::Assistant), text)),
+        "result.completed" => data.get("result").map(|result| {
+            (
+                EventType::Message,
+                Some(EventRole::Assistant),
+                eve_value_text(result, "Eve result"),
+            )
+        }),
+        "actions.requested" => data.get("actions").map(|actions| {
+            (
+                EventType::ToolCall,
+                Some(EventRole::Assistant),
+                eve_actions_text(actions),
+            )
+        }),
+        "action.result" => data.get("result").map(|result| {
+            let text = data
+                .get("error")
+                .and_then(|error| provider_string_field(error, &["message", "code"]))
+                .or_else(|| {
+                    result
+                        .get("output")
+                        .map(|output| eve_value_text(output, "Eve action result"))
+                })
+                .unwrap_or_else(|| eve_value_text(result, "Eve action result"));
+            (EventType::ToolOutput, Some(EventRole::Tool), text)
+        }),
+        "subagent.called" => Some((
+            EventType::ToolCall,
+            Some(EventRole::Assistant),
+            provider_string_field(data, &["name", "toolName", "tool_name"])
+                .map(|name| format!("subagent called: {name}"))
+                .unwrap_or_else(|| "subagent called".to_owned()),
+        )),
+        "subagent.completed" => Some((
+            EventType::ToolOutput,
+            Some(EventRole::Tool),
+            provider_string_field(data, &["output"])
+                .unwrap_or_else(|| "subagent completed".to_owned()),
+        )),
+        "session.failed" | "turn.failed" | "step.failed" => Some((
+            EventType::Notice,
+            Some(EventRole::System),
+            provider_string_field(data, &["message", "code"])
+                .unwrap_or_else(|| format!("Eve {event_type}")),
+        )),
+        "authorization.required" | "authorization.completed" | "input.requested" => Some((
+            EventType::Notice,
+            Some(EventRole::System),
+            format!("Eve {event_type}"),
+        )),
+        _ => None,
+    }
+}
+
+fn eve_value_text(value: &Value, fallback: &str) -> String {
+    value
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| serde_json::to_string(value).unwrap_or_else(|_| fallback.to_owned()))
+}
+
+fn eve_actions_text(actions: &Value) -> String {
+    let Some(items) = actions.as_array() else {
+        return eve_value_text(actions, "Eve action request");
+    };
+    let rendered = items
+        .iter()
+        .enumerate()
+        .map(|(index, action)| {
+            let name = provider_string_field(action, &["name", "toolName", "tool_name", "kind"])
+                .unwrap_or_else(|| format!("action-{index}"));
+            let call_id = provider_string_field(action, &["callId", "call_id"]);
+            match call_id {
+                Some(call_id) => format!("{name} ({call_id})"),
+                None => name,
+            }
+        })
+        .collect::<Vec<_>>();
+    if rendered.is_empty() {
+        "Eve action request".to_owned()
+    } else {
+        format!("Eve action request: {}", rendered.join(", "))
+    }
+}
+
+fn eve_event_hash(event_type: &str, data: &Value, row: &EveStreamEventRow) -> String {
+    let turn_id = data.get("turnId").and_then(Value::as_str).unwrap_or("");
+    let sequence = data.get("sequence").and_then(Value::as_u64).unwrap_or(0);
+    let step_index = data.get("stepIndex").and_then(Value::as_u64).unwrap_or(0);
+    let call_id = data
+        .get("callId")
+        .or_else(|| data.pointer("/result/callId"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    format!(
+        "{event_type}:{turn_id}:{sequence}:{step_index}:{call_id}:{}:{}",
+        row.chunk_index, row.event_index_in_chunk
     )
 }
 
@@ -33198,6 +33882,83 @@ mod tests {
         assert_eq!(second.imported_events, 0);
         assert_eq!(second.skipped_sessions, 1);
         assert_eq!(second.skipped_events, 3);
+    }
+
+    #[test]
+    fn native_eve_fixture_imports_searches_reimports_and_tool_events() {
+        let temp = tempdir();
+        let fixture = provider_history_fixture("eve/v0.19.0/.workflow-data");
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let source = provider_source_for_path(CaptureProvider::Eve, fixture.clone());
+        assert_eq!(source.source_format, EVE_WORKFLOW_DATA_SOURCE_FORMAT);
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+
+        let first = import_eve_history(
+            &fixture,
+            &mut store,
+            EveImportOptions {
+                machine_id: "test-machine".into(),
+                source_path: Some(fixture.clone()),
+                imported_at: DateTime::parse_from_rfc3339("2026-07-05T00:00:10Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                allow_partial_failures: true,
+                ..EveImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(first.failed, 0, "{:?}", first.failures);
+        assert_eq!(first.imported_sessions, 1);
+        assert_eq!(first.imported_events, 4);
+
+        let session_id = provider_session_uuid(CaptureProvider::Eve, "wrun_evefixture");
+        let events = store.events_for_session(session_id).unwrap();
+        assert_eq!(events.len(), 4);
+        assert_eq!(events[0].role, Some(EventRole::User));
+        assert_eq!(events[1].event_type, EventType::ToolCall);
+        assert_eq!(events[2].event_type, EventType::ToolOutput);
+        assert_eq!(events[3].role, Some(EventRole::Assistant));
+        let rendered = serde_json::to_string(&events).unwrap();
+        assert!(rendered.contains("Eve fixture oracle prompt about 7d9b4c"));
+        assert!(rendered.contains("Eve fixture assistant answer 91c2"));
+        assert!(rendered.contains("Eve fixture tool result 4d2a"));
+        assert!(store
+            .search_event_hits("Eve fixture oracle prompt", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::Eve)));
+        assert!(store
+            .search_event_hits("Eve fixture assistant answer", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::Eve)));
+
+        let source = store
+            .capture_source_by_external_session(CaptureProvider::Eve, "wrun_evefixture")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            source.sync.metadata["source_metadata"]["upstream_schema_anchor"]["package"].as_str(),
+            Some("eve@0.19.0")
+        );
+
+        let second = import_eve_history(
+            &fixture,
+            &mut store,
+            EveImportOptions {
+                source_path: Some(fixture.clone()),
+                allow_partial_failures: true,
+                ..EveImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(second.failed, 0, "{:?}", second.failures);
+        assert_eq!(second.imported_sessions, 0);
+        assert_eq!(second.imported_events, 0);
+        assert_eq!(second.skipped_sessions, 1);
+        assert_eq!(second.skipped_events, 4);
     }
 
     #[test]

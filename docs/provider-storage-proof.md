@@ -250,6 +250,37 @@ IDE/application storage imports.
 - Caveat: no global `~/.firebender` chat transcript file is claimed; the proven
   chat store is project-local.
 
+## Eve
+
+- Source evidence: the published `eve@0.19.0` package documents durable
+  sessions and replayable streams; local development and self-deployed
+  `eve start` use Workflow local-world storage by default.
+- Workflow local-world evidence: `@workflow/world-local@5.0.0-beta.22`
+  resolves the data directory from `WORKFLOW_LOCAL_DATA_DIR` or `.workflow-data`
+  and stores runs, stream maps, chunks, steps, events, and hooks as local JSON
+  and binary files.
+- Storage evidence: local stream maps are written under
+  `.workflow-data/streams/runs/<runId>.json`, and stream chunks are written
+  under `.workflow-data/streams/chunks/<streamName>-<chunkId>.bin`.
+- Eve runtime evidence: the Eve workflow entry obtains a default workflow
+  writable stream, and turn steps write `encodeMessageStreamEvent(...)` records
+  to that parent writable. The message protocol encodes each event as NDJSON.
+- Encoding evidence: current Workflow local-world stream chunks prepend a
+  one-byte EOF marker; data chunks then contain length-prefixed Workflow frames.
+  Eve message bytes are wrapped as `devl`-serialized `Uint8Array` payloads that
+  decode back to NDJSON stream events such as `message.received`,
+  `message.completed`, `actions.requested`, and `action.result`.
+- `ctx` imports this shape as `eve_workflow_data_streams`, using conservative
+  discovery from `WORKFLOW_LOCAL_DATA_DIR` and current-project
+  `.workflow-data` only when stream maps and matching chunks exist. Explicit
+  import also accepts a `.workflow-data` directory or project root.
+- Caveat: `.eve/` contains build/runtime artifacts and dev-server state, not
+  the durable transcript source. ctx does not import `.eve/` as history.
+- Caveat: ctx imports completed/default Eve message stream events and skips
+  incremental deltas to avoid duplicate transcript text. Encrypted or
+  non-devalue Workflow stream chunks remain unclaimed until source proof and
+  fixtures exist.
+
 ## Kode
 
 - Source evidence: `@shareai-lab/kode@2.2.1` declares repository

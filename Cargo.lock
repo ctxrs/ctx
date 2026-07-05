@@ -302,6 +302,7 @@ dependencies = [
 name = "ctx-history-capture"
 version = "0.19.0"
 dependencies = [
+ "base64",
  "chrono",
  "ctx-history-core",
  "ctx-history-store",
