@@ -1911,6 +1911,75 @@
       ]
     },
     {
+      "id": "firebender",
+      "display_name": "Firebender",
+      "priority": "p1",
+      "status": "local_import_when_supported",
+      "capture_provider": "firebender",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "firebender_chat_history_sqlite",
+          "fidelity": "imported",
+          "proof": [
+            "Firebender 1.0.10 JetBrains Marketplace plugin bytecode (updateId=1045537) references project-local .idea/firebender/chat_history.db",
+            "ctx sources discovers a current-project ancestor only when .idea/firebender/chat_history.db exists with chat_sessions",
+            "ctx import --provider firebender",
+            "cargo test -p ctx-history-capture native_firebender_fixture_imports_project_root_db_and_reimports"
+          ],
+          "notes": [
+            "Reads Firebender JetBrains project chat history SQLite databases at .idea/firebender/chat_history.db or an explicit DB path.",
+            "Normalizes chat_sessions messages_json entries into user, assistant, tool-call, and tool-output events while retaining capped row metadata."
+          ]
+        }
+      ],
+      "history_locations": [
+        "<project>/.idea/firebender/chat_history.db"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": false,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": true,
+        "command_output": false,
+        "files_touched": false,
+        "artifacts": false,
+        "model_identity": false,
+        "costs": false,
+        "token_usage": false,
+        "parent_child_session_edges": false
+      },
+      "redaction_notes": [
+        "Reads the local project SQLite database read-only; imported message text and source paths remain in the local ctx index.",
+        "Raw Firebender message JSON is retained in event payloads; session metadata_json is retained only as capped provider metadata."
+      ],
+      "blockers": [
+        "Importer is based on public JetBrains Marketplace Firebender 1.0.10 plugin bytecode proof plus a minimized SQLite fixture; future plugin schema changes may need adapter updates.",
+        "The npx skills registry advertises ~/.firebender for skills, but the proven chat transcript store is project-local .idea/firebender/chat_history.db rather than a global ~/.firebender history file."
+      ],
+      "public_docs": "docs/provider-support.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/firebender/v1/.idea/firebender/chat_history.db"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs",
+        "tests/fixtures/provider-history/firebender/v1/.idea/firebender/chat_history.db"
+      ],
+      "metadata": {
+        "aliases": [
+          "firebender-jetbrains",
+          "firebender_jetbrains"
+        ],
+        "npx_skills_id": "firebender",
+        "canonical_provider_id": "firebender"
+      }
+    },
+    {
       "id": "forgecode",
       "display_name": "ForgeCode",
       "priority": "p1",

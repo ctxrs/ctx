@@ -544,6 +544,27 @@ impl Default for AuggieImportOptions {
 }
 
 #[derive(Debug, Clone)]
+pub struct FirebenderSqliteImportOptions {
+    pub machine_id: String,
+    pub source_path: Option<PathBuf>,
+    pub imported_at: DateTime<Utc>,
+    pub history_record_id: Option<Uuid>,
+    pub allow_partial_failures: bool,
+}
+
+impl Default for FirebenderSqliteImportOptions {
+    fn default() -> Self {
+        Self {
+            machine_id: default_machine_id(),
+            source_path: None,
+            imported_at: utc_now(),
+            history_record_id: None,
+            allow_partial_failures: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct OpenCodeSqliteImportOptions {
     pub machine_id: String,
     pub source_path: Option<PathBuf>,
@@ -1520,6 +1541,9 @@ pub struct AiderDeskContextJsonAdapter;
 pub struct AuggieSessionJsonAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
+pub struct FirebenderSqliteAdapter;
+
+#[derive(Debug, Clone, Copy, Default)]
 pub struct OpenCodeSqliteAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -2371,6 +2395,24 @@ impl ProviderCaptureAdapter for AuggieSessionJsonAdapter {
         context: &ProviderAdapterContext,
     ) -> Result<ProviderNormalizationResult> {
         normalize_auggie_sessions(path, context)
+    }
+}
+
+impl ProviderCaptureAdapter for FirebenderSqliteAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Firebender
+    }
+
+    fn source_format(&self) -> &str {
+        FIREBENDER_SQLITE_SOURCE_FORMAT
+    }
+
+    fn normalize_path(
+        &self,
+        path: &Path,
+        context: &ProviderAdapterContext,
+    ) -> Result<ProviderNormalizationResult> {
+        normalize_firebender_sqlite(path, context)
     }
 }
 
@@ -5135,6 +5177,41 @@ pub fn import_auggie_history(
     )
 }
 
+pub fn import_firebender_sqlite(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: FirebenderSqliteImportOptions,
+) -> Result<ProviderImportSummary> {
+    let path = path.as_ref();
+    let source_path = options
+        .source_path
+        .clone()
+        .unwrap_or_else(|| path.to_path_buf());
+    let normalization = FirebenderSqliteAdapter.normalize_path(
+        path,
+        &ProviderAdapterContext {
+            machine_id: options.machine_id,
+            source_path: Some(source_path),
+            imported_at: options.imported_at,
+            tool_output_mode: CodexToolOutputMode::Full,
+            event_mode: CodexEventImportMode::Rich,
+            include_notices: true,
+        },
+    )?;
+
+    import_normalized_provider_captures(
+        store,
+        normalization,
+        NormalizedProviderImportOptions {
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+            persist_cursors: true,
+            wrap_transaction: true,
+            fast_event_inserts: true,
+        },
+    )
+}
+
 pub fn import_opencode_sqlite(
     path: impl AsRef<Path>,
     store: &mut Store,
@@ -6137,6 +6214,7 @@ const ROO_TASK_JSON_SOURCE_FORMAT: &str = "roo_task_directory_json";
 const CODEBUDDY_SOURCE_FORMAT: &str = "codebuddy_history_json";
 const AIDER_DESK_SOURCE_FORMAT: &str = "aider_desk_task_context_json";
 const AUGGIE_SESSION_JSON_SOURCE_FORMAT: &str = "auggie_session_json";
+const FIREBENDER_SQLITE_SOURCE_FORMAT: &str = "firebender_chat_history_sqlite";
 const OPENCODE_SQLITE_SOURCE_FORMAT: &str = "opencode_sqlite";
 const KILO_SQLITE_SOURCE_FORMAT: &str = "kilo_sqlite";
 const KIRO_SQLITE_SOURCE_FORMAT: &str = "kiro_cli_sqlite";
@@ -10596,6 +10674,350 @@ fn auggie_node_text(node: &Value) -> Option<String> {
                 .and_then(Value::as_str)
                 .map(|name| format!("tool: {name}"))
         })
+}
+
+#[derive(Debug, Clone)]
+struct FirebenderChatSessionRow {
+    id: String,
+    name: String,
+    created_at: i64,
+    updated_at: i64,
+    messages_json: String,
+    metadata_json: String,
+    row_number: u64,
+}
+
+fn normalize_firebender_sqlite(
+    path: &Path,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    let db_path = firebender_chat_history_db_path(path)?;
+    let conn = open_provider_sqlite_readonly(&db_path)?;
+    if !sqlite_table_exists(&conn, "chat_sessions")? {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: db_path,
+            reason: "Firebender chat_history.db is missing required chat_sessions table",
+        });
+    }
+    let columns = sqlite_table_columns(&conn, "chat_sessions")?;
+    ensure_sqlite_table_columns(
+        &columns,
+        "Firebender chat_sessions table",
+        &[
+            "id",
+            "name",
+            "created_at",
+            "updated_at",
+            "messages_json",
+            "metadata_json",
+        ],
+    )?;
+    let schema_fingerprint = opencode_schema_fingerprint(&conn)?;
+    let rows = firebender_chat_session_rows(&conn, &columns)?;
+    let mut result = ProviderNormalizationResult::default();
+
+    for row in rows {
+        let line = provider_line_from_index(row.row_number);
+        let started_at = provider_timestamp_millis(Some(row.created_at), context.imported_at);
+        let ended_at = Some(provider_timestamp_millis(Some(row.updated_at), started_at));
+        let metadata = provider_json_text(&row.metadata_json);
+        let messages = match serde_json::from_str::<Value>(&row.messages_json) {
+            Ok(Value::Array(messages)) => messages,
+            Ok(_) => {
+                push_provider_import_failure(
+                    &mut result.summary,
+                    line,
+                    format!(
+                        "Firebender session {} messages_json is not an array",
+                        row.id
+                    ),
+                );
+                Vec::new()
+            }
+            Err(err) => {
+                push_provider_import_failure(
+                    &mut result.summary,
+                    line,
+                    format!(
+                        "Firebender session {} messages_json is invalid JSON: {err}",
+                        row.id
+                    ),
+                );
+                Vec::new()
+            }
+        };
+
+        if messages.is_empty() {
+            result.captures.push((
+                line,
+                firebender_capture(
+                    &row,
+                    &metadata,
+                    &db_path,
+                    started_at,
+                    ended_at,
+                    &schema_fingerprint,
+                    context,
+                    None,
+                ),
+            ));
+            continue;
+        }
+
+        for (message_index, message) in messages.iter().enumerate() {
+            let provider_event_index = message_index as u64;
+            let occurred_at = firebender_message_time(
+                message,
+                started_at + Duration::milliseconds(message_index as i64),
+            );
+            let event = firebender_event(&row.id, provider_event_index, message, occurred_at);
+            result.captures.push((
+                line,
+                firebender_capture(
+                    &row,
+                    &metadata,
+                    &db_path,
+                    started_at,
+                    ended_at,
+                    &schema_fingerprint,
+                    context,
+                    Some(event),
+                ),
+            ));
+        }
+    }
+
+    Ok(result)
+}
+
+fn firebender_chat_history_db_path(path: &Path) -> Result<PathBuf> {
+    let metadata = fs::symlink_metadata(path)?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "symlinked provider transcript roots are rejected",
+        });
+    }
+    if file_type.is_file() {
+        return Ok(path.to_path_buf());
+    }
+    if file_type.is_dir() {
+        let db_path = path
+            .join(".idea")
+            .join("firebender")
+            .join("chat_history.db");
+        if db_path.exists() {
+            return Ok(db_path);
+        }
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "Firebender project root is missing .idea/firebender/chat_history.db",
+        });
+    }
+    Err(CaptureError::InvalidProviderTranscriptPath {
+        path: path.to_path_buf(),
+        reason: "Firebender import path must be chat_history.db or a project root",
+    })
+}
+
+fn firebender_chat_session_rows(
+    conn: &Connection,
+    columns: &BTreeSet<String>,
+) -> Result<Vec<FirebenderChatSessionRow>> {
+    let deleted_filter = if columns.contains("deleted_at") {
+        "where deleted_at is null"
+    } else {
+        ""
+    };
+    let sql = format!(
+        "select id, name, created_at, updated_at, messages_json, metadata_json \
+         from chat_sessions {deleted_filter} order by updated_at, id"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for (index, row) in rows.enumerate() {
+        let (id, name, created_at, updated_at, messages_json, metadata_json) = row?;
+        out.push(FirebenderChatSessionRow {
+            id,
+            name,
+            created_at,
+            updated_at,
+            messages_json,
+            metadata_json,
+            row_number: u64::try_from(index + 1).unwrap_or(u64::MAX),
+        });
+    }
+    Ok(out)
+}
+
+fn firebender_message_time(message: &Value, fallback: DateTime<Utc>) -> DateTime<Utc> {
+    provider_timestamp_value(
+        message
+            .get("timestamp")
+            .or_else(|| message.get("created_at"))
+            .or_else(|| message.get("updated_at")),
+        fallback,
+    )
+}
+
+fn firebender_event(
+    provider_session_id: &str,
+    provider_event_index: u64,
+    message: &Value,
+    occurred_at: DateTime<Utc>,
+) -> ProviderEventEnvelope {
+    let role = message.get("role").and_then(Value::as_str);
+    let tool_calls = message
+        .get("tool_calls")
+        .or_else(|| message.get("toolCalls"));
+    let event_type = if role == Some("tool") {
+        EventType::ToolOutput
+    } else if tool_calls.is_some_and(|value| {
+        value
+            .as_array()
+            .map(|items| !items.is_empty())
+            .unwrap_or(true)
+    }) {
+        EventType::ToolCall
+    } else {
+        EventType::Message
+    };
+    native_event(NativeEventDraft {
+        provider: CaptureProvider::Firebender,
+        source_format: FIREBENDER_SQLITE_SOURCE_FORMAT,
+        provider_session_id: provider_session_id.to_owned(),
+        provider_event_index,
+        provider_event_hash: message
+            .get("id")
+            .or_else(|| message.get("tool_call_id"))
+            .or_else(|| message.get("toolCallId"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        cursor: format!("chat_sessions:{provider_session_id}:message:{provider_event_index}"),
+        event_type,
+        role: Some(provider_role(role)),
+        occurred_at,
+        text: firebender_message_text(message)
+            .unwrap_or_else(|| format!("Firebender {}", role.unwrap_or("message"))),
+        body: message.clone(),
+        metadata: json!({
+            "source": "firebender_chat_sessions",
+            "source_format": FIREBENDER_SQLITE_SOURCE_FORMAT,
+            "role": role,
+            "name": message.get("name").and_then(Value::as_str),
+            "tool_call_id": message
+                .get("tool_call_id")
+                .or_else(|| message.get("toolCallId"))
+                .and_then(Value::as_str),
+            "content_type": message
+                .get("content")
+                .and_then(|content| content.get("type"))
+                .and_then(Value::as_str),
+        }),
+    })
+}
+
+fn firebender_message_text(message: &Value) -> Option<String> {
+    if let Some(content) = message.get("content") {
+        match content {
+            Value::Object(object) => {
+                if let Some(text) = object
+                    .get("text")
+                    .or_else(|| object.get("content"))
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.trim().is_empty())
+                {
+                    return Some(text.to_owned());
+                }
+            }
+            _ => {
+                if let Some(text) =
+                    provider_value_text(content).filter(|text| !text.trim().is_empty())
+                {
+                    return Some(text);
+                }
+            }
+        }
+    }
+    if let Some(tool_calls) = message
+        .get("tool_calls")
+        .or_else(|| message.get("toolCalls"))
+        .and_then(Value::as_array)
+    {
+        let names = tool_calls
+            .iter()
+            .filter_map(|call| {
+                call.get("function")
+                    .and_then(|function| function.get("name"))
+                    .or_else(|| call.get("name"))
+                    .and_then(Value::as_str)
+            })
+            .collect::<Vec<_>>();
+        if !names.is_empty() {
+            return Some(format!("tool call: {}", names.join(", ")));
+        }
+    }
+    message
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+        .map(str::to_owned)
+}
+
+fn firebender_capture(
+    row: &FirebenderChatSessionRow,
+    metadata: &Value,
+    path: &Path,
+    started_at: DateTime<Utc>,
+    ended_at: Option<DateTime<Utc>>,
+    schema_fingerprint: &str,
+    context: &ProviderAdapterContext,
+    event: Option<ProviderEventEnvelope>,
+) -> ProviderCaptureEnvelope {
+    native_provider_capture(
+        NativeSessionDraft {
+            provider: CaptureProvider::Firebender,
+            source_format: FIREBENDER_SQLITE_SOURCE_FORMAT,
+            provider_session_id: row.id.clone(),
+            parent_provider_session_id: None,
+            root_provider_session_id: None,
+            external_agent_id: None,
+            agent_type: AgentType::Primary,
+            role_hint: Some("primary".to_owned()),
+            is_primary: true,
+            started_at,
+            ended_at,
+            cwd: None,
+            fidelity: Fidelity::Imported,
+            raw_source_path: path.display().to_string(),
+            trust: ProviderSourceTrust::ProviderNative,
+            source_metadata: json!({
+                "adapter": FIREBENDER_SQLITE_SOURCE_FORMAT,
+                "schema_fingerprint": schema_fingerprint,
+                "storage": ".idea/firebender/chat_history.db",
+            }),
+            session_metadata: json!({
+                "source_format": FIREBENDER_SQLITE_SOURCE_FORMAT,
+                "title": row.name,
+                "metadata": provider_capped_json(metadata, PROVIDER_MAX_PREVIEW_CHARS),
+                "storage": ".idea/firebender/chat_history.db",
+                "timestamp_note": "message rows do not carry durable per-message timestamps; ctx preserves session created_at/updated_at and import order",
+            }),
+        },
+        context,
+        event,
+    )
 }
 
 fn normalize_codebuddy_history(
@@ -32689,6 +33111,93 @@ mod tests {
         assert_eq!(second.imported_events, 0);
         assert_eq!(second.skipped_sessions, 1);
         assert_eq!(second.skipped_events, 4);
+    }
+
+    #[test]
+    fn native_firebender_fixture_imports_project_root_db_and_reimports() {
+        let temp = tempdir();
+        let project_root = provider_history_fixture("firebender/v1");
+        let fixture = project_root
+            .join(".idea")
+            .join("firebender")
+            .join("chat_history.db");
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let root_source =
+            provider_source_for_path(CaptureProvider::Firebender, project_root.clone());
+        assert_eq!(root_source.source_format, FIREBENDER_SQLITE_SOURCE_FORMAT);
+        assert_eq!(root_source.status, ProviderSourceStatus::Available);
+        let db_source = provider_source_for_path(CaptureProvider::Firebender, fixture.clone());
+        assert_eq!(db_source.source_format, FIREBENDER_SQLITE_SOURCE_FORMAT);
+        assert_eq!(db_source.status, ProviderSourceStatus::Available);
+
+        let first = import_firebender_sqlite(
+            &project_root,
+            &mut store,
+            FirebenderSqliteImportOptions {
+                machine_id: "test-machine".into(),
+                source_path: Some(project_root.clone()),
+                imported_at: DateTime::parse_from_rfc3339("2026-07-04T20:10:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                allow_partial_failures: true,
+                ..FirebenderSqliteImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(first.failed, 0, "{:?}", first.failures);
+        assert_eq!(first.imported_sessions, 1);
+        assert_eq!(first.imported_events, 3);
+        let session_id =
+            provider_session_uuid(CaptureProvider::Firebender, "firebender-fixture-session");
+        let events = store.events_for_session(session_id).unwrap();
+        assert_eq!(events.len(), 3);
+        assert!(events
+            .iter()
+            .any(|event| event.role == Some(EventRole::User)));
+        assert!(events
+            .iter()
+            .any(|event| event.role == Some(EventRole::Assistant)));
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == EventType::ToolCall));
+        let rendered = serde_json::to_string(&events).unwrap();
+        assert!(rendered.contains("firebender fixture oracle prompt"));
+        assert!(rendered.contains("Firebender fixture oracle response"));
+        assert!(store
+            .search_event_hits("firebender fixture oracle", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::Firebender)));
+
+        let source = store
+            .capture_source_by_external_session(
+                CaptureProvider::Firebender,
+                "firebender-fixture-session",
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            source.sync.metadata["source_metadata"]["storage"].as_str(),
+            Some(".idea/firebender/chat_history.db")
+        );
+
+        let second = import_firebender_sqlite(
+            &fixture,
+            &mut store,
+            FirebenderSqliteImportOptions {
+                source_path: Some(fixture.clone()),
+                allow_partial_failures: true,
+                ..FirebenderSqliteImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(second.failed, 0, "{:?}", second.failures);
+        assert_eq!(second.imported_sessions, 0);
+        assert_eq!(second.imported_events, 0);
+        assert_eq!(second.skipped_sessions, 1);
+        assert_eq!(second.skipped_events, 3);
     }
 
     #[test]

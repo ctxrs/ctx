@@ -230,6 +230,26 @@ IDE/application storage imports.
   changed-file, and IDE/application history semantics remain unclaimed until a
   public contract or fixture proves them.
 
+## Firebender
+
+- Registry evidence: `vercel-labs/skills` maps the `firebender` agent id to
+  `~/.firebender/skills`.
+- Source evidence: the public Firebender 1.0.10 JetBrains Marketplace plugin
+  artifact (`updateId=1045537`) contains `ChatHistoryDatabaseService`, which
+  decodes and opens a project-local `.idea/firebender/chat_history.db` SQLite
+  database.
+- Schema evidence: the decoded database service creates `chat_sessions` with
+  `id`, `name`, `created_at`, `updated_at`, `deleted_at`, `messages_json`, and
+  `metadata_json`.
+- Message evidence: serialized Firebender message/content classes carry
+  `role`, `content`, `tool_calls`, `tool_call_id`, `type`, and `text` field
+  names that match the fixture's `messages_json` shape.
+- `ctx` imports this shape as `firebender_chat_history_sqlite`, using explicit
+  DB paths, explicit project-root paths, and current-project ancestor discovery
+  for `.idea/firebender/chat_history.db`.
+- Caveat: no global `~/.firebender` chat transcript file is claimed; the proven
+  chat store is project-local.
+
 ## Kode
 
 - Source evidence: `@shareai-lab/kode@2.2.1` declares repository

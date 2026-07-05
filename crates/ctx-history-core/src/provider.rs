@@ -132,6 +132,12 @@ pub enum ProviderId {
     Neovate,
     #[serde(rename = "command_code", alias = "command-code", alias = "commandcode")]
     CommandCode,
+    #[serde(
+        rename = "firebender",
+        alias = "firebender-jetbrains",
+        alias = "firebender_jetbrains"
+    )]
+    Firebender,
     Terramind,
     #[serde(rename = "rovodev", alias = "rovo-dev", alias = "rovo_dev")]
     RovoDev,
@@ -150,7 +156,7 @@ pub enum ProviderId {
 }
 
 impl ProviderId {
-    pub const ALL: [Self; 58] = [
+    pub const ALL: [Self; 59] = [
         Self::Codex,
         Self::ClaudeCode,
         Self::ClaudeCliCrp,
@@ -198,6 +204,7 @@ impl ProviderId {
         Self::Kode,
         Self::Neovate,
         Self::CommandCode,
+        Self::Firebender,
         Self::Terramind,
         Self::RovoDev,
         Self::CortexCode,
@@ -507,6 +514,7 @@ mod tests {
             ProviderId::AntigravityCli,
             ProviderId::AstrBot,
             ProviderId::AutohandCode,
+            ProviderId::Auggie,
             ProviderId::ClaudeCode,
             ProviderId::Cline,
             ProviderId::Codex,
@@ -519,6 +527,7 @@ mod tests {
             ProviderId::CopilotCli,
             ProviderId::Dexto,
             ProviderId::FactoryAiDroid,
+            ProviderId::Firebender,
             ProviderId::ForgeCode,
             ProviderId::DeepAgents,
             ProviderId::MistralVibe,
