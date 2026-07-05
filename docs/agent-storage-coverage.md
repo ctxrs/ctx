@@ -21,8 +21,8 @@ Status meanings:
 - `install-target`: npx target is an aggregate or project skill target, not a
   proven history-producing agent.
 
-Result on this integration branch: 46 `native-auto`, 8 `native-preview`, 5
-`candidate-family`, 5 `webapp-boundary`, 6 `unknown`, and 2 `install-target`
+Result on this integration branch: 47 `native-auto`, 8 `native-preview`, 5
+`candidate-family`, 5 `webapp-boundary`, 5 `unknown`, and 2 `install-target`
 rows.
 
 ## Shared Families

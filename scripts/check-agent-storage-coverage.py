@@ -18,11 +18,11 @@ PROVIDER_MATRIX_PATH = REPO_ROOT / "docs" / "provider-support-matrix.json"
 UPSTREAM_PACKAGE = "skills@1.5.14"
 UPSTREAM_COMMIT = "2adcfe5a4cce0ce5f4d5547a997b2a161ec5d127"
 EXPECTED_COUNTS = {
-    "native-auto": 46,
+    "native-auto": 47,
     "native-preview": 8,
     "candidate-family": 5,
     "webapp-boundary": 5,
-    "unknown": 6,
+    "unknown": 5,
     "install-target": 2,
 }
 ALLOWED_STATUSES = set(EXPECTED_COUNTS)
