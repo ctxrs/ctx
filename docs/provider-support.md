@@ -57,6 +57,7 @@ is:
 | Jazz | `local_import_when_supported` | Jazz per-agent history JSON files under `JAZZ_HOME/history`, `~/.jazz/history`, or an explicit history directory/file. | Static local-history fixture smoke; imports only conversations retained in each Jazz history file. |
 | OpenLoaf | `local_import_when_supported` | OpenLoaf `chat-history/<session>/messages.jsonl` with optional `session.json` under `~/.openloaf/chat-history`, bounded `~/OpenLoafData/projects/*/.openloaf/chat-history`, or an explicit project/session path. | Static local-history fixture smoke; `loaf` is accepted as a provider alias, while `~/.loaf` remains npx detection-only. |
 | Auggie | `local_import_when_supported` | Auggie session JSON files under `~/.augment/sessions`, or an explicit session JSON/session directory. | Static package-derived fixture smoke; imports `chatHistory` request/response text and recognized text nodes. |
+| Devin CLI | `local_import_when_supported` | Explicit Devin CLI `devin --export [PATH]` ATIF JSON file or directory supplied with `--path`. | Static synthetic ATIF fixture smoke; proof comes from official Devin CLI docs/changelog plus the public ATIF RFC. No Devin cloud, login, account, default local, or `~/.config/devin` history paths are claimed. |
 | Eve | `local_import_when_supported` | Eve local Workflow `.workflow-data` streams from `WORKFLOW_LOCAL_DATA_DIR`, a current project `.workflow-data`, or an explicit `.workflow-data`/project path. | Static package-derived Workflow stream fixture smoke; imports durable Eve message stream events, not `.eve` build/runtime artifacts. |
 | Firebender | `local_import_when_supported` | Firebender JetBrains project chat history SQLite at `.idea/firebender/chat_history.db`, or an explicit project root/DB path. | Static local-history fixture smoke; schema proof comes from public Firebender Marketplace plugin bytecode. |
 | ForgeCode | `local_import_when_supported` | `FORGE_CONFIG/.forge.db`, legacy `~/forge/.forge.db`, `~/.forge/.forge.db`, or an explicit ForgeCode SQLite DB. | Static local-history fixture smoke; imports conversation context JSON and metrics file touches. |
@@ -75,7 +76,7 @@ is:
 
 `ctx sources --json` uses `import_support: "preview"` and `native_import:
 false` for preview sources/importers such as NanoClaw, AstrBot, Pochi,
-Windsurf, and Amp explicit exports. Those paths can be
+Windsurf, Amp explicit exports, and Devin ATIF exports. Those paths can be
 imported explicitly with `ctx import --provider ...` when discovery finds them,
 or with `ctx import --provider ... --path ...` for a specific path. They are not
 swept up by `ctx import --all` or the default pre-search refresh.
