@@ -21,7 +21,7 @@ Status meanings:
 - `install-target`: npx target is an aggregate or project skill target, not a
   proven history-producing agent.
 
-Result on this integration branch: 43 `native-auto`, 4 `native-preview`, 9
+Result on this integration branch: 45 `native-auto`, 4 `native-preview`, 7
 `candidate-family`, 9 `webapp-boundary`, 5 `unknown`, and 2 `install-target`
 rows.
 
@@ -66,7 +66,7 @@ rows.
 | --- | --- | --- | --- | --- |
 | `aider-desk` | `native-auto` | `project task JSON` | ctx `aider_desk_task_context_json`; npx `~/.aider-desk`; source proof shows project `.aider-desk/tasks/<taskId>/context.json` task context files | - |
 | `amp` | `candidate-family` | `JSONL CLI event logs` | npx `~/.config/amp`; no ctx provider | Need transcript location and schema proof. |
-| `antigravity` | `candidate-family` | `VS Code/Electron storage` | npx `~/.gemini/antigravity`; no ctx provider for IDE id | IDE history is not proven equivalent to CLI brain transcripts. |
+| `antigravity` | `native-auto` | `JSONL CLI event logs` | ctx `antigravity_cli_transcript_jsonl_tree`; npx `~/.gemini/antigravity`; official IDE transcripts live under `~/.gemini/antigravity-ide/brain` | ctx imports official IDE brain transcripts, not the npx skill/config path `~/.gemini/antigravity`. |
 | `antigravity-cli` | `native-auto` | `JSONL CLI event logs` | ctx `antigravity_cli_transcript_jsonl_tree`; npx `~/.gemini/antigravity-cli` | - |
 | `astrbot` | `native-preview` | `generic sqlite messages` | ctx `astrbot_data_v4_sqlite`; npx `~/.astrbot` | Preview explicit import only; full per-platform transcript coverage remains unproven. |
 | `autohand-code` | `native-auto` | `JSONL CLI event logs` | ctx `autohand_code_sessions_jsonl`; npx `AUTOHAND_HOME` or `~/.autohand` | - |
@@ -104,7 +104,7 @@ rows.
 | `kimi-code-cli` | `native-auto` | `JSONL CLI event logs` | ctx `kimi_code_cli_wire_jsonl_tree`; npx `~/.kimi-code` or `~/.kimi` | - |
 | `kiro-cli` | `native-auto` | `generic sqlite messages` | ctx `kiro_cli_sqlite`; npx `~/.kiro` | SQLite import covers the proven `conversations_v2`/`conversations` DB at the Kiro CLI data dir; newer `~/.kiro/sessions/cli` event logs are not imported yet. |
 | `kode` | `native-auto` | `JSONL CLI event logs` | ctx `kode_session_jsonl_tree`; npx `~/.kode`; `@shareai-lab/kode` stores project JSONL sessions under `KODE_CONFIG_DIR`, `CLAUDE_CONFIG_DIR`, or `~/.kode` | - |
-| `lingma` | `native-auto` | `VS Code/Electron storage` | ctx `lingma_sqlite`; npx `~/.lingma` | Schema proof from WayLog `shayne-snap/WayLog@6939033b7a39326fbdc249e28e6aa12461db1f09`; imports `chat_prompt` plus assistant `summary`/`error_result`, which may be partial. Qoder CN is documented by Alibaba as the renamed Lingma product line, but no `qoder-cn` alias is shipped without source-backed DB contract proof. |
+| `lingma` | `native-auto` | `VS Code/Electron storage` | ctx `lingma_sqlite`; npx `~/.lingma` | Schema proof from WayLog plus official Qoder CN VSIX/package path evidence; imports `chat_prompt` plus assistant `summary`/`error_result`, which may be partial. `qoder-cn` aliases to this importer; separate Qoder IDE homes remain unclaimed. |
 | `loaf` | `native-auto` | `OpenLoaf chat JSONL` | ctx `openloaf_chat_jsonl_tree`; npx `~/.loaf` detects `loaf`, but the source-backed importer targets OpenLoaf paths `~/.openloaf/chat-history`, `~/OpenLoafData/projects`, and explicit project `.openloaf/chat-history` roots | ctx aliases `loaf`/`openloaf` to canonical provider `openloaf`; `~/.loaf` remains detection-only and is not crawled by the native importer. |
 | `mcpjam` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.mcpjam`; no ctx provider | UI or account-backed activity should use exporter or plugin until local storage is proven. |
 | `mistral-vibe` | `native-auto` | `JSONL CLI event logs` | ctx `mistral_vibe_session_jsonl_tree`; npx `VIBE_HOME` or `~/.vibe` | - |
@@ -116,7 +116,7 @@ rows.
 | `ona` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.ona`; no ctx provider | No proven stable local transcript boundary; prefer exporter or plugin. |
 | `pi` | `native-auto` | `JSONL CLI event logs` | ctx `pi_session_jsonl`; npx `~/.pi/agent` | - |
 | `qoder` | `candidate-family` | `VS Code/Electron storage` | npx `~/.qoder`; no ctx provider | Need local app storage or export contract proof; Lingma/Qoder CN rename evidence does not prove this separate home path. |
-| `qoder-cn` | `candidate-family` | `VS Code/Electron storage` | npx `~/.qoder-cn`; no ctx provider | Alibaba docs identify Qoder CN as the renamed Lingma product line, but ctx needs source-backed proof that Qoder CN still uses the same local DB path/schema before adding an alias. |
+| `qoder-cn` | `native-auto` | `VS Code/Electron storage` | ctx `lingma_sqlite` via `qoder-cn` alias; npx `~/.qoder-cn`; official Qoder CN VSIX remains `Alibaba-Cloud.tongyi-lingma` and uses `~/.lingma/vscode/sharedClientCache/cache/db/local.db` | Imports the Lingma/Qoder CN VS Code extension database; `~/.qoder-cn` and `.qodercn` homes remain unclaimed. |
 | `qwen-code` | `native-auto` | `JSONL CLI event logs` | ctx `qwen_code_chat_jsonl_tree`; npx `~/.qwen` | - |
 | `replit` | `webapp-boundary` | `webapp/object-store boundary` | npx project `.replit`; no ctx provider | Project marker is not a local agent history contract. |
 | `reasonix` | `native-auto` | `JSONL CLI event logs` | ctx `reasonix_session_jsonl_tree`; npx `~/.reasonix/sessions`; package `reasonix@0.53.2` | - |

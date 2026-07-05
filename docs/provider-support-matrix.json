@@ -536,8 +536,8 @@
           ],
           "notes": [
             "Reads Lingma chat_record rows from ~/.lingma/vscode/sharedClientCache/cache/db/local.db and the vscode-insiders variant.",
-            "Imports chat_prompt as user prompts and summary/error_result as assistant summary/notice content; original assistant answers may be encrypted, transformed, or unavailable.",
-            "Qoder CN is the renamed Lingma product line in Alibaba public docs, but ctx does not alias qoder-cn without source-backed proof of the same local DB path and schema."
+            "Qoder CN is the renamed Lingma product line in Alibaba public docs; the official Qoder CN VSIX remains Alibaba-Cloud.tongyi-lingma and still uses the same ~/.lingma/vscode/sharedClientCache/cache/db/local.db path/schema.",
+            "The qoder-cn and qoder_cn CLI aliases resolve to this Lingma importer; separate Qoder IDE homes such as ~/.qodercn or ~/.qoder-cn are not imported without source-backed storage proof."
           ]
         }
       ],
@@ -566,7 +566,7 @@
         "Assistant content is summary/error_result only and may be incomplete."
       ],
       "blockers": [
-        "No qoder-cn provider alias is shipped because source-backed proof for a Qoder CN local DB path/schema was not found."
+        "Separate Qoder IDE paths such as ~/.qodercn or ~/.qoder-cn remain unclaimed without source-backed storage proof."
       ],
       "public_docs": "docs/providers.md",
       "fixture_paths": [
@@ -576,7 +576,13 @@
         "crates/ctx-cli/tests/cli.rs",
         "crates/ctx-history-capture/src/lib.rs",
         "crates/ctx-history-capture/src/provider_sources.rs"
-      ]
+      ],
+      "metadata": {
+        "aliases": [
+          "qoder-cn",
+          "qoder_cn"
+        ]
+      }
     },
     {
       "id": "pochi",
@@ -1169,7 +1175,7 @@
             "ctx import --provider antigravity"
           ],
           "notes": [
-            "Reads Antigravity transcript JSONL mirrors under ~/.gemini/antigravity-cli/brain/*/.system_generated/logs, preferring transcript_full.jsonl when present.",
+            "Reads Antigravity transcript JSONL mirrors under ~/.gemini/antigravity-cli/brain/*/.system_generated/logs and official IDE transcripts under ~/.gemini/antigravity-ide/brain/*/.system_generated/logs, preferring transcript_full.jsonl when present.",
             "Native source discovery marks Antigravity available only when transcript_full.jsonl or transcript.jsonl exists.",
             "Preserves typed tool call arguments as bounded local JSON previews."
           ]
@@ -1177,7 +1183,9 @@
       ],
       "history_locations": [
         "~/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript_full.jsonl",
-        "~/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript.jsonl"
+        "~/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript.jsonl",
+        "~/.gemini/antigravity-ide/brain/*/.system_generated/logs/transcript_full.jsonl",
+        "~/.gemini/antigravity-ide/brain/*/.system_generated/logs/transcript.jsonl"
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
@@ -1195,7 +1203,9 @@
         "token_usage": false,
         "parent_child_session_edges": false
       },
-      "blockers": [],
+      "blockers": [
+        "The npx skills id `antigravity` advertises ~/.gemini/antigravity, but the official IDE transcript path proven here is ~/.gemini/antigravity-ide/brain; ctx does not crawl ~/.gemini/antigravity without separate proof."
+      ],
       "public_docs": "docs/provider-support.md",
       "fixture_paths": [
         "tests/fixtures/provider/antigravity.jsonl",

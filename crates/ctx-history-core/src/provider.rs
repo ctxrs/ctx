@@ -83,6 +83,7 @@ pub enum ProviderId {
     Crush,
     Goose,
     Dexto,
+    #[serde(rename = "lingma", alias = "qoder-cn", alias = "qoder_cn")]
     Lingma,
     Pochi,
     #[serde(rename = "codebuddy", alias = "code_buddy", alias = "code-buddy")]

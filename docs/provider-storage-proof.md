@@ -101,10 +101,14 @@ IDE/application storage imports.
   be encrypted. `ctx` therefore imports user `chat_prompt` values plus assistant
   `summary` or meaningful `error_result` values with partial/summary-only
   fidelity, not as full assistant transcripts.
-- Alibaba public docs say Qoder CN is the renamed Lingma product line. This
-  supports documenting product overlap, but it does not prove a Qoder CN local
-  DB path or identical schema, so `ctx` does not ship a `qoder-cn` alias.
-  Source anchors:
+- Alibaba public docs say Qoder CN is the renamed Lingma product line, and the
+  official Qoder CN VSIX/package identity remains `Alibaba-Cloud.tongyi-lingma`.
+  That ties Qoder CN to the same extension-local `~/.lingma/.../local.db`
+  contract, so `ctx` accepts `qoder-cn` and `qoder_cn` as aliases for the Lingma
+  importer.
+- Separate Qoder IDE homes such as `~/.qodercn` or `~/.qoder-cn` remain
+  unclaimed because no source-backed local transcript schema was found for those
+  paths. Source anchors:
   `https://www.alibabacloud.com/help/zh/lingma/product-overview/introduction-of-lingma`
   and
   `https://www.alibabacloud.com/help/en/lingma/product-overview/qoder-cn-update-log`.
@@ -280,6 +284,20 @@ IDE/application storage imports.
   incremental deltas to avoid duplicate transcript text. Encrypted or
   non-devalue Workflow stream chunks remain unclaimed until source proof and
   fixtures exist.
+
+## Antigravity
+
+- CLI source evidence: existing ctx support imports Antigravity CLI brain transcript
+  JSONL files from `~/.gemini/antigravity-cli/brain`.
+- IDE source evidence: official Antigravity IDE hook docs expose a
+  `transcriptPath` and document IDE transcript JSONL under
+  `~/.gemini/antigravity-ide/brain/<conversationId>/.system_generated/logs/transcript.jsonl`.
+- CLI/IDE bridge evidence: official Antigravity CLI conversation docs state the
+  CLI can import desktop/IDE conversations, supporting the shared transcript
+  family rather than a separate opaque IDE database.
+- `ctx` imports this shape as `antigravity_cli_transcript_jsonl_tree`, using
+  read-only discovery for both CLI and official IDE brain roots. The npx skills
+  `~/.gemini/antigravity` skill/config path is not treated as a transcript root.
 
 ## Kode
 
