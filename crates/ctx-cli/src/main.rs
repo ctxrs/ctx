@@ -35,7 +35,7 @@ use ctx_history_capture::{
     catalog_codex_session_tree, discover_provider_sources, discover_provider_sources_for_provider,
     import_adal_history, import_aider_desk_history, import_amp_threads_export,
     import_antigravity_cli_history, import_astrbot_sqlite, import_auggie_history,
-    import_autohand_code_sessions, import_claude_projects_jsonl_tree,
+    import_autohand_code_sessions, import_bob_task_json_history, import_claude_projects_jsonl_tree,
     import_cline_task_json_history, import_codebuddy_history, import_codex_history_jsonl,
     import_codex_session_jsonl, import_codex_session_jsonl_tail, import_codex_session_paths,
     import_codex_session_tree, import_command_code_history, import_continue_cli_sessions,
@@ -56,26 +56,26 @@ use ctx_history_capture::{
     provider_source_for_path, provider_source_spec, stable_capture_uuid,
     validate_custom_history_jsonl_v1, validate_custom_history_jsonl_v1_reader, AdalImportOptions,
     AiderDeskImportOptions, AmpImportOptions, AntigravityCliImportOptions,
-    AstrBotSqliteImportOptions, AuggieImportOptions, AutohandCodeImportOptions, CatalogSummary,
-    ClaudeProjectsImportOptions, ClineTaskJsonImportOptions, CodeBuddyImportOptions,
-    CodexEventImportMode, CodexHistoryImportOptions, CodexSessionCatalogOptions,
-    CodexSessionImportOptions, CodexSessionImportProgress, CodexSessionImportProgressCallback,
-    CodexToolOutputMode, CommandCodeImportOptions, ContinueCliImportOptions,
-    CopilotCliImportOptions, CortexCodeImportOptions, CrushSqliteImportOptions,
-    CursorNativeImportOptions, CustomHistoryJsonlV1ImportOptions, DeepAgentsSqliteImportOptions,
-    DevinAtifImportOptions, DextoSqliteImportOptions, EveImportOptions,
-    FactoryAiDroidImportOptions, FirebenderSqliteImportOptions, ForgeCodeSqliteImportOptions,
-    GeminiCliImportOptions, GooseSessionsSqliteImportOptions, HermesSqliteImportOptions,
-    IflowCliImportOptions, JazzImportOptions, KiloSqliteImportOptions, KimiCodeCliImportOptions,
-    KiroSqliteImportOptions, KodeImportOptions, LingmaSqliteImportOptions,
-    MistralVibeImportOptions, MuxImportOptions, NanoClawImportOptions, NeovateImportOptions,
-    OpenClawImportOptions, OpenCodeSqliteImportOptions, OpenHandsImportOptions,
-    OpenLoafImportOptions, PiSessionImportOptions, PochiLivestoreSqliteImportOptions,
-    ProviderImportSummary, ProviderImportSupport, ProviderSource, ProviderSourceStatus,
-    QoderImportOptions, QwenCodeImportOptions, ReasonixImportOptions, RooTaskJsonImportOptions,
-    RovoDevImportOptions, ShelleySqliteImportOptions, TerramindSqliteImportOptions,
-    TraeImportOptions, WarpSqliteImportOptions, WindsurfCascadeHookImportOptions,
-    ZedThreadsSqliteImportOptions,
+    AstrBotSqliteImportOptions, AuggieImportOptions, AutohandCodeImportOptions,
+    BobTaskJsonImportOptions, CatalogSummary, ClaudeProjectsImportOptions,
+    ClineTaskJsonImportOptions, CodeBuddyImportOptions, CodexEventImportMode,
+    CodexHistoryImportOptions, CodexSessionCatalogOptions, CodexSessionImportOptions,
+    CodexSessionImportProgress, CodexSessionImportProgressCallback, CodexToolOutputMode,
+    CommandCodeImportOptions, ContinueCliImportOptions, CopilotCliImportOptions,
+    CortexCodeImportOptions, CrushSqliteImportOptions, CursorNativeImportOptions,
+    CustomHistoryJsonlV1ImportOptions, DeepAgentsSqliteImportOptions, DevinAtifImportOptions,
+    DextoSqliteImportOptions, EveImportOptions, FactoryAiDroidImportOptions,
+    FirebenderSqliteImportOptions, ForgeCodeSqliteImportOptions, GeminiCliImportOptions,
+    GooseSessionsSqliteImportOptions, HermesSqliteImportOptions, IflowCliImportOptions,
+    JazzImportOptions, KiloSqliteImportOptions, KimiCodeCliImportOptions, KiroSqliteImportOptions,
+    KodeImportOptions, LingmaSqliteImportOptions, MistralVibeImportOptions, MuxImportOptions,
+    NanoClawImportOptions, NeovateImportOptions, OpenClawImportOptions,
+    OpenCodeSqliteImportOptions, OpenHandsImportOptions, OpenLoafImportOptions,
+    PiSessionImportOptions, PochiLivestoreSqliteImportOptions, ProviderImportSummary,
+    ProviderImportSupport, ProviderSource, ProviderSourceStatus, QoderImportOptions,
+    QwenCodeImportOptions, ReasonixImportOptions, RooTaskJsonImportOptions, RovoDevImportOptions,
+    ShelleySqliteImportOptions, TerramindSqliteImportOptions, TraeImportOptions,
+    WarpSqliteImportOptions, WindsurfCascadeHookImportOptions, ZedThreadsSqliteImportOptions,
 };
 use ctx_history_core::{
     database_path, default_data_root, utc_now, CaptureProvider, ContextCitation,
@@ -809,6 +809,8 @@ enum NativeProviderArg {
     Cline,
     #[value(name = "roo", alias = "roo-code", alias = "roo_code")]
     RooCode,
+    #[value(name = "bob", alias = "ibm-bob", alias = "ibm_bob")]
+    Bob,
     Dexto,
     #[value(alias = "qoder-cn", alias = "qoder_cn")]
     Lingma,
@@ -943,6 +945,8 @@ enum ProviderArg {
     Cline,
     #[value(name = "roo", alias = "roo-code", alias = "roo_code")]
     RooCode,
+    #[value(name = "bob", alias = "ibm-bob", alias = "ibm_bob")]
+    Bob,
     Dexto,
     #[value(alias = "qoder-cn", alias = "qoder_cn")]
     Lingma,
@@ -1029,6 +1033,7 @@ impl NativeProviderArg {
             Self::OpenHands => CaptureProvider::OpenHands,
             Self::Cline => CaptureProvider::Cline,
             Self::RooCode => CaptureProvider::RooCode,
+            Self::Bob => CaptureProvider::Bob,
             Self::Dexto => CaptureProvider::Dexto,
             Self::Lingma => CaptureProvider::Lingma,
             Self::Qoder => CaptureProvider::Qoder,
@@ -1111,6 +1116,7 @@ impl ProviderArg {
             Self::OpenHands => CaptureProvider::OpenHands,
             Self::Cline => CaptureProvider::Cline,
             Self::RooCode => CaptureProvider::RooCode,
+            Self::Bob => CaptureProvider::Bob,
             Self::Dexto => CaptureProvider::Dexto,
             Self::Lingma => CaptureProvider::Lingma,
             Self::Qoder => CaptureProvider::Qoder,
@@ -1172,6 +1178,7 @@ impl ProviderArg {
             Self::OpenHands => "openhands",
             Self::Cline => "cline",
             Self::RooCode => "roo",
+            Self::Bob => "bob",
             Self::Dexto => "dexto",
             Self::Lingma => "lingma",
             Self::Qoder => "qoder",
@@ -5937,6 +5944,17 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
+        CaptureProvider::Bob => import_bob_task_json_history(
+            &source.path,
+            store,
+            BobTaskJsonImportOptions {
+                source_path: Some(source.path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: true,
+                ..BobTaskJsonImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
         CaptureProvider::CodeBuddy => import_codebuddy_history(
             &source.path,
             store,
@@ -6599,6 +6617,7 @@ fn source_uses_import_file_manifest(source: &SourceInfo) -> bool {
             | "shelley_sqlite"
             | "cline_task_directory_json"
             | "roo_task_directory_json"
+            | "bob_task_directory_json"
             | "reasonix_session_jsonl_tree"
             | "openloaf_chat_jsonl_tree"
             | "eve_workflow_data_streams"

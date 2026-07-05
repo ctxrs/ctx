@@ -119,6 +119,8 @@ The current CLI imports local history for:
 - Roo Code task JSON directories under `roo-cline.customStoragePath`, common
   VS Code globalStorage folders for `RooVeterinaryInc.roo-cline`, or an
   explicit path.
+- IBM Bob IDE task JSON directories under app-data folders named `IBM Bob` or
+  `Bob-IDE`, specifically `User/globalStorage/ibm.bob-code/tasks`.
 
 These are built-in provider adapters for native local history. The custom
 history format is separate: `ctx import --format ctx-history-jsonl-v1 --path
@@ -206,16 +208,17 @@ Custom history imports follow the same read-only and idempotent principles, but
 their compatibility contract is the `ctx-history-jsonl-v1` schema rather than a
 provider-owned native transcript format.
 
-## Cline And Roo Code Notes
+## Cline, Roo Code, And IBM Bob Notes
 
-Cline and Roo Code import support reads file-backed task directories, not VS
-Code's private extension state databases. The importer looks for task folders
-containing files such as `api_conversation_history.json`, `ui_messages.json`,
-`task_metadata.json`, `history_item.json`, `_index.json`, and Roo's fallback
-`claude_messages.json`. Common VS Code globalStorage paths are probed only when
-those task files are present. Legacy installations that still keep task data
-only inside VS Code state need an upstream/exported file-backed task directory
-or an explicit `--path` once those files exist.
+Cline, Roo Code, and IBM Bob import support reads file-backed task directories,
+not VS Code's private extension state databases. The importer looks for task
+folders containing files such as `api_conversation_history.json`,
+`ui_messages.json`, `task_metadata.json`, `history_item.json`, `_index.json`,
+and Roo's fallback `claude_messages.json`. Common IDE/globalStorage paths are
+probed only when those task files are present. Bob Shell `~/.bob` skill/state
+paths are not imported by this adapter. Legacy installations that still keep
+task data only inside VS Code state need an upstream/exported file-backed task
+directory or an explicit `--path` once those files exist.
 
 ## Fidelity
 

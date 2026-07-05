@@ -542,6 +542,79 @@ const ROO_DEFAULTS: &[ProviderDefaultLocation] = &[
     },
 ];
 
+const BOB_DEFAULTS: &[ProviderDefaultLocation] = &[
+    ProviderDefaultLocation {
+        path_components: &[
+            ".config",
+            "IBM Bob",
+            "User",
+            "globalStorage",
+            "ibm.bob-code",
+        ],
+        source_format: "bob_task_directory_json",
+        source_kind: ProviderSourceKind::NativeHistory,
+    },
+    ProviderDefaultLocation {
+        path_components: &[
+            ".config",
+            "Bob-IDE",
+            "User",
+            "globalStorage",
+            "ibm.bob-code",
+        ],
+        source_format: "bob_task_directory_json",
+        source_kind: ProviderSourceKind::NativeHistory,
+    },
+    ProviderDefaultLocation {
+        path_components: &[
+            "Library",
+            "Application Support",
+            "IBM Bob",
+            "User",
+            "globalStorage",
+            "ibm.bob-code",
+        ],
+        source_format: "bob_task_directory_json",
+        source_kind: ProviderSourceKind::NativeHistory,
+    },
+    ProviderDefaultLocation {
+        path_components: &[
+            "Library",
+            "Application Support",
+            "Bob-IDE",
+            "User",
+            "globalStorage",
+            "ibm.bob-code",
+        ],
+        source_format: "bob_task_directory_json",
+        source_kind: ProviderSourceKind::NativeHistory,
+    },
+    ProviderDefaultLocation {
+        path_components: &[
+            "AppData",
+            "Roaming",
+            "IBM Bob",
+            "User",
+            "globalStorage",
+            "ibm.bob-code",
+        ],
+        source_format: "bob_task_directory_json",
+        source_kind: ProviderSourceKind::NativeHistory,
+    },
+    ProviderDefaultLocation {
+        path_components: &[
+            "AppData",
+            "Roaming",
+            "Bob-IDE",
+            "User",
+            "globalStorage",
+            "ibm.bob-code",
+        ],
+        source_format: "bob_task_directory_json",
+        source_kind: ProviderSourceKind::NativeHistory,
+    },
+];
+
 const CODEBUDDY_DEFAULTS: &[ProviderDefaultLocation] = &[
     ProviderDefaultLocation {
         path_components: &[".codebuddy"],
@@ -1009,6 +1082,16 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         provider: CaptureProvider::RooCode,
         display_name: "Roo Code",
         default_locations: ROO_DEFAULTS,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
+    ProviderSourceSpec {
+        provider: CaptureProvider::Bob,
+        display_name: "IBM Bob",
+        default_locations: BOB_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         raw_retention: ProviderRawRetention::PathReference,
@@ -1504,6 +1587,9 @@ fn discover_provider_sources_for_spec(
         CaptureProvider::RooCode => {
             sources.extend(discover_roo_task_json_sources(home, spec));
         }
+        CaptureProvider::Bob => {
+            sources.extend(discover_bob_task_json_sources(home, spec));
+        }
         CaptureProvider::Pochi => {
             let storage = home.join(".pochi").join("storage");
             if storage.exists() {
@@ -1692,12 +1778,39 @@ fn discover_roo_task_json_sources(home: &Path, spec: &ProviderSourceSpec) -> Vec
     sources
 }
 
+fn discover_bob_task_json_sources(_home: &Path, spec: &ProviderSourceSpec) -> Vec<ProviderSource> {
+    let mut sources = Vec::new();
+    if let Some(path) = env_path("XDG_CONFIG_HOME") {
+        sources.extend(bob_app_data_dirs(path, spec));
+    }
+    if let Some(path) = env_path("APPDATA") {
+        sources.extend(bob_app_data_dirs(path, spec));
+    }
+    sources
+}
+
+fn bob_app_data_dirs(base: PathBuf, spec: &ProviderSourceSpec) -> Vec<ProviderSource> {
+    ["IBM Bob", "Bob-IDE"]
+        .into_iter()
+        .map(|app_name| {
+            task_json_source(
+                spec,
+                base.join(app_name)
+                    .join("User")
+                    .join("globalStorage")
+                    .join("ibm.bob-code"),
+            )
+        })
+        .collect()
+}
+
 fn task_json_source(spec: &ProviderSourceSpec, path: PathBuf) -> ProviderSource {
     provider_source_from_parts(
         spec,
         path,
         match spec.provider {
             CaptureProvider::RooCode => "roo_task_directory_json",
+            CaptureProvider::Bob => "bob_task_directory_json",
             _ => "cline_task_directory_json",
         },
         ProviderSourceKind::NativeHistory,
@@ -2015,6 +2128,7 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::OpenHands => "openhands_file_events",
         CaptureProvider::Cline => "cline_task_directory_json",
         CaptureProvider::RooCode => "roo_task_directory_json",
+        CaptureProvider::Bob => "bob_task_directory_json",
         CaptureProvider::Dexto => "dexto_sqlite",
         CaptureProvider::Lingma => "lingma_sqlite",
         CaptureProvider::Trae => "trae_state_vscdb",
@@ -2224,6 +2338,7 @@ fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         }
         CaptureProvider::Cline => Some("path exists but no Cline task JSON files were found"),
         CaptureProvider::RooCode => Some("path exists but no Roo Code task JSON files were found"),
+        CaptureProvider::Bob => Some("path exists but no IBM Bob IDE task JSON files were found"),
         CaptureProvider::Dexto => Some("path exists but no Dexto SQLite database was found"),
         CaptureProvider::Lingma => {
             Some("path exists but no Lingma chat_record table with the expected columns was found")
@@ -2318,6 +2433,9 @@ fn unknown_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::Adal => Some("path exists but the AdaL session probe hit its scan budget"),
         CaptureProvider::CommandCode => {
             Some("path exists but the Command Code session probe hit its scan budget")
+        }
+        CaptureProvider::Bob => {
+            Some("path exists but the IBM Bob IDE task JSON probe hit its scan budget")
         }
         CaptureProvider::RovoDev => {
             Some("path exists but the Rovo Dev session probe hit its scan budget")
@@ -2487,6 +2605,9 @@ fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::AiderDesk => Some(
             "path exists but Aider Desk task context JSON files could not be read; check permissions",
         ),
+        CaptureProvider::Bob => {
+            Some("path exists but IBM Bob IDE task JSON files could not be read; check permissions")
+        }
         _ => None,
     }
 }
@@ -2625,6 +2746,12 @@ fn default_location_import_probe(
                     | "history_item.json"
                     | "_index.json"
                     | "claude_messages.json"
+            )
+        }),
+        CaptureProvider::Bob => has_task_json_file_under_matching(path, 10_000, |name| {
+            matches!(
+                name,
+                "api_conversation_history.json" | "ui_messages.json" | "task_metadata.json"
             )
         }),
         CaptureProvider::Lingma => has_lingma_chat_record_table(path),
@@ -4700,6 +4827,44 @@ mod tests {
 
         assert_eq!(source.status, ProviderSourceStatus::Available);
         assert_eq!(source.import_support, ProviderImportSupport::Native);
+    }
+
+    #[test]
+    fn bob_discovery_uses_ide_app_data_task_storage() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _xdg_config_home = EnvGuard::remove("XDG_CONFIG_HOME");
+        let _appdata = EnvGuard::remove("APPDATA");
+        let ibm_bob = temp
+            .path()
+            .join(".config/IBM Bob/User/globalStorage/ibm.bob-code");
+        let preview_bob = temp
+            .path()
+            .join(".config/Bob-IDE/User/globalStorage/ibm.bob-code");
+        write_task_json_discovery_task(&ibm_bob, "bob-ga-task", "ui_messages.json");
+        write_task_json_discovery_task(
+            &preview_bob,
+            "bob-preview-task",
+            "api_conversation_history.json",
+        );
+
+        let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Bob);
+        for path in [&ibm_bob, &preview_bob] {
+            let source = sources
+                .iter()
+                .find(|source| source.provider == CaptureProvider::Bob && source.path == *path)
+                .unwrap_or_else(|| panic!("missing Bob source {path:?} in {sources:#?}"));
+            assert_eq!(source.source_format, "bob_task_directory_json");
+            assert_eq!(source.status, ProviderSourceStatus::Available);
+            assert_eq!(source.import_support, ProviderImportSupport::Native);
+        }
+        assert!(
+            sources.iter().all(|source| !source
+                .path
+                .components()
+                .any(|component| { component.as_os_str().to_str() == Some(".bob") })),
+            "Bob IDE discovery must not scan Bob Shell ~/.bob paths: {sources:#?}"
+        );
     }
 
     #[test]

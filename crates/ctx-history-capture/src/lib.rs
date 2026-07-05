@@ -482,6 +482,27 @@ impl Default for RooTaskJsonImportOptions {
 }
 
 #[derive(Debug, Clone)]
+pub struct BobTaskJsonImportOptions {
+    pub machine_id: String,
+    pub source_path: Option<PathBuf>,
+    pub imported_at: DateTime<Utc>,
+    pub history_record_id: Option<Uuid>,
+    pub allow_partial_failures: bool,
+}
+
+impl Default for BobTaskJsonImportOptions {
+    fn default() -> Self {
+        Self {
+            machine_id: default_machine_id(),
+            source_path: None,
+            imported_at: utc_now(),
+            history_record_id: None,
+            allow_partial_failures: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct CodeBuddyImportOptions {
     pub machine_id: String,
     pub source_path: Option<PathBuf>,
@@ -1680,6 +1701,9 @@ pub struct ClineTaskJsonAdapter;
 pub struct RooTaskJsonAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
+pub struct BobTaskJsonAdapter;
+
+#[derive(Debug, Clone, Copy, Default)]
 pub struct CodeBuddyHistoryJsonAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -2504,6 +2528,24 @@ impl ProviderCaptureAdapter for RooTaskJsonAdapter {
         context: &ProviderAdapterContext,
     ) -> Result<ProviderNormalizationResult> {
         normalize_task_json_history(path, context, task_json_provider(CaptureProvider::RooCode))
+    }
+}
+
+impl ProviderCaptureAdapter for BobTaskJsonAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Bob
+    }
+
+    fn source_format(&self) -> &str {
+        BOB_TASK_JSON_SOURCE_FORMAT
+    }
+
+    fn normalize_path(
+        &self,
+        path: &Path,
+        context: &ProviderAdapterContext,
+    ) -> Result<ProviderNormalizationResult> {
+        normalize_task_json_history(path, context, task_json_provider(CaptureProvider::Bob))
     }
 }
 
@@ -5202,6 +5244,41 @@ pub fn import_roo_task_json_history(
     )
 }
 
+pub fn import_bob_task_json_history(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: BobTaskJsonImportOptions,
+) -> Result<ProviderImportSummary> {
+    let path = path.as_ref();
+    let source_path = options
+        .source_path
+        .clone()
+        .unwrap_or_else(|| path.to_path_buf());
+    let normalization = BobTaskJsonAdapter.normalize_path(
+        path,
+        &ProviderAdapterContext {
+            machine_id: options.machine_id,
+            source_path: Some(source_path),
+            imported_at: options.imported_at,
+            tool_output_mode: CodexToolOutputMode::Full,
+            event_mode: CodexEventImportMode::Rich,
+            include_notices: true,
+        },
+    )?;
+
+    import_normalized_provider_captures(
+        store,
+        normalization,
+        NormalizedProviderImportOptions {
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+            persist_cursors: true,
+            wrap_transaction: true,
+            fast_event_inserts: true,
+        },
+    )
+}
+
 pub fn import_codebuddy_history(
     path: impl AsRef<Path>,
     store: &mut Store,
@@ -6676,6 +6753,7 @@ const CODEX_SESSION_SOURCE_FORMAT: &str = "codex_session_jsonl";
 const CLAUDE_PROJECTS_SOURCE_FORMAT: &str = "claude_projects_jsonl_tree";
 const CLINE_TASK_JSON_SOURCE_FORMAT: &str = "cline_task_directory_json";
 const ROO_TASK_JSON_SOURCE_FORMAT: &str = "roo_task_directory_json";
+const BOB_TASK_JSON_SOURCE_FORMAT: &str = "bob_task_directory_json";
 const CODEBUDDY_SOURCE_FORMAT: &str = "codebuddy_history_json";
 const AIDER_DESK_SOURCE_FORMAT: &str = "aider_desk_task_context_json";
 const AMP_THREADS_EXPORT_SOURCE_FORMAT: &str = "amp_threads_export_json";
@@ -9584,6 +9662,17 @@ fn task_json_provider(provider: CaptureProvider) -> TaskJsonProviderSpec {
             index_file: Some("_index.json"),
             fallback_api_file: Some("claude_messages.json"),
         },
+        CaptureProvider::Bob => TaskJsonProviderSpec {
+            provider,
+            source_format: BOB_TASK_JSON_SOURCE_FORMAT,
+            display_name: "IBM Bob",
+            api_file: "api_conversation_history.json",
+            ui_file: "ui_messages.json",
+            metadata_file: "task_metadata.json",
+            history_item_file: None,
+            index_file: None,
+            fallback_api_file: None,
+        },
         _ => TaskJsonProviderSpec {
             provider: CaptureProvider::Cline,
             source_format: CLINE_TASK_JSON_SOURCE_FORMAT,
@@ -9635,6 +9724,9 @@ fn task_json_missing_reason(provider: CaptureProvider) -> &'static str {
     match provider {
         CaptureProvider::RooCode => {
             "no Roo Code task JSON directories with api_conversation_history.json, ui_messages.json, history_item.json, _index.json, or claude_messages.json were found"
+        }
+        CaptureProvider::Bob => {
+            "no IBM Bob task JSON directories with api_conversation_history.json, ui_messages.json, or task_metadata.json were found"
         }
         _ => {
             "no Cline task JSON directories with api_conversation_history.json, ui_messages.json, or task_metadata.json were found"
@@ -36711,6 +36803,67 @@ mod tests {
             .files_touched
             .iter()
             .any(|file| file.path == "tests/roo-task-json.txt"));
+    }
+
+    #[test]
+    fn native_task_json_imports_bob_ide_task_directories() {
+        let temp = tempdir();
+        let fixture = provider_history_fixture("bob/User/globalStorage/ibm.bob-code");
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let first = import_bob_task_json_history(
+            &fixture,
+            &mut store,
+            BobTaskJsonImportOptions {
+                source_path: Some(fixture.clone()),
+                allow_partial_failures: true,
+                imported_at: "2026-07-04T14:10:00Z".parse().unwrap(),
+                ..BobTaskJsonImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(first.failed, 0, "{:?}", first.failures);
+        assert_eq!(first.imported_sessions, 1);
+        assert_eq!(first.imported_events, 4);
+
+        let session_id = provider_session_uuid(CaptureProvider::Bob, "bob-task-1");
+        let session = store.get_session(session_id).unwrap();
+        assert_eq!(session.provider, CaptureProvider::Bob);
+        let events = store.events_for_session(session_id).unwrap();
+        assert_eq!(events.len(), 4);
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == EventType::ToolCall));
+        assert!(store
+            .export_archive()
+            .unwrap()
+            .files_touched
+            .iter()
+            .any(|file| file.path == "src/bob_task.rs"));
+
+        let second = import_bob_task_json_history(
+            &fixture,
+            &mut store,
+            BobTaskJsonImportOptions {
+                source_path: Some(fixture.clone()),
+                allow_partial_failures: true,
+                imported_at: "2026-07-04T14:10:00Z".parse().unwrap(),
+                ..BobTaskJsonImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(second.imported_sessions, 0);
+        assert_eq!(second.imported_events, 0);
+        assert_eq!(second.skipped_sessions, 1);
+        assert_eq!(second.skipped_events, 4);
+
+        let hits = store
+            .search_event_hits("bob-default-refresh-oracle", 10)
+            .unwrap();
+        assert!(hits
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::Bob)));
     }
 
     #[test]
