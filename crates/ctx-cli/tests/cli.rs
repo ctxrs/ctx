@@ -2406,6 +2406,7 @@ fn provider_help_matches_implemented_importers() {
         "iflow-cli",
         "jazz",
         "auggie",
+        "devin",
         "eve",
         "forgecode",
         "mistral-vibe",
@@ -2574,7 +2575,7 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
             vec![
                 "Usage: ctx import",
                 "--provider <PROVIDER>",
-                "[possible values: codex, pi, claude, opencode, openloaf, kilo, kiro-cli, crush, goose, antigravity, gemini, cursor, windsurf, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, jazz, auggie, eve, firebender, forgecode, deepagents, mistral-vibe, mux, reasonix, kode, neovate, command-code, terramind, rovodev, cortex-code, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto, lingma, pochi, codebuddy, aider-desk, amp]",
+                "[possible values: codex, pi, claude, opencode, openloaf, kilo, kiro-cli, crush, goose, antigravity, gemini, cursor, windsurf, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, jazz, auggie, devin, eve, firebender, forgecode, deepagents, mistral-vibe, mux, reasonix, kode, neovate, command-code, terramind, rovodev, cortex-code, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto, lingma, pochi, codebuddy, aider-desk, amp]",
                 "--path <PATH>",
                 "--format <FORMAT>",
                 "--resume",
@@ -4642,6 +4643,7 @@ fn mcp_status_and_tools_list_are_read_only_without_initialized_store() {
     assert!(providers.iter().any(|provider| provider == "aider-desk"));
     assert!(providers.iter().any(|provider| provider == "aider_desk"));
     assert!(providers.iter().any(|provider| provider == "auggie"));
+    assert!(providers.iter().any(|provider| provider == "devin"));
     assert!(providers.iter().any(|provider| provider == "zed"));
     assert!(providers.iter().any(|provider| provider == "forgecode"));
     assert!(providers.iter().any(|provider| provider == "deepagents"));
@@ -6304,6 +6306,48 @@ fn pi_cli_import_search_flow() {
         2
     );
     assert_eq!(sqlite_count(&conn, "SELECT COUNT(*) FROM session_edges"), 0);
+}
+
+#[test]
+fn devin_atif_cli_import_search_flow() {
+    let temp = tempdir();
+    let fixture = provider_history_fixture("devin/atif/export.json");
+
+    let imported = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "devin",
+        "--path",
+        &fixture,
+        "--json",
+    ]));
+    assert_eq!(imported["schema_version"], 1);
+    assert_eq!(imported["sources"][0]["provider"], "devin");
+    assert_eq!(imported["sources"][0]["source_format"], "devin_atif_json");
+    assert_eq!(imported["totals"]["imported_sessions"], 1);
+    assert_eq!(imported["totals"]["imported_events"], 4);
+
+    let search = json_output(ctx(&temp).args([
+        "search",
+        "explicit Devin ATIF export ingestion",
+        "--provider",
+        "devin",
+        "--json",
+    ]));
+    assert_search_provider_oracle(
+        &search,
+        "devin",
+        "explicit Devin ATIF export ingestion",
+        1,
+        "message",
+    );
+
+    let sources = json_output(ctx(&temp).args(["sources", "--json"]));
+    assert!(!sources["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|source| source["provider"] == "devin"));
 }
 
 #[test]
@@ -9839,6 +9883,7 @@ fn native_provider_cli_requires_existing_history_or_explicit_path() {
         ("aider-desk", "no importable aider_desk history found"),
         ("amp", "no importable amp history found"),
         ("auggie", "no importable auggie history found"),
+        ("devin", "no importable devin history found"),
         ("eve", "no importable eve history found"),
         ("iflow-cli", "no importable iflow_cli history found"),
         ("deepagents", "no importable deepagents history found"),
@@ -9857,7 +9902,10 @@ fn native_provider_cli_requires_existing_history_or_explicit_path() {
 
         assert!(stderr.contains(expected_blocker), "{stderr}");
         assert!(stderr.contains("use `ctx sources`"), "{stderr}");
-        if matches!(cli_provider, "nanoclaw" | "aider-desk" | "amp" | "eve") {
+        if matches!(
+            cli_provider,
+            "nanoclaw" | "aider-desk" | "amp" | "devin" | "eve"
+        ) {
             assert!(
                 stderr.contains("no default paths are registered for this provider"),
                 "{stderr}"

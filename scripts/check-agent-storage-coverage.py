@@ -19,9 +19,9 @@ UPSTREAM_PACKAGE = "skills@1.5.14"
 UPSTREAM_COMMIT = "2adcfe5a4cce0ce5f4d5547a997b2a161ec5d127"
 EXPECTED_COUNTS = {
     "native-auto": 45,
-    "native-preview": 5,
+    "native-preview": 6,
     "candidate-family": 5,
-    "webapp-boundary": 9,
+    "webapp-boundary": 8,
     "unknown": 6,
     "install-target": 2,
 }
@@ -39,6 +39,7 @@ REQUIRED_SCHEMA_FAMILIES = {
     "LiveStore SQLite state DB",
     "Workflow local-world streams",
     "per-agent history JSON",
+    "explicit ATIF export JSON",
     "VS Code/Electron storage",
     "webapp/object-store boundary",
 }
