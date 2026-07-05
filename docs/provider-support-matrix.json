@@ -585,6 +585,71 @@
       }
     },
     {
+      "id": "qoder",
+      "display_name": "Qoder",
+      "priority": "p1",
+      "status": "local_import_when_supported",
+      "capture_provider": "qoder",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "qoder_transcript_jsonl_tree",
+          "fidelity": "imported",
+          "proof": [
+            "Official Qoder Hooks docs Transcript File Format section",
+            "ctx sources",
+            "ctx import --provider qoder"
+          ],
+          "notes": [
+            "Reads official Qoder transcript JSONL files under ~/.qoder/projects/<project>/transcript/<session-id>.jsonl.",
+            "Imports documented session_meta, user, assistant, progress, text, tool_use, and tool_result records.",
+            "Does not parse Qoder VS Code/Electron state databases or encrypted application logs."
+          ]
+        }
+      ],
+      "history_locations": [
+        "~/.qoder/projects/*/transcript/*.jsonl"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": false,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": true,
+        "command_output": false,
+        "files_touched": true,
+        "artifacts": false,
+        "model_identity": true,
+        "costs": false,
+        "token_usage": false,
+        "parent_child_session_edges": false
+      },
+      "redaction_notes": [
+        "Reads provider transcript JSONL files read-only; imported prompt text, assistant text, tool names/inputs, tool result previews, cwd, local source paths, and searchable previews remain in the local ctx index.",
+        "Raw provider event JSON is retained only as capped local preview metadata; review output before sharing."
+      ],
+      "blockers": [
+        "Encrypted Qoder application logs and VS Code/Electron state databases are not imported."
+      ],
+      "public_docs": "docs/provider-support.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/qoder/projects"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs"
+      ],
+      "metadata": {
+        "canonical_provider_id": "qoder",
+        "source_docs": [
+          "https://docs.qoder.com/extensions/hooks"
+        ]
+      }
+    },
+    {
       "id": "pochi",
       "display_name": "Pochi",
       "priority": "p1",

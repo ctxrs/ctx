@@ -243,6 +243,12 @@ const LINGMA_DEFAULTS: &[ProviderDefaultLocation] = &[
 
 const TRAE_DEFAULTS: &[ProviderDefaultLocation] = &[];
 
+const QODER_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
+    path_components: &[".qoder", "projects"],
+    source_format: "qoder_transcript_jsonl_tree",
+    source_kind: ProviderSourceKind::NativeHistory,
+}];
+
 const CORTEX_CODE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     path_components: &[".snowflake", "cortex", "conversations"],
     source_format: "cortex_code_conversations_json",
@@ -1018,6 +1024,16 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         display_name: "Trae",
         default_locations: TRAE_DEFAULTS,
         import_support: ProviderImportSupport::Preview,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
+    ProviderSourceSpec {
+        provider: CaptureProvider::Qoder,
+        display_name: "Qoder",
+        default_locations: QODER_DEFAULTS,
+        import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         raw_retention: ProviderRawRetention::PathReference,
         redaction_boundary: ProviderRedactionBoundary::BeforeExport,
@@ -1985,6 +2001,8 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::Dexto => "dexto_sqlite",
         CaptureProvider::Lingma => "lingma_sqlite",
         CaptureProvider::Trae => "trae_state_vscdb",
+        CaptureProvider::Qoder if path.is_dir() => "qoder_transcript_jsonl_tree",
+        CaptureProvider::Qoder => "qoder_transcript_jsonl",
         CaptureProvider::Pochi => "pochi_livestore_state_sqlite",
         CaptureProvider::Warp => "warp_sqlite",
         CaptureProvider::CortexCode if path.is_dir() => "cortex_code_conversations_json",
@@ -2189,6 +2207,9 @@ fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::Dexto => Some("path exists but no Dexto SQLite database was found"),
         CaptureProvider::Lingma => {
             Some("path exists but no Lingma chat_record table with the expected columns was found")
+        }
+        CaptureProvider::Qoder => {
+            Some("path exists but no Qoder transcript JSONL files were found")
         }
         CaptureProvider::Pochi => {
             Some("path exists but no Pochi LiveStore state SQLite database was found")
@@ -2430,6 +2451,9 @@ fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::Lingma => {
             Some("path exists but the Lingma chat_record SQLite database could not be read")
         }
+        CaptureProvider::Qoder => {
+            Some("path exists but Qoder transcript JSONL files could not be read; check permissions")
+        }
         CaptureProvider::Pochi => {
             Some("path exists but the Pochi LiveStore state database could not be read")
         }
@@ -2483,6 +2507,9 @@ fn default_location_import_probe(
             path_has_component(candidate, "agent-transcripts")
         }),
         CaptureProvider::Windsurf => has_jsonl_file_under_matching(path, 10_000, |_| true),
+        CaptureProvider::Qoder => has_jsonl_file_under_matching(path, 10_000, |candidate| {
+            path_has_component(candidate, "transcript")
+        }),
         CaptureProvider::Zed => path_is_file_probe(path),
         CaptureProvider::CopilotCli => has_jsonl_file_under_matching(path, 10_000, |candidate| {
             candidate.file_name().and_then(|name| name.to_str()) == Some("events.jsonl")

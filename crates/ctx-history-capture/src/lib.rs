@@ -1116,6 +1116,27 @@ impl Default for WindsurfCascadeHookImportOptions {
 }
 
 #[derive(Debug, Clone)]
+pub struct QoderImportOptions {
+    pub machine_id: String,
+    pub source_path: Option<PathBuf>,
+    pub imported_at: DateTime<Utc>,
+    pub history_record_id: Option<Uuid>,
+    pub allow_partial_failures: bool,
+}
+
+impl Default for QoderImportOptions {
+    fn default() -> Self {
+        Self {
+            machine_id: default_machine_id(),
+            source_path: None,
+            imported_at: utc_now(),
+            history_record_id: None,
+            allow_partial_failures: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct ZedThreadsSqliteImportOptions {
     pub machine_id: String,
     pub source_path: Option<PathBuf>,
@@ -1714,6 +1735,9 @@ pub struct CursorAgentTranscriptJsonlAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct WindsurfCascadeHookTranscriptJsonlAdapter;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct QoderJsonlAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ZedThreadsSqliteAdapter;
@@ -2946,6 +2970,24 @@ impl ProviderCaptureAdapter for WindsurfCascadeHookTranscriptJsonlAdapter {
             CaptureProvider::Windsurf,
             WINDSURF_CASCADE_HOOK_TRANSCRIPT_SOURCE_FORMAT,
         )
+    }
+}
+
+impl ProviderCaptureAdapter for QoderJsonlAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Qoder
+    }
+
+    fn source_format(&self) -> &str {
+        QODER_SOURCE_FORMAT
+    }
+
+    fn normalize_path(
+        &self,
+        path: &Path,
+        context: &ProviderAdapterContext,
+    ) -> Result<ProviderNormalizationResult> {
+        normalize_jsonl_tree(path, context, CaptureProvider::Qoder, QODER_SOURCE_FORMAT)
     }
 }
 
@@ -6079,6 +6121,25 @@ pub fn import_warp_sqlite(
     )
 }
 
+pub fn import_qoder_history(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: QoderImportOptions,
+) -> Result<ProviderImportSummary> {
+    import_native_jsonl_tree(
+        store,
+        NativeJsonlTreeImport {
+            path: path.as_ref(),
+            machine_id: options.machine_id,
+            source_path: options.source_path,
+            imported_at: options.imported_at,
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+        },
+        QoderJsonlAdapter,
+    )
+}
+
 pub fn import_zed_threads_sqlite(
     path: impl AsRef<Path>,
     store: &mut Store,
@@ -6582,6 +6643,7 @@ const GEMINI_CLI_SOURCE_FORMAT: &str = "gemini_cli_chat_recording_jsonl";
 const CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT: &str = "cursor_agent_transcript_jsonl";
 const WINDSURF_CASCADE_HOOK_TRANSCRIPT_SOURCE_FORMAT: &str =
     "windsurf_cascade_hook_transcript_jsonl";
+const QODER_SOURCE_FORMAT: &str = "qoder_transcript_jsonl";
 const ZED_THREADS_SQLITE_SOURCE_FORMAT: &str = "zed_threads_sqlite";
 const FACTORY_DROID_SOURCE_FORMAT: &str = "factory_ai_droid_sessions_jsonl";
 const COPILOT_CLI_SOURCE_FORMAT: &str = "copilot_cli_session_events_jsonl";
@@ -20113,6 +20175,9 @@ fn native_jsonl_missing_reason(provider: CaptureProvider) -> &'static str {
         CaptureProvider::Windsurf => {
             "no Windsurf Cascade hook transcript JSONL files found under ~/.windsurf/transcripts"
         }
+        CaptureProvider::Qoder => {
+            "no Qoder transcript JSONL files found under ~/.qoder/projects/*/transcript"
+        }
         CaptureProvider::CopilotCli => "no Copilot CLI session events.jsonl transcripts found",
         CaptureProvider::FactoryAiDroid => "no Factory AI Droid session JSONL transcripts found",
         CaptureProvider::QwenCode => "no Qwen Code chat JSONL transcripts found under chats",
@@ -20150,6 +20215,12 @@ fn provider_jsonl_path_is_native(provider: CaptureProvider, path: &Path) -> bool
             .components()
             .any(|component| component.as_os_str() == "agent-transcripts"),
         CaptureProvider::Windsurf => path.extension().and_then(|ext| ext.to_str()) == Some("jsonl"),
+        CaptureProvider::Qoder => {
+            path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
+                && path
+                    .components()
+                    .any(|component| component.as_os_str() == "transcript")
+        }
         CaptureProvider::CopilotCli => {
             path.file_name().and_then(|name| name.to_str()) == Some("events.jsonl")
         }
@@ -24943,6 +25014,7 @@ fn native_jsonl_header_session_id(provider: CaptureProvider, value: &Value) -> O
         .then(|| value.pointer("/data/sessionId").and_then(Value::as_str))
         .flatten(),
         CaptureProvider::QwenCode => value.get("sessionId").and_then(Value::as_str),
+        CaptureProvider::Qoder => value.get("sessionId").and_then(Value::as_str),
         CaptureProvider::IflowCli => value.get("sessionId").and_then(Value::as_str),
         CaptureProvider::Kode => value.get("sessionId").and_then(Value::as_str),
         CaptureProvider::Neovate => value.get("sessionId").and_then(Value::as_str),
@@ -24980,6 +25052,7 @@ fn native_jsonl_header_cwd(provider: CaptureProvider, value: &Value) -> Option<S
         CaptureProvider::FactoryAiDroid => value.get("cwd").and_then(Value::as_str),
         CaptureProvider::CopilotCli => value.pointer("/data/context/cwd").and_then(Value::as_str),
         CaptureProvider::QwenCode => value.get("cwd").and_then(Value::as_str),
+        CaptureProvider::Qoder => value.get("cwd").and_then(Value::as_str),
         CaptureProvider::IflowCli => value.get("cwd").and_then(Value::as_str),
         CaptureProvider::Kode => value.get("cwd").and_then(Value::as_str),
         CaptureProvider::Neovate => value.get("cwd").and_then(Value::as_str),
@@ -25399,6 +25472,15 @@ fn native_jsonl_event_type(provider: CaptureProvider, value: &Value) -> EventTyp
             Some("summary" | "checkpoint") => EventType::Summary,
             _ => EventType::Notice,
         },
+        CaptureProvider::Qoder => match value.get("type").and_then(Value::as_str) {
+            Some("assistant") if native_jsonl_content_has(value, "tool_use") => EventType::ToolCall,
+            Some("user") if native_jsonl_content_has(value, "tool_result") => EventType::ToolOutput,
+            Some("user" | "assistant") => EventType::Message,
+            Some("progress") => EventType::Notice,
+            Some("session_meta") => EventType::Notice,
+            _ if value.get("toolUseResult").is_some() => EventType::ToolOutput,
+            _ => EventType::Notice,
+        },
         CaptureProvider::QwenCode => match value.get("type").and_then(Value::as_str) {
             Some("user" | "assistant") if native_jsonl_content_has(value, "tool_use") => {
                 EventType::ToolCall
@@ -25542,6 +25624,12 @@ fn native_jsonl_role(provider: CaptureProvider, value: &Value) -> EventRole {
             Some("code_action") => EventRole::Tool,
             _ => EventRole::Unknown,
         },
+        CaptureProvider::Qoder => provider_role(
+            value
+                .pointer("/message/role")
+                .or_else(|| value.get("type"))
+                .and_then(Value::as_str),
+        ),
         CaptureProvider::QwenCode => provider_role(
             value
                 .pointer("/message/role")
@@ -25645,6 +25733,21 @@ fn native_jsonl_event_text(
             .or_else(|| value.get("text").and_then(Value::as_str).map(str::to_owned))
             .unwrap_or_else(|| format!("Cursor event: {entry_type}")),
         CaptureProvider::Windsurf => windsurf_event_text(value, entry_type),
+        CaptureProvider::Qoder => {
+            let primary = if event_type == EventType::ToolOutput {
+                value
+                    .get("toolUseResult")
+                    .or_else(|| value.pointer("/message/content"))
+            } else {
+                value
+                    .pointer("/message/content")
+                    .or_else(|| value.get("toolUseResult"))
+            };
+            primary
+                .or_else(|| value.pointer("/data/content"))
+                .and_then(provider_value_text)
+                .unwrap_or_else(|| format!("Qoder event: {entry_type}"))
+        }
         CaptureProvider::QwenCode => value
             .pointer("/message/content")
             .or_else(|| value.get("message"))
@@ -25856,6 +25959,10 @@ fn native_jsonl_model(provider: CaptureProvider, value: &Value) -> Option<Value>
             .or_else(|| value.pointer("/metadata/model").cloned()),
         CaptureProvider::CopilotCli => value.pointer("/data/selectedModel").cloned(),
         CaptureProvider::QwenCode => value
+            .get("model")
+            .cloned()
+            .or_else(|| value.pointer("/message/model").cloned()),
+        CaptureProvider::Qoder => value
             .get("model")
             .cloned()
             .or_else(|| value.pointer("/message/model").cloned()),
@@ -35782,6 +35889,79 @@ mod tests {
         assert_eq!(second.imported_events, 0);
         assert_eq!(second.skipped_sessions, 1);
         assert_eq!(second.skipped_events, 5);
+    }
+
+    #[test]
+    fn native_qoder_fixture_imports_documented_transcript_jsonl() {
+        let temp = tempdir();
+        let fixture = provider_history_fixture("qoder/projects");
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let source = provider_source_for_path(CaptureProvider::Qoder, fixture.clone());
+        assert_eq!(source.source_format, "qoder_transcript_jsonl_tree");
+        assert_eq!(source.import_support, ProviderImportSupport::Native);
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+
+        let first = import_qoder_history(
+            &fixture,
+            &mut store,
+            QoderImportOptions {
+                source_path: Some(fixture.clone()),
+                allow_partial_failures: true,
+                imported_at: "2026-07-01T12:00:00Z".parse().unwrap(),
+                ..QoderImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(first.failed, 0, "{first:?}");
+        assert_eq!(first.imported_sessions, 1);
+        assert_eq!(first.imported_events, 7);
+        assert!(store
+            .search_event_hits("qoder jsonl oracle prompt", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::Qoder)));
+        assert!(store
+            .search_event_hits("qoder native import ok", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::Qoder)));
+
+        let session_id = provider_session_uuid(CaptureProvider::Qoder, "qoder-session-1");
+        let events = store.events_for_session(session_id).unwrap();
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == EventType::Message
+                && event.role == Some(EventRole::User)));
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == EventType::ToolCall
+                && event.role == Some(EventRole::Assistant)));
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == EventType::ToolOutput
+                && event.role == Some(EventRole::User)
+                && event.payload["body"]["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("qoder import ok"))));
+
+        let second = import_qoder_history(
+            &fixture,
+            &mut store,
+            QoderImportOptions {
+                source_path: Some(fixture.clone()),
+                allow_partial_failures: true,
+                imported_at: "2026-07-01T12:05:00Z".parse().unwrap(),
+                ..QoderImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(second.failed, 0, "{second:?}");
+        assert_eq!(second.imported_sessions, 0);
+        assert_eq!(second.imported_events, 0);
+        assert_eq!(second.skipped_sessions, 1);
+        assert_eq!(second.skipped_events, 7);
     }
 
     #[test]
