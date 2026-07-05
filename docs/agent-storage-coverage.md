@@ -21,8 +21,8 @@ Status meanings:
 - `install-target`: npx target is an aggregate or project skill target, not a
   proven history-producing agent.
 
-Result on this integration branch: 45 `native-auto`, 5 `native-preview`, 5
-`candidate-family`, 9 `webapp-boundary`, 6 `unknown`, and 2 `install-target`
+Result on this integration branch: 45 `native-auto`, 6 `native-preview`, 5
+`candidate-family`, 8 `webapp-boundary`, 6 `unknown`, and 2 `install-target`
 rows.
 
 ## Shared Families
@@ -88,7 +88,7 @@ rows.
 | `crush` | `native-auto` | `generic sqlite messages` | ctx `crush_sqlite`; npx `~/.config/crush` | - |
 | `cursor` | `native-auto` | `VS Code/Electron storage` | ctx `cursor_agent_transcript_jsonl_tree`; npx `~/.cursor` | - |
 | `deepagents` | `native-auto` | `LangGraph checkpoint SQLite` | ctx `deepagents_sessions_sqlite`; npx `~/.deepagents`; official local state evidence points to `~/.deepagents/.state/sessions.db` and `history.jsonl` | Imports decoded root `writes.messages` chat messages only; `history.jsonl` and arbitrary checkpoint state blobs are not indexed. |
-| `devin` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.config/devin`; no ctx provider | Hosted-agent history should use an explicit export path such as ATIF when available; no local conversation DB is proven. |
+| `devin` | `native-preview` | `explicit ATIF export JSON` | ctx `devin_atif_json` via explicit `--path`; npx `~/.config/devin` remains unclaimed | Preview explicit import only from user-supplied Devin CLI `devin --export [PATH]` ATIF files/directories. No Devin cloud scraping, login, account paths, default discovery, or `~/.config/devin` local conversation DB is claimed. |
 | `dexto` | `native-preview` | `generic sqlite messages` | ctx `dexto_sqlite`; npx `~/.dexto` | Preview explicit import only; no proven default discovery path yet. |
 | `droid` | `native-auto` | `JSONL CLI event logs` | ctx `factory_ai_droid_sessions_jsonl`; npx `~/.factory` | - |
 | `eve` | `native-auto` | `Workflow local-world streams` | ctx `eve_workflow_data_streams`; npx project `agent`; `eve@0.19.0` local development uses Workflow local-world `.workflow-data` durable stream storage | Imports default Eve message stream chunks from `WORKFLOW_LOCAL_DATA_DIR`, current project `.workflow-data`, or explicit paths; `.eve` build/runtime artifacts are not treated as history. |
