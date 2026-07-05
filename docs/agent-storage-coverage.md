@@ -21,8 +21,8 @@ Status meanings:
 - `install-target`: npx target is an aggregate or project skill target, not a
   proven history-producing agent.
 
-Result on this integration branch: 45 `native-auto`, 7 `native-preview`, 4
-`candidate-family`, 8 `webapp-boundary`, 6 `unknown`, and 2 `install-target`
+Result on this integration branch: 45 `native-auto`, 8 `native-preview`, 4
+`candidate-family`, 7 `webapp-boundary`, 6 `unknown`, and 2 `install-target`
 rows.
 
 ## Shared Families
@@ -130,7 +130,7 @@ rows.
 | `tinycloud` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.tinycloud`; no ctx provider | No proven stable local transcript boundary; prefer exporter or plugin. |
 | `trae` | `native-preview` | `VS Code/Electron storage` | ctx `trae_state_vscdb`; npx `~/.trae`; official Trae docs show `ModularData` roots; `yuanjing001/trae-chats-exporter@85e2d111a5a0e35f0957502097d3a8b18095ef72` reads Trae `User/workspaceStorage/<workspace>/state.vscdb` `ItemTable` keys including `memento/icube-ai-agent-storage`, `chat.ChatSessionStore.index`, and `ChatStore` | Preview explicit import only; source-backed synthetic fixture; no default discovery, real Trae run fixture, or `trae-cn` alias is claimed. |
 | `trae-cn` | `candidate-family` | `VS Code/Electron storage` | npx `~/.trae-cn`; no ctx provider | Need local app storage or export contract proof. |
-| `warp` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.warp`; no ctx provider | Skill/config target is not a local transcript contract; native support needs explicit export or local DB proof. |
+| `warp` | `native-preview` | `Warp restoration SQLite` | ctx `warp_sqlite`; npx `~/.warp`; official docs document platform `warp.sqlite` paths, and public Warp source/proto define `agent_conversations`, `agent_tasks.task`, and `Task.messages` | Preview manual import only via `ctx import --provider warp` for discovered documented Linux/macOS paths or `ctx import --provider warp --path <warp.sqlite>`; no native-auto claim without a safe live local fixture or stronger official import/export contract. Windows `%LOCALAPPDATA%` default discovery, cloud sync, Oz/cloud conversations, browser IndexedDB, Markdown exports, and Warp Drive/team data are not parsed. |
 | `windsurf` | `native-preview` | `JSONL CLI event logs` | ctx `windsurf_cascade_hook_transcript_jsonl_tree`; npx `~/.codeium/windsurf`; official hook writes `~/.windsurf/transcripts/{trajectory_id}.jsonl` | Preview explicit import only; hook must be configured; private `~/.codeium/windsurf/cascade` cache and VS Code state DBs are not parsed. |
 | `zed` | `native-auto` | `VS Code/Electron storage` | ctx `zed_threads_sqlite`; npx `$XDG_DATA_HOME/zed` or `~/.local/share/zed` | Per-message timestamps are unavailable; ctx uses thread `updated_at`. |
 | `zencoder` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.zencoder`; no ctx provider | Skill home evidence is not a transcript schema; prefer exporter, plugin, or underlying provider imports. |

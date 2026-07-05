@@ -2577,7 +2577,7 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
             vec![
                 "Usage: ctx import",
                 "--provider <PROVIDER>",
-                "[possible values: codex, pi, claude, opencode, openloaf, kilo, kiro-cli, crush, goose, antigravity, gemini, cursor, windsurf, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, jazz, auggie, devin, eve, firebender, forgecode, deepagents, mistral-vibe, mux, reasonix, kode, neovate, command-code, terramind, rovodev, cortex-code, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto, lingma, pochi, codebuddy, aider-desk, amp, trae]",
+                "[possible values: codex, pi, claude, opencode, openloaf, kilo, kiro-cli, crush, goose, antigravity, gemini, cursor, windsurf, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, jazz, auggie, devin, eve, firebender, forgecode, deepagents, mistral-vibe, mux, reasonix, kode, neovate, command-code, terramind, rovodev, cortex-code, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto, lingma, pochi, warp, codebuddy, aider-desk, amp, trae]",
                 "--path <PATH>",
                 "--format <FORMAT>",
                 "--resume",
@@ -6878,6 +6878,100 @@ fn trae_cli_imports_explicit_workspace_storage_preview_only() {
     assert_eq!(second["totals"]["failed"], 0);
     assert_eq!(second["totals"]["imported_sessions"], 0);
     assert_eq!(second["totals"]["imported_events"], 0);
+}
+
+#[test]
+fn warp_cli_imports_explicit_sqlite_preview() {
+    let temp = tempdir();
+    let fixture = provider_history_fixture("warp/v1/warp.sqlite");
+    let imported = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "warp",
+        "--path",
+        &fixture,
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(imported["schema_version"], 1);
+    assert_eq!(imported["sources"][0]["provider"], "warp");
+    assert_eq!(imported["sources"][0]["source_format"], "warp_sqlite");
+    assert_eq!(imported["totals"]["failed"], 0);
+    assert_eq!(imported["totals"]["imported_sessions"], 1);
+    assert_eq!(imported["totals"]["imported_events"], 4);
+
+    let search = json_output(ctx(&temp).args([
+        "search",
+        "Warp sqlite oracle answer",
+        "--provider",
+        "warp",
+        "--refresh",
+        "off",
+        "--json",
+    ]));
+    assert_search_provider_oracle(&search, "warp", "Warp sqlite oracle answer", 1, "message");
+
+    let second = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "warp",
+        "--path",
+        &fixture,
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(second["totals"]["failed"], 0);
+    assert_eq!(second["totals"]["imported_sessions"], 0);
+    assert_eq!(second["totals"]["imported_events"], 0);
+}
+
+#[test]
+fn warp_preview_default_discovery_is_not_auto_imported() {
+    let temp = tempdir();
+    let default_db = temp.path().join(".local/state/warp-terminal/warp.sqlite");
+    fs::create_dir_all(default_db.parent().unwrap()).unwrap();
+    fs::copy(provider_history_fixture("warp/v1/warp.sqlite"), &default_db).unwrap();
+
+    let sources = json_output(ctx(&temp).args(["sources", "--json"]));
+    let source = sources["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| source["provider"] == "warp")
+        .unwrap_or_else(|| panic!("missing Warp source in {sources:#}"));
+    assert_eq!(source["status"], "available");
+    assert_eq!(source["source_format"], "warp_sqlite");
+    assert_eq!(source["import_support"], "preview");
+    assert_eq!(source["native_import"], false);
+    assert_eq!(source["importable"], true);
+
+    let search_before = json_output(ctx(&temp).args([
+        "search",
+        "Warp sqlite oracle answer",
+        "--provider",
+        "warp",
+        "--json",
+    ]));
+    assert_eq!(search_before["freshness"]["mode"], "auto");
+    assert_eq!(search_before["freshness"]["status"], "no_sources");
+    assert_eq!(search_before["freshness"]["source_count"], 0);
+    assert!(search_before["results"].as_array().unwrap().is_empty());
+
+    let imported = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "warp",
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(imported["sources"][0]["provider"], "warp");
+    assert_eq!(imported["sources"][0]["source_format"], "warp_sqlite");
+    assert_eq!(imported["totals"]["failed"], 0);
+    assert_eq!(imported["totals"]["imported_sessions"], 1);
+    assert_eq!(imported["totals"]["imported_events"], 4);
 }
 
 #[test]

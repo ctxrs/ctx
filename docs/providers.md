@@ -30,6 +30,10 @@ The current CLI imports local history for:
   `~/.lingma/vscode-insiders/sharedClientCache/cache/db/local.db`, or an
   explicit Lingma `local.db` path. Lingma assistant content is imported from
   `summary`/`error_result` only and may be partial;
+- Warp Terminal local restoration SQLite history from documented Linux/macOS
+  `warp.sqlite` paths or an explicit `warp.sqlite` path. This is
+  preview/manual only: use `ctx import --provider warp` for a discovered source or
+  `ctx import --provider warp --path <warp.sqlite>`;
 - CodeBuddy JSON history under `~/.codebuddy`,
   `~/Library/Application Support/CodeBuddyExtension/Data`,
   `%LOCALAPPDATA%/CodeBuddyExtension`, or an explicit CodeBuddy history root;
@@ -142,7 +146,7 @@ snake_case, such as `copilot_cli`, `factory_ai_droid`, `qwen_code`,
 `mistral_vibe`; Aider Desk is reported as `aider_desk`, while compact native
 IDs such as `kilo`, `openclaw`, `crush`, `goose`, `dexto`, `mux`, `reasonix`,
 `kode`, `neovate`, `terramind`, `zed`, `lingma`, `codebuddy`, `amp`, `forgecode`,
-`deepagents`, `nanoclaw`, `astrbot`, `trae`, `shelley`, `continue`, and `openhands`
+`deepagents`, `nanoclaw`, `astrbot`, `trae`, `warp`, `shelley`, `continue`, and `openhands`
 stay compact. Roo Code is
 reported as `roo_code`.
 
@@ -152,8 +156,8 @@ when provider-specific transcript files exist. Sources with `import_support:
 "preview"` are explicit-import preview paths: use `ctx import --provider
 nanoclaw` or `ctx import --provider astrbot` when discovery finds the desired
 source, or use `ctx import --provider trae --path <state.vscdb-or-workspaceStorage>`
-for Trae. Add `--path` to target a specific source such as an Amp export JSON
-before searching it. They
+for Trae. Add `--path` to target a specific source such as a Warp SQLite DB or
+Amp export JSON before searching it. They
 are intentionally excluded from `ctx import --all` and pre-search refresh until
 promoted. Sources with
 `status: "unknown"` hit the bounded transcript probe budget before proving

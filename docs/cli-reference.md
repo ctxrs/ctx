@@ -92,8 +92,8 @@ machine. Current rows include:
   ForgeCode, Deep Agents, OpenClaw, Hermes, Gemini, Cursor, Zed, Kiro CLI,
   Copilot CLI, Factory AI Droid, Qwen Code, Kimi Code CLI, Autohand Code,
   iFlow CLI, CodeBuddy, Cline, and Roo Code local history locations;
-- preview rows for NanoClaw project roots and AstrBot SQLite history when those
-  paths are discoverable;
+- preview rows for NanoClaw project roots, AstrBot SQLite history, and Warp
+  `warp.sqlite` restoration history when those paths are discoverable;
 - local history-source plugin manifests under `$CTX_DATA_ROOT/plugins` or
   `CTX_HISTORY_PLUGIN_PATH`.
 
@@ -303,7 +303,7 @@ optimized for agent reading; use `--verbose` for expanded text diagnostics.
 
 Filters:
 
-- `--provider codex|pi|claude|opencode|kilo|kiro-cli|forgecode|deepagents|mistral-vibe|mux|reasonix|kode|neovate|terramind|crush|goose|dexto|lingma|openclaw|hermes|nanoclaw|astrbot|shelley|continue|openhands|antigravity|gemini|cursor|zed|copilot-cli|factory-ai-droid|qwen-code|kimi-code-cli|autohand-code|iflow-cli|codebuddy|aider-desk|cline|roo|custom`;
+- `--provider codex|pi|claude|opencode|kilo|kiro-cli|forgecode|deepagents|mistral-vibe|mux|reasonix|kode|neovate|terramind|crush|goose|dexto|lingma|warp|openclaw|hermes|nanoclaw|astrbot|shelley|continue|openhands|antigravity|gemini|cursor|zed|copilot-cli|factory-ai-droid|qwen-code|kimi-code-cli|autohand-code|iflow-cli|codebuddy|aider-desk|cline|roo|custom`;
 - `--workspace <name-or-path>`, substring match over stored workspace, cwd,
   source path, or repository-name text;
 - `--since <rfc3339-or-days>d`, for example `2026-06-01T00:00:00Z` or `30d`;

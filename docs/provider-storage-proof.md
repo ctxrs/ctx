@@ -712,6 +712,53 @@ IDE/application storage imports.
   application caches, `trae-cn`, and robust promotion beyond preview remain
   unclaimed until real fixtures and drift validation exist.
 
+## Warp
+
+- Official local path evidence:
+  `https://docs.warp.dev/terminal/sessions/session-restoration/` documents that
+  Warp saves session restoration data to a local SQLite database and lists
+  `warp.sqlite` paths for macOS, Windows, and Linux. Linux is
+  `${XDG_STATE_HOME:-$HOME/.local/state}/warp-terminal/warp.sqlite`; macOS is
+  `~/Library/Group Containers/2BBY89MBSN.dev.warp/Library/Application Support/dev.warp.Warp-Stable/warp.sqlite`;
+  Windows is `%LOCALAPPDATA%\warp\Warp\data\warp.sqlite`.
+- Official local/cloud boundary evidence:
+  `https://docs.warp.dev/agent-platform/local-agents/interacting-with-agents/`
+  says the conversation panel shows active and past agent conversations and
+  notes that when cloud sync is disabled, conversations are stored locally only
+  and cannot be shared; cloud agent conversations are always stored in the
+  cloud.
+- Open-source client evidence: `https://github.com/warpdotdev/warp` is Warp's
+  public client repository. At the inspected public checkout, `crates/persistence/src/schema.rs`
+  defines `agent_conversations(id, conversation_id, conversation_data, last_modified_at)`,
+  `agent_tasks(id, conversation_id, task_id, task, last_modified_at)`, and
+  `ai_queries(...)`.
+- Write/read evidence: `app/src/persistence/agent.rs` serializes
+  `AgentConversationData` JSON into `agent_conversations.conversation_data`,
+  writes each `warp_multi_agent_api::Task` with `task.encode_to_vec()` into
+  `agent_tasks.task`, and reads those rows back with `api::Task::decode`.
+- Message-shape evidence:
+  `https://github.com/warpdotdev/warp-proto-apis` publishes
+  `apis/multi_agent/v1/task.proto`; `Task` has repeated `Message messages`, and
+  `Message` includes `UserQuery.query`, `AgentOutput.text`, tool-call/result,
+  reasoning, summary, and inter-agent message variants.
+- `ctx` imports this shape as `warp_sqlite`, but only as preview/manual import:
+  `ctx import --provider warp` for a discovered documented Linux/macOS path or
+  `ctx import --provider warp --path <warp.sqlite>` for any explicit local
+  Warp SQLite database, including the documented Windows `%LOCALAPPDATA%` path.
+  It reads the SQLite database read-only, decodes the public protobuf subset,
+  and does not copy `server_conversation_token` or
+  `forked_from_server_conversation_token` values into ctx metadata.
+- Fixture evidence: `tests/fixtures/provider-history/warp/v1/warp.sqlite` is a
+  sanitized schema-backed fixture generated for ctx tests, not copied from a
+  user Warp profile. This host did not have a safe local Warp `warp.sqlite`
+  fixture under the documented Linux path.
+- Caveats and unclaimed formats: ctx does not parse cloud-synced conversations,
+  Oz/cloud agent conversations, browser IndexedDB, Markdown exports, Warp Drive
+  or team data, shell command history outside decoded `agent_tasks.task`, or
+  any private remote data. Windows `%LOCALAPPDATA%` default discovery is not
+  implemented. Default discovery remains preview/manual until a safe-run local
+  fixture or stronger official import/export contract supports native-auto.
+
 ## Void
 
 - Source evidence: Void stores chat threads through VS Code/Electron application
