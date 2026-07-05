@@ -6437,7 +6437,11 @@ fn search_filters(
             .map_err(|err| anyhow!("{err}"))?,
         file: input.file.and_then(|path| {
             let s = path.display().to_string();
-            if s.trim().is_empty() { None } else { Some(s) }
+            if s.trim().is_empty() {
+                None
+            } else {
+                Some(s)
+            }
         }),
         exclude_provider_session,
     })

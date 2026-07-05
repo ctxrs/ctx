@@ -7174,18 +7174,15 @@ fn file_only_search_returns_touched_file_matches() {
 #[test]
 fn search_normalizes_whitespace_only_filters() {
     let temp = tempdir();
-    let no_file = json_output(
-        ctx(&temp).args(["search", "test", "--file", " ", "--json"]),
-    );
+    let no_file = json_output(ctx(&temp).args(["search", "test", "--file", " ", "--json"]));
     assert!(
         !no_file["filters"].as_object().unwrap().contains_key("file"),
         "expected no \"file\" key in filters, got: {}",
         no_file["filters"],
     );
 
-    let no_workspace = json_output(
-        ctx(&temp).args(["search", "test", "--workspace", " ", "--json"]),
-    );
+    let no_workspace =
+        json_output(ctx(&temp).args(["search", "test", "--workspace", " ", "--json"]));
     assert!(
         !no_workspace["filters"]
             .as_object()
