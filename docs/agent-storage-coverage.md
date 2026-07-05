@@ -21,8 +21,8 @@ Status meanings:
 - `install-target`: npx target is an aggregate or project skill target, not a
   proven history-producing agent.
 
-Result on this integration branch: 46 `native-auto`, 8 `native-preview`, 3
-`candidate-family`, 7 `webapp-boundary`, 6 `unknown`, and 2 `install-target`
+Result on this integration branch: 46 `native-auto`, 8 `native-preview`, 5
+`candidate-family`, 5 `webapp-boundary`, 6 `unknown`, and 2 `install-target`
 rows.
 
 ## Shared Families
@@ -102,7 +102,7 @@ rows.
 | `inference-sh` | `unknown` | `unknown native history` | npx `~/.inferencesh`; no ctx provider | Need native history storage research before claiming import support. |
 | `iflow-cli` | `native-auto` | `JSONL CLI event logs` | ctx `iflow_cli_session_jsonl_tree`; npx `IFLOW_HOME` or `~/.iflow` | - |
 | `jazz` | `native-auto` | `per-agent history JSON` | ctx `jazz_history_json`; npx `JAZZ_HOME` or `~/.jazz/history`; package `jazz-ai@0.12.5` writes `history/<agentId>.json` | Imports the retained conversations present in each per-agent history file; Jazz currently caps the stored conversation list in the package writer. |
-| `junie` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.junie`; no ctx provider | IDE-managed history boundary needs a verified local export or plugin. |
+| `junie` | `candidate-family` | `VS Code/Electron storage` | npx `~/.junie`; no ctx provider; official docs describe `/history`, full transcript view, and stored full context for the last 10 sessions | Need a stable first-party transcript path/schema, export contract, or sanitized fixture; package/app data inspection has not proven durable local transcript files. |
 | `kilo` | `native-auto` | `opencode sqlite family` | ctx `kilo_sqlite`; npx `~/.kilocode` | - |
 | `kimi-code-cli` | `native-auto` | `JSONL CLI event logs` | ctx `kimi_code_cli_wire_jsonl_tree`; npx `~/.kimi-code` or `~/.kimi` | - |
 | `kiro-cli` | `native-auto` | `generic sqlite messages` | ctx `kiro_cli_sqlite`; npx `~/.kiro` | SQLite import covers the proven `conversations_v2`/`conversations` DB at the Kiro CLI data dir; newer `~/.kiro/sessions/cli` event logs are not imported yet. |
@@ -133,7 +133,7 @@ rows.
 | `warp` | `native-preview` | `Warp restoration SQLite` | ctx `warp_sqlite`; npx `~/.warp`; official docs document platform `warp.sqlite` paths, and public Warp source/proto define `agent_conversations`, `agent_tasks.task`, and `Task.messages` | Preview manual import only via `ctx import --provider warp` for discovered documented Linux/macOS paths or `ctx import --provider warp --path <warp.sqlite>`; no native-auto claim without a safe live local fixture or stronger official import/export contract. Windows `%LOCALAPPDATA%` default discovery, cloud sync, Oz/cloud conversations, browser IndexedDB, Markdown exports, and Warp Drive/team data are not parsed. |
 | `windsurf` | `native-preview` | `JSONL CLI event logs` | ctx `windsurf_cascade_hook_transcript_jsonl_tree`; npx `~/.codeium/windsurf`; official hook writes `~/.windsurf/transcripts/{trajectory_id}.jsonl` | Preview explicit import only; hook must be configured; private `~/.codeium/windsurf/cascade` cache and VS Code state DBs are not parsed. |
 | `zed` | `native-auto` | `VS Code/Electron storage` | ctx `zed_threads_sqlite`; npx `$XDG_DATA_HOME/zed` or `~/.local/share/zed` | Per-message timestamps are unavailable; ctx uses thread `updated_at`. |
-| `zencoder` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.zencoder`; no ctx provider | Skill home evidence is not a transcript schema; prefer exporter, plugin, or underlying provider imports. |
+| `zencoder` | `candidate-family` | `VS Code/Electron storage` | npx `~/.zencoder`; no ctx provider; third-party Opik exporter reads a local `zencoder-chat` folder with `sessions.json` plus `sessions/<id>.json` | Need first-party or real sanitized fixture proof before importing an undocumented IDE private cache; `~/.zencoder` skill home remains non-transcript evidence. |
 | `zenflow` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.zencoder`; no ctx provider | Shares Zencoder skill home but no proven local history contract; prefer exporter or underlying provider imports. |
 | `pochi` | `native-preview` | `LiveStore SQLite state DB` | ctx `pochi_livestore_state_sqlite`; npx `~/.pochi`; Pochi CLI writes `~/.pochi/storage/<storeId>/state<schemaHash>@6.db` only when `POCHI_LIVEKIT_SYNC_ON` is enabled | Preview discovery scans `~/.pochi/storage` only when that directory exists; no `config.jsonc` parsing or VS Code OPFS import. |
 | `promptscript` | `install-target` | `agent skills aggregate` | npx project `.promptscript` or `promptscript.yaml`; no ctx provider | Project skill target only; use custom history JSONL if it emits runs. |
