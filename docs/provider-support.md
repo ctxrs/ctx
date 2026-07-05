@@ -35,6 +35,7 @@ is:
 | Pochi | `local_import_when_supported` | Preview import from synced LiveStore state DBs under `~/.pochi/storage`, an explicit `state*.db` SQLite file, or a directory containing those files. | Static local-history fixture smoke; default discovery is limited to `~/.pochi/storage` when filesystem sync has produced `state*.db`; no `config.jsonc` parsing or VS Code OPFS import is claimed. |
 | CodeBuddy | `local_import_when_supported` | `~/.codebuddy`, `~/Library/Application Support/CodeBuddyExtension/Data`, `%LOCALAPPDATA%/CodeBuddyExtension`, or an explicit CodeBuddy history root. | Static local-history fixture smoke; schema proof comes from WayLog and sanitized fixtures. |
 | Aider Desk | `local_import_when_supported` | Project-local `.aider-desk/tasks/<taskId>/context.json`, `AIDER_DESK_DIR/tasks/<taskId>/context.json`, or an explicit task, tasks, context file, or project root. | Static local-history fixture smoke; cwd/ancestor discovery only reports projects that already have task context files. |
+| Amp | `local_import_when_supported` | Explicit JSON emitted by `amp threads export <threadIDOrURL>` and imported with `ctx import --provider amp --path <file>`. | Static redacted export fixture smoke; no default discovery is registered, and `$XDG_CACHE_HOME/amp/logs/cli.log` is not crawled. |
 | OpenClaw | `local_import_when_supported` | `OPENCLAW_STATE_DIR`, `~/.openclaw`, legacy `~/.clawdbot`/`~/.moltbot`, or an explicit OpenClaw state tree. | Static local-history fixture smoke; beta storage-contract notes in the matrix. |
 | Hermes Agent | `local_import_when_supported` | `HERMES_HOME/state.db`, `~/.hermes/state.db`, or an explicit Hermes SQLite DB. | Static local-history fixture smoke. |
 | NanoClaw | `local_import_when_supported` | Preview/manual import from a NanoClaw project root or `data/v2.db`; cwd/ancestor discovery only. | Static local-history fixture smoke; excluded from `ctx import --all` and pre-search refresh until promoted. |
@@ -73,7 +74,8 @@ is:
 | Roo Code | `local_import_when_supported` | `roo-cline.customStoragePath`, common VS Code globalStorage task folders for `RooVeterinaryInc.roo-cline`, or an explicit Roo task storage path. | Static local-history fixture smoke; VS Code state databases are not parsed. |
 
 `ctx sources --json` uses `import_support: "preview"` and `native_import:
-false` for preview sources such as NanoClaw, AstrBot, Pochi, and Windsurf. Those paths can be
+false` for preview sources/importers such as NanoClaw, AstrBot, Pochi,
+Windsurf, and Amp explicit exports. Those paths can be
 imported explicitly with `ctx import --provider ...` when discovery finds them,
 or with `ctx import --provider ... --path ...` for a specific path. They are not
 swept up by `ctx import --all` or the default pre-search refresh.

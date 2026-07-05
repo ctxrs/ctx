@@ -524,6 +524,27 @@ impl Default for AiderDeskImportOptions {
 }
 
 #[derive(Debug, Clone)]
+pub struct AmpImportOptions {
+    pub machine_id: String,
+    pub source_path: Option<PathBuf>,
+    pub imported_at: DateTime<Utc>,
+    pub history_record_id: Option<Uuid>,
+    pub allow_partial_failures: bool,
+}
+
+impl Default for AmpImportOptions {
+    fn default() -> Self {
+        Self {
+            machine_id: default_machine_id(),
+            source_path: None,
+            imported_at: utc_now(),
+            history_record_id: None,
+            allow_partial_failures: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct AuggieImportOptions {
     pub machine_id: String,
     pub source_path: Option<PathBuf>,
@@ -1560,6 +1581,9 @@ pub struct CodeBuddyHistoryJsonAdapter;
 pub struct AiderDeskContextJsonAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
+pub struct AmpThreadsExportJsonAdapter;
+
+#[derive(Debug, Clone, Copy, Default)]
 pub struct AuggieSessionJsonAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -2402,6 +2426,24 @@ impl ProviderCaptureAdapter for AiderDeskContextJsonAdapter {
         context: &ProviderAdapterContext,
     ) -> Result<ProviderNormalizationResult> {
         normalize_aider_desk_history(path, context)
+    }
+}
+
+impl ProviderCaptureAdapter for AmpThreadsExportJsonAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Amp
+    }
+
+    fn source_format(&self) -> &str {
+        AMP_THREADS_EXPORT_SOURCE_FORMAT
+    }
+
+    fn normalize_path(
+        &self,
+        path: &Path,
+        context: &ProviderAdapterContext,
+    ) -> Result<ProviderNormalizationResult> {
+        normalize_amp_threads_export(path, context)
     }
 }
 
@@ -5185,6 +5227,41 @@ pub fn import_aider_desk_history(
     )
 }
 
+pub fn import_amp_threads_export(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: AmpImportOptions,
+) -> Result<ProviderImportSummary> {
+    let path = path.as_ref();
+    let source_path = options
+        .source_path
+        .clone()
+        .unwrap_or_else(|| path.to_path_buf());
+    let normalization = AmpThreadsExportJsonAdapter.normalize_path(
+        path,
+        &ProviderAdapterContext {
+            machine_id: options.machine_id,
+            source_path: Some(source_path),
+            imported_at: options.imported_at,
+            tool_output_mode: CodexToolOutputMode::Full,
+            event_mode: CodexEventImportMode::Rich,
+            include_notices: true,
+        },
+    )?;
+
+    import_normalized_provider_captures(
+        store,
+        normalization,
+        NormalizedProviderImportOptions {
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+            persist_cursors: true,
+            wrap_transaction: true,
+            fast_event_inserts: true,
+        },
+    )
+}
+
 pub fn import_auggie_history(
     path: impl AsRef<Path>,
     store: &mut Store,
@@ -6291,6 +6368,7 @@ const CLINE_TASK_JSON_SOURCE_FORMAT: &str = "cline_task_directory_json";
 const ROO_TASK_JSON_SOURCE_FORMAT: &str = "roo_task_directory_json";
 const CODEBUDDY_SOURCE_FORMAT: &str = "codebuddy_history_json";
 const AIDER_DESK_SOURCE_FORMAT: &str = "aider_desk_task_context_json";
+const AMP_THREADS_EXPORT_SOURCE_FORMAT: &str = "amp_threads_export_json";
 const AUGGIE_SESSION_JSON_SOURCE_FORMAT: &str = "auggie_session_json";
 const EVE_WORKFLOW_DATA_SOURCE_FORMAT: &str = "eve_workflow_data_streams";
 const FIREBENDER_SQLITE_SOURCE_FORMAT: &str = "firebender_chat_history_sqlite";
@@ -10360,6 +10438,465 @@ fn aider_desk_content_has(content: &Value, expected: &str) -> bool {
                 .any(|part| part.get("type").and_then(Value::as_str) == Some(expected))
         })
         .unwrap_or(false)
+}
+
+fn normalize_amp_threads_export(
+    path: &Path,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    ensure_regular_provider_transcript_file(path)?;
+    let thread = read_json_file_limited(
+        path,
+        MAX_PROVIDER_JSONL_LINE_BYTES,
+        "Amp threads export JSON",
+    )?;
+    if !thread.is_object() {
+        return Err(CaptureError::InvalidPayload(
+            "Amp threads export JSON must contain a thread object".to_owned(),
+        ));
+    }
+    let provider_session_id = provider_string_field(&thread, &["id", "threadId", "threadID"])
+        .ok_or_else(|| {
+            CaptureError::InvalidPayload("Amp threads export JSON is missing thread id".to_owned())
+        })?;
+    let messages = thread
+        .get("messages")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            CaptureError::InvalidPayload(
+                "Amp threads export JSON is missing messages array".to_owned(),
+            )
+        })?;
+    let started_at = provider_timestamp_from_fields(
+        &thread,
+        &[
+            "created",
+            "createdAt",
+            "created_at",
+            "startedAt",
+            "started_at",
+            "timestamp",
+        ],
+    )
+    .or_else(|| messages.iter().find_map(amp_message_time))
+    .unwrap_or(context.imported_at);
+    let ended_at = provider_timestamp_from_fields(
+        &thread,
+        &[
+            "updated",
+            "updatedAt",
+            "updated_at",
+            "endedAt",
+            "ended_at",
+            "modifiedAt",
+        ],
+    )
+    .or_else(|| messages.iter().rev().find_map(amp_message_time));
+    let raw_source_path = path.display().to_string();
+    let source_command = "amp threads export";
+    let upstream_schema_anchor = amp_upstream_schema_anchor();
+    let source_metadata = json!({
+        "adapter": AMP_THREADS_EXPORT_SOURCE_FORMAT,
+        "source_path": raw_source_path,
+        "source_command": source_command,
+        "upstream_schema_anchor": upstream_schema_anchor.clone(),
+        "limitations": [
+            "ctx imports explicit Amp thread export JSON only",
+            "ctx does not crawl $XDG_CACHE_HOME/amp/logs/cli.log because that file is an operational log, not proven transcript history",
+            "Amp raw/internal thread payload variants beyond messages[].content[] are retained as capped native JSON until the export contract is public"
+        ],
+    });
+    let session_metadata = json!({
+        "source_format": AMP_THREADS_EXPORT_SOURCE_FORMAT,
+        "provider": CaptureProvider::Amp.as_str(),
+        "display_name": "Amp",
+        "source_command": source_command,
+        "upstream_schema_anchor": upstream_schema_anchor,
+        "thread_id": provider_session_id,
+        "title": provider_string_field(&thread, &["title", "name"]),
+        "agent_mode": provider_string_field(&thread, &["agentMode", "agent_mode"]),
+        "message_count": messages.len(),
+        "limitations": [
+            "explicit Amp export JSON only; no default filesystem discovery is registered",
+            "thinking and redacted_thinking content blocks are intentionally skipped"
+        ],
+    });
+    let base_draft = NativeSessionDraft {
+        provider: CaptureProvider::Amp,
+        source_format: AMP_THREADS_EXPORT_SOURCE_FORMAT,
+        provider_session_id: provider_session_id.clone(),
+        parent_provider_session_id: provider_string_field(
+            &thread,
+            &["parentThreadId", "parent_thread_id", "parentId"],
+        ),
+        root_provider_session_id: provider_string_field(
+            &thread,
+            &["rootThreadId", "root_thread_id", "rootId"],
+        ),
+        external_agent_id: provider_string_field(&thread, &["agentId", "agent_id"]),
+        agent_type: AgentType::Primary,
+        role_hint: Some("primary".to_owned()),
+        is_primary: true,
+        started_at,
+        ended_at,
+        cwd: amp_thread_cwd(&thread),
+        fidelity: Fidelity::Imported,
+        raw_source_path: raw_source_path.clone(),
+        trust: ProviderSourceTrust::ProviderExport,
+        source_metadata,
+        session_metadata,
+    };
+
+    let mut result = ProviderNormalizationResult::default();
+    let mut provider_event_index = 0u64;
+    for (message_index, message) in messages.iter().enumerate() {
+        let base_time = amp_message_time(message)
+            .unwrap_or_else(|| started_at + Duration::milliseconds(message_index as i64));
+        let role_text = message.get("role").and_then(Value::as_str);
+        let null = Value::Null;
+        let content = message.get("content").unwrap_or(&null);
+
+        if let Some(blocks) = content.as_array() {
+            for (block_index, block) in blocks.iter().enumerate() {
+                let occurred_at = provider_timestamp_from_fields(
+                    block,
+                    &["created", "createdAt", "created_at", "timestamp"],
+                )
+                .unwrap_or_else(|| base_time + Duration::milliseconds(block_index as i64));
+                let Some(event) = amp_content_block_event(AmpContentBlockEventInput {
+                    provider_session_id: &provider_session_id,
+                    message,
+                    block,
+                    message_index,
+                    block_index,
+                    provider_event_index,
+                    role_text,
+                    occurred_at,
+                }) else {
+                    continue;
+                };
+                let line = message_index
+                    .saturating_mul(100)
+                    .saturating_add(block_index)
+                    .saturating_add(1);
+                result
+                    .files_touched
+                    .extend(provider_file_touches_from_raw_value(
+                        CaptureProvider::Amp,
+                        &provider_session_id,
+                        AMP_THREADS_EXPORT_SOURCE_FORMAT,
+                        Some(raw_source_path.as_str()),
+                        block,
+                        &event,
+                        line,
+                    ));
+                result.captures.push((
+                    line,
+                    native_provider_capture(base_draft.clone(), context, Some(event)),
+                ));
+                provider_event_index = provider_event_index.saturating_add(1);
+            }
+            continue;
+        }
+
+        if let Some(text) = provider_value_text(content).filter(|text| !text.trim().is_empty()) {
+            let event = amp_message_content_event(
+                &provider_session_id,
+                message,
+                message_index,
+                provider_event_index,
+                role_text,
+                base_time,
+                text,
+            );
+            let line = message_index.saturating_mul(100).saturating_add(1);
+            result.captures.push((
+                line,
+                native_provider_capture(base_draft.clone(), context, Some(event)),
+            ));
+            provider_event_index = provider_event_index.saturating_add(1);
+        }
+    }
+
+    if result.captures.is_empty() {
+        result
+            .captures
+            .push((1, native_provider_capture(base_draft, context, None)));
+    }
+
+    Ok(result)
+}
+
+struct AmpContentBlockEventInput<'a> {
+    provider_session_id: &'a str,
+    message: &'a Value,
+    block: &'a Value,
+    message_index: usize,
+    block_index: usize,
+    provider_event_index: u64,
+    role_text: Option<&'a str>,
+    occurred_at: DateTime<Utc>,
+}
+
+fn amp_content_block_event(input: AmpContentBlockEventInput<'_>) -> Option<ProviderEventEnvelope> {
+    let block_type = input
+        .block
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let role = amp_role(input.role_text);
+    let (event_type, role, text) = match block_type {
+        "text" => {
+            let text = amp_value_text_field(input.block, &["text", "content"])?;
+            (EventType::Message, role, text)
+        }
+        "tool_use" | "tool" | "toolCall" | "function_call" => {
+            let name = provider_string_field(input.block, &["name", "tool", "toolName"])
+                .unwrap_or_else(|| "tool".to_owned());
+            (
+                EventType::ToolCall,
+                EventRole::Assistant,
+                format!("tool call: {name}"),
+            )
+        }
+        "tool_result" | "toolResult" | "function_result" => (
+            EventType::ToolOutput,
+            EventRole::Tool,
+            amp_tool_result_text(input.block),
+        ),
+        "summary" => {
+            let text = amp_summary_text(input.block)?;
+            (EventType::Summary, EventRole::System, text)
+        }
+        "manual_bash_invocation" => (
+            EventType::CommandOutput,
+            EventRole::Tool,
+            amp_manual_bash_text(input.block),
+        ),
+        "image" => (
+            EventType::Notice,
+            EventRole::User,
+            "image attachment".to_owned(),
+        ),
+        "thinking" | "redacted_thinking" => return None,
+        _ => (
+            EventType::Notice,
+            role,
+            provider_value_text(input.block)
+                .filter(|text| !text.trim().is_empty())
+                .unwrap_or_else(|| format!("Amp {block_type} content")),
+        ),
+    };
+    Some(amp_event(AmpEventInput {
+        provider_session_id: input.provider_session_id,
+        message: input.message,
+        body: input.block,
+        message_index: input.message_index,
+        block_index: Some(input.block_index),
+        provider_event_index: input.provider_event_index,
+        event_type,
+        role,
+        occurred_at: input.occurred_at,
+        text,
+        block_type: Some(block_type),
+    }))
+}
+
+fn amp_message_content_event(
+    provider_session_id: &str,
+    message: &Value,
+    message_index: usize,
+    provider_event_index: u64,
+    role_text: Option<&str>,
+    occurred_at: DateTime<Utc>,
+    text: String,
+) -> ProviderEventEnvelope {
+    amp_event(AmpEventInput {
+        provider_session_id,
+        message,
+        body: message,
+        message_index,
+        block_index: None,
+        provider_event_index,
+        event_type: if matches!(role_text, Some("user" | "assistant" | "system")) {
+            EventType::Message
+        } else {
+            EventType::Notice
+        },
+        role: amp_role(role_text),
+        occurred_at,
+        text,
+        block_type: None,
+    })
+}
+
+struct AmpEventInput<'a> {
+    provider_session_id: &'a str,
+    message: &'a Value,
+    body: &'a Value,
+    message_index: usize,
+    block_index: Option<usize>,
+    provider_event_index: u64,
+    event_type: EventType,
+    role: EventRole,
+    occurred_at: DateTime<Utc>,
+    text: String,
+    block_type: Option<&'a str>,
+}
+
+fn amp_event(input: AmpEventInput<'_>) -> ProviderEventEnvelope {
+    let message_id = provider_string_field(input.message, &["id", "messageId", "message_id"])
+        .unwrap_or_else(|| format!("message-{}", input.message_index));
+    let event_hash = provider_string_field(
+        input.body,
+        &["id", "callId", "call_id", "toolUseID", "toolUseId"],
+    )
+    .map(|id| format!("{message_id}:{id}"))
+    .unwrap_or_else(|| match input.block_index {
+        Some(block_index) => {
+            format!(
+                "{message_id}:block-{block_index}:{}",
+                input.block_type.unwrap_or("content")
+            )
+        }
+        None => format!("{message_id}:content"),
+    });
+    native_event(NativeEventDraft {
+        provider: CaptureProvider::Amp,
+        source_format: AMP_THREADS_EXPORT_SOURCE_FORMAT,
+        provider_session_id: input.provider_session_id.to_owned(),
+        provider_event_index: input.provider_event_index,
+        provider_event_hash: Some(event_hash.clone()),
+        cursor: format!("{}:{event_hash}", input.provider_session_id),
+        event_type: input.event_type,
+        role: Some(input.role),
+        occurred_at: input.occurred_at,
+        text: input.text,
+        body: json!({
+            "message": amp_message_metadata(input.message),
+            "content_block": input.body,
+        }),
+        metadata: json!({
+            "source": "amp_threads_export",
+            "source_format": AMP_THREADS_EXPORT_SOURCE_FORMAT,
+            "message_index": input.message_index,
+            "block_index": input.block_index,
+            "block_type": input.block_type,
+            "message_role": input.message.get("role").and_then(Value::as_str),
+            "message_state": input.message.get("state").cloned(),
+        }),
+    })
+}
+
+fn amp_message_metadata(message: &Value) -> Value {
+    let Some(object) = message.as_object() else {
+        return Value::Null;
+    };
+    let mut metadata = object.clone();
+    metadata.remove("content");
+    Value::Object(metadata)
+}
+
+fn amp_message_time(message: &Value) -> Option<DateTime<Utc>> {
+    provider_timestamp_from_fields(
+        message,
+        &[
+            "created",
+            "createdAt",
+            "created_at",
+            "sentAt",
+            "sent_at",
+            "timestamp",
+        ],
+    )
+}
+
+fn amp_role(role: Option<&str>) -> EventRole {
+    match role {
+        Some("user" | "human") => EventRole::User,
+        Some("assistant" | "agent") => EventRole::Assistant,
+        Some("system" | "developer" | "info") => EventRole::System,
+        Some("tool") => EventRole::Tool,
+        _ => EventRole::Unknown,
+    }
+}
+
+fn amp_value_text_field(value: &Value, fields: &[&str]) -> Option<String> {
+    fields.iter().find_map(|field| {
+        value
+            .get(*field)
+            .and_then(provider_value_text)
+            .filter(|text| !text.trim().is_empty())
+    })
+}
+
+fn amp_tool_result_text(block: &Value) -> String {
+    let run = block.get("run").unwrap_or(block);
+    let status = run.get("status").and_then(Value::as_str);
+    let text = amp_value_text_field(run, &["result", "output", "error"])
+        .or_else(|| amp_value_text_field(block, &["result", "output", "error", "text"]))
+        .unwrap_or_else(|| "tool result".to_owned());
+    match status {
+        Some(status) => format!("tool result ({status}): {text}"),
+        None => text,
+    }
+}
+
+fn amp_summary_text(block: &Value) -> Option<String> {
+    let summary = block.get("summary").unwrap_or(block);
+    amp_value_text_field(summary, &["summary", "text", "content"])
+        .or_else(|| provider_value_text(summary).filter(|text| !text.trim().is_empty()))
+}
+
+fn amp_manual_bash_text(block: &Value) -> String {
+    amp_value_text_field(block, &["command", "cmd", "text", "result", "output"])
+        .or_else(|| {
+            block
+                .get("args")
+                .and_then(|args| amp_value_text_field(args, &["command", "cmd", "script"]))
+        })
+        .map(|text| format!("manual bash invocation: {text}"))
+        .unwrap_or_else(|| "manual bash invocation".to_owned())
+}
+
+fn amp_thread_cwd(thread: &Value) -> Option<String> {
+    provider_string_field(
+        thread,
+        &[
+            "cwd",
+            "workspacePath",
+            "workspace_path",
+            "projectRoot",
+            "project_root",
+        ],
+    )
+    .or_else(|| {
+        thread.get("env").and_then(|env| {
+            provider_string_field(env, &["cwd", "workspacePath", "workspace_path"]).or_else(|| {
+                env.pointer("/initial/cwd")
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.trim().is_empty())
+                    .map(str::to_owned)
+            })
+        })
+    })
+    .or_else(|| {
+        thread.get("workspace").and_then(|workspace| {
+            provider_string_field(workspace, &["path", "root", "cwd", "workspacePath"])
+        })
+    })
+}
+
+fn amp_upstream_schema_anchor() -> Value {
+    json!({
+        "package": "@ampcode/cli",
+        "package_version": "0.0.1783181941-g187572",
+        "export_command": "amp threads export <threadIDOrURL>",
+        "export_help": "Export a thread as JSON; outputs the full thread payload",
+        "thread_loader": "threadRemote.getThread(threadIDOrURL)",
+        "export_handler": "l2$ JSON.stringify(thread)",
+        "markdown_renderer": "M8H reads title, id, created, agentMode, messages, roles, text, tool_use, tool_result, summary, and manual_bash_invocation blocks"
+    })
 }
 
 fn normalize_auggie_sessions(
@@ -33722,6 +34259,101 @@ mod tests {
         assert_eq!(second.imported_events, 0);
         assert_eq!(second.skipped_sessions, 1);
         assert_eq!(second.skipped_events, 4);
+    }
+
+    #[test]
+    fn native_amp_threads_export_imports_explicit_json_searches_and_reimports() {
+        let temp = tempdir();
+        let fixture = provider_history_fixture("amp/threads-export/redacted-thread.json");
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let source = provider_source_for_path(CaptureProvider::Amp, fixture.clone());
+        assert_eq!(source.source_format, AMP_THREADS_EXPORT_SOURCE_FORMAT);
+        assert_eq!(source.import_support, ProviderImportSupport::Preview);
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+
+        let first = import_amp_threads_export(
+            &fixture,
+            &mut store,
+            AmpImportOptions {
+                machine_id: "test-machine".into(),
+                source_path: Some(fixture.clone()),
+                imported_at: DateTime::parse_from_rfc3339("2026-07-05T00:30:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                allow_partial_failures: true,
+                ..AmpImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(first.failed, 0, "{:?}", first.failures);
+        assert_eq!(first.imported_sessions, 1);
+        assert_eq!(first.imported_events, 5);
+
+        let session_id = provider_session_uuid(
+            CaptureProvider::Amp,
+            "T-019c0000-0000-7000-8000-0000000000aa",
+        );
+        let events = store.events_for_session(session_id).unwrap();
+        assert_eq!(events.len(), 5);
+        assert_eq!(events[0].role, Some(EventRole::User));
+        assert_eq!(events[1].role, Some(EventRole::Assistant));
+        assert_eq!(events[2].event_type, EventType::ToolCall);
+        assert_eq!(events[3].event_type, EventType::ToolOutput);
+        assert_eq!(events[4].event_type, EventType::Summary);
+
+        let rendered = serde_json::to_string(&events).unwrap();
+        assert!(rendered.contains("Amp export oracle prompt"));
+        assert!(rendered.contains("Amp export oracle response"));
+        assert!(rendered.contains("Provider matrix updated for Amp explicit export"));
+        assert!(!rendered.contains("redacted private reasoning"));
+        assert!(store
+            .search_event_hits("Amp export oracle response", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::Amp)));
+        assert!(store
+            .search_event_hits("redacted private reasoning", 10)
+            .unwrap()
+            .is_empty());
+
+        let archive = store.export_archive().unwrap();
+        assert!(archive.files_touched.iter().any(|file| {
+            file.path == "docs/provider-support.md" && file.confidence == Confidence::High
+        }));
+
+        let source = store
+            .capture_source_by_external_session(
+                CaptureProvider::Amp,
+                "T-019c0000-0000-7000-8000-0000000000aa",
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            source.sync.metadata["source_metadata"]["upstream_schema_anchor"]["package"].as_str(),
+            Some("@ampcode/cli")
+        );
+        assert_eq!(
+            source.sync.metadata["source_metadata"]["source_command"].as_str(),
+            Some("amp threads export")
+        );
+
+        let second = import_amp_threads_export(
+            &fixture,
+            &mut store,
+            AmpImportOptions {
+                source_path: Some(fixture.clone()),
+                allow_partial_failures: true,
+                ..AmpImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(second.failed, 0, "{:?}", second.failures);
+        assert_eq!(second.imported_sessions, 0);
+        assert_eq!(second.imported_events, 0);
+        assert_eq!(second.skipped_sessions, 1);
+        assert_eq!(second.skipped_events, 5);
     }
 
     #[test]

@@ -2399,6 +2399,7 @@ fn provider_help_matches_implemented_importers() {
         "lingma",
         "codebuddy",
         "aider-desk",
+        "amp",
         "qwen-code",
         "kimi-code-cli",
         "autohand-code",
@@ -2433,6 +2434,7 @@ fn provider_json_names_are_accepted_as_cli_filter_aliases() {
         ("code_buddy", "codebuddy"),
         ("aider_desk", "aider_desk"),
         ("aiderdesk", "aider_desk"),
+        ("amp", "amp"),
         ("auggie", "auggie"),
         ("augment", "auggie"),
         ("augment-code", "auggie"),
@@ -2572,7 +2574,7 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
             vec![
                 "Usage: ctx import",
                 "--provider <PROVIDER>",
-                "[possible values: codex, pi, claude, opencode, openloaf, kilo, kiro-cli, crush, goose, antigravity, gemini, cursor, windsurf, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, jazz, auggie, eve, firebender, forgecode, deepagents, mistral-vibe, mux, reasonix, kode, neovate, command-code, terramind, rovodev, cortex-code, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto, lingma, pochi, codebuddy, aider-desk]",
+                "[possible values: codex, pi, claude, opencode, openloaf, kilo, kiro-cli, crush, goose, antigravity, gemini, cursor, windsurf, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, jazz, auggie, eve, firebender, forgecode, deepagents, mistral-vibe, mux, reasonix, kode, neovate, command-code, terramind, rovodev, cortex-code, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto, lingma, pochi, codebuddy, aider-desk, amp]",
                 "--path <PATH>",
                 "--format <FORMAT>",
                 "--resume",
@@ -6465,6 +6467,12 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
             write_native_aider_desk_fixture,
         ),
         (
+            "amp",
+            "amp",
+            "amp_threads_export_json",
+            write_native_amp_fixture,
+        ),
+        (
             "auggie",
             "auggie",
             "auggie_session_json",
@@ -8186,6 +8194,18 @@ fn write_native_aider_desk_fixture(temp: &TempDir, query: &str) -> String {
         .to_owned()
 }
 
+fn write_native_amp_fixture(temp: &TempDir, query: &str) -> String {
+    let path = temp.path().join("native-amp/redacted-thread.json");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let text = fs::read_to_string(provider_history_fixture(
+        "amp/threads-export/redacted-thread.json",
+    ))
+    .unwrap()
+    .replace("Amp export oracle prompt", query);
+    fs::write(&path, text).unwrap();
+    path.to_str().unwrap().to_owned()
+}
+
 fn write_native_auggie_fixture(temp: &TempDir, query: &str) -> String {
     let root = temp.path().join("native-auggie/sessions");
     fs::create_dir_all(&root).unwrap();
@@ -9817,6 +9837,7 @@ fn native_provider_cli_requires_existing_history_or_explicit_path() {
         ("lingma", "no importable lingma history found"),
         ("codebuddy", "no importable codebuddy history found"),
         ("aider-desk", "no importable aider_desk history found"),
+        ("amp", "no importable amp history found"),
         ("auggie", "no importable auggie history found"),
         ("eve", "no importable eve history found"),
         ("iflow-cli", "no importable iflow_cli history found"),
@@ -9836,7 +9857,7 @@ fn native_provider_cli_requires_existing_history_or_explicit_path() {
 
         assert!(stderr.contains(expected_blocker), "{stderr}");
         assert!(stderr.contains("use `ctx sources`"), "{stderr}");
-        if matches!(cli_provider, "nanoclaw" | "aider-desk" | "eve") {
+        if matches!(cli_provider, "nanoclaw" | "aider-desk" | "amp" | "eve") {
             assert!(
                 stderr.contains("no default paths are registered for this provider"),
                 "{stderr}"

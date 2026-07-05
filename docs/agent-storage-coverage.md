@@ -21,7 +21,7 @@ Status meanings:
 - `install-target`: npx target is an aggregate or project skill target, not a
   proven history-producing agent.
 
-Result on this integration branch: 45 `native-auto`, 4 `native-preview`, 6
+Result on this integration branch: 45 `native-auto`, 5 `native-preview`, 5
 `candidate-family`, 9 `webapp-boundary`, 6 `unknown`, and 2 `install-target`
 rows.
 
@@ -37,8 +37,9 @@ rows.
   sessions, plus Windsurf Cascade hook transcript JSONL and OpenLoaf
   `messages.jsonl` chat-history trees.
 - `CLI session JSON`: covers Continue CLI `sessions/*.json` files with
-  `sessions.json` metadata, Auggie `~/.augment/sessions/*.json`, plus Rovo Dev
-  session directories and Cortex Code conversation snapshots/history sidecars.
+  `sessions.json` metadata, Auggie `~/.augment/sessions/*.json`, Amp explicit
+  `amp threads export` JSON, plus Rovo Dev session directories and Cortex Code
+  conversation snapshots/history sidecars.
 - `project task JSON`: covers Aider Desk project-local task directories such as
   `.aider-desk/tasks/<taskId>/context.json`; related task-directory tools can
   reuse this scanner once storage proof and fixtures exist.
@@ -66,7 +67,7 @@ rows.
 | npx skills agent id | ctx storage ingestion status | schema family | evidence source | blocked reason / gap |
 | --- | --- | --- | --- | --- |
 | `aider-desk` | `native-auto` | `project task JSON` | ctx `aider_desk_task_context_json`; npx `~/.aider-desk`; source proof shows project `.aider-desk/tasks/<taskId>/context.json` task context files | - |
-| `amp` | `candidate-family` | `JSONL CLI event logs` | npx `~/.config/amp`; no ctx provider | Need transcript location and schema proof. |
+| `amp` | `native-preview` | `CLI session JSON` | ctx `amp_threads_export_json`; npx `~/.config/amp`; `@ampcode/cli@0.0.1783181941-g187572` exposes `amp threads export`, `amp threads markdown`, and `amp threads raw`; export handler serializes `threadRemote.getThread(...)` | Preview explicit import only from `amp threads export` JSON; no default `~/.config/amp` scan and no `$XDG_CACHE_HOME/amp/logs/cli.log` crawl. |
 | `antigravity` | `native-auto` | `JSONL CLI event logs` | ctx `antigravity_cli_transcript_jsonl_tree`; npx `~/.gemini/antigravity`; official IDE transcripts live under `~/.gemini/antigravity-ide/brain` | ctx imports official IDE brain transcripts, not the npx skill/config path `~/.gemini/antigravity`. |
 | `antigravity-cli` | `native-auto` | `JSONL CLI event logs` | ctx `antigravity_cli_transcript_jsonl_tree`; npx `~/.gemini/antigravity-cli` | - |
 | `astrbot` | `native-preview` | `generic sqlite messages` | ctx `astrbot_data_v4_sqlite`; npx `~/.astrbot` | Preview explicit import only; full per-platform transcript coverage remains unproven. |

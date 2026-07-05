@@ -33,13 +33,13 @@ use analytics::{AnalyticsEvent, AnalyticsProperties};
 use config::{AppConfig, CONFIG_FILE};
 use ctx_history_capture::{
     catalog_codex_session_tree, discover_provider_sources, discover_provider_sources_for_provider,
-    import_aider_desk_history, import_antigravity_cli_history, import_astrbot_sqlite,
-    import_auggie_history, import_autohand_code_sessions, import_claude_projects_jsonl_tree,
-    import_cline_task_json_history, import_codebuddy_history, import_codex_history_jsonl,
-    import_codex_session_jsonl, import_codex_session_jsonl_tail, import_codex_session_paths,
-    import_codex_session_tree, import_command_code_history, import_continue_cli_sessions,
-    import_copilot_cli_session_events, import_cortex_code_history, import_crush_sqlite,
-    import_cursor_native_history, import_custom_history_jsonl_v1,
+    import_aider_desk_history, import_amp_threads_export, import_antigravity_cli_history,
+    import_astrbot_sqlite, import_auggie_history, import_autohand_code_sessions,
+    import_claude_projects_jsonl_tree, import_cline_task_json_history, import_codebuddy_history,
+    import_codex_history_jsonl, import_codex_session_jsonl, import_codex_session_jsonl_tail,
+    import_codex_session_paths, import_codex_session_tree, import_command_code_history,
+    import_continue_cli_sessions, import_copilot_cli_session_events, import_cortex_code_history,
+    import_crush_sqlite, import_cursor_native_history, import_custom_history_jsonl_v1,
     import_custom_history_jsonl_v1_reader, import_deepagents_sqlite, import_dexto_sqlite,
     import_eve_history, import_factory_ai_droid_sessions, import_firebender_sqlite,
     import_forgecode_sqlite, import_gemini_cli_history, import_goose_sessions_sqlite,
@@ -53,25 +53,26 @@ use ctx_history_capture::{
     import_terramind_sqlite, import_windsurf_cascade_hook_transcripts, import_zed_threads_sqlite,
     provider_source_for_path, provider_source_spec, stable_capture_uuid,
     validate_custom_history_jsonl_v1, validate_custom_history_jsonl_v1_reader,
-    AiderDeskImportOptions, AntigravityCliImportOptions, AstrBotSqliteImportOptions,
-    AuggieImportOptions, AutohandCodeImportOptions, CatalogSummary, ClaudeProjectsImportOptions,
-    ClineTaskJsonImportOptions, CodeBuddyImportOptions, CodexEventImportMode,
-    CodexHistoryImportOptions, CodexSessionCatalogOptions, CodexSessionImportOptions,
-    CodexSessionImportProgress, CodexSessionImportProgressCallback, CodexToolOutputMode,
-    CommandCodeImportOptions, ContinueCliImportOptions, CopilotCliImportOptions,
-    CortexCodeImportOptions, CrushSqliteImportOptions, CursorNativeImportOptions,
-    CustomHistoryJsonlV1ImportOptions, DeepAgentsSqliteImportOptions, DextoSqliteImportOptions,
-    EveImportOptions, FactoryAiDroidImportOptions, FirebenderSqliteImportOptions,
-    ForgeCodeSqliteImportOptions, GeminiCliImportOptions, GooseSessionsSqliteImportOptions,
-    HermesSqliteImportOptions, IflowCliImportOptions, JazzImportOptions, KiloSqliteImportOptions,
-    KimiCodeCliImportOptions, KiroSqliteImportOptions, KodeImportOptions,
-    LingmaSqliteImportOptions, MistralVibeImportOptions, MuxImportOptions, NanoClawImportOptions,
-    NeovateImportOptions, OpenClawImportOptions, OpenCodeSqliteImportOptions,
-    OpenHandsImportOptions, OpenLoafImportOptions, PiSessionImportOptions,
-    PochiLivestoreSqliteImportOptions, ProviderImportSummary, ProviderImportSupport,
-    ProviderSource, ProviderSourceStatus, QwenCodeImportOptions, ReasonixImportOptions,
-    RooTaskJsonImportOptions, RovoDevImportOptions, ShelleySqliteImportOptions,
-    TerramindSqliteImportOptions, WindsurfCascadeHookImportOptions, ZedThreadsSqliteImportOptions,
+    AiderDeskImportOptions, AmpImportOptions, AntigravityCliImportOptions,
+    AstrBotSqliteImportOptions, AuggieImportOptions, AutohandCodeImportOptions, CatalogSummary,
+    ClaudeProjectsImportOptions, ClineTaskJsonImportOptions, CodeBuddyImportOptions,
+    CodexEventImportMode, CodexHistoryImportOptions, CodexSessionCatalogOptions,
+    CodexSessionImportOptions, CodexSessionImportProgress, CodexSessionImportProgressCallback,
+    CodexToolOutputMode, CommandCodeImportOptions, ContinueCliImportOptions,
+    CopilotCliImportOptions, CortexCodeImportOptions, CrushSqliteImportOptions,
+    CursorNativeImportOptions, CustomHistoryJsonlV1ImportOptions, DeepAgentsSqliteImportOptions,
+    DextoSqliteImportOptions, EveImportOptions, FactoryAiDroidImportOptions,
+    FirebenderSqliteImportOptions, ForgeCodeSqliteImportOptions, GeminiCliImportOptions,
+    GooseSessionsSqliteImportOptions, HermesSqliteImportOptions, IflowCliImportOptions,
+    JazzImportOptions, KiloSqliteImportOptions, KimiCodeCliImportOptions, KiroSqliteImportOptions,
+    KodeImportOptions, LingmaSqliteImportOptions, MistralVibeImportOptions, MuxImportOptions,
+    NanoClawImportOptions, NeovateImportOptions, OpenClawImportOptions,
+    OpenCodeSqliteImportOptions, OpenHandsImportOptions, OpenLoafImportOptions,
+    PiSessionImportOptions, PochiLivestoreSqliteImportOptions, ProviderImportSummary,
+    ProviderImportSupport, ProviderSource, ProviderSourceStatus, QwenCodeImportOptions,
+    ReasonixImportOptions, RooTaskJsonImportOptions, RovoDevImportOptions,
+    ShelleySqliteImportOptions, TerramindSqliteImportOptions, WindsurfCascadeHookImportOptions,
+    ZedThreadsSqliteImportOptions,
 };
 use ctx_history_core::{
     database_path, default_data_root, utc_now, CaptureProvider, ContextCitation,
@@ -810,6 +811,7 @@ enum NativeProviderArg {
     CodeBuddy,
     #[value(name = "aider-desk", alias = "aider_desk", alias = "aiderdesk")]
     AiderDesk,
+    Amp,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -937,6 +939,7 @@ enum ProviderArg {
     CodeBuddy,
     #[value(name = "aider-desk", alias = "aider_desk", alias = "aiderdesk")]
     AiderDesk,
+    Amp,
     Custom,
 }
 
@@ -1014,6 +1017,7 @@ impl NativeProviderArg {
             Self::Pochi => CaptureProvider::Pochi,
             Self::CodeBuddy => CaptureProvider::CodeBuddy,
             Self::AiderDesk => CaptureProvider::AiderDesk,
+            Self::Amp => CaptureProvider::Amp,
         }
     }
 }
@@ -1090,6 +1094,7 @@ impl ProviderArg {
             Self::Pochi => CaptureProvider::Pochi,
             Self::CodeBuddy => CaptureProvider::CodeBuddy,
             Self::AiderDesk => CaptureProvider::AiderDesk,
+            Self::Amp => CaptureProvider::Amp,
             Self::Custom => CaptureProvider::Custom,
         }
     }
@@ -1145,6 +1150,7 @@ impl ProviderArg {
             Self::Pochi => "pochi",
             Self::CodeBuddy => "codebuddy",
             Self::AiderDesk => "aider-desk",
+            Self::Amp => "amp",
             Self::Custom => "custom",
         }
     }
@@ -5923,6 +5929,17 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
+        CaptureProvider::Amp => import_amp_threads_export(
+            &source.path,
+            store,
+            AmpImportOptions {
+                source_path: Some(source.path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: true,
+                ..AmpImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
         CaptureProvider::OpenCode => import_opencode_sqlite(
             &source.path,
             store,
@@ -6502,6 +6519,7 @@ fn source_uses_import_file_manifest(source: &SourceInfo) -> bool {
             | "eve_workflow_data_streams"
             | "firebender_chat_history_sqlite"
             | "codebuddy_history_json"
+            | "amp_threads_export_json"
     )
 }
 
@@ -6696,6 +6714,7 @@ fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bool {
             path.file_name().and_then(|name| name.to_str()) == Some("context.json")
                 && path.starts_with(&source.path)
         }
+        CaptureProvider::Amp => path == source.path,
         CaptureProvider::KimiCodeCli => {
             path.file_name().and_then(|name| name.to_str()) == Some("wire.jsonl")
                 && path
@@ -7049,6 +7068,7 @@ fn source_uses_incremental_event_search(source: &SourceInfo) -> bool {
             | CaptureProvider::RooCode
             | CaptureProvider::CodeBuddy
             | CaptureProvider::AiderDesk
+            | CaptureProvider::Amp
     )
 }
 

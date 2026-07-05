@@ -231,6 +231,7 @@ text_enum! {
         CortexCode => "cortex_code",
         CodeBuddy => "codebuddy",
         AiderDesk => "aider_desk",
+        Amp => "amp",
         Shell => "shell",
         Git => "git",
         Jj => "jj",
@@ -1614,6 +1615,10 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<CaptureProvider>("\"lingma\"").unwrap(),
             CaptureProvider::Lingma
+        );
+        assert_eq!(
+            serde_json::from_str::<CaptureProvider>("\"amp\"").unwrap(),
+            CaptureProvider::Amp
         );
 
         let sync: SyncMetadata = serde_json::from_value(json!({})).unwrap();
