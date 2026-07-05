@@ -32,7 +32,7 @@ is:
 | Goose | `local_import_when_supported` | `GOOSE_PATH_ROOT/data/sessions/sessions.db`, `$XDG_DATA_HOME/goose/sessions/sessions.db`, `$XDG_DATA_HOME/Block/goose/sessions/sessions.db`, defaults under `~/.local/share`, or an explicit Goose sessions SQLite DB. | Static local-history fixture smoke. |
 | Dexto | `local_import_when_supported` | Explicit Dexto SQLite DB path. | Static local-history fixture smoke; default discovery remains intentionally unclaimed. |
 | Lingma | `local_import_when_supported` | `~/.lingma/vscode/sharedClientCache/cache/db/local.db`, `~/.lingma/vscode-insiders/sharedClientCache/cache/db/local.db`, or an explicit Lingma `local.db`. | Static local-history fixture smoke; schema proof comes from WayLog and official Qoder CN VSIX/package path evidence. Assistant content is summary/error_result only and may be partial. `qoder-cn` is accepted as an alias for the same Lingma `local.db`; separate `.qodercn`/`.qoder-cn` paths remain unclaimed. |
-| Pochi | `local_import_when_supported` | Preview explicit import from a Pochi LiveStore `state*.db` SQLite file, or a directory containing those files. | Static local-history fixture smoke; no default `~/.pochi` discovery, `config.jsonc` parsing, or VS Code OPFS import is claimed. |
+| Pochi | `local_import_when_supported` | Preview import from synced LiveStore state DBs under `~/.pochi/storage`, an explicit `state*.db` SQLite file, or a directory containing those files. | Static local-history fixture smoke; default discovery is limited to `~/.pochi/storage` when filesystem sync has produced `state*.db`; no `config.jsonc` parsing or VS Code OPFS import is claimed. |
 | CodeBuddy | `local_import_when_supported` | `~/.codebuddy`, `~/Library/Application Support/CodeBuddyExtension/Data`, `%LOCALAPPDATA%/CodeBuddyExtension`, or an explicit CodeBuddy history root. | Static local-history fixture smoke; schema proof comes from WayLog and sanitized fixtures. |
 | Aider Desk | `local_import_when_supported` | Project-local `.aider-desk/tasks/<taskId>/context.json`, `AIDER_DESK_DIR/tasks/<taskId>/context.json`, or an explicit task, tasks, context file, or project root. | Static local-history fixture smoke; cwd/ancestor discovery only reports projects that already have task context files. |
 | OpenClaw | `local_import_when_supported` | `OPENCLAW_STATE_DIR`, `~/.openclaw`, legacy `~/.clawdbot`/`~/.moltbot`, or an explicit OpenClaw state tree. | Static local-history fixture smoke; beta storage-contract notes in the matrix. |
@@ -73,7 +73,7 @@ is:
 | Roo Code | `local_import_when_supported` | `roo-cline.customStoragePath`, common VS Code globalStorage task folders for `RooVeterinaryInc.roo-cline`, or an explicit Roo task storage path. | Static local-history fixture smoke; VS Code state databases are not parsed. |
 
 `ctx sources --json` uses `import_support: "preview"` and `native_import:
-false` for preview sources such as NanoClaw, AstrBot, and Windsurf. Those paths can be
+false` for preview sources such as NanoClaw, AstrBot, Pochi, and Windsurf. Those paths can be
 imported explicitly with `ctx import --provider ...` when discovery finds them,
 or with `ctx import --provider ... --path ...` for a specific path. They are not
 swept up by `ctx import --all` or the default pre-search refresh.

@@ -172,12 +172,12 @@ IDE/application storage imports.
 - CLI storage evidence: `packages/cli/src/livekit/store.ts` enables filesystem
   LiveStore sync only when `POCHI_LIVEKIT_SYNC_ON` is set and stores state under
   `~/.pochi/storage/<storeId>/state<schemaHash>@6.db`.
-- `ctx` imports this shape as `pochi_livestore_state_sqlite`, reading explicit
-  SQLite file paths or explicit directories containing `state*.db` files
-  read-only.
-- This is preview and explicit-path-only. `ctx` does not add default
-  `~/.pochi` discovery, does not read `config.jsonc`, and does not attempt VS
-  Code OPFS extraction.
+- `ctx` imports this shape as `pochi_livestore_state_sqlite`, reading synced
+  `~/.pochi/storage` roots when present, explicit SQLite file paths, or
+  explicit directories containing `state*.db` files read-only.
+- This remains preview. `ctx` does not read `config.jsonc`, does not attempt VS
+  Code OPFS extraction, and does not auto-import Pochi during `ctx import --all`
+  or pre-search refresh.
 
 ## OpenLoaf
 

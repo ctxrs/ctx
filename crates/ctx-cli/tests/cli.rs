@@ -6695,6 +6695,73 @@ fn pochi_cli_imports_explicit_livestore_state_db_and_directory_only() {
 }
 
 #[test]
+fn pochi_preview_default_discovery_imports_only_when_explicit_provider() {
+    let temp = tempdir();
+    install_default_pochi_fixture(&temp);
+
+    let sources = json_output(ctx(&temp).args(["sources", "--json"]));
+    let pochi = sources["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| source["provider"] == "pochi")
+        .unwrap_or_else(|| panic!("missing Pochi source in {sources:#}"));
+    assert_eq!(pochi["status"], "available");
+    assert_eq!(pochi["source_format"], "pochi_livestore_state_sqlite");
+    assert_eq!(pochi["import_support"], "preview");
+    assert_eq!(pochi["native_import"], false);
+    assert_eq!(pochi["importable"], true);
+    assert!(pochi["path"].as_str().unwrap().ends_with(".pochi/storage"));
+
+    let search_before = json_output(ctx(&temp).args([
+        "search",
+        "POCHI_ORACLE_ASSISTANT_TEXT",
+        "--provider",
+        "pochi",
+        "--json",
+    ]));
+    assert_eq!(search_before["freshness"]["mode"], "auto");
+    assert_eq!(search_before["freshness"]["status"], "no_sources");
+    assert_eq!(search_before["freshness"]["source_count"], 0);
+    assert!(search_before["results"].as_array().unwrap().is_empty());
+
+    let imported = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "pochi",
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(imported["totals"]["failed"], 0);
+    assert_eq!(imported["totals"]["imported_sources"], 1);
+    assert_eq!(imported["sources"][0]["provider"], "pochi");
+    assert_eq!(
+        imported["sources"][0]["source_format"],
+        "pochi_livestore_state_sqlite"
+    );
+
+    let search_after = json_output(ctx(&temp).args([
+        "search",
+        "POCHI_ORACLE_ASSISTANT_TEXT",
+        "--provider",
+        "pochi",
+        "--refresh",
+        "off",
+        "--json",
+    ]));
+    assert_search_provider_oracle_with_scope(
+        &search_after,
+        "pochi",
+        "POCHI_ORACLE_ASSISTANT_TEXT",
+        1,
+        "message",
+        "session_result",
+        "session",
+    );
+}
+
+#[test]
 fn lingma_cli_default_source_imports_home_local_db() {
     let temp = tempdir();
     let query = "lingma-default-import-oracle";
@@ -7092,6 +7159,12 @@ fn install_default_astrbot_fixture(temp: &TempDir, query: &str) {
     let target = temp.path().join(".astrbot/data");
     fs::create_dir_all(&target).unwrap();
     fs::copy(source, target.join("data_v4.db")).unwrap();
+}
+
+fn install_default_pochi_fixture(temp: &TempDir) {
+    let fixture = provider_history_fixture("pochi/v1/storage/store-alpha");
+    let target = temp.path().join(".pochi/storage/store-alpha");
+    copy_dir_all(Path::new(&fixture), &target);
 }
 
 fn install_default_shelley_fixture(temp: &TempDir, query: &str) {
