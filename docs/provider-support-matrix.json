@@ -579,6 +579,67 @@
       ]
     },
     {
+      "id": "pochi",
+      "display_name": "Pochi",
+      "priority": "p1",
+      "status": "local_import_when_supported",
+      "capture_provider": "pochi",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "pochi_livestore_state_sqlite",
+          "fidelity": "imported",
+          "proof": [
+            "ctx import --provider pochi --path <state*.db>",
+            "cargo test -p ctx-history-capture native_pochi_fixture_imports_searches_reimports_and_file_touches",
+            "cargo test -p ctx pochi_cli_imports_explicit_livestore_state_db_and_directory_only"
+          ],
+          "notes": [
+            "Preview explicit import for Pochi LiveStore state SQLite databases; pass a state*.db file or a directory containing state*.db files.",
+            "Reads tasks and messages tables read-only, normalizing text parts, tool parts, executeCommand output, and known file-touch tool input paths.",
+            "No default ~/.pochi discovery, config.jsonc parsing, or VS Code OPFS extraction is claimed."
+          ]
+        }
+      ],
+      "history_locations": [
+        "Explicit state*.db file path",
+        "Explicit directory containing state*.db files"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": false,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": true,
+        "command_output": true,
+        "files_touched": true,
+        "artifacts": false,
+        "model_identity": true,
+        "costs": false,
+        "token_usage": false,
+        "parent_child_session_edges": false
+      },
+      "redaction_notes": [
+        "Reads the provider SQLite database read-only; imported message text, tool input/output text, file paths, cwd, model id, and local source paths remain in the local ctx index."
+      ],
+      "blockers": [
+        "Preview explicit-path-only importer; no automatic ~/.pochi scan is shipped.",
+        "Pochi CLI filesystem LiveStore sync is only present when POCHI_LIVEKIT_SYNC_ON is enabled, so many installations may not have an importable state DB."
+      ],
+      "public_docs": "docs/provider-support.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/pochi/v1/storage/store-alpha/statep0chifixture@6.db"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs",
+        "tests/fixtures/provider-history/pochi/v1/storage/store-alpha/statep0chifixture@6.db"
+      ]
+    },
+    {
       "id": "codebuddy",
       "display_name": "CodeBuddy",
       "priority": "p1",

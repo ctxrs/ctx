@@ -77,6 +77,7 @@ pub enum ProviderId {
     Goose,
     Dexto,
     Lingma,
+    Pochi,
     #[serde(rename = "codebuddy", alias = "code_buddy", alias = "code-buddy")]
     CodeBuddy,
     #[serde(rename = "aider_desk", alias = "aider-desk")]
@@ -141,7 +142,7 @@ pub enum ProviderId {
 }
 
 impl ProviderId {
-    pub const ALL: [Self; 56] = [
+    pub const ALL: [Self; 57] = [
         Self::Codex,
         Self::ClaudeCode,
         Self::ClaudeCliCrp,
@@ -170,6 +171,7 @@ impl ProviderId {
         Self::Goose,
         Self::Dexto,
         Self::Lingma,
+        Self::Pochi,
         Self::CodeBuddy,
         Self::AiderDesk,
         Self::OpenHands,
@@ -523,6 +525,7 @@ mod tests {
             ProviderId::Kode,
             ProviderId::KimiCodeCli,
             ProviderId::Lingma,
+            ProviderId::Pochi,
             ProviderId::NanoClaw,
             ProviderId::Neovate,
             ProviderId::CommandCode,

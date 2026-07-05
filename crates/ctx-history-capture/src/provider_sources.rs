@@ -178,6 +178,8 @@ const GOOSE_DEFAULTS: &[ProviderDefaultLocation] = &[
 
 const DEXTO_DEFAULTS: &[ProviderDefaultLocation] = &[];
 
+const POCHI_DEFAULTS: &[ProviderDefaultLocation] = &[];
+
 const LINGMA_DEFAULTS: &[ProviderDefaultLocation] = &[
     ProviderDefaultLocation {
         path_components: &[
@@ -899,6 +901,16 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         display_name: "Lingma",
         default_locations: LINGMA_DEFAULTS,
         import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
+    ProviderSourceSpec {
+        provider: CaptureProvider::Pochi,
+        display_name: "Pochi",
+        default_locations: POCHI_DEFAULTS,
+        import_support: ProviderImportSupport::Preview,
         catalog_support: ProviderCatalogSupport::None,
         raw_retention: ProviderRawRetention::PathReference,
         redaction_boundary: ProviderRedactionBoundary::BeforeExport,
@@ -1776,6 +1788,7 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::RooCode => "roo_task_directory_json",
         CaptureProvider::Dexto => "dexto_sqlite",
         CaptureProvider::Lingma => "lingma_sqlite",
+        CaptureProvider::Pochi => "pochi_livestore_state_sqlite",
         CaptureProvider::CortexCode if path.is_dir() => "cortex_code_conversations_json",
         CaptureProvider::CortexCode => {
             if path
@@ -1965,6 +1978,9 @@ fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::Dexto => Some("path exists but no Dexto SQLite database was found"),
         CaptureProvider::Lingma => {
             Some("path exists but no Lingma chat_record table with the expected columns was found")
+        }
+        CaptureProvider::Pochi => {
+            Some("path exists but no Pochi LiveStore state SQLite database was found")
         }
         CaptureProvider::CortexCode => {
             Some("path exists but no Cortex Code session JSON or history JSONL files were found")
@@ -2178,6 +2194,9 @@ fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::Lingma => {
             Some("path exists but the Lingma chat_record SQLite database could not be read")
         }
+        CaptureProvider::Pochi => {
+            Some("path exists but the Pochi LiveStore state database could not be read")
+        }
         CaptureProvider::CodeBuddy => Some(
             "path exists but CodeBuddy history JSON files could not be read; check permissions",
         ),
@@ -2215,6 +2234,7 @@ fn default_location_import_probe(
         }),
         CaptureProvider::OpenHands => has_openhands_event_json(path, 10_000),
         CaptureProvider::Dexto => path_is_file_probe(path),
+        CaptureProvider::Pochi => path_is_file_probe(path),
         CaptureProvider::Antigravity => has_jsonl_file_under_matching(path, 10_000, |candidate| {
             matches!(
                 candidate.file_name().and_then(|name| name.to_str()),
