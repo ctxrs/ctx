@@ -1,0 +1,14 @@
+[
+  {
+    "type": "ask",
+    "ask": "text",
+    "text": "bob-default-refresh-oracle Please import this IBM Bob IDE task history.",
+    "ts": "2026-07-04T14:00:01Z"
+  },
+  {
+    "type": "say",
+    "say": "text",
+    "text": "Bob task JSON fixture response for native ctx ingestion.",
+    "ts": "2026-07-04T14:00:03Z"
+  }
+]

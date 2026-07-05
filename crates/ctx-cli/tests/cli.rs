@@ -46,7 +46,9 @@ fn apply_hermetic_env(command: &mut Command, temp: &TempDir) {
     command.env_remove("KILO_DB");
     command.env_remove("FORGE_CONFIG");
     command.env_remove("VIBE_HOME");
+    command.env_remove("XDG_CONFIG_HOME");
     command.env_remove("XDG_DATA_HOME");
+    command.env_remove("APPDATA");
 }
 
 fn copied_ctx_binary(temp: &TempDir) -> PathBuf {
@@ -2408,6 +2410,7 @@ fn provider_help_matches_implemented_importers() {
         "qoder",
         "codebuddy",
         "aider-desk",
+        "bob",
         "amp",
         "trae",
         "qwen-code",
@@ -2445,6 +2448,8 @@ fn provider_json_names_are_accepted_as_cli_filter_aliases() {
         ("code_buddy", "codebuddy"),
         ("aider_desk", "aider_desk"),
         ("aiderdesk", "aider_desk"),
+        ("ibm_bob", "bob"),
+        ("ibm-bob", "bob"),
         ("amp", "amp"),
         ("trae", "trae"),
         ("auggie", "auggie"),
@@ -6018,6 +6023,7 @@ fn search_refresh_auto_imports_discovered_top_provider_sources() {
         ),
         ("lingma", "lingma", install_default_lingma_fixture),
         ("qoder", "qoder", install_default_qoder_fixture),
+        ("bob", "bob", install_default_bob_fixture),
     ] {
         let temp = tempdir();
         let query = format!("{stored_provider}-default-refresh-oracle");
@@ -7403,6 +7409,18 @@ fn install_default_windsurf_fixture(temp: &TempDir, query: &str) {
 fn install_default_qoder_fixture(temp: &TempDir, query: &str) {
     let source = PathBuf::from(write_native_qoder_fixture(temp, query));
     copy_dir_all(&source, &temp.path().join(".qoder").join("projects"));
+}
+
+fn install_default_bob_fixture(temp: &TempDir, _query: &str) {
+    let source = PathBuf::from(provider_history_fixture(
+        "bob/User/globalStorage/ibm.bob-code",
+    ));
+    copy_dir_all(
+        &source,
+        &temp
+            .path()
+            .join(".config/IBM Bob/User/globalStorage/ibm.bob-code"),
+    );
 }
 
 fn install_default_openclaw_fixture(temp: &TempDir, query: &str) {
@@ -10202,6 +10220,7 @@ fn native_provider_cli_requires_existing_history_or_explicit_path() {
         ("terramind", "no importable terramind history found"),
         ("cline", "no importable cline history found"),
         ("roo", "no importable roo_code history found"),
+        ("bob", "no importable bob history found"),
     ] {
         let temp = tempdir();
         let stderr =
@@ -10284,6 +10303,36 @@ fn task_json_cli_imports_cline_and_roo_and_searches() {
     assert!(results
         .iter()
         .all(|result| result["provider"] == "roo_code"));
+
+    let bob = provider_history_fixture("bob/User/globalStorage/ibm.bob-code");
+    let imported =
+        json_output(ctx(&temp).args(["import", "--provider", "ibm-bob", "--path", &bob, "--json"]));
+    assert_eq!(imported["schema_version"], 1);
+    assert_eq!(imported["sources"][0]["provider"], "bob");
+    assert_eq!(
+        imported["sources"][0]["source_format"],
+        "bob_task_directory_json"
+    );
+    assert_eq!(imported["totals"]["imported_sessions"], 1);
+    assert_eq!(imported["totals"]["imported_events"], 4);
+    assert_eq!(imported["totals"]["failed"], 0);
+
+    let second =
+        json_output(ctx(&temp).args(["import", "--provider", "bob", "--path", &bob, "--json"]));
+    assert_eq!(second["totals"]["imported_sessions"], 0);
+    assert_eq!(second["totals"]["imported_events"], 0);
+    assert_eq!(second["totals"]["skipped_events"], 4);
+
+    let search = json_output(ctx(&temp).args([
+        "search",
+        "bob-default-refresh-oracle",
+        "--provider",
+        "bob",
+        "--json",
+    ]));
+    let results = search["results"].as_array().unwrap();
+    assert!(!results.is_empty(), "{search:#}");
+    assert!(results.iter().all(|result| result["provider"] == "bob"));
 }
 
 #[test]

@@ -1,0 +1,28 @@
+[
+  {
+    "role": "user",
+    "content": "bob-default-refresh-oracle Write a short note proving IBM Bob IDE task JSON import.",
+    "timestamp": "2026-07-04T14:00:01Z",
+    "model": "ibm-bob-auto"
+  },
+  {
+    "role": "assistant",
+    "content": [
+      {
+        "type": "text",
+        "text": "I will add a sanitized Bob task fixture note."
+      },
+      {
+        "type": "tool_use",
+        "name": "apply_patch",
+        "input": "*** Begin Patch\n*** Add File: src/bob_task.rs\n+pub fn bob_task_fixture() -> &'static str {\n+    \"bob-default-refresh-oracle\"\n+}\n*** End Patch\n"
+      }
+    ],
+    "timestamp": "2026-07-04T14:00:02Z",
+    "model": "ibm-bob-auto",
+    "usage": {
+      "input_tokens": 42,
+      "output_tokens": 24
+    }
+  }
+]

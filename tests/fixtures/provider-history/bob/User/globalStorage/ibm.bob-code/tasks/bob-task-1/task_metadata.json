@@ -1,0 +1,7 @@
+{
+  "taskId": "bob-task-1",
+  "createdAt": "2026-07-04T14:00:00Z",
+  "lastModified": "2026-07-04T14:02:00Z",
+  "cwd": "/workspace/bob-fixture",
+  "title": "Import IBM Bob IDE task JSON"
+}

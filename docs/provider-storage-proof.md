@@ -836,6 +836,22 @@ IDE/application storage imports.
   implemented. Default discovery remains preview/manual until a safe-run local
   fixture or stronger official import/export contract supports native-auto.
 
+## IBM Bob
+
+- Official IBM docs prove Bob skill/config paths such as project `.bob/skills`
+  and global `~/.bob/skills`, but those docs do not prove transcript storage.
+- IBM community history-export evidence names the Bob IDE task history path as
+  `C:\Users\<USER>\AppData\Roaming\Bob-IDE\User\globalStorage\ibm.bob-code\tasks`.
+- CodeBurn's IBM Bob provider independently reads IBM Bob IDE task history from
+  `User/globalStorage/ibm.bob-code/tasks` below app-data folders named
+  `IBM Bob` and `Bob-IDE`, and reuses its Cline-family task JSON parser.
+- `ctx` imports this shape as `bob_task_directory_json`, using the existing
+  task JSON adapter for `ui_messages.json`, optional
+  `api_conversation_history.json`, and `task_metadata.json`.
+- Unclaimed paths: Bob Shell `~/.bob` skill/state data, arbitrary VS
+  Code/Electron state databases, and cloud/account-backed Bob data are not
+  parsed by this adapter.
+
 ## Void
 
 - Source evidence: Void stores chat threads through VS Code/Electron application

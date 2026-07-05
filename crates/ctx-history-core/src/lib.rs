@@ -225,6 +225,7 @@ text_enum! {
         OpenHands => "openhands",
         Cline => "cline",
         RooCode => "roo_code",
+        Bob => "bob",
         Crush => "crush",
         Goose => "goose",
         Dexto => "dexto",
@@ -1628,6 +1629,10 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<CaptureProvider>("\"amp\"").unwrap(),
             CaptureProvider::Amp
+        );
+        assert_eq!(
+            serde_json::from_str::<CaptureProvider>("\"bob\"").unwrap(),
+            CaptureProvider::Bob
         );
 
         let sync: SyncMetadata = serde_json::from_value(json!({})).unwrap();

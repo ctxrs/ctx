@@ -91,7 +91,7 @@ machine. Current rows include:
 - native rows for supported Antigravity, Claude, OpenCode, Kilo Code,
   ForgeCode, Deep Agents, OpenClaw, Hermes, Gemini, Cursor, Zed, Kiro CLI,
   Copilot CLI, Factory AI Droid, Qwen Code, Kimi Code CLI, Autohand Code,
-  iFlow CLI, CodeBuddy, Cline, and Roo Code local history locations;
+  iFlow CLI, CodeBuddy, Cline, Roo Code, and IBM Bob local history locations;
 - preview rows for NanoClaw project roots, AstrBot SQLite history, and Warp
   `warp.sqlite` restoration history when those paths are discoverable;
 - local history-source plugin manifests under `$CTX_DATA_ROOT/plugins` or

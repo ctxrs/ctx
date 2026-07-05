@@ -21,16 +21,16 @@ Status meanings:
 - `install-target`: npx target is an aggregate or project skill target, not a
   proven history-producing agent.
 
-Result on this integration branch: 47 `native-auto`, 8 `native-preview`, 5
-`candidate-family`, 5 `webapp-boundary`, 5 `unknown`, and 2 `install-target`
+Result on this integration branch: 48 `native-auto`, 8 `native-preview`, 5
+`candidate-family`, 5 `webapp-boundary`, 4 `unknown`, and 2 `install-target`
 rows.
 
 ## Shared Families
 
 - `opencode sqlite family`: native `opencode` and `kilo` coverage share the
   reusable SQLite baseline for OpenCode-style message/session tables.
-- `Cline/Roo task JSON`: native `cline` and `roo` coverage share one task JSON
-  importer for file-backed task directories.
+- `Cline/Roo/Bob task JSON`: native `cline`, `roo`, and IBM Bob IDE coverage
+  share one task JSON importer for file-backed task directories.
 - `JSONL CLI event logs`: already covers Codex, Claude Code, OpenClaw,
   Antigravity CLI, Gemini CLI, Pi, Factory Droid, Copilot CLI-shaped logs, and
   Autohand Code, iFlow CLI, Mistral Vibe, Mux, Reasonix, and Command Code
@@ -74,10 +74,10 @@ rows.
 | `astrbot` | `native-preview` | `generic sqlite messages` | ctx `astrbot_data_v4_sqlite`; npx `~/.astrbot` | Preview explicit import only; full per-platform transcript coverage remains unproven. |
 | `autohand-code` | `native-auto` | `JSONL CLI event logs` | ctx `autohand_code_sessions_jsonl`; npx `AUTOHAND_HOME` or `~/.autohand` | - |
 | `augment` | `native-auto` | `CLI session JSON` | ctx `auggie_session_json`; npx `~/.augment`; `@augmentcode/auggie@0.32.0` stores sessions under `~/.augment/sessions/<session_id>.json` | Imports package-backed Auggie CLI `chatHistory` request/response text only; richer IDE/app storage remains unclaimed. |
-| `bob` | `unknown` | `unknown native history` | npx `~/.bob`; no ctx provider | Need native history storage research before claiming import support. |
+| `bob` | `native-auto` | `Cline/Roo/Bob task JSON` | ctx `bob_task_directory_json`; IBM community and CodeBurn prove IBM Bob IDE app-data task storage under `User/globalStorage/ibm.bob-code/tasks`; npx `~/.bob` remains Bob Shell skill/state evidence only | Imports IBM Bob IDE task JSON from app-data `IBM Bob`/`Bob-IDE` folders only; Bob Shell `~/.bob` is not crawled. |
 | `claude-code` | `native-auto` | `JSONL CLI event logs` | ctx `claude_projects_jsonl_tree`; npx `~/.claude` | - |
 | `openclaw` | `native-auto` | `JSONL CLI event logs` | ctx `openclaw_session_jsonl_tree`; npx `~/.openclaw` or legacy homes | Provider matrix still notes GA schema-stability validation. |
-| `cline` | `native-auto` | `Cline/Roo task JSON` | ctx `cline_task_directory_json`; npx `~/.cline` | - |
+| `cline` | `native-auto` | `Cline/Roo/Bob task JSON` | ctx `cline_task_directory_json`; npx `~/.cline` | - |
 | `codearts-agent` | `candidate-family` | `VS Code/Electron storage` | npx `~/.codeartsdoer`; no ctx provider; VSIX evidence shows `~/.codeartsdoer` plus VS Code app-data cache paths such as `User/chat_sessions/<session>/chat_baseInfo.json` and `messages_<n>.json` | Current extension also routes sessions through an agent-kernel API; need sanitized real fixture proving whether cache JSON is complete/stable before adapting IDE-family importers. |
 | `codebuddy` | `native-auto` | `VS Code/Electron storage` | ctx `codebuddy_history_json`; npx project or home `.codebuddy` | Schema proof from WayLog `shayne-snap/WayLog@6939033b7a39326fbdc249e28e6aa12461db1f09`; continue validating schema drift. |
 | `codemaker` | `unknown` | `unknown native history` | npx `~/.codemaker`; no ctx provider | Need native history storage research before claiming import support. |
@@ -123,7 +123,7 @@ rows.
 | `qwen-code` | `native-auto` | `JSONL CLI event logs` | ctx `qwen_code_chat_jsonl_tree`; npx `~/.qwen` | - |
 | `replit` | `webapp-boundary` | `webapp/object-store boundary` | npx project `.replit`; no ctx provider | Project marker is not a local agent history contract. |
 | `reasonix` | `native-auto` | `JSONL CLI event logs` | ctx `reasonix_session_jsonl_tree`; npx `~/.reasonix/sessions`; package `reasonix@0.53.2` | - |
-| `roo` | `native-auto` | `Cline/Roo task JSON` | ctx `roo_task_directory_json`; npx `~/.roo` | - |
+| `roo` | `native-auto` | `Cline/Roo/Bob task JSON` | ctx `roo_task_directory_json`; npx `~/.roo` | - |
 | `rovodev` | `native-auto` | `CLI session JSON` | ctx `rovodev_session_json_tree`; npx `~/.rovodev`; default discovery reads `~/.rovodev/sessions` | - |
 | `tabnine-cli` | `unknown` | `unknown native history` | npx `~/.tabnine`; official docs mention saved/resumable chats under `~/.tabnine/agent/tmp/...`, but no file names or schema; no ctx provider | Need source-backed transcript file path and schema proof before claiming import support. |
 | `terramind` | `native-auto` | `generic sqlite messages` | ctx `terramind_agents_sqlite`; npx package `terramind@0.2.91` resolves Nucleus app data to `$XDG_CONFIG_HOME/Nucleus/data/agents.db`, `~/.config/Nucleus/data/agents.db`, macOS `~/Library/Application Support/Nucleus/data/agents.db`, or Windows `%APPDATA%/Nucleus/data/agents.db` | Fixture is source-backed from the published package schema because a no-auth `npx terramind@0.2.91 list --chats` probe did not complete. |

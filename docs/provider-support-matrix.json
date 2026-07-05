@@ -3116,6 +3116,70 @@
       ]
     },
     {
+      "id": "bob",
+      "display_name": "IBM Bob",
+      "priority": "p1",
+      "status": "local_import_when_supported",
+      "capture_provider": "bob",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "bob_task_directory_json",
+          "fidelity": "imported",
+          "proof": [
+            "ctx sources",
+            "ctx import --provider bob"
+          ],
+          "notes": [
+            "Reads IBM Bob IDE task directories containing ui_messages.json, optional api_conversation_history.json, and task_metadata.json.",
+            "Discovery covers IBM Bob and Bob-IDE app-data folders under User/globalStorage/ibm.bob-code and only reports sources importable when task JSON markers are present."
+          ]
+        }
+      ],
+      "history_locations": [
+        "~/.config/IBM Bob/User/globalStorage/ibm.bob-code/tasks/*/{ui_messages.json,api_conversation_history.json,task_metadata.json}",
+        "~/.config/Bob-IDE/User/globalStorage/ibm.bob-code/tasks/*/{ui_messages.json,api_conversation_history.json,task_metadata.json}",
+        "~/Library/Application Support/IBM Bob/User/globalStorage/ibm.bob-code/tasks/*/{ui_messages.json,api_conversation_history.json,task_metadata.json}",
+        "~/Library/Application Support/Bob-IDE/User/globalStorage/ibm.bob-code/tasks/*/{ui_messages.json,api_conversation_history.json,task_metadata.json}",
+        "%APPDATA%/IBM Bob/User/globalStorage/ibm.bob-code/tasks/*/{ui_messages.json,api_conversation_history.json,task_metadata.json}",
+        "%APPDATA%/Bob-IDE/User/globalStorage/ibm.bob-code/tasks/*/{ui_messages.json,api_conversation_history.json,task_metadata.json}"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": false,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": true,
+        "command_output": false,
+        "files_touched": true,
+        "artifacts": false,
+        "model_identity": true,
+        "costs": false,
+        "token_usage": true,
+        "parent_child_session_edges": false
+      },
+      "redaction_notes": [
+        "Reads local Bob IDE task JSON files read-only; imported text remains in the local ctx index.",
+        "Raw provider paths are retained only as local source metadata for citations."
+      ],
+      "blockers": [
+        "Bob Shell ~/.bob skill/state paths are not parsed because they are a separate storage surface without a proven transcript schema.",
+        "VS Code private extension state databases are not parsed; file-backed task directories are required."
+      ],
+      "public_docs": "docs/providers.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/bob/User/globalStorage/ibm.bob-code"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs",
+        "crates/ctx-history-store/src/lib.rs"
+      ]
+    },
+    {
       "id": "cline",
       "display_name": "Cline",
       "priority": "p1",
