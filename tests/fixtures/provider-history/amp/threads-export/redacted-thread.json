@@ -1,0 +1,77 @@
+{
+  "id": "T-019c0000-0000-7000-8000-0000000000aa",
+  "created": "2026-07-04T16:23:29.457Z",
+  "title": "Amp export fixture",
+  "agentMode": "smart",
+  "workspace": {
+    "path": "/workspace/ctx-amp-fixture"
+  },
+  "messages": [
+    {
+      "id": "msg_amp_fixture_user_1",
+      "role": "user",
+      "created": "2026-07-04T16:23:30.000Z",
+      "content": [
+        {
+          "type": "text",
+          "text": "Amp export oracle prompt: import an explicit threads export JSON and do not read cli.log."
+        }
+      ]
+    },
+    {
+      "id": "msg_amp_fixture_assistant_1",
+      "role": "assistant",
+      "created": "2026-07-04T16:23:31.000Z",
+      "state": {
+        "type": "complete"
+      },
+      "content": [
+        {
+          "type": "thinking",
+          "text": "redacted private reasoning must not be indexed"
+        },
+        {
+          "type": "text",
+          "text": "Amp export oracle response: use explicit JSON export only."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_amp_fixture_1",
+          "name": "read_file",
+          "input": {
+            "path": "docs/provider-support.md"
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_amp_fixture_tool_result_1",
+      "role": "user",
+      "created": "2026-07-04T16:23:32.000Z",
+      "content": [
+        {
+          "type": "tool_result",
+          "toolUseID": "toolu_amp_fixture_1",
+          "run": {
+            "status": "done",
+            "result": "Provider matrix updated for Amp explicit export."
+          }
+        }
+      ]
+    },
+    {
+      "id": "msg_amp_fixture_info_1",
+      "role": "info",
+      "created": "2026-07-04T16:23:33.000Z",
+      "content": [
+        {
+          "type": "summary",
+          "summary": {
+            "type": "message",
+            "summary": "Amp fixture summary for ctx import coverage."
+          }
+        }
+      ]
+    }
+  ]
+}

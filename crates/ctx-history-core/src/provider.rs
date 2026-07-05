@@ -155,10 +155,11 @@ pub enum ProviderId {
     Junie,
     Kilo,
     SweAgent,
+    Amp,
 }
 
 impl ProviderId {
-    pub const ALL: [Self; 60] = [
+    pub const ALL: [Self; 61] = [
         Self::Codex,
         Self::ClaudeCode,
         Self::ClaudeCliCrp,
@@ -219,6 +220,7 @@ impl ProviderId {
         Self::Junie,
         Self::Kilo,
         Self::SweAgent,
+        Self::Amp,
     ];
 }
 
@@ -515,6 +517,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
         let expected = [
             ProviderId::AntigravityCli,
+            ProviderId::Amp,
             ProviderId::AstrBot,
             ProviderId::AutohandCode,
             ProviderId::Auggie,
