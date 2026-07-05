@@ -20,9 +20,9 @@ UPSTREAM_COMMIT = "2adcfe5a4cce0ce5f4d5547a997b2a161ec5d127"
 EXPECTED_COUNTS = {
     "native-auto": 45,
     "native-preview": 4,
-    "candidate-family": 7,
+    "candidate-family": 6,
     "webapp-boundary": 9,
-    "unknown": 5,
+    "unknown": 6,
     "install-target": 2,
 }
 ALLOWED_STATUSES = set(EXPECTED_COUNTS)

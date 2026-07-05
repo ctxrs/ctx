@@ -547,6 +547,42 @@ IDE/application storage imports.
   complete without interactive setup, so the fixture is a sanitized SQLite DB
   built from the package-backed schema rather than a live-generated chat.
 
+## Tabnine CLI (insufficient proof)
+
+- npx skills evidence: `skills@1.5.14` registers the `tabnine-cli` target with
+  `skillsDir = ".tabnine/agent/skills"`,
+  `globalSkillsDir = "~/.tabnine/agent/skills"`, and install detection based
+  only on `~/.tabnine`. This proves a skills/config home, not transcript
+  storage.
+- Official install evidence:
+  `https://docs.tabnine.com/main/getting-started/tabnine-cli/getting-started/installation`
+  installs Tabnine CLI from a Tabnine host, requires Tabnine Agents to be
+  enabled for the team, uses `~/.local/bin/tabnine` as the Linux/macOS default
+  binary path, and uninstalls by removing `~/.tabnine/agent`.
+- Official settings and command evidence:
+  `https://docs.tabnine.com/main/getting-started/tabnine-cli/features/settings`
+  documents `~/.tabnine/agent/settings.json`, and
+  `https://docs.tabnine.com/main/getting-started/tabnine-cli/features/commands`
+  documents `/chat save`, `/chat resume`, `/chat list`, `/chat share`, and
+  `/resume`, but does not document the backing file names or JSON/schema shape.
+- Official checkpoint evidence:
+  `https://docs.tabnine.com/main/getting-started/tabnine-cli/features/checkpointing`
+  says checkpoint metadata is stored under
+  `~/.tabnine/agent/tmp/<project_hash>/checkpoints/` and compares `/chat save`
+  conversation history to a location under `~/.tabnine/agent/tmp/...`; this is
+  path-adjacent evidence only, not a transcript schema.
+- Negative npm evidence: the public `tabnine@0.0.0-dev-202603280606` package is
+  a small `stardrop` binary wrapper with no transcript reader/writer schema and
+  is not the official host-installed CLI documented above.
+- Local fixture evidence: no `~/.tabnine` history fixture was present on this
+  machine, and a safe no-auth generated fixture was not available because the
+  official CLI requires a Tabnine host and team Agents enablement.
+- Decision: ctx should not add a native `tabnine-cli` importer yet. Unclaimed
+  candidate paths are `~/.tabnine/agent/tmp/...`,
+  `~/.tabnine/agent/tmp/<project_hash>/checkpoints/`, and any file exported by
+  `/chat share`; native support needs source-backed file names and record
+  schemas or a sanitized real fixture from a safe run.
+
 ## OpenHands
 
 - Source evidence: OpenHands `get_default_persistence_dir()` checks

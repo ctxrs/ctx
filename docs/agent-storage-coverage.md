@@ -21,8 +21,8 @@ Status meanings:
 - `install-target`: npx target is an aggregate or project skill target, not a
   proven history-producing agent.
 
-Result on this integration branch: 45 `native-auto`, 4 `native-preview`, 7
-`candidate-family`, 9 `webapp-boundary`, 5 `unknown`, and 2 `install-target`
+Result on this integration branch: 45 `native-auto`, 4 `native-preview`, 6
+`candidate-family`, 9 `webapp-boundary`, 6 `unknown`, and 2 `install-target`
 rows.
 
 ## Shared Families
@@ -122,7 +122,7 @@ rows.
 | `reasonix` | `native-auto` | `JSONL CLI event logs` | ctx `reasonix_session_jsonl_tree`; npx `~/.reasonix/sessions`; package `reasonix@0.53.2` | - |
 | `roo` | `native-auto` | `Cline/Roo task JSON` | ctx `roo_task_directory_json`; npx `~/.roo` | - |
 | `rovodev` | `native-auto` | `CLI session JSON` | ctx `rovodev_session_json_tree`; npx `~/.rovodev`; default discovery reads `~/.rovodev/sessions` | - |
-| `tabnine-cli` | `candidate-family` | `JSONL CLI event logs` | npx `~/.tabnine`; no ctx provider | Need transcript location and schema proof. |
+| `tabnine-cli` | `unknown` | `unknown native history` | npx `~/.tabnine`; official docs mention saved/resumable chats under `~/.tabnine/agent/tmp/...`, but no file names or schema; no ctx provider | Need source-backed transcript file path and schema proof before claiming import support. |
 | `terramind` | `native-auto` | `generic sqlite messages` | ctx `terramind_agents_sqlite`; npx package `terramind@0.2.91` resolves Nucleus app data to `$XDG_CONFIG_HOME/Nucleus/data/agents.db`, `~/.config/Nucleus/data/agents.db`, macOS `~/Library/Application Support/Nucleus/data/agents.db`, or Windows `%APPDATA%/Nucleus/data/agents.db` | Fixture is source-backed from the published package schema because a no-auth `npx terramind@0.2.91 list --chats` probe did not complete. |
 | `tinycloud` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.tinycloud`; no ctx provider | No proven stable local transcript boundary; prefer exporter or plugin. |
 | `trae` | `candidate-family` | `VS Code/Electron storage` | npx `~/.trae`; no ctx provider | Need local app storage or export contract proof. |
