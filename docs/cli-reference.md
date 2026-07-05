@@ -99,8 +99,13 @@ machine. Current rows include:
 - Zencoder `zencoder-chat` session trees under common VS Code-family
   `User/globalStorage/ZencoderAI.zencoder/zencoder-chat` roots, or an explicit
   chat tree/session path;
-- preview rows for NanoClaw project roots when those paths are discoverable,
-  plus bounded native AstrBot SQLite history when `data_v4.db` exists;
+- Zenflow Desktop `db.sqlite` under `ZENFLOW_DATA_DIR`,
+  `$XDG_DATA_HOME/zenflow`, `~/.local/share/zenflow`, macOS
+  `~/Library/Application Support/ai.forgoodai.zenflow`, Windows
+  `%APPDATA%/forgoodai/zenflow/data`, or an explicit DB path;
+- bounded native Moxby `moxby_chats.db` and AstrBot `data_v4.db` history when
+  those files exist;
+- preview rows for NanoClaw project roots when those paths are discoverable;
 - local history-source plugin manifests under `$CTX_DATA_ROOT/plugins` or
   `CTX_HISTORY_PLUGIN_PATH`.
 

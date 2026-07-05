@@ -25,8 +25,8 @@ Status meanings:
 - `install-target`: npx target is an aggregate or project skill target, not a
   proven history-producing agent.
 
-Result on this integration branch: 61 `native-auto`, 0 `native-explicit`, 0
-`native-preview`, 0 `candidate-family`, 6 `webapp-boundary`, 2 `unknown`, and
+Result on this integration branch: 63 `native-auto`, 0 `native-explicit`, 0
+`native-preview`, 0 `candidate-family`, 5 `webapp-boundary`, 2 `unknown`, and
 2 `install-target` rows.
 
 ## Shared Families
@@ -51,7 +51,8 @@ Result on this integration branch: 61 `native-auto`, 0 `native-explicit`, 0
   `<persistence>/<user_id>/v1_conversations`.
 - `generic sqlite messages`: already covers Crush, Goose, Hermes, Kiro CLI,
   Dexto CLI database roots, Terramind/Nucleus `agents.db`, Firebender project
-  chat history DBs, the bounded AstrBot native-auto importer, and ctx-native Shelley.
+  chat history DBs, Moxby `moxby_chats.db`, Zenflow Desktop `db.sqlite`,
+  the bounded AstrBot native-auto importer, and ctx-native Shelley.
 - `Forge conversation SQLite`: covers ForgeCode's `.forge.db` conversation
   snapshots with JSON context/metrics DTOs.
 - `LangGraph checkpoint SQLite`: candidate family for LangGraph-style
@@ -139,7 +140,7 @@ Result on this integration branch: 61 `native-auto`, 0 `native-explicit`, 0
 | `windsurf` | `native-auto` | `JSONL CLI event logs` | ctx `windsurf_cascade_hook_transcript_jsonl_tree`; npx `~/.codeium/windsurf` detection evidence only; official hook writes `~/.windsurf/transcripts/{trajectory_id}.jsonl` | - |
 | `zed` | `native-auto` | `VS Code/Electron storage` | ctx `zed_threads_sqlite`; npx `$XDG_DATA_HOME/zed` or `~/.local/share/zed` | Per-message timestamps are unavailable; ctx uses thread `updated_at`. |
 | `zencoder` | `native-auto` | `VS Code/Electron storage` | ctx `zencoder_chat_sessions_json_tree`; npx `~/.zencoder`; `jverre/opik-chat-history@5e7380933564d4fe1084d0e6f48f0e49e43e45ea` reads a local `zencoder-chat` folder with `sessions.json` plus `sessions/<id>.json`, and Open VSX `ZencoderAI.zencoder` v3.63.9002 constants confirm the extension storage anchors | Imports only `User/globalStorage/ZencoderAI.zencoder/zencoder-chat` `sessions.json` and `sessions/*.json` from proven VS Code-family app-data roots or explicit paths; `.zencoder` skill/config homes and unrelated extension caches are not imported. |
-| `zenflow` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.zencoder`; no ctx provider; Zenflow Desktop 2.3.1 creates local `db.sqlite` tables for tasks, chats, execution processes/logs, assistant sessions, and attachments | Blocked on a sanitized real fixture or source-backed row proof with user/assistant/tool-call/tool-output records; isolated no-auth probes only produced task/chat/process rows, synthetic error-message patches, and empty raw-log sidecars. Prefer exporter or underlying provider imports meanwhile. |
+| `zenflow` | `native-auto` | `generic sqlite messages` | ctx `zenflow_sqlite`; npx `~/.zencoder`; Zenflow Desktop 2.3.1 Linux artifact SHA256 `e623e073a212fccbfa295e2a7b7645a2c34525ab55f9cf247edce15babc731f2` and extracted app path code prove bounded local `db.sqlite` paths for tasks, chats, executor sessions, execution logs, assistant sessions, and attachments | Imports proven `db.sqlite` rows from bounded Zenflow Desktop app-data paths or explicit DB paths; cloud/auth state, attachments, and raw sidecar logs are not parsed. Future Zenflow schema drift may need adapter updates. |
 | `pochi` | `native-auto` | `LiveStore SQLite state DB` | ctx `pochi_livestore_state_sqlite`; npx `~/.pochi`; Pochi CLI writes `~/.pochi/storage/<storeId>/state<schemaHash>@6.db` only when `POCHI_LIVEKIT_SYNC_ON` is enabled | Auto import is limited to bounded `~/.pochi/storage/**/state*.db` discovery with a `tasks`/`messages` schema probe plus explicit state DB file/directory paths; no `config.jsonc` parsing or VS Code OPFS import. |
 | `promptscript` | `install-target` | `agent skills aggregate` | npx project `.promptscript` or `promptscript.yaml`; no ctx provider | Project skill target only; use custom history JSONL if it emits runs. |
 | `adal` | `native-auto` | `JSONL CLI event logs` | ctx `adal_session_jsonl`; npx `~/.adal`; package-backed evidence points to `~/.adal/sessions/conversation_<id>.jsonl` plus `<id>_metadata.json` | Fixture is synthetic from package writer bytecode and sidecar proof; the no-auth safe run still produced only an empty JSONL, so authenticated live fixtures, settings discovery, and exports remain unclaimed. |

@@ -187,10 +187,11 @@ pub enum ProviderId {
     SweAgent,
     #[serde(rename = "tinycloud", alias = "tiny_cloud", alias = "tiny-cloud")]
     TinyCloud,
+    Zenflow,
 }
 
 impl ProviderId {
-    pub const ALL: [Self; 71] = [
+    pub const ALL: [Self; 72] = [
         Self::Codex,
         Self::ClaudeCode,
         Self::ClaudeCliCrp,
@@ -262,6 +263,7 @@ impl ProviderId {
         Self::Kilo,
         Self::SweAgent,
         Self::TinyCloud,
+        Self::Zenflow,
     ];
 }
 

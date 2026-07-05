@@ -54,7 +54,7 @@ that support it.
 
 Search filters narrow both human output and JSON:
 
-- `--provider codex|pi|claude|opencode|codearts-agent|zencoder|kilo|kiro-cli|forgecode|deepagents|mistral-vibe|mux|reasonix|kode|neovate|junie|tinycloud|codestudio|terramind|crush|goose|dexto|lingma|warp|openclaw|hermes|nanoclaw|astrbot|shelley|continue|openhands|antigravity|gemini|cursor|windsurf|zed|copilot-cli|factory-ai-droid|qwen-code|kimi-code-cli|autohand-code|iflow-cli|codebuddy|aider-desk|cline|roo`;
+- `--provider codex|pi|claude|opencode|codearts-agent|zencoder|zenflow|kilo|kiro-cli|forgecode|deepagents|mistral-vibe|mux|reasonix|kode|neovate|junie|tinycloud|codestudio|terramind|crush|goose|dexto|lingma|warp|openclaw|hermes|nanoclaw|astrbot|shelley|continue|openhands|antigravity|gemini|cursor|windsurf|zed|copilot-cli|factory-ai-droid|qwen-code|kimi-code-cli|autohand-code|iflow-cli|codebuddy|aider-desk|cline|roo`;
 - `--history-source <plugin/source-or-provider_key/source_id>`, for custom
   history imports;
 - `--provider-key <key>`, `--source-id <id>`, and

@@ -785,25 +785,38 @@ IDE/application storage imports.
 - Decision: Replit stays `webapp-boundary`; future support should use an
   exporter, history-source plugin, or explicit cloud/project export contract.
 
-## Zenflow (webapp/object-store boundary)
+## Zenflow (native-auto)
 
-- npx skills evidence: `skills@1.5.14` maps Zenflow into the Zencoder skill
-  home surface, but that home is not itself a proven Zenflow transcript store.
-- Local storage lead: native local `db.sqlite` evidence makes Zenflow a
-  plausible native-preview candidate.
-- Repro attempt: Zenflow Desktop 2.3.1 Linux was run in an isolated
-  `ZENFLOW_DATA_DIR`. It created `db.sqlite` with transcript-shaped tables
-  (`tasks`, `chats`, `execution_processes`, `execution_process_logs`,
-  `execution_process_normalized_logs`, `assistant_sessions`, `attachments`),
-  and no-auth API probes could create task/chat/process rows plus synthetic
-  `error_message` log patches. They did not produce user/assistant/tool log
-  rows; custom no-auth executor runs left empty `raw_logs/*.jsonl` sidecars.
-- Gap: ctx still needs a sanitized real task fixture, or equivalent
-  source-backed row proof, showing user, assistant, tool-call, and tool-output
-  records before adding a native reader.
-- Decision: Zenflow remains `webapp-boundary` for the npx ledger until those
-  proofs exist; users should prefer an exporter or underlying provider import
-  where available.
+- Package evidence: the Arch AUR `zenflow-bin` PKGBUILD points to
+  `https://download.zencoder.ai/zenflowapp/latest/linux-x64/Zenflow.deb`; the
+  downloaded Debian package identifies `zenflow-desktop` version `2.3.1` with
+  homepage `https://zencoder.ai/`.
+- Artifact proof: Zenflow Desktop 2.3.1 Linux `Zenflow.deb` SHA256
+  `e623e073a212fccbfa295e2a7b7645a2c34525ab55f9cf247edce15babc731f2`.
+- Extracted app proof: the Electron app `resources/app.asar` path code resolves
+  `ZENFLOW_DATA_DIR`, Linux `$XDG_DATA_HOME/zenflow` or
+  `~/.local/share/zenflow`, macOS
+  `~/Library/Application Support/ai.forgoodai.zenflow`, and Windows
+  `%APPDATA%/forgoodai/zenflow/data`.
+- Runtime proof: running the packaged backend in an isolated `ZENFLOW_DATA_DIR`
+  created `db.sqlite` with durable transcript/task tables including `tasks`,
+  `chats`, `execution_processes`, `executor_sessions`,
+  `execution_process_logs`, `execution_process_normalized_logs`,
+  `assistant_sessions`, `attachments`, and `task_attachments`.
+- Import contract: ctx tracks this native-auto shape as `zenflow_sqlite`.
+  Default discovery is bounded to proven `db.sqlite` app-data paths, and
+  explicit `ctx import --provider zenflow --path <db.sqlite>` remains supported.
+  The importer reads the DB read-only and normalizes `chats.initial_prompt`,
+  `executor_sessions.prompt`, raw/normalized execution log JSONL rows,
+  `executor_sessions.summary`, assistant session metadata, executor action,
+  token-window metadata, and used-credit metadata.
+- Fixture proof: `tests/fixtures/provider-history/zenflow/v2.3.1/db.sqlite`
+  preserves the real 2.3.1 schema and contains sanitized user, assistant,
+  tool-call, tool-output, and summary oracle rows.
+- Caveat: cloud/auth state, token/config files, attachments, and `raw_logs`
+  sidecars are not parsed. The schema is artifact/runtime-backed rather than a
+  first-party published storage contract, so future Zenflow schema drift may
+  need adapter updates.
 
 ## AstrBot (native-auto)
 
