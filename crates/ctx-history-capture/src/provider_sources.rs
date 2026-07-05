@@ -232,11 +232,18 @@ const ROVODEV_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     source_kind: ProviderSourceKind::NativeHistory,
 }];
 
-const ANTIGRAVITY_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".gemini", "antigravity-cli", "brain"],
-    source_format: "antigravity_cli_transcript_jsonl_tree",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
+const ANTIGRAVITY_DEFAULTS: &[ProviderDefaultLocation] = &[
+    ProviderDefaultLocation {
+        path_components: &[".gemini", "antigravity-cli", "brain"],
+        source_format: "antigravity_cli_transcript_jsonl_tree",
+        source_kind: ProviderSourceKind::NativeHistory,
+    },
+    ProviderDefaultLocation {
+        path_components: &[".gemini", "antigravity-ide", "brain"],
+        source_format: "antigravity_cli_transcript_jsonl_tree",
+        source_kind: ProviderSourceKind::NativeHistory,
+    },
+];
 
 const GEMINI_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     path_components: &[".gemini"],
@@ -3280,6 +3287,26 @@ mod tests {
             temp.path(),
             CaptureProvider::Antigravity,
             ProviderSourceStatus::Available,
+        );
+
+        let antigravity_ide = temp.path().join(".gemini/antigravity-ide/brain");
+        std::fs::create_dir_all(antigravity_ide.join("ide-session/.system_generated/logs"))
+            .unwrap();
+        std::fs::write(
+            antigravity_ide.join("ide-session/.system_generated/logs/transcript.jsonl"),
+            "{}\n",
+        )
+        .unwrap();
+        let ide_source = discover_provider_sources(temp.path())
+            .into_iter()
+            .find(|source| {
+                source.provider == CaptureProvider::Antigravity && source.path == antigravity_ide
+            })
+            .unwrap();
+        assert_eq!(ide_source.status, ProviderSourceStatus::Available);
+        assert_eq!(
+            ide_source.source_format,
+            "antigravity_cli_transcript_jsonl_tree"
         );
 
         let cursor = temp.path().join(".cursor/projects");

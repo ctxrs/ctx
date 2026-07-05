@@ -2446,6 +2446,8 @@ fn provider_json_names_are_accepted_as_cli_filter_aliases() {
         ("deepseek-reasonix", "reasonix"),
         ("shareai_kode", "kode"),
         ("neovate_code", "neovate"),
+        ("qoder-cn", "lingma"),
+        ("qoder_cn", "lingma"),
         ("open_claw", "openclaw"),
         ("nano_claw", "nanoclaw"),
         ("astr_bot", "astrbot"),

@@ -803,6 +803,7 @@ enum NativeProviderArg {
     #[value(name = "roo", alias = "roo-code", alias = "roo_code")]
     RooCode,
     Dexto,
+    #[value(alias = "qoder-cn", alias = "qoder_cn")]
     Lingma,
     Pochi,
     #[value(name = "codebuddy", alias = "code-buddy", alias = "code_buddy")]
@@ -929,6 +930,7 @@ enum ProviderArg {
     #[value(name = "roo", alias = "roo-code", alias = "roo_code")]
     RooCode,
     Dexto,
+    #[value(alias = "qoder-cn", alias = "qoder_cn")]
     Lingma,
     Pochi,
     #[value(name = "codebuddy", alias = "code-buddy", alias = "code_buddy")]
