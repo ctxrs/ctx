@@ -21,7 +21,7 @@ Status meanings:
 - `install-target`: npx target is an aggregate or project skill target, not a
   proven history-producing agent.
 
-Result on this integration branch: 45 `native-auto`, 8 `native-preview`, 4
+Result on this integration branch: 46 `native-auto`, 8 `native-preview`, 3
 `candidate-family`, 7 `webapp-boundary`, 6 `unknown`, and 2 `install-target`
 rows.
 
@@ -34,7 +34,7 @@ rows.
 - `JSONL CLI event logs`: already covers Codex, Claude Code, OpenClaw,
   Antigravity CLI, Gemini CLI, Pi, Factory Droid, Copilot CLI-shaped logs, and
   Autohand Code, iFlow CLI, Mistral Vibe, Mux, Reasonix, and Command Code
-  sessions, plus Windsurf Cascade hook transcript JSONL and OpenLoaf
+  sessions, plus Qoder transcript JSONL, Windsurf Cascade hook transcript JSONL, and OpenLoaf
   `messages.jsonl` chat-history trees.
 - `CLI session JSON`: covers Continue CLI `sessions/*.json` files with
   `sessions.json` metadata, Auggie `~/.augment/sessions/*.json`, Amp explicit
@@ -78,10 +78,10 @@ rows.
 | `claude-code` | `native-auto` | `JSONL CLI event logs` | ctx `claude_projects_jsonl_tree`; npx `~/.claude` | - |
 | `openclaw` | `native-auto` | `JSONL CLI event logs` | ctx `openclaw_session_jsonl_tree`; npx `~/.openclaw` or legacy homes | Provider matrix still notes GA schema-stability validation. |
 | `cline` | `native-auto` | `Cline/Roo task JSON` | ctx `cline_task_directory_json`; npx `~/.cline` | - |
-| `codearts-agent` | `candidate-family` | `VS Code/Electron storage` | npx `~/.codeartsdoer`; no ctx provider | Need app storage proof before adapting IDE-family importers. |
+| `codearts-agent` | `candidate-family` | `VS Code/Electron storage` | npx `~/.codeartsdoer`; no ctx provider; current Visual Studio Marketplace page for `HuaweiCloud.vscode-codebot` proves a VS Code extension with chat/Q&A features but not a local transcript file/schema | Need source-backed local transcript schema or exporter before adapting IDE-family importers; VS Code state/globalStorage and extension APIs remain unclaimed. |
 | `codebuddy` | `native-auto` | `VS Code/Electron storage` | ctx `codebuddy_history_json`; npx project or home `.codebuddy` | Schema proof from WayLog `shayne-snap/WayLog@6939033b7a39326fbdc249e28e6aa12461db1f09`; continue validating schema drift. |
 | `codemaker` | `unknown` | `unknown native history` | npx `~/.codemaker`; no ctx provider | Need native history storage research before claiming import support. |
-| `codestudio` | `candidate-family` | `VS Code/Electron storage` | npx `~/.codestudio`; no ctx provider | Need app storage proof before adapting IDE-family importers. |
+| `codestudio` | `candidate-family` | `VS Code/Electron storage` | npx `~/.codestudio`; no ctx provider; Syncfusion Code Studio docs currently prove agent/skill/instruction locations and IDE agent features | Need source-backed transcript file path/schema or exporter; `.codestudio/skills`, `.codestudio/agents`, and settings docs are detection/config evidence only. |
 | `codex` | `native-auto` | `JSONL CLI event logs` | ctx `codex_session_jsonl_tree` and `codex_history_jsonl`; npx `CODEX_HOME` | - |
 | `command-code` | `native-auto` | `JSONL CLI event logs` | ctx `command_code_session_jsonl_tree`; npx `~/.commandcode`; default discovery reads `~/.commandcode/projects` | - |
 | `continue` | `native-auto` | `CLI session JSON` | ctx `continue_cli_sessions_json`; npx project or home `.continue` | - |
@@ -118,7 +118,7 @@ rows.
 | `openhands` | `native-auto` | `filesystem event JSON` | ctx `openhands_file_events`; npx `~/.openhands` | - |
 | `ona` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.ona`; no ctx provider | No proven stable local transcript boundary; prefer exporter or plugin. |
 | `pi` | `native-auto` | `JSONL CLI event logs` | ctx `pi_session_jsonl`; npx `~/.pi/agent` | - |
-| `qoder` | `candidate-family` | `VS Code/Electron storage` | npx `~/.qoder`; no ctx provider | Need local app storage or export contract proof; Lingma/Qoder CN rename evidence does not prove this separate home path. |
+| `qoder` | `native-auto` | `JSONL CLI event logs` | ctx `qoder_transcript_jsonl_tree`; npx `~/.qoder`; official Qoder Hooks docs define transcript JSONL at `~/.qoder/projects/<project>/transcript/<session-id>.jsonl` | Imports documented transcript records only; encrypted Qoder app logs and VS Code/Electron state databases remain unclaimed. |
 | `qoder-cn` | `native-auto` | `VS Code/Electron storage` | ctx `lingma_sqlite` via `qoder-cn` alias; npx `~/.qoder-cn`; official Qoder CN VSIX remains `Alibaba-Cloud.tongyi-lingma` and uses `~/.lingma/vscode/sharedClientCache/cache/db/local.db` | Imports the Lingma/Qoder CN VS Code extension database; `~/.qoder-cn` and `.qodercn` homes remain unclaimed. |
 | `qwen-code` | `native-auto` | `JSONL CLI event logs` | ctx `qwen_code_chat_jsonl_tree`; npx `~/.qwen` | - |
 | `replit` | `webapp-boundary` | `webapp/object-store boundary` | npx project `.replit`; no ctx provider | Project marker is not a local agent history contract. |
