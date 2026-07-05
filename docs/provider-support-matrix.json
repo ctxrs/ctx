@@ -1911,6 +1911,77 @@
       ]
     },
     {
+      "id": "eve",
+      "display_name": "Eve",
+      "priority": "p1",
+      "status": "local_import_when_supported",
+      "capture_provider": "eve",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "eve_workflow_data_streams",
+          "fidelity": "imported",
+          "proof": [
+            "eve@0.19.0 durable session and streaming docs",
+            "@workflow/world-local@5.0.0-beta.22 local disk stream storage code",
+            "ctx sources",
+            "ctx import --provider eve",
+            "cargo test -p ctx-history-capture native_eve_fixture_imports_searches_reimports_and_tool_events"
+          ],
+          "notes": [
+            "Reads Eve local Workflow .workflow-data stream maps and chunks from WORKFLOW_LOCAL_DATA_DIR, a current project .workflow-data, or an explicit .workflow-data/project path.",
+            "Normalizes durable default message stream events into user, assistant, tool-call, tool-output, summary, and notice events.",
+            ".eve/ is build/runtime state and is intentionally not treated as a durable transcript source."
+          ]
+        }
+      ],
+      "history_locations": [
+        "WORKFLOW_LOCAL_DATA_DIR/streams/{runs,chunks}",
+        "<project>/.workflow-data/streams/{runs,chunks}",
+        "<explicit>/.workflow-data/streams/{runs,chunks}"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": false,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": true,
+        "command_output": false,
+        "files_touched": false,
+        "artifacts": false,
+        "model_identity": true,
+        "costs": false,
+        "token_usage": false,
+        "parent_child_session_edges": false
+      },
+      "redaction_notes": [
+        "Reads provider .workflow-data files read-only; imported message text, local source paths, and stream metadata remain in the local ctx index.",
+        "Raw Eve stream events are retained in capped provider metadata; external reporting should remain provider-level unless explicitly reviewed."
+      ],
+      "blockers": [
+        "Importer is based on eve@0.19.0 and @workflow/world-local@5.0.0-beta.22 storage proof plus sanitized Workflow stream fixtures; future Workflow serialization changes may need adapter updates.",
+        "Encrypted or non-devalue Workflow stream chunks are not decoded by the native importer.",
+        "Only default message stream events are imported; .eve build/runtime artifacts and private session snapshot streams are not parsed."
+      ],
+      "public_docs": "docs/provider-support.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/eve/v0.19.0/.workflow-data"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs",
+        "tests/fixtures/provider-history/eve/v0.19.0/.workflow-data"
+      ],
+      "metadata": {
+        "npx_skills_id": "eve",
+        "package": "eve@0.19.0",
+        "workflow_local_package": "@workflow/world-local@5.0.0-beta.22"
+      }
+    },
+    {
       "id": "firebender",
       "display_name": "Firebender",
       "priority": "p1",

@@ -41,9 +41,9 @@ use ctx_history_capture::{
     import_copilot_cli_session_events, import_cortex_code_history, import_crush_sqlite,
     import_cursor_native_history, import_custom_history_jsonl_v1,
     import_custom_history_jsonl_v1_reader, import_deepagents_sqlite, import_dexto_sqlite,
-    import_factory_ai_droid_sessions, import_firebender_sqlite, import_forgecode_sqlite,
-    import_gemini_cli_history, import_goose_sessions_sqlite, import_hermes_sqlite,
-    import_iflow_cli_history, import_jazz_history, import_kilo_sqlite,
+    import_eve_history, import_factory_ai_droid_sessions, import_firebender_sqlite,
+    import_forgecode_sqlite, import_gemini_cli_history, import_goose_sessions_sqlite,
+    import_hermes_sqlite, import_iflow_cli_history, import_jazz_history, import_kilo_sqlite,
     import_kimi_code_cli_history, import_kiro_sqlite, import_kode_history, import_lingma_sqlite,
     import_mistral_vibe_history, import_mux_history, import_nanoclaw_project,
     import_neovate_history, import_openclaw_history, import_opencode_sqlite,
@@ -61,17 +61,17 @@ use ctx_history_capture::{
     CommandCodeImportOptions, ContinueCliImportOptions, CopilotCliImportOptions,
     CortexCodeImportOptions, CrushSqliteImportOptions, CursorNativeImportOptions,
     CustomHistoryJsonlV1ImportOptions, DeepAgentsSqliteImportOptions, DextoSqliteImportOptions,
-    FactoryAiDroidImportOptions, FirebenderSqliteImportOptions, ForgeCodeSqliteImportOptions,
-    GeminiCliImportOptions, GooseSessionsSqliteImportOptions, HermesSqliteImportOptions,
-    IflowCliImportOptions, JazzImportOptions, KiloSqliteImportOptions, KimiCodeCliImportOptions,
-    KiroSqliteImportOptions, KodeImportOptions, LingmaSqliteImportOptions,
-    MistralVibeImportOptions, MuxImportOptions, NanoClawImportOptions, NeovateImportOptions,
-    OpenClawImportOptions, OpenCodeSqliteImportOptions, OpenHandsImportOptions,
-    OpenLoafImportOptions, PiSessionImportOptions, PochiLivestoreSqliteImportOptions,
-    ProviderImportSummary, ProviderImportSupport, ProviderSource, ProviderSourceStatus,
-    QwenCodeImportOptions, ReasonixImportOptions, RooTaskJsonImportOptions, RovoDevImportOptions,
-    ShelleySqliteImportOptions, TerramindSqliteImportOptions, WindsurfCascadeHookImportOptions,
-    ZedThreadsSqliteImportOptions,
+    EveImportOptions, FactoryAiDroidImportOptions, FirebenderSqliteImportOptions,
+    ForgeCodeSqliteImportOptions, GeminiCliImportOptions, GooseSessionsSqliteImportOptions,
+    HermesSqliteImportOptions, IflowCliImportOptions, JazzImportOptions, KiloSqliteImportOptions,
+    KimiCodeCliImportOptions, KiroSqliteImportOptions, KodeImportOptions,
+    LingmaSqliteImportOptions, MistralVibeImportOptions, MuxImportOptions, NanoClawImportOptions,
+    NeovateImportOptions, OpenClawImportOptions, OpenCodeSqliteImportOptions,
+    OpenHandsImportOptions, OpenLoafImportOptions, PiSessionImportOptions,
+    PochiLivestoreSqliteImportOptions, ProviderImportSummary, ProviderImportSupport,
+    ProviderSource, ProviderSourceStatus, QwenCodeImportOptions, ReasonixImportOptions,
+    RooTaskJsonImportOptions, RovoDevImportOptions, ShelleySqliteImportOptions,
+    TerramindSqliteImportOptions, WindsurfCascadeHookImportOptions, ZedThreadsSqliteImportOptions,
 };
 use ctx_history_core::{
     database_path, default_data_root, utc_now, CaptureProvider, ContextCitation,
@@ -744,6 +744,7 @@ enum NativeProviderArg {
     Jazz,
     #[value(name = "auggie", alias = "augment", alias = "augment-code")]
     Auggie,
+    Eve,
     #[value(
         name = "firebender",
         alias = "firebender-jetbrains",
@@ -869,6 +870,7 @@ enum ProviderArg {
     Jazz,
     #[value(name = "auggie", alias = "augment", alias = "augment-code")]
     Auggie,
+    Eve,
     #[value(
         name = "firebender",
         alias = "firebender-jetbrains",
@@ -983,6 +985,7 @@ impl NativeProviderArg {
             Self::IflowCli => CaptureProvider::IflowCli,
             Self::Jazz => CaptureProvider::Jazz,
             Self::Auggie => CaptureProvider::Auggie,
+            Self::Eve => CaptureProvider::Eve,
             Self::Firebender => CaptureProvider::Firebender,
             Self::ForgeCode => CaptureProvider::ForgeCode,
             Self::DeepAgents => CaptureProvider::DeepAgents,
@@ -1058,6 +1061,7 @@ impl ProviderArg {
             Self::IflowCli => CaptureProvider::IflowCli,
             Self::Jazz => CaptureProvider::Jazz,
             Self::Auggie => CaptureProvider::Auggie,
+            Self::Eve => CaptureProvider::Eve,
             Self::Firebender => CaptureProvider::Firebender,
             Self::ForgeCode => CaptureProvider::ForgeCode,
             Self::DeepAgents => CaptureProvider::DeepAgents,
@@ -1112,6 +1116,7 @@ impl ProviderArg {
             Self::IflowCli => "iflow-cli",
             Self::Jazz => "jazz",
             Self::Auggie => "auggie",
+            Self::Eve => "eve",
             Self::Firebender => "firebender",
             Self::ForgeCode => "forgecode",
             Self::DeepAgents => "deepagents",
@@ -6257,6 +6262,17 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
+        CaptureProvider::Eve => import_eve_history(
+            &source.path,
+            store,
+            EveImportOptions {
+                source_path: Some(source.path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: true,
+                ..EveImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
         CaptureProvider::Firebender => import_firebender_sqlite(
             &source.path,
             store,
@@ -6481,6 +6497,7 @@ fn source_uses_import_file_manifest(source: &SourceInfo) -> bool {
             | "roo_task_directory_json"
             | "reasonix_session_jsonl_tree"
             | "openloaf_chat_jsonl_tree"
+            | "eve_workflow_data_streams"
             | "firebender_chat_history_sqlite"
             | "codebuddy_history_json"
     )
@@ -6703,6 +6720,17 @@ fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bool {
         CaptureProvider::Auggie => {
             path.extension().and_then(|ext| ext.to_str()) == Some("json")
                 && path.starts_with(&source.path)
+        }
+        CaptureProvider::Eve => {
+            path == source.path
+                || (path.starts_with(&source.path)
+                    && matches!(
+                        path.extension().and_then(|ext| ext.to_str()),
+                        Some("json" | "bin")
+                    )
+                    && path.components().any(|component| {
+                        matches!(component.as_os_str().to_str(), Some("runs" | "chunks"))
+                    }))
         }
         CaptureProvider::Firebender => {
             path.file_name().and_then(|name| name.to_str()) == Some("chat_history.db")
@@ -7002,6 +7030,7 @@ fn source_uses_incremental_event_search(source: &SourceInfo) -> bool {
             | CaptureProvider::IflowCli
             | CaptureProvider::Jazz
             | CaptureProvider::Auggie
+            | CaptureProvider::Eve
             | CaptureProvider::Firebender
             | CaptureProvider::Kode
             | CaptureProvider::Neovate

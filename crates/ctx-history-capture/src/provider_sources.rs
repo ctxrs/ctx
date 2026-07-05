@@ -310,6 +310,8 @@ const AUGGIE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     source_kind: ProviderSourceKind::NativeHistory,
 }];
 
+const EVE_DEFAULTS: &[ProviderDefaultLocation] = &[];
+
 const FIREBENDER_DEFAULTS: &[ProviderDefaultLocation] = &[];
 
 const KODE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
@@ -731,6 +733,16 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         provider: CaptureProvider::Auggie,
         display_name: "Auggie",
         default_locations: AUGGIE_DEFAULTS,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
+    ProviderSourceSpec {
+        provider: CaptureProvider::Eve,
+        display_name: "Eve",
+        default_locations: EVE_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         raw_retention: ProviderRawRetention::PathReference,
@@ -1210,6 +1222,20 @@ fn discover_provider_sources_for_spec(
             }
         }
         CaptureProvider::Auggie => {}
+        CaptureProvider::Eve => {
+            if let Some(path) = env_path_resolved("WORKFLOW_LOCAL_DATA_DIR", home) {
+                sources.push(eve_workflow_data_source(spec, path));
+            }
+            for root in current_dir_ancestors_with(|candidate| {
+                candidate
+                    .join(".workflow-data")
+                    .join("streams")
+                    .join("runs")
+                    .is_dir()
+            }) {
+                sources.push(eve_workflow_data_source(spec, root.join(".workflow-data")));
+            }
+        }
         CaptureProvider::Firebender => {
             for root in current_dir_ancestors_with(|candidate| {
                 candidate
@@ -1423,6 +1449,15 @@ fn forgecode_db_source(spec: &ProviderSourceSpec, path: PathBuf) -> ProviderSour
         spec,
         path,
         "forgecode_sqlite",
+        ProviderSourceKind::NativeHistory,
+    )
+}
+
+fn eve_workflow_data_source(spec: &ProviderSourceSpec, path: PathBuf) -> ProviderSource {
+    provider_source_from_parts(
+        spec,
+        path,
+        "eve_workflow_data_streams",
         ProviderSourceKind::NativeHistory,
     )
 }
@@ -1833,6 +1868,7 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::IflowCli => "iflow_cli_session_jsonl",
         CaptureProvider::Jazz => "jazz_history_json",
         CaptureProvider::Auggie => "auggie_session_json",
+        CaptureProvider::Eve => "eve_workflow_data_streams",
         CaptureProvider::Firebender => "firebender_chat_history_sqlite",
         CaptureProvider::Kode if path.is_dir() => "kode_session_jsonl_tree",
         CaptureProvider::Kode => "kode_session_jsonl",
@@ -2008,6 +2044,9 @@ fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::Auggie => {
             Some("path exists but no Auggie session JSON files with chatHistory were found")
         }
+        CaptureProvider::Eve => {
+            Some("path exists but no Eve .workflow-data default session streams were found")
+        }
         CaptureProvider::Firebender => {
             Some("path exists but no Firebender chat_sessions table was found")
         }
@@ -2132,6 +2171,9 @@ fn unknown_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::Auggie => {
             Some("path exists but the Auggie session JSON probe hit its scan budget")
         }
+        CaptureProvider::Eve => {
+            Some("path exists but the Eve .workflow-data stream probe hit its scan budget")
+        }
         CaptureProvider::Firebender => {
             Some("path exists but the Firebender database could not be fully probed")
         }
@@ -2234,6 +2276,9 @@ fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'static str> {
         }
         CaptureProvider::Auggie => {
             Some("path exists but Auggie session JSON files could not be read; check permissions")
+        }
+        CaptureProvider::Eve => {
+            Some("path exists but Eve .workflow-data streams could not be read; check permissions")
         }
         CaptureProvider::Firebender => {
             Some("path exists but the Firebender chat history database could not be read; check permissions")
@@ -2381,6 +2426,7 @@ fn default_location_import_probe(
         CaptureProvider::Auggie => has_json_file_under_matching(path, 10_000, |candidate| {
             candidate.extension().and_then(|ext| ext.to_str()) == Some("json")
         }),
+        CaptureProvider::Eve => has_eve_workflow_stream(path, 10_000),
         CaptureProvider::Firebender => has_firebender_chat_sessions_table(path),
         CaptureProvider::Kode => has_jsonl_file_under_matching(path, 10_000, |candidate| {
             !path_has_component(candidate, "requests")
@@ -2533,6 +2579,170 @@ fn has_openloaf_project_chat_histories(root: &Path, max_entries: usize) -> Bound
     }
 }
 
+fn has_firebender_chat_sessions_table(path: &Path) -> BoundedProbe {
+    let db_path = match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => path.to_path_buf(),
+        Ok(metadata) if metadata.file_type().is_dir() => path
+            .join(".idea")
+            .join("firebender")
+            .join("chat_history.db"),
+        Ok(_) => return BoundedProbe::NotFound,
+        Err(err) if err.kind() == ErrorKind::NotFound => return BoundedProbe::NotFound,
+        Err(_) => return BoundedProbe::IoError,
+    };
+    match path_is_file_probe(&db_path) {
+        BoundedProbe::Found => {}
+        other => return other,
+    }
+    match Connection::open_with_flags(
+        &db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .and_then(|conn| {
+        conn.query_row(
+            "select count(*) from sqlite_schema where type = 'table' and name = 'chat_sessions'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+    }) {
+        Ok(count) if count > 0 => BoundedProbe::Found,
+        Ok(_) => BoundedProbe::NotFound,
+        Err(_) => BoundedProbe::IoError,
+    }
+}
+
+fn has_eve_workflow_stream(root: &Path, max_entries: usize) -> BoundedProbe {
+    let data_dir = if root.file_name().and_then(|name| name.to_str()) == Some(".workflow-data") {
+        root.to_path_buf()
+    } else {
+        let nested = root.join(".workflow-data");
+        if nested.is_dir() {
+            nested
+        } else {
+            root.to_path_buf()
+        }
+    };
+
+    match path_is_dir_probe(&data_dir) {
+        BoundedProbe::Found => {}
+        other => return other,
+    }
+    let runs_dir = data_dir.join("streams").join("runs");
+    let chunks_dir = data_dir.join("streams").join("chunks");
+    match (path_is_dir_probe(&runs_dir), path_is_dir_probe(&chunks_dir)) {
+        (BoundedProbe::Found, BoundedProbe::Found) => {}
+        (BoundedProbe::IoError, _) | (_, BoundedProbe::IoError) => return BoundedProbe::IoError,
+        _ => return BoundedProbe::NotFound,
+    }
+
+    let entries = match fs::read_dir(&runs_dir) {
+        Ok(entries) => entries,
+        Err(_) => return BoundedProbe::IoError,
+    };
+    let mut visited = 0usize;
+    let mut candidate_streams = HashSet::new();
+    let mut saw_read_error = false;
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        visited = visited.saturating_add(1);
+        if visited > max_entries {
+            return BoundedProbe::BudgetExhausted;
+        }
+        let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(_) => continue,
+        };
+        if !file_type.is_file() || path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(stream_name) = eve_default_workflow_stream_name(&path) else {
+            continue;
+        };
+        match eve_stream_map_contains(&path, &stream_name) {
+            Ok(true) => {
+                candidate_streams.insert(stream_name);
+            }
+            Ok(false) => {}
+            Err(_) => saw_read_error = true,
+        }
+    }
+    if candidate_streams.is_empty() {
+        return if saw_read_error {
+            BoundedProbe::IoError
+        } else {
+            BoundedProbe::NotFound
+        };
+    }
+
+    let entries = match fs::read_dir(&chunks_dir) {
+        Ok(entries) => entries,
+        Err(_) => return BoundedProbe::IoError,
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        visited = visited.saturating_add(1);
+        if visited > max_entries {
+            return BoundedProbe::BudgetExhausted;
+        }
+        let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(_) => continue,
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if candidate_streams.iter().any(|stream_name| {
+            name.starts_with(&format!("{stream_name}-"))
+                && (name.ends_with(".bin") || name.ends_with(".json"))
+        }) {
+            return BoundedProbe::Found;
+        }
+    }
+
+    BoundedProbe::NotFound
+}
+
+fn eve_default_workflow_stream_name(stream_map_path: &Path) -> Option<String> {
+    let run_id = stream_map_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())?
+        .split('.')
+        .next()
+        .unwrap_or_default();
+    let suffix = run_id.strip_prefix("wrun_")?;
+    if suffix.is_empty() {
+        None
+    } else {
+        Some(format!("strm_{suffix}_user"))
+    }
+}
+
+fn eve_stream_map_contains(path: &Path, stream_name: &str) -> std::io::Result<bool> {
+    let text = fs::read_to_string(path)?;
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        return Ok(false);
+    };
+    Ok(value
+        .get("streams")
+        .and_then(Value::as_array)
+        .is_some_and(|streams| {
+            streams
+                .iter()
+                .any(|stream| stream.as_str() == Some(stream_name))
+        }))
+}
+
 fn has_cortex_code_session_files(root: &Path, max_entries: usize) -> BoundedProbe {
     let json_probe = has_json_file_under_matching(root, max_entries, |candidate| {
         candidate
@@ -2579,38 +2789,6 @@ fn has_forgecode_conversations_table(path: &Path) -> BoundedProbe {
     .and_then(|conn| {
         conn.query_row(
             "select count(*) from sqlite_schema where type = 'table' and name = 'conversations'",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-    }) {
-        Ok(count) if count > 0 => BoundedProbe::Found,
-        Ok(_) => BoundedProbe::NotFound,
-        Err(_) => BoundedProbe::IoError,
-    }
-}
-
-fn has_firebender_chat_sessions_table(path: &Path) -> BoundedProbe {
-    let db_path = match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_file() => path.to_path_buf(),
-        Ok(metadata) if metadata.file_type().is_dir() => path
-            .join(".idea")
-            .join("firebender")
-            .join("chat_history.db"),
-        Ok(_) => return BoundedProbe::NotFound,
-        Err(err) if err.kind() == ErrorKind::NotFound => return BoundedProbe::NotFound,
-        Err(_) => return BoundedProbe::IoError,
-    };
-    match path_is_file_probe(&db_path) {
-        BoundedProbe::Found => {}
-        other => return other,
-    }
-    match Connection::open_with_flags(
-        &db_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .and_then(|conn| {
-        conn.query_row(
-            "select count(*) from sqlite_schema where type = 'table' and name = 'chat_sessions'",
             [],
             |row| row.get::<_, i64>(0),
         )
@@ -3647,40 +3825,6 @@ mod tests {
     }
 
     #[test]
-    fn firebender_discovery_uses_current_project_chat_history_db() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let temp = tempfile::tempdir().unwrap();
-        let project = temp.path().join("project");
-        let nested = project.join("src/module");
-        let db = project.join(".idea/firebender/chat_history.db");
-        std::fs::create_dir_all(&nested).unwrap();
-        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
-        Connection::open(&db)
-            .unwrap()
-            .execute_batch(
-                r#"
-                CREATE TABLE chat_sessions (
-                    id TEXT PRIMARY KEY,
-                    messages_json TEXT NOT NULL
-                );
-                "#,
-            )
-            .unwrap();
-        let _cwd = CwdGuard::set(&nested);
-
-        let sources =
-            discover_provider_sources_for_provider(temp.path(), CaptureProvider::Firebender);
-        let source = sources
-            .iter()
-            .find(|source| source.provider == CaptureProvider::Firebender && source.path == db)
-            .unwrap_or_else(|| panic!("missing Firebender cwd source in {sources:#?}"));
-
-        assert_eq!(source.status, ProviderSourceStatus::Available);
-        assert_eq!(source.source_format, "firebender_chat_history_sqlite");
-        assert_eq!(source.import_support, ProviderImportSupport::Native);
-    }
-
-    #[test]
     fn iflow_cli_discovery_uses_default_and_home_env_projects() {
         let _lock = ENV_LOCK.lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
@@ -3747,6 +3891,82 @@ mod tests {
         assert!(sources.iter().any(|source| {
             source.path == custom_history && source.status == ProviderSourceStatus::Available
         }));
+    }
+
+    #[test]
+    fn firebender_discovery_uses_current_project_chat_history_db() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        let nested = project.join("src/module");
+        let db = project.join(".idea/firebender/chat_history.db");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        Connection::open(&db)
+            .unwrap()
+            .execute_batch(
+                r#"
+                CREATE TABLE chat_sessions (
+                    id TEXT PRIMARY KEY,
+                    messages_json TEXT NOT NULL
+                );
+                "#,
+            )
+            .unwrap();
+        let _cwd = CwdGuard::set(&nested);
+
+        let sources =
+            discover_provider_sources_for_provider(temp.path(), CaptureProvider::Firebender);
+        let source = sources
+            .iter()
+            .find(|source| source.provider == CaptureProvider::Firebender && source.path == db)
+            .unwrap_or_else(|| panic!("missing Firebender cwd source in {sources:#?}"));
+
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+        assert_eq!(source.source_format, "firebender_chat_history_sqlite");
+        assert_eq!(source.import_support, ProviderImportSupport::Native);
+    }
+
+    #[test]
+    fn eve_discovery_uses_workflow_data_env_and_current_project() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _workflow_data = EnvGuard::remove("WORKFLOW_LOCAL_DATA_DIR");
+
+        let env_data = temp.path().join("custom-workflow-data");
+        std::fs::create_dir_all(&env_data).unwrap();
+        let _workflow_data = EnvGuard::set("WORKFLOW_LOCAL_DATA_DIR", env_data.as_os_str());
+        let empty_source =
+            discover_provider_sources_for_provider(temp.path(), CaptureProvider::Eve)
+                .into_iter()
+                .find(|source| source.path == env_data)
+                .unwrap();
+        assert_eq!(empty_source.status, ProviderSourceStatus::Empty);
+
+        write_eve_discovery_workflow_data(&env_data, "envdiscovery");
+        let source = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Eve)
+            .into_iter()
+            .find(|source| source.path == env_data)
+            .unwrap();
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+        assert_eq!(source.source_format, "eve_workflow_data_streams");
+        assert_eq!(source.import_support, ProviderImportSupport::Native);
+
+        let project = temp.path().join("project");
+        let nested = project.join("agent");
+        std::fs::create_dir_all(&nested).unwrap();
+        let project_data = project.join(".workflow-data");
+        write_eve_discovery_workflow_data(&project_data, "projectdiscovery");
+        let _cwd = CwdGuard::set(&nested);
+
+        let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Eve);
+        let project_source = sources
+            .iter()
+            .find(|source| source.path == project_data)
+            .unwrap_or_else(|| panic!("missing Eve project source in {sources:#?}"));
+        assert_eq!(project_source.status, ProviderSourceStatus::Available);
+        assert_eq!(project_source.source_format, "eve_workflow_data_streams");
+        assert_eq!(project_source.import_support, ProviderImportSupport::Native);
     }
 
     #[test]
@@ -4323,6 +4543,25 @@ mod tests {
         std::fs::write(
             history.join("jazz-agent.json"),
             r#"{"agentId":"jazz-agent","conversations":[]}"#,
+        )
+        .unwrap();
+    }
+
+    fn write_eve_discovery_workflow_data(data_dir: &Path, suffix: &str) {
+        let run_id = format!("wrun_{suffix}");
+        let stream_name = format!("strm_{suffix}_user");
+        std::fs::create_dir_all(data_dir.join("streams/runs")).unwrap();
+        std::fs::create_dir_all(data_dir.join("streams/chunks")).unwrap();
+        std::fs::write(
+            data_dir.join("streams/runs").join(format!("{run_id}.json")),
+            format!(r#"{{"streams":["{stream_name}"]}}"#),
+        )
+        .unwrap();
+        std::fs::write(
+            data_dir
+                .join("streams/chunks")
+                .join(format!("{stream_name}-chnk_01.bin")),
+            b"\0",
         )
         .unwrap();
     }

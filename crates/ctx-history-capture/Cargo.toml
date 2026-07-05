@@ -10,6 +10,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+base64.workspace = true
 chrono.workspace = true
 rmpv.workspace = true
 rusqlite.workspace = true

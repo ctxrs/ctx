@@ -74,6 +74,9 @@ The current CLI imports local history for:
   `conversation.jsonl`;
 - iFlow CLI session JSONL transcripts under `IFLOW_HOME/projects` or
   `~/.iflow/projects`, where project directories contain `session-*.jsonl`;
+- Eve local Workflow `.workflow-data` streams from `WORKFLOW_LOCAL_DATA_DIR`,
+  a current project `.workflow-data`, or an explicit `.workflow-data`/project
+  path;
 - ForgeCode conversation SQLite history from `FORGE_CONFIG/.forge.db`, legacy
   `~/forge/.forge.db`, `~/.forge/.forge.db`, or an explicit ForgeCode DB path;
 - Deep Agents LangGraph checkpoint SQLite history from
@@ -123,7 +126,7 @@ CLI provider flags use names such as `kilo`, `crush`, `goose`, `dexto`,
 `openclaw`, `hermes`,
 `nanoclaw`, `astrbot`, `shelley`, `continue`, `openhands`, `copilot-cli`,
 `factory-ai-droid`, `qwen-code`, `kimi-code-cli`, `autohand-code`,
-`kiro-cli`, `iflow-cli`, `forgecode`, `deepagents`, `mistral-vibe`, `mux`,
+`kiro-cli`, `iflow-cli`, `eve`, `forgecode`, `deepagents`, `mistral-vibe`, `mux`,
 `reasonix`, `kode`, `neovate`, `terramind`, `zed`, `lingma`, `codebuddy`,
 `aider-desk`, `cline`, and `roo`/`roo-code`.
 Structured JSON and stable SQL views use provider IDs in ctx output; multiword IDs may be

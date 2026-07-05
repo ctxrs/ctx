@@ -2405,6 +2405,7 @@ fn provider_help_matches_implemented_importers() {
         "iflow-cli",
         "jazz",
         "auggie",
+        "eve",
         "forgecode",
         "mistral-vibe",
         "mux",
@@ -2569,7 +2570,7 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
             vec![
                 "Usage: ctx import",
                 "--provider <PROVIDER>",
-                "[possible values: codex, pi, claude, opencode, openloaf, kilo, kiro-cli, crush, goose, antigravity, gemini, cursor, windsurf, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, jazz, auggie, forgecode, deepagents, mistral-vibe, mux, reasonix, kode, neovate, command-code, terramind, rovodev, cortex-code, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto, lingma, pochi, codebuddy, aider-desk]",
+                "[possible values: codex, pi, claude, opencode, openloaf, kilo, kiro-cli, crush, goose, antigravity, gemini, cursor, windsurf, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, jazz, auggie, eve, firebender, forgecode, deepagents, mistral-vibe, mux, reasonix, kode, neovate, command-code, terramind, rovodev, cortex-code, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto, lingma, pochi, codebuddy, aider-desk]",
                 "--path <PATH>",
                 "--format <FORMAT>",
                 "--resume",
@@ -6468,6 +6469,12 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
             write_native_auggie_fixture,
         ),
         (
+            "eve",
+            "eve",
+            "eve_workflow_data_streams",
+            write_native_eve_fixture,
+        ),
+        (
             "firebender",
             "firebender",
             "firebender_chat_history_sqlite",
@@ -8196,6 +8203,108 @@ fn write_native_firebender_fixture(temp: &TempDir, query: &str) -> String {
     project.to_str().unwrap().to_owned()
 }
 
+fn write_native_eve_fixture(temp: &TempDir, query: &str) -> String {
+    let root = temp.path().join("native-eve/.workflow-data");
+    let run_id = "wrun_eveclifixture";
+    let stream_name = "strm_eveclifixture_user";
+    let chunks = root.join("streams/chunks");
+    fs::create_dir_all(root.join("runs")).unwrap();
+    fs::create_dir_all(root.join("streams/runs")).unwrap();
+    fs::create_dir_all(&chunks).unwrap();
+    fs::write(
+        root.join("streams/runs").join(format!("{run_id}.json")),
+        serde_json::to_string_pretty(&json!({
+            "streams": [stream_name, format!("{stream_name}_ZXZlLnNlc3Npb24")]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        root.join("runs").join(format!("{run_id}.json")),
+        serde_json::to_string_pretty(&json!({
+            "runId": run_id,
+            "status": "completed",
+            "workflowName": "eve.workflowEntry",
+            "createdAt": "2026-07-05T00:00:00.000Z",
+            "startedAt": "2026-07-05T00:00:00.000Z",
+            "completedAt": "2026-07-05T00:00:03.000Z",
+            "attributes": {
+                "eve.sessionId": run_id
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    for (index, event) in [
+        json!({
+            "type": "session.started",
+            "data": {
+                "sessionId": run_id,
+                "runtime": {
+                    "agentId": "eve-cli-fixture-agent",
+                    "agentName": "Eve CLI Fixture",
+                    "eveVersion": "0.19.0"
+                }
+            },
+            "meta": {"at": "2026-07-05T00:00:00.000Z"}
+        }),
+        json!({
+            "type": "message.received",
+            "data": {
+                "turnId": "turn-eve-cli-fixture",
+                "sequence": 1,
+                "message": query
+            },
+            "meta": {"at": "2026-07-05T00:00:01.000Z"}
+        }),
+        json!({
+            "type": "message.completed",
+            "data": {
+                "turnId": "turn-eve-cli-fixture",
+                "sequence": 2,
+                "message": "native Eve CLI import ok",
+                "finishReason": "stop"
+            },
+            "meta": {"at": "2026-07-05T00:00:02.000Z"}
+        }),
+        json!({
+            "type": "session.completed",
+            "data": {
+                "sessionId": run_id,
+                "status": "completed"
+            },
+            "meta": {"at": "2026-07-05T00:00:03.000Z"}
+        }),
+    ]
+    .iter()
+    .enumerate()
+    {
+        write_eve_workflow_chunk(&chunks, stream_name, index + 1, event);
+    }
+
+    root.to_str().unwrap().to_owned()
+}
+
+fn write_eve_workflow_chunk(chunks: &Path, stream_name: &str, index: usize, event: &Value) {
+    let ndjson = format!("{event}\n");
+    let devalue = format!(
+        "devl{}",
+        json!([["Uint8Array", 1], BASE64.encode(ndjson.as_bytes())])
+    );
+    let mut bytes = Vec::with_capacity(1 + 4 + devalue.len());
+    bytes.push(0);
+    bytes.extend_from_slice(&(devalue.len() as u32).to_be_bytes());
+    bytes.extend_from_slice(devalue.as_bytes());
+    fs::write(
+        chunks.join(format!(
+            "{stream_name}-chnk_01K0EVECLI{index:02}0000000000.bin"
+        )),
+        bytes,
+    )
+    .unwrap();
+}
+
 fn write_native_mux_fixture(temp: &TempDir, query: &str) -> String {
     let root = temp.path().join("native-mux/sessions");
     let session_dir = root.join("mux-cli-native");
@@ -9634,6 +9743,7 @@ fn native_provider_cli_requires_existing_history_or_explicit_path() {
         ("codebuddy", "no importable codebuddy history found"),
         ("aider-desk", "no importable aider_desk history found"),
         ("auggie", "no importable auggie history found"),
+        ("eve", "no importable eve history found"),
         ("iflow-cli", "no importable iflow_cli history found"),
         ("deepagents", "no importable deepagents history found"),
         ("mistral-vibe", "no importable mistral_vibe history found"),
@@ -9651,7 +9761,7 @@ fn native_provider_cli_requires_existing_history_or_explicit_path() {
 
         assert!(stderr.contains(expected_blocker), "{stderr}");
         assert!(stderr.contains("use `ctx sources`"), "{stderr}");
-        if matches!(cli_provider, "nanoclaw" | "aider-desk") {
+        if matches!(cli_provider, "nanoclaw" | "aider-desk" | "eve") {
             assert!(
                 stderr.contains("no default paths are registered for this provider"),
                 "{stderr}"

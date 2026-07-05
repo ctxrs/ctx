@@ -21,8 +21,8 @@ Status meanings:
 - `install-target`: npx target is an aggregate or project skill target, not a
   proven history-producing agent.
 
-Result on this integration branch: 42 `native-auto`, 4 `native-preview`, 9
-`candidate-family`, 9 `webapp-boundary`, 6 `unknown`, and 2 `install-target`
+Result on this integration branch: 43 `native-auto`, 4 `native-preview`, 9
+`candidate-family`, 9 `webapp-boundary`, 5 `unknown`, and 2 `install-target`
 rows.
 
 ## Shared Families
@@ -89,7 +89,7 @@ rows.
 | `devin` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.config/devin`; no ctx provider | Hosted-agent history should use an explicit export path such as ATIF when available; no local conversation DB is proven. |
 | `dexto` | `native-preview` | `generic sqlite messages` | ctx `dexto_sqlite`; npx `~/.dexto` | Preview explicit import only; no proven default discovery path yet. |
 | `droid` | `native-auto` | `JSONL CLI event logs` | ctx `factory_ai_droid_sessions_jsonl`; npx `~/.factory` | - |
-| `eve` | `unknown` | `unknown native history` | npx project `agent`; no ctx provider | Project skill layout does not prove a local history schema. |
+| `eve` | `native-auto` | `Workflow local-world streams` | ctx `eve_workflow_data_streams`; npx project `agent`; `eve@0.19.0` local development uses Workflow local-world `.workflow-data` durable stream storage | Imports default Eve message stream chunks from `WORKFLOW_LOCAL_DATA_DIR`, current project `.workflow-data`, or explicit paths; `.eve` build/runtime artifacts are not treated as history. |
 | `firebender` | `native-auto` | `generic sqlite messages` | ctx `firebender_chat_history_sqlite`; npx `~/.firebender`; public Firebender 1.0.10 JetBrains plugin stores project chat history in `.idea/firebender/chat_history.db` | Proven transcript storage is project-local `.idea/firebender/chat_history.db`; no global `~/.firebender` chat history file is claimed. |
 | `forgecode` | `native-auto` | `Forge conversation SQLite` | ctx `forgecode_sqlite`; npx `FORGE_CONFIG`, legacy `~/forge`, or `~/.forge` | - |
 | `gemini-cli` | `native-auto` | `JSONL CLI event logs` | ctx `gemini_cli_chat_recording_jsonl`; npx `~/.gemini` | - |
