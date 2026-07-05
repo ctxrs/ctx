@@ -142,6 +142,7 @@ pub enum ProviderId {
     Aider,
     ClineRoo,
     ContinueCody,
+    #[serde(rename = "auggie", alias = "augment", alias = "augment-code")]
     Auggie,
     Junie,
     Kilo,
