@@ -686,6 +686,32 @@ IDE/application storage imports.
 - Caveat: `DbThread` messages do not carry per-message timestamps, so ctx uses
   thread-level `updated_at` for imported event timestamps.
 
+## Trae
+
+- Official storage evidence: Trae troubleshooting docs document local app data
+  roots under `~/Library/Application Support/Trae/ModularData` on macOS and
+  `%USERPROFILE%\AppData\Roaming\Trae\ModularData` on Windows, including an
+  `ai-agent/snapshot` subdirectory for agent data artifacts.
+- Schema evidence: `yuanjing001/trae-chats-exporter` commit
+  `85e2d111a5a0e35f0957502097d3a8b18095ef72` reads Trae chat data from
+  `~/Library/Application Support/Trae/User/workspaceStorage/<workspace>/state.vscdb`.
+- The exporter opens SQLite table `ItemTable` and reads VS Code-style storage
+  keys including `memento/icube-ai-agent-storage`,
+  `chat.ChatSessionStore.index`, `ChatStore`,
+  `memento/icube-ai-chat-storage-7467774676505887760`, and
+  `memento/icube-ai-ng-chat-storage-7467774676505887760`.
+- `ctx` imports this shape as `trae_state_vscdb` only when the user provides an
+  explicit `state.vscdb`, workspace directory, or `User/workspaceStorage` root.
+  The importer opens the SQLite database read-only and indexes recognizable
+  session/message JSON from those known keys.
+- Fixture provenance: `tests/fixtures/provider-history/trae` is a sanitized,
+  source-backed synthetic `state.vscdb` fixture modeled on the exporter-visible
+  `ItemTable` key contract. No local Trae binary or data root was available in
+  this environment, so no real Trae run fixture was generated.
+- Unclaimed paths: default discovery from `ModularData`, arbitrary Trae
+  application caches, `trae-cn`, and robust promotion beyond preview remain
+  unclaimed until real fixtures and drift validation exist.
+
 ## Void
 
 - Source evidence: Void stores chat threads through VS Code/Electron application
