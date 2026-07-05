@@ -2124,22 +2124,6 @@ fn sources_lists_personal_agent_provider_defaults() {
 }
 
 #[test]
-fn sources_lists_preview_agent_provider_defaults_without_auto_import_claim() {
-    let temp = tempdir();
-    fs::create_dir_all(temp.path().join(".config").join("amp")).unwrap();
-
-    let sources = json_output(ctx(&temp).args(["sources", "--json"]));
-    assert!(
-        !sources["sources"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|source| source["provider"] == "amp"),
-        "Amp should stay explicit-export-only and ignore ~/.config/amp without transcript proof: {sources:#}"
-    );
-}
-
-#[test]
 fn sources_discovers_shelley_db_env_override() {
     let temp = tempdir();
     let db_path = temp.path().join("custom-shelley.db");
@@ -2458,7 +2442,6 @@ fn provider_help_matches_implemented_importers() {
         "codebuddy",
         "aider-desk",
         "bob",
-        "amp",
         "trae",
         "qwen-code",
         "kimi-code-cli",
@@ -2466,7 +2449,6 @@ fn provider_help_matches_implemented_importers() {
         "iflow-cli",
         "jazz",
         "auggie",
-        "devin",
         "eve",
         "forgecode",
         "mistral-vibe",
@@ -2497,7 +2479,6 @@ fn provider_json_names_are_accepted_as_cli_filter_aliases() {
         ("aiderdesk", "aider_desk"),
         ("ibm_bob", "bob"),
         ("ibm-bob", "bob"),
-        ("amp", "amp"),
         ("trae", "trae"),
         ("auggie", "auggie"),
         ("augment", "auggie"),
@@ -2639,7 +2620,7 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
             vec![
                 "Usage: ctx import",
                 "--provider <PROVIDER>",
-                "[possible values: codex, pi, claude, opencode, codearts-agent, openloaf, kilo, kiro-cli, crush, goose, antigravity, gemini, tabnine, cursor, windsurf, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, jazz, auggie, devin, eve, junie, firebender, forgecode, deepagents, mistral-vibe, mux, reasonix, adal, kode, neovate, command-code, terramind, rovodev, cortex-code, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, bob, dexto, lingma, qoder, pochi, warp, codebuddy, aider-desk, amp, trae, tinycloud, zencoder, codestudio]",
+                "[possible values: codex, pi, claude, opencode, codearts-agent, openloaf, kilo, kiro-cli, crush, goose, antigravity, gemini, tabnine, cursor, windsurf, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, jazz, auggie, eve, junie, firebender, forgecode, deepagents, mistral-vibe, mux, reasonix, adal, kode, neovate, command-code, terramind, rovodev, cortex-code, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, bob, dexto, lingma, qoder, pochi, warp, codebuddy, aider-desk, trae, tinycloud, zencoder, codestudio]",
                 "--path <PATH>",
                 "--format <FORMAT>",
                 "--resume",
@@ -4707,7 +4688,6 @@ fn mcp_status_and_tools_list_are_read_only_without_initialized_store() {
     assert!(providers.iter().any(|provider| provider == "aider-desk"));
     assert!(providers.iter().any(|provider| provider == "aider_desk"));
     assert!(providers.iter().any(|provider| provider == "auggie"));
-    assert!(providers.iter().any(|provider| provider == "devin"));
     assert!(providers.iter().any(|provider| provider == "zed"));
     assert!(providers.iter().any(|provider| provider == "forgecode"));
     assert!(providers.iter().any(|provider| provider == "deepagents"));
@@ -6437,111 +6417,6 @@ fn adal_cli_import_search_flow() {
 }
 
 #[test]
-fn devin_atif_cli_import_search_flow() {
-    let temp = tempdir();
-    let fixture = provider_history_fixture("devin/atif/export.json");
-
-    let imported = json_output(ctx(&temp).args([
-        "import",
-        "--provider",
-        "devin",
-        "--path",
-        &fixture,
-        "--json",
-    ]));
-    assert_eq!(imported["schema_version"], 1);
-    assert_eq!(imported["sources"][0]["provider"], "devin");
-    assert_eq!(imported["sources"][0]["source_format"], "devin_atif_json");
-    assert_eq!(imported["sources"][0]["import_support"], "explicit");
-    assert_eq!(imported["sources"][0]["native_import"], false);
-    assert_eq!(imported["sources"][0]["importable"], true);
-    assert_eq!(imported["totals"]["imported_sessions"], 1);
-    assert_eq!(imported["totals"]["imported_events"], 4);
-
-    let search = json_output(ctx(&temp).args([
-        "search",
-        "explicit Devin ATIF export ingestion",
-        "--provider",
-        "devin",
-        "--json",
-    ]));
-    assert_search_provider_oracle(
-        &search,
-        "devin",
-        "explicit Devin ATIF export ingestion",
-        1,
-        "message",
-    );
-
-    let sources = json_output(ctx(&temp).args(["sources", "--json"]));
-    assert!(!sources["sources"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|source| source["provider"] == "devin"));
-}
-
-#[test]
-fn devin_atif_cli_imports_explicit_export_directory() {
-    let temp = tempdir();
-    let export_root = temp.path().join("devin-exports");
-    let exports = export_root.join("nested");
-    fs::create_dir_all(&exports).unwrap();
-    fs::copy(
-        provider_history_fixture("devin/atif/export.json"),
-        exports.join("export.json"),
-    )
-    .unwrap();
-    let export_root = export_root.to_str().unwrap().to_owned();
-
-    let imported = json_output(ctx(&temp).args([
-        "import",
-        "--provider",
-        "devin",
-        "--path",
-        &export_root,
-        "--json",
-    ]));
-    assert_eq!(imported["sources"][0]["provider"], "devin");
-    assert_eq!(imported["sources"][0]["source_format"], "devin_atif_json");
-    assert_eq!(imported["sources"][0]["import_support"], "explicit");
-    assert_eq!(imported["totals"]["imported_sessions"], 1);
-    assert_eq!(imported["totals"]["imported_events"], 4);
-}
-
-#[test]
-fn amp_cli_import_reports_explicit_export_support_without_default_source() {
-    let temp = tempdir();
-    fs::create_dir_all(temp.path().join(".config").join("amp")).unwrap();
-    let query = "amp-explicit-cli-oracle";
-    let fixture = write_native_amp_fixture(&temp, query);
-
-    let imported =
-        json_output(ctx(&temp).args(["import", "--provider", "amp", "--path", &fixture, "--json"]));
-    assert_eq!(imported["schema_version"], 1);
-    assert_eq!(imported["sources"][0]["provider"], "amp");
-    assert_eq!(
-        imported["sources"][0]["source_format"],
-        "amp_threads_export_json"
-    );
-    assert_eq!(imported["sources"][0]["import_support"], "explicit");
-    assert_eq!(imported["sources"][0]["native_import"], false);
-    assert_eq!(imported["sources"][0]["importable"], true);
-    assert_eq!(imported["totals"]["imported_sessions"], 1);
-    assert_eq!(imported["totals"]["imported_events"], 5);
-
-    let search = json_output(ctx(&temp).args(["search", query, "--provider", "amp", "--json"]));
-    assert_search_provider_oracle(&search, "amp", query, 1, "message");
-
-    let sources = json_output(ctx(&temp).args(["sources", "--json"]));
-    assert!(!sources["sources"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|source| source["provider"] == "amp"));
-}
-
-#[test]
 fn native_provider_cli_flow_imports_new_supported_provider_paths() {
     for (cli_provider, stored_provider, expected_format, fixture) in [
         (
@@ -6707,12 +6582,6 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
             "aider_desk",
             "aider_desk_task_context_json",
             write_native_aider_desk_fixture,
-        ),
-        (
-            "amp",
-            "amp",
-            "amp_threads_export_json",
-            write_native_amp_fixture,
         ),
         (
             "auggie",
@@ -9046,18 +8915,6 @@ fn write_native_aider_desk_fixture(temp: &TempDir, query: &str) -> String {
         .to_owned()
 }
 
-fn write_native_amp_fixture(temp: &TempDir, query: &str) -> String {
-    let path = temp.path().join("native-amp/redacted-thread.json");
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let text = fs::read_to_string(provider_history_fixture(
-        "amp/threads-export/redacted-thread.json",
-    ))
-    .unwrap()
-    .replace("Amp export oracle prompt", query);
-    fs::write(&path, text).unwrap();
-    path.to_str().unwrap().to_owned()
-}
-
 fn write_native_auggie_fixture(temp: &TempDir, query: &str) -> String {
     let root = temp.path().join("native-auggie/sessions");
     fs::create_dir_all(&root).unwrap();
@@ -10948,9 +10805,7 @@ fn native_provider_cli_requires_existing_history_or_explicit_path() {
         ("lingma", "no importable lingma history found"),
         ("codebuddy", "no importable codebuddy history found"),
         ("aider-desk", "no importable aider_desk history found"),
-        ("amp", "no importable amp history found"),
         ("auggie", "no importable auggie history found"),
-        ("devin", "no importable devin history found"),
         ("eve", "no importable eve history found"),
         ("iflow-cli", "no importable iflow_cli history found"),
         ("deepagents", "no importable deepagents history found"),
@@ -10970,10 +10825,7 @@ fn native_provider_cli_requires_existing_history_or_explicit_path() {
 
         assert!(stderr.contains(expected_blocker), "{stderr}");
         assert!(stderr.contains("use `ctx sources`"), "{stderr}");
-        if matches!(
-            cli_provider,
-            "nanoclaw" | "aider-desk" | "amp" | "devin" | "eve"
-        ) {
+        if matches!(cli_provider, "nanoclaw" | "aider-desk" | "eve") {
             assert!(
                 stderr.contains("no default paths are registered for this provider"),
                 "{stderr}"

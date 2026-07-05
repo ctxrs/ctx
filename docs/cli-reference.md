@@ -94,9 +94,6 @@ machine. Current rows include:
   iFlow CLI, Junie, TinyCloud, Syncfusion Code Studio session-store DBs,
   Windsurf official hook transcripts, CodeBuddy, Warp Terminal restoration
   SQLite, Cline, Roo Code, and IBM Bob local history locations;
-- explicit Amp export JSON and Devin ATIF export files/directories passed with
-  `ctx import --provider amp --path <export.json>` or
-  `ctx import --provider devin --path <atif-file-or-dir>`;
 - CodeArts Agent kernel `opencode.db` history from proven default paths or an
   explicit DB path;
 - Zencoder `zencoder-chat` session trees under common VS Code-family
@@ -159,8 +156,6 @@ ctx import --provider lingma
 ctx import --provider codebuddy
 ctx import --provider aider-desk
 ctx import --provider codestudio
-ctx import --provider amp --path ./amp-thread-export.json
-ctx import --provider devin --path ./devin-atif-export.json
 ctx import --provider codex --path ~/.codex/sessions
 ctx import --provider pi --path ~/.pi/agent/sessions
 ctx import --format ctx-history-jsonl-v1 --path ./history.jsonl
@@ -210,9 +205,6 @@ Preview providers such as NanoClaw and AstrBot are not included in
 `--all` or pre-search refresh. Import them explicitly with `--provider` when
 discovery finds the desired source, or add `--path` to target a specific source,
 then search the existing index.
-
-Explicit export providers such as Amp and Devin also require `--path`; ctx does
-not discover Amp or Devin default account/config paths.
 
 The current `--resume` flag is an idempotent-rescan mode marker. JSON reports
 `resume: true` and `resume_mode: "idempotent_rescan"`, but provider-native
@@ -282,9 +274,9 @@ indexes, `auto` serves current results without a foreground catch-up scan; use
 `--refresh strict` or `ctx import --all` when you need a full catch-up before
 querying. Use `--refresh off` to search the existing index without refreshing, or
 `--refresh strict` to fail when the pre-search refresh cannot run or import
-successfully. Explicit export sources such as Amp and Devin, and preview native
-sources such as NanoClaw and AstrBot, are searched from the existing index until
-they are explicitly imported through a supported path. Search requires a
+successfully. Preview native sources such as NanoClaw and AstrBot are searched
+from the existing index until they are explicitly imported through a supported
+path. Search requires a
 non-empty query, at least one non-empty `--term`, or
 `--file <path>`; provider, workspace, time, session, event, source, and result
 flags only narrow an actual search. Default results are session-diverse: ctx
@@ -323,7 +315,7 @@ optimized for agent reading; use `--verbose` for expanded text diagnostics.
 
 Filters:
 
-- `--provider codex|pi|claude|opencode|kilo|kiro-cli|forgecode|deepagents|mistral-vibe|mux|reasonix|kode|neovate|tinycloud|terramind|crush|goose|dexto|lingma|warp|windsurf|amp|devin|openclaw|hermes|nanoclaw|astrbot|shelley|continue|openhands|antigravity|gemini|cursor|zed|copilot-cli|factory-ai-droid|qwen-code|kimi-code-cli|autohand-code|iflow-cli|codebuddy|aider-desk|cline|roo|custom`;
+- `--provider codex|pi|claude|opencode|kilo|kiro-cli|forgecode|deepagents|mistral-vibe|mux|reasonix|kode|neovate|tinycloud|terramind|crush|goose|dexto|lingma|warp|windsurf|openclaw|hermes|nanoclaw|astrbot|shelley|continue|openhands|antigravity|gemini|cursor|zed|copilot-cli|factory-ai-droid|qwen-code|kimi-code-cli|autohand-code|iflow-cli|codebuddy|aider-desk|cline|roo|custom`;
 - `--workspace <name-or-path>`, substring match over stored workspace, cwd,
   source path, or repository-name text;
 - `--since <rfc3339-or-days>d`, for example `2026-06-01T00:00:00Z` or `30d`;

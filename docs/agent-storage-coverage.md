@@ -25,8 +25,8 @@ Status meanings:
 - `install-target`: npx target is an aggregate or project skill target, not a
   proven history-producing agent.
 
-Result on this integration branch: 60 `native-auto`, 2 `native-explicit`, 1
-`native-preview`, 0 `candidate-family`, 4 `webapp-boundary`, 3 `unknown`, and
+Result on this integration branch: 60 `native-auto`, 0 `native-explicit`, 1
+`native-preview`, 0 `candidate-family`, 6 `webapp-boundary`, 3 `unknown`, and
 2 `install-target` rows.
 
 ## Shared Families
@@ -42,9 +42,8 @@ Result on this integration branch: 60 `native-auto`, 2 `native-explicit`, 1
   sessions, plus Qoder transcript JSONL, Windsurf Cascade hook transcript JSONL,
   TinyCloud session JSONL, and OpenLoaf `messages.jsonl` chat-history trees.
 - `CLI session JSON`: covers Continue CLI `sessions/*.json` files with
-  `sessions.json` metadata, Auggie `~/.augment/sessions/*.json`, Amp explicit
-  `amp threads export` JSON, plus Rovo Dev session directories and Cortex Code
-  conversation snapshots/history sidecars.
+  `sessions.json` metadata, Auggie `~/.augment/sessions/*.json`, plus Rovo Dev
+  session directories and Cortex Code conversation snapshots/history sidecars.
 - `project task JSON`: covers Aider Desk project-local task directories such as
   `.aider-desk/tasks/<taskId>/context.json`; related task-directory tools can
   reuse this scanner once storage proof and fixtures exist.
@@ -74,7 +73,7 @@ Result on this integration branch: 60 `native-auto`, 2 `native-explicit`, 1
 | npx skills agent id | ctx storage ingestion status | schema family | evidence source | blocked reason / gap |
 | --- | --- | --- | --- | --- |
 | `aider-desk` | `native-auto` | `project task JSON` | ctx `aider_desk_task_context_json`; npx `~/.aider-desk`; source proof shows project `.aider-desk/tasks/<taskId>/context.json` task context files | - |
-| `amp` | `native-explicit` | `CLI session JSON` | ctx `amp_threads_export_json`; npx `~/.config/amp`; `@ampcode/cli@0.0.1783181941-g187572` exposes `amp threads export`, `amp threads markdown`, and `amp threads raw`; export handler serializes `threadRemote.getThread(...)` | Official explicit import from user-supplied `amp threads export` JSON; no default `~/.config/amp` scan and no `$XDG_CACHE_HOME/amp/logs/cli.log` crawl. |
+| `amp` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.config/amp`; no ctx provider on this local-native branch; `@ampcode/cli@0.0.1783181941-g187572` exposes `amp threads export`, `amp threads markdown`, and `amp threads raw`; export handler serializes `threadRemote.getThread(...)` | Hosted/export import work lives on the hosted/cloud branch. No default `~/.config/amp` scan is claimed, and `$XDG_CACHE_HOME/amp/logs/cli.log` is not treated as durable transcript history. |
 | `antigravity` | `native-auto` | `JSONL CLI event logs` | ctx `antigravity_cli_transcript_jsonl_tree`; npx `~/.gemini/antigravity`; official IDE transcripts live under `~/.gemini/antigravity-ide/brain` | ctx imports official IDE brain transcripts, not the npx skill/config path `~/.gemini/antigravity`. |
 | `antigravity-cli` | `native-auto` | `JSONL CLI event logs` | ctx `antigravity_cli_transcript_jsonl_tree`; npx `~/.gemini/antigravity-cli` | - |
 | `astrbot` | `native-preview` | `generic sqlite messages` | ctx `astrbot_data_v4_sqlite`; npx `~/.astrbot`; upstream AstrBot v4.26.4 source confirms `data/data_v4.db` under `ASTRBOT_ROOT`/packaged `~/.astrbot`, `conversations`, and `platform_message_history` | Preview explicit import only. `conversations.content` is durable LLM context and `platform_message_history` is proven for WebChat/OpenAPI/live chat, but upstream model docs still say non-WebChat platform conversations do not persist non-LLM replies because those are stored on their platforms. Full per-platform raw IM transcript coverage remains unproven. |
@@ -95,7 +94,7 @@ Result on this integration branch: 60 `native-auto`, 2 `native-explicit`, 1
 | `crush` | `native-auto` | `generic sqlite messages` | ctx `crush_sqlite`; npx `~/.config/crush` | - |
 | `cursor` | `native-auto` | `VS Code/Electron storage` | ctx `cursor_agent_transcript_jsonl_tree`; npx `~/.cursor` | - |
 | `deepagents` | `native-auto` | `LangGraph checkpoint SQLite` | ctx `deepagents_sessions_sqlite`; npx `~/.deepagents`; official local state evidence points to `~/.deepagents/.state/sessions.db` and `history.jsonl` | Imports decoded root `writes.messages` chat messages only; `history.jsonl` and arbitrary checkpoint state blobs are not indexed. |
-| `devin` | `native-explicit` | `explicit ATIF export JSON` | ctx `devin_atif_json` via explicit `--path`; npx `~/.config/devin` remains unclaimed | Official explicit import from user-supplied Devin CLI `devin --export [PATH]` ATIF files/directories. No Devin cloud scraping, login, account paths, default discovery, or `~/.config/devin` local conversation DB is claimed; the fixture remains synthetic from the public ATIF/export contract. |
+| `devin` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.config/devin`; no ctx provider on this local-native branch; official Devin CLI docs describe `devin --export [PATH]` ATIF export as a user-supplied export path | Hosted/export import work lives on the hosted/cloud branch. No Devin cloud scraping, login, account paths, default discovery, or `~/.config/devin` local conversation DB is claimed. |
 | `dexto` | `native-auto` | `generic sqlite messages` | ctx `dexto_sqlite`; npx `~/.dexto`; `dexto@1.9.1`, `@dexto/storage@1.9.1`, and `@dexto/agent-management@1.9.1` prove CLI-enriched SQLite paths under Dexto `database` roots | Auto import scans bounded `.dexto/database/*.db` roots with Dexto `kv_store`/`list_store` schema; custom SQLite paths outside default roots still require explicit `--path`. |
 | `droid` | `native-auto` | `JSONL CLI event logs` | ctx `factory_ai_droid_sessions_jsonl`; npx `~/.factory` | - |
 | `eve` | `native-auto` | `Workflow local-world streams` | ctx `eve_workflow_data_streams`; npx project `agent`; `eve@0.19.0` local development uses Workflow local-world `.workflow-data` durable stream storage | Imports default Eve message stream chunks from `WORKFLOW_LOCAL_DATA_DIR`, current project `.workflow-data`, or explicit paths; `.eve` build/runtime artifacts are not treated as history. |

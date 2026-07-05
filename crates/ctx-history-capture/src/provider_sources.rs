@@ -604,8 +604,6 @@ const AUGGIE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     source_kind: ProviderSourceKind::NativeHistory,
 }];
 
-const DEVIN_DEFAULTS: &[ProviderDefaultLocation] = &[];
-
 const EVE_DEFAULTS: &[ProviderDefaultLocation] = &[];
 
 const JUNIE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
@@ -893,8 +891,6 @@ const CODEBUDDY_DEFAULTS: &[ProviderDefaultLocation] = &[
 
 const AIDER_DESK_DEFAULTS: &[ProviderDefaultLocation] = &[];
 
-const AMP_DEFAULTS: &[ProviderDefaultLocation] = &[];
-
 const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
     ProviderSourceSpec {
         provider: CaptureProvider::Codex,
@@ -1131,16 +1127,6 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         display_name: "Auggie",
         default_locations: AUGGIE_DEFAULTS,
         import_support: ProviderImportSupport::Native,
-        catalog_support: ProviderCatalogSupport::None,
-        raw_retention: ProviderRawRetention::PathReference,
-        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
-        unsupported_reason: None,
-    },
-    ProviderSourceSpec {
-        provider: CaptureProvider::Devin,
-        display_name: "Devin CLI",
-        default_locations: DEVIN_DEFAULTS,
-        import_support: ProviderImportSupport::Explicit,
         catalog_support: ProviderCatalogSupport::None,
         raw_retention: ProviderRawRetention::PathReference,
         redaction_boundary: ProviderRedactionBoundary::BeforeExport,
@@ -1501,16 +1487,6 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         display_name: "Aider Desk",
         default_locations: AIDER_DESK_DEFAULTS,
         import_support: ProviderImportSupport::Native,
-        catalog_support: ProviderCatalogSupport::None,
-        raw_retention: ProviderRawRetention::PathReference,
-        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
-        unsupported_reason: None,
-    },
-    ProviderSourceSpec {
-        provider: CaptureProvider::Amp,
-        display_name: "Amp",
-        default_locations: AMP_DEFAULTS,
-        import_support: ProviderImportSupport::Explicit,
         catalog_support: ProviderCatalogSupport::None,
         raw_retention: ProviderRawRetention::PathReference,
         redaction_boundary: ProviderRedactionBoundary::BeforeExport,
@@ -2542,7 +2518,6 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::IflowCli => "iflow_cli_session_jsonl",
         CaptureProvider::Jazz => "jazz_history_json",
         CaptureProvider::Auggie => "auggie_session_json",
-        CaptureProvider::Devin => "devin_atif_json",
         CaptureProvider::Eve => "eve_workflow_data_streams",
         CaptureProvider::Junie if path.is_dir() => "junie_session_events_jsonl_tree",
         CaptureProvider::Junie => "junie_session_events_jsonl",
@@ -2596,7 +2571,6 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         }
         CaptureProvider::CodeBuddy => "codebuddy_history_json",
         CaptureProvider::AiderDesk => "aider_desk_task_context_json",
-        CaptureProvider::Amp => "amp_threads_export_json",
         CaptureProvider::TinyCloud => "tinycloud_session_jsonl_tree",
         CaptureProvider::Zencoder if path.is_dir() => "zencoder_chat_sessions_json_tree",
         CaptureProvider::Zencoder => {
@@ -3282,9 +3256,7 @@ fn default_location_import_probe(
         CaptureProvider::TinyCloud => has_tinycloud_session_jsonl(path, 10_000),
         CaptureProvider::Zencoder => has_zencoder_session_json(path, 10_000),
         CaptureProvider::CodeStudio => has_codestudio_session_store(path),
-        CaptureProvider::Amp
-        | CaptureProvider::Devin
-        | CaptureProvider::Shell
+        CaptureProvider::Shell
         | CaptureProvider::Git
         | CaptureProvider::Jj
         | CaptureProvider::Gh
@@ -5710,49 +5682,6 @@ mod tests {
         assert_eq!(source.source_format, "dexto_sqlite");
         assert_eq!(source.import_support, ProviderImportSupport::Native);
         assert!(source.import_support.is_auto_importable());
-    }
-
-    #[test]
-    fn amp_export_support_is_explicit_path_only() {
-        let temp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(temp.path().join(".config/amp")).unwrap();
-
-        let discovered = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Amp);
-        assert!(discovered.is_empty(), "{discovered:#?}");
-
-        let export = temp.path().join("amp-thread-export.json");
-        std::fs::write(&export, b"{\"id\":\"thread\",\"messages\":[]}").unwrap();
-        let source = provider_source_for_path(CaptureProvider::Amp, export.clone());
-        assert_eq!(source.path, export);
-        assert_eq!(source.status, ProviderSourceStatus::Available);
-        assert_eq!(source.source_format, "amp_threads_export_json");
-        assert_eq!(source.import_support, ProviderImportSupport::Explicit);
-        assert!(source.import_support.is_importable());
-        assert!(!source.import_support.is_auto_importable());
-    }
-
-    #[test]
-    fn devin_atif_support_is_explicit_path_only() {
-        let temp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(temp.path().join(".config/devin")).unwrap();
-
-        let discovered =
-            discover_provider_sources_for_provider(temp.path(), CaptureProvider::Devin);
-        assert!(discovered.is_empty(), "{discovered:#?}");
-
-        let export = temp.path().join("devin-export.json");
-        std::fs::write(
-            &export,
-            br#"{"schema_version":"1.7","agent":{"name":"devin"},"steps":[]}"#,
-        )
-        .unwrap();
-        let source = provider_source_for_path(CaptureProvider::Devin, export.clone());
-        assert_eq!(source.path, export);
-        assert_eq!(source.status, ProviderSourceStatus::Available);
-        assert_eq!(source.source_format, "devin_atif_json");
-        assert_eq!(source.import_support, ProviderImportSupport::Explicit);
-        assert!(source.import_support.is_importable());
-        assert!(!source.import_support.is_auto_importable());
     }
 
     #[test]

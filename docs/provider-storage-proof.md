@@ -85,28 +85,6 @@ IDE/application storage imports.
 - Caveat: ctx imports task context snapshots and optional task settings, not the
   Aider Desk application usage database.
 
-## Amp Thread Export
-
-- Source evidence: `@ampcode/cli@0.0.1783181941-g187572` exposes
-  `amp threads export <threadIDOrURL>`, `amp threads markdown`, and
-  `amp threads raw`.
-- Export-handler evidence: the bundled CLI export path loads the requested
-  thread through the same thread loader used by markdown/raw views and serializes
-  the returned thread JSON. The markdown renderer consumes `id`, `created`,
-  optional `title`/`agentMode`, and message blocks including visible text,
-  `tool_use`, `tool_result`, `summary`, and `manual_bash_invocation`.
-- `ctx` imports this official explicit export shape as
-  `amp_threads_export_json` only when the user supplies a file with
-  `ctx import --provider amp --path <export.json>`.
-- Fixture provenance: `tests/fixtures/provider-history/amp/threads-export/redacted-thread.json`
-  is a sanitized package/source-backed fixture. This environment had no `amp`
-  binary on `PATH` and no Amp/OpenRouter/Anthropic key environment variables, so
-  no safe live generated export fixture was available.
-- Caveat: ctx does not discover or parse `~/.config/amp`,
-  `$XDG_CACHE_HOME/amp/logs/cli.log`, account/auth files, or remote Amp thread
-  history. Default discovery remains unclaimed until Amp proves durable local
-  transcript storage distinct from operational logs.
-
 ## Dexto
 
 - Package evidence: public npm packages `dexto@1.9.1`,
@@ -370,32 +348,6 @@ IDE/application storage imports.
 - Caveat: ctx indexes user/assistant request and response text only. Richer tool,
   changed-file, and IDE/application history semantics remain unclaimed until a
   public contract or fixture proves them.
-
-## Devin CLI ATIF Export
-
-- Official CLI evidence: the Devin CLI command reference documents
-  `devin --export [PATH]` and states that it exports the conversation to a file
-  after each turn in ATIF format. The same page shows both default-path and
-  explicit-file examples.
-- Official changelog evidence: the 2026.5.26-0 stable changelog entry added the
-  `--export` flag for ATIF conversation history. A later stable entry says ATIF
-  exports include richer per-step transcript details and timing metrics.
-- Schema evidence: the public ATIF RFC defines a JSON root with
-  `schema_version`, `agent`, and `steps`; step records carry message/source data
-  and optional tool/observation-like details.
-- `ctx` imports this shape as `devin_atif_json` only through an explicit
-  user-supplied path: `ctx import --provider devin --path <atif-file-or-dir>`.
-  A directory import recursively scans `.json` files; an explicit file path is
-  validated by ATIF content even if a temporary fixture path has no `.json`
-  suffix.
-- Fixture provenance: `tests/fixtures/provider-history/devin/atif/export.json`
-  is synthetic, minimized from the public ATIF root/step contract and Devin CLI
-  export docs. It is not copied from a Devin account, Devin cloud history, local
-  Devin config, login state, or a private user session.
-- Caveat: ctx does not discover or parse `~/.config/devin`, cloud/object-store
-  state, login/account paths, or any default local Devin history location. Those
-  paths remain unclaimed until a public local storage contract or safe generated
-  export fixture proves them.
 
 ## Firebender
 

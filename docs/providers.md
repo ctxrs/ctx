@@ -66,14 +66,6 @@ The current CLI imports local history for:
 - Aider Desk project task context files under `.aider-desk/tasks/<taskId>`,
   `AIDER_DESK_DIR/tasks/<taskId>`, or an explicit task, tasks, context file, or
   project root;
-- official Amp thread export JSON files produced by
-  `amp threads export <threadIDOrURL>` and passed explicitly with
-  `ctx import --provider amp --path <file>`; ctx does not auto-discover Amp
-  paths or crawl `$XDG_CACHE_HOME/amp/logs/cli.log`;
-- official Devin CLI ATIF JSON files/directories produced by
-  `devin --export [PATH]` and passed explicitly with
-  `ctx import --provider devin --path <atif-file-or-dir>`; ctx does not
-  auto-discover Devin paths or inspect `~/.config/devin`;
 - Trae chat state from Trae and Trae CN `User/workspaceStorage` roots at
   `~/Library/Application Support/Trae/User/workspaceStorage`,
   `~/Library/Application Support/Trae CN/User/workspaceStorage`,
@@ -188,9 +180,9 @@ CLI provider flags use names such as `kilo`, `crush`, `goose`, `dexto`,
 `openclaw`, `hermes`,
 `nanoclaw`, `astrbot`, `shelley`, `continue`, `openhands`, `copilot-cli`,
 `factory-ai-droid`, `qwen-code`, `kimi-code-cli`, `autohand-code`,
-`kiro-cli`, `iflow-cli`, `devin`, `eve`, `codearts-agent`, `forgecode`, `deepagents`, `mistral-vibe`, `mux`,
+`kiro-cli`, `iflow-cli`, `eve`, `codearts-agent`, `forgecode`, `deepagents`, `mistral-vibe`, `mux`,
 `reasonix`, `adal`, `kode`, `neovate`, `terramind`, `zed`, `lingma`, `qoder`, `pochi`,
-`warp`, `codebuddy`, `aider-desk`, `amp`, `trae`, `tinycloud`, `windsurf`, `cline`, and `roo`/`roo-code`.
+`warp`, `codebuddy`, `aider-desk`, `trae`, `tinycloud`, `windsurf`, `cline`, and `roo`/`roo-code`.
 Structured JSON and stable SQL views use provider IDs in ctx output; multiword IDs may be
 snake_case, such as `copilot_cli`, `factory_ai_droid`, `qwen_code`,
 `kimi_code_cli`, `autohand_code`, `kiro_cli`, `iflow_cli`, or
@@ -198,19 +190,14 @@ snake_case, such as `copilot_cli`, `factory_ai_droid`, `qwen_code`,
 reported as `aider_desk`, while compact native
 IDs such as `kilo`, `openclaw`, `crush`, `goose`, `dexto`, `mux`, `reasonix`,
 `adal`, `kode`, `neovate`, `terramind`, `zed`, `lingma`, `qoder`, `pochi`, `codebuddy`,
-`amp`, `devin`, `forgecode`, `deepagents`, `nanoclaw`, `astrbot`, `trae`, `tinycloud`, `windsurf`, `warp`,
+`forgecode`, `deepagents`, `nanoclaw`, `astrbot`, `trae`, `tinycloud`, `windsurf`, `warp`,
 `shelley`, `continue`, and `openhands`
 stay compact. Roo Code is
 reported as `roo_code`.
 
 `ctx sources --json` reports each known provider source with `import_support`
 and `importable` fields. A native source is marked available/importable only
-when provider-specific transcript files exist. Sources with `import_support:
-"explicit"` are supported explicit exports or user-supplied paths, such as Amp
-JSON from `amp threads export`; they require
-`ctx import --provider ... --path <path>` because no default source discovery is
-claimed. Devin ATIF JSON from `devin --export [PATH]` has the same
-explicit-export support semantics in the matrix. Sources with
+when provider-specific transcript files exist. Sources with
 `import_support: "preview"` are explicit-import preview paths: use
 `ctx import --provider nanoclaw` or `ctx import --provider astrbot` when
 discovery finds the desired source, or use `ctx import --provider trae --path

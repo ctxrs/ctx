@@ -34,16 +34,16 @@ use analytics::{AnalyticsEvent, AnalyticsProperties};
 use config::{AppConfig, CONFIG_FILE};
 use ctx_history_capture::{
     catalog_codex_session_tree, discover_provider_sources, discover_provider_sources_for_provider,
-    import_adal_history, import_aider_desk_history, import_amp_threads_export,
-    import_antigravity_cli_history, import_astrbot_sqlite, import_auggie_history,
-    import_autohand_code_sessions, import_bob_task_json_history, import_claude_projects_jsonl_tree,
+    import_adal_history, import_aider_desk_history, import_antigravity_cli_history,
+    import_astrbot_sqlite, import_auggie_history, import_autohand_code_sessions,
+    import_bob_task_json_history, import_claude_projects_jsonl_tree,
     import_cline_task_json_history, import_codearts_agent_sqlite, import_codebuddy_history,
     import_codestudio_sqlite, import_codex_history_jsonl, import_codex_session_jsonl,
     import_codex_session_jsonl_tail, import_codex_session_paths, import_codex_session_tree,
     import_command_code_history, import_continue_cli_sessions, import_copilot_cli_session_events,
     import_cortex_code_history, import_crush_sqlite, import_cursor_native_history,
     import_custom_history_jsonl_v1, import_custom_history_jsonl_v1_reader,
-    import_deepagents_sqlite, import_devin_atif_exports, import_dexto_sqlite, import_eve_history,
+    import_deepagents_sqlite, import_dexto_sqlite, import_eve_history,
     import_factory_ai_droid_sessions, import_firebender_sqlite, import_forgecode_sqlite,
     import_gemini_cli_history, import_goose_sessions_sqlite, import_hermes_sqlite,
     import_iflow_cli_history, import_jazz_history, import_junie_history, import_kilo_sqlite,
@@ -58,16 +58,15 @@ use ctx_history_capture::{
     import_windsurf_cascade_hook_transcripts, import_zed_threads_sqlite, import_zencoder_history,
     provider_source_for_path, provider_source_spec, stable_capture_uuid,
     validate_custom_history_jsonl_v1, validate_custom_history_jsonl_v1_reader, AdalImportOptions,
-    AiderDeskImportOptions, AmpImportOptions, AntigravityCliImportOptions,
-    AstrBotSqliteImportOptions, AuggieImportOptions, AutohandCodeImportOptions,
-    BobTaskJsonImportOptions, CatalogSummary, ClaudeProjectsImportOptions,
-    ClineTaskJsonImportOptions, CodeArtsAgentSqliteImportOptions, CodeBuddyImportOptions,
-    CodeStudioSqliteImportOptions, CodexEventImportMode, CodexHistoryImportOptions,
-    CodexSessionCatalogOptions, CodexSessionImportOptions, CodexSessionImportProgress,
-    CodexSessionImportProgressCallback, CodexToolOutputMode, CommandCodeImportOptions,
-    ContinueCliImportOptions, CopilotCliImportOptions, CortexCodeImportOptions,
-    CrushSqliteImportOptions, CursorNativeImportOptions, CustomHistoryJsonlV1ImportOptions,
-    DeepAgentsSqliteImportOptions, DevinAtifImportOptions, DextoSqliteImportOptions,
+    AiderDeskImportOptions, AntigravityCliImportOptions, AstrBotSqliteImportOptions,
+    AuggieImportOptions, AutohandCodeImportOptions, BobTaskJsonImportOptions, CatalogSummary,
+    ClaudeProjectsImportOptions, ClineTaskJsonImportOptions, CodeArtsAgentSqliteImportOptions,
+    CodeBuddyImportOptions, CodeStudioSqliteImportOptions, CodexEventImportMode,
+    CodexHistoryImportOptions, CodexSessionCatalogOptions, CodexSessionImportOptions,
+    CodexSessionImportProgress, CodexSessionImportProgressCallback, CodexToolOutputMode,
+    CommandCodeImportOptions, ContinueCliImportOptions, CopilotCliImportOptions,
+    CortexCodeImportOptions, CrushSqliteImportOptions, CursorNativeImportOptions,
+    CustomHistoryJsonlV1ImportOptions, DeepAgentsSqliteImportOptions, DextoSqliteImportOptions,
     EveImportOptions, FactoryAiDroidImportOptions, FirebenderSqliteImportOptions,
     ForgeCodeSqliteImportOptions, GeminiCliImportOptions, GooseSessionsSqliteImportOptions,
     HermesSqliteImportOptions, IflowCliImportOptions, JazzImportOptions, JunieImportOptions,
@@ -762,7 +761,6 @@ enum NativeProviderArg {
     Jazz,
     #[value(name = "auggie", alias = "augment", alias = "augment-code")]
     Auggie,
-    Devin,
     Eve,
     Junie,
     #[value(
@@ -836,7 +834,6 @@ enum NativeProviderArg {
     CodeBuddy,
     #[value(name = "aider-desk", alias = "aider_desk", alias = "aiderdesk")]
     AiderDesk,
-    Amp,
     #[value(alias = "trae-cn", alias = "trae_cn")]
     Trae,
     #[value(name = "tinycloud", alias = "tiny-cloud", alias = "tiny_cloud")]
@@ -920,7 +917,6 @@ enum ProviderArg {
     Jazz,
     #[value(name = "auggie", alias = "augment", alias = "augment-code")]
     Auggie,
-    Devin,
     Eve,
     Junie,
     #[value(
@@ -994,7 +990,6 @@ enum ProviderArg {
     CodeBuddy,
     #[value(name = "aider-desk", alias = "aider_desk", alias = "aiderdesk")]
     AiderDesk,
-    Amp,
     #[value(alias = "trae-cn", alias = "trae_cn")]
     Trae,
     #[value(name = "tinycloud", alias = "tiny-cloud", alias = "tiny_cloud")]
@@ -1060,7 +1055,6 @@ impl NativeProviderArg {
             Self::IflowCli => CaptureProvider::IflowCli,
             Self::Jazz => CaptureProvider::Jazz,
             Self::Auggie => CaptureProvider::Auggie,
-            Self::Devin => CaptureProvider::Devin,
             Self::Eve => CaptureProvider::Eve,
             Self::Junie => CaptureProvider::Junie,
             Self::Firebender => CaptureProvider::Firebender,
@@ -1093,7 +1087,6 @@ impl NativeProviderArg {
             Self::Warp => CaptureProvider::Warp,
             Self::CodeBuddy => CaptureProvider::CodeBuddy,
             Self::AiderDesk => CaptureProvider::AiderDesk,
-            Self::Amp => CaptureProvider::Amp,
             Self::Trae => CaptureProvider::Trae,
             Self::TinyCloud => CaptureProvider::TinyCloud,
             Self::Zencoder => CaptureProvider::Zencoder,
@@ -1149,7 +1142,6 @@ impl ProviderArg {
             Self::IflowCli => CaptureProvider::IflowCli,
             Self::Jazz => CaptureProvider::Jazz,
             Self::Auggie => CaptureProvider::Auggie,
-            Self::Devin => CaptureProvider::Devin,
             Self::Eve => CaptureProvider::Eve,
             Self::Junie => CaptureProvider::Junie,
             Self::Firebender => CaptureProvider::Firebender,
@@ -1182,7 +1174,6 @@ impl ProviderArg {
             Self::Warp => CaptureProvider::Warp,
             Self::CodeBuddy => CaptureProvider::CodeBuddy,
             Self::AiderDesk => CaptureProvider::AiderDesk,
-            Self::Amp => CaptureProvider::Amp,
             Self::Trae => CaptureProvider::Trae,
             Self::TinyCloud => CaptureProvider::TinyCloud,
             Self::Zencoder => CaptureProvider::Zencoder,
@@ -1217,7 +1208,6 @@ impl ProviderArg {
             Self::IflowCli => "iflow-cli",
             Self::Jazz => "jazz",
             Self::Auggie => "auggie",
-            Self::Devin => "devin",
             Self::Eve => "eve",
             Self::Junie => "junie",
             Self::Firebender => "firebender",
@@ -1250,7 +1240,6 @@ impl ProviderArg {
             Self::Warp => "warp",
             Self::CodeBuddy => "codebuddy",
             Self::AiderDesk => "aider-desk",
-            Self::Amp => "amp",
             Self::Trae => "trae",
             Self::TinyCloud => "tinycloud",
             Self::Zencoder => "zencoder",
@@ -6053,17 +6042,6 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
-        CaptureProvider::Amp => import_amp_threads_export(
-            &source.path,
-            store,
-            AmpImportOptions {
-                source_path: Some(source.path.clone()),
-                history_record_id: Some(record_id),
-                allow_partial_failures: true,
-                ..AmpImportOptions::default()
-            },
-        )
-        .map_err(anyhow::Error::from),
         CaptureProvider::Trae => import_trae_history(
             &source.path,
             store,
@@ -6504,17 +6482,6 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
-        CaptureProvider::Devin => import_devin_atif_exports(
-            &source.path,
-            store,
-            DevinAtifImportOptions {
-                source_path: Some(source.path.clone()),
-                history_record_id: Some(record_id),
-                allow_partial_failures: true,
-                ..DevinAtifImportOptions::default()
-            },
-        )
-        .map_err(anyhow::Error::from),
         CaptureProvider::Eve => import_eve_history(
             &source.path,
             store,
@@ -6765,7 +6732,6 @@ fn source_uses_import_file_manifest(source: &SourceInfo) -> bool {
             | "eve_workflow_data_streams"
             | "firebender_chat_history_sqlite"
             | "codebuddy_history_json"
-            | "amp_threads_export_json"
             | "tinycloud_session_jsonl_tree"
             | "zencoder_chat_sessions_json_tree"
     )
@@ -6979,7 +6945,6 @@ fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bool {
             path.file_name().and_then(|name| name.to_str()) == Some("context.json")
                 && path.starts_with(&source.path)
         }
-        CaptureProvider::Amp => path == source.path,
         CaptureProvider::Trae => {
             path.file_name().and_then(|name| name.to_str()) == Some("state.vscdb")
                 && (path == source.path || path.starts_with(&source.path))
@@ -7029,10 +6994,6 @@ fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bool {
                     .is_some_and(|name| !name.starts_with(".history-"))
         }
         CaptureProvider::Auggie => {
-            path.extension().and_then(|ext| ext.to_str()) == Some("json")
-                && path.starts_with(&source.path)
-        }
-        CaptureProvider::Devin => {
             path.extension().and_then(|ext| ext.to_str()) == Some("json")
                 && path.starts_with(&source.path)
         }
@@ -7376,7 +7337,6 @@ fn source_uses_incremental_event_search(source: &SourceInfo) -> bool {
             | CaptureProvider::IflowCli
             | CaptureProvider::Jazz
             | CaptureProvider::Auggie
-            | CaptureProvider::Devin
             | CaptureProvider::Eve
             | CaptureProvider::Junie
             | CaptureProvider::Firebender
@@ -7395,7 +7355,6 @@ fn source_uses_incremental_event_search(source: &SourceInfo) -> bool {
             | CaptureProvider::RooCode
             | CaptureProvider::CodeBuddy
             | CaptureProvider::AiderDesk
-            | CaptureProvider::Amp
             | CaptureProvider::Trae
             | CaptureProvider::TinyCloud
             | CaptureProvider::Zencoder
