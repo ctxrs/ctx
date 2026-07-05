@@ -143,10 +143,15 @@ IDE/application storage imports.
   `HuaweiCloud.vscode-codebot` identifies CodeArts Agent as a VS Code extension
   and documents editor/chat features such as R&D Q&A, slash commands, chat-panel
   shortcuts, and selected-code actions.
-- Gap: that public page proves an IDE-like agent surface, not a local transcript
-  path or stable schema. No public source-backed file contract was found for
-  `~/.codeartsdoer`, VS Code `globalStorage`, `workspaceStorage`, state DB keys,
-  chat snapshots, or local CodeArts Agent APIs.
+- Package evidence: the VSIX bundle contains `getKernelConfigDir()` resolving
+  `~/.codeartsdoer` and legacy/cache history paths under VS Code app data such
+  as `User/chat_sessions/<session>/chat_baseInfo.json`,
+  `User/chat_sessions/<session>/messages_<n>.json`, and `claw_session`.
+- Gap: the current extension also routes session operations through an
+  `agentKernelClient.cag.session.*` API, so the durable/current transcript store
+  may be kernel-managed rather than those JSON cache files. No sanitized real
+  CodeArts Agent run fixture has verified that the cache shape is complete or
+  stable enough to import.
 - Decision: no native importer is claimed. The `codearts-agent` npx target
   remains `candidate-family` until a stable local transcript schema, official
   exporter, or sanitized real fixture can be verified without account-specific
@@ -162,9 +167,12 @@ IDE/application storage imports.
 - Configuration evidence: current user settings docs prove agent, instruction,
   hook, and skill locations including `.codestudio/agents`,
   `~/.codestudio/agents`, `.codestudio/skills`, and `~/.codestudio/skills`.
-- Gap: those docs prove configuration and skill discovery paths only. They do
-  not identify a local chat transcript file, database, export format, or stable
-  schema under `~/.codestudio`.
+- Debug/session evidence: troubleshooting docs describe a unified sessions list
+  and optional persistent agent debug file logging with detailed local JSONL
+  records.
+- Gap: those docs do not identify a stable file path, filename, schema, or
+  export contract for the session/debug JSONL files, and the skill/settings
+  paths remain configuration evidence only.
 - Decision: no native importer is claimed. The `codestudio` npx target remains
   `candidate-family` until a source-backed transcript path/schema or exporter is
   available.
