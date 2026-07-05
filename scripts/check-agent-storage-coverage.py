@@ -18,13 +18,8 @@ PROVIDER_MATRIX_PATH = REPO_ROOT / "docs" / "provider-support-matrix.json"
 UPSTREAM_PACKAGE = "skills@1.5.14"
 UPSTREAM_COMMIT = "2adcfe5a4cce0ce5f4d5547a997b2a161ec5d127"
 EXPECTED_COUNTS = {
-    "native-auto": 63,
-    "native-explicit": 0,
-    "native-preview": 0,
-    "candidate-family": 0,
-    "webapp-boundary": 5,
-    "unknown": 2,
-    "install-target": 2,
+    "supported": 63,
+    "not-supported": 9,
 }
 ALLOWED_STATUSES = set(EXPECTED_COUNTS)
 REQUIRED_SCHEMA_FAMILIES = {
@@ -52,7 +47,7 @@ ALLOWED_SCHEMA_FAMILIES = REQUIRED_SCHEMA_FAMILIES | {
 }
 PRIVATE_TEXT_MARKERS = ("/home/", "ctx-private", "ctx-multi-repo-workspace")
 TABLE_HEADER = (
-    "| npx skills agent id | ctx storage ingestion status | schema family | "
+    "| npx skills agent id | ctx support | schema family | "
     "evidence source | blocked reason / gap |"
 )
 ROW_RE = re.compile(
@@ -179,20 +174,16 @@ def validate_rows(rows: list[dict[str, str]], expected_ids: list[str], ctx_forma
             fail(f"{agent_id}: unsupported schema family {family}")
         if "npx" not in evidence:
             fail(f"{agent_id}: evidence must cite npx upstream config")
-        if status in {"native-auto", "native-explicit", "native-preview"}:
+        if status == "supported":
             cited_formats = set(re.findall(r"`([^`]+)`", evidence))
             if not cited_formats.intersection(ctx_formats):
-                fail(f"{agent_id}: native row must cite a ctx source format")
+                fail(f"{agent_id}: supported row must cite a ctx source format")
             if "ctx" not in evidence:
-                fail(f"{agent_id}: native row must cite ctx evidence")
+                fail(f"{agent_id}: supported row must cite ctx evidence")
         elif "no ctx provider" not in evidence:
-            fail(f"{agent_id}: non-native row must state that no ctx provider exists")
-        if status not in {"native-auto"} and gap == "-":
-            fail(f"{agent_id}: non-auto row needs a blocked reason or gap")
-        if status == "native-explicit" and "explicit" not in f"{evidence} {gap}".lower():
-            fail(f"{agent_id}: explicit row must explain the explicit import/export contract")
-        if status == "native-preview" and "Preview" not in gap:
-            fail(f"{agent_id}: preview row must explain preview status")
+            fail(f"{agent_id}: not-supported row must state that no ctx provider exists")
+        if status == "not-supported" and gap == "-":
+            fail(f"{agent_id}: not-supported row needs a blocked reason or gap")
 
 
 def main() -> int:

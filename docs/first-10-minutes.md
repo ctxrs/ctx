@@ -51,8 +51,8 @@ Expect rows for supported local import providers such as Codex, Pi,
 Antigravity, Claude, OpenCode, Kilo Code, OpenClaw, Hermes, Gemini, Cursor,
 Zed, Copilot CLI, Factory AI Droid, Autohand Code, and Warp Terminal restoration
 SQLite. NanoClaw can appear as a preview/manual row when ctx can discover its
-local project paths; AstrBot appears as native-auto when a bounded `data_v4.db`
-source exists. Warp is native auto-importable from documented local
+local project paths; AstrBot appears as supported when a bounded `data_v4.db`
+source exists. Warp is supported from documented local
 `warp.sqlite` paths. A row with
 `exists: false`
 means ctx knows the default path but did not find local history there. A JSON

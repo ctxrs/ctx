@@ -178,7 +178,7 @@ IDE/application storage imports.
   `~/.codeartsdoer/codearts-data/opencode.db`,
   `$XDG_DATA_HOME/codeartsdoer/opencode.db`,
   `~/.local/share/codeartsdoer/opencode.db`, or an explicit DB path. The
-  native-auto claim is for the kernel SQLite DB, not the legacy JSON cache.
+  supported claim is for the kernel SQLite DB, not the legacy JSON cache.
 - Caveat: ctx does not import older/private VS Code cache JSON such as
   `User/chat_sessions` or `claw_session`; those remain unclaimed until fixtures
   prove they are durable and complete.
@@ -198,7 +198,7 @@ IDE/application storage imports.
   features, settings, hooks, and skill locations including `.codestudio/agents`,
   `~/.codestudio/agents`, `.codestudio/skills`, and `~/.codestudio/skills`.
 - `ctx` tracks this intended native shape as `codestudio_session_store_sqlite`,
-  with native-auto discovery for Code Studio app-data
+  with supported discovery for Code Studio app-data
   `User/globalStorage/session-store.db` files and explicit DB paths. Discovery
   requires the session-store SQLite tables/columns before auto-importing.
 - Caveat: `.codestudio/skills`, `.codestudio/agents`, and settings files remain
@@ -217,7 +217,7 @@ IDE/application storage imports.
 - Extension evidence: Open VSX `ZencoderAI.zencoder` v3.63.9002 constants
   confirm the extension `zencoder-chat` storage root and `sessions.json`
   persisted-chat anchors used for local chat/session history.
-- `ctx` tracks this native-auto shape as `zencoder_chat_sessions_json_tree`.
+- `ctx` tracks this supported shape as `zencoder_chat_sessions_json_tree`.
   Default discovery covers common VS Code-family app-data roots under
   `User/globalStorage/ZencoderAI.zencoder/zencoder-chat`, and explicit
   `ctx import --provider zencoder --path <zencoder-chat>` remains supported.
@@ -289,7 +289,7 @@ IDE/application storage imports.
 - `ctx` imports this shape as `pochi_livestore_state_sqlite`, reading synced
   `~/.pochi/storage` roots when present, explicit SQLite file paths, or
   explicit directories containing `state*.db` files read-only.
-- This is native-auto only for bounded LiveStore state SQLite paths:
+- This is supported only for bounded LiveStore state SQLite paths:
   `~/.pochi/storage/**/state*.db` and explicit state DB file/directory paths.
   Default discovery requires a read-only `tasks`/`messages` schema probe. `ctx`
   does not read `config.jsonc` and does not attempt VS Code OPFS extraction.
@@ -715,7 +715,7 @@ IDE/application storage imports.
   `~/.inferencesh`; future support needs an official export/API/plugin
   contract or a source-backed local store.
 
-## Moxby (native-auto)
+## Moxby (supported)
 
 - npx skills evidence: `skills@1.5.14` registers the `moxby` target with
   `skillsDir = ".moxby/skills"`, `globalSkillsDir = "~/.moxby/skills"`, and
@@ -741,7 +741,7 @@ IDE/application storage imports.
   `last_event_id`, `first_event_seq`, `last_event_seq`, `message_index`,
   `role`, `content_json`, `text`, `token_estimate`, `provider`, `model`,
   `created_at`, and `updated_at`.
-- ctx decision: add native-auto support for `moxby_chats_sqlite` only.
+- ctx decision: support `moxby_chats_sqlite` only.
   Discovery is bounded to `MOXBY_STATE_DIR/moxby_chats.db`, XDG data
   `com.moxby.agent/moxby_chats.db`, macOS
   `~/Library/Application Support/com.moxby.agent/moxby_chats.db`, Windows
@@ -761,7 +761,7 @@ IDE/application storage imports.
 - Boundary evidence: current evidence points to a stateless CLI plus backend or
   object-store activity boundary, not to a durable local transcript file under
   the skill home.
-- Decision: MCPJam stays `webapp-boundary` until it provides an exporter,
+- Decision: MCPJam stays `not-supported` until it provides an exporter,
   history-source plugin, documented local transcript store, or managed import
   API.
 
@@ -772,7 +772,7 @@ IDE/application storage imports.
 - Boundary evidence: no stable local transcript path or schema is proven. The
   best current lead is a support bundle or API-backed managed import contract,
   not direct local file discovery.
-- Decision: Ona stays `webapp-boundary` until an official support-bundle/API
+- Decision: Ona stays `not-supported` until an official support-bundle/API
   import path or sanitized local fixture proves a bounded history format.
 
 ## Replit (webapp/object-store boundary)
@@ -782,10 +782,10 @@ IDE/application storage imports.
 - Boundary evidence: the project marker identifies a Replit project, but it is
   not a local agent-history transcript contract. Agent activity remains tied to
   the project/cloud boundary.
-- Decision: Replit stays `webapp-boundary`; future support should use an
+- Decision: Replit stays `not-supported`; future support should use an
   exporter, history-source plugin, or explicit cloud/project export contract.
 
-## Zenflow (native-auto)
+## Zenflow (supported)
 
 - Package evidence: the Arch AUR `zenflow-bin` PKGBUILD points to
   `https://download.zencoder.ai/zenflowapp/latest/linux-x64/Zenflow.deb`; the
@@ -803,7 +803,7 @@ IDE/application storage imports.
   `chats`, `execution_processes`, `executor_sessions`,
   `execution_process_logs`, `execution_process_normalized_logs`,
   `assistant_sessions`, `attachments`, and `task_attachments`.
-- Import contract: ctx tracks this native-auto shape as `zenflow_sqlite`.
+- Import contract: ctx tracks this supported shape as `zenflow_sqlite`.
   Default discovery is bounded to proven `db.sqlite` app-data paths, and
   explicit `ctx import --provider zenflow --path <db.sqlite>` remains supported.
   The importer reads the DB read-only and normalizes `chats.initial_prompt`,
@@ -818,7 +818,7 @@ IDE/application storage imports.
   first-party published storage contract, so future Zenflow schema drift may
   need adapter updates.
 
-## AstrBot (native-auto)
+## AstrBot (supported)
 
 - npx skills evidence: `skills@1.5.14` registers `astrbot` under `~/.astrbot`,
   matching AstrBot's packaged desktop root.
@@ -841,7 +841,7 @@ IDE/application storage imports.
   not find a general IM-platform write path that records complete raw user and
   assistant transcripts for QQ/Telegram/WeCom/Lark/DingTalk/Slack/etc. into
   `data_v4.db`.
-- Decision: AstrBot is `native-auto` for the bounded, provider-owned
+- Decision: AstrBot is `supported` for the bounded, provider-owned
   `data_v4.db` locations. ctx auto-imports the durable local LLM context and
   available platform history rows from `ASTRBOT_ROOT/data/data_v4.db`,
   packaged `~/.astrbot/data/data_v4.db`, and cwd/ancestor project

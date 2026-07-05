@@ -1272,7 +1272,7 @@
       "metadata": {
         "default_auto_discovery": true,
         "default_auto_discovery_scope": "Trae and Trae CN User/workspaceStorage roots with known ItemTable chat keys",
-        "import_support": "native-auto defaults plus explicit paths",
+        "import_support": "supported defaults plus explicit paths",
         "aliases": [
           "trae-cn",
           "trae_cn"
