@@ -535,6 +535,7 @@ mod tests {
             ProviderId::KimiCodeCli,
             ProviderId::Lingma,
             ProviderId::Pochi,
+            ProviderId::Auggie,
             ProviderId::NanoClaw,
             ProviderId::Neovate,
             ProviderId::CommandCode,
