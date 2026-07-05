@@ -1031,6 +1031,27 @@ impl Default for IflowCliImportOptions {
 }
 
 #[derive(Debug, Clone)]
+pub struct JazzImportOptions {
+    pub machine_id: String,
+    pub source_path: Option<PathBuf>,
+    pub imported_at: DateTime<Utc>,
+    pub history_record_id: Option<Uuid>,
+    pub allow_partial_failures: bool,
+}
+
+impl Default for JazzImportOptions {
+    fn default() -> Self {
+        Self {
+            machine_id: default_machine_id(),
+            source_path: None,
+            imported_at: utc_now(),
+            history_record_id: None,
+            allow_partial_failures: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct KodeImportOptions {
     pub machine_id: String,
     pub source_path: Option<PathBuf>,
@@ -1482,6 +1503,9 @@ pub struct AutohandCodeSessionsJsonlAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct IflowCliJsonlAdapter;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct JazzHistoryJsonAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct KodeJsonlAdapter;
@@ -2702,6 +2726,24 @@ impl ProviderCaptureAdapter for IflowCliJsonlAdapter {
             CaptureProvider::IflowCli,
             IFLOW_CLI_SOURCE_FORMAT,
         )
+    }
+}
+
+impl ProviderCaptureAdapter for JazzHistoryJsonAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Jazz
+    }
+
+    fn source_format(&self) -> &str {
+        JAZZ_HISTORY_SOURCE_FORMAT
+    }
+
+    fn normalize_path(
+        &self,
+        path: &Path,
+        context: &ProviderAdapterContext,
+    ) -> Result<ProviderNormalizationResult> {
+        normalize_jazz_history(path, context)
     }
 }
 
@@ -5538,6 +5580,40 @@ pub fn import_iflow_cli_history(
     )
 }
 
+pub fn import_jazz_history(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: JazzImportOptions,
+) -> Result<ProviderImportSummary> {
+    let path = path.as_ref();
+    let source_path = options
+        .source_path
+        .clone()
+        .unwrap_or_else(|| path.to_path_buf());
+    let normalization = JazzHistoryJsonAdapter.normalize_path(
+        path,
+        &ProviderAdapterContext {
+            machine_id: options.machine_id,
+            source_path: Some(source_path),
+            imported_at: options.imported_at,
+            tool_output_mode: CodexToolOutputMode::Full,
+            event_mode: CodexEventImportMode::Rich,
+            include_notices: true,
+        },
+    )?;
+    import_normalized_provider_captures(
+        store,
+        normalization,
+        NormalizedProviderImportOptions {
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+            persist_cursors: true,
+            wrap_transaction: true,
+            fast_event_inserts: true,
+        },
+    )
+}
+
 pub fn import_kode_history(
     path: impl AsRef<Path>,
     store: &mut Store,
@@ -5804,6 +5880,7 @@ const QWEN_CODE_SOURCE_FORMAT: &str = "qwen_code_chat_jsonl";
 const KIMI_CODE_CLI_SOURCE_FORMAT: &str = "kimi_code_cli_wire_jsonl";
 const AUTOHAND_CODE_SOURCE_FORMAT: &str = "autohand_code_sessions_jsonl";
 const IFLOW_CLI_SOURCE_FORMAT: &str = "iflow_cli_session_jsonl";
+const JAZZ_HISTORY_SOURCE_FORMAT: &str = "jazz_history_json";
 const KODE_SOURCE_FORMAT: &str = "kode_session_jsonl";
 const NEOVATE_SOURCE_FORMAT: &str = "neovate_session_jsonl";
 const COMMAND_CODE_SOURCE_FORMAT: &str = "command_code_session_jsonl";
@@ -24917,6 +24994,599 @@ fn kimi_session_index_metadata(entry: &KimiSessionIndexEntry) -> Value {
     })
 }
 
+fn normalize_jazz_history(
+    path: &Path,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    let paths = collect_jazz_history_paths(path)?;
+    if paths.is_empty() {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "no Jazz agent history JSON files found",
+        });
+    }
+
+    let mut merged = ProviderNormalizationResult::default();
+    for (path_index, history_path) in paths.into_iter().enumerate() {
+        match normalize_jazz_history_file(&history_path, context) {
+            Ok(mut result) => {
+                merged.summary.merge(result.summary);
+                merged.captures.append(&mut result.captures);
+                merged.files_touched.append(&mut result.files_touched);
+            }
+            Err(err) => push_provider_import_failure(
+                &mut merged.summary,
+                path_index + 1,
+                format!("{}: {err}", history_path.display()),
+            ),
+        }
+    }
+
+    Ok(merged)
+}
+
+fn collect_jazz_history_paths(root: &Path) -> Result<Vec<PathBuf>> {
+    let metadata = fs::symlink_metadata(root)?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: root.to_path_buf(),
+            reason: "symlinked provider transcript roots are rejected",
+        });
+    }
+    ensure_provider_path_parents_are_not_symlinks(root)?;
+    if file_type.is_file() {
+        let mut paths = Vec::new();
+        if is_jazz_history_json_file(root) {
+            ensure_regular_provider_transcript_file(root)?;
+            paths.push(root.to_path_buf());
+        }
+        return Ok(paths);
+    }
+    if !file_type.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let history_dir = root.join("history");
+    let scan_root = if history_dir.is_dir() {
+        let history_metadata = fs::symlink_metadata(&history_dir)?;
+        if history_metadata.file_type().is_symlink() {
+            return Err(CaptureError::InvalidProviderTranscriptPath {
+                path: history_dir,
+                reason: "symlinked provider transcript roots are rejected",
+            });
+        }
+        ensure_provider_path_parents_are_not_symlinks(&history_dir)?;
+        history_dir
+    } else {
+        root.to_path_buf()
+    };
+
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(&scan_root)? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_file() && is_jazz_history_json_file(&path) {
+            ensure_regular_provider_transcript_file(&path)?;
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+fn is_jazz_history_json_file(path: &Path) -> bool {
+    path.extension().and_then(|ext| ext.to_str()) == Some("json")
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| !name.starts_with(".history-"))
+}
+
+fn normalize_jazz_history_file(
+    path: &Path,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    ensure_regular_provider_transcript_file(path)?;
+    let value = read_json_file_limited(path, MAX_PROVIDER_JSONL_LINE_BYTES, "Jazz history JSON")?;
+    let file_agent_id = jazz_required_string(&value, "agentId")?.to_owned();
+    let conversations = value
+        .get("conversations")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            CaptureError::InvalidPayload("Jazz history JSON missing conversations array".to_owned())
+        })?;
+    let raw_source_path = path.display().to_string();
+    let mut result = ProviderNormalizationResult::default();
+
+    for (conversation_index, conversation) in conversations.iter().enumerate() {
+        let line = conversation_index + 1;
+        if !conversation.is_object() {
+            push_provider_import_failure(
+                &mut result.summary,
+                line,
+                "Jazz conversation entry must be an object".to_owned(),
+            );
+            continue;
+        }
+        let conversation_id = match jazz_required_string(conversation, "conversationId") {
+            Ok(id) => id.to_owned(),
+            Err(err) => {
+                push_provider_import_failure(&mut result.summary, line, err.to_string());
+                continue;
+            }
+        };
+        let started_at = match jazz_required_timestamp(conversation, "startedAt") {
+            Ok(timestamp) => timestamp,
+            Err(err) => {
+                push_provider_import_failure(&mut result.summary, line, err.to_string());
+                continue;
+            }
+        };
+        let ended_at = match jazz_optional_timestamp(conversation, "endedAt") {
+            Ok(timestamp) => timestamp,
+            Err(err) => {
+                push_provider_import_failure(&mut result.summary, line, err.to_string());
+                continue;
+            }
+        };
+        let messages = match conversation.get("messages").and_then(Value::as_array) {
+            Some(messages) => messages,
+            None => {
+                push_provider_import_failure(
+                    &mut result.summary,
+                    line,
+                    "Jazz conversation missing messages array".to_owned(),
+                );
+                continue;
+            }
+        };
+        let agent_id = conversation
+            .get("agentId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or(&file_agent_id)
+            .to_owned();
+        let title = conversation
+            .get("title")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let declared_message_count = conversation.get("messageCount").and_then(Value::as_u64);
+
+        result.captures.push((
+            line,
+            jazz_capture(
+                JazzCaptureDraft {
+                    provider_session_id: &conversation_id,
+                    file_agent_id: &file_agent_id,
+                    agent_id: &agent_id,
+                    title: title.as_deref(),
+                    started_at,
+                    ended_at,
+                    declared_message_count,
+                    stored_message_count: messages.len(),
+                    raw_source_path: &raw_source_path,
+                    conversation,
+                    event: None,
+                },
+                context,
+            ),
+        ));
+
+        for (message_index, message) in messages.iter().enumerate() {
+            let event_line = line
+                .saturating_mul(10_000)
+                .saturating_add(message_index)
+                .saturating_add(1);
+            let occurred_at = started_at + Duration::milliseconds(message_index as i64);
+            match jazz_message_event(&conversation_id, message_index, message, occurred_at, path) {
+                Ok(event) => result.captures.push((
+                    event_line,
+                    jazz_capture(
+                        JazzCaptureDraft {
+                            provider_session_id: &conversation_id,
+                            file_agent_id: &file_agent_id,
+                            agent_id: &agent_id,
+                            title: title.as_deref(),
+                            started_at,
+                            ended_at,
+                            declared_message_count,
+                            stored_message_count: messages.len(),
+                            raw_source_path: &raw_source_path,
+                            conversation,
+                            event: Some(event),
+                        },
+                        context,
+                    ),
+                )),
+                Err(err) => {
+                    push_provider_import_failure(&mut result.summary, event_line, err.to_string())
+                }
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+struct JazzCaptureDraft<'a> {
+    provider_session_id: &'a str,
+    file_agent_id: &'a str,
+    agent_id: &'a str,
+    title: Option<&'a str>,
+    started_at: DateTime<Utc>,
+    ended_at: Option<DateTime<Utc>>,
+    declared_message_count: Option<u64>,
+    stored_message_count: usize,
+    raw_source_path: &'a str,
+    conversation: &'a Value,
+    event: Option<ProviderEventEnvelope>,
+}
+
+fn jazz_capture(
+    draft: JazzCaptureDraft<'_>,
+    context: &ProviderAdapterContext,
+) -> ProviderCaptureEnvelope {
+    native_provider_capture(
+        NativeSessionDraft {
+            provider: CaptureProvider::Jazz,
+            source_format: JAZZ_HISTORY_SOURCE_FORMAT,
+            provider_session_id: draft.provider_session_id.to_owned(),
+            parent_provider_session_id: None,
+            root_provider_session_id: None,
+            external_agent_id: Some(draft.agent_id.to_owned()),
+            agent_type: AgentType::Primary,
+            role_hint: Some("primary".to_owned()),
+            is_primary: true,
+            started_at: draft.started_at,
+            ended_at: draft.ended_at,
+            cwd: None,
+            fidelity: Fidelity::Imported,
+            raw_source_path: draft.raw_source_path.to_owned(),
+            trust: ProviderSourceTrust::ProviderNative,
+            source_metadata: json!({
+                "adapter": JAZZ_HISTORY_SOURCE_FORMAT,
+                "source_path": draft.raw_source_path,
+                "published_package": "jazz-ai@0.12.5",
+                "storage": "JAZZ_HOME or ~/.jazz/history/<agentId>.json",
+                "retention_note": "Jazz keeps the most recent conversations stored in the agent history file.",
+            }),
+            session_metadata: json!({
+                "source_format": JAZZ_HISTORY_SOURCE_FORMAT,
+                "conversation_id": draft.provider_session_id,
+                "title": draft.title,
+                "agent_id": draft.agent_id,
+                "history_file_agent_id": draft.file_agent_id,
+                "declared_message_count": draft.declared_message_count,
+                "stored_message_count": draft.stored_message_count,
+                "conversation": provider_capped_json(draft.conversation, PROVIDER_MAX_PREVIEW_CHARS),
+                "limitations": [
+                    "message-level timestamps are not present in the Jazz history JSON; ctx orders messages by array index",
+                    "Jazz stores only the conversations retained in the per-agent history file"
+                ],
+            }),
+        },
+        context,
+        draft.event,
+    )
+}
+
+fn jazz_message_event(
+    provider_session_id: &str,
+    message_index: usize,
+    message: &Value,
+    occurred_at: DateTime<Utc>,
+    path: &Path,
+) -> Result<ProviderEventEnvelope> {
+    if !message.is_object() {
+        return Err(CaptureError::InvalidPayload(
+            "Jazz message entry must be an object".to_owned(),
+        ));
+    }
+    let role_text = message.get("role").and_then(Value::as_str);
+    let event_type = jazz_message_event_type(message, role_text);
+    let role = Some(provider_role(role_text));
+    let text = jazz_message_text(message, role_text, event_type);
+    Ok(native_event(NativeEventDraft {
+        provider: CaptureProvider::Jazz,
+        source_format: JAZZ_HISTORY_SOURCE_FORMAT,
+        provider_session_id: provider_session_id.to_owned(),
+        provider_event_index: message_index as u64,
+        provider_event_hash: jazz_message_hash(message),
+        cursor: format!(
+            "{}:conversation:{provider_session_id}:message:{message_index}",
+            path.display()
+        ),
+        event_type,
+        role,
+        occurred_at,
+        text,
+        body: message.clone(),
+        metadata: json!({
+            "source": "jazz_history_json",
+            "source_format": JAZZ_HISTORY_SOURCE_FORMAT,
+            "message_index": message_index,
+            "message_role": role_text,
+            "message_id": jazz_message_hash(message),
+            "model": message.get("model").cloned(),
+            "usage": message.get("usage").cloned(),
+        }),
+    }))
+}
+
+fn jazz_message_hash(message: &Value) -> Option<String> {
+    [
+        "id",
+        "messageId",
+        "message_id",
+        "toolCallId",
+        "tool_call_id",
+    ]
+    .iter()
+    .find_map(|field| {
+        message
+            .get(*field)
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .map(str::to_owned)
+    })
+}
+
+fn jazz_message_event_type(message: &Value, role_text: Option<&str>) -> EventType {
+    let content = message.get("content");
+    if role_text == Some("tool")
+        || content.is_some_and(jazz_content_has_tool_result)
+        || json_field_has_non_empty_calls(
+            message,
+            &[
+                "toolResult",
+                "toolResults",
+                "tool_result",
+                "tool_results",
+                "toolCallResult",
+                "toolCallResults",
+            ],
+        )
+    {
+        return EventType::ToolOutput;
+    }
+    if content.is_some_and(jazz_content_has_tool_call)
+        || json_field_has_non_empty_calls(
+            message,
+            &[
+                "toolCalls",
+                "tool_calls",
+                "toolInvocations",
+                "tool_invocations",
+            ],
+        )
+    {
+        return EventType::ToolCall;
+    }
+    EventType::Message
+}
+
+fn jazz_message_text(message: &Value, role_text: Option<&str>, event_type: EventType) -> String {
+    for key in [
+        "content",
+        "text",
+        "output",
+        "result",
+        "message",
+        "reasoning",
+        "toolCalls",
+        "tool_calls",
+        "toolInvocations",
+        "tool_invocations",
+        "toolResult",
+        "toolResults",
+    ] {
+        if let Some(text) = message.get(key).and_then(jazz_content_text) {
+            return text;
+        }
+    }
+    match event_type {
+        EventType::ToolCall => message
+            .as_object()
+            .and_then(jazz_tool_name)
+            .map(|name| format!("tool call: {name}"))
+            .unwrap_or_else(|| "Jazz tool call".to_owned()),
+        EventType::ToolOutput => "Jazz tool result".to_owned(),
+        _ => role_text
+            .map(|role| format!("Jazz {role} message"))
+            .unwrap_or_else(|| "Jazz message".to_owned()),
+    }
+}
+
+fn jazz_content_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => {
+            let text = text.trim();
+            (!text.is_empty()).then(|| text.to_owned())
+        }
+        Value::Array(items) => {
+            let mut parts = Vec::new();
+            for item in items {
+                jazz_collect_content_text(item, &mut parts);
+            }
+            (!parts.is_empty()).then(|| parts.join("\n"))
+        }
+        Value::Object(object) => {
+            let mut parts = Vec::new();
+            jazz_collect_object_text(object, &mut parts);
+            if parts.is_empty() {
+                provider_value_text(value)
+            } else {
+                Some(parts.join("\n"))
+            }
+        }
+        Value::Number(_) | Value::Bool(_) => Some(value.to_string()),
+        Value::Null => None,
+    }
+}
+
+fn jazz_collect_content_text(value: &Value, parts: &mut Vec<String>) {
+    match value {
+        Value::String(text) => jazz_push_text(parts, text),
+        Value::Array(items) => {
+            for item in items {
+                jazz_collect_content_text(item, parts);
+            }
+        }
+        Value::Object(object) => jazz_collect_object_text(object, parts),
+        Value::Number(_) | Value::Bool(_) => jazz_push_text(parts, &value.to_string()),
+        Value::Null => {}
+    }
+}
+
+fn jazz_collect_object_text(object: &serde_json::Map<String, Value>, parts: &mut Vec<String>) {
+    let kind = object
+        .get("type")
+        .and_then(Value::as_str)
+        .map(jazz_normalized_content_type);
+    match kind.as_deref() {
+        Some("text") => {
+            for key in ["text", "content"] {
+                if let Some(text) = object.get(key).and_then(Value::as_str) {
+                    jazz_push_text(parts, text);
+                    return;
+                }
+            }
+        }
+        Some("reasoning") => {
+            for key in ["text", "reasoning", "content"] {
+                if let Some(text) = object.get(key).and_then(Value::as_str) {
+                    jazz_push_text(parts, text);
+                    return;
+                }
+            }
+        }
+        Some("tool_call") => {
+            let name = jazz_tool_name(object).unwrap_or("tool");
+            jazz_push_text(parts, &format!("tool call: {name}"));
+            for key in ["input", "args", "arguments"] {
+                if let Some(input) = object.get(key) {
+                    jazz_push_text(parts, &format!("tool input: {}", jazz_value_preview(input)));
+                    break;
+                }
+            }
+            return;
+        }
+        Some("tool_result") => {
+            let name = jazz_tool_name(object).unwrap_or("tool");
+            jazz_push_text(parts, &format!("tool result: {name}"));
+            for key in ["output", "result", "content", "error"] {
+                if let Some(output) = object.get(key).and_then(jazz_content_text) {
+                    jazz_push_text(parts, &output);
+                    break;
+                }
+            }
+            return;
+        }
+        _ => {}
+    }
+
+    for key in [
+        "text", "content", "output", "result", "summary", "message", "error",
+    ] {
+        if let Some(value) = object.get(key) {
+            jazz_collect_content_text(value, parts);
+        }
+    }
+}
+
+fn jazz_content_has_tool_call(value: &Value) -> bool {
+    jazz_content_has_kind(value, &["tool_call"])
+}
+
+fn jazz_content_has_tool_result(value: &Value) -> bool {
+    jazz_content_has_kind(value, &["tool_result"])
+}
+
+fn jazz_content_has_kind(value: &Value, expected: &[&str]) -> bool {
+    match value {
+        Value::Array(items) => items
+            .iter()
+            .any(|item| jazz_content_has_kind(item, expected)),
+        Value::Object(object) => {
+            object
+                .get("type")
+                .and_then(Value::as_str)
+                .map(jazz_normalized_content_type)
+                .is_some_and(|kind| expected.contains(&kind.as_str()))
+                || object
+                    .values()
+                    .any(|child| jazz_content_has_kind(child, expected))
+        }
+        _ => false,
+    }
+}
+
+fn jazz_normalized_content_type(value: &str) -> String {
+    match value {
+        "tool-call" | "toolCall" | "tool_call" | "tool_use" | "function_call" => "tool_call",
+        "tool-result" | "toolResult" | "tool_result" => "tool_result",
+        "reasoning" | "thinking" => "reasoning",
+        other => other,
+    }
+    .to_owned()
+}
+
+fn jazz_tool_name(object: &serde_json::Map<String, Value>) -> Option<&str> {
+    ["toolName", "tool_name", "name", "tool"]
+        .iter()
+        .find_map(|key| object.get(*key).and_then(Value::as_str))
+        .filter(|name| !name.trim().is_empty())
+}
+
+fn jazz_value_preview(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        _ => serde_json::to_string(value).unwrap_or_else(|_| value.to_string()),
+    }
+}
+
+fn jazz_push_text(parts: &mut Vec<String>, text: &str) {
+    let text = text.trim();
+    if !text.is_empty() {
+        parts.push(text.to_owned());
+    }
+}
+
+fn jazz_required_string<'a>(value: &'a Value, field: &'static str) -> Result<&'a str> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+        .ok_or_else(|| CaptureError::InvalidPayload(format!("Jazz history missing {field}")))
+}
+
+fn jazz_required_timestamp(value: &Value, field: &'static str) -> Result<DateTime<Utc>> {
+    let raw = value.get(field).and_then(Value::as_str).ok_or_else(|| {
+        CaptureError::InvalidPayload(format!("Jazz conversation missing {field}"))
+    })?;
+    parse_rfc3339_utc(raw).ok_or_else(|| {
+        CaptureError::InvalidPayload(format!("{field} is not a valid RFC3339 timestamp"))
+    })
+}
+
+fn jazz_optional_timestamp(value: &Value, field: &'static str) -> Result<Option<DateTime<Utc>>> {
+    let Some(raw_value) = value.get(field) else {
+        return Ok(None);
+    };
+    if raw_value.is_null() {
+        return Ok(None);
+    }
+    let raw = raw_value.as_str().ok_or_else(|| {
+        CaptureError::InvalidPayload(format!("{field} must be an RFC3339 string"))
+    })?;
+    parse_rfc3339_utc(raw)
+        .ok_or_else(|| {
+            CaptureError::InvalidPayload(format!("{field} is not a valid RFC3339 timestamp"))
+        })
+        .map(Some)
+}
+
 fn pi_session_header(value: Value) -> Result<PiSessionHeader> {
     let id = value
         .get("id")
@@ -31334,6 +32004,102 @@ mod tests {
         assert_eq!(second.skipped_sessions, 2);
         assert_eq!(second.skipped_events, 5);
         assert_eq!(second.skipped_edges, 1);
+    }
+
+    #[test]
+    fn native_jazz_fixture_imports_searches_reimports_and_tool_events() {
+        let temp = tempdir();
+        let fixture = provider_history_fixture("jazz/v0.12.5/history");
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let source = provider_source_for_path(CaptureProvider::Jazz, fixture.clone());
+        assert_eq!(source.source_format, "jazz_history_json");
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+
+        let first = import_jazz_history(
+            &fixture,
+            &mut store,
+            JazzImportOptions {
+                machine_id: "test-machine".into(),
+                source_path: Some(fixture.clone()),
+                imported_at: DateTime::parse_from_rfc3339("2026-07-04T17:30:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                allow_partial_failures: true,
+                ..JazzImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(first.failed, 0, "{:?}", first.failures);
+        assert_eq!(first.imported_sessions, 1);
+        assert_eq!(first.imported_events, 4);
+        let events = store
+            .events_for_session(provider_session_uuid(
+                CaptureProvider::Jazz,
+                "jazz-conversation-1",
+            ))
+            .unwrap();
+        assert_eq!(events.len(), 4);
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == EventType::ToolCall));
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == EventType::ToolOutput));
+        let rendered = serde_json::to_string(&events).unwrap();
+        assert!(rendered.contains("Jazz fixture oracle prompt"));
+        assert!(rendered.contains("jazz-fixture-model"));
+        assert!(store
+            .search_event_hits("jazz tool result oracle", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::Jazz)));
+
+        let second = import_jazz_history(
+            &fixture,
+            &mut store,
+            JazzImportOptions {
+                source_path: Some(fixture.clone()),
+                allow_partial_failures: true,
+                ..JazzImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(second.failed, 0, "{:?}", second.failures);
+        assert_eq!(second.imported_sessions, 0);
+        assert_eq!(second.imported_events, 0);
+        assert_eq!(second.skipped_sessions, 1);
+        assert_eq!(second.skipped_events, 4);
+    }
+
+    #[test]
+    fn native_jazz_reports_malformed_conversations_partially() {
+        let temp = tempdir();
+        let fixture = provider_history_fixture("jazz/malformed/history");
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let summary = import_jazz_history(
+            &fixture,
+            &mut store,
+            JazzImportOptions {
+                allow_partial_failures: true,
+                ..JazzImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.failed, 1, "{:?}", summary.failures);
+        assert_eq!(summary.imported_sessions, 1);
+        assert_eq!(summary.imported_events, 1);
+        assert!(summary.failures[0]
+            .error
+            .contains("Jazz conversation missing startedAt"));
+        assert!(store
+            .search_event_hits("jazz malformed fixture surviving oracle", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::Jazz)));
     }
 
     #[test]

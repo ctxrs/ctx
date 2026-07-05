@@ -1601,6 +1601,65 @@
       ]
     },
     {
+      "id": "jazz",
+      "display_name": "Jazz",
+      "priority": "p1",
+      "status": "local_import_when_supported",
+      "capture_provider": "jazz",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "jazz_history_json",
+          "fidelity": "imported",
+          "proof": [
+            "ctx sources",
+            "ctx import --provider jazz",
+            "cargo test -p ctx-history-capture native_jazz_fixture_imports_searches_reimports_and_tool_events"
+          ],
+          "notes": [
+            "Reads Jazz per-agent history JSON files under JAZZ_HOME/history or ~/.jazz/history.",
+            "Normalizes retained conversations from each <agentId>.json file into sessions and indexes message array entries in order; message-level timestamps are not present in the Jazz history JSON."
+          ]
+        }
+      ],
+      "history_locations": [
+        "JAZZ_HOME/history/*.json",
+        "~/.jazz/history/*.json"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": false,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": true,
+        "command_output": false,
+        "files_touched": false,
+        "artifacts": false,
+        "model_identity": false,
+        "costs": false,
+        "token_usage": false,
+        "parent_child_session_edges": false
+      },
+      "blockers": [
+        "Importer is based on jazz-ai@0.12.5 package storage proof and sanitized fixtures; future package schema changes may need adapter updates.",
+        "Jazz stores only the conversations retained in each per-agent history file, so older conversations may no longer be available for import."
+      ],
+      "public_docs": "docs/provider-support.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/jazz/v0.12.5/history",
+        "tests/fixtures/provider-history/jazz/malformed/history"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs",
+        "tests/fixtures/provider-history/jazz/v0.12.5/history",
+        "tests/fixtures/provider-history/jazz/malformed/history"
+      ]
+    },
+    {
       "id": "forgecode",
       "display_name": "ForgeCode",
       "priority": "p1",

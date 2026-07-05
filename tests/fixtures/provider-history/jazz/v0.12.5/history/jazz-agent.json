@@ -1,0 +1,58 @@
+{
+  "agentId": "jazz-agent",
+  "conversations": [
+    {
+      "conversationId": "jazz-conversation-1",
+      "title": "Jazz fixture conversation",
+      "agentId": "jazz-agent",
+      "startedAt": "2026-07-04T17:00:00Z",
+      "endedAt": "2026-07-04T17:00:09Z",
+      "messageCount": 4,
+      "messages": [
+        {
+          "id": "msg-user-1",
+          "role": "user",
+          "content": "Jazz fixture oracle prompt"
+        },
+        {
+          "id": "msg-assistant-1",
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "I will inspect src/jazz_oracle.txt."
+            },
+            {
+              "type": "tool-call",
+              "toolName": "read_file",
+              "input": {
+                "path": "src/jazz_oracle.txt"
+              }
+            }
+          ],
+          "model": "jazz-fixture-model",
+          "usage": {
+            "promptTokens": 12,
+            "completionTokens": 8
+          }
+        },
+        {
+          "id": "msg-tool-1",
+          "role": "tool",
+          "content": [
+            {
+              "type": "tool-result",
+              "toolName": "read_file",
+              "output": "jazz tool result oracle"
+            }
+          ]
+        },
+        {
+          "id": "msg-assistant-2",
+          "role": "assistant",
+          "content": "Jazz final answer mentions src/jazz_oracle.txt."
+        }
+      ]
+    }
+  ]
+}

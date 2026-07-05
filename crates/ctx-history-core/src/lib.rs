@@ -198,6 +198,7 @@ text_enum! {
         KimiCodeCli => "kimi_code_cli",
         AutohandCode => "autohand_code",
         IflowCli => "iflow_cli",
+        Jazz => "jazz",
         ForgeCode => "forgecode",
         DeepAgents => "deepagents",
         MistralVibe => "mistral_vibe",
@@ -1555,6 +1556,10 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<CaptureProvider>("\"iflow_cli\"").unwrap(),
             CaptureProvider::IflowCli
+        );
+        assert_eq!(
+            serde_json::from_str::<CaptureProvider>("\"jazz\"").unwrap(),
+            CaptureProvider::Jazz
         );
         assert_eq!(
             serde_json::from_str::<CaptureProvider>("\"forgecode\"").unwrap(),

@@ -277,6 +277,12 @@ const IFLOW_CLI_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation
     source_kind: ProviderSourceKind::NativeHistory,
 }];
 
+const JAZZ_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
+    path_components: &[".jazz", "history"],
+    source_format: "jazz_history_json",
+    source_kind: ProviderSourceKind::NativeHistory,
+}];
+
 const KODE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     path_components: &[".kode", "projects"],
     source_format: "kode_session_jsonl_tree",
@@ -656,6 +662,16 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         provider: CaptureProvider::IflowCli,
         display_name: "iFlow CLI",
         default_locations: IFLOW_CLI_DEFAULTS,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
+    ProviderSourceSpec {
+        provider: CaptureProvider::Jazz,
+        display_name: "Jazz",
+        default_locations: JAZZ_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         raw_retention: ProviderRawRetention::PathReference,
@@ -1100,6 +1116,16 @@ fn discover_provider_sources_for_spec(
                     spec,
                     path.join("projects"),
                     "iflow_cli_session_jsonl_tree",
+                    ProviderSourceKind::NativeHistory,
+                ));
+            }
+        }
+        CaptureProvider::Jazz => {
+            if let Some(path) = env_path_resolved("JAZZ_HOME", home) {
+                sources.push(provider_source_from_parts(
+                    spec,
+                    path.join("history"),
+                    "jazz_history_json",
                     ProviderSourceKind::NativeHistory,
                 ));
             }
@@ -1699,6 +1725,7 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::AutohandCode => "autohand_code_sessions_jsonl",
         CaptureProvider::IflowCli if path.is_dir() => "iflow_cli_session_jsonl_tree",
         CaptureProvider::IflowCli => "iflow_cli_session_jsonl",
+        CaptureProvider::Jazz => "jazz_history_json",
         CaptureProvider::Kode if path.is_dir() => "kode_session_jsonl_tree",
         CaptureProvider::Kode => "kode_session_jsonl",
         CaptureProvider::Neovate if path.is_dir() => "neovate_session_jsonl_tree",
@@ -1863,6 +1890,9 @@ fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::IflowCli => {
             Some("path exists but no iFlow CLI session-*.jsonl files were found under projects")
         }
+        CaptureProvider::Jazz => {
+            Some("path exists but no Jazz agent history JSON files were found")
+        }
         CaptureProvider::Kode => {
             Some("path exists but no Kode session JSONL files were found under projects")
         }
@@ -1972,6 +2002,9 @@ fn unknown_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::IflowCli => {
             Some("path exists but the iFlow CLI session probe hit its scan budget")
         }
+        CaptureProvider::Jazz => {
+            Some("path exists but the Jazz history JSON probe hit its scan budget")
+        }
         CaptureProvider::MistralVibe => {
             Some("path exists but the Mistral Vibe session probe hit its scan budget")
         }
@@ -2062,6 +2095,9 @@ fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'static str> {
         ),
         CaptureProvider::IflowCli => {
             Some("path exists but iFlow CLI session transcripts could not be read; check permissions")
+        }
+        CaptureProvider::Jazz => {
+            Some("path exists but Jazz history JSON files could not be read; check permissions")
         }
         CaptureProvider::CommandCode => Some(
             "path exists but Command Code session transcripts could not be read; check permissions",
@@ -2190,6 +2226,12 @@ fn default_location_import_probe(
                 .file_name()
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.starts_with("session-") && name.ends_with(".jsonl"))
+        }),
+        CaptureProvider::Jazz => has_json_file_under_matching(path, 10_000, |candidate| {
+            candidate
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| !name.starts_with(".history-") && name.ends_with(".json"))
         }),
         CaptureProvider::Kode => has_jsonl_file_under_matching(path, 10_000, |candidate| {
             !path_has_component(candidate, "requests")
@@ -3390,6 +3432,40 @@ mod tests {
     }
 
     #[test]
+    fn jazz_discovery_uses_default_and_home_env_history() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::remove("JAZZ_HOME");
+
+        let default_history = temp.path().join(".jazz/history");
+        std::fs::create_dir_all(&default_history).unwrap();
+        let empty_source =
+            discover_provider_sources_for_provider(temp.path(), CaptureProvider::Jazz)
+                .into_iter()
+                .find(|source| source.path == default_history)
+                .unwrap();
+        assert_eq!(empty_source.status, ProviderSourceStatus::Empty);
+
+        write_jazz_discovery_history(&default_history);
+        let source = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Jazz)
+            .into_iter()
+            .find(|source| source.path == default_history)
+            .unwrap();
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+        assert_eq!(source.source_format, "jazz_history_json");
+        assert_eq!(source.import_support, ProviderImportSupport::Native);
+
+        let custom_home = temp.path().join("custom-jazz");
+        let custom_history = custom_home.join("history");
+        write_jazz_discovery_history(&custom_history);
+        let _home = EnvGuard::set("JAZZ_HOME", custom_home.as_os_str());
+        let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Jazz);
+        assert!(sources.iter().any(|source| {
+            source.path == custom_history && source.status == ProviderSourceStatus::Available
+        }));
+    }
+
+    #[test]
     fn kode_and_neovate_discovery_use_default_and_env_project_roots() {
         let _lock = ENV_LOCK.lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
@@ -3913,6 +3989,15 @@ mod tests {
         let project = projects.join("sanitized-workspace");
         std::fs::create_dir_all(&project).unwrap();
         std::fs::write(project.join("session-iflow-discovery.jsonl"), "{}\n").unwrap();
+    }
+
+    fn write_jazz_discovery_history(history: &Path) {
+        std::fs::create_dir_all(history).unwrap();
+        std::fs::write(
+            history.join("jazz-agent.json"),
+            r#"{"agentId":"jazz-agent","conversations":[]}"#,
+        )
+        .unwrap();
     }
 
     fn write_generic_project_jsonl(projects: &Path, file_name: &str) {

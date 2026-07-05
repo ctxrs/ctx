@@ -43,13 +43,13 @@ use ctx_history_capture::{
     import_custom_history_jsonl_v1_reader, import_deepagents_sqlite, import_dexto_sqlite,
     import_factory_ai_droid_sessions, import_forgecode_sqlite, import_gemini_cli_history,
     import_goose_sessions_sqlite, import_hermes_sqlite, import_iflow_cli_history,
-    import_kilo_sqlite, import_kimi_code_cli_history, import_kiro_sqlite, import_kode_history,
-    import_lingma_sqlite, import_mistral_vibe_history, import_mux_history, import_nanoclaw_project,
-    import_neovate_history, import_openclaw_history, import_opencode_sqlite,
-    import_openhands_file_events, import_pi_session_jsonl, import_qwen_code_history,
-    import_reasonix_history, import_roo_task_json_history, import_rovodev_history,
-    import_shelley_sqlite, import_terramind_sqlite, import_zed_threads_sqlite,
-    provider_source_for_path, provider_source_spec, stable_capture_uuid,
+    import_jazz_history, import_kilo_sqlite, import_kimi_code_cli_history, import_kiro_sqlite,
+    import_kode_history, import_lingma_sqlite, import_mistral_vibe_history, import_mux_history,
+    import_nanoclaw_project, import_neovate_history, import_openclaw_history,
+    import_opencode_sqlite, import_openhands_file_events, import_pi_session_jsonl,
+    import_qwen_code_history, import_reasonix_history, import_roo_task_json_history,
+    import_rovodev_history, import_shelley_sqlite, import_terramind_sqlite,
+    import_zed_threads_sqlite, provider_source_for_path, provider_source_spec, stable_capture_uuid,
     validate_custom_history_jsonl_v1, validate_custom_history_jsonl_v1_reader,
     AiderDeskImportOptions, AntigravityCliImportOptions, AstrBotSqliteImportOptions,
     AutohandCodeImportOptions, CatalogSummary, ClaudeProjectsImportOptions,
@@ -61,13 +61,13 @@ use ctx_history_capture::{
     CustomHistoryJsonlV1ImportOptions, DeepAgentsSqliteImportOptions, DextoSqliteImportOptions,
     FactoryAiDroidImportOptions, ForgeCodeSqliteImportOptions, GeminiCliImportOptions,
     GooseSessionsSqliteImportOptions, HermesSqliteImportOptions, IflowCliImportOptions,
-    KiloSqliteImportOptions, KimiCodeCliImportOptions, KiroSqliteImportOptions, KodeImportOptions,
-    LingmaSqliteImportOptions, MistralVibeImportOptions, MuxImportOptions, NanoClawImportOptions,
-    NeovateImportOptions, OpenClawImportOptions, OpenCodeSqliteImportOptions,
-    OpenHandsImportOptions, PiSessionImportOptions, ProviderImportSummary, ProviderImportSupport,
-    ProviderSource, ProviderSourceStatus, QwenCodeImportOptions, ReasonixImportOptions,
-    RooTaskJsonImportOptions, RovoDevImportOptions, ShelleySqliteImportOptions,
-    TerramindSqliteImportOptions, ZedThreadsSqliteImportOptions,
+    JazzImportOptions, KiloSqliteImportOptions, KimiCodeCliImportOptions, KiroSqliteImportOptions,
+    KodeImportOptions, LingmaSqliteImportOptions, MistralVibeImportOptions, MuxImportOptions,
+    NanoClawImportOptions, NeovateImportOptions, OpenClawImportOptions,
+    OpenCodeSqliteImportOptions, OpenHandsImportOptions, PiSessionImportOptions,
+    ProviderImportSummary, ProviderImportSupport, ProviderSource, ProviderSourceStatus,
+    QwenCodeImportOptions, ReasonixImportOptions, RooTaskJsonImportOptions, RovoDevImportOptions,
+    ShelleySqliteImportOptions, TerramindSqliteImportOptions, ZedThreadsSqliteImportOptions,
 };
 use ctx_history_core::{
     database_path, default_data_root, utc_now, CaptureProvider, ContextCitation,
@@ -722,6 +722,7 @@ enum NativeProviderArg {
     AutohandCode,
     #[value(name = "iflow-cli", alias = "iflow", alias = "iflow_cli")]
     IflowCli,
+    Jazz,
     #[value(
         name = "forgecode",
         alias = "forge",
@@ -822,6 +823,7 @@ enum ProviderArg {
     AutohandCode,
     #[value(name = "iflow-cli", alias = "iflow", alias = "iflow_cli")]
     IflowCli,
+    Jazz,
     #[value(
         name = "forgecode",
         alias = "forge",
@@ -925,6 +927,7 @@ impl NativeProviderArg {
             Self::KimiCodeCli => CaptureProvider::KimiCodeCli,
             Self::AutohandCode => CaptureProvider::AutohandCode,
             Self::IflowCli => CaptureProvider::IflowCli,
+            Self::Jazz => CaptureProvider::Jazz,
             Self::ForgeCode => CaptureProvider::ForgeCode,
             Self::DeepAgents => CaptureProvider::DeepAgents,
             Self::MistralVibe => CaptureProvider::MistralVibe,
@@ -994,6 +997,7 @@ impl ProviderArg {
             Self::KimiCodeCli => CaptureProvider::KimiCodeCli,
             Self::AutohandCode => CaptureProvider::AutohandCode,
             Self::IflowCli => CaptureProvider::IflowCli,
+            Self::Jazz => CaptureProvider::Jazz,
             Self::ForgeCode => CaptureProvider::ForgeCode,
             Self::DeepAgents => CaptureProvider::DeepAgents,
             Self::MistralVibe => CaptureProvider::MistralVibe,
@@ -1042,6 +1046,7 @@ impl ProviderArg {
             Self::KimiCodeCli => "kimi-code-cli",
             Self::AutohandCode => "autohand-code",
             Self::IflowCli => "iflow-cli",
+            Self::Jazz => "jazz",
             Self::ForgeCode => "forgecode",
             Self::DeepAgents => "deepagents",
             Self::MistralVibe => "mistral-vibe",
@@ -6130,6 +6135,17 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
+        CaptureProvider::Jazz => import_jazz_history(
+            &source.path,
+            store,
+            JazzImportOptions {
+                source_path: Some(source.path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: true,
+                ..JazzImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
         CaptureProvider::Kode => import_kode_history(
             &source.path,
             store,
@@ -6543,6 +6559,13 @@ fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bool {
             .file_name()
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.starts_with("session-") && name.ends_with(".jsonl")),
+        CaptureProvider::Jazz => {
+            path.extension().and_then(|ext| ext.to_str()) == Some("json")
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| !name.starts_with(".history-"))
+        }
         CaptureProvider::Kode => {
             path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
                 && path
@@ -6832,6 +6855,7 @@ fn source_uses_incremental_event_search(source: &SourceInfo) -> bool {
             | CaptureProvider::KimiCodeCli
             | CaptureProvider::AutohandCode
             | CaptureProvider::IflowCli
+            | CaptureProvider::Jazz
             | CaptureProvider::Kode
             | CaptureProvider::Neovate
             | CaptureProvider::ForgeCode
