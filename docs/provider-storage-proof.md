@@ -349,6 +349,32 @@ IDE/application storage imports.
   changed-file, and IDE/application history semantics remain unclaimed until a
   public contract or fixture proves them.
 
+## Devin CLI ATIF Export
+
+- Official CLI evidence: the Devin CLI command reference documents
+  `devin --export [PATH]` and states that it exports the conversation to a file
+  after each turn in ATIF format. The same page shows both default-path and
+  explicit-file examples.
+- Official changelog evidence: the 2026.5.26-0 stable changelog entry added the
+  `--export` flag for ATIF conversation history. A later stable entry says ATIF
+  exports include richer per-step transcript details and timing metrics.
+- Schema evidence: the public ATIF RFC defines a JSON root with
+  `schema_version`, `agent`, and `steps`; step records carry message/source data
+  and optional tool/observation-like details.
+- `ctx` imports this shape as `devin_atif_json` only through an explicit
+  user-supplied path: `ctx import --provider devin --path <atif-file-or-dir>`.
+  A directory import recursively scans `.json` files; an explicit file path is
+  validated by ATIF content even if a temporary fixture path has no `.json`
+  suffix.
+- Fixture provenance: `tests/fixtures/provider-history/devin/atif/export.json`
+  is synthetic, minimized from the public ATIF root/step contract and Devin CLI
+  export docs. It is not copied from a Devin account, Devin cloud history, local
+  Devin config, login state, or a private user session.
+- Caveat: ctx does not discover or parse `~/.config/devin`, cloud/object-store
+  state, login/account paths, or any default local Devin history location. Those
+  paths remain unclaimed until a public local storage contract or safe generated
+  export fixture proves them.
+
 ## Firebender
 
 - Registry evidence: `vercel-labs/skills` maps the `firebender` agent id to

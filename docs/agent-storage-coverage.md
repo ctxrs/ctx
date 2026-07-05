@@ -25,8 +25,8 @@ Status meanings:
 - `install-target`: npx target is an aggregate or project skill target, not a
   proven history-producing agent.
 
-Result on this integration branch: 63 `native-auto`, 1 `native-explicit`, 0
-`native-preview`, 0 `candidate-family`, 4 `webapp-boundary`, 2 `unknown`, and
+Result on this integration branch: 63 `native-auto`, 2 `native-explicit`, 0
+`native-preview`, 0 `candidate-family`, 3 `webapp-boundary`, 2 `unknown`, and
 2 `install-target` rows.
 
 ## Shared Families
@@ -96,7 +96,7 @@ Result on this integration branch: 63 `native-auto`, 1 `native-explicit`, 0
 | `crush` | `native-auto` | `generic sqlite messages` | ctx `crush_sqlite`; npx `~/.config/crush` | - |
 | `cursor` | `native-auto` | `VS Code/Electron storage` | ctx `cursor_agent_transcript_jsonl_tree`; npx `~/.cursor` | - |
 | `deepagents` | `native-auto` | `LangGraph checkpoint SQLite` | ctx `deepagents_sessions_sqlite`; npx `~/.deepagents`; official local state evidence points to `~/.deepagents/.state/sessions.db` and `history.jsonl` | Imports decoded root `writes.messages` chat messages only; `history.jsonl` and arbitrary checkpoint state blobs are not indexed. |
-| `devin` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.config/devin`; no ctx provider on this local-native branch; official Devin CLI docs describe `devin --export [PATH]` ATIF export as a user-supplied export path | Hosted/export import work lives on the hosted/cloud branch. No Devin cloud scraping, login, account paths, default discovery, or `~/.config/devin` local conversation DB is claimed. |
+| `devin` | `native-explicit` | `explicit ATIF export JSON` | ctx `devin_atif_json` via explicit `--path`; npx `~/.config/devin` remains unclaimed; official Devin CLI docs describe `devin --export [PATH]` ATIF export as a user-supplied export path | Official explicit import from user-supplied Devin CLI `devin --export [PATH]` ATIF files/directories. No Devin cloud scraping, login, account paths, default discovery, or `~/.config/devin` local conversation DB is claimed. |
 | `dexto` | `native-auto` | `generic sqlite messages` | ctx `dexto_sqlite`; npx `~/.dexto`; `dexto@1.9.1`, `@dexto/storage@1.9.1`, and `@dexto/agent-management@1.9.1` prove CLI-enriched SQLite paths under Dexto `database` roots | Auto import scans bounded `.dexto/database/*.db` roots with Dexto `kv_store`/`list_store` schema; custom SQLite paths outside default roots still require explicit `--path`. |
 | `droid` | `native-auto` | `JSONL CLI event logs` | ctx `factory_ai_droid_sessions_jsonl`; npx `~/.factory` | - |
 | `eve` | `native-auto` | `Workflow local-world streams` | ctx `eve_workflow_data_streams`; npx project `agent`; `eve@0.19.0` local development uses Workflow local-world `.workflow-data` durable stream storage | Imports default Eve message stream chunks from `WORKFLOW_LOCAL_DATA_DIR`, current project `.workflow-data`, or explicit paths; `.eve` build/runtime artifacts are not treated as history. |

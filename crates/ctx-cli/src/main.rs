@@ -43,7 +43,7 @@ use ctx_history_capture::{
     import_command_code_history, import_continue_cli_sessions, import_copilot_cli_session_events,
     import_cortex_code_history, import_crush_sqlite, import_cursor_native_history,
     import_custom_history_jsonl_v1, import_custom_history_jsonl_v1_reader,
-    import_deepagents_sqlite, import_dexto_sqlite, import_eve_history,
+    import_deepagents_sqlite, import_devin_atif_exports, import_dexto_sqlite, import_eve_history,
     import_factory_ai_droid_sessions, import_firebender_sqlite, import_forgecode_sqlite,
     import_gemini_cli_history, import_goose_sessions_sqlite, import_hermes_sqlite,
     import_iflow_cli_history, import_jazz_history, import_junie_history, import_kilo_sqlite,
@@ -67,11 +67,11 @@ use ctx_history_capture::{
     CodexSessionImportProgressCallback, CodexToolOutputMode, CommandCodeImportOptions,
     ContinueCliImportOptions, CopilotCliImportOptions, CortexCodeImportOptions,
     CrushSqliteImportOptions, CursorNativeImportOptions, CustomHistoryJsonlV1ImportOptions,
-    DeepAgentsSqliteImportOptions, DextoSqliteImportOptions, EveImportOptions,
-    FactoryAiDroidImportOptions, FirebenderSqliteImportOptions, ForgeCodeSqliteImportOptions,
-    GeminiCliImportOptions, GooseSessionsSqliteImportOptions, HermesSqliteImportOptions,
-    IflowCliImportOptions, JazzImportOptions, JunieImportOptions, KiloSqliteImportOptions,
-    KimiCodeCliImportOptions, KiroSqliteImportOptions, KodeImportOptions,
+    DeepAgentsSqliteImportOptions, DevinAtifImportOptions, DextoSqliteImportOptions,
+    EveImportOptions, FactoryAiDroidImportOptions, FirebenderSqliteImportOptions,
+    ForgeCodeSqliteImportOptions, GeminiCliImportOptions, GooseSessionsSqliteImportOptions,
+    HermesSqliteImportOptions, IflowCliImportOptions, JazzImportOptions, JunieImportOptions,
+    KiloSqliteImportOptions, KimiCodeCliImportOptions, KiroSqliteImportOptions, KodeImportOptions,
     LingmaSqliteImportOptions, MistralVibeImportOptions, MoxbySqliteImportOptions,
     MuxImportOptions, NanoClawImportOptions, NeovateImportOptions, OpenClawImportOptions,
     OpenCodeSqliteImportOptions, OpenHandsImportOptions, OpenLoafImportOptions,
@@ -763,6 +763,7 @@ enum NativeProviderArg {
     Jazz,
     #[value(name = "auggie", alias = "augment", alias = "augment-code")]
     Auggie,
+    Devin,
     Eve,
     Junie,
     #[value(
@@ -922,6 +923,7 @@ enum ProviderArg {
     Jazz,
     #[value(name = "auggie", alias = "augment", alias = "augment-code")]
     Auggie,
+    Devin,
     Eve,
     Junie,
     #[value(
@@ -1063,6 +1065,7 @@ impl NativeProviderArg {
             Self::IflowCli => CaptureProvider::IflowCli,
             Self::Jazz => CaptureProvider::Jazz,
             Self::Auggie => CaptureProvider::Auggie,
+            Self::Devin => CaptureProvider::Devin,
             Self::Eve => CaptureProvider::Eve,
             Self::Junie => CaptureProvider::Junie,
             Self::Firebender => CaptureProvider::Firebender,
@@ -1153,6 +1156,7 @@ impl ProviderArg {
             Self::IflowCli => CaptureProvider::IflowCli,
             Self::Jazz => CaptureProvider::Jazz,
             Self::Auggie => CaptureProvider::Auggie,
+            Self::Devin => CaptureProvider::Devin,
             Self::Eve => CaptureProvider::Eve,
             Self::Junie => CaptureProvider::Junie,
             Self::Firebender => CaptureProvider::Firebender,
@@ -1222,6 +1226,7 @@ impl ProviderArg {
             Self::IflowCli => "iflow-cli",
             Self::Jazz => "jazz",
             Self::Auggie => "auggie",
+            Self::Devin => "devin",
             Self::Eve => "eve",
             Self::Junie => "junie",
             Self::Firebender => "firebender",
@@ -6521,6 +6526,17 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
+        CaptureProvider::Devin => import_devin_atif_exports(
+            &source.path,
+            store,
+            DevinAtifImportOptions {
+                source_path: Some(source.path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: true,
+                ..DevinAtifImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
         CaptureProvider::Eve => import_eve_history(
             &source.path,
             store,
@@ -7050,6 +7066,10 @@ fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bool {
             path.extension().and_then(|ext| ext.to_str()) == Some("json")
                 && path.starts_with(&source.path)
         }
+        CaptureProvider::Devin => {
+            path.extension().and_then(|ext| ext.to_str()) == Some("json")
+                && path.starts_with(&source.path)
+        }
         CaptureProvider::Eve => {
             path == source.path
                 || (path.starts_with(&source.path)
@@ -7390,6 +7410,7 @@ fn source_uses_incremental_event_search(source: &SourceInfo) -> bool {
             | CaptureProvider::IflowCli
             | CaptureProvider::Jazz
             | CaptureProvider::Auggie
+            | CaptureProvider::Devin
             | CaptureProvider::Eve
             | CaptureProvider::Junie
             | CaptureProvider::Firebender

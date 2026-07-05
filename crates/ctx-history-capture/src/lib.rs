@@ -587,6 +587,27 @@ impl Default for AuggieImportOptions {
 }
 
 #[derive(Debug, Clone)]
+pub struct DevinAtifImportOptions {
+    pub machine_id: String,
+    pub source_path: Option<PathBuf>,
+    pub imported_at: DateTime<Utc>,
+    pub history_record_id: Option<Uuid>,
+    pub allow_partial_failures: bool,
+}
+
+impl Default for DevinAtifImportOptions {
+    fn default() -> Self {
+        Self {
+            machine_id: default_machine_id(),
+            source_path: None,
+            imported_at: utc_now(),
+            history_record_id: None,
+            allow_partial_failures: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct EveImportOptions {
     pub machine_id: String,
     pub source_path: Option<PathBuf>,
@@ -1765,6 +1786,9 @@ pub struct AmpThreadsExportJsonAdapter;
 pub struct AuggieSessionJsonAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
+pub struct DevinAtifJsonAdapter;
+
+#[derive(Debug, Clone, Copy, Default)]
 pub struct EveWorkflowDataAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -2688,6 +2712,24 @@ impl ProviderCaptureAdapter for AuggieSessionJsonAdapter {
         context: &ProviderAdapterContext,
     ) -> Result<ProviderNormalizationResult> {
         normalize_auggie_sessions(path, context)
+    }
+}
+
+impl ProviderCaptureAdapter for DevinAtifJsonAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Devin
+    }
+
+    fn source_format(&self) -> &str {
+        DEVIN_ATIF_SOURCE_FORMAT
+    }
+
+    fn normalize_path(
+        &self,
+        path: &Path,
+        context: &ProviderAdapterContext,
+    ) -> Result<ProviderNormalizationResult> {
+        normalize_devin_atif_exports(path, context)
     }
 }
 
@@ -5852,6 +5894,41 @@ pub fn import_auggie_history(
     )
 }
 
+pub fn import_devin_atif_exports(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: DevinAtifImportOptions,
+) -> Result<ProviderImportSummary> {
+    let path = path.as_ref();
+    let source_path = options
+        .source_path
+        .clone()
+        .unwrap_or_else(|| path.to_path_buf());
+    let normalization = DevinAtifJsonAdapter.normalize_path(
+        path,
+        &ProviderAdapterContext {
+            machine_id: options.machine_id,
+            source_path: Some(source_path),
+            imported_at: options.imported_at,
+            tool_output_mode: CodexToolOutputMode::Full,
+            event_mode: CodexEventImportMode::Rich,
+            include_notices: true,
+        },
+    )?;
+
+    import_normalized_provider_captures(
+        store,
+        normalization,
+        NormalizedProviderImportOptions {
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+            persist_cursors: true,
+            wrap_transaction: true,
+            fast_event_inserts: true,
+        },
+    )
+}
+
 pub fn import_eve_history(
     path: impl AsRef<Path>,
     store: &mut Store,
@@ -7155,6 +7232,7 @@ const CODEBUDDY_SOURCE_FORMAT: &str = "codebuddy_history_json";
 const AIDER_DESK_SOURCE_FORMAT: &str = "aider_desk_task_context_json";
 const AMP_THREADS_EXPORT_SOURCE_FORMAT: &str = "amp_threads_export_json";
 const AUGGIE_SESSION_JSON_SOURCE_FORMAT: &str = "auggie_session_json";
+const DEVIN_ATIF_SOURCE_FORMAT: &str = "devin_atif_json";
 const EVE_WORKFLOW_DATA_SOURCE_FORMAT: &str = "eve_workflow_data_streams";
 const JUNIE_SESSION_EVENTS_SOURCE_FORMAT: &str = "junie_session_events_jsonl_tree";
 const FIREBENDER_SQLITE_SOURCE_FORMAT: &str = "firebender_chat_history_sqlite";
@@ -11717,6 +11795,322 @@ fn amp_upstream_schema_anchor() -> Value {
         "export_handler": "l2$ JSON.stringify(thread)",
         "markdown_renderer": "M8H reads title, id, created, agentMode, messages, roles, text, tool_use, tool_result, summary, and manual_bash_invocation blocks"
     })
+}
+
+fn normalize_devin_atif_exports(
+    path: &Path,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    let mut paths = Vec::new();
+    collect_json_paths(path, &mut paths)?;
+    paths.sort();
+    if paths.is_empty() {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "no Devin ATIF JSON export files were found",
+        });
+    }
+
+    let mut merged = ProviderNormalizationResult::default();
+    for (export_index, export_path) in paths.iter().enumerate() {
+        match normalize_devin_atif_file(export_path, context, export_index + 1) {
+            Ok(mut result) => {
+                merged.summary.merge(result.summary);
+                merged.captures.append(&mut result.captures);
+                merged.files_touched.append(&mut result.files_touched);
+            }
+            Err(err) => push_provider_import_failure(
+                &mut merged.summary,
+                export_index + 1,
+                format!("{}: {err}", export_path.display()),
+            ),
+        }
+    }
+
+    if merged.captures.is_empty() && merged.summary.failed == 0 {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "no Devin ATIF trajectories with steps were found",
+        });
+    }
+    Ok(merged)
+}
+
+fn normalize_devin_atif_file(
+    path: &Path,
+    context: &ProviderAdapterContext,
+    export_index: usize,
+) -> Result<ProviderNormalizationResult> {
+    let trajectory = read_provider_json_file(path, "Devin ATIF export JSON")?;
+    validate_atif_root(&trajectory)?;
+    let steps = trajectory
+        .get("steps")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            CaptureError::InvalidPayload("Devin ATIF export is missing steps array".to_owned())
+        })?;
+    let provider_session_id = devin_atif_session_id(&trajectory, path);
+    let started_at = steps
+        .iter()
+        .find_map(devin_atif_step_time)
+        .or_else(|| provider_timestamp_from_fields(&trajectory, &["created_at", "createdAt"]))
+        .unwrap_or(context.imported_at);
+    let ended_at = steps
+        .iter()
+        .rev()
+        .find_map(devin_atif_step_time)
+        .or_else(|| provider_timestamp_from_fields(&trajectory, &["updated_at", "updatedAt"]));
+    let agent = trajectory.get("agent").cloned().unwrap_or(Value::Null);
+    let cwd = provider_string_field(
+        &trajectory,
+        &["cwd", "workspace", "workspace_path", "workspacePath"],
+    )
+    .or_else(|| {
+        trajectory.get("extra").and_then(|extra| {
+            provider_string_field(
+                extra,
+                &["cwd", "workspace", "workspace_path", "workspacePath"],
+            )
+        })
+    });
+    let raw_source_path = path.display().to_string();
+    let source_metadata = json!({
+        "adapter": DEVIN_ATIF_SOURCE_FORMAT,
+        "source_path": raw_source_path,
+        "upstream_schema_anchor": {
+            "devin_cli_reference": "https://docs.devin.ai/cli/reference/commands",
+            "devin_cli_changelog": "https://docs.devin.ai/cli/changelog/stable",
+            "atif_rfc": "https://github.com/harbor-framework/harbor/blob/main/rfcs/0001-trajectory-format.md",
+        },
+        "privacy_boundary": "explicit user-supplied Devin CLI --export ATIF file or directory only",
+    });
+    let session_metadata = json!({
+        "source_format": DEVIN_ATIF_SOURCE_FORMAT,
+        "provider": CaptureProvider::Devin.as_str(),
+        "schema_version": trajectory.get("schema_version").cloned(),
+        "trajectory_id": trajectory.get("trajectory_id").and_then(Value::as_str),
+        "session_id": trajectory.get("session_id").and_then(Value::as_str),
+        "agent": provider_capped_json(&agent, PROVIDER_MAX_PREVIEW_CHARS),
+        "step_count": steps.len(),
+        "final_metrics": trajectory.get("final_metrics").map(|value| provider_capped_json(value, PROVIDER_MAX_PREVIEW_CHARS)),
+        "limitations": [
+            "ctx imports only explicit Devin CLI ATIF exports supplied with --path",
+            "ctx does not read Devin cloud sessions, account paths, login state, object storage, or default local config directories",
+            "ATIF steps are indexed as capped local previews; full native JSON remains referenced by raw_source_path",
+        ],
+    });
+    let base_draft = NativeSessionDraft {
+        provider: CaptureProvider::Devin,
+        source_format: DEVIN_ATIF_SOURCE_FORMAT,
+        provider_session_id: provider_session_id.clone(),
+        parent_provider_session_id: None,
+        root_provider_session_id: None,
+        external_agent_id: devin_atif_agent_name(&agent),
+        agent_type: AgentType::Primary,
+        role_hint: Some("primary".to_owned()),
+        is_primary: true,
+        started_at,
+        ended_at,
+        cwd,
+        fidelity: Fidelity::Imported,
+        raw_source_path: raw_source_path.clone(),
+        trust: ProviderSourceTrust::ProviderExport,
+        source_metadata,
+        session_metadata,
+    };
+
+    let mut result = ProviderNormalizationResult::default();
+    if steps.is_empty() {
+        result.captures.push((
+            export_index,
+            native_provider_capture(base_draft, context, None),
+        ));
+        return Ok(result);
+    }
+
+    for (step_index, step) in steps.iter().enumerate() {
+        let line = export_index
+            .saturating_mul(100_000)
+            .saturating_add(step_index)
+            .saturating_add(1);
+        let event = devin_atif_event(
+            &provider_session_id,
+            step,
+            step_index as u64,
+            started_at + Duration::milliseconds(step_index as i64),
+            &raw_source_path,
+        );
+        result
+            .files_touched
+            .extend(provider_file_touches_from_raw_value(
+                CaptureProvider::Devin,
+                &provider_session_id,
+                DEVIN_ATIF_SOURCE_FORMAT,
+                Some(raw_source_path.as_str()),
+                step,
+                &event,
+                line,
+            ));
+        result.captures.push((
+            line,
+            native_provider_capture(base_draft.clone(), context, Some(event)),
+        ));
+    }
+    Ok(result)
+}
+
+fn validate_atif_root(value: &Value) -> Result<()> {
+    if value.get("schema_version").is_none() {
+        return Err(CaptureError::InvalidPayload(
+            "ATIF root is missing schema_version".to_owned(),
+        ));
+    }
+    if !value.get("agent").is_some_and(Value::is_object) {
+        return Err(CaptureError::InvalidPayload(
+            "ATIF root is missing agent object".to_owned(),
+        ));
+    }
+    if !value.get("steps").is_some_and(Value::is_array) {
+        return Err(CaptureError::InvalidPayload(
+            "ATIF root is missing steps array".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn devin_atif_session_id(value: &Value, path: &Path) -> String {
+    for key in ["session_id", "trajectory_id", "id"] {
+        if let Some(id) = value
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+        {
+            return id.to_owned();
+        }
+    }
+    let key = json!({
+        "provider": "devin",
+        "source_format": DEVIN_ATIF_SOURCE_FORMAT,
+        "path": path.display().to_string(),
+    });
+    format!(
+        "devin-atif-{}",
+        stable_capture_uuid(&key.to_string(), "devin-atif-session")
+    )
+}
+
+fn devin_atif_agent_name(agent: &Value) -> Option<String> {
+    provider_string_field(agent, &["name", "agent_name", "agentName"])
+}
+
+fn devin_atif_step_time(step: &Value) -> Option<DateTime<Utc>> {
+    provider_timestamp_from_fields(
+        step,
+        &[
+            "timestamp",
+            "started_at",
+            "startedAt",
+            "ended_at",
+            "endedAt",
+        ],
+    )
+}
+
+fn devin_atif_event(
+    provider_session_id: &str,
+    step: &Value,
+    fallback_index: u64,
+    fallback_time: DateTime<Utc>,
+    raw_source_path: &str,
+) -> ProviderEventEnvelope {
+    let step_id = devin_atif_step_id(step, fallback_index);
+    let source = step
+        .get("source")
+        .or_else(|| step.get("role"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let occurred_at = devin_atif_step_time(step).unwrap_or(fallback_time);
+    native_event(NativeEventDraft {
+        provider: CaptureProvider::Devin,
+        source_format: DEVIN_ATIF_SOURCE_FORMAT,
+        provider_session_id: provider_session_id.to_owned(),
+        provider_event_index: fallback_index,
+        provider_event_hash: Some(step_id.clone()),
+        cursor: format!("{raw_source_path}:step:{step_id}"),
+        event_type: devin_atif_event_type(step, source),
+        role: Some(devin_atif_role(source)),
+        occurred_at,
+        text: devin_atif_step_text(step).unwrap_or_else(|| format!("Devin ATIF step {step_id}")),
+        body: step.clone(),
+        metadata: json!({
+            "source": "devin_atif_step",
+            "source_format": DEVIN_ATIF_SOURCE_FORMAT,
+            "step_id": step_id,
+            "step_source": source,
+            "llm_call_count": step.get("llm_call_count").and_then(Value::as_u64),
+            "metrics": step.get("metrics").map(|value| provider_capped_json(value, PROVIDER_MAX_PREVIEW_CHARS)),
+        }),
+    })
+}
+
+fn devin_atif_step_id(step: &Value, fallback_index: u64) -> String {
+    step.get("step_id")
+        .or_else(|| step.get("id"))
+        .and_then(|value| match value {
+            Value::String(text) if !text.trim().is_empty() => Some(text.clone()),
+            Value::Number(number) => Some(number.to_string()),
+            _ => None,
+        })
+        .unwrap_or_else(|| format!("step-{fallback_index}"))
+}
+
+fn devin_atif_role(source: &str) -> EventRole {
+    match source {
+        "user" => EventRole::User,
+        "agent" | "assistant" => EventRole::Assistant,
+        "system" => EventRole::System,
+        "tool" | "environment" => EventRole::Tool,
+        _ => EventRole::Unknown,
+    }
+}
+
+fn devin_atif_event_type(step: &Value, source: &str) -> EventType {
+    if step.get("tool_calls").is_some() {
+        EventType::ToolCall
+    } else if step.get("observation").is_some() || matches!(source, "tool" | "environment") {
+        EventType::ToolOutput
+    } else if source == "system" {
+        EventType::Notice
+    } else {
+        EventType::Message
+    }
+}
+
+fn devin_atif_step_text(step: &Value) -> Option<String> {
+    step.get("message")
+        .and_then(provider_value_text)
+        .or_else(|| {
+            step.get("observation")
+                .and_then(|observation| observation.get("content").or(Some(observation)))
+                .and_then(provider_value_text)
+        })
+        .or_else(|| {
+            step.get("tool_calls")
+                .and_then(Value::as_array)
+                .and_then(|tools| {
+                    let rendered = tools
+                        .iter()
+                        .filter_map(|tool| {
+                            tool.get("name")
+                                .or_else(|| tool.get("tool_name"))
+                                .or_else(|| tool.get("function").and_then(|f| f.get("name")))
+                                .and_then(Value::as_str)
+                                .map(|name| format!("tool call: {name}"))
+                        })
+                        .collect::<Vec<_>>();
+                    (!rendered.is_empty()).then(|| rendered.join("\n"))
+                })
+        })
 }
 
 fn normalize_auggie_sessions(
@@ -41022,6 +41416,85 @@ mod tests {
             AuggieImportOptions {
                 allow_partial_failures: true,
                 ..AuggieImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(second.failed, 0, "{:?}", second.failures);
+        assert_eq!(second.imported_sessions, 0);
+        assert_eq!(second.imported_events, 0);
+        assert_eq!(second.skipped_sessions, 1);
+        assert_eq!(second.skipped_events, 4);
+    }
+
+    #[test]
+    fn native_devin_atif_fixture_imports_explicit_export_only() {
+        let temp = tempdir();
+        let fixture = provider_history_fixture("devin/atif/export.json");
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let source = provider_source_for_path(CaptureProvider::Devin, fixture.clone());
+        assert_eq!(source.source_format, DEVIN_ATIF_SOURCE_FORMAT);
+        assert_eq!(source.import_support, ProviderImportSupport::Explicit);
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+
+        let discovered =
+            discover_provider_sources_for_provider(temp.path(), CaptureProvider::Devin);
+        assert!(discovered.is_empty());
+
+        let first = import_devin_atif_exports(
+            &fixture,
+            &mut store,
+            DevinAtifImportOptions {
+                machine_id: "test-machine".into(),
+                source_path: Some(fixture.clone()),
+                imported_at: "2026-06-01T12:30:00Z".parse().unwrap(),
+                allow_partial_failures: true,
+                ..DevinAtifImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(first.failed, 0, "{:?}", first.failures);
+        assert_eq!(first.imported_sessions, 1);
+        assert_eq!(first.imported_events, 4);
+
+        let session_id =
+            provider_session_uuid(CaptureProvider::Devin, "devin-atif-fixture-session");
+        let events = store.events_for_session(session_id).unwrap();
+        assert_eq!(events.len(), 4);
+        assert_eq!(events[0].role, Some(EventRole::User));
+        assert_eq!(events[1].event_type, EventType::ToolCall);
+        assert_eq!(events[2].event_type, EventType::ToolOutput);
+        assert!(store
+            .search_event_hits("explicit Devin ATIF export ingestion", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::Devin)));
+
+        let source = store
+            .capture_source_by_external_session(
+                CaptureProvider::Devin,
+                "devin-atif-fixture-session",
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            source.sync.metadata["source_metadata"]["privacy_boundary"].as_str(),
+            Some("explicit user-supplied Devin CLI --export ATIF file or directory only")
+        );
+        assert_eq!(
+            source.sync.metadata["source_metadata"]["upstream_schema_anchor"]
+                ["devin_cli_reference"]
+                .as_str(),
+            Some("https://docs.devin.ai/cli/reference/commands")
+        );
+
+        let second = import_devin_atif_exports(
+            &fixture,
+            &mut store,
+            DevinAtifImportOptions {
+                allow_partial_failures: true,
+                ..DevinAtifImportOptions::default()
             },
         )
         .unwrap();

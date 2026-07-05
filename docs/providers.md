@@ -75,6 +75,9 @@ The current CLI imports local history for:
 - Amp thread export JSON from an explicit `amp threads export <threadIDOrURL>`
   output file. ctx does not auto-discover Amp history or crawl operational Amp
   logs;
+- Devin CLI ATIF export JSON from an explicit `devin --export [PATH]` file or
+  directory. ctx does not authenticate to Devin, scrape cloud history, or scan
+  `~/.config/devin`;
 - Trae chat state from Trae and Trae CN `User/workspaceStorage` roots at
   `~/Library/Application Support/Trae/User/workspaceStorage`,
   `~/Library/Application Support/Trae CN/User/workspaceStorage`,
@@ -194,8 +197,8 @@ CLI provider flags use names such as `kilo`, `crush`, `goose`, `dexto`,
 `factory-ai-droid`, `qwen-code`, `kimi-code-cli`, `autohand-code`,
 `kiro-cli`, `iflow-cli`, `eve`, `codearts-agent`, `forgecode`, `deepagents`, `mistral-vibe`, `mux`,
 `reasonix`, `adal`, `kode`, `neovate`, `terramind`, `zed`, `lingma`, `qoder`, `pochi`,
-`warp`, `codebuddy`, `aider-desk`, `amp`, `trae`, `tinycloud`, `windsurf`,
-`cline`, and `roo`/`roo-code`.
+`warp`, `codebuddy`, `aider-desk`, `amp`, `devin`, `trae`, `tinycloud`,
+`windsurf`, `cline`, and `roo`/`roo-code`.
 Structured JSON and stable SQL views use provider IDs in ctx output; multiword IDs may be
 snake_case, such as `copilot_cli`, `factory_ai_droid`, `qwen_code`,
 `kimi_code_cli`, `autohand_code`, `kiro_cli`, `iflow_cli`, or
@@ -203,8 +206,8 @@ snake_case, such as `copilot_cli`, `factory_ai_droid`, `qwen_code`,
 reported as `aider_desk`, while compact native
 IDs such as `kilo`, `openclaw`, `crush`, `goose`, `dexto`, `mux`, `reasonix`,
 `adal`, `kode`, `neovate`, `terramind`, `zed`, `lingma`, `qoder`, `pochi`, `codebuddy`,
-`forgecode`, `deepagents`, `nanoclaw`, `astrbot`, `amp`, `trae`, `tinycloud`,
-`windsurf`, `warp`, `shelley`, `continue`, and `openhands`
+`forgecode`, `deepagents`, `nanoclaw`, `astrbot`, `amp`, `devin`, `trae`,
+`tinycloud`, `windsurf`, `warp`, `shelley`, `continue`, and `openhands`
 stay compact. Roo Code is
 reported as `roo_code`.
 
@@ -215,6 +218,7 @@ when provider-specific transcript files exist. Sources with
 `ctx import --provider nanoclaw` when discovery finds the desired source, or use
 `ctx import --provider trae --path <state.vscdb-or-workspaceStorage>` for Trae.
 Use `ctx import --provider amp --path <amp-export.json>` for Amp thread exports.
+Use `ctx import --provider devin --path <atif-file-or-dir>` for Devin exports.
 Add `--path` to target a specific source before searching it. Explicit and
 preview paths are intentionally excluded from `ctx import --all` and
 pre-search refresh until

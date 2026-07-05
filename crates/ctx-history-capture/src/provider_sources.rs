@@ -635,6 +635,8 @@ const AUGGIE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     source_kind: ProviderSourceKind::NativeHistory,
 }];
 
+const DEVIN_DEFAULTS: &[ProviderDefaultLocation] = &[];
+
 const EVE_DEFAULTS: &[ProviderDefaultLocation] = &[];
 
 const JUNIE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
@@ -1183,6 +1185,16 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         display_name: "Auggie",
         default_locations: AUGGIE_DEFAULTS,
         import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
+    ProviderSourceSpec {
+        provider: CaptureProvider::Devin,
+        display_name: "Devin CLI",
+        default_locations: DEVIN_DEFAULTS,
+        import_support: ProviderImportSupport::Explicit,
         catalog_support: ProviderCatalogSupport::None,
         raw_retention: ProviderRawRetention::PathReference,
         redaction_boundary: ProviderRedactionBoundary::BeforeExport,
@@ -2659,6 +2671,7 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::IflowCli => "iflow_cli_session_jsonl",
         CaptureProvider::Jazz => "jazz_history_json",
         CaptureProvider::Auggie => "auggie_session_json",
+        CaptureProvider::Devin => "devin_atif_json",
         CaptureProvider::Eve => "eve_workflow_data_streams",
         CaptureProvider::Junie if path.is_dir() => "junie_session_events_jsonl_tree",
         CaptureProvider::Junie => "junie_session_events_jsonl",
@@ -3402,6 +3415,7 @@ fn default_location_import_probe(
             has_task_json_file_under_matching(path, 10_000, |name| name == "context.json")
         }
         CaptureProvider::Amp => path_is_file_probe(path),
+        CaptureProvider::Devin => has_json_file_under_matching(path, 10_000, |_| true),
         CaptureProvider::TinyCloud => has_tinycloud_session_jsonl(path, 10_000),
         CaptureProvider::Zencoder => has_zencoder_session_json(path, 10_000),
         CaptureProvider::Zenflow => path_is_file_probe(path),

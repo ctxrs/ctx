@@ -2489,6 +2489,77 @@
       ]
     },
     {
+      "id": "devin",
+      "display_name": "Devin CLI",
+      "priority": "p2",
+      "status": "local_import_when_supported",
+      "capture_provider": "devin",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "devin_atif_json",
+          "fidelity": "partial",
+          "proof": [
+            "Official Devin CLI command reference documents `devin --export [PATH]` and says it writes ATIF format after each turn.",
+            "Official Devin CLI stable changelog says 2026.5.26-0 added `--export` for ATIF conversation history and later added richer per-step transcript details.",
+            "Public ATIF RFC documents a JSON root with `schema_version`, `agent`, and `steps`.",
+            "ctx import --provider devin --path <atif-file-or-dir>",
+            "cargo test -p ctx-history-capture native_devin_atif_fixture_imports_explicit_export_only",
+            "cargo test -p ctx devin_atif_cli_import_search_flow"
+          ],
+          "notes": [
+            "Reads only explicit user-supplied Devin ATIF export files or directories; there is no default discovery.",
+            "A directory import recursively scans `.json` files, while an explicit file path is validated by ATIF content.",
+            "Normalizes ATIF steps into user, assistant, system, tool-call, and tool-output preview events; full raw JSON remains in the user-supplied source file and only capped step metadata is indexed."
+          ]
+        }
+      ],
+      "history_locations": [
+        "explicit `devin --export [PATH]` ATIF JSON file or directory"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": false,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": true,
+        "command_output": false,
+        "files_touched": true,
+        "artifacts": false,
+        "model_identity": true,
+        "costs": false,
+        "token_usage": false,
+        "parent_child_session_edges": false
+      },
+      "redaction_notes": [
+        "Reads user-supplied export files read-only; imported message text, tool text, local workspace paths, and source paths remain in the local ctx index.",
+        "The importer does not authenticate to Devin, scrape Devin cloud history, or inspect account/config paths such as ~/.config/devin.",
+        "Provider raw retention is path-reference only; unrecognized ATIF step fields are capped in normalized metadata."
+      ],
+      "blockers": [
+        "No official Devin sample export was found in the public docs checked; the fixture is synthetic and minimized from the public ATIF root/step contract.",
+        "Default local Devin account/config/cache paths remain unclaimed until a public local storage contract or safe generated export fixture proves them."
+      ],
+      "public_docs": "docs/provider-support.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/devin/atif/export.json"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs",
+        "tests/fixtures/provider-history/devin/atif/export.json"
+      ],
+      "metadata": {
+        "export_command": "devin --export [PATH]",
+        "schema_family": "ATIF",
+        "default_discovery": false,
+        "import_support": "explicit"
+      }
+    },
+    {
       "id": "eve",
       "display_name": "Eve",
       "priority": "p1",

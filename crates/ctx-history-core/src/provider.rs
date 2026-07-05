@@ -182,6 +182,7 @@ pub enum ProviderId {
     ContinueCody,
     #[serde(rename = "auggie", alias = "augment", alias = "augment-code")]
     Auggie,
+    Devin,
     Eve,
     Junie,
     Kilo,
@@ -192,7 +193,7 @@ pub enum ProviderId {
 }
 
 impl ProviderId {
-    pub const ALL: [Self; 73] = [
+    pub const ALL: [Self; 74] = [
         Self::Codex,
         Self::ClaudeCode,
         Self::ClaudeCliCrp,
@@ -260,6 +261,7 @@ impl ProviderId {
         Self::ClineRoo,
         Self::ContinueCody,
         Self::Auggie,
+        Self::Devin,
         Self::Eve,
         Self::Junie,
         Self::Kilo,
@@ -582,6 +584,7 @@ mod tests {
             ProviderId::Cursor,
             ProviderId::Windsurf,
             ProviderId::CopilotCli,
+            ProviderId::Devin,
             ProviderId::Dexto,
             ProviderId::FactoryAiDroid,
             ProviderId::Firebender,

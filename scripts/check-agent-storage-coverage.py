@@ -19,10 +19,10 @@ UPSTREAM_PACKAGE = "skills@1.5.14"
 UPSTREAM_COMMIT = "2adcfe5a4cce0ce5f4d5547a997b2a161ec5d127"
 EXPECTED_COUNTS = {
     "native-auto": 63,
-    "native-explicit": 1,
+    "native-explicit": 2,
     "native-preview": 0,
     "candidate-family": 0,
-    "webapp-boundary": 4,
+    "webapp-boundary": 3,
     "unknown": 2,
     "install-target": 2,
 }
@@ -42,6 +42,7 @@ REQUIRED_SCHEMA_FAMILIES = {
     "Warp restoration SQLite",
     "Workflow local-world streams",
     "per-agent history JSON",
+    "explicit ATIF export JSON",
     "VS Code/Electron storage",
     "webapp/object-store boundary",
 }

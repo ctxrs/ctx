@@ -203,6 +203,7 @@ text_enum! {
         IflowCli => "iflow_cli",
         Jazz => "jazz",
         Auggie => "auggie",
+        Devin => "devin",
         Eve => "eve",
         Junie => "junie",
         Firebender => "firebender",
