@@ -50,7 +50,7 @@ use ctx_history_capture::{
     import_opencode_sqlite, import_openhands_file_events, import_openloaf_history,
     import_pi_session_jsonl, import_pochi_livestore_sqlite, import_qwen_code_history,
     import_reasonix_history, import_roo_task_json_history, import_rovodev_history,
-    import_shelley_sqlite, import_terramind_sqlite, import_trae_history,
+    import_shelley_sqlite, import_terramind_sqlite, import_trae_history, import_warp_sqlite,
     import_windsurf_cascade_hook_transcripts, import_zed_threads_sqlite, provider_source_for_path,
     provider_source_spec, stable_capture_uuid, validate_custom_history_jsonl_v1,
     validate_custom_history_jsonl_v1_reader, AiderDeskImportOptions, AmpImportOptions,
@@ -73,7 +73,7 @@ use ctx_history_capture::{
     ProviderImportSupport, ProviderSource, ProviderSourceStatus, QwenCodeImportOptions,
     ReasonixImportOptions, RooTaskJsonImportOptions, RovoDevImportOptions,
     ShelleySqliteImportOptions, TerramindSqliteImportOptions, TraeImportOptions,
-    WindsurfCascadeHookImportOptions, ZedThreadsSqliteImportOptions,
+    WarpSqliteImportOptions, WindsurfCascadeHookImportOptions, ZedThreadsSqliteImportOptions,
 };
 use ctx_history_core::{
     database_path, default_data_root, utc_now, CaptureProvider, ContextCitation,
@@ -809,6 +809,7 @@ enum NativeProviderArg {
     #[value(alias = "qoder-cn", alias = "qoder_cn")]
     Lingma,
     Pochi,
+    Warp,
     #[value(name = "codebuddy", alias = "code-buddy", alias = "code_buddy")]
     CodeBuddy,
     #[value(name = "aider-desk", alias = "aider_desk", alias = "aiderdesk")]
@@ -939,6 +940,7 @@ enum ProviderArg {
     #[value(alias = "qoder-cn", alias = "qoder_cn")]
     Lingma,
     Pochi,
+    Warp,
     #[value(name = "codebuddy", alias = "code-buddy", alias = "code_buddy")]
     CodeBuddy,
     #[value(name = "aider-desk", alias = "aider_desk", alias = "aiderdesk")]
@@ -1021,6 +1023,7 @@ impl NativeProviderArg {
             Self::Dexto => CaptureProvider::Dexto,
             Self::Lingma => CaptureProvider::Lingma,
             Self::Pochi => CaptureProvider::Pochi,
+            Self::Warp => CaptureProvider::Warp,
             Self::CodeBuddy => CaptureProvider::CodeBuddy,
             Self::AiderDesk => CaptureProvider::AiderDesk,
             Self::Amp => CaptureProvider::Amp,
@@ -1100,6 +1103,7 @@ impl ProviderArg {
             Self::Dexto => CaptureProvider::Dexto,
             Self::Lingma => CaptureProvider::Lingma,
             Self::Pochi => CaptureProvider::Pochi,
+            Self::Warp => CaptureProvider::Warp,
             Self::CodeBuddy => CaptureProvider::CodeBuddy,
             Self::AiderDesk => CaptureProvider::AiderDesk,
             Self::Amp => CaptureProvider::Amp,
@@ -1158,6 +1162,7 @@ impl ProviderArg {
             Self::Dexto => "dexto",
             Self::Lingma => "lingma",
             Self::Pochi => "pochi",
+            Self::Warp => "warp",
             Self::CodeBuddy => "codebuddy",
             Self::AiderDesk => "aider-desk",
             Self::Amp => "amp",
@@ -6171,6 +6176,17 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
+        CaptureProvider::Warp => import_warp_sqlite(
+            &source.path,
+            store,
+            WarpSqliteImportOptions {
+                source_path: Some(source.path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: true,
+                ..WarpSqliteImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
         CaptureProvider::Gemini => import_gemini_cli_history(
             &source.path,
             store,
@@ -6651,6 +6667,7 @@ fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bool {
         | CaptureProvider::Goose
         | CaptureProvider::Dexto
         | CaptureProvider::Lingma
+        | CaptureProvider::Warp
         | CaptureProvider::Zed => path == source.path,
         CaptureProvider::Pochi => {
             path == source.path
@@ -7080,6 +7097,7 @@ fn source_uses_incremental_event_search(source: &SourceInfo) -> bool {
             | CaptureProvider::Goose
             | CaptureProvider::Dexto
             | CaptureProvider::Pochi
+            | CaptureProvider::Warp
             | CaptureProvider::Antigravity
             | CaptureProvider::Gemini
             | CaptureProvider::Windsurf

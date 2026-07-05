@@ -649,6 +649,74 @@
       ]
     },
     {
+      "id": "warp",
+      "display_name": "Warp",
+      "priority": "p1",
+      "status": "local_import_when_supported",
+      "capture_provider": "warp",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "warp_sqlite",
+          "fidelity": "partial",
+          "proof": [
+            "Official Warp Session Restoration docs document the local warp.sqlite path on macOS, Windows, and Linux; ctx discovers the documented Linux/macOS paths and accepts any explicit warp.sqlite path.",
+            "warpdotdev/warp open-source client crates/persistence/src/schema.rs defines agent_conversations, agent_tasks, and ai_queries tables.",
+            "warpdotdev/warp open-source client app/src/persistence/agent.rs writes agent_tasks.task as warp_multi_agent_api::Task protobuf snapshots.",
+            "warpdotdev/warp-proto-apis apis/multi_agent/v1/task.proto defines Task.messages and Message user_query/agent_output/tool fields.",
+            "cargo test -p ctx-history-capture native_warp",
+            "cargo test -p ctx warp_cli_imports_explicit_sqlite_preview"
+          ],
+          "notes": [
+            "Preview manual import for Warp Terminal local restoration SQLite databases; use ctx import --provider warp for discovered documented Linux/macOS paths or ctx import --provider warp --path <warp.sqlite>.",
+            "Reads agent_conversations and agent_tasks read-only and decodes the public Task protobuf subset needed for user prompts, assistant messages, tool call markers, tool output markers, reasoning, summaries, and inter-agent message text.",
+            "Automatic default discovery is intentionally not enabled for import/search refresh because Warp documents warp.sqlite as a session restoration/cache database and this branch lacks a real safe-run local fixture."
+          ]
+        }
+      ],
+      "history_locations": [
+        "~/.local/state/warp-terminal/warp.sqlite",
+        "~/Library/Group Containers/2BBY89MBSN.dev.warp/Library/Application Support/dev.warp.Warp-Stable/warp.sqlite",
+        "%LOCALAPPDATA%/warp/Warp/data/warp.sqlite",
+        "Explicit warp.sqlite path, including the documented Windows %LOCALAPPDATA% path"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": true,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": true,
+        "command_output": false,
+        "files_touched": false,
+        "artifacts": false,
+        "model_identity": false,
+        "costs": false,
+        "token_usage": true,
+        "parent_child_session_edges": true
+      },
+      "redaction_notes": [
+        "Reads the provider SQLite database read-only; imported prompt/assistant text, tool markers, reasoning/summary text, token usage metadata, task summaries, and local source paths remain in the local ctx index.",
+        "server_conversation_token and forked_from_server_conversation_token values from Warp conversation_data are not copied into ctx metadata; ctx records only boolean token presence."
+      ],
+      "blockers": [
+        "Preview manual importer; documented Linux/macOS defaults can be discovered, but no automatic search-refresh/import-all ingestion or Windows %LOCALAPPDATA% default discovery is claimed.",
+        "No live safe-run local Warp fixture was present on this host; the repository fixture is sanitized and schema-backed, not copied from a user profile.",
+        "Cloud-synced conversations, Oz/cloud agent conversations, Markdown exports, browser IndexedDB, command history outside agent_tasks, and Warp Drive/team data are not parsed."
+      ],
+      "public_docs": "docs/provider-storage-proof.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/warp/v1/warp.sqlite"
+      ],
+      "tests": [
+        "crates/ctx-history-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs",
+        "crates/ctx-cli/src/main.rs",
+        "crates/ctx-cli/tests/cli.rs"
+      ]
+    },
+    {
       "id": "codebuddy",
       "display_name": "CodeBuddy",
       "priority": "p1",
