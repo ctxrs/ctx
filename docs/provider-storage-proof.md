@@ -175,6 +175,31 @@ IDE/application storage imports.
   `~/.pochi` discovery, does not read `config.jsonc`, and does not attempt VS
   Code OPFS extraction.
 
+## OpenLoaf
+
+- Source evidence: the public [OpenLoaf repository](https://github.com/OpenLoaf/OpenLoaf)
+  documents a local-first app with data rooted in the user's OpenLoaf
+  directories.
+- Path evidence: [`packages/config/src/openloaf-paths.ts`](https://raw.githubusercontent.com/OpenLoaf/OpenLoaf/main/packages/config/src/openloaf-paths.ts)
+  confirms the root directory `~/.openloaf`, the SQLite file name
+  `openloaf.db`, and the data root `~/OpenLoafData`.
+- Session path evidence: [`packages/api/src/services/chatSessionPaths.ts`](https://raw.githubusercontent.com/OpenLoaf/OpenLoaf/main/packages/api/src/services/chatSessionPaths.ts)
+  defines `chat-history` and `messages.jsonl`, with global, project
+  `.openloaf/chat-history`, and board-scoped chat-history directory
+  conventions.
+- Message schema evidence: [`apps/server/src/ai/services/chat/repositories/chatFileStore.ts`](https://raw.githubusercontent.com/OpenLoaf/OpenLoaf/main/apps/server/src/ai/services/chat/repositories/chatFileStore.ts)
+  writes optional `session.json` plus StoredMessage JSONL records containing
+  `id`, `parentMessageId`, `role`, `messageKind`, `parts`, `metadata`, and
+  `createdAt`.
+- `ctx` imports this shape as `openloaf_chat_jsonl_tree`, using read-only
+  discovery under `~/.openloaf/chat-history` and bounded
+  `~/OpenLoafData/projects` project chat-history roots. Explicit imports also
+  accept a project `.openloaf/chat-history`, session directory, or
+  `messages.jsonl` file.
+- npx-skills detects the agent id `loaf`; ctx maps `loaf` and `openloaf` CLI
+  aliases to the canonical provider `openloaf`. The native importer does not
+  treat `~/.loaf` as a source-backed history path.
+
 ## Kode
 
 - Source evidence: `@shareai-lab/kode@2.2.1` declares repository

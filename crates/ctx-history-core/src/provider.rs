@@ -43,6 +43,13 @@ pub enum ProviderId {
     ClaudeCliCrp,
     Pi,
     OpenCode,
+    #[serde(
+        rename = "openloaf",
+        alias = "loaf",
+        alias = "open-loaf",
+        alias = "open_loaf"
+    )]
+    OpenLoaf,
     Cursor,
     AntigravityCli,
     GeminiCli,
@@ -142,12 +149,13 @@ pub enum ProviderId {
 }
 
 impl ProviderId {
-    pub const ALL: [Self; 57] = [
+    pub const ALL: [Self; 58] = [
         Self::Codex,
         Self::ClaudeCode,
         Self::ClaudeCliCrp,
         Self::Pi,
         Self::OpenCode,
+        Self::OpenLoaf,
         Self::Cursor,
         Self::AntigravityCli,
         Self::GeminiCli,
@@ -532,6 +540,7 @@ mod tests {
             ProviderId::RovoDev,
             ProviderId::CortexCode,
             ProviderId::OpenCode,
+            ProviderId::OpenLoaf,
             ProviderId::OpenClaw,
             ProviderId::OpenHands,
             ProviderId::Pi,

@@ -46,11 +46,11 @@ use ctx_history_capture::{
     import_jazz_history, import_kilo_sqlite, import_kimi_code_cli_history, import_kiro_sqlite,
     import_kode_history, import_lingma_sqlite, import_mistral_vibe_history, import_mux_history,
     import_nanoclaw_project, import_neovate_history, import_openclaw_history,
-    import_opencode_sqlite, import_openhands_file_events, import_pi_session_jsonl,
-    import_pochi_livestore_sqlite, import_qwen_code_history, import_reasonix_history,
-    import_roo_task_json_history, import_rovodev_history, import_shelley_sqlite,
-    import_terramind_sqlite, import_windsurf_cascade_hook_transcripts, import_zed_threads_sqlite,
-    provider_source_for_path, provider_source_spec, stable_capture_uuid,
+    import_opencode_sqlite, import_openhands_file_events, import_openloaf_history,
+    import_pi_session_jsonl, import_pochi_livestore_sqlite, import_qwen_code_history,
+    import_reasonix_history, import_roo_task_json_history, import_rovodev_history,
+    import_shelley_sqlite, import_terramind_sqlite, import_windsurf_cascade_hook_transcripts,
+    import_zed_threads_sqlite, provider_source_for_path, provider_source_spec, stable_capture_uuid,
     validate_custom_history_jsonl_v1, validate_custom_history_jsonl_v1_reader,
     AiderDeskImportOptions, AntigravityCliImportOptions, AstrBotSqliteImportOptions,
     AutohandCodeImportOptions, CatalogSummary, ClaudeProjectsImportOptions,
@@ -65,11 +65,12 @@ use ctx_history_capture::{
     JazzImportOptions, KiloSqliteImportOptions, KimiCodeCliImportOptions, KiroSqliteImportOptions,
     KodeImportOptions, LingmaSqliteImportOptions, MistralVibeImportOptions, MuxImportOptions,
     NanoClawImportOptions, NeovateImportOptions, OpenClawImportOptions,
-    OpenCodeSqliteImportOptions, OpenHandsImportOptions, PiSessionImportOptions,
-    PochiLivestoreSqliteImportOptions, ProviderImportSummary, ProviderImportSupport,
-    ProviderSource, ProviderSourceStatus, QwenCodeImportOptions, ReasonixImportOptions,
-    RooTaskJsonImportOptions, RovoDevImportOptions, ShelleySqliteImportOptions,
-    TerramindSqliteImportOptions, WindsurfCascadeHookImportOptions, ZedThreadsSqliteImportOptions,
+    OpenCodeSqliteImportOptions, OpenHandsImportOptions, OpenLoafImportOptions,
+    PiSessionImportOptions, PochiLivestoreSqliteImportOptions, ProviderImportSummary,
+    ProviderImportSupport, ProviderSource, ProviderSourceStatus, QwenCodeImportOptions,
+    ReasonixImportOptions, RooTaskJsonImportOptions, RovoDevImportOptions,
+    ShelleySqliteImportOptions, TerramindSqliteImportOptions, WindsurfCascadeHookImportOptions,
+    ZedThreadsSqliteImportOptions,
 };
 use ctx_history_core::{
     database_path, default_data_root, utc_now, CaptureProvider, ContextCitation,
@@ -692,6 +693,13 @@ enum NativeProviderArg {
     #[value(name = "opencode", alias = "open-code")]
     OpenCode,
     #[value(
+        name = "openloaf",
+        alias = "loaf",
+        alias = "open-loaf",
+        alias = "open_loaf"
+    )]
+    OpenLoaf,
+    #[value(
         name = "kilo",
         alias = "kilo-code",
         alias = "kilo_code",
@@ -801,6 +809,13 @@ enum ProviderArg {
     Claude,
     #[value(name = "opencode", alias = "open-code")]
     OpenCode,
+    #[value(
+        name = "openloaf",
+        alias = "loaf",
+        alias = "open-loaf",
+        alias = "open_loaf"
+    )]
+    OpenLoaf,
     #[value(
         name = "kilo",
         alias = "kilo-code",
@@ -933,6 +948,7 @@ impl NativeProviderArg {
             Self::Pi => CaptureProvider::Pi,
             Self::Claude => CaptureProvider::Claude,
             Self::OpenCode => CaptureProvider::OpenCode,
+            Self::OpenLoaf => CaptureProvider::OpenLoaf,
             Self::Kilo => CaptureProvider::Kilo,
             Self::KiroCli => CaptureProvider::KiroCli,
             Self::Crush => CaptureProvider::Crush,
@@ -1005,6 +1021,7 @@ impl ProviderArg {
             Self::Pi => CaptureProvider::Pi,
             Self::Claude => CaptureProvider::Claude,
             Self::OpenCode => CaptureProvider::OpenCode,
+            Self::OpenLoaf => CaptureProvider::OpenLoaf,
             Self::Kilo => CaptureProvider::Kilo,
             Self::KiroCli => CaptureProvider::KiroCli,
             Self::Crush => CaptureProvider::Crush,
@@ -1056,6 +1073,7 @@ impl ProviderArg {
             Self::Pi => "pi",
             Self::Claude => "claude",
             Self::OpenCode => "opencode",
+            Self::OpenLoaf => "openloaf",
             Self::Kilo => "kilo",
             Self::KiroCli => "kiro-cli",
             Self::Crush => "crush",
@@ -5886,6 +5904,17 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
+        CaptureProvider::OpenLoaf => import_openloaf_history(
+            &source.path,
+            store,
+            OpenLoafImportOptions {
+                source_path: Some(source.path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: true,
+                ..OpenLoafImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
         CaptureProvider::Kilo => import_kilo_sqlite(
             &source.path,
             store,
@@ -6406,6 +6435,7 @@ fn source_uses_import_file_manifest(source: &SourceInfo) -> bool {
             | "cline_task_directory_json"
             | "roo_task_directory_json"
             | "reasonix_session_jsonl_tree"
+            | "openloaf_chat_jsonl_tree"
             | "codebuddy_history_json"
     )
 }
@@ -6495,6 +6525,7 @@ fn collect_source_import_paths(source: &SourceInfo) -> Result<Vec<PathBuf>> {
 fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bool {
     match source.provider {
         CaptureProvider::OpenCode
+        | CaptureProvider::OpenLoaf
         | CaptureProvider::Kilo
         | CaptureProvider::KiroCli
         | CaptureProvider::ForgeCode
@@ -6898,6 +6929,7 @@ fn source_uses_incremental_event_search(source: &SourceInfo) -> bool {
             | CaptureProvider::Pi
             | CaptureProvider::Cursor
             | CaptureProvider::OpenCode
+            | CaptureProvider::OpenLoaf
             | CaptureProvider::Kilo
             | CaptureProvider::KiroCli
             | CaptureProvider::Crush

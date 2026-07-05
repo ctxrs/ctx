@@ -1157,6 +1157,27 @@ impl Default for CommandCodeImportOptions {
 }
 
 #[derive(Debug, Clone)]
+pub struct OpenLoafImportOptions {
+    pub machine_id: String,
+    pub source_path: Option<PathBuf>,
+    pub imported_at: DateTime<Utc>,
+    pub history_record_id: Option<Uuid>,
+    pub allow_partial_failures: bool,
+}
+
+impl Default for OpenLoafImportOptions {
+    fn default() -> Self {
+        Self {
+            machine_id: default_machine_id(),
+            source_path: None,
+            imported_at: utc_now(),
+            history_record_id: None,
+            allow_partial_failures: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct RovoDevImportOptions {
     pub machine_id: String,
     pub source_path: Option<PathBuf>,
@@ -1563,6 +1584,9 @@ pub struct NeovateJsonlAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CommandCodeJsonlAdapter;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OpenLoafJsonlAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RovoDevSessionJsonAdapter;
@@ -2897,6 +2921,24 @@ impl ProviderCaptureAdapter for CommandCodeJsonlAdapter {
             CaptureProvider::CommandCode,
             COMMAND_CODE_SOURCE_FORMAT,
         )
+    }
+}
+
+impl ProviderCaptureAdapter for OpenLoafJsonlAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::OpenLoaf
+    }
+
+    fn source_format(&self) -> &str {
+        OPENLOAF_SOURCE_FORMAT
+    }
+
+    fn normalize_path(
+        &self,
+        path: &Path,
+        context: &ProviderAdapterContext,
+    ) -> Result<ProviderNormalizationResult> {
+        normalize_openloaf_sessions(path, context)
     }
 }
 
@@ -5813,6 +5855,25 @@ pub fn import_command_code_history(
     )
 }
 
+pub fn import_openloaf_history(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: OpenLoafImportOptions,
+) -> Result<ProviderImportSummary> {
+    import_native_jsonl_tree(
+        store,
+        NativeJsonlTreeImport {
+            path: path.as_ref(),
+            machine_id: options.machine_id,
+            source_path: options.source_path,
+            imported_at: options.imported_at,
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+        },
+        OpenLoafJsonlAdapter,
+    )
+}
+
 pub fn import_rovodev_history(
     path: impl AsRef<Path>,
     store: &mut Store,
@@ -6029,6 +6090,7 @@ const JAZZ_HISTORY_SOURCE_FORMAT: &str = "jazz_history_json";
 const KODE_SOURCE_FORMAT: &str = "kode_session_jsonl";
 const NEOVATE_SOURCE_FORMAT: &str = "neovate_session_jsonl";
 const COMMAND_CODE_SOURCE_FORMAT: &str = "command_code_session_jsonl";
+const OPENLOAF_SOURCE_FORMAT: &str = "openloaf_chat_jsonl";
 const ROVODEV_SOURCE_FORMAT: &str = "rovodev_session_json";
 const CORTEX_CODE_SOURCE_FORMAT: &str = "cortex_code_session_json";
 const FORGECODE_SQLITE_SOURCE_FORMAT: &str = "forgecode_sqlite";
@@ -8161,7 +8223,10 @@ fn provider_file_touches_from_raw_value(
         && (event_type_supports_structured_file_touches(event.event_type)
             || (matches!(
                 provider,
-                CaptureProvider::IflowCli | CaptureProvider::Kode | CaptureProvider::Neovate
+                CaptureProvider::IflowCli
+                    | CaptureProvider::Kode
+                    | CaptureProvider::Neovate
+                    | CaptureProvider::OpenLoaf
             ) && event.event_type == EventType::ToolOutput))
     {
         collect_structured_file_touches(raw_value, &mut drafts);
@@ -16109,6 +16174,9 @@ fn native_jsonl_missing_reason(provider: CaptureProvider) -> &'static str {
         }
         CaptureProvider::Mux => "no Mux chat.jsonl or partial.json session files found",
         CaptureProvider::Reasonix => "no Reasonix session JSONL files found",
+        CaptureProvider::OpenLoaf => {
+            "no OpenLoaf chat-history messages.jsonl session directories found"
+        }
         _ => "no native provider JSONL transcripts found",
     }
 }
@@ -22818,6 +22886,769 @@ fn provider_json_without_keys(value: &Value, keys: &[&str]) -> Value {
         object.remove(*key);
     }
     Value::Object(object)
+}
+
+const OPENLOAF_MAX_SCAN_ENTRIES: usize = 10_000;
+
+#[derive(Debug, Clone)]
+struct OpenLoafSessionSource {
+    session_dir: PathBuf,
+    messages_path: PathBuf,
+    session_path: Option<PathBuf>,
+    parent_provider_session_id: Option<String>,
+    root_provider_session_id: Option<String>,
+    external_agent_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct OpenLoafMessageRow {
+    line_number: usize,
+    value: Value,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OpenLoafScanBudget {
+    visited: usize,
+    max: usize,
+}
+
+impl OpenLoafScanBudget {
+    fn new(max: usize) -> Self {
+        Self { visited: 0, max }
+    }
+
+    fn visit(&mut self, path: &Path) -> Result<()> {
+        self.visited = self.visited.saturating_add(1);
+        if self.visited > self.max {
+            return Err(CaptureError::InvalidProviderTranscriptPath {
+                path: path.to_path_buf(),
+                reason: "OpenLoaf chat-history scan exceeded its filesystem entry budget; pass an explicit chat-history, session, or messages.jsonl path",
+            });
+        }
+        Ok(())
+    }
+}
+
+fn normalize_openloaf_sessions(
+    path: &Path,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    let mut session_sources = Vec::new();
+    let mut budget = OpenLoafScanBudget::new(OPENLOAF_MAX_SCAN_ENTRIES);
+    collect_openloaf_session_sources(path, &mut session_sources, &mut budget)?;
+    session_sources.sort_by(|left, right| left.messages_path.cmp(&right.messages_path));
+    session_sources.dedup_by(|left, right| left.messages_path == right.messages_path);
+    if session_sources.is_empty() {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: native_jsonl_missing_reason(CaptureProvider::OpenLoaf),
+        });
+    }
+
+    let mut merged = ProviderNormalizationResult::default();
+    for source in session_sources {
+        let mut result = normalize_openloaf_session_source(&source, context)?;
+        merged.summary.merge(result.summary);
+        merged.captures.append(&mut result.captures);
+        merged.files_touched.append(&mut result.files_touched);
+    }
+    Ok(merged)
+}
+
+fn collect_openloaf_session_sources(
+    root: &Path,
+    sessions: &mut Vec<OpenLoafSessionSource>,
+    budget: &mut OpenLoafScanBudget,
+) -> Result<()> {
+    budget.visit(root)?;
+    let metadata = fs::symlink_metadata(root)?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: root.to_path_buf(),
+            reason: "symlinked provider transcript roots are rejected",
+        });
+    }
+    ensure_provider_path_parents_are_not_symlinks(root)?;
+
+    if file_type.is_file() {
+        ensure_regular_provider_transcript_file(root)?;
+        if matches!(
+            root.file_name().and_then(|name| name.to_str()),
+            Some("messages.jsonl" | "session.json")
+        ) {
+            if let Some(session_dir) = root.parent() {
+                if let Some(source) = openloaf_session_source_from_dir(session_dir)? {
+                    sessions.push(source);
+                }
+            }
+        }
+        return Ok(());
+    }
+    if !file_type.is_dir() {
+        return Ok(());
+    }
+
+    if openloaf_is_default_projects_root(root) {
+        collect_openloaf_projects_root_sources(root, sessions, budget)?;
+        return Ok(());
+    }
+
+    if let Some(chat_history) = openloaf_project_chat_history_dir(root) {
+        collect_openloaf_session_sources(&chat_history, sessions, budget)?;
+        collect_openloaf_board_chat_history_sources(root, sessions, budget)?;
+        return Ok(());
+    }
+
+    if let Some(source) = openloaf_session_source_from_dir(root)? {
+        sessions.push(source);
+        let agents_dir = root.join("agents");
+        if agents_dir.is_dir() {
+            collect_openloaf_agent_session_sources(&agents_dir, sessions, budget)?;
+        }
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            collect_openloaf_session_sources(&entry.path(), sessions, budget)?;
+        }
+    }
+    Ok(())
+}
+
+fn openloaf_is_default_projects_root(path: &Path) -> bool {
+    path.file_name().and_then(|name| name.to_str()) == Some("projects")
+        && path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            == Some("OpenLoafData")
+}
+
+fn collect_openloaf_projects_root_sources(
+    root: &Path,
+    sessions: &mut Vec<OpenLoafSessionSource>,
+    budget: &mut OpenLoafScanBudget,
+) -> Result<()> {
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            budget.visit(&path)?;
+            if let Some(chat_history) = openloaf_project_chat_history_dir(&path) {
+                collect_openloaf_session_sources(&chat_history, sessions, budget)?;
+            }
+            collect_openloaf_board_chat_history_sources(&path, sessions, budget)?;
+        }
+    }
+    Ok(())
+}
+
+fn openloaf_project_chat_history_dir(root: &Path) -> Option<PathBuf> {
+    let chat_history = if root.file_name().and_then(|name| name.to_str()) == Some(".openloaf") {
+        root.join("chat-history")
+    } else {
+        root.join(".openloaf").join("chat-history")
+    };
+    chat_history.is_dir().then_some(chat_history)
+}
+
+fn collect_openloaf_board_chat_history_sources(
+    project_root: &Path,
+    sessions: &mut Vec<OpenLoafSessionSource>,
+    budget: &mut OpenLoafScanBudget,
+) -> Result<()> {
+    for boards_dir in [
+        project_root.join("boards"),
+        project_root.join(".openloaf").join("boards"),
+    ] {
+        let Ok(metadata) = fs::symlink_metadata(&boards_dir) else {
+            continue;
+        };
+        let file_type = metadata.file_type();
+        if !file_type.is_dir() || file_type.is_symlink() {
+            continue;
+        }
+        for entry in fs::read_dir(&boards_dir)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                let chat_history = entry.path().join("chat-history");
+                if chat_history.is_dir() {
+                    collect_openloaf_session_sources(&chat_history, sessions, budget)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn collect_openloaf_agent_session_sources(
+    agents_dir: &Path,
+    sessions: &mut Vec<OpenLoafSessionSource>,
+    budget: &mut OpenLoafScanBudget,
+) -> Result<()> {
+    budget.visit(agents_dir)?;
+    for entry in fs::read_dir(agents_dir)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            collect_openloaf_session_sources(&entry.path(), sessions, budget)?;
+        }
+    }
+    Ok(())
+}
+
+fn openloaf_session_source_from_dir(dir: &Path) -> Result<Option<OpenLoafSessionSource>> {
+    let messages_path = dir.join("messages.jsonl");
+    if !messages_path.is_file() {
+        return Ok(None);
+    }
+    ensure_regular_provider_transcript_file(&messages_path)?;
+    let session_path = provider_optional_regular_file(&dir.join("session.json"))?;
+    let (parent_provider_session_id, root_provider_session_id, external_agent_id) =
+        openloaf_agent_identity_from_path(dir);
+    Ok(Some(OpenLoafSessionSource {
+        session_dir: dir.to_path_buf(),
+        messages_path,
+        session_path,
+        parent_provider_session_id,
+        root_provider_session_id,
+        external_agent_id,
+    }))
+}
+
+fn openloaf_agent_identity_from_path(
+    dir: &Path,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let Some(parent) = dir.parent() else {
+        return (None, None, None);
+    };
+    if parent.file_name().and_then(|name| name.to_str()) != Some("agents") {
+        return (None, None, None);
+    }
+    let parent_session = parent
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .map(str::to_owned);
+    let agent_id = dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .map(str::to_owned);
+    (parent_session.clone(), parent_session, agent_id)
+}
+
+fn normalize_openloaf_session_source(
+    source: &OpenLoafSessionSource,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    let mut result = ProviderNormalizationResult::default();
+    let metadata =
+        read_openloaf_session_metadata(source.session_path.as_deref(), &mut result.summary);
+    let rows = read_openloaf_messages(&source.messages_path, &mut result.summary)?;
+    let directory_session_id = source
+        .session_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
+            path: source.session_dir.clone(),
+            reason: "OpenLoaf session directory is missing a session id",
+        })?;
+    let raw_session_id = openloaf_string_field(&metadata, &["id", "sessionId", "session_id"])
+        .unwrap_or(directory_session_id);
+    let parent_provider_session_id = openloaf_string_field(
+        &metadata,
+        &[
+            "parentSessionId",
+            "parent_session_id",
+            "parentId",
+            "parent_id",
+        ],
+    )
+    .or_else(|| source.parent_provider_session_id.clone());
+    let root_provider_session_id =
+        openloaf_string_field(&metadata, &["rootSessionId", "root_session_id"])
+            .or_else(|| source.root_provider_session_id.clone())
+            .or_else(|| parent_provider_session_id.clone());
+    let external_agent_id = openloaf_string_field(
+        &metadata,
+        &["agentId", "agent_id", "assistantId", "assistant_id"],
+    )
+    .or_else(|| source.external_agent_id.clone());
+    let provider_session_id = openloaf_provider_session_id(
+        &raw_session_id,
+        parent_provider_session_id.as_deref(),
+        external_agent_id.as_deref(),
+    );
+    let agent_type = if parent_provider_session_id.is_some() {
+        AgentType::Subagent
+    } else {
+        AgentType::Primary
+    };
+    let role_hint = if parent_provider_session_id.is_some() {
+        "subagent"
+    } else {
+        "primary"
+    };
+    let started_at = openloaf_session_timestamp(
+        &metadata,
+        &[
+            "createdAt",
+            "created_at",
+            "startedAt",
+            "started_at",
+            "startTime",
+        ],
+    )
+    .or_else(|| {
+        rows.iter()
+            .filter_map(|row| openloaf_message_timestamp(&row.value))
+            .min()
+    })
+    .unwrap_or(context.imported_at);
+    let ended_at = openloaf_session_timestamp(
+        &metadata,
+        &["updatedAt", "updated_at", "endedAt", "ended_at", "endTime"],
+    )
+    .or_else(|| {
+        rows.iter()
+            .filter_map(|row| openloaf_message_timestamp(&row.value))
+            .max()
+    });
+    let cwd = openloaf_string_field(
+        &metadata,
+        &[
+            "projectPath",
+            "projectRoot",
+            "workspacePath",
+            "workspaceRoot",
+            "cwd",
+        ],
+    );
+
+    if rows.is_empty() {
+        result.captures.push((
+            0,
+            openloaf_capture(
+                OpenLoafCaptureDraft {
+                    provider_session_id,
+                    parent_provider_session_id,
+                    root_provider_session_id,
+                    external_agent_id,
+                    agent_type,
+                    role_hint: role_hint.to_owned(),
+                    is_primary: agent_type == AgentType::Primary,
+                    started_at,
+                    ended_at,
+                    cwd,
+                    metadata: &metadata,
+                    message_count: 0,
+                    source,
+                    event: None,
+                },
+                context,
+            ),
+        ));
+        return Ok(result);
+    }
+
+    let message_count = rows.len();
+    for (event_index, row) in rows.iter().enumerate() {
+        let occurred_at = openloaf_message_timestamp(&row.value).unwrap_or(started_at);
+        let event = openloaf_event(&provider_session_id, event_index as u64, row, occurred_at);
+        let raw_source_path = source.messages_path.display().to_string();
+        result
+            .files_touched
+            .extend(provider_file_touches_from_raw_value(
+                CaptureProvider::OpenLoaf,
+                &provider_session_id,
+                OPENLOAF_SOURCE_FORMAT,
+                Some(raw_source_path.as_str()),
+                &row.value,
+                &event,
+                row.line_number,
+            ));
+        result.captures.push((
+            row.line_number,
+            openloaf_capture(
+                OpenLoafCaptureDraft {
+                    provider_session_id: provider_session_id.clone(),
+                    parent_provider_session_id: parent_provider_session_id.clone(),
+                    root_provider_session_id: root_provider_session_id.clone(),
+                    external_agent_id: external_agent_id.clone(),
+                    agent_type,
+                    role_hint: role_hint.to_owned(),
+                    is_primary: agent_type == AgentType::Primary,
+                    started_at,
+                    ended_at,
+                    cwd: cwd.clone(),
+                    metadata: &metadata,
+                    message_count,
+                    source,
+                    event: Some(event),
+                },
+                context,
+            ),
+        ));
+    }
+    Ok(result)
+}
+
+fn read_openloaf_messages(
+    path: &Path,
+    summary: &mut ProviderImportSummary,
+) -> Result<Vec<OpenLoafMessageRow>> {
+    ensure_regular_provider_transcript_file(path)?;
+    let file = File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let mut rows = Vec::new();
+    let mut line = Vec::new();
+    let mut line_number = 0usize;
+
+    while read_provider_jsonl_line(&mut reader, &mut line)? {
+        line_number += 1;
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        match serde_json::from_slice::<Value>(&line) {
+            Ok(value) if value.is_object() => rows.push(OpenLoafMessageRow { line_number, value }),
+            Ok(_) => push_provider_import_failure(
+                summary,
+                line_number,
+                "OpenLoaf messages.jsonl line must contain a JSON object".to_owned(),
+            ),
+            Err(err) => push_provider_import_failure(
+                summary,
+                line_number,
+                format!("malformed JSONL: {err}"),
+            ),
+        }
+    }
+    Ok(rows)
+}
+
+fn read_openloaf_session_metadata(
+    path: Option<&Path>,
+    summary: &mut ProviderImportSummary,
+) -> Value {
+    let Some(path) = path else {
+        return Value::Null;
+    };
+    match read_provider_json_file(path, "OpenLoaf session.json") {
+        Ok(value) => value,
+        Err(err) => {
+            push_provider_import_failure(
+                summary,
+                0,
+                format!("invalid OpenLoaf session.json: {err}"),
+            );
+            Value::Null
+        }
+    }
+}
+
+fn openloaf_provider_session_id(
+    raw_session_id: &str,
+    parent_provider_session_id: Option<&str>,
+    external_agent_id: Option<&str>,
+) -> String {
+    let raw_session_id = raw_session_id.trim();
+    if parent_provider_session_id.is_some() && !raw_session_id.contains("/agents/") {
+        let agent_id = external_agent_id
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or(raw_session_id);
+        format!("{}/agents/{agent_id}", parent_provider_session_id.unwrap())
+    } else {
+        raw_session_id.to_owned()
+    }
+}
+
+struct OpenLoafCaptureDraft<'a> {
+    provider_session_id: String,
+    parent_provider_session_id: Option<String>,
+    root_provider_session_id: Option<String>,
+    external_agent_id: Option<String>,
+    agent_type: AgentType,
+    role_hint: String,
+    is_primary: bool,
+    started_at: DateTime<Utc>,
+    ended_at: Option<DateTime<Utc>>,
+    cwd: Option<String>,
+    metadata: &'a Value,
+    message_count: usize,
+    source: &'a OpenLoafSessionSource,
+    event: Option<ProviderEventEnvelope>,
+}
+
+fn openloaf_capture(
+    draft: OpenLoafCaptureDraft<'_>,
+    context: &ProviderAdapterContext,
+) -> ProviderCaptureEnvelope {
+    native_provider_capture(
+        NativeSessionDraft {
+            provider: CaptureProvider::OpenLoaf,
+            source_format: OPENLOAF_SOURCE_FORMAT,
+            provider_session_id: draft.provider_session_id.clone(),
+            parent_provider_session_id: draft.parent_provider_session_id.clone(),
+            root_provider_session_id: draft.root_provider_session_id,
+            external_agent_id: draft.external_agent_id,
+            agent_type: draft.agent_type,
+            role_hint: Some(draft.role_hint),
+            is_primary: draft.is_primary,
+            started_at: draft.started_at,
+            ended_at: draft.ended_at,
+            cwd: draft.cwd,
+            fidelity: Fidelity::Imported,
+            raw_source_path: draft.source.messages_path.display().to_string(),
+            trust: ProviderSourceTrust::ProviderNative,
+            source_metadata: json!({
+                "adapter": OPENLOAF_SOURCE_FORMAT,
+                "source_path": draft.source.messages_path.display().to_string(),
+                "messages_path": draft.source.messages_path.display().to_string(),
+                "session_path": draft.source.session_path.as_ref().map(|path| path.display().to_string()),
+                "session_dir": draft.source.session_dir.display().to_string(),
+            }),
+            session_metadata: json!({
+                "source_format": OPENLOAF_SOURCE_FORMAT,
+                "provider": CaptureProvider::OpenLoaf.as_str(),
+                "session_id": draft.provider_session_id,
+                "title": openloaf_string_field(draft.metadata, &["title", "name"]),
+                "project_id": openloaf_string_field(draft.metadata, &["projectId", "project_id"]),
+                "board_id": openloaf_string_field(draft.metadata, &["boardId", "board_id"]),
+                "cli_id": openloaf_string_field(draft.metadata, &["cliId", "cli_id"]),
+                "message_count": draft.message_count,
+                "stored_message_count": draft.metadata.get("messageCount").and_then(Value::as_u64),
+                "is_user_rename": draft.metadata.get("isUserRename").and_then(Value::as_bool),
+                "is_pin": draft.metadata.get("isPin").and_then(Value::as_bool),
+                "has_session_json": draft.source.session_path.is_some(),
+                "session": provider_capped_json_value(draft.metadata, PROVIDER_MAX_PREVIEW_CHARS),
+            }),
+        },
+        context,
+        draft.event,
+    )
+}
+
+fn openloaf_event(
+    provider_session_id: &str,
+    provider_event_index: u64,
+    row: &OpenLoafMessageRow,
+    occurred_at: DateTime<Utc>,
+) -> ProviderEventEnvelope {
+    let role = row
+        .value
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let message_kind = row
+        .value
+        .get("messageKind")
+        .or_else(|| row.value.get("message_kind"))
+        .and_then(Value::as_str);
+    let event_type = openloaf_event_type(&row.value, role, message_kind);
+    native_event(NativeEventDraft {
+        provider: CaptureProvider::OpenLoaf,
+        source_format: OPENLOAF_SOURCE_FORMAT,
+        provider_session_id: provider_session_id.to_owned(),
+        provider_event_index,
+        provider_event_hash: Some(openloaf_event_id(&row.value, row.line_number, role)),
+        cursor: format!("line:{}", row.line_number),
+        event_type,
+        role: Some(openloaf_role(role)),
+        occurred_at,
+        text: openloaf_event_text(&row.value, role, event_type),
+        body: row.value.clone(),
+        metadata: json!({
+            "source": OPENLOAF_SOURCE_FORMAT,
+            "source_format": OPENLOAF_SOURCE_FORMAT,
+            "line": row.line_number,
+            "role": role,
+            "message_kind": message_kind,
+            "message_id": row.value.get("id").and_then(Value::as_str),
+            "parent_message_id": row.value.get("parentMessageId").or_else(|| row.value.get("parent_message_id")).and_then(Value::as_str),
+            "metadata": row.value.get("metadata").map(|metadata| provider_capped_json_value(metadata, PROVIDER_MAX_PREVIEW_CHARS)),
+        }),
+    })
+}
+
+fn openloaf_event_type(value: &Value, role: &str, message_kind: Option<&str>) -> EventType {
+    let role_lower = role.to_ascii_lowercase();
+    let kind_lower = message_kind.unwrap_or_default().to_ascii_lowercase();
+    if role_lower == "system" {
+        return EventType::Notice;
+    }
+    if role_lower == "task-report"
+        || kind_lower.contains("summary")
+        || kind_lower.contains("compact")
+        || kind_lower.contains("task-report")
+    {
+        return EventType::Summary;
+    }
+    if openloaf_has_part_kind(value, &["result", "output", "observation"]) {
+        return EventType::ToolOutput;
+    }
+    if openloaf_has_part_kind(value, &["tool", "action", "command", "function"]) {
+        return EventType::ToolCall;
+    }
+    EventType::Message
+}
+
+fn openloaf_has_part_kind(value: &Value, needles: &[&str]) -> bool {
+    let Some(parts) = provider_message_parts(value) else {
+        return false;
+    };
+    parts.iter().any(|part| {
+        [
+            "type",
+            "kind",
+            "messageKind",
+            "partKind",
+            "name",
+            "tool",
+            "toolName",
+        ]
+        .iter()
+        .filter_map(|key| part.get(*key).and_then(Value::as_str))
+        .map(str::to_ascii_lowercase)
+        .any(|haystack| needles.iter().any(|needle| haystack.contains(needle)))
+    })
+}
+
+fn openloaf_role(role: &str) -> EventRole {
+    match role {
+        "user" => EventRole::User,
+        "assistant" | "subagent" | "task-report" => EventRole::Assistant,
+        "system" => EventRole::System,
+        "tool" => EventRole::Tool,
+        other => provider_role(Some(other)),
+    }
+}
+
+fn openloaf_event_text(value: &Value, role: &str, event_type: EventType) -> String {
+    openloaf_parts_text(value)
+        .or_else(|| provider_block_text(value))
+        .unwrap_or_else(|| match event_type {
+            EventType::ToolCall => "OpenLoaf tool call".to_owned(),
+            EventType::ToolOutput => "OpenLoaf tool output".to_owned(),
+            EventType::Summary => "OpenLoaf summary".to_owned(),
+            _ => format!("OpenLoaf {role} message"),
+        })
+}
+
+fn openloaf_parts_text(value: &Value) -> Option<String> {
+    let parts = provider_message_parts(value)?;
+    let mut rendered = Vec::new();
+    for part in parts {
+        if let Some(text) = openloaf_part_text(part) {
+            if !text.trim().is_empty() {
+                rendered.push(text);
+            }
+        }
+    }
+    (!rendered.is_empty()).then(|| rendered.join("\n"))
+}
+
+fn openloaf_part_text(part: &Value) -> Option<String> {
+    let kind = [
+        "type",
+        "kind",
+        "messageKind",
+        "message_kind",
+        "partKind",
+        "part_kind",
+    ]
+    .iter()
+    .find_map(|key| part.get(*key).and_then(Value::as_str))
+    .unwrap_or_default()
+    .to_ascii_lowercase();
+    if let Some(text) = part
+        .get("text")
+        .or_else(|| part.get("content"))
+        .or_else(|| part.get("summary"))
+        .or_else(|| part.get("thinking"))
+        .and_then(provider_value_text)
+        .filter(|text| !text.trim().is_empty())
+    {
+        return Some(text);
+    }
+    let name = part
+        .get("name")
+        .or_else(|| part.get("tool"))
+        .or_else(|| part.get("toolName"))
+        .or_else(|| part.get("action"))
+        .and_then(Value::as_str)
+        .unwrap_or("tool");
+    if kind.contains("result") || kind.contains("output") || kind.contains("observation") {
+        let preview = part
+            .get("output")
+            .or_else(|| part.get("result"))
+            .or_else(|| part.get("content"))
+            .and_then(provider_value_text);
+        return Some(
+            preview
+                .map(|preview| format!("tool output: {name}\n{preview}"))
+                .unwrap_or_else(|| format!("tool output: {name}")),
+        );
+    }
+    if kind.contains("tool")
+        || kind.contains("action")
+        || kind.contains("command")
+        || kind.contains("function")
+    {
+        let preview = part
+            .get("input")
+            .or_else(|| part.get("args"))
+            .or_else(|| part.get("arguments"))
+            .or_else(|| part.get("parameters"))
+            .and_then(provider_value_text);
+        return Some(
+            preview
+                .map(|preview| format!("tool call: {name}\n{preview}"))
+                .unwrap_or_else(|| format!("tool call: {name}")),
+        );
+    }
+    provider_part_text(part)
+}
+
+fn openloaf_event_id(value: &Value, line_number: usize, role: &str) -> String {
+    value
+        .get("id")
+        .or_else(|| value.get("messageId"))
+        .or_else(|| value.get("message_id"))
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("{role}:line-{line_number}"))
+}
+
+fn openloaf_message_timestamp(value: &Value) -> Option<DateTime<Utc>> {
+    provider_timestamp_from_fields(
+        value,
+        &[
+            "createdAt",
+            "created_at",
+            "timestamp",
+            "updatedAt",
+            "updated_at",
+        ],
+    )
+}
+
+fn openloaf_session_timestamp(value: &Value, fields: &[&str]) -> Option<DateTime<Utc>> {
+    provider_timestamp_from_fields(value, fields)
+}
+
+fn openloaf_string_field(value: &Value, fields: &[&str]) -> Option<String> {
+    provider_string_field(value, fields)
 }
 
 #[derive(Debug, Clone)]
@@ -33236,6 +34067,70 @@ mod tests {
         assert_eq!(second.skipped_sessions, 2);
         assert_eq!(second.skipped_events, 5);
         assert_eq!(second.skipped_edges, 1);
+    }
+
+    #[test]
+    fn native_openloaf_fixture_imports_searches_reimports_and_file_touches() {
+        let temp = tempdir();
+        let fixture = provider_history_fixture("loaf/v1/chat-history");
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let source = provider_source_for_path(CaptureProvider::OpenLoaf, fixture.clone());
+        assert_eq!(source.source_format, "openloaf_chat_jsonl_tree");
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+
+        let first = import_openloaf_history(
+            &fixture,
+            &mut store,
+            OpenLoafImportOptions {
+                machine_id: "test-machine".into(),
+                source_path: Some(fixture.clone()),
+                imported_at: DateTime::parse_from_rfc3339("2026-07-04T19:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                allow_partial_failures: true,
+                ..OpenLoafImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(first.failed, 0, "{:?}", first.failures);
+        assert_eq!(first.imported_sessions, 1);
+        assert_eq!(first.imported_events, 5);
+        let session_id = provider_session_uuid(CaptureProvider::OpenLoaf, "openloaf-session-1");
+        let session = store.get_session(session_id).unwrap();
+        assert_eq!(session.provider, CaptureProvider::OpenLoaf);
+        assert_eq!(
+            session.external_session_id.as_deref(),
+            Some("openloaf-session-1")
+        );
+        assert!(store
+            .search_event_hits("openloaf loaf oracle 6f40d1", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::OpenLoaf)));
+        assert!(store
+            .export_archive()
+            .unwrap()
+            .files_touched
+            .iter()
+            .any(|file| file.path == "src/openloaf_fixture.rs"));
+
+        let second = import_openloaf_history(
+            &fixture,
+            &mut store,
+            OpenLoafImportOptions {
+                source_path: Some(fixture.clone()),
+                allow_partial_failures: true,
+                ..OpenLoafImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(second.failed, 0, "{:?}", second.failures);
+        assert_eq!(second.imported_sessions, 0);
+        assert_eq!(second.imported_events, 0);
+        assert_eq!(second.skipped_sessions, 1);
+        assert_eq!(second.skipped_events, 5);
     }
 
     #[test]

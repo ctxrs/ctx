@@ -1,0 +1,16 @@
+{
+  "id": "openloaf-session-1",
+  "title": "OpenLoaf Fixture Import",
+  "isUserRename": false,
+  "isPin": false,
+  "errorMessage": null,
+  "sessionPreface": "fixture preface",
+  "projectId": "project-openloaf-fixture",
+  "boardId": null,
+  "cliId": "loaf-cli-fixture",
+  "projectPath": "/workspace/openloaf-fixture",
+  "createdAt": "2026-07-04T19:00:00.000Z",
+  "updatedAt": "2026-07-04T19:04:00.000Z",
+  "deletedAt": null,
+  "messageCount": 5
+}
