@@ -25,6 +25,7 @@ ring.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+rusqlite.workspace = true
 ureq = { version = "2.10", default-features = true }
 uuid.workspace = true
 ctx-history-capture = { path = "../ctx-history-capture" }
@@ -39,5 +40,4 @@ libc.workspace = true
 assert_cmd.workspace = true
 predicates.workspace = true
 proptest.workspace = true
-rusqlite.workspace = true
 tempfile.workspace = true

@@ -44,6 +44,14 @@ pub enum ProviderId {
     Pi,
     OpenCode,
     #[serde(
+        rename = "codearts_agent",
+        alias = "codearts",
+        alias = "codearts-agent",
+        alias = "codearts_doer",
+        alias = "codearts-doer"
+    )]
+    CodeArtsAgent,
+    #[serde(
         rename = "openloaf",
         alias = "loaf",
         alias = "open-loaf",
@@ -95,8 +103,18 @@ pub enum ProviderId {
     CodeBuddy,
     #[serde(rename = "aider_desk", alias = "aider-desk")]
     AiderDesk,
-    #[serde(rename = "trae")]
+    #[serde(rename = "trae", alias = "trae-cn", alias = "trae_cn")]
     Trae,
+    #[serde(rename = "zencoder", alias = "zen-coder", alias = "zen_coder")]
+    Zencoder,
+    #[serde(
+        rename = "codestudio",
+        alias = "code_studio",
+        alias = "code-studio",
+        alias = "syncfusion_code_studio",
+        alias = "syncfusion-code-studio"
+    )]
+    CodeStudio,
     #[serde(rename = "openhands")]
     OpenHands,
     Cagent,
@@ -126,6 +144,8 @@ pub enum ProviderId {
         alias = "vibe"
     )]
     MistralVibe,
+    #[serde(rename = "tabnine", alias = "tabnine-cli", alias = "tabnine_cli")]
+    Tabnine,
     Mux,
     #[serde(rename = "reasonix", alias = "deepseek-reasonix")]
     Reasonix,
@@ -166,20 +186,24 @@ pub enum ProviderId {
     Kilo,
     SweAgent,
     Amp,
+    #[serde(rename = "tinycloud", alias = "tiny_cloud", alias = "tiny-cloud")]
+    TinyCloud,
 }
 
 impl ProviderId {
-    pub const ALL: [Self; 67] = [
+    pub const ALL: [Self; 72] = [
         Self::Codex,
         Self::ClaudeCode,
         Self::ClaudeCliCrp,
         Self::Pi,
         Self::OpenCode,
+        Self::CodeArtsAgent,
         Self::OpenLoaf,
         Self::Cursor,
         Self::AntigravityCli,
         Self::GeminiCli,
         Self::Gemini,
+        Self::Tabnine,
         Self::CopilotCli,
         Self::Copilot,
         Self::Windsurf,
@@ -206,6 +230,8 @@ impl ProviderId {
         Self::CodeBuddy,
         Self::AiderDesk,
         Self::Trae,
+        Self::Zencoder,
+        Self::CodeStudio,
         Self::OpenHands,
         Self::Cagent,
         Self::QwenCode,
@@ -237,6 +263,7 @@ impl ProviderId {
         Self::Kilo,
         Self::SweAgent,
         Self::Amp,
+        Self::TinyCloud,
     ];
 }
 
@@ -542,8 +569,12 @@ mod tests {
             ProviderId::Cline,
             ProviderId::Codex,
             ProviderId::CodeBuddy,
+            ProviderId::CodeArtsAgent,
             ProviderId::AiderDesk,
             ProviderId::Trae,
+            ProviderId::Zencoder,
+            ProviderId::CodeStudio,
+            ProviderId::TinyCloud,
             ProviderId::Continue,
             ProviderId::Crush,
             ProviderId::Cursor,
@@ -561,6 +592,7 @@ mod tests {
             ProviderId::Adal,
             ProviderId::Terramind,
             ProviderId::GeminiCli,
+            ProviderId::Tabnine,
             ProviderId::Goose,
             ProviderId::Hermes,
             ProviderId::Kilo,
@@ -574,6 +606,7 @@ mod tests {
             ProviderId::Warp,
             ProviderId::Auggie,
             ProviderId::Eve,
+            ProviderId::Junie,
             ProviderId::NanoClaw,
             ProviderId::Neovate,
             ProviderId::CommandCode,

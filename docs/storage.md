@@ -57,9 +57,9 @@ large raw payloads, ctx should store a bounded preview plus a citation back to
 the raw source path when available.
 
 Provider-specific sensitive handles should stay out of normalized metadata when
-they are not needed for local search. For example, the preview Warp SQLite
-importer records only boolean presence for Warp server conversation tokens and
-does not copy token values from `agent_conversations.conversation_data`.
+they are not needed for local search. For example, the Warp SQLite importer
+records only boolean presence for Warp server conversation tokens and does not
+copy token values from `agent_conversations.conversation_data`.
 
 No session text, prompts, transcripts, or indexed snippets are sent by ctx by
 default.

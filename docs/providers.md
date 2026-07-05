@@ -24,7 +24,8 @@ The current CLI imports local history for:
   `$XDG_DATA_HOME/goose/sessions/sessions.db`,
   `$XDG_DATA_HOME/Block/goose/sessions/sessions.db`, matching defaults under
   `~/.local/share`, or an explicit Goose sessions DB path;
-- Dexto SQLite history from an explicit Dexto DB path;
+- Dexto SQLite history from `~/.dexto/database/*.db`, current project
+  `.dexto/database/*.db`, or an explicit Dexto DB path;
 - Lingma SQLite history from
   `~/.lingma/vscode/sharedClientCache/cache/db/local.db`,
   `~/.lingma/vscode-insiders/sharedClientCache/cache/db/local.db`, or an
@@ -35,23 +36,54 @@ The current CLI imports local history for:
   `~/.qoder/projects`, or an explicit transcript file/directory. This importer
   reads the official transcript format and does not parse encrypted Qoder app
   logs or VS Code/Electron state databases;
-- Warp Terminal local restoration SQLite history from documented Linux/macOS
-  `warp.sqlite` paths or an explicit `warp.sqlite` path. This is
-  preview/manual only: use `ctx import --provider warp` for a discovered source or
-  `ctx import --provider warp --path <warp.sqlite>`;
+- Windsurf official Cascade hook transcript JSONL files under
+  `~/.windsurf/transcripts`, or an explicit transcript file/directory. Hook
+  transcripts are usually opt-in and capture sessions after hook setup; ctx
+  does not parse `~/.codeium/windsurf/cascade` or guessed VS Code state
+  databases;
+- Warp Terminal local restoration SQLite history from documented Linux, macOS,
+  and Windows `warp.sqlite` paths or an explicit `warp.sqlite` path. Discovered
+  local restoration DBs are native auto-importable; cloud sync endpoints,
+  Oz/cloud conversations, browser IndexedDB, Markdown exports, command history
+  outside `agent_tasks`, and Warp Drive/team data are not parsed;
 - CodeBuddy JSON history under `~/.codebuddy`,
   `~/Library/Application Support/CodeBuddyExtension/Data`,
   `%LOCALAPPDATA%/CodeBuddyExtension`, or an explicit CodeBuddy history root;
+- CodeArts Agent kernel SQLite rows for `opencode.db` under
+  `~/.codeartsdoer/vscode-data`, `~/.codeartsdoer/codearts-data`,
+  XDG data homes, or an explicit DB path. This importer is limited to the
+  kernel-managed OpenCode-derived SQLite DB and does not parse older/private VS
+  Code cache JSON;
+- Zencoder chat session trees under common VS Code-family app-data
+  `User/globalStorage/ZencoderAI.zencoder/zencoder-chat` roots, or an explicit
+  `zencoder-chat` tree/session path. Imports are limited to `sessions.json` and
+  `sessions/*.json`; `.zencoder` skill/config homes and other extension caches
+  are not parsed;
+- Syncfusion Code Studio session-store SQLite DBs under Code Studio app-data
+  `User/globalStorage/session-store.db`, or an explicit session DB path. This
+  importer is limited to the proven session-store DB and does not parse
+  `.codestudio` skills/agents/settings or debug logs;
 - Aider Desk project task context files under `.aider-desk/tasks/<taskId>`,
   `AIDER_DESK_DIR/tasks/<taskId>`, or an explicit task, tasks, context file, or
   project root;
-- Amp thread export JSON files produced by `amp threads export <threadIDOrURL>`
-  and passed explicitly with `ctx import --provider amp --path <file>`; ctx does
-  not auto-discover Amp paths or crawl `$XDG_CACHE_HOME/amp/logs/cli.log`;
-- Trae chat state from an explicit `User/workspaceStorage` root, workspace
-  directory, or `state.vscdb` file. This preview importer reads known
-  VS Code-style `ItemTable` keys only; default discovery and `trae-cn` are not
-  claimed;
+- official Amp thread export JSON files produced by
+  `amp threads export <threadIDOrURL>` and passed explicitly with
+  `ctx import --provider amp --path <file>`; ctx does not auto-discover Amp
+  paths or crawl `$XDG_CACHE_HOME/amp/logs/cli.log`;
+- official Devin CLI ATIF JSON files/directories produced by
+  `devin --export [PATH]` and passed explicitly with
+  `ctx import --provider devin --path <atif-file-or-dir>`; ctx does not
+  auto-discover Devin paths or inspect `~/.config/devin`;
+- Trae chat state from Trae and Trae CN `User/workspaceStorage` roots at
+  `~/Library/Application Support/Trae/User/workspaceStorage`,
+  `~/Library/Application Support/Trae CN/User/workspaceStorage`,
+  `%APPDATA%/Trae/User/workspaceStorage`, or
+  `%APPDATA%/Trae CN/User/workspaceStorage`, plus explicit
+  `User/workspaceStorage` roots, workspace directories, or `state.vscdb` files.
+  The importer reads known VS Code-style `ItemTable` keys only; `trae-cn` is an
+  alias for canonical provider `trae`. CN input-history rows are often user
+  prompts only, and ctx does not claim `globalStorage`, `ModularData`, arbitrary
+  caches, or unknown `ItemTable` keys;
 - OpenClaw session JSONL trees under `OPENCLAW_STATE_DIR`, `~/.openclaw`,
   legacy `~/.clawdbot`, or legacy `~/.moltbot`;
 - Hermes Agent SQLite history under `HERMES_HOME/state.db` or
@@ -74,6 +106,8 @@ The current CLI imports local history for:
   `~/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript_full.jsonl`
   or `transcript.jsonl`;
 - Gemini CLI chat JSONL records under `~/.gemini/tmp/**/chats/**/*.jsonl`;
+- Tabnine CLI chat JSONL records under
+  `~/.tabnine/agent/tmp/**/chats/**/*.jsonl`;
 - Cursor CLI agent transcript JSONL files under
   `~/.cursor/projects/**/agent-transcripts/**/*.jsonl`;
 - Zed agent thread SQLite DBs at `$XDG_DATA_HOME/zed/threads/threads.db` or
@@ -93,6 +127,13 @@ The current CLI imports local history for:
 - Eve local Workflow `.workflow-data` streams from `WORKFLOW_LOCAL_DATA_DIR`,
   a current project `.workflow-data`, or an explicit `.workflow-data`/project
   path;
+- Junie session event streams from `JUNIE_SESSIONS_DIR`,
+  `JUNIE_HOME/sessions`, `~/.junie/sessions`, or an explicit sessions/session
+  path containing `index.jsonl` and `session-*/events.jsonl`;
+- TinyCloud project session JSONL files under
+  `$TINYCLOUD_HOME/projects/*/sessions/*.jsonl`,
+  `~/.tinycloud/projects/*/sessions/*.jsonl`, legacy `<home>/sessions/*.jsonl`,
+  or an explicit TinyCloud home/session path;
 - ForgeCode conversation SQLite history from `FORGE_CONFIG/.forge.db`, legacy
   `~/forge/.forge.db`, `~/.forge/.forge.db`, or an explicit ForgeCode DB path;
 - Deep Agents LangGraph checkpoint SQLite history from
@@ -147,16 +188,17 @@ CLI provider flags use names such as `kilo`, `crush`, `goose`, `dexto`,
 `openclaw`, `hermes`,
 `nanoclaw`, `astrbot`, `shelley`, `continue`, `openhands`, `copilot-cli`,
 `factory-ai-droid`, `qwen-code`, `kimi-code-cli`, `autohand-code`,
-`kiro-cli`, `iflow-cli`, `eve`, `forgecode`, `deepagents`, `mistral-vibe`, `mux`,
+`kiro-cli`, `iflow-cli`, `devin`, `eve`, `codearts-agent`, `forgecode`, `deepagents`, `mistral-vibe`, `mux`,
 `reasonix`, `adal`, `kode`, `neovate`, `terramind`, `zed`, `lingma`, `qoder`, `pochi`,
-`warp`, `codebuddy`, `aider-desk`, `amp`, `trae`, `cline`, and `roo`/`roo-code`.
+`warp`, `codebuddy`, `aider-desk`, `amp`, `trae`, `tinycloud`, `windsurf`, `cline`, and `roo`/`roo-code`.
 Structured JSON and stable SQL views use provider IDs in ctx output; multiword IDs may be
 snake_case, such as `copilot_cli`, `factory_ai_droid`, `qwen_code`,
 `kimi_code_cli`, `autohand_code`, `kiro_cli`, `iflow_cli`, or
-`mistral_vibe`; Aider Desk is reported as `aider_desk`, while compact native
+`mistral_vibe`; CodeArts Agent is reported as `codearts_agent`, Aider Desk is
+reported as `aider_desk`, while compact native
 IDs such as `kilo`, `openclaw`, `crush`, `goose`, `dexto`, `mux`, `reasonix`,
 `adal`, `kode`, `neovate`, `terramind`, `zed`, `lingma`, `qoder`, `pochi`, `codebuddy`,
-`amp`, `forgecode`, `deepagents`, `nanoclaw`, `astrbot`, `trae`, `warp`,
+`amp`, `devin`, `forgecode`, `deepagents`, `nanoclaw`, `astrbot`, `trae`, `tinycloud`, `windsurf`, `warp`,
 `shelley`, `continue`, and `openhands`
 stay compact. Roo Code is
 reported as `roo_code`.
@@ -164,13 +206,18 @@ reported as `roo_code`.
 `ctx sources --json` reports each known provider source with `import_support`
 and `importable` fields. A native source is marked available/importable only
 when provider-specific transcript files exist. Sources with `import_support:
-"preview"` are explicit-import preview paths: use `ctx import --provider
-nanoclaw` or `ctx import --provider astrbot` when discovery finds the desired
-source, or use `ctx import --provider trae --path <state.vscdb-or-workspaceStorage>`
-for Trae. Add `--path` to target a specific source such as a Warp SQLite DB or
-Amp export JSON before searching it. They
+"explicit"` are supported explicit exports or user-supplied paths, such as Amp
+JSON from `amp threads export`; they require
+`ctx import --provider ... --path <path>` because no default source discovery is
+claimed. Devin ATIF JSON from `devin --export [PATH]` has the same
+explicit-export support semantics in the matrix. Sources with
+`import_support: "preview"` are explicit-import preview paths: use
+`ctx import --provider nanoclaw` or `ctx import --provider astrbot` when
+discovery finds the desired source, or use `ctx import --provider trae --path
+<state.vscdb-or-workspaceStorage>` for Trae. Add `--path` to target a specific
+source before searching it. Explicit and preview paths
 are intentionally excluded from `ctx import --all` and pre-search refresh until
-promoted. Sources with
+they have safe default discovery. Sources with
 `status: "unknown"` hit the bounded transcript probe budget before proving
 history exists, and sources with `import_support: "unsupported"` are detections
 or blockers, not importable native history.
