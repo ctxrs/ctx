@@ -228,6 +228,7 @@ text_enum! {
         Goose => "goose",
         Dexto => "dexto",
         Lingma => "lingma",
+        Qoder => "qoder",
         Pochi => "pochi",
         Warp => "warp",
         CortexCode => "cortex_code",

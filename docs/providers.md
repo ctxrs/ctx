@@ -30,6 +30,11 @@ The current CLI imports local history for:
   `~/.lingma/vscode-insiders/sharedClientCache/cache/db/local.db`, or an
   explicit Lingma `local.db` path. Lingma assistant content is imported from
   `summary`/`error_result` only and may be partial;
+- Qoder transcript JSONL files under
+  `~/.qoder/projects/<project>/transcript/<session-id>.jsonl`,
+  `~/.qoder/projects`, or an explicit transcript file/directory. This importer
+  reads the official transcript format and does not parse encrypted Qoder app
+  logs or VS Code/Electron state databases;
 - Warp Terminal local restoration SQLite history from documented Linux/macOS
   `warp.sqlite` paths or an explicit `warp.sqlite` path. This is
   preview/manual only: use `ctx import --provider warp` for a discovered source or
@@ -138,15 +143,16 @@ CLI provider flags use names such as `kilo`, `crush`, `goose`, `dexto`,
 `nanoclaw`, `astrbot`, `shelley`, `continue`, `openhands`, `copilot-cli`,
 `factory-ai-droid`, `qwen-code`, `kimi-code-cli`, `autohand-code`,
 `kiro-cli`, `iflow-cli`, `eve`, `forgecode`, `deepagents`, `mistral-vibe`, `mux`,
-`reasonix`, `kode`, `neovate`, `terramind`, `zed`, `lingma`, `codebuddy`,
-`aider-desk`, `amp`, `cline`, and `roo`/`roo-code`.
+`reasonix`, `kode`, `neovate`, `terramind`, `zed`, `lingma`, `qoder`, `pochi`,
+`warp`, `codebuddy`, `aider-desk`, `amp`, `trae`, `cline`, and `roo`/`roo-code`.
 Structured JSON and stable SQL views use provider IDs in ctx output; multiword IDs may be
 snake_case, such as `copilot_cli`, `factory_ai_droid`, `qwen_code`,
 `kimi_code_cli`, `autohand_code`, `kiro_cli`, `iflow_cli`, or
 `mistral_vibe`; Aider Desk is reported as `aider_desk`, while compact native
 IDs such as `kilo`, `openclaw`, `crush`, `goose`, `dexto`, `mux`, `reasonix`,
-`kode`, `neovate`, `terramind`, `zed`, `lingma`, `codebuddy`, `amp`, `forgecode`,
-`deepagents`, `nanoclaw`, `astrbot`, `trae`, `warp`, `shelley`, `continue`, and `openhands`
+`kode`, `neovate`, `terramind`, `zed`, `lingma`, `qoder`, `pochi`, `codebuddy`,
+`amp`, `forgecode`, `deepagents`, `nanoclaw`, `astrbot`, `trae`, `warp`,
+`shelley`, `continue`, and `openhands`
 stay compact. Roo Code is
 reported as `roo_code`.
 
