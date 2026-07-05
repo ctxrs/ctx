@@ -205,7 +205,9 @@ text_enum! {
         Reasonix => "reasonix",
         Kode => "kode",
         Neovate => "neovate",
+        CommandCode => "command_code",
         Terramind => "terramind",
+        RovoDev => "rovodev",
         OpenClaw => "openclaw",
         Hermes => "hermes",
         NanoClaw => "nanoclaw",
@@ -219,6 +221,7 @@ text_enum! {
         Goose => "goose",
         Dexto => "dexto",
         Lingma => "lingma",
+        CortexCode => "cortex_code",
         CodeBuddy => "codebuddy",
         AiderDesk => "aider_desk",
         Shell => "shell",
@@ -1584,6 +1587,18 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<CaptureProvider>("\"neovate\"").unwrap(),
             CaptureProvider::Neovate
+        );
+        assert_eq!(
+            serde_json::from_str::<CaptureProvider>("\"command_code\"").unwrap(),
+            CaptureProvider::CommandCode
+        );
+        assert_eq!(
+            serde_json::from_str::<CaptureProvider>("\"rovodev\"").unwrap(),
+            CaptureProvider::RovoDev
+        );
+        assert_eq!(
+            serde_json::from_str::<CaptureProvider>("\"cortex_code\"").unwrap(),
+            CaptureProvider::CortexCode
         );
         assert_eq!(
             serde_json::from_str::<CaptureProvider>("\"lingma\"").unwrap(),

@@ -37,8 +37,9 @@ use ctx_history_capture::{
     import_autohand_code_sessions, import_claude_projects_jsonl_tree,
     import_cline_task_json_history, import_codebuddy_history, import_codex_history_jsonl,
     import_codex_session_jsonl, import_codex_session_jsonl_tail, import_codex_session_paths,
-    import_codex_session_tree, import_continue_cli_sessions, import_copilot_cli_session_events,
-    import_crush_sqlite, import_cursor_native_history, import_custom_history_jsonl_v1,
+    import_codex_session_tree, import_command_code_history, import_continue_cli_sessions,
+    import_copilot_cli_session_events, import_cortex_code_history, import_crush_sqlite,
+    import_cursor_native_history, import_custom_history_jsonl_v1,
     import_custom_history_jsonl_v1_reader, import_deepagents_sqlite, import_dexto_sqlite,
     import_factory_ai_droid_sessions, import_forgecode_sqlite, import_gemini_cli_history,
     import_goose_sessions_sqlite, import_hermes_sqlite, import_iflow_cli_history,
@@ -46,26 +47,27 @@ use ctx_history_capture::{
     import_lingma_sqlite, import_mistral_vibe_history, import_mux_history, import_nanoclaw_project,
     import_neovate_history, import_openclaw_history, import_opencode_sqlite,
     import_openhands_file_events, import_pi_session_jsonl, import_qwen_code_history,
-    import_reasonix_history, import_roo_task_json_history, import_shelley_sqlite,
-    import_terramind_sqlite, import_zed_threads_sqlite, provider_source_for_path,
-    provider_source_spec, stable_capture_uuid, validate_custom_history_jsonl_v1,
-    validate_custom_history_jsonl_v1_reader, AiderDeskImportOptions, AntigravityCliImportOptions,
-    AstrBotSqliteImportOptions, AutohandCodeImportOptions, CatalogSummary,
-    ClaudeProjectsImportOptions, ClineTaskJsonImportOptions, CodeBuddyImportOptions,
-    CodexEventImportMode, CodexHistoryImportOptions, CodexSessionCatalogOptions,
-    CodexSessionImportOptions, CodexSessionImportProgress, CodexSessionImportProgressCallback,
-    CodexToolOutputMode, ContinueCliImportOptions, CopilotCliImportOptions,
-    CrushSqliteImportOptions, CursorNativeImportOptions, CustomHistoryJsonlV1ImportOptions,
-    DeepAgentsSqliteImportOptions, DextoSqliteImportOptions, FactoryAiDroidImportOptions,
-    ForgeCodeSqliteImportOptions, GeminiCliImportOptions, GooseSessionsSqliteImportOptions,
-    HermesSqliteImportOptions, IflowCliImportOptions, KiloSqliteImportOptions,
-    KimiCodeCliImportOptions, KiroSqliteImportOptions, KodeImportOptions,
+    import_reasonix_history, import_roo_task_json_history, import_rovodev_history,
+    import_shelley_sqlite, import_terramind_sqlite, import_zed_threads_sqlite,
+    provider_source_for_path, provider_source_spec, stable_capture_uuid,
+    validate_custom_history_jsonl_v1, validate_custom_history_jsonl_v1_reader,
+    AiderDeskImportOptions, AntigravityCliImportOptions, AstrBotSqliteImportOptions,
+    AutohandCodeImportOptions, CatalogSummary, ClaudeProjectsImportOptions,
+    ClineTaskJsonImportOptions, CodeBuddyImportOptions, CodexEventImportMode,
+    CodexHistoryImportOptions, CodexSessionCatalogOptions, CodexSessionImportOptions,
+    CodexSessionImportProgress, CodexSessionImportProgressCallback, CodexToolOutputMode,
+    CommandCodeImportOptions, ContinueCliImportOptions, CopilotCliImportOptions,
+    CortexCodeImportOptions, CrushSqliteImportOptions, CursorNativeImportOptions,
+    CustomHistoryJsonlV1ImportOptions, DeepAgentsSqliteImportOptions, DextoSqliteImportOptions,
+    FactoryAiDroidImportOptions, ForgeCodeSqliteImportOptions, GeminiCliImportOptions,
+    GooseSessionsSqliteImportOptions, HermesSqliteImportOptions, IflowCliImportOptions,
+    KiloSqliteImportOptions, KimiCodeCliImportOptions, KiroSqliteImportOptions, KodeImportOptions,
     LingmaSqliteImportOptions, MistralVibeImportOptions, MuxImportOptions, NanoClawImportOptions,
     NeovateImportOptions, OpenClawImportOptions, OpenCodeSqliteImportOptions,
     OpenHandsImportOptions, PiSessionImportOptions, ProviderImportSummary, ProviderImportSupport,
     ProviderSource, ProviderSourceStatus, QwenCodeImportOptions, ReasonixImportOptions,
-    RooTaskJsonImportOptions, ShelleySqliteImportOptions, TerramindSqliteImportOptions,
-    ZedThreadsSqliteImportOptions,
+    RooTaskJsonImportOptions, RovoDevImportOptions, ShelleySqliteImportOptions,
+    TerramindSqliteImportOptions, ZedThreadsSqliteImportOptions,
 };
 use ctx_history_core::{
     database_path, default_data_root, utc_now, CaptureProvider, ContextCitation,
@@ -749,7 +751,13 @@ enum NativeProviderArg {
     Kode,
     #[value(name = "neovate", alias = "neovate-code", alias = "neovate_code")]
     Neovate,
+    #[value(name = "command-code", alias = "command_code", alias = "commandcode")]
+    CommandCode,
     Terramind,
+    #[value(name = "rovodev", alias = "rovo-dev", alias = "rovo_dev")]
+    RovoDev,
+    #[value(name = "cortex-code", alias = "cortex", alias = "cortex_code")]
+    CortexCode,
     #[value(name = "openclaw", alias = "open-claw", alias = "open_claw")]
     OpenClaw,
     Hermes,
@@ -843,7 +851,13 @@ enum ProviderArg {
     Kode,
     #[value(name = "neovate", alias = "neovate-code", alias = "neovate_code")]
     Neovate,
+    #[value(name = "command-code", alias = "command_code", alias = "commandcode")]
+    CommandCode,
     Terramind,
+    #[value(name = "rovodev", alias = "rovo-dev", alias = "rovo_dev")]
+    RovoDev,
+    #[value(name = "cortex-code", alias = "cortex", alias = "cortex_code")]
+    CortexCode,
     #[value(name = "openclaw", alias = "open-claw", alias = "open_claw")]
     OpenClaw,
     Hermes,
@@ -918,7 +932,10 @@ impl NativeProviderArg {
             Self::Reasonix => CaptureProvider::Reasonix,
             Self::Kode => CaptureProvider::Kode,
             Self::Neovate => CaptureProvider::Neovate,
+            Self::CommandCode => CaptureProvider::CommandCode,
             Self::Terramind => CaptureProvider::Terramind,
+            Self::RovoDev => CaptureProvider::RovoDev,
+            Self::CortexCode => CaptureProvider::CortexCode,
             Self::OpenClaw => CaptureProvider::OpenClaw,
             Self::Hermes => CaptureProvider::Hermes,
             Self::NanoClaw => CaptureProvider::NanoClaw,
@@ -984,7 +1001,10 @@ impl ProviderArg {
             Self::Reasonix => CaptureProvider::Reasonix,
             Self::Kode => CaptureProvider::Kode,
             Self::Neovate => CaptureProvider::Neovate,
+            Self::CommandCode => CaptureProvider::CommandCode,
             Self::Terramind => CaptureProvider::Terramind,
+            Self::RovoDev => CaptureProvider::RovoDev,
+            Self::CortexCode => CaptureProvider::CortexCode,
             Self::OpenClaw => CaptureProvider::OpenClaw,
             Self::Hermes => CaptureProvider::Hermes,
             Self::NanoClaw => CaptureProvider::NanoClaw,
@@ -1029,7 +1049,10 @@ impl ProviderArg {
             Self::Reasonix => "reasonix",
             Self::Kode => "kode",
             Self::Neovate => "neovate",
+            Self::CommandCode => "command-code",
             Self::Terramind => "terramind",
+            Self::RovoDev => "rovodev",
+            Self::CortexCode => "cortex-code",
             Self::OpenClaw => "openclaw",
             Self::Hermes => "hermes",
             Self::NanoClaw => "nanoclaw",
@@ -6129,6 +6152,39 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
+        CaptureProvider::CommandCode => import_command_code_history(
+            &source.path,
+            store,
+            CommandCodeImportOptions {
+                source_path: Some(source.path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: true,
+                ..CommandCodeImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
+        CaptureProvider::RovoDev => import_rovodev_history(
+            &source.path,
+            store,
+            RovoDevImportOptions {
+                source_path: Some(source.path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: true,
+                ..RovoDevImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
+        CaptureProvider::CortexCode => import_cortex_code_history(
+            &source.path,
+            store,
+            CortexCodeImportOptions {
+                source_path: Some(source.path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: true,
+                ..CortexCodeImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
         CaptureProvider::MistralVibe => import_mistral_vibe_history(
             &source.path,
             store,
@@ -6409,6 +6465,28 @@ fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bool {
                                 || name.ends_with(".pending.json")
                                 || name.ends_with(".plan.json")
                         }))
+        }
+        CaptureProvider::CommandCode => {
+            path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        !name.ends_with(".checkpoints.jsonl")
+                            && !name.contains(".checkpoints.")
+                            && !name.contains(".prompts.")
+                    })
+        }
+        CaptureProvider::RovoDev => {
+            path.file_name().and_then(|name| name.to_str()) == Some("session_context.json")
+        }
+        CaptureProvider::CortexCode => {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    (name.ends_with(".json") && !name.ends_with(".history.json"))
+                        || name.ends_with(".history.jsonl")
+                })
         }
         CaptureProvider::CopilotCli => {
             path.file_name().and_then(|name| name.to_str()) == Some("events.jsonl")
@@ -6761,6 +6839,9 @@ fn source_uses_incremental_event_search(source: &SourceInfo) -> bool {
             | CaptureProvider::MistralVibe
             | CaptureProvider::Mux
             | CaptureProvider::Reasonix
+            | CaptureProvider::CommandCode
+            | CaptureProvider::RovoDev
+            | CaptureProvider::CortexCode
             | CaptureProvider::Terramind
             | CaptureProvider::Cline
             | CaptureProvider::RooCode

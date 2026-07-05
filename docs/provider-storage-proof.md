@@ -161,6 +161,60 @@ IDE/application storage imports.
 - `ctx` imports this shape as `neovate_session_jsonl_tree` and excludes
   `requests/` and `file-history/` JSONL sidecars from primary session import.
 
+## Command Code
+
+- Source evidence: the published `command-code@0.41.1` package writes project
+  history under `~/.commandcode/projects/<sanitized-cwd>/<sessionId>.jsonl`.
+- Bundle evidence: session records include `id`, `sessionId`, optional
+  `parentId`, `role`, `content`, `timestamp`, `gitBranch`, and `metadata`;
+  sidecars include `<sessionId>.meta.json`, `<sessionId>.checkpoints.jsonl`,
+  and prompt/checkpoint JSONL files.
+- `ctx` imports this shape as `command_code_session_jsonl_tree`, using read-only
+  discovery under `~/.commandcode/projects`.
+- The importer requires a `sessionId` row, imports `parentId` as a child-session
+  edge, and skips prompt/checkpoint sidecars. Non-session JSONL files found
+  while scanning a project tree are skipped so valid sessions still import.
+- Privacy note: ctx stores local transcript text and path references in its
+  local history store only. Analytics must not include transcript paths,
+  usernames, repository paths, message content, or file bodies.
+
+## Rovo Dev
+
+- Source evidence: Atlassian Rovo Dev CLI session management docs describe the
+  sessions directory under `~/.rovodev/sessions`, with per-session
+  `session_context.json` and `metadata.json` files.
+- Schema evidence: public Rovo Dev readers parse `session_context.json`
+  `message_history[]` entries with message roles/kinds and part arrays, while
+  `metadata.json` carries title, workspace path, session IDs, and fork/parent
+  metadata.
+- `ctx` imports this shape as `rovodev_session_json_tree`, using read-only
+  discovery under `~/.rovodev/sessions`.
+- The importer accepts a sessions root, a single session directory, or a
+  `session_context.json` file; it imports message text, tool-use/tool-result
+  parts, cwd metadata, and parent-session metadata when present.
+- Privacy note: Rovo Dev metadata can contain local workspace paths. Those paths
+  stay local and are not part of ctx analytics.
+
+## Cortex Code
+
+- Source evidence: Snowflake Cortex Code CLI and ACP docs document local
+  conversations under `~/.snowflake/cortex/conversations`, including
+  `<sessionId>.json` snapshots and `<sessionId>.history.jsonl` append-only
+  history sidecars.
+- Schema evidence: public Cortex Code replay tooling parses snapshot fields
+  such as `title`, `session_id`, `created_at`, `last_updated`,
+  `connection_name`, and `working_directory`, plus history rows with `role`,
+  `user_sent_time`, and content blocks such as `text`, `thinking`, `tool_use`,
+  and `tool_result`.
+- `ctx` imports this shape as `cortex_code_conversations_json`, using read-only
+  discovery under `~/.snowflake/cortex/conversations`.
+- The importer groups snapshot and `.history.jsonl` sidecar files by session ID.
+  History JSONL rows are preferred; snapshot `history`/`messages` arrays are
+  used as fallback when no sidecar rows exist.
+- Privacy note: Cortex Code conversation files can include local working
+  directories, SQL context, and tool outputs. ctx keeps imported data local and
+  telemetry must remain coarse/provider-level only.
+
 ## ForgeCode
 
 - Source evidence: Forge repository commit

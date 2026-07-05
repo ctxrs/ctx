@@ -205,6 +205,18 @@ const LINGMA_DEFAULTS: &[ProviderDefaultLocation] = &[
     },
 ];
 
+const CORTEX_CODE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
+    path_components: &[".snowflake", "cortex", "conversations"],
+    source_format: "cortex_code_conversations_json",
+    source_kind: ProviderSourceKind::NativeHistory,
+}];
+
+const ROVODEV_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
+    path_components: &[".rovodev", "sessions"],
+    source_format: "rovodev_session_json_tree",
+    source_kind: ProviderSourceKind::NativeHistory,
+}];
+
 const ANTIGRAVITY_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     path_components: &[".gemini", "antigravity-cli", "brain"],
     source_format: "antigravity_cli_transcript_jsonl_tree",
@@ -274,6 +286,12 @@ const KODE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
 const NEOVATE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     path_components: &[".neovate", "projects"],
     source_format: "neovate_session_jsonl_tree",
+    source_kind: ProviderSourceKind::NativeHistory,
+}];
+
+const COMMAND_CODE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
+    path_components: &[".commandcode", "projects"],
+    source_format: "command_code_session_jsonl_tree",
     source_kind: ProviderSourceKind::NativeHistory,
 }];
 
@@ -665,6 +683,16 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         unsupported_reason: None,
     },
     ProviderSourceSpec {
+        provider: CaptureProvider::CommandCode,
+        display_name: "Command Code",
+        default_locations: COMMAND_CODE_DEFAULTS,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
+    ProviderSourceSpec {
         provider: CaptureProvider::ForgeCode,
         display_name: "ForgeCode",
         default_locations: FORGECODE_DEFAULTS,
@@ -718,6 +746,16 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         provider: CaptureProvider::Terramind,
         display_name: "Terramind",
         default_locations: TERRAMIND_DEFAULTS,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
+    ProviderSourceSpec {
+        provider: CaptureProvider::RovoDev,
+        display_name: "Rovo Dev",
+        default_locations: ROVODEV_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         raw_retention: ProviderRawRetention::PathReference,
@@ -828,6 +866,16 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         provider: CaptureProvider::Lingma,
         display_name: "Lingma",
         default_locations: LINGMA_DEFAULTS,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
+    ProviderSourceSpec {
+        provider: CaptureProvider::CortexCode,
+        display_name: "Cortex Code",
+        default_locations: CORTEX_CODE_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         raw_retention: ProviderRawRetention::PathReference,
@@ -1655,6 +1703,8 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::Kode => "kode_session_jsonl",
         CaptureProvider::Neovate if path.is_dir() => "neovate_session_jsonl_tree",
         CaptureProvider::Neovate => "neovate_session_jsonl",
+        CaptureProvider::CommandCode if path.is_dir() => "command_code_session_jsonl_tree",
+        CaptureProvider::CommandCode => "command_code_session_jsonl",
         CaptureProvider::ForgeCode => "forgecode_sqlite",
         CaptureProvider::DeepAgents => "deepagents_sessions_sqlite",
         CaptureProvider::MistralVibe if path.is_dir() => "mistral_vibe_session_jsonl_tree",
@@ -1664,6 +1714,8 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::Reasonix if path.is_dir() => "reasonix_session_jsonl_tree",
         CaptureProvider::Reasonix => "reasonix_session_jsonl",
         CaptureProvider::Terramind => "terramind_agents_sqlite",
+        CaptureProvider::RovoDev if path.is_dir() => "rovodev_session_json_tree",
+        CaptureProvider::RovoDev => "rovodev_session_json",
         CaptureProvider::OpenClaw => "openclaw_session_jsonl_tree",
         CaptureProvider::Hermes => "hermes_state_sqlite",
         CaptureProvider::NanoClaw => "nanoclaw_project",
@@ -1675,6 +1727,18 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::RooCode => "roo_task_directory_json",
         CaptureProvider::Dexto => "dexto_sqlite",
         CaptureProvider::Lingma => "lingma_sqlite",
+        CaptureProvider::CortexCode if path.is_dir() => "cortex_code_conversations_json",
+        CaptureProvider::CortexCode => {
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".history.jsonl"))
+            {
+                "cortex_code_history_jsonl"
+            } else {
+                "cortex_code_session_json"
+            }
+        }
         CaptureProvider::CodeBuddy => "codebuddy_history_json",
         CaptureProvider::AiderDesk => "aider_desk_task_context_json",
         _ => "unsupported",
@@ -1805,6 +1869,9 @@ fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::Neovate => {
             Some("path exists but no Neovate session JSONL files were found under projects")
         }
+        CaptureProvider::CommandCode => {
+            Some("path exists but no Command Code session JSONL files were found under projects")
+        }
         CaptureProvider::ForgeCode => {
             Some("path exists but no ForgeCode conversations table was found")
         }
@@ -1822,6 +1889,9 @@ fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         }
         CaptureProvider::Terramind => {
             Some("path exists but no Terramind agents.db chat tables were found")
+        }
+        CaptureProvider::RovoDev => {
+            Some("path exists but no Rovo Dev session_context.json files were found")
         }
         CaptureProvider::OpenClaw => {
             Some("path exists but no OpenClaw agent session JSONL files were found")
@@ -1843,6 +1913,9 @@ fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::Dexto => Some("path exists but no Dexto SQLite database was found"),
         CaptureProvider::Lingma => {
             Some("path exists but no Lingma chat_record table with the expected columns was found")
+        }
+        CaptureProvider::CortexCode => {
+            Some("path exists but no Cortex Code session JSON or history JSONL files were found")
         }
         CaptureProvider::CodeBuddy => {
             Some("path exists but no CodeBuddy history sessions were found")
@@ -1905,6 +1978,12 @@ fn unknown_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::Mux => Some("path exists but the Mux session probe hit its scan budget"),
         CaptureProvider::Reasonix => {
             Some("path exists but the Reasonix session probe hit its scan budget")
+        }
+        CaptureProvider::CommandCode => {
+            Some("path exists but the Command Code session probe hit its scan budget")
+        }
+        CaptureProvider::RovoDev => {
+            Some("path exists but the Rovo Dev session probe hit its scan budget")
         }
         CaptureProvider::OpenClaw => {
             Some("path exists but the OpenClaw transcript probe hit its scan budget")
@@ -1984,6 +2063,9 @@ fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::IflowCli => {
             Some("path exists but iFlow CLI session transcripts could not be read; check permissions")
         }
+        CaptureProvider::CommandCode => Some(
+            "path exists but Command Code session transcripts could not be read; check permissions",
+        ),
         CaptureProvider::ForgeCode => {
             Some("path exists but the ForgeCode database could not be read; check permissions")
         }
@@ -2001,6 +2083,9 @@ fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'static str> {
         }
         CaptureProvider::Terramind => {
             Some("path exists but the Terramind agents database could not be read; check permissions")
+        }
+        CaptureProvider::RovoDev => {
+            Some("path exists but Rovo Dev session files could not be read; check permissions")
         }
         CaptureProvider::OpenClaw => Some(
             "path exists but OpenClaw session transcripts could not be read; check permissions",
@@ -2114,6 +2199,17 @@ fn default_location_import_probe(
             !path_has_component(candidate, "requests")
                 && !path_has_component(candidate, "file-history")
         }),
+        CaptureProvider::CommandCode => has_jsonl_file_under_matching(path, 10_000, |candidate| {
+            candidate
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name.ends_with(".jsonl")
+                        && !name.ends_with(".checkpoints.jsonl")
+                        && !name.contains(".checkpoints.")
+                        && !name.contains(".prompts.")
+                })
+        }),
         CaptureProvider::ForgeCode => has_forgecode_conversations_table(path),
         CaptureProvider::DeepAgents => has_deepagents_checkpoint_tables(path),
         CaptureProvider::MistralVibe => has_jsonl_file_under_matching(path, 10_000, |candidate| {
@@ -2130,6 +2226,9 @@ fn default_location_import_probe(
                 .is_some_and(|name| name.ends_with(".jsonl") && !name.ends_with(".events.jsonl"))
         }),
         CaptureProvider::Terramind => has_terramind_chat_tables(path),
+        CaptureProvider::RovoDev => has_json_file_under_matching(path, 10_000, |candidate| {
+            candidate.file_name().and_then(|name| name.to_str()) == Some("session_context.json")
+        }),
         CaptureProvider::Cline => has_task_json_file_under_matching(path, 10_000, |name| {
             matches!(
                 name,
@@ -2150,6 +2249,7 @@ fn default_location_import_probe(
             )
         }),
         CaptureProvider::Lingma => has_lingma_chat_record_table(path),
+        CaptureProvider::CortexCode => has_cortex_code_session_files(path, 10_000),
         CaptureProvider::CodeBuddy => has_codebuddy_history_json(path, 10_000),
         CaptureProvider::AiderDesk => {
             has_task_json_file_under_matching(path, 10_000, |name| name == "context.json")
@@ -2171,6 +2271,40 @@ fn has_gemini_chat_jsonl(root: &Path, max_entries: usize) -> BoundedProbe {
         _ => return BoundedProbe::NotFound,
     }
     has_jsonl_file_under_matching(&tmp, max_entries, |path| path_has_component(path, "chats"))
+}
+
+fn has_cortex_code_session_files(root: &Path, max_entries: usize) -> BoundedProbe {
+    let json_probe = has_json_file_under_matching(root, max_entries, |candidate| {
+        candidate
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| !name.ends_with(".history.json"))
+    });
+    if json_probe == BoundedProbe::Found {
+        return json_probe;
+    }
+    let jsonl_probe = has_jsonl_file_under_matching(root, max_entries, |candidate| {
+        candidate
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".history.jsonl"))
+    });
+    if jsonl_probe == BoundedProbe::Found {
+        return jsonl_probe;
+    }
+    if matches!(
+        (json_probe, jsonl_probe),
+        (BoundedProbe::IoError, _) | (_, BoundedProbe::IoError)
+    ) {
+        return BoundedProbe::IoError;
+    }
+    if matches!(
+        (json_probe, jsonl_probe),
+        (BoundedProbe::BudgetExhausted, _) | (_, BoundedProbe::BudgetExhausted)
+    ) {
+        return BoundedProbe::BudgetExhausted;
+    }
+    BoundedProbe::NotFound
 }
 
 fn has_forgecode_conversations_table(path: &Path) -> BoundedProbe {
@@ -2775,6 +2909,55 @@ mod tests {
         assert_source_status(
             temp.path(),
             CaptureProvider::Neovate,
+            ProviderSourceStatus::Available,
+        );
+
+        let command_code = temp.path().join(".commandcode/projects/-workspace-command");
+        std::fs::create_dir_all(&command_code).unwrap();
+        std::fs::write(
+            command_code.join("command-session.checkpoints.jsonl"),
+            "{}\n",
+        )
+        .unwrap();
+        assert_source_status(
+            temp.path(),
+            CaptureProvider::CommandCode,
+            ProviderSourceStatus::Empty,
+        );
+        std::fs::write(command_code.join("command-session.jsonl"), "{}\n").unwrap();
+        assert_source_status(
+            temp.path(),
+            CaptureProvider::CommandCode,
+            ProviderSourceStatus::Available,
+        );
+
+        let rovodev = temp.path().join(".rovodev/sessions/rovo-session");
+        std::fs::create_dir_all(&rovodev).unwrap();
+        std::fs::write(rovodev.join("metadata.json"), "{}\n").unwrap();
+        assert_source_status(
+            temp.path(),
+            CaptureProvider::RovoDev,
+            ProviderSourceStatus::Empty,
+        );
+        std::fs::write(rovodev.join("session_context.json"), "{}\n").unwrap();
+        assert_source_status(
+            temp.path(),
+            CaptureProvider::RovoDev,
+            ProviderSourceStatus::Available,
+        );
+
+        let cortex = temp.path().join(".snowflake/cortex/conversations");
+        std::fs::create_dir_all(&cortex).unwrap();
+        std::fs::write(cortex.join("cortex-session.history.json"), "{}\n").unwrap();
+        assert_source_status(
+            temp.path(),
+            CaptureProvider::CortexCode,
+            ProviderSourceStatus::Empty,
+        );
+        std::fs::write(cortex.join("cortex-session.history.jsonl"), "{}\n").unwrap();
+        assert_source_status(
+            temp.path(),
+            CaptureProvider::CortexCode,
             ProviderSourceStatus::Available,
         );
 

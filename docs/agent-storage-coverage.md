@@ -3,7 +3,7 @@
 This ledger compares every `AgentType` in `skills@1.5.14` commit
 `2adcfe5a4cce0ce5f4d5547a997b2a161ec5d127` against ctx native history
 providers on `origin/main`. Upstream evidence comes from `src/types.ts` and
-`src/agents.ts`; ctx evidence comes from `docs/provider-support-matrix.json`,
+`src/agents.ts`; ctx evidence on this integration branch comes from `docs/provider-support-matrix.json`,
 `crates/ctx-history-capture/src/provider_sources.rs`, and the native provider
 arguments in `crates/ctx-cli/src/main.rs`.
 
@@ -21,8 +21,8 @@ Status meanings:
 - `install-target`: npx target is an aggregate or project skill target, not a
   proven history-producing agent.
 
-Result on this integration branch: 35 `native-auto`, 2 `native-preview`, 14
-`candidate-family`, 9 `webapp-boundary`, 10 `unknown`, and 2 `install-target`
+Result on this integration branch: 38 `native-auto`, 2 `native-preview`, 13
+`candidate-family`, 9 `webapp-boundary`, 8 `unknown`, and 2 `install-target`
 rows.
 
 ## Shared Families
@@ -33,9 +33,11 @@ rows.
   importer for file-backed task directories.
 - `JSONL CLI event logs`: already covers Codex, Claude Code, OpenClaw,
   Antigravity CLI, Gemini CLI, Pi, Factory Droid, Copilot CLI-shaped logs, and
-  Autohand Code, iFlow CLI, Mistral Vibe, Mux, and Reasonix sessions.
+  Autohand Code, iFlow CLI, Mistral Vibe, Mux, Reasonix, and Command Code
+  sessions.
 - `CLI session JSON`: covers Continue CLI `sessions/*.json` files with
-  `sessions.json` metadata.
+  `sessions.json` metadata, plus Rovo Dev session directories and Cortex Code
+  conversation snapshots/history sidecars.
 - `project task JSON`: covers Aider Desk project-local task directories such as
   `.aider-desk/tasks/<taskId>/context.json`; related task-directory tools can
   reuse this scanner once storage proof and fixtures exist.
@@ -75,9 +77,9 @@ rows.
 | `codemaker` | `unknown` | `unknown native history` | npx `~/.codemaker`; no ctx provider | Need native history storage research before claiming import support. |
 | `codestudio` | `candidate-family` | `VS Code/Electron storage` | npx `~/.codestudio`; no ctx provider | Need app storage proof before adapting IDE-family importers. |
 | `codex` | `native-auto` | `JSONL CLI event logs` | ctx `codex_session_jsonl_tree` and `codex_history_jsonl`; npx `CODEX_HOME` | - |
-| `command-code` | `unknown` | `unknown native history` | npx `~/.commandcode`; no ctx provider | Need native history storage research before claiming import support. |
+| `command-code` | `native-auto` | `JSONL CLI event logs` | ctx `command_code_session_jsonl_tree`; npx `~/.commandcode`; default discovery reads `~/.commandcode/projects` | - |
 | `continue` | `native-auto` | `CLI session JSON` | ctx `continue_cli_sessions_json`; npx project or home `.continue` | - |
-| `cortex` | `unknown` | `unknown native history` | npx `~/.snowflake/cortex`; no ctx provider | Need native history storage research before claiming import support. |
+| `cortex` | `native-auto` | `CLI session JSON` | ctx `cortex_code_conversations_json`; npx `~/.snowflake/cortex`; default discovery reads `~/.snowflake/cortex/conversations` | - |
 | `crush` | `native-auto` | `generic sqlite messages` | ctx `crush_sqlite`; npx `~/.config/crush` | - |
 | `cursor` | `native-auto` | `VS Code/Electron storage` | ctx `cursor_agent_transcript_jsonl_tree`; npx `~/.cursor` | - |
 | `deepagents` | `native-auto` | `LangGraph checkpoint SQLite` | ctx `deepagents_sessions_sqlite`; npx `~/.deepagents`; official local state evidence points to `~/.deepagents/.state/sessions.db` and `history.jsonl` | Imports decoded root `writes.messages` chat messages only; `history.jsonl` and arbitrary checkpoint state blobs are not indexed. |
@@ -116,7 +118,7 @@ rows.
 | `replit` | `webapp-boundary` | `webapp/object-store boundary` | npx project `.replit`; no ctx provider | Project marker is not a local agent history contract. |
 | `reasonix` | `native-auto` | `JSONL CLI event logs` | ctx `reasonix_session_jsonl_tree`; npx `~/.reasonix/sessions`; package `reasonix@0.53.2` | - |
 | `roo` | `native-auto` | `Cline/Roo task JSON` | ctx `roo_task_directory_json`; npx `~/.roo` | - |
-| `rovodev` | `candidate-family` | `JSONL CLI event logs` | npx `~/.rovodev`; no ctx provider | Need transcript location and schema proof. |
+| `rovodev` | `native-auto` | `CLI session JSON` | ctx `rovodev_session_json_tree`; npx `~/.rovodev`; default discovery reads `~/.rovodev/sessions` | - |
 | `tabnine-cli` | `candidate-family` | `JSONL CLI event logs` | npx `~/.tabnine`; no ctx provider | Need transcript location and schema proof. |
 | `terramind` | `native-auto` | `generic sqlite messages` | ctx `terramind_agents_sqlite`; npx package `terramind@0.2.91` resolves Nucleus app data to `$XDG_CONFIG_HOME/Nucleus/data/agents.db`, `~/.config/Nucleus/data/agents.db`, macOS `~/Library/Application Support/Nucleus/data/agents.db`, or Windows `%APPDATA%/Nucleus/data/agents.db` | Fixture is source-backed from the published package schema because a no-auth `npx terramind@0.2.91 list --chats` probe did not complete. |
 | `tinycloud` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.tinycloud`; no ctx provider | No proven stable local transcript boundary; prefer exporter or plugin. |

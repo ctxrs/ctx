@@ -1,0 +1,2 @@
+{"id":"cmd-child-user-1","sessionId":"command-code-child-session","parentId":"command-code-fixture-session","timestamp":"2026-06-24T12:00:03Z","role":"user","content":"command code child fixture oracle prompt","metadata":{"version":2,"entrypoint":"worker","cwd":"/workspace/command-code"}}
+{"id":"cmd-child-assistant-1","sessionId":"command-code-child-session","parentId":"command-code-fixture-session","timestamp":"2026-06-24T12:00:04Z","role":"assistant","content":"command code child fixture oracle answer"}

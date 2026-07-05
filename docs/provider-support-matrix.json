@@ -2016,6 +2016,174 @@
       ]
     },
     {
+      "id": "command_code",
+      "display_name": "Command Code",
+      "priority": "p1",
+      "status": "local_import_when_supported",
+      "capture_provider": "command_code",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "command_code_session_jsonl_tree",
+          "fidelity": "imported",
+          "proof": [
+            "ctx sources",
+            "ctx import --provider command-code",
+            "cargo test -p ctx-history-capture native_command_code_fixture_imports_searches_reimports_and_file_touches"
+          ],
+          "notes": [
+            "Reads Command Code project JSONL transcripts under ~/.commandcode/projects or an explicit projects/session JSONL path.",
+            "Requires sessionId-bearing rows, imports parentId child-session edges, and skips prompt/checkpoint sidecar JSONL files."
+          ]
+        }
+      ],
+      "history_locations": [
+        "~/.commandcode/projects/*/*.jsonl"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": true,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": true,
+        "command_output": false,
+        "files_touched": true,
+        "artifacts": false,
+        "model_identity": true,
+        "costs": false,
+        "token_usage": true,
+        "parent_child_session_edges": true
+      },
+      "blockers": [
+        "Importer is based on command-code@0.41.1 bundled storage code plus sanitized fixtures; future package schema changes may need adapter updates.",
+        "Prompt and checkpoint sidecars are not primary session transcripts and are not imported as sessions."
+      ],
+      "public_docs": "docs/provider-support.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/command-code/v1/projects"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs",
+        "tests/fixtures/provider-history/command-code/v1/projects"
+      ]
+    },
+    {
+      "id": "rovodev",
+      "display_name": "Rovo Dev",
+      "priority": "p1",
+      "status": "local_import_when_supported",
+      "capture_provider": "rovodev",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "rovodev_session_json_tree",
+          "fidelity": "imported",
+          "proof": [
+            "ctx sources",
+            "ctx import --provider rovodev",
+            "cargo test -p ctx-history-capture native_rovodev_fixture_imports_searches_reimports_and_file_touches"
+          ],
+          "notes": [
+            "Reads Rovo Dev session_context.json files under ~/.rovodev/sessions or an explicit sessions/session path.",
+            "Imports message_history/messages entries, tool-use/tool-result parts, workspace metadata, and parent-session metadata when present."
+          ]
+        }
+      ],
+      "history_locations": [
+        "~/.rovodev/sessions/*/session_context.json",
+        "~/.rovodev/sessions/*/metadata.json"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": true,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": true,
+        "command_output": false,
+        "files_touched": true,
+        "artifacts": false,
+        "model_identity": false,
+        "costs": false,
+        "token_usage": false,
+        "parent_child_session_edges": true
+      },
+      "blockers": [
+        "Schema proof comes from Atlassian Rovo Dev CLI session-management docs and public readers; future message part variants may need adapter updates."
+      ],
+      "public_docs": "docs/provider-support.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/rovodev/v1/sessions"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs",
+        "tests/fixtures/provider-history/rovodev/v1/sessions"
+      ]
+    },
+    {
+      "id": "cortex_code",
+      "display_name": "Cortex Code",
+      "priority": "p1",
+      "status": "local_import_when_supported",
+      "capture_provider": "cortex_code",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "cortex_code_conversations_json",
+          "fidelity": "imported",
+          "proof": [
+            "ctx sources",
+            "ctx import --provider cortex-code",
+            "cargo test -p ctx-history-capture native_cortex_code_fixture_imports_searches_reimports_and_file_touches"
+          ],
+          "notes": [
+            "Reads Cortex Code session snapshots and .history.jsonl sidecars under ~/.snowflake/cortex/conversations or an explicit conversations/session path.",
+            "Prefers append-only history rows when present and falls back to snapshot history/messages arrays."
+          ]
+        }
+      ],
+      "history_locations": [
+        "~/.snowflake/cortex/conversations/*.json",
+        "~/.snowflake/cortex/conversations/*.history.jsonl"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": false,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": true,
+        "command_output": false,
+        "files_touched": true,
+        "artifacts": false,
+        "model_identity": false,
+        "costs": false,
+        "token_usage": false,
+        "parent_child_session_edges": false
+      },
+      "blockers": [
+        "Path proof comes from Snowflake Cortex Code docs; detailed message block schema proof comes from public replay tooling plus sanitized fixtures."
+      ],
+      "public_docs": "docs/provider-support.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/cortex-code/v1/conversations"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs",
+        "tests/fixtures/provider-history/cortex-code/v1/conversations"
+      ]
+    },
+    {
       "id": "terramind",
       "display_name": "Terramind",
       "priority": "p1",
