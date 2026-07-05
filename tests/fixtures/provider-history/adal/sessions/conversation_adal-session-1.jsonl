@@ -1,0 +1,5 @@
+{"type":"metadata","conversation_id":"adal-session-1","user_id":"user_sanitized","created_at":"2026-07-01T10:00:00Z","platform":"Linux","version":"1.4.1","project_path":"/workspace/adal-example"}
+{"type":"turn_created","turn_id":"turn-1","turn_index":0,"timestamp":"2026-07-01T10:00:01Z"}
+{"type":"message","message_id":"msg-user-1","turn_id":"turn-1","role":"user","content":"adal fixture oracle prompt: inspect src/adal_oracle.rs without exposing credentials.","metadata":{"referenced_files":["src/adal_oracle.rs"],"source":"synthetic-fixture"},"timestamp":"2026-07-01T10:00:02Z"}
+{"type":"message","message_id":"msg-assistant-1","turn_id":"turn-1","role":"assistant","content":"Confirmed ADAL JSONL import fixture can be searched and re-imported idempotently.","metadata":{"is_final_answer":true,"step":1},"timestamp":"2026-07-01T10:00:03Z"}
+{"type":"usage","turn_id":"turn-1","step":1,"model":"synthetic-adal-model","input_tokens":42,"output_tokens":17,"cached_read_input_tokens":0,"cache_creation_tokens":0,"reasoning_tokens":3,"source":"main","timestamp":"2026-07-01T10:00:04Z"}

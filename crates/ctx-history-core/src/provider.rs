@@ -127,6 +127,8 @@ pub enum ProviderId {
     Mux,
     #[serde(rename = "reasonix", alias = "deepseek-reasonix")]
     Reasonix,
+    #[serde(rename = "adal", alias = "adal-cli", alias = "adal_cli")]
+    Adal,
     #[serde(
         rename = "kode",
         alias = "shareai-kode",
@@ -165,7 +167,7 @@ pub enum ProviderId {
 }
 
 impl ProviderId {
-    pub const ALL: [Self; 65] = [
+    pub const ALL: [Self; 66] = [
         Self::Codex,
         Self::ClaudeCode,
         Self::ClaudeCliCrp,
@@ -213,6 +215,7 @@ impl ProviderId {
         Self::MistralVibe,
         Self::Mux,
         Self::Reasonix,
+        Self::Adal,
         Self::Kode,
         Self::Neovate,
         Self::CommandCode,
@@ -551,6 +554,7 @@ mod tests {
             ProviderId::MistralVibe,
             ProviderId::Mux,
             ProviderId::Reasonix,
+            ProviderId::Adal,
             ProviderId::Terramind,
             ProviderId::GeminiCli,
             ProviderId::Goose,

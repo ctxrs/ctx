@@ -107,6 +107,9 @@ The current CLI imports local history for:
 - Reasonix session JSONL files under `~/.reasonix/sessions`, including
   adjacent `.events.jsonl`, `.meta.json`, `.pending.json`, and `.plan.json`
   sidecars;
+- AdaL event-sourced JSONL sessions under `~/.adal/sessions`, where each
+  session is named `conversation_<id>.jsonl` and may have a sibling
+  `<id>_metadata.json` sidecar;
 - Kode project JSONL transcripts under `KODE_CONFIG_DIR/projects`,
   `CLAUDE_CONFIG_DIR/projects`, or `~/.kode/projects`;
 - Neovate project session JSONL transcripts under `~/.neovate/projects`,
@@ -143,14 +146,14 @@ CLI provider flags use names such as `kilo`, `crush`, `goose`, `dexto`,
 `nanoclaw`, `astrbot`, `shelley`, `continue`, `openhands`, `copilot-cli`,
 `factory-ai-droid`, `qwen-code`, `kimi-code-cli`, `autohand-code`,
 `kiro-cli`, `iflow-cli`, `eve`, `forgecode`, `deepagents`, `mistral-vibe`, `mux`,
-`reasonix`, `kode`, `neovate`, `terramind`, `zed`, `lingma`, `qoder`, `pochi`,
+`reasonix`, `adal`, `kode`, `neovate`, `terramind`, `zed`, `lingma`, `qoder`, `pochi`,
 `warp`, `codebuddy`, `aider-desk`, `amp`, `trae`, `cline`, and `roo`/`roo-code`.
 Structured JSON and stable SQL views use provider IDs in ctx output; multiword IDs may be
 snake_case, such as `copilot_cli`, `factory_ai_droid`, `qwen_code`,
 `kimi_code_cli`, `autohand_code`, `kiro_cli`, `iflow_cli`, or
 `mistral_vibe`; Aider Desk is reported as `aider_desk`, while compact native
 IDs such as `kilo`, `openclaw`, `crush`, `goose`, `dexto`, `mux`, `reasonix`,
-`kode`, `neovate`, `terramind`, `zed`, `lingma`, `qoder`, `pochi`, `codebuddy`,
+`adal`, `kode`, `neovate`, `terramind`, `zed`, `lingma`, `qoder`, `pochi`, `codebuddy`,
 `amp`, `forgecode`, `deepagents`, `nanoclaw`, `astrbot`, `trae`, `warp`,
 `shelley`, `continue`, and `openhands`
 stay compact. Roo Code is
