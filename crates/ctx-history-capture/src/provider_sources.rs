@@ -328,6 +328,12 @@ const AUTOHAND_CODE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLoca
     source_kind: ProviderSourceKind::NativeHistory,
 }];
 
+const ADAL_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
+    path_components: &[".adal", "sessions"],
+    source_format: "adal_session_jsonl",
+    source_kind: ProviderSourceKind::NativeHistory,
+}];
+
 const IFLOW_CLI_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     path_components: &[".iflow", "projects"],
     source_format: "iflow_cli_session_jsonl_tree",
@@ -883,6 +889,16 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         provider: CaptureProvider::Reasonix,
         display_name: "Reasonix",
         default_locations: REASONIX_DEFAULTS,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
+    ProviderSourceSpec {
+        provider: CaptureProvider::Adal,
+        display_name: "AdaL",
+        default_locations: ADAL_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         raw_retention: ProviderRawRetention::PathReference,
@@ -1986,6 +2002,7 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::Mux => "mux_session_jsonl",
         CaptureProvider::Reasonix if path.is_dir() => "reasonix_session_jsonl_tree",
         CaptureProvider::Reasonix => "reasonix_session_jsonl",
+        CaptureProvider::Adal => "adal_session_jsonl",
         CaptureProvider::Terramind => "terramind_agents_sqlite",
         CaptureProvider::RovoDev if path.is_dir() => "rovodev_session_json_tree",
         CaptureProvider::RovoDev => "rovodev_session_json",
@@ -2181,6 +2198,9 @@ fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::Reasonix => {
             Some("path exists but no Reasonix session JSONL files were found")
         }
+        CaptureProvider::Adal => {
+            Some("path exists but no AdaL conversation_*.jsonl files were found")
+        }
         CaptureProvider::Terramind => {
             Some("path exists but no Terramind agents.db chat tables were found")
         }
@@ -2295,6 +2315,7 @@ fn unknown_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::Reasonix => {
             Some("path exists but the Reasonix session probe hit its scan budget")
         }
+        CaptureProvider::Adal => Some("path exists but the AdaL session probe hit its scan budget"),
         CaptureProvider::CommandCode => {
             Some("path exists but the Command Code session probe hit its scan budget")
         }
@@ -2411,6 +2432,9 @@ fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'static str> {
         }
         CaptureProvider::Reasonix => {
             Some("path exists but Reasonix session files could not be read; check permissions")
+        }
+        CaptureProvider::Adal => {
+            Some("path exists but AdaL session files could not be read; check permissions")
         }
         CaptureProvider::Terramind => {
             Some("path exists but the Terramind agents database could not be read; check permissions")
@@ -2579,6 +2603,7 @@ fn default_location_import_probe(
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.ends_with(".jsonl") && !name.ends_with(".events.jsonl"))
         }),
+        CaptureProvider::Adal => has_adal_session_jsonl(path, 10_000),
         CaptureProvider::Terramind => has_terramind_chat_tables(path),
         CaptureProvider::RovoDev => has_json_file_under_matching(path, 10_000, |candidate| {
             candidate.file_name().and_then(|name| name.to_str()) == Some("session_context.json")
@@ -2698,6 +2723,20 @@ fn has_openloaf_project_chat_histories(root: &Path, max_entries: usize) -> Bound
     } else {
         BoundedProbe::NotFound
     }
+}
+
+fn has_adal_session_jsonl(root: &Path, max_entries: usize) -> BoundedProbe {
+    has_jsonl_file_under_matching(root, max_entries, |candidate| {
+        let Some(name) = candidate.file_name().and_then(|name| name.to_str()) else {
+            return false;
+        };
+        if !name.starts_with("conversation_") || !name.ends_with(".jsonl") {
+            return false;
+        }
+        fs::metadata(candidate)
+            .map(|metadata| metadata.len() > 0)
+            .unwrap_or(false)
+    })
 }
 
 fn has_firebender_chat_sessions_table(path: &Path) -> BoundedProbe {
@@ -4355,6 +4394,41 @@ mod tests {
             .unwrap();
         assert_eq!(source.status, ProviderSourceStatus::Available);
         assert_eq!(source.source_format, "reasonix_session_jsonl_tree");
+        assert_eq!(source.import_support, ProviderImportSupport::Native);
+    }
+
+    #[test]
+    fn adal_discovery_uses_default_sessions_and_ignores_empty_bootstrap_jsonl() {
+        let temp = tempfile::tempdir().unwrap();
+        let default_sessions = temp.path().join(".adal/sessions");
+        std::fs::create_dir_all(&default_sessions).unwrap();
+
+        let empty_source =
+            discover_provider_sources_for_provider(temp.path(), CaptureProvider::Adal)
+                .into_iter()
+                .find(|source| source.path == default_sessions)
+                .unwrap();
+        assert_eq!(empty_source.status, ProviderSourceStatus::Empty);
+
+        std::fs::write(default_sessions.join("conversation_empty.jsonl"), "").unwrap();
+        let still_empty =
+            discover_provider_sources_for_provider(temp.path(), CaptureProvider::Adal)
+                .into_iter()
+                .find(|source| source.path == default_sessions)
+                .unwrap();
+        assert_eq!(still_empty.status, ProviderSourceStatus::Empty);
+
+        std::fs::write(
+            default_sessions.join("conversation_adal-discovery.jsonl"),
+            r#"{"type":"message","message_id":"m","turn_id":"t","role":"user","content":"adal discovery oracle","metadata":{},"timestamp":"2026-07-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+        let source = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Adal)
+            .into_iter()
+            .find(|source| source.path == default_sessions)
+            .unwrap();
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+        assert_eq!(source.source_format, "adal_session_jsonl");
         assert_eq!(source.import_support, ProviderImportSupport::Native);
     }
 

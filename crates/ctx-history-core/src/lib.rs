@@ -210,6 +210,7 @@ text_enum! {
         MistralVibe => "mistral_vibe",
         Mux => "mux",
         Reasonix => "reasonix",
+        Adal => "adal",
         Kode => "kode",
         Neovate => "neovate",
         CommandCode => "command_code",
@@ -1595,6 +1596,10 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<CaptureProvider>("\"reasonix\"").unwrap(),
             CaptureProvider::Reasonix
+        );
+        assert_eq!(
+            serde_json::from_str::<CaptureProvider>("\"adal\"").unwrap(),
+            CaptureProvider::Adal
         );
         assert_eq!(
             serde_json::from_str::<CaptureProvider>("\"kode\"").unwrap(),

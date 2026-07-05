@@ -1451,6 +1451,27 @@ impl Default for ReasonixImportOptions {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct AdalImportOptions {
+    pub machine_id: String,
+    pub source_path: Option<PathBuf>,
+    pub imported_at: DateTime<Utc>,
+    pub history_record_id: Option<Uuid>,
+    pub allow_partial_failures: bool,
+}
+
+impl Default for AdalImportOptions {
+    fn default() -> Self {
+        Self {
+            machine_id: default_machine_id(),
+            source_path: None,
+            imported_at: utc_now(),
+            history_record_id: None,
+            allow_partial_failures: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderFixtureLine {
     pub provider: CaptureProvider,
@@ -1795,6 +1816,9 @@ pub struct MuxJsonlAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ReasonixJsonlAdapter;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AdalJsonlAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TerramindSqliteAdapter;
@@ -3360,6 +3384,24 @@ impl ProviderCaptureAdapter for ReasonixJsonlAdapter {
         context: &ProviderAdapterContext,
     ) -> Result<ProviderNormalizationResult> {
         normalize_reasonix_sessions(path, context)
+    }
+}
+
+impl ProviderCaptureAdapter for AdalJsonlAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Adal
+    }
+
+    fn source_format(&self) -> &str {
+        ADAL_SOURCE_FORMAT
+    }
+
+    fn normalize_path(
+        &self,
+        path: &Path,
+        context: &ProviderAdapterContext,
+    ) -> Result<ProviderNormalizationResult> {
+        normalize_adal_sessions(path, context)
     }
 }
 
@@ -6557,6 +6599,25 @@ pub fn import_reasonix_history(
     )
 }
 
+pub fn import_adal_history(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: AdalImportOptions,
+) -> Result<ProviderImportSummary> {
+    import_native_jsonl_tree(
+        store,
+        NativeJsonlTreeImport {
+            path: path.as_ref(),
+            machine_id: options.machine_id,
+            source_path: options.source_path,
+            imported_at: options.imported_at,
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+        },
+        AdalJsonlAdapter,
+    )
+}
+
 struct NativeJsonlTreeImport<'a> {
     path: &'a Path,
     machine_id: String,
@@ -6663,6 +6724,7 @@ const DEEPAGENTS_SQLITE_SOURCE_FORMAT: &str = "deepagents_sessions_sqlite";
 const MISTRAL_VIBE_SOURCE_FORMAT: &str = "mistral_vibe_session_jsonl";
 const MUX_SOURCE_FORMAT: &str = "mux_session_jsonl";
 const REASONIX_SOURCE_FORMAT: &str = "reasonix_session_jsonl";
+const ADAL_SOURCE_FORMAT: &str = "adal_session_jsonl";
 const TERRAMIND_SQLITE_SOURCE_FORMAT: &str = "terramind_agents_sqlite";
 const CODEX_MAX_TEXT_CHARS: usize = 16_000;
 const CODEX_MAX_METADATA_TEXT_CHARS: usize = 4_000;
@@ -29830,6 +29892,551 @@ fn reasonix_collect_embedded_json_args(value: &Value, out: &mut Vec<Value>) {
 }
 
 #[derive(Debug, Clone)]
+struct AdalSessionSource {
+    session_path: PathBuf,
+    metadata_path: Option<PathBuf>,
+    provider_session_id: String,
+}
+
+fn normalize_adal_sessions(
+    path: &Path,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    let mut session_sources = Vec::new();
+    collect_adal_session_sources(path, &mut session_sources)?;
+    session_sources.sort_by(|left, right| left.session_path.cmp(&right.session_path));
+    session_sources.dedup_by(|left, right| left.session_path == right.session_path);
+    if session_sources.is_empty() {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "no AdaL conversation_*.jsonl files found",
+        });
+    }
+
+    let mut merged = ProviderNormalizationResult::default();
+    for source in session_sources {
+        let mut result = normalize_adal_session_source(&source, context)?;
+        merged.summary.merge(result.summary);
+        merged.captures.append(&mut result.captures);
+        merged.files_touched.append(&mut result.files_touched);
+    }
+    Ok(merged)
+}
+
+fn collect_adal_session_sources(root: &Path, sessions: &mut Vec<AdalSessionSource>) -> Result<()> {
+    let metadata = fs::symlink_metadata(root)?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: root.to_path_buf(),
+            reason: "symlinked provider transcript roots are rejected",
+        });
+    }
+    ensure_provider_path_parents_are_not_symlinks(root)?;
+    if file_type.is_file() {
+        ensure_regular_provider_transcript_file(root)?;
+        if adal_is_session_jsonl(root) {
+            sessions.push(adal_session_source_from_path(root)?);
+        } else if adal_is_metadata_sidecar(root) {
+            if let Some(session_path) = adal_session_path_from_metadata(root) {
+                if session_path.is_file() {
+                    sessions.push(adal_session_source_from_path(&session_path)?);
+                }
+            }
+        }
+        return Ok(());
+    }
+    if !file_type.is_dir() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            collect_adal_session_sources(&path, sessions)?;
+        } else if file_type.is_file() && adal_is_session_jsonl(&path) {
+            sessions.push(adal_session_source_from_path(&path)?);
+        }
+    }
+    Ok(())
+}
+
+fn adal_session_source_from_path(path: &Path) -> Result<AdalSessionSource> {
+    ensure_regular_provider_transcript_file(path)?;
+    let provider_session_id = adal_provider_session_id_from_path(path).ok_or_else(|| {
+        CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "AdaL session files must be named conversation_<id>.jsonl",
+        }
+    })?;
+    let metadata_path = adal_metadata_sidecar(path, &provider_session_id)?;
+    Ok(AdalSessionSource {
+        session_path: path.to_path_buf(),
+        metadata_path,
+        provider_session_id,
+    })
+}
+
+fn adal_metadata_sidecar(
+    session_path: &Path,
+    provider_session_id: &str,
+) -> Result<Option<PathBuf>> {
+    let Some(parent) = session_path.parent() else {
+        return Ok(None);
+    };
+    let path = parent.join(format!("{provider_session_id}_metadata.json"));
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            ensure_regular_provider_transcript_file(&path)?;
+            Ok(Some(path))
+        }
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(CaptureError::InvalidProviderTranscriptPath {
+                path,
+                reason: "symlinked provider transcript files are rejected",
+            })
+        }
+        Ok(_) => Ok(None),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(CaptureError::Io(err)),
+    }
+}
+
+fn adal_is_session_jsonl(path: &Path) -> bool {
+    adal_provider_session_id_from_path(path).is_some()
+}
+
+fn adal_provider_session_id_from_path(path: &Path) -> Option<String> {
+    let file_name = path.file_name()?.to_str()?;
+    let id = file_name
+        .strip_prefix("conversation_")?
+        .strip_suffix(".jsonl")?;
+    (!id.trim().is_empty()).then(|| id.to_owned())
+}
+
+fn adal_is_metadata_sidecar(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with("_metadata.json"))
+}
+
+fn adal_session_path_from_metadata(path: &Path) -> Option<PathBuf> {
+    let file_name = path.file_name()?.to_str()?;
+    let id = file_name.strip_suffix("_metadata.json")?;
+    if id.trim().is_empty() {
+        return None;
+    }
+    let mut session = path.to_path_buf();
+    session.set_file_name(format!("conversation_{id}.jsonl"));
+    Some(session)
+}
+
+fn normalize_adal_session_source(
+    source: &AdalSessionSource,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    let mut result = ProviderNormalizationResult::default();
+    let sidecar = read_adal_metadata_sidecar(source.metadata_path.as_deref(), &mut result.summary);
+    let rows = read_adal_session_jsonl(&source.session_path, &mut result.summary)?;
+    if rows.is_empty() && !sidecar.is_object() {
+        return Ok(result);
+    }
+
+    let metadata_event = rows
+        .iter()
+        .find(|(_, value)| value.get("type").and_then(Value::as_str) == Some("metadata"))
+        .map(|(_, value)| value.clone())
+        .unwrap_or(Value::Null);
+    let first_row_time = rows.iter().find_map(|(_, value)| {
+        adal_timestamp(value, "timestamp").or_else(|| adal_timestamp(value, "created_at"))
+    });
+    let started_at = adal_timestamp(&metadata_event, "created_at")
+        .or_else(|| adal_timestamp(&sidecar, "created_at"))
+        .or(first_row_time)
+        .unwrap_or(context.imported_at);
+    let ended_at = rows
+        .iter()
+        .filter_map(|(_, value)| adal_timestamp(value, "timestamp"))
+        .chain(adal_timestamp(&sidecar, "last_accessed"))
+        .max()
+        .filter(|time| *time > started_at);
+    let cwd = adal_metadata_string(&metadata_event, "project_path")
+        .or_else(|| adal_metadata_string(&sidecar, "project_path"));
+    let model = rows
+        .iter()
+        .find_map(|(_, value)| {
+            (value.get("type").and_then(Value::as_str) == Some("usage"))
+                .then(|| value.get("model").and_then(Value::as_str))
+                .flatten()
+        })
+        .map(str::to_owned);
+    let raw_source_path = source.session_path.display().to_string();
+
+    result.captures.push((
+        0,
+        adal_capture(
+            AdalCaptureDraft {
+                provider_session_id: source.provider_session_id.clone(),
+                started_at,
+                ended_at,
+                cwd: cwd.clone(),
+                model: model.clone(),
+                source,
+                metadata_event: &metadata_event,
+                sidecar: &sidecar,
+                event: None,
+            },
+            context,
+        ),
+    ));
+
+    for (line_number, value) in rows {
+        if value.get("type").and_then(Value::as_str) == Some("metadata") {
+            continue;
+        }
+        let occurred_at = adal_timestamp(&value, "timestamp")
+            .or_else(|| adal_timestamp(&value, "created_at"))
+            .unwrap_or(started_at);
+        let event = adal_event(
+            &source.provider_session_id,
+            line_number,
+            &value,
+            occurred_at,
+            &source.session_path,
+        );
+        result
+            .files_touched
+            .extend(provider_file_touches_from_raw_value(
+                CaptureProvider::Adal,
+                &source.provider_session_id,
+                ADAL_SOURCE_FORMAT,
+                Some(raw_source_path.as_str()),
+                &value,
+                &event,
+                line_number,
+            ));
+        result.captures.push((
+            line_number,
+            adal_capture(
+                AdalCaptureDraft {
+                    provider_session_id: source.provider_session_id.clone(),
+                    started_at,
+                    ended_at,
+                    cwd: cwd.clone(),
+                    model: model.clone(),
+                    source,
+                    metadata_event: &metadata_event,
+                    sidecar: &sidecar,
+                    event: Some(event),
+                },
+                context,
+            ),
+        ));
+    }
+
+    Ok(result)
+}
+
+fn read_adal_session_jsonl(
+    path: &Path,
+    summary: &mut ProviderImportSummary,
+) -> Result<Vec<(usize, Value)>> {
+    let file = File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+    let mut line_number = 0usize;
+    let mut rows = Vec::new();
+
+    while read_provider_jsonl_line(&mut reader, &mut line)? {
+        line_number += 1;
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let value: Value = match serde_json::from_slice(&line) {
+            Ok(value) => value,
+            Err(err) => {
+                push_provider_import_failure(
+                    summary,
+                    line_number,
+                    format!("malformed AdaL JSONL: {err}"),
+                );
+                continue;
+            }
+        };
+        if value.get("type").and_then(Value::as_str).is_none() {
+            push_provider_import_failure(
+                summary,
+                line_number,
+                "AdaL JSONL record missing type".to_owned(),
+            );
+            continue;
+        }
+        rows.push((line_number, value));
+    }
+
+    Ok(rows)
+}
+
+fn read_adal_metadata_sidecar(path: Option<&Path>, summary: &mut ProviderImportSummary) -> Value {
+    let Some(path) = path else {
+        return Value::Null;
+    };
+    match read_text_file_limited(path, MAX_PROVIDER_JSONL_LINE_BYTES, "AdaL metadata sidecar") {
+        Ok(raw) => match serde_json::from_str::<Value>(&raw) {
+            Ok(value) if value.is_object() => value,
+            Ok(_) => {
+                push_provider_import_failure(
+                    summary,
+                    0,
+                    "AdaL metadata sidecar must contain a JSON object".to_owned(),
+                );
+                Value::Null
+            }
+            Err(err) => {
+                push_provider_import_failure(
+                    summary,
+                    0,
+                    format!("invalid AdaL metadata sidecar: {err}"),
+                );
+                Value::Null
+            }
+        },
+        Err(err) => {
+            push_provider_import_failure(
+                summary,
+                0,
+                format!("could not read AdaL metadata sidecar: {err}"),
+            );
+            Value::Null
+        }
+    }
+}
+
+struct AdalCaptureDraft<'a> {
+    provider_session_id: String,
+    started_at: DateTime<Utc>,
+    ended_at: Option<DateTime<Utc>>,
+    cwd: Option<String>,
+    model: Option<String>,
+    source: &'a AdalSessionSource,
+    metadata_event: &'a Value,
+    sidecar: &'a Value,
+    event: Option<ProviderEventEnvelope>,
+}
+
+fn adal_capture(
+    draft: AdalCaptureDraft<'_>,
+    context: &ProviderAdapterContext,
+) -> ProviderCaptureEnvelope {
+    native_provider_capture(
+        NativeSessionDraft {
+            provider: CaptureProvider::Adal,
+            source_format: ADAL_SOURCE_FORMAT,
+            provider_session_id: draft.provider_session_id.clone(),
+            parent_provider_session_id: None,
+            root_provider_session_id: None,
+            external_agent_id: None,
+            agent_type: AgentType::Primary,
+            role_hint: Some("primary".to_owned()),
+            is_primary: true,
+            started_at: draft.started_at,
+            ended_at: draft.ended_at,
+            cwd: draft.cwd,
+            fidelity: Fidelity::Imported,
+            raw_source_path: draft.source.session_path.display().to_string(),
+            trust: ProviderSourceTrust::ProviderNative,
+            source_metadata: json!({
+                "adapter": ADAL_SOURCE_FORMAT,
+                "source_path": draft.source.session_path.display().to_string(),
+                "metadata_path": draft.source.metadata_path.as_ref().map(|path| path.display().to_string()),
+            }),
+            session_metadata: json!({
+                "source_format": ADAL_SOURCE_FORMAT,
+                "provider": CaptureProvider::Adal.as_str(),
+                "session_id": draft.provider_session_id,
+                "conversation_id": adal_metadata_string(draft.metadata_event, "conversation_id")
+                    .or_else(|| adal_metadata_string(draft.sidecar, "conversation_id")),
+                "user_id": adal_metadata_string(draft.metadata_event, "user_id")
+                    .or_else(|| adal_metadata_string(draft.sidecar, "user_id")),
+                "platform": adal_metadata_string(draft.metadata_event, "platform")
+                    .or_else(|| adal_metadata_string(draft.sidecar, "platform")),
+                "version": adal_metadata_string(draft.metadata_event, "version")
+                    .or_else(|| adal_metadata_string(draft.sidecar, "version")),
+                "last_user_message": adal_metadata_string(draft.sidecar, "last_user_message"),
+                "total_messages": draft.sidecar.get("total_messages").and_then(Value::as_u64),
+                "total_turns": draft.sidecar.get("total_turns").and_then(Value::as_u64),
+                "model": draft.model,
+                "metadata_event": provider_capped_json_value(draft.metadata_event, PROVIDER_MAX_PREVIEW_CHARS),
+                "metadata_sidecar": provider_capped_json_value(draft.sidecar, PROVIDER_MAX_PREVIEW_CHARS),
+            }),
+        },
+        context,
+        draft.event,
+    )
+}
+
+fn adal_event(
+    provider_session_id: &str,
+    line_number: usize,
+    value: &Value,
+    occurred_at: DateTime<Utc>,
+    path: &Path,
+) -> ProviderEventEnvelope {
+    let event_type_name = value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let event_type = adal_event_type(event_type_name, value);
+    native_event(NativeEventDraft {
+        provider: CaptureProvider::Adal,
+        source_format: ADAL_SOURCE_FORMAT,
+        provider_session_id: provider_session_id.to_owned(),
+        provider_event_index: (line_number - 1) as u64,
+        provider_event_hash: Some(adal_event_id(value, line_number, event_type_name)),
+        cursor: format!("{}:line:{line_number}", path.display()),
+        event_type,
+        role: Some(adal_event_role(event_type_name, value, event_type)),
+        occurred_at,
+        text: adal_event_text(event_type_name, value),
+        body: value.clone(),
+        metadata: json!({
+            "source": ADAL_SOURCE_FORMAT,
+            "source_format": ADAL_SOURCE_FORMAT,
+            "line": line_number,
+            "event_type": event_type_name,
+            "turn_id": value.get("turn_id").and_then(Value::as_str),
+            "turn_index": value.get("turn_index").and_then(Value::as_u64),
+            "message_id": value.get("message_id").and_then(Value::as_str),
+            "compact_id": value.get("compact_id").and_then(Value::as_str),
+            "role": value.get("role").and_then(Value::as_str),
+            "model": value.get("model").cloned(),
+            "step": value.get("step").and_then(Value::as_u64),
+            "adal_source": value.get("source").and_then(Value::as_str),
+            "subagent_type": value.get("subagent_type").and_then(Value::as_str),
+            "input_tokens": value.get("input_tokens").and_then(Value::as_u64),
+            "output_tokens": value.get("output_tokens").and_then(Value::as_u64),
+            "cached_read_input_tokens": value.get("cached_read_input_tokens").and_then(Value::as_u64),
+            "cache_creation_tokens": value.get("cache_creation_tokens").and_then(Value::as_u64),
+            "reasoning_tokens": value.get("reasoning_tokens").and_then(Value::as_u64),
+            "metadata": value.get("metadata").map(|metadata| provider_capped_json_value(metadata, PROVIDER_MAX_PREVIEW_CHARS)),
+        }),
+    })
+}
+
+fn adal_event_type(event_type: &str, value: &Value) -> EventType {
+    match event_type {
+        "message" => match value.get("role").and_then(Value::as_str) {
+            Some("system" | "developer") => EventType::Notice,
+            _ => EventType::Message,
+        },
+        "compact" => EventType::Summary,
+        "usage" => EventType::Summary,
+        "clear" | "turn_created" => EventType::Notice,
+        _ => EventType::Notice,
+    }
+}
+
+fn adal_event_role(event_type: &str, value: &Value, ctx_event_type: EventType) -> EventRole {
+    match event_type {
+        "message" => provider_role(value.get("role").and_then(Value::as_str)),
+        "compact" => EventRole::Assistant,
+        "usage" | "clear" | "turn_created" => EventRole::System,
+        _ if ctx_event_type == EventType::Summary => EventRole::System,
+        _ => EventRole::Unknown,
+    }
+}
+
+fn adal_event_text(event_type: &str, value: &Value) -> String {
+    match event_type {
+        "message" => {
+            let role = value
+                .get("role")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            value
+                .get("content")
+                .and_then(provider_value_text)
+                .filter(|text| !text.trim().is_empty())
+                .unwrap_or_else(|| format!("AdaL {role} message"))
+        }
+        "compact" => value
+            .get("content")
+            .and_then(provider_value_text)
+            .filter(|text| !text.trim().is_empty())
+            .unwrap_or_else(|| "AdaL compacted conversation".to_owned()),
+        "clear" => value
+            .get("reason")
+            .and_then(provider_value_text)
+            .map(|reason| format!("AdaL conversation cleared: {reason}"))
+            .unwrap_or_else(|| "AdaL conversation cleared".to_owned()),
+        "turn_created" => value
+            .get("turn_index")
+            .and_then(Value::as_u64)
+            .map(|index| format!("AdaL turn {index} created"))
+            .unwrap_or_else(|| "AdaL turn created".to_owned()),
+        "usage" => {
+            let model = value
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown model");
+            let input = value
+                .get("input_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let output = value
+                .get("output_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            format!("AdaL usage for {model}: input_tokens={input}, output_tokens={output}")
+        }
+        _ => format!("AdaL event: {event_type}"),
+    }
+}
+
+fn adal_event_id(value: &Value, line_number: usize, event_type: &str) -> String {
+    value
+        .get("message_id")
+        .or_else(|| value.get("compact_id"))
+        .or_else(|| value.get("turn_id"))
+        .and_then(|id| match id {
+            Value::String(raw) => Some(raw.clone()),
+            Value::Number(number) => Some(number.to_string()),
+            _ => None,
+        })
+        .filter(|id| !id.trim().is_empty())
+        .map(|id| {
+            if event_type == "usage" {
+                let step = value
+                    .get("step")
+                    .and_then(Value::as_u64)
+                    .map(|step| step.to_string())
+                    .unwrap_or_else(|| line_number.to_string());
+                format!("{event_type}:{id}:{step}")
+            } else {
+                format!("{event_type}:{id}")
+            }
+        })
+        .unwrap_or_else(|| format!("{event_type}:line-{line_number}"))
+}
+
+fn adal_timestamp(value: &Value, field: &str) -> Option<DateTime<Utc>> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .and_then(parse_rfc3339_utc)
+}
+
+fn adal_metadata_string(value: &Value, field: &str) -> Option<String> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|raw| !raw.trim().is_empty())
+        .map(str::to_owned)
+}
+
+#[derive(Debug, Clone)]
 
 struct AutohandSessionSource {
     session_dir: PathBuf,
@@ -38981,6 +39588,70 @@ mod tests {
                 source_path: Some(fixture.clone()),
                 allow_partial_failures: true,
                 ..JazzImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(second.failed, 0, "{:?}", second.failures);
+        assert_eq!(second.imported_sessions, 0);
+        assert_eq!(second.imported_events, 0);
+        assert_eq!(second.skipped_sessions, 1);
+        assert_eq!(second.skipped_events, 4);
+    }
+
+    #[test]
+    fn native_adal_fixture_imports_searches_reimports_and_discovers_default_sessions() {
+        let temp = tempdir();
+        let fixture = provider_history_fixture("adal/sessions");
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let source = provider_source_for_path(CaptureProvider::Adal, fixture.clone());
+        assert_eq!(source.source_format, "adal_session_jsonl");
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+
+        let first = import_adal_history(
+            &fixture,
+            &mut store,
+            AdalImportOptions {
+                source_path: Some(fixture.clone()),
+                allow_partial_failures: true,
+                ..AdalImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(first.failed, 0, "{:?}", first.failures);
+        assert_eq!(first.imported_sessions, 1);
+        assert_eq!(first.imported_events, 4);
+
+        let events = store
+            .events_for_session(provider_session_uuid(
+                CaptureProvider::Adal,
+                "adal-session-1",
+            ))
+            .unwrap();
+        assert_eq!(events.len(), 4);
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == EventType::Message
+                && event.role == Some(EventRole::User)));
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == EventType::Summary));
+        let rendered = serde_json::to_string(&events).unwrap();
+        assert!(rendered.contains("adal fixture oracle prompt"));
+        assert!(rendered.contains("synthetic-adal-model"));
+        assert!(store
+            .search_event_hits("adal fixture oracle", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::Adal)));
+
+        let second = import_adal_history(
+            &fixture,
+            &mut store,
+            AdalImportOptions {
+                source_path: Some(fixture.clone()),
+                allow_partial_failures: true,
+                ..AdalImportOptions::default()
             },
         )
         .unwrap();

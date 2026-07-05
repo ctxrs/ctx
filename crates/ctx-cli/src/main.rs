@@ -33,13 +33,14 @@ use analytics::{AnalyticsEvent, AnalyticsProperties};
 use config::{AppConfig, CONFIG_FILE};
 use ctx_history_capture::{
     catalog_codex_session_tree, discover_provider_sources, discover_provider_sources_for_provider,
-    import_aider_desk_history, import_amp_threads_export, import_antigravity_cli_history,
-    import_astrbot_sqlite, import_auggie_history, import_autohand_code_sessions,
-    import_claude_projects_jsonl_tree, import_cline_task_json_history, import_codebuddy_history,
-    import_codex_history_jsonl, import_codex_session_jsonl, import_codex_session_jsonl_tail,
-    import_codex_session_paths, import_codex_session_tree, import_command_code_history,
-    import_continue_cli_sessions, import_copilot_cli_session_events, import_cortex_code_history,
-    import_crush_sqlite, import_cursor_native_history, import_custom_history_jsonl_v1,
+    import_adal_history, import_aider_desk_history, import_amp_threads_export,
+    import_antigravity_cli_history, import_astrbot_sqlite, import_auggie_history,
+    import_autohand_code_sessions, import_claude_projects_jsonl_tree,
+    import_cline_task_json_history, import_codebuddy_history, import_codex_history_jsonl,
+    import_codex_session_jsonl, import_codex_session_jsonl_tail, import_codex_session_paths,
+    import_codex_session_tree, import_command_code_history, import_continue_cli_sessions,
+    import_copilot_cli_session_events, import_cortex_code_history, import_crush_sqlite,
+    import_cursor_native_history, import_custom_history_jsonl_v1,
     import_custom_history_jsonl_v1_reader, import_deepagents_sqlite, import_devin_atif_exports,
     import_dexto_sqlite, import_eve_history, import_factory_ai_droid_sessions,
     import_firebender_sqlite, import_forgecode_sqlite, import_gemini_cli_history,
@@ -53,7 +54,7 @@ use ctx_history_capture::{
     import_rovodev_history, import_shelley_sqlite, import_terramind_sqlite, import_trae_history,
     import_warp_sqlite, import_windsurf_cascade_hook_transcripts, import_zed_threads_sqlite,
     provider_source_for_path, provider_source_spec, stable_capture_uuid,
-    validate_custom_history_jsonl_v1, validate_custom_history_jsonl_v1_reader,
+    validate_custom_history_jsonl_v1, validate_custom_history_jsonl_v1_reader, AdalImportOptions,
     AiderDeskImportOptions, AmpImportOptions, AntigravityCliImportOptions,
     AstrBotSqliteImportOptions, AuggieImportOptions, AutohandCodeImportOptions, CatalogSummary,
     ClaudeProjectsImportOptions, ClineTaskJsonImportOptions, CodeBuddyImportOptions,
@@ -774,6 +775,8 @@ enum NativeProviderArg {
     Mux,
     #[value(name = "reasonix", alias = "deepseek-reasonix")]
     Reasonix,
+    #[value(name = "adal", alias = "adal-cli", alias = "adal_cli")]
+    Adal,
     #[value(
         name = "kode",
         alias = "shareai-kode",
@@ -906,6 +909,8 @@ enum ProviderArg {
     Mux,
     #[value(name = "reasonix", alias = "deepseek-reasonix")]
     Reasonix,
+    #[value(name = "adal", alias = "adal-cli", alias = "adal_cli")]
+    Adal,
     #[value(
         name = "kode",
         alias = "shareai-kode",
@@ -1008,6 +1013,7 @@ impl NativeProviderArg {
             Self::MistralVibe => CaptureProvider::MistralVibe,
             Self::Mux => CaptureProvider::Mux,
             Self::Reasonix => CaptureProvider::Reasonix,
+            Self::Adal => CaptureProvider::Adal,
             Self::Kode => CaptureProvider::Kode,
             Self::Neovate => CaptureProvider::Neovate,
             Self::CommandCode => CaptureProvider::CommandCode,
@@ -1089,6 +1095,7 @@ impl ProviderArg {
             Self::MistralVibe => CaptureProvider::MistralVibe,
             Self::Mux => CaptureProvider::Mux,
             Self::Reasonix => CaptureProvider::Reasonix,
+            Self::Adal => CaptureProvider::Adal,
             Self::Kode => CaptureProvider::Kode,
             Self::Neovate => CaptureProvider::Neovate,
             Self::CommandCode => CaptureProvider::CommandCode,
@@ -1149,6 +1156,7 @@ impl ProviderArg {
             Self::MistralVibe => "mistral-vibe",
             Self::Mux => "mux",
             Self::Reasonix => "reasonix",
+            Self::Adal => "adal",
             Self::Kode => "kode",
             Self::Neovate => "neovate",
             Self::CommandCode => "command-code",
@@ -6072,6 +6080,17 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
+        CaptureProvider::Adal => import_adal_history(
+            &source.path,
+            store,
+            AdalImportOptions {
+                source_path: Some(source.path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: true,
+                ..AdalImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
         CaptureProvider::OpenClaw => import_openclaw_history(
             &source.path,
             store,
@@ -6719,6 +6738,10 @@ fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bool {
                                 || name.ends_with(".plan.json")
                         }))
         }
+        CaptureProvider::Adal => path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("conversation_") && name.ends_with(".jsonl")),
         CaptureProvider::CommandCode => {
             path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
                 && path
