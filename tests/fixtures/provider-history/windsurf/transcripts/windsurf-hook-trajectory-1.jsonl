@@ -1,0 +1,5 @@
+{"status":"done","type":"user_input","user_input":{"rules_applied":{"always_on":["my-rule.md"]},"user_response":"create a hello world file with windsurf cascade hook oracle"}}
+{"planner_response":{"response":"I'll create a hello world file for the windsurf cascade hook oracle."},"status":"done","type":"planner_response"}
+{"code_action":{"new_content":"print('windsurf cascade hook oracle')\n","path":"src/windsurf_hook_oracle.py"},"status":"done","type":"code_action"}
+{"planner_response":{"response":"I created the windsurf cascade hook oracle file for you."},"status":"done","type":"planner_response"}
+{"status":"done","type":"custom_note","custom_note":{"message":"windsurf unknown typed payload oracle","details":{"safe_text":"unknown payload preserved"}}}

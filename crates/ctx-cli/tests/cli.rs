@@ -2247,6 +2247,60 @@ fn preview_native_sources_are_listed_but_not_auto_imported() {
 }
 
 #[test]
+fn windsurf_preview_default_discovery_imports_only_when_explicit_provider() {
+    let temp = tempdir();
+    let query = "windsurf-preview-default-discovery-oracle";
+    install_default_windsurf_fixture(&temp, query);
+
+    let sources = json_output(ctx(&temp).args(["sources", "--json"]));
+    let windsurf = sources["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| source["provider"] == "windsurf")
+        .unwrap();
+    assert_eq!(windsurf["status"], "available");
+    assert_eq!(
+        windsurf["source_format"],
+        "windsurf_cascade_hook_transcript_jsonl_tree"
+    );
+    assert_eq!(windsurf["import_support"], "preview");
+    assert_eq!(windsurf["native_import"], false);
+    assert_eq!(windsurf["importable"], true);
+    assert!(windsurf["path"]
+        .as_str()
+        .unwrap()
+        .ends_with(".windsurf/transcripts"));
+
+    let search_before =
+        json_output(ctx(&temp).args(["search", query, "--provider", "windsurf", "--json"]));
+    assert_eq!(search_before["freshness"]["mode"], "auto");
+    assert_eq!(search_before["freshness"]["status"], "no_sources");
+    assert_eq!(search_before["freshness"]["source_count"], 0);
+    assert!(search_before["results"].as_array().unwrap().is_empty());
+
+    let imported = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "windsurf",
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(imported["totals"]["failed"], 0);
+    assert_eq!(imported["totals"]["imported_sources"], 1);
+    assert_eq!(imported["sources"][0]["provider"], "windsurf");
+    assert_eq!(
+        imported["sources"][0]["source_format"],
+        "windsurf_cascade_hook_transcript_jsonl_tree"
+    );
+
+    let search_after =
+        json_output(ctx(&temp).args(["search", query, "--provider", "windsurf", "--json"]));
+    assert_search_provider_oracle(&search_after, "windsurf", query, 1, "message");
+}
+
+#[test]
 fn import_all_reports_source_failure_without_losing_successes() {
     let temp = tempdir();
     copy_dir_all(
@@ -2333,6 +2387,7 @@ fn provider_help_matches_implemented_importers() {
         "antigravity",
         "gemini",
         "cursor",
+        "windsurf",
         "zed",
         "copilot-cli",
         "factory-ai-droid",
@@ -2386,6 +2441,8 @@ fn provider_json_names_are_accepted_as_cli_filter_aliases() {
         ("open_claw", "openclaw"),
         ("nano_claw", "nanoclaw"),
         ("astr_bot", "astrbot"),
+        ("devin_desktop", "windsurf"),
+        ("windsurf_cascade", "windsurf"),
         ("open_hands", "openhands"),
     ] {
         let search = json_output(ctx(&temp).args([
@@ -2505,7 +2562,7 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
             vec![
                 "Usage: ctx import",
                 "--provider <PROVIDER>",
-                "[possible values: codex, pi, claude, opencode, kilo, kiro-cli, crush, goose, antigravity, gemini, cursor, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, forgecode, deepagents, mistral-vibe, mux, reasonix, kode, neovate, command-code, terramind, rovodev, cortex-code, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto, lingma, codebuddy, aider-desk]",
+                "[possible values: codex, pi, claude, opencode, kilo, kiro-cli, crush, goose, antigravity, gemini, cursor, windsurf, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, jazz, forgecode, deepagents, mistral-vibe, mux, reasonix, kode, neovate, command-code, terramind, rovodev, cortex-code, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto, lingma, codebuddy, aider-desk]",
                 "--path <PATH>",
                 "--format <FORMAT>",
                 "--resume",
@@ -6271,6 +6328,12 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
             write_native_cursor_fixture,
         ),
         (
+            "windsurf",
+            "windsurf",
+            "windsurf_cascade_hook_transcript_jsonl_tree",
+            write_native_windsurf_fixture,
+        ),
+        (
             "copilot-cli",
             "copilot_cli",
             "copilot_cli_session_events_jsonl",
@@ -6848,6 +6911,11 @@ fn install_default_pi_fixture(temp: &TempDir, query: &str) {
 fn install_default_cursor_fixture(temp: &TempDir, query: &str) {
     let source = PathBuf::from(write_native_cursor_fixture(temp, query));
     copy_dir_all(&source, &temp.path().join(".cursor").join("projects"));
+}
+
+fn install_default_windsurf_fixture(temp: &TempDir, query: &str) {
+    let source = PathBuf::from(write_native_windsurf_fixture(temp, query));
+    copy_dir_all(&source, &temp.path().join(".windsurf").join("transcripts"));
 }
 
 fn install_default_openclaw_fixture(temp: &TempDir, query: &str) {
@@ -8059,6 +8127,37 @@ fn write_native_cursor_fixture(temp: &TempDir, query: &str) -> String {
         .to_str()
         .unwrap()
         .to_owned()
+}
+
+fn write_native_windsurf_fixture(temp: &TempDir, query: &str) -> String {
+    let root = temp.path().join("native-windsurf/transcripts");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        root.join("windsurf-cli-native.jsonl"),
+        format!(
+            "{}\n{}\n{}\n",
+            json!({
+                "status": "done",
+                "type": "user_input",
+                "user_input": {"user_response": query}
+            }),
+            json!({
+                "status": "done",
+                "type": "planner_response",
+                "planner_response": {"response": "native import ok"}
+            }),
+            json!({
+                "status": "done",
+                "type": "code_action",
+                "code_action": {
+                    "path": "src/windsurf_cli_native.py",
+                    "new_content": "print('native import ok')\n"
+                }
+            })
+        ),
+    )
+    .unwrap();
+    root.to_str().unwrap().to_owned()
 }
 
 fn write_native_openhands_fixture(temp: &TempDir, query: &str) -> String {

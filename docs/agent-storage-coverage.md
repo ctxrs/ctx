@@ -21,7 +21,7 @@ Status meanings:
 - `install-target`: npx target is an aggregate or project skill target, not a
   proven history-producing agent.
 
-Result on this integration branch: 39 `native-auto`, 2 `native-preview`, 13
+Result on this integration branch: 39 `native-auto`, 3 `native-preview`, 12
 `candidate-family`, 9 `webapp-boundary`, 7 `unknown`, and 2 `install-target`
 rows.
 
@@ -34,7 +34,7 @@ rows.
 - `JSONL CLI event logs`: already covers Codex, Claude Code, OpenClaw,
   Antigravity CLI, Gemini CLI, Pi, Factory Droid, Copilot CLI-shaped logs, and
   Autohand Code, iFlow CLI, Mistral Vibe, Mux, Reasonix, and Command Code
-  sessions.
+  sessions, plus Windsurf Cascade hook transcript JSONL.
 - `CLI session JSON`: covers Continue CLI `sessions/*.json` files with
   `sessions.json` metadata, plus Rovo Dev session directories and Cortex Code
   conversation snapshots/history sidecars.
@@ -125,7 +125,7 @@ rows.
 | `trae` | `candidate-family` | `VS Code/Electron storage` | npx `~/.trae`; no ctx provider | Need local app storage or export contract proof. |
 | `trae-cn` | `candidate-family` | `VS Code/Electron storage` | npx `~/.trae-cn`; no ctx provider | Need local app storage or export contract proof. |
 | `warp` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.warp`; no ctx provider | Skill/config target is not a local transcript contract; native support needs explicit export or local DB proof. |
-| `windsurf` | `candidate-family` | `VS Code/Electron storage` | npx `~/.codeium/windsurf`; no ctx provider | Need local app storage or export contract proof. |
+| `windsurf` | `native-preview` | `JSONL CLI event logs` | ctx `windsurf_cascade_hook_transcript_jsonl_tree`; npx `~/.codeium/windsurf`; official hook writes `~/.windsurf/transcripts/{trajectory_id}.jsonl` | Preview explicit import only; hook must be configured; private `~/.codeium/windsurf/cascade` cache and VS Code state DBs are not parsed. |
 | `zed` | `native-auto` | `VS Code/Electron storage` | ctx `zed_threads_sqlite`; npx `$XDG_DATA_HOME/zed` or `~/.local/share/zed` | Per-message timestamps are unavailable; ctx uses thread `updated_at`. |
 | `zencoder` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.zencoder`; no ctx provider | Skill home evidence is not a transcript schema; prefer exporter, plugin, or underlying provider imports. |
 | `zenflow` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.zencoder`; no ctx provider | Shares Zencoder skill home but no proven local history contract; prefer exporter or underlying provider imports. |

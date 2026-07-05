@@ -235,6 +235,12 @@ const CURSOR_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     source_kind: ProviderSourceKind::NativeHistory,
 }];
 
+const WINDSURF_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
+    path_components: &[".windsurf", "transcripts"],
+    source_format: "windsurf_cascade_hook_transcript_jsonl_tree",
+    source_kind: ProviderSourceKind::NativeHistory,
+}];
+
 const ZED_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     path_components: &[".local", "share", "zed", "threads", "threads.db"],
     source_format: "zed_threads_sqlite",
@@ -593,6 +599,16 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         display_name: "Cursor",
         default_locations: CURSOR_DEFAULTS,
         import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
+    ProviderSourceSpec {
+        provider: CaptureProvider::Windsurf,
+        display_name: "Windsurf",
+        default_locations: WINDSURF_DEFAULTS,
+        import_support: ProviderImportSupport::Preview,
         catalog_support: ProviderCatalogSupport::None,
         raw_retention: ProviderRawRetention::PathReference,
         redaction_boundary: ProviderRedactionBoundary::BeforeExport,
@@ -1715,6 +1731,12 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
             "cursor_agent_transcript_jsonl"
         }
         CaptureProvider::Cursor => "cursor_agent_transcript_jsonl_tree",
+        CaptureProvider::Windsurf
+            if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") =>
+        {
+            "windsurf_cascade_hook_transcript_jsonl"
+        }
+        CaptureProvider::Windsurf => "windsurf_cascade_hook_transcript_jsonl_tree",
         CaptureProvider::Zed => "zed_threads_sqlite",
         CaptureProvider::CopilotCli => "copilot_cli_session_events_jsonl",
         CaptureProvider::FactoryAiDroid => "factory_ai_droid_sessions_jsonl",
@@ -2203,6 +2225,7 @@ fn default_location_import_probe(
         CaptureProvider::Cursor => has_jsonl_file_under_matching(path, 10_000, |candidate| {
             path_has_component(candidate, "agent-transcripts")
         }),
+        CaptureProvider::Windsurf => has_jsonl_file_under_matching(path, 10_000, |_| true),
         CaptureProvider::Zed => path_is_file_probe(path),
         CaptureProvider::CopilotCli => has_jsonl_file_under_matching(path, 10_000, |candidate| {
             candidate.file_name().and_then(|name| name.to_str()) == Some("events.jsonl")

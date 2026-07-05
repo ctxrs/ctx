@@ -139,6 +139,25 @@ IDE/application storage imports.
 - `ctx` imports this shape as `jazz_history_json`, using read-only discovery
   under `JAZZ_HOME/history` or `~/.jazz/history`.
 
+## Windsurf
+
+- Source evidence: official Windsurf Cascade Hooks docs at
+  `https://docs.windsurf.com/windsurf/cascade/hooks` redirect to Devin Desktop
+  Cascade Hooks docs.
+- Hook evidence: `post_cascade_response_with_transcript` writes JSONL
+  transcript files to `~/.windsurf/transcripts/{trajectory_id}.jsonl`.
+- Schema evidence: the docs examples show one JSON object per line with `type`,
+  `status`, and payloads such as `user_input.user_response`,
+  `planner_response.response`, and `code_action.path`/`new_content`.
+- Privacy evidence: the docs warn transcripts may include file contents,
+  command outputs, tool arguments, search results, rules, and conversation
+  history, and that exact step structure may change.
+- `ctx` imports this shape as
+  `windsurf_cascade_hook_transcript_jsonl_tree`, preview-only, from explicit
+  file/directory paths or default discovery under `~/.windsurf/transcripts`.
+- Caveat: ctx does not parse the private `~/.codeium/windsurf/cascade` cache or
+  guessed VS Code state databases.
+
 ## Kode
 
 - Source evidence: `@shareai-lab/kode@2.2.1` declares repository
@@ -191,7 +210,7 @@ IDE/application storage imports.
   edge, and skips prompt/checkpoint sidecars. Non-session JSONL files found
   while scanning a project tree are skipped so valid sessions still import.
 - Privacy note: ctx stores local transcript text and path references in its
-  local history store only. Analytics must not include transcript paths,
+  local history store only. External reporting must not include transcript paths,
   usernames, repository paths, message content, or file bodies.
 
 ## Rovo Dev
@@ -209,7 +228,7 @@ IDE/application storage imports.
   `session_context.json` file; it imports message text, tool-use/tool-result
   parts, cwd metadata, and parent-session metadata when present.
 - Privacy note: Rovo Dev metadata can contain local workspace paths. Those paths
-  stay local and are not part of ctx analytics.
+  stay local and are not part of external reporting.
 
 ## Cortex Code
 
@@ -229,7 +248,7 @@ IDE/application storage imports.
   used as fallback when no sidecar rows exist.
 - Privacy note: Cortex Code conversation files can include local working
   directories, SQL context, and tool outputs. ctx keeps imported data local and
-  telemetry must remain coarse/provider-level only.
+  external reporting must remain coarse/provider-level only.
 
 ## ForgeCode
 
