@@ -1240,6 +1240,65 @@
       ]
     },
     {
+      "id": "windsurf",
+      "display_name": "Windsurf",
+      "priority": "p1",
+      "status": "local_import_when_supported",
+      "capture_provider": "windsurf",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "windsurf_cascade_hook_transcript_jsonl_tree",
+          "fidelity": "partial",
+          "proof": [
+            "ctx sources",
+            "ctx import --provider windsurf"
+          ],
+          "notes": [
+            "Preview importer for official Devin Desktop Cascade hook transcript JSONL files under ~/.windsurf/transcripts.",
+            "The hook is opt-in and docs warn transcript rows can include sensitive customer-owned data and may change shape.",
+            "Does not import the private ~/.codeium/windsurf/cascade cache or guessed VS Code state databases."
+          ]
+        }
+      ],
+      "history_locations": [
+        "~/.windsurf/transcripts",
+        "<transcript>.jsonl"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": false,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": false,
+        "command_output": false,
+        "files_touched": true,
+        "artifacts": false,
+        "model_identity": false,
+        "costs": false,
+        "token_usage": false,
+        "parent_child_session_edges": false
+      },
+      "redaction_notes": [
+        "Reads hook-generated JSONL files read-only; imported user prompts, planner responses, event types/statuses, local transcript paths, and touched file paths remain in the local ctx index.",
+        "Known sensitive fields such as file contents, command outputs, tool arguments, and results are redacted from the stored event body preview."
+      ],
+      "blockers": [
+        "Automatic refresh is intentionally disabled until more real-world hook transcript drift is validated."
+      ],
+      "public_docs": "docs/provider-support.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/windsurf"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs"
+      ]
+    },
+    {
       "id": "zed",
       "display_name": "Zed",
       "priority": "p1",

@@ -926,6 +926,27 @@ impl Default for CursorNativeImportOptions {
 }
 
 #[derive(Debug, Clone)]
+pub struct WindsurfCascadeHookImportOptions {
+    pub machine_id: String,
+    pub source_path: Option<PathBuf>,
+    pub imported_at: DateTime<Utc>,
+    pub history_record_id: Option<Uuid>,
+    pub allow_partial_failures: bool,
+}
+
+impl Default for WindsurfCascadeHookImportOptions {
+    fn default() -> Self {
+        Self {
+            machine_id: default_machine_id(),
+            source_path: None,
+            imported_at: utc_now(),
+            history_record_id: None,
+            allow_partial_failures: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct ZedThreadsSqliteImportOptions {
     pub machine_id: String,
     pub source_path: Option<PathBuf>,
@@ -1482,6 +1503,9 @@ pub struct GeminiCliJsonlAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CursorAgentTranscriptJsonlAdapter;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WindsurfCascadeHookTranscriptJsonlAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ZedThreadsSqliteAdapter;
@@ -2579,6 +2603,29 @@ impl ProviderCaptureAdapter for CursorAgentTranscriptJsonlAdapter {
             context,
             CaptureProvider::Cursor,
             CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT,
+        )
+    }
+}
+
+impl ProviderCaptureAdapter for WindsurfCascadeHookTranscriptJsonlAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Windsurf
+    }
+
+    fn source_format(&self) -> &str {
+        WINDSURF_CASCADE_HOOK_TRANSCRIPT_SOURCE_FORMAT
+    }
+
+    fn normalize_path(
+        &self,
+        path: &Path,
+        context: &ProviderAdapterContext,
+    ) -> Result<ProviderNormalizationResult> {
+        normalize_jsonl_tree(
+            path,
+            context,
+            CaptureProvider::Windsurf,
+            WINDSURF_CASCADE_HOOK_TRANSCRIPT_SOURCE_FORMAT,
         )
     }
 }
@@ -5398,6 +5445,25 @@ pub fn import_cursor_native_history(
     )
 }
 
+pub fn import_windsurf_cascade_hook_transcripts(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: WindsurfCascadeHookImportOptions,
+) -> Result<ProviderImportSummary> {
+    import_native_jsonl_tree(
+        store,
+        NativeJsonlTreeImport {
+            path: path.as_ref(),
+            machine_id: options.machine_id,
+            source_path: options.source_path,
+            imported_at: options.imported_at,
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+        },
+        WindsurfCascadeHookTranscriptJsonlAdapter,
+    )
+}
+
 pub fn import_zed_threads_sqlite(
     path: impl AsRef<Path>,
     store: &mut Store,
@@ -5873,6 +5939,8 @@ const LINGMA_SQLITE_SOURCE_FORMAT: &str = "lingma_sqlite";
 const ANTIGRAVITY_CLI_SOURCE_FORMAT: &str = "antigravity_cli_transcript_jsonl_tree";
 const GEMINI_CLI_SOURCE_FORMAT: &str = "gemini_cli_chat_recording_jsonl";
 const CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT: &str = "cursor_agent_transcript_jsonl";
+const WINDSURF_CASCADE_HOOK_TRANSCRIPT_SOURCE_FORMAT: &str =
+    "windsurf_cascade_hook_transcript_jsonl";
 const ZED_THREADS_SQLITE_SOURCE_FORMAT: &str = "zed_threads_sqlite";
 const FACTORY_DROID_SOURCE_FORMAT: &str = "factory_ai_droid_sessions_jsonl";
 const COPILOT_CLI_SOURCE_FORMAT: &str = "copilot_cli_session_events_jsonl";
@@ -15946,6 +16014,9 @@ fn native_jsonl_missing_reason(provider: CaptureProvider) -> &'static str {
         CaptureProvider::Cursor => {
             "no Cursor agent transcript JSONL files found under projects/*/agent-transcripts"
         }
+        CaptureProvider::Windsurf => {
+            "no Windsurf Cascade hook transcript JSONL files found under ~/.windsurf/transcripts"
+        }
         CaptureProvider::CopilotCli => "no Copilot CLI session events.jsonl transcripts found",
         CaptureProvider::FactoryAiDroid => "no Factory AI Droid session JSONL transcripts found",
         CaptureProvider::QwenCode => "no Qwen Code chat JSONL transcripts found under chats",
@@ -15979,6 +16050,7 @@ fn provider_jsonl_path_is_native(provider: CaptureProvider, path: &Path) -> bool
         CaptureProvider::Cursor => path
             .components()
             .any(|component| component.as_os_str() == "agent-transcripts"),
+        CaptureProvider::Windsurf => path.extension().and_then(|ext| ext.to_str()) == Some("jsonl"),
         CaptureProvider::CopilotCli => {
             path.file_name().and_then(|name| name.to_str()) == Some("events.jsonl")
         }
@@ -16083,7 +16155,10 @@ fn normalize_native_jsonl_session_file(
         rows.push((line_number, value));
     }
 
-    let header_index = if provider == CaptureProvider::Antigravity {
+    let header_index = if matches!(
+        provider,
+        CaptureProvider::Antigravity | CaptureProvider::Windsurf
+    ) {
         if rows.is_empty() {
             return Err(CaptureError::InvalidProviderTranscriptPath {
                 path: path.to_path_buf(),
@@ -16116,11 +16191,15 @@ fn normalize_native_jsonl_session_file(
     };
 
     let header = rows[header_index].1.clone();
-    let native_session_id = if provider == CaptureProvider::Antigravity {
-        antigravity_session_id_from_path(path).unwrap_or_else(|| "unknown-session".to_owned())
-    } else {
-        native_jsonl_header_session_id(provider, &header)
-            .unwrap_or_else(|| "unknown-session".to_owned())
+    let native_session_id = match provider {
+        CaptureProvider::Antigravity => {
+            antigravity_session_id_from_path(path).unwrap_or_else(|| "unknown-session".to_owned())
+        }
+        CaptureProvider::Windsurf => {
+            windsurf_session_id_from_path(path).unwrap_or_else(|| "unknown-session".to_owned())
+        }
+        _ => native_jsonl_header_session_id(provider, &header)
+            .unwrap_or_else(|| "unknown-session".to_owned()),
     };
     let (provider_session_id, parent_provider_session_id, external_agent_id, agent_type) =
         native_jsonl_path_session(provider, path, &header, &native_session_id);
@@ -20301,6 +20380,13 @@ fn antigravity_session_id_from_path(path: &Path) -> Option<String> {
         })
 }
 
+fn windsurf_session_id_from_path(path: &Path) -> Option<String> {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.trim().is_empty())
+        .map(str::to_owned)
+}
+
 fn native_jsonl_timestamp(value: &Value) -> Option<DateTime<Utc>> {
     value
         .get("timestamp")
@@ -20364,6 +20450,11 @@ fn native_jsonl_event(
     } else {
         None
     };
+    let body = if provider == CaptureProvider::Windsurf {
+        windsurf_redacted_body(value)
+    } else {
+        provider_capped_json(value, PROVIDER_MAX_PREVIEW_CHARS)
+    };
 
     Some(ProviderEventEnvelope {
         provider_event_index: (line_number - 1) as u64,
@@ -20386,7 +20477,7 @@ fn native_jsonl_event(
             "text": text,
             "truncated": truncated,
             "tool_calls": tool_calls,
-            "body": provider_capped_json(value, PROVIDER_MAX_PREVIEW_CHARS),
+            "body": body,
         }),
         metadata: json!({
             "source": source_format,
@@ -20522,6 +20613,12 @@ fn native_jsonl_event_type(provider: CaptureProvider, value: &Value) -> EventTyp
                 }
             }
         }
+        CaptureProvider::Windsurf => match value.get("type").and_then(Value::as_str) {
+            Some("user_input" | "planner_response") => EventType::Message,
+            Some("code_action") => EventType::ToolCall,
+            Some("summary" | "checkpoint") => EventType::Summary,
+            _ => EventType::Notice,
+        },
         CaptureProvider::QwenCode => match value.get("type").and_then(Value::as_str) {
             Some("user" | "assistant") if native_jsonl_content_has(value, "tool_use") => {
                 EventType::ToolCall
@@ -20659,6 +20756,12 @@ fn native_jsonl_role(provider: CaptureProvider, value: &Value) -> EventRole {
                 .or_else(|| value.pointer("/message/role"))
                 .and_then(Value::as_str),
         ),
+        CaptureProvider::Windsurf => match value.get("type").and_then(Value::as_str) {
+            Some("user_input") => EventRole::User,
+            Some("planner_response") => EventRole::Assistant,
+            Some("code_action") => EventRole::Tool,
+            _ => EventRole::Unknown,
+        },
         CaptureProvider::QwenCode => provider_role(
             value
                 .pointer("/message/role")
@@ -20761,6 +20864,7 @@ fn native_jsonl_event_text(
             .and_then(provider_value_text)
             .or_else(|| value.get("text").and_then(Value::as_str).map(str::to_owned))
             .unwrap_or_else(|| format!("Cursor event: {entry_type}")),
+        CaptureProvider::Windsurf => windsurf_event_text(value, entry_type),
         CaptureProvider::QwenCode => value
             .pointer("/message/content")
             .or_else(|| value.get("message"))
@@ -20804,6 +20908,162 @@ fn native_jsonl_event_text(
         _ if event_type == EventType::Notice => format!("Provider event: {entry_type}"),
         _ => serde_json::to_string(value).unwrap_or_else(|_| entry_type.to_owned()),
     }
+}
+
+fn windsurf_event_text(value: &Value, entry_type: &str) -> String {
+    match entry_type {
+        "user_input" => value
+            .pointer("/user_input/user_response")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| value.get("user_input").and_then(windsurf_extract_text))
+            .unwrap_or_else(|| "Windsurf user input".to_owned()),
+        "planner_response" => value
+            .pointer("/planner_response/response")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| {
+                value
+                    .get("planner_response")
+                    .and_then(windsurf_extract_text)
+            })
+            .unwrap_or_else(|| "Windsurf planner response".to_owned()),
+        "code_action" => value
+            .pointer("/code_action/path")
+            .and_then(Value::as_str)
+            .filter(|path| !path.trim().is_empty())
+            .map(|path| format!("Windsurf code action: {path}"))
+            .unwrap_or_else(|| "Windsurf code action".to_owned()),
+        _ => windsurf_extract_text(value)
+            .filter(|text| !text.trim().is_empty())
+            .unwrap_or_else(|| format!("Windsurf event: {entry_type}")),
+    }
+}
+
+fn windsurf_extract_text(value: &Value) -> Option<String> {
+    let mut parts = Vec::new();
+    windsurf_collect_text(value, None, &mut parts);
+    (!parts.is_empty()).then(|| parts.join("\n"))
+}
+
+fn windsurf_collect_text(value: &Value, key: Option<&str>, out: &mut Vec<String>) {
+    if out.iter().map(|part| part.chars().count()).sum::<usize>() >= PROVIDER_MAX_TEXT_CHARS {
+        return;
+    }
+    match value {
+        Value::String(text) => {
+            if !windsurf_sensitive_key(key.unwrap_or_default()) && !text.trim().is_empty() {
+                let label =
+                    key.filter(|key| !matches!(normalized_key(key).as_str(), "text" | "message"));
+                if let Some(label) = label {
+                    out.push(format!("{label}: {text}"));
+                } else {
+                    out.push(text.to_owned());
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                windsurf_collect_text(item, key, out);
+            }
+        }
+        Value::Object(object) => {
+            for wanted in [
+                "user_response",
+                "response",
+                "text",
+                "message",
+                "summary",
+                "path",
+                "tool",
+                "name",
+                "status",
+                "type",
+            ] {
+                if let Some(child) = object.get(wanted) {
+                    windsurf_collect_text(child, Some(wanted), out);
+                }
+            }
+            for (child_key, child) in object {
+                if matches!(
+                    normalized_key(child_key).as_str(),
+                    "userresponse"
+                        | "response"
+                        | "text"
+                        | "message"
+                        | "summary"
+                        | "path"
+                        | "tool"
+                        | "name"
+                        | "status"
+                        | "type"
+                ) {
+                    continue;
+                }
+                windsurf_collect_text(child, Some(child_key), out);
+            }
+        }
+        Value::Number(_) | Value::Bool(_) if !windsurf_sensitive_key(key.unwrap_or_default()) => {
+            if let Some(key) = key {
+                out.push(format!("{key}: {value}"));
+            }
+        }
+        Value::Number(_) | Value::Bool(_) | Value::Null => {}
+    }
+}
+
+fn windsurf_redacted_body(value: &Value) -> Value {
+    provider_capped_json_value(
+        &windsurf_redact_value(value, None),
+        PROVIDER_MAX_PREVIEW_CHARS,
+    )
+}
+
+fn windsurf_redact_value(value: &Value, key: Option<&str>) -> Value {
+    if windsurf_sensitive_key(key.unwrap_or_default()) {
+        return json!({"redacted": "sensitive_transcript_field"});
+    }
+    match value {
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| windsurf_redact_value(item, key))
+                .collect(),
+        ),
+        Value::Object(object) => Value::Object(
+            object
+                .iter()
+                .map(|(child_key, child)| {
+                    (
+                        child_key.clone(),
+                        windsurf_redact_value(child, Some(child_key)),
+                    )
+                })
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
+}
+
+fn windsurf_sensitive_key(key: &str) -> bool {
+    matches!(
+        normalized_key(key).as_str(),
+        "newcontent"
+            | "oldcontent"
+            | "filecontent"
+            | "filecontents"
+            | "content"
+            | "output"
+            | "stdout"
+            | "stderr"
+            | "commandoutput"
+            | "toolarguments"
+            | "arguments"
+            | "args"
+            | "result"
+            | "results"
+            | "searchresults"
+    )
 }
 
 fn native_jsonl_model(provider: CaptureProvider, value: &Value) -> Option<Value> {
@@ -29899,6 +30159,115 @@ mod tests {
         assert!(rendered.contains("ghp_1234567890abcdef"));
         assert!(rendered.contains("/home/example/private.txt"));
         assert!(!rendered.contains("[REDACTED"));
+    }
+
+    #[test]
+    fn native_windsurf_fixture_imports_searches_reimports_and_file_touches() {
+        let temp = tempdir();
+        let fixture = provider_history_fixture("windsurf/transcripts");
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let source = provider_source_for_path(CaptureProvider::Windsurf, fixture.clone());
+        assert_eq!(
+            source.source_format,
+            "windsurf_cascade_hook_transcript_jsonl_tree"
+        );
+        assert_eq!(source.import_support, ProviderImportSupport::Preview);
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+
+        let first = import_windsurf_cascade_hook_transcripts(
+            &fixture,
+            &mut store,
+            WindsurfCascadeHookImportOptions {
+                source_path: Some(fixture.clone()),
+                allow_partial_failures: true,
+                imported_at: "2026-06-24T14:00:00Z".parse().unwrap(),
+                ..WindsurfCascadeHookImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(first.failed, 0, "{first:?}");
+        assert_eq!(first.imported_sessions, 1);
+        assert_eq!(first.imported_events, 5);
+        assert!(store
+            .search_event_hits("windsurf cascade hook oracle", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::Windsurf)));
+        assert!(store
+            .search_event_hits("windsurf unknown typed payload oracle", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::Windsurf)));
+
+        let session_id =
+            provider_session_uuid(CaptureProvider::Windsurf, "windsurf-hook-trajectory-1");
+        let events = store.events_for_session(session_id).unwrap();
+        let code_action = events
+            .iter()
+            .find(|event| event.event_type == EventType::ToolCall)
+            .unwrap();
+        assert_eq!(
+            code_action.payload["body"]["body"]["code_action"]["path"].as_str(),
+            Some("src/windsurf_hook_oracle.py")
+        );
+        assert_eq!(
+            code_action.payload["body"]["body"]["code_action"]["new_content"]["redacted"].as_str(),
+            Some("sensitive_transcript_field")
+        );
+        assert!(!code_action.payload.to_string().contains("print("));
+
+        let archive = store.export_archive().unwrap();
+        assert!(archive.files_touched.iter().any(|file| {
+            file.path == "src/windsurf_hook_oracle.py" && file.confidence == Confidence::High
+        }));
+
+        let second = import_windsurf_cascade_hook_transcripts(
+            &fixture,
+            &mut store,
+            WindsurfCascadeHookImportOptions {
+                source_path: Some(fixture.clone()),
+                allow_partial_failures: true,
+                imported_at: "2026-06-24T14:05:00Z".parse().unwrap(),
+                ..WindsurfCascadeHookImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(second.failed, 0, "{second:?}");
+        assert_eq!(second.imported_sessions, 0);
+        assert_eq!(second.imported_events, 0);
+        assert_eq!(second.skipped_sessions, 1);
+        assert_eq!(second.skipped_events, 5);
+    }
+
+    #[test]
+    fn native_windsurf_reports_malformed_jsonl_partially() {
+        let temp = tempdir();
+        let fixture = provider_history_fixture("windsurf/malformed/transcripts");
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let summary = import_windsurf_cascade_hook_transcripts(
+            &fixture,
+            &mut store,
+            WindsurfCascadeHookImportOptions {
+                allow_partial_failures: true,
+                imported_at: "2026-06-24T14:00:00Z".parse().unwrap(),
+                ..WindsurfCascadeHookImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.failed, 1, "{summary:?}");
+        assert_eq!(summary.failures[0].line, 2);
+        assert!(summary.failures[0].error.contains("malformed JSONL"));
+        assert_eq!(summary.imported_sessions, 1);
+        assert_eq!(summary.imported_events, 2);
+        assert!(store
+            .search_event_hits("windsurf malformed after bad oracle", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::Windsurf)));
     }
 
     #[test]

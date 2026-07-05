@@ -49,25 +49,26 @@ use ctx_history_capture::{
     import_opencode_sqlite, import_openhands_file_events, import_pi_session_jsonl,
     import_qwen_code_history, import_reasonix_history, import_roo_task_json_history,
     import_rovodev_history, import_shelley_sqlite, import_terramind_sqlite,
-    import_zed_threads_sqlite, provider_source_for_path, provider_source_spec, stable_capture_uuid,
-    validate_custom_history_jsonl_v1, validate_custom_history_jsonl_v1_reader,
-    AiderDeskImportOptions, AntigravityCliImportOptions, AstrBotSqliteImportOptions,
-    AutohandCodeImportOptions, CatalogSummary, ClaudeProjectsImportOptions,
-    ClineTaskJsonImportOptions, CodeBuddyImportOptions, CodexEventImportMode,
-    CodexHistoryImportOptions, CodexSessionCatalogOptions, CodexSessionImportOptions,
-    CodexSessionImportProgress, CodexSessionImportProgressCallback, CodexToolOutputMode,
-    CommandCodeImportOptions, ContinueCliImportOptions, CopilotCliImportOptions,
-    CortexCodeImportOptions, CrushSqliteImportOptions, CursorNativeImportOptions,
-    CustomHistoryJsonlV1ImportOptions, DeepAgentsSqliteImportOptions, DextoSqliteImportOptions,
-    FactoryAiDroidImportOptions, ForgeCodeSqliteImportOptions, GeminiCliImportOptions,
-    GooseSessionsSqliteImportOptions, HermesSqliteImportOptions, IflowCliImportOptions,
-    JazzImportOptions, KiloSqliteImportOptions, KimiCodeCliImportOptions, KiroSqliteImportOptions,
-    KodeImportOptions, LingmaSqliteImportOptions, MistralVibeImportOptions, MuxImportOptions,
-    NanoClawImportOptions, NeovateImportOptions, OpenClawImportOptions,
-    OpenCodeSqliteImportOptions, OpenHandsImportOptions, PiSessionImportOptions,
-    ProviderImportSummary, ProviderImportSupport, ProviderSource, ProviderSourceStatus,
-    QwenCodeImportOptions, ReasonixImportOptions, RooTaskJsonImportOptions, RovoDevImportOptions,
-    ShelleySqliteImportOptions, TerramindSqliteImportOptions, ZedThreadsSqliteImportOptions,
+    import_windsurf_cascade_hook_transcripts, import_zed_threads_sqlite, provider_source_for_path,
+    provider_source_spec, stable_capture_uuid, validate_custom_history_jsonl_v1,
+    validate_custom_history_jsonl_v1_reader, AiderDeskImportOptions, AntigravityCliImportOptions,
+    AstrBotSqliteImportOptions, AutohandCodeImportOptions, CatalogSummary,
+    ClaudeProjectsImportOptions, ClineTaskJsonImportOptions, CodeBuddyImportOptions,
+    CodexEventImportMode, CodexHistoryImportOptions, CodexSessionCatalogOptions,
+    CodexSessionImportOptions, CodexSessionImportProgress, CodexSessionImportProgressCallback,
+    CodexToolOutputMode, CommandCodeImportOptions, ContinueCliImportOptions,
+    CopilotCliImportOptions, CortexCodeImportOptions, CrushSqliteImportOptions,
+    CursorNativeImportOptions, CustomHistoryJsonlV1ImportOptions, DeepAgentsSqliteImportOptions,
+    DextoSqliteImportOptions, FactoryAiDroidImportOptions, ForgeCodeSqliteImportOptions,
+    GeminiCliImportOptions, GooseSessionsSqliteImportOptions, HermesSqliteImportOptions,
+    IflowCliImportOptions, JazzImportOptions, KiloSqliteImportOptions, KimiCodeCliImportOptions,
+    KiroSqliteImportOptions, KodeImportOptions, LingmaSqliteImportOptions,
+    MistralVibeImportOptions, MuxImportOptions, NanoClawImportOptions, NeovateImportOptions,
+    OpenClawImportOptions, OpenCodeSqliteImportOptions, OpenHandsImportOptions,
+    PiSessionImportOptions, ProviderImportSummary, ProviderImportSupport, ProviderSource,
+    ProviderSourceStatus, QwenCodeImportOptions, ReasonixImportOptions, RooTaskJsonImportOptions,
+    RovoDevImportOptions, ShelleySqliteImportOptions, TerramindSqliteImportOptions,
+    WindsurfCascadeHookImportOptions, ZedThreadsSqliteImportOptions,
 };
 use ctx_history_core::{
     database_path, default_data_root, utc_now, CaptureProvider, ContextCitation,
@@ -705,6 +706,14 @@ enum NativeProviderArg {
     #[value(alias = "gemini-cli")]
     Gemini,
     Cursor,
+    #[value(
+        name = "windsurf",
+        alias = "devin-desktop",
+        alias = "devin_desktop",
+        alias = "windsurf-cascade",
+        alias = "windsurf_cascade"
+    )]
+    Windsurf,
     Zed,
     #[value(alias = "copilot", alias = "copilot_cli")]
     CopilotCli,
@@ -806,6 +815,14 @@ enum ProviderArg {
     #[value(alias = "gemini-cli")]
     Gemini,
     Cursor,
+    #[value(
+        name = "windsurf",
+        alias = "devin-desktop",
+        alias = "devin_desktop",
+        alias = "windsurf-cascade",
+        alias = "windsurf_cascade"
+    )]
+    Windsurf,
     Zed,
     #[value(alias = "copilot", alias = "copilot_cli")]
     CopilotCli,
@@ -920,6 +937,7 @@ impl NativeProviderArg {
             Self::Antigravity => CaptureProvider::Antigravity,
             Self::Gemini => CaptureProvider::Gemini,
             Self::Cursor => CaptureProvider::Cursor,
+            Self::Windsurf => CaptureProvider::Windsurf,
             Self::Zed => CaptureProvider::Zed,
             Self::CopilotCli => CaptureProvider::CopilotCli,
             Self::FactoryAiDroid => CaptureProvider::FactoryAiDroid,
@@ -990,6 +1008,7 @@ impl ProviderArg {
             Self::Antigravity => CaptureProvider::Antigravity,
             Self::Gemini => CaptureProvider::Gemini,
             Self::Cursor => CaptureProvider::Cursor,
+            Self::Windsurf => CaptureProvider::Windsurf,
             Self::Zed => CaptureProvider::Zed,
             Self::CopilotCli => CaptureProvider::CopilotCli,
             Self::FactoryAiDroid => CaptureProvider::FactoryAiDroid,
@@ -1039,6 +1058,7 @@ impl ProviderArg {
             Self::Antigravity => "antigravity",
             Self::Gemini => "gemini",
             Self::Cursor => "cursor",
+            Self::Windsurf => "windsurf",
             Self::Zed => "zed",
             Self::CopilotCli => "copilot-cli",
             Self::FactoryAiDroid => "factory-ai-droid",
@@ -6058,6 +6078,17 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
+        CaptureProvider::Windsurf => import_windsurf_cascade_hook_transcripts(
+            &source.path,
+            store,
+            WindsurfCascadeHookImportOptions {
+                source_path: Some(source.path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: true,
+                ..WindsurfCascadeHookImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
         CaptureProvider::Zed => import_zed_threads_sqlite(
             &source.path,
             store,
@@ -6523,6 +6554,7 @@ fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bool {
                     .components()
                     .any(|component| component.as_os_str() == "agent-transcripts")
         }
+        CaptureProvider::Windsurf => path.extension().and_then(|ext| ext.to_str()) == Some("jsonl"),
         CaptureProvider::Continue => {
             path.extension().and_then(|ext| ext.to_str()) == Some("json")
                 && path.file_name().and_then(|name| name.to_str()) != Some("sessions.json")
@@ -6848,6 +6880,7 @@ fn source_uses_incremental_event_search(source: &SourceInfo) -> bool {
             | CaptureProvider::Dexto
             | CaptureProvider::Antigravity
             | CaptureProvider::Gemini
+            | CaptureProvider::Windsurf
             | CaptureProvider::CopilotCli
             | CaptureProvider::FactoryAiDroid
             | CaptureProvider::Continue

@@ -1,0 +1,3 @@
+{"status":"done","type":"user_input","user_input":{"user_response":"windsurf malformed before bad oracle"}}
+{this is not json
+{"planner_response":{"response":"windsurf malformed after bad oracle"},"status":"done","type":"planner_response"}

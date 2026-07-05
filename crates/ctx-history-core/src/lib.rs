@@ -191,6 +191,7 @@ text_enum! {
         Antigravity => "antigravity",
         Gemini => "gemini",
         Cursor => "cursor",
+        Windsurf => "windsurf",
         Zed => "zed",
         CopilotCli => "copilot_cli",
         FactoryAiDroid => "factory_ai_droid",

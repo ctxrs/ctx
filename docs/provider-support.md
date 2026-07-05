@@ -44,6 +44,7 @@ is:
 | Antigravity | `local_import_when_supported` | Antigravity `transcript_full.jsonl` or `transcript.jsonl` files under `~/.gemini/antigravity-cli/brain`, or an explicit Antigravity transcript JSONL tree. | Static local-history fixture smoke. |
 | Gemini | `local_import_when_supported` | Gemini chat JSONL files under `~/.gemini/tmp/**/chats`, or an explicit Gemini CLI history tree. | Static local-history fixture smoke. |
 | Cursor | `local_import_when_supported` | Cursor agent transcript JSONL files under `~/.cursor/projects/**/agent-transcripts`, or an explicit Cursor agent transcript path. | Static local-history fixture smoke. |
+| Windsurf | `local_import_when_supported` | Preview/manual import from official Cascade hook transcript JSONL files under `~/.windsurf/transcripts`, or an explicit transcript file/directory. | Static local-history fixture smoke; excluded from `ctx import --all` and pre-search refresh until promoted. Does not import `~/.codeium/windsurf/cascade` or VS Code state DBs. |
 | Zed | `local_import_when_supported` | Zed agent threads SQLite DB at `$XDG_DATA_HOME/zed/threads/threads.db`, `~/.local/share/zed/threads/threads.db`, or an explicit Zed `threads.db` path. | Static local-history fixture smoke; imports zstd-compressed Zed `DbThread` messages from `threads.data`. |
 | Copilot CLI | `local_import_when_supported` | Copilot CLI `events.jsonl` files under `~/.copilot/session-state`, or an explicit Copilot CLI session-state tree. | Static local-history fixture smoke. |
 | Factory AI Droid | `local_import_when_supported` | `~/.factory/sessions` or an explicit Factory AI Droid sessions tree. | Static local-history fixture smoke. |
@@ -67,7 +68,7 @@ is:
 | Roo Code | `local_import_when_supported` | `roo-cline.customStoragePath`, common VS Code globalStorage task folders for `RooVeterinaryInc.roo-cline`, or an explicit Roo task storage path. | Static local-history fixture smoke; VS Code state databases are not parsed. |
 
 `ctx sources --json` uses `import_support: "preview"` and `native_import:
-false` for preview sources such as NanoClaw and AstrBot. Those paths can be
+false` for preview sources such as NanoClaw, AstrBot, and Windsurf. Those paths can be
 imported explicitly with `ctx import --provider ...` when discovery finds them,
 or with `ctx import --provider ... --path ...` for a specific path. They are not
 swept up by `ctx import --all` or the default pre-search refresh.
