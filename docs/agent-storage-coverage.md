@@ -21,7 +21,7 @@ Status meanings:
 - `install-target`: npx target is an aggregate or project skill target, not a
   proven history-producing agent.
 
-Result on this integration branch: 41 `native-auto`, 4 `native-preview`, 10
+Result on this integration branch: 42 `native-auto`, 4 `native-preview`, 9
 `candidate-family`, 9 `webapp-boundary`, 6 `unknown`, and 2 `install-target`
 rows.
 
@@ -45,8 +45,8 @@ rows.
 - `filesystem event JSON`: covers OpenHands event JSON under
   `<persistence>/<user_id>/v1_conversations`.
 - `generic sqlite messages`: already covers Crush, Goose, Hermes, Kiro CLI,
-  Dexto explicit imports, Terramind/Nucleus `agents.db`, the AstrBot preview
-  importer, and ctx-native Shelley.
+  Dexto explicit imports, Terramind/Nucleus `agents.db`, Firebender project
+  chat history DBs, the AstrBot preview importer, and ctx-native Shelley.
 - `Forge conversation SQLite`: covers ForgeCode's `.forge.db` conversation
   snapshots with JSON context/metrics DTOs.
 - `LangGraph checkpoint SQLite`: candidate family for LangGraph-style
@@ -90,7 +90,7 @@ rows.
 | `dexto` | `native-preview` | `generic sqlite messages` | ctx `dexto_sqlite`; npx `~/.dexto` | Preview explicit import only; no proven default discovery path yet. |
 | `droid` | `native-auto` | `JSONL CLI event logs` | ctx `factory_ai_droid_sessions_jsonl`; npx `~/.factory` | - |
 | `eve` | `unknown` | `unknown native history` | npx project `agent`; no ctx provider | Project skill layout does not prove a local history schema. |
-| `firebender` | `candidate-family` | `VS Code/Electron storage` | npx `~/.firebender`; no ctx provider | Need local app storage or export contract proof. |
+| `firebender` | `native-auto` | `generic sqlite messages` | ctx `firebender_chat_history_sqlite`; npx `~/.firebender`; public Firebender 1.0.10 JetBrains plugin stores project chat history in `.idea/firebender/chat_history.db` | Proven transcript storage is project-local `.idea/firebender/chat_history.db`; no global `~/.firebender` chat history file is claimed. |
 | `forgecode` | `native-auto` | `Forge conversation SQLite` | ctx `forgecode_sqlite`; npx `FORGE_CONFIG`, legacy `~/forge`, or `~/.forge` | - |
 | `gemini-cli` | `native-auto` | `JSONL CLI event logs` | ctx `gemini_cli_chat_recording_jsonl`; npx `~/.gemini` | - |
 | `github-copilot` | `native-auto` | `JSONL CLI event logs` | ctx `copilot_cli_session_events_jsonl`; npx `~/.copilot` | Coverage is for Copilot CLI session-state logs, not editor or web history. |

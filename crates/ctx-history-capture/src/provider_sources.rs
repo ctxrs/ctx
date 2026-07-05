@@ -310,6 +310,8 @@ const AUGGIE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     source_kind: ProviderSourceKind::NativeHistory,
 }];
 
+const FIREBENDER_DEFAULTS: &[ProviderDefaultLocation] = &[];
+
 const KODE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     path_components: &[".kode", "projects"],
     source_format: "kode_session_jsonl_tree",
@@ -729,6 +731,16 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         provider: CaptureProvider::Auggie,
         display_name: "Auggie",
         default_locations: AUGGIE_DEFAULTS,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
+    ProviderSourceSpec {
+        provider: CaptureProvider::Firebender,
+        display_name: "Firebender",
+        default_locations: FIREBENDER_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         raw_retention: ProviderRawRetention::PathReference,
@@ -1198,6 +1210,24 @@ fn discover_provider_sources_for_spec(
             }
         }
         CaptureProvider::Auggie => {}
+        CaptureProvider::Firebender => {
+            for root in current_dir_ancestors_with(|candidate| {
+                candidate
+                    .join(".idea")
+                    .join("firebender")
+                    .join("chat_history.db")
+                    .is_file()
+            }) {
+                sources.push(provider_source_from_parts(
+                    spec,
+                    root.join(".idea")
+                        .join("firebender")
+                        .join("chat_history.db"),
+                    "firebender_chat_history_sqlite",
+                    ProviderSourceKind::NativeHistory,
+                ));
+            }
+        }
         CaptureProvider::Kode => {
             for env_name in ["KODE_CONFIG_DIR", "CLAUDE_CONFIG_DIR"] {
                 if let Some(path) = env_path_resolved(env_name, home) {
@@ -1803,6 +1833,7 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::IflowCli => "iflow_cli_session_jsonl",
         CaptureProvider::Jazz => "jazz_history_json",
         CaptureProvider::Auggie => "auggie_session_json",
+        CaptureProvider::Firebender => "firebender_chat_history_sqlite",
         CaptureProvider::Kode if path.is_dir() => "kode_session_jsonl_tree",
         CaptureProvider::Kode => "kode_session_jsonl",
         CaptureProvider::Neovate if path.is_dir() => "neovate_session_jsonl_tree",
@@ -1977,6 +2008,9 @@ fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::Auggie => {
             Some("path exists but no Auggie session JSON files with chatHistory were found")
         }
+        CaptureProvider::Firebender => {
+            Some("path exists but no Firebender chat_sessions table was found")
+        }
         CaptureProvider::Kode => {
             Some("path exists but no Kode session JSONL files were found under projects")
         }
@@ -2098,6 +2132,9 @@ fn unknown_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::Auggie => {
             Some("path exists but the Auggie session JSON probe hit its scan budget")
         }
+        CaptureProvider::Firebender => {
+            Some("path exists but the Firebender database could not be fully probed")
+        }
         CaptureProvider::MistralVibe => {
             Some("path exists but the Mistral Vibe session probe hit its scan budget")
         }
@@ -2197,6 +2234,9 @@ fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'static str> {
         }
         CaptureProvider::Auggie => {
             Some("path exists but Auggie session JSON files could not be read; check permissions")
+        }
+        CaptureProvider::Firebender => {
+            Some("path exists but the Firebender chat history database could not be read; check permissions")
         }
         CaptureProvider::CommandCode => Some(
             "path exists but Command Code session transcripts could not be read; check permissions",
@@ -2341,6 +2381,7 @@ fn default_location_import_probe(
         CaptureProvider::Auggie => has_json_file_under_matching(path, 10_000, |candidate| {
             candidate.extension().and_then(|ext| ext.to_str()) == Some("json")
         }),
+        CaptureProvider::Firebender => has_firebender_chat_sessions_table(path),
         CaptureProvider::Kode => has_jsonl_file_under_matching(path, 10_000, |candidate| {
             !path_has_component(candidate, "requests")
                 && !path_has_component(candidate, "file-history")
@@ -2538,6 +2579,38 @@ fn has_forgecode_conversations_table(path: &Path) -> BoundedProbe {
     .and_then(|conn| {
         conn.query_row(
             "select count(*) from sqlite_schema where type = 'table' and name = 'conversations'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+    }) {
+        Ok(count) if count > 0 => BoundedProbe::Found,
+        Ok(_) => BoundedProbe::NotFound,
+        Err(_) => BoundedProbe::IoError,
+    }
+}
+
+fn has_firebender_chat_sessions_table(path: &Path) -> BoundedProbe {
+    let db_path = match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => path.to_path_buf(),
+        Ok(metadata) if metadata.file_type().is_dir() => path
+            .join(".idea")
+            .join("firebender")
+            .join("chat_history.db"),
+        Ok(_) => return BoundedProbe::NotFound,
+        Err(err) if err.kind() == ErrorKind::NotFound => return BoundedProbe::NotFound,
+        Err(_) => return BoundedProbe::IoError,
+    };
+    match path_is_file_probe(&db_path) {
+        BoundedProbe::Found => {}
+        other => return other,
+    }
+    match Connection::open_with_flags(
+        &db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .and_then(|conn| {
+        conn.query_row(
+            "select count(*) from sqlite_schema where type = 'table' and name = 'chat_sessions'",
             [],
             |row| row.get::<_, i64>(0),
         )
@@ -3570,6 +3643,40 @@ mod tests {
 
         assert_eq!(source.status, ProviderSourceStatus::Available);
         assert_eq!(source.source_format, "aider_desk_task_context_json");
+        assert_eq!(source.import_support, ProviderImportSupport::Native);
+    }
+
+    #[test]
+    fn firebender_discovery_uses_current_project_chat_history_db() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        let nested = project.join("src/module");
+        let db = project.join(".idea/firebender/chat_history.db");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        Connection::open(&db)
+            .unwrap()
+            .execute_batch(
+                r#"
+                CREATE TABLE chat_sessions (
+                    id TEXT PRIMARY KEY,
+                    messages_json TEXT NOT NULL
+                );
+                "#,
+            )
+            .unwrap();
+        let _cwd = CwdGuard::set(&nested);
+
+        let sources =
+            discover_provider_sources_for_provider(temp.path(), CaptureProvider::Firebender);
+        let source = sources
+            .iter()
+            .find(|source| source.provider == CaptureProvider::Firebender && source.path == db)
+            .unwrap_or_else(|| panic!("missing Firebender cwd source in {sources:#?}"));
+
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+        assert_eq!(source.source_format, "firebender_chat_history_sqlite");
         assert_eq!(source.import_support, ProviderImportSupport::Native);
     }
 
