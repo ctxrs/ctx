@@ -55,6 +55,17 @@ fn imports_cursor_agent_transcript_jsonl_tree() {
         r#"{"type":"turn_ended","status":"aborted","error":"User aborted/interrupted manually."}"#,
     )
     .unwrap();
+    let empty = fixture.join("sanitized-workspace/agent-transcripts/cursor-empty-stub-session");
+    fs::create_dir_all(&empty).unwrap();
+    fs::write(empty.join("cursor-empty-stub-session.jsonl"), "").unwrap();
+    let malformed =
+        fixture.join("sanitized-workspace/agent-transcripts/cursor-malformed-stub-session");
+    fs::create_dir_all(&malformed).unwrap();
+    fs::write(
+        malformed.join("cursor-malformed-stub-session.jsonl"),
+        "{\"not valid\"\n",
+    )
+    .unwrap();
     let mut store = Store::open(&db_path).unwrap();
 
     let summary = import_cursor_native_history(
@@ -69,7 +80,7 @@ fn imports_cursor_agent_transcript_jsonl_tree() {
     )
     .unwrap();
 
-    assert_eq!(summary.failed, 2, "{:?}", summary.failures);
+    assert_eq!(summary.failed, 3, "{:?}", summary.failures);
     assert_eq!(summary.imported_sessions, 2);
     assert_eq!(summary.imported_events, 6);
     drop(store);
@@ -125,6 +136,47 @@ fn reports_malformed_cursor_agent_transcript_when_partial_disallowed() {
     assert_eq!(summary.failed, 1);
     assert_eq!(summary.imported_events, 0);
     assert!(summary.failures[0].error.contains("malformed JSONL"));
+}
+
+#[test]
+fn reports_all_malformed_cursor_agent_transcript_when_partial_disallowed() {
+    let temp = tempdir();
+    let fixture = temp
+        .path()
+        .join("cursor/projects/sanitized-workspace/agent-transcripts/cursor-malformed-session");
+    fs::create_dir_all(&fixture).unwrap();
+    fs::write(
+        fixture.join("cursor-malformed-session.jsonl"),
+        "{\"not valid\"\n",
+    )
+    .unwrap();
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let summary =
+        import_cursor_native_history(&fixture, &mut store, CursorNativeImportOptions::default())
+            .unwrap();
+
+    assert_eq!(summary.failed, 1);
+    assert_eq!(summary.imported_events, 0);
+    assert!(summary.failures[0].error.contains("malformed JSONL"));
+}
+
+#[test]
+fn ignores_empty_cursor_agent_transcript_when_partial_disallowed() {
+    let temp = tempdir();
+    let fixture = temp
+        .path()
+        .join("cursor/projects/sanitized-workspace/agent-transcripts/cursor-empty-session");
+    fs::create_dir_all(&fixture).unwrap();
+    fs::write(fixture.join("cursor-empty-session.jsonl"), "").unwrap();
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let summary =
+        import_cursor_native_history(&fixture, &mut store, CursorNativeImportOptions::default())
+            .unwrap();
+
+    assert_eq!(summary.failed, 0);
+    assert_eq!(summary.imported_events, 0);
 }
 
 #[test]

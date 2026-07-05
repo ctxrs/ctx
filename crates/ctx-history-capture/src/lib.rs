@@ -10003,6 +10003,9 @@ fn normalize_native_jsonl_session_file(
         }
         0
     } else {
+        if rows.is_empty() {
+            return Ok(result);
+        }
         let Some(header_index) = rows
             .iter()
             .position(|(_, value)| native_jsonl_header_session_id(provider, value).is_some())
@@ -15675,6 +15678,102 @@ mod tests {
         assert!(summary.failures[0]
             .error
             .contains("no importable native JSONL session header"));
+    }
+
+    #[test]
+    fn native_jsonl_tree_tolerates_unimportable_siblings_for_shared_providers() {
+        let temp = tempdir();
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let gemini = write_gemini_smoke_fixture(&temp);
+        write_unimportable_jsonl_siblings(
+            &temp.path().join("gemini/.gemini/tmp/project/chats"),
+            "gemini",
+        );
+        let gemini_summary = import_gemini_cli_history(
+            &gemini,
+            &mut store,
+            GeminiCliImportOptions {
+                allow_partial_failures: true,
+                ..GeminiCliImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(gemini_summary.failed, 2, "{:?}", gemini_summary.failures);
+        assert_eq!(gemini_summary.imported_sessions, 2);
+        assert_eq!(gemini_summary.imported_events, 5);
+        assert_provider_failures_include_headerless_and_malformed(&gemini_summary);
+
+        let droid = write_droid_smoke_fixture(&temp);
+        write_unimportable_jsonl_siblings(&temp.path().join("droid/sessions/project"), "droid");
+        let droid_summary = import_factory_ai_droid_sessions(
+            &droid,
+            &mut store,
+            FactoryAiDroidImportOptions {
+                allow_partial_failures: true,
+                ..FactoryAiDroidImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(droid_summary.failed, 2, "{:?}", droid_summary.failures);
+        assert_eq!(droid_summary.imported_sessions, 2);
+        assert_eq!(droid_summary.imported_events, 5);
+        assert_provider_failures_include_headerless_and_malformed(&droid_summary);
+
+        let copilot = write_copilot_smoke_fixture(&temp);
+        write_unimportable_copilot_siblings(&temp.path().join("copilot/session-state"));
+        let copilot_summary = import_copilot_cli_session_events(
+            &copilot,
+            &mut store,
+            CopilotCliImportOptions {
+                allow_partial_failures: true,
+                ..CopilotCliImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(copilot_summary.failed, 2, "{:?}", copilot_summary.failures);
+        assert_eq!(copilot_summary.imported_sessions, 1);
+        assert_eq!(copilot_summary.imported_events, 5);
+        assert_provider_failures_include_headerless_and_malformed(&copilot_summary);
+    }
+
+    fn write_unimportable_jsonl_siblings(root: &Path, prefix: &str) {
+        fs::write(root.join(format!("{prefix}-empty.jsonl")), "").unwrap();
+        fs::write(
+            root.join(format!("{prefix}-malformed.jsonl")),
+            "{\"not valid\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join(format!("{prefix}-headerless.jsonl")),
+            "{\"type\":\"message\",\"content\":\"missing session header\"}\n",
+        )
+        .unwrap();
+    }
+
+    fn write_unimportable_copilot_siblings(root: &Path) {
+        for (session, content) in [
+            ("copilot-empty", ""),
+            ("copilot-malformed", "{\"not valid\"\n"),
+            (
+                "copilot-headerless",
+                "{\"type\":\"user.message\",\"data\":{\"content\":\"missing session header\"}}\n",
+            ),
+        ] {
+            let path = root.join(session);
+            fs::create_dir_all(&path).unwrap();
+            fs::write(path.join("events.jsonl"), content).unwrap();
+        }
+    }
+
+    fn assert_provider_failures_include_headerless_and_malformed(summary: &ProviderImportSummary) {
+        assert!(summary.failures.iter().any(|failure| failure
+            .error
+            .contains("no importable native JSONL session header")));
+        assert!(summary
+            .failures
+            .iter()
+            .any(|failure| failure.error.contains("malformed JSONL")));
     }
 
     fn write_claude_smoke_fixture(temp: &TempDir) -> PathBuf {
