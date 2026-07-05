@@ -136,7 +136,7 @@ rows.
 | `zenflow` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.zencoder`; no ctx provider | Shares Zencoder skill home but no proven local history contract; prefer exporter or underlying provider imports. |
 | `pochi` | `native-preview` | `LiveStore SQLite state DB` | ctx `pochi_livestore_state_sqlite`; npx `~/.pochi`; Pochi CLI writes `~/.pochi/storage/<storeId>/state<schemaHash>@6.db` only when `POCHI_LIVEKIT_SYNC_ON` is enabled | Preview discovery scans `~/.pochi/storage` only when that directory exists; no `config.jsonc` parsing or VS Code OPFS import. |
 | `promptscript` | `install-target` | `agent skills aggregate` | npx project `.promptscript` or `promptscript.yaml`; no ctx provider | Project skill target only; use custom history JSONL if it emits runs. |
-| `adal` | `unknown` | `unknown native history` | npx `~/.adal`; no ctx provider | Need native history storage research before claiming import support. |
+| `adal` | `unknown` | `JSONL CLI event logs` | npx `~/.adal`; no ctx provider; package-backed evidence points to `~/.adal/sessions/conversation_<id>.jsonl` plus `<id>_metadata.json` | No importer yet: safe unauth run created only an empty JSONL; backend bytecode proves event names/keys, but native support still needs a sanitized non-empty message fixture. |
 | `universal` | `install-target` | `agent skills aggregate` | npx virtual `.agents/skills` target; no ctx provider | Aggregate skill install target, not a history-producing native provider. |
 
 ## ctx Native Providers Outside This npx Target Set
