@@ -2400,6 +2400,7 @@ fn provider_help_matches_implemented_importers() {
         "codebuddy",
         "aider-desk",
         "amp",
+        "trae",
         "qwen-code",
         "kimi-code-cli",
         "autohand-code",
@@ -2436,6 +2437,7 @@ fn provider_json_names_are_accepted_as_cli_filter_aliases() {
         ("aider_desk", "aider_desk"),
         ("aiderdesk", "aider_desk"),
         ("amp", "amp"),
+        ("trae", "trae"),
         ("auggie", "auggie"),
         ("augment", "auggie"),
         ("augment-code", "auggie"),
@@ -2575,7 +2577,7 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
             vec![
                 "Usage: ctx import",
                 "--provider <PROVIDER>",
-                "[possible values: codex, pi, claude, opencode, openloaf, kilo, kiro-cli, crush, goose, antigravity, gemini, cursor, windsurf, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, jazz, auggie, devin, eve, firebender, forgecode, deepagents, mistral-vibe, mux, reasonix, kode, neovate, command-code, terramind, rovodev, cortex-code, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto, lingma, pochi, codebuddy, aider-desk, amp]",
+                "[possible values: codex, pi, claude, opencode, openloaf, kilo, kiro-cli, crush, goose, antigravity, gemini, cursor, windsurf, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, jazz, auggie, devin, eve, firebender, forgecode, deepagents, mistral-vibe, mux, reasonix, kode, neovate, command-code, terramind, rovodev, cortex-code, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto, lingma, pochi, codebuddy, aider-desk, amp, trae]",
                 "--path <PATH>",
                 "--format <FORMAT>",
                 "--resume",
@@ -6811,6 +6813,71 @@ fn pochi_preview_default_discovery_imports_only_when_explicit_provider() {
         "session_result",
         "session",
     );
+}
+
+#[test]
+fn trae_cli_imports_explicit_workspace_storage_preview_only() {
+    let temp = tempdir();
+    let empty_sources = json_output(ctx(&temp).args(["sources", "--json"]));
+    assert!(
+        !empty_sources["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|source| source["provider"] == "trae"),
+        "Trae should not have default discovery sources: {empty_sources:#}"
+    );
+
+    let fixture = provider_history_fixture("trae/User/workspaceStorage");
+    let imported = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "trae",
+        "--path",
+        &fixture,
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(imported["schema_version"], 1);
+    assert_eq!(imported["sources"][0]["provider"], "trae");
+    assert_eq!(imported["sources"][0]["source_format"], "trae_state_vscdb");
+    assert_eq!(imported["totals"]["failed"], 0);
+    assert_eq!(imported["totals"]["imported_sessions"], 1);
+    assert_eq!(imported["totals"]["imported_events"], 2);
+
+    let search = json_output(ctx(&temp).args([
+        "search",
+        "trae oracle answer",
+        "--provider",
+        "trae",
+        "--refresh",
+        "off",
+        "--json",
+    ]));
+    assert_search_provider_oracle_with_scope(
+        &search,
+        "trae",
+        "trae oracle answer",
+        1,
+        "message",
+        "session_result",
+        "session",
+    );
+
+    let second = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "trae",
+        "--path",
+        &fixture,
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(second["totals"]["failed"], 0);
+    assert_eq!(second["totals"]["imported_sessions"], 0);
+    assert_eq!(second["totals"]["imported_events"], 0);
 }
 
 #[test]

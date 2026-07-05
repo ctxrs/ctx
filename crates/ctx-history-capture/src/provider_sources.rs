@@ -220,6 +220,8 @@ const LINGMA_DEFAULTS: &[ProviderDefaultLocation] = &[
     },
 ];
 
+const TRAE_DEFAULTS: &[ProviderDefaultLocation] = &[];
+
 const CORTEX_CODE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     path_components: &[".snowflake", "cortex", "conversations"],
     source_format: "cortex_code_conversations_json",
@@ -985,6 +987,16 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         display_name: "Lingma",
         default_locations: LINGMA_DEFAULTS,
         import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
+    ProviderSourceSpec {
+        provider: CaptureProvider::Trae,
+        display_name: "Trae",
+        default_locations: TRAE_DEFAULTS,
+        import_support: ProviderImportSupport::Preview,
         catalog_support: ProviderCatalogSupport::None,
         raw_retention: ProviderRawRetention::PathReference,
         redaction_boundary: ProviderRedactionBoundary::BeforeExport,
@@ -1941,6 +1953,7 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::RooCode => "roo_task_directory_json",
         CaptureProvider::Dexto => "dexto_sqlite",
         CaptureProvider::Lingma => "lingma_sqlite",
+        CaptureProvider::Trae => "trae_state_vscdb",
         CaptureProvider::Pochi => "pochi_livestore_state_sqlite",
         CaptureProvider::CortexCode if path.is_dir() => "cortex_code_conversations_json",
         CaptureProvider::CortexCode => {
@@ -2537,6 +2550,7 @@ fn default_location_import_probe(
         }
         CaptureProvider::Amp
         | CaptureProvider::Devin
+        | CaptureProvider::Trae
         | CaptureProvider::Shell
         | CaptureProvider::Git
         | CaptureProvider::Jj

@@ -846,6 +846,73 @@
       }
     },
     {
+      "id": "trae",
+      "display_name": "Trae",
+      "priority": "p2",
+      "status": "local_import_when_supported",
+      "capture_provider": "trae",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "trae_state_vscdb",
+          "fidelity": "partial",
+          "proof": [
+            "ctx import --provider trae --path <workspaceStorage-or-state.vscdb>",
+            "tests/fixtures/provider-history/trae/User/workspaceStorage/trae-workspace-1/state.vscdb",
+            "yuanjing001/trae-chats-exporter@85e2d111a5a0e35f0957502097d3a8b18095ef72"
+          ],
+          "notes": [
+            "Preview importer for explicit Trae User/workspaceStorage roots, workspace directories, or state.vscdb files.",
+            "Reads SQLite ItemTable values for exporter-backed keys including memento/icube-ai-agent-storage, chat.ChatSessionStore.index, and ChatStore.",
+            "Default discovery is intentionally unclaimed until real fixture validation exists."
+          ]
+        }
+      ],
+      "history_locations": [
+        "explicit Trae User/workspaceStorage directory",
+        "explicit Trae workspace directory containing state.vscdb",
+        "explicit Trae state.vscdb file"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": false,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": false,
+        "tool_output": false,
+        "command_output": false,
+        "files_touched": false,
+        "artifacts": false,
+        "model_identity": true,
+        "costs": false,
+        "token_usage": false,
+        "parent_child_session_edges": false
+      },
+      "redaction_notes": [
+        "Reads explicit local Trae SQLite state databases read-only; imported message text and local source paths remain in the local ctx index.",
+        "Provider-native JSON metadata is capped and marked preview/local."
+      ],
+      "blockers": [
+        "Preview explicit import only; no robust default discovery or real Trae run fixture was available.",
+        "trae-cn is not aliased or claimed."
+      ],
+      "public_docs": "docs/provider-support.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/trae/User/workspaceStorage/trae-workspace-1/state.vscdb",
+        "tests/fixtures/provider-history/trae/README.md"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs",
+        "tests/fixtures/provider-history/trae"
+      ],
+      "metadata": {
+        "default_auto_discovery": false,
+        "import_support": "preview"
+      }
+    },
+    {
       "id": "openclaw",
       "display_name": "OpenClaw",
       "priority": "p1",

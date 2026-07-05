@@ -36,6 +36,7 @@ is:
 | CodeBuddy | `local_import_when_supported` | `~/.codebuddy`, `~/Library/Application Support/CodeBuddyExtension/Data`, `%LOCALAPPDATA%/CodeBuddyExtension`, or an explicit CodeBuddy history root. | Static local-history fixture smoke; schema proof comes from WayLog and sanitized fixtures. |
 | Aider Desk | `local_import_when_supported` | Project-local `.aider-desk/tasks/<taskId>/context.json`, `AIDER_DESK_DIR/tasks/<taskId>/context.json`, or an explicit task, tasks, context file, or project root. | Static local-history fixture smoke; cwd/ancestor discovery only reports projects that already have task context files. |
 | Amp | `local_import_when_supported` | Explicit JSON emitted by `amp threads export <threadIDOrURL>` and imported with `ctx import --provider amp --path <file>`. | Static redacted export fixture smoke; no default discovery is registered, and `$XDG_CACHE_HOME/amp/logs/cli.log` is not crawled. |
+| Trae | `local_import_when_supported` | Preview explicit import from a Trae `User/workspaceStorage` root, workspace directory, or `state.vscdb` file. | Source-backed synthetic state.vscdb fixture smoke; default discovery and real-run fixtures remain unclaimed. No `trae-cn` alias is claimed. |
 | OpenClaw | `local_import_when_supported` | `OPENCLAW_STATE_DIR`, `~/.openclaw`, legacy `~/.clawdbot`/`~/.moltbot`, or an explicit OpenClaw state tree. | Static local-history fixture smoke; beta storage-contract notes in the matrix. |
 | Hermes Agent | `local_import_when_supported` | `HERMES_HOME/state.db`, `~/.hermes/state.db`, or an explicit Hermes SQLite DB. | Static local-history fixture smoke. |
 | NanoClaw | `local_import_when_supported` | Preview/manual import from a NanoClaw project root or `data/v2.db`; cwd/ancestor discovery only. | Static local-history fixture smoke; excluded from `ctx import --all` and pre-search refresh until promoted. |
@@ -76,7 +77,8 @@ is:
 
 `ctx sources --json` uses `import_support: "preview"` and `native_import:
 false` for preview sources/importers such as NanoClaw, AstrBot, Pochi,
-Windsurf, Amp explicit exports, and Devin ATIF exports. Those paths can be
+Windsurf, Amp explicit exports, Devin ATIF exports, and Trae explicit state
+databases. Those paths can be
 imported explicitly with `ctx import --provider ...` when discovery finds them,
 or with `ctx import --provider ... --path ...` for a specific path. They are not
 swept up by `ctx import --all` or the default pre-search refresh.

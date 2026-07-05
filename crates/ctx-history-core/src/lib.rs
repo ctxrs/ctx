@@ -233,6 +233,7 @@ text_enum! {
         CodeBuddy => "codebuddy",
         AiderDesk => "aider_desk",
         Amp => "amp",
+        Trae => "trae",
         Shell => "shell",
         Git => "git",
         Jj => "jj",

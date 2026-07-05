@@ -948,6 +948,27 @@ impl Default for LingmaSqliteImportOptions {
 }
 
 #[derive(Debug, Clone)]
+pub struct TraeImportOptions {
+    pub machine_id: String,
+    pub source_path: Option<PathBuf>,
+    pub imported_at: DateTime<Utc>,
+    pub history_record_id: Option<Uuid>,
+    pub allow_partial_failures: bool,
+}
+
+impl Default for TraeImportOptions {
+    fn default() -> Self {
+        Self {
+            machine_id: default_machine_id(),
+            source_path: None,
+            imported_at: utc_now(),
+            history_record_id: None,
+            allow_partial_failures: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct AntigravityCliImportOptions {
     pub machine_id: String,
     pub source_path: Option<PathBuf>,
@@ -5087,6 +5108,41 @@ pub fn import_codebuddy_history(
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
     let normalization = CodeBuddyHistoryJsonAdapter.normalize_path(
+        path,
+        &ProviderAdapterContext {
+            machine_id: options.machine_id,
+            source_path: Some(source_path),
+            imported_at: options.imported_at,
+            tool_output_mode: CodexToolOutputMode::Full,
+            event_mode: CodexEventImportMode::Rich,
+            include_notices: true,
+        },
+    )?;
+
+    import_normalized_provider_captures(
+        store,
+        normalization,
+        NormalizedProviderImportOptions {
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+            persist_cursors: true,
+            wrap_transaction: true,
+            fast_event_inserts: true,
+        },
+    )
+}
+
+pub fn import_trae_history(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: TraeImportOptions,
+) -> Result<ProviderImportSummary> {
+    let path = path.as_ref();
+    let source_path = options
+        .source_path
+        .clone()
+        .unwrap_or_else(|| path.to_path_buf());
+    let normalization = normalize_trae_history(
         path,
         &ProviderAdapterContext {
             machine_id: options.machine_id,
@@ -13271,6 +13327,528 @@ fn codebuddy_event(
             "role": event.role,
             "ref_type": event.ref_type,
             "model": event.decoded_message.get("model").cloned(),
+        }),
+    }
+}
+
+const TRAE_STATE_VSCDB_SOURCE_FORMAT: &str = "trae_state_vscdb";
+const TRAE_CHAT_KEYS: &[&str] = &[
+    "memento/icube-ai-agent-storage",
+    "chat.ChatSessionStore.index",
+    "ChatStore",
+    "memento/icube-ai-chat-storage-7467774676505887760",
+    "memento/icube-ai-ng-chat-storage-7467774676505887760",
+];
+
+fn normalize_trae_history(
+    path: &Path,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    let mut db_paths = collect_trae_state_vscdb_paths(path)?;
+    db_paths.sort();
+    db_paths.dedup();
+    if db_paths.is_empty() {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "no Trae state.vscdb files found",
+        });
+    }
+
+    let mut merged = ProviderNormalizationResult::default();
+    for (workspace_ordinal, db_path) in db_paths.iter().enumerate() {
+        let mut result = normalize_trae_state_vscdb(db_path, context, workspace_ordinal + 1)?;
+        merged.summary.merge(result.summary);
+        merged.captures.append(&mut result.captures);
+        merged.files_touched.append(&mut result.files_touched);
+    }
+    if merged.captures.is_empty() && merged.summary.failed == 0 {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "no Trae chat sessions with messages were found",
+        });
+    }
+    Ok(merged)
+}
+
+fn collect_trae_state_vscdb_paths(path: &Path) -> Result<Vec<PathBuf>> {
+    let metadata = fs::symlink_metadata(path)?;
+    let file_type = metadata.file_type();
+    if file_type.is_file() {
+        if path.file_name().and_then(|name| name.to_str()) != Some("state.vscdb") {
+            return Ok(Vec::new());
+        }
+        ensure_regular_provider_transcript_file(path)?;
+        return Ok(vec![path.to_path_buf()]);
+    }
+    if !file_type.is_dir() {
+        return Ok(Vec::new());
+    }
+    ensure_provider_path_parents_are_not_symlinks(path)?;
+
+    let direct = path.join("state.vscdb");
+    if direct.is_file() {
+        ensure_regular_provider_transcript_file(&direct)?;
+        return Ok(vec![direct]);
+    }
+
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let candidate = entry.path().join("state.vscdb");
+        if candidate.is_file() {
+            ensure_regular_provider_transcript_file(&candidate)?;
+            paths.push(candidate);
+        }
+    }
+    Ok(paths)
+}
+
+fn normalize_trae_state_vscdb(
+    path: &Path,
+    context: &ProviderAdapterContext,
+    workspace_ordinal: usize,
+) -> Result<ProviderNormalizationResult> {
+    let conn = open_provider_sqlite_readonly(path)?;
+    if !sqlite_table_exists(&conn, "ItemTable")? {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "Trae state.vscdb is missing ItemTable",
+        });
+    }
+    let columns = sqlite_table_columns(&conn, "ItemTable")?;
+    ensure_sqlite_table_columns(&columns, "Trae ItemTable", &["key", "value"])?;
+
+    let chat_rows = trae_chat_rows(&conn)?;
+    let workspace_id = path
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or("state-vscdb")
+        .to_owned();
+    let workspace_folder = trae_workspace_folder(path);
+    let raw_source_path = path.display().to_string();
+    let mut result = ProviderNormalizationResult::default();
+
+    for (key_index, row) in chat_rows.into_iter().enumerate() {
+        let line_base = workspace_ordinal
+            .saturating_mul(1_000_000)
+            .saturating_add(key_index.saturating_mul(10_000));
+        let chat_data = match serde_json::from_str::<Value>(&row.value) {
+            Ok(value) => value,
+            Err(err) => {
+                push_provider_import_failure(
+                    &mut result.summary,
+                    line_base.saturating_add(1),
+                    format!(
+                        "Trae ItemTable key `{}` contains invalid JSON: {err}",
+                        row.key
+                    ),
+                );
+                continue;
+            }
+        };
+        let sessions = trae_session_entries(&chat_data, &row.key);
+        for (session_index, session) in sessions.into_iter().enumerate() {
+            let Some(messages) = trae_session_messages(&session) else {
+                continue;
+            };
+            if messages.is_empty() {
+                continue;
+            }
+            let native_session_id = trae_session_id(&session, session_index);
+            let provider_session_id = format!("{workspace_id}/{native_session_id}");
+            let events = trae_events_from_messages(
+                &provider_session_id,
+                &workspace_id,
+                &row.key,
+                &messages,
+                context.imported_at,
+                line_base.saturating_add(session_index.saturating_mul(1_000)),
+            );
+            if events.is_empty() {
+                continue;
+            }
+            let first_event_at = events
+                .first()
+                .map(|event| event.occurred_at)
+                .unwrap_or(context.imported_at);
+            let last_event_at = events.last().map(|event| event.occurred_at);
+            let started_at =
+                task_json_time_field(&session, &["createdAt", "created_at", "timestamp", "time"])
+                    .unwrap_or(first_event_at);
+            let ended_at =
+                task_json_time_field(&session, &["updatedAt", "updated_at", "lastModified"])
+                    .or(last_event_at);
+            let title = task_json_string_field(&session, &["title", "name"])
+                .or_else(|| trae_generated_title(&events));
+
+            for event in events {
+                let line = event.line_number;
+                result.captures.push((
+                    line,
+                    trae_capture(TraeCaptureInput {
+                        provider_session_id: &provider_session_id,
+                        native_session_id: &native_session_id,
+                        workspace_id: &workspace_id,
+                        workspace_folder: workspace_folder.as_deref(),
+                        raw_source_path: &raw_source_path,
+                        chat_key: &row.key,
+                        session: &session,
+                        context,
+                        started_at,
+                        ended_at,
+                        title: title.clone(),
+                        event,
+                    }),
+                ));
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+#[derive(Debug, Clone)]
+struct TraeChatRow {
+    key: String,
+    value: String,
+}
+
+fn trae_chat_rows(conn: &Connection) -> Result<Vec<TraeChatRow>> {
+    let mut rows = Vec::new();
+    for key in TRAE_CHAT_KEYS {
+        let value = conn
+            .query_row(
+                "select value from ItemTable where [key] = ?1",
+                [key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if let Some(value) = value {
+            rows.push(TraeChatRow {
+                key: (*key).to_owned(),
+                value,
+            });
+        }
+    }
+    Ok(rows)
+}
+
+fn trae_workspace_folder(path: &Path) -> Option<String> {
+    let workspace_json = path.parent()?.join("workspace.json");
+    let value = read_json_file_limited(
+        &workspace_json,
+        MAX_PROVIDER_JSONL_LINE_BYTES,
+        "Trae workspace.json",
+    )
+    .ok()?;
+    task_json_string_field(&value, &["folder", "workspace", "path"])
+}
+
+fn trae_session_entries(value: &Value, key: &str) -> Vec<Value> {
+    if key == "memento/icube-ai-agent-storage" {
+        if let Some(items) = value.get("list").and_then(Value::as_array) {
+            return items.clone();
+        }
+    }
+    if key == "ChatStore" {
+        for field in ["sessions", "entries", "conversations", "list"] {
+            if let Some(entries) = trae_entries_from_field(value.get(field)) {
+                return entries;
+            }
+        }
+        if let Some(items) = value.as_array() {
+            return items.clone();
+        }
+    }
+    for field in ["entries", "sessions", "conversations", "list"] {
+        if let Some(entries) = trae_entries_from_field(value.get(field)) {
+            return entries;
+        }
+    }
+    if let Some(items) = value.as_array() {
+        return items.clone();
+    }
+    Vec::new()
+}
+
+fn trae_entries_from_field(value: Option<&Value>) -> Option<Vec<Value>> {
+    match value? {
+        Value::Array(items) => Some(items.clone()),
+        Value::Object(map) => Some(map.values().cloned().collect()),
+        _ => None,
+    }
+}
+
+fn trae_session_messages(session: &Value) -> Option<Vec<Value>> {
+    for field in ["messages", "chatMessages", "bubbles", "items"] {
+        if let Some(messages) = session.get(field).and_then(Value::as_array) {
+            return Some(messages.clone());
+        }
+    }
+    None
+}
+
+fn trae_session_id(session: &Value, index: usize) -> String {
+    task_json_string_field(
+        session,
+        &[
+            "sessionId",
+            "session_id",
+            "id",
+            "conversationId",
+            "conversation_id",
+        ],
+    )
+    .unwrap_or_else(|| format!("session-{}", index.saturating_add(1)))
+}
+
+#[derive(Debug, Clone)]
+struct TraeEventInput {
+    line_number: usize,
+    provider_event_index: u64,
+    native_message_id: String,
+    role: Option<String>,
+    occurred_at: DateTime<Utc>,
+    text: String,
+    raw_message: Value,
+}
+
+fn trae_events_from_messages(
+    provider_session_id: &str,
+    workspace_id: &str,
+    chat_key: &str,
+    messages: &[Value],
+    fallback_time: DateTime<Utc>,
+    line_base: usize,
+) -> Vec<TraeEventInput> {
+    let mut events = Vec::new();
+    for (message_index, message) in messages.iter().enumerate() {
+        let Some(text) = trae_message_text(message) else {
+            continue;
+        };
+        if text.trim().is_empty() {
+            continue;
+        }
+        let native_message_id = task_json_string_field(
+            message,
+            &[
+                "id",
+                "messageId",
+                "message_id",
+                "uuid",
+                "requestId",
+                "responseId",
+            ],
+        )
+        .unwrap_or_else(|| {
+            format!("{workspace_id}:{provider_session_id}:{chat_key}:{message_index}")
+        });
+        let occurred_at = task_json_time_field(
+            message,
+            &["createdAt", "created_at", "timestamp", "time", "date"],
+        )
+        .unwrap_or(fallback_time);
+        events.push(TraeEventInput {
+            line_number: line_base.saturating_add(message_index).saturating_add(1),
+            provider_event_index: message_index as u64,
+            native_message_id,
+            role: task_json_string_field(message, &["role", "type", "sender"]),
+            occurred_at,
+            text,
+            raw_message: message.clone(),
+        });
+    }
+    events
+}
+
+fn trae_message_text(message: &Value) -> Option<String> {
+    for field in ["content", "text", "message", "summary", "answer", "query"] {
+        if let Some(text) = message.get(field).and_then(trae_content_text) {
+            return Some(text);
+        }
+    }
+    message
+        .pointer("/data/summary")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+fn trae_content_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.trim().to_owned()),
+        Value::Array(items) => {
+            let parts = items
+                .iter()
+                .filter_map(trae_content_text)
+                .filter(|text| !text.trim().is_empty())
+                .collect::<Vec<_>>();
+            (!parts.is_empty()).then(|| parts.join("\n"))
+        }
+        Value::Object(map) => {
+            for field in ["text", "content", "value", "summary"] {
+                if let Some(text) = map.get(field).and_then(trae_content_text) {
+                    return Some(text);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn trae_generated_title(events: &[TraeEventInput]) -> Option<String> {
+    events
+        .iter()
+        .find(|event| provider_role(event.role.as_deref()) == EventRole::User)
+        .or_else(|| events.first())
+        .map(|event| event.text.replace('\n', " "))
+        .map(|title| title.chars().take(50).collect::<String>())
+        .filter(|title| !title.trim().is_empty())
+}
+
+struct TraeCaptureInput<'a> {
+    provider_session_id: &'a str,
+    native_session_id: &'a str,
+    workspace_id: &'a str,
+    workspace_folder: Option<&'a str>,
+    raw_source_path: &'a str,
+    chat_key: &'a str,
+    session: &'a Value,
+    context: &'a ProviderAdapterContext,
+    started_at: DateTime<Utc>,
+    ended_at: Option<DateTime<Utc>>,
+    title: Option<String>,
+    event: TraeEventInput,
+}
+
+fn trae_capture(input: TraeCaptureInput<'_>) -> ProviderCaptureEnvelope {
+    let event_envelope = trae_event(
+        input.provider_session_id,
+        input.workspace_id,
+        input.chat_key,
+        &input.event,
+    );
+    ProviderCaptureEnvelope {
+        schema_version: PROVIDER_CAPTURE_ENVELOPE_SCHEMA_VERSION,
+        provider: CaptureProvider::Trae,
+        source: ProviderSourceEnvelope {
+            source_format: TRAE_STATE_VSCDB_SOURCE_FORMAT.to_owned(),
+            machine_id: input.context.machine_id.clone(),
+            observed_at: input.context.imported_at,
+            raw_source_path: Some(input.raw_source_path.to_owned()),
+            raw_retention: ProviderRawRetention::PathReference,
+            redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+            trust: ProviderSourceTrust::ProviderNative,
+            fidelity: Fidelity::Partial,
+            cursor: Some(ProviderCursorRange {
+                before: None,
+                after: Some(ProviderCursorCheckpoint {
+                    stream: provider_cursor_stream(
+                        CaptureProvider::Trae,
+                        TRAE_STATE_VSCDB_SOURCE_FORMAT,
+                    ),
+                    cursor: event_envelope
+                        .cursor
+                        .clone()
+                        .unwrap_or_else(|| input.provider_session_id.to_owned()),
+                    observed_at: event_envelope.occurred_at,
+                }),
+            }),
+            idempotency_key: Some(format!(
+                "provider-source:trae:{TRAE_STATE_VSCDB_SOURCE_FORMAT}:{}",
+                input.provider_session_id
+            )),
+            metadata: json!({
+                "adapter": TRAE_STATE_VSCDB_SOURCE_FORMAT,
+                "chat_key": input.chat_key,
+                "native_workspace_id": input.workspace_id,
+                "schema_proof": "yuanjing001/trae-chats-exporter@85e2d111 src/extension.ts and src/utils.ts read Trae User/workspaceStorage/*/state.vscdb ItemTable keys",
+                "preview_import": true,
+            }),
+        },
+        session: ProviderSessionEnvelope {
+            provider_session_id: input.provider_session_id.to_owned(),
+            parent_provider_session_id: None,
+            root_provider_session_id: None,
+            external_agent_id: None,
+            agent_type: AgentType::Primary,
+            role_hint: Some("primary".to_owned()),
+            is_primary: true,
+            status: SessionStatus::Imported,
+            started_at: input.started_at,
+            ended_at: input.ended_at,
+            cwd: input.workspace_folder.map(str::to_owned),
+            fidelity: Fidelity::Partial,
+            idempotency_key: Some(format!(
+                "provider-session:trae:{}",
+                input.provider_session_id
+            )),
+            artifacts: Vec::new(),
+            metadata: json!({
+                "source_format": TRAE_STATE_VSCDB_SOURCE_FORMAT,
+                "provider": CaptureProvider::Trae.as_str(),
+                "display_name": "Trae",
+                "title": input.title,
+                "native_workspace_id": input.workspace_id,
+                "native_session_id": input.native_session_id,
+                "workspace_folder": input.workspace_folder,
+                "chat_key": input.chat_key,
+                "session": provider_capped_json(input.session, PROVIDER_MAX_PREVIEW_CHARS),
+                "limitations": [
+                    "Preview importer based on public exporter source and synthetic fixture, not a real local Trae run fixture",
+                    "Only known Trae ItemTable chat keys and direct message arrays are imported",
+                    "Trae CN is not aliased to this importer"
+                ],
+            }),
+        },
+        event: Some(event_envelope),
+    }
+}
+
+fn trae_event(
+    provider_session_id: &str,
+    workspace_id: &str,
+    chat_key: &str,
+    event: &TraeEventInput,
+) -> ProviderEventEnvelope {
+    let (text, truncated) = provider_local_preview(&event.text, PROVIDER_MAX_TEXT_CHARS);
+    let event_id = format!("{provider_session_id}:{}", event.native_message_id);
+    ProviderEventEnvelope {
+        provider_event_index: event.provider_event_index,
+        provider_event_hash: Some(event_id.clone()),
+        cursor: Some(format!("{chat_key}:{event_id}")),
+        event_type: EventType::Message,
+        role: Some(provider_role(event.role.as_deref())),
+        occurred_at: event.occurred_at,
+        fidelity: Fidelity::Partial,
+        redaction_state: RedactionState::LocalPreview,
+        idempotency_key: Some(format!(
+            "provider-event:trae:{TRAE_STATE_VSCDB_SOURCE_FORMAT}:{event_id}"
+        )),
+        artifacts: Vec::new(),
+        payload: json!({
+            "event_id": event_id,
+            "native_workspace_id": workspace_id,
+            "native_message_id": event.native_message_id,
+            "text": text,
+            "truncated": truncated,
+            "body": provider_capped_json(&event.raw_message, PROVIDER_MAX_PREVIEW_CHARS),
+        }),
+        metadata: json!({
+            "source": "trae_state_vscdb_itemtable",
+            "source_format": TRAE_STATE_VSCDB_SOURCE_FORMAT,
+            "chat_key": chat_key,
+            "native_message_id": event.native_message_id,
+            "role": event.role,
+            "model": task_json_string_field(&event.raw_message, &["model", "modelType", "model_id"]),
         }),
     }
 }
@@ -34621,6 +35199,134 @@ mod tests {
         assert_eq!(second.imported_events, 0);
         assert_eq!(second.skipped_sessions, 2);
         assert_eq!(second.skipped_events, 3);
+    }
+
+    #[test]
+    fn native_trae_fixture_imports_searches_and_reimports() {
+        let temp = tempdir();
+        let fixture = provider_history_fixture("trae/User/workspaceStorage");
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let first = import_trae_history(
+            &fixture,
+            &mut store,
+            TraeImportOptions {
+                machine_id: "test-machine".into(),
+                source_path: Some(fixture.clone()),
+                imported_at: DateTime::parse_from_rfc3339("2026-07-04T21:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                allow_partial_failures: true,
+                ..TraeImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(first.failed, 0, "{:?}", first.failures);
+        assert_eq!(first.imported_sessions, 1);
+        assert_eq!(first.imported_events, 2);
+
+        let source = provider_source_for_path(CaptureProvider::Trae, fixture.clone());
+        assert_eq!(source.source_format, TRAE_STATE_VSCDB_SOURCE_FORMAT);
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+
+        let session_id = provider_session_uuid(
+            CaptureProvider::Trae,
+            "trae-workspace-1/trae-fixture-session",
+        );
+        let session = store.get_session(session_id).unwrap();
+        assert_eq!(session.provider, CaptureProvider::Trae);
+        assert_eq!(
+            session.sync.metadata["metadata"]["workspace_folder"].as_str(),
+            Some("/workspace/trae-fixture")
+        );
+
+        let events = store.events_for_session(session_id).unwrap();
+        let rendered = serde_json::to_string(&events).unwrap();
+        assert!(rendered.contains("trae oracle prompt from state vscdb"));
+        assert!(rendered.contains("trae oracle answer from state vscdb"));
+        assert!(store
+            .search_event_hits("trae oracle answer", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::Trae)));
+
+        let second = import_trae_history(
+            &fixture,
+            &mut store,
+            TraeImportOptions {
+                allow_partial_failures: true,
+                ..TraeImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(second.failed, 0, "{:?}", second.failures);
+        assert_eq!(second.imported_sessions, 0);
+        assert_eq!(second.imported_events, 0);
+        assert_eq!(second.skipped_sessions, 1);
+        assert_eq!(second.skipped_events, 2);
+    }
+
+    #[test]
+    fn native_trae_chatstore_entries_schema_drift_imports() {
+        let temp = tempdir();
+        let workspace = temp.path().join("User/workspaceStorage/schema-drift");
+        fs::create_dir_all(&workspace).unwrap();
+        let db_path = workspace.join("state.vscdb");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "CREATE TABLE ItemTable ([key] TEXT PRIMARY KEY, value TEXT)",
+            [],
+        )
+        .unwrap();
+        let value = json!({
+            "entries": {
+                "drift-session": {
+                    "id": "drift-session",
+                    "name": "Drift session",
+                    "messages": [
+                        {
+                            "id": "drift-user",
+                            "role": "user",
+                            "content": [{"type": "text", "text": "trae drift prompt"}],
+                            "createdAt": "2026-07-05T12:00:00Z"
+                        },
+                        {
+                            "id": "drift-assistant",
+                            "role": "assistant",
+                            "content": {"summary": "trae drift answer"},
+                            "createdAt": "2026-07-05T12:01:00Z"
+                        }
+                    ]
+                }
+            }
+        })
+        .to_string();
+        conn.execute(
+            "INSERT INTO ItemTable ([key], value) VALUES ('ChatStore', ?1)",
+            [value],
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let summary = import_trae_history(
+            temp.path().join("User/workspaceStorage"),
+            &mut store,
+            TraeImportOptions {
+                allow_partial_failures: true,
+                ..TraeImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+        assert_eq!(summary.imported_sessions, 1);
+        assert_eq!(summary.imported_events, 2);
+        assert!(store
+            .search_event_hits("trae drift answer", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::Trae)));
     }
 
     #[test]

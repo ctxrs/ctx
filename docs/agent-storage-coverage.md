@@ -21,7 +21,7 @@ Status meanings:
 - `install-target`: npx target is an aggregate or project skill target, not a
   proven history-producing agent.
 
-Result on this integration branch: 45 `native-auto`, 6 `native-preview`, 5
+Result on this integration branch: 45 `native-auto`, 7 `native-preview`, 4
 `candidate-family`, 8 `webapp-boundary`, 6 `unknown`, and 2 `install-target`
 rows.
 
@@ -56,9 +56,10 @@ rows.
   imports from discovered `~/.pochi/storage` or explicit paths when filesystem
   sync has produced a state database.
 - `VS Code/Electron storage`: Cursor is covered through a known transcript tree,
-  CodeBuddy is covered through its file-backed history JSON, and Zed is covered
-  through its agent `threads.db`; other IDE-like tools need storage discovery
-  before reuse.
+  CodeBuddy is covered through its file-backed history JSON, Zed is covered
+  through its agent `threads.db`, and Trae has preview explicit
+  `state.vscdb` imports from `User/workspaceStorage`; other IDE-like tools need
+  storage discovery before reuse.
 - `webapp/object-store boundary`: prefer explicit exporters or
   `ctx-history-jsonl-v1` history-source plugins over speculative native readers.
 
@@ -127,7 +128,7 @@ rows.
 | `tabnine-cli` | `unknown` | `unknown native history` | npx `~/.tabnine`; official docs mention saved/resumable chats under `~/.tabnine/agent/tmp/...`, but no file names or schema; no ctx provider | Need source-backed transcript file path and schema proof before claiming import support. |
 | `terramind` | `native-auto` | `generic sqlite messages` | ctx `terramind_agents_sqlite`; npx package `terramind@0.2.91` resolves Nucleus app data to `$XDG_CONFIG_HOME/Nucleus/data/agents.db`, `~/.config/Nucleus/data/agents.db`, macOS `~/Library/Application Support/Nucleus/data/agents.db`, or Windows `%APPDATA%/Nucleus/data/agents.db` | Fixture is source-backed from the published package schema because a no-auth `npx terramind@0.2.91 list --chats` probe did not complete. |
 | `tinycloud` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.tinycloud`; no ctx provider | No proven stable local transcript boundary; prefer exporter or plugin. |
-| `trae` | `candidate-family` | `VS Code/Electron storage` | npx `~/.trae`; no ctx provider | Need local app storage or export contract proof. |
+| `trae` | `native-preview` | `VS Code/Electron storage` | ctx `trae_state_vscdb`; npx `~/.trae`; official Trae docs show `ModularData` roots; `yuanjing001/trae-chats-exporter@85e2d111a5a0e35f0957502097d3a8b18095ef72` reads Trae `User/workspaceStorage/<workspace>/state.vscdb` `ItemTable` keys including `memento/icube-ai-agent-storage`, `chat.ChatSessionStore.index`, and `ChatStore` | Preview explicit import only; source-backed synthetic fixture; no default discovery, real Trae run fixture, or `trae-cn` alias is claimed. |
 | `trae-cn` | `candidate-family` | `VS Code/Electron storage` | npx `~/.trae-cn`; no ctx provider | Need local app storage or export contract proof. |
 | `warp` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.warp`; no ctx provider | Skill/config target is not a local transcript contract; native support needs explicit export or local DB proof. |
 | `windsurf` | `native-preview` | `JSONL CLI event logs` | ctx `windsurf_cascade_hook_transcript_jsonl_tree`; npx `~/.codeium/windsurf`; official hook writes `~/.windsurf/transcripts/{trajectory_id}.jsonl` | Preview explicit import only; hook must be configured; private `~/.codeium/windsurf/cascade` cache and VS Code state DBs are not parsed. |
