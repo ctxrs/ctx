@@ -15,11 +15,12 @@ shipped.
   supported only when their documented
   local history paths exist and match the supported native formats in the
   provider matrix.
-- NanoClaw and AstrBot local import are preview/manual-path support. They are
-  not included in `ctx import --all` or pre-search refresh. AstrBot imports
-  local LLM context plus WebChat/OpenAPI/live-chat platform history rows when
-  present, but upstream AstrBot still treats non-WebChat raw IM replies as
-  platform-side history rather than guaranteed `data_v4.db` transcript rows.
+- NanoClaw local import is preview/manual-path support and is not included in
+  `ctx import --all` or pre-search refresh. AstrBot is native-auto for bounded
+  `data_v4.db` locations and imports local LLM context plus available platform
+  history rows when present, but upstream AstrBot still treats non-WebChat raw
+  IM replies as platform-side history rather than guaranteed `data_v4.db`
+  transcript rows.
 - Unknown provider formats should not be parsed optimistically.
 
 ## Import Semantics

@@ -99,8 +99,8 @@ machine. Current rows include:
 - Zencoder `zencoder-chat` session trees under common VS Code-family
   `User/globalStorage/ZencoderAI.zencoder/zencoder-chat` roots, or an explicit
   chat tree/session path;
-- preview rows for NanoClaw project roots and AstrBot SQLite history when those
-  paths are discoverable;
+- preview rows for NanoClaw project roots when those paths are discoverable,
+  plus bounded native AstrBot SQLite history when `data_v4.db` exists;
 - local history-source plugin manifests under `$CTX_DATA_ROOT/plugins` or
   `CTX_HISTORY_PLUGIN_PATH`.
 
@@ -201,10 +201,11 @@ Import selection rules:
 - with `--provider <provider> --path <path>`, import exactly that native
   provider path.
 
-Preview providers such as NanoClaw and AstrBot are not included in
-`--all` or pre-search refresh. Import them explicitly with `--provider` when
-discovery finds the desired source, or add `--path` to target a specific source,
-then search the existing index.
+Preview providers such as NanoClaw are not included in `--all` or pre-search
+refresh. Import them explicitly with `--provider` when discovery finds the
+desired source, or add `--path` to target a specific source, then search the
+existing index. AstrBot `data_v4.db` sources are native-auto for bounded default
+locations and remain available for explicit `--path` imports.
 
 The current `--resume` flag is an idempotent-rescan mode marker. JSON reports
 `resume: true` and `resume_mode: "idempotent_rescan"`, but provider-native
@@ -274,9 +275,9 @@ indexes, `auto` serves current results without a foreground catch-up scan; use
 `--refresh strict` or `ctx import --all` when you need a full catch-up before
 querying. Use `--refresh off` to search the existing index without refreshing, or
 `--refresh strict` to fail when the pre-search refresh cannot run or import
-successfully. Preview native sources such as NanoClaw and AstrBot are searched
-from the existing index until they are explicitly imported through a supported
-path. Search requires a
+successfully. Preview native sources such as NanoClaw are searched from the
+existing index until they are explicitly imported through a supported path.
+Search requires a
 non-empty query, at least one non-empty `--term`, or
 `--file <path>`; provider, workspace, time, session, event, source, and result
 flags only narrow an actual search. Default results are session-diverse: ctx

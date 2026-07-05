@@ -1306,7 +1306,7 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         provider: CaptureProvider::AstrBot,
         display_name: "AstrBot",
         default_locations: ASTRBOT_DEFAULTS,
-        import_support: ProviderImportSupport::Preview,
+        import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         raw_retention: ProviderRawRetention::PathReference,
         redaction_boundary: ProviderRedactionBoundary::BeforeExport,
@@ -4791,12 +4791,9 @@ mod tests {
             .find(|source| source.provider == CaptureProvider::AstrBot)
             .unwrap();
         assert_eq!(astrbot_source.status, ProviderSourceStatus::Available);
-        assert_eq!(
-            astrbot_source.import_support,
-            ProviderImportSupport::Preview
-        );
+        assert_eq!(astrbot_source.import_support, ProviderImportSupport::Native);
         assert!(astrbot_source.import_support.is_importable());
-        assert!(!astrbot_source.import_support.is_auto_importable());
+        assert!(astrbot_source.import_support.is_auto_importable());
 
         let shelley = temp.path().join(".config/shelley");
         std::fs::create_dir_all(&shelley).unwrap();
