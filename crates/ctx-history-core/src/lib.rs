@@ -242,6 +242,7 @@ text_enum! {
         TinyCloud => "tinycloud",
         CodeArtsAgent => "codearts_agent",
         Zencoder => "zencoder",
+        Zenflow => "zenflow",
         CodeStudio => "codestudio",
         Shell => "shell",
         Git => "git",

@@ -2052,6 +2052,7 @@ fn sources_lists_personal_agent_provider_defaults() {
     install_default_auggie_fixture(&temp, "auggie-sources-oracle");
     install_default_tinycloud_fixture(&temp, "tinycloud-sources-oracle");
     install_default_zencoder_fixture(&temp, "zencoder-sources-oracle");
+    install_default_zenflow_fixture(&temp, "zenflow-sources-oracle");
     install_default_codestudio_fixture(&temp, "codestudio-sources-oracle");
     install_default_warp_fixture(&temp);
     install_default_codearts_agent_fixture(&temp, "codearts-sources-oracle");
@@ -2096,6 +2097,7 @@ fn sources_lists_personal_agent_provider_defaults() {
             "native",
             true,
         ),
+        ("zenflow", "zenflow_sqlite", "native", true),
         (
             "codestudio",
             "codestudio_session_store_sqlite",
@@ -6059,6 +6061,7 @@ fn search_refresh_auto_imports_discovered_top_provider_sources() {
         ("junie", "junie", install_default_junie_fixture),
         ("tinycloud", "tinycloud", install_default_tinycloud_fixture),
         ("zencoder", "zencoder", install_default_zencoder_fixture),
+        ("zenflow", "zenflow", install_default_zenflow_fixture),
         (
             "codestudio",
             "codestudio",
@@ -6622,6 +6625,12 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
             "zencoder",
             "zencoder_chat_sessions_json_tree",
             write_native_zencoder_fixture,
+        ),
+        (
+            "zenflow",
+            "zenflow",
+            "zenflow_sqlite",
+            write_native_zenflow_fixture,
         ),
         (
             "codestudio",
@@ -7956,6 +7965,13 @@ fn install_default_zencoder_fixture(temp: &TempDir, query: &str) {
             .path()
             .join(".config/Code/User/globalStorage/ZencoderAI.zencoder/zencoder-chat"),
     );
+}
+
+fn install_default_zenflow_fixture(temp: &TempDir, query: &str) {
+    let source = PathBuf::from(write_native_zenflow_fixture(temp, query));
+    let target = temp.path().join(".local/share/zenflow");
+    fs::create_dir_all(&target).unwrap();
+    fs::copy(source, target.join("db.sqlite")).unwrap();
 }
 
 fn install_default_codestudio_fixture(temp: &TempDir, query: &str) {
@@ -9319,6 +9335,28 @@ fn write_native_zencoder_fixture(temp: &TempDir, query: &str) -> String {
     )
     .unwrap();
     root.to_str().unwrap().to_owned()
+}
+
+fn write_native_zenflow_fixture(temp: &TempDir, query: &str) -> String {
+    let path = temp.path().join("native-zenflow/db.sqlite");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::copy(provider_history_fixture("zenflow/v2.3.1/db.sqlite"), &path).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    conn.execute(
+        "UPDATE chats SET initial_prompt = ?1 WHERE id = X'22222222222222222222222222222222'",
+        [query],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE executor_sessions SET prompt = ?1, summary = ?2 \
+         WHERE id = X'44444444444444444444444444444444'",
+        [
+            format!("zenflow executor prompt {query}"),
+            format!("Zenflow answered {query}"),
+        ],
+    )
+    .unwrap();
+    path.to_str().unwrap().to_owned()
 }
 
 fn write_native_codestudio_fixture(temp: &TempDir, query: &str) -> String {

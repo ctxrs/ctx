@@ -988,6 +988,79 @@
       }
     },
     {
+      "id": "zenflow",
+      "display_name": "Zenflow",
+      "priority": "p2",
+      "status": "local_import_when_supported",
+      "capture_provider": "zenflow",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "zenflow_sqlite",
+          "fidelity": "imported",
+          "proof": [
+            "Zenflow Desktop 2.3.1 Linux Zenflow.deb SHA256 e623e073a212fccbfa295e2a7b7645a2c34525ab55f9cf247edce15babc731f2",
+            "ctx native importer zenflow_sqlite",
+            "ctx sources default discovery reports import_support=native and native_import=true",
+            "cargo test -p ctx-history-capture zenflow"
+          ],
+          "notes": [
+            "Native-auto import reads Zenflow Desktop db.sqlite files from bounded app-data paths or an explicit DB path.",
+            "The importer normalizes chats, executor sessions, raw/normalized execution logs, assistant session metadata, summaries, and tool-shaped log rows read-only.",
+            "The app-data path contract is anchored by extracted Zenflow Desktop 2.3.1 app path code and an isolated app-created db.sqlite schema."
+          ]
+        }
+      ],
+      "history_locations": [
+        "ZENFLOW_DATA_DIR/db.sqlite",
+        "$XDG_DATA_HOME/zenflow/db.sqlite",
+        "~/.local/share/zenflow/db.sqlite",
+        "macOS ~/Library/Application Support/ai.forgoodai.zenflow/db.sqlite",
+        "Windows %APPDATA%/forgoodai/zenflow/data/db.sqlite",
+        "explicit Zenflow db.sqlite path"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": true,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": true,
+        "command_output": false,
+        "files_touched": false,
+        "artifacts": false,
+        "model_identity": true,
+        "costs": true,
+        "token_usage": true,
+        "parent_child_session_edges": true
+      },
+      "redaction_notes": [
+        "Reads discovered or explicit local provider SQLite databases read-only; imported prompt/log text and local source paths remain in the local ctx index.",
+        "Zenflow token/config files, cloud/auth state, attachments, and raw_logs sidecars are not imported as history by this adapter."
+      ],
+      "blockers": [
+        "The row is anchored to Zenflow Desktop 2.3.1 artifact/runtime schema evidence; future Zenflow schema changes may need adapter updates.",
+        "No cloud account, hosted task store, attachment payload, or raw sidecar log import is claimed."
+      ],
+      "public_docs": "docs/provider-support.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/zenflow/v2.3.1"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs",
+        "docs/provider-storage-proof.md"
+      ],
+      "metadata": {
+        "npx_skills_id": "zenflow",
+        "import_support": "native",
+        "native_auto": true,
+        "artifact_sha256": "e623e073a212fccbfa295e2a7b7645a2c34525ab55f9cf247edce15babc731f2",
+        "source_format": "zenflow_sqlite"
+      }
+    },
+    {
       "id": "codestudio",
       "display_name": "Syncfusion Code Studio",
       "priority": "p2",
