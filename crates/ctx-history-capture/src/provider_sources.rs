@@ -1003,7 +1003,7 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         provider: CaptureProvider::Dexto,
         display_name: "Dexto",
         default_locations: DEXTO_DEFAULTS,
-        import_support: ProviderImportSupport::Native,
+        import_support: ProviderImportSupport::Preview,
         catalog_support: ProviderCatalogSupport::None,
         raw_retention: ProviderRawRetention::PathReference,
         redaction_boundary: ProviderRedactionBoundary::BeforeExport,
@@ -4454,7 +4454,9 @@ mod tests {
         assert_eq!(source.path, db);
         assert_eq!(source.status, ProviderSourceStatus::Available);
         assert_eq!(source.source_format, "dexto_sqlite");
-        assert_eq!(source.import_support, ProviderImportSupport::Native);
+        assert_eq!(source.import_support, ProviderImportSupport::Preview);
+        assert!(source.import_support.is_importable());
+        assert!(!source.import_support.is_auto_importable());
     }
 
     #[test]

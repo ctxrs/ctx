@@ -30,7 +30,7 @@ is:
 | Kiro CLI | `local_import_when_supported` | `$XDG_DATA_HOME/kiro-cli/data.sqlite3`, `~/.local/share/kiro-cli/data.sqlite3`, macOS `~/Library/Application Support/kiro-cli/data.sqlite3`, or an explicit Kiro CLI SQLite DB. | Static local-history fixture smoke; imports the proven `conversations_v2`/`conversations` SQLite DB, not the newer `~/.kiro/sessions/cli` event-log path. |
 | Crush | `local_import_when_supported` | `CRUSH_GLOBAL_DATA/crush.db`, `$XDG_DATA_HOME/crush/crush.db`, `~/.local/share/crush/crush.db`, configured `data_directory`, project `.crush/crush.db`, or an explicit Crush SQLite DB. | Static local-history fixture smoke. |
 | Goose | `local_import_when_supported` | `GOOSE_PATH_ROOT/data/sessions/sessions.db`, `$XDG_DATA_HOME/goose/sessions/sessions.db`, `$XDG_DATA_HOME/Block/goose/sessions/sessions.db`, defaults under `~/.local/share`, or an explicit Goose sessions SQLite DB. | Static local-history fixture smoke. |
-| Dexto | `local_import_when_supported` | Explicit Dexto SQLite DB path. | Static local-history fixture smoke; default discovery remains intentionally unclaimed. |
+| Dexto | `local_import_when_supported` | Preview import from an explicit Dexto SQLite DB path. | Static local-history fixture smoke; default discovery remains intentionally unclaimed. |
 | Lingma | `local_import_when_supported` | `~/.lingma/vscode/sharedClientCache/cache/db/local.db`, `~/.lingma/vscode-insiders/sharedClientCache/cache/db/local.db`, or an explicit Lingma `local.db`. | Static local-history fixture smoke; schema proof comes from WayLog and official Qoder CN VSIX/package path evidence. Assistant content is summary/error_result only and may be partial. `qoder-cn` is accepted as an alias for the same Lingma `local.db`; separate `.qodercn`/`.qoder-cn` paths remain unclaimed. |
 | Qoder | `local_import_when_supported` | Official transcript JSONL files under `~/.qoder/projects/<project>/transcript/<session-id>.jsonl`, `~/.qoder/projects`, or an explicit transcript file/directory. | Static local-history fixture smoke; schema proof comes from Qoder Hooks docs. Imports documented `session_meta`, `user`, `assistant`, `progress`, `tool_use`, and `tool_result` records. Encrypted Qoder app logs and VS Code/Electron state databases are not parsed. |
 | Pochi | `local_import_when_supported` | Preview import from synced LiveStore state DBs under `~/.pochi/storage`, an explicit `state*.db` SQLite file, or a directory containing those files. | Static local-history fixture smoke; default discovery is limited to `~/.pochi/storage` when filesystem sync has produced `state*.db`; no `config.jsonc` parsing or VS Code OPFS import is claimed. |
@@ -78,8 +78,8 @@ is:
 | Roo Code | `local_import_when_supported` | `roo-cline.customStoragePath`, common VS Code globalStorage task folders for `RooVeterinaryInc.roo-cline`, or an explicit Roo task storage path. | Static local-history fixture smoke; VS Code state databases are not parsed. |
 
 `ctx sources --json` uses `import_support: "preview"` and `native_import:
-false` for preview sources/importers such as NanoClaw, AstrBot, Pochi,
-Windsurf, Amp explicit exports, Devin ATIF exports, and Trae explicit state
+false` for preview sources/importers such as NanoClaw, AstrBot, Dexto, Pochi,
+Windsurf, Amp explicit exports, Devin ATIF exports, Trae explicit state
 databases, and Warp SQLite databases. Those paths can be
 imported explicitly with `ctx import --provider ...` when discovery finds them,
 or with `ctx import --provider ... --path ...` for a specific path. They are not
