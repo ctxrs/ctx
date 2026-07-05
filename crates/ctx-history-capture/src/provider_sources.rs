@@ -451,6 +451,37 @@ const ZENCODER_DEFAULTS: &[ProviderDefaultLocation] = &[
     },
 ];
 
+const ZENFLOW_SQLITE_SOURCE_FORMAT: &str = "zenflow_sqlite";
+const ZENFLOW_DEFAULTS: &[ProviderDefaultLocation] = &[
+    ProviderDefaultLocation {
+        path_components: &[".local", "share", "zenflow", "db.sqlite"],
+        source_format: ZENFLOW_SQLITE_SOURCE_FORMAT,
+        source_kind: ProviderSourceKind::NativeHistory,
+    },
+    ProviderDefaultLocation {
+        path_components: &[
+            "Library",
+            "Application Support",
+            "ai.forgoodai.zenflow",
+            "db.sqlite",
+        ],
+        source_format: ZENFLOW_SQLITE_SOURCE_FORMAT,
+        source_kind: ProviderSourceKind::NativeHistory,
+    },
+    ProviderDefaultLocation {
+        path_components: &[
+            "AppData",
+            "Roaming",
+            "forgoodai",
+            "zenflow",
+            "data",
+            "db.sqlite",
+        ],
+        source_format: ZENFLOW_SQLITE_SOURCE_FORMAT,
+        source_kind: ProviderSourceKind::NativeHistory,
+    },
+];
+
 const CODESTUDIO_DEFAULTS: &[ProviderDefaultLocation] = &[
     ProviderDefaultLocation {
         path_components: &[
@@ -1456,6 +1487,16 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         unsupported_reason: None,
     },
     ProviderSourceSpec {
+        provider: CaptureProvider::Zenflow,
+        display_name: "Zenflow",
+        default_locations: ZENFLOW_DEFAULTS,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
+    ProviderSourceSpec {
         provider: CaptureProvider::CodeStudio,
         display_name: "Syncfusion Code Studio",
         default_locations: CODESTUDIO_DEFAULTS,
@@ -2059,6 +2100,26 @@ fn discover_provider_sources_for_spec(
                 sources.extend(zencoder_app_data_dirs(path, spec));
             }
         }
+        CaptureProvider::Zenflow => {
+            if let Some(path) = env_path("ZENFLOW_DATA_DIR") {
+                sources.push(zenflow_db_source(spec, path.join("db.sqlite")));
+            }
+            if let Some(path) = env_path("XDG_DATA_HOME") {
+                sources.push(zenflow_db_source(
+                    spec,
+                    path.join("zenflow").join("db.sqlite"),
+                ));
+            }
+            if let Some(path) = env_path("APPDATA") {
+                sources.push(zenflow_db_source(
+                    spec,
+                    path.join("forgoodai")
+                        .join("zenflow")
+                        .join("data")
+                        .join("db.sqlite"),
+                ));
+            }
+        }
         CaptureProvider::AiderDesk => {
             let aider_dir = env::var_os("AIDER_DESK_DIR")
                 .filter(|value| !value.is_empty())
@@ -2268,6 +2329,15 @@ fn zencoder_app_data_dirs(base: PathBuf, spec: &ProviderSourceSpec) -> Vec<Provi
             )
         })
         .collect()
+}
+
+fn zenflow_db_source(spec: &ProviderSourceSpec, path: PathBuf) -> ProviderSource {
+    provider_source_from_parts(
+        spec,
+        path,
+        ZENFLOW_SQLITE_SOURCE_FORMAT,
+        ProviderSourceKind::NativeHistory,
+    )
 }
 
 fn task_json_source(spec: &ProviderSourceSpec, path: PathBuf) -> ProviderSource {
@@ -2640,6 +2710,7 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
                 "zencoder_chat_session_json"
             }
         }
+        CaptureProvider::Zenflow => ZENFLOW_SQLITE_SOURCE_FORMAT,
         CaptureProvider::CodeStudio => "codestudio_session_store_sqlite",
         _ => "unsupported",
     };
@@ -3319,6 +3390,7 @@ fn default_location_import_probe(
         }
         CaptureProvider::TinyCloud => has_tinycloud_session_jsonl(path, 10_000),
         CaptureProvider::Zencoder => has_zencoder_session_json(path, 10_000),
+        CaptureProvider::Zenflow => path_is_file_probe(path),
         CaptureProvider::CodeStudio => has_codestudio_session_store(path),
         CaptureProvider::Shell
         | CaptureProvider::Git

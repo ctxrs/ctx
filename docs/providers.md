@@ -59,6 +59,12 @@ The current CLI imports local history for:
   `zencoder-chat` tree/session path. Imports are limited to `sessions.json` and
   `sessions/*.json`; `.zencoder` skill/config homes and other extension caches
   are not parsed;
+- Zenflow Desktop `db.sqlite` under `ZENFLOW_DATA_DIR`,
+  `$XDG_DATA_HOME/zenflow`, `~/.local/share/zenflow`, macOS
+  `~/Library/Application Support/ai.forgoodai.zenflow`, Windows
+  `%APPDATA%/forgoodai/zenflow/data`, or an explicit DB path. Imports are
+  limited to the proven SQLite task/chat/executor-session/log tables; cloud
+  auth state, attachments, and raw sidecar logs are not parsed;
 - Syncfusion Code Studio session-store SQLite DBs under Code Studio app-data
   `User/globalStorage/session-store.db`, or an explicit session DB path. This
   importer is limited to the proven session-store DB and does not parse

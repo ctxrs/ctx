@@ -1186,6 +1186,27 @@ impl Default for ZedThreadsSqliteImportOptions {
 }
 
 #[derive(Debug, Clone)]
+pub struct ZenflowSqliteImportOptions {
+    pub machine_id: String,
+    pub source_path: Option<PathBuf>,
+    pub imported_at: DateTime<Utc>,
+    pub history_record_id: Option<Uuid>,
+    pub allow_partial_failures: bool,
+}
+
+impl Default for ZenflowSqliteImportOptions {
+    fn default() -> Self {
+        Self {
+            machine_id: default_machine_id(),
+            source_path: None,
+            imported_at: utc_now(),
+            history_record_id: None,
+            allow_partial_failures: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct QwenCodeImportOptions {
     pub machine_id: String,
     pub source_path: Option<PathBuf>,
@@ -1808,6 +1829,9 @@ pub struct QoderJsonlAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ZedThreadsSqliteAdapter;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ZenflowSqliteAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FactoryAiDroidJsonlAdapter;
@@ -3190,6 +3214,24 @@ impl ProviderCaptureAdapter for ZedThreadsSqliteAdapter {
         context: &ProviderAdapterContext,
     ) -> Result<ProviderNormalizationResult> {
         normalize_zed_threads_sqlite(path, context)
+    }
+}
+
+impl ProviderCaptureAdapter for ZenflowSqliteAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Zenflow
+    }
+
+    fn source_format(&self) -> &str {
+        ZENFLOW_SQLITE_SOURCE_FORMAT
+    }
+
+    fn normalize_path(
+        &self,
+        path: &Path,
+        context: &ProviderAdapterContext,
+    ) -> Result<ProviderNormalizationResult> {
+        normalize_zenflow_sqlite(path, context)
     }
 }
 
@@ -6537,6 +6579,40 @@ pub fn import_zed_threads_sqlite(
     )
 }
 
+pub fn import_zenflow_sqlite(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: ZenflowSqliteImportOptions,
+) -> Result<ProviderImportSummary> {
+    let path = path.as_ref();
+    let source_path = options
+        .source_path
+        .clone()
+        .unwrap_or_else(|| path.to_path_buf());
+    let normalization = ZenflowSqliteAdapter.normalize_path(
+        path,
+        &ProviderAdapterContext {
+            machine_id: options.machine_id,
+            source_path: Some(source_path),
+            imported_at: options.imported_at,
+            tool_output_mode: CodexToolOutputMode::Full,
+            event_mode: CodexEventImportMode::Rich,
+            include_notices: true,
+        },
+    )?;
+    import_normalized_provider_captures(
+        store,
+        normalization,
+        NormalizedProviderImportOptions {
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+            persist_cursors: true,
+            wrap_transaction: true,
+            fast_event_inserts: true,
+        },
+    )
+}
+
 pub fn import_lingma_sqlite(
     path: impl AsRef<Path>,
     store: &mut Store,
@@ -7033,6 +7109,7 @@ const WINDSURF_CASCADE_HOOK_TRANSCRIPT_SOURCE_FORMAT: &str =
     "windsurf_cascade_hook_transcript_jsonl";
 const QODER_SOURCE_FORMAT: &str = "qoder_transcript_jsonl";
 const ZED_THREADS_SQLITE_SOURCE_FORMAT: &str = "zed_threads_sqlite";
+const ZENFLOW_SQLITE_SOURCE_FORMAT: &str = "zenflow_sqlite";
 const FACTORY_DROID_SOURCE_FORMAT: &str = "factory_ai_droid_sessions_jsonl";
 const COPILOT_CLI_SOURCE_FORMAT: &str = "copilot_cli_session_events_jsonl";
 const QWEN_CODE_SOURCE_FORMAT: &str = "qwen_code_chat_jsonl";
@@ -19291,6 +19368,992 @@ fn zed_ordered_folder_paths(paths: &[String], order: Option<&str>) -> Vec<String
         .collect::<Vec<(String, usize)>>();
     ordered.sort_by_key(|(_, index)| *index);
     ordered.into_iter().map(|(path, _)| path).collect()
+}
+
+#[derive(Debug, Clone)]
+struct ZenflowTaskRow {
+    id: String,
+    project_id: Option<String>,
+    title: String,
+    description: Option<String>,
+    status: String,
+    branch: String,
+    base_branch: String,
+    container_ref: String,
+    execution_mode: String,
+    context_dir_name: String,
+    created_at: String,
+    updated_at: String,
+    archived_at: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ZenflowChatRow {
+    id: String,
+    task_id: String,
+    main_chat_id: Option<String>,
+    chat_role: String,
+    container_ref: Option<String>,
+    branch: Option<String>,
+    base_branch: String,
+    executor_profile_id: String,
+    initial_prompt: Option<String>,
+    hidden_prompt: Option<String>,
+    setup_completed_at: Option<String>,
+    created_at: String,
+    updated_at: String,
+    unread: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ZenflowExecutionProcessRow {
+    id: String,
+    task_id: String,
+    chat_id: Option<String>,
+    run_reason: String,
+    executor_action: Option<Value>,
+    before_head_commit: Option<String>,
+    after_head_commit: Option<String>,
+    status: String,
+    exit_code: Option<i64>,
+    started_at: String,
+    completed_at: Option<String>,
+    created_at: String,
+    updated_at: String,
+    attachment_ids: Option<String>,
+    context_window_usage: Option<Value>,
+    error_kind: Option<String>,
+    used_credits: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+struct ZenflowExecutorSessionRow {
+    id: String,
+    chat_id: String,
+    execution_process_id: String,
+    session_id: Option<String>,
+    prompt: Option<String>,
+    summary: Option<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Clone)]
+struct ZenflowAssistantSessionRow {
+    id: String,
+    title: String,
+    source: String,
+    status: String,
+    task_id: String,
+    chat_id: String,
+    metadata: Value,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Clone)]
+struct ZenflowLogRow {
+    execution_id: String,
+    logs: String,
+    normalized: bool,
+    inserted_at: String,
+}
+
+#[derive(Debug, Clone)]
+struct ZenflowEventDraft {
+    provider_event_index: u64,
+    occurred_at: DateTime<Utc>,
+    event_type: EventType,
+    role: EventRole,
+    payload: Value,
+    metadata: Value,
+    cursor: String,
+}
+
+fn normalize_zenflow_sqlite(
+    path: &Path,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    let conn = open_provider_sqlite_readonly(path)?;
+    zenflow_require_core_schema(&conn)?;
+    let user_version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let schema_fingerprint = opencode_schema_fingerprint(&conn)?;
+    let raw_source_path = path.display().to_string();
+    let tasks = zenflow_task_rows(&conn)?;
+    let chats = zenflow_chat_rows(&conn)?;
+    let processes = zenflow_execution_process_rows(&conn)?;
+    let executor_sessions = zenflow_executor_session_rows(&conn)?;
+    let assistant_sessions = zenflow_assistant_session_rows(&conn)?;
+    let logs = zenflow_log_rows(&conn)?;
+
+    let tasks_by_id = tasks
+        .iter()
+        .map(|task| (task.id.clone(), task))
+        .collect::<BTreeMap<_, _>>();
+    let processes_by_id = processes
+        .iter()
+        .map(|process| (process.id.clone(), process))
+        .collect::<BTreeMap<_, _>>();
+    let mut executor_sessions_by_chat = BTreeMap::<String, Vec<&ZenflowExecutorSessionRow>>::new();
+    for session in &executor_sessions {
+        executor_sessions_by_chat
+            .entry(session.chat_id.clone())
+            .or_default()
+            .push(session);
+    }
+    for sessions in executor_sessions_by_chat.values_mut() {
+        sessions.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+    }
+    let mut assistant_sessions_by_chat = BTreeMap::<String, &ZenflowAssistantSessionRow>::new();
+    for session in &assistant_sessions {
+        assistant_sessions_by_chat.insert(session.chat_id.clone(), session);
+    }
+    let mut logs_by_execution = BTreeMap::<String, Vec<&ZenflowLogRow>>::new();
+    for row in &logs {
+        logs_by_execution
+            .entry(row.execution_id.clone())
+            .or_default()
+            .push(row);
+    }
+    for rows in logs_by_execution.values_mut() {
+        rows.sort_by(|left, right| {
+            left.normalized
+                .cmp(&right.normalized)
+                .then_with(|| left.inserted_at.cmp(&right.inserted_at))
+        });
+    }
+
+    let mut result = ProviderNormalizationResult::default();
+    for chat in chats {
+        let line = provider_line_from_index(text_id_index(&chat.id, 0));
+        let Some(task) = tasks_by_id.get(&chat.task_id) else {
+            push_provider_import_failure(
+                &mut result.summary,
+                line,
+                format!(
+                    "Zenflow chat {} references missing task {}",
+                    chat.id, chat.task_id
+                ),
+            );
+            continue;
+        };
+        let assistant_session = assistant_sessions_by_chat.get(&chat.id).copied();
+        let started_at = zenflow_timestamp(Some(&chat.created_at), context.imported_at);
+        let ended_at = Some(zenflow_timestamp(Some(&chat.updated_at), started_at));
+        let mut events = Vec::<ZenflowEventDraft>::new();
+        let mut next_index = 0u64;
+
+        if let Some(prompt) = nonempty_string(chat.initial_prompt.as_deref()) {
+            events.push(zenflow_text_event(
+                &mut next_index,
+                started_at,
+                EventRole::User,
+                EventType::Message,
+                &prompt,
+                "chats.initial_prompt",
+                json!({
+                    "chat_id": chat.id,
+                    "task_id": chat.task_id,
+                }),
+            ));
+        }
+
+        for session in executor_sessions_by_chat
+            .get(&chat.id)
+            .into_iter()
+            .flatten()
+            .copied()
+        {
+            let session_started_at = zenflow_timestamp(Some(&session.created_at), started_at);
+            if let Some(prompt) = nonempty_string(session.prompt.as_deref()) {
+                let same_as_initial = chat
+                    .initial_prompt
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|initial| initial == prompt.trim());
+                if !same_as_initial {
+                    events.push(zenflow_text_event(
+                        &mut next_index,
+                        session_started_at,
+                        EventRole::User,
+                        EventType::Message,
+                        &prompt,
+                        "executor_sessions.prompt",
+                        json!({
+                            "executor_session_id": session.id,
+                            "execution_process_id": session.execution_process_id,
+                            "external_session_id": session.session_id,
+                        }),
+                    ));
+                }
+            }
+
+            if let Some(process) = processes_by_id.get(&session.execution_process_id) {
+                if let Some(log_rows) = logs_by_execution.get(&process.id) {
+                    for row in log_rows {
+                        for event in zenflow_log_events(
+                            row,
+                            process,
+                            &mut next_index,
+                            zenflow_timestamp(Some(&process.started_at), session_started_at),
+                            &mut result.summary,
+                        ) {
+                            events.push(event);
+                        }
+                    }
+                }
+            }
+
+            if let Some(summary) = nonempty_string(session.summary.as_deref()) {
+                events.push(zenflow_text_event(
+                    &mut next_index,
+                    zenflow_timestamp(Some(&session.updated_at), session_started_at),
+                    EventRole::Assistant,
+                    EventType::Summary,
+                    &summary,
+                    "executor_sessions.summary",
+                    json!({
+                        "executor_session_id": session.id,
+                        "execution_process_id": session.execution_process_id,
+                        "external_session_id": session.session_id,
+                    }),
+                ));
+            }
+        }
+
+        if events.is_empty() {
+            result.captures.push((
+                line,
+                zenflow_capture(
+                    ZenflowCaptureDraft {
+                        task,
+                        chat: &chat,
+                        assistant_session,
+                        started_at,
+                        ended_at,
+                        raw_source_path: &raw_source_path,
+                        user_version,
+                        schema_fingerprint: &schema_fingerprint,
+                        event_count: 0,
+                        event: None,
+                    },
+                    context,
+                ),
+            ));
+            continue;
+        }
+
+        for event in events {
+            let line = provider_line_from_index(event.provider_event_index);
+            result
+                .files_touched
+                .extend(provider_file_touches_from_raw_value(
+                    CaptureProvider::Zenflow,
+                    &chat.id,
+                    ZENFLOW_SQLITE_SOURCE_FORMAT,
+                    Some(raw_source_path.as_str()),
+                    &event.payload,
+                    &zenflow_provider_event(&chat.id, &event),
+                    line,
+                ));
+            result.captures.push((
+                line,
+                zenflow_capture(
+                    ZenflowCaptureDraft {
+                        task,
+                        chat: &chat,
+                        assistant_session,
+                        started_at,
+                        ended_at,
+                        raw_source_path: &raw_source_path,
+                        user_version,
+                        schema_fingerprint: &schema_fingerprint,
+                        event_count: next_index as usize,
+                        event: Some(zenflow_provider_event(&chat.id, &event)),
+                    },
+                    context,
+                ),
+            ));
+        }
+    }
+
+    Ok(result)
+}
+
+struct ZenflowCaptureDraft<'a> {
+    task: &'a ZenflowTaskRow,
+    chat: &'a ZenflowChatRow,
+    assistant_session: Option<&'a ZenflowAssistantSessionRow>,
+    started_at: DateTime<Utc>,
+    ended_at: Option<DateTime<Utc>>,
+    raw_source_path: &'a str,
+    user_version: i64,
+    schema_fingerprint: &'a str,
+    event_count: usize,
+    event: Option<ProviderEventEnvelope>,
+}
+
+fn zenflow_capture(
+    draft: ZenflowCaptureDraft<'_>,
+    context: &ProviderAdapterContext,
+) -> ProviderCaptureEnvelope {
+    native_provider_capture(
+        NativeSessionDraft {
+            provider: CaptureProvider::Zenflow,
+            source_format: ZENFLOW_SQLITE_SOURCE_FORMAT,
+            provider_session_id: draft.chat.id.clone(),
+            parent_provider_session_id: draft.chat.main_chat_id.clone(),
+            root_provider_session_id: draft.chat.main_chat_id.clone(),
+            external_agent_id: draft
+                .assistant_session
+                .map(|session| format!("assistant:{}", session.source))
+                .or_else(|| Some("zenflow".to_owned())),
+            agent_type: if draft.chat.main_chat_id.is_some() {
+                AgentType::Subagent
+            } else {
+                AgentType::Primary
+            },
+            role_hint: Some(draft.chat.chat_role.clone()),
+            is_primary: draft.chat.main_chat_id.is_none(),
+            started_at: draft.started_at,
+            ended_at: draft.ended_at,
+            cwd: nonempty_string(Some(&draft.task.context_dir_name))
+                .or_else(|| nonempty_string(draft.chat.container_ref.as_deref())),
+            fidelity: Fidelity::Imported,
+            raw_source_path: draft.raw_source_path.to_owned(),
+            trust: ProviderSourceTrust::ProviderNative,
+            source_metadata: json!({
+                "adapter": ZENFLOW_SQLITE_SOURCE_FORMAT,
+                "sqlite_user_version": draft.user_version,
+                "schema_fingerprint": draft.schema_fingerprint,
+                "source_path": draft.raw_source_path,
+                "upstream_schema_anchor": {
+                    "artifact": "Zenflow Desktop 2.3.1 Linux Zenflow.deb",
+                    "sha256": "e623e073a212fccbfa295e2a7b7645a2c34525ab55f9cf247edce15babc731f2",
+                    "app_data_paths": [
+                        "ZENFLOW_DATA_DIR/db.sqlite",
+                        "$XDG_DATA_HOME/zenflow/db.sqlite",
+                        "~/.local/share/zenflow/db.sqlite",
+                        "~/Library/Application Support/ai.forgoodai.zenflow/db.sqlite",
+                        "%APPDATA%/forgoodai/zenflow/data/db.sqlite"
+                    ],
+                    "tables": [
+                        "tasks",
+                        "chats",
+                        "execution_processes",
+                        "executor_sessions",
+                        "execution_process_logs",
+                        "execution_process_normalized_logs",
+                        "assistant_sessions"
+                    ]
+                },
+            }),
+            session_metadata: json!({
+                "source_format": ZENFLOW_SQLITE_SOURCE_FORMAT,
+                "task_id": draft.task.id,
+                "task_title": draft.task.title,
+                "task_description": draft.task.description,
+                "task_status": draft.task.status,
+                "task_project_id": draft.task.project_id,
+                "task_branch": draft.task.branch,
+                "task_base_branch": draft.task.base_branch,
+                "task_container_ref": draft.task.container_ref,
+                "task_execution_mode": draft.task.execution_mode,
+                "task_context_dir_name": draft.task.context_dir_name,
+                "task_created_at": draft.task.created_at,
+                "task_updated_at": draft.task.updated_at,
+                "task_archived_at": draft.task.archived_at,
+                "chat_id": draft.chat.id,
+                "chat_role": draft.chat.chat_role,
+                "chat_main_chat_id": draft.chat.main_chat_id,
+                "chat_branch": draft.chat.branch,
+                "chat_base_branch": draft.chat.base_branch,
+                "chat_container_ref": draft.chat.container_ref,
+                "chat_executor_profile_id": draft.chat.executor_profile_id,
+                "chat_setup_completed_at": draft.chat.setup_completed_at,
+                "chat_hidden_prompt_present": draft.chat.hidden_prompt.as_deref().is_some_and(|value| !value.trim().is_empty()),
+                "chat_unread": draft.chat.unread,
+                "assistant_session": draft.assistant_session.map(|session| json!({
+                    "id": session.id,
+                    "title": session.title,
+                    "source": session.source,
+                    "status": session.status,
+                    "task_id": session.task_id,
+                    "chat_id": session.chat_id,
+                    "metadata": provider_capped_json_value(&session.metadata, PROVIDER_MAX_PREVIEW_CHARS),
+                    "created_at": session.created_at,
+                    "updated_at": session.updated_at,
+                })),
+                "event_count": draft.event_count,
+            }),
+        },
+        context,
+        draft.event,
+    )
+}
+
+fn zenflow_provider_event(chat_id: &str, event: &ZenflowEventDraft) -> ProviderEventEnvelope {
+    ProviderEventEnvelope {
+        provider_event_index: event.provider_event_index,
+        provider_event_hash: None,
+        cursor: Some(event.cursor.clone()),
+        event_type: event.event_type,
+        role: Some(event.role),
+        occurred_at: event.occurred_at,
+        fidelity: Fidelity::Imported,
+        redaction_state: RedactionState::LocalPreview,
+        idempotency_key: Some(format!(
+            "provider-event:{}:{}:{}",
+            CaptureProvider::Zenflow.as_str(),
+            chat_id,
+            event.provider_event_index
+        )),
+        artifacts: Vec::new(),
+        payload: event.payload.clone(),
+        metadata: event.metadata.clone(),
+    }
+}
+
+fn zenflow_text_event(
+    next_index: &mut u64,
+    occurred_at: DateTime<Utc>,
+    role: EventRole,
+    event_type: EventType,
+    text: &str,
+    source: &str,
+    metadata: Value,
+) -> ZenflowEventDraft {
+    let provider_event_index = *next_index;
+    *next_index = next_index.saturating_add(1);
+    ZenflowEventDraft {
+        provider_event_index,
+        occurred_at,
+        event_type,
+        role,
+        payload: json!({
+            "text": provider_local_preview(text, PROVIDER_MAX_TEXT_CHARS).0,
+        }),
+        metadata: json!({
+            "source": source,
+            "source_format": ZENFLOW_SQLITE_SOURCE_FORMAT,
+            "metadata": metadata,
+        }),
+        cursor: format!("{source}:{provider_event_index}"),
+    }
+}
+
+fn zenflow_log_events(
+    row: &ZenflowLogRow,
+    process: &ZenflowExecutionProcessRow,
+    next_index: &mut u64,
+    fallback: DateTime<Utc>,
+    summary: &mut ProviderImportSummary,
+) -> Vec<ZenflowEventDraft> {
+    let mut events = Vec::new();
+    for (line_index, line) in row.logs.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let parsed = match serde_json::from_str::<Value>(line) {
+            Ok(value) => value,
+            Err(err) => {
+                push_provider_import_failure(
+                    summary,
+                    provider_line_from_index(*next_index),
+                    format!(
+                        "invalid JSONL in Zenflow {} for execution {} line {}: {err}",
+                        if row.normalized {
+                            "execution_process_normalized_logs.logs"
+                        } else {
+                            "execution_process_logs.logs"
+                        },
+                        row.execution_id,
+                        line_index + 1
+                    ),
+                );
+                continue;
+            }
+        };
+        let provider_event_index = *next_index;
+        *next_index = next_index.saturating_add(1);
+        let occurred_at = zenflow_log_timestamp(&parsed, fallback, line_index);
+        let role = zenflow_log_role(&parsed);
+        let event_type = zenflow_log_event_type(&parsed, role);
+        let text = provider_value_text(&parsed)
+            .or_else(|| {
+                parsed
+                    .get("message")
+                    .or_else(|| parsed.get("text"))
+                    .or_else(|| parsed.get("content"))
+                    .or_else(|| parsed.get("output"))
+                    .or_else(|| parsed.get("summary"))
+                    .and_then(provider_value_text)
+            })
+            .unwrap_or_else(|| line.to_owned());
+        events.push(ZenflowEventDraft {
+            provider_event_index,
+            occurred_at,
+            event_type,
+            role,
+            payload: json!({
+                "text": provider_local_preview(&text, PROVIDER_MAX_TEXT_CHARS).0,
+                "log": provider_capped_json_value(&parsed, PROVIDER_MAX_PREVIEW_CHARS),
+                "execution_process": zenflow_process_metadata(process),
+            }),
+            metadata: json!({
+                "source": if row.normalized {
+                    "execution_process_normalized_logs.logs"
+                } else {
+                    "execution_process_logs.logs"
+                },
+                "source_format": ZENFLOW_SQLITE_SOURCE_FORMAT,
+                "execution_id": row.execution_id,
+                "line_index": line_index,
+                "normalized": row.normalized,
+            }),
+            cursor: format!(
+                "{}:{}:{}",
+                if row.normalized {
+                    "normalized-log"
+                } else {
+                    "log"
+                },
+                row.execution_id,
+                line_index
+            ),
+        });
+    }
+    events
+}
+
+fn zenflow_process_metadata(process: &ZenflowExecutionProcessRow) -> Value {
+    json!({
+        "id": process.id,
+        "task_id": process.task_id,
+        "chat_id": process.chat_id,
+        "run_reason": process.run_reason,
+        "executor_action": provider_capped_json_value(
+            &process.executor_action.clone().unwrap_or(Value::Null),
+            PROVIDER_MAX_PREVIEW_CHARS
+        ),
+        "before_head_commit": process.before_head_commit,
+        "after_head_commit": process.after_head_commit,
+        "status": process.status,
+        "exit_code": process.exit_code,
+        "started_at": process.started_at,
+        "completed_at": process.completed_at,
+        "created_at": process.created_at,
+        "updated_at": process.updated_at,
+        "attachment_ids": process.attachment_ids,
+        "context_window_usage": process.context_window_usage,
+        "error_kind": process.error_kind,
+        "used_credits": process.used_credits,
+    })
+}
+
+fn zenflow_log_timestamp(
+    value: &Value,
+    fallback: DateTime<Utc>,
+    line_index: usize,
+) -> DateTime<Utc> {
+    provider_timestamp_value(
+        value
+            .get("timestamp")
+            .or_else(|| value.get("time"))
+            .or_else(|| value.get("created_at"))
+            .or_else(|| value.get("createdAt")),
+        fallback + Duration::milliseconds(i64::try_from(line_index).unwrap_or(i64::MAX)),
+    )
+}
+
+fn zenflow_log_role(value: &Value) -> EventRole {
+    let role = value
+        .get("role")
+        .or_else(|| value.get("source"))
+        .or_else(|| value.get("stream"))
+        .or_else(|| value.get("kind"))
+        .or_else(|| value.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if role.contains("assistant") || role.contains("agent") {
+        EventRole::Assistant
+    } else if role.contains("user") {
+        EventRole::User
+    } else if role.contains("system") {
+        EventRole::System
+    } else if role.contains("tool") || role.contains("stdout") || role.contains("stderr") {
+        EventRole::Tool
+    } else {
+        EventRole::Tool
+    }
+}
+
+fn zenflow_log_event_type(value: &Value, role: EventRole) -> EventType {
+    let kind = value
+        .get("type")
+        .or_else(|| value.get("kind"))
+        .or_else(|| value.get("event"))
+        .or_else(|| value.get("subtype"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if kind.contains("tool_call") || kind.contains("tool-call") || kind.contains("tooluse") {
+        EventType::ToolCall
+    } else if kind.contains("tool_result")
+        || kind.contains("tool-output")
+        || kind.contains("tool_output")
+        || kind.contains("stdout")
+        || kind.contains("stderr")
+    {
+        EventType::ToolOutput
+    } else if kind.contains("summary") {
+        EventType::Summary
+    } else if role == EventRole::Tool {
+        EventType::ToolOutput
+    } else {
+        EventType::Message
+    }
+}
+
+fn zenflow_require_core_schema(conn: &Connection) -> Result<()> {
+    for (table, label, required) in [
+        (
+            "tasks",
+            "Zenflow tasks table",
+            &["id", "title", "status", "created_at", "updated_at"][..],
+        ),
+        (
+            "chats",
+            "Zenflow chats table",
+            &["id", "task_id", "chat_role", "created_at", "updated_at"][..],
+        ),
+        (
+            "execution_processes",
+            "Zenflow execution_processes table",
+            &[
+                "id",
+                "task_id",
+                "chat_id",
+                "run_reason",
+                "status",
+                "started_at",
+                "created_at",
+                "updated_at",
+            ][..],
+        ),
+        (
+            "executor_sessions",
+            "Zenflow executor_sessions table",
+            &[
+                "id",
+                "chat_id",
+                "execution_process_id",
+                "created_at",
+                "updated_at",
+            ][..],
+        ),
+    ] {
+        if !sqlite_table_exists(conn, table)? {
+            return Err(CaptureError::InvalidPayload(format!(
+                "Zenflow db.sqlite is missing required {table} table"
+            )));
+        }
+        let columns = sqlite_table_columns(conn, table)?;
+        ensure_sqlite_table_columns(&columns, label, required)?;
+    }
+    Ok(())
+}
+
+fn zenflow_task_rows(conn: &Connection) -> Result<Vec<ZenflowTaskRow>> {
+    let columns = sqlite_table_columns(conn, "tasks")?;
+    let project_id = optional_column_expr(&columns, "project_id", "NULL");
+    let description = optional_column_expr(&columns, "description", "NULL");
+    let branch = optional_column_expr(&columns, "branch", "''");
+    let base_branch = optional_column_expr(&columns, "base_branch", "''");
+    let container_ref = optional_column_expr(&columns, "container_ref", "''");
+    let execution_mode = optional_column_expr(&columns, "execution_mode", "''");
+    let context_dir_name = optional_column_expr(&columns, "context_dir_name", "''");
+    let archived_at = optional_column_expr(&columns, "archived_at", "NULL");
+    let sql = format!(
+        "select id, {project_id}, title, {description}, status, {branch}, {base_branch}, \
+         {container_ref}, {execution_mode}, {context_dir_name}, created_at, updated_at, \
+         {archived_at} from tasks order by created_at, id"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok(ZenflowTaskRow {
+            id: zenflow_blob_column(row, 0)?,
+            project_id: zenflow_optional_blob_column(row, 1)?,
+            title: row.get(2)?,
+            description: row.get(3)?,
+            status: row.get(4)?,
+            branch: row.get(5)?,
+            base_branch: row.get(6)?,
+            container_ref: row.get(7)?,
+            execution_mode: row.get(8)?,
+            context_dir_name: row.get(9)?,
+            created_at: row.get(10)?,
+            updated_at: row.get(11)?,
+            archived_at: row.get(12)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(CaptureError::from)
+}
+
+fn zenflow_chat_rows(conn: &Connection) -> Result<Vec<ZenflowChatRow>> {
+    let columns = sqlite_table_columns(conn, "chats")?;
+    let main_chat_id = optional_column_expr(&columns, "main_chat_id", "NULL");
+    let container_ref = optional_column_expr(&columns, "container_ref", "NULL");
+    let branch = optional_column_expr(&columns, "branch", "NULL");
+    let base_branch = optional_column_expr(&columns, "base_branch", "''");
+    let executor_profile_id = optional_column_expr(&columns, "executor_profile_id", "''");
+    let initial_prompt = optional_column_expr(&columns, "initial_prompt", "NULL");
+    let hidden_prompt = optional_column_expr(&columns, "hidden_prompt", "NULL");
+    let setup_completed_at = optional_column_expr(&columns, "setup_completed_at", "NULL");
+    let unread = optional_column_expr(&columns, "unread", "0");
+    let sql = format!(
+        "select id, task_id, {main_chat_id}, chat_role, {container_ref}, {branch}, \
+         {base_branch}, {executor_profile_id}, {initial_prompt}, {hidden_prompt}, \
+         {setup_completed_at}, created_at, updated_at, {unread} from chats \
+         order by created_at, id"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok(ZenflowChatRow {
+            id: zenflow_blob_column(row, 0)?,
+            task_id: zenflow_blob_column(row, 1)?,
+            main_chat_id: zenflow_optional_blob_column(row, 2)?,
+            chat_role: row.get(3)?,
+            container_ref: row.get(4)?,
+            branch: row.get(5)?,
+            base_branch: row.get(6)?,
+            executor_profile_id: row.get(7)?,
+            initial_prompt: row.get(8)?,
+            hidden_prompt: row.get(9)?,
+            setup_completed_at: row.get(10)?,
+            created_at: row.get(11)?,
+            updated_at: row.get(12)?,
+            unread: row.get(13)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(CaptureError::from)
+}
+
+fn zenflow_execution_process_rows(conn: &Connection) -> Result<Vec<ZenflowExecutionProcessRow>> {
+    let columns = sqlite_table_columns(conn, "execution_processes")?;
+    let executor_action = optional_column_expr(&columns, "executor_action", "NULL");
+    let before_head_commit = optional_column_expr(&columns, "before_head_commit", "NULL");
+    let after_head_commit = optional_column_expr(&columns, "after_head_commit", "NULL");
+    let exit_code = optional_column_expr(&columns, "exit_code", "NULL");
+    let completed_at = optional_column_expr(&columns, "completed_at", "NULL");
+    let attachment_ids = optional_column_expr(&columns, "attachment_ids", "NULL");
+    let context_window_usage = optional_column_expr(&columns, "context_window_usage", "NULL");
+    let error_kind = optional_column_expr(&columns, "error_kind", "NULL");
+    let used_credits = optional_column_expr(&columns, "used_credits", "NULL");
+    let sql = format!(
+        "select id, task_id, chat_id, run_reason, {executor_action}, {before_head_commit}, \
+         {after_head_commit}, status, {exit_code}, started_at, {completed_at}, created_at, \
+         updated_at, {attachment_ids}, {context_window_usage}, {error_kind}, {used_credits} \
+         from execution_processes order by started_at, id"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok(ZenflowExecutionProcessRow {
+            id: zenflow_blob_column(row, 0)?,
+            task_id: zenflow_blob_column(row, 1)?,
+            chat_id: zenflow_optional_blob_column(row, 2)?,
+            run_reason: row.get(3)?,
+            executor_action: zenflow_optional_json_column(row, 4)?,
+            before_head_commit: row.get(5)?,
+            after_head_commit: row.get(6)?,
+            status: row.get(7)?,
+            exit_code: row.get(8)?,
+            started_at: row.get(9)?,
+            completed_at: row.get(10)?,
+            created_at: row.get(11)?,
+            updated_at: row.get(12)?,
+            attachment_ids: row.get(13)?,
+            context_window_usage: zenflow_optional_json_column(row, 14)?,
+            error_kind: row.get(15)?,
+            used_credits: row.get(16)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(CaptureError::from)
+}
+
+fn zenflow_executor_session_rows(conn: &Connection) -> Result<Vec<ZenflowExecutorSessionRow>> {
+    let columns = sqlite_table_columns(conn, "executor_sessions")?;
+    let session_id = optional_column_expr(&columns, "session_id", "NULL");
+    let prompt = optional_column_expr(&columns, "prompt", "NULL");
+    let summary = optional_column_expr(&columns, "summary", "NULL");
+    let mut stmt = conn.prepare(&format!(
+        "select id, chat_id, execution_process_id, {session_id}, {prompt}, {summary}, \
+         created_at, updated_at from executor_sessions order by created_at, id"
+    ))?;
+    let rows = stmt.query_map([], |row| {
+        Ok(ZenflowExecutorSessionRow {
+            id: zenflow_blob_column(row, 0)?,
+            chat_id: zenflow_blob_column(row, 1)?,
+            execution_process_id: zenflow_blob_column(row, 2)?,
+            session_id: row.get(3)?,
+            prompt: row.get(4)?,
+            summary: row.get(5)?,
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(CaptureError::from)
+}
+
+fn zenflow_assistant_session_rows(conn: &Connection) -> Result<Vec<ZenflowAssistantSessionRow>> {
+    if !sqlite_table_exists(conn, "assistant_sessions")? {
+        return Ok(Vec::new());
+    }
+    let columns = sqlite_table_columns(conn, "assistant_sessions")?;
+    ensure_sqlite_table_columns(
+        &columns,
+        "Zenflow assistant_sessions table",
+        &["id", "task_id", "chat_id", "created_at", "updated_at"],
+    )?;
+    let title = optional_column_expr(&columns, "title", "''");
+    let source = optional_column_expr(&columns, "source", "'web'");
+    let status = optional_column_expr(&columns, "status", "'active'");
+    let metadata = optional_column_expr(&columns, "metadata", "'{}'");
+    let mut stmt = conn.prepare(&format!(
+        "select id, {title}, {source}, {status}, task_id, chat_id, {metadata}, created_at, \
+         updated_at from assistant_sessions order by created_at, id"
+    ))?;
+    let rows = stmt.query_map([], |row| {
+        let raw_metadata: String = row.get(6)?;
+        Ok(ZenflowAssistantSessionRow {
+            id: zenflow_blob_column(row, 0)?,
+            title: row.get(1)?,
+            source: row.get(2)?,
+            status: row.get(3)?,
+            task_id: zenflow_blob_column(row, 4)?,
+            chat_id: zenflow_blob_column(row, 5)?,
+            metadata: serde_json::from_str(&raw_metadata).unwrap_or(Value::Null),
+            created_at: row.get(7)?,
+            updated_at: row.get(8)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(CaptureError::from)
+}
+
+fn zenflow_log_rows(conn: &Connection) -> Result<Vec<ZenflowLogRow>> {
+    let mut rows = Vec::new();
+    for (table, normalized) in [
+        ("execution_process_logs", false),
+        ("execution_process_normalized_logs", true),
+    ] {
+        if !sqlite_table_exists(conn, table)? {
+            continue;
+        }
+        let columns = sqlite_table_columns(conn, table)?;
+        ensure_sqlite_table_columns(
+            &columns,
+            &format!("Zenflow {table} table"),
+            &["execution_id", "logs", "inserted_at"],
+        )?;
+        let mut stmt = conn.prepare(&format!(
+            "select execution_id, logs, inserted_at from {table} order by inserted_at, execution_id"
+        ))?;
+        let mapped = stmt.query_map([], |row| {
+            Ok(ZenflowLogRow {
+                execution_id: zenflow_blob_column(row, 0)?,
+                logs: row.get(1)?,
+                normalized,
+                inserted_at: row.get(2)?,
+            })
+        })?;
+        rows.extend(
+            mapped
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(CaptureError::from)?,
+        );
+    }
+    Ok(rows)
+}
+
+fn zenflow_blob_column(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<String> {
+    let bytes: Vec<u8> = row.get(index)?;
+    Ok(zenflow_blob_id(bytes))
+}
+
+fn zenflow_optional_blob_column(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+) -> rusqlite::Result<Option<String>> {
+    let bytes: Option<Vec<u8>> = row.get(index)?;
+    Ok(bytes.map(zenflow_blob_id))
+}
+
+fn zenflow_optional_json_column(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+) -> rusqlite::Result<Option<Value>> {
+    let raw = match row.get_ref(index)? {
+        rusqlite::types::ValueRef::Null => return Ok(None),
+        rusqlite::types::ValueRef::Text(bytes) | rusqlite::types::ValueRef::Blob(bytes) => {
+            bytes.to_vec()
+        }
+        rusqlite::types::ValueRef::Integer(value) => {
+            return Ok(Some(Value::Number(value.into())));
+        }
+        rusqlite::types::ValueRef::Real(value) => {
+            return Ok(serde_json::Number::from_f64(value).map(Value::Number));
+        }
+    };
+    Ok(Some(
+        std::str::from_utf8(&raw)
+            .ok()
+            .and_then(|text| serde_json::from_str(text).ok())
+            .unwrap_or_else(|| Value::String(String::from_utf8_lossy(&raw).into_owned())),
+    ))
+}
+
+fn zenflow_blob_id(bytes: Vec<u8>) -> String {
+    if bytes.len() == 16 {
+        if let Ok(uuid) = Uuid::from_slice(&bytes) {
+            return uuid.to_string();
+        }
+    }
+    bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn zenflow_timestamp(raw: Option<&str>, fallback: DateTime<Utc>) -> DateTime<Utc> {
+    let Some(raw) = raw.filter(|value| !value.trim().is_empty()) else {
+        return fallback;
+    };
+    parse_rfc3339_utc(raw)
+        .or_else(|| {
+            NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S%.f")
+                .ok()
+                .map(|timestamp| DateTime::<Utc>::from_naive_utc_and_offset(timestamp, Utc))
+        })
+        .unwrap_or(fallback)
+}
+
+fn nonempty_string(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
 }
 
 #[derive(Debug, Clone)]
@@ -39925,6 +40988,162 @@ mod tests {
         assert_eq!(second.imported_events, 0);
         assert_eq!(second.skipped_sessions, 1);
         assert_eq!(second.skipped_events, 2);
+    }
+
+    #[test]
+    fn native_zenflow_fixture_imports_searches_reimports_and_logs() {
+        let temp = tempdir();
+        let fixture = provider_history_fixture("zenflow/v2.3.1/db.sqlite");
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let source = provider_source_for_path(CaptureProvider::Zenflow, fixture.clone());
+        assert_eq!(source.source_format, ZENFLOW_SQLITE_SOURCE_FORMAT);
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+
+        let first = import_zenflow_sqlite(
+            &fixture,
+            &mut store,
+            ZenflowSqliteImportOptions {
+                machine_id: "test-machine".into(),
+                source_path: Some(fixture.clone()),
+                imported_at: DateTime::parse_from_rfc3339("2026-07-05T14:10:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                allow_partial_failures: true,
+                ..ZenflowSqliteImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(first.failed, 0, "{:?}", first.failures);
+        assert_eq!(first.imported_sessions, 1);
+        assert_eq!(first.imported_events, 7);
+
+        let provider_session_id = "22222222-2222-2222-2222-222222222222";
+        let session_id = provider_session_uuid(CaptureProvider::Zenflow, provider_session_id);
+        let session = store.get_session(session_id).unwrap();
+        assert_eq!(session.provider, CaptureProvider::Zenflow);
+        assert_eq!(session.sync.fidelity, Fidelity::Imported);
+        assert_eq!(
+            session.sync.metadata["source_format"].as_str(),
+            Some(ZENFLOW_SQLITE_SOURCE_FORMAT)
+        );
+
+        let events = store.events_for_session(session_id).unwrap();
+        assert_eq!(events.len(), 7);
+        assert_eq!(events[0].role, Some(EventRole::User));
+        assert!(events
+            .iter()
+            .any(|event| event.role == Some(EventRole::Assistant)));
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == EventType::ToolCall));
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == EventType::ToolOutput));
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == EventType::Summary));
+        let rendered = serde_json::to_string(&events).unwrap();
+        assert!(rendered.contains("zenflow sqlite oracle prompt"));
+        assert!(rendered.contains("Zenflow assistant log oracle answer"));
+        assert!(rendered.contains("Zenflow tool output oracle"));
+        assert!(rendered.contains("Zenflow normalized log oracle"));
+
+        assert!(store
+            .search_event_hits("zenflow sqlite oracle", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::Zenflow)));
+        assert!(store
+            .search_event_hits("Zenflow tool output oracle", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::Zenflow)));
+
+        let source = store
+            .capture_source_by_external_session(CaptureProvider::Zenflow, provider_session_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            source.sync.metadata["source_metadata"]["upstream_schema_anchor"]["sha256"].as_str(),
+            Some("e623e073a212fccbfa295e2a7b7645a2c34525ab55f9cf247edce15babc731f2")
+        );
+
+        let second = import_zenflow_sqlite(
+            &fixture,
+            &mut store,
+            ZenflowSqliteImportOptions {
+                source_path: Some(fixture.clone()),
+                allow_partial_failures: true,
+                ..ZenflowSqliteImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(second.failed, 0, "{:?}", second.failures);
+        assert_eq!(second.imported_sessions, 0);
+        assert_eq!(second.imported_events, 0);
+        assert_eq!(second.skipped_sessions, 1);
+        assert_eq!(second.skipped_events, 7);
+    }
+
+    #[test]
+    fn provider_sources_discovers_zenflow_default_db() {
+        let temp = tempdir();
+        let fixture = provider_history_fixture("zenflow/v2.3.1/db.sqlite");
+        let db = temp.path().join(".local/share/zenflow/db.sqlite");
+        fs::create_dir_all(db.parent().unwrap()).unwrap();
+        fs::copy(&fixture, &db).unwrap();
+
+        let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Zenflow);
+        let source = sources
+            .iter()
+            .find(|source| source.source_format == ZENFLOW_SQLITE_SOURCE_FORMAT)
+            .unwrap_or_else(|| panic!("missing Zenflow source in {sources:#?}"));
+        assert_eq!(source.provider, CaptureProvider::Zenflow);
+        assert_eq!(source.path, db);
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+    }
+
+    #[test]
+    fn native_zenflow_reports_missing_table_and_corrupt_db() {
+        let temp = tempdir();
+        let missing = temp.path().join("missing-zenflow.db");
+        Connection::open(&missing)
+            .unwrap()
+            .execute_batch("CREATE TABLE unrelated(id INTEGER PRIMARY KEY);")
+            .unwrap();
+        let corrupt = temp.path().join("corrupt-zenflow.db");
+        fs::write(&corrupt, b"not sqlite").unwrap();
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let missing_err =
+            import_zenflow_sqlite(&missing, &mut store, ZenflowSqliteImportOptions::default())
+                .unwrap_err();
+        assert!(missing_err
+            .to_string()
+            .contains("Zenflow db.sqlite is missing required tasks table"));
+
+        let corrupt_err =
+            import_zenflow_sqlite(&corrupt, &mut store, ZenflowSqliteImportOptions::default())
+                .unwrap_err();
+        assert!(corrupt_err.to_string().contains("not a database"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_zenflow_normalizer_rejects_symlinked_sqlite() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir();
+        let fixture = provider_history_fixture("zenflow/v2.3.1/db.sqlite");
+        let link = temp.path().join("linked-zenflow.db");
+        symlink(&fixture, &link).unwrap();
+
+        let err = normalize_zenflow_sqlite(&link, &ProviderAdapterContext::default()).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("symlinked provider transcript files are rejected"));
     }
 
     #[test]

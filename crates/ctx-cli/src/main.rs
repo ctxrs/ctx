@@ -56,7 +56,7 @@ use ctx_history_capture::{
     import_shelley_sqlite, import_tabnine_cli_history, import_terramind_sqlite,
     import_tinycloud_history, import_trae_history, import_warp_sqlite,
     import_windsurf_cascade_hook_transcripts, import_zed_threads_sqlite, import_zencoder_history,
-    provider_source_for_path, provider_source_spec, stable_capture_uuid,
+    import_zenflow_sqlite, provider_source_for_path, provider_source_spec, stable_capture_uuid,
     validate_custom_history_jsonl_v1, validate_custom_history_jsonl_v1_reader, AdalImportOptions,
     AiderDeskImportOptions, AntigravityCliImportOptions, AstrBotSqliteImportOptions,
     AuggieImportOptions, AutohandCodeImportOptions, BobTaskJsonImportOptions, CatalogSummary,
@@ -80,6 +80,7 @@ use ctx_history_capture::{
     ShelleySqliteImportOptions, TabnineCliImportOptions, TerramindSqliteImportOptions,
     TinyCloudImportOptions, TraeImportOptions, WarpSqliteImportOptions,
     WindsurfCascadeHookImportOptions, ZedThreadsSqliteImportOptions, ZencoderImportOptions,
+    ZenflowSqliteImportOptions,
 };
 use ctx_history_core::{
     database_path, default_data_root, utc_now, CaptureProvider, ContextCitation,
@@ -840,6 +841,7 @@ enum NativeProviderArg {
     #[value(name = "tinycloud", alias = "tiny-cloud", alias = "tiny_cloud")]
     TinyCloud,
     Zencoder,
+    Zenflow,
     #[value(
         name = "codestudio",
         alias = "code-studio",
@@ -997,6 +999,7 @@ enum ProviderArg {
     #[value(name = "tinycloud", alias = "tiny-cloud", alias = "tiny_cloud")]
     TinyCloud,
     Zencoder,
+    Zenflow,
     #[value(
         name = "codestudio",
         alias = "code-studio",
@@ -1093,6 +1096,7 @@ impl NativeProviderArg {
             Self::Trae => CaptureProvider::Trae,
             Self::TinyCloud => CaptureProvider::TinyCloud,
             Self::Zencoder => CaptureProvider::Zencoder,
+            Self::Zenflow => CaptureProvider::Zenflow,
             Self::CodeStudio => CaptureProvider::CodeStudio,
         }
     }
@@ -1181,6 +1185,7 @@ impl ProviderArg {
             Self::Trae => CaptureProvider::Trae,
             Self::TinyCloud => CaptureProvider::TinyCloud,
             Self::Zencoder => CaptureProvider::Zencoder,
+            Self::Zenflow => CaptureProvider::Zenflow,
             Self::CodeStudio => CaptureProvider::CodeStudio,
             Self::Custom => CaptureProvider::Custom,
         }
@@ -1248,6 +1253,7 @@ impl ProviderArg {
             Self::Trae => "trae",
             Self::TinyCloud => "tinycloud",
             Self::Zencoder => "zencoder",
+            Self::Zenflow => "zenflow",
             Self::CodeStudio => "codestudio",
             Self::Custom => "custom",
         }
@@ -6080,6 +6086,17 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
+        CaptureProvider::Zenflow => import_zenflow_sqlite(
+            &source.path,
+            store,
+            ZenflowSqliteImportOptions {
+                source_path: Some(source.path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: true,
+                ..ZenflowSqliteImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
         CaptureProvider::OpenCode => import_opencode_sqlite(
             &source.path,
             store,
@@ -6849,6 +6866,7 @@ fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bool {
         | CaptureProvider::Goose
         | CaptureProvider::Lingma
         | CaptureProvider::Warp
+        | CaptureProvider::Zenflow
         | CaptureProvider::Zed => path == source.path,
         CaptureProvider::Dexto => {
             path == source.path
@@ -7376,6 +7394,7 @@ fn source_uses_incremental_event_search(source: &SourceInfo) -> bool {
             | CaptureProvider::Trae
             | CaptureProvider::TinyCloud
             | CaptureProvider::Zencoder
+            | CaptureProvider::Zenflow
             | CaptureProvider::CodeStudio
     )
 }
