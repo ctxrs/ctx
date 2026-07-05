@@ -1,0 +1,3 @@
+{"id":"cortex-user-1","role":"user","user_sent_time":"2026-06-24T12:00:00Z","content":[{"type":"text","text":"cortex code fixture oracle prompt"}]}
+{"id":"cortex-assistant-1","role":"assistant","user_sent_time":"2026-06-24T12:00:01Z","content":[{"type":"text","text":"cortex code fixture oracle answer"},{"type":"tool_use","name":"write_file","input":{"path":"src/cortex_code_oracle.rs","content":"proof"}}]}
+{"id":"cortex-tool-1","role":"tool","user_sent_time":"2026-06-24T12:00:02Z","content":[{"type":"tool_result","content":"wrote src/cortex_code_oracle.rs"}]}

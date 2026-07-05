@@ -1073,6 +1073,69 @@ impl Default for NeovateImportOptions {
 }
 
 #[derive(Debug, Clone)]
+pub struct CommandCodeImportOptions {
+    pub machine_id: String,
+    pub source_path: Option<PathBuf>,
+    pub imported_at: DateTime<Utc>,
+    pub history_record_id: Option<Uuid>,
+    pub allow_partial_failures: bool,
+}
+
+impl Default for CommandCodeImportOptions {
+    fn default() -> Self {
+        Self {
+            machine_id: default_machine_id(),
+            source_path: None,
+            imported_at: utc_now(),
+            history_record_id: None,
+            allow_partial_failures: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RovoDevImportOptions {
+    pub machine_id: String,
+    pub source_path: Option<PathBuf>,
+    pub imported_at: DateTime<Utc>,
+    pub history_record_id: Option<Uuid>,
+    pub allow_partial_failures: bool,
+}
+
+impl Default for RovoDevImportOptions {
+    fn default() -> Self {
+        Self {
+            machine_id: default_machine_id(),
+            source_path: None,
+            imported_at: utc_now(),
+            history_record_id: None,
+            allow_partial_failures: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CortexCodeImportOptions {
+    pub machine_id: String,
+    pub source_path: Option<PathBuf>,
+    pub imported_at: DateTime<Utc>,
+    pub history_record_id: Option<Uuid>,
+    pub allow_partial_failures: bool,
+}
+
+impl Default for CortexCodeImportOptions {
+    fn default() -> Self {
+        Self {
+            machine_id: default_machine_id(),
+            source_path: None,
+            imported_at: utc_now(),
+            history_record_id: None,
+            allow_partial_failures: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct MistralVibeImportOptions {
     pub machine_id: String,
     pub source_path: Option<PathBuf>,
@@ -1425,6 +1488,15 @@ pub struct KodeJsonlAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NeovateJsonlAdapter;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CommandCodeJsonlAdapter;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RovoDevSessionJsonAdapter;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CortexCodeSessionJsonAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ForgeCodeSqliteAdapter;
@@ -2671,6 +2743,65 @@ impl ProviderCaptureAdapter for NeovateJsonlAdapter {
             CaptureProvider::Neovate,
             NEOVATE_SOURCE_FORMAT,
         )
+    }
+}
+
+impl ProviderCaptureAdapter for CommandCodeJsonlAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::CommandCode
+    }
+
+    fn source_format(&self) -> &str {
+        COMMAND_CODE_SOURCE_FORMAT
+    }
+
+    fn normalize_path(
+        &self,
+        path: &Path,
+        context: &ProviderAdapterContext,
+    ) -> Result<ProviderNormalizationResult> {
+        normalize_jsonl_tree(
+            path,
+            context,
+            CaptureProvider::CommandCode,
+            COMMAND_CODE_SOURCE_FORMAT,
+        )
+    }
+}
+
+impl ProviderCaptureAdapter for RovoDevSessionJsonAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::RovoDev
+    }
+
+    fn source_format(&self) -> &str {
+        ROVODEV_SOURCE_FORMAT
+    }
+
+    fn normalize_path(
+        &self,
+        path: &Path,
+        context: &ProviderAdapterContext,
+    ) -> Result<ProviderNormalizationResult> {
+        normalize_rovodev_sessions(path, context)
+    }
+}
+
+impl ProviderCaptureAdapter for CortexCodeSessionJsonAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::CortexCode
+    }
+
+    fn source_format(&self) -> &str {
+        CORTEX_CODE_SOURCE_FORMAT
+    }
+
+    fn normalize_path(
+        &self,
+        path: &Path,
+        context: &ProviderAdapterContext,
+    ) -> Result<ProviderNormalizationResult> {
+        normalize_cortex_code_sessions(path, context)
     }
 }
 
@@ -5445,6 +5576,93 @@ pub fn import_neovate_history(
     )
 }
 
+pub fn import_command_code_history(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: CommandCodeImportOptions,
+) -> Result<ProviderImportSummary> {
+    import_native_jsonl_tree(
+        store,
+        NativeJsonlTreeImport {
+            path: path.as_ref(),
+            machine_id: options.machine_id,
+            source_path: options.source_path,
+            imported_at: options.imported_at,
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+        },
+        CommandCodeJsonlAdapter,
+    )
+}
+
+pub fn import_rovodev_history(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: RovoDevImportOptions,
+) -> Result<ProviderImportSummary> {
+    let path = path.as_ref();
+    let source_path = options
+        .source_path
+        .clone()
+        .unwrap_or_else(|| path.to_path_buf());
+    let normalization = RovoDevSessionJsonAdapter.normalize_path(
+        path,
+        &ProviderAdapterContext {
+            machine_id: options.machine_id,
+            source_path: Some(source_path),
+            imported_at: options.imported_at,
+            tool_output_mode: CodexToolOutputMode::Full,
+            event_mode: CodexEventImportMode::Rich,
+            include_notices: true,
+        },
+    )?;
+    import_normalized_provider_captures(
+        store,
+        normalization,
+        NormalizedProviderImportOptions {
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+            persist_cursors: true,
+            wrap_transaction: true,
+            fast_event_inserts: true,
+        },
+    )
+}
+
+pub fn import_cortex_code_history(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: CortexCodeImportOptions,
+) -> Result<ProviderImportSummary> {
+    let path = path.as_ref();
+    let source_path = options
+        .source_path
+        .clone()
+        .unwrap_or_else(|| path.to_path_buf());
+    let normalization = CortexCodeSessionJsonAdapter.normalize_path(
+        path,
+        &ProviderAdapterContext {
+            machine_id: options.machine_id,
+            source_path: Some(source_path),
+            imported_at: options.imported_at,
+            tool_output_mode: CodexToolOutputMode::Full,
+            event_mode: CodexEventImportMode::Rich,
+            include_notices: true,
+        },
+    )?;
+    import_normalized_provider_captures(
+        store,
+        normalization,
+        NormalizedProviderImportOptions {
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+            persist_cursors: true,
+            wrap_transaction: true,
+            fast_event_inserts: true,
+        },
+    )
+}
+
 pub fn import_mistral_vibe_history(
     path: impl AsRef<Path>,
     store: &mut Store,
@@ -5588,6 +5806,9 @@ const AUTOHAND_CODE_SOURCE_FORMAT: &str = "autohand_code_sessions_jsonl";
 const IFLOW_CLI_SOURCE_FORMAT: &str = "iflow_cli_session_jsonl";
 const KODE_SOURCE_FORMAT: &str = "kode_session_jsonl";
 const NEOVATE_SOURCE_FORMAT: &str = "neovate_session_jsonl";
+const COMMAND_CODE_SOURCE_FORMAT: &str = "command_code_session_jsonl";
+const ROVODEV_SOURCE_FORMAT: &str = "rovodev_session_json";
+const CORTEX_CODE_SOURCE_FORMAT: &str = "cortex_code_session_json";
 const FORGECODE_SQLITE_SOURCE_FORMAT: &str = "forgecode_sqlite";
 const DEEPAGENTS_SQLITE_SOURCE_FORMAT: &str = "deepagents_sessions_sqlite";
 const MISTRAL_VIBE_SOURCE_FORMAT: &str = "mistral_vibe_session_jsonl";
@@ -15587,6 +15808,7 @@ fn normalize_jsonl_tree(
     provider: CaptureProvider,
     source_format: &'static str,
 ) -> Result<ProviderNormalizationResult> {
+    let root_is_file = fs::symlink_metadata(path)?.file_type().is_file();
     let mut paths = Vec::new();
     collect_jsonl_paths(path, &mut paths)?;
     paths.retain(|path| provider_jsonl_path_is_native(provider, path));
@@ -15602,12 +15824,37 @@ fn normalize_jsonl_tree(
     }
 
     let mut merged = ProviderNormalizationResult::default();
+    let mut skipped_command_code_non_sessions = Vec::new();
     for path in paths {
-        let mut result =
-            normalize_native_jsonl_session_file(&path, context, provider, source_format)?;
-        merged.summary.merge(result.summary);
-        merged.captures.append(&mut result.captures);
-        merged.files_touched.append(&mut result.files_touched);
+        match normalize_native_jsonl_session_file(&path, context, provider, source_format) {
+            Ok(mut result) => {
+                merged.summary.merge(result.summary);
+                merged.captures.append(&mut result.captures);
+                merged.files_touched.append(&mut result.files_touched);
+            }
+            Err(CaptureError::InvalidProviderTranscriptPath { path, reason })
+                if provider == CaptureProvider::CommandCode
+                    && !root_is_file
+                    && reason == native_jsonl_missing_reason(provider) =>
+            {
+                skipped_command_code_non_sessions.push(path);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    if !skipped_command_code_non_sessions.is_empty() {
+        if merged.captures.is_empty() && merged.files_touched.is_empty() {
+            push_provider_import_failure(
+                &mut merged.summary,
+                0,
+                format!(
+                    "no Command Code session JSONL files with sessionId found; first skipped file: {}",
+                    skipped_command_code_non_sessions[0].display()
+                ),
+            );
+        } else {
+            merged.summary.skipped += skipped_command_code_non_sessions.len();
+        }
     }
     Ok(merged)
 }
@@ -15685,6 +15932,15 @@ fn provider_jsonl_path_is_native(provider: CaptureProvider, path: &Path) -> bool
                     )
                 })
         }
+        CaptureProvider::CommandCode => path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                name.ends_with(".jsonl")
+                    && !name.ends_with(".checkpoints.jsonl")
+                    && !name.contains(".checkpoints.")
+                    && !name.contains(".prompts.")
+            }),
         CaptureProvider::KimiCodeCli => {
             path.file_name().and_then(|name| name.to_str()) == Some("wire.jsonl")
                 && path
@@ -19754,6 +20010,7 @@ fn native_jsonl_header_session_id(provider: CaptureProvider, value: &Value) -> O
         CaptureProvider::IflowCli => value.get("sessionId").and_then(Value::as_str),
         CaptureProvider::Kode => value.get("sessionId").and_then(Value::as_str),
         CaptureProvider::Neovate => value.get("sessionId").and_then(Value::as_str),
+        CaptureProvider::CommandCode => value.get("sessionId").and_then(Value::as_str),
         CaptureProvider::Cursor => (value.get("role").is_some()
             || value.get("event").is_some()
             || value.get("message").is_some())
@@ -19790,6 +20047,10 @@ fn native_jsonl_header_cwd(provider: CaptureProvider, value: &Value) -> Option<S
         CaptureProvider::IflowCli => value.get("cwd").and_then(Value::as_str),
         CaptureProvider::Kode => value.get("cwd").and_then(Value::as_str),
         CaptureProvider::Neovate => value.get("cwd").and_then(Value::as_str),
+        CaptureProvider::CommandCode => value
+            .get("cwd")
+            .or_else(|| value.pointer("/metadata/cwd"))
+            .and_then(Value::as_str),
         _ => None,
     }
     .filter(|cwd| !cwd.trim().is_empty())
@@ -19908,6 +20169,30 @@ fn native_jsonl_path_session(
                 native_session_id.to_owned(),
                 parent,
                 external_agent_id,
+                agent_type,
+            )
+        }
+        CaptureProvider::CommandCode => {
+            let parent = header
+                .get("parentId")
+                .or_else(|| header.get("parent_id"))
+                .and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+                .map(str::to_owned);
+            let agent_type = if parent.is_some() {
+                AgentType::Subagent
+            } else {
+                AgentType::Primary
+            };
+            (
+                native_session_id.to_owned(),
+                parent,
+                header
+                    .pointer("/metadata/entrypoint")
+                    .or_else(|| header.get("entrypoint"))
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.trim().is_empty())
+                    .map(str::to_owned),
                 agent_type,
             )
         }
@@ -20243,6 +20528,25 @@ fn native_jsonl_event_type(provider: CaptureProvider, value: &Value) -> EventTyp
                 }
             }
         }
+        CaptureProvider::CommandCode => {
+            if native_jsonl_content_has(value, "tool_result")
+                || value.get("role").and_then(Value::as_str) == Some("tool")
+            {
+                EventType::ToolOutput
+            } else if native_jsonl_content_has(value, "tool_use")
+                || native_jsonl_content_has(value, "tool-call")
+                || json_field_has_non_empty_calls(value, &["toolCalls", "tool_calls"])
+            {
+                EventType::ToolCall
+            } else {
+                match value.get("role").and_then(Value::as_str) {
+                    Some("user" | "assistant") => EventType::Message,
+                    Some("system" | "developer") => EventType::Notice,
+                    Some("tool") => EventType::ToolOutput,
+                    _ => EventType::Notice,
+                }
+            }
+        }
         _ => EventType::Notice,
     }
 }
@@ -20303,6 +20607,7 @@ fn native_jsonl_role(provider: CaptureProvider, value: &Value) -> EventRole {
                 .or_else(|| value.pointer("/message/role"))
                 .and_then(Value::as_str),
         ),
+        CaptureProvider::CommandCode => provider_role(value.get("role").and_then(Value::as_str)),
         _ => EventRole::Unknown,
     }
 }
@@ -20412,6 +20717,13 @@ fn native_jsonl_event_text(
             .or_else(|| value.get("snapshot").and_then(provider_value_text))
             .or_else(|| value.get("metadata").and_then(provider_value_text))
             .unwrap_or_else(|| format!("Neovate event: {entry_type}")),
+        CaptureProvider::CommandCode => value
+            .get("content")
+            .and_then(provider_value_text)
+            .or_else(|| value.get("message").and_then(provider_value_text))
+            .or_else(|| value.get("toolUseResult").and_then(provider_value_text))
+            .or_else(|| value.get("toolResult").and_then(provider_value_text))
+            .unwrap_or_else(|| format!("Command Code event: {entry_type}")),
         _ if event_type == EventType::Notice => format!("Provider event: {entry_type}"),
         _ => serde_json::to_string(value).unwrap_or_else(|_| entry_type.to_owned()),
     }
@@ -20442,23 +20754,975 @@ fn native_jsonl_model(provider: CaptureProvider, value: &Value) -> Option<Value>
             .get("model")
             .cloned()
             .or_else(|| value.pointer("/metadata/model").cloned()),
+        CaptureProvider::CommandCode => value
+            .get("model")
+            .cloned()
+            .or_else(|| value.pointer("/metadata/model").cloned()),
         _ => None,
     }
 }
 
 fn native_jsonl_tokens(provider: CaptureProvider, value: &Value) -> Option<Value> {
     match provider {
-        CaptureProvider::IflowCli | CaptureProvider::Kode | CaptureProvider::Neovate => value
+        CaptureProvider::IflowCli
+        | CaptureProvider::Kode
+        | CaptureProvider::Neovate
+        | CaptureProvider::CommandCode => value
             .pointer("/message/usage")
             .cloned()
             .or_else(|| value.get("usage").cloned())
             .or_else(|| value.get("usageMetadata").cloned())
+            .or_else(|| value.pointer("/metadata/usage").cloned())
             .or_else(|| value.get("tokens").cloned()),
         _ => value
             .get("tokens")
             .or_else(|| value.get("usageMetadata"))
             .cloned(),
     }
+}
+
+#[derive(Debug, Clone)]
+struct RovoDevSessionSource {
+    session_dir: PathBuf,
+    context_path: PathBuf,
+    metadata_path: Option<PathBuf>,
+    provider_session_id: String,
+}
+
+fn normalize_rovodev_sessions(
+    path: &Path,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    let mut session_sources = Vec::new();
+    collect_rovodev_session_sources(path, &mut session_sources)?;
+    session_sources.sort_by(|left, right| left.context_path.cmp(&right.context_path));
+    session_sources.dedup_by(|left, right| left.context_path == right.context_path);
+    if session_sources.is_empty() {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "no Rovo Dev session_context.json files found",
+        });
+    }
+
+    let mut merged = ProviderNormalizationResult::default();
+    for source in session_sources {
+        let mut result = normalize_rovodev_session_source(&source, context)?;
+        merged.summary.merge(result.summary);
+        merged.captures.append(&mut result.captures);
+        merged.files_touched.append(&mut result.files_touched);
+    }
+    Ok(merged)
+}
+
+fn collect_rovodev_session_sources(
+    root: &Path,
+    sessions: &mut Vec<RovoDevSessionSource>,
+) -> Result<()> {
+    let metadata = fs::symlink_metadata(root)?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: root.to_path_buf(),
+            reason: "symlinked provider transcript roots are rejected",
+        });
+    }
+    ensure_provider_path_parents_are_not_symlinks(root)?;
+    if file_type.is_file() {
+        ensure_regular_provider_transcript_file(root)?;
+        if root.file_name().and_then(|name| name.to_str()) == Some("session_context.json") {
+            if let Some(session_dir) = root.parent() {
+                if let Some(source) = rovodev_session_source_from_dir(session_dir)? {
+                    sessions.push(source);
+                }
+            }
+        }
+        return Ok(());
+    }
+    if !file_type.is_dir() {
+        return Ok(());
+    }
+
+    if let Some(source) = rovodev_session_source_from_dir(root)? {
+        sessions.push(source);
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            collect_rovodev_session_sources(&entry.path(), sessions)?;
+        }
+    }
+    Ok(())
+}
+
+fn rovodev_session_source_from_dir(dir: &Path) -> Result<Option<RovoDevSessionSource>> {
+    let context_path = dir.join("session_context.json");
+    if !context_path.is_file() {
+        return Ok(None);
+    }
+    ensure_regular_provider_transcript_file(&context_path)?;
+    let metadata_path = provider_optional_regular_file(&dir.join("metadata.json"))?;
+    let provider_session_id = dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
+            path: dir.to_path_buf(),
+            reason: "Rovo Dev session directory is missing a session id",
+        })?;
+    Ok(Some(RovoDevSessionSource {
+        session_dir: dir.to_path_buf(),
+        context_path,
+        metadata_path,
+        provider_session_id,
+    }))
+}
+
+fn normalize_rovodev_session_source(
+    source: &RovoDevSessionSource,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    let mut result = ProviderNormalizationResult::default();
+    let context_json =
+        match read_provider_json_file(&source.context_path, "Rovo Dev session_context.json") {
+            Ok(value) => value,
+            Err(err) => {
+                push_provider_import_failure(&mut result.summary, 1, err.to_string());
+                return Ok(result);
+            }
+        };
+    let metadata = match source.metadata_path.as_deref() {
+        Some(path) => match read_provider_json_file(path, "Rovo Dev metadata.json") {
+            Ok(value) => value,
+            Err(err) => {
+                push_provider_import_failure(&mut result.summary, 1, err.to_string());
+                Value::Null
+            }
+        },
+        None => Value::Null,
+    };
+    let Some(messages) = rovodev_message_history(&context_json) else {
+        push_provider_import_failure(
+            &mut result.summary,
+            1,
+            "Rovo Dev session_context.json is missing message_history array".to_owned(),
+        );
+        return Ok(result);
+    };
+    let provider_session_id = provider_string_field(&metadata, &["session_id", "sessionId"])
+        .or_else(|| provider_string_field(&context_json, &["session_id", "sessionId"]))
+        .unwrap_or_else(|| source.provider_session_id.clone());
+    let parent_provider_session_id = provider_string_field(
+        &metadata,
+        &[
+            "parent_session_id",
+            "parentSessionId",
+            "forked_from_session_id",
+            "forkedFromSessionId",
+            "fork_parent_id",
+        ],
+    );
+    let started_at = provider_timestamp_from_fields(
+        &metadata,
+        &["created_at", "createdAt", "started_at", "startedAt"],
+    )
+    .or_else(|| messages.iter().find_map(rovodev_message_timestamp))
+    .unwrap_or(context.imported_at);
+    let ended_at = provider_timestamp_from_fields(
+        &metadata,
+        &["updated_at", "updatedAt", "last_updated", "lastUpdated"],
+    )
+    .or_else(|| messages.iter().rev().find_map(rovodev_message_timestamp));
+    let cwd = provider_string_field(
+        &metadata,
+        &[
+            "workspace_path",
+            "workspacePath",
+            "working_directory",
+            "workingDirectory",
+            "cwd",
+        ],
+    );
+    let raw_source_path = source.context_path.display().to_string();
+
+    if messages.is_empty() {
+        result.captures.push((
+            0,
+            rovodev_capture(
+                RovoDevCaptureDraft {
+                    provider_session_id,
+                    parent_provider_session_id,
+                    started_at,
+                    ended_at,
+                    cwd,
+                    source,
+                    context_json: &context_json,
+                    metadata: &metadata,
+                    message_count: 0,
+                    event: None,
+                },
+                context,
+            ),
+        ));
+        return Ok(result);
+    }
+
+    let message_count = messages.len();
+    for (index, message) in messages.iter().enumerate() {
+        let line = index + 1;
+        let occurred_at = rovodev_message_timestamp(message).unwrap_or(started_at);
+        let event = rovodev_event(
+            &provider_session_id,
+            index as u64,
+            message,
+            occurred_at,
+            source,
+        );
+        result
+            .files_touched
+            .extend(provider_file_touches_from_raw_value(
+                CaptureProvider::RovoDev,
+                &provider_session_id,
+                ROVODEV_SOURCE_FORMAT,
+                Some(raw_source_path.as_str()),
+                message,
+                &event,
+                line,
+            ));
+        result.captures.push((
+            line,
+            rovodev_capture(
+                RovoDevCaptureDraft {
+                    provider_session_id: provider_session_id.clone(),
+                    parent_provider_session_id: parent_provider_session_id.clone(),
+                    started_at,
+                    ended_at,
+                    cwd: cwd.clone(),
+                    source,
+                    context_json: &context_json,
+                    metadata: &metadata,
+                    message_count,
+                    event: Some(event),
+                },
+                context,
+            ),
+        ));
+    }
+    Ok(result)
+}
+
+struct RovoDevCaptureDraft<'a> {
+    provider_session_id: String,
+    parent_provider_session_id: Option<String>,
+    started_at: DateTime<Utc>,
+    ended_at: Option<DateTime<Utc>>,
+    cwd: Option<String>,
+    source: &'a RovoDevSessionSource,
+    context_json: &'a Value,
+    metadata: &'a Value,
+    message_count: usize,
+    event: Option<ProviderEventEnvelope>,
+}
+
+fn rovodev_capture(
+    draft: RovoDevCaptureDraft<'_>,
+    context: &ProviderAdapterContext,
+) -> ProviderCaptureEnvelope {
+    let is_primary = draft.parent_provider_session_id.is_none();
+    native_provider_capture(
+        NativeSessionDraft {
+            provider: CaptureProvider::RovoDev,
+            source_format: ROVODEV_SOURCE_FORMAT,
+            provider_session_id: draft.provider_session_id.clone(),
+            parent_provider_session_id: draft.parent_provider_session_id.clone(),
+            root_provider_session_id: draft.parent_provider_session_id.clone(),
+            external_agent_id: provider_string_field(
+                draft.metadata,
+                &["agent_id", "agentId", "agent_name", "agentName"],
+            ),
+            agent_type: if is_primary {
+                AgentType::Primary
+            } else {
+                AgentType::Subagent
+            },
+            role_hint: Some(if is_primary { "primary" } else { "subagent" }.to_owned()),
+            is_primary,
+            started_at: draft.started_at,
+            ended_at: draft.ended_at,
+            cwd: draft.cwd,
+            fidelity: Fidelity::Imported,
+            raw_source_path: draft.source.context_path.display().to_string(),
+            trust: ProviderSourceTrust::ProviderNative,
+            source_metadata: json!({
+                "adapter": ROVODEV_SOURCE_FORMAT,
+                "source_path": draft.source.context_path.display().to_string(),
+                "metadata_path": draft.source.metadata_path.as_ref().map(|path| path.display().to_string()),
+                "session_dir": draft.source.session_dir.display().to_string(),
+                "upstream_schema_anchor": {
+                    "docs": "https://support.atlassian.com/rovo/docs/manage-sessions-in-rovo-dev-cli/"
+                },
+            }),
+            session_metadata: json!({
+                "source_format": ROVODEV_SOURCE_FORMAT,
+                "provider": CaptureProvider::RovoDev.as_str(),
+                "session_id": draft.provider_session_id,
+                "title": provider_string_field(draft.metadata, &["title", "name"]),
+                "workspace_path": provider_string_field(draft.metadata, &["workspace_path", "workspacePath"]),
+                "message_count": draft.message_count,
+                "metadata": provider_capped_json_value(draft.metadata, PROVIDER_MAX_PREVIEW_CHARS),
+                "context": provider_capped_json_value(&provider_json_without_keys(draft.context_json, &["message_history", "messages"]), PROVIDER_MAX_PREVIEW_CHARS),
+            }),
+        },
+        context,
+        draft.event,
+    )
+}
+
+fn rovodev_event(
+    provider_session_id: &str,
+    event_index: u64,
+    message: &Value,
+    occurred_at: DateTime<Utc>,
+    source: &RovoDevSessionSource,
+) -> ProviderEventEnvelope {
+    let role_text = message
+        .get("role")
+        .or_else(|| message.get("kind"))
+        .or_else(|| message.get("type"))
+        .and_then(Value::as_str);
+    native_event(NativeEventDraft {
+        provider: CaptureProvider::RovoDev,
+        source_format: ROVODEV_SOURCE_FORMAT,
+        provider_session_id: provider_session_id.to_owned(),
+        provider_event_index: event_index,
+        provider_event_hash: Some(provider_message_id(message, event_index)),
+        cursor: format!(
+            "{}:{}",
+            source.context_path.display(),
+            provider_message_id(message, event_index)
+        ),
+        event_type: provider_block_event_type(message, role_text),
+        role: Some(provider_role_from_message(message, role_text)),
+        occurred_at,
+        text: provider_block_text(message).unwrap_or_else(|| "Rovo Dev message".to_owned()),
+        body: message.clone(),
+        metadata: json!({
+            "source": ROVODEV_SOURCE_FORMAT,
+            "source_format": ROVODEV_SOURCE_FORMAT,
+            "message_id": provider_message_id(message, event_index),
+            "role": role_text,
+            "kind": message.get("kind").and_then(Value::as_str),
+            "part_count": provider_message_parts(message).map(|parts| parts.len()),
+        }),
+    })
+}
+
+fn rovodev_message_history(value: &Value) -> Option<&Vec<Value>> {
+    value
+        .get("message_history")
+        .or_else(|| value.pointer("/session_context/message_history"))
+        .or_else(|| value.get("messages"))
+        .or_else(|| value.pointer("/conversation/messages"))
+        .and_then(Value::as_array)
+}
+
+fn rovodev_message_timestamp(value: &Value) -> Option<DateTime<Utc>> {
+    provider_timestamp_from_fields(
+        value,
+        &[
+            "timestamp",
+            "created_at",
+            "createdAt",
+            "updated_at",
+            "updatedAt",
+            "user_sent_time",
+        ],
+    )
+}
+
+#[derive(Debug, Clone)]
+struct CortexCodeSessionSource {
+    session_dir: PathBuf,
+    provider_session_id: String,
+    snapshot_path: Option<PathBuf>,
+    history_path: Option<PathBuf>,
+}
+
+fn normalize_cortex_code_sessions(
+    path: &Path,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    let mut sources = BTreeMap::new();
+    collect_cortex_code_session_sources(path, &mut sources)?;
+    if sources.is_empty() {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "no Cortex Code session JSON or history JSONL files found",
+        });
+    }
+
+    let mut merged = ProviderNormalizationResult::default();
+    for source in sources.into_values() {
+        let mut result = normalize_cortex_code_session_source(&source, context)?;
+        merged.summary.merge(result.summary);
+        merged.captures.append(&mut result.captures);
+        merged.files_touched.append(&mut result.files_touched);
+    }
+    Ok(merged)
+}
+
+fn collect_cortex_code_session_sources(
+    root: &Path,
+    sources: &mut BTreeMap<(PathBuf, String), CortexCodeSessionSource>,
+) -> Result<()> {
+    let metadata = fs::symlink_metadata(root)?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: root.to_path_buf(),
+            reason: "symlinked provider transcript roots are rejected",
+        });
+    }
+    ensure_provider_path_parents_are_not_symlinks(root)?;
+    if file_type.is_file() {
+        ensure_regular_provider_transcript_file(root)?;
+        cortex_code_insert_source_file(root, sources)?;
+        return Ok(());
+    }
+    if !file_type.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            collect_cortex_code_session_sources(&path, sources)?;
+        } else if file_type.is_file() {
+            cortex_code_insert_source_file(&path, sources)?;
+        }
+    }
+    Ok(())
+}
+
+fn cortex_code_insert_source_file(
+    path: &Path,
+    sources: &mut BTreeMap<(PathBuf, String), CortexCodeSessionSource>,
+) -> Result<()> {
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return Ok(());
+    };
+    let (provider_session_id, is_history) =
+        if let Some(id) = file_name.strip_suffix(".history.jsonl") {
+            (id.to_owned(), true)
+        } else if let Some(id) = file_name.strip_suffix(".json") {
+            if id.ends_with(".history") {
+                return Ok(());
+            }
+            (id.to_owned(), false)
+        } else {
+            return Ok(());
+        };
+    if provider_session_id.trim().is_empty() {
+        return Ok(());
+    }
+    ensure_regular_provider_transcript_file(path)?;
+    let session_dir = path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let key = (session_dir.clone(), provider_session_id.clone());
+    let entry = sources
+        .entry(key)
+        .or_insert_with(|| CortexCodeSessionSource {
+            session_dir,
+            provider_session_id,
+            snapshot_path: None,
+            history_path: None,
+        });
+    if is_history {
+        entry.history_path = Some(path.to_path_buf());
+    } else {
+        entry.snapshot_path = Some(path.to_path_buf());
+    }
+    Ok(())
+}
+
+fn normalize_cortex_code_session_source(
+    source: &CortexCodeSessionSource,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    let mut result = ProviderNormalizationResult::default();
+    let (snapshot, snapshot_failed) = match source.snapshot_path.as_deref() {
+        Some(path) => match read_provider_json_file(path, "Cortex Code session JSON") {
+            Ok(value) => (value, false),
+            Err(err) => {
+                push_provider_import_failure(&mut result.summary, 1, err.to_string());
+                (Value::Null, true)
+            }
+        },
+        None => (Value::Null, false),
+    };
+    let provider_session_id = provider_string_field(&snapshot, &["session_id", "sessionId"])
+        .unwrap_or_else(|| source.provider_session_id.clone());
+    let mut rows = Vec::new();
+    if let Some(history_path) = &source.history_path {
+        rows = read_cortex_history_jsonl(history_path, &mut result.summary)?;
+    }
+    if rows.is_empty() {
+        if let Some(history) = snapshot
+            .get("history")
+            .or_else(|| snapshot.get("messages"))
+            .and_then(Value::as_array)
+        {
+            rows = history
+                .iter()
+                .enumerate()
+                .map(|(index, value)| (index + 1, value.clone()))
+                .collect();
+        }
+    }
+    let started_at = provider_timestamp_from_fields(
+        &snapshot,
+        &["created_at", "createdAt", "started_at", "startedAt"],
+    )
+    .or_else(|| {
+        rows.iter()
+            .find_map(|(_, value)| cortex_message_timestamp(value))
+    })
+    .unwrap_or(context.imported_at);
+    let ended_at = provider_timestamp_from_fields(
+        &snapshot,
+        &["last_updated", "lastUpdated", "updated_at", "updatedAt"],
+    )
+    .or_else(|| {
+        rows.iter()
+            .rev()
+            .find_map(|(_, value)| cortex_message_timestamp(value))
+    });
+    let cwd = provider_string_field(
+        &snapshot,
+        &[
+            "working_directory",
+            "workingDirectory",
+            "workspace_path",
+            "workspacePath",
+            "cwd",
+        ],
+    );
+    if rows.is_empty() && snapshot_failed {
+        return Ok(result);
+    }
+    if rows.is_empty() {
+        result.captures.push((
+            0,
+            cortex_code_capture(
+                CortexCodeCaptureDraft {
+                    provider_session_id,
+                    started_at,
+                    ended_at,
+                    cwd,
+                    source,
+                    snapshot: &snapshot,
+                    event: None,
+                    message_count: 0,
+                },
+                context,
+            ),
+        ));
+        return Ok(result);
+    }
+
+    let message_count = rows.len();
+    for (line, value) in rows {
+        let event_index = (line - 1) as u64;
+        let occurred_at = cortex_message_timestamp(&value).unwrap_or(started_at);
+        let event = cortex_code_event(
+            &provider_session_id,
+            event_index,
+            line,
+            &value,
+            occurred_at,
+            source,
+        );
+        let raw_source_path = cortex_code_primary_path(source).display().to_string();
+        result
+            .files_touched
+            .extend(provider_file_touches_from_raw_value(
+                CaptureProvider::CortexCode,
+                &provider_session_id,
+                CORTEX_CODE_SOURCE_FORMAT,
+                Some(raw_source_path.as_str()),
+                &value,
+                &event,
+                line,
+            ));
+        result.captures.push((
+            line,
+            cortex_code_capture(
+                CortexCodeCaptureDraft {
+                    provider_session_id: provider_session_id.clone(),
+                    started_at,
+                    ended_at,
+                    cwd: cwd.clone(),
+                    source,
+                    snapshot: &snapshot,
+                    event: Some(event),
+                    message_count,
+                },
+                context,
+            ),
+        ));
+    }
+    Ok(result)
+}
+
+struct CortexCodeCaptureDraft<'a> {
+    provider_session_id: String,
+    started_at: DateTime<Utc>,
+    ended_at: Option<DateTime<Utc>>,
+    cwd: Option<String>,
+    source: &'a CortexCodeSessionSource,
+    snapshot: &'a Value,
+    event: Option<ProviderEventEnvelope>,
+    message_count: usize,
+}
+
+fn cortex_code_capture(
+    draft: CortexCodeCaptureDraft<'_>,
+    context: &ProviderAdapterContext,
+) -> ProviderCaptureEnvelope {
+    let primary_path = cortex_code_primary_path(draft.source);
+    native_provider_capture(
+        NativeSessionDraft {
+            provider: CaptureProvider::CortexCode,
+            source_format: CORTEX_CODE_SOURCE_FORMAT,
+            provider_session_id: draft.provider_session_id.clone(),
+            parent_provider_session_id: None,
+            root_provider_session_id: None,
+            external_agent_id: provider_string_field(
+                draft.snapshot,
+                &["connection_name", "connectionName"],
+            ),
+            agent_type: AgentType::Primary,
+            role_hint: Some("primary".to_owned()),
+            is_primary: true,
+            started_at: draft.started_at,
+            ended_at: draft.ended_at,
+            cwd: draft.cwd,
+            fidelity: Fidelity::Imported,
+            raw_source_path: primary_path.display().to_string(),
+            trust: ProviderSourceTrust::ProviderNative,
+            source_metadata: json!({
+                "adapter": CORTEX_CODE_SOURCE_FORMAT,
+                "source_path": primary_path.display().to_string(),
+                "snapshot_path": draft.source.snapshot_path.as_ref().map(|path| path.display().to_string()),
+                "history_path": draft.source.history_path.as_ref().map(|path| path.display().to_string()),
+                "session_dir": draft.source.session_dir.display().to_string(),
+                "upstream_schema_anchor": {
+                    "docs": "https://docs.snowflake.com/en/user-guide/cortex-code/cortex-code-acp"
+                },
+            }),
+            session_metadata: json!({
+                "source_format": CORTEX_CODE_SOURCE_FORMAT,
+                "provider": CaptureProvider::CortexCode.as_str(),
+                "session_id": draft.provider_session_id,
+                "title": provider_string_field(draft.snapshot, &["title", "name"]),
+                "connection_name": provider_string_field(draft.snapshot, &["connection_name", "connectionName"]),
+                "message_count": draft.message_count,
+                "snapshot": provider_capped_json_value(&provider_json_without_keys(draft.snapshot, &["history", "messages"]), PROVIDER_MAX_PREVIEW_CHARS),
+            }),
+        },
+        context,
+        draft.event,
+    )
+}
+
+fn cortex_code_event(
+    provider_session_id: &str,
+    event_index: u64,
+    line: usize,
+    value: &Value,
+    occurred_at: DateTime<Utc>,
+    source: &CortexCodeSessionSource,
+) -> ProviderEventEnvelope {
+    let role_text = value
+        .get("role")
+        .or_else(|| value.get("type"))
+        .and_then(Value::as_str);
+    native_event(NativeEventDraft {
+        provider: CaptureProvider::CortexCode,
+        source_format: CORTEX_CODE_SOURCE_FORMAT,
+        provider_session_id: provider_session_id.to_owned(),
+        provider_event_index: event_index,
+        provider_event_hash: Some(provider_message_id(value, event_index)),
+        cursor: format!("{}:{line}", cortex_code_primary_path(source).display()),
+        event_type: provider_block_event_type(value, role_text),
+        role: Some(provider_role_from_message(value, role_text)),
+        occurred_at,
+        text: provider_block_text(value).unwrap_or_else(|| "Cortex Code message".to_owned()),
+        body: value.clone(),
+        metadata: json!({
+            "source": CORTEX_CODE_SOURCE_FORMAT,
+            "source_format": CORTEX_CODE_SOURCE_FORMAT,
+            "line": line,
+            "message_id": provider_message_id(value, event_index),
+            "role": role_text,
+            "part_count": provider_message_parts(value).map(|parts| parts.len()),
+        }),
+    })
+}
+
+fn read_cortex_history_jsonl(
+    path: &Path,
+    summary: &mut ProviderImportSummary,
+) -> Result<Vec<(usize, Value)>> {
+    let file = File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+    let mut line_number = 0usize;
+    let mut rows = Vec::new();
+    while read_provider_jsonl_line(&mut reader, &mut line)? {
+        line_number += 1;
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        match serde_json::from_slice::<Value>(&line) {
+            Ok(value) if value.is_object() => rows.push((line_number, value)),
+            Ok(_) => push_provider_import_failure(
+                summary,
+                line_number,
+                "Cortex Code history JSONL line must contain a JSON object".to_owned(),
+            ),
+            Err(err) => push_provider_import_failure(
+                summary,
+                line_number,
+                format!("malformed JSONL: {err}"),
+            ),
+        }
+    }
+    Ok(rows)
+}
+
+fn cortex_code_primary_path(source: &CortexCodeSessionSource) -> &Path {
+    source
+        .history_path
+        .as_deref()
+        .or(source.snapshot_path.as_deref())
+        .unwrap_or(source.session_dir.as_path())
+}
+
+fn cortex_message_timestamp(value: &Value) -> Option<DateTime<Utc>> {
+    provider_timestamp_from_fields(
+        value,
+        &[
+            "user_sent_time",
+            "timestamp",
+            "created_at",
+            "createdAt",
+            "updated_at",
+            "updatedAt",
+        ],
+    )
+}
+
+fn provider_optional_regular_file(path: &Path) -> Result<Option<PathBuf>> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            ensure_regular_provider_transcript_file(path)?;
+            Ok(Some(path.to_path_buf()))
+        }
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(CaptureError::InvalidProviderTranscriptPath {
+                path: path.to_path_buf(),
+                reason: "symlinked provider transcript files are rejected",
+            })
+        }
+        Ok(_) => Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "provider sidecar paths must be regular files",
+        }),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn read_provider_json_file(path: &Path, label: &str) -> Result<Value> {
+    let raw = read_text_file_limited(path, MAX_PROVIDER_JSONL_LINE_BYTES, label)?;
+    let value: Value = serde_json::from_str(&raw)?;
+    if !value.is_object() {
+        return Err(CaptureError::InvalidPayload(format!(
+            "{label} must contain a JSON object"
+        )));
+    }
+    Ok(value)
+}
+
+fn provider_string_field(value: &Value, fields: &[&str]) -> Option<String> {
+    fields.iter().find_map(|field| {
+        value
+            .get(*field)
+            .and_then(Value::as_str)
+            .filter(|text| !text.trim().is_empty())
+            .map(str::to_owned)
+    })
+}
+
+fn provider_timestamp_from_fields(value: &Value, fields: &[&str]) -> Option<DateTime<Utc>> {
+    fields.iter().find_map(|field| {
+        let raw = value.get(*field)?;
+        match raw {
+            Value::String(text) => parse_rfc3339_utc(text).or_else(|| {
+                text.parse::<f64>()
+                    .ok()
+                    .and_then(provider_timestamp_seconds_to_datetime)
+            }),
+            Value::Number(number) => number
+                .as_f64()
+                .and_then(provider_timestamp_seconds_to_datetime),
+            _ => None,
+        }
+    })
+}
+
+fn provider_message_id(value: &Value, fallback_index: u64) -> String {
+    value
+        .get("id")
+        .or_else(|| value.get("message_id"))
+        .or_else(|| value.get("messageId"))
+        .or_else(|| value.get("request_id"))
+        .or_else(|| value.get("requestId"))
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("message-{fallback_index}"))
+}
+
+fn provider_role_from_message(value: &Value, role_text: Option<&str>) -> EventRole {
+    let role = role_text.or_else(|| value.get("kind").and_then(Value::as_str));
+    match role {
+        Some("user" | "human" | "user_prompt" | "user-prompt") => EventRole::User,
+        Some("assistant" | "agent" | "ai" | "model") => EventRole::Assistant,
+        Some("system" | "developer" | "system_prompt" | "system-prompt") => EventRole::System,
+        Some("tool" | "tool_result" | "tool-result" | "tool_use_result") => EventRole::Tool,
+        _ => EventRole::Unknown,
+    }
+}
+
+fn provider_block_event_type(value: &Value, role_text: Option<&str>) -> EventType {
+    let role = role_text.unwrap_or_default();
+    if role.contains("tool_result")
+        || role.contains("tool-result")
+        || provider_message_has_part_kind(value, &["tool_result", "tool-result"])
+    {
+        EventType::ToolOutput
+    } else if role.contains("tool_use")
+        || role.contains("tool-use")
+        || provider_message_has_part_kind(
+            value,
+            &["tool_use", "tool-use", "tool-call", "tool_call"],
+        )
+    {
+        EventType::ToolCall
+    } else if matches!(
+        role,
+        "system" | "developer" | "system_prompt" | "system-prompt"
+    ) {
+        EventType::Notice
+    } else {
+        EventType::Message
+    }
+}
+
+fn provider_message_has_part_kind(value: &Value, kinds: &[&str]) -> bool {
+    provider_message_parts(value)
+        .map(|parts| {
+            parts.iter().any(|part| {
+                part.get("type")
+                    .or_else(|| part.get("kind"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| kinds.contains(&kind))
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn provider_block_text(value: &Value) -> Option<String> {
+    for key in [
+        "text", "content", "message", "prompt", "response", "output", "summary",
+    ] {
+        if let Some(text) = value.get(key).and_then(provider_value_text) {
+            if !text.trim().is_empty() {
+                return Some(text);
+            }
+        }
+    }
+    let parts = provider_message_parts(value)?;
+    let mut rendered = Vec::new();
+    for part in parts {
+        if let Some(text) = provider_part_text(part) {
+            rendered.push(text);
+        }
+    }
+    (!rendered.is_empty()).then(|| rendered.join("\n"))
+}
+
+fn provider_message_parts(value: &Value) -> Option<&Vec<Value>> {
+    value
+        .get("parts")
+        .or_else(|| value.get("content"))
+        .or_else(|| value.get("blocks"))
+        .and_then(Value::as_array)
+}
+
+fn provider_part_text(part: &Value) -> Option<String> {
+    let kind = part
+        .get("type")
+        .or_else(|| part.get("kind"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if matches!(
+        kind,
+        "tool_use" | "tool-use" | "tool_call" | "tool-call" | "function_call"
+    ) {
+        let name = part
+            .get("name")
+            .or_else(|| part.get("tool"))
+            .or_else(|| part.get("tool_name"))
+            .or_else(|| part.get("toolName"))
+            .and_then(Value::as_str)
+            .unwrap_or("tool");
+        return Some(format!("tool call: {name}"));
+    }
+    if matches!(
+        kind,
+        "tool_result" | "tool-result" | "tool_use_result" | "function_result"
+    ) {
+        return part
+            .get("content")
+            .or_else(|| part.get("result"))
+            .or_else(|| part.get("output"))
+            .and_then(provider_value_text)
+            .or_else(|| Some("tool result".to_owned()));
+    }
+    part.get("text")
+        .or_else(|| part.get("content"))
+        .or_else(|| part.get("thinking"))
+        .or_else(|| part.get("summary"))
+        .and_then(provider_value_text)
+}
+
+fn provider_json_without_keys(value: &Value, keys: &[&str]) -> Value {
+    let Value::Object(object) = value else {
+        return value.clone();
+    };
+    let mut object = object.clone();
+    for key in keys {
+        object.remove(*key);
+    }
+    Value::Object(object)
 }
 
 #[derive(Debug, Clone)]
@@ -23095,6 +24359,15 @@ fn native_jsonl_content_has(value: &Value, expected: &str) -> bool {
                 .any(|block| block.get("type").and_then(Value::as_str) == Some(expected))
         })
         .unwrap_or(false)
+}
+
+fn json_field_has_non_empty_calls(value: &Value, fields: &[&str]) -> bool {
+    fields.iter().any(|field| match value.get(*field) {
+        Some(Value::Array(items)) => !items.is_empty(),
+        Some(Value::Object(object)) => !object.is_empty(),
+        Some(Value::String(text)) => !text.trim().is_empty(),
+        _ => false,
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -29993,6 +31266,188 @@ mod tests {
         assert_eq!(neovate_second.imported_events, 0);
         assert_eq!(neovate_second.skipped_sessions, 1);
         assert_eq!(neovate_second.skipped_events, 5);
+    }
+
+    #[test]
+    fn native_command_code_fixture_imports_searches_reimports_and_file_touches() {
+        let temp = tempdir();
+        let fixture = provider_history_fixture("command-code/v1/projects");
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let source = provider_source_for_path(CaptureProvider::CommandCode, fixture.clone());
+        assert_eq!(source.source_format, "command_code_session_jsonl_tree");
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+
+        let first = import_command_code_history(
+            &fixture,
+            &mut store,
+            CommandCodeImportOptions {
+                machine_id: "test-machine".into(),
+                source_path: Some(fixture.clone()),
+                imported_at: DateTime::parse_from_rfc3339("2026-07-04T14:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                allow_partial_failures: true,
+                ..CommandCodeImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(first.failed, 0, "{:?}", first.failures);
+        assert_eq!(first.imported_sessions, 2);
+        assert_eq!(first.imported_events, 5);
+        assert_eq!(first.imported_edges, 1);
+        let command_parent =
+            provider_session_uuid(CaptureProvider::CommandCode, "command-code-fixture-session");
+        let command_child =
+            provider_session_uuid(CaptureProvider::CommandCode, "command-code-child-session");
+        assert_eq!(
+            store.get_session(command_child).unwrap().parent_session_id,
+            Some(command_parent)
+        );
+        assert!(store
+            .search_event_hits("command code fixture oracle", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::CommandCode)));
+        assert!(store
+            .export_archive()
+            .unwrap()
+            .files_touched
+            .iter()
+            .any(|file| file.path == "src/command_code_oracle.rs"));
+
+        let second = import_command_code_history(
+            &fixture,
+            &mut store,
+            CommandCodeImportOptions {
+                source_path: Some(fixture.clone()),
+                allow_partial_failures: true,
+                ..CommandCodeImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(second.failed, 0, "{:?}", second.failures);
+        assert_eq!(second.imported_sessions, 0);
+        assert_eq!(second.imported_events, 0);
+        assert_eq!(second.imported_edges, 0);
+        assert_eq!(second.skipped_sessions, 2);
+        assert_eq!(second.skipped_events, 5);
+        assert_eq!(second.skipped_edges, 1);
+    }
+
+    #[test]
+    fn native_rovodev_fixture_imports_searches_reimports_and_file_touches() {
+        let temp = tempdir();
+        let fixture = provider_history_fixture("rovodev/v1/sessions");
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let source = provider_source_for_path(CaptureProvider::RovoDev, fixture.clone());
+        assert_eq!(source.source_format, "rovodev_session_json_tree");
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+
+        let first = import_rovodev_history(
+            &fixture,
+            &mut store,
+            RovoDevImportOptions {
+                machine_id: "test-machine".into(),
+                source_path: Some(fixture.clone()),
+                imported_at: DateTime::parse_from_rfc3339("2026-07-04T15:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                allow_partial_failures: true,
+                ..RovoDevImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(first.failed, 0, "{:?}", first.failures);
+        assert_eq!(first.imported_sessions, 1);
+        assert_eq!(first.imported_events, 3);
+        assert!(store
+            .search_event_hits("rovodev fixture oracle", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::RovoDev)));
+        assert!(store
+            .export_archive()
+            .unwrap()
+            .files_touched
+            .iter()
+            .any(|file| file.path == "src/rovodev_oracle.rs"));
+
+        let second = import_rovodev_history(
+            &fixture,
+            &mut store,
+            RovoDevImportOptions {
+                source_path: Some(fixture.clone()),
+                allow_partial_failures: true,
+                ..RovoDevImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(second.failed, 0, "{:?}", second.failures);
+        assert_eq!(second.imported_sessions, 0);
+        assert_eq!(second.imported_events, 0);
+        assert_eq!(second.skipped_sessions, 1);
+        assert_eq!(second.skipped_events, 3);
+    }
+
+    #[test]
+    fn native_cortex_code_fixture_imports_searches_reimports_and_file_touches() {
+        let temp = tempdir();
+        let fixture = provider_history_fixture("cortex-code/v1/conversations");
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let source = provider_source_for_path(CaptureProvider::CortexCode, fixture.clone());
+        assert_eq!(source.source_format, "cortex_code_conversations_json");
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+
+        let first = import_cortex_code_history(
+            &fixture,
+            &mut store,
+            CortexCodeImportOptions {
+                machine_id: "test-machine".into(),
+                source_path: Some(fixture.clone()),
+                imported_at: DateTime::parse_from_rfc3339("2026-07-04T16:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                allow_partial_failures: true,
+                ..CortexCodeImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(first.failed, 0, "{:?}", first.failures);
+        assert_eq!(first.imported_sessions, 1);
+        assert_eq!(first.imported_events, 3);
+        assert!(store
+            .search_event_hits("cortex code fixture oracle", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::CortexCode)));
+        assert!(store
+            .export_archive()
+            .unwrap()
+            .files_touched
+            .iter()
+            .any(|file| file.path == "src/cortex_code_oracle.rs"));
+
+        let second = import_cortex_code_history(
+            &fixture,
+            &mut store,
+            CortexCodeImportOptions {
+                source_path: Some(fixture.clone()),
+                allow_partial_failures: true,
+                ..CortexCodeImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(second.failed, 0, "{:?}", second.failures);
+        assert_eq!(second.imported_sessions, 0);
+        assert_eq!(second.imported_events, 0);
+        assert_eq!(second.skipped_sessions, 1);
+        assert_eq!(second.skipped_events, 3);
     }
 
     #[test]

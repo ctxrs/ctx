@@ -2505,7 +2505,7 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
             vec![
                 "Usage: ctx import",
                 "--provider <PROVIDER>",
-                "[possible values: codex, pi, claude, opencode, kilo, kiro-cli, crush, goose, antigravity, gemini, cursor, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, forgecode, deepagents, mistral-vibe, mux, reasonix, kode, neovate, terramind, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto, lingma, codebuddy, aider-desk]",
+                "[possible values: codex, pi, claude, opencode, kilo, kiro-cli, crush, goose, antigravity, gemini, cursor, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, forgecode, deepagents, mistral-vibe, mux, reasonix, kode, neovate, command-code, terramind, rovodev, cortex-code, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto, lingma, codebuddy, aider-desk]",
                 "--path <PATH>",
                 "--format <FORMAT>",
                 "--resume",
@@ -5921,6 +5921,17 @@ fn search_refresh_auto_imports_discovered_top_provider_sources() {
         ("reasonix", "reasonix", install_default_reasonix_fixture),
         ("kode", "kode", install_default_kode_fixture),
         ("neovate", "neovate", install_default_neovate_fixture),
+        (
+            "command-code",
+            "command_code",
+            install_default_command_code_fixture,
+        ),
+        ("rovodev", "rovodev", install_default_rovodev_fixture),
+        (
+            "cortex-code",
+            "cortex_code",
+            install_default_cortex_code_fixture,
+        ),
         ("lingma", "lingma", install_default_lingma_fixture),
     ] {
         let temp = tempdir();
@@ -6330,6 +6341,24 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
             "neovate",
             "neovate_session_jsonl_tree",
             write_native_neovate_fixture,
+        ),
+        (
+            "command-code",
+            "command_code",
+            "command_code_session_jsonl_tree",
+            write_native_command_code_fixture,
+        ),
+        (
+            "rovodev",
+            "rovodev",
+            "rovodev_session_json_tree",
+            write_native_rovodev_fixture,
+        ),
+        (
+            "cortex-code",
+            "cortex_code",
+            "cortex_code_conversations_json",
+            write_native_cortex_code_fixture,
         ),
         (
             "terramind",
@@ -6917,6 +6946,28 @@ fn install_default_kode_fixture(temp: &TempDir, query: &str) {
 fn install_default_neovate_fixture(temp: &TempDir, query: &str) {
     let source = PathBuf::from(write_native_neovate_fixture(temp, query));
     copy_dir_all(&source, &temp.path().join(".neovate").join("projects"));
+}
+
+fn install_default_command_code_fixture(temp: &TempDir, query: &str) {
+    let source = PathBuf::from(write_native_command_code_fixture(temp, query));
+    copy_dir_all(&source, &temp.path().join(".commandcode").join("projects"));
+}
+
+fn install_default_rovodev_fixture(temp: &TempDir, query: &str) {
+    let source = PathBuf::from(write_native_rovodev_fixture(temp, query));
+    copy_dir_all(&source, &temp.path().join(".rovodev").join("sessions"));
+}
+
+fn install_default_cortex_code_fixture(temp: &TempDir, query: &str) {
+    let source = PathBuf::from(write_native_cortex_code_fixture(temp, query));
+    copy_dir_all(
+        &source,
+        &temp
+            .path()
+            .join(".snowflake")
+            .join("cortex")
+            .join("conversations"),
+    );
 }
 
 fn install_default_terramind_fixture(temp: &TempDir, query: &str) {
@@ -7556,6 +7607,160 @@ fn write_native_neovate_fixture(temp: &TempDir, query: &str) -> String {
         .to_str()
         .unwrap()
         .to_owned()
+}
+
+fn write_native_command_code_fixture(temp: &TempDir, query: &str) -> String {
+    let project = temp
+        .path()
+        .join("native-command-code/projects/sanitized-workspace");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        project.join("command-code-cli-native.jsonl"),
+        format!(
+            "{}\n{}\n{}\n",
+            json!({
+                "id": "command-code-cli-native-user",
+                "sessionId": "command-code-cli-native",
+                "timestamp": "2026-07-04T18:10:00Z",
+                "role": "user",
+                "content": query,
+                "gitBranch": "main",
+                "metadata": {"version": 2, "entrypoint": "cli", "cwd": "/workspace/command-code"}
+            }),
+            json!({
+                "id": "command-code-cli-native-assistant",
+                "sessionId": "command-code-cli-native",
+                "timestamp": "2026-07-04T18:10:01Z",
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "command code native import ok"},
+                    {"type": "tool_use", "name": "Write", "input": {"path": "src/command_code_cli_native.txt", "content": "proof"}}
+                ],
+                "model": "openrouter/free-model",
+                "metadata": {"usage": {"input_tokens": 7, "output_tokens": 11}}
+            }),
+            json!({
+                "id": "command-code-cli-native-tool",
+                "sessionId": "command-code-cli-native",
+                "timestamp": "2026-07-04T18:10:02Z",
+                "role": "tool",
+                "content": [{"type": "tool_result", "content": "wrote src/command_code_cli_native.txt"}]
+            })
+        ),
+    )
+    .unwrap();
+    fs::write(
+        project.join("command-code-cli-native.checkpoints.jsonl"),
+        "{\"type\":\"file-history-snapshot\",\"content\":\"sidecar\"}\n",
+    )
+    .unwrap();
+    temp.path()
+        .join("native-command-code/projects")
+        .to_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn write_native_rovodev_fixture(temp: &TempDir, query: &str) -> String {
+    let session = temp
+        .path()
+        .join("native-rovodev/sessions/rovodev-cli-native");
+    fs::create_dir_all(&session).unwrap();
+    fs::write(
+        session.join("metadata.json"),
+        json!({
+            "session_id": "rovodev-cli-native",
+            "title": "Rovo Dev CLI native",
+            "workspace_path": "/workspace/rovodev",
+            "created_at": "2026-07-04T18:20:00Z",
+            "updated_at": "2026-07-04T18:20:02Z"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        session.join("session_context.json"),
+        json!({
+            "message_history": [
+                {
+                    "id": "rovodev-cli-native-user",
+                    "role": "user",
+                    "created_at": "2026-07-04T18:20:00Z",
+                    "parts": [{"kind": "text", "text": query}]
+                },
+                {
+                    "id": "rovodev-cli-native-assistant",
+                    "role": "assistant",
+                    "created_at": "2026-07-04T18:20:01Z",
+                    "parts": [
+                        {"kind": "text", "text": "rovodev native import ok"},
+                        {"kind": "tool_use", "name": "Write", "input": {"path": "src/rovodev_cli_native.txt", "content": "proof"}}
+                    ]
+                },
+                {
+                    "id": "rovodev-cli-native-tool",
+                    "role": "tool",
+                    "created_at": "2026-07-04T18:20:02Z",
+                    "parts": [{"kind": "tool_result", "content": "wrote src/rovodev_cli_native.txt"}]
+                }
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    temp.path()
+        .join("native-rovodev/sessions")
+        .to_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn write_native_cortex_code_fixture(temp: &TempDir, query: &str) -> String {
+    let conversations = temp.path().join("native-cortex-code/conversations");
+    fs::create_dir_all(&conversations).unwrap();
+    fs::write(
+        conversations.join("cortex-code-cli-native.json"),
+        json!({
+            "session_id": "cortex-code-cli-native",
+            "title": "Cortex Code CLI native",
+            "created_at": "2026-07-04T18:30:00Z",
+            "last_updated": "2026-07-04T18:30:02Z",
+            "connection_name": "fixture-connection",
+            "working_directory": "/workspace/cortex",
+            "history": []
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        conversations.join("cortex-code-cli-native.history.jsonl"),
+        format!(
+            "{}\n{}\n{}\n",
+            json!({
+                "id": "cortex-code-cli-native-user",
+                "role": "user",
+                "user_sent_time": "2026-07-04T18:30:00Z",
+                "content": [{"type": "text", "text": query}]
+            }),
+            json!({
+                "id": "cortex-code-cli-native-assistant",
+                "role": "assistant",
+                "user_sent_time": "2026-07-04T18:30:01Z",
+                "content": [
+                    {"type": "text", "text": "cortex code native import ok"},
+                    {"type": "tool_use", "name": "Write", "input": {"path": "src/cortex_code_cli_native.txt", "content": "proof"}}
+                ]
+            }),
+            json!({
+                "id": "cortex-code-cli-native-tool",
+                "role": "tool",
+                "user_sent_time": "2026-07-04T18:30:02Z",
+                "content": [{"type": "tool_result", "content": "wrote src/cortex_code_cli_native.txt"}]
+            })
+        ),
+    )
+    .unwrap();
+    conversations.to_str().unwrap().to_owned()
 }
 
 fn write_native_aider_desk_fixture(temp: &TempDir, query: &str) -> String {

@@ -1,0 +1,45 @@
+{
+  "message_history": [
+    {
+      "id": "rovo-user-1",
+      "role": "user",
+      "created_at": "2026-06-24T12:00:00Z",
+      "parts": [
+        {
+          "kind": "text",
+          "text": "rovodev fixture oracle prompt"
+        }
+      ]
+    },
+    {
+      "id": "rovo-assistant-1",
+      "role": "assistant",
+      "created_at": "2026-06-24T12:00:01Z",
+      "parts": [
+        {
+          "kind": "text",
+          "text": "rovodev fixture oracle answer"
+        },
+        {
+          "kind": "tool_use",
+          "name": "write_file",
+          "input": {
+            "path": "src/rovodev_oracle.rs",
+            "content": "proof"
+          }
+        }
+      ]
+    },
+    {
+      "id": "rovo-tool-1",
+      "role": "tool",
+      "created_at": "2026-06-24T12:00:02Z",
+      "parts": [
+        {
+          "kind": "tool_result",
+          "content": "wrote src/rovodev_oracle.rs"
+        }
+      ]
+    }
+  ]
+}

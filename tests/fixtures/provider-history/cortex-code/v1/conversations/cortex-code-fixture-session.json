@@ -1,0 +1,9 @@
+{
+  "session_id": "cortex-code-fixture-session",
+  "title": "Cortex Code fixture",
+  "created_at": "2026-06-24T12:00:00Z",
+  "last_updated": "2026-06-24T12:00:03Z",
+  "connection_name": "fixture-connection",
+  "working_directory": "/workspace/cortex",
+  "history": []
+}
