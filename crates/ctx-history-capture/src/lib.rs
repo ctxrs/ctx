@@ -20045,7 +20045,7 @@ fn normalize_astrbot_sqlite(
                             "adapter": ASTRBOT_SQLITE_SOURCE_FORMAT,
                             "sqlite_user_version": user_version,
                             "schema_fingerprint": schema_fingerprint,
-                            "support_level": "preview",
+                            "support_level": "native-auto",
                         }),
                         session_metadata: json!({
                             "source_format": ASTRBOT_SQLITE_SOURCE_FORMAT,
@@ -20121,7 +20121,7 @@ fn astrbot_capture(
                 "adapter": ASTRBOT_SQLITE_SOURCE_FORMAT,
                 "sqlite_user_version": user_version,
                 "schema_fingerprint": schema_fingerprint,
-                "support_level": "preview",
+                "support_level": "native-auto",
             }),
             session_metadata: json!({
                 "source_format": ASTRBOT_SQLITE_SOURCE_FORMAT,
@@ -20133,7 +20133,7 @@ fn astrbot_capture(
                 "persona_id": conversation.persona_id,
                 "token_usage": conversation.token_usage.as_deref().map(provider_json_text),
                 "selected_conversation": selected_conversation,
-                "fidelity_gap": "AstrBot preview imports local LLM context plus available platform history; it may not be a complete raw IM transcript",
+                "fidelity_gap": "AstrBot native-auto imports local LLM context plus available platform history from data_v4.db; platform-native chats may still be partial when upstream stores non-LLM replies on the IM platform",
             }),
         },
         context,

@@ -784,7 +784,7 @@ IDE/application storage imports.
   proofs exist; users should prefer an exporter or underlying provider import
   where available.
 
-## AstrBot (native-preview)
+## AstrBot (native-auto)
 
 - npx skills evidence: `skills@1.5.14` registers `astrbot` under `~/.astrbot`,
   matching AstrBot's packaged desktop root.
@@ -801,17 +801,19 @@ IDE/application storage imports.
 - Write-path evidence: upstream WebChat/OpenAPI/live-chat services insert user
   and bot message records into `platform_message_history`, and LLM request
   handling writes the model-facing context into `conversations.content`.
-- Blocker: upstream's own conversation model documentation still says WebChat
+- Scope note: upstream's own conversation model documentation still says WebChat
   history stores all messages, while other platform chats do not store
   non-LLM replies because those are considered stored on their platforms. I did
   not find a general IM-platform write path that records complete raw user and
   assistant transcripts for QQ/Telegram/WeCom/Lark/DingTalk/Slack/etc. into
   `data_v4.db`.
-- Decision: AstrBot stays `native-preview`. The existing importer is useful for
-  local LLM context plus available WebChat/OpenAPI/live-chat platform rows, but
-  ctx should not include it in native-auto/import-all/search-refresh until
-  upstream guarantees complete per-platform local transcript retention or a
-  sanitized multi-platform runtime fixture proves the durable schema.
+- Decision: AstrBot is `native-auto` for the bounded, provider-owned
+  `data_v4.db` locations. ctx auto-imports the durable local LLM context and
+  available platform history rows from `ASTRBOT_ROOT/data/data_v4.db`,
+  packaged `~/.astrbot/data/data_v4.db`, and cwd/ancestor project
+  `data/data_v4.db` files. This is a partial-fidelity native import, not a
+  claim that AstrBot retains complete raw IM-platform transcripts for every
+  supported platform.
 
 ## Tabnine CLI
 
