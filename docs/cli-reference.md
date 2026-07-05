@@ -209,7 +209,7 @@ Import selection rules:
 Preview providers such as NanoClaw are not included in `--all` or pre-search
 refresh. Import them explicitly with `--provider` when discovery finds the
 desired source, or add `--path` to target a specific source, then search the
-existing index. AstrBot `data_v4.db` sources are native-auto for bounded default
+existing index. AstrBot `data_v4.db` sources are supported for bounded default
 locations and remain available for explicit `--path` imports.
 
 The current `--resume` flag is an idempotent-rescan mode marker. JSON reports

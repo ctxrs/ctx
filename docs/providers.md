@@ -43,7 +43,7 @@ The current CLI imports local history for:
   databases;
 - Warp Terminal local restoration SQLite history from documented Linux, macOS,
   and Windows `warp.sqlite` paths or an explicit `warp.sqlite` path. Discovered
-  local restoration DBs are native auto-importable; cloud sync endpoints,
+  local restoration DBs are supported; cloud sync endpoints,
   Oz/cloud conversations, browser IndexedDB, Markdown exports, command history
   outside `agent_tasks`, and Warp Drive/team data are not parsed;
 - CodeBuddy JSON history under `~/.codebuddy`,
