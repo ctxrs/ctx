@@ -25,7 +25,7 @@ Status meanings:
 - `install-target`: npx target is an aggregate or project skill target, not a
   proven history-producing agent.
 
-Result on this integration branch: 60 `native-auto`, 0 `native-explicit`, 1
+Result on this integration branch: 61 `native-auto`, 0 `native-explicit`, 0
 `native-preview`, 0 `candidate-family`, 6 `webapp-boundary`, 3 `unknown`, and
 2 `install-target` rows.
 
@@ -51,7 +51,7 @@ Result on this integration branch: 60 `native-auto`, 0 `native-explicit`, 1
   `<persistence>/<user_id>/v1_conversations`.
 - `generic sqlite messages`: already covers Crush, Goose, Hermes, Kiro CLI,
   Dexto CLI database roots, Terramind/Nucleus `agents.db`, Firebender project
-  chat history DBs, the AstrBot preview importer, and ctx-native Shelley.
+  chat history DBs, the bounded AstrBot native-auto importer, and ctx-native Shelley.
 - `Forge conversation SQLite`: covers ForgeCode's `.forge.db` conversation
   snapshots with JSON context/metrics DTOs.
 - `LangGraph checkpoint SQLite`: candidate family for LangGraph-style
@@ -76,7 +76,7 @@ Result on this integration branch: 60 `native-auto`, 0 `native-explicit`, 1
 | `amp` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.config/amp`; no ctx provider on this local-native branch; `@ampcode/cli@0.0.1783181941-g187572` exposes `amp threads export`, `amp threads markdown`, and `amp threads raw`; export handler serializes `threadRemote.getThread(...)` | Hosted/export import work lives on the hosted/cloud branch. No default `~/.config/amp` scan is claimed, and `$XDG_CACHE_HOME/amp/logs/cli.log` is not treated as durable transcript history. |
 | `antigravity` | `native-auto` | `JSONL CLI event logs` | ctx `antigravity_cli_transcript_jsonl_tree`; npx `~/.gemini/antigravity`; official IDE transcripts live under `~/.gemini/antigravity-ide/brain` | ctx imports official IDE brain transcripts, not the npx skill/config path `~/.gemini/antigravity`. |
 | `antigravity-cli` | `native-auto` | `JSONL CLI event logs` | ctx `antigravity_cli_transcript_jsonl_tree`; npx `~/.gemini/antigravity-cli` | - |
-| `astrbot` | `native-preview` | `generic sqlite messages` | ctx `astrbot_data_v4_sqlite`; npx `~/.astrbot`; upstream AstrBot v4.26.4 source confirms `data/data_v4.db` under `ASTRBOT_ROOT`/packaged `~/.astrbot`, `conversations`, and `platform_message_history` | Preview explicit import only. `conversations.content` is durable LLM context and `platform_message_history` is proven for WebChat/OpenAPI/live chat, but upstream model docs still say non-WebChat platform conversations do not persist non-LLM replies because those are stored on their platforms. Full per-platform raw IM transcript coverage remains unproven. |
+| `astrbot` | `native-auto` | `generic sqlite messages` | ctx `astrbot_data_v4_sqlite`; npx `~/.astrbot`; upstream AstrBot v4.26.4 source confirms `data/data_v4.db` under `ASTRBOT_ROOT`/packaged `~/.astrbot`, `conversations`, and `platform_message_history`; default discovery imports bounded `data_v4.db` paths | - |
 | `autohand-code` | `native-auto` | `JSONL CLI event logs` | ctx `autohand_code_sessions_jsonl`; npx `AUTOHAND_HOME` or `~/.autohand` | - |
 | `augment` | `native-auto` | `CLI session JSON` | ctx `auggie_session_json`; npx `~/.augment`; `@augmentcode/auggie@0.32.0` stores sessions under `~/.augment/sessions/<session_id>.json` | Imports package-backed Auggie CLI `chatHistory` request/response text only; richer IDE/app storage remains unclaimed. |
 | `bob` | `native-auto` | `Cline/Roo/Bob task JSON` | ctx `bob_task_directory_json`; IBM community and CodeBurn prove IBM Bob IDE app-data task storage under `User/globalStorage/ibm.bob-code/tasks`; npx `~/.bob` remains Bob Shell skill/state evidence only | Imports IBM Bob IDE task JSON from app-data `IBM Bob`/`Bob-IDE` folders only; Bob Shell `~/.bob` is not crawled. |

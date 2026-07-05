@@ -83,8 +83,7 @@ The current CLI imports local history for:
 - NanoClaw project history from a project root with `data/v2.db` and
   `data/v2-sessions` when imported explicitly;
 - AstrBot local SQLite history from `ASTRBOT_ROOT/data/data_v4.db`,
-  `~/.astrbot/data/data_v4.db`, or a project `data/data_v4.db` when imported
-  explicitly;
+  `~/.astrbot/data/data_v4.db`, or a project `data/data_v4.db`;
 - Shelley SQLite history from `SHELLEY_DB`, `~/.config/shelley/shelley.db`, or
   an explicit Shelley DB path;
 - Terramind/Nucleus SQLite history from `$XDG_CONFIG_HOME/Nucleus/data/agents.db`,
@@ -199,11 +198,11 @@ reported as `roo_code`.
 and `importable` fields. A native source is marked available/importable only
 when provider-specific transcript files exist. Sources with
 `import_support: "preview"` are explicit-import preview paths: use
-`ctx import --provider nanoclaw` or `ctx import --provider astrbot` when
-discovery finds the desired source, or use `ctx import --provider trae --path
-<state.vscdb-or-workspaceStorage>` for Trae. Add `--path` to target a specific
-source before searching it. Explicit and preview paths
-are intentionally excluded from `ctx import --all` and pre-search refresh until
+`ctx import --provider nanoclaw` when discovery finds the desired source, or use
+`ctx import --provider trae --path <state.vscdb-or-workspaceStorage>` for Trae.
+Add `--path` to target a specific source before searching it. Explicit and
+preview paths are intentionally excluded from `ctx import --all` and
+pre-search refresh until
 they have safe default discovery. Sources with
 `status: "unknown"` hit the bounded transcript probe budget before proving
 history exists, and sources with `import_support: "unsupported"` are detections

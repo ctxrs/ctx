@@ -124,8 +124,8 @@ sources or already-cataloged indexes, `auto` serves current results without a
 foreground catch-up scan; use `--refresh strict` or `ctx import --all` when you
 need a full catch-up before querying. `off` skips the pre-search refresh and
 never runs plugin commands. `strict` fails the search if the refresh cannot run
-or import successfully. Preview native sources such as NanoClaw and AstrBot,
-plus search-only sources without native import support, are searched from the
+or import successfully. Preview native sources such as NanoClaw, plus
+search-only sources without native import support, are searched from the
 existing index until they are explicitly imported through a supported path.
 
 Use `--refresh off` for a strictly read-only search over the existing ctx index.

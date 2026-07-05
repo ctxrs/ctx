@@ -2060,7 +2060,7 @@ fn sources_lists_personal_agent_provider_defaults() {
         ("hermes", "hermes_state_sqlite", "native", true),
         ("kilo", "kilo_sqlite", "native", true),
         ("kiro_cli", "kiro_cli_sqlite", "native", true),
-        ("astrbot", "astrbot_data_v4_sqlite", "preview", false),
+        ("astrbot", "astrbot_data_v4_sqlite", "native", true),
         ("shelley", "shelley_sqlite", "native", true),
         ("continue", "continue_cli_sessions_json", "native", true),
         (
@@ -6030,6 +6030,7 @@ fn search_refresh_auto_imports_discovered_top_provider_sources() {
         ("openclaw", "openclaw", install_default_openclaw_fixture),
         ("hermes", "hermes", install_default_hermes_fixture),
         ("kilo", "kilo", install_default_kilo_fixture),
+        ("astrbot", "astrbot", install_default_astrbot_fixture),
         ("terramind", "terramind", install_default_terramind_fixture),
         ("shelley", "shelley", install_default_shelley_fixture),
         ("continue", "continue", install_default_continue_fixture),
@@ -7129,6 +7130,39 @@ fn trae_cn_native_default_discovery_is_included_in_import_all() {
         "session_result",
         "session",
     );
+}
+
+#[test]
+fn astrbot_native_default_discovery_is_included_in_import_all() {
+    let temp = tempdir();
+    let query = "astrbot-import-all-oracle";
+    install_default_astrbot_fixture(&temp, query);
+
+    let imported =
+        json_output(ctx(&temp).args(["import", "--all", "--json", "--progress", "none"]));
+    assert!(imported["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|source| {
+            source["provider"] == "astrbot"
+                && source["source_format"] == "astrbot_data_v4_sqlite"
+                && source["import_support"] == "native"
+        }));
+    assert_eq!(imported["totals"]["failed"], 0);
+    assert_eq!(imported["totals"]["imported_sessions"], 1);
+    assert_eq!(imported["totals"]["imported_events"], 3);
+
+    let search = json_output(ctx(&temp).args([
+        "search",
+        query,
+        "--provider",
+        "astrbot",
+        "--refresh",
+        "off",
+        "--json",
+    ]));
+    assert_search_provider_oracle(&search, "astrbot", query, 1, "message");
 }
 
 #[test]

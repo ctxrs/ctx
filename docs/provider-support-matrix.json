@@ -1383,12 +1383,14 @@
           "fidelity": "partial",
           "proof": [
             "ctx sources",
+            "ctx import --all",
+            "ctx search <query> --provider astrbot",
             "ctx import --provider astrbot --path <data_v4.db>",
             "cargo test -p ctx-history-capture native_astrbot_fixture_imports_searches_and_reimports"
           ],
           "notes": [
-            "Preview importer for AstrBot data/data_v4.db conversation context plus available platform_message_history rows.",
-            "AstrBot v4.26.4 source confirms data/data_v4.db, conversations.content, and platform_message_history. The platform history table is proven for WebChat/OpenAPI/live-chat writes, but upstream docs/source do not guarantee complete raw IM transcript rows for every non-WebChat platform."
+            "Native-auto importer for bounded AstrBot data/data_v4.db locations, covering durable conversation context plus available platform_message_history rows.",
+            "AstrBot v4.26.4 source confirms data/data_v4.db, conversations.content, and platform_message_history. The platform history table is proven for WebChat/OpenAPI/live-chat writes; other platform-native non-LLM replies may remain stored on those IM platforms rather than in data_v4.db."
           ]
         }
       ],
@@ -1414,11 +1416,9 @@
         "parent_child_session_edges": false
       },
       "redaction_notes": [
-        "Manual preview imports may include IM platform IDs, user IDs, sender names, and local chat text."
+        "Native-auto imports may include IM platform IDs, user IDs, sender names, and local chat text from data_v4.db."
       ],
-      "blockers": [
-        "Full GA/native-auto needs either upstream guarantees or sanitized multi-platform runtime fixtures proving that data_v4.db contains complete raw user and assistant transcript history across AstrBot's supported IM platforms, not just LLM context plus WebChat/OpenAPI/live-chat platform history."
-      ],
+      "blockers": [],
       "public_docs": "docs/providers.md",
       "fixture_paths": [
         "tests/fixtures/provider-history/astrbot/v1/data/data_v4.db"

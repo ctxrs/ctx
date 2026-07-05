@@ -44,7 +44,7 @@ is:
 | OpenClaw | `local_import_when_supported` | `OPENCLAW_STATE_DIR`, `~/.openclaw`, legacy `~/.clawdbot`/`~/.moltbot`, or an explicit OpenClaw state tree. | Static local-history fixture smoke; beta storage-contract notes in the matrix. |
 | Hermes Agent | `local_import_when_supported` | `HERMES_HOME/state.db`, `~/.hermes/state.db`, or an explicit Hermes SQLite DB. | Static local-history fixture smoke. |
 | NanoClaw | `local_import_when_supported` | Preview/manual import from a NanoClaw project root or `data/v2.db`; cwd/ancestor discovery only. | Static local-history fixture smoke; excluded from `ctx import --all` and pre-search refresh until promoted. |
-| AstrBot | `local_import_when_supported` | Preview/manual import from `ASTRBOT_ROOT/data/data_v4.db`, packaged desktop `~/.astrbot/data/data_v4.db`, cwd/ancestor project DBs, or an explicit DB path. | Static local-history fixture smoke plus upstream AstrBot v4.26.4 source inspection; imports durable LLM context and WebChat/OpenAPI/live-chat platform history rows when present, but is not a complete raw IM transcript importer for every AstrBot platform. |
+| AstrBot | `local_import_when_supported` | Native-auto import from `ASTRBOT_ROOT/data/data_v4.db`, packaged desktop `~/.astrbot/data/data_v4.db`, cwd/ancestor project DBs, or an explicit DB path. | Static local-history fixture smoke plus upstream AstrBot v4.26.4 source inspection; default discovery, `ctx import --all`, and pre-search refresh import bounded `data_v4.db` paths. Imports durable LLM context and available platform history rows, but is not a complete raw IM transcript importer for every AstrBot platform. |
 | Shelley | `local_import_when_supported` | `SHELLEY_DB`, `~/.config/shelley/shelley.db`, or an explicit Shelley SQLite DB. | Static local-history fixture smoke; imports conversations/messages read-only with tool text, usage/model metadata, and parent conversation links. |
 | Continue | `local_import_when_supported` | `CONTINUE_GLOBAL_DIR/sessions`, `~/.continue/sessions`, or an explicit Continue sessions path. | Static local-history fixture smoke; imports Continue CLI `sessions/*.json` history items and optional `sessions.json` metadata. |
 | OpenHands | `local_import_when_supported` | `OH_PERSISTENCE_DIR`, legacy `FILE_STORE_PATH`, `~/.openhands`, or an explicit persistence root containing `<user_id>/v1_conversations/<conversation-id-hex>/*.json`. | Static local-history fixture smoke. |
@@ -84,7 +84,7 @@ is:
 | Roo Code | `local_import_when_supported` | `roo-cline.customStoragePath`, common VS Code globalStorage task folders for `RooVeterinaryInc.roo-cline`, or an explicit Roo task storage path. | Static local-history fixture smoke; VS Code state databases are not parsed. |
 
 `ctx sources --json` uses `import_support: "preview"` and `native_import:
-false` for preview sources/importers such as NanoClaw, AstrBot, and state
+false` for preview sources/importers such as NanoClaw and state
 databases outside the proven Trae/Trae CN workspaceStorage defaults.
 Those paths can be imported explicitly with
 `ctx import --provider ...` when discovery finds them, or with
