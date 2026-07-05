@@ -2592,7 +2592,7 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
             vec![
                 "Usage: ctx import",
                 "--provider <PROVIDER>",
-                "[possible values: codex, pi, claude, opencode, openloaf, kilo, kiro-cli, crush, goose, antigravity, gemini, cursor, windsurf, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, jazz, auggie, devin, eve, firebender, forgecode, deepagents, mistral-vibe, mux, reasonix, kode, neovate, command-code, terramind, rovodev, cortex-code, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto, lingma, qoder, pochi, warp, codebuddy, aider-desk, amp, trae]",
+                "[possible values: codex, pi, claude, opencode, openloaf, kilo, kiro-cli, crush, goose, antigravity, gemini, cursor, windsurf, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, jazz, auggie, devin, eve, firebender, forgecode, deepagents, mistral-vibe, mux, reasonix, adal, kode, neovate, command-code, terramind, rovodev, cortex-code, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, bob, dexto, lingma, qoder, pochi, warp, codebuddy, aider-desk, amp, trae]",
                 "--path <PATH>",
                 "--format <FORMAT>",
                 "--resume",
