@@ -25,8 +25,8 @@ Status meanings:
 - `install-target`: npx target is an aggregate or project skill target, not a
   proven history-producing agent.
 
-Result on this integration branch: 63 `native-auto`, 0 `native-explicit`, 0
-`native-preview`, 0 `candidate-family`, 5 `webapp-boundary`, 2 `unknown`, and
+Result on this integration branch: 63 `native-auto`, 1 `native-explicit`, 0
+`native-preview`, 0 `candidate-family`, 4 `webapp-boundary`, 2 `unknown`, and
 2 `install-target` rows.
 
 ## Shared Families
@@ -42,8 +42,9 @@ Result on this integration branch: 63 `native-auto`, 0 `native-explicit`, 0
   sessions, plus Qoder transcript JSONL, Windsurf Cascade hook transcript JSONL,
   TinyCloud session JSONL, and OpenLoaf `messages.jsonl` chat-history trees.
 - `CLI session JSON`: covers Continue CLI `sessions/*.json` files with
-  `sessions.json` metadata, Auggie `~/.augment/sessions/*.json`, plus Rovo Dev
-  session directories and Cortex Code conversation snapshots/history sidecars.
+  `sessions.json` metadata, Auggie `~/.augment/sessions/*.json`, Amp explicit
+  `amp threads export` JSON, plus Rovo Dev session directories and Cortex Code
+  conversation snapshots/history sidecars.
 - `project task JSON`: covers Aider Desk project-local task directories such as
   `.aider-desk/tasks/<taskId>/context.json`; related task-directory tools can
   reuse this scanner once storage proof and fixtures exist.
@@ -74,7 +75,7 @@ Result on this integration branch: 63 `native-auto`, 0 `native-explicit`, 0
 | npx skills agent id | ctx storage ingestion status | schema family | evidence source | blocked reason / gap |
 | --- | --- | --- | --- | --- |
 | `aider-desk` | `native-auto` | `project task JSON` | ctx `aider_desk_task_context_json`; npx `~/.aider-desk`; source proof shows project `.aider-desk/tasks/<taskId>/context.json` task context files | - |
-| `amp` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.config/amp`; no ctx provider on this local-native branch; `@ampcode/cli@0.0.1783181941-g187572` exposes `amp threads export`, `amp threads markdown`, and `amp threads raw`; export handler serializes `threadRemote.getThread(...)` | Hosted/export import work lives on the hosted/cloud branch. No default `~/.config/amp` scan is claimed, and `$XDG_CACHE_HOME/amp/logs/cli.log` is not treated as durable transcript history. |
+| `amp` | `native-explicit` | `CLI session JSON` | ctx `amp_threads_export_json`; npx `~/.config/amp`; `@ampcode/cli@0.0.1783181941-g187572` exposes `amp threads export`, `amp threads markdown`, and `amp threads raw`; export handler serializes `threadRemote.getThread(...)` | Official explicit import from user-supplied `amp threads export` JSON; no default `~/.config/amp` scan and no `$XDG_CACHE_HOME/amp/logs/cli.log` crawl. |
 | `antigravity` | `native-auto` | `JSONL CLI event logs` | ctx `antigravity_cli_transcript_jsonl_tree`; npx `~/.gemini/antigravity`; official IDE transcripts live under `~/.gemini/antigravity-ide/brain` | ctx imports official IDE brain transcripts, not the npx skill/config path `~/.gemini/antigravity`. |
 | `antigravity-cli` | `native-auto` | `JSONL CLI event logs` | ctx `antigravity_cli_transcript_jsonl_tree`; npx `~/.gemini/antigravity-cli` | - |
 | `astrbot` | `native-auto` | `generic sqlite messages` | ctx `astrbot_data_v4_sqlite`; npx `~/.astrbot`; upstream AstrBot v4.26.4 source confirms `data/data_v4.db` under `ASTRBOT_ROOT`/packaged `~/.astrbot`, `conversations`, and `platform_message_history`; default discovery imports bounded `data_v4.db` paths | - |

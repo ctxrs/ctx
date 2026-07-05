@@ -945,6 +945,8 @@ const CODEBUDDY_DEFAULTS: &[ProviderDefaultLocation] = &[
 
 const AIDER_DESK_DEFAULTS: &[ProviderDefaultLocation] = &[];
 
+const AMP_DEFAULTS: &[ProviderDefaultLocation] = &[];
+
 const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
     ProviderSourceSpec {
         provider: CaptureProvider::Codex,
@@ -1561,6 +1563,16 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         display_name: "Aider Desk",
         default_locations: AIDER_DESK_DEFAULTS,
         import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
+    ProviderSourceSpec {
+        provider: CaptureProvider::Amp,
+        display_name: "Amp",
+        default_locations: AMP_DEFAULTS,
+        import_support: ProviderImportSupport::Explicit,
         catalog_support: ProviderCatalogSupport::None,
         raw_retention: ProviderRawRetention::PathReference,
         redaction_boundary: ProviderRedactionBoundary::BeforeExport,
@@ -2701,6 +2713,7 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         }
         CaptureProvider::CodeBuddy => "codebuddy_history_json",
         CaptureProvider::AiderDesk => "aider_desk_task_context_json",
+        CaptureProvider::Amp => "amp_threads_export_json",
         CaptureProvider::TinyCloud => "tinycloud_session_jsonl_tree",
         CaptureProvider::Zencoder if path.is_dir() => "zencoder_chat_sessions_json_tree",
         CaptureProvider::Zencoder => {
@@ -3388,6 +3401,7 @@ fn default_location_import_probe(
         CaptureProvider::AiderDesk => {
             has_task_json_file_under_matching(path, 10_000, |name| name == "context.json")
         }
+        CaptureProvider::Amp => path_is_file_probe(path),
         CaptureProvider::TinyCloud => has_tinycloud_session_jsonl(path, 10_000),
         CaptureProvider::Zencoder => has_zencoder_session_json(path, 10_000),
         CaptureProvider::Zenflow => path_is_file_probe(path),

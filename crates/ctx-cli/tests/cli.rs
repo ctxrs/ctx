@@ -6597,6 +6597,12 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
             write_native_aider_desk_fixture,
         ),
         (
+            "amp",
+            "amp",
+            "amp_threads_export_json",
+            write_native_amp_fixture,
+        ),
+        (
             "auggie",
             "auggie",
             "auggie_session_json",
@@ -8983,6 +8989,18 @@ fn write_native_aider_desk_fixture(temp: &TempDir, query: &str) -> String {
         .to_owned()
 }
 
+fn write_native_amp_fixture(temp: &TempDir, query: &str) -> String {
+    let path = temp.path().join("native-amp/redacted-thread.json");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let text = fs::read_to_string(provider_history_fixture(
+        "amp/threads-export/redacted-thread.json",
+    ))
+    .unwrap()
+    .replace("Amp export oracle prompt", query);
+    fs::write(&path, text).unwrap();
+    path.to_str().unwrap().to_owned()
+}
+
 fn write_native_auggie_fixture(temp: &TempDir, query: &str) -> String {
     let root = temp.path().join("native-auggie/sessions");
     fs::create_dir_all(&root).unwrap();
@@ -11044,6 +11062,7 @@ fn native_provider_cli_requires_existing_history_or_explicit_path() {
         ("lingma", "no importable lingma history found"),
         ("codebuddy", "no importable codebuddy history found"),
         ("aider-desk", "no importable aider_desk history found"),
+        ("amp", "no importable amp history found"),
         ("auggie", "no importable auggie history found"),
         ("eve", "no importable eve history found"),
         ("iflow-cli", "no importable iflow_cli history found"),
@@ -11064,7 +11083,7 @@ fn native_provider_cli_requires_existing_history_or_explicit_path() {
 
         assert!(stderr.contains(expected_blocker), "{stderr}");
         assert!(stderr.contains("use `ctx sources`"), "{stderr}");
-        if matches!(cli_provider, "nanoclaw" | "aider-desk" | "eve") {
+        if matches!(cli_provider, "nanoclaw" | "aider-desk" | "amp" | "eve") {
             assert!(
                 stderr.contains("no default paths are registered for this provider"),
                 "{stderr}"

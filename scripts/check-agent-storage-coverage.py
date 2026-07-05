@@ -19,10 +19,10 @@ UPSTREAM_PACKAGE = "skills@1.5.14"
 UPSTREAM_COMMIT = "2adcfe5a4cce0ce5f4d5547a997b2a161ec5d127"
 EXPECTED_COUNTS = {
     "native-auto": 63,
-    "native-explicit": 0,
+    "native-explicit": 1,
     "native-preview": 0,
     "candidate-family": 0,
-    "webapp-boundary": 5,
+    "webapp-boundary": 4,
     "unknown": 2,
     "install-target": 2,
 }

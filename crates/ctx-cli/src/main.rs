@@ -34,9 +34,9 @@ use analytics::{AnalyticsEvent, AnalyticsProperties};
 use config::{AppConfig, CONFIG_FILE};
 use ctx_history_capture::{
     catalog_codex_session_tree, discover_provider_sources, discover_provider_sources_for_provider,
-    import_adal_history, import_aider_desk_history, import_antigravity_cli_history,
-    import_astrbot_sqlite, import_auggie_history, import_autohand_code_sessions,
-    import_bob_task_json_history, import_claude_projects_jsonl_tree,
+    import_adal_history, import_aider_desk_history, import_amp_threads_export,
+    import_antigravity_cli_history, import_astrbot_sqlite, import_auggie_history,
+    import_autohand_code_sessions, import_bob_task_json_history, import_claude_projects_jsonl_tree,
     import_cline_task_json_history, import_codearts_agent_sqlite, import_codebuddy_history,
     import_codestudio_sqlite, import_codex_history_jsonl, import_codex_session_jsonl,
     import_codex_session_jsonl_tail, import_codex_session_paths, import_codex_session_tree,
@@ -58,19 +58,20 @@ use ctx_history_capture::{
     import_windsurf_cascade_hook_transcripts, import_zed_threads_sqlite, import_zencoder_history,
     import_zenflow_sqlite, provider_source_for_path, provider_source_spec, stable_capture_uuid,
     validate_custom_history_jsonl_v1, validate_custom_history_jsonl_v1_reader, AdalImportOptions,
-    AiderDeskImportOptions, AntigravityCliImportOptions, AstrBotSqliteImportOptions,
-    AuggieImportOptions, AutohandCodeImportOptions, BobTaskJsonImportOptions, CatalogSummary,
-    ClaudeProjectsImportOptions, ClineTaskJsonImportOptions, CodeArtsAgentSqliteImportOptions,
-    CodeBuddyImportOptions, CodeStudioSqliteImportOptions, CodexEventImportMode,
-    CodexHistoryImportOptions, CodexSessionCatalogOptions, CodexSessionImportOptions,
-    CodexSessionImportProgress, CodexSessionImportProgressCallback, CodexToolOutputMode,
-    CommandCodeImportOptions, ContinueCliImportOptions, CopilotCliImportOptions,
-    CortexCodeImportOptions, CrushSqliteImportOptions, CursorNativeImportOptions,
-    CustomHistoryJsonlV1ImportOptions, DeepAgentsSqliteImportOptions, DextoSqliteImportOptions,
-    EveImportOptions, FactoryAiDroidImportOptions, FirebenderSqliteImportOptions,
-    ForgeCodeSqliteImportOptions, GeminiCliImportOptions, GooseSessionsSqliteImportOptions,
-    HermesSqliteImportOptions, IflowCliImportOptions, JazzImportOptions, JunieImportOptions,
-    KiloSqliteImportOptions, KimiCodeCliImportOptions, KiroSqliteImportOptions, KodeImportOptions,
+    AiderDeskImportOptions, AmpImportOptions, AntigravityCliImportOptions,
+    AstrBotSqliteImportOptions, AuggieImportOptions, AutohandCodeImportOptions,
+    BobTaskJsonImportOptions, CatalogSummary, ClaudeProjectsImportOptions,
+    ClineTaskJsonImportOptions, CodeArtsAgentSqliteImportOptions, CodeBuddyImportOptions,
+    CodeStudioSqliteImportOptions, CodexEventImportMode, CodexHistoryImportOptions,
+    CodexSessionCatalogOptions, CodexSessionImportOptions, CodexSessionImportProgress,
+    CodexSessionImportProgressCallback, CodexToolOutputMode, CommandCodeImportOptions,
+    ContinueCliImportOptions, CopilotCliImportOptions, CortexCodeImportOptions,
+    CrushSqliteImportOptions, CursorNativeImportOptions, CustomHistoryJsonlV1ImportOptions,
+    DeepAgentsSqliteImportOptions, DextoSqliteImportOptions, EveImportOptions,
+    FactoryAiDroidImportOptions, FirebenderSqliteImportOptions, ForgeCodeSqliteImportOptions,
+    GeminiCliImportOptions, GooseSessionsSqliteImportOptions, HermesSqliteImportOptions,
+    IflowCliImportOptions, JazzImportOptions, JunieImportOptions, KiloSqliteImportOptions,
+    KimiCodeCliImportOptions, KiroSqliteImportOptions, KodeImportOptions,
     LingmaSqliteImportOptions, MistralVibeImportOptions, MoxbySqliteImportOptions,
     MuxImportOptions, NanoClawImportOptions, NeovateImportOptions, OpenClawImportOptions,
     OpenCodeSqliteImportOptions, OpenHandsImportOptions, OpenLoafImportOptions,
@@ -836,6 +837,7 @@ enum NativeProviderArg {
     CodeBuddy,
     #[value(name = "aider-desk", alias = "aider_desk", alias = "aiderdesk")]
     AiderDesk,
+    Amp,
     #[value(alias = "trae-cn", alias = "trae_cn")]
     Trae,
     #[value(name = "tinycloud", alias = "tiny-cloud", alias = "tiny_cloud")]
@@ -994,6 +996,7 @@ enum ProviderArg {
     CodeBuddy,
     #[value(name = "aider-desk", alias = "aider_desk", alias = "aiderdesk")]
     AiderDesk,
+    Amp,
     #[value(alias = "trae-cn", alias = "trae_cn")]
     Trae,
     #[value(name = "tinycloud", alias = "tiny-cloud", alias = "tiny_cloud")]
@@ -1093,6 +1096,7 @@ impl NativeProviderArg {
             Self::Warp => CaptureProvider::Warp,
             Self::CodeBuddy => CaptureProvider::CodeBuddy,
             Self::AiderDesk => CaptureProvider::AiderDesk,
+            Self::Amp => CaptureProvider::Amp,
             Self::Trae => CaptureProvider::Trae,
             Self::TinyCloud => CaptureProvider::TinyCloud,
             Self::Zencoder => CaptureProvider::Zencoder,
@@ -1182,6 +1186,7 @@ impl ProviderArg {
             Self::Warp => CaptureProvider::Warp,
             Self::CodeBuddy => CaptureProvider::CodeBuddy,
             Self::AiderDesk => CaptureProvider::AiderDesk,
+            Self::Amp => CaptureProvider::Amp,
             Self::Trae => CaptureProvider::Trae,
             Self::TinyCloud => CaptureProvider::TinyCloud,
             Self::Zencoder => CaptureProvider::Zencoder,
@@ -1250,6 +1255,7 @@ impl ProviderArg {
             Self::Warp => "warp",
             Self::CodeBuddy => "codebuddy",
             Self::AiderDesk => "aider-desk",
+            Self::Amp => "amp",
             Self::Trae => "trae",
             Self::TinyCloud => "tinycloud",
             Self::Zencoder => "zencoder",
@@ -6053,6 +6059,17 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
+        CaptureProvider::Amp => import_amp_threads_export(
+            &source.path,
+            store,
+            AmpImportOptions {
+                source_path: Some(source.path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: true,
+                ..AmpImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
         CaptureProvider::Trae => import_trae_history(
             &source.path,
             store,
@@ -6980,6 +6997,7 @@ fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bool {
             path.file_name().and_then(|name| name.to_str()) == Some("context.json")
                 && path.starts_with(&source.path)
         }
+        CaptureProvider::Amp => path == source.path,
         CaptureProvider::Trae => {
             path.file_name().and_then(|name| name.to_str()) == Some("state.vscdb")
                 && (path == source.path || path.starts_with(&source.path))

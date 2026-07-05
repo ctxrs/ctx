@@ -103,6 +103,7 @@ pub enum ProviderId {
     CodeBuddy,
     #[serde(rename = "aider_desk", alias = "aider-desk")]
     AiderDesk,
+    Amp,
     #[serde(rename = "trae", alias = "trae-cn", alias = "trae_cn")]
     Trae,
     #[serde(rename = "zencoder", alias = "zen-coder", alias = "zen_coder")]
@@ -191,7 +192,7 @@ pub enum ProviderId {
 }
 
 impl ProviderId {
-    pub const ALL: [Self; 72] = [
+    pub const ALL: [Self; 73] = [
         Self::Codex,
         Self::ClaudeCode,
         Self::ClaudeCliCrp,
@@ -229,6 +230,7 @@ impl ProviderId {
         Self::Warp,
         Self::CodeBuddy,
         Self::AiderDesk,
+        Self::Amp,
         Self::Trae,
         Self::Zencoder,
         Self::CodeStudio,
@@ -560,6 +562,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
         let expected = [
             ProviderId::AntigravityCli,
+            ProviderId::Amp,
             ProviderId::AstrBot,
             ProviderId::AutohandCode,
             ProviderId::Auggie,

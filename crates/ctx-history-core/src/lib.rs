@@ -238,6 +238,7 @@ text_enum! {
         CortexCode => "cortex_code",
         CodeBuddy => "codebuddy",
         AiderDesk => "aider_desk",
+        Amp => "amp",
         Trae => "trae",
         TinyCloud => "tinycloud",
         CodeArtsAgent => "codearts_agent",
@@ -1595,6 +1596,10 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<CaptureProvider>("\"aider_desk\"").unwrap(),
             CaptureProvider::AiderDesk
+        );
+        assert_eq!(
+            serde_json::from_str::<CaptureProvider>("\"amp\"").unwrap(),
+            CaptureProvider::Amp
         );
         assert_eq!(
             serde_json::from_str::<CaptureProvider>("\"mux\"").unwrap(),
