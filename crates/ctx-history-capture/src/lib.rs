@@ -800,6 +800,27 @@ impl Default for DextoSqliteImportOptions {
 }
 
 #[derive(Debug, Clone)]
+pub struct PochiLivestoreSqliteImportOptions {
+    pub machine_id: String,
+    pub source_path: Option<PathBuf>,
+    pub imported_at: DateTime<Utc>,
+    pub history_record_id: Option<Uuid>,
+    pub allow_partial_failures: bool,
+}
+
+impl Default for PochiLivestoreSqliteImportOptions {
+    fn default() -> Self {
+        Self {
+            machine_id: default_machine_id(),
+            source_path: None,
+            imported_at: utc_now(),
+            history_record_id: None,
+            allow_partial_failures: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct LingmaSqliteImportOptions {
     pub machine_id: String,
     pub source_path: Option<PathBuf>,
@@ -1491,6 +1512,9 @@ pub struct OpenHandsFileEventsAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DextoSqliteAdapter;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PochiLivestoreSqliteAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LingmaSqliteAdapter;
@@ -2499,6 +2523,24 @@ impl ProviderCaptureAdapter for DextoSqliteAdapter {
         context: &ProviderAdapterContext,
     ) -> Result<ProviderNormalizationResult> {
         normalize_dexto_sqlite(path, context)
+    }
+}
+
+impl ProviderCaptureAdapter for PochiLivestoreSqliteAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Pochi
+    }
+
+    fn source_format(&self) -> &str {
+        POCHI_LIVESTORE_SQLITE_SOURCE_FORMAT
+    }
+
+    fn normalize_path(
+        &self,
+        path: &Path,
+        context: &ProviderAdapterContext,
+    ) -> Result<ProviderNormalizationResult> {
+        normalize_pochi_livestore_sqlite_path(path, context)
     }
 }
 
@@ -5388,6 +5430,40 @@ pub fn import_dexto_sqlite(
     )
 }
 
+pub fn import_pochi_livestore_sqlite(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: PochiLivestoreSqliteImportOptions,
+) -> Result<ProviderImportSummary> {
+    let path = path.as_ref();
+    let source_path = options
+        .source_path
+        .clone()
+        .unwrap_or_else(|| path.to_path_buf());
+    let normalization = PochiLivestoreSqliteAdapter.normalize_path(
+        path,
+        &ProviderAdapterContext {
+            machine_id: options.machine_id,
+            source_path: Some(source_path),
+            imported_at: options.imported_at,
+            tool_output_mode: CodexToolOutputMode::Full,
+            event_mode: CodexEventImportMode::Rich,
+            include_notices: true,
+        },
+    )?;
+    import_normalized_provider_captures(
+        store,
+        normalization,
+        NormalizedProviderImportOptions {
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+            persist_cursors: true,
+            wrap_transaction: true,
+            fast_event_inserts: true,
+        },
+    )
+}
+
 pub fn import_antigravity_cli_history(
     path: impl AsRef<Path>,
     store: &mut Store,
@@ -5935,6 +6011,7 @@ const SHELLEY_SQLITE_SOURCE_FORMAT: &str = "shelley_sqlite";
 const CONTINUE_CLI_SOURCE_FORMAT: &str = "continue_cli_sessions_json";
 const OPENHANDS_FILE_EVENTS_SOURCE_FORMAT: &str = "openhands_file_events";
 const DEXTO_SQLITE_SOURCE_FORMAT: &str = "dexto_sqlite";
+const POCHI_LIVESTORE_SQLITE_SOURCE_FORMAT: &str = "pochi_livestore_state_sqlite";
 const LINGMA_SQLITE_SOURCE_FORMAT: &str = "lingma_sqlite";
 const ANTIGRAVITY_CLI_SOURCE_FORMAT: &str = "antigravity_cli_transcript_jsonl_tree";
 const GEMINI_CLI_SOURCE_FORMAT: &str = "gemini_cli_chat_recording_jsonl";
@@ -17775,6 +17852,687 @@ fn dexto_message_text(value: &Value) -> Option<String> {
         .or_else(|| value.get("message"))
         .and_then(provider_value_text)
         .or_else(|| provider_value_text(value))
+}
+
+#[derive(Debug, Clone)]
+struct PochiTaskRow {
+    id: String,
+    cwd: Option<String>,
+    title: Option<String>,
+    parent_id: Option<String>,
+    created_at: Option<i64>,
+    updated_at: Option<i64>,
+    model_id: Option<String>,
+    status: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct PochiMessageRow {
+    id: String,
+    task_id: String,
+    raw: String,
+    row_number: u64,
+}
+
+fn normalize_pochi_livestore_sqlite_path(
+    path: &Path,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    if fs::symlink_metadata(path)?.file_type().is_file() {
+        return normalize_pochi_livestore_sqlite(path, context);
+    }
+
+    let mut paths = Vec::new();
+    collect_pochi_state_db_paths(path, &mut paths)?;
+    paths.sort();
+    if paths.is_empty() {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "no Pochi LiveStore state SQLite databases matching state*.db found",
+        });
+    }
+
+    let mut merged = ProviderNormalizationResult::default();
+    for db_path in paths {
+        let mut file_context = context.clone();
+        file_context.source_path = Some(db_path.clone());
+        let mut result = normalize_pochi_livestore_sqlite(&db_path, &file_context)?;
+        merged.summary.merge(result.summary);
+        merged.captures.append(&mut result.captures);
+        merged.files_touched.append(&mut result.files_touched);
+    }
+    Ok(merged)
+}
+
+fn collect_pochi_state_db_paths(root: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
+    let metadata = fs::symlink_metadata(root)?;
+    if metadata.file_type().is_symlink() {
+        return Ok(());
+    }
+    if metadata.file_type().is_file() {
+        if root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(pochi_state_db_file_name)
+        {
+            paths.push(root.to_path_buf());
+        }
+        return Ok(());
+    }
+    if !metadata.file_type().is_dir() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        collect_pochi_state_db_paths(&entry.path(), paths)?;
+    }
+    Ok(())
+}
+
+fn pochi_state_db_file_name(name: &str) -> bool {
+    name.starts_with("state") && name.ends_with(".db")
+}
+
+fn normalize_pochi_livestore_sqlite(
+    path: &Path,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    let conn = open_provider_sqlite_readonly(path)?;
+    let user_version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let schema_fingerprint = opencode_schema_fingerprint(&conn)?;
+    let mut tasks = pochi_tasks(&conn)?;
+    let messages = pochi_messages(&conn)?;
+    for message in &messages {
+        tasks
+            .entry(message.task_id.clone())
+            .or_insert_with(|| PochiTaskRow::orphan(message.task_id.clone()));
+    }
+
+    let raw_source_path = context
+        .source_path
+        .as_ref()
+        .map_or(path, PathBuf::as_path)
+        .display()
+        .to_string();
+    let mut result = ProviderNormalizationResult::default();
+    let mut sessions_with_events = BTreeSet::new();
+
+    for message in messages {
+        let Some(task) = tasks.get(&message.task_id).cloned() else {
+            continue;
+        };
+        let line = provider_line_from_index(message.row_number);
+        let data: Value = match serde_json::from_str(&message.raw) {
+            Ok(data) => data,
+            Err(err) => {
+                push_provider_import_failure(
+                    &mut result.summary,
+                    line,
+                    format!(
+                        "invalid JSON in Pochi messages:{} id {}: {err}",
+                        message.task_id, message.id
+                    ),
+                );
+                continue;
+            }
+        };
+        let started_at = pochi_task_started_at(&task, context.imported_at);
+        let occurred_at = pochi_message_timestamp(&data, &task, started_at);
+        let events = pochi_message_events(&message, &task, &data, occurred_at);
+        for event in events {
+            sessions_with_events.insert(task.id.clone());
+            result.files_touched.extend(pochi_file_touches_from_event(
+                &task.id,
+                Some(raw_source_path.as_str()),
+                &event,
+                line,
+            ));
+            result.captures.push((
+                line,
+                pochi_capture(
+                    &task,
+                    PochiCaptureContext {
+                        started_at,
+                        ended_at: pochi_task_ended_at(&task, occurred_at),
+                        raw_source_path: &raw_source_path,
+                        user_version,
+                        schema_fingerprint: &schema_fingerprint,
+                        event: Some(event),
+                    },
+                    context,
+                ),
+            ));
+        }
+    }
+
+    for task in tasks.values() {
+        if sessions_with_events.contains(&task.id) {
+            continue;
+        }
+        let started_at = pochi_task_started_at(task, context.imported_at);
+        result.captures.push((
+            0,
+            pochi_capture(
+                task,
+                PochiCaptureContext {
+                    started_at,
+                    ended_at: pochi_task_ended_at(task, started_at),
+                    raw_source_path: &raw_source_path,
+                    user_version,
+                    schema_fingerprint: &schema_fingerprint,
+                    event: None,
+                },
+                context,
+            ),
+        ));
+    }
+
+    Ok(result)
+}
+
+impl PochiTaskRow {
+    fn orphan(id: String) -> Self {
+        Self {
+            id,
+            cwd: None,
+            title: None,
+            parent_id: None,
+            created_at: None,
+            updated_at: None,
+            model_id: None,
+            status: None,
+        }
+    }
+}
+
+struct PochiCaptureContext<'a> {
+    started_at: DateTime<Utc>,
+    ended_at: Option<DateTime<Utc>>,
+    raw_source_path: &'a str,
+    user_version: i64,
+    schema_fingerprint: &'a str,
+    event: Option<ProviderEventEnvelope>,
+}
+
+fn pochi_capture(
+    task: &PochiTaskRow,
+    draft: PochiCaptureContext<'_>,
+    context: &ProviderAdapterContext,
+) -> ProviderCaptureEnvelope {
+    native_provider_capture(
+        NativeSessionDraft {
+            provider: CaptureProvider::Pochi,
+            source_format: POCHI_LIVESTORE_SQLITE_SOURCE_FORMAT,
+            provider_session_id: task.id.clone(),
+            parent_provider_session_id: task.parent_id.clone(),
+            root_provider_session_id: task.parent_id.clone(),
+            external_agent_id: None,
+            agent_type: AgentType::Primary,
+            role_hint: Some("primary".to_owned()),
+            is_primary: true,
+            started_at: draft.started_at,
+            ended_at: draft.ended_at,
+            cwd: task.cwd.clone(),
+            fidelity: Fidelity::Imported,
+            raw_source_path: draft.raw_source_path.to_owned(),
+            trust: ProviderSourceTrust::ProviderNative,
+            source_metadata: json!({
+                "adapter": POCHI_LIVESTORE_SQLITE_SOURCE_FORMAT,
+                "sqlite_user_version": draft.user_version,
+                "schema_fingerprint": draft.schema_fingerprint,
+                "source_path": draft.raw_source_path,
+                "path_semantics": "preview explicit SQLite path only; no ~/.pochi default discovery, config.jsonc lookup, or VS Code OPFS import",
+            }),
+            session_metadata: json!({
+                "source_format": POCHI_LIVESTORE_SQLITE_SOURCE_FORMAT,
+                "task_id": task.id,
+                "title": task.title,
+                "cwd": task.cwd,
+                "model_id": task.model_id,
+                "status": task.status,
+                "created_at_ms": task.created_at,
+                "updated_at_ms": task.updated_at,
+            }),
+        },
+        context,
+        draft.event,
+    )
+}
+
+fn pochi_tasks(conn: &Connection) -> Result<BTreeMap<String, PochiTaskRow>> {
+    if !sqlite_table_exists(conn, "tasks")? {
+        return Err(CaptureError::InvalidPayload(
+            "Pochi LiveStore SQLite database is missing required tasks table".into(),
+        ));
+    }
+    let columns = sqlite_table_columns(conn, "tasks")?;
+    ensure_sqlite_table_columns(&columns, "Pochi tasks table", &["id"])?;
+    let cwd = optional_column_expr(&columns, "cwd", "NULL");
+    let title = optional_column_expr(&columns, "title", "NULL");
+    let parent_id = optional_column_expr(&columns, "parentId", "NULL");
+    let created_at = optional_column_expr(&columns, "createdAt", "NULL");
+    let updated_at = optional_column_expr(&columns, "updatedAt", "NULL");
+    let model_id = optional_column_expr(&columns, "modelId", "NULL");
+    let status = optional_column_expr(&columns, "status", "NULL");
+    let sql = format!(
+        "select id, {cwd}, {title}, {parent_id}, {created_at}, {updated_at}, {model_id}, {status} \
+         from tasks order by id"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok(PochiTaskRow {
+            id: row.get(0)?,
+            cwd: row.get(1)?,
+            title: row.get(2)?,
+            parent_id: row.get(3)?,
+            created_at: row.get(4)?,
+            updated_at: row.get(5)?,
+            model_id: row.get(6)?,
+            status: row.get(7)?,
+        })
+    })?;
+    let rows = rows
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(CaptureError::from)?;
+    Ok(rows
+        .into_iter()
+        .map(|task| (task.id.clone(), task))
+        .collect())
+}
+
+fn pochi_messages(conn: &Connection) -> Result<Vec<PochiMessageRow>> {
+    if !sqlite_table_exists(conn, "messages")? {
+        return Err(CaptureError::InvalidPayload(
+            "Pochi LiveStore SQLite database is missing required messages table".into(),
+        ));
+    }
+    let columns = sqlite_table_columns(conn, "messages")?;
+    ensure_sqlite_table_columns(&columns, "Pochi messages table", &["id", "taskId", "data"])?;
+    let mut stmt = conn.prepare("select id, taskId, data from messages order by taskId, id")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(CaptureError::from)
+        .map(|rows| {
+            rows.into_iter()
+                .enumerate()
+                .map(|(index, (id, task_id, raw))| PochiMessageRow {
+                    id,
+                    task_id,
+                    raw,
+                    row_number: (index as u64).saturating_add(1),
+                })
+                .collect()
+        })
+}
+
+fn pochi_task_started_at(task: &PochiTaskRow, fallback: DateTime<Utc>) -> DateTime<Utc> {
+    provider_timestamp_millis(task.created_at, fallback)
+}
+
+fn pochi_task_ended_at(task: &PochiTaskRow, fallback: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    Some(provider_timestamp_millis(task.updated_at, fallback))
+}
+
+fn pochi_message_timestamp(
+    data: &Value,
+    task: &PochiTaskRow,
+    fallback: DateTime<Utc>,
+) -> DateTime<Utc> {
+    provider_timestamp_value(
+        data.get("createdAt")
+            .or_else(|| data.get("created_at"))
+            .or_else(|| data.get("timestamp"))
+            .or_else(|| data.get("time"))
+            .or_else(|| data.get("updatedAt")),
+        provider_timestamp_millis(task.updated_at.or(task.created_at), fallback),
+    )
+}
+
+fn pochi_message_events(
+    row: &PochiMessageRow,
+    task: &PochiTaskRow,
+    data: &Value,
+    occurred_at: DateTime<Utc>,
+) -> Vec<ProviderEventEnvelope> {
+    let role = data
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let message_id = data
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or(row.id.as_str());
+    let parts = data.get("parts").and_then(Value::as_array);
+    let mut out = Vec::new();
+
+    if matches!(role, "user" | "assistant" | "system") {
+        let text = parts
+            .map(|parts| {
+                parts
+                    .iter()
+                    .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+                    .filter_map(|part| part.get("text").and_then(Value::as_str))
+                    .filter(|text| !text.trim().is_empty())
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .filter(|text| !text.trim().is_empty())
+            .or_else(|| {
+                data.get("text")
+                    .or_else(|| data.get("content"))
+                    .and_then(provider_value_text)
+            });
+        if let Some(text) = text {
+            out.push(pochi_event(PochiEventDraft {
+                task_id: &task.id,
+                message_id,
+                local_index: 0,
+                kind: "message",
+                event_type: EventType::Message,
+                role: Some(provider_role(Some(role))),
+                occurred_at,
+                text,
+                body: json!({
+                    "message_id": message_id,
+                    "row_message_id": row.id,
+                    "role": role,
+                    "message": provider_capped_json_value(data, PROVIDER_MAX_PREVIEW_CHARS),
+                }),
+                metadata: json!({
+                    "source": "pochi_messages",
+                    "source_format": POCHI_LIVESTORE_SQLITE_SOURCE_FORMAT,
+                    "task_id": task.id,
+                    "message_id": message_id,
+                    "row_message_id": row.id,
+                    "role": role,
+                }),
+                row_number: row.row_number,
+            }));
+        }
+    }
+
+    if let Some(parts) = parts {
+        for (part_index, part) in parts.iter().enumerate() {
+            let Some(tool_name) = pochi_tool_name(part) else {
+                continue;
+            };
+            let local_index = ((part_index as u64).saturating_add(1)) << 1;
+            let input = pochi_tool_input(part);
+            let input_path = input.and_then(pochi_tool_input_path);
+            let call_text = pochi_tool_call_text(&tool_name, input);
+            out.push(pochi_event(PochiEventDraft {
+                task_id: &task.id,
+                message_id,
+                local_index,
+                kind: "tool_call",
+                event_type: EventType::ToolCall,
+                role: Some(EventRole::Assistant),
+                occurred_at,
+                text: call_text,
+                body: json!({
+                    "message_id": message_id,
+                    "row_message_id": row.id,
+                    "part_index": part_index,
+                    "tool_name": tool_name,
+                    "input": input.map(|value| provider_capped_json_value(value, PROVIDER_MAX_PREVIEW_CHARS)),
+                    "part": provider_capped_json_value(part, PROVIDER_MAX_PREVIEW_CHARS),
+                }),
+                metadata: json!({
+                    "source": "pochi_messages",
+                    "source_format": POCHI_LIVESTORE_SQLITE_SOURCE_FORMAT,
+                    "task_id": task.id,
+                    "message_id": message_id,
+                    "row_message_id": row.id,
+                    "part_index": part_index,
+                    "tool_name": tool_name,
+                    "tool_part_type": part.get("type").and_then(Value::as_str),
+                    "input_path": input_path,
+                }),
+                row_number: row.row_number,
+            }));
+            if let Some(output) = pochi_tool_output(part) {
+                let Some(output_text) = pochi_tool_output_text(&tool_name, output) else {
+                    continue;
+                };
+                let event_type = if pochi_tool_name_is(&tool_name, "executeCommand") {
+                    EventType::CommandOutput
+                } else {
+                    EventType::ToolOutput
+                };
+                out.push(pochi_event(PochiEventDraft {
+                    task_id: &task.id,
+                    message_id,
+                    local_index: local_index | 1,
+                    kind: "tool_output",
+                    event_type,
+                    role: Some(EventRole::Tool),
+                    occurred_at,
+                    text: output_text,
+                    body: json!({
+                        "message_id": message_id,
+                        "row_message_id": row.id,
+                        "part_index": part_index,
+                        "tool_name": tool_name,
+                        "output": provider_capped_json_value(output, PROVIDER_MAX_PREVIEW_CHARS),
+                    }),
+                    metadata: json!({
+                        "source": "pochi_messages",
+                        "source_format": POCHI_LIVESTORE_SQLITE_SOURCE_FORMAT,
+                        "task_id": task.id,
+                        "message_id": message_id,
+                        "row_message_id": row.id,
+                        "part_index": part_index,
+                        "tool_name": tool_name,
+                        "tool_part_type": part.get("type").and_then(Value::as_str),
+                    }),
+                    row_number: row.row_number,
+                }));
+            }
+        }
+    }
+
+    out
+}
+
+struct PochiEventDraft<'a> {
+    task_id: &'a str,
+    message_id: &'a str,
+    local_index: u64,
+    kind: &'a str,
+    event_type: EventType,
+    role: Option<EventRole>,
+    occurred_at: DateTime<Utc>,
+    text: String,
+    body: Value,
+    metadata: Value,
+    row_number: u64,
+}
+
+fn pochi_event(draft: PochiEventDraft<'_>) -> ProviderEventEnvelope {
+    native_event(NativeEventDraft {
+        provider: CaptureProvider::Pochi,
+        source_format: POCHI_LIVESTORE_SQLITE_SOURCE_FORMAT,
+        provider_session_id: draft.task_id.to_owned(),
+        provider_event_index: (draft.row_number << 16) | draft.local_index,
+        provider_event_hash: Some(format!(
+            "{}:{}:{}",
+            draft.message_id, draft.local_index, draft.kind
+        )),
+        cursor: format!(
+            "messages:{}:{}:{}:{}",
+            draft.task_id, draft.message_id, draft.local_index, draft.kind
+        ),
+        event_type: draft.event_type,
+        role: draft.role,
+        occurred_at: draft.occurred_at,
+        text: draft.text,
+        body: draft.body,
+        metadata: draft.metadata,
+    })
+}
+
+fn pochi_tool_name(part: &Value) -> Option<String> {
+    let part_type = part.get("type").and_then(Value::as_str)?;
+    if let Some(name) = part_type.strip_prefix("tool-") {
+        return (!name.trim().is_empty()).then(|| name.to_owned());
+    }
+    if part_type == "tool-invocation" {
+        return part
+            .pointer("/toolInvocation/toolName")
+            .or_else(|| part.pointer("/toolInvocation/tool_name"))
+            .or_else(|| part.pointer("/toolInvocation/name"))
+            .and_then(Value::as_str)
+            .filter(|name| !name.trim().is_empty())
+            .map(str::to_owned);
+    }
+    None
+}
+
+fn pochi_tool_input(part: &Value) -> Option<&Value> {
+    part.get("input")
+        .or_else(|| part.get("args"))
+        .or_else(|| part.get("arguments"))
+        .or_else(|| part.pointer("/toolInvocation/input"))
+        .or_else(|| part.pointer("/toolInvocation/args"))
+        .or_else(|| part.pointer("/toolInvocation/arguments"))
+}
+
+fn pochi_tool_output(part: &Value) -> Option<&Value> {
+    part.get("output")
+        .or_else(|| part.get("result"))
+        .or_else(|| part.get("errorText"))
+        .or_else(|| part.pointer("/toolInvocation/output"))
+        .or_else(|| part.pointer("/toolInvocation/result"))
+        .or_else(|| part.pointer("/toolInvocation/errorText"))
+}
+
+fn pochi_tool_call_text(tool_name: &str, input: Option<&Value>) -> String {
+    let mut parts = vec![format!("tool call: {tool_name}")];
+    if let Some(path) = input.and_then(pochi_tool_input_path) {
+        parts.push(format!("path: {path}"));
+    }
+    if let Some(command) = input.and_then(pochi_tool_input_command) {
+        parts.push(format!("command: {command}"));
+    }
+    parts.join("\n")
+}
+
+fn pochi_tool_output_text(tool_name: &str, output: &Value) -> Option<String> {
+    if pochi_tool_name_is(tool_name, "executeCommand") {
+        return pochi_command_output_text(output);
+    }
+    provider_value_text(output)
+        .filter(|text| !text.trim().is_empty())
+        .or_else(|| serde_json::to_string(output).ok())
+}
+
+fn pochi_command_output_text(output: &Value) -> Option<String> {
+    let mut parts = Vec::new();
+    for key in ["stdout", "stderr", "output", "text", "message", "content"] {
+        if let Some(text) = output.get(key).and_then(Value::as_str) {
+            if !text.trim().is_empty() {
+                parts.push(text.to_owned());
+            }
+        }
+    }
+    if parts.is_empty() {
+        provider_value_text(output).filter(|text| !text.trim().is_empty())
+    } else {
+        Some(parts.join("\n"))
+    }
+}
+
+fn pochi_file_touches_from_event(
+    provider_session_id: &str,
+    raw_source_path: Option<&str>,
+    event: &ProviderEventEnvelope,
+    line_number: usize,
+) -> Vec<(usize, ProviderFileTouchedEnvelope)> {
+    let mut drafts = Vec::new();
+    if event.event_type == EventType::ToolCall {
+        let tool_name = event
+            .metadata
+            .get("tool_name")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if pochi_tool_name_is(tool_name, "writeToFile")
+            || pochi_tool_name_is(tool_name, "applyDiff")
+            || pochi_tool_name_is(tool_name, "editNotebook")
+        {
+            if let Some(path) = event
+                .metadata
+                .get("input_path")
+                .and_then(Value::as_str)
+                .and_then(normalize_file_path)
+            {
+                drafts.push(file_touch_draft(
+                    path,
+                    None,
+                    FileChangeKind::Modified,
+                    Confidence::Explicit,
+                    "pochi_tool_input_path",
+                ));
+            }
+        }
+    }
+    if drafts.is_empty() {
+        return provider_file_touches_from_event(
+            CaptureProvider::Pochi,
+            provider_session_id,
+            POCHI_LIVESTORE_SQLITE_SOURCE_FORMAT,
+            raw_source_path,
+            event,
+            line_number,
+        );
+    }
+    provider_file_touch_envelopes(
+        ProviderFileTouchEnvelopeContext {
+            provider: CaptureProvider::Pochi,
+            provider_session_id,
+            source_format: POCHI_LIVESTORE_SQLITE_SOURCE_FORMAT,
+            raw_source_path,
+            occurred_at: event.occurred_at,
+            provider_event_index: Some(event.provider_event_index),
+            provider_touch_base_index: event.provider_event_index << 16,
+            line_number,
+        },
+        drafts,
+    )
+}
+
+fn pochi_tool_input_path(input: &Value) -> Option<String> {
+    ["path", "filePath", "filepath", "notebookPath", "targetPath"]
+        .into_iter()
+        .find_map(|key| input.get(key).and_then(Value::as_str))
+        .and_then(normalize_file_path)
+}
+
+fn pochi_tool_input_command(input: &Value) -> Option<&str> {
+    input
+        .get("command")
+        .or_else(|| input.get("cmd"))
+        .and_then(Value::as_str)
+        .filter(|command| !command.trim().is_empty())
+}
+
+fn pochi_tool_name_is(tool_name: &str, expected: &str) -> bool {
+    pochi_tool_name_key(tool_name) == pochi_tool_name_key(expected)
+}
+
+fn pochi_tool_name_key(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -31657,6 +32415,111 @@ mod tests {
         assert_eq!(second.imported_events, 0);
         assert_eq!(second.skipped_sessions, 1);
         assert_eq!(second.skipped_events, 3);
+    }
+
+    #[test]
+    fn native_pochi_fixture_imports_searches_reimports_and_file_touches() {
+        let temp = tempdir();
+        let fixture =
+            provider_history_fixture("pochi/v1/storage/store-alpha/statep0chifixture@6.db");
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let source = provider_source_for_path(CaptureProvider::Pochi, fixture.clone());
+        assert_eq!(source.source_format, POCHI_LIVESTORE_SQLITE_SOURCE_FORMAT);
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+
+        let first = import_pochi_livestore_sqlite(
+            &fixture,
+            &mut store,
+            PochiLivestoreSqliteImportOptions {
+                machine_id: "test-machine".into(),
+                source_path: Some(fixture.clone()),
+                imported_at: DateTime::parse_from_rfc3339("2026-07-06T12:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                allow_partial_failures: true,
+                ..PochiLivestoreSqliteImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(first.failed, 0, "{:?}", first.failures);
+        assert_eq!(first.imported_sessions, 1);
+        assert_eq!(first.imported_events, 8);
+
+        let session_id = provider_session_uuid(CaptureProvider::Pochi, "pochi-task-oracle-1");
+        let session = store.get_session(session_id).unwrap();
+        assert_eq!(session.provider, CaptureProvider::Pochi);
+        let source = store
+            .capture_source_by_external_session(CaptureProvider::Pochi, "pochi-task-oracle-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            source.descriptor.cwd.as_deref(),
+            Some("/workspace/pochi-fixture")
+        );
+        assert_eq!(
+            source.sync.metadata["source_format"].as_str(),
+            Some(POCHI_LIVESTORE_SQLITE_SOURCE_FORMAT)
+        );
+
+        let events = store.events_for_session(session_id).unwrap();
+        assert_eq!(events.len(), 8);
+        assert!(events
+            .iter()
+            .any(|event| event.role == Some(EventRole::User)));
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == EventType::ToolCall));
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == EventType::CommandOutput));
+        let rendered = serde_json::to_string(&events).unwrap();
+        assert!(rendered.contains("POCHI_ORACLE_USER_TEXT zesty quartz lighthouse"));
+        assert!(rendered.contains("POCHI_ORACLE_ASSISTANT_TEXT azure marmalade compass"));
+        assert!(rendered.contains("POCHI_EXECUTE_OUTPUT garnet semaphore"));
+
+        assert!(store
+            .search_event_hits("POCHI_ORACLE_ASSISTANT_TEXT", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::Pochi)));
+        assert!(store
+            .search_event_hits("POCHI_EXECUTE_OUTPUT", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::Pochi)));
+
+        let archive = store.export_archive().unwrap();
+        for path in [
+            "src/pochi_oracle.rs",
+            "src/pochi_diff.rs",
+            "notebooks/pochi_fixture.ipynb",
+        ] {
+            let touched = archive
+                .files_touched
+                .iter()
+                .find(|file| file.path == path)
+                .unwrap_or_else(|| panic!("missing Pochi file touch for {path}"));
+            assert_eq!(touched.change_kind, Some(FileChangeKind::Modified));
+            assert_eq!(touched.confidence, Confidence::Explicit);
+            assert!(touched.event_id.is_some());
+        }
+
+        let second = import_pochi_livestore_sqlite(
+            &fixture,
+            &mut store,
+            PochiLivestoreSqliteImportOptions {
+                allow_partial_failures: true,
+                ..PochiLivestoreSqliteImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(second.failed, 0, "{:?}", second.failures);
+        assert_eq!(second.imported_sessions, 0);
+        assert_eq!(second.imported_events, 0);
+        assert_eq!(second.skipped_sessions, 1);
+        assert_eq!(second.skipped_events, 8);
     }
 
     #[test]

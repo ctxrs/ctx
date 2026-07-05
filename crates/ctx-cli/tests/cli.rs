@@ -6552,6 +6552,114 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
 }
 
 #[test]
+fn pochi_cli_imports_explicit_livestore_state_db_and_directory_only() {
+    let temp = tempdir();
+    let empty_sources = json_output(ctx(&temp).args(["sources", "--json"]));
+    assert!(
+        !empty_sources["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|source| source["provider"] == "pochi"),
+        "Pochi should not have default discovery sources: {empty_sources:#}"
+    );
+
+    let fixture = provider_history_fixture("pochi/v1/storage/store-alpha/statep0chifixture@6.db");
+    let imported = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "pochi",
+        "--path",
+        &fixture,
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(imported["schema_version"], 1);
+    assert_eq!(imported["sources"][0]["provider"], "pochi");
+    assert_eq!(
+        imported["sources"][0]["source_format"],
+        "pochi_livestore_state_sqlite"
+    );
+    assert_eq!(imported["totals"]["failed"], 0);
+    assert_eq!(imported["totals"]["imported_sessions"], 1);
+    assert_eq!(imported["totals"]["imported_events"], 8);
+
+    let search = json_output(ctx(&temp).args([
+        "search",
+        "POCHI_ORACLE_ASSISTANT_TEXT",
+        "--provider",
+        "pochi",
+        "--refresh",
+        "off",
+        "--json",
+    ]));
+    assert_search_provider_oracle_with_scope(
+        &search,
+        "pochi",
+        "POCHI_ORACLE_ASSISTANT_TEXT",
+        1,
+        "message",
+        "session_result",
+        "session",
+    );
+
+    let output_search = json_output(ctx(&temp).args([
+        "search",
+        "POCHI_EXECUTE_OUTPUT",
+        "--provider",
+        "pochi",
+        "--refresh",
+        "off",
+        "--json",
+    ]));
+    assert_search_provider_oracle_with_scope(
+        &output_search,
+        "pochi",
+        "POCHI_EXECUTE_OUTPUT",
+        1,
+        "command_event",
+        "session_result",
+        "session",
+    );
+
+    let second = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "pochi",
+        "--path",
+        &fixture,
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(second["totals"]["failed"], 0);
+    assert_eq!(second["totals"]["imported_sessions"], 0);
+    assert_eq!(second["totals"]["imported_events"], 0);
+
+    let dir_temp = tempdir();
+    let fixture_dir = provider_history_fixture("pochi/v1/storage/store-alpha");
+    let imported_dir = json_output(ctx(&dir_temp).args([
+        "import",
+        "--provider",
+        "pochi",
+        "--path",
+        &fixture_dir,
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(imported_dir["sources"][0]["provider"], "pochi");
+    assert_eq!(
+        imported_dir["sources"][0]["source_format"],
+        "pochi_livestore_state_sqlite"
+    );
+    assert_eq!(imported_dir["totals"]["failed"], 0);
+    assert_eq!(imported_dir["totals"]["imported_sessions"], 1);
+    assert_eq!(imported_dir["totals"]["imported_events"], 8);
+}
+
+#[test]
 fn lingma_cli_default_source_imports_home_local_db() {
     let temp = tempdir();
     let query = "lingma-default-import-oracle";

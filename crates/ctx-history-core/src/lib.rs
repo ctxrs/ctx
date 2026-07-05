@@ -223,6 +223,7 @@ text_enum! {
         Goose => "goose",
         Dexto => "dexto",
         Lingma => "lingma",
+        Pochi => "pochi",
         CortexCode => "cortex_code",
         CodeBuddy => "codebuddy",
         AiderDesk => "aider_desk",

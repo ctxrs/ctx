@@ -47,28 +47,29 @@ use ctx_history_capture::{
     import_kode_history, import_lingma_sqlite, import_mistral_vibe_history, import_mux_history,
     import_nanoclaw_project, import_neovate_history, import_openclaw_history,
     import_opencode_sqlite, import_openhands_file_events, import_pi_session_jsonl,
-    import_qwen_code_history, import_reasonix_history, import_roo_task_json_history,
-    import_rovodev_history, import_shelley_sqlite, import_terramind_sqlite,
-    import_windsurf_cascade_hook_transcripts, import_zed_threads_sqlite, provider_source_for_path,
-    provider_source_spec, stable_capture_uuid, validate_custom_history_jsonl_v1,
-    validate_custom_history_jsonl_v1_reader, AiderDeskImportOptions, AntigravityCliImportOptions,
-    AstrBotSqliteImportOptions, AutohandCodeImportOptions, CatalogSummary,
-    ClaudeProjectsImportOptions, ClineTaskJsonImportOptions, CodeBuddyImportOptions,
-    CodexEventImportMode, CodexHistoryImportOptions, CodexSessionCatalogOptions,
-    CodexSessionImportOptions, CodexSessionImportProgress, CodexSessionImportProgressCallback,
-    CodexToolOutputMode, CommandCodeImportOptions, ContinueCliImportOptions,
-    CopilotCliImportOptions, CortexCodeImportOptions, CrushSqliteImportOptions,
-    CursorNativeImportOptions, CustomHistoryJsonlV1ImportOptions, DeepAgentsSqliteImportOptions,
-    DextoSqliteImportOptions, FactoryAiDroidImportOptions, ForgeCodeSqliteImportOptions,
-    GeminiCliImportOptions, GooseSessionsSqliteImportOptions, HermesSqliteImportOptions,
-    IflowCliImportOptions, JazzImportOptions, KiloSqliteImportOptions, KimiCodeCliImportOptions,
-    KiroSqliteImportOptions, KodeImportOptions, LingmaSqliteImportOptions,
-    MistralVibeImportOptions, MuxImportOptions, NanoClawImportOptions, NeovateImportOptions,
-    OpenClawImportOptions, OpenCodeSqliteImportOptions, OpenHandsImportOptions,
-    PiSessionImportOptions, ProviderImportSummary, ProviderImportSupport, ProviderSource,
-    ProviderSourceStatus, QwenCodeImportOptions, ReasonixImportOptions, RooTaskJsonImportOptions,
-    RovoDevImportOptions, ShelleySqliteImportOptions, TerramindSqliteImportOptions,
-    WindsurfCascadeHookImportOptions, ZedThreadsSqliteImportOptions,
+    import_pochi_livestore_sqlite, import_qwen_code_history, import_reasonix_history,
+    import_roo_task_json_history, import_rovodev_history, import_shelley_sqlite,
+    import_terramind_sqlite, import_windsurf_cascade_hook_transcripts, import_zed_threads_sqlite,
+    provider_source_for_path, provider_source_spec, stable_capture_uuid,
+    validate_custom_history_jsonl_v1, validate_custom_history_jsonl_v1_reader,
+    AiderDeskImportOptions, AntigravityCliImportOptions, AstrBotSqliteImportOptions,
+    AutohandCodeImportOptions, CatalogSummary, ClaudeProjectsImportOptions,
+    ClineTaskJsonImportOptions, CodeBuddyImportOptions, CodexEventImportMode,
+    CodexHistoryImportOptions, CodexSessionCatalogOptions, CodexSessionImportOptions,
+    CodexSessionImportProgress, CodexSessionImportProgressCallback, CodexToolOutputMode,
+    CommandCodeImportOptions, ContinueCliImportOptions, CopilotCliImportOptions,
+    CortexCodeImportOptions, CrushSqliteImportOptions, CursorNativeImportOptions,
+    CustomHistoryJsonlV1ImportOptions, DeepAgentsSqliteImportOptions, DextoSqliteImportOptions,
+    FactoryAiDroidImportOptions, ForgeCodeSqliteImportOptions, GeminiCliImportOptions,
+    GooseSessionsSqliteImportOptions, HermesSqliteImportOptions, IflowCliImportOptions,
+    JazzImportOptions, KiloSqliteImportOptions, KimiCodeCliImportOptions, KiroSqliteImportOptions,
+    KodeImportOptions, LingmaSqliteImportOptions, MistralVibeImportOptions, MuxImportOptions,
+    NanoClawImportOptions, NeovateImportOptions, OpenClawImportOptions,
+    OpenCodeSqliteImportOptions, OpenHandsImportOptions, PiSessionImportOptions,
+    PochiLivestoreSqliteImportOptions, ProviderImportSummary, ProviderImportSupport,
+    ProviderSource, ProviderSourceStatus, QwenCodeImportOptions, ReasonixImportOptions,
+    RooTaskJsonImportOptions, RovoDevImportOptions, ShelleySqliteImportOptions,
+    TerramindSqliteImportOptions, WindsurfCascadeHookImportOptions, ZedThreadsSqliteImportOptions,
 };
 use ctx_history_core::{
     database_path, default_data_root, utc_now, CaptureProvider, ContextCitation,
@@ -785,6 +786,7 @@ enum NativeProviderArg {
     RooCode,
     Dexto,
     Lingma,
+    Pochi,
     #[value(name = "codebuddy", alias = "code-buddy", alias = "code_buddy")]
     CodeBuddy,
     #[value(name = "aider-desk", alias = "aider_desk", alias = "aiderdesk")]
@@ -894,6 +896,7 @@ enum ProviderArg {
     RooCode,
     Dexto,
     Lingma,
+    Pochi,
     #[value(name = "codebuddy", alias = "code-buddy", alias = "code_buddy")]
     CodeBuddy,
     #[value(name = "aider-desk", alias = "aider_desk", alias = "aiderdesk")]
@@ -968,6 +971,7 @@ impl NativeProviderArg {
             Self::RooCode => CaptureProvider::RooCode,
             Self::Dexto => CaptureProvider::Dexto,
             Self::Lingma => CaptureProvider::Lingma,
+            Self::Pochi => CaptureProvider::Pochi,
             Self::CodeBuddy => CaptureProvider::CodeBuddy,
             Self::AiderDesk => CaptureProvider::AiderDesk,
         }
@@ -1039,6 +1043,7 @@ impl ProviderArg {
             Self::RooCode => CaptureProvider::RooCode,
             Self::Dexto => CaptureProvider::Dexto,
             Self::Lingma => CaptureProvider::Lingma,
+            Self::Pochi => CaptureProvider::Pochi,
             Self::CodeBuddy => CaptureProvider::CodeBuddy,
             Self::AiderDesk => CaptureProvider::AiderDesk,
             Self::Custom => CaptureProvider::Custom,
@@ -1089,6 +1094,7 @@ impl ProviderArg {
             Self::RooCode => "roo",
             Self::Dexto => "dexto",
             Self::Lingma => "lingma",
+            Self::Pochi => "pochi",
             Self::CodeBuddy => "codebuddy",
             Self::AiderDesk => "aider-desk",
             Self::Custom => "custom",
@@ -6056,6 +6062,17 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
+        CaptureProvider::Pochi => import_pochi_livestore_sqlite(
+            &source.path,
+            store,
+            PochiLivestoreSqliteImportOptions {
+                source_path: Some(source.path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: true,
+                ..PochiLivestoreSqliteImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
         CaptureProvider::Gemini => import_gemini_cli_history(
             &source.path,
             store,
@@ -6488,6 +6505,14 @@ fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bool {
         | CaptureProvider::Dexto
         | CaptureProvider::Lingma
         | CaptureProvider::Zed => path == source.path,
+        CaptureProvider::Pochi => {
+            path == source.path
+                || (path.starts_with(&source.path)
+                    && path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with("state") && name.ends_with(".db")))
+        }
         CaptureProvider::MistralVibe => {
             path == source.path
                 || (path.file_name().and_then(|name| name.to_str()) == Some("messages.jsonl")
@@ -6878,6 +6903,7 @@ fn source_uses_incremental_event_search(source: &SourceInfo) -> bool {
             | CaptureProvider::Crush
             | CaptureProvider::Goose
             | CaptureProvider::Dexto
+            | CaptureProvider::Pochi
             | CaptureProvider::Antigravity
             | CaptureProvider::Gemini
             | CaptureProvider::Windsurf

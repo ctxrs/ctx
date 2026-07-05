@@ -158,6 +158,23 @@ IDE/application storage imports.
 - Caveat: ctx does not parse the private `~/.codeium/windsurf/cascade` cache or
   guessed VS Code state databases.
 
+## Pochi
+
+- Source evidence: Pochi's `packages/livekit/src/livestore/default-schema.ts`
+  defines LiveStore materialized state tables for `tasks`, `messages`, and
+  `files`.
+- Message type evidence: `packages/livekit/src/livestore/types.ts` defines UI
+  messages with `role` plus typed `parts`, including text and tool parts.
+- CLI storage evidence: `packages/cli/src/livekit/store.ts` enables filesystem
+  LiveStore sync only when `POCHI_LIVEKIT_SYNC_ON` is set and stores state under
+  `~/.pochi/storage/<storeId>/state<schemaHash>@6.db`.
+- `ctx` imports this shape as `pochi_livestore_state_sqlite`, reading explicit
+  SQLite file paths or explicit directories containing `state*.db` files
+  read-only.
+- This is preview and explicit-path-only. `ctx` does not add default
+  `~/.pochi` discovery, does not read `config.jsonc`, and does not attempt VS
+  Code OPFS extraction.
+
 ## Kode
 
 - Source evidence: `@shareai-lab/kode@2.2.1` declares repository
