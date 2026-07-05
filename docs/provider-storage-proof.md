@@ -200,6 +200,36 @@ IDE/application storage imports.
   aliases to the canonical provider `openloaf`. The native importer does not
   treat `~/.loaf` as a source-backed history path.
 
+## Auggie / Augment CLI
+
+- Source evidence: the published `@augmentcode/auggie@0.32.0` package bundle
+  contains the Augment CLI implementation.
+- Official Augment CLI docs describe the npm-installed `auggie` command,
+  `--augment-cache-dir` defaulting to `~/.augment`, resumable sessions,
+  `auggie session list`, session sharing, and `--dont-save-session`.
+- Bundle storage evidence: `SessionManager` resolves the session directory as
+  `<augment-cache-dir>/sessions`, and `SessionStore` stores each session as
+  `<session_id>.json`.
+- Schema evidence: package code writes JSON objects with `sessionId`, `created`,
+  `modified`, `workspaceId`, optional workspace path metadata, `agentState`, and
+  `chatHistory`. Each `chatHistory` item includes an `exchange`, completion
+  flags, sequence/timestamp metadata, changed-file arrays, history-summary
+  markers, and a source marker.
+- Exchange evidence: remote session materialization maps backend exchanges into
+  `exchange.request_message`, `exchange.response_text`, and `exchange.request_id`.
+  Current package code also carries node arrays; ctx imports recognized text-node
+  content when present.
+- Direct no-auth probe evidence: running Auggie 0.32.0 with a temporary
+  `--augment-cache-dir` created the cache/session directory but could not
+  produce full transcript JSON without Augment login. The repository fixture is
+  therefore minimized from the verified package schema rather than invented from
+  a live private account.
+- `ctx` imports this shape as `auggie_session_json`, using read-only discovery
+  under `~/.augment/sessions` or an explicit session JSON/session directory.
+- Caveat: ctx indexes user/assistant request and response text only. Richer tool,
+  changed-file, and IDE/application history semantics remain unclaimed until a
+  public contract or fixture proves them.
+
 ## Kode
 
 - Source evidence: `@shareai-lab/kode@2.2.1` declares repository

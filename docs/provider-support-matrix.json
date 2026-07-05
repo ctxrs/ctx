@@ -1849,6 +1849,68 @@
       }
     },
     {
+      "id": "auggie",
+      "display_name": "Auggie",
+      "priority": "p1",
+      "status": "local_import_when_supported",
+      "capture_provider": "auggie",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "auggie_session_json",
+          "fidelity": "partial",
+          "proof": [
+            "@augmentcode/auggie@0.32.0 package SessionStore and SessionManager storage code",
+            "Augment CLI docs for --augment-cache-dir, resume, session list, and --dont-save-session",
+            "ctx sources",
+            "ctx import --provider auggie",
+            "cargo test -p ctx-history-capture native_auggie_fixture_imports_searches_and_reimports"
+          ],
+          "notes": [
+            "Reads Auggie session JSON files under ~/.augment/sessions or an explicit session JSON/session directory.",
+            "Normalizes chatHistory exchange request_message/response_text and recognized text nodes into user and assistant events; full tool and file-change semantics are retained only in capped native metadata."
+          ]
+        }
+      ],
+      "history_locations": [
+        "~/.augment/sessions/*.json"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": false,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": false,
+        "tool_output": false,
+        "command_output": false,
+        "files_touched": false,
+        "artifacts": false,
+        "model_identity": false,
+        "costs": false,
+        "token_usage": false,
+        "parent_child_session_edges": false
+      },
+      "redaction_notes": [
+        "Reads provider JSON files read-only; imported message text, local workspace paths, and source paths remain in the local ctx index.",
+        "Agent state and unrecognized exchange fields are retained only as capped native JSON metadata."
+      ],
+      "blockers": [
+        "Importer is based on @augmentcode/auggie@0.32.0 package storage proof and sanitized fixtures; future package schema changes may need adapter updates.",
+        "No-auth CLI probes could create the cache/session directory but could not generate full transcript JSON without Augment login, so fixture data is minimized from the verified package schema."
+      ],
+      "public_docs": "docs/provider-support.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/auggie/v0.32.0/sessions"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs",
+        "tests/fixtures/provider-history/auggie/v0.32.0/sessions"
+      ]
+    },
+    {
       "id": "forgecode",
       "display_name": "ForgeCode",
       "priority": "p1",

@@ -98,7 +98,7 @@ pub enum StoreError {
 
 pub type Result<T> = std::result::Result<T, StoreError>;
 
-const SCHEMA_VERSION: i64 = 29;
+const SCHEMA_VERSION: i64 = 30;
 const BUSY_TIMEOUT: Duration = Duration::from_millis(30_000);
 const OBJECTS_DIR: &str = "objects";
 const SPOOL_DIR: &str = "spool";
@@ -483,7 +483,7 @@ const CREATE_TABLES_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS capture_sources (
     id TEXT PRIMARY KEY NOT NULL,
     kind TEXT NOT NULL CHECK (kind IN ('provider_import', 'provider_hook', 'direct_cli', 'manual')),
-    provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'openloaf', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'cursor', 'windsurf', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'iflow_cli', 'jazz', 'forgecode', 'deepagents', 'mistral_vibe', 'mux', 'reasonix', 'kode', 'neovate', 'command_code', 'terramind', 'rovodev', 'cortex_code', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'dexto', 'lingma', 'pochi', 'codebuddy', 'aider_desk', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
+    provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'openloaf', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'cursor', 'windsurf', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'iflow_cli', 'jazz', 'forgecode', 'deepagents', 'mistral_vibe', 'mux', 'reasonix', 'kode', 'neovate', 'command_code', 'terramind', 'rovodev', 'cortex_code', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'dexto', 'lingma', 'pochi', 'codebuddy', 'aider_desk', 'auggie', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
     machine_id TEXT NOT NULL,
     process_id INTEGER,
     cwd TEXT,
@@ -500,7 +500,7 @@ CREATE TABLE IF NOT EXISTS capture_sources (
 
 CREATE TABLE IF NOT EXISTS catalog_sessions (
     source_path TEXT PRIMARY KEY NOT NULL,
-    provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'openloaf', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'cursor', 'windsurf', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'iflow_cli', 'jazz', 'forgecode', 'deepagents', 'mistral_vibe', 'mux', 'reasonix', 'kode', 'neovate', 'command_code', 'terramind', 'rovodev', 'cortex_code', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'dexto', 'lingma', 'pochi', 'codebuddy', 'aider_desk', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
+    provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'openloaf', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'cursor', 'windsurf', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'iflow_cli', 'jazz', 'forgecode', 'deepagents', 'mistral_vibe', 'mux', 'reasonix', 'kode', 'neovate', 'command_code', 'terramind', 'rovodev', 'cortex_code', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'dexto', 'lingma', 'pochi', 'codebuddy', 'aider_desk', 'auggie', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
     source_format TEXT NOT NULL,
     source_root TEXT NOT NULL,
     external_session_id TEXT,
@@ -529,7 +529,7 @@ CREATE TABLE IF NOT EXISTS catalog_sessions (
 );
 
 CREATE TABLE IF NOT EXISTS source_import_files (
-    provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'openloaf', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'cursor', 'windsurf', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'iflow_cli', 'jazz', 'forgecode', 'deepagents', 'mistral_vibe', 'mux', 'reasonix', 'kode', 'neovate', 'command_code', 'terramind', 'rovodev', 'cortex_code', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'dexto', 'lingma', 'pochi', 'codebuddy', 'aider_desk', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
+    provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'openloaf', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'cursor', 'windsurf', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'iflow_cli', 'jazz', 'forgecode', 'deepagents', 'mistral_vibe', 'mux', 'reasonix', 'kode', 'neovate', 'command_code', 'terramind', 'rovodev', 'cortex_code', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'dexto', 'lingma', 'pochi', 'codebuddy', 'aider_desk', 'auggie', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
     source_format TEXT NOT NULL,
     source_root TEXT NOT NULL,
     source_path TEXT NOT NULL,
@@ -1444,6 +1444,9 @@ impl Store {
         }
         if user_version < 29 {
             migrate_to_v29(&self.conn)?;
+        }
+        if user_version < 30 {
+            migrate_to_v30(&self.conn)?;
         }
         create_fts_tables_if_supported(&self.conn)?;
         Ok(())
@@ -5656,6 +5659,43 @@ fn migrate_to_v29(conn: &Connection) -> Result<()> {
     }
 }
 
+fn migrate_to_v30(conn: &Connection) -> Result<()> {
+    let foreign_keys_enabled: i64 = conn.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
+    conn.execute_batch("PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;")?;
+    let migration = (|| -> Result<()> {
+        conn.execute_batch(CREATE_TABLES_SQL)?;
+        if stable_sql_views_exist(conn)? {
+            drop_stable_sql_views(conn)?;
+        }
+        rebuild_capture_sources_provider_check(conn)?;
+        rebuild_catalog_sessions_provider_check(conn)?;
+        rebuild_source_import_files_provider_check(conn)?;
+        conn.execute_batch(INDEXES_SQL)?;
+        create_stable_sql_views(conn)?;
+        conn.execute_batch("PRAGMA user_version = 30;")?;
+        Ok(())
+    })();
+
+    match migration {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;")?;
+            if foreign_keys_enabled != 0 {
+                conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+            }
+            Ok(())
+        }
+        Err(err) => {
+            if let Err(rollback_err) = conn.execute_batch("ROLLBACK;") {
+                return Err(StoreError::Sql(rollback_err));
+            }
+            if foreign_keys_enabled != 0 {
+                conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+            }
+            Err(err)
+        }
+    }
+}
+
 fn create_stable_sql_views(conn: &Connection) -> Result<()> {
     conn.execute_batch(STABLE_SQL_VIEWS_SQL)?;
     Ok(())
@@ -5822,7 +5862,7 @@ fn rebuild_capture_sources_provider_check(conn: &Connection) -> Result<()> {
         CREATE TABLE capture_sources_new (
             id TEXT PRIMARY KEY NOT NULL,
             kind TEXT NOT NULL CHECK (kind IN ('provider_import', 'provider_hook', 'direct_cli', 'manual')),
-            provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'openloaf', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'cursor', 'windsurf', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'iflow_cli', 'jazz', 'forgecode', 'deepagents', 'mistral_vibe', 'mux', 'reasonix', 'kode', 'neovate', 'command_code', 'terramind', 'rovodev', 'cortex_code', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'dexto', 'lingma', 'pochi', 'codebuddy', 'aider_desk', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
+            provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'openloaf', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'cursor', 'windsurf', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'iflow_cli', 'jazz', 'forgecode', 'deepagents', 'mistral_vibe', 'mux', 'reasonix', 'kode', 'neovate', 'command_code', 'terramind', 'rovodev', 'cortex_code', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'dexto', 'lingma', 'pochi', 'codebuddy', 'aider_desk', 'auggie', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
             machine_id TEXT NOT NULL,
             process_id INTEGER,
             cwd TEXT,
@@ -5870,7 +5910,7 @@ fn rebuild_catalog_sessions_provider_check(conn: &Connection) -> Result<()> {
         DROP TABLE IF EXISTS catalog_sessions_new;
         CREATE TABLE catalog_sessions_new (
             source_path TEXT PRIMARY KEY NOT NULL,
-            provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'openloaf', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'cursor', 'windsurf', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'iflow_cli', 'jazz', 'forgecode', 'deepagents', 'mistral_vibe', 'mux', 'reasonix', 'kode', 'neovate', 'command_code', 'terramind', 'rovodev', 'cortex_code', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'dexto', 'lingma', 'pochi', 'codebuddy', 'aider_desk', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
+            provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'openloaf', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'cursor', 'windsurf', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'iflow_cli', 'jazz', 'forgecode', 'deepagents', 'mistral_vibe', 'mux', 'reasonix', 'kode', 'neovate', 'command_code', 'terramind', 'rovodev', 'cortex_code', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'dexto', 'lingma', 'pochi', 'codebuddy', 'aider_desk', 'auggie', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
             source_format TEXT NOT NULL,
             source_root TEXT NOT NULL,
             external_session_id TEXT,
@@ -5925,7 +5965,7 @@ fn rebuild_source_import_files_provider_check(conn: &Connection) -> Result<()> {
         r#"
         DROP TABLE IF EXISTS source_import_files_new;
         CREATE TABLE source_import_files_new (
-            provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'openloaf', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'cursor', 'windsurf', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'iflow_cli', 'jazz', 'forgecode', 'deepagents', 'mistral_vibe', 'mux', 'reasonix', 'kode', 'neovate', 'command_code', 'terramind', 'rovodev', 'cortex_code', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'dexto', 'lingma', 'pochi', 'codebuddy', 'aider_desk', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
+            provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'openloaf', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'cursor', 'windsurf', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'iflow_cli', 'jazz', 'forgecode', 'deepagents', 'mistral_vibe', 'mux', 'reasonix', 'kode', 'neovate', 'command_code', 'terramind', 'rovodev', 'cortex_code', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'dexto', 'lingma', 'pochi', 'codebuddy', 'aider_desk', 'auggie', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
             source_format TEXT NOT NULL,
             source_root TEXT NOT NULL,
             source_path TEXT NOT NULL,
@@ -9784,6 +9824,7 @@ mod catalog_tests {
             ("lingma", "lingma_sqlite"),
             ("pochi", "pochi_livestore_state_sqlite"),
             ("openloaf", "openloaf_chat_jsonl"),
+            ("auggie", "auggie_session_json"),
             ("copilot_cli", "copilot_cli_session_events_jsonl"),
             ("factory_ai_droid", "factory_ai_droid_sessions_jsonl"),
             ("continue", "continue_cli_sessions_json"),
@@ -9842,7 +9883,7 @@ mod catalog_tests {
         let source_count: i64 = store
             .conn
             .query_row(
-                "SELECT COUNT(*) FROM capture_sources WHERE provider IN ('kilo', 'crush', 'goose', 'dexto', 'lingma', 'pochi', 'openloaf', 'copilot_cli', 'factory_ai_droid', 'continue', 'openhands', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'kiro_cli', 'iflow_cli', 'jazz', 'forgecode', 'deepagents', 'mistral_vibe', 'mux', 'reasonix', 'kode', 'neovate', 'command_code', 'terramind', 'rovodev', 'cortex_code', 'codebuddy', 'aider_desk', 'windsurf', 'zed', 'custom')",
+                "SELECT COUNT(*) FROM capture_sources WHERE provider IN ('kilo', 'crush', 'goose', 'dexto', 'lingma', 'pochi', 'openloaf', 'copilot_cli', 'factory_ai_droid', 'continue', 'openhands', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'kiro_cli', 'iflow_cli', 'jazz', 'auggie', 'forgecode', 'deepagents', 'mistral_vibe', 'mux', 'reasonix', 'kode', 'neovate', 'command_code', 'terramind', 'rovodev', 'cortex_code', 'codebuddy', 'aider_desk', 'windsurf', 'zed', 'custom')",
                 [],
                 |row| row.get(0),
             )
@@ -9850,13 +9891,13 @@ mod catalog_tests {
         let catalog_count: i64 = store
             .conn
             .query_row(
-                "SELECT COUNT(*) FROM catalog_sessions WHERE provider IN ('kilo', 'crush', 'goose', 'dexto', 'lingma', 'pochi', 'openloaf', 'copilot_cli', 'factory_ai_droid', 'continue', 'openhands', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'kiro_cli', 'iflow_cli', 'jazz', 'forgecode', 'deepagents', 'mistral_vibe', 'mux', 'reasonix', 'kode', 'neovate', 'command_code', 'terramind', 'rovodev', 'cortex_code', 'codebuddy', 'aider_desk', 'windsurf', 'zed', 'custom')",
+                "SELECT COUNT(*) FROM catalog_sessions WHERE provider IN ('kilo', 'crush', 'goose', 'dexto', 'lingma', 'pochi', 'openloaf', 'copilot_cli', 'factory_ai_droid', 'continue', 'openhands', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'kiro_cli', 'iflow_cli', 'jazz', 'auggie', 'forgecode', 'deepagents', 'mistral_vibe', 'mux', 'reasonix', 'kode', 'neovate', 'command_code', 'terramind', 'rovodev', 'cortex_code', 'codebuddy', 'aider_desk', 'windsurf', 'zed', 'custom')",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(source_count, 33);
-        assert_eq!(catalog_count, 33);
+        assert_eq!(source_count, 34);
+        assert_eq!(catalog_count, 34);
     }
 
     #[test]
@@ -10730,122 +10771,64 @@ mod catalog_tests {
 
     #[test]
     fn schema_v27_adds_windsurf_provider_checks() {
-        let temp = tempdir();
-        let path = temp.path().join("work.sqlite");
-        {
-            let conn = Connection::open(&path).unwrap();
-            let legacy_sql = CREATE_TABLES_SQL.replace(", 'windsurf'", "");
-            conn.execute_batch(&legacy_sql).unwrap();
-            conn.execute_batch(INDEXES_SQL).unwrap();
-            conn.execute_batch("PRAGMA user_version = 26;").unwrap();
-        }
-
-        let store = Store::open(&path).unwrap();
-        let version: i64 = store
-            .conn
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(version, SCHEMA_VERSION);
-
-        store
-            .conn
-            .execute(
-                r#"
-                INSERT INTO capture_sources
-                (id, kind, provider, machine_id, started_at_ms, fidelity)
-                VALUES (?1, 'provider_import', 'windsurf', 'test-machine', 0, 'imported')
-                "#,
-                params![new_id().to_string()],
-            )
-            .unwrap();
-        store
-            .conn
-            .execute(
-                r#"
-                INSERT INTO catalog_sessions
-                (source_path, provider, source_format, source_root, agent_type, file_size_bytes, file_modified_at_ms, cataloged_at_ms)
-                VALUES ('/tmp/windsurf/transcripts/trajectory.jsonl', 'windsurf', 'windsurf_cascade_hook_transcript_jsonl', '/tmp/windsurf/transcripts', 'primary', 1, 0, 0)
-                "#,
-                [],
-            )
-            .unwrap();
-        store
-            .conn
-            .execute(
-                r#"
-                INSERT INTO source_import_files
-                (provider, source_format, source_root, source_path, file_size_bytes, file_modified_at_ms, observed_at_ms)
-                VALUES ('windsurf', 'windsurf_cascade_hook_transcript_jsonl', '/tmp/windsurf/transcripts', '/tmp/windsurf/transcripts/trajectory.jsonl', 1, 0, 0)
-                "#,
-                [],
-            )
-            .unwrap();
+        assert_provider_migration_accepts(
+            26,
+            "windsurf",
+            "windsurf_cascade_hook_transcript_jsonl",
+            "/tmp/windsurf/transcripts",
+            "/tmp/windsurf/transcripts/trajectory.jsonl",
+        );
     }
 
     #[test]
     fn schema_v28_adds_pochi_provider_checks() {
-        let temp = tempdir();
-        let path = temp.path().join("work.sqlite");
-        {
-            let conn = Connection::open(&path).unwrap();
-            let legacy_sql = CREATE_TABLES_SQL.replace(", 'pochi'", "");
-            conn.execute_batch(&legacy_sql).unwrap();
-            conn.execute_batch(INDEXES_SQL).unwrap();
-            conn.execute_batch("PRAGMA user_version = 27;").unwrap();
-        }
-
-        let store = Store::open(&path).unwrap();
-        let version: i64 = store
-            .conn
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(version, SCHEMA_VERSION);
-
-        store
-            .conn
-            .execute(
-                r#"
-                INSERT INTO capture_sources
-                (id, kind, provider, machine_id, started_at_ms, fidelity)
-                VALUES (?1, 'provider_import', 'pochi', 'test-machine', 0, 'imported')
-                "#,
-                params![new_id().to_string()],
-            )
-            .unwrap();
-        store
-            .conn
-            .execute(
-                r#"
-                INSERT INTO catalog_sessions
-                (source_path, provider, source_format, source_root, agent_type, file_size_bytes, file_modified_at_ms, cataloged_at_ms)
-                VALUES ('/tmp/pochi/storage/store/state@6.db', 'pochi', 'pochi_livestore_state_sqlite', '/tmp/pochi/storage/store', 'primary', 1, 0, 0)
-                "#,
-                [],
-            )
-            .unwrap();
-        store
-            .conn
-            .execute(
-                r#"
-                INSERT INTO source_import_files
-                (provider, source_format, source_root, source_path, file_size_bytes, file_modified_at_ms, observed_at_ms)
-                VALUES ('pochi', 'pochi_livestore_state_sqlite', '/tmp/pochi/storage/store', '/tmp/pochi/storage/store/state@6.db', 1, 0, 0)
-                "#,
-                [],
-            )
-            .unwrap();
+        assert_provider_migration_accepts(
+            27,
+            "pochi",
+            "pochi_livestore_state_sqlite",
+            "/tmp/pochi/storage/store",
+            "/tmp/pochi/storage/store/state@6.db",
+        );
     }
 
     #[test]
     fn schema_v29_adds_openloaf_provider_checks() {
+        assert_provider_migration_accepts(
+            28,
+            "openloaf",
+            "openloaf_chat_jsonl",
+            "/tmp/openloaf/chat-history",
+            "/tmp/openloaf/chat-history/session/messages.jsonl",
+        );
+    }
+
+    #[test]
+    fn schema_v30_adds_auggie_provider_checks() {
+        assert_provider_migration_accepts(
+            29,
+            "auggie",
+            "auggie_session_json",
+            "/tmp/augment/sessions",
+            "/tmp/augment/sessions/session.json",
+        );
+    }
+
+    fn assert_provider_migration_accepts(
+        legacy_version: i64,
+        provider: &str,
+        source_format: &str,
+        source_root: &str,
+        source_path: &str,
+    ) {
         let temp = tempdir();
         let path = temp.path().join("work.sqlite");
         {
             let conn = Connection::open(&path).unwrap();
-            let legacy_sql = CREATE_TABLES_SQL.replace(", 'openloaf'", "");
+            let legacy_sql = CREATE_TABLES_SQL.replace(&format!(", '{provider}'"), "");
             conn.execute_batch(&legacy_sql).unwrap();
             conn.execute_batch(INDEXES_SQL).unwrap();
-            conn.execute_batch("PRAGMA user_version = 28;").unwrap();
+            conn.execute_batch(&format!("PRAGMA user_version = {legacy_version};"))
+                .unwrap();
         }
 
         let store = Store::open(&path).unwrap();
@@ -10861,9 +10844,9 @@ mod catalog_tests {
                 r#"
                 INSERT INTO capture_sources
                 (id, kind, provider, machine_id, started_at_ms, fidelity)
-                VALUES (?1, 'provider_import', 'openloaf', 'test-machine', 0, 'imported')
+                VALUES (?1, 'provider_import', ?2, 'test-machine', 0, 'imported')
                 "#,
-                params![new_id().to_string()],
+                params![new_id().to_string(), provider],
             )
             .unwrap();
         store
@@ -10872,9 +10855,9 @@ mod catalog_tests {
                 r#"
                 INSERT INTO catalog_sessions
                 (source_path, provider, source_format, source_root, agent_type, file_size_bytes, file_modified_at_ms, cataloged_at_ms)
-                VALUES ('/tmp/openloaf/chat-history/session/messages.jsonl', 'openloaf', 'openloaf_chat_jsonl', '/tmp/openloaf/chat-history', 'primary', 1, 0, 0)
+                VALUES (?1, ?2, ?3, ?4, 'primary', 1, 0, 0)
                 "#,
-                [],
+                params![source_path, provider, source_format, source_root],
             )
             .unwrap();
         store
@@ -10883,9 +10866,9 @@ mod catalog_tests {
                 r#"
                 INSERT INTO source_import_files
                 (provider, source_format, source_root, source_path, file_size_bytes, file_modified_at_ms, observed_at_ms)
-                VALUES ('openloaf', 'openloaf_chat_jsonl', '/tmp/openloaf/chat-history', '/tmp/openloaf/chat-history/session/messages.jsonl', 1, 0, 0)
+                VALUES (?1, ?2, ?3, ?4, 1, 0, 0)
                 "#,
-                [],
+                params![provider, source_format, source_root, source_path],
             )
             .unwrap();
     }
