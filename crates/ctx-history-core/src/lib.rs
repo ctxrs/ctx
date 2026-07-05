@@ -229,6 +229,7 @@ text_enum! {
         Dexto => "dexto",
         Lingma => "lingma",
         Pochi => "pochi",
+        Warp => "warp",
         CortexCode => "cortex_code",
         CodeBuddy => "codebuddy",
         AiderDesk => "aider_desk",
