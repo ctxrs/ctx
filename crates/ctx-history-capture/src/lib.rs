@@ -654,6 +654,7 @@ pub type CodeArtsAgentSqliteImportOptions = OpenCodeSqliteImportOptions;
 pub type KiroSqliteImportOptions = OpenCodeSqliteImportOptions;
 pub type CodeStudioSqliteImportOptions = OpenCodeSqliteImportOptions;
 pub type TerramindSqliteImportOptions = OpenCodeSqliteImportOptions;
+pub type MoxbySqliteImportOptions = OpenCodeSqliteImportOptions;
 
 #[derive(Debug, Clone)]
 pub struct ForgeCodeSqliteImportOptions {
@@ -1728,6 +1729,9 @@ pub struct JunieSessionEventsAdapter;
 pub struct FirebenderSqliteAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
+pub struct MoxbySqliteAdapter;
+
+#[derive(Debug, Clone, Copy, Default)]
 pub struct OpenCodeSqliteAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -2672,6 +2676,24 @@ impl ProviderCaptureAdapter for FirebenderSqliteAdapter {
         context: &ProviderAdapterContext,
     ) -> Result<ProviderNormalizationResult> {
         normalize_firebender_sqlite(path, context)
+    }
+}
+
+impl ProviderCaptureAdapter for MoxbySqliteAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Moxby
+    }
+
+    fn source_format(&self) -> &str {
+        MOXBY_SQLITE_SOURCE_FORMAT
+    }
+
+    fn normalize_path(
+        &self,
+        path: &Path,
+        context: &ProviderAdapterContext,
+    ) -> Result<ProviderNormalizationResult> {
+        normalize_moxby_sqlite(path, context)
     }
 }
 
@@ -5815,6 +5837,41 @@ pub fn import_firebender_sqlite(
     )
 }
 
+pub fn import_moxby_sqlite(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: MoxbySqliteImportOptions,
+) -> Result<ProviderImportSummary> {
+    let path = path.as_ref();
+    let source_path = options
+        .source_path
+        .clone()
+        .unwrap_or_else(|| path.to_path_buf());
+    let normalization = MoxbySqliteAdapter.normalize_path(
+        path,
+        &ProviderAdapterContext {
+            machine_id: options.machine_id,
+            source_path: Some(source_path),
+            imported_at: options.imported_at,
+            tool_output_mode: CodexToolOutputMode::Full,
+            event_mode: CodexEventImportMode::Rich,
+            include_notices: true,
+        },
+    )?;
+
+    import_normalized_provider_captures(
+        store,
+        normalization,
+        NormalizedProviderImportOptions {
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+            persist_cursors: true,
+            wrap_transaction: true,
+            fast_event_inserts: true,
+        },
+    )
+}
+
 pub fn import_opencode_sqlite(
     path: impl AsRef<Path>,
     store: &mut Store,
@@ -6947,6 +7004,7 @@ const AUGGIE_SESSION_JSON_SOURCE_FORMAT: &str = "auggie_session_json";
 const EVE_WORKFLOW_DATA_SOURCE_FORMAT: &str = "eve_workflow_data_streams";
 const JUNIE_SESSION_EVENTS_SOURCE_FORMAT: &str = "junie_session_events_jsonl_tree";
 const FIREBENDER_SQLITE_SOURCE_FORMAT: &str = "firebender_chat_history_sqlite";
+const MOXBY_SQLITE_SOURCE_FORMAT: &str = "moxby_chats_sqlite";
 const OPENCODE_SQLITE_SOURCE_FORMAT: &str = "opencode_sqlite";
 const CODEARTS_AGENT_SQLITE_SOURCE_FORMAT: &str = "codearts_agent_kernel_sqlite";
 const KILO_SQLITE_SOURCE_FORMAT: &str = "kilo_sqlite";
@@ -11809,6 +11867,498 @@ fn firebender_capture(
                 "metadata": provider_capped_json(metadata, PROVIDER_MAX_PREVIEW_CHARS),
                 "storage": ".idea/firebender/chat_history.db",
                 "timestamp_note": "message rows do not carry durable per-message timestamps; ctx preserves session created_at/updated_at and import order",
+            }),
+        },
+        context,
+        event,
+    )
+}
+
+#[derive(Debug, Clone)]
+struct MoxbyChatRow {
+    id: String,
+    workspace_id: Option<String>,
+    title: String,
+    created_at: i64,
+    updated_at: i64,
+    archived: i64,
+    chat_type: Option<String>,
+    mission_id: Option<String>,
+    folder_id: Option<String>,
+    entity_kind: Option<String>,
+    entity_ref: Option<String>,
+    bound_tab_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct MoxbyThreadRow {
+    id: String,
+    chat_id: String,
+    parent_thread_id: Option<String>,
+    origin: Option<String>,
+    external_thread_id: Option<String>,
+    title: Option<String>,
+    status: Option<String>,
+    assigned_agent_id: Option<String>,
+    created_at: i64,
+    updated_at: i64,
+}
+
+#[derive(Debug, Clone)]
+struct MoxbyMessageRow {
+    id: String,
+    chat_id: String,
+    thread_id: String,
+    turn_id: Option<String>,
+    first_event_id: Option<String>,
+    last_event_id: Option<String>,
+    first_event_seq: Option<i64>,
+    last_event_seq: Option<i64>,
+    message_index: i64,
+    role: String,
+    content_json: String,
+    text: String,
+    token_estimate: i64,
+    provider: Option<String>,
+    model: Option<String>,
+    created_at: i64,
+    updated_at: i64,
+}
+
+fn normalize_moxby_sqlite(
+    path: &Path,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    let db_path = moxby_chats_db_path(path)?;
+    let conn = open_provider_sqlite_readonly(&db_path)?;
+    if !sqlite_table_exists(&conn, "chats")? {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: db_path.clone(),
+            reason: "Moxby moxby_chats.db is missing required chats table",
+        });
+    }
+    let chat_columns = sqlite_table_columns(&conn, "chats")?;
+    ensure_sqlite_table_columns(
+        &chat_columns,
+        "Moxby chats table",
+        &["id", "title", "created_at", "updated_at"],
+    )?;
+    if !sqlite_table_exists(&conn, "chat_threads")? {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: db_path.clone(),
+            reason: "Moxby moxby_chats.db is missing required chat_threads table",
+        });
+    }
+    let thread_columns = sqlite_table_columns(&conn, "chat_threads")?;
+    ensure_sqlite_table_columns(
+        &thread_columns,
+        "Moxby chat_threads table",
+        &["id", "chat_id", "created_at", "updated_at"],
+    )?;
+    if !sqlite_table_exists(&conn, "chat_messages")? {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: db_path.clone(),
+            reason: "Moxby moxby_chats.db is missing required chat_messages table",
+        });
+    }
+    let message_columns = sqlite_table_columns(&conn, "chat_messages")?;
+    ensure_sqlite_table_columns(
+        &message_columns,
+        "Moxby chat_messages table",
+        &[
+            "id",
+            "chat_id",
+            "thread_id",
+            "message_index",
+            "role",
+            "content_json",
+            "text",
+            "created_at",
+            "updated_at",
+        ],
+    )?;
+    let schema_fingerprint = opencode_schema_fingerprint(&conn)?;
+    let chats = moxby_chat_rows(&conn, &chat_columns)?;
+    let threads = moxby_thread_rows(&conn, &thread_columns)?;
+    let messages = moxby_message_rows(&conn, &message_columns)?;
+
+    let chats_by_id = chats
+        .into_iter()
+        .map(|chat| (chat.id.clone(), chat))
+        .collect::<BTreeMap<_, _>>();
+    let threads_by_id = threads
+        .into_iter()
+        .map(|thread| (thread.id.clone(), thread))
+        .collect::<BTreeMap<_, _>>();
+    let mut messages_by_thread = BTreeMap::<String, Vec<MoxbyMessageRow>>::new();
+    for message in messages {
+        messages_by_thread
+            .entry(message.thread_id.clone())
+            .or_default()
+            .push(message);
+    }
+    for messages in messages_by_thread.values_mut() {
+        messages.sort_by(|left, right| {
+            left.message_index
+                .cmp(&right.message_index)
+                .then_with(|| left.created_at.cmp(&right.created_at))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+    }
+
+    let mut result = ProviderNormalizationResult::default();
+    for (thread_id, messages) in messages_by_thread {
+        let Some(thread) = threads_by_id.get(&thread_id) else {
+            push_provider_import_failure(
+                &mut result.summary,
+                1,
+                format!("Moxby message thread {thread_id} is missing chat_threads row"),
+            );
+            continue;
+        };
+        let Some(chat) = chats_by_id.get(&thread.chat_id) else {
+            push_provider_import_failure(
+                &mut result.summary,
+                1,
+                format!(
+                    "Moxby thread {thread_id} is missing chats row {}",
+                    thread.chat_id
+                ),
+            );
+            continue;
+        };
+        let provider_session_id = moxby_provider_session_id(chat, thread);
+        let started_at = messages
+            .first()
+            .map(|message| provider_timestamp_millis(Some(message.created_at), context.imported_at))
+            .unwrap_or_else(|| {
+                provider_timestamp_millis(Some(thread.created_at), context.imported_at)
+            });
+        let ended_at = messages
+            .last()
+            .map(|message| provider_timestamp_millis(Some(message.updated_at), started_at))
+            .or_else(|| {
+                Some(provider_timestamp_millis(
+                    Some(thread.updated_at),
+                    started_at,
+                ))
+            });
+
+        for (event_index, message) in messages.iter().enumerate() {
+            let line = provider_line_from_index(event_index as u64 + 1);
+            let occurred_at = provider_timestamp_millis(
+                Some(message.created_at),
+                started_at + Duration::milliseconds(event_index as i64),
+            );
+            let event = moxby_message_event(
+                &provider_session_id,
+                message,
+                event_index as u64,
+                occurred_at,
+            );
+            result.captures.push((
+                line,
+                moxby_capture(
+                    chat,
+                    thread,
+                    &provider_session_id,
+                    &db_path,
+                    started_at,
+                    ended_at,
+                    &schema_fingerprint,
+                    context,
+                    Some(event),
+                ),
+            ));
+        }
+    }
+
+    Ok(result)
+}
+
+fn moxby_chats_db_path(path: &Path) -> Result<PathBuf> {
+    let metadata = fs::symlink_metadata(path)?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "symlinked provider transcript roots are rejected",
+        });
+    }
+    if file_type.is_file() {
+        ensure_regular_provider_transcript_file(path)?;
+        return Ok(path.to_path_buf());
+    }
+    if file_type.is_dir() {
+        let db_path = path.join("moxby_chats.db");
+        if db_path.exists() {
+            ensure_regular_provider_transcript_file(&db_path)?;
+            return Ok(db_path);
+        }
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "Moxby state directory is missing moxby_chats.db",
+        });
+    }
+    Err(CaptureError::InvalidProviderTranscriptPath {
+        path: path.to_path_buf(),
+        reason: "Moxby import path must be moxby_chats.db or its parent state directory",
+    })
+}
+
+fn moxby_chat_rows(conn: &Connection, columns: &BTreeSet<String>) -> Result<Vec<MoxbyChatRow>> {
+    let workspace_id = optional_column_expr(columns, "workspace_id", "NULL");
+    let archived = optional_column_expr(columns, "archived", "0");
+    let chat_type = optional_column_expr(columns, "chat_type", "NULL");
+    let mission_id = optional_column_expr(columns, "mission_id", "NULL");
+    let folder_id = optional_column_expr(columns, "folder_id", "NULL");
+    let entity_kind = optional_column_expr(columns, "entity_kind", "NULL");
+    let entity_ref = optional_column_expr(columns, "entity_ref", "NULL");
+    let bound_tab_id = optional_column_expr(columns, "bound_tab_id", "NULL");
+    let sql = format!(
+        "select id, {workspace_id}, title, created_at, updated_at, {archived}, \
+         {chat_type}, {mission_id}, {folder_id}, {entity_kind}, {entity_ref}, \
+         {bound_tab_id} from chats order by updated_at, id"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok(MoxbyChatRow {
+            id: row.get(0)?,
+            workspace_id: row.get(1)?,
+            title: row.get(2)?,
+            created_at: row.get(3)?,
+            updated_at: row.get(4)?,
+            archived: row.get(5)?,
+            chat_type: row.get(6)?,
+            mission_id: row.get(7)?,
+            folder_id: row.get(8)?,
+            entity_kind: row.get(9)?,
+            entity_ref: row.get(10)?,
+            bound_tab_id: row.get(11)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(CaptureError::from)
+}
+
+fn moxby_thread_rows(conn: &Connection, columns: &BTreeSet<String>) -> Result<Vec<MoxbyThreadRow>> {
+    let parent_thread_id = optional_column_expr(columns, "parent_thread_id", "NULL");
+    let origin = optional_column_expr(columns, "origin", "NULL");
+    let external_thread_id = optional_column_expr(columns, "external_thread_id", "NULL");
+    let title = optional_column_expr(columns, "title", "NULL");
+    let status = optional_column_expr(columns, "status", "NULL");
+    let assigned_agent_id = optional_column_expr(columns, "assigned_agent_id", "NULL");
+    let sql = format!(
+        "select id, chat_id, {parent_thread_id}, {origin}, {external_thread_id}, \
+         {title}, {status}, {assigned_agent_id}, created_at, updated_at \
+         from chat_threads order by chat_id, updated_at, id"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok(MoxbyThreadRow {
+            id: row.get(0)?,
+            chat_id: row.get(1)?,
+            parent_thread_id: row.get(2)?,
+            origin: row.get(3)?,
+            external_thread_id: row.get(4)?,
+            title: row.get(5)?,
+            status: row.get(6)?,
+            assigned_agent_id: row.get(7)?,
+            created_at: row.get(8)?,
+            updated_at: row.get(9)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(CaptureError::from)
+}
+
+fn moxby_message_rows(
+    conn: &Connection,
+    columns: &BTreeSet<String>,
+) -> Result<Vec<MoxbyMessageRow>> {
+    let turn_id = optional_column_expr(columns, "turn_id", "NULL");
+    let first_event_id = optional_column_expr(columns, "first_event_id", "NULL");
+    let last_event_id = optional_column_expr(columns, "last_event_id", "NULL");
+    let first_event_seq = optional_column_expr(columns, "first_event_seq", "NULL");
+    let last_event_seq = optional_column_expr(columns, "last_event_seq", "NULL");
+    let token_estimate = optional_column_expr(columns, "token_estimate", "0");
+    let provider = optional_column_expr(columns, "provider", "NULL");
+    let model = optional_column_expr(columns, "model", "NULL");
+    let sql = format!(
+        "select id, chat_id, thread_id, {turn_id}, {first_event_id}, {last_event_id}, \
+         {first_event_seq}, {last_event_seq}, message_index, role, content_json, text, \
+         {token_estimate}, {provider}, {model}, created_at, updated_at \
+         from chat_messages order by thread_id, message_index, created_at, id"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok(MoxbyMessageRow {
+            id: row.get(0)?,
+            chat_id: row.get(1)?,
+            thread_id: row.get(2)?,
+            turn_id: row.get(3)?,
+            first_event_id: row.get(4)?,
+            last_event_id: row.get(5)?,
+            first_event_seq: row.get(6)?,
+            last_event_seq: row.get(7)?,
+            message_index: row.get(8)?,
+            role: row.get(9)?,
+            content_json: row.get(10)?,
+            text: row.get(11)?,
+            token_estimate: row.get(12)?,
+            provider: row.get(13)?,
+            model: row.get(14)?,
+            created_at: row.get(15)?,
+            updated_at: row.get(16)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(CaptureError::from)
+}
+
+fn moxby_provider_session_id(chat: &MoxbyChatRow, thread: &MoxbyThreadRow) -> String {
+    format!("{}:{}", chat.id, thread.id)
+}
+
+fn moxby_message_event(
+    provider_session_id: &str,
+    message: &MoxbyMessageRow,
+    provider_event_index: u64,
+    occurred_at: DateTime<Utc>,
+) -> ProviderEventEnvelope {
+    let content_json = serde_json::from_str::<Value>(&message.content_json).unwrap_or(Value::Null);
+    native_event(NativeEventDraft {
+        provider: CaptureProvider::Moxby,
+        source_format: MOXBY_SQLITE_SOURCE_FORMAT,
+        provider_session_id: provider_session_id.to_owned(),
+        provider_event_index,
+        provider_event_hash: Some(message.id.clone()),
+        cursor: format!(
+            "chat_messages:{}:{}:{}",
+            message.thread_id, message.message_index, message.id
+        ),
+        event_type: moxby_event_type(&message.role, &content_json),
+        role: Some(provider_role(Some(&message.role))),
+        occurred_at,
+        text: if message.text.trim().is_empty() {
+            format!("Moxby {} message", message.role)
+        } else {
+            message.text.clone()
+        },
+        body: json!({
+            "id": message.id,
+            "chat_id": message.chat_id,
+            "thread_id": message.thread_id,
+            "turn_id": message.turn_id,
+            "first_event_id": message.first_event_id,
+            "last_event_id": message.last_event_id,
+            "first_event_seq": message.first_event_seq,
+            "last_event_seq": message.last_event_seq,
+            "message_index": message.message_index,
+            "role": message.role,
+            "content_json": provider_capped_json_value(&content_json, PROVIDER_MAX_PREVIEW_CHARS),
+            "text": message.text,
+            "token_estimate": message.token_estimate,
+            "provider": message.provider,
+            "model": message.model,
+            "created_at": message.created_at,
+            "updated_at": message.updated_at,
+        }),
+        metadata: json!({
+            "source": "moxby_chat_messages",
+            "source_format": MOXBY_SQLITE_SOURCE_FORMAT,
+            "chat_id": message.chat_id,
+            "thread_id": message.thread_id,
+            "turn_id": message.turn_id,
+            "message_id": message.id,
+            "message_index": message.message_index,
+            "role": message.role,
+            "provider": message.provider,
+            "model": message.model,
+            "token_estimate": message.token_estimate,
+        }),
+    })
+}
+
+fn moxby_event_type(role: &str, content_json: &Value) -> EventType {
+    if role == "tool" {
+        return EventType::ToolOutput;
+    }
+    if role == "assistant"
+        && content_json.as_array().is_some_and(|items| {
+            items.iter().any(|item| {
+                item.get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| kind.contains("tool"))
+            })
+        })
+    {
+        return EventType::ToolCall;
+    }
+    match role {
+        "user" | "assistant" | "system" => EventType::Message,
+        _ => EventType::Notice,
+    }
+}
+
+fn moxby_capture(
+    chat: &MoxbyChatRow,
+    thread: &MoxbyThreadRow,
+    provider_session_id: &str,
+    path: &Path,
+    started_at: DateTime<Utc>,
+    ended_at: Option<DateTime<Utc>>,
+    schema_fingerprint: &str,
+    context: &ProviderAdapterContext,
+    event: Option<ProviderEventEnvelope>,
+) -> ProviderCaptureEnvelope {
+    native_provider_capture(
+        NativeSessionDraft {
+            provider: CaptureProvider::Moxby,
+            source_format: MOXBY_SQLITE_SOURCE_FORMAT,
+            provider_session_id: provider_session_id.to_owned(),
+            parent_provider_session_id: thread
+                .parent_thread_id
+                .as_ref()
+                .map(|parent| format!("{}:{parent}", chat.id)),
+            root_provider_session_id: None,
+            external_agent_id: thread.assigned_agent_id.clone(),
+            agent_type: AgentType::Primary,
+            role_hint: thread.origin.clone(),
+            is_primary: thread.parent_thread_id.is_none(),
+            started_at,
+            ended_at,
+            cwd: None,
+            fidelity: Fidelity::Imported,
+            raw_source_path: path.display().to_string(),
+            trust: ProviderSourceTrust::ProviderNative,
+            source_metadata: json!({
+                "adapter": MOXBY_SQLITE_SOURCE_FORMAT,
+                "schema_fingerprint": schema_fingerprint,
+                "storage": "moxby_chats.db",
+                "bundle_id": "com.moxby.agent",
+            }),
+            session_metadata: json!({
+                "source_format": MOXBY_SQLITE_SOURCE_FORMAT,
+                "chat_id": chat.id,
+                "thread_id": thread.id,
+                "workspace_id": chat.workspace_id,
+                "title": chat.title,
+                "thread_title": thread.title,
+                "chat_created_at": chat.created_at,
+                "chat_updated_at": chat.updated_at,
+                "archived": chat.archived != 0,
+                "chat_type": chat.chat_type,
+                "mission_id": chat.mission_id,
+                "folder_id": chat.folder_id,
+                "entity_kind": chat.entity_kind,
+                "entity_ref": chat.entity_ref,
+                "bound_tab_id": chat.bound_tab_id,
+                "thread_origin": thread.origin,
+                "thread_status": thread.status,
+                "external_thread_id": thread.external_thread_id,
+                "assigned_agent_id": thread.assigned_agent_id,
+                "storage": "moxby_chats.db",
             }),
         },
         context,
@@ -41899,6 +42449,82 @@ mod tests {
     }
 
     #[test]
+    fn native_moxby_fixture_imports_searches_reimports_and_tool_outputs() {
+        let temp = tempdir();
+        let fixture = provider_history_fixture("moxby/v2.3.0/moxby_chats.db");
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let source = provider_source_for_path(CaptureProvider::Moxby, fixture.clone());
+        assert_eq!(source.source_format, MOXBY_SQLITE_SOURCE_FORMAT);
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+
+        let first = import_moxby_sqlite(
+            &fixture,
+            &mut store,
+            MoxbySqliteImportOptions {
+                machine_id: "test-machine".into(),
+                source_path: Some(fixture.clone()),
+                imported_at: DateTime::parse_from_rfc3339("2026-07-05T12:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                allow_partial_failures: true,
+                ..MoxbySqliteImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(first.failed, 0, "{:?}", first.failures);
+        assert_eq!(first.imported_sessions, 1);
+        assert_eq!(first.imported_events, 3);
+        let session_id = provider_session_uuid(
+            CaptureProvider::Moxby,
+            "moxby-chat-oracle-1:moxby-thread-main",
+        );
+        let session = store.get_session(session_id).unwrap();
+        assert_eq!(session.provider, CaptureProvider::Moxby);
+        let source = store
+            .capture_source_by_external_session(
+                CaptureProvider::Moxby,
+                "moxby-chat-oracle-1:moxby-thread-main",
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            source.sync.metadata["source_metadata"]["storage"].as_str(),
+            Some("moxby_chats.db")
+        );
+        let events = store.events_for_session(session_id).unwrap();
+        assert_eq!(events.len(), 3);
+        assert!(events
+            .iter()
+            .any(|event| event.role == Some(EventRole::User)));
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == EventType::ToolOutput));
+        assert!(store
+            .search_event_hits("moxby sqlite oracle answer", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::Moxby)));
+
+        let second = import_moxby_sqlite(
+            &fixture,
+            &mut store,
+            MoxbySqliteImportOptions {
+                source_path: Some(fixture.clone()),
+                allow_partial_failures: true,
+                ..MoxbySqliteImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(second.failed, 0, "{:?}", second.failures);
+        assert_eq!(second.imported_sessions, 0);
+        assert_eq!(second.imported_events, 0);
+        assert_eq!(second.skipped_sessions, 1);
+        assert_eq!(second.skipped_events, 3);
+    }
+
+    #[test]
     fn provider_sources_discovers_terramind_default_db() {
         let temp = tempdir();
         let db = temp.path().join(".config/Nucleus/data/agents.db");
@@ -41915,6 +42541,52 @@ mod tests {
         assert_eq!(source.status, ProviderSourceStatus::Available);
         assert_eq!(source.import_support, ProviderImportSupport::Native);
         assert_eq!(source.path, db);
+    }
+
+    #[test]
+    fn native_moxby_reports_missing_table_and_corrupt_db() {
+        let temp = tempdir();
+        let missing_table = temp.path().join("missing-moxby.db");
+        let conn = Connection::open(&missing_table).unwrap();
+        conn.execute_batch("CREATE TABLE unrelated (id INTEGER PRIMARY KEY);")
+            .unwrap();
+        drop(conn);
+        let corrupt = temp.path().join("corrupt-moxby.db");
+        fs::write(&corrupt, b"not sqlite").unwrap();
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let err = import_moxby_sqlite(
+            &missing_table,
+            &mut store,
+            MoxbySqliteImportOptions::default(),
+        )
+        .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Moxby moxby_chats.db is missing required chats table"));
+
+        let err = import_moxby_sqlite(&corrupt, &mut store, MoxbySqliteImportOptions::default())
+            .unwrap_err();
+        assert!(err.to_string().contains("not a database"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_moxby_rejects_symlinked_sqlite() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir();
+        let fixture = provider_history_fixture("moxby/v2.3.0/moxby_chats.db");
+        let link = temp.path().join("linked-moxby.db");
+        symlink(&fixture, &link).unwrap();
+
+        let err = normalize_moxby_sqlite(&link, &ProviderAdapterContext::default()).unwrap_err();
+        assert!(matches!(
+            err,
+            CaptureError::InvalidProviderTranscriptPath { path, reason }
+                if path.ends_with("linked-moxby.db")
+                    && reason == "symlinked provider transcript roots are rejected"
+        ));
     }
 
     #[test]

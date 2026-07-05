@@ -210,6 +210,7 @@ text_enum! {
         DeepAgents => "deepagents",
         MistralVibe => "mistral_vibe",
         Mux => "mux",
+        Moxby => "moxby",
         Reasonix => "reasonix",
         Adal => "adal",
         Kode => "kode",

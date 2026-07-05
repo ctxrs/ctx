@@ -136,6 +136,10 @@ The current CLI imports local history for:
 - Mux session transcripts under `MUX_ROOT/sessions` or `~/.mux/sessions`,
   where each workspace directory has `chat.jsonl` and optional `partial.json`
   plus archived subagent transcripts;
+- Moxby chat SQLite history under `MOXBY_STATE_DIR`,
+  `$XDG_DATA_HOME/com.moxby.agent/moxby_chats.db`, common app-data
+  `com.moxby.agent/moxby_chats.db` paths, or an explicit Moxby state
+  directory/DB path;
 - Reasonix session JSONL files under `~/.reasonix/sessions`, including
   adjacent `.events.jsonl`, `.meta.json`, `.pending.json`, and `.plan.json`
   sidecars;

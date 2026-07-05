@@ -26,7 +26,7 @@ Status meanings:
   proven history-producing agent.
 
 Result on this integration branch: 61 `native-auto`, 0 `native-explicit`, 0
-`native-preview`, 0 `candidate-family`, 6 `webapp-boundary`, 3 `unknown`, and
+`native-preview`, 0 `candidate-family`, 6 `webapp-boundary`, 2 `unknown`, and
 2 `install-target` rows.
 
 ## Shared Families
@@ -116,7 +116,7 @@ Result on this integration branch: 61 `native-auto`, 0 `native-explicit`, 0
 | `loaf` | `native-auto` | `OpenLoaf chat JSONL` | ctx `openloaf_chat_jsonl_tree`; npx `~/.loaf` detects `loaf`, but the source-backed importer targets OpenLoaf paths `~/.openloaf/chat-history`, `~/OpenLoafData/projects`, and explicit project `.openloaf/chat-history` roots | ctx aliases `loaf`/`openloaf` to canonical provider `openloaf`; `~/.loaf` remains detection-only and is not crawled by the native importer. |
 | `mcpjam` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.mcpjam`; no ctx provider; current evidence points to a stateless CLI/backend/object-store activity model rather than a durable local transcript file | UI or account-backed activity should use exporter or plugin until local storage is proven. |
 | `mistral-vibe` | `native-auto` | `JSONL CLI event logs` | ctx `mistral_vibe_session_jsonl_tree`; npx `VIBE_HOME` or `~/.vibe` | - |
-| `moxby` | `unknown` | `unknown native history` | npx `~/.moxby`; no ctx provider; public product docs imply local desktop/browser data and chat/session features, and local SQLite chat DB proof suggests there may be native history | Need the exact app-data path plus a sanitized schema/fixture before importing Chromium/desktop internals. |
+| `moxby` | `native-auto` | `generic sqlite messages` | ctx `moxby_chats_sqlite`; npx `~/.moxby`; Moxby v2.3.0 `ChainAI-Org/moxby-agent-releases` macOS bundle proves bundle id `com.moxby.agent`, `MOXBY_STATE_DIR`/app-data anchors, durable `moxby_chats.db`, and `chat_messages`/`chats`/`chat_threads` schema | Imports only proven `moxby_chats.db` chat transcripts from bounded app-data paths or explicit state DB/directory paths. `moxby.db` docs/workspaces storage, Chromium/browser data, credentials, logs, quests/tasks, and cloud/provider state remain unclaimed. |
 | `mux` | `native-auto` | `JSONL CLI event logs` | ctx `mux_session_jsonl_tree`; npx `MUX_ROOT` or `~/.mux` | - |
 | `neovate` | `native-auto` | `JSONL CLI event logs` | ctx `neovate_session_jsonl_tree`; npx `~/.neovate`; `@neovate/code` stores project session JSONL under `~/.neovate/projects` | - |
 | `opencode` | `native-auto` | `opencode sqlite family` | ctx `opencode_sqlite`; npx `~/.config/opencode` | - |

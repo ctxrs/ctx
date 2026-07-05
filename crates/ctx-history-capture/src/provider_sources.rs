@@ -652,6 +652,29 @@ const MUX_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     source_kind: ProviderSourceKind::NativeHistory,
 }];
 
+const MOXBY_DEFAULTS: &[ProviderDefaultLocation] = &[
+    ProviderDefaultLocation {
+        path_components: &[".local", "share", "com.moxby.agent", "moxby_chats.db"],
+        source_format: "moxby_chats_sqlite",
+        source_kind: ProviderSourceKind::NativeHistory,
+    },
+    ProviderDefaultLocation {
+        path_components: &[
+            "Library",
+            "Application Support",
+            "com.moxby.agent",
+            "moxby_chats.db",
+        ],
+        source_format: "moxby_chats_sqlite",
+        source_kind: ProviderSourceKind::NativeHistory,
+    },
+    ProviderDefaultLocation {
+        path_components: &["AppData", "Roaming", "com.moxby.agent", "moxby_chats.db"],
+        source_format: "moxby_chats_sqlite",
+        source_kind: ProviderSourceKind::NativeHistory,
+    },
+];
+
 const REASONIX_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     path_components: &[".reasonix", "sessions"],
     source_format: "reasonix_session_jsonl_tree",
@@ -1233,6 +1256,16 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         unsupported_reason: None,
     },
     ProviderSourceSpec {
+        provider: CaptureProvider::Moxby,
+        display_name: "Moxby",
+        default_locations: MOXBY_DEFAULTS,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
+    ProviderSourceSpec {
         provider: CaptureProvider::Reasonix,
         display_name: "Reasonix",
         default_locations: REASONIX_DEFAULTS,
@@ -1797,6 +1830,32 @@ fn discover_provider_sources_for_spec(
                     spec,
                     path.join("sessions"),
                     "mux_session_jsonl_tree",
+                    ProviderSourceKind::NativeHistory,
+                ));
+            }
+        }
+        CaptureProvider::Moxby => {
+            if let Some(path) = env_path_resolved("MOXBY_STATE_DIR", home) {
+                sources.push(provider_source_from_parts(
+                    spec,
+                    path.join("moxby_chats.db"),
+                    "moxby_chats_sqlite",
+                    ProviderSourceKind::NativeHistory,
+                ));
+            }
+            if let Some(path) = env_path("XDG_DATA_HOME") {
+                sources.push(provider_source_from_parts(
+                    spec,
+                    path.join("com.moxby.agent").join("moxby_chats.db"),
+                    "moxby_chats_sqlite",
+                    ProviderSourceKind::NativeHistory,
+                ));
+            }
+            if let Some(path) = env_path("APPDATA") {
+                sources.push(provider_source_from_parts(
+                    spec,
+                    path.join("com.moxby.agent").join("moxby_chats.db"),
+                    "moxby_chats_sqlite",
                     ProviderSourceKind::NativeHistory,
                 ));
             }
@@ -2534,6 +2593,7 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::MistralVibe => "mistral_vibe_session_jsonl",
         CaptureProvider::Mux if path.is_dir() => "mux_session_jsonl_tree",
         CaptureProvider::Mux => "mux_session_jsonl",
+        CaptureProvider::Moxby => "moxby_chats_sqlite",
         CaptureProvider::Reasonix if path.is_dir() => "reasonix_session_jsonl_tree",
         CaptureProvider::Reasonix => "reasonix_session_jsonl",
         CaptureProvider::Adal => "adal_session_jsonl",
@@ -2747,6 +2807,9 @@ fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         }
         CaptureProvider::Mux => {
             Some("path exists but no Mux chat.jsonl or partial.json session files were found")
+        }
+        CaptureProvider::Moxby => {
+            Some("path exists but no Moxby moxby_chats.db chat_messages schema was found")
         }
         CaptureProvider::Reasonix => {
             Some("path exists but no Reasonix session JSONL files were found")
@@ -3209,6 +3272,7 @@ fn default_location_import_probe(
                     .is_some_and(|parent| parent.join("meta.json").is_file())
         }),
         CaptureProvider::Mux => has_mux_session_files(path, 10_000),
+        CaptureProvider::Moxby => has_moxby_chat_tables(path),
         CaptureProvider::Reasonix => has_jsonl_file_under_matching(path, 10_000, |candidate| {
             candidate
                 .file_name()
@@ -3811,6 +3875,31 @@ fn has_terramind_chat_tables(path: &Path) -> BoundedProbe {
         )
     }) {
         Ok(3) => BoundedProbe::Found,
+        Ok(_) => BoundedProbe::NotFound,
+        Err(_) => BoundedProbe::IoError,
+    }
+}
+
+fn has_moxby_chat_tables(path: &Path) -> BoundedProbe {
+    match path_is_file_probe(path) {
+        BoundedProbe::Found => {}
+        other => return other,
+    }
+    match Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .and_then(|conn| {
+        conn.query_row(
+            "select \
+             (select count(*) from sqlite_schema where type = 'table' and name in ('chats', 'chat_threads', 'chat_messages')) as table_count, \
+             (select count(*) from pragma_table_info('chat_messages') \
+                where name in ('id', 'chat_id', 'thread_id', 'message_index', 'role', 'content_json', 'text', 'created_at', 'updated_at')) as column_count",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )
+    }) {
+        Ok((3, count)) if count >= 9 => BoundedProbe::Found,
         Ok(_) => BoundedProbe::NotFound,
         Err(_) => BoundedProbe::IoError,
     }
@@ -5467,6 +5556,44 @@ mod tests {
         let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Mux);
         assert!(sources.iter().any(|source| {
             source.path == custom_sessions && source.status == ProviderSourceStatus::Available
+        }));
+    }
+
+    #[test]
+    fn moxby_discovery_uses_default_and_state_dir_db() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _state_dir = EnvGuard::remove("MOXBY_STATE_DIR");
+
+        let default_db = temp
+            .path()
+            .join(".local/share/com.moxby.agent/moxby_chats.db");
+        std::fs::create_dir_all(default_db.parent().unwrap()).unwrap();
+        std::fs::copy(
+            shared_provider_history_fixture("moxby/v2.3.0/moxby_chats.db"),
+            &default_db,
+        )
+        .unwrap();
+        let source = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Moxby)
+            .into_iter()
+            .find(|source| source.path == default_db)
+            .unwrap();
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+        assert_eq!(source.source_format, "moxby_chats_sqlite");
+        assert_eq!(source.import_support, ProviderImportSupport::Native);
+
+        let custom_state = temp.path().join("custom-moxby-state");
+        let custom_db = custom_state.join("moxby_chats.db");
+        std::fs::create_dir_all(&custom_state).unwrap();
+        std::fs::copy(
+            shared_provider_history_fixture("moxby/v2.3.0/moxby_chats.db"),
+            &custom_db,
+        )
+        .unwrap();
+        let _state_dir = EnvGuard::set("MOXBY_STATE_DIR", custom_state.as_os_str());
+        let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Moxby);
+        assert!(sources.iter().any(|source| {
+            source.path == custom_db && source.status == ProviderSourceStatus::Available
         }));
     }
 

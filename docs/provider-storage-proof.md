@@ -715,23 +715,44 @@ IDE/application storage imports.
   `~/.inferencesh`; future support needs an official export/API/plugin
   contract or a source-backed local store.
 
-## Moxby (insufficient proof)
+## Moxby (native-auto)
 
 - npx skills evidence: `skills@1.5.14` registers the `moxby` target with
   `skillsDir = ".moxby/skills"`, `globalSkillsDir = "~/.moxby/skills"`, and
   install detection based only on `~/.moxby`.
-- Public product evidence: Moxby describes a local desktop/browser workspace,
-  coding-agent harnessing for Claude Code or Codex subscriptions, chat/session
-  features, and line-level reasoning/history.
-- Local storage lead: local inspection found SQLite chat database proof for
-  Moxby, so the product is no longer just a web-account guess. The proof is not
-  yet enough to implement because ctx still lacks the exact stable app-data
-  path, a documented or fixture-backed schema, and a sanitized real fixture.
-- Gap: no public source-backed app-data path, SQLite/IndexedDB schema, export
-  contract, or sanitized real fixture was found for durable local transcripts.
-- Decision: Moxby remains an unknown native-history target for ctx. If a real
-  fixture proves the app-data SQLite storage, it may become a candidate desktop
-  storage importer.
+- Public product evidence: Moxby describes a local Mac/Windows
+  desktop/browser workspace where data stays on the user's machine, with
+  coding-agent harnessing for Claude Code, Codex, Gemini, ChatGPT, and
+  OpenRouter accounts.
+- Release evidence: the official download page points to
+  `ChainAI-Org/moxby-agent-releases`. The inspected `Moxby_x64.app.tar.gz`
+  release artifact for `Moxby v2.3.0` was published 2026-07-05 and had SHA256
+  `270842c5e632c8d6ab9885a45c57fff935948f79cb1a5043b770f40cf5fd0cbe`.
+  `Contents/Info.plist` declares bundle id `com.moxby.agent`.
+- Storage evidence: strings from the bundled `Contents/MacOS/moxby-mcp`
+  binary reference `MOXBY_STATE_DIR`, `Application Support`, `moxby.db`, and
+  durable chat storage in `moxby_chats.db`. The binary text distinguishes
+  `moxby.db` local docs/workspaces storage from `moxby_chats.db`
+  tasks/chats/missions storage.
+- Schema evidence: the same bundle includes read-only chat/list/search tool
+  descriptions over active state DB `moxby_chats.db`, with `chat_messages`
+  joins to `chats` and `chat_threads`. The proven `chat_messages` columns are
+  `id`, `chat_id`, `thread_id`, `turn_id`, `first_event_id`,
+  `last_event_id`, `first_event_seq`, `last_event_seq`, `message_index`,
+  `role`, `content_json`, `text`, `token_estimate`, `provider`, `model`,
+  `created_at`, and `updated_at`.
+- ctx decision: add native-auto support for `moxby_chats_sqlite` only.
+  Discovery is bounded to `MOXBY_STATE_DIR/moxby_chats.db`, XDG data
+  `com.moxby.agent/moxby_chats.db`, macOS
+  `~/Library/Application Support/com.moxby.agent/moxby_chats.db`, Windows
+  `%APPDATA%/com.moxby.agent/moxby_chats.db`, and explicit DB/state-directory
+  paths that pass the schema probe.
+- Fixture: `tests/fixtures/provider-history/moxby/v2.3.0/moxby_chats.db` is a
+  sanitized synthetic SQLite DB with the proven Moxby chat tables and synthetic
+  user/assistant/tool rows. It contains no real Moxby user data.
+- Boundary: ctx does not import `moxby.db`, Chromium/browser data, credentials,
+  logs, local docs/workspaces data, quest/task state outside `chat_messages`,
+  cloud/provider state, or arbitrary `~/.moxby` skill/config files.
 
 ## MCPJam (webapp/object-store boundary)
 

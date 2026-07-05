@@ -45,6 +45,7 @@ fn apply_hermetic_env(command: &mut Command, temp: &TempDir) {
     command.env_remove("SHELLEY_DB");
     command.env_remove("KILO_DB");
     command.env_remove("FORGE_CONFIG");
+    command.env_remove("MOXBY_STATE_DIR");
     command.env_remove("VIBE_HOME");
     command.env_remove("TINYCLOUD_HOME");
     command.env_remove("XDG_CONFIG_HOME");
@@ -2040,6 +2041,7 @@ fn sources_lists_personal_agent_provider_defaults() {
     install_default_forgecode_fixture(&temp, "forgecode-sources-oracle");
     install_default_mistral_vibe_fixture(&temp, "mistral-vibe-sources-oracle");
     install_default_mux_fixture(&temp, "mux-sources-oracle");
+    install_default_moxby_fixture(&temp, "moxby-sources-oracle");
     install_default_reasonix_fixture(&temp, "reasonix-sources-oracle");
     install_default_kode_fixture(&temp, "kode-sources-oracle");
     install_default_neovate_fixture(&temp, "neovate-sources-oracle");
@@ -2078,6 +2080,7 @@ fn sources_lists_personal_agent_provider_defaults() {
             true,
         ),
         ("mux", "mux_session_jsonl_tree", "native", true),
+        ("moxby", "moxby_chats_sqlite", "native", true),
         ("reasonix", "reasonix_session_jsonl_tree", "native", true),
         ("kode", "kode_session_jsonl_tree", "native", true),
         ("neovate", "neovate_session_jsonl_tree", "native", true),
@@ -6525,6 +6528,12 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
             write_native_mux_fixture,
         ),
         (
+            "moxby",
+            "moxby",
+            "moxby_chats_sqlite",
+            write_native_moxby_fixture,
+        ),
+        (
             "reasonix",
             "reasonix",
             "reasonix_session_jsonl_tree",
@@ -7862,6 +7871,15 @@ fn install_default_mistral_vibe_fixture(temp: &TempDir, query: &str) {
 fn install_default_mux_fixture(temp: &TempDir, query: &str) {
     let source = PathBuf::from(write_native_mux_fixture(temp, query));
     copy_dir_all(&source, &temp.path().join(".mux").join("sessions"));
+}
+
+fn install_default_moxby_fixture(temp: &TempDir, query: &str) {
+    let source = PathBuf::from(write_native_moxby_fixture(temp, query));
+    let target = temp
+        .path()
+        .join(".local/share/com.moxby.agent/moxby_chats.db");
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    fs::copy(source, target).unwrap();
 }
 
 fn install_default_reasonix_fixture(temp: &TempDir, query: &str) {
@@ -9434,6 +9452,155 @@ fn write_native_mux_fixture(temp: &TempDir, query: &str) -> String {
     )
     .unwrap();
     root.to_str().unwrap().to_owned()
+}
+
+fn write_native_moxby_fixture(temp: &TempDir, query: &str) -> String {
+    let state = temp.path().join("native-moxby");
+    fs::create_dir_all(&state).unwrap();
+    let db = state.join("moxby_chats.db");
+    let conn = Connection::open(&db).unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TABLE chats (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT,
+            title TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            archived INTEGER NOT NULL DEFAULT 0,
+            chat_type TEXT,
+            mission_id TEXT,
+            folder_id TEXT,
+            title_user_set INTEGER,
+            pinned INTEGER,
+            pinned_tab_target_id TEXT,
+            entity_kind TEXT,
+            entity_ref TEXT,
+            bound_tab_id TEXT
+        );
+        CREATE TABLE chat_threads (
+            id TEXT PRIMARY KEY,
+            chat_id TEXT NOT NULL,
+            parent_thread_id TEXT,
+            origin TEXT,
+            external_thread_id TEXT,
+            title TEXT,
+            status TEXT,
+            spawned_by_agent_id TEXT,
+            assigned_agent_id TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            latest_turn_index INTEGER,
+            latest_event_seq INTEGER,
+            compaction_epoch INTEGER
+        );
+        CREATE TABLE chat_messages (
+            id TEXT PRIMARY KEY,
+            chat_id TEXT NOT NULL,
+            thread_id TEXT NOT NULL,
+            turn_id TEXT,
+            first_event_id TEXT NOT NULL,
+            last_event_id TEXT NOT NULL,
+            first_event_seq INTEGER NOT NULL,
+            last_event_seq INTEGER NOT NULL,
+            message_index INTEGER NOT NULL,
+            role TEXT NOT NULL,
+            content_json TEXT NOT NULL DEFAULT '[]',
+            text TEXT NOT NULL DEFAULT '',
+            token_estimate INTEGER NOT NULL DEFAULT 0,
+            provider TEXT,
+            model TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        "#,
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO chats (
+            id, workspace_id, title, created_at, updated_at, archived, chat_type
+        ) VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
+        params![
+            "moxby-cli-chat",
+            "moxby-cli-workspace",
+            "Moxby CLI fixture",
+            1783180800000_i64,
+            1783180801000_i64,
+            "chat"
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO chat_threads (
+            id, chat_id, origin, title, status, assigned_agent_id, created_at, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            "moxby-cli-thread",
+            "moxby-cli-chat",
+            "user",
+            "Main",
+            "completed",
+            "moxby-cli-agent",
+            1783180800000_i64,
+            1783180801000_i64
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO chat_messages (
+            id, chat_id, thread_id, turn_id, first_event_id, last_event_id,
+            first_event_seq, last_event_seq, message_index, role, content_json,
+            text, token_estimate, provider, model, created_at, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+        params![
+            "moxby-cli-msg-user",
+            "moxby-cli-chat",
+            "moxby-cli-thread",
+            "moxby-cli-turn-1",
+            "moxby-cli-event-user",
+            "moxby-cli-event-user",
+            1_i64,
+            1_i64,
+            0_i64,
+            "user",
+            serde_json::to_string(&json!([{"type":"text","text":query}])).unwrap(),
+            query,
+            8_i64,
+            "openrouter",
+            "synthetic-moxby-model",
+            1783180800000_i64,
+            1783180800000_i64
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO chat_messages (
+            id, chat_id, thread_id, turn_id, first_event_id, last_event_id,
+            first_event_seq, last_event_seq, message_index, role, content_json,
+            text, token_estimate, provider, model, created_at, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+        params![
+            "moxby-cli-msg-assistant",
+            "moxby-cli-chat",
+            "moxby-cli-thread",
+            "moxby-cli-turn-1",
+            "moxby-cli-event-assistant",
+            "moxby-cli-event-assistant",
+            2_i64,
+            2_i64,
+            1_i64,
+            "assistant",
+            serde_json::to_string(&json!([{"type":"text","text":"Moxby CLI import ok"}])).unwrap(),
+            "Moxby CLI import ok",
+            6_i64,
+            "openrouter",
+            "synthetic-moxby-model",
+            1783180801000_i64,
+            1783180801000_i64
+        ],
+    )
+    .unwrap();
+    db.to_str().unwrap().to_owned()
 }
 
 fn write_native_terramind_fixture(temp: &TempDir, query: &str) -> String {

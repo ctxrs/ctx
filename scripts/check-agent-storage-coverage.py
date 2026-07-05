@@ -23,7 +23,7 @@ EXPECTED_COUNTS = {
     "native-preview": 0,
     "candidate-family": 0,
     "webapp-boundary": 6,
-    "unknown": 3,
+    "unknown": 2,
     "install-target": 2,
 }
 ALLOWED_STATUSES = set(EXPECTED_COUNTS)

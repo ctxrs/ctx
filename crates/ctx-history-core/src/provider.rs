@@ -147,6 +147,7 @@ pub enum ProviderId {
     #[serde(rename = "tabnine", alias = "tabnine-cli", alias = "tabnine_cli")]
     Tabnine,
     Mux,
+    Moxby,
     #[serde(rename = "reasonix", alias = "deepseek-reasonix")]
     Reasonix,
     #[serde(rename = "adal", alias = "adal-cli", alias = "adal_cli")]
@@ -189,7 +190,7 @@ pub enum ProviderId {
 }
 
 impl ProviderId {
-    pub const ALL: [Self; 70] = [
+    pub const ALL: [Self; 71] = [
         Self::Codex,
         Self::ClaudeCode,
         Self::ClaudeCliCrp,
@@ -241,6 +242,7 @@ impl ProviderId {
         Self::DeepAgents,
         Self::MistralVibe,
         Self::Mux,
+        Self::Moxby,
         Self::Reasonix,
         Self::Adal,
         Self::Kode,
