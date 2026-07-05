@@ -48,7 +48,7 @@ use ctx_history_capture::{
     import_gemini_cli_history, import_goose_sessions_sqlite, import_hermes_sqlite,
     import_iflow_cli_history, import_jazz_history, import_junie_history, import_kilo_sqlite,
     import_kimi_code_cli_history, import_kiro_sqlite, import_kode_history, import_lingma_sqlite,
-    import_mistral_vibe_history, import_mux_history, import_nanoclaw_project,
+    import_mistral_vibe_history, import_moxby_sqlite, import_mux_history, import_nanoclaw_project,
     import_neovate_history, import_openclaw_history, import_opencode_sqlite,
     import_openhands_file_events, import_openloaf_history, import_pi_session_jsonl,
     import_pochi_livestore_sqlite, import_qoder_history, import_qwen_code_history,
@@ -71,12 +71,12 @@ use ctx_history_capture::{
     ForgeCodeSqliteImportOptions, GeminiCliImportOptions, GooseSessionsSqliteImportOptions,
     HermesSqliteImportOptions, IflowCliImportOptions, JazzImportOptions, JunieImportOptions,
     KiloSqliteImportOptions, KimiCodeCliImportOptions, KiroSqliteImportOptions, KodeImportOptions,
-    LingmaSqliteImportOptions, MistralVibeImportOptions, MuxImportOptions, NanoClawImportOptions,
-    NeovateImportOptions, OpenClawImportOptions, OpenCodeSqliteImportOptions,
-    OpenHandsImportOptions, OpenLoafImportOptions, PiSessionImportOptions,
-    PochiLivestoreSqliteImportOptions, ProviderImportSummary, ProviderImportSupport,
-    ProviderSource, ProviderSourceStatus, QoderImportOptions, QwenCodeImportOptions,
-    ReasonixImportOptions, RooTaskJsonImportOptions, RovoDevImportOptions,
+    LingmaSqliteImportOptions, MistralVibeImportOptions, MoxbySqliteImportOptions,
+    MuxImportOptions, NanoClawImportOptions, NeovateImportOptions, OpenClawImportOptions,
+    OpenCodeSqliteImportOptions, OpenHandsImportOptions, OpenLoafImportOptions,
+    PiSessionImportOptions, PochiLivestoreSqliteImportOptions, ProviderImportSummary,
+    ProviderImportSupport, ProviderSource, ProviderSourceStatus, QoderImportOptions,
+    QwenCodeImportOptions, ReasonixImportOptions, RooTaskJsonImportOptions, RovoDevImportOptions,
     ShelleySqliteImportOptions, TabnineCliImportOptions, TerramindSqliteImportOptions,
     TinyCloudImportOptions, TraeImportOptions, WarpSqliteImportOptions,
     WindsurfCascadeHookImportOptions, ZedThreadsSqliteImportOptions, ZencoderImportOptions,
@@ -786,6 +786,7 @@ enum NativeProviderArg {
     )]
     MistralVibe,
     Mux,
+    Moxby,
     #[value(name = "reasonix", alias = "deepseek-reasonix")]
     Reasonix,
     #[value(name = "adal", alias = "adal-cli", alias = "adal_cli")]
@@ -942,6 +943,7 @@ enum ProviderArg {
     )]
     MistralVibe,
     Mux,
+    Moxby,
     #[value(name = "reasonix", alias = "deepseek-reasonix")]
     Reasonix,
     #[value(name = "adal", alias = "adal-cli", alias = "adal_cli")]
@@ -1062,6 +1064,7 @@ impl NativeProviderArg {
             Self::DeepAgents => CaptureProvider::DeepAgents,
             Self::MistralVibe => CaptureProvider::MistralVibe,
             Self::Mux => CaptureProvider::Mux,
+            Self::Moxby => CaptureProvider::Moxby,
             Self::Reasonix => CaptureProvider::Reasonix,
             Self::Adal => CaptureProvider::Adal,
             Self::Kode => CaptureProvider::Kode,
@@ -1149,6 +1152,7 @@ impl ProviderArg {
             Self::DeepAgents => CaptureProvider::DeepAgents,
             Self::MistralVibe => CaptureProvider::MistralVibe,
             Self::Mux => CaptureProvider::Mux,
+            Self::Moxby => CaptureProvider::Moxby,
             Self::Reasonix => CaptureProvider::Reasonix,
             Self::Adal => CaptureProvider::Adal,
             Self::Kode => CaptureProvider::Kode,
@@ -1215,6 +1219,7 @@ impl ProviderArg {
             Self::DeepAgents => "deepagents",
             Self::MistralVibe => "mistral-vibe",
             Self::Mux => "mux",
+            Self::Moxby => "moxby",
             Self::Reasonix => "reasonix",
             Self::Adal => "adal",
             Self::Kode => "kode",
@@ -6592,6 +6597,17 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
+        CaptureProvider::Moxby => import_moxby_sqlite(
+            &source.path,
+            store,
+            MoxbySqliteImportOptions {
+                source_path: Some(source.path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: true,
+                ..MoxbySqliteImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
         CaptureProvider::Terramind => import_terramind_sqlite(
             &source.path,
             store,
@@ -6860,6 +6876,7 @@ fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bool {
                     Some("chat.jsonl" | "partial.json")
                 ) && path.starts_with(&source.path))
         }
+        CaptureProvider::Moxby => path == source.path,
         CaptureProvider::Reasonix => {
             path == source.path
                 || (path.starts_with(&source.path)
@@ -7346,6 +7363,7 @@ fn source_uses_incremental_event_search(source: &SourceInfo) -> bool {
             | CaptureProvider::DeepAgents
             | CaptureProvider::MistralVibe
             | CaptureProvider::Mux
+            | CaptureProvider::Moxby
             | CaptureProvider::Reasonix
             | CaptureProvider::CommandCode
             | CaptureProvider::RovoDev

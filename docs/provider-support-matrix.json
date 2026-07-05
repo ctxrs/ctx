@@ -2931,6 +2931,67 @@
       ]
     },
     {
+      "id": "moxby",
+      "display_name": "Moxby",
+      "priority": "p1",
+      "status": "local_import_when_supported",
+      "capture_provider": "moxby",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "moxby_chats_sqlite",
+          "fidelity": "imported",
+          "proof": [
+            "ctx sources",
+            "ctx import --provider moxby",
+            "cargo test -p ctx-history-capture native_moxby_fixture_imports_searches_reimports_and_tool_outputs",
+            "cargo test -p ctx-history-capture moxby_discovery_uses_default_and_state_dir_db"
+          ],
+          "notes": [
+            "Reads Moxby moxby_chats.db SQLite files discovered under MOXBY_STATE_DIR, XDG data, macOS Application Support, Windows APPDATA, or supplied explicitly.",
+            "Normalizes chat_messages rows into user/assistant/system messages and tool output/tool-call events with chat/thread metadata from chats and chat_threads."
+          ]
+        }
+      ],
+      "history_locations": [
+        "MOXBY_STATE_DIR/moxby_chats.db",
+        "$XDG_DATA_HOME/com.moxby.agent/moxby_chats.db",
+        "~/.local/share/com.moxby.agent/moxby_chats.db",
+        "~/Library/Application Support/com.moxby.agent/moxby_chats.db",
+        "%APPDATA%/com.moxby.agent/moxby_chats.db"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": true,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": true,
+        "command_output": false,
+        "files_touched": false,
+        "artifacts": false,
+        "model_identity": true,
+        "costs": false,
+        "token_usage": false,
+        "parent_child_session_edges": true
+      },
+      "blockers": [
+        "Importer is bounded to the proven moxby_chats.db chat transcript schema from the Moxby v2.3.0 macOS release bundle; browser data, moxby.db local docs/workspaces storage, credentials, logs, and cloud/provider state are not imported.",
+        "The checked-in fixture is sanitized and synthetic, but its table/column contract is backed by the inspected release bundle strings and schema/tool descriptions."
+      ],
+      "public_docs": "docs/provider-support.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/moxby/v2.3.0/moxby_chats.db"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs",
+        "tests/fixtures/provider-history/moxby/v2.3.0"
+      ]
+    },
+    {
       "id": "reasonix",
       "display_name": "Reasonix",
       "priority": "p1",
