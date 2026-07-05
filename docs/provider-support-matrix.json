@@ -475,15 +475,19 @@
           "source_format": "dexto_sqlite",
           "fidelity": "imported",
           "proof": [
+            "ctx import --all",
+            "ctx search --provider dexto <query>",
             "ctx import --provider dexto --path <dexto.db>"
           ],
           "notes": [
             "Reads Dexto SQLite kv_store/list_store session data using a read-only connection.",
-            "Discovery is explicit-path only because the researched clone did not prove a stable default data directory."
+            "Discovery scans Dexto CLI database roots for *.db files with the kv_store/list_store schema."
           ]
         }
       ],
       "history_locations": [
+        "~/.dexto/database/*.db",
+        "<dexto-project>/.dexto/database/*.db",
         "<explicit-dexto-sqlite-db>"
       ],
       "imports_existing_history": true,
@@ -505,9 +509,7 @@
       "redaction_notes": [
         "Reads the provider SQLite database read-only; imported generic message JSON, file paths, parent session metadata, and local source paths remain in the local ctx index."
       ],
-      "blockers": [
-        "No default local Dexto data directory is claimed yet; users must pass an explicit SQLite path."
-      ],
+      "blockers": [],
       "public_docs": "docs/providers.md",
       "fixture_paths": [
         "tests/fixtures/provider-history/dexto/v1/dexto.db"
@@ -663,12 +665,12 @@
           "proof": [
             "ctx import --provider pochi",
             "ctx import --provider pochi --path <state*.db>",
-            "cargo test -p ctx pochi_preview_default_discovery_imports_only_when_explicit_provider",
+            "cargo test -p ctx pochi_native_default_discovery_search_refresh_imports_livestore_state_db",
             "cargo test -p ctx-history-capture native_pochi_fixture_imports_searches_reimports_and_file_touches",
             "cargo test -p ctx pochi_cli_imports_explicit_livestore_state_db_and_directory_only"
           ],
           "notes": [
-            "Preview import for Pochi LiveStore state SQLite databases; discovers synced state DBs under ~/.pochi/storage when that directory exists, or pass a state*.db file or a directory containing state*.db files.",
+            "Native-auto import for bounded Pochi LiveStore state SQLite databases; discovers synced state DBs under ~/.pochi/storage when that directory exists and a read-only schema probe finds tasks/messages tables, or pass a state*.db file or a directory containing state*.db files.",
             "Reads tasks and messages tables read-only, normalizing text parts, tool parts, executeCommand output, and known file-touch tool input paths.",
             "No config.jsonc parsing or VS Code OPFS extraction is claimed."
           ]
@@ -699,7 +701,7 @@
         "Reads the provider SQLite database read-only; imported message text, tool input/output text, file paths, cwd, model id, and local source paths remain in the local ctx index."
       ],
       "blockers": [
-        "Preview importer; discovered ~/.pochi/storage sources are not included in ctx import --all or pre-search refresh.",
+        "Native-auto scope is limited to ~/.pochi/storage/**/state*.db and explicit state DB file/directory paths; config.jsonc and VS Code OPFS storage remain unclaimed.",
         "Pochi CLI filesystem LiveStore sync is only present when POCHI_LIVEKIT_SYNC_ON is enabled, so many installations may not have an importable state DB."
       ],
       "public_docs": "docs/provider-support.md",
@@ -725,22 +727,24 @@
           "source_format": "warp_sqlite",
           "fidelity": "partial",
           "proof": [
-            "Official Warp Session Restoration docs document the local warp.sqlite path on macOS, Windows, and Linux; ctx discovers the documented Linux/macOS paths and accepts any explicit warp.sqlite path.",
+            "Official Warp Session Restoration docs document the local warp.sqlite path on macOS, Windows, and Linux; ctx discovers the documented Linux, macOS, and Windows paths and accepts any explicit warp.sqlite path.",
             "warpdotdev/warp open-source client crates/persistence/src/schema.rs defines agent_conversations, agent_tasks, and ai_queries tables.",
             "warpdotdev/warp open-source client app/src/persistence/agent.rs writes agent_tasks.task as warp_multi_agent_api::Task protobuf snapshots.",
             "warpdotdev/warp-proto-apis apis/multi_agent/v1/task.proto defines Task.messages and Message user_query/agent_output/tool fields.",
             "cargo test -p ctx-history-capture native_warp",
-            "cargo test -p ctx warp_cli_imports_explicit_sqlite_preview"
+            "cargo test -p ctx warp_native_default_discovery_auto_imports_for_search",
+            "cargo test -p ctx warp_native_default_discovery_is_included_in_import_all",
+            "cargo test -p ctx warp_cli_imports_explicit_sqlite"
           ],
           "notes": [
-            "Preview manual import for Warp Terminal local restoration SQLite databases; use ctx import --provider warp for discovered documented Linux/macOS paths or ctx import --provider warp --path <warp.sqlite>.",
+            "Native import for Warp Terminal local restoration SQLite databases; ctx import --all and search refresh include discovered documented local paths, and ctx import --provider warp --path <warp.sqlite> preserves explicit-path import.",
             "Reads agent_conversations and agent_tasks read-only and decodes the public Task protobuf subset needed for user prompts, assistant messages, tool call markers, tool output markers, reasoning, summaries, and inter-agent message text.",
-            "Automatic default discovery is intentionally not enabled for import/search refresh because Warp documents warp.sqlite as a session restoration/cache database and this branch lacks a real safe-run local fixture."
+            "Live SQLite handling uses a read-only query-only SQLite connection with normal WAL visibility; tests cover committed WAL content while a writer connection remains open."
           ]
         }
       ],
       "history_locations": [
-        "~/.local/state/warp-terminal/warp.sqlite",
+        "${XDG_STATE_HOME:-~/.local/state}/warp-terminal/warp.sqlite",
         "~/Library/Group Containers/2BBY89MBSN.dev.warp/Library/Application Support/dev.warp.Warp-Stable/warp.sqlite",
         "%LOCALAPPDATA%/warp/Warp/data/warp.sqlite",
         "Explicit warp.sqlite path, including the documented Windows %LOCALAPPDATA% path"
@@ -766,9 +770,7 @@
         "server_conversation_token and forked_from_server_conversation_token values from Warp conversation_data are not copied into ctx metadata; ctx records only boolean token presence."
       ],
       "blockers": [
-        "Preview manual importer; documented Linux/macOS defaults can be discovered, but no automatic search-refresh/import-all ingestion or Windows %LOCALAPPDATA% default discovery is claimed.",
-        "No live safe-run local Warp fixture was present on this host; the repository fixture is sanitized and schema-backed, not copied from a user profile.",
-        "Cloud-synced conversations, Oz/cloud agent conversations, Markdown exports, browser IndexedDB, command history outside agent_tasks, and Warp Drive/team data are not parsed."
+        "Cloud sync endpoints, Oz/cloud agent conversations, Markdown exports, browser IndexedDB, command history outside agent_tasks, and Warp Drive/team data are not parsed."
       ],
       "public_docs": "docs/provider-storage-proof.md",
       "fixture_paths": [
@@ -843,6 +845,216 @@
         "crates/ctx-history-capture/src/lib.rs",
         "crates/ctx-history-capture/src/provider_sources.rs"
       ]
+    },
+    {
+      "id": "codearts_agent",
+      "display_name": "CodeArts Agent",
+      "priority": "p2",
+      "status": "local_import_when_supported",
+      "capture_provider": "codearts_agent",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "codearts_agent_kernel_sqlite",
+          "fidelity": "partial",
+          "proof": [
+            "VSIX HuaweiCloud.vscode-codebot v26.6.0 SHA256 394f54ba999bdab8095f9bdd3ccd28ce5e0df3ab804911703efdbe1a329a2d34",
+            "ctx fixture tests cover codearts-agent/v1/opencode.sql default discovery and search auto-refresh"
+          ],
+          "notes": [
+            "Native-auto row for the CodeArts Agent kernel opencode.db family under proven ~/.codeartsdoer and XDG data opencode.db paths, or an explicit DB path.",
+            "The native claim is for the kernel-managed SQLite DB, not older VS Code cache JSON such as User/chat_sessions messages."
+          ]
+        }
+      ],
+      "history_locations": [
+        "~/.codeartsdoer/vscode-data/opencode.db",
+        "~/.codeartsdoer/codearts-data/opencode.db",
+        "~/.local/share/codeartsdoer/opencode.db",
+        "$XDG_DATA_HOME/codeartsdoer/opencode.db",
+        "explicit CodeArts Agent opencode.db file"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": false,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": true,
+        "command_output": false,
+        "files_touched": true,
+        "artifacts": false,
+        "model_identity": true,
+        "costs": false,
+        "token_usage": false,
+        "parent_child_session_edges": false
+      },
+      "redaction_notes": [
+        "Reads local provider SQLite databases read-only; imported prompt/assistant/tool text, local paths, and source metadata remain in the local ctx index.",
+        "Account, auth, and extension cache files outside the kernel DB are not part of the native claim."
+      ],
+      "blockers": [
+        "Legacy chat_sessions JSON cache files remain unclaimed until fixtures prove they are durable and complete."
+      ],
+      "public_docs": "docs/provider-support.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/codearts-agent/v1/opencode.sql"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs",
+        "docs/provider-storage-proof.md"
+      ],
+      "metadata": {
+        "npx_skills_id": "codearts-agent",
+        "import_support": "native",
+        "native_auto": true,
+        "vsix": "HuaweiCloud.vscode-codebot@26.6.0",
+        "sha256": "394f54ba999bdab8095f9bdd3ccd28ce5e0df3ab804911703efdbe1a329a2d34",
+        "schema_family": "opencode sqlite family"
+      }
+    },
+    {
+      "id": "zencoder",
+      "display_name": "Zencoder",
+      "priority": "p2",
+      "status": "local_import_when_supported",
+      "capture_provider": "zencoder",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "zencoder_chat_sessions_json_tree",
+          "fidelity": "partial",
+          "proof": [
+            "jverre/opik-chat-history@5e7380933564d4fe1084d0e6f48f0e49e43e45ea",
+            "Open VSX ZencoderAI.zencoder v3.63.9002 constants",
+            "ctx native importer zencoder_chat_sessions_json_tree",
+            "ctx sources default discovery reports import_support=native and native_import=true"
+          ],
+          "notes": [
+            "Native-auto import for Zencoder zencoder-chat trees with sessions.json plus sessions/<id>.json.",
+            "~/.zencoder remains npx skill/config evidence; the import claim is for the proven zencoder-chat session tree.",
+            "Default discovery covers common VS Code-family User/globalStorage/ZencoderAI.zencoder/zencoder-chat roots, and explicit chat tree/session paths remain supported."
+          ]
+        }
+      ],
+      "history_locations": [
+        "~/.config/Code/User/globalStorage/ZencoderAI.zencoder/zencoder-chat/sessions.json",
+        "~/.config/Code/User/globalStorage/ZencoderAI.zencoder/zencoder-chat/sessions/<session-id>.json",
+        "macOS ~/Library/Application Support/Code/User/globalStorage/ZencoderAI.zencoder/zencoder-chat",
+        "Windows %APPDATA%/Code/User/globalStorage/ZencoderAI.zencoder/zencoder-chat",
+        "explicit Zencoder chat session tree or session JSON file"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": false,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": false,
+        "tool_output": false,
+        "command_output": false,
+        "files_touched": false,
+        "artifacts": false,
+        "model_identity": false,
+        "costs": false,
+        "token_usage": false,
+        "parent_child_session_edges": false
+      },
+      "redaction_notes": [
+        "Reads local provider JSON files read-only; imported message text and local source paths remain in the local ctx index.",
+        "Extension caches outside the zencoder-chat session tree are not part of the native import claim."
+      ],
+      "blockers": [
+        "The storage contract is source-backed by a third-party exporter plus extension constants, not a first-party published schema."
+      ],
+      "public_docs": "docs/provider-support.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/zencoder/ZencoderAI.zencoder/zencoder-chat"
+      ],
+      "tests": [
+        "crates/ctx-history-capture/src/provider_sources.rs",
+        "crates/ctx-cli/tests/cli.rs",
+        "docs/provider-storage-proof.md"
+      ],
+      "metadata": {
+        "npx_skills_id": "zencoder",
+        "import_support": "native",
+        "native_auto": true,
+        "exporter_evidence": "jverre/opik-chat-history@5e7380933564d4fe1084d0e6f48f0e49e43e45ea",
+        "open_vsx": "ZencoderAI.zencoder@3.63.9002"
+      }
+    },
+    {
+      "id": "codestudio",
+      "display_name": "Syncfusion Code Studio",
+      "priority": "p2",
+      "status": "local_import_when_supported",
+      "capture_provider": "codestudio",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "codestudio_session_store_sqlite",
+          "fidelity": "partial",
+          "proof": [
+            "Syncfusion Code Studio v2.0.4 artifact SHA256 603991729cbb154e1bbc1a12d292b389895e1c2fb6f07b25bc1cda4fe14fa13b",
+            "syncfusion-content/syncfusion-code-studio-docs@de44c7b35fc30ece937ff85d113b5b360a3e3955",
+            "ctx native discovery/import/search refresh coverage"
+          ],
+          "notes": [
+            "Native-auto import reads Syncfusion Code Studio session-store SQLite DBs from proven Code Studio app-data User/globalStorage paths or explicit DB paths.",
+            "Skill, agent, hook, and settings files under .codestudio or ~/.codestudio are configuration evidence only, not transcript history.",
+            "Default discovery requires the session-store schema_version table, sessions.id, and turns id/session_id/role/content columns before auto import."
+          ]
+        }
+      ],
+      "history_locations": [
+        "~/.config/Code Studio/User/globalStorage/session-store.db",
+        "~/Library/Application Support/Code Studio/User/globalStorage/session-store.db",
+        "%APPDATA%/Code Studio/User/globalStorage/session-store.db",
+        "explicit Syncfusion Code Studio session-store SQLite DB"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": false,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": false,
+        "tool_output": false,
+        "command_output": false,
+        "files_touched": false,
+        "artifacts": false,
+        "model_identity": true,
+        "costs": false,
+        "token_usage": false,
+        "parent_child_session_edges": false
+      },
+      "redaction_notes": [
+        "Reads discovered or explicit local provider SQLite databases read-only; imported prompt/assistant text and local source paths remain in the local ctx index.",
+        "Agent skill/configuration directories and debug logs are not imported as history."
+      ],
+      "blockers": [
+        "The row is anchored to v2.0.4 artifact/docs evidence; future Code Studio schema changes may need adapter updates."
+      ],
+      "public_docs": "docs/provider-support.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/codestudio/v1/session-store.sql"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs",
+        "docs/provider-storage-proof.md"
+      ],
+      "metadata": {
+        "npx_skills_id": "codestudio",
+        "import_support": "native",
+        "pending_code_worker": false,
+        "artifact_sha256": "603991729cbb154e1bbc1a12d292b389895e1c2fb6f07b25bc1cda4fe14fa13b",
+        "docs_repo": "syncfusion-content/syncfusion-code-studio-docs@de44c7b35fc30ece937ff85d113b5b360a3e3955"
+      }
     },
     {
       "id": "aider_desk",
@@ -929,7 +1141,7 @@
             "cargo test -p ctx-history-capture native_amp_threads_export_imports_explicit_json_searches_and_reimports"
           ],
           "notes": [
-            "Reads only explicit JSON emitted by amp threads export <threadIDOrURL>.",
+            "Reads the official explicit JSON emitted by amp threads export <threadIDOrURL>.",
             "No default locations are registered for Amp; ctx does not crawl $XDG_CACHE_HOME/amp/logs/cli.log because the CLI help/source identify it as an operational log path, not durable transcript history.",
             "Normalizes visible text, tool_use, tool_result, summary, and manual_bash_invocation blocks; thinking and redacted_thinking blocks are intentionally skipped."
           ]
@@ -959,7 +1171,7 @@
         "thinking and redacted_thinking content blocks are skipped and not stored in adjacent event bodies."
       ],
       "blockers": [
-        "Importer is anchored to @ampcode/cli package version 0.0.1783181941-g187572 export/markdown handlers and a redacted fixture; a public stable JSON schema is not otherwise documented.",
+        "Fixture remains package/source-backed because this environment has no amp binary and no Amp/OpenRouter credentials for a safe live export run.",
         "No default auto-discovery is claimed until Amp proves durable local transcript storage distinct from operational logs."
       ],
       "public_docs": "docs/provider-support.md",
@@ -974,7 +1186,8 @@
       ],
       "metadata": {
         "default_auto_discovery": false,
-        "import_support": "preview",
+        "import_support": "explicit",
+        "fixture_provenance": "package/source-backed sanitized export fixture; no local amp binary or credentials were available for a live generated fixture",
         "source_command": "amp threads export"
       }
     },
@@ -991,18 +1204,30 @@
           "fidelity": "partial",
           "proof": [
             "ctx import --provider trae --path <workspaceStorage-or-state.vscdb>",
+            "ctx import --provider trae-cn --path <workspaceStorage-or-state.vscdb>",
+            "ctx search <query> --provider trae",
+            "ctx search <query> --provider trae-cn",
+            "ctx import --all",
             "tests/fixtures/provider-history/trae/User/workspaceStorage/trae-workspace-1/state.vscdb",
-            "yuanjing001/trae-chats-exporter@85e2d111a5a0e35f0957502097d3a8b18095ef72"
+            "yuanjing001/trae-chats-exporter",
+            "llg23456/ai-dialog-compressor@e9dbf1f4b5cd0a033053e62ea9643f675d3a2ca7"
           ],
           "notes": [
-            "Preview importer for explicit Trae User/workspaceStorage roots, workspace directories, or state.vscdb files.",
-            "Reads SQLite ItemTable values for exporter-backed keys including memento/icube-ai-agent-storage, chat.ChatSessionStore.index, and ChatStore.",
-            "Default discovery is intentionally unclaimed until real fixture validation exists."
+            "Native-auto discovery is limited to Trae and Trae CN User/workspaceStorage roots at ~/Library/Application Support/Trae/User/workspaceStorage, ~/Library/Application Support/Trae CN/User/workspaceStorage, %APPDATA%/Trae/User/workspaceStorage, and %APPDATA%/Trae CN/User/workspaceStorage.",
+            "Explicit Trae or Trae CN User/workspaceStorage roots, workspace directories, or state.vscdb files remain supported.",
+            "Reads SQLite ItemTable values for exporter-backed keys including memento/icube-ai-agent-storage, icube-ai-agent-storage-input-history, chat.ChatSessionStore.index, and ChatStore.",
+            "Trae CN input-history rows are imported as user prompts when assistant replies are not present in local state.",
+            "globalStorage, ModularData, arbitrary caches, unknown ItemTable keys, and full assistant transcript recovery from input-history-only databases are not claimed."
           ]
         }
       ],
       "history_locations": [
+        "~/Library/Application Support/Trae/User/workspaceStorage",
+        "~/Library/Application Support/Trae CN/User/workspaceStorage",
+        "%APPDATA%/Trae/User/workspaceStorage",
+        "%APPDATA%/Trae CN/User/workspaceStorage",
         "explicit Trae User/workspaceStorage directory",
+        "explicit Trae CN User/workspaceStorage directory",
         "explicit Trae workspace directory containing state.vscdb",
         "explicit Trae state.vscdb file"
       ],
@@ -1023,12 +1248,12 @@
         "parent_child_session_edges": false
       },
       "redaction_notes": [
-        "Reads explicit local Trae SQLite state databases read-only; imported message text and local source paths remain in the local ctx index.",
-        "Provider-native JSON metadata is capped and marked preview/local."
+        "Reads local Trae SQLite state databases read-only; imported message text and local source paths remain in the local ctx index.",
+        "Provider-native JSON metadata is capped and marked local partial."
       ],
       "blockers": [
-        "Preview explicit import only; no robust default discovery or real Trae run fixture was available.",
-        "trae-cn is not aliased or claimed."
+        "No real Trae or Trae CN run fixture is bundled; default discovery coverage is source-backed and synthetic-fixture-backed.",
+        "globalStorage, ModularData, arbitrary caches, unknown ItemTable keys, and full assistant transcript recovery from Trae CN input-history-only databases remain unclaimed."
       ],
       "public_docs": "docs/provider-support.md",
       "fixture_paths": [
@@ -1041,8 +1266,14 @@
         "tests/fixtures/provider-history/trae"
       ],
       "metadata": {
-        "default_auto_discovery": false,
-        "import_support": "preview"
+        "default_auto_discovery": true,
+        "default_auto_discovery_scope": "Trae and Trae CN User/workspaceStorage roots with known ItemTable chat keys",
+        "import_support": "native-auto defaults plus explicit paths",
+        "aliases": [
+          "trae-cn",
+          "trae_cn"
+        ],
+        "canonical_provider_id": "trae"
       }
     },
     {
@@ -1221,11 +1452,12 @@
           "fidelity": "partial",
           "proof": [
             "ctx sources",
-            "ctx import --provider astrbot --path <data_v4.db>"
+            "ctx import --provider astrbot --path <data_v4.db>",
+            "cargo test -p ctx-history-capture native_astrbot_fixture_imports_searches_and_reimports"
           ],
           "notes": [
             "Preview importer for AstrBot data/data_v4.db conversation context plus available platform_message_history rows.",
-            "This is not a full all-channel IM transcript guarantee; connector/plugin histories may live outside the supported tables."
+            "AstrBot v4.26.4 source confirms data/data_v4.db, conversations.content, and platform_message_history. The platform history table is proven for WebChat/OpenAPI/live-chat writes, but upstream docs/source do not guarantee complete raw IM transcript rows for every non-WebChat platform."
           ]
         }
       ],
@@ -1254,13 +1486,16 @@
         "Manual preview imports may include IM platform IDs, user IDs, sender names, and local chat text."
       ],
       "blockers": [
-        "Full GA needs stronger upstream guarantees for complete per-platform raw message retention."
+        "Full GA/native-auto needs either upstream guarantees or sanitized multi-platform runtime fixtures proving that data_v4.db contains complete raw user and assistant transcript history across AstrBot's supported IM platforms, not just LLM context plus WebChat/OpenAPI/live-chat platform history."
       ],
       "public_docs": "docs/providers.md",
-      "fixture_paths": [],
+      "fixture_paths": [
+        "tests/fixtures/provider-history/astrbot/v1/data/data_v4.db"
+      ],
       "tests": [
         "crates/ctx-cli/tests/cli.rs",
-        "crates/ctx-history-capture/src/lib.rs"
+        "crates/ctx-history-capture/src/lib.rs",
+        "tests/fixtures/provider-history/astrbot/v1/data/data_v4.db"
       ]
     },
     {
@@ -1533,6 +1768,61 @@
       ]
     },
     {
+      "id": "tabnine",
+      "display_name": "Tabnine",
+      "priority": "p1",
+      "status": "local_import_when_supported",
+      "capture_provider": "tabnine",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "tabnine_cli_chat_recording_jsonl",
+          "fidelity": "imported",
+          "proof": [
+            "ctx sources",
+            "ctx import --provider tabnine",
+            "Tabnine CLI 0.25.1 official installer bundle"
+          ],
+          "notes": [
+            "Reads Tabnine CLI chat JSONL records under ~/.tabnine/agent/tmp/**/chats, including nested subagent chats when present.",
+            "Native source discovery marks Tabnine available only when chat JSONL files exist under the chats path.",
+            "Checkpoint JSON files are resumable state and are not imported as the primary transcript source."
+          ]
+        }
+      ],
+      "history_locations": [
+        "~/.tabnine/agent/tmp/*/chats/session-*.jsonl",
+        "~/.tabnine/agent/tmp/*/chats/<parent-session-id>/*.jsonl"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": true,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": true,
+        "command_output": false,
+        "files_touched": true,
+        "artifacts": false,
+        "model_identity": true,
+        "costs": false,
+        "token_usage": true,
+        "parent_child_session_edges": true
+      },
+      "blockers": [
+        "No authenticated live Tabnine chat fixture was generated in this environment; the fixture is source-shaped from the official 0.25.1 bundle."
+      ],
+      "public_docs": "docs/provider-support.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/tabnine-cli"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs"
+      ]
+    },
+    {
       "id": "cursor",
       "display_name": "Cursor",
       "priority": "p1",
@@ -1594,11 +1884,14 @@
           "fidelity": "partial",
           "proof": [
             "ctx sources",
-            "ctx import --provider windsurf"
+            "ctx import --provider windsurf",
+            "ctx search --provider windsurf",
+            "cargo test -p ctx-history-capture native_windsurf",
+            "cargo test -p ctx --test cli windsurf_default_discovery_is_native_and_search_refresh_imports"
           ],
           "notes": [
-            "Preview importer for official Devin Desktop Cascade hook transcript JSONL files under ~/.windsurf/transcripts.",
-            "The hook is opt-in and docs warn transcript rows can include sensitive customer-owned data and may change shape.",
+            "Native importer for official Cascade hook transcript JSONL files under ~/.windsurf/transcripts; search refresh and ctx import --all include this source when transcript JSONL files are present.",
+            "The hook is opt-in and usually captures sessions after hook setup; docs warn transcript rows can include sensitive customer-owned data and may change shape.",
             "Does not import the private ~/.codeium/windsurf/cascade cache or guessed VS Code state databases."
           ]
         }
@@ -1628,7 +1921,7 @@
         "Known sensitive fields such as file contents, command outputs, tool arguments, and results are redacted from the stored event body preview."
       ],
       "blockers": [
-        "Automatic refresh is intentionally disabled until more real-world hook transcript drift is validated."
+        "Support is limited to official hook transcript JSONL; sessions that Windsurf did not write after hook setup are not backfilled from private caches."
       ],
       "public_docs": "docs/provider-support.md",
       "fixture_paths": [
@@ -2208,12 +2501,16 @@
             "Public ATIF RFC documents a JSON root with `schema_version`, `agent`, and `steps`.",
             "ctx import --provider devin --path <atif-file-or-dir>",
             "cargo test -p ctx-history-capture native_devin_atif_fixture_imports_explicit_export_only",
+            "cargo test -p ctx-history-capture native_devin_atif_directory_imports_json_exports_and_reimports",
+            "cargo test -p ctx-history-capture native_devin_atif_directory_partial_failures_are_explicit",
+            "cargo test -p ctx-history-capture devin_atif_support_is_explicit_path_only",
+            "cargo test -p ctx devin_atif_cli_imports_explicit_export_directory",
             "cargo test -p ctx devin_atif_cli_import_search_flow"
           ],
           "notes": [
             "Reads only explicit user-supplied Devin ATIF export files or directories; there is no default discovery.",
             "A directory import recursively scans `.json` files, while an explicit file path is validated by ATIF content.",
-            "Normalizes ATIF steps into user, assistant, system, tool-call, and tool-output preview events; full raw JSON remains in the user-supplied source file and only capped step metadata is indexed."
+            "Normalizes ATIF steps into user, assistant, system, tool-call, and tool-output local-preview events; full raw JSON remains in the user-supplied source file and only capped step metadata is indexed."
           ]
         }
       ],
@@ -2258,6 +2555,7 @@
       "metadata": {
         "export_command": "devin --export [PATH]",
         "schema_family": "ATIF",
+        "import_support": "explicit",
         "default_discovery": false
       }
     },
@@ -2330,6 +2628,147 @@
         "npx_skills_id": "eve",
         "package": "eve@0.19.0",
         "workflow_local_package": "@workflow/world-local@5.0.0-beta.22"
+      }
+    },
+    {
+      "id": "junie",
+      "display_name": "Junie",
+      "priority": "p1",
+      "status": "local_import_when_supported",
+      "capture_provider": "junie",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "junie_session_events_jsonl_tree",
+          "fidelity": "imported",
+          "proof": [
+            "Claudescope Junie connector built from real ~/.junie build 1892.22 storage",
+            "JetBrains Junie release jar contains UserPromptEvent, SessionA2uxEvent, and block event classes",
+            "ctx sources",
+            "ctx import --provider junie",
+            "cargo test -p ctx-history-capture native_junie_fixture_imports_searches_reimports_and_file_touches"
+          ],
+          "notes": [
+            "Reads Junie sessions from ~/.junie/sessions/index.jsonl plus session-*/events.jsonl, JUNIE_SESSIONS_DIR, JUNIE_HOME/sessions, or an explicit sessions/session path.",
+            "Normalizes UserPromptEvent rows and SessionA2uxEvent agentEvent blocks into user, assistant, tool-call, command-output, and file-touch events.",
+            "Discovery is index-driven and rejects sessionId values with path separators or traversal segments."
+          ]
+        }
+      ],
+      "history_locations": [
+        "JUNIE_SESSIONS_DIR/index.jsonl and session-*/events.jsonl",
+        "JUNIE_HOME/sessions/index.jsonl and session-*/events.jsonl",
+        "~/.junie/sessions/index.jsonl and session-*/events.jsonl"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": false,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": true,
+        "command_output": true,
+        "files_touched": true,
+        "artifacts": false,
+        "model_identity": true,
+        "costs": false,
+        "token_usage": true,
+        "parent_child_session_edges": false
+      },
+      "redaction_notes": [
+        "Reads Junie session files read-only; imported prompt/result/tool text, local source paths, and session metadata remain in the local ctx index.",
+        "The native importer does not read custom attachment image files or Junie project memory directories."
+      ],
+      "blockers": [
+        "Junie's events.jsonl schema is not documented first-party and may drift; support is based on Claudescope source proof, JetBrains release class evidence, and sanitized fixtures.",
+        "Junie stores a UI event stream rather than a conversational assistant transcript; ctx imports block/result text that is present in events.jsonl."
+      ],
+      "public_docs": "docs/provider-support.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/junie/sessions"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs",
+        "tests/fixtures/provider-history/junie/sessions"
+      ],
+      "metadata": {
+        "npx_skills_id": "junie",
+        "canonical_provider_id": "junie",
+        "schema_family": "Junie event-sourced UI stream"
+      }
+    },
+    {
+      "id": "tinycloud",
+      "display_name": "TinyCloud",
+      "priority": "p2",
+      "status": "local_import_when_supported",
+      "capture_provider": "tinycloud",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "tinycloud_session_jsonl_tree",
+          "fidelity": "partial",
+          "proof": [
+            "@cloudglue/tinycloud@0.3.8 gitHead fb0b313286bc83d4c48f66831e8acb7a6b51847a",
+            "ctx sources",
+            "ctx import --provider tinycloud",
+            "cargo test -p ctx-history-capture native_tinycloud_fixture_imports_project_and_legacy_sessions_idempotently"
+          ],
+          "notes": [
+            "Reads TinyCloud project session JSONL under $TINYCLOUD_HOME/projects/*/sessions/*.jsonl, ~/.tinycloud/projects/*/sessions/*.jsonl, and legacy <home>/sessions/*.jsonl.",
+            "Default discovery reads the TinyCloud home when present, and explicit TinyCloud home/session paths remain supported.",
+            "~/.tinycloud/skills is npx skill evidence only and is not treated as transcript history."
+          ]
+        }
+      ],
+      "history_locations": [
+        "$TINYCLOUD_HOME/projects/*/sessions/*.jsonl",
+        "~/.tinycloud/projects/*/sessions/*.jsonl",
+        "<tinycloud-home>/sessions/*.jsonl",
+        "explicit TinyCloud home/session path"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": false,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": false,
+        "tool_output": false,
+        "command_output": false,
+        "files_touched": true,
+        "artifacts": false,
+        "model_identity": false,
+        "costs": false,
+        "token_usage": false,
+        "parent_child_session_edges": false
+      },
+      "redaction_notes": [
+        "Reads local TinyCloud JSONL files read-only; imported message text, local file paths, and source metadata remain in the local ctx index.",
+        "TinyCloud config, cache, job, artifact, and skill directories are not imported as history."
+      ],
+      "blockers": [
+        "TinyCloud session JSONL support is package-backed by @cloudglue/tinycloud@0.3.8 evidence and sanitized fixtures; future schema drift may need adapter updates.",
+        "Only TinyCloud message rows and compaction summaries with importable text are indexed; config, cache, job, artifact, and skill directories are not imported as history."
+      ],
+      "public_docs": "docs/provider-support.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/tinycloud"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs",
+        "tests/fixtures/provider-history/tinycloud"
+      ],
+      "metadata": {
+        "npx_skills_id": "tinycloud",
+        "package": "@cloudglue/tinycloud@0.3.8",
+        "git_head": "fb0b313286bc83d4c48f66831e8acb7a6b51847a",
+        "schema_family": "JSONL CLI event logs"
       }
     },
     {

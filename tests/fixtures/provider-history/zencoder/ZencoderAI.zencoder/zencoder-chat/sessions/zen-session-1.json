@@ -1,0 +1,20 @@
+{
+  "id": "zen-session-1",
+  "title": "Zencoder fixture",
+  "workspacePath": "/workspace/zencoder",
+  "createdAt": "2026-07-05T15:00:00Z",
+  "messages": [
+    {
+      "id": "zen-user-1",
+      "role": "user",
+      "timestamp": "2026-07-05T15:00:00Z",
+      "content": "ZENCODER_ORACLE_USER_TEXT green signal"
+    },
+    {
+      "id": "zen-assistant-1",
+      "role": "assistant",
+      "timestamp": "2026-07-05T15:00:01Z",
+      "content": "ZENCODER_ORACLE_ASSISTANT_TEXT violet signal"
+    }
+  ]
+}

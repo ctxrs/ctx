@@ -1,0 +1,10 @@
+{
+  "sessions": [
+    {
+      "id": "zen-session-1",
+      "title": "Zencoder fixture",
+      "workspacePath": "/workspace/zencoder",
+      "createdAt": "2026-07-05T15:00:00Z"
+    }
+  ]
+}

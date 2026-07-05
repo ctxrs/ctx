@@ -49,9 +49,11 @@ ctx sources --json
 
 Expect rows for supported local import providers such as Codex, Pi,
 Antigravity, Claude, OpenCode, Kilo Code, OpenClaw, Hermes, Gemini, Cursor,
-Zed, Copilot CLI, Factory AI Droid, and Autohand Code. NanoClaw, AstrBot, and
-Warp can appear as preview rows when ctx can discover their local project or
-SQLite paths. A row with `exists: false`
+Zed, Copilot CLI, Factory AI Droid, Autohand Code, and Warp Terminal restoration
+SQLite. NanoClaw and AstrBot can appear as preview/manual rows when ctx can
+discover their local project or SQLite paths; Warp is native auto-importable
+from documented local `warp.sqlite` paths. A row with
+`exists: false`
 means ctx knows the default path but did not find local history there. A JSON
 row with `status: "empty"` means the path exists but no provider-specific
 transcript files were found. A row with `status: "unknown"` means the bounded

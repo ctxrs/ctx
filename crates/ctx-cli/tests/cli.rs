@@ -46,8 +46,11 @@ fn apply_hermetic_env(command: &mut Command, temp: &TempDir) {
     command.env_remove("KILO_DB");
     command.env_remove("FORGE_CONFIG");
     command.env_remove("VIBE_HOME");
+    command.env_remove("TINYCLOUD_HOME");
     command.env_remove("XDG_CONFIG_HOME");
     command.env_remove("XDG_DATA_HOME");
+    command.env_remove("XDG_STATE_HOME");
+    command.env_remove("LOCALAPPDATA");
     command.env_remove("APPDATA");
 }
 
@@ -383,6 +386,13 @@ fn materialized_fixture(category: &str, name: &str) -> String {
         fs::copy(&source, &target).unwrap();
     }
     target.to_str().unwrap().to_owned()
+}
+
+fn write_sqlite_fixture_from_sql(sql_fixture: &str, db_path: &Path) {
+    fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+    let sql = fs::read_to_string(provider_history_fixture(sql_fixture)).unwrap();
+    let conn = Connection::open(db_path).unwrap();
+    conn.execute_batch(&sql).unwrap();
 }
 
 fn copy_dir_all(from: &Path, to: &Path) {
@@ -2034,9 +2044,15 @@ fn sources_lists_personal_agent_provider_defaults() {
     install_default_kode_fixture(&temp, "kode-sources-oracle");
     install_default_neovate_fixture(&temp, "neovate-sources-oracle");
     install_default_terramind_fixture(&temp, "terramind-sources-oracle");
+    install_default_dexto_fixture(&temp, "dexto-sources-oracle");
     install_default_lingma_fixture(&temp, "lingma-sources-oracle");
     install_default_qoder_fixture(&temp, "qoder-sources-oracle");
     install_default_auggie_fixture(&temp, "auggie-sources-oracle");
+    install_default_tinycloud_fixture(&temp, "tinycloud-sources-oracle");
+    install_default_zencoder_fixture(&temp, "zencoder-sources-oracle");
+    install_default_codestudio_fixture(&temp, "codestudio-sources-oracle");
+    install_default_warp_fixture(&temp);
+    install_default_codearts_agent_fixture(&temp, "codearts-sources-oracle");
 
     let sources = json_output(ctx(&temp).args(["sources", "--json"]));
     for (provider, source_format, import_support, native_import) in [
@@ -2066,9 +2082,30 @@ fn sources_lists_personal_agent_provider_defaults() {
         ("kode", "kode_session_jsonl_tree", "native", true),
         ("neovate", "neovate_session_jsonl_tree", "native", true),
         ("terramind", "terramind_agents_sqlite", "native", true),
+        ("dexto", "dexto_sqlite", "native", true),
         ("lingma", "lingma_sqlite", "native", true),
         ("qoder", "qoder_transcript_jsonl_tree", "native", true),
         ("auggie", "auggie_session_json", "native", true),
+        ("tinycloud", "tinycloud_session_jsonl_tree", "native", true),
+        (
+            "zencoder",
+            "zencoder_chat_sessions_json_tree",
+            "native",
+            true,
+        ),
+        (
+            "codestudio",
+            "codestudio_session_store_sqlite",
+            "native",
+            true,
+        ),
+        ("warp", "warp_sqlite", "native", true),
+        (
+            "codearts_agent",
+            "codearts_agent_kernel_sqlite",
+            "native",
+            true,
+        ),
     ] {
         let source = sources["sources"]
             .as_array()
@@ -2084,6 +2121,22 @@ fn sources_lists_personal_agent_provider_defaults() {
         assert_eq!(source["importable"], true);
         assert!(source["unsupported_reason"].is_null());
     }
+}
+
+#[test]
+fn sources_lists_preview_agent_provider_defaults_without_auto_import_claim() {
+    let temp = tempdir();
+    fs::create_dir_all(temp.path().join(".config").join("amp")).unwrap();
+
+    let sources = json_output(ctx(&temp).args(["sources", "--json"]));
+    assert!(
+        !sources["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|source| source["provider"] == "amp"),
+        "Amp should stay explicit-export-only and ignore ~/.config/amp without transcript proof: {sources:#}"
+    );
 }
 
 #[test]
@@ -2259,9 +2312,9 @@ fn preview_native_sources_are_listed_but_not_auto_imported() {
 }
 
 #[test]
-fn windsurf_preview_default_discovery_imports_only_when_explicit_provider() {
+fn windsurf_default_discovery_is_native_and_search_refresh_imports() {
     let temp = tempdir();
-    let query = "windsurf-preview-default-discovery-oracle";
+    let query = "windsurf-native-default-discovery-oracle";
     install_default_windsurf_fixture(&temp, query);
 
     let sources = json_output(ctx(&temp).args(["sources", "--json"]));
@@ -2276,22 +2329,25 @@ fn windsurf_preview_default_discovery_imports_only_when_explicit_provider() {
         windsurf["source_format"],
         "windsurf_cascade_hook_transcript_jsonl_tree"
     );
-    assert_eq!(windsurf["import_support"], "preview");
-    assert_eq!(windsurf["native_import"], false);
+    assert_eq!(windsurf["import_support"], "native");
+    assert_eq!(windsurf["native_import"], true);
     assert_eq!(windsurf["importable"], true);
     assert!(windsurf["path"]
         .as_str()
         .unwrap()
         .ends_with(".windsurf/transcripts"));
 
-    let search_before =
+    let search =
         json_output(ctx(&temp).args(["search", query, "--provider", "windsurf", "--json"]));
-    assert_eq!(search_before["freshness"]["mode"], "auto");
-    assert_eq!(search_before["freshness"]["status"], "no_sources");
-    assert_eq!(search_before["freshness"]["source_count"], 0);
-    assert!(search_before["results"].as_array().unwrap().is_empty());
+    assert_eq!(search["freshness"]["mode"], "auto");
+    assert_eq!(search["freshness"]["status"], "completed");
+    assert_eq!(search["freshness"]["source_count"], 1);
+    assert_eq!(search["freshness"]["totals"]["failed"], 0);
+    assert_eq!(search["freshness"]["totals"]["imported_sessions"], 1);
+    assert_eq!(search["freshness"]["totals"]["imported_events"], 3);
+    assert_search_provider_oracle(&search, "windsurf", query, 1, "message");
 
-    let imported = json_output(ctx(&temp).args([
+    let second = json_output(ctx(&temp).args([
         "import",
         "--provider",
         "windsurf",
@@ -2299,17 +2355,8 @@ fn windsurf_preview_default_discovery_imports_only_when_explicit_provider() {
         "--progress",
         "none",
     ]));
-    assert_eq!(imported["totals"]["failed"], 0);
-    assert_eq!(imported["totals"]["imported_sources"], 1);
-    assert_eq!(imported["sources"][0]["provider"], "windsurf");
-    assert_eq!(
-        imported["sources"][0]["source_format"],
-        "windsurf_cascade_hook_transcript_jsonl_tree"
-    );
-
-    let search_after =
-        json_output(ctx(&temp).args(["search", query, "--provider", "windsurf", "--json"]));
-    assert_search_provider_oracle(&search_after, "windsurf", query, 1, "message");
+    assert_eq!(second["totals"]["failed"], 0);
+    assert_eq!(second["totals"]["imported_events"], 0);
 }
 
 #[test]
@@ -2592,7 +2639,7 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
             vec![
                 "Usage: ctx import",
                 "--provider <PROVIDER>",
-                "[possible values: codex, pi, claude, opencode, openloaf, kilo, kiro-cli, crush, goose, antigravity, gemini, cursor, windsurf, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, jazz, auggie, devin, eve, firebender, forgecode, deepagents, mistral-vibe, mux, reasonix, adal, kode, neovate, command-code, terramind, rovodev, cortex-code, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, bob, dexto, lingma, qoder, pochi, warp, codebuddy, aider-desk, amp, trae]",
+                "[possible values: codex, pi, claude, opencode, codearts-agent, openloaf, kilo, kiro-cli, crush, goose, antigravity, gemini, tabnine, cursor, windsurf, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, jazz, auggie, devin, eve, junie, firebender, forgecode, deepagents, mistral-vibe, mux, reasonix, adal, kode, neovate, command-code, terramind, rovodev, cortex-code, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, bob, dexto, lingma, qoder, pochi, warp, codebuddy, aider-desk, amp, trae, tinycloud, zencoder, codestudio]",
                 "--path <PATH>",
                 "--format <FORMAT>",
                 "--resume",
@@ -6024,6 +6071,20 @@ fn search_refresh_auto_imports_discovered_top_provider_sources() {
         ("lingma", "lingma", install_default_lingma_fixture),
         ("qoder", "qoder", install_default_qoder_fixture),
         ("bob", "bob", install_default_bob_fixture),
+        ("dexto", "dexto", install_default_dexto_fixture),
+        ("junie", "junie", install_default_junie_fixture),
+        ("tinycloud", "tinycloud", install_default_tinycloud_fixture),
+        ("zencoder", "zencoder", install_default_zencoder_fixture),
+        (
+            "codestudio",
+            "codestudio",
+            install_default_codestudio_fixture,
+        ),
+        (
+            "codearts-agent",
+            "codearts_agent",
+            install_default_codearts_agent_fixture,
+        ),
     ] {
         let temp = tempdir();
         let query = format!("{stored_provider}-default-refresh-oracle");
@@ -6391,6 +6452,9 @@ fn devin_atif_cli_import_search_flow() {
     assert_eq!(imported["schema_version"], 1);
     assert_eq!(imported["sources"][0]["provider"], "devin");
     assert_eq!(imported["sources"][0]["source_format"], "devin_atif_json");
+    assert_eq!(imported["sources"][0]["import_support"], "explicit");
+    assert_eq!(imported["sources"][0]["native_import"], false);
+    assert_eq!(imported["sources"][0]["importable"], true);
     assert_eq!(imported["totals"]["imported_sessions"], 1);
     assert_eq!(imported["totals"]["imported_events"], 4);
 
@@ -6418,6 +6482,66 @@ fn devin_atif_cli_import_search_flow() {
 }
 
 #[test]
+fn devin_atif_cli_imports_explicit_export_directory() {
+    let temp = tempdir();
+    let export_root = temp.path().join("devin-exports");
+    let exports = export_root.join("nested");
+    fs::create_dir_all(&exports).unwrap();
+    fs::copy(
+        provider_history_fixture("devin/atif/export.json"),
+        exports.join("export.json"),
+    )
+    .unwrap();
+    let export_root = export_root.to_str().unwrap().to_owned();
+
+    let imported = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "devin",
+        "--path",
+        &export_root,
+        "--json",
+    ]));
+    assert_eq!(imported["sources"][0]["provider"], "devin");
+    assert_eq!(imported["sources"][0]["source_format"], "devin_atif_json");
+    assert_eq!(imported["sources"][0]["import_support"], "explicit");
+    assert_eq!(imported["totals"]["imported_sessions"], 1);
+    assert_eq!(imported["totals"]["imported_events"], 4);
+}
+
+#[test]
+fn amp_cli_import_reports_explicit_export_support_without_default_source() {
+    let temp = tempdir();
+    fs::create_dir_all(temp.path().join(".config").join("amp")).unwrap();
+    let query = "amp-explicit-cli-oracle";
+    let fixture = write_native_amp_fixture(&temp, query);
+
+    let imported =
+        json_output(ctx(&temp).args(["import", "--provider", "amp", "--path", &fixture, "--json"]));
+    assert_eq!(imported["schema_version"], 1);
+    assert_eq!(imported["sources"][0]["provider"], "amp");
+    assert_eq!(
+        imported["sources"][0]["source_format"],
+        "amp_threads_export_json"
+    );
+    assert_eq!(imported["sources"][0]["import_support"], "explicit");
+    assert_eq!(imported["sources"][0]["native_import"], false);
+    assert_eq!(imported["sources"][0]["importable"], true);
+    assert_eq!(imported["totals"]["imported_sessions"], 1);
+    assert_eq!(imported["totals"]["imported_events"], 5);
+
+    let search = json_output(ctx(&temp).args(["search", query, "--provider", "amp", "--json"]));
+    assert_search_provider_oracle(&search, "amp", query, 1, "message");
+
+    let sources = json_output(ctx(&temp).args(["sources", "--json"]));
+    assert!(!sources["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|source| source["provider"] == "amp"));
+}
+
+#[test]
 fn native_provider_cli_flow_imports_new_supported_provider_paths() {
     for (cli_provider, stored_provider, expected_format, fixture) in [
         (
@@ -6433,6 +6557,12 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
             write_native_opencode_fixture,
         ),
         (
+            "codearts-agent",
+            "codearts_agent",
+            "codearts_agent_kernel_sqlite",
+            write_native_codearts_agent_fixture,
+        ),
+        (
             "loaf",
             "openloaf",
             "openloaf_chat_jsonl_tree",
@@ -6445,6 +6575,7 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
             "kiro_cli_sqlite",
             write_native_kiro_fixture,
         ),
+        ("dexto", "dexto", "dexto_sqlite", write_native_dexto_fixture),
         (
             "gemini",
             "gemini",
@@ -6596,6 +6727,30 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
             write_native_eve_fixture,
         ),
         (
+            "junie",
+            "junie",
+            "junie_session_events_jsonl_tree",
+            write_native_junie_fixture,
+        ),
+        (
+            "tinycloud",
+            "tinycloud",
+            "tinycloud_session_jsonl_tree",
+            write_native_tinycloud_fixture,
+        ),
+        (
+            "zencoder",
+            "zencoder",
+            "zencoder_chat_sessions_json_tree",
+            write_native_zencoder_fixture,
+        ),
+        (
+            "codestudio",
+            "codestudio",
+            "codestudio_session_store_sqlite",
+            write_native_codestudio_fixture,
+        ),
+        (
             "firebender",
             "firebender",
             "firebender_chat_history_sqlite",
@@ -6703,6 +6858,49 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
         assert_eq!(second["totals"]["failed"], 0);
         assert_eq!(second["totals"]["imported_events"], 0);
     }
+}
+
+#[test]
+fn dexto_native_default_discovery_search_refresh_imports_database_root() {
+    let temp = tempdir();
+    let query = "dexto-default-discovery-oracle";
+    install_default_dexto_fixture(&temp, query);
+
+    let sources = json_output(ctx(&temp).args(["sources", "--json"]));
+    let source = sources["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| source["provider"] == "dexto")
+        .unwrap_or_else(|| panic!("missing Dexto source in {sources:#}"));
+    assert_eq!(source["status"], "available");
+    assert_eq!(source["source_format"], "dexto_sqlite");
+    assert_eq!(source["import_support"], "native");
+    assert_eq!(source["native_import"], true);
+    assert_eq!(source["importable"], true);
+    assert!(source["path"]
+        .as_str()
+        .is_some_and(|path| path.ends_with(".dexto/database")));
+
+    let search = json_output(ctx(&temp).args(["search", query, "--provider", "dexto", "--json"]));
+    assert_eq!(search["freshness"]["mode"], "auto");
+    assert_eq!(search["freshness"]["status"], "completed");
+    assert_eq!(search["freshness"]["source_count"], 1);
+    assert_eq!(search["freshness"]["totals"]["imported_sessions"], 1);
+    assert_eq!(search["freshness"]["totals"]["imported_events"], 3);
+    assert_search_provider_oracle(&search, "dexto", query, 1, "message");
+
+    let second = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "dexto",
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(second["totals"]["failed"], 0);
+    assert_eq!(second["totals"]["imported_sessions"], 0);
+    assert_eq!(second["totals"]["imported_events"], 0);
 }
 
 #[test]
@@ -6814,7 +7012,7 @@ fn pochi_cli_imports_explicit_livestore_state_db_and_directory_only() {
 }
 
 #[test]
-fn pochi_preview_default_discovery_imports_only_when_explicit_provider() {
+fn pochi_native_default_discovery_search_refresh_imports_livestore_state_db() {
     let temp = tempdir();
     install_default_pochi_fixture(&temp);
 
@@ -6827,50 +7025,26 @@ fn pochi_preview_default_discovery_imports_only_when_explicit_provider() {
         .unwrap_or_else(|| panic!("missing Pochi source in {sources:#}"));
     assert_eq!(pochi["status"], "available");
     assert_eq!(pochi["source_format"], "pochi_livestore_state_sqlite");
-    assert_eq!(pochi["import_support"], "preview");
-    assert_eq!(pochi["native_import"], false);
+    assert_eq!(pochi["import_support"], "native");
+    assert_eq!(pochi["native_import"], true);
     assert_eq!(pochi["importable"], true);
     assert!(pochi["path"].as_str().unwrap().ends_with(".pochi/storage"));
 
-    let search_before = json_output(ctx(&temp).args([
+    let search = json_output(ctx(&temp).args([
         "search",
         "POCHI_ORACLE_ASSISTANT_TEXT",
         "--provider",
         "pochi",
         "--json",
     ]));
-    assert_eq!(search_before["freshness"]["mode"], "auto");
-    assert_eq!(search_before["freshness"]["status"], "no_sources");
-    assert_eq!(search_before["freshness"]["source_count"], 0);
-    assert!(search_before["results"].as_array().unwrap().is_empty());
-
-    let imported = json_output(ctx(&temp).args([
-        "import",
-        "--provider",
-        "pochi",
-        "--json",
-        "--progress",
-        "none",
-    ]));
-    assert_eq!(imported["totals"]["failed"], 0);
-    assert_eq!(imported["totals"]["imported_sources"], 1);
-    assert_eq!(imported["sources"][0]["provider"], "pochi");
-    assert_eq!(
-        imported["sources"][0]["source_format"],
-        "pochi_livestore_state_sqlite"
-    );
-
-    let search_after = json_output(ctx(&temp).args([
-        "search",
-        "POCHI_ORACLE_ASSISTANT_TEXT",
-        "--provider",
-        "pochi",
-        "--refresh",
-        "off",
-        "--json",
-    ]));
+    assert_eq!(search["freshness"]["mode"], "auto");
+    assert_eq!(search["freshness"]["status"], "completed");
+    assert_eq!(search["freshness"]["source_count"], 1);
+    assert_eq!(search["freshness"]["totals"]["failed"], 0);
+    assert_eq!(search["freshness"]["totals"]["imported_sessions"], 1);
+    assert_eq!(search["freshness"]["totals"]["imported_events"], 8);
     assert_search_provider_oracle_with_scope(
-        &search_after,
+        &search,
         "pochi",
         "POCHI_ORACLE_ASSISTANT_TEXT",
         1,
@@ -6878,26 +7052,41 @@ fn pochi_preview_default_discovery_imports_only_when_explicit_provider() {
         "session_result",
         "session",
     );
+
+    let second = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "pochi",
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(second["totals"]["failed"], 0);
+    assert_eq!(second["totals"]["imported_sessions"], 0);
+    assert_eq!(second["totals"]["imported_events"], 0);
 }
 
 #[test]
-fn trae_cli_imports_explicit_workspace_storage_preview_only() {
+fn trae_cli_imports_explicit_workspace_storage_with_default_discovery() {
     let temp = tempdir();
     let empty_sources = json_output(ctx(&temp).args(["sources", "--json"]));
-    assert!(
-        !empty_sources["sources"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|source| source["provider"] == "trae"),
-        "Trae should not have default discovery sources: {empty_sources:#}"
-    );
+    let trae_source = empty_sources["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| source["provider"] == "trae")
+        .unwrap_or_else(|| panic!("missing Trae default source: {empty_sources:#}"));
+    assert_eq!(trae_source["status"], "missing");
+    assert_eq!(trae_source["source_format"], "trae_state_vscdb");
+    assert_eq!(trae_source["import_support"], "native");
+    assert_eq!(trae_source["native_import"], true);
+    assert_eq!(trae_source["importable"], false);
 
     let fixture = provider_history_fixture("trae/User/workspaceStorage");
     let imported = json_output(ctx(&temp).args([
         "import",
         "--provider",
-        "trae",
+        "trae-cn",
         "--path",
         &fixture,
         "--json",
@@ -6915,7 +7104,7 @@ fn trae_cli_imports_explicit_workspace_storage_preview_only() {
         "search",
         "trae oracle answer",
         "--provider",
-        "trae",
+        "trae-cn",
         "--refresh",
         "off",
         "--json",
@@ -6946,7 +7135,135 @@ fn trae_cli_imports_explicit_workspace_storage_preview_only() {
 }
 
 #[test]
-fn warp_cli_imports_explicit_sqlite_preview() {
+fn trae_cn_native_default_discovery_search_refresh_imports_input_history() {
+    let temp = tempdir();
+    let query = "trae-cn-default-discovery-oracle";
+    install_default_trae_cn_fixture(&temp, query);
+
+    let sources = json_output(ctx(&temp).args(["sources", "--json"]));
+    let source = sources["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| {
+            source["provider"] == "trae"
+                && source["status"] == "available"
+                && source["path"]
+                    .as_str()
+                    .is_some_and(|path| path.ends_with("Trae CN/User/workspaceStorage"))
+        })
+        .unwrap_or_else(|| panic!("missing Trae CN source in {sources:#}"));
+    assert_eq!(source["status"], "available");
+    assert_eq!(source["source_format"], "trae_state_vscdb");
+    assert_eq!(source["import_support"], "native");
+    assert_eq!(source["native_import"], true);
+    assert!(source["path"]
+        .as_str()
+        .unwrap()
+        .ends_with("Trae CN/User/workspaceStorage"));
+
+    let search = json_output(ctx(&temp).args(["search", query, "--provider", "trae-cn", "--json"]));
+    assert_eq!(search["freshness"]["mode"], "auto");
+    assert_eq!(search["freshness"]["status"], "completed");
+    assert_eq!(search["freshness"]["source_count"], 1);
+    assert_eq!(search["freshness"]["totals"]["failed"], 0);
+    assert_eq!(search["freshness"]["totals"]["imported_sessions"], 1);
+    assert_eq!(search["freshness"]["totals"]["imported_events"], 2);
+    assert_search_provider_oracle_with_scope(
+        &search,
+        "trae",
+        query,
+        1,
+        "message",
+        "session_result",
+        "session",
+    );
+}
+
+#[test]
+fn trae_native_default_discovery_search_refresh_imports_standard_workspace_storage() {
+    let temp = tempdir();
+    let query = "trae-standard-default-discovery-oracle";
+    install_default_trae_fixture(&temp, query);
+
+    let sources = json_output(ctx(&temp).args(["sources", "--json"]));
+    let source = sources["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| {
+            source["provider"] == "trae"
+                && source["status"] == "available"
+                && source["path"]
+                    .as_str()
+                    .is_some_and(|path| path.ends_with("Trae/User/workspaceStorage"))
+        })
+        .unwrap_or_else(|| panic!("missing standard Trae source in {sources:#}"));
+    assert_eq!(source["source_format"], "trae_state_vscdb");
+    assert_eq!(source["import_support"], "native");
+    assert_eq!(source["native_import"], true);
+
+    let search = json_output(ctx(&temp).args(["search", query, "--provider", "trae", "--json"]));
+    assert_eq!(search["freshness"]["mode"], "auto");
+    assert_eq!(search["freshness"]["status"], "completed");
+    assert_eq!(search["freshness"]["source_count"], 1);
+    assert_eq!(search["freshness"]["totals"]["failed"], 0);
+    assert_eq!(search["freshness"]["totals"]["imported_sessions"], 1);
+    assert_eq!(search["freshness"]["totals"]["imported_events"], 2);
+    assert_search_provider_oracle_with_scope(
+        &search,
+        "trae",
+        query,
+        1,
+        "message",
+        "session_result",
+        "session",
+    );
+}
+
+#[test]
+fn trae_cn_native_default_discovery_is_included_in_import_all() {
+    let temp = tempdir();
+    let query = "trae-cn-import-all-oracle";
+    install_default_trae_cn_fixture(&temp, query);
+
+    let imported =
+        json_output(ctx(&temp).args(["import", "--all", "--json", "--progress", "none"]));
+    assert!(imported["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|source| {
+            source["provider"] == "trae"
+                && source["source_format"] == "trae_state_vscdb"
+                && source["import_support"] == "native"
+        }));
+    assert_eq!(imported["totals"]["failed"], 0);
+    assert_eq!(imported["totals"]["imported_sessions"], 1);
+    assert_eq!(imported["totals"]["imported_events"], 2);
+
+    let search = json_output(ctx(&temp).args([
+        "search",
+        query,
+        "--provider",
+        "trae-cn",
+        "--refresh",
+        "off",
+        "--json",
+    ]));
+    assert_search_provider_oracle_with_scope(
+        &search,
+        "trae",
+        query,
+        1,
+        "message",
+        "session_result",
+        "session",
+    );
+}
+
+#[test]
+fn warp_cli_imports_explicit_sqlite() {
     let temp = tempdir();
     let fixture = provider_history_fixture("warp/v1/warp.sqlite");
     let imported = json_output(ctx(&temp).args([
@@ -6993,11 +7310,9 @@ fn warp_cli_imports_explicit_sqlite_preview() {
 }
 
 #[test]
-fn warp_preview_default_discovery_is_not_auto_imported() {
+fn warp_native_default_discovery_auto_imports_for_search() {
     let temp = tempdir();
-    let default_db = temp.path().join(".local/state/warp-terminal/warp.sqlite");
-    fs::create_dir_all(default_db.parent().unwrap()).unwrap();
-    fs::copy(provider_history_fixture("warp/v1/warp.sqlite"), &default_db).unwrap();
+    install_default_warp_fixture(&temp);
 
     let sources = json_output(ctx(&temp).args(["sources", "--json"]));
     let source = sources["sources"]
@@ -7008,35 +7323,54 @@ fn warp_preview_default_discovery_is_not_auto_imported() {
         .unwrap_or_else(|| panic!("missing Warp source in {sources:#}"));
     assert_eq!(source["status"], "available");
     assert_eq!(source["source_format"], "warp_sqlite");
-    assert_eq!(source["import_support"], "preview");
-    assert_eq!(source["native_import"], false);
+    assert_eq!(source["import_support"], "native");
+    assert_eq!(source["native_import"], true);
     assert_eq!(source["importable"], true);
 
-    let search_before = json_output(ctx(&temp).args([
+    let search = json_output(ctx(&temp).args([
         "search",
         "Warp sqlite oracle answer",
         "--provider",
         "warp",
         "--json",
     ]));
-    assert_eq!(search_before["freshness"]["mode"], "auto");
-    assert_eq!(search_before["freshness"]["status"], "no_sources");
-    assert_eq!(search_before["freshness"]["source_count"], 0);
-    assert!(search_before["results"].as_array().unwrap().is_empty());
+    assert_eq!(search["freshness"]["mode"], "auto");
+    assert_eq!(search["freshness"]["status"], "completed");
+    assert_eq!(search["freshness"]["source_count"], 1);
+    assert_eq!(search["freshness"]["totals"]["failed"], 0);
+    assert_eq!(search["freshness"]["totals"]["imported_sessions"], 1);
+    assert_eq!(search["freshness"]["totals"]["imported_events"], 4);
+    assert_search_provider_oracle(&search, "warp", "Warp sqlite oracle answer", 1, "message");
+}
 
-    let imported = json_output(ctx(&temp).args([
-        "import",
-        "--provider",
-        "warp",
-        "--json",
-        "--progress",
-        "none",
-    ]));
-    assert_eq!(imported["sources"][0]["provider"], "warp");
-    assert_eq!(imported["sources"][0]["source_format"], "warp_sqlite");
+#[test]
+fn warp_native_default_discovery_is_included_in_import_all() {
+    let temp = tempdir();
+    install_default_warp_fixture(&temp);
+
+    let imported =
+        json_output(ctx(&temp).args(["import", "--all", "--json", "--progress", "none"]));
+    assert!(imported["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|source| {
+            source["provider"] == "warp" && source["source_format"] == "warp_sqlite"
+        }));
     assert_eq!(imported["totals"]["failed"], 0);
     assert_eq!(imported["totals"]["imported_sessions"], 1);
     assert_eq!(imported["totals"]["imported_events"], 4);
+
+    let search = json_output(ctx(&temp).args([
+        "search",
+        "Warp sqlite oracle answer",
+        "--provider",
+        "warp",
+        "--refresh",
+        "off",
+        "--json",
+    ]));
+    assert_search_provider_oracle(&search, "warp", "Warp sqlite oracle answer", 1, "message");
 }
 
 #[test]
@@ -7449,6 +7783,13 @@ fn install_default_kiro_fixture(temp: &TempDir, query: &str) {
     fs::copy(source, target.join("data.sqlite3")).unwrap();
 }
 
+fn install_default_dexto_fixture(temp: &TempDir, query: &str) {
+    let source = PathBuf::from(write_native_dexto_fixture(temp, query));
+    let target = temp.path().join(".dexto").join("database");
+    fs::create_dir_all(&target).unwrap();
+    fs::copy(source, target.join("coding-agent.db")).unwrap();
+}
+
 fn install_default_astrbot_fixture(temp: &TempDir, query: &str) {
     let source = PathBuf::from(write_native_astrbot_fixture(temp, query));
     let target = temp.path().join(".astrbot/data");
@@ -7460,6 +7801,114 @@ fn install_default_pochi_fixture(temp: &TempDir) {
     let fixture = provider_history_fixture("pochi/v1/storage/store-alpha");
     let target = temp.path().join(".pochi/storage/store-alpha");
     copy_dir_all(Path::new(&fixture), &target);
+}
+
+fn install_default_warp_fixture(temp: &TempDir) {
+    let target = temp.path().join(".local/state/warp-terminal");
+    fs::create_dir_all(&target).unwrap();
+    fs::copy(
+        provider_history_fixture("warp/v1/warp.sqlite"),
+        target.join("warp.sqlite"),
+    )
+    .unwrap();
+}
+
+fn install_default_trae_cn_fixture(temp: &TempDir, query: &str) {
+    let workspace = temp
+        .path()
+        .join("Library/Application Support/Trae CN/User/workspaceStorage/cn-workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(
+        workspace.join("workspace.json"),
+        r#"{"folder":"file:///workspace/trae-cn-default"}"#,
+    )
+    .unwrap();
+    let conn = Connection::open(workspace.join("state.vscdb")).unwrap();
+    conn.execute(
+        "CREATE TABLE ItemTable ([key] TEXT PRIMARY KEY, value TEXT)",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO ItemTable ([key], value) VALUES (?1, ?2)",
+        params![
+            "icube-ai-agent-storage-input-history",
+            json!([
+                {
+                    "id": "input-1",
+                    "inputText": query,
+                    "createdAt": "2026-07-05T13:00:00Z"
+                },
+                {
+                    "id": "input-2",
+                    "text": format!("{query} follow-up"),
+                    "createdAt": "2026-07-05T13:01:00Z"
+                }
+            ])
+            .to_string()
+        ],
+    )
+    .unwrap();
+}
+
+fn install_default_trae_fixture(temp: &TempDir, query: &str) {
+    let workspace = temp
+        .path()
+        .join("Library/Application Support/Trae/User/workspaceStorage/standard-workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(
+        workspace.join("workspace.json"),
+        r#"{"folder":"file:///workspace/trae-standard-default"}"#,
+    )
+    .unwrap();
+    let conn = Connection::open(workspace.join("state.vscdb")).unwrap();
+    conn.execute(
+        "CREATE TABLE ItemTable ([key] TEXT PRIMARY KEY, value TEXT)",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO ItemTable ([key], value) VALUES (?1, ?2)",
+        params![
+            "memento/icube-ai-agent-storage",
+            json!({
+                "list": [
+                    {
+                        "id": "standard-session",
+                        "title": "Standard Trae default discovery",
+                        "createdAt": "2026-07-05T14:00:00Z",
+                        "messages": [
+                            {
+                                "id": "standard-user",
+                                "role": "user",
+                                "content": query,
+                                "createdAt": "2026-07-05T14:00:00Z"
+                            },
+                            {
+                                "id": "standard-assistant",
+                                "role": "assistant",
+                                "content": format!("{query} assistant reply"),
+                                "createdAt": "2026-07-05T14:01:00Z"
+                            }
+                        ]
+                    }
+                ]
+            })
+            .to_string()
+        ],
+    )
+    .unwrap();
+}
+
+fn install_default_codearts_agent_fixture(temp: &TempDir, query: &str) {
+    write_codearts_agent_fixture_at(
+        &temp
+            .path()
+            .join(".codeartsdoer")
+            .join("vscode-data")
+            .join("opencode.db"),
+        query,
+    );
 }
 
 fn install_default_shelley_fixture(temp: &TempDir, query: &str) {
@@ -7566,6 +8015,33 @@ fn install_default_lingma_fixture(temp: &TempDir, query: &str) {
 fn install_default_auggie_fixture(temp: &TempDir, query: &str) {
     let source = PathBuf::from(write_native_auggie_fixture(temp, query));
     copy_dir_all(&source, &temp.path().join(".augment").join("sessions"));
+}
+
+fn install_default_junie_fixture(temp: &TempDir, query: &str) {
+    let source = PathBuf::from(write_native_junie_fixture(temp, query));
+    copy_dir_all(&source, &temp.path().join(".junie").join("sessions"));
+}
+
+fn install_default_tinycloud_fixture(temp: &TempDir, query: &str) {
+    let source = PathBuf::from(write_native_tinycloud_fixture(temp, query));
+    copy_dir_all(&source, &temp.path().join(".tinycloud"));
+}
+
+fn install_default_zencoder_fixture(temp: &TempDir, query: &str) {
+    let source = PathBuf::from(write_native_zencoder_fixture(temp, query));
+    copy_dir_all(
+        &source,
+        &temp
+            .path()
+            .join(".config/Code/User/globalStorage/ZencoderAI.zencoder/zencoder-chat"),
+    );
+}
+
+fn install_default_codestudio_fixture(temp: &TempDir, query: &str) {
+    let source = PathBuf::from(write_native_codestudio_fixture(temp, query));
+    let target = temp.path().join(".config/Code Studio/User/globalStorage");
+    fs::create_dir_all(&target).unwrap();
+    fs::copy(source, target.join("session-store.db")).unwrap();
 }
 
 fn install_default_openhands_fixture(temp: &TempDir, query: &str) {
@@ -7869,6 +8345,95 @@ fn write_native_kiro_fixture(temp: &TempDir, query: &str) -> String {
         [value.to_string()],
     )
     .unwrap();
+    path.to_str().unwrap().to_owned()
+}
+
+fn write_native_dexto_fixture(temp: &TempDir, query: &str) -> String {
+    let path = temp.path().join("native-dexto.db");
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "create table kv_store (
+            key text primary key,
+            value text not null,
+            created_at text not null default current_timestamp,
+            updated_at text not null default current_timestamp
+        );
+        create table list_store (
+            key text not null,
+            value text not null,
+            sequence integer not null,
+            created_at text not null default current_timestamp,
+            primary key (key, sequence)
+        );
+        create index idx_list_store_key_sequence on list_store(key, sequence);",
+    )
+    .unwrap();
+    let session_id = "dexto-cli-native";
+    conn.execute(
+        "insert into kv_store (key, value, created_at, updated_at)
+         values (?1, ?2, '2026-06-24T12:00:00Z', '2026-06-24T12:00:03Z')",
+        params![
+            format!("session:{session_id}"),
+            json!({
+                "id": session_id,
+                "userId": "user-1",
+                "createdAt": "2026-06-24T12:00:00Z",
+                "lastActivity": "2026-06-24T12:00:03Z",
+                "messageCount": 3,
+                "metadata": {"workspace": "/workspace/dexto-cli"}
+            })
+            .to_string()
+        ],
+    )
+    .unwrap();
+    for (sequence, created_at, value) in [
+        (
+            1_i64,
+            "2026-06-24T12:00:01Z",
+            json!({
+                "id": "dexto-cli-native-user",
+                "role": "user",
+                "content": query,
+                "createdAt": "2026-06-24T12:00:01Z"
+            }),
+        ),
+        (
+            2_i64,
+            "2026-06-24T12:00:02Z",
+            json!({
+                "id": "dexto-cli-native-assistant",
+                "role": "assistant",
+                "content": [{"type": "text", "text": format!("Dexto native import ok for {query}")}],
+                "toolCalls": [{
+                    "name": "read_file",
+                    "arguments": {"path": "/workspace/dexto-cli/README.md"}
+                }],
+                "createdAt": "2026-06-24T12:00:02Z"
+            }),
+        ),
+        (
+            3_i64,
+            "2026-06-24T12:00:03Z",
+            json!({
+                "id": "dexto-cli-native-tool",
+                "role": "tool",
+                "content": "Dexto tool output fixture",
+                "toolResult": {"ok": true},
+                "createdAt": "2026-06-24T12:00:03Z"
+            }),
+        ),
+    ] {
+        conn.execute(
+            "insert into list_store (key, value, sequence, created_at) values (?1, ?2, ?3, ?4)",
+            params![
+                format!("messages:{session_id}"),
+                value.to_string(),
+                sequence,
+                created_at
+            ],
+        )
+        .unwrap();
+    }
     path.to_str().unwrap().to_owned()
 }
 
@@ -8685,6 +9250,183 @@ fn write_eve_workflow_chunk(chunks: &Path, stream_name: &str, index: usize, even
         bytes,
     )
     .unwrap();
+}
+
+fn write_native_codearts_agent_fixture(temp: &TempDir, query: &str) -> String {
+    let path = temp.path().join("native-codearts/opencode.db");
+    write_codearts_agent_fixture_at(&path, query);
+    path.to_str().unwrap().to_owned()
+}
+
+fn write_codearts_agent_fixture_at(path: &Path, query: &str) {
+    write_sqlite_fixture_from_sql("codearts-agent/v1/opencode.sql", path);
+    let conn = Connection::open(path).unwrap();
+    conn.execute(
+        "UPDATE session_message SET data = ?1 WHERE id = 'codearts-user-1'",
+        [json!({"time":{"created":1783263600000i64},"text":query}).to_string()],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE session_message SET data = ?1 WHERE id = 'codearts-assistant-1'",
+        [json!({"time":{"created":1783263601000i64},"text":format!("CodeArts answered {query}")}).to_string()],
+    )
+    .unwrap();
+}
+
+fn write_native_junie_fixture(temp: &TempDir, query: &str) -> String {
+    let sessions = temp.path().join("native-junie/sessions");
+    let session_id = "session-260607-120000-native";
+    let session = sessions.join(session_id);
+    fs::create_dir_all(&session).unwrap();
+    fs::write(
+        sessions.join("index.jsonl"),
+        format!(
+            "{}\n",
+            json!({
+                "sessionId": session_id,
+                "createdAt": 1783348800000i64,
+                "updatedAt": 1783348920000i64,
+                "taskName": "Junie native CLI fixture",
+                "projectDir": "/workspace/junie-native"
+            })
+        ),
+    )
+    .unwrap();
+    fs::write(
+        session.join("events.jsonl"),
+        format!(
+            "{}\n{}\n",
+            json!({
+                "kind": "UserPromptEvent",
+                "prompt": query
+            }),
+            json!({
+                "kind": "SessionA2uxEvent",
+                "timestampMs": 1783348920000i64,
+                "event": {
+                    "agentEvent": {
+                        "kind": "ResultBlockUpdatedEvent",
+                        "stepId": "result-1",
+                        "result": format!("Junie answered {query}")
+                    }
+                }
+            })
+        ),
+    )
+    .unwrap();
+    sessions.to_str().unwrap().to_owned()
+}
+
+fn write_native_tinycloud_fixture(temp: &TempDir, query: &str) -> String {
+    let root = temp.path().join("native-tinycloud");
+    let session_dir = root.join("projects/acme/sessions");
+    let legacy_dir = root.join("sessions");
+    fs::create_dir_all(&session_dir).unwrap();
+    fs::create_dir_all(&legacy_dir).unwrap();
+    fs::write(
+        session_dir.join("tinycloud-native.jsonl"),
+        format!(
+            "{}\n{}\n{}\n",
+            json!({
+                "type": "message",
+                "id": "tinycloud-native-user",
+                "timestamp": "2026-07-05T14:00:00Z",
+                "cwd": "/workspace/tinycloud-native",
+                "message": {"role": "user", "content": query}
+            }),
+            json!({
+                "type": "message",
+                "id": "tinycloud-native-assistant",
+                "timestamp": "2026-07-05T14:00:01Z",
+                "message": {"role": "assistant", "content": format!("TinyCloud answered {query}")}
+            }),
+            json!({
+                "type": "compaction",
+                "id": "tinycloud-native-summary",
+                "timestamp": "2026-07-05T14:00:02Z",
+                "summary": format!("TinyCloud compacted {query}")
+            })
+        ),
+    )
+    .unwrap();
+    fs::write(
+        legacy_dir.join("tinycloud-legacy.jsonl"),
+        format!(
+            "{}\n",
+            json!({
+                "type": "message",
+                "id": "tinycloud-legacy-user",
+                "timestamp": "2026-07-05T14:01:00Z",
+                "message": {"role": "user", "content": format!("legacy {query}")}
+            })
+        ),
+    )
+    .unwrap();
+    root.to_str().unwrap().to_owned()
+}
+
+fn write_native_zencoder_fixture(temp: &TempDir, query: &str) -> String {
+    let root = temp
+        .path()
+        .join("native-zencoder/ZencoderAI.zencoder/zencoder-chat");
+    let sessions = root.join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(
+        root.join("sessions.json"),
+        serde_json::to_string_pretty(&json!([
+            {
+                "id": "zencoder-native",
+                "title": "Zencoder native fixture",
+                "updatedAt": 1783263601000i64,
+                "isAgent": true
+            }
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        sessions.join("zencoder-native.json"),
+        serde_json::to_string_pretty(&json!({
+            "id": "zencoder-native",
+            "title": "Zencoder native fixture",
+            "workspacePath": "/workspace/zencoder-native",
+            "updatedAt": 1783263601000i64,
+            "messages": [
+                {
+                    "id": "zencoder-native-user",
+                    "role": "user",
+                    "createdAt": 1783263600000i64,
+                    "content": [{"type": "text", "text": query}]
+                },
+                {
+                    "id": "zencoder-native-assistant",
+                    "role": "assistant",
+                    "createdAt": 1783263601000i64,
+                    "content": [{"type": "text", "text": format!("Zencoder answered {query}")}]
+                }
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    root.to_str().unwrap().to_owned()
+}
+
+fn write_native_codestudio_fixture(temp: &TempDir, query: &str) -> String {
+    let path = temp.path().join("native-codestudio/session-store.db");
+    write_sqlite_fixture_from_sql("codestudio/v1/session-store.sql", &path);
+    let conn = Connection::open(&path).unwrap();
+    conn.execute(
+        "UPDATE turns SET content = ?1 WHERE id = 'codestudio-user-1'",
+        [query],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE turns SET content = ?1 WHERE id = 'codestudio-assistant-1'",
+        [format!("Code Studio answered {query}")],
+    )
+    .unwrap();
+    path.to_str().unwrap().to_owned()
 }
 
 fn write_native_mux_fixture(temp: &TempDir, query: &str) -> String {
