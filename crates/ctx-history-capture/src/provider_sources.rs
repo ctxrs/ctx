@@ -304,6 +304,12 @@ const JAZZ_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     source_kind: ProviderSourceKind::NativeHistory,
 }];
 
+const AUGGIE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
+    path_components: &[".augment", "sessions"],
+    source_format: "auggie_session_json",
+    source_kind: ProviderSourceKind::NativeHistory,
+}];
+
 const KODE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     path_components: &[".kode", "projects"],
     source_format: "kode_session_jsonl_tree",
@@ -713,6 +719,16 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         provider: CaptureProvider::Jazz,
         display_name: "Jazz",
         default_locations: JAZZ_DEFAULTS,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
+    ProviderSourceSpec {
+        provider: CaptureProvider::Auggie,
+        display_name: "Auggie",
+        default_locations: AUGGIE_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         raw_retention: ProviderRawRetention::PathReference,
@@ -1181,6 +1197,7 @@ fn discover_provider_sources_for_spec(
                 ));
             }
         }
+        CaptureProvider::Auggie => {}
         CaptureProvider::Kode => {
             for env_name in ["KODE_CONFIG_DIR", "CLAUDE_CONFIG_DIR"] {
                 if let Some(path) = env_path_resolved(env_name, home) {
@@ -1785,6 +1802,7 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::IflowCli if path.is_dir() => "iflow_cli_session_jsonl_tree",
         CaptureProvider::IflowCli => "iflow_cli_session_jsonl",
         CaptureProvider::Jazz => "jazz_history_json",
+        CaptureProvider::Auggie => "auggie_session_json",
         CaptureProvider::Kode if path.is_dir() => "kode_session_jsonl_tree",
         CaptureProvider::Kode => "kode_session_jsonl",
         CaptureProvider::Neovate if path.is_dir() => "neovate_session_jsonl_tree",
@@ -1956,6 +1974,9 @@ fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::Jazz => {
             Some("path exists but no Jazz agent history JSON files were found")
         }
+        CaptureProvider::Auggie => {
+            Some("path exists but no Auggie session JSON files with chatHistory were found")
+        }
         CaptureProvider::Kode => {
             Some("path exists but no Kode session JSONL files were found under projects")
         }
@@ -2074,6 +2095,9 @@ fn unknown_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::Jazz => {
             Some("path exists but the Jazz history JSON probe hit its scan budget")
         }
+        CaptureProvider::Auggie => {
+            Some("path exists but the Auggie session JSON probe hit its scan budget")
+        }
         CaptureProvider::MistralVibe => {
             Some("path exists but the Mistral Vibe session probe hit its scan budget")
         }
@@ -2170,6 +2194,9 @@ fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'static str> {
         }
         CaptureProvider::Jazz => {
             Some("path exists but Jazz history JSON files could not be read; check permissions")
+        }
+        CaptureProvider::Auggie => {
+            Some("path exists but Auggie session JSON files could not be read; check permissions")
         }
         CaptureProvider::CommandCode => Some(
             "path exists but Command Code session transcripts could not be read; check permissions",
@@ -2310,6 +2337,9 @@ fn default_location_import_probe(
                 .file_name()
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| !name.starts_with(".history-") && name.ends_with(".json"))
+        }),
+        CaptureProvider::Auggie => has_json_file_under_matching(path, 10_000, |candidate| {
+            candidate.extension().and_then(|ext| ext.to_str()) == Some("json")
         }),
         CaptureProvider::Kode => has_jsonl_file_under_matching(path, 10_000, |candidate| {
             !path_has_component(candidate, "requests")

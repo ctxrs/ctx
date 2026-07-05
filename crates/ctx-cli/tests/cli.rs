@@ -2027,6 +2027,7 @@ fn sources_lists_personal_agent_provider_defaults() {
     install_default_neovate_fixture(&temp, "neovate-sources-oracle");
     install_default_terramind_fixture(&temp, "terramind-sources-oracle");
     install_default_lingma_fixture(&temp, "lingma-sources-oracle");
+    install_default_auggie_fixture(&temp, "auggie-sources-oracle");
 
     let sources = json_output(ctx(&temp).args(["sources", "--json"]));
     for (provider, source_format, import_support, native_import) in [
@@ -2057,6 +2058,7 @@ fn sources_lists_personal_agent_provider_defaults() {
         ("neovate", "neovate_session_jsonl_tree", "native", true),
         ("terramind", "terramind_agents_sqlite", "native", true),
         ("lingma", "lingma_sqlite", "native", true),
+        ("auggie", "auggie_session_json", "native", true),
     ] {
         let source = sources["sources"]
             .as_array()
@@ -2401,6 +2403,8 @@ fn provider_help_matches_implemented_importers() {
         "kimi-code-cli",
         "autohand-code",
         "iflow-cli",
+        "jazz",
+        "auggie",
         "forgecode",
         "mistral-vibe",
         "mux",
@@ -2428,6 +2432,9 @@ fn provider_json_names_are_accepted_as_cli_filter_aliases() {
         ("code_buddy", "codebuddy"),
         ("aider_desk", "aider_desk"),
         ("aiderdesk", "aider_desk"),
+        ("auggie", "auggie"),
+        ("augment", "auggie"),
+        ("augment-code", "auggie"),
         ("iflow_cli", "iflow_cli"),
         ("forge", "forgecode"),
         ("forge_code", "forgecode"),
@@ -2562,7 +2569,7 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
             vec![
                 "Usage: ctx import",
                 "--provider <PROVIDER>",
-                "[possible values: codex, pi, claude, opencode, kilo, kiro-cli, crush, goose, antigravity, gemini, cursor, windsurf, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, jazz, forgecode, deepagents, mistral-vibe, mux, reasonix, kode, neovate, command-code, terramind, rovodev, cortex-code, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto, lingma, codebuddy, aider-desk]",
+                "[possible values: codex, pi, claude, opencode, openloaf, kilo, kiro-cli, crush, goose, antigravity, gemini, cursor, windsurf, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, jazz, auggie, forgecode, deepagents, mistral-vibe, mux, reasonix, kode, neovate, command-code, terramind, rovodev, cortex-code, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, dexto, lingma, pochi, codebuddy, aider-desk]",
                 "--path <PATH>",
                 "--format <FORMAT>",
                 "--resume",
@@ -4629,6 +4636,7 @@ fn mcp_status_and_tools_list_are_read_only_without_initialized_store() {
     assert!(providers.iter().any(|provider| provider == "codebuddy"));
     assert!(providers.iter().any(|provider| provider == "aider-desk"));
     assert!(providers.iter().any(|provider| provider == "aider_desk"));
+    assert!(providers.iter().any(|provider| provider == "auggie"));
     assert!(providers.iter().any(|provider| provider == "zed"));
     assert!(providers.iter().any(|provider| provider == "forgecode"));
     assert!(providers.iter().any(|provider| provider == "deepagents"));
@@ -6454,6 +6462,12 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
             write_native_aider_desk_fixture,
         ),
         (
+            "auggie",
+            "auggie",
+            "auggie_session_json",
+            write_native_auggie_fixture,
+        ),
+        (
             "openclaw",
             "openclaw",
             "openclaw_session_jsonl_tree",
@@ -7164,6 +7178,11 @@ fn install_default_lingma_fixture(temp: &TempDir, query: &str) {
         .path()
         .join(".lingma/vscode/sharedClientCache/cache/db/local.db");
     write_lingma_sqlite_fixture(&target, query);
+}
+
+fn install_default_auggie_fixture(temp: &TempDir, query: &str) {
+    let source = PathBuf::from(write_native_auggie_fixture(temp, query));
+    copy_dir_all(&source, &temp.path().join(".augment").join("sessions"));
 }
 
 fn install_default_openhands_fixture(temp: &TempDir, query: &str) {
@@ -8077,6 +8096,72 @@ fn write_native_aider_desk_fixture(temp: &TempDir, query: &str) -> String {
         .to_str()
         .unwrap()
         .to_owned()
+}
+
+fn write_native_auggie_fixture(temp: &TempDir, query: &str) -> String {
+    let root = temp.path().join("native-auggie/sessions");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        root.join("01K0AUGGIENATIVE0000000000.json"),
+        serde_json::to_string_pretty(&json!({
+            "sessionId": "01K0AUGGIENATIVE0000000000",
+            "created": "2026-07-04T20:00:00.000Z",
+            "modified": "2026-07-04T20:00:04.000Z",
+            "workspaceId": "workspace-auggie-native",
+            "workspaceRoot": "/workspace/auggie",
+            "agentState": {
+                "userGuidelines": "",
+                "workspaceGuidelines": ""
+            },
+            "chatHistory": [
+                {
+                    "exchange": {
+                        "request_message": query,
+                        "response_text": "native Auggie import ok",
+                        "request_id": "req-auggie-native-1"
+                    },
+                    "completed": true,
+                    "sequenceId": 1,
+                    "finishedAt": "2026-07-04T20:00:02.000Z",
+                    "changedFiles": [],
+                    "changedFilesSkipped": [],
+                    "changedFilesSkippedCount": 0,
+                    "isHistorySummary": false,
+                    "historySummaryVersion": 0,
+                    "source": "remote"
+                },
+                {
+                    "exchange": {
+                        "request_nodes": [{
+                            "type": 0,
+                            "text_node": {
+                                "content": format!("{query} node")
+                            }
+                        }],
+                        "response_nodes": [{
+                            "type": 0,
+                            "text_node": {
+                                "content": "native Auggie node response"
+                            }
+                        }],
+                        "request_id": "req-auggie-native-2"
+                    },
+                    "completed": true,
+                    "sequenceId": 2,
+                    "finishedAt": "2026-07-04T20:00:04.000Z",
+                    "changedFiles": [],
+                    "changedFilesSkipped": [],
+                    "changedFilesSkippedCount": 0,
+                    "isHistorySummary": false,
+                    "historySummaryVersion": 0,
+                    "source": "remote"
+                }
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    root.to_str().unwrap().to_owned()
 }
 
 fn write_native_mux_fixture(temp: &TempDir, query: &str) -> String {
@@ -9516,6 +9601,7 @@ fn native_provider_cli_requires_existing_history_or_explicit_path() {
         ("lingma", "no importable lingma history found"),
         ("codebuddy", "no importable codebuddy history found"),
         ("aider-desk", "no importable aider_desk history found"),
+        ("auggie", "no importable auggie history found"),
         ("iflow-cli", "no importable iflow_cli history found"),
         ("deepagents", "no importable deepagents history found"),
         ("mistral-vibe", "no importable mistral_vibe history found"),

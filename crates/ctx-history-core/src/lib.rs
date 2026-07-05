@@ -201,6 +201,7 @@ text_enum! {
         AutohandCode => "autohand_code",
         IflowCli => "iflow_cli",
         Jazz => "jazz",
+        Auggie => "auggie",
         ForgeCode => "forgecode",
         DeepAgents => "deepagents",
         MistralVibe => "mistral_vibe",

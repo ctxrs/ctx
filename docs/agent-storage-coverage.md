@@ -21,7 +21,7 @@ Status meanings:
 - `install-target`: npx target is an aggregate or project skill target, not a
   proven history-producing agent.
 
-Result on this integration branch: 40 `native-auto`, 4 `native-preview`, 11
+Result on this integration branch: 41 `native-auto`, 4 `native-preview`, 10
 `candidate-family`, 9 `webapp-boundary`, 6 `unknown`, and 2 `install-target`
 rows.
 
@@ -37,8 +37,8 @@ rows.
   sessions, plus Windsurf Cascade hook transcript JSONL and OpenLoaf
   `messages.jsonl` chat-history trees.
 - `CLI session JSON`: covers Continue CLI `sessions/*.json` files with
-  `sessions.json` metadata, plus Rovo Dev session directories and Cortex Code
-  conversation snapshots/history sidecars.
+  `sessions.json` metadata, Auggie `~/.augment/sessions/*.json`, plus Rovo Dev
+  session directories and Cortex Code conversation snapshots/history sidecars.
 - `project task JSON`: covers Aider Desk project-local task directories such as
   `.aider-desk/tasks/<taskId>/context.json`; related task-directory tools can
   reuse this scanner once storage proof and fixtures exist.
@@ -70,7 +70,7 @@ rows.
 | `antigravity-cli` | `native-auto` | `JSONL CLI event logs` | ctx `antigravity_cli_transcript_jsonl_tree`; npx `~/.gemini/antigravity-cli` | - |
 | `astrbot` | `native-preview` | `generic sqlite messages` | ctx `astrbot_data_v4_sqlite`; npx `~/.astrbot` | Preview explicit import only; full per-platform transcript coverage remains unproven. |
 | `autohand-code` | `native-auto` | `JSONL CLI event logs` | ctx `autohand_code_sessions_jsonl`; npx `AUTOHAND_HOME` or `~/.autohand` | - |
-| `augment` | `candidate-family` | `VS Code/Electron storage` | npx `~/.augment`; no ctx provider | Need local app storage or export contract proof. |
+| `augment` | `native-auto` | `CLI session JSON` | ctx `auggie_session_json`; npx `~/.augment`; `@augmentcode/auggie@0.32.0` stores sessions under `~/.augment/sessions/<session_id>.json` | Imports package-backed Auggie CLI `chatHistory` request/response text only; richer IDE/app storage remains unclaimed. |
 | `bob` | `unknown` | `unknown native history` | npx `~/.bob`; no ctx provider | Need native history storage research before claiming import support. |
 | `claude-code` | `native-auto` | `JSONL CLI event logs` | ctx `claude_projects_jsonl_tree`; npx `~/.claude` | - |
 | `openclaw` | `native-auto` | `JSONL CLI event logs` | ctx `openclaw_session_jsonl_tree`; npx `~/.openclaw` or legacy homes | Provider matrix still notes GA schema-stability validation. |

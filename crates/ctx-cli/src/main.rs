@@ -34,7 +34,7 @@ use config::{AppConfig, CONFIG_FILE};
 use ctx_history_capture::{
     catalog_codex_session_tree, discover_provider_sources, discover_provider_sources_for_provider,
     import_aider_desk_history, import_antigravity_cli_history, import_astrbot_sqlite,
-    import_autohand_code_sessions, import_claude_projects_jsonl_tree,
+    import_auggie_history, import_autohand_code_sessions, import_claude_projects_jsonl_tree,
     import_cline_task_json_history, import_codebuddy_history, import_codex_history_jsonl,
     import_codex_session_jsonl, import_codex_session_jsonl_tail, import_codex_session_paths,
     import_codex_session_tree, import_command_code_history, import_continue_cli_sessions,
@@ -53,7 +53,7 @@ use ctx_history_capture::{
     import_zed_threads_sqlite, provider_source_for_path, provider_source_spec, stable_capture_uuid,
     validate_custom_history_jsonl_v1, validate_custom_history_jsonl_v1_reader,
     AiderDeskImportOptions, AntigravityCliImportOptions, AstrBotSqliteImportOptions,
-    AutohandCodeImportOptions, CatalogSummary, ClaudeProjectsImportOptions,
+    AuggieImportOptions, AutohandCodeImportOptions, CatalogSummary, ClaudeProjectsImportOptions,
     ClineTaskJsonImportOptions, CodeBuddyImportOptions, CodexEventImportMode,
     CodexHistoryImportOptions, CodexSessionCatalogOptions, CodexSessionImportOptions,
     CodexSessionImportProgress, CodexSessionImportProgressCallback, CodexToolOutputMode,
@@ -741,6 +741,8 @@ enum NativeProviderArg {
     #[value(name = "iflow-cli", alias = "iflow", alias = "iflow_cli")]
     IflowCli,
     Jazz,
+    #[value(name = "auggie", alias = "augment", alias = "augment-code")]
+    Auggie,
     #[value(
         name = "forgecode",
         alias = "forge",
@@ -858,6 +860,8 @@ enum ProviderArg {
     #[value(name = "iflow-cli", alias = "iflow", alias = "iflow_cli")]
     IflowCli,
     Jazz,
+    #[value(name = "auggie", alias = "augment", alias = "augment-code")]
+    Auggie,
     #[value(
         name = "forgecode",
         alias = "forge",
@@ -965,6 +969,7 @@ impl NativeProviderArg {
             Self::AutohandCode => CaptureProvider::AutohandCode,
             Self::IflowCli => CaptureProvider::IflowCli,
             Self::Jazz => CaptureProvider::Jazz,
+            Self::Auggie => CaptureProvider::Auggie,
             Self::ForgeCode => CaptureProvider::ForgeCode,
             Self::DeepAgents => CaptureProvider::DeepAgents,
             Self::MistralVibe => CaptureProvider::MistralVibe,
@@ -1038,6 +1043,7 @@ impl ProviderArg {
             Self::AutohandCode => CaptureProvider::AutohandCode,
             Self::IflowCli => CaptureProvider::IflowCli,
             Self::Jazz => CaptureProvider::Jazz,
+            Self::Auggie => CaptureProvider::Auggie,
             Self::ForgeCode => CaptureProvider::ForgeCode,
             Self::DeepAgents => CaptureProvider::DeepAgents,
             Self::MistralVibe => CaptureProvider::MistralVibe,
@@ -1090,6 +1096,7 @@ impl ProviderArg {
             Self::AutohandCode => "autohand-code",
             Self::IflowCli => "iflow-cli",
             Self::Jazz => "jazz",
+            Self::Auggie => "auggie",
             Self::ForgeCode => "forgecode",
             Self::DeepAgents => "deepagents",
             Self::MistralVibe => "mistral-vibe",
@@ -6223,6 +6230,17 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
+        CaptureProvider::Auggie => import_auggie_history(
+            &source.path,
+            store,
+            AuggieImportOptions {
+                source_path: Some(source.path.clone()),
+                history_record_id: Some(record_id),
+                allow_partial_failures: true,
+                ..AuggieImportOptions::default()
+            },
+        )
+        .map_err(anyhow::Error::from),
         CaptureProvider::Kode => import_kode_history(
             &source.path,
             store,
@@ -6654,6 +6672,10 @@ fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bool {
                     .and_then(|name| name.to_str())
                     .is_some_and(|name| !name.starts_with(".history-"))
         }
+        CaptureProvider::Auggie => {
+            path.extension().and_then(|ext| ext.to_str()) == Some("json")
+                && path.starts_with(&source.path)
+        }
         CaptureProvider::Kode => {
             path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
                 && path
@@ -6947,6 +6969,7 @@ fn source_uses_incremental_event_search(source: &SourceInfo) -> bool {
             | CaptureProvider::AutohandCode
             | CaptureProvider::IflowCli
             | CaptureProvider::Jazz
+            | CaptureProvider::Auggie
             | CaptureProvider::Kode
             | CaptureProvider::Neovate
             | CaptureProvider::ForgeCode
