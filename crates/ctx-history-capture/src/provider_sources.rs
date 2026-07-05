@@ -131,6 +131,19 @@ const OPENCODE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation 
     source_kind: ProviderSourceKind::NativeHistory,
 }];
 
+const OPENLOAF_DEFAULTS: &[ProviderDefaultLocation] = &[
+    ProviderDefaultLocation {
+        path_components: &[".openloaf", "chat-history"],
+        source_format: "openloaf_chat_jsonl_tree",
+        source_kind: ProviderSourceKind::NativeHistory,
+    },
+    ProviderDefaultLocation {
+        path_components: &["OpenLoafData", "projects"],
+        source_format: "openloaf_chat_jsonl_tree",
+        source_kind: ProviderSourceKind::NativeHistory,
+    },
+];
+
 const KILO_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     path_components: &[".local", "share", "kilo", "kilo.db"],
     source_format: "kilo_sqlite",
@@ -530,6 +543,16 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         provider: CaptureProvider::OpenCode,
         display_name: "OpenCode",
         default_locations: OPENCODE_DEFAULTS,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        raw_retention: ProviderRawRetention::PathReference,
+        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
+        unsupported_reason: None,
+    },
+    ProviderSourceSpec {
+        provider: CaptureProvider::OpenLoaf,
+        display_name: "OpenLoaf",
+        default_locations: OPENLOAF_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         raw_retention: ProviderRawRetention::PathReference,
@@ -1731,6 +1754,8 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::Pi => "pi_session_jsonl",
         CaptureProvider::Claude => "claude_projects_jsonl_tree",
         CaptureProvider::OpenCode => "opencode_sqlite",
+        CaptureProvider::OpenLoaf if path.is_dir() => "openloaf_chat_jsonl_tree",
+        CaptureProvider::OpenLoaf => "openloaf_chat_jsonl",
         CaptureProvider::Kilo => "kilo_sqlite",
         CaptureProvider::KiroCli => "kiro_cli_sqlite",
         CaptureProvider::Crush => "crush_sqlite",
@@ -1892,6 +1917,9 @@ fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
             Some("path exists but no Claude project JSONL transcripts were found")
         }
         CaptureProvider::OpenCode => Some("path exists but no OpenCode SQLite database was found"),
+        CaptureProvider::OpenLoaf => Some(
+            "path exists but no OpenLoaf chat-history messages.jsonl session directories were found",
+        ),
         CaptureProvider::Kilo => Some("path exists but no Kilo SQLite database was found"),
         CaptureProvider::Crush => Some("path exists but no Crush SQLite database was found"),
         CaptureProvider::Goose => {
@@ -2015,6 +2043,9 @@ fn unknown_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::Cursor => {
             Some("path exists but the Cursor transcript probe hit its scan budget")
         }
+        CaptureProvider::OpenLoaf => {
+            Some("path exists but the OpenLoaf chat-history probe hit its scan budget")
+        }
         CaptureProvider::Zed => None,
         CaptureProvider::CopilotCli => {
             Some("path exists but the Copilot CLI transcript probe hit its scan budget")
@@ -2092,6 +2123,9 @@ fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::OpenCode => {
             Some("path exists but the OpenCode database could not be read; check permissions")
         }
+        CaptureProvider::OpenLoaf => Some(
+            "path exists but OpenLoaf chat-history files could not be read; check permissions",
+        ),
         CaptureProvider::Kilo => {
             Some("path exists but the Kilo database could not be read; check permissions")
         }
@@ -2219,6 +2253,7 @@ fn default_location_import_probe(
         CaptureProvider::Codex => has_jsonl_file_under_matching(path, 10_000, |_| true),
         CaptureProvider::Pi => has_jsonl_file_under_matching(path, 10_000, |_| true),
         CaptureProvider::OpenCode => path_is_file_probe(path),
+        CaptureProvider::OpenLoaf => has_openloaf_session_files(path, 10_000),
         CaptureProvider::Kilo => path_is_file_probe(path),
         CaptureProvider::KiroCli => path_is_file_probe(path),
         CaptureProvider::Crush => path_is_file_probe(path),
@@ -2356,6 +2391,75 @@ fn has_gemini_chat_jsonl(root: &Path, max_entries: usize) -> BoundedProbe {
         _ => return BoundedProbe::NotFound,
     }
     has_jsonl_file_under_matching(&tmp, max_entries, |path| path_has_component(path, "chats"))
+}
+
+fn has_openloaf_session_files(root: &Path, max_entries: usize) -> BoundedProbe {
+    match path_metadata_probe(root) {
+        PathProbe::File => {
+            return BoundedProbe::from_bool(
+                root.file_name().and_then(|name| name.to_str()) == Some("messages.jsonl"),
+            );
+        }
+        PathProbe::Dir => {}
+        PathProbe::Missing | PathProbe::Other => return BoundedProbe::NotFound,
+        PathProbe::IoError => return BoundedProbe::IoError,
+    }
+
+    if openloaf_is_projects_root(root) {
+        return has_openloaf_project_chat_histories(root, max_entries);
+    }
+
+    has_jsonl_file_under_matching(root, max_entries, |candidate| {
+        candidate.file_name().and_then(|name| name.to_str()) == Some("messages.jsonl")
+            && path_has_component(candidate, "chat-history")
+    })
+}
+
+fn openloaf_is_projects_root(path: &Path) -> bool {
+    path.file_name().and_then(|name| name.to_str()) == Some("projects")
+        && path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            == Some("OpenLoafData")
+}
+
+fn has_openloaf_project_chat_histories(root: &Path, max_entries: usize) -> BoundedProbe {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(_) => return BoundedProbe::IoError,
+    };
+    let mut visited = 0usize;
+    let mut saw_budget = false;
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        visited = visited.saturating_add(1);
+        if visited > max_entries {
+            return BoundedProbe::BudgetExhausted;
+        }
+        let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(_) => continue,
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        match has_openloaf_session_files(&path.join(".openloaf").join("chat-history"), max_entries)
+        {
+            BoundedProbe::Found => return BoundedProbe::Found,
+            BoundedProbe::BudgetExhausted => saw_budget = true,
+            BoundedProbe::IoError | BoundedProbe::NotFound => {}
+        }
+    }
+    if saw_budget {
+        BoundedProbe::BudgetExhausted
+    } else {
+        BoundedProbe::NotFound
+    }
 }
 
 fn has_cortex_code_session_files(root: &Path, max_entries: usize) -> BoundedProbe {
@@ -3509,6 +3613,49 @@ mod tests {
     }
 
     #[test]
+    fn openloaf_discovery_uses_global_chat_history_and_bounded_data_projects() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let global_history = temp.path().join(".openloaf/chat-history");
+        std::fs::create_dir_all(&global_history).unwrap();
+        let empty_source =
+            discover_provider_sources_for_provider(temp.path(), CaptureProvider::OpenLoaf)
+                .into_iter()
+                .find(|source| source.path == global_history)
+                .unwrap();
+        assert_eq!(empty_source.status, ProviderSourceStatus::Empty);
+        assert_eq!(empty_source.source_format, "openloaf_chat_jsonl_tree");
+
+        write_openloaf_discovery_session(&global_history, "openloaf-global-discovery");
+        let source = discover_provider_sources_for_provider(temp.path(), CaptureProvider::OpenLoaf)
+            .into_iter()
+            .find(|source| source.path == global_history)
+            .unwrap();
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+        assert_eq!(source.import_support, ProviderImportSupport::Native);
+
+        let projects = temp.path().join("OpenLoafData/projects");
+        let project_history = projects.join("project-a/.openloaf/chat-history");
+        write_openloaf_discovery_session(&project_history, "openloaf-project-discovery");
+        let project_source =
+            discover_provider_sources_for_provider(temp.path(), CaptureProvider::OpenLoaf)
+                .into_iter()
+                .find(|source| source.path == projects)
+                .unwrap();
+        assert_eq!(project_source.status, ProviderSourceStatus::Available);
+        assert_eq!(project_source.source_format, "openloaf_chat_jsonl_tree");
+
+        let explicit_file = provider_source_for_path(
+            CaptureProvider::OpenLoaf,
+            project_history
+                .join("openloaf-project-discovery")
+                .join("messages.jsonl"),
+        );
+        assert_eq!(explicit_file.source_format, "openloaf_chat_jsonl");
+        assert_eq!(explicit_file.status, ProviderSourceStatus::Available);
+    }
+
+    #[test]
     fn kode_and_neovate_discovery_use_default_and_env_project_roots() {
         let _lock = ENV_LOCK.lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
@@ -4039,6 +4186,23 @@ mod tests {
         std::fs::write(
             history.join("jazz-agent.json"),
             r#"{"agentId":"jazz-agent","conversations":[]}"#,
+        )
+        .unwrap();
+    }
+
+    fn write_openloaf_discovery_session(history: &Path, session_id: &str) {
+        let session = history.join(session_id);
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::write(
+            session.join("session.json"),
+            format!(r#"{{"id":"{session_id}","createdAt":"2026-07-04T19:00:00Z"}}"#),
+        )
+        .unwrap();
+        std::fs::write(
+            session.join("messages.jsonl"),
+            format!(
+                r#"{{"id":"{session_id}-msg","role":"user","messageKind":"message","parts":[{{"type":"text","text":"openloaf discovery"}}],"createdAt":"2026-07-04T19:00:01Z"}}"#
+            ),
         )
         .unwrap();
     }

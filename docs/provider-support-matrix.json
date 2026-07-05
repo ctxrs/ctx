@@ -1780,6 +1780,75 @@
       ]
     },
     {
+      "id": "openloaf",
+      "display_name": "OpenLoaf",
+      "priority": "p1",
+      "status": "local_import_when_supported",
+      "capture_provider": "openloaf",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "openloaf_chat_jsonl_tree",
+          "fidelity": "imported",
+          "proof": [
+            "ctx sources",
+            "ctx import --provider openloaf",
+            "ctx import --provider loaf --path <openloaf-chat-history>",
+            "cargo test -p ctx-history-capture native_openloaf_fixture_imports_searches_reimports_and_file_touches"
+          ],
+          "notes": [
+            "Reads OpenLoaf session directories containing messages.jsonl and optional session.json.",
+            "Default discovery is source-backed and conservative: ~/.openloaf/chat-history plus bounded ~/OpenLoafData/projects project chat-history roots; project .openloaf/chat-history is supported for explicit paths.",
+            "npx-skills detects the agent id loaf, while ctx stores the canonical provider id openloaf and accepts loaf as a CLI/provider alias."
+          ]
+        }
+      ],
+      "history_locations": [
+        "~/.openloaf/chat-history/*/messages.jsonl",
+        "~/OpenLoafData/projects/*/.openloaf/chat-history/*/messages.jsonl",
+        "<project>/.openloaf/chat-history/*/messages.jsonl (explicit path)"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": false,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": true,
+        "command_output": false,
+        "files_touched": true,
+        "artifacts": false,
+        "model_identity": false,
+        "costs": false,
+        "token_usage": false,
+        "parent_child_session_edges": false
+      },
+      "blockers": [
+        "Importer is based on OpenLoaf's verified local chat-history schema and sanitized fixtures; future OpenLoaf schema changes may need adapter updates.",
+        "~/.loaf is an npx-skills detection path only and is intentionally not crawled by the source-backed OpenLoaf importer."
+      ],
+      "public_docs": "docs/provider-support.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/loaf/v1/chat-history"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs",
+        "tests/fixtures/provider-history/loaf/v1/chat-history"
+      ],
+      "metadata": {
+        "aliases": [
+          "loaf",
+          "open-loaf",
+          "open_loaf"
+        ],
+        "npx_skills_id": "loaf",
+        "canonical_provider_id": "openloaf"
+      }
+    },
+    {
       "id": "forgecode",
       "display_name": "ForgeCode",
       "priority": "p1",

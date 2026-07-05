@@ -21,8 +21,8 @@ Status meanings:
 - `install-target`: npx target is an aggregate or project skill target, not a
   proven history-producing agent.
 
-Result on this integration branch: 39 `native-auto`, 4 `native-preview`, 11
-`candidate-family`, 9 `webapp-boundary`, 7 `unknown`, and 2 `install-target`
+Result on this integration branch: 40 `native-auto`, 4 `native-preview`, 11
+`candidate-family`, 9 `webapp-boundary`, 6 `unknown`, and 2 `install-target`
 rows.
 
 ## Shared Families
@@ -34,7 +34,8 @@ rows.
 - `JSONL CLI event logs`: already covers Codex, Claude Code, OpenClaw,
   Antigravity CLI, Gemini CLI, Pi, Factory Droid, Copilot CLI-shaped logs, and
   Autohand Code, iFlow CLI, Mistral Vibe, Mux, Reasonix, and Command Code
-  sessions, plus Windsurf Cascade hook transcript JSONL.
+  sessions, plus Windsurf Cascade hook transcript JSONL and OpenLoaf
+  `messages.jsonl` chat-history trees.
 - `CLI session JSON`: covers Continue CLI `sessions/*.json` files with
   `sessions.json` metadata, plus Rovo Dev session directories and Cortex Code
   conversation snapshots/history sidecars.
@@ -104,7 +105,7 @@ rows.
 | `kiro-cli` | `native-auto` | `generic sqlite messages` | ctx `kiro_cli_sqlite`; npx `~/.kiro` | SQLite import covers the proven `conversations_v2`/`conversations` DB at the Kiro CLI data dir; newer `~/.kiro/sessions/cli` event logs are not imported yet. |
 | `kode` | `native-auto` | `JSONL CLI event logs` | ctx `kode_session_jsonl_tree`; npx `~/.kode`; `@shareai-lab/kode` stores project JSONL sessions under `KODE_CONFIG_DIR`, `CLAUDE_CONFIG_DIR`, or `~/.kode` | - |
 | `lingma` | `native-auto` | `VS Code/Electron storage` | ctx `lingma_sqlite`; npx `~/.lingma` | Schema proof from WayLog `shayne-snap/WayLog@6939033b7a39326fbdc249e28e6aa12461db1f09`; imports `chat_prompt` plus assistant `summary`/`error_result`, which may be partial. Qoder CN is documented by Alibaba as the renamed Lingma product line, but no `qoder-cn` alias is shipped without source-backed DB contract proof. |
-| `loaf` | `unknown` | `unknown native history` | npx `~/.loaf`; no ctx provider | Need native history storage research before claiming import support. |
+| `loaf` | `native-auto` | `OpenLoaf chat JSONL` | ctx `openloaf_chat_jsonl_tree`; npx `~/.loaf` detects `loaf`, but the source-backed importer targets OpenLoaf paths `~/.openloaf/chat-history`, `~/OpenLoafData/projects`, and explicit project `.openloaf/chat-history` roots | ctx aliases `loaf`/`openloaf` to canonical provider `openloaf`; `~/.loaf` remains detection-only and is not crawled by the native importer. |
 | `mcpjam` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.mcpjam`; no ctx provider | UI or account-backed activity should use exporter or plugin until local storage is proven. |
 | `mistral-vibe` | `native-auto` | `JSONL CLI event logs` | ctx `mistral_vibe_session_jsonl_tree`; npx `VIBE_HOME` or `~/.vibe` | - |
 | `moxby` | `unknown` | `unknown native history` | npx `~/.moxby`; no ctx provider | Need native history storage research before claiming import support. |

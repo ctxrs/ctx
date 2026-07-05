@@ -186,6 +186,7 @@ text_enum! {
         Claude => "claude",
         Pi => "pi",
         OpenCode => "opencode",
+        OpenLoaf => "openloaf",
         Kilo => "kilo",
         KiroCli => "kiro_cli",
         Antigravity => "antigravity",

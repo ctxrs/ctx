@@ -18,11 +18,11 @@ PROVIDER_MATRIX_PATH = REPO_ROOT / "docs" / "provider-support-matrix.json"
 UPSTREAM_PACKAGE = "skills@1.5.14"
 UPSTREAM_COMMIT = "2adcfe5a4cce0ce5f4d5547a997b2a161ec5d127"
 EXPECTED_COUNTS = {
-    "native-auto": 39,
+    "native-auto": 40,
     "native-preview": 4,
     "candidate-family": 11,
     "webapp-boundary": 9,
-    "unknown": 7,
+    "unknown": 6,
     "install-target": 2,
 }
 ALLOWED_STATUSES = set(EXPECTED_COUNTS)
@@ -33,6 +33,7 @@ REQUIRED_SCHEMA_FAMILIES = {
     "project task JSON",
     "filesystem event JSON",
     "generic sqlite messages",
+    "OpenLoaf chat JSONL",
     "Forge conversation SQLite",
     "LangGraph checkpoint SQLite",
     "LiveStore SQLite state DB",

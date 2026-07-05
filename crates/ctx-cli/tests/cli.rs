@@ -6308,6 +6308,12 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
             "opencode_sqlite",
             write_native_opencode_fixture,
         ),
+        (
+            "loaf",
+            "openloaf",
+            "openloaf_chat_jsonl_tree",
+            write_native_openloaf_fixture,
+        ),
         ("kilo", "kilo", "kilo_sqlite", write_native_kilo_fixture),
         (
             "kiro-cli",
@@ -7261,6 +7267,54 @@ fn write_native_opencode_fixture(temp: &TempDir, query: &str) -> String {
     )
     .unwrap();
     path.to_str().unwrap().to_owned()
+}
+
+fn write_native_openloaf_fixture(temp: &TempDir, query: &str) -> String {
+    let projects = temp.path().join("OpenLoafData/projects");
+    let session = projects.join("sample-project/.openloaf/chat-history/openloaf-cli-session");
+    fs::create_dir_all(&session).unwrap();
+    fs::write(
+        session.join("session.json"),
+        serde_json::to_vec_pretty(&json!({
+            "id": "openloaf-cli-session",
+            "title": "OpenLoaf CLI Fixture",
+            "projectPath": "/workspace/openloaf-cli",
+            "createdAt": "2026-07-04T20:00:00Z",
+            "updatedAt": "2026-07-04T20:01:00Z",
+            "messageCount": 2
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let messages = [
+        json!({
+            "id": "openloaf-cli-user",
+            "parentMessageId": null,
+            "role": "user",
+            "messageKind": "message",
+            "parts": [{"type": "text", "text": query}],
+            "metadata": {"source": "cli-fixture"},
+            "createdAt": "2026-07-04T20:00:00Z"
+        })
+        .to_string(),
+        json!({
+            "id": "openloaf-cli-assistant",
+            "parentMessageId": "openloaf-cli-user",
+            "role": "assistant",
+            "messageKind": "message",
+            "parts": [{
+                "type": "action",
+                "name": "write_file",
+                "input": {"path": "src/openloaf_cli_fixture.rs", "content": query}
+            }],
+            "metadata": {"fileTouches": [{"path": "src/openloaf_cli_fixture.rs", "operation": "write"}]},
+            "createdAt": "2026-07-04T20:01:00Z"
+        })
+        .to_string(),
+    ]
+    .join("\n");
+    fs::write(session.join("messages.jsonl"), format!("{messages}\n")).unwrap();
+    projects.to_str().unwrap().to_owned()
 }
 
 fn write_native_kilo_fixture(temp: &TempDir, query: &str) -> String {
