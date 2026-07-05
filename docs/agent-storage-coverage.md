@@ -21,8 +21,8 @@ Status meanings:
 - `install-target`: npx target is an aggregate or project skill target, not a
   proven history-producing agent.
 
-Result on this integration branch: 38 `native-auto`, 2 `native-preview`, 13
-`candidate-family`, 9 `webapp-boundary`, 8 `unknown`, and 2 `install-target`
+Result on this integration branch: 39 `native-auto`, 2 `native-preview`, 13
+`candidate-family`, 9 `webapp-boundary`, 7 `unknown`, and 2 `install-target`
 rows.
 
 ## Shared Families
@@ -95,7 +95,7 @@ rows.
 | `hermes-agent` | `native-auto` | `generic sqlite messages` | ctx `hermes_state_sqlite`; npx `HERMES_HOME` | - |
 | `inference-sh` | `unknown` | `unknown native history` | npx `~/.inferencesh`; no ctx provider | Need native history storage research before claiming import support. |
 | `iflow-cli` | `native-auto` | `JSONL CLI event logs` | ctx `iflow_cli_session_jsonl_tree`; npx `IFLOW_HOME` or `~/.iflow` | - |
-| `jazz` | `unknown` | `unknown native history` | npx project or home `.jazz`; no ctx provider | Need native history storage research before claiming import support. |
+| `jazz` | `native-auto` | `per-agent history JSON` | ctx `jazz_history_json`; npx `JAZZ_HOME` or `~/.jazz/history`; package `jazz-ai@0.12.5` writes `history/<agentId>.json` | Imports the retained conversations present in each per-agent history file; Jazz currently caps the stored conversation list in the package writer. |
 | `junie` | `webapp-boundary` | `webapp/object-store boundary` | npx `~/.junie`; no ctx provider | IDE-managed history boundary needs a verified local export or plugin. |
 | `kilo` | `native-auto` | `opencode sqlite family` | ctx `kilo_sqlite`; npx `~/.kilocode` | - |
 | `kimi-code-cli` | `native-auto` | `JSONL CLI event logs` | ctx `kimi_code_cli_wire_jsonl_tree`; npx `~/.kimi-code` or `~/.kimi` | - |

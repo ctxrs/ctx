@@ -18,11 +18,11 @@ PROVIDER_MATRIX_PATH = REPO_ROOT / "docs" / "provider-support-matrix.json"
 UPSTREAM_PACKAGE = "skills@1.5.14"
 UPSTREAM_COMMIT = "2adcfe5a4cce0ce5f4d5547a997b2a161ec5d127"
 EXPECTED_COUNTS = {
-    "native-auto": 38,
+    "native-auto": 39,
     "native-preview": 2,
     "candidate-family": 13,
     "webapp-boundary": 9,
-    "unknown": 8,
+    "unknown": 7,
     "install-target": 2,
 }
 ALLOWED_STATUSES = set(EXPECTED_COUNTS)
@@ -35,6 +35,7 @@ REQUIRED_SCHEMA_FAMILIES = {
     "generic sqlite messages",
     "Forge conversation SQLite",
     "LangGraph checkpoint SQLite",
+    "per-agent history JSON",
     "VS Code/Electron storage",
     "webapp/object-store boundary",
 }

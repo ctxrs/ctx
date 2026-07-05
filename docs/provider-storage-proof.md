@@ -123,6 +123,22 @@ IDE/application storage imports.
   `ctx` imports the resumable project `session-*.jsonl` transcripts as
   `iflow_cli_session_jsonl_tree`.
 
+## Jazz
+
+- Source evidence: the published `jazz-ai@0.12.5` package bundle resolves
+  `JAZZ_HOME` first and otherwise falls back to `~/.jazz`.
+- Bundle storage evidence: the history helper resolves the history directory as
+  `<jazz-home>/history` and writes per-agent files at
+  `<history>/<agentId>.json`.
+- Schema evidence: the writer persists a top-level object with `agentId` and
+  `conversations`; each conversation includes `conversationId`, `title`,
+  `agentId`, `startedAt`, `endedAt`, `messageCount`, and `messages`.
+- Retention evidence: the package writer prepends the latest conversation and
+  slices the retained list to the package's current maximum, so ctx imports only
+  conversations still present in the history JSON file.
+- `ctx` imports this shape as `jazz_history_json`, using read-only discovery
+  under `JAZZ_HOME/history` or `~/.jazz/history`.
+
 ## Kode
 
 - Source evidence: `@shareai-lab/kode@2.2.1` declares repository

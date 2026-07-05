@@ -1,0 +1,24 @@
+{
+  "agentId": "jazz-agent",
+  "conversations": [
+    {
+      "conversationId": "jazz-valid-after-malformed",
+      "title": "Jazz valid retained conversation",
+      "agentId": "jazz-agent",
+      "startedAt": "2026-07-04T18:00:00Z",
+      "endedAt": "2026-07-04T18:00:02Z",
+      "messageCount": 1,
+      "messages": [
+        {
+          "id": "msg-valid-1",
+          "role": "user",
+          "content": "jazz malformed fixture surviving oracle"
+        }
+      ]
+    },
+    {
+      "conversationId": "jazz-bad-conversation",
+      "title": "Missing timestamp and messages"
+    }
+  ]
+}
