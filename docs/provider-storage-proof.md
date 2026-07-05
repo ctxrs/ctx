@@ -85,6 +85,50 @@ IDE/application storage imports.
 - Caveat: ctx imports task context snapshots and optional task settings, not the
   Aider Desk application usage database.
 
+## Amp Thread Export
+
+- Source evidence: `@ampcode/cli@0.0.1783181941-g187572` exposes
+  `amp threads export <threadIDOrURL>`, `amp threads markdown`, and
+  `amp threads raw`.
+- Export-handler evidence: the bundled CLI export path loads the requested
+  thread through the same thread loader used by markdown/raw views and serializes
+  the returned thread JSON. The markdown renderer consumes `id`, `created`,
+  optional `title`/`agentMode`, and message blocks including visible text,
+  `tool_use`, `tool_result`, `summary`, and `manual_bash_invocation`.
+- `ctx` imports this official explicit export shape as
+  `amp_threads_export_json` only when the user supplies a file with
+  `ctx import --provider amp --path <export.json>`.
+- Fixture provenance: `tests/fixtures/provider-history/amp/threads-export/redacted-thread.json`
+  is a sanitized package/source-backed fixture. This environment had no `amp`
+  binary on `PATH` and no Amp/OpenRouter/Anthropic key environment variables, so
+  no safe live generated export fixture was available.
+- Caveat: ctx does not discover or parse `~/.config/amp`,
+  `$XDG_CACHE_HOME/amp/logs/cli.log`, account/auth files, or remote Amp thread
+  history. Default discovery remains unclaimed until Amp proves durable local
+  transcript storage distinct from operational logs.
+
+## Dexto
+
+- Package evidence: public npm packages `dexto@1.9.1`,
+  `@dexto/storage@1.9.1`, and `@dexto/agent-management@1.9.1`.
+- Storage evidence: `@dexto/storage/dist/database/sqlite-store.js` creates
+  `kv_store` and `list_store`; `dist/database/schemas.js` requires a SQLite
+  `path` and notes CLI enrichment provides the per-agent path.
+- Path evidence:
+  `@dexto/agent-management/dist/config/config-enrichment.js` fills missing
+  SQLite storage paths by calling `getDextoPath("database", ...)` with an
+  `<agentId>.db` filename.
+- Path evidence: `@dexto/core/dist/utils/path.js` maps global CLI resources to
+  `~/.dexto/<type>` and Dexto project resources to `<project>/.dexto/<type>`,
+  so the enriched database roots are `~/.dexto/database` and project
+  `.dexto/database`.
+- `ctx` imports this shape as `dexto_sqlite`, scanning bounded
+  `.dexto/database/*.db` roots only when a SQLite file has the Dexto
+  `kv_store`/`list_store` schema; explicit Dexto DB paths remain supported.
+- Caveat: `~/.dexto/logs`, agents, blobs, `.env`, config files, and arbitrary
+  cache paths are not history sources. Custom `storage.database.path` values
+  outside the default roots still require explicit `--path`.
+
 ## Lingma
 
 - Source evidence: WayLog `shayne-snap/WayLog` commit
@@ -143,19 +187,23 @@ IDE/application storage imports.
   `HuaweiCloud.vscode-codebot` identifies CodeArts Agent as a VS Code extension
   and documents editor/chat features such as R&D Q&A, slash commands, chat-panel
   shortcuts, and selected-code actions.
-- Package evidence: the VSIX bundle contains `getKernelConfigDir()` resolving
-  `~/.codeartsdoer` and legacy/cache history paths under VS Code app data such
-  as `User/chat_sessions/<session>/chat_baseInfo.json`,
+- Package evidence: VSIX `HuaweiCloud.vscode-codebot` v26.6.0, SHA256
+  `394f54ba999bdab8095f9bdd3ccd28ce5e0df3ab804911703efdbe1a329a2d34`,
+  resolves `~/.codeartsdoer` and routes current session operations through an
+  agent-kernel client.
+- Storage evidence: the kernel store is an OpenCode-derived SQLite family under
+  `~/.codeartsdoer/.../opencode.db`, while older/cache evidence also shows VS
+  Code app-data paths such as `User/chat_sessions/<session>/chat_baseInfo.json`,
   `User/chat_sessions/<session>/messages_<n>.json`, and `claw_session`.
-- Gap: the current extension also routes session operations through an
-  `agentKernelClient.cag.session.*` API, so the durable/current transcript store
-  may be kernel-managed rather than those JSON cache files. No sanitized real
-  CodeArts Agent run fixture has verified that the cache shape is complete or
-  stable enough to import.
-- Decision: no native importer is claimed. The `codearts-agent` npx target
-  remains `candidate-family` until a stable local transcript schema, official
-  exporter, or sanitized real fixture can be verified without account-specific
-  data or secrets.
+- `ctx` imports this native shape as `codearts_agent_kernel_sqlite` from
+  `~/.codeartsdoer/vscode-data/opencode.db`,
+  `~/.codeartsdoer/codearts-data/opencode.db`,
+  `$XDG_DATA_HOME/codeartsdoer/opencode.db`,
+  `~/.local/share/codeartsdoer/opencode.db`, or an explicit DB path. The
+  native-auto claim is for the kernel SQLite DB, not the legacy JSON cache.
+- Caveat: ctx does not import older/private VS Code cache JSON such as
+  `User/chat_sessions` or `claw_session`; those remain unclaimed until fixtures
+  prove they are durable and complete.
 - Source anchor:
   `https://marketplace.visualstudio.com/items?itemName=HuaweiCloud.vscode-codebot`.
 
@@ -164,21 +212,39 @@ IDE/application storage imports.
 - Source evidence: Syncfusion Code Studio docs describe an AI-powered IDE with
   Ask, Edit, Agent, Plan, checkpoint, hooks, custom agents, and Agent Skills
   features.
-- Configuration evidence: current user settings docs prove agent, instruction,
-  hook, and skill locations including `.codestudio/agents`,
+- Artifact evidence: Syncfusion Code Studio v2.0.4 artifact SHA256
+  `603991729cbb154e1bbc1a12d292b389895e1c2fb6f07b25bc1cda4fe14fa13b`
+  backs the local session-store SQLite shape.
+- Docs evidence: `syncfusion-content/syncfusion-code-studio-docs` commit
+  `de44c7b35fc30ece937ff85d113b5b360a3e3955` documents sessions, agent
+  features, settings, hooks, and skill locations including `.codestudio/agents`,
   `~/.codestudio/agents`, `.codestudio/skills`, and `~/.codestudio/skills`.
-- Debug/session evidence: troubleshooting docs describe a unified sessions list
-  and optional persistent agent debug file logging with detailed local JSONL
-  records.
-- Gap: those docs do not identify a stable file path, filename, schema, or
-  export contract for the session/debug JSONL files, and the skill/settings
-  paths remain configuration evidence only.
-- Decision: no native importer is claimed. The `codestudio` npx target remains
-  `candidate-family` until a source-backed transcript path/schema or exporter is
-  available.
+- `ctx` tracks this intended native shape as `codestudio_session_store_sqlite`,
+  with native-auto discovery for Code Studio app-data
+  `User/globalStorage/session-store.db` files and explicit DB paths. Discovery
+  requires the session-store SQLite tables/columns before auto-importing.
+- Caveat: `.codestudio/skills`, `.codestudio/agents`, and settings files remain
+  configuration evidence only; debug logs are not imported; the importer claim
+  is limited to the session-store SQLite DB.
 - Source anchors:
   `https://help.syncfusion.com/code-studio/getting-started/overview` and
   `https://help.syncfusion.com/code-studio/reference/configure-properties/usersettings`.
+
+## Zencoder
+
+- Exporter evidence: `jverre/opik-chat-history` commit
+  `5e7380933564d4fe1084d0e6f48f0e49e43e45ea` reads Zencoder chat history from a
+  local `zencoder-chat` folder with `sessions.json` plus
+  `sessions/<session-id>.json`.
+- Extension evidence: Open VSX `ZencoderAI.zencoder` v3.63.9002 constants
+  confirm the extension `zencoder-chat` storage root and `sessions.json`
+  persisted-chat anchors used for local chat/session history.
+- `ctx` tracks this native-auto shape as `zencoder_chat_sessions_json_tree`.
+  Default discovery covers common VS Code-family app-data roots under
+  `User/globalStorage/ZencoderAI.zencoder/zencoder-chat`, and explicit
+  `ctx import --provider zencoder --path <zencoder-chat>` remains supported.
+- Caveat: `~/.zencoder` remains npx skill/config evidence; native import reads
+  the proven `zencoder-chat` session tree, not arbitrary extension caches.
 
 ## iFlow CLI
 
@@ -224,8 +290,11 @@ IDE/application storage imports.
   command outputs, tool arguments, search results, rules, and conversation
   history, and that exact step structure may change.
 - `ctx` imports this shape as
-  `windsurf_cascade_hook_transcript_jsonl_tree`, preview-only, from explicit
-  file/directory paths or default discovery under `~/.windsurf/transcripts`.
+  `windsurf_cascade_hook_transcript_jsonl_tree`, from explicit file/directory
+  paths or native default discovery under `~/.windsurf/transcripts`.
+- Boundary: support is limited to official hook transcript JSONL. Hook
+  transcripts are opt-in and usually capture sessions after hook setup, so ctx
+  does not backfill earlier sessions from other Windsurf storage.
 - Caveat: ctx does not parse the private `~/.codeium/windsurf/cascade` cache or
   guessed VS Code state databases.
 
@@ -242,9 +311,10 @@ IDE/application storage imports.
 - `ctx` imports this shape as `pochi_livestore_state_sqlite`, reading synced
   `~/.pochi/storage` roots when present, explicit SQLite file paths, or
   explicit directories containing `state*.db` files read-only.
-- This remains preview. `ctx` does not read `config.jsonc`, does not attempt VS
-  Code OPFS extraction, and does not auto-import Pochi during `ctx import --all`
-  or pre-search refresh.
+- This is native-auto only for bounded LiveStore state SQLite paths:
+  `~/.pochi/storage/**/state*.db` and explicit state DB file/directory paths.
+  Default discovery requires a read-only `tasks`/`messages` schema probe. `ctx`
+  does not read `config.jsonc` and does not attempt VS Code OPFS extraction.
 
 ## OpenLoaf
 
@@ -377,6 +447,29 @@ IDE/application storage imports.
   incremental deltas to avoid duplicate transcript text. Encrypted or
   non-devalue Workflow stream chunks remain unclaimed until source proof and
   fixtures exist.
+
+## Junie
+
+- Source-backed storage evidence: the public Claudescope Junie connector
+  documents and reads `~/.junie/sessions/index.jsonl` plus
+  `~/.junie/sessions/session-*/events.jsonl`, and its implementation says it
+  was built against real Junie on-disk data from build `1892.22`.
+- Event-shape evidence: Claudescope parses top-level `UserPromptEvent` rows and
+  `SessionA2uxEvent` wrappers around nested `agentEvent` blocks including
+  `LlmResponseMetadataEvent`, `TerminalBlockUpdatedEvent`,
+  `ViewFilesBlockUpdatedEvent`, `FileChangesBlockUpdatedEvent`, and
+  `ResultBlockUpdatedEvent`.
+- JetBrains release evidence: the downloaded Junie release jar contains matching
+  event classes such as `UserPromptEvent`, `SessionA2uxEvent`,
+  `LlmResponseMetadataEvent`, and file/result block events, though the cloned
+  first-party installer repo does not document the `index.jsonl` path itself.
+- `ctx` imports this shape as `junie_session_events_jsonl_tree`, using
+  `JUNIE_SESSIONS_DIR`, `JUNIE_HOME/sessions`, `~/.junie/sessions`, or explicit
+  sessions/session paths. Discovery follows `index.jsonl` and rejects unsafe
+  `sessionId` path segments.
+- Caveat: Junie's local file schema is not first-party documented and may drift.
+  ctx imports the UI event stream blocks that exist in `events.jsonl`; it does
+  not read attachment image paths or project memory directories.
 
 ## Antigravity
 
@@ -640,13 +733,141 @@ IDE/application storage imports.
   complete without interactive setup, so the fixture is a sanitized SQLite DB
   built from the package-backed schema rather than a live-generated chat.
 
-## Tabnine CLI (insufficient proof)
+## CodeMaker CLI (insufficient proof)
+
+- npx skills evidence: `skills@1.5.14` registers the `codemaker` target with
+  `skillsDir = ".codemaker/skills"`,
+  `globalSkillsDir = "~/.codemaker/skills"`, and install detection based only
+  on `~/.codemaker`.
+- Public source evidence: the `codemakerai/codemaker-cli` repository reads and
+  writes `~/.codemaker/config` for API configuration and then calls the
+  CodeMaker SDK for generation/refactor/fix commands.
+- Negative evidence: source search found no durable local session,
+  conversation, chat, transcript, SQLite, or JSONL history store.
+- Decision: ctx should not add a native `codemaker` importer from
+  `~/.codemaker` until a newer product or fixture proves transcript storage.
+
+## inference.sh / belt (insufficient proof)
+
+- npx skills evidence: `skills@1.5.14` registers the `inference-sh` target with
+  `skillsDir = ".inferencesh/skills"`,
+  `globalSkillsDir = "~/.inferencesh/skills"`, and install detection based only
+  on `~/.inferencesh`.
+- Package evidence: the current `infsh@0.0.2` npm package is a stub that tells
+  users to install `@inferencesh/belt`; `@inferencesh/belt@1.14.10` is a
+  wrapper that downloads/runs the `belt` binary.
+- Public docs evidence: inference.sh CLI docs describe skills, knowledge,
+  cloud tasks, chats, and agent runtime commands, but they do not document a
+  stable local transcript file path or schema under `~/.inferencesh`.
+- Decision: ctx should not add a native `inference-sh` importer from
+  `~/.inferencesh`; future support needs an official export/API/plugin
+  contract or a source-backed local store.
+
+## Moxby (insufficient proof)
+
+- npx skills evidence: `skills@1.5.14` registers the `moxby` target with
+  `skillsDir = ".moxby/skills"`, `globalSkillsDir = "~/.moxby/skills"`, and
+  install detection based only on `~/.moxby`.
+- Public product evidence: Moxby describes a local desktop/browser workspace,
+  coding-agent harnessing for Claude Code or Codex subscriptions, chat/session
+  features, and line-level reasoning/history.
+- Local storage lead: local inspection found SQLite chat database proof for
+  Moxby, so the product is no longer just a web-account guess. The proof is not
+  yet enough to implement because ctx still lacks the exact stable app-data
+  path, a documented or fixture-backed schema, and a sanitized real fixture.
+- Gap: no public source-backed app-data path, SQLite/IndexedDB schema, export
+  contract, or sanitized real fixture was found for durable local transcripts.
+- Decision: Moxby remains an unknown native-history target for ctx. If a real
+  fixture proves the app-data SQLite storage, it may become a candidate desktop
+  storage importer.
+
+## MCPJam (webapp/object-store boundary)
+
+- npx skills evidence: `skills@1.5.14` registers the `mcpjam` target with
+  skill installation rooted at `~/.mcpjam`.
+- Boundary evidence: current evidence points to a stateless CLI plus backend or
+  object-store activity boundary, not to a durable local transcript file under
+  the skill home.
+- Decision: MCPJam stays `webapp-boundary` until it provides an exporter,
+  history-source plugin, documented local transcript store, or managed import
+  API.
+
+## Ona (webapp/object-store boundary)
+
+- npx skills evidence: `skills@1.5.14` registers the `ona` target with skill
+  installation rooted at `~/.ona`.
+- Boundary evidence: no stable local transcript path or schema is proven. The
+  best current lead is a support bundle or API-backed managed import contract,
+  not direct local file discovery.
+- Decision: Ona stays `webapp-boundary` until an official support-bundle/API
+  import path or sanitized local fixture proves a bounded history format.
+
+## Replit (webapp/object-store boundary)
+
+- npx skills evidence: `skills@1.5.14` registers `replit` through project
+  markers such as `.replit`.
+- Boundary evidence: the project marker identifies a Replit project, but it is
+  not a local agent-history transcript contract. Agent activity remains tied to
+  the project/cloud boundary.
+- Decision: Replit stays `webapp-boundary`; future support should use an
+  exporter, history-source plugin, or explicit cloud/project export contract.
+
+## Zenflow (webapp/object-store boundary)
+
+- npx skills evidence: `skills@1.5.14` maps Zenflow into the Zencoder skill
+  home surface, but that home is not itself a proven Zenflow transcript store.
+- Local storage lead: native local `db.sqlite` evidence makes Zenflow a
+  plausible native-preview candidate.
+- Repro attempt: Zenflow Desktop 2.3.1 Linux was run in an isolated
+  `ZENFLOW_DATA_DIR`. It created `db.sqlite` with transcript-shaped tables
+  (`tasks`, `chats`, `execution_processes`, `execution_process_logs`,
+  `execution_process_normalized_logs`, `assistant_sessions`, `attachments`),
+  and no-auth API probes could create task/chat/process rows plus synthetic
+  `error_message` log patches. They did not produce user/assistant/tool log
+  rows; custom no-auth executor runs left empty `raw_logs/*.jsonl` sidecars.
+- Gap: ctx still needs a sanitized real task fixture, or equivalent
+  source-backed row proof, showing user, assistant, tool-call, and tool-output
+  records before adding a native reader.
+- Decision: Zenflow remains `webapp-boundary` for the npx ledger until those
+  proofs exist; users should prefer an exporter or underlying provider import
+  where available.
+
+## AstrBot (native-preview)
+
+- npx skills evidence: `skills@1.5.14` registers `astrbot` under `~/.astrbot`,
+  matching AstrBot's packaged desktop root.
+- Upstream source evidence: `AstrBotDevs/AstrBot` v4.26.4
+  (`25cbd41e08eb7e678b0ab3f5e6c972581bd0589f`) derives the root from
+  `ASTRBOT_ROOT`, packaged desktop `~/.astrbot`, or cwd, and sets
+  `DB_PATH = <root>/data/data_v4.db`.
+- Schema evidence: upstream SQLModel tables include `conversations` with
+  `content` JSON for OpenAI-formatted LLM messages and
+  `platform_message_history` with `platform_id`, `user_id`, `sender_id`,
+  `sender_name`, JSON `content`, and optional `llm_checkpoint_id`. ctx's
+  sanitized fixture at `tests/fixtures/provider-history/astrbot/v1/data/data_v4.db`
+  matches those tables and imports/searches idempotently.
+- Write-path evidence: upstream WebChat/OpenAPI/live-chat services insert user
+  and bot message records into `platform_message_history`, and LLM request
+  handling writes the model-facing context into `conversations.content`.
+- Blocker: upstream's own conversation model documentation still says WebChat
+  history stores all messages, while other platform chats do not store
+  non-LLM replies because those are considered stored on their platforms. I did
+  not find a general IM-platform write path that records complete raw user and
+  assistant transcripts for QQ/Telegram/WeCom/Lark/DingTalk/Slack/etc. into
+  `data_v4.db`.
+- Decision: AstrBot stays `native-preview`. The existing importer is useful for
+  local LLM context plus available WebChat/OpenAPI/live-chat platform rows, but
+  ctx should not include it in native-auto/import-all/search-refresh until
+  upstream guarantees complete per-platform local transcript retention or a
+  sanitized multi-platform runtime fixture proves the durable schema.
+
+## Tabnine CLI
 
 - npx skills evidence: `skills@1.5.14` registers the `tabnine-cli` target with
   `skillsDir = ".tabnine/agent/skills"`,
   `globalSkillsDir = "~/.tabnine/agent/skills"`, and install detection based
-  only on `~/.tabnine`. This proves a skills/config home, not transcript
-  storage.
+  only on `~/.tabnine`. This proves the Tabnine agent home used by skills and
+  configuration.
 - Official install evidence:
   `https://docs.tabnine.com/main/getting-started/tabnine-cli/getting-started/installation`
   installs Tabnine CLI from a Tabnine host, requires Tabnine Agents to be
@@ -657,24 +878,64 @@ IDE/application storage imports.
   documents `~/.tabnine/agent/settings.json`, and
   `https://docs.tabnine.com/main/getting-started/tabnine-cli/features/commands`
   documents `/chat save`, `/chat resume`, `/chat list`, `/chat share`, and
-  `/resume`, but does not document the backing file names or JSON/schema shape.
+  `/resume`.
 - Official checkpoint evidence:
   `https://docs.tabnine.com/main/getting-started/tabnine-cli/features/checkpointing`
   says checkpoint metadata is stored under
   `~/.tabnine/agent/tmp/<project_hash>/checkpoints/` and compares `/chat save`
-  conversation history to a location under `~/.tabnine/agent/tmp/...`; this is
-  path-adjacent evidence only, not a transcript schema.
-- Negative npm evidence: the public `tabnine@0.0.0-dev-202603280606` package is
-  a small `stardrop` binary wrapper with no transcript reader/writer schema and
-  is not the official host-installed CLI documented above.
-- Local fixture evidence: no `~/.tabnine` history fixture was present on this
-  machine, and a safe no-auth generated fixture was not available because the
-  official CLI requires a Tabnine host and team Agents enablement.
-- Decision: ctx should not add a native `tabnine-cli` importer yet. Unclaimed
-  candidate paths are `~/.tabnine/agent/tmp/...`,
-  `~/.tabnine/agent/tmp/<project_hash>/checkpoints/`, and any file exported by
-  `/chat share`; native support needs source-backed file names and record
-  schemas or a sanitized real fixture from a safe run.
+  conversation history to a location under `~/.tabnine/agent/tmp/...`.
+- Package evidence: the public `tabnine@0.0.0-dev-202603280606` npm package is
+  a small `stardrop` wrapper, but the official installer at
+  `https://console.tabnine.com/update/cli/installer.mjs` installed Tabnine CLI
+  `0.25.1` into a scratch `HOME` with bundles under
+  `~/.tabnine/agent/.bundles/<version>`.
+- Bundle evidence: Tabnine CLI `0.25.1` sets `GEMINI_DIR` to
+  `.tabnine/agent`, records project slugs in `~/.tabnine/agent/projects.json`,
+  and uses `~/.tabnine/agent/tmp/<project-id>` as the project temp root.
+- Transcript evidence: `ChatRecordingService` writes JSONL under
+  `tmp/<project-id>/chats/session-<timestamp>-<sessionid8>.jsonl`, with first
+  record metadata fields such as `sessionId`, `projectHash`, `startTime`,
+  `lastUpdated`, `kind`, and `directories`. Message records include `id`,
+  `timestamp`, `type`, and `content`; Tabnine assistant messages use
+  `type: "tabnine"`, while legacy Gemini-family records may use
+  `type: "gemini"`.
+- Subagent evidence: Tabnine writes subagent JSONL under
+  `tmp/<project-id>/chats/<parent-session-id>/<agent>.jsonl` and marks those
+  records with `kind: "subagent"`.
+- Checkpoint evidence from the bundle: `/chat save <tag>` writes
+  `checkpoint-<encodedTag>.json` in the project temp directory. ctx does not
+  import checkpoint JSON as the primary transcript source; it imports the chat
+  recording JSONL.
+- Runtime probe: a safe no-auth scratch run of `tabnine -p ...` initialized
+  `~/.tabnine/agent/tmp/<project-id>`, `history/<project-id>`, and
+  `projects.json`, but timed out before authentication/model access produced a
+  chat JSONL file. The fixture is therefore source-shaped from the official
+  bundle rather than a live authenticated transcript.
+- `ctx` imports this native shape as `tabnine_cli_chat_recording_jsonl` from
+  bounded `~/.tabnine/agent/tmp/**/chats/**/*.jsonl` discovery or explicit
+  Tabnine agent/history paths. It does not import skills, settings, credentials,
+  checkpoint JSON, shared-chat exports, or arbitrary temp files.
+
+## TinyCloud
+
+- npx skills evidence: `skills@1.5.14` registers the `tinycloud` target with
+  `skillsDir = ".tinycloud/skills"`,
+  `globalSkillsDir = "~/.tinycloud/skills"`, and install detection based only
+  on `~/.tinycloud`.
+- Package evidence: `@cloudglue/tinycloud@0.3.8` gitHead
+  `fb0b313286bc83d4c48f66831e8acb7a6b51847a` documents an isolated
+  `--home`/`TINYCLOUD_HOME` state home whose default is `~/.tinycloud`, with
+  config, sessions, cache, jobs, artifacts, and skills.
+- Session-path evidence: TinyCloud writes project-scoped JSONL sessions under
+  `$TINYCLOUD_HOME/projects/*/sessions/*.jsonl` or
+  `~/.tinycloud/projects/*/sessions/*.jsonl`, with legacy support for
+  `<home>/sessions/*.jsonl`.
+- `ctx` imports this native shape as `tinycloud_session_jsonl_tree`, using
+  `TINYCLOUD_HOME`, `~/.tinycloud`, or explicit home/session paths.
+- Caveat: TinyCloud session support is package-backed by
+  `@cloudglue/tinycloud@0.3.8` evidence and sanitized fixtures; future schema
+  drift may need adapter updates. `~/.tinycloud/skills` remains skills evidence
+  only and is not treated as transcript history.
 
 ## AdaL CLI
 
@@ -769,25 +1030,38 @@ IDE/application storage imports.
   roots under `~/Library/Application Support/Trae/ModularData` on macOS and
   `%USERPROFILE%\AppData\Roaming\Trae\ModularData` on Windows, including an
   `ai-agent/snapshot` subdirectory for agent data artifacts.
-- Schema evidence: `yuanjing001/trae-chats-exporter` commit
-  `85e2d111a5a0e35f0957502097d3a8b18095ef72` reads Trae chat data from
+- Schema evidence: `yuanjing001/trae-chats-exporter` reads Trae chat data from
   `~/Library/Application Support/Trae/User/workspaceStorage/<workspace>/state.vscdb`.
 - The exporter opens SQLite table `ItemTable` and reads VS Code-style storage
   keys including `memento/icube-ai-agent-storage`,
   `chat.ChatSessionStore.index`, `ChatStore`,
   `memento/icube-ai-chat-storage-7467774676505887760`, and
   `memento/icube-ai-ng-chat-storage-7467774676505887760`.
-- `ctx` imports this shape as `trae_state_vscdb` only when the user provides an
+- Trae CN evidence: official community reports point to
+  `Trae CN/User/workspaceStorage/<workspace>/state.vscdb` plus
+  `workspace.json`. `llg23456/ai-dialog-compressor` commit
+  `e9dbf1f4b5cd0a033053e62ea9643f675d3a2ca7` reads the same VS Code
+  workspaceStorage shape and the Trae-CN-specific
+  `icube-ai-agent-storage-input-history` key, whose entries usually contain
+  user-only `inputText` or `text` fields.
+- `ctx` imports this shape as `trae_state_vscdb`. Default discovery is limited
+  to Trae and Trae CN app-data `User/workspaceStorage` roots at
+  `~/Library/Application Support/Trae/User/workspaceStorage`,
+  `~/Library/Application Support/Trae CN/User/workspaceStorage`,
+  `%APPDATA%/Trae/User/workspaceStorage`, and
+  `%APPDATA%/Trae CN/User/workspaceStorage`; the bounded probe marks a root
+  available only when a direct workspace `state.vscdb` has `ItemTable` and one
+  of the known Trae chat/input-history keys. Users can still provide an
   explicit `state.vscdb`, workspace directory, or `User/workspaceStorage` root.
-  The importer opens the SQLite database read-only and indexes recognizable
-  session/message JSON from those known keys.
+  `ctx import --provider trae-cn` is accepted as a CLI alias and stores
+  imported rows under the canonical `trae` provider.
 - Fixture provenance: `tests/fixtures/provider-history/trae` is a sanitized,
   source-backed synthetic `state.vscdb` fixture modeled on the exporter-visible
   `ItemTable` key contract. No local Trae binary or data root was available in
-  this environment, so no real Trae run fixture was generated.
-- Unclaimed paths: default discovery from `ModularData`, arbitrary Trae
-  application caches, `trae-cn`, and robust promotion beyond preview remain
-  unclaimed until real fixtures and drift validation exist.
+  this environment, so no real Trae or Trae CN run fixture was generated.
+- Unclaimed paths: `globalStorage`, `ModularData`, arbitrary Trae application
+  caches, unknown `ItemTable` keys, and full Trae CN assistant transcript
+  recovery from input-history-only databases.
 
 ## Warp
 
@@ -818,23 +1092,25 @@ IDE/application storage imports.
   `apis/multi_agent/v1/task.proto`; `Task` has repeated `Message messages`, and
   `Message` includes `UserQuery.query`, `AgentOutput.text`, tool-call/result,
   reasoning, summary, and inter-agent message variants.
-- `ctx` imports this shape as `warp_sqlite`, but only as preview/manual import:
-  `ctx import --provider warp` for a discovered documented Linux/macOS path or
-  `ctx import --provider warp --path <warp.sqlite>` for any explicit local
-  Warp SQLite database, including the documented Windows `%LOCALAPPDATA%` path.
-  It reads the SQLite database read-only, decodes the public protobuf subset,
-  and does not copy `server_conversation_token` or
-  `forked_from_server_conversation_token` values into ctx metadata.
+- `ctx` imports this shape as native `warp_sqlite` history from the documented
+  Linux, macOS, and Windows local restoration paths. `ctx import --all` and
+  default search refresh include discovered `warp.sqlite` sources; explicit
+  `ctx import --provider warp --path <warp.sqlite>` remains supported for any
+  user-supplied local Warp SQLite database.
+- Live SQLite handling: ctx opens the provider database with SQLite read-only
+  flags, sets `query_only`, and uses normal SQLite locking/WAL visibility rather
+  than immutable file reads or ad hoc copying. The capture tests cover committed
+  WAL content while a writer connection remains open.
+- Privacy boundary: ctx decodes the public protobuf subset and does not copy
+  `server_conversation_token` or `forked_from_server_conversation_token` values
+  into ctx metadata.
 - Fixture evidence: `tests/fixtures/provider-history/warp/v1/warp.sqlite` is a
   sanitized schema-backed fixture generated for ctx tests, not copied from a
-  user Warp profile. This host did not have a safe local Warp `warp.sqlite`
-  fixture under the documented Linux path.
+  user Warp profile.
 - Caveats and unclaimed formats: ctx does not parse cloud-synced conversations,
   Oz/cloud agent conversations, browser IndexedDB, Markdown exports, Warp Drive
   or team data, shell command history outside decoded `agent_tasks.task`, or
-  any private remote data. Windows `%LOCALAPPDATA%` default discovery is not
-  implemented. Default discovery remains preview/manual until a safe-run local
-  fixture or stronger official import/export contract supports native-auto.
+  any private remote data.
 
 ## IBM Bob
 

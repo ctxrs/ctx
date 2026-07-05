@@ -54,11 +54,14 @@ that support it.
 
 Search filters narrow both human output and JSON:
 
-- `--provider codex|pi|claude|opencode|kilo|kiro-cli|forgecode|deepagents|mistral-vibe|mux|reasonix|kode|neovate|terramind|crush|goose|dexto|lingma|warp|openclaw|hermes|nanoclaw|astrbot|shelley|continue|openhands|antigravity|gemini|cursor|zed|copilot-cli|factory-ai-droid|qwen-code|kimi-code-cli|autohand-code|iflow-cli|codebuddy|aider-desk|cline|roo`;
+- `--provider codex|pi|claude|opencode|codearts-agent|zencoder|kilo|kiro-cli|forgecode|deepagents|mistral-vibe|mux|reasonix|kode|neovate|junie|tinycloud|codestudio|terramind|crush|goose|dexto|lingma|warp|openclaw|hermes|nanoclaw|astrbot|shelley|continue|openhands|antigravity|gemini|cursor|windsurf|zed|copilot-cli|factory-ai-droid|qwen-code|kimi-code-cli|autohand-code|iflow-cli|codebuddy|aider-desk|amp|cline|roo`;
 - `--history-source <plugin/source-or-provider_key/source_id>`, for custom
   history imports;
 - `--provider-key <key>`, `--source-id <id>`, and
   `--source-format <format>`, for exact custom history source filters;
+
+Provider matrix rows marked pending should be added to this filter list only
+after the code-worker provider enum/search wiring lands.
 - `--workspace <name-or-path>`, substring match over stored workspace, cwd,
   source path, or repository-name text;
 - `--since <rfc3339-or-days>d`;
@@ -79,10 +82,10 @@ Search filters narrow both human output and JSON:
 CLI provider filters use the kebab-case names above. JSON output and stable SQL
 views use provider IDs in ctx output; multiword provider IDs may be snake_case,
 such as `copilot_cli`, `factory_ai_droid`, `qwen_code`, `kimi_code_cli`,
-`autohand_code`, `kiro_cli`, `iflow_cli`, `mistral_vibe`, or `aider_desk`,
-while compact IDs such as `forgecode`, `deepagents`, `mux`, `reasonix`, `kode`,
-`neovate`, `terramind`, `openclaw`, `nanoclaw`, `astrbot`, `shelley`,
-`continue`, and `openhands` stay compact.
+`autohand_code`, `kiro_cli`, `iflow_cli`, `mistral_vibe`, `codearts_agent`, or
+`aider_desk`, while compact IDs such as `forgecode`, `deepagents`, `mux`,
+`reasonix`, `kode`, `neovate`, `terramind`, `openclaw`, `nanoclaw`, `astrbot`,
+`shelley`, `continue`, `windsurf`, and `openhands` stay compact.
 
 `--since` accepts RFC 3339 timestamps such as `2026-06-01T00:00:00Z` or a day
 window such as `30d`.
@@ -121,9 +124,10 @@ sources or already-cataloged indexes, `auto` serves current results without a
 foreground catch-up scan; use `--refresh strict` or `ctx import --all` when you
 need a full catch-up before querying. `off` skips the pre-search refresh and
 never runs plugin commands. `strict` fails the search if the refresh cannot run
-or import successfully. Preview native sources such as NanoClaw and AstrBot,
-plus search-only sources without native import support, are searched from the
-existing index until they are explicitly imported through a supported path.
+or import successfully. Explicit export sources such as Amp and Devin, preview
+native sources such as NanoClaw and AstrBot, plus search-only sources without
+native import support, are searched from the existing index until they are
+explicitly imported through a supported path.
 
 Use `--refresh off` for a strictly read-only search over the existing ctx index.
 This avoids provider imports, plugin execution, and updates to the ctx SQLite

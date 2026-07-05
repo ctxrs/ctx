@@ -629,6 +629,27 @@ impl Default for EveImportOptions {
 }
 
 #[derive(Debug, Clone)]
+pub struct JunieImportOptions {
+    pub machine_id: String,
+    pub source_path: Option<PathBuf>,
+    pub imported_at: DateTime<Utc>,
+    pub history_record_id: Option<Uuid>,
+    pub allow_partial_failures: bool,
+}
+
+impl Default for JunieImportOptions {
+    fn default() -> Self {
+        Self {
+            machine_id: default_machine_id(),
+            source_path: None,
+            imported_at: utc_now(),
+            history_record_id: None,
+            allow_partial_failures: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct FirebenderSqliteImportOptions {
     pub machine_id: String,
     pub source_path: Option<PathBuf>,
@@ -671,7 +692,9 @@ impl Default for OpenCodeSqliteImportOptions {
 }
 
 pub type KiloSqliteImportOptions = OpenCodeSqliteImportOptions;
+pub type CodeArtsAgentSqliteImportOptions = OpenCodeSqliteImportOptions;
 pub type KiroSqliteImportOptions = OpenCodeSqliteImportOptions;
+pub type CodeStudioSqliteImportOptions = OpenCodeSqliteImportOptions;
 pub type TerramindSqliteImportOptions = OpenCodeSqliteImportOptions;
 
 #[derive(Debug, Clone)]
@@ -1011,6 +1034,29 @@ impl Default for TraeImportOptions {
 }
 
 #[derive(Debug, Clone)]
+pub struct TinyCloudImportOptions {
+    pub machine_id: String,
+    pub source_path: Option<PathBuf>,
+    pub imported_at: DateTime<Utc>,
+    pub history_record_id: Option<Uuid>,
+    pub allow_partial_failures: bool,
+}
+
+impl Default for TinyCloudImportOptions {
+    fn default() -> Self {
+        Self {
+            machine_id: default_machine_id(),
+            source_path: None,
+            imported_at: utc_now(),
+            history_record_id: None,
+            allow_partial_failures: false,
+        }
+    }
+}
+
+pub type ZencoderImportOptions = TinyCloudImportOptions;
+
+#[derive(Debug, Clone)]
 pub struct AntigravityCliImportOptions {
     pub machine_id: String,
     pub source_path: Option<PathBuf>,
@@ -1051,6 +1097,8 @@ impl Default for GeminiCliImportOptions {
         }
     }
 }
+
+pub type TabnineCliImportOptions = GeminiCliImportOptions;
 
 #[derive(Debug, Clone)]
 pub struct FactoryAiDroidImportOptions {
@@ -1722,10 +1770,16 @@ pub struct DevinAtifJsonAdapter;
 pub struct EveWorkflowDataAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
+pub struct JunieSessionEventsAdapter;
+
+#[derive(Debug, Clone, Copy, Default)]
 pub struct FirebenderSqliteAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OpenCodeSqliteAdapter;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CodeArtsAgentSqliteAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct KiloSqliteAdapter;
@@ -1770,10 +1824,22 @@ pub struct PochiLivestoreSqliteAdapter;
 pub struct LingmaSqliteAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
+pub struct TinyCloudJsonlAdapter;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ZencoderJsonAdapter;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CodeStudioSqliteAdapter;
+
+#[derive(Debug, Clone, Copy, Default)]
 pub struct AntigravityCliJsonlAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GeminiCliJsonlAdapter;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TabnineCliJsonlAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CursorAgentTranscriptJsonlAdapter;
@@ -2404,7 +2470,7 @@ fn normalize_pi_session_jsonl_file(
             continue;
         }
 
-        let value: Value = match serde_json::from_slice(&line) {
+        let value: Value = match serde_json::from_slice::<Value>(&line) {
             Ok(value) => value,
             Err(err) => {
                 result.summary.failed += 1;
@@ -2657,6 +2723,24 @@ impl ProviderCaptureAdapter for EveWorkflowDataAdapter {
     }
 }
 
+impl ProviderCaptureAdapter for JunieSessionEventsAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Junie
+    }
+
+    fn source_format(&self) -> &str {
+        JUNIE_SESSION_EVENTS_SOURCE_FORMAT
+    }
+
+    fn normalize_path(
+        &self,
+        path: &Path,
+        context: &ProviderAdapterContext,
+    ) -> Result<ProviderNormalizationResult> {
+        normalize_junie_session_events(path, context)
+    }
+}
+
 impl ProviderCaptureAdapter for FirebenderSqliteAdapter {
     fn provider(&self) -> CaptureProvider {
         CaptureProvider::Firebender
@@ -2691,6 +2775,25 @@ impl ProviderCaptureAdapter for OpenCodeSqliteAdapter {
     ) -> Result<ProviderNormalizationResult> {
         ensure_regular_provider_transcript_file(path)?;
         normalize_opencode_sqlite(path, context, &OPENCODE_SQLITE_DIALECT)
+    }
+}
+
+impl ProviderCaptureAdapter for CodeArtsAgentSqliteAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::CodeArtsAgent
+    }
+
+    fn source_format(&self) -> &str {
+        CODEARTS_AGENT_SQLITE_SOURCE_FORMAT
+    }
+
+    fn normalize_path(
+        &self,
+        path: &Path,
+        context: &ProviderAdapterContext,
+    ) -> Result<ProviderNormalizationResult> {
+        ensure_regular_provider_transcript_file(path)?;
+        normalize_opencode_sqlite(path, context, &CODEARTS_AGENT_SQLITE_DIALECT)
     }
 }
 
@@ -2929,6 +3032,60 @@ impl ProviderCaptureAdapter for LingmaSqliteAdapter {
     }
 }
 
+impl ProviderCaptureAdapter for TinyCloudJsonlAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::TinyCloud
+    }
+
+    fn source_format(&self) -> &str {
+        TINYCLOUD_SOURCE_FORMAT
+    }
+
+    fn normalize_path(
+        &self,
+        path: &Path,
+        context: &ProviderAdapterContext,
+    ) -> Result<ProviderNormalizationResult> {
+        normalize_tinycloud_history(path, context)
+    }
+}
+
+impl ProviderCaptureAdapter for ZencoderJsonAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Zencoder
+    }
+
+    fn source_format(&self) -> &str {
+        ZENCODER_SOURCE_FORMAT
+    }
+
+    fn normalize_path(
+        &self,
+        path: &Path,
+        context: &ProviderAdapterContext,
+    ) -> Result<ProviderNormalizationResult> {
+        normalize_zencoder_history(path, context)
+    }
+}
+
+impl ProviderCaptureAdapter for CodeStudioSqliteAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::CodeStudio
+    }
+
+    fn source_format(&self) -> &str {
+        CODESTUDIO_SQLITE_SOURCE_FORMAT
+    }
+
+    fn normalize_path(
+        &self,
+        path: &Path,
+        context: &ProviderAdapterContext,
+    ) -> Result<ProviderNormalizationResult> {
+        normalize_codestudio_sqlite(path, context)
+    }
+}
+
 impl ProviderCaptureAdapter for OpenHandsFileEventsAdapter {
     fn provider(&self) -> CaptureProvider {
         CaptureProvider::OpenHands
@@ -2989,6 +3146,29 @@ impl ProviderCaptureAdapter for GeminiCliJsonlAdapter {
             context,
             CaptureProvider::Gemini,
             GEMINI_CLI_SOURCE_FORMAT,
+        )
+    }
+}
+
+impl ProviderCaptureAdapter for TabnineCliJsonlAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Tabnine
+    }
+
+    fn source_format(&self) -> &str {
+        TABNINE_CLI_SOURCE_FORMAT
+    }
+
+    fn normalize_path(
+        &self,
+        path: &Path,
+        context: &ProviderAdapterContext,
+    ) -> Result<ProviderNormalizationResult> {
+        normalize_jsonl_tree(
+            path,
+            context,
+            CaptureProvider::Tabnine,
+            TABNINE_CLI_SOURCE_FORMAT,
         )
     }
 }
@@ -5349,6 +5529,79 @@ pub fn import_trae_history(
     )
 }
 
+pub fn import_tinycloud_history(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: TinyCloudImportOptions,
+) -> Result<ProviderImportSummary> {
+    import_native_jsonl_tree(
+        store,
+        NativeJsonlTreeImport {
+            path: path.as_ref(),
+            machine_id: options.machine_id,
+            source_path: options.source_path,
+            imported_at: options.imported_at,
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+        },
+        TinyCloudJsonlAdapter,
+    )
+}
+
+pub fn import_zencoder_history(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: ZencoderImportOptions,
+) -> Result<ProviderImportSummary> {
+    import_native_jsonl_tree(
+        store,
+        NativeJsonlTreeImport {
+            path: path.as_ref(),
+            machine_id: options.machine_id,
+            source_path: options.source_path,
+            imported_at: options.imported_at,
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+        },
+        ZencoderJsonAdapter,
+    )
+}
+
+pub fn import_codestudio_sqlite(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: CodeStudioSqliteImportOptions,
+) -> Result<ProviderImportSummary> {
+    let path = path.as_ref();
+    let source_path = options
+        .source_path
+        .clone()
+        .unwrap_or_else(|| path.to_path_buf());
+    let normalization = CodeStudioSqliteAdapter.normalize_path(
+        path,
+        &ProviderAdapterContext {
+            machine_id: options.machine_id,
+            source_path: Some(source_path),
+            imported_at: options.imported_at,
+            tool_output_mode: CodexToolOutputMode::Full,
+            event_mode: CodexEventImportMode::Rich,
+            include_notices: true,
+        },
+    )?;
+
+    import_normalized_provider_captures(
+        store,
+        normalization,
+        NormalizedProviderImportOptions {
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+            persist_cursors: true,
+            wrap_transaction: true,
+            fast_event_inserts: true,
+        },
+    )
+}
+
 pub fn import_crush_sqlite(
     path: impl AsRef<Path>,
     store: &mut Store,
@@ -5647,6 +5900,40 @@ pub fn import_eve_history(
     )
 }
 
+pub fn import_junie_history(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: JunieImportOptions,
+) -> Result<ProviderImportSummary> {
+    let path = path.as_ref();
+    let source_path = options
+        .source_path
+        .clone()
+        .unwrap_or_else(|| path.to_path_buf());
+    let normalization = JunieSessionEventsAdapter.normalize_path(
+        path,
+        &ProviderAdapterContext {
+            machine_id: options.machine_id,
+            source_path: Some(source_path),
+            imported_at: options.imported_at,
+            tool_output_mode: CodexToolOutputMode::Full,
+            event_mode: CodexEventImportMode::Rich,
+            include_notices: true,
+        },
+    )?;
+    import_normalized_provider_captures(
+        store,
+        normalization,
+        NormalizedProviderImportOptions {
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+            persist_cursors: true,
+            wrap_transaction: true,
+            fast_event_inserts: true,
+        },
+    )
+}
+
 pub fn import_firebender_sqlite(
     path: impl AsRef<Path>,
     store: &mut Store,
@@ -5693,6 +5980,41 @@ pub fn import_opencode_sqlite(
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
     let normalization = OpenCodeSqliteAdapter.normalize_path(
+        path,
+        &ProviderAdapterContext {
+            machine_id: options.machine_id,
+            source_path: Some(source_path),
+            imported_at: options.imported_at,
+            tool_output_mode: CodexToolOutputMode::Full,
+            event_mode: CodexEventImportMode::Rich,
+            include_notices: true,
+        },
+    )?;
+
+    import_normalized_provider_captures(
+        store,
+        normalization,
+        NormalizedProviderImportOptions {
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+            persist_cursors: true,
+            wrap_transaction: true,
+            fast_event_inserts: true,
+        },
+    )
+}
+
+pub fn import_codearts_agent_sqlite(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: CodeArtsAgentSqliteImportOptions,
+) -> Result<ProviderImportSummary> {
+    let path = path.as_ref();
+    let source_path = options
+        .source_path
+        .clone()
+        .unwrap_or_else(|| path.to_path_buf());
+    let normalization = CodeArtsAgentSqliteAdapter.normalize_path(
         path,
         &ProviderAdapterContext {
             machine_id: options.machine_id,
@@ -6165,6 +6487,25 @@ pub fn import_gemini_cli_history(
             allow_partial_failures: options.allow_partial_failures,
         },
         GeminiCliJsonlAdapter,
+    )
+}
+
+pub fn import_tabnine_cli_history(
+    path: impl AsRef<Path>,
+    store: &mut Store,
+    options: TabnineCliImportOptions,
+) -> Result<ProviderImportSummary> {
+    import_native_jsonl_tree(
+        store,
+        NativeJsonlTreeImport {
+            path: path.as_ref(),
+            machine_id: options.machine_id,
+            source_path: options.source_path,
+            imported_at: options.imported_at,
+            history_record_id: options.history_record_id,
+            allow_partial_failures: options.allow_partial_failures,
+        },
+        TabnineCliJsonlAdapter,
     )
 }
 
@@ -6760,8 +7101,10 @@ const AMP_THREADS_EXPORT_SOURCE_FORMAT: &str = "amp_threads_export_json";
 const AUGGIE_SESSION_JSON_SOURCE_FORMAT: &str = "auggie_session_json";
 const DEVIN_ATIF_SOURCE_FORMAT: &str = "devin_atif_json";
 const EVE_WORKFLOW_DATA_SOURCE_FORMAT: &str = "eve_workflow_data_streams";
+const JUNIE_SESSION_EVENTS_SOURCE_FORMAT: &str = "junie_session_events_jsonl_tree";
 const FIREBENDER_SQLITE_SOURCE_FORMAT: &str = "firebender_chat_history_sqlite";
 const OPENCODE_SQLITE_SOURCE_FORMAT: &str = "opencode_sqlite";
+const CODEARTS_AGENT_SQLITE_SOURCE_FORMAT: &str = "codearts_agent_kernel_sqlite";
 const KILO_SQLITE_SOURCE_FORMAT: &str = "kilo_sqlite";
 const KIRO_SQLITE_SOURCE_FORMAT: &str = "kiro_cli_sqlite";
 const CRUSH_SQLITE_SOURCE_FORMAT: &str = "crush_sqlite";
@@ -6777,8 +7120,12 @@ const DEXTO_SQLITE_SOURCE_FORMAT: &str = "dexto_sqlite";
 const POCHI_LIVESTORE_SQLITE_SOURCE_FORMAT: &str = "pochi_livestore_state_sqlite";
 const WARP_SQLITE_SOURCE_FORMAT: &str = "warp_sqlite";
 const LINGMA_SQLITE_SOURCE_FORMAT: &str = "lingma_sqlite";
+const TINYCLOUD_SOURCE_FORMAT: &str = "tinycloud_session_jsonl_tree";
+const ZENCODER_SOURCE_FORMAT: &str = "zencoder_chat_sessions_json_tree";
+const CODESTUDIO_SQLITE_SOURCE_FORMAT: &str = "codestudio_session_store_sqlite";
 const ANTIGRAVITY_CLI_SOURCE_FORMAT: &str = "antigravity_cli_transcript_jsonl_tree";
 const GEMINI_CLI_SOURCE_FORMAT: &str = "gemini_cli_chat_recording_jsonl";
+const TABNINE_CLI_SOURCE_FORMAT: &str = "tabnine_cli_chat_recording_jsonl";
 const CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT: &str = "cursor_agent_transcript_jsonl";
 const WINDSURF_CASCADE_HOOK_TRANSCRIPT_SOURCE_FORMAT: &str =
     "windsurf_cascade_hook_transcript_jsonl";
@@ -6831,6 +7178,16 @@ const OPENCODE_SQLITE_DIALECT: OpenCodeSqliteDialect = OpenCodeSqliteDialect {
     session_message_seq_field: "OpenCode session_message seq",
     session_message_time_created_field: "OpenCode session_message time_created",
     event_time_created_field: "OpenCode event time.created",
+};
+
+const CODEARTS_AGENT_SQLITE_DIALECT: OpenCodeSqliteDialect = OpenCodeSqliteDialect {
+    provider: CaptureProvider::CodeArtsAgent,
+    display_name: "CodeArts Agent",
+    source_format: CODEARTS_AGENT_SQLITE_SOURCE_FORMAT,
+    session_time_created_field: "CodeArts Agent session time_created",
+    session_message_seq_field: "CodeArts Agent session_message seq",
+    session_message_time_created_field: "CodeArts Agent session_message time_created",
+    event_time_created_field: "CodeArts Agent event time.created",
 };
 
 const KILO_SQLITE_DIALECT: OpenCodeSqliteDialect = OpenCodeSqliteDialect {
@@ -12995,6 +13352,864 @@ fn eve_event_hash(event_type: &str, data: &Value, row: &EveStreamEventRow) -> St
     )
 }
 
+#[derive(Debug, Clone, Default)]
+struct JunieIndexMeta {
+    session_id: String,
+    created_at: Option<i64>,
+    updated_at: Option<i64>,
+    task_name: Option<String>,
+    project_dir: Option<String>,
+    raw: Value,
+}
+
+#[derive(Debug, Clone)]
+struct JunieSessionPath {
+    events_path: PathBuf,
+    index_meta: JunieIndexMeta,
+}
+
+#[derive(Debug, Clone)]
+struct JunieStepAgg {
+    order: usize,
+    label: Option<String>,
+    command: Option<String>,
+    files: Option<Value>,
+    changes: Vec<Value>,
+    details: Option<String>,
+    status: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct JunieUsage {
+    input_tokens: i64,
+    output_tokens: i64,
+    cache_read_tokens: i64,
+    cache_write_tokens: i64,
+    model: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct JunieAssistantBuffer {
+    open: bool,
+    turn_ts: Option<DateTime<Utc>>,
+    steps: BTreeMap<String, JunieStepAgg>,
+    results: BTreeMap<String, String>,
+    usage: JunieUsage,
+}
+
+fn normalize_junie_session_events(
+    path: &Path,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    let session_paths = junie_session_event_paths(path)?;
+    if session_paths.is_empty() {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "no Junie index.jsonl entries with session events.jsonl files were found",
+        });
+    }
+
+    let mut merged = ProviderNormalizationResult::default();
+    for (session_ordinal, session_path) in session_paths.iter().enumerate() {
+        match normalize_junie_session_events_file(session_path, context, session_ordinal) {
+            Ok(mut result) => {
+                merged.summary.merge(result.summary);
+                merged.captures.append(&mut result.captures);
+                merged.files_touched.append(&mut result.files_touched);
+            }
+            Err(err) => {
+                merged.summary.failed += 1;
+                merged.summary.failures.push(ProviderImportFailure {
+                    line: session_ordinal.saturating_add(1),
+                    error: err.to_string(),
+                });
+            }
+        }
+    }
+    if merged.captures.is_empty() && merged.summary.failed == 0 {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "Junie session events were empty or unsupported",
+        });
+    }
+    Ok(merged)
+}
+
+fn junie_session_event_paths(path: &Path) -> Result<Vec<JunieSessionPath>> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_file() {
+        ensure_regular_provider_transcript_file(path)?;
+        if path.file_name().and_then(|name| name.to_str()) != Some("events.jsonl") {
+            return Ok(Vec::new());
+        }
+        let session_id = junie_session_id_from_events_path(path)?;
+        let index_meta =
+            junie_index_meta_for_events_path(path, &session_id).unwrap_or_else(|| JunieIndexMeta {
+                session_id,
+                ..JunieIndexMeta::default()
+            });
+        return Ok(vec![JunieSessionPath {
+            events_path: path.to_path_buf(),
+            index_meta,
+        }]);
+    }
+    if !metadata.file_type().is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let direct_events = path.join("events.jsonl");
+    if direct_events.is_file() {
+        let session_id = junie_session_id_from_events_path(&direct_events)?;
+        let index_meta = junie_index_meta_for_events_path(&direct_events, &session_id)
+            .unwrap_or_else(|| JunieIndexMeta {
+                session_id,
+                ..JunieIndexMeta::default()
+            });
+        return Ok(vec![JunieSessionPath {
+            events_path: direct_events,
+            index_meta,
+        }]);
+    }
+
+    let index_path = path.join("index.jsonl");
+    if !index_path.is_file() {
+        return Ok(Vec::new());
+    }
+    let metas = junie_read_index(&index_path)?;
+    let mut out = Vec::new();
+    for meta in metas {
+        if !junie_session_id_is_safe(&meta.session_id) {
+            continue;
+        }
+        let events_path = path.join(&meta.session_id).join("events.jsonl");
+        if events_path.is_file() {
+            out.push(JunieSessionPath {
+                events_path,
+                index_meta: meta,
+            });
+        }
+    }
+    Ok(out)
+}
+
+fn junie_index_meta_for_events_path(path: &Path, session_id: &str) -> Option<JunieIndexMeta> {
+    let index_path = path.parent()?.parent()?.join("index.jsonl");
+    junie_read_index(&index_path)
+        .ok()?
+        .into_iter()
+        .find(|meta| meta.session_id == session_id)
+}
+
+fn junie_read_index(path: &Path) -> Result<Vec<JunieIndexMeta>> {
+    ensure_regular_provider_transcript_file(path)?;
+    let file = File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let mut metas = Vec::new();
+    let mut line = Vec::new();
+    while read_provider_jsonl_line(&mut reader, &mut line)? {
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let Ok(value) = serde_json::from_slice::<Value>(&line) else {
+            continue;
+        };
+        let Some(session_id) = value
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .filter(|session_id| junie_session_id_is_safe(session_id))
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        metas.push(JunieIndexMeta {
+            session_id,
+            created_at: junie_timestamp_millis_field(&value, "createdAt"),
+            updated_at: junie_timestamp_millis_field(&value, "updatedAt"),
+            task_name: value
+                .get("taskName")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_owned),
+            project_dir: value
+                .get("projectDir")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_owned),
+            raw: value,
+        });
+    }
+    Ok(metas)
+}
+
+fn junie_timestamp_millis_field(value: &Value, field: &str) -> Option<i64> {
+    let value = value.get(field)?;
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
+        .or_else(|| value.as_f64().map(|value| value.round() as i64))
+}
+
+fn junie_session_id_from_events_path(path: &Path) -> Result<String> {
+    let Some(session_id) = path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+    else {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "Junie events.jsonl path is not inside a session directory",
+        });
+    };
+    if !junie_session_id_is_safe(session_id) {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "Junie session id is not a safe path segment",
+        });
+    }
+    Ok(session_id.to_owned())
+}
+
+fn junie_session_id_is_safe(session_id: &str) -> bool {
+    !session_id.is_empty()
+        && session_id != "."
+        && session_id != ".."
+        && !session_id.contains('/')
+        && !session_id.contains('\\')
+}
+
+fn normalize_junie_session_events_file(
+    session_path: &JunieSessionPath,
+    context: &ProviderAdapterContext,
+    session_ordinal: usize,
+) -> Result<ProviderNormalizationResult> {
+    ensure_regular_provider_transcript_file(&session_path.events_path)?;
+    let provider_session_id = if session_path.index_meta.session_id.is_empty() {
+        junie_session_id_from_events_path(&session_path.events_path)?
+    } else {
+        session_path.index_meta.session_id.clone()
+    };
+    if !junie_session_id_is_safe(&provider_session_id) {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: session_path.events_path.clone(),
+            reason: "Junie session id is not a safe path segment",
+        });
+    }
+
+    let started_at =
+        provider_timestamp_millis(session_path.index_meta.created_at, context.imported_at);
+    let mut ended_at = session_path
+        .index_meta
+        .updated_at
+        .map(|timestamp| provider_timestamp_millis(Some(timestamp), started_at));
+    let raw_source_path = session_path.events_path.display().to_string();
+    let mut cwd = session_path.index_meta.project_dir.clone();
+    let mut title = session_path.index_meta.task_name.clone();
+    let base_line = session_ordinal.saturating_mul(100_000);
+    let mut result = ProviderNormalizationResult::default();
+    let mut buffer = JunieAssistantBuffer::default();
+    let mut provider_event_index = 0u64;
+    let mut last_ts = started_at;
+    let mut saw_supported_event = false;
+    let base_draft = NativeSessionDraft {
+        provider: CaptureProvider::Junie,
+        source_format: JUNIE_SESSION_EVENTS_SOURCE_FORMAT,
+        provider_session_id: provider_session_id.clone(),
+        parent_provider_session_id: None,
+        root_provider_session_id: None,
+        external_agent_id: None,
+        agent_type: AgentType::Primary,
+        role_hint: Some("primary".to_owned()),
+        is_primary: true,
+        started_at,
+        ended_at,
+        cwd: cwd.clone(),
+        fidelity: Fidelity::Imported,
+        raw_source_path: raw_source_path.clone(),
+        trust: ProviderSourceTrust::ProviderNative,
+        source_metadata: json!({
+            "adapter": JUNIE_SESSION_EVENTS_SOURCE_FORMAT,
+            "source_path": raw_source_path.clone(),
+            "storage": "~/.junie/sessions/index.jsonl + session-*/events.jsonl",
+            "upstream_schema_anchor": {
+                "source": "vladar107/claudescope",
+                "connector": "packages/server/src/connectors/junie",
+                "notes": "event-sourced UI render stream with UserPromptEvent and SessionA2uxEvent agentEvent blocks"
+            },
+        }),
+        session_metadata: json!({
+            "source_format": JUNIE_SESSION_EVENTS_SOURCE_FORMAT,
+            "session_id": provider_session_id.clone(),
+            "title": title.clone(),
+            "project_dir": cwd.clone(),
+            "index": provider_capped_json_value(&session_path.index_meta.raw, PROVIDER_MAX_PREVIEW_CHARS),
+            "limitations": [
+                "ctx imports Junie events.jsonl UI stream blocks, not a provider conversational message log",
+                "custom attachment image files are not read by the native importer",
+                "unknown SessionA2uxEvent agentEvent kinds are skipped"
+            ],
+        }),
+    };
+
+    let file = File::open(&session_path.events_path)?;
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+    let mut line_number = 0usize;
+    while read_provider_jsonl_line(&mut reader, &mut line)? {
+        line_number += 1;
+        let import_line = base_line.saturating_add(line_number);
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let value: Value = match serde_json::from_slice(&line) {
+            Ok(value) => value,
+            Err(err) => {
+                push_provider_import_failure(
+                    &mut result.summary,
+                    import_line,
+                    format!("malformed Junie events JSONL: {err}"),
+                );
+                continue;
+            }
+        };
+        let kind = value.get("kind").and_then(Value::as_str).unwrap_or("");
+        if kind == "UserPromptEvent" {
+            junie_flush_assistant(
+                &mut buffer,
+                &base_draft,
+                context,
+                &mut result,
+                import_line,
+                &mut provider_event_index,
+            );
+            let prompt = value.get("prompt").and_then(Value::as_str).unwrap_or("");
+            if !prompt.trim().is_empty() {
+                let event = native_event(NativeEventDraft {
+                    provider: CaptureProvider::Junie,
+                    source_format: JUNIE_SESSION_EVENTS_SOURCE_FORMAT,
+                    provider_session_id: provider_session_id.clone(),
+                    provider_event_index,
+                    provider_event_hash: Some(format!("line:{line_number}:user")),
+                    cursor: format!(
+                        "{}:line:{line_number}:event:{provider_event_index}",
+                        session_path.events_path.display()
+                    ),
+                    event_type: EventType::Message,
+                    role: Some(EventRole::User),
+                    occurred_at: last_ts,
+                    text: prompt.to_owned(),
+                    body: json!({
+                        "kind": kind,
+                        "prompt": prompt,
+                    }),
+                    metadata: json!({
+                        "source": "junie_user_prompt",
+                        "source_format": JUNIE_SESSION_EVENTS_SOURCE_FORMAT,
+                    }),
+                });
+                provider_event_index = provider_event_index.saturating_add(1);
+                result.captures.push((
+                    import_line,
+                    native_provider_capture(base_draft.clone(), context, Some(event)),
+                ));
+                saw_supported_event = true;
+            }
+            continue;
+        }
+        if kind != "SessionA2uxEvent" {
+            continue;
+        }
+        if let Some(timestamp) = junie_timestamp_millis_field(&value, "timestampMs")
+            .and_then(DateTime::<Utc>::from_timestamp_millis)
+        {
+            last_ts = timestamp;
+            ended_at = Some(timestamp);
+        }
+        let agent_event = value
+            .get("event")
+            .and_then(|event| event.get("agentEvent"))
+            .unwrap_or(&Value::Null);
+        let agent_kind = agent_event
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        match agent_kind {
+            "LlmResponseMetadataEvent" => {
+                junie_ensure_assistant(&mut buffer, last_ts);
+                junie_merge_usage(&mut buffer.usage, agent_event);
+                saw_supported_event = true;
+            }
+            "AgentTaskNameUpdatedEvent" => {
+                if let Some(name) = agent_event.get("name").and_then(Value::as_str) {
+                    if !name.trim().is_empty() {
+                        title = Some(name.to_owned());
+                    }
+                }
+            }
+            "CurrentDirectoryUpdatedEvent" => {
+                if cwd.is_none() {
+                    cwd = agent_event
+                        .get("currentDirectory")
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.trim().is_empty())
+                        .map(str::to_owned);
+                }
+            }
+            "ResultBlockUpdatedEvent" => {
+                junie_ensure_assistant(&mut buffer, last_ts);
+                if let Some(text) = agent_event.get("result").and_then(Value::as_str) {
+                    if !text.trim().is_empty() {
+                        let step_id = agent_event
+                            .get("stepId")
+                            .and_then(Value::as_str)
+                            .filter(|value| !value.is_empty())
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| format!("result-{line_number}"));
+                        buffer.results.insert(step_id, text.to_owned());
+                        saw_supported_event = true;
+                    }
+                }
+            }
+            "ToolBlockUpdatedEvent"
+            | "TerminalBlockUpdatedEvent"
+            | "ViewFilesBlockUpdatedEvent"
+            | "FileChangesBlockUpdatedEvent" => {
+                junie_merge_step(&mut buffer, agent_event, last_ts);
+                saw_supported_event = true;
+            }
+            _ => {}
+        }
+    }
+    junie_flush_assistant(
+        &mut buffer,
+        &base_draft,
+        context,
+        &mut result,
+        base_line.saturating_add(line_number.saturating_add(1)),
+        &mut provider_event_index,
+    );
+
+    if result.captures.is_empty() && !saw_supported_event {
+        push_provider_import_failure(
+            &mut result.summary,
+            base_line,
+            "Junie events.jsonl contained no supported UserPromptEvent or SessionA2uxEvent blocks"
+                .to_owned(),
+        );
+    }
+
+    if let Some(ended_at) = ended_at {
+        for (_, capture) in &mut result.captures {
+            capture.session.ended_at = Some(ended_at);
+            capture.session.cwd = cwd.clone();
+            capture.session.metadata["title"] = json!(title.clone());
+            capture.session.metadata["project_dir"] = json!(cwd.clone());
+        }
+    }
+    Ok(result)
+}
+
+fn junie_ensure_assistant(buffer: &mut JunieAssistantBuffer, occurred_at: DateTime<Utc>) {
+    if !buffer.open {
+        buffer.open = true;
+        buffer.turn_ts = Some(occurred_at);
+    }
+}
+
+fn junie_merge_usage(usage: &mut JunieUsage, agent_event: &Value) {
+    let Some(items) = agent_event.get("modelUsage").and_then(Value::as_array) else {
+        return;
+    };
+    for item in items {
+        usage.input_tokens = usage
+            .input_tokens
+            .saturating_add(junie_i64_field(item, "inputTokens"));
+        usage.output_tokens = usage
+            .output_tokens
+            .saturating_add(junie_i64_field(item, "outputTokens"));
+        usage.cache_read_tokens = usage
+            .cache_read_tokens
+            .saturating_add(junie_i64_field(item, "cacheInputTokens"));
+        usage.cache_write_tokens = usage
+            .cache_write_tokens
+            .saturating_add(junie_i64_field(item, "cacheCreateTokens"));
+        if let Some(model) = item.get("model").and_then(Value::as_str) {
+            if !model.trim().is_empty() {
+                usage.model = Some(model.to_owned());
+            }
+        }
+    }
+}
+
+fn junie_i64_field(value: &Value, field: &str) -> i64 {
+    value
+        .get(field)
+        .and_then(|value| {
+            value
+                .as_i64()
+                .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
+        })
+        .unwrap_or(0)
+}
+
+fn junie_merge_step(
+    buffer: &mut JunieAssistantBuffer,
+    agent_event: &Value,
+    occurred_at: DateTime<Utc>,
+) {
+    let Some(step_id) = agent_event
+        .get("stepId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+    junie_ensure_assistant(buffer, occurred_at);
+    let next_order = buffer.steps.len();
+    let step = buffer
+        .steps
+        .entry(step_id.to_owned())
+        .or_insert_with(|| JunieStepAgg {
+            order: next_order,
+            label: None,
+            command: None,
+            files: None,
+            changes: Vec::new(),
+            details: None,
+            status: None,
+        });
+    if let Some(text) = agent_event.get("text").and_then(Value::as_str) {
+        if !text.trim().is_empty() {
+            step.label = Some(text.to_owned());
+        }
+    }
+    if let Some(command) = agent_event.get("command").and_then(Value::as_str) {
+        if !command.trim().is_empty() {
+            step.command = Some(command.to_owned());
+        }
+    }
+    if let Some(files) = agent_event.get("files").filter(|value| value.is_array()) {
+        step.files = Some(files.clone());
+    }
+    if let Some(changes) = agent_event.get("changes").and_then(Value::as_array) {
+        step.changes = changes.clone();
+    }
+    if let Some(details) = agent_event.get("details").and_then(Value::as_str) {
+        if !details.trim().is_empty() {
+            step.details = Some(details.to_owned());
+        }
+    }
+    if let Some(status) = agent_event.get("status").and_then(Value::as_str) {
+        if !status.trim().is_empty() {
+            step.status = Some(status.to_owned());
+        }
+    }
+}
+
+fn junie_flush_assistant(
+    buffer: &mut JunieAssistantBuffer,
+    base_draft: &NativeSessionDraft,
+    context: &ProviderAdapterContext,
+    result: &mut ProviderNormalizationResult,
+    line_number: usize,
+    provider_event_index: &mut u64,
+) {
+    if !buffer.open {
+        return;
+    }
+    let occurred_at = buffer.turn_ts.unwrap_or(base_draft.started_at);
+    let mut steps = buffer.steps.values().cloned().collect::<Vec<_>>();
+    steps.sort_by_key(|step| step.order);
+    for step in &steps {
+        if !step.changes.is_empty() {
+            junie_emit_file_changes(
+                base_draft,
+                context,
+                result,
+                line_number,
+                provider_event_index,
+                occurred_at,
+                step,
+            );
+        } else {
+            junie_emit_step_events(
+                base_draft,
+                context,
+                result,
+                line_number,
+                provider_event_index,
+                occurred_at,
+                step,
+            );
+        }
+    }
+    let final_text = buffer
+        .results
+        .values()
+        .filter(|value| !value.trim().is_empty())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if !final_text.trim().is_empty() {
+        let index = *provider_event_index;
+        let event = native_event(NativeEventDraft {
+            provider: CaptureProvider::Junie,
+            source_format: JUNIE_SESSION_EVENTS_SOURCE_FORMAT,
+            provider_session_id: base_draft.provider_session_id.clone(),
+            provider_event_index: index,
+            provider_event_hash: Some(format!("assistant-result:{index}")),
+            cursor: format!(
+                "{}:line:{line_number}:event:{index}",
+                base_draft.raw_source_path
+            ),
+            event_type: EventType::Message,
+            role: Some(EventRole::Assistant),
+            occurred_at,
+            text: final_text,
+            body: json!({
+                "result_blocks": buffer.results.clone(),
+                "model": buffer.usage.model.clone(),
+                "usage": {
+                    "input_tokens": buffer.usage.input_tokens,
+                    "output_tokens": buffer.usage.output_tokens,
+                    "cache_read_tokens": buffer.usage.cache_read_tokens,
+                    "cache_write_tokens": buffer.usage.cache_write_tokens,
+                },
+            }),
+            metadata: json!({
+                "source": "junie_result_blocks",
+                "source_format": JUNIE_SESSION_EVENTS_SOURCE_FORMAT,
+                "model": buffer.usage.model.clone(),
+                "usage": {
+                    "input_tokens": buffer.usage.input_tokens,
+                    "output_tokens": buffer.usage.output_tokens,
+                    "cache_read_tokens": buffer.usage.cache_read_tokens,
+                    "cache_write_tokens": buffer.usage.cache_write_tokens,
+                },
+            }),
+        });
+        *provider_event_index = (*provider_event_index).saturating_add(1);
+        result.captures.push((
+            line_number,
+            native_provider_capture(base_draft.clone(), context, Some(event)),
+        ));
+    }
+    *buffer = JunieAssistantBuffer::default();
+}
+
+fn junie_emit_step_events(
+    base_draft: &NativeSessionDraft,
+    context: &ProviderAdapterContext,
+    result: &mut ProviderNormalizationResult,
+    line_number: usize,
+    provider_event_index: &mut u64,
+    occurred_at: DateTime<Utc>,
+    step: &JunieStepAgg,
+) {
+    let (tool_name, text, body) = if let Some(command) = &step.command {
+        (
+            "Bash",
+            format!("Bash: {command}"),
+            json!({
+                "tool_name": "Bash",
+                "command": command,
+                "label": step.label,
+                "status": step.status,
+            }),
+        )
+    } else if let Some(files) = &step.files {
+        (
+            "view",
+            step.label
+                .clone()
+                .unwrap_or_else(|| "View files".to_owned()),
+            json!({
+                "tool_name": "view",
+                "label": step.label,
+                "files": files,
+                "status": step.status,
+            }),
+        )
+    } else {
+        (
+            "tool",
+            step.label
+                .clone()
+                .unwrap_or_else(|| "Junie tool step".to_owned()),
+            json!({
+                "tool_name": "tool",
+                "label": step.label,
+                "status": step.status,
+            }),
+        )
+    };
+    let tool_index = *provider_event_index;
+    let tool_event = native_event(NativeEventDraft {
+        provider: CaptureProvider::Junie,
+        source_format: JUNIE_SESSION_EVENTS_SOURCE_FORMAT,
+        provider_session_id: base_draft.provider_session_id.clone(),
+        provider_event_index: tool_index,
+        provider_event_hash: Some(format!("step:{}:tool", step.order)),
+        cursor: format!(
+            "{}:line:{line_number}:event:{tool_index}",
+            base_draft.raw_source_path
+        ),
+        event_type: EventType::ToolCall,
+        role: Some(EventRole::Assistant),
+        occurred_at,
+        text,
+        body: body.clone(),
+        metadata: json!({
+            "source": "junie_step",
+            "source_format": JUNIE_SESSION_EVENTS_SOURCE_FORMAT,
+            "tool_name": tool_name,
+        }),
+    });
+    *provider_event_index = (*provider_event_index).saturating_add(1);
+    result.captures.push((
+        line_number,
+        native_provider_capture(base_draft.clone(), context, Some(tool_event)),
+    ));
+
+    if let Some(details) = &step.details {
+        if !details.trim().is_empty() {
+            let output_index = *provider_event_index;
+            let output_event = native_event(NativeEventDraft {
+                provider: CaptureProvider::Junie,
+                source_format: JUNIE_SESSION_EVENTS_SOURCE_FORMAT,
+                provider_session_id: base_draft.provider_session_id.clone(),
+                provider_event_index: output_index,
+                provider_event_hash: Some(format!("step:{}:output", step.order)),
+                cursor: format!(
+                    "{}:line:{line_number}:event:{output_index}",
+                    base_draft.raw_source_path
+                ),
+                event_type: if step.command.is_some() {
+                    EventType::CommandOutput
+                } else {
+                    EventType::ToolOutput
+                },
+                role: Some(EventRole::Tool),
+                occurred_at,
+                text: details.clone(),
+                body: json!({
+                    "tool_name": tool_name,
+                    "details": details,
+                    "status": step.status,
+                }),
+                metadata: json!({
+                    "source": "junie_step_details",
+                    "source_format": JUNIE_SESSION_EVENTS_SOURCE_FORMAT,
+                    "tool_name": tool_name,
+                }),
+            });
+            *provider_event_index = (*provider_event_index).saturating_add(1);
+            result.captures.push((
+                line_number,
+                native_provider_capture(base_draft.clone(), context, Some(output_event)),
+            ));
+        }
+    }
+}
+
+fn junie_emit_file_changes(
+    base_draft: &NativeSessionDraft,
+    context: &ProviderAdapterContext,
+    result: &mut ProviderNormalizationResult,
+    line_number: usize,
+    provider_event_index: &mut u64,
+    occurred_at: DateTime<Utc>,
+    step: &JunieStepAgg,
+) {
+    for (change_index, change) in step.changes.iter().enumerate() {
+        let before_path = change.get("beforeRelativePath").and_then(Value::as_str);
+        let after_path = change.get("afterRelativePath").and_then(Value::as_str);
+        let Some(path) = after_path.or(before_path) else {
+            continue;
+        };
+        if path.trim().is_empty() {
+            continue;
+        }
+        let change_kind = match (before_path, after_path) {
+            (None, Some(_)) => FileChangeKind::Created,
+            (Some(_), None) => FileChangeKind::Deleted,
+            (Some(before), Some(after)) if before != after => FileChangeKind::Renamed,
+            _ => FileChangeKind::Modified,
+        };
+        let event_index = *provider_event_index;
+        let event = native_event(NativeEventDraft {
+            provider: CaptureProvider::Junie,
+            source_format: JUNIE_SESSION_EVENTS_SOURCE_FORMAT,
+            provider_session_id: base_draft.provider_session_id.clone(),
+            provider_event_index: event_index,
+            provider_event_hash: Some(format!("step:{}:change:{change_index}", step.order)),
+            cursor: format!(
+                "{}:line:{line_number}:event:{event_index}",
+                base_draft.raw_source_path
+            ),
+            event_type: EventType::ToolCall,
+            role: Some(EventRole::Assistant),
+            occurred_at,
+            text: format!("Edit: {path}"),
+            body: json!({
+                "tool_name": "Edit",
+                "file_path": path,
+                "old_string": junie_file_content_text(change.get("beforeContent")),
+                "new_string": junie_file_content_text(change.get("afterContent")),
+                "before_relative_path": before_path,
+                "after_relative_path": after_path,
+                "change_kind": change_kind.as_str(),
+                "status": step.status,
+            }),
+            metadata: json!({
+                "source": "junie_file_change",
+                "source_format": JUNIE_SESSION_EVENTS_SOURCE_FORMAT,
+                "tool_name": "Edit",
+                "change_kind": change_kind.as_str(),
+            }),
+        });
+        *provider_event_index = (*provider_event_index).saturating_add(1);
+        result.captures.push((
+            line_number,
+            native_provider_capture(base_draft.clone(), context, Some(event)),
+        ));
+        result.files_touched.push((
+            line_number,
+            ProviderFileTouchedEnvelope {
+                provider: CaptureProvider::Junie,
+                provider_session_id: base_draft.provider_session_id.clone(),
+                provider_touch_index: event_index
+                    .saturating_mul(1_000)
+                    .saturating_add(change_index as u64),
+                provider_event_index: Some(event_index),
+                raw_source_path: Some(base_draft.raw_source_path.clone()),
+                path: path.to_owned(),
+                change_kind: Some(change_kind),
+                old_path: before_path
+                    .filter(|before| after_path.is_some_and(|after| after != *before))
+                    .map(str::to_owned),
+                line_count_delta: None,
+                confidence: Confidence::Explicit,
+                occurred_at,
+                source_format: JUNIE_SESSION_EVENTS_SOURCE_FORMAT.to_owned(),
+                metadata: json!({
+                    "source": "junie_file_change",
+                    "step_order": step.order,
+                    "change_index": change_index,
+                }),
+            },
+        ));
+    }
+}
+
+fn junie_file_content_text(value: Option<&Value>) -> Option<String> {
+    let value = value?;
+    value
+        .get("text")
+        .and_then(Value::as_str)
+        .or_else(|| value.as_str())
+        .map(str::to_owned)
+}
+
 fn normalize_codebuddy_history(
     path: &Path,
     context: &ProviderAdapterContext,
@@ -13604,8 +14819,10 @@ fn codebuddy_event(
 }
 
 const TRAE_STATE_VSCDB_SOURCE_FORMAT: &str = "trae_state_vscdb";
+const TRAE_CN_INPUT_HISTORY_KEY: &str = "icube-ai-agent-storage-input-history";
 const TRAE_CHAT_KEYS: &[&str] = &[
     "memento/icube-ai-agent-storage",
+    TRAE_CN_INPUT_HISTORY_KEY,
     "chat.ChatSessionStore.index",
     "ChatStore",
     "memento/icube-ai-chat-storage-7467774676505887760",
@@ -13822,12 +15039,49 @@ fn trae_workspace_folder(path: &Path) -> Option<String> {
     )
     .ok()?;
     task_json_string_field(&value, &["folder", "workspace", "path"])
+        .map(|folder| trae_workspace_folder_label(&folder))
+}
+
+fn trae_workspace_folder_label(folder: &str) -> String {
+    let Some(path) = folder.strip_prefix("file://") else {
+        return folder.to_owned();
+    };
+    percent_decode_uri_path(path)
+}
+
+fn percent_decode_uri_path(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let hi = (bytes[index + 1] as char).to_digit(16);
+            let lo = (bytes[index + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push(((hi << 4) | lo) as u8);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| value.to_owned())
 }
 
 fn trae_session_entries(value: &Value, key: &str) -> Vec<Value> {
     if key == "memento/icube-ai-agent-storage" {
         if let Some(items) = value.get("list").and_then(Value::as_array) {
             return items.clone();
+        }
+    }
+    if key == TRAE_CN_INPUT_HISTORY_KEY {
+        if let Some(items) = value.as_array() {
+            return vec![json!({
+                "id": "trae-cn-input-history",
+                "title": "Trae CN input history",
+                "messages": items,
+            })];
         }
     }
     if key == "ChatStore" {
@@ -13928,11 +15182,15 @@ fn trae_events_from_messages(
             &["createdAt", "created_at", "timestamp", "time", "date"],
         )
         .unwrap_or(fallback_time);
+        let mut role = task_json_string_field(message, &["role", "type", "sender"]);
+        if chat_key == TRAE_CN_INPUT_HISTORY_KEY && role.is_none() {
+            role = Some("user".to_owned());
+        }
         events.push(TraeEventInput {
             line_number: line_base.saturating_add(message_index).saturating_add(1),
             provider_event_index: message_index as u64,
             native_message_id,
-            role: task_json_string_field(message, &["role", "type", "sender"]),
+            role,
             occurred_at,
             text,
             raw_message: message.clone(),
@@ -13942,7 +15200,16 @@ fn trae_events_from_messages(
 }
 
 fn trae_message_text(message: &Value) -> Option<String> {
-    for field in ["content", "text", "message", "summary", "answer", "query"] {
+    for field in [
+        "content",
+        "inputText",
+        "text",
+        "message",
+        "summary",
+        "answer",
+        "query",
+        "parsedQuery",
+    ] {
         if let Some(text) = message.get(field).and_then(trae_content_text) {
             return Some(text);
         }
@@ -14042,8 +15309,8 @@ fn trae_capture(input: TraeCaptureInput<'_>) -> ProviderCaptureEnvelope {
                 "adapter": TRAE_STATE_VSCDB_SOURCE_FORMAT,
                 "chat_key": input.chat_key,
                 "native_workspace_id": input.workspace_id,
-                "schema_proof": "yuanjing001/trae-chats-exporter@85e2d111 src/extension.ts and src/utils.ts read Trae User/workspaceStorage/*/state.vscdb ItemTable keys",
-                "preview_import": true,
+                "schema_proof": "yuanjing001/trae-chats-exporter src/extension.ts and src/utils.ts read Trae User/workspaceStorage/*/state.vscdb ItemTable keys",
+                "native_auto_scope": "Trae and Trae CN User/workspaceStorage roots with known ItemTable chat keys",
             }),
         },
         session: ProviderSessionEnvelope {
@@ -14075,9 +15342,9 @@ fn trae_capture(input: TraeCaptureInput<'_>) -> ProviderCaptureEnvelope {
                 "chat_key": input.chat_key,
                 "session": provider_capped_json(input.session, PROVIDER_MAX_PREVIEW_CHARS),
                 "limitations": [
-                    "Preview importer based on public exporter source and synthetic fixture, not a real local Trae run fixture",
-                    "Only known Trae ItemTable chat keys and direct message arrays are imported",
-                    "Trae CN is not aliased to this importer"
+                    "Importer is based on public exporter source and synthetic fixture; no real local Trae run fixture is bundled",
+                    "Only known Trae and Trae CN ItemTable chat keys and direct message arrays are imported",
+                    "Trae CN input-history rows are usually user prompts only and may not include assistant replies"
                 ],
             }),
         },
@@ -14123,6 +15390,1119 @@ fn trae_event(
             "model": task_json_string_field(&event.raw_message, &["model", "modelType", "model_id"]),
         }),
     }
+}
+
+#[derive(Debug, Clone)]
+struct TinyCloudSessionSource {
+    path: PathBuf,
+    provider_session_id: String,
+    project_key: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct TinyCloudRow {
+    line_number: usize,
+    value: Value,
+    occurred_at: DateTime<Utc>,
+    row_id: String,
+    row_type: String,
+    event_type: EventType,
+    role: EventRole,
+    text: String,
+}
+
+fn normalize_tinycloud_history(
+    path: &Path,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    let mut sources = Vec::new();
+    collect_tinycloud_session_sources(path, &mut sources)?;
+    sources.sort_by(|left, right| left.path.cmp(&right.path));
+    sources.dedup_by(|left, right| left.path == right.path);
+    if sources.is_empty() {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: native_jsonl_missing_reason(CaptureProvider::TinyCloud),
+        });
+    }
+
+    let mut merged = ProviderNormalizationResult::default();
+    for source in sources {
+        let mut result = normalize_tinycloud_session_source(&source, context)?;
+        merged.summary.merge(result.summary);
+        merged.captures.append(&mut result.captures);
+        merged.files_touched.append(&mut result.files_touched);
+    }
+    Ok(merged)
+}
+
+fn collect_tinycloud_session_sources(
+    root: &Path,
+    sessions: &mut Vec<TinyCloudSessionSource>,
+) -> Result<()> {
+    let metadata = fs::symlink_metadata(root)?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: root.to_path_buf(),
+            reason: "symlinked provider transcript roots are rejected",
+        });
+    }
+    ensure_provider_path_parents_are_not_symlinks(root)?;
+
+    if file_type.is_file() {
+        if root.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
+            ensure_regular_provider_transcript_file(root)?;
+            sessions.push(tinycloud_session_source(root)?);
+        }
+        return Ok(());
+    }
+    if !file_type.is_dir() {
+        return Ok(());
+    }
+
+    let mut paths = Vec::new();
+    collect_jsonl_paths(root, &mut paths)?;
+    for path in paths
+        .into_iter()
+        .filter(|path| tinycloud_path_is_session(path))
+    {
+        sessions.push(tinycloud_session_source(&path)?);
+    }
+    Ok(())
+}
+
+fn tinycloud_path_is_session(path: &Path) -> bool {
+    path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
+        && path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            == Some("sessions")
+}
+
+fn tinycloud_session_source(path: &Path) -> Result<TinyCloudSessionSource> {
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.trim().is_empty())
+        .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "TinyCloud session JSONL file is missing a session id",
+        })?;
+    let project_key = tinycloud_project_key(path);
+    let provider_session_id = project_key
+        .as_ref()
+        .map(|project| format!("{project}/{stem}"))
+        .unwrap_or_else(|| {
+            if path
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                == Some("sessions")
+            {
+                format!("legacy/{stem}")
+            } else {
+                stem.to_owned()
+            }
+        });
+    Ok(TinyCloudSessionSource {
+        path: path.to_path_buf(),
+        provider_session_id,
+        project_key,
+    })
+}
+
+fn tinycloud_project_key(path: &Path) -> Option<String> {
+    let parent = path.parent()?;
+    if parent.file_name().and_then(|name| name.to_str()) != Some("sessions") {
+        return None;
+    }
+    let project = parent.parent()?;
+    let projects = project.parent()?;
+    if projects.file_name().and_then(|name| name.to_str()) != Some("projects") {
+        return None;
+    }
+    project
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .map(str::to_owned)
+}
+
+fn normalize_tinycloud_session_source(
+    source: &TinyCloudSessionSource,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    ensure_regular_provider_transcript_file(&source.path)?;
+    let file = File::open(&source.path)?;
+    let mut reader = BufReader::new(file);
+    let mut result = ProviderNormalizationResult::default();
+    let mut rows = Vec::new();
+    let mut line = Vec::new();
+    let mut line_number = 0usize;
+
+    while read_provider_jsonl_line(&mut reader, &mut line)? {
+        line_number += 1;
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let value: Value = match serde_json::from_slice::<Value>(&line) {
+            Ok(value) if value.is_object() => value,
+            Ok(_) => {
+                push_provider_import_failure(
+                    &mut result.summary,
+                    line_number,
+                    "TinyCloud JSONL row must contain a JSON object".to_owned(),
+                );
+                continue;
+            }
+            Err(err) => {
+                push_provider_import_failure(
+                    &mut result.summary,
+                    line_number,
+                    format!("malformed JSONL: {err}"),
+                );
+                continue;
+            }
+        };
+        let occurred_at =
+            tinycloud_timestamp(value.get("timestamp")).unwrap_or(context.imported_at);
+        match tinycloud_row(value, line_number, occurred_at) {
+            Some(row) => rows.push(row),
+            None => push_provider_import_failure(
+                &mut result.summary,
+                line_number,
+                "TinyCloud JSONL row missing message content or compaction summary".to_owned(),
+            ),
+        }
+    }
+
+    if rows.is_empty() {
+        if result.summary.failed == 0 {
+            push_provider_import_failure(
+                &mut result.summary,
+                0,
+                "TinyCloud session JSONL had no importable rows".to_owned(),
+            );
+        }
+        return Ok(result);
+    }
+
+    let started_at = rows
+        .first()
+        .map(|row| row.occurred_at)
+        .unwrap_or(context.imported_at);
+    let ended_at = rows.last().map(|row| row.occurred_at);
+    let cwd = rows.iter().find_map(|row| {
+        task_json_string_field(
+            &row.value,
+            &["cwd", "projectPath", "workspacePath", "workspace_path"],
+        )
+    });
+    let raw_source_path = source.path.display().to_string();
+
+    for row in rows {
+        let event = tinycloud_event(&source.provider_session_id, &source.path, &row);
+        result
+            .files_touched
+            .extend(provider_file_touches_from_raw_value(
+                CaptureProvider::TinyCloud,
+                &source.provider_session_id,
+                TINYCLOUD_SOURCE_FORMAT,
+                Some(raw_source_path.as_str()),
+                &row.value,
+                &event,
+                row.line_number,
+            ));
+        result.captures.push((
+            row.line_number,
+            native_provider_capture(
+                NativeSessionDraft {
+                    provider: CaptureProvider::TinyCloud,
+                    source_format: TINYCLOUD_SOURCE_FORMAT,
+                    provider_session_id: source.provider_session_id.clone(),
+                    parent_provider_session_id: None,
+                    root_provider_session_id: None,
+                    external_agent_id: None,
+                    agent_type: AgentType::Primary,
+                    role_hint: Some("primary".to_owned()),
+                    is_primary: true,
+                    started_at,
+                    ended_at,
+                    cwd: cwd.clone(),
+                    fidelity: Fidelity::Imported,
+                    raw_source_path: raw_source_path.clone(),
+                    trust: ProviderSourceTrust::ProviderNative,
+                    source_metadata: json!({
+                        "adapter": TINYCLOUD_SOURCE_FORMAT,
+                        "source_path": raw_source_path,
+                        "storage": "~/.tinycloud/projects/*/sessions/*.jsonl",
+                        "legacy_storage": "~/.tinycloud/sessions/*.jsonl",
+                        "package": "@cloudglue/tinycloud@0.3.8",
+                        "git_head": "fb0b313286bc83d4c48f66831e8acb7a6b51847a",
+                    }),
+                    session_metadata: json!({
+                        "source_format": TINYCLOUD_SOURCE_FORMAT,
+                        "provider": CaptureProvider::TinyCloud.as_str(),
+                        "session_id": source.provider_session_id,
+                        "project_key": source.project_key,
+                    }),
+                },
+                context,
+                Some(event),
+            ),
+        ));
+    }
+
+    Ok(result)
+}
+
+fn tinycloud_row(
+    value: Value,
+    line_number: usize,
+    occurred_at: DateTime<Utc>,
+) -> Option<TinyCloudRow> {
+    let row_type = value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("message")
+        .to_owned();
+    let row_id = task_json_string_field(&value, &["id", "messageId", "message_id"])
+        .unwrap_or_else(|| format!("line-{line_number}"));
+    let is_compaction = matches!(row_type.as_str(), "compaction" | "compact" | "summary");
+    let text = if is_compaction {
+        tinycloud_value_text(value.get("summary"))
+    } else {
+        value
+            .get("message")
+            .and_then(tinycloud_message_text)
+            .or_else(|| tinycloud_value_text(value.get("content")))
+            .or_else(|| tinycloud_value_text(value.get("text")))
+            .or_else(|| tinycloud_value_text(value.get("prompt")))
+            .or_else(|| tinycloud_value_text(value.get("summary")))
+    }?;
+    let role = if is_compaction {
+        EventRole::Assistant
+    } else {
+        value
+            .get("message")
+            .and_then(|message| message.get("role"))
+            .or_else(|| value.get("role"))
+            .and_then(Value::as_str)
+            .map(|role| provider_role(Some(role)))
+            .unwrap_or(EventRole::Unknown)
+    };
+    Some(TinyCloudRow {
+        line_number,
+        value,
+        occurred_at,
+        row_id,
+        row_type,
+        event_type: if is_compaction {
+            EventType::Summary
+        } else {
+            EventType::Message
+        },
+        role,
+        text,
+    })
+}
+
+fn tinycloud_message_text(value: &Value) -> Option<String> {
+    tinycloud_value_text(value.get("content"))
+        .or_else(|| tinycloud_value_text(value.get("text")))
+        .or_else(|| tinycloud_value_text(value.get("summary")))
+}
+
+fn tinycloud_value_text(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(provider_value_text)
+        .filter(|text| !text.trim().is_empty())
+}
+
+fn tinycloud_timestamp(value: Option<&Value>) -> Option<DateTime<Utc>> {
+    match value {
+        Some(Value::String(raw)) => parse_rfc3339_utc(raw).or_else(|| {
+            raw.parse::<f64>()
+                .ok()
+                .and_then(provider_timestamp_seconds_to_datetime)
+        }),
+        Some(Value::Number(number)) => number
+            .as_f64()
+            .and_then(provider_timestamp_seconds_to_datetime),
+        _ => None,
+    }
+}
+
+fn tinycloud_event(
+    provider_session_id: &str,
+    path: &Path,
+    row: &TinyCloudRow,
+) -> ProviderEventEnvelope {
+    native_event(NativeEventDraft {
+        provider: CaptureProvider::TinyCloud,
+        source_format: TINYCLOUD_SOURCE_FORMAT,
+        provider_session_id: provider_session_id.to_owned(),
+        provider_event_index: row.line_number.saturating_sub(1) as u64,
+        provider_event_hash: Some(row.row_id.clone()),
+        cursor: format!("{}:line:{}", path.display(), row.line_number),
+        event_type: row.event_type,
+        role: Some(row.role),
+        occurred_at: row.occurred_at,
+        text: row.text.clone(),
+        body: row.value.clone(),
+        metadata: json!({
+            "source": TINYCLOUD_SOURCE_FORMAT,
+            "source_format": TINYCLOUD_SOURCE_FORMAT,
+            "line": row.line_number,
+            "row_id": row.row_id,
+            "row_type": row.row_type,
+            "role": match row.role {
+                EventRole::User => "user",
+                EventRole::Assistant => "assistant",
+                EventRole::System => "system",
+                EventRole::Tool => "tool",
+                EventRole::Unknown => "unknown",
+            },
+        }),
+    })
+}
+
+#[derive(Debug, Clone)]
+struct ZencoderSessionSource {
+    path: PathBuf,
+    provider_session_id: String,
+    index_metadata: Value,
+}
+
+#[derive(Debug, Clone)]
+struct ZencoderEventRow {
+    index: usize,
+    value: Value,
+    occurred_at: DateTime<Utc>,
+    row_id: String,
+    row_type: String,
+    event_type: EventType,
+    role: EventRole,
+    text: String,
+}
+
+fn normalize_zencoder_history(
+    path: &Path,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    let mut sources = Vec::new();
+    collect_zencoder_session_sources(path, &mut sources)?;
+    sources.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then_with(|| left.provider_session_id.cmp(&right.provider_session_id))
+    });
+    sources.dedup_by(|left, right| {
+        left.path == right.path && left.provider_session_id == right.provider_session_id
+    });
+    if sources.is_empty() {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "no Zencoder sessions.json or sessions/*.json files found",
+        });
+    }
+
+    let mut merged = ProviderNormalizationResult::default();
+    for source in sources {
+        let mut result = normalize_zencoder_session_source(&source, context)?;
+        merged.summary.merge(result.summary);
+        merged.captures.append(&mut result.captures);
+        merged.files_touched.append(&mut result.files_touched);
+    }
+    Ok(merged)
+}
+
+fn collect_zencoder_session_sources(
+    root: &Path,
+    sessions: &mut Vec<ZencoderSessionSource>,
+) -> Result<()> {
+    let metadata = fs::symlink_metadata(root)?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: root.to_path_buf(),
+            reason: "symlinked provider transcript roots are rejected",
+        });
+    }
+    ensure_provider_path_parents_are_not_symlinks(root)?;
+
+    if file_type.is_file() {
+        ensure_regular_provider_transcript_file(root)?;
+        if root.file_name().and_then(|name| name.to_str()) == Some("sessions.json") {
+            collect_zencoder_index_sources(root, sessions)?;
+        } else if zencoder_session_file_path(root) {
+            sessions.push(zencoder_session_source(root, Value::Null)?);
+        }
+        return Ok(());
+    }
+    if !file_type.is_dir() {
+        return Ok(());
+    }
+
+    let chat_root = if root.join("sessions.json").is_file() || root.join("sessions").is_dir() {
+        root.to_path_buf()
+    } else if root.join("zencoder-chat").is_dir() {
+        root.join("zencoder-chat")
+    } else {
+        root.to_path_buf()
+    };
+    let index = chat_root.join("sessions.json");
+    if index.is_file() {
+        collect_zencoder_index_sources(&index, sessions)?;
+    }
+    let sessions_dir = chat_root.join("sessions");
+    if sessions_dir.is_dir() {
+        let mut paths = Vec::new();
+        collect_json_paths(&sessions_dir, &mut paths)?;
+        for path in paths
+            .into_iter()
+            .filter(|path| zencoder_session_file_path(path))
+        {
+            sessions.push(zencoder_session_source(&path, Value::Null)?);
+        }
+    }
+    Ok(())
+}
+
+fn collect_zencoder_index_sources(
+    index_path: &Path,
+    sessions: &mut Vec<ZencoderSessionSource>,
+) -> Result<()> {
+    ensure_regular_provider_transcript_file(index_path)?;
+    let value: Value = serde_json::from_reader(BufReader::new(File::open(index_path)?))?;
+    let base = index_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    for (fallback_id, entry) in zencoder_index_entries(&value) {
+        let Some(session_id) = zencoder_session_id(&entry).or(fallback_id) else {
+            continue;
+        };
+        let session_path = zencoder_session_path_from_index_entry(&base, &entry, &session_id);
+        if session_path.is_file() {
+            sessions.push(ZencoderSessionSource {
+                path: session_path,
+                provider_session_id: session_id,
+                index_metadata: entry,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn zencoder_index_entries(value: &Value) -> Vec<(Option<String>, Value)> {
+    if let Some(items) = value.as_array() {
+        return items.iter().cloned().map(|entry| (None, entry)).collect();
+    }
+    if let Some(items) = value.get("sessions").and_then(Value::as_array) {
+        return items.iter().cloned().map(|entry| (None, entry)).collect();
+    }
+    let Some(object) = value.as_object() else {
+        return Vec::new();
+    };
+    object
+        .iter()
+        .filter_map(|(key, entry)| {
+            if entry.is_object() {
+                Some((Some(key.clone()), entry.clone()))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn zencoder_session_path_from_index_entry(base: &Path, entry: &Value, session_id: &str) -> PathBuf {
+    for field in ["path", "file", "filePath", "sessionPath"] {
+        if let Some(raw) = entry.get(field).and_then(Value::as_str) {
+            let path = PathBuf::from(raw);
+            return if path.is_absolute() {
+                path
+            } else {
+                base.join(path)
+            };
+        }
+    }
+    base.join("sessions").join(format!("{session_id}.json"))
+}
+
+fn zencoder_session_file_path(path: &Path) -> bool {
+    path.extension().and_then(|ext| ext.to_str()) == Some("json")
+        && path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            == Some("sessions")
+}
+
+fn zencoder_session_source(path: &Path, index_metadata: Value) -> Result<ZencoderSessionSource> {
+    let value: Value = serde_json::from_reader(BufReader::new(File::open(path)?))?;
+    let provider_session_id = zencoder_session_id(&value)
+        .or_else(|| {
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .filter(|stem| !stem.trim().is_empty())
+                .map(str::to_owned)
+        })
+        .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "Zencoder session JSON file is missing a session id",
+        })?;
+    Ok(ZencoderSessionSource {
+        path: path.to_path_buf(),
+        provider_session_id,
+        index_metadata,
+    })
+}
+
+fn zencoder_session_id(value: &Value) -> Option<String> {
+    task_json_string_field(value, &["id", "sessionId", "session_id", "conversationId"])
+}
+
+fn normalize_zencoder_session_source(
+    source: &ZencoderSessionSource,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    ensure_regular_provider_transcript_file(&source.path)?;
+    let value: Value = serde_json::from_reader(BufReader::new(File::open(&source.path)?))?;
+    let session_id =
+        zencoder_session_id(&value).unwrap_or_else(|| source.provider_session_id.clone());
+    let mut rows = Vec::new();
+    if let Some(messages) = zencoder_messages(&value) {
+        for (index, message) in messages.iter().enumerate() {
+            if let Some(row) = zencoder_event_row(message.clone(), index, context.imported_at) {
+                rows.push(row);
+            }
+        }
+    }
+
+    let mut result = ProviderNormalizationResult::default();
+    if rows.is_empty() {
+        push_provider_import_failure(
+            &mut result.summary,
+            0,
+            "Zencoder session JSON had no importable messages".to_owned(),
+        );
+        return Ok(result);
+    }
+
+    let started_at = zencoder_time(&value, context.imported_at)
+        .or_else(|| rows.first().map(|row| row.occurred_at))
+        .unwrap_or(context.imported_at);
+    let ended_at = rows.last().map(|row| row.occurred_at);
+    let cwd = task_json_string_field(
+        &value,
+        &[
+            "cwd",
+            "projectPath",
+            "workspacePath",
+            "workspace_path",
+            "folder",
+        ],
+    )
+    .or_else(|| {
+        task_json_string_field(
+            &source.index_metadata,
+            &[
+                "cwd",
+                "projectPath",
+                "workspacePath",
+                "workspace_path",
+                "folder",
+            ],
+        )
+    });
+    let raw_source_path = source.path.display().to_string();
+    let title = task_json_string_field(&value, &["title", "name", "summary"])
+        .or_else(|| task_json_string_field(&source.index_metadata, &["title", "name", "summary"]));
+
+    for row in rows {
+        let event = native_event(NativeEventDraft {
+            provider: CaptureProvider::Zencoder,
+            source_format: ZENCODER_SOURCE_FORMAT,
+            provider_session_id: session_id.clone(),
+            provider_event_index: row.index as u64,
+            provider_event_hash: Some(row.row_id.clone()),
+            cursor: format!("{}:message:{}", source.path.display(), row.index),
+            event_type: row.event_type,
+            role: Some(row.role),
+            occurred_at: row.occurred_at,
+            text: row.text.clone(),
+            body: row.value.clone(),
+            metadata: json!({
+                "source": ZENCODER_SOURCE_FORMAT,
+                "source_format": ZENCODER_SOURCE_FORMAT,
+                "message_index": row.index,
+                "message_id": row.row_id,
+                "message_type": row.row_type,
+            }),
+        });
+        result
+            .files_touched
+            .extend(provider_file_touches_from_raw_value(
+                CaptureProvider::Zencoder,
+                &session_id,
+                ZENCODER_SOURCE_FORMAT,
+                Some(raw_source_path.as_str()),
+                &row.value,
+                &event,
+                row.index + 1,
+            ));
+        result.captures.push((
+            row.index + 1,
+            native_provider_capture(
+                NativeSessionDraft {
+                    provider: CaptureProvider::Zencoder,
+                    source_format: ZENCODER_SOURCE_FORMAT,
+                    provider_session_id: session_id.clone(),
+                    parent_provider_session_id: None,
+                    root_provider_session_id: None,
+                    external_agent_id: None,
+                    agent_type: AgentType::Primary,
+                    role_hint: Some("primary".to_owned()),
+                    is_primary: true,
+                    started_at,
+                    ended_at,
+                    cwd: cwd.clone(),
+                    fidelity: Fidelity::Imported,
+                    raw_source_path: raw_source_path.clone(),
+                    trust: ProviderSourceTrust::ProviderNative,
+                    source_metadata: json!({
+                        "adapter": ZENCODER_SOURCE_FORMAT,
+                        "source_path": raw_source_path,
+                        "storage": "ZencoderAI.zencoder/zencoder-chat/sessions.json",
+                    }),
+                    session_metadata: json!({
+                        "source_format": ZENCODER_SOURCE_FORMAT,
+                        "provider": CaptureProvider::Zencoder.as_str(),
+                        "session_id": session_id,
+                        "title": title,
+                        "index_metadata": provider_capped_json(
+                            &source.index_metadata,
+                            PROVIDER_MAX_PREVIEW_CHARS
+                        ),
+                    }),
+                },
+                context,
+                Some(event),
+            ),
+        ));
+    }
+    Ok(result)
+}
+
+fn zencoder_messages(value: &Value) -> Option<&Vec<Value>> {
+    for field in ["messages", "turns", "items", "conversation", "chat"] {
+        if let Some(messages) = value.get(field).and_then(Value::as_array) {
+            return Some(messages);
+        }
+    }
+    value.as_array()
+}
+
+fn zencoder_event_row(
+    value: Value,
+    index: usize,
+    fallback_time: DateTime<Utc>,
+) -> Option<ZencoderEventRow> {
+    let row_type = value
+        .get("type")
+        .or_else(|| value.get("kind"))
+        .and_then(Value::as_str)
+        .unwrap_or("message")
+        .to_owned();
+    let row_id = task_json_string_field(
+        &value,
+        &["id", "messageId", "message_id", "turnId", "turn_id"],
+    )
+    .unwrap_or_else(|| format!("message-{index}"));
+    let is_summary = matches!(row_type.as_str(), "summary" | "compaction" | "compact");
+    let role = if is_summary {
+        EventRole::Assistant
+    } else {
+        value
+            .get("role")
+            .or_else(|| value.pointer("/message/role"))
+            .and_then(Value::as_str)
+            .map(|role| provider_role(Some(role)))
+            .unwrap_or(EventRole::Unknown)
+    };
+    let text = zencoder_message_text(&value, is_summary)?;
+    let event_type = if is_summary {
+        EventType::Summary
+    } else if role == EventRole::Assistant && opencode_content_has_tool(&value) {
+        EventType::ToolCall
+    } else {
+        EventType::Message
+    };
+    Some(ZencoderEventRow {
+        index,
+        value: value.clone(),
+        occurred_at: zencoder_time(&value, fallback_time).unwrap_or(fallback_time),
+        row_id,
+        row_type,
+        event_type,
+        role,
+        text,
+    })
+}
+
+fn zencoder_message_text(value: &Value, is_summary: bool) -> Option<String> {
+    if is_summary {
+        return value
+            .get("summary")
+            .and_then(provider_value_text)
+            .filter(|text| !text.trim().is_empty());
+    }
+    for field in [
+        "content", "text", "message", "prompt", "response", "answer", "summary",
+    ] {
+        if let Some(text) = value
+            .get(field)
+            .and_then(provider_value_text)
+            .filter(|text| !text.trim().is_empty())
+        {
+            return Some(text);
+        }
+    }
+    value
+        .pointer("/message/content")
+        .and_then(provider_value_text)
+        .filter(|text| !text.trim().is_empty())
+}
+
+fn zencoder_time(value: &Value, fallback: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    for field in [
+        "timestamp",
+        "createdAt",
+        "created_at",
+        "updatedAt",
+        "updated_at",
+        "time",
+    ] {
+        if value.get(field).is_some() {
+            return Some(provider_timestamp_value(value.get(field), fallback));
+        }
+    }
+    None
+}
+
+#[derive(Debug, Clone)]
+struct CodeStudioSessionRow {
+    id: String,
+    title: Option<String>,
+    cwd: Option<String>,
+    created_at: DateTime<Utc>,
+    updated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone)]
+struct CodeStudioTurnRow {
+    id: String,
+    session_id: String,
+    seq: i64,
+    role: String,
+    content: String,
+    occurred_at: DateTime<Utc>,
+    metadata: Value,
+}
+
+fn normalize_codestudio_sqlite(
+    path: &Path,
+    context: &ProviderAdapterContext,
+) -> Result<ProviderNormalizationResult> {
+    let conn = open_provider_sqlite_readonly(path)?;
+    ensure_codestudio_schema(&conn)?;
+    let schema_fingerprint = opencode_schema_fingerprint(&conn)?;
+    let schema_version = codestudio_schema_version(&conn)?;
+    let sessions = codestudio_sessions(&conn, context.imported_at)?;
+    let turns = codestudio_turns(&conn, context.imported_at)?;
+    let sessions_by_id = sessions
+        .into_iter()
+        .map(|session| (session.id.clone(), session))
+        .collect::<BTreeMap<_, _>>();
+    let raw_source_path = path.display().to_string();
+    let mut result = ProviderNormalizationResult::default();
+
+    for row in turns {
+        let provider_event_index =
+            match provider_nonnegative_i64_to_u64(row.seq, "Code Studio turn seq") {
+                Ok(value) => value,
+                Err(err) => {
+                    push_provider_import_failure(&mut result.summary, 0, err.to_string());
+                    continue;
+                }
+            };
+        let line = provider_line_from_index(provider_event_index);
+        let Some(session) = sessions_by_id.get(&row.session_id) else {
+            push_provider_import_failure(
+                &mut result.summary,
+                line,
+                format!(
+                    "Code Studio turn {} references missing session {}",
+                    row.id, row.session_id
+                ),
+            );
+            continue;
+        };
+        let body = json!({
+            "turn_id": row.id,
+            "session_id": row.session_id,
+            "seq": row.seq,
+            "role": row.role,
+            "content": row.content,
+            "metadata": row.metadata,
+        });
+        let role = provider_role(Some(&row.role));
+        let event_type = if row.role == "summary" {
+            EventType::Summary
+        } else {
+            EventType::Message
+        };
+        let event = native_event(NativeEventDraft {
+            provider: CaptureProvider::CodeStudio,
+            source_format: CODESTUDIO_SQLITE_SOURCE_FORMAT,
+            provider_session_id: row.session_id.clone(),
+            provider_event_index,
+            provider_event_hash: Some(row.id.clone()),
+            cursor: format!("turn:{}:seq:{}", row.session_id, row.seq),
+            event_type,
+            role: Some(role),
+            occurred_at: row.occurred_at,
+            text: row.content.clone(),
+            body: body.clone(),
+            metadata: json!({
+                "source": CODESTUDIO_SQLITE_SOURCE_FORMAT,
+                "source_format": CODESTUDIO_SQLITE_SOURCE_FORMAT,
+                "turn_id": row.id,
+                "turn_seq": row.seq,
+                "role": row.role,
+            }),
+        });
+        result
+            .files_touched
+            .extend(provider_file_touches_from_raw_value(
+                CaptureProvider::CodeStudio,
+                &row.session_id,
+                CODESTUDIO_SQLITE_SOURCE_FORMAT,
+                Some(raw_source_path.as_str()),
+                &body,
+                &event,
+                line,
+            ));
+        result.captures.push((
+            line,
+            native_provider_capture(
+                NativeSessionDraft {
+                    provider: CaptureProvider::CodeStudio,
+                    source_format: CODESTUDIO_SQLITE_SOURCE_FORMAT,
+                    provider_session_id: row.session_id.clone(),
+                    parent_provider_session_id: None,
+                    root_provider_session_id: None,
+                    external_agent_id: None,
+                    agent_type: AgentType::Primary,
+                    role_hint: Some("primary".to_owned()),
+                    is_primary: true,
+                    started_at: session.created_at,
+                    ended_at: session.updated_at,
+                    cwd: session.cwd.clone(),
+                    fidelity: Fidelity::Imported,
+                    raw_source_path: raw_source_path.clone(),
+                    trust: ProviderSourceTrust::ProviderNative,
+                    source_metadata: json!({
+                        "adapter": CODESTUDIO_SQLITE_SOURCE_FORMAT,
+                        "source_path": raw_source_path,
+                        "sqlite_schema_version": schema_version,
+                        "schema_fingerprint": schema_fingerprint,
+                    }),
+                    session_metadata: json!({
+                        "source_format": CODESTUDIO_SQLITE_SOURCE_FORMAT,
+                        "provider": CaptureProvider::CodeStudio.as_str(),
+                        "session_id": session.id,
+                        "title": session.title,
+                    }),
+                },
+                context,
+                Some(event),
+            ),
+        ));
+    }
+
+    Ok(result)
+}
+
+fn ensure_codestudio_schema(conn: &Connection) -> Result<()> {
+    for table in ["schema_version", "sessions", "turns"] {
+        if !sqlite_table_exists(conn, table)? {
+            return Err(CaptureError::InvalidPayload(format!(
+                "Code Studio SQLite database is missing required {table} table"
+            )));
+        }
+    }
+    let session_columns = sqlite_table_columns(conn, "sessions")?;
+    ensure_sqlite_table_columns(&session_columns, "Code Studio sessions table", &["id"])?;
+    let turn_columns = sqlite_table_columns(conn, "turns")?;
+    ensure_sqlite_table_columns(
+        &turn_columns,
+        "Code Studio turns table",
+        &["id", "session_id", "role", "content"],
+    )
+}
+
+fn codestudio_schema_version(conn: &Connection) -> Result<Value> {
+    let columns = sqlite_table_columns(conn, "schema_version")?;
+    let Some(column) = columns.iter().next() else {
+        return Ok(Value::Null);
+    };
+    let sql = format!(
+        "select cast({} as text) from schema_version limit 1",
+        sqlite_ident(column)
+    );
+    let value = conn
+        .query_row(&sql, [], |row| row.get::<_, Option<String>>(0))
+        .optional()?
+        .flatten()
+        .map(Value::String)
+        .unwrap_or(Value::Null);
+    Ok(value)
+}
+
+fn codestudio_sessions(
+    conn: &Connection,
+    fallback_time: DateTime<Utc>,
+) -> Result<Vec<CodeStudioSessionRow>> {
+    let columns = sqlite_table_columns(conn, "sessions")?;
+    let title = optional_column_expr(&columns, "title", "NULL");
+    let cwd = optional_column_expr(
+        &columns,
+        "cwd",
+        optional_column_expr(&columns, "workspace_path", "NULL"),
+    );
+    let created_at = optional_column_expr(&columns, "created_at", "NULL");
+    let updated_at = optional_column_expr(&columns, "updated_at", created_at);
+    let order_by = if columns.contains("created_at") {
+        "created_at, id"
+    } else {
+        "id"
+    };
+    let sql = format!(
+        "select id, {title}, {cwd}, cast({created_at} as text), cast({updated_at} as text) \
+         from sessions order by {order_by}"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, Option<String>>(4)?,
+        ))
+    })?;
+    let rows = rows
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(CaptureError::from)?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, title, cwd, created_at, updated_at)| {
+            let created_at = codestudio_timestamp_text(created_at.as_deref(), fallback_time);
+            let updated_at = updated_at
+                .as_deref()
+                .map(|value| codestudio_timestamp_text(Some(value), created_at));
+            CodeStudioSessionRow {
+                id,
+                title,
+                cwd,
+                created_at,
+                updated_at,
+            }
+        })
+        .collect())
+}
+
+fn codestudio_turns(
+    conn: &Connection,
+    fallback_time: DateTime<Utc>,
+) -> Result<Vec<CodeStudioTurnRow>> {
+    let columns = sqlite_table_columns(conn, "turns")?;
+    let seq = optional_column_expr(&columns, "seq", "NULL");
+    let created_at = optional_column_expr(&columns, "created_at", "NULL");
+    let metadata_json = optional_column_expr(&columns, "metadata_json", "NULL");
+    let order_by = if columns.contains("seq") {
+        "session_id, seq, id"
+    } else if columns.contains("created_at") {
+        "session_id, created_at, id"
+    } else {
+        "session_id, id"
+    };
+    let sql = format!(
+        "select id, session_id, {seq}, role, content, cast({created_at} as text), {metadata_json} \
+         from turns order by {order_by}"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<i64>>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, Option<String>>(5)?,
+            row.get::<_, Option<String>>(6)?,
+        ))
+    })?;
+    let rows = rows
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(CaptureError::from)?;
+    let mut next_seq_by_session = BTreeMap::<String, i64>::new();
+    Ok(rows
+        .into_iter()
+        .map(
+            |(id, session_id, seq, role, content, created_at, metadata_json)| {
+                let seq = seq.unwrap_or_else(|| {
+                    let entry = next_seq_by_session
+                        .entry(session_id.clone())
+                        .and_modify(|seq| *seq += 1)
+                        .or_insert(1);
+                    *entry
+                });
+                let metadata = metadata_json
+                    .as_deref()
+                    .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                    .unwrap_or(Value::Null);
+                CodeStudioTurnRow {
+                    id,
+                    session_id,
+                    seq,
+                    role,
+                    content,
+                    occurred_at: codestudio_timestamp_text(created_at.as_deref(), fallback_time),
+                    metadata,
+                }
+            },
+        )
+        .collect())
+}
+
+fn codestudio_timestamp_text(value: Option<&str>, fallback: DateTime<Utc>) -> DateTime<Utc> {
+    let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
+        return fallback;
+    };
+    parse_rfc3339_utc(value)
+        .or_else(|| {
+            value
+                .parse::<f64>()
+                .ok()
+                .and_then(provider_timestamp_seconds_to_datetime)
+        })
+        .unwrap_or(fallback)
 }
 
 fn task_json_string_field(value: &Value, fields: &[&str]) -> Option<String> {
@@ -20323,6 +22703,7 @@ fn native_jsonl_missing_reason(provider: CaptureProvider) -> &'static str {
             "no Antigravity transcript JSONL files found under brain/*/.system_generated/logs"
         }
         CaptureProvider::Gemini => "no Gemini CLI chat JSONL transcripts found under chats",
+        CaptureProvider::Tabnine => "no Tabnine CLI chat JSONL transcripts found under chats",
         CaptureProvider::Cursor => {
             "no Cursor agent transcript JSONL files found under projects/*/agent-transcripts"
         }
@@ -20362,7 +22743,7 @@ fn provider_jsonl_path_is_native(provider: CaptureProvider, path: &Path) -> bool
                 Some("transcript_full.jsonl" | "transcript.jsonl")
             )
         }
-        CaptureProvider::Gemini => path
+        CaptureProvider::Gemini | CaptureProvider::Tabnine => path
             .components()
             .any(|component| component.as_os_str() == "chats"),
         CaptureProvider::Cursor => path
@@ -21868,7 +24249,7 @@ fn normalize_dexto_sqlite(
                 "session_id": message.session_id,
                 "sequence": message.sequence,
                 "message_id": message_id,
-                "path_semantics": "explicit SQLite path only; Dexto default data directory was not inferred from the researched clone",
+                "path_semantics": "Dexto CLI SQLite database path; default discovery scans Dexto database roots for kv_store/list_store SQLite files",
             }),
         });
         result
@@ -21974,7 +24355,7 @@ fn dexto_capture(
                 "sqlite_user_version": draft.user_version,
                 "schema_fingerprint": draft.schema_fingerprint,
                 "source_path": draft.raw_source_path,
-                "path_semantics": "explicit SQLite path only; Dexto default data directory was not inferred from the researched clone",
+                "path_semantics": "Dexto CLI SQLite database path; default discovery scans Dexto database roots for kv_store/list_store SQLite files",
             }),
             session_metadata: json!({
                 "source_format": DEXTO_SQLITE_SOURCE_FORMAT,
@@ -22329,7 +24710,7 @@ fn pochi_capture(
                 "sqlite_user_version": draft.user_version,
                 "schema_fingerprint": draft.schema_fingerprint,
                 "source_path": draft.raw_source_path,
-                "path_semantics": "preview explicit SQLite path only; no ~/.pochi default discovery, config.jsonc lookup, or VS Code OPFS import",
+                "path_semantics": "bounded LiveStore state SQLite path; default discovery is schema-probed ~/.pochi/storage/**/state*.db only; no config.jsonc lookup or VS Code OPFS import",
             }),
             session_metadata: json!({
                 "source_format": POCHI_LIVESTORE_SQLITE_SOURCE_FORMAT,
@@ -25158,7 +27539,9 @@ fn json_has_any_key(value: &Value, keys: &[&str]) -> bool {
 
 fn native_jsonl_header_session_id(provider: CaptureProvider, value: &Value) -> Option<String> {
     match provider {
-        CaptureProvider::Gemini => value.get("sessionId").and_then(Value::as_str),
+        CaptureProvider::Gemini | CaptureProvider::Tabnine => {
+            value.get("sessionId").and_then(Value::as_str)
+        }
         CaptureProvider::FactoryAiDroid => (value.get("type").and_then(Value::as_str)
             == Some("session_start"))
         .then(|| value.get("sessionId").and_then(Value::as_str))
@@ -25189,7 +27572,9 @@ fn native_jsonl_header_start_time(
 ) -> Option<DateTime<Utc>> {
     match provider {
         CaptureProvider::Antigravity => value.get("created_at").and_then(Value::as_str),
-        CaptureProvider::Gemini => value.get("startTime").and_then(Value::as_str),
+        CaptureProvider::Gemini | CaptureProvider::Tabnine => {
+            value.get("startTime").and_then(Value::as_str)
+        }
         CaptureProvider::CopilotCli => value.pointer("/data/startTime").and_then(Value::as_str),
         _ => None,
     }
@@ -25198,7 +27583,7 @@ fn native_jsonl_header_start_time(
 
 fn native_jsonl_header_cwd(provider: CaptureProvider, value: &Value) -> Option<String> {
     match provider {
-        CaptureProvider::Gemini => value
+        CaptureProvider::Gemini | CaptureProvider::Tabnine => value
             .get("directories")
             .and_then(Value::as_array)
             .and_then(|dirs| dirs.first())
@@ -25227,7 +27612,7 @@ fn native_jsonl_path_session(
     native_session_id: &str,
 ) -> (String, Option<String>, Option<String>, AgentType) {
     match provider {
-        CaptureProvider::Gemini => {
+        CaptureProvider::Gemini | CaptureProvider::Tabnine => {
             let parent = path
                 .parent()
                 .and_then(Path::file_name)
@@ -25534,7 +27919,7 @@ fn native_jsonl_entry_type(provider: CaptureProvider, value: &Value) -> String {
             .get("type")
             .and_then(Value::as_str)
             .unwrap_or("unknown"),
-        CaptureProvider::Gemini => {
+        CaptureProvider::Gemini | CaptureProvider::Tabnine => {
             if value.get("$set").is_some() {
                 "$set"
             } else if value.get("$rewindTo").is_some() {
@@ -25570,7 +27955,7 @@ fn native_jsonl_event_type(provider: CaptureProvider, value: &Value) -> EventTyp
             Some("SYSTEM_MESSAGE") => EventType::Notice,
             _ => EventType::Notice,
         },
-        CaptureProvider::Gemini => {
+        CaptureProvider::Gemini | CaptureProvider::Tabnine => {
             if value.get("$set").is_some() || value.get("$rewindTo").is_some() {
                 EventType::Notice
             } else if value.get("toolCalls").is_some() {
@@ -25581,7 +27966,7 @@ fn native_jsonl_event_type(provider: CaptureProvider, value: &Value) -> EventTyp
                 }
             } else {
                 match value.get("type").and_then(Value::as_str) {
-                    Some("user" | "gemini") => EventType::Message,
+                    Some("user" | "gemini" | "tabnine") => EventType::Message,
                     _ => EventType::Notice,
                 }
             }
@@ -25754,11 +28139,13 @@ fn native_jsonl_role(provider: CaptureProvider, value: &Value) -> EventRole {
                 _ => EventRole::Assistant,
             },
         },
-        CaptureProvider::Gemini => match value.get("type").and_then(Value::as_str) {
-            Some("user") => EventRole::User,
-            Some("gemini") => EventRole::Assistant,
-            _ => EventRole::System,
-        },
+        CaptureProvider::Gemini | CaptureProvider::Tabnine => {
+            match value.get("type").and_then(Value::as_str) {
+                Some("user") => EventRole::User,
+                Some("gemini" | "tabnine") => EventRole::Assistant,
+                _ => EventRole::System,
+            }
+        }
         CaptureProvider::FactoryAiDroid => provider_role(value.get("role").and_then(Value::as_str)),
         CaptureProvider::CopilotCli => match value.get("type").and_then(Value::as_str) {
             Some("user.message") => EventRole::User,
@@ -25834,7 +28221,7 @@ fn native_jsonl_event_text(
             .or_else(|| value.get("thinking").and_then(provider_value_text))
             .or_else(|| value.get("tool_calls").and_then(antigravity_tool_call_text))
             .unwrap_or_else(|| format!("Antigravity event: {entry_type}")),
-        CaptureProvider::Gemini => value
+        CaptureProvider::Gemini | CaptureProvider::Tabnine => value
             .get("content")
             .and_then(provider_value_text)
             .or_else(|| value.get("toolCalls").and_then(provider_value_text))
@@ -25845,7 +28232,14 @@ fn native_jsonl_event_text(
                     .and_then(Value::as_str)
                     .map(|id| format!("rewind to {id}"))
             })
-            .unwrap_or_else(|| format!("Gemini event: {entry_type}")),
+            .unwrap_or_else(|| {
+                let name = if provider == CaptureProvider::Tabnine {
+                    "Tabnine"
+                } else {
+                    "Gemini"
+                };
+                format!("{name} event: {entry_type}")
+            }),
         CaptureProvider::FactoryAiDroid => value
             .get("content")
             .and_then(provider_value_text)
@@ -26106,7 +28500,7 @@ fn windsurf_sensitive_key(key: &str) -> bool {
 fn native_jsonl_model(provider: CaptureProvider, value: &Value) -> Option<Value> {
     match provider {
         CaptureProvider::Antigravity => value.get("model").cloned(),
-        CaptureProvider::Gemini => value.get("model").cloned(),
+        CaptureProvider::Gemini | CaptureProvider::Tabnine => value.get("model").cloned(),
         CaptureProvider::FactoryAiDroid => value
             .get("model")
             .cloned()
@@ -34260,6 +36654,14 @@ mod tests {
         materialized_fixture("provider-history", name)
     }
 
+    fn sqlite_provider_history_fixture(sql_fixture: &str, db_path: &Path) -> PathBuf {
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let sql = fs::read_to_string(provider_history_fixture(sql_fixture)).unwrap();
+        let conn = Connection::open(db_path).unwrap();
+        conn.execute_batch(&sql).unwrap();
+        db_path.to_path_buf()
+    }
+
     fn custom_history_fixture(name: &str) -> PathBuf {
         materialized_fixture("custom-history-jsonl", name)
     }
@@ -36521,7 +38923,8 @@ mod tests {
             source.source_format,
             "windsurf_cascade_hook_transcript_jsonl_tree"
         );
-        assert_eq!(source.import_support, ProviderImportSupport::Preview);
+        assert_eq!(source.import_support, ProviderImportSupport::Native);
+        assert!(source.import_support.is_auto_importable());
         assert_eq!(source.status, ProviderSourceStatus::Available);
 
         let first = import_windsurf_cascade_hook_transcripts(
@@ -37106,6 +39509,79 @@ mod tests {
     }
 
     #[test]
+    fn native_trae_cn_input_history_key_imports_user_messages() {
+        let temp = tempdir();
+        let workspace = temp
+            .path()
+            .join("Trae CN/User/workspaceStorage/cn-workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(
+            workspace.join("workspace.json"),
+            r#"{"folder":"file:///workspace/trae-cn-fixture"}"#,
+        )
+        .unwrap();
+        let db_path = workspace.join("state.vscdb");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "CREATE TABLE ItemTable ([key] TEXT PRIMARY KEY, value TEXT)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ItemTable ([key], value) VALUES (?1, ?2)",
+            rusqlite::params![
+                TRAE_CN_INPUT_HISTORY_KEY,
+                json!([
+                    {
+                        "id": "cn-input-1",
+                        "inputText": "TRAE_CN_INPUT_HISTORY_ORACLE alpha",
+                        "createdAt": "2026-07-05T13:00:00Z"
+                    },
+                    {
+                        "id": "cn-input-2",
+                        "text": "TRAE_CN_INPUT_HISTORY_ORACLE beta",
+                        "createdAt": "2026-07-05T13:01:00Z"
+                    }
+                ])
+                .to_string()
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let summary = import_trae_history(
+            temp.path().join("Trae CN/User/workspaceStorage"),
+            &mut store,
+            TraeImportOptions {
+                allow_partial_failures: true,
+                ..TraeImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+        assert_eq!(summary.imported_sessions, 1);
+        assert_eq!(summary.imported_events, 2);
+
+        let session_id =
+            provider_session_uuid(CaptureProvider::Trae, "cn-workspace/trae-cn-input-history");
+        let session = store.get_session(session_id).unwrap();
+        assert_eq!(
+            session.sync.metadata["metadata"]["workspace_folder"].as_str(),
+            Some("/workspace/trae-cn-fixture")
+        );
+        let events = store.events_for_session(session_id).unwrap();
+        assert!(events
+            .iter()
+            .all(|event| event.role == Some(EventRole::User)));
+        assert!(store
+            .search_event_hits("TRAE_CN_INPUT_HISTORY_ORACLE", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::Trae)));
+    }
+
+    #[test]
     fn native_aider_desk_fixture_imports_searches_and_reimports() {
         let temp = tempdir();
         let fixture = provider_history_fixture("aider-desk/v1/project/.aider-desk/tasks");
@@ -37177,7 +39653,9 @@ mod tests {
 
         let source = provider_source_for_path(CaptureProvider::Amp, fixture.clone());
         assert_eq!(source.source_format, AMP_THREADS_EXPORT_SOURCE_FORMAT);
-        assert_eq!(source.import_support, ProviderImportSupport::Preview);
+        assert_eq!(source.import_support, ProviderImportSupport::Explicit);
+        assert!(source.import_support.is_importable());
+        assert!(!source.import_support.is_auto_importable());
         assert_eq!(source.status, ProviderSourceStatus::Available);
 
         let first = import_amp_threads_export(
@@ -37345,7 +39823,7 @@ mod tests {
 
         let source = provider_source_for_path(CaptureProvider::Devin, fixture.clone());
         assert_eq!(source.source_format, DEVIN_ATIF_SOURCE_FORMAT);
-        assert_eq!(source.import_support, ProviderImportSupport::Preview);
+        assert_eq!(source.import_support, ProviderImportSupport::Explicit);
         assert_eq!(source.status, ProviderSourceStatus::Available);
 
         let discovered =
@@ -37414,6 +39892,134 @@ mod tests {
         assert_eq!(second.imported_events, 0);
         assert_eq!(second.skipped_sessions, 1);
         assert_eq!(second.skipped_events, 4);
+    }
+
+    #[test]
+    fn native_devin_atif_directory_imports_json_exports_and_reimports() {
+        let temp = tempdir();
+        let exports = temp.path().join("devin-exports/nested");
+        std::fs::create_dir_all(&exports).unwrap();
+        std::fs::copy(
+            provider_history_fixture("devin/atif/export.json"),
+            exports.join("first.json"),
+        )
+        .unwrap();
+        write_devin_atif_export(
+            &exports.join("second.json"),
+            "devin-atif-directory-session",
+            "Directory import should include this explicit Devin export.",
+        );
+        std::fs::write(exports.join("notes.txt"), "not a JSON export").unwrap();
+
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let first = import_devin_atif_exports(
+            temp.path().join("devin-exports"),
+            &mut store,
+            DevinAtifImportOptions {
+                allow_partial_failures: true,
+                ..DevinAtifImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(first.failed, 0, "{:?}", first.failures);
+        assert_eq!(first.imported_sessions, 2);
+        assert_eq!(first.imported_events, 5);
+
+        let hits = store
+            .search_event_hits(
+                "Directory import should include this explicit Devin export",
+                10,
+            )
+            .unwrap();
+        assert!(hits
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::Devin)));
+
+        let second = import_devin_atif_exports(
+            temp.path().join("devin-exports"),
+            &mut store,
+            DevinAtifImportOptions {
+                allow_partial_failures: true,
+                ..DevinAtifImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(second.failed, 0, "{:?}", second.failures);
+        assert_eq!(second.imported_sessions, 0);
+        assert_eq!(second.imported_events, 0);
+        assert_eq!(second.skipped_sessions, 2);
+        assert_eq!(second.skipped_events, 5);
+    }
+
+    #[test]
+    fn native_devin_atif_directory_partial_failures_are_explicit() {
+        let temp = tempdir();
+        let exports = temp.path().join("devin-exports");
+        std::fs::create_dir_all(&exports).unwrap();
+        std::fs::copy(
+            provider_history_fixture("devin/atif/export.json"),
+            exports.join("valid.json"),
+        )
+        .unwrap();
+        std::fs::write(
+            exports.join("malformed.json"),
+            br#"{"schema_version":"1.7","agent":{"name":"devin"}}"#,
+        )
+        .unwrap();
+
+        let mut strict_store = Store::open(temp.path().join("strict.sqlite")).unwrap();
+        let strict = import_devin_atif_exports(
+            &exports,
+            &mut strict_store,
+            DevinAtifImportOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(strict.failed, 1, "{:?}", strict.failures);
+        assert_eq!(strict.imported_sessions, 0);
+        assert_eq!(strict.imported_events, 0);
+        assert!(strict.failures[0]
+            .error
+            .contains("ATIF root is missing steps array"));
+
+        let mut partial_store = Store::open(temp.path().join("partial.sqlite")).unwrap();
+        let partial = import_devin_atif_exports(
+            &exports,
+            &mut partial_store,
+            DevinAtifImportOptions {
+                allow_partial_failures: true,
+                ..DevinAtifImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(partial.failed, 1, "{:?}", partial.failures);
+        assert_eq!(partial.imported_sessions, 1);
+        assert_eq!(partial.imported_events, 4);
+        assert!(partial.failures[0]
+            .error
+            .contains("malformed.json: invalid capture payload: ATIF root is missing steps array"));
+    }
+
+    fn write_devin_atif_export(path: &Path, session_id: &str, message: &str) {
+        let export = json!({
+            "schema_version": "1.7",
+            "session_id": session_id,
+            "agent": {
+                "name": "devin",
+                "version": "2026.5.26-0"
+            },
+            "steps": [
+                {
+                    "step_id": 1,
+                    "source": "agent",
+                    "timestamp": "2026-06-01T13:00:00Z",
+                    "message": message
+                }
+            ],
+            "extra": {
+                "fixture_provenance": "synthetic-official-atif-contract"
+            }
+        });
+        std::fs::write(path, serde_json::to_vec_pretty(&export).unwrap()).unwrap();
     }
 
     #[test]
@@ -37751,6 +40357,202 @@ mod tests {
     }
 
     #[test]
+    fn native_tinycloud_fixture_imports_project_and_legacy_sessions_idempotently() {
+        let temp = tempdir();
+        let fixture = provider_history_fixture("tinycloud");
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let source = provider_source_for_path(CaptureProvider::TinyCloud, fixture.clone());
+        assert_eq!(source.source_format, TINYCLOUD_SOURCE_FORMAT);
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+
+        let first = import_tinycloud_history(
+            &fixture,
+            &mut store,
+            TinyCloudImportOptions {
+                machine_id: "test-machine".into(),
+                source_path: Some(fixture.clone()),
+                imported_at: DateTime::parse_from_rfc3339("2026-07-05T14:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                allow_partial_failures: true,
+                ..TinyCloudImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(first.failed, 0, "{:?}", first.failures);
+        assert_eq!(first.imported_sessions, 2);
+        assert_eq!(first.imported_events, 4);
+
+        let project_session =
+            provider_session_uuid(CaptureProvider::TinyCloud, "acme/tinycloud-session-1");
+        let events = store.events_for_session(project_session).unwrap();
+        assert_eq!(events.len(), 3);
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == EventType::Summary));
+        let rendered = serde_json::to_string(&events).unwrap();
+        assert!(rendered.contains("TINYCLOUD_ORACLE_USER_TEXT"));
+        assert!(rendered.contains("TINYCLOUD_ORACLE_SUMMARY_TEXT"));
+        assert!(store
+            .search_event_hits("TINYCLOUD_LEGACY_ORACLE_TEXT", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::TinyCloud)));
+
+        let second = import_tinycloud_history(
+            &fixture,
+            &mut store,
+            TinyCloudImportOptions {
+                allow_partial_failures: true,
+                ..TinyCloudImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(second.failed, 0, "{:?}", second.failures);
+        assert_eq!(second.imported_sessions, 0);
+        assert_eq!(second.imported_events, 0);
+        assert_eq!(second.skipped_sessions, 2);
+        assert_eq!(second.skipped_events, 4);
+    }
+
+    #[test]
+    fn native_codearts_agent_reuses_opencode_sqlite_normalizer() {
+        let temp = tempdir();
+        let fixture = sqlite_provider_history_fixture(
+            "codearts-agent/v1/opencode.sql",
+            &temp.path().join("codearts-agent/opencode.db"),
+        );
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let first = import_codearts_agent_sqlite(
+            &fixture,
+            &mut store,
+            CodeArtsAgentSqliteImportOptions {
+                machine_id: "test-machine".into(),
+                source_path: Some(fixture.clone()),
+                imported_at: DateTime::parse_from_rfc3339("2026-07-05T15:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                allow_partial_failures: true,
+                ..CodeArtsAgentSqliteImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(first.failed, 0, "{:?}", first.failures);
+        assert_eq!(first.imported_sessions, 1);
+        assert_eq!(first.imported_events, 2);
+        let session_id = provider_session_uuid(CaptureProvider::CodeArtsAgent, "codearts-root");
+        let session = store.get_session(session_id).unwrap();
+        assert_eq!(session.provider, CaptureProvider::CodeArtsAgent);
+        let events = store.events_for_session(session_id).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[0].sync.metadata["source_format"].as_str(),
+            Some(CODEARTS_AGENT_SQLITE_SOURCE_FORMAT)
+        );
+        assert!(store
+            .search_event_hits("CODEARTS_ORACLE_ASSISTANT_TEXT", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::CodeArtsAgent)));
+
+        let second = import_codearts_agent_sqlite(
+            &fixture,
+            &mut store,
+            CodeArtsAgentSqliteImportOptions {
+                allow_partial_failures: true,
+                ..CodeArtsAgentSqliteImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(second.failed, 0, "{:?}", second.failures);
+        assert_eq!(second.imported_sessions, 0);
+        assert_eq!(second.imported_events, 0);
+        assert_eq!(second.skipped_sessions, 1);
+        assert_eq!(second.skipped_events, 2);
+    }
+
+    #[test]
+    fn zencoder_and_codestudio_fixtures_import_and_search() {
+        let temp = tempdir();
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let zencoder = provider_history_fixture("zencoder/ZencoderAI.zencoder/zencoder-chat");
+        let zencoder_first = import_zencoder_history(
+            &zencoder,
+            &mut store,
+            ZencoderImportOptions {
+                source_path: Some(zencoder.clone()),
+                allow_partial_failures: true,
+                ..ZencoderImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(zencoder_first.failed, 0, "{:?}", zencoder_first.failures);
+        assert_eq!(zencoder_first.imported_sessions, 1);
+        assert_eq!(zencoder_first.imported_events, 2);
+        assert!(store
+            .search_event_hits("ZENCODER_ORACLE_ASSISTANT_TEXT", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::Zencoder)));
+
+        let codestudio = sqlite_provider_history_fixture(
+            "codestudio/v1/session-store.sql",
+            &temp.path().join("codestudio/session-store.db"),
+        );
+        let codestudio_first = import_codestudio_sqlite(
+            &codestudio,
+            &mut store,
+            CodeStudioSqliteImportOptions {
+                source_path: Some(codestudio.clone()),
+                allow_partial_failures: true,
+                ..CodeStudioSqliteImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            codestudio_first.failed, 0,
+            "{:?}",
+            codestudio_first.failures
+        );
+        assert_eq!(codestudio_first.imported_sessions, 1);
+        assert_eq!(codestudio_first.imported_events, 2);
+        assert!(store
+            .search_event_hits("CODESTUDIO_ORACLE_ASSISTANT_TEXT", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::CodeStudio)));
+
+        let zencoder_second = import_zencoder_history(
+            &zencoder,
+            &mut store,
+            ZencoderImportOptions {
+                allow_partial_failures: true,
+                ..ZencoderImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(zencoder_second.imported_events, 0);
+        assert_eq!(zencoder_second.skipped_events, 2);
+
+        let codestudio_second = import_codestudio_sqlite(
+            &codestudio,
+            &mut store,
+            CodeStudioSqliteImportOptions {
+                allow_partial_failures: true,
+                ..CodeStudioSqliteImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(codestudio_second.imported_events, 0);
+        assert_eq!(codestudio_second.skipped_events, 2);
+    }
+
+    #[test]
     fn native_kilo_imports_opencode_derived_sqlite_fixture_idempotently() {
         let temp = tempdir();
         let fixture = provider_history_fixture("kilo/kilo.db");
@@ -37811,7 +40613,7 @@ mod tests {
     }
 
     #[test]
-    fn native_warp_preview_imports_sqlite_fixture_idempotently() {
+    fn native_warp_imports_sqlite_fixture_idempotently() {
         let temp = tempdir();
         let fixture = provider_history_fixture("warp/v1/warp.sqlite");
         let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
@@ -37877,7 +40679,51 @@ mod tests {
     }
 
     #[test]
-    fn native_warp_preview_rejects_changed_schema_before_querying() {
+    fn native_warp_import_reads_committed_wal_content() {
+        let temp = tempdir();
+        let fixture = provider_history_fixture("warp/v1/warp.sqlite");
+        let live_db = temp.path().join("warp-live.sqlite");
+        fs::copy(&fixture, &live_db).unwrap();
+        let writer = Connection::open(&live_db).unwrap();
+        writer.pragma_update(None, "journal_mode", "WAL").unwrap();
+        writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+        let conversation_data = json!({
+            "agent_name": "Warp WAL Agent",
+            "server_conversation_token": "redacted-token-not-imported"
+        })
+        .to_string();
+        writer
+            .execute(
+                "update agent_conversations set conversation_data = ?1 where conversation_id = ?2",
+                rusqlite::params![conversation_data, "warp-conversation-1"],
+            )
+            .unwrap();
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let summary = import_warp_sqlite(
+            &live_db,
+            &mut store,
+            WarpSqliteImportOptions {
+                source_path: Some(live_db.clone()),
+                allow_partial_failures: true,
+                ..WarpSqliteImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+        assert_eq!(summary.imported_sessions, 1);
+        assert_eq!(summary.imported_events, 4);
+        let session_id = provider_session_uuid(CaptureProvider::Warp, "warp-conversation-1");
+        let session = store.get_session(session_id).unwrap();
+        let rendered_session = serde_json::to_string(&session.sync.metadata).unwrap();
+        assert!(rendered_session.contains("Warp WAL Agent"));
+        assert!(!rendered_session.contains("redacted-token-not-imported"));
+        drop(writer);
+    }
+
+    #[test]
+    fn native_warp_rejects_changed_schema_before_querying() {
         let temp = tempdir();
         let db = temp.path().join("warp-missing-task.db");
         let conn = Connection::open(&db).unwrap();
@@ -38800,6 +41646,228 @@ mod tests {
     }
 
     #[test]
+    fn native_astrbot_fixture_imports_searches_and_reimports() {
+        let temp = tempdir();
+        let fixture = provider_history_fixture("astrbot/v1/data/data_v4.db");
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let source = provider_source_for_path(CaptureProvider::AstrBot, fixture.clone());
+        assert_eq!(source.source_format, ASTRBOT_SQLITE_SOURCE_FORMAT);
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+
+        let first = import_astrbot_sqlite(
+            &fixture,
+            &mut store,
+            AstrBotSqliteImportOptions {
+                machine_id: "test-machine".into(),
+                source_path: Some(fixture.clone()),
+                imported_at: DateTime::parse_from_rfc3339("2026-07-06T12:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                allow_partial_failures: true,
+                ..AstrBotSqliteImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(first.failed, 0, "{:?}", first.failures);
+        assert_eq!(first.imported_sessions, 1);
+        assert_eq!(first.imported_events, 3);
+
+        let session_id = provider_session_uuid(CaptureProvider::AstrBot, "umo-astrbot-1");
+        let session = store.get_session(session_id).unwrap();
+        assert_eq!(session.provider, CaptureProvider::AstrBot);
+        let source = store
+            .capture_source_by_external_session(CaptureProvider::AstrBot, "umo-astrbot-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            source.sync.metadata["source_format"].as_str(),
+            Some(ASTRBOT_SQLITE_SOURCE_FORMAT)
+        );
+
+        let events = store.events_for_session(session_id).unwrap();
+        assert_eq!(events.len(), 3);
+        assert!(events
+            .iter()
+            .any(|event| event.role == Some(EventRole::User)));
+        let rendered = serde_json::to_string(&events).unwrap();
+        assert!(rendered.contains("ASTRBOT_ORACLE_USER_TEXT violet jasper harbor"));
+        assert!(rendered.contains("ASTRBOT_ORACLE_ASSISTANT_TEXT copper lantern atlas"));
+        assert!(rendered.contains("ASTRBOT_PLATFORM_HISTORY_TEXT saffron comet"));
+
+        assert!(store
+            .search_event_hits("ASTRBOT_ORACLE_ASSISTANT_TEXT", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::AstrBot)));
+        assert!(store
+            .search_event_hits("ASTRBOT_PLATFORM_HISTORY_TEXT", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::AstrBot)));
+
+        let second = import_astrbot_sqlite(
+            &fixture,
+            &mut store,
+            AstrBotSqliteImportOptions {
+                allow_partial_failures: true,
+                ..AstrBotSqliteImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(second.failed, 0, "{:?}", second.failures);
+        assert_eq!(second.imported_sessions, 0);
+        assert_eq!(second.imported_events, 0);
+        assert_eq!(second.skipped_sessions, 1);
+        assert_eq!(second.skipped_events, 3);
+    }
+
+    #[test]
+    fn native_junie_fixture_imports_searches_reimports_and_file_touches() {
+        let temp = tempdir();
+        let fixture = provider_history_fixture("junie/sessions");
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        let source = provider_source_for_path(CaptureProvider::Junie, fixture.clone());
+        assert_eq!(source.source_format, JUNIE_SESSION_EVENTS_SOURCE_FORMAT);
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+
+        let first = import_junie_history(
+            &fixture,
+            &mut store,
+            JunieImportOptions {
+                machine_id: "test-machine".into(),
+                source_path: Some(fixture.clone()),
+                imported_at: DateTime::parse_from_rfc3339("2026-07-06T12:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                allow_partial_failures: true,
+                ..JunieImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(first.failed, 0, "{:?}", first.failures);
+        assert_eq!(first.imported_sessions, 1);
+        assert_eq!(first.imported_events, 5);
+
+        let session_id =
+            provider_session_uuid(CaptureProvider::Junie, "session-260607-100000-acme");
+        let session = store.get_session(session_id).unwrap();
+        assert_eq!(session.provider, CaptureProvider::Junie);
+        let source = store
+            .capture_source_by_external_session(
+                CaptureProvider::Junie,
+                "session-260607-100000-acme",
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            source.descriptor.cwd.as_deref(),
+            Some("/workspace/junie-fixture")
+        );
+        assert_eq!(
+            source.sync.metadata["source_format"].as_str(),
+            Some(JUNIE_SESSION_EVENTS_SOURCE_FORMAT)
+        );
+
+        let events = store.events_for_session(session_id).unwrap();
+        assert_eq!(events.len(), 5);
+        assert!(events
+            .iter()
+            .any(|event| event.role == Some(EventRole::User)));
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == EventType::ToolCall));
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == EventType::CommandOutput));
+        let rendered = serde_json::to_string(&events).unwrap();
+        assert!(rendered.contains("JUNIE_ORACLE_USER_TEXT violet cedar compass"));
+        assert!(rendered.contains("JUNIE_TERMINAL_OUTPUT saffron harbor"));
+        assert!(rendered.contains("JUNIE_FILE_CHANGE_TEXT cobalt lantern"));
+        assert!(rendered.contains("JUNIE_RESULT_TEXT copper lantern atlas"));
+
+        assert!(store
+            .search_event_hits("JUNIE_RESULT_TEXT", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::Junie)));
+        assert!(store
+            .search_event_hits("JUNIE_TERMINAL_OUTPUT", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::Junie)));
+
+        let archive = store.export_archive().unwrap();
+        let touched = archive
+            .files_touched
+            .iter()
+            .find(|file| file.path == "src/junie_theme.rs")
+            .expect("missing Junie file touch");
+        assert_eq!(touched.change_kind, Some(FileChangeKind::Modified));
+        assert_eq!(touched.confidence, Confidence::Explicit);
+        assert!(touched.event_id.is_some());
+
+        let second = import_junie_history(
+            &fixture,
+            &mut store,
+            JunieImportOptions {
+                allow_partial_failures: true,
+                ..JunieImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(second.failed, 0, "{:?}", second.failures);
+        assert_eq!(second.imported_sessions, 0);
+        assert_eq!(second.imported_events, 0);
+        assert_eq!(second.skipped_sessions, 1);
+        assert_eq!(second.skipped_events, 5);
+    }
+
+    #[test]
+    fn native_junie_index_rejects_traversal_session_ids() {
+        let temp = tempdir();
+        let sessions = temp.path().join("sessions");
+        fs::create_dir_all(sessions.join("session-safe")).unwrap();
+        fs::write(
+            sessions.join("index.jsonl"),
+            "{\"sessionId\":\"../escape\",\"createdAt\":1783339200000}\n\
+             {\"sessionId\":\"session-safe\",\"createdAt\":1783339200000,\"taskName\":\"safe\"}\n",
+        )
+        .unwrap();
+        fs::write(
+            sessions.join("session-safe").join("events.jsonl"),
+            "{\"kind\":\"UserPromptEvent\",\"prompt\":\"JUNIE_SAFE_SESSION_TEXT\"}\n",
+        )
+        .unwrap();
+
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let summary = import_junie_history(
+            &sessions,
+            &mut store,
+            JunieImportOptions {
+                allow_partial_failures: true,
+                ..JunieImportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+        assert_eq!(summary.imported_sessions, 1);
+        assert!(store
+            .capture_source_by_external_session(CaptureProvider::Junie, "../escape")
+            .unwrap()
+            .is_none());
+        assert!(store
+            .search_event_hits("JUNIE_SAFE_SESSION_TEXT", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.provider == Some(CaptureProvider::Junie)));
+    }
+
+    #[test]
     fn native_pochi_fixture_imports_searches_reimports_and_file_touches() {
         let temp = tempdir();
         let fixture =
@@ -38808,6 +41876,8 @@ mod tests {
 
         let source = provider_source_for_path(CaptureProvider::Pochi, fixture.clone());
         assert_eq!(source.source_format, POCHI_LIVESTORE_SQLITE_SOURCE_FORMAT);
+        assert_eq!(source.import_support, ProviderImportSupport::Native);
+        assert!(source.import_support.is_auto_importable());
         assert_eq!(source.status, ProviderSourceStatus::Available);
 
         let first = import_pochi_livestore_sqlite(
@@ -40183,6 +43253,45 @@ mod tests {
         assert_eq!(gemini_summary.failed, 0);
         assert_eq!(gemini_summary.imported_sessions, 2);
         assert_eq!(gemini_summary.imported_edges, 1);
+
+        let tabnine = provider_history_fixture("tabnine-cli/.tabnine/agent");
+        let tabnine_summary = import_tabnine_cli_history(
+            &tabnine,
+            &mut store,
+            TabnineCliImportOptions {
+                allow_partial_failures: true,
+                ..TabnineCliImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(tabnine_summary.failed, 0, "{:?}", tabnine_summary.failures);
+        assert_eq!(tabnine_summary.imported_sessions, 2);
+        assert_eq!(tabnine_summary.imported_events, 6);
+        assert_eq!(tabnine_summary.imported_edges, 1);
+
+        let tabnine_events = store
+            .events_for_session(provider_session_uuid(
+                CaptureProvider::Tabnine,
+                "tabnine-root",
+            ))
+            .unwrap();
+        assert!(tabnine_events
+            .iter()
+            .any(|event| event.role == Some(EventRole::Assistant)));
+        assert!(tabnine_events
+            .iter()
+            .any(|event| event.event_type == EventType::ToolCall));
+        let tabnine_rendered = serde_json::to_string(&tabnine_events).unwrap();
+        assert!(tabnine_rendered.contains("tabnine jsonl oracle prompt"));
+        assert!(tabnine_rendered.contains("tabnine jsonl oracle answer"));
+        assert!(tabnine_rendered.contains("src/tabnine_oracle.txt"));
+
+        let tabnine_child = provider_session_uuid(CaptureProvider::Tabnine, "tabnine-child");
+        let tabnine_parent = provider_session_uuid(CaptureProvider::Tabnine, "tabnine-root");
+        assert_eq!(
+            store.get_session(tabnine_child).unwrap().parent_session_id,
+            Some(tabnine_parent)
+        );
 
         let droid = write_droid_smoke_fixture(&temp);
         let droid_summary = import_factory_ai_droid_sessions(
