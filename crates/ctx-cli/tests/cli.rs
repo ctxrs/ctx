@@ -6322,6 +6322,54 @@ fn pi_cli_import_search_flow() {
 }
 
 #[test]
+fn adal_cli_import_search_flow() {
+    let temp = tempdir();
+    let fixture = provider_history_fixture("adal/sessions");
+
+    let imported = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "adal",
+        "--path",
+        &fixture,
+        "--json",
+    ]));
+    assert_eq!(imported["schema_version"], 1);
+    assert_eq!(imported["sources"][0]["provider"], "adal");
+    assert_eq!(
+        imported["sources"][0]["source_format"],
+        "adal_session_jsonl"
+    );
+    assert_eq!(imported["totals"]["imported_sessions"], 1);
+    assert_eq!(imported["totals"]["imported_events"], 4);
+    assert_eq!(imported["totals"]["failed"], 0);
+
+    let search = json_output(ctx(&temp).args([
+        "search",
+        "adal fixture oracle",
+        "--provider",
+        "adal",
+        "--json",
+    ]));
+    assert_search_provider_oracle(&search, "adal", "adal fixture oracle", 1, "message");
+
+    let second = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "adal",
+        "--path",
+        &fixture,
+        "--resume",
+        "--json",
+    ]));
+    assert_eq!(second["resume"], true);
+    assert_eq!(second["resume_mode"], "idempotent_rescan");
+    assert_eq!(second["totals"]["imported_sessions"], 0);
+    assert_eq!(second["totals"]["imported_events"], 0);
+    assert_eq!(second["totals"]["skipped"].as_u64().unwrap(), 5);
+}
+
+#[test]
 fn devin_atif_cli_import_search_flow() {
     let temp = tempdir();
     let fixture = provider_history_fixture("devin/atif/export.json");

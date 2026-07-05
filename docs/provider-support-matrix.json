@@ -2701,6 +2701,78 @@
       ]
     },
     {
+      "id": "adal",
+      "display_name": "AdaL",
+      "priority": "p1",
+      "status": "local_import_when_supported",
+      "capture_provider": "adal",
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "adal_session_jsonl",
+          "fidelity": "partial",
+          "proof": [
+            "@sylphai/adal-cli@1.4.1 npm wrapper and linux-x64 platform package",
+            "PyInstaller backend bytecode for adalflow.components.memory.session_persistence",
+            "AdaL public manage-conversations and headless-mode docs",
+            "ctx sources",
+            "ctx import --provider adal",
+            "cargo test -p ctx-history-capture native_adal_fixture_imports_searches_reimports_and_discovers_default_sessions"
+          ],
+          "notes": [
+            "Reads AdaL event-sourced JSONL sessions under ~/.adal/sessions or an explicit sessions/session JSONL path.",
+            "Imports message, compact, usage, clear, and turn-created events from conversation_<id>.jsonl and uses optional <id>_metadata.json sidecars for session metadata.",
+            "Native discovery marks AdaL available only when a non-empty conversation_*.jsonl file exists, so empty bootstrap files created before authentication remain empty sources."
+          ]
+        }
+      ],
+      "history_locations": [
+        "~/.adal/sessions/conversation_*.jsonl",
+        "~/.adal/sessions/*_metadata.json"
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": false,
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": false,
+        "tool_output": false,
+        "command_output": false,
+        "files_touched": false,
+        "artifacts": false,
+        "model_identity": true,
+        "costs": false,
+        "token_usage": true,
+        "parent_child_session_edges": false
+      },
+      "redaction_notes": [
+        "Reads local AdaL JSONL and sidecar files read-only; imported message text, project paths, and capped provider metadata remain in the local ctx index.",
+        "Synthetic fixtures contain no private user data; the importer does not authenticate to AdaL or read remote/cloud history."
+      ],
+      "blockers": [
+        "Importer is based on @sylphai/adal-cli@1.4.1 package bytecode and synthetic fixtures; future package schema changes may need adapter updates.",
+        "No authenticated non-empty live AdaL fixture is checked in, and project settings under ~/.adal/settings.json are not parsed for discovery.",
+        "HTML exports, browser/cloud state, and any separate tool-call transcript format remain unclaimed."
+      ],
+      "public_docs": "docs/provider-support.md",
+      "fixture_paths": [
+        "tests/fixtures/provider-history/adal/sessions"
+      ],
+      "tests": [
+        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-history-capture/src/lib.rs",
+        "crates/ctx-history-capture/src/provider_sources.rs",
+        "tests/fixtures/provider-history/adal/sessions"
+      ],
+      "metadata": {
+        "npx_skills_id": "adal",
+        "package": "@sylphai/adal-cli@1.4.1",
+        "schema_anchor": "adalflow.components.memory.session_persistence",
+        "default_discovery": true
+      }
+    },
+    {
       "id": "kode",
       "display_name": "Kode",
       "priority": "p1",

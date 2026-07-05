@@ -676,32 +676,30 @@ IDE/application storage imports.
   `/chat share`; native support needs source-backed file names and record
   schemas or a sanitized real fixture from a safe run.
 
-## AdaL CLI (insufficient proof)
+## AdaL CLI
 
 - Package evidence: `npm view @sylphai/adal-cli@1.4.1` reports repository
   `https://github.com/SylphAI-Inc/adal-cli.git`; the public repository is
   documentation-only and says the main AdaL source lives outside that public
-  repo. The npm package is a proprietary wrapper plus platform package.
+  repo. The npm package is a proprietary wrapper plus platform package
+  (`@sylphai/adal-cli-linux-x64@1.4.1` on this host).
+- Public docs evidence: AdaL's manage-conversations docs say session history
+  saves full conversation messages, tool calls, responses, working context, and
+  metadata. The headless docs expose JSON/NDJSON response examples with
+  `session_id` and document `--resume <id>` as resuming a saved conversation by
+  session ID.
 - Safe-run evidence: running `@sylphai/adal-cli@1.4.1` through its installed
   npm wrapper with disposable `HOME`, a public scratch working directory, and
   fixed `--session-id ctx-adal-fixed-session` failed before model execution
   because no credentials were available. The run created
   `~/.adal/sessions/conversation_ctx-adal-fixed-session.jsonl` as an empty
   file and wrote `~/.adal/sessions/ctx-adal-fixed-session_metadata.json`.
-- Metadata sidecar evidence from that run: the sidecar contains
-  `conversation_id`, `created_at`, `last_accessed`, `last_user_message`,
-  `total_messages`, `total_turns`, `project_path`, `user_id`, `platform`, and
-  `version`. The project path was the disposable scratch directory.
-- Public docs evidence: AdaL's manage-conversations docs say session history
-  saves full conversation messages, tool calls, responses, working context, and
-  metadata, and the headless docs expose JSON/NDJSON response examples with
-  `session_id`. Those docs do not specify the backing JSONL record schema.
-- Binary schema evidence: the Linux x64 platform package contains a
-  PyInstaller backend. Extracting the backend archive locally showed
-  `adalflow.components.memory.session_persistence`, whose docstrings describe
-  JSONL event sourcing with real-time append and replay. Bytecode constants
-  show the session file name pattern `conversation_<id>.jsonl` and event types
-  `metadata`, `turn_created`, `message`, `compact`, `clear`, and `usage`.
+- Binary schema evidence: extracting the Linux x64 platform package's
+  PyInstaller backend showed `adalflow.components.memory.session_persistence`.
+  Its module docstring describes JSONL session persistence for real-time append
+  and replay. Bytecode constants show the session file name pattern
+  `conversation_<id>.jsonl` and event types `metadata`, `turn_created`,
+  `message`, `compact`, `clear`, and `usage`.
 - Binary field evidence: the same bytecode constants show record keys:
   `metadata` events include `type`, `conversation_id`, `user_id`,
   `created_at`, `platform`, `version`, and `project_path`; `turn_created`
@@ -710,16 +708,28 @@ IDE/application storage imports.
   `metadata`, and `timestamp`; `compact` events include `compact_id`,
   `start_index`, `end_index`, `content`, `metadata`, and `timestamp`; `clear`
   events include `reason` and `timestamp`; `usage` events include `turn_id`,
-  `step`, `model`, token count fields, `source`, optional `subagent_type`, and
-  `timestamp`.
-- Decision: ctx should not add a native AdaL importer yet. The storage path and
-  writer schema are package-backed, but this pass did not produce a non-empty
-  authenticated message fixture and the public source does not expose the
-  writer implementation. Native support needs a sanitized real
-  `conversation_<id>.jsonl` containing at least one `turn_created` and
-  `message` event, plus validation of when the first `metadata` event is
-  written and whether project settings under `~/.adal/settings.json` are needed
-  for discovery.
+  `step`, `model`, `input_tokens`, `output_tokens`,
+  `cached_read_input_tokens`, `cache_creation_tokens`, `reasoning_tokens`,
+  `source`, optional `subagent_type`, and `timestamp`.
+- Binary discovery and sidecar evidence: `deep_research.config.config_initializer`
+  resolves the sessions directory to `~/.adal/sessions/`, builds
+  `conversation_<id>.jsonl`, and globs `conversation_*.jsonl`. Workspace
+  endpoint bytecode constructs `<id>_metadata.json` sidecars, and
+  `adalflow.components.memory.flexible_memory` restores `SessionMetadata`
+  fields including `conversation_id`, `created_at`, `last_accessed`,
+  `last_user_message`, `total_messages`, `total_turns`, `project_path`,
+  `user_id`, `platform`, and `version`.
+- Decision: ctx imports this shape as `adal_session_jsonl`. Default discovery
+  checks `~/.adal/sessions` and reports AdaL available only when a non-empty
+  `conversation_*.jsonl` exists, so the known empty no-auth bootstrap file is
+  not imported. Explicit `--path` imports accept a sessions directory, a
+  `conversation_<id>.jsonl` file, or an adjacent `<id>_metadata.json` sidecar.
+  The checked-in fixture is synthetic from the package-backed writer schema and
+  contains no private user data.
+- Unclaimed gaps: no authenticated non-empty live AdaL fixture is checked in;
+  project settings under `~/.adal/settings.json`, HTML exports, browser/cloud
+  state, and any separate tool-call transcript format remain unparsed until
+  independently proven.
 
 ## OpenHands
 
