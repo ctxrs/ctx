@@ -1405,6 +1405,17 @@ fn discover_provider_sources_for_spec(
         CaptureProvider::RooCode => {
             sources.extend(discover_roo_task_json_sources(home, spec));
         }
+        CaptureProvider::Pochi => {
+            let storage = home.join(".pochi").join("storage");
+            if storage.exists() {
+                sources.push(provider_source_from_parts(
+                    spec,
+                    storage,
+                    "pochi_livestore_state_sqlite",
+                    ProviderSourceKind::NativeHistory,
+                ));
+            }
+        }
         CaptureProvider::CodeBuddy => {
             if let Some(path) = env_path("LOCALAPPDATA") {
                 sources.push(provider_source_from_parts(
@@ -2388,7 +2399,7 @@ fn default_location_import_probe(
         }),
         CaptureProvider::OpenHands => has_openhands_event_json(path, 10_000),
         CaptureProvider::Dexto => path_is_file_probe(path),
-        CaptureProvider::Pochi => path_is_file_probe(path),
+        CaptureProvider::Pochi => has_pochi_state_db(path, 10_000),
         CaptureProvider::Antigravity => has_jsonl_file_under_matching(path, 10_000, |candidate| {
             matches!(
                 candidate.file_name().and_then(|name| name.to_str()),
@@ -2924,6 +2935,57 @@ fn has_codebuddy_history_json(root: &Path, max_entries: usize) -> BoundedProbe {
         path.file_name().and_then(|name| name.to_str()) == Some("index.json")
             && path_has_component(path, "history")
     })
+}
+
+fn has_pochi_state_db(root: &Path, max_entries: usize) -> BoundedProbe {
+    match path_metadata_probe(root) {
+        PathProbe::File => {
+            return BoundedProbe::from_bool(
+                root.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("state") && name.ends_with(".db")),
+            );
+        }
+        PathProbe::Dir => {}
+        PathProbe::Missing | PathProbe::Other => return BoundedProbe::NotFound,
+        PathProbe::IoError => return BoundedProbe::IoError,
+    }
+
+    let mut visited = 0usize;
+    let mut stack = vec![(root.to_path_buf(), true)];
+    while let Some((dir, is_root)) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) if is_root => return BoundedProbe::IoError,
+            Err(_) => continue,
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => continue,
+            };
+            visited = visited.saturating_add(1);
+            if visited > max_entries {
+                return BoundedProbe::BudgetExhausted;
+            }
+            let path = entry.path();
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(_) => continue,
+            };
+            if file_type.is_dir() {
+                stack.push((path, false));
+            } else if file_type.is_file()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("state") && name.ends_with(".db"))
+            {
+                return BoundedProbe::Found;
+            }
+        }
+    }
+    BoundedProbe::NotFound
 }
 
 fn has_nanoclaw_project(root: &Path) -> BoundedProbe {
@@ -4290,6 +4352,40 @@ mod tests {
         assert_eq!(source.status, ProviderSourceStatus::Available);
         assert_eq!(source.source_format, "dexto_sqlite");
         assert_eq!(source.import_support, ProviderImportSupport::Native);
+    }
+
+    #[test]
+    fn pochi_discovery_uses_synced_storage_root_when_present() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let discovered =
+            discover_provider_sources_for_provider(temp.path(), CaptureProvider::Pochi);
+        assert!(discovered.is_empty(), "{discovered:#?}");
+
+        let storage = temp.path().join(".pochi/storage");
+        std::fs::create_dir_all(storage.join("store-alpha")).unwrap();
+        let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Pochi);
+        let source = sources
+            .iter()
+            .find(|source| source.path == storage)
+            .unwrap_or_else(|| panic!("missing Pochi storage source in {sources:#?}"));
+        assert_eq!(source.status, ProviderSourceStatus::Empty);
+        assert_eq!(source.source_format, "pochi_livestore_state_sqlite");
+        assert_eq!(source.import_support, ProviderImportSupport::Preview);
+
+        std::fs::write(
+            temp.path()
+                .join(".pochi/storage/store-alpha/statep0chifixture@6.db"),
+            b"sqlite fixture marker",
+        )
+        .unwrap();
+        let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Pochi);
+        let source = sources
+            .iter()
+            .find(|source| source.path == storage)
+            .unwrap_or_else(|| panic!("missing Pochi storage source in {sources:#?}"));
+        assert_eq!(source.status, ProviderSourceStatus::Available);
+        assert_eq!(source.import_support, ProviderImportSupport::Preview);
     }
 
     #[test]

@@ -596,18 +596,21 @@
           "source_format": "pochi_livestore_state_sqlite",
           "fidelity": "imported",
           "proof": [
+            "ctx import --provider pochi",
             "ctx import --provider pochi --path <state*.db>",
+            "cargo test -p ctx pochi_preview_default_discovery_imports_only_when_explicit_provider",
             "cargo test -p ctx-history-capture native_pochi_fixture_imports_searches_reimports_and_file_touches",
             "cargo test -p ctx pochi_cli_imports_explicit_livestore_state_db_and_directory_only"
           ],
           "notes": [
-            "Preview explicit import for Pochi LiveStore state SQLite databases; pass a state*.db file or a directory containing state*.db files.",
+            "Preview import for Pochi LiveStore state SQLite databases; discovers synced state DBs under ~/.pochi/storage when that directory exists, or pass a state*.db file or a directory containing state*.db files.",
             "Reads tasks and messages tables read-only, normalizing text parts, tool parts, executeCommand output, and known file-touch tool input paths.",
-            "No default ~/.pochi discovery, config.jsonc parsing, or VS Code OPFS extraction is claimed."
+            "No config.jsonc parsing or VS Code OPFS extraction is claimed."
           ]
         }
       ],
       "history_locations": [
+        "~/.pochi/storage",
         "Explicit state*.db file path",
         "Explicit directory containing state*.db files"
       ],
@@ -631,7 +634,7 @@
         "Reads the provider SQLite database read-only; imported message text, tool input/output text, file paths, cwd, model id, and local source paths remain in the local ctx index."
       ],
       "blockers": [
-        "Preview explicit-path-only importer; no automatic ~/.pochi scan is shipped.",
+        "Preview importer; discovered ~/.pochi/storage sources are not included in ctx import --all or pre-search refresh.",
         "Pochi CLI filesystem LiveStore sync is only present when POCHI_LIVEKIT_SYNC_ON is enabled, so many installations may not have an importable state DB."
       ],
       "public_docs": "docs/provider-support.md",
