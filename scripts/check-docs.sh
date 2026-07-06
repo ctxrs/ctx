@@ -21,7 +21,6 @@ required_paths=(
   docs/limitations.md
   docs/security-checks.md
   docs/agent-usage.md
-  docs/agent-storage-coverage.md
   docs/testing-taxonomy.md
   docs/troubleshooting.md
   docs/threat-model.md
@@ -43,7 +42,6 @@ if command -v jq >/dev/null 2>&1; then
   jq empty docs/provider-support-matrix.json
 fi
 python3 scripts/check-provider-support-matrix.py
-python3 scripts/check-agent-storage-coverage.py
 
 public_docs=(
   README.md
@@ -76,14 +74,7 @@ scan_docs() {
 unsupported_surface_pattern='dashboard|shim|shims|pull request|pull-request|pr evidence|pr-evidence|ctx pr|ctx publish|ctx evidence|ctx update|ctx uninstall|\bADE\b|automatic summar|\bMVP\b|recover prior decisions|ctx remembers everything|privacy-first|ctx context|ctx list|ctx export|ctx validate|--until|normalized-only|normalized only|normalized_import_only|normalized provider JSONL|CTX_PROVIDER_NORMALIZED_IMPORT_DEV|[W]ork Recorder|[w]ork recorder|\bwork-[r]ecord\b'
 private_path_pattern='/home/[d]addy|/home/[^[:space:]]+/(code|Documents|Desktop)|/Users/[^[:space:]]+/(code|Documents|Desktop)|ctx-[p]rivate|ctx-multi-repo-workspace|\.ctx/worktrees'
 
-product_surface_docs=()
-for path in "${public_docs[@]}"; do
-  if [[ "${path}" != "docs/agent-storage-coverage.md" ]]; then
-    product_surface_docs+=("${path}")
-  fi
-done
-
-if scan_docs "${unsupported_surface_pattern}" "${product_surface_docs[@]}"; then
+if scan_docs "${unsupported_surface_pattern}" "${public_docs[@]}"; then
     printf 'public docs contain removed or unsupported product surface wording\n' >&2
     exit 1
 fi

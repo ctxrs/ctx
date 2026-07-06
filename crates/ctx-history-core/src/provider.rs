@@ -51,13 +51,6 @@ pub enum ProviderId {
         alias = "codearts-doer"
     )]
     CodeArtsAgent,
-    #[serde(
-        rename = "openloaf",
-        alias = "loaf",
-        alias = "open-loaf",
-        alias = "open_loaf"
-    )]
-    OpenLoaf,
     Cursor,
     AntigravityCli,
     GeminiCli,
@@ -87,47 +80,27 @@ pub enum ProviderId {
     Cline,
     #[serde(rename = "roo_code", alias = "roo", alias = "roo-code")]
     RooCode,
-    #[serde(rename = "bob", alias = "ibm-bob", alias = "ibm_bob")]
-    Bob,
     Continue,
     Crush,
     Goose,
-    Dexto,
     #[serde(rename = "lingma", alias = "qoder-cn", alias = "qoder_cn")]
     Lingma,
     Qoder,
-    Pochi,
     #[serde(rename = "warp")]
     Warp,
     #[serde(rename = "codebuddy", alias = "code_buddy", alias = "code-buddy")]
     CodeBuddy,
-    #[serde(rename = "aider_desk", alias = "aider-desk")]
-    AiderDesk,
     #[serde(rename = "trae", alias = "trae-cn", alias = "trae_cn")]
     Trae,
     #[serde(rename = "zencoder", alias = "zen-coder", alias = "zen_coder")]
     Zencoder,
-    #[serde(
-        rename = "codestudio",
-        alias = "code_studio",
-        alias = "code-studio",
-        alias = "syncfusion_code_studio",
-        alias = "syncfusion-code-studio"
-    )]
-    CodeStudio,
     #[serde(rename = "openhands")]
     OpenHands,
     Cagent,
     #[serde(rename = "qwen_code", alias = "qwen", alias = "qwen-code")]
     QwenCode,
-    #[serde(rename = "autohand_code", alias = "autohand", alias = "autohand-code")]
-    AutohandCode,
     #[serde(rename = "kiro_cli", alias = "kiro", alias = "kiro-cli")]
     KiroCli,
-    #[serde(rename = "iflow_cli", alias = "iflow", alias = "iflow-cli")]
-    IflowCli,
-    #[serde(rename = "jazz")]
-    Jazz,
     #[serde(
         rename = "forgecode",
         alias = "forge",
@@ -147,33 +120,14 @@ pub enum ProviderId {
     #[serde(rename = "tabnine", alias = "tabnine-cli", alias = "tabnine_cli")]
     Tabnine,
     Mux,
-    Moxby,
-    #[serde(rename = "reasonix", alias = "deepseek-reasonix")]
-    Reasonix,
-    #[serde(rename = "adal", alias = "adal-cli", alias = "adal_cli")]
-    Adal,
-    #[serde(
-        rename = "kode",
-        alias = "shareai-kode",
-        alias = "shareai_kode",
-        alias = "shareai_lab_kode"
-    )]
-    Kode,
-    #[serde(rename = "neovate", alias = "neovate-code", alias = "neovate_code")]
-    Neovate,
-    #[serde(rename = "command_code", alias = "command-code", alias = "commandcode")]
-    CommandCode,
     #[serde(
         rename = "firebender",
         alias = "firebender-jetbrains",
         alias = "firebender_jetbrains"
     )]
     Firebender,
-    Terramind,
     #[serde(rename = "rovodev", alias = "rovo-dev", alias = "rovo_dev")]
     RovoDev,
-    #[serde(rename = "cortex_code", alias = "cortex", alias = "cortex-code")]
-    CortexCode,
     #[serde(rename = "kimi_code_cli", alias = "kimi", alias = "kimi-code-cli")]
     KimiCodeCli,
     Aider,
@@ -181,24 +135,19 @@ pub enum ProviderId {
     ContinueCody,
     #[serde(rename = "auggie", alias = "augment", alias = "augment-code")]
     Auggie,
-    Eve,
     Junie,
     Kilo,
     SweAgent,
-    #[serde(rename = "tinycloud", alias = "tiny_cloud", alias = "tiny-cloud")]
-    TinyCloud,
-    Zenflow,
 }
 
 impl ProviderId {
-    pub const ALL: [Self; 72] = [
+    pub const ALL: [Self; 52] = [
         Self::Codex,
         Self::ClaudeCode,
         Self::ClaudeCliCrp,
         Self::Pi,
         Self::OpenCode,
         Self::CodeArtsAgent,
-        Self::OpenLoaf,
         Self::Cursor,
         Self::AntigravityCli,
         Self::GeminiCli,
@@ -218,52 +167,33 @@ impl ProviderId {
         Self::Shelley,
         Self::Cline,
         Self::RooCode,
-        Self::Bob,
         Self::Continue,
         Self::Crush,
         Self::Goose,
-        Self::Dexto,
         Self::Lingma,
         Self::Qoder,
-        Self::Pochi,
         Self::Warp,
         Self::CodeBuddy,
-        Self::AiderDesk,
         Self::Trae,
         Self::Zencoder,
-        Self::CodeStudio,
         Self::OpenHands,
         Self::Cagent,
         Self::QwenCode,
-        Self::AutohandCode,
         Self::KiroCli,
-        Self::IflowCli,
-        Self::Jazz,
         Self::ForgeCode,
         Self::DeepAgents,
         Self::MistralVibe,
         Self::Mux,
-        Self::Moxby,
-        Self::Reasonix,
-        Self::Adal,
-        Self::Kode,
-        Self::Neovate,
-        Self::CommandCode,
         Self::Firebender,
-        Self::Terramind,
         Self::RovoDev,
-        Self::CortexCode,
         Self::KimiCodeCli,
         Self::Aider,
         Self::ClineRoo,
         Self::ContinueCody,
         Self::Auggie,
-        Self::Eve,
         Self::Junie,
         Self::Kilo,
         Self::SweAgent,
-        Self::TinyCloud,
-        Self::Zenflow,
     ];
 }
 

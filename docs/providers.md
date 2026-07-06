@@ -24,8 +24,6 @@ codex, claude, cursor, pi, opencode, github-copilot, copilot-cli, antigravity, g
 
 Aliases are accepted for common naming differences, for example `claude-code`, `gemini-cli`, `github-copilot`, `droid`, `augment`, `qoder-cn`, `trae-cn`, and `roo-code`.
 
-For the pinned npx skills target set, see [`agent-storage-coverage.md`](agent-storage-coverage.md). That ledger also records deliberately unsupported install-only, hosted/export, unknown, and deferred targets.
-
 Custom history is separate: `ctx import --format ctx-history-jsonl-v1 --path <file>` reads an explicit JSONL interchange file from any exporter, and history-source plugins can stream the same format from local adapter commands.
 
 ## Import Rules

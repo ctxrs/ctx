@@ -6,9 +6,7 @@ research trail: if a provider is not listed in the support matrix, ctx does not
 claim local-history ingestion for it on this branch.
 
 The support contract lives in
-[`provider-support-matrix.json`](provider-support-matrix.json) and the npx
-skills comparison ledger in
-[`agent-storage-coverage.md`](agent-storage-coverage.md).
+[`provider-support-matrix.json`](provider-support-matrix.json).
 
 ## Kiro CLI
 

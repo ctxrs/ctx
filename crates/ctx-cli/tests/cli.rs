@@ -47,9 +47,7 @@ fn apply_hermetic_env(command: &mut Command, temp: &TempDir) {
     command.env_remove("SHELLEY_DB");
     command.env_remove("KILO_DB");
     command.env_remove("FORGE_CONFIG");
-    command.env_remove("MOXBY_STATE_DIR");
     command.env_remove("VIBE_HOME");
-    command.env_remove("TINYCLOUD_HOME");
     command.env_remove("XDG_CONFIG_HOME");
     command.env_remove("XDG_DATA_HOME");
     command.env_remove("XDG_STATE_HOME");
@@ -1138,7 +1136,6 @@ fn sources_default_hides_unsupported_missing_locations() {
     assert!(visible
         .iter()
         .any(|source| source["provider"] == "copilot_cli"));
-    assert!(!visible.iter().any(|source| source["provider"] == "moxby"));
 
     let text = ctx(&temp)
         .arg("sources")
@@ -1150,14 +1147,12 @@ fn sources_default_hides_unsupported_missing_locations() {
     let text = String::from_utf8(text).unwrap();
     assert!(text.contains("missing provider locations hidden"));
     assert!(text.contains("ctx sources --all"));
-    assert!(!text.contains("moxby "));
 
     let all_sources = json_output(ctx(&temp).args(["sources", "--json", "--all"]));
     assert_eq!(all_sources["scope"], "all");
     assert_eq!(all_sources["hidden_missing_sources"], 0);
     let all = all_sources["sources"].as_array().unwrap();
     assert!(all.len() > visible.len());
-    assert!(!all.iter().any(|source| source["provider"] == "moxby"));
 }
 
 #[test]
@@ -1165,7 +1160,7 @@ fn sources_provider_filter_rejects_unsupported_providers() {
     let temp = tempdir();
 
     ctx(&temp)
-        .args(["sources", "--provider", "moxby", "--json"])
+        .args(["sources", "--provider", "not-a-real-provider", "--json"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("unknown provider"));
@@ -2407,19 +2402,6 @@ fn provider_help_stays_compact_for_large_supported_provider_set() {
         !help.contains("--provider <PROVIDER>\n          [possible values:"),
         "{help}"
     );
-    for unsupported in [
-        "aider-desk",
-        "moxby",
-        "pochi",
-        "tinycloud",
-        "zenflow",
-        "terramind",
-    ] {
-        assert!(
-            !help.contains(unsupported),
-            "unsupported provider {unsupported} leaked into compact help:\n{help}"
-        );
-    }
 }
 
 #[test]
@@ -4644,25 +4626,6 @@ fn mcp_status_and_tools_list_are_read_only_without_initialized_store() {
     assert!(providers.iter().any(|provider| provider == "cline"));
     assert!(providers.iter().any(|provider| provider == "roo"));
     assert!(providers.iter().any(|provider| provider == "roo_code"));
-    for unsupported in [
-        "aider-desk",
-        "autohand-code",
-        "bob",
-        "command-code",
-        "dexto",
-        "iflow-cli",
-        "moxby",
-        "reasonix",
-        "terramind",
-        "tinycloud",
-        "zenflow",
-    ] {
-        assert!(
-            !providers.iter().any(|provider| provider == unsupported),
-            "unsupported provider {unsupported} leaked into MCP schema {providers:#?}"
-        );
-    }
-
     let status = &responses[2]["result"]["structuredContent"];
     assert_eq!(status["schema_version"], 1);
     assert_eq!(status["initialized"], false);
@@ -5043,7 +5006,7 @@ fn mcp_search_requires_query_term_or_file_without_opening_store() {
                     "name": "search",
                     "arguments": {
                         "query": "hidden provider probe",
-                        "provider": "moxby",
+                        "provider": "not-a-real-provider",
                         "limit": 5
                     }
                 }
@@ -6325,30 +6288,10 @@ fn pi_cli_import_search_flow() {
 }
 
 #[test]
-fn unsupported_native_providers_are_rejected_by_public_cli() {
+fn unknown_native_providers_are_rejected_by_public_cli() {
     let temp = tempdir();
 
-    for provider in [
-        "adal",
-        "aider-desk",
-        "autohand-code",
-        "bob",
-        "codestudio",
-        "command-code",
-        "cortex-code",
-        "dexto",
-        "iflow-cli",
-        "jazz",
-        "kode",
-        "loaf",
-        "moxby",
-        "neovate",
-        "pochi",
-        "reasonix",
-        "terramind",
-        "tinycloud",
-        "zenflow",
-    ] {
+    for provider in ["not-a-real-provider", "unsupported-provider-placeholder"] {
         let stderr = failure_stderr(ctx(&temp).args(["import", "--provider", provider, "--json"]));
         assert!(stderr.contains("unknown provider"), "{provider}: {stderr}");
     }

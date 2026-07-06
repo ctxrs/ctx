@@ -1383,7 +1383,7 @@
         "parent_child_session_edges": false
       },
       "blockers": [
-        "The npx skills id `antigravity` advertises ~/.gemini/antigravity, but the official IDE transcript path proven here is ~/.gemini/antigravity-ide/brain; ctx does not crawl ~/.gemini/antigravity without separate proof."
+        "The official IDE transcript path proven here is ~/.gemini/antigravity-ide/brain; ctx does not crawl other Antigravity homes without separate transcript-storage proof."
       ],
       "public_docs": "docs/provider-support.md",
       "fixture_paths": [
@@ -2038,7 +2038,7 @@
       ],
       "blockers": [
         "Importer is based on public JetBrains Marketplace Firebender 1.0.10 plugin bytecode proof plus a minimized SQLite fixture; future plugin schema changes may need adapter updates.",
-        "The npx skills registry advertises ~/.firebender for skills, but the proven chat transcript store is project-local .idea/firebender/chat_history.db rather than a global ~/.firebender history file."
+        "The proven chat transcript store is project-local .idea/firebender/chat_history.db; ctx does not claim a global Firebender transcript home."
       ],
       "public_docs": "docs/provider-support.md",
       "fixture_paths": [
