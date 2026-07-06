@@ -198,36 +198,37 @@ fn generated_ids_are_uuid_v7_and_paths_are_centralized() {
 
 #[test]
 fn local_layout_paths_are_flat_under_data_root() {
-    let root = PathBuf::from("/tmp/ctx-root");
-    assert_eq!(history_dir(root.clone()), PathBuf::from("/tmp/ctx-root"));
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().to_path_buf();
+    assert_eq!(history_dir(root.clone()), root);
     assert_eq!(
         database_path(root.clone()),
-        PathBuf::from("/tmp/ctx-root/work.sqlite")
+        root.join("work.sqlite")
     );
     assert_eq!(
         object_dir(root.clone()),
-        PathBuf::from("/tmp/ctx-root/objects")
+        root.join("objects")
     );
     assert_eq!(
         blob_dir(root.clone()),
-        PathBuf::from("/tmp/ctx-root/objects")
+        root.join("objects")
     );
     assert_eq!(
         spool_dir(root.clone()),
-        PathBuf::from("/tmp/ctx-root/spool")
+        root.join("spool")
     );
     assert_eq!(
         inbox_dir(root.clone()),
-        PathBuf::from("/tmp/ctx-root/spool")
+        root.join("spool")
     );
     assert_eq!(
         config_path(root.clone()),
-        PathBuf::from("/tmp/ctx-root/config.toml")
+        root.join("config.toml")
     );
-    assert_eq!(logs_dir(root.clone()), PathBuf::from("/tmp/ctx-root/logs"));
+    assert_eq!(logs_dir(root.clone()), root.join("logs"));
     assert_eq!(
         device_path(root),
-        PathBuf::from("/tmp/ctx-root/device.json")
+        root.join("device.json")
     );
 }
 
@@ -242,15 +243,17 @@ fn ctx_data_root_env_is_the_ctx_root_itself() {
     let default_root = default_data_root().unwrap();
     assert!(default_root.ends_with(".ctx"));
 
-    env::set_var("CTX_DATA_ROOT", "/tmp/custom-ctx-root");
+    let temp = tempfile::tempdir().unwrap();
+    let custom_root = temp.path().join("custom-ctx-root");
+    env::set_var("CTX_DATA_ROOT", &custom_root);
 
     assert_eq!(
         default_data_root().unwrap(),
-        PathBuf::from("/tmp/custom-ctx-root")
+        custom_root
     );
     assert_eq!(
         database_path(default_data_root().unwrap()),
-        PathBuf::from("/tmp/custom-ctx-root/work.sqlite")
+        custom_root.join("work.sqlite")
     );
 
     if let Some(previous) = previous {

@@ -19,22 +19,29 @@ use crate::analytics;
 
 #[test]
 fn default_target_is_global_canonical_agents_dir() {
-    let context = PathContext::for_tests(PathBuf::from("/home/tester"), PathBuf::from("/repo"));
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let context = PathContext::for_tests(home.clone(), temp.path().join("repo"));
     let targets = resolve_targets(&[], false, false, &context).unwrap();
     assert_eq!(targets.len(), 1);
     assert_eq!(targets[0].agent, SkillAgentArg::Universal);
     assert_eq!(
         targets[0].skill_dir,
-        PathBuf::from("/home/tester/.agents/skills/ctx-agent-history-search")
+        home.join(".agents/skills/ctx-agent-history-search")
     );
 }
 
 #[test]
 fn agent_global_paths_preserve_env_and_xdg_rules() {
-    let context = PathContext::for_tests(PathBuf::from("/home/tester"), PathBuf::from("/repo"))
-        .with_xdg_config_home(PathBuf::from("/xdg"))
-        .with_env_override("CODEX_HOME", PathBuf::from("/codex-home"))
-        .with_env_override("CLAUDE_CONFIG_DIR", PathBuf::from("/claude-home"));
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let xdg = temp.path().join("xdg");
+    let codex_home = temp.path().join("codex-home");
+    let claude_home = temp.path().join("claude-home");
+    let context = PathContext::for_tests(home, temp.path().join("repo"))
+        .with_xdg_config_home(xdg.clone())
+        .with_env_override("CODEX_HOME", codex_home.clone())
+        .with_env_override("CLAUDE_CONFIG_DIR", claude_home.clone());
     let targets = resolve_targets(
         &[
             SkillAgentArg::Codex,
@@ -53,25 +60,27 @@ fn agent_global_paths_preserve_env_and_xdg_rules() {
         .collect::<BTreeMap<_, _>>();
     assert_eq!(
         paths["codex"],
-        PathBuf::from("/codex-home/skills/ctx-agent-history-search")
+        codex_home.join("skills/ctx-agent-history-search")
     );
     assert_eq!(
         paths["claude-code"],
-        PathBuf::from("/claude-home/skills/ctx-agent-history-search")
+        claude_home.join("skills/ctx-agent-history-search")
     );
     assert_eq!(
         paths["opencode"],
-        PathBuf::from("/xdg/opencode/skills/ctx-agent-history-search")
+        xdg.join("opencode/skills/ctx-agent-history-search")
     );
     assert_eq!(
         paths["amp"],
-        PathBuf::from("/xdg/agents/skills/ctx-agent-history-search")
+        xdg.join("agents/skills/ctx-agent-history-search")
     );
 }
 
 #[test]
 fn project_paths_are_agent_specific_and_relative_to_cwd() {
-    let context = PathContext::for_tests(PathBuf::from("/home/tester"), PathBuf::from("/repo"));
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    let context = PathContext::for_tests(temp.path().join("home"), repo.clone());
     let targets = resolve_targets(
         &[SkillAgentArg::ClaudeCode, SkillAgentArg::Codex],
         false,
@@ -85,7 +94,7 @@ fn project_paths_are_agent_specific_and_relative_to_cwd() {
         .collect::<BTreeMap<_, _>>();
     assert_eq!(
         paths["claude-code"],
-        PathBuf::from("/repo/.claude/skills/ctx-agent-history-search")
+        repo.join(".claude/skills/ctx-agent-history-search")
     );
     assert_eq!(
         paths["codex"],

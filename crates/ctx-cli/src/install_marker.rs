@@ -88,9 +88,11 @@ mod tests {
 
     #[test]
     fn appends_marker_suffix_to_full_exe_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let exe = temp.path().join("ctx.exe");
         assert_eq!(
-            install_marker_path(Path::new("/tmp/ctx.exe")),
-            PathBuf::from("/tmp/ctx.exe.install.json")
+            install_marker_path(&exe),
+            temp.path().join("ctx.exe.install.json")
         );
     }
 
