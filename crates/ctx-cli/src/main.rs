@@ -176,10 +176,11 @@ struct SourcesArgs {
     #[arg(
         long,
         value_parser = parse_provider_arg,
+        hide_possible_values = true,
         help = "Show sources for one provider, for example codex, claude, cursor, pi, copilot-cli, or opencode"
     )]
     provider: Option<ProviderArg>,
-    #[arg(long, help = "Show every known provider location")]
+    #[arg(long, help = "Show every supported provider location")]
     all: bool,
     #[arg(long, help = "Show missing locations for every known provider")]
     show_missing: bool,
@@ -198,6 +199,7 @@ struct ImportArgs {
     #[arg(
         long,
         value_parser = parse_native_provider_arg,
+        hide_possible_values = true,
         help = "Import one provider, for example codex, claude, cursor, pi, copilot-cli, or opencode"
     )]
     provider: Option<NativeProviderArg>,
@@ -251,6 +253,7 @@ struct ShowSessionArgs {
     #[arg(help = "ctx session id or unambiguous id prefix")]
     id: Option<String>,
     #[arg(long, value_parser = parse_provider_arg)]
+    #[arg(hide_possible_values = true)]
     provider: Option<ProviderArg>,
     #[arg(long = "provider-session")]
     provider_session: Option<String>,
@@ -299,6 +302,7 @@ struct LocateSessionArgs {
     #[arg(help = "ctx session id or unambiguous id prefix")]
     id: Option<String>,
     #[arg(long, value_parser = parse_provider_arg)]
+    #[arg(hide_possible_values = true)]
     provider: Option<ProviderArg>,
     #[arg(long = "provider-session")]
     provider_session: Option<String>,
@@ -337,6 +341,7 @@ struct SearchArgs {
     #[arg(
         long,
         value_parser = parse_provider_arg,
+        hide_possible_values = true,
         help = "Search only one provider, for example codex, claude, cursor, pi, copilot-cli, or opencode"
     )]
     provider: Option<ProviderArg>,
@@ -775,12 +780,13 @@ enum NativeProviderArg {
     )]
     Windsurf,
     Zed,
-    #[value(alias = "copilot", alias = "copilot_cli")]
+    #[value(alias = "copilot", alias = "copilot_cli", alias = "github-copilot")]
     CopilotCli,
     #[value(
         alias = "factoryai-droid",
         alias = "factory-droid",
-        alias = "factory_ai_droid"
+        alias = "factory_ai_droid",
+        alias = "droid"
     )]
     FactoryAiDroid,
     #[value(name = "qwen-code", alias = "qwen", alias = "qwen_code")]
@@ -933,12 +939,13 @@ enum ProviderArg {
     )]
     Windsurf,
     Zed,
-    #[value(alias = "copilot", alias = "copilot_cli")]
+    #[value(alias = "copilot", alias = "copilot_cli", alias = "github-copilot")]
     CopilotCli,
     #[value(
         alias = "factoryai-droid",
         alias = "factory-droid",
-        alias = "factory_ai_droid"
+        alias = "factory_ai_droid",
+        alias = "droid"
     )]
     FactoryAiDroid,
     #[value(name = "qwen-code", alias = "qwen", alias = "qwen_code")]
@@ -1142,6 +1149,9 @@ impl ProviderArg {
     pub(crate) fn mcp_names() -> Vec<&'static str> {
         let mut names = Vec::new();
         for provider in Self::value_variants() {
+            if !cli_supported_provider(provider.capture_provider()) {
+                continue;
+            }
             let cli_name = provider.cli_name();
             if !names.contains(&cli_name) {
                 names.push(cli_name);
@@ -1293,6 +1303,55 @@ impl ProviderArg {
 }
 
 type SourceInfo = ProviderSource;
+
+fn cli_supported_provider(provider: CaptureProvider) -> bool {
+    matches!(
+        provider,
+        CaptureProvider::Codex
+            | CaptureProvider::Claude
+            | CaptureProvider::Pi
+            | CaptureProvider::OpenCode
+            | CaptureProvider::CodeArtsAgent
+            | CaptureProvider::Kilo
+            | CaptureProvider::KiroCli
+            | CaptureProvider::Crush
+            | CaptureProvider::Goose
+            | CaptureProvider::Antigravity
+            | CaptureProvider::Gemini
+            | CaptureProvider::Tabnine
+            | CaptureProvider::Cursor
+            | CaptureProvider::Windsurf
+            | CaptureProvider::Zed
+            | CaptureProvider::CopilotCli
+            | CaptureProvider::FactoryAiDroid
+            | CaptureProvider::QwenCode
+            | CaptureProvider::KimiCodeCli
+            | CaptureProvider::Auggie
+            | CaptureProvider::Junie
+            | CaptureProvider::Firebender
+            | CaptureProvider::ForgeCode
+            | CaptureProvider::DeepAgents
+            | CaptureProvider::MistralVibe
+            | CaptureProvider::Mux
+            | CaptureProvider::RovoDev
+            | CaptureProvider::OpenClaw
+            | CaptureProvider::Hermes
+            | CaptureProvider::NanoClaw
+            | CaptureProvider::AstrBot
+            | CaptureProvider::Shelley
+            | CaptureProvider::Continue
+            | CaptureProvider::OpenHands
+            | CaptureProvider::Cline
+            | CaptureProvider::RooCode
+            | CaptureProvider::Lingma
+            | CaptureProvider::Qoder
+            | CaptureProvider::Warp
+            | CaptureProvider::CodeBuddy
+            | CaptureProvider::Trae
+            | CaptureProvider::Zencoder
+            | CaptureProvider::Custom
+    )
+}
 
 #[derive(Debug, Clone, Default)]
 struct ImportTotals {
@@ -4553,11 +4612,23 @@ fn parse_search_limit(value: &str) -> std::result::Result<usize, String> {
 }
 
 fn parse_native_provider_arg(value: &str) -> std::result::Result<NativeProviderArg, String> {
-    NativeProviderArg::from_str(value, false).map_err(|_| compact_provider_error(value))
+    let provider =
+        NativeProviderArg::from_str(value, false).map_err(|_| compact_provider_error(value))?;
+    if cli_supported_provider(provider.capture_provider()) {
+        Ok(provider)
+    } else {
+        Err(compact_provider_error(value))
+    }
 }
 
 fn parse_provider_arg(value: &str) -> std::result::Result<ProviderArg, String> {
-    ProviderArg::from_str(value, false).map_err(|_| compact_provider_error(value))
+    let provider =
+        ProviderArg::from_str(value, false).map_err(|_| compact_provider_error(value))?;
+    if cli_supported_provider(provider.capture_provider()) {
+        Ok(provider)
+    } else {
+        Err(compact_provider_error(value))
+    }
 }
 
 fn compact_provider_error(value: &str) -> String {
@@ -7632,14 +7703,25 @@ fn discovered_sources() -> Vec<SourceInfo> {
     home_dir()
         .as_deref()
         .map(discover_provider_sources)
+        .map(filter_cli_supported_sources)
         .unwrap_or_default()
 }
 
 fn discovered_sources_for_provider(provider: CaptureProvider) -> Vec<SourceInfo> {
+    if !cli_supported_provider(provider) {
+        return Vec::new();
+    }
     home_dir()
         .as_deref()
         .map(|home| discover_provider_sources_for_provider(home, provider))
         .unwrap_or_default()
+}
+
+fn filter_cli_supported_sources(sources: Vec<SourceInfo>) -> Vec<SourceInfo> {
+    sources
+        .into_iter()
+        .filter(|source| cli_supported_provider(source.provider))
+        .collect()
 }
 
 fn explicit_path_source(provider: CaptureProvider, path: PathBuf) -> SourceInfo {

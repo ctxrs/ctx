@@ -20,7 +20,7 @@ curl -fsSL https://ctx.rs/install | sh
 Optional but recommended for agent sessions:
 
 ```bash
-npx skills add ctxrs/ctx
+ctx skill install
 ```
 
 For marketplace/plugin installs in Codex, Claude Code, Cursor, and raw Agent
@@ -98,12 +98,43 @@ Support means ctx can discover or read that harness's persisted local history an
 | Claude Code | Supported |
 | Codex | Supported |
 | Cursor | Supported |
-| Zed | Supported |
 | Pi | Supported |
+| GitHub Copilot CLI | Supported |
 | OpenCode | Supported |
-| Antigravity / Gemini CLI | Supported |
+| Gemini CLI / Antigravity | Supported |
 | Factory AI Droid | Supported |
-| Copilot CLI | Supported |
+| OpenClaw | Supported |
+| Hermes Agent | Supported |
+| AstrBot | Supported |
+| NanoClaw | Supported |
+| Shelley | Supported |
+| Auggie / Augment | Supported |
+| Cline / Roo Code | Supported |
+| CodeArts Agent | Supported |
+| CodeBuddy | Supported |
+| Continue | Supported |
+| Crush | Supported |
+| Deep Agents | Supported |
+| Firebender | Supported |
+| ForgeCode | Supported |
+| Goose | Supported |
+| Junie | Supported |
+| Kilo Code | Supported |
+| Kimi Code CLI | Supported |
+| Kiro CLI | Supported |
+| Lingma / Qoder CN | Supported |
+| Mistral Vibe | Supported |
+| Mux | Supported |
+| OpenHands | Supported |
+| Qoder | Supported |
+| Qwen Code | Supported |
+| Rovo Dev | Supported |
+| Tabnine CLI | Supported |
+| Trae / Trae CN | Supported |
+| Warp | Supported |
+| Windsurf | Supported |
+| Zed | Supported |
+| Zencoder | Supported |
 
 ## How ctx compares
 
