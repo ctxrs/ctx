@@ -10,12 +10,10 @@ shipped.
 - Pi local import is supported when matching local session JSONL files exist
   under `~/.pi/agent/sessions`, or when an explicit Pi session JSONL file is
   passed with `--path`.
-- Antigravity, Claude, OpenCode, Kilo Code, OpenClaw, Hermes, Gemini, Cursor,
-  Zed, Copilot CLI, Factory AI Droid, and Autohand Code local import is
-  supported only when their documented
-  local history paths exist and match the supported native formats in the
-  provider matrix.
-- NanoClaw local import is preview/manual-path support and is not included in
+- Additional supported agent harnesses are listed in the provider matrix and are
+  imported only when their documented local history paths exist and match the
+  supported native formats.
+- NanoClaw local import is explicit-path support and is not included in
   `ctx import --all` or pre-search refresh. AstrBot is supported for bounded
   `data_v4.db` locations and imports local LLM context plus available platform
   history rows when present, but upstream AstrBot still treats non-WebChat raw

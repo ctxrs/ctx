@@ -789,7 +789,6 @@
       "metadata": {
         "npx_skills_id": "codearts-agent",
         "import_support": "native",
-        "native_auto": true,
         "vsix": "HuaweiCloud.vscode-codebot@26.6.0",
         "sha256": "394f54ba999bdab8095f9bdd3ccd28ce5e0df3ab804911703efdbe1a329a2d34",
         "schema_family": "opencode sqlite family"
@@ -861,7 +860,6 @@
       "metadata": {
         "npx_skills_id": "zencoder",
         "import_support": "native",
-        "native_auto": true,
         "exporter_evidence": "jverre/opik-chat-history@5e7380933564d4fe1084d0e6f48f0e49e43e45ea",
         "open_vsx": "ZencoderAI.zencoder@3.63.9002"
       }
