@@ -586,7 +586,6 @@ impl Default for OpenCodeSqliteImportOptions {
 }
 
 pub type KiloSqliteImportOptions = OpenCodeSqliteImportOptions;
-pub type CodeArtsAgentSqliteImportOptions = OpenCodeSqliteImportOptions;
 pub type KiroSqliteImportOptions = OpenCodeSqliteImportOptions;
 #[derive(Debug, Clone)]
 pub struct ForgeCodeSqliteImportOptions {
@@ -881,8 +880,6 @@ impl Default for TraeImportOptions {
         }
     }
 }
-
-pub type ZencoderImportOptions = OpenCodeSqliteImportOptions;
 
 #[derive(Debug, Clone)]
 pub struct AntigravityCliImportOptions {
@@ -1382,9 +1379,6 @@ pub struct FirebenderSqliteAdapter;
 pub struct OpenCodeSqliteAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
-pub struct CodeArtsAgentSqliteAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
 pub struct KiloSqliteAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -1419,9 +1413,6 @@ pub struct OpenHandsFileEventsAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LingmaSqliteAdapter;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ZencoderJsonAdapter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AntigravityCliJsonlAdapter;
@@ -2246,25 +2237,6 @@ impl ProviderCaptureAdapter for OpenCodeSqliteAdapter {
     }
 }
 
-impl ProviderCaptureAdapter for CodeArtsAgentSqliteAdapter {
-    fn provider(&self) -> CaptureProvider {
-        CaptureProvider::CodeArtsAgent
-    }
-
-    fn source_format(&self) -> &str {
-        CODEARTS_AGENT_SQLITE_SOURCE_FORMAT
-    }
-
-    fn normalize_path(
-        &self,
-        path: &Path,
-        context: &ProviderAdapterContext,
-    ) -> Result<ProviderNormalizationResult> {
-        ensure_regular_provider_transcript_file(path)?;
-        normalize_opencode_sqlite(path, context, &CODEARTS_AGENT_SQLITE_DIALECT)
-    }
-}
-
 impl ProviderCaptureAdapter for KiloSqliteAdapter {
     fn provider(&self) -> CaptureProvider {
         CaptureProvider::Kilo
@@ -2461,24 +2433,6 @@ impl ProviderCaptureAdapter for LingmaSqliteAdapter {
         context: &ProviderAdapterContext,
     ) -> Result<ProviderNormalizationResult> {
         normalize_lingma_sqlite(path, context)
-    }
-}
-
-impl ProviderCaptureAdapter for ZencoderJsonAdapter {
-    fn provider(&self) -> CaptureProvider {
-        CaptureProvider::Zencoder
-    }
-
-    fn source_format(&self) -> &str {
-        ZENCODER_SOURCE_FORMAT
-    }
-
-    fn normalize_path(
-        &self,
-        path: &Path,
-        context: &ProviderAdapterContext,
-    ) -> Result<ProviderNormalizationResult> {
-        normalize_zencoder_history(path, context)
     }
 }
 
@@ -4677,25 +4631,6 @@ pub fn import_trae_history(
     )
 }
 
-pub fn import_zencoder_history(
-    path: impl AsRef<Path>,
-    store: &mut Store,
-    options: ZencoderImportOptions,
-) -> Result<ProviderImportSummary> {
-    import_native_jsonl_tree(
-        store,
-        NativeJsonlTreeImport {
-            path: path.as_ref(),
-            machine_id: options.machine_id,
-            source_path: options.source_path,
-            imported_at: options.imported_at,
-            history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
-        },
-        ZencoderJsonAdapter,
-    )
-}
-
 pub fn import_crush_sqlite(
     path: impl AsRef<Path>,
     store: &mut Store,
@@ -4934,41 +4869,6 @@ pub fn import_opencode_sqlite(
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
     let normalization = OpenCodeSqliteAdapter.normalize_path(
-        path,
-        &ProviderAdapterContext {
-            machine_id: options.machine_id,
-            source_path: Some(source_path),
-            imported_at: options.imported_at,
-            tool_output_mode: CodexToolOutputMode::Full,
-            event_mode: CodexEventImportMode::Rich,
-            include_notices: true,
-        },
-    )?;
-
-    import_normalized_provider_captures(
-        store,
-        normalization,
-        NormalizedProviderImportOptions {
-            history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
-            persist_cursors: true,
-            wrap_transaction: true,
-            fast_event_inserts: true,
-        },
-    )
-}
-
-pub fn import_codearts_agent_sqlite(
-    path: impl AsRef<Path>,
-    store: &mut Store,
-    options: CodeArtsAgentSqliteImportOptions,
-) -> Result<ProviderImportSummary> {
-    let path = path.as_ref();
-    let source_path = options
-        .source_path
-        .clone()
-        .unwrap_or_else(|| path.to_path_buf());
-    let normalization = CodeArtsAgentSqliteAdapter.normalize_path(
         path,
         &ProviderAdapterContext {
             machine_id: options.machine_id,
@@ -5730,7 +5630,6 @@ const AUGGIE_SESSION_JSON_SOURCE_FORMAT: &str = "auggie_session_json";
 const JUNIE_SESSION_EVENTS_SOURCE_FORMAT: &str = "junie_session_events_jsonl_tree";
 const FIREBENDER_SQLITE_SOURCE_FORMAT: &str = "firebender_chat_history_sqlite";
 const OPENCODE_SQLITE_SOURCE_FORMAT: &str = "opencode_sqlite";
-const CODEARTS_AGENT_SQLITE_SOURCE_FORMAT: &str = "codearts_agent_kernel_sqlite";
 const KILO_SQLITE_SOURCE_FORMAT: &str = "kilo_sqlite";
 const KIRO_SQLITE_SOURCE_FORMAT: &str = "kiro_cli_sqlite";
 const CRUSH_SQLITE_SOURCE_FORMAT: &str = "crush_sqlite";
@@ -5744,7 +5643,6 @@ const CONTINUE_CLI_SOURCE_FORMAT: &str = "continue_cli_sessions_json";
 const OPENHANDS_FILE_EVENTS_SOURCE_FORMAT: &str = "openhands_file_events";
 const WARP_SQLITE_SOURCE_FORMAT: &str = "warp_sqlite";
 const LINGMA_SQLITE_SOURCE_FORMAT: &str = "lingma_sqlite";
-const ZENCODER_SOURCE_FORMAT: &str = "zencoder_chat_sessions_json_tree";
 const ANTIGRAVITY_CLI_SOURCE_FORMAT: &str = "antigravity_cli_transcript_jsonl_tree";
 const GEMINI_CLI_SOURCE_FORMAT: &str = "gemini_cli_chat_recording_jsonl";
 const TABNINE_CLI_SOURCE_FORMAT: &str = "tabnine_cli_chat_recording_jsonl";
@@ -5789,16 +5687,6 @@ const OPENCODE_SQLITE_DIALECT: OpenCodeSqliteDialect = OpenCodeSqliteDialect {
     session_message_seq_field: "OpenCode session_message seq",
     session_message_time_created_field: "OpenCode session_message time_created",
     event_time_created_field: "OpenCode event time.created",
-};
-
-const CODEARTS_AGENT_SQLITE_DIALECT: OpenCodeSqliteDialect = OpenCodeSqliteDialect {
-    provider: CaptureProvider::CodeArtsAgent,
-    display_name: "CodeArts Agent",
-    source_format: CODEARTS_AGENT_SQLITE_SOURCE_FORMAT,
-    session_time_created_field: "CodeArts Agent session time_created",
-    session_message_seq_field: "CodeArts Agent session_message seq",
-    session_message_time_created_field: "CodeArts Agent session_message time_created",
-    event_time_created_field: "CodeArts Agent event time.created",
 };
 
 const KILO_SQLITE_DIALECT: OpenCodeSqliteDialect = OpenCodeSqliteDialect {
@@ -9826,38 +9714,6 @@ fn auggie_node_text(node: &Value) -> Option<String> {
         })
 }
 
-fn collect_json_paths(root: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
-    let metadata = fs::symlink_metadata(root)?;
-    let file_type = metadata.file_type();
-    if file_type.is_symlink() {
-        return Err(CaptureError::InvalidProviderTranscriptPath {
-            path: root.to_path_buf(),
-            reason: "symlinked provider transcript roots are rejected",
-        });
-    }
-    ensure_provider_path_parents_are_not_symlinks(root)?;
-    if file_type.is_file() {
-        ensure_regular_provider_transcript_file(root)?;
-        paths.push(root.to_path_buf());
-        return Ok(());
-    }
-    if !file_type.is_dir() {
-        return Ok(());
-    }
-    for entry in fs::read_dir(root)? {
-        let entry = entry?;
-        let path = entry.path();
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            collect_json_paths(&path, paths)?;
-        } else if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
-            ensure_regular_provider_transcript_file(&path)?;
-            paths.push(path);
-        }
-    }
-    Ok(())
-}
-
 #[derive(Debug, Clone)]
 struct FirebenderChatSessionRow {
     id: String,
@@ -12239,431 +12095,6 @@ fn trae_event(
             "model": task_json_string_field(&event.raw_message, &["model", "modelType", "model_id"]),
         }),
     }
-}
-
-#[derive(Debug, Clone)]
-struct ZencoderSessionSource {
-    path: PathBuf,
-    provider_session_id: String,
-    index_metadata: Value,
-}
-
-#[derive(Debug, Clone)]
-struct ZencoderEventRow {
-    index: usize,
-    value: Value,
-    occurred_at: DateTime<Utc>,
-    row_id: String,
-    row_type: String,
-    event_type: EventType,
-    role: EventRole,
-    text: String,
-}
-
-fn normalize_zencoder_history(
-    path: &Path,
-    context: &ProviderAdapterContext,
-) -> Result<ProviderNormalizationResult> {
-    let mut sources = Vec::new();
-    collect_zencoder_session_sources(path, &mut sources)?;
-    sources.sort_by(|left, right| {
-        left.path
-            .cmp(&right.path)
-            .then_with(|| left.provider_session_id.cmp(&right.provider_session_id))
-    });
-    sources.dedup_by(|left, right| {
-        left.path == right.path && left.provider_session_id == right.provider_session_id
-    });
-    if sources.is_empty() {
-        return Err(CaptureError::InvalidProviderTranscriptPath {
-            path: path.to_path_buf(),
-            reason: "no Zencoder sessions.json or sessions/*.json files found",
-        });
-    }
-
-    let mut merged = ProviderNormalizationResult::default();
-    for source in sources {
-        let mut result = normalize_zencoder_session_source(&source, context)?;
-        merged.summary.merge(result.summary);
-        merged.captures.append(&mut result.captures);
-        merged.files_touched.append(&mut result.files_touched);
-    }
-    Ok(merged)
-}
-
-fn collect_zencoder_session_sources(
-    root: &Path,
-    sessions: &mut Vec<ZencoderSessionSource>,
-) -> Result<()> {
-    let metadata = fs::symlink_metadata(root)?;
-    let file_type = metadata.file_type();
-    if file_type.is_symlink() {
-        return Err(CaptureError::InvalidProviderTranscriptPath {
-            path: root.to_path_buf(),
-            reason: "symlinked provider transcript roots are rejected",
-        });
-    }
-    ensure_provider_path_parents_are_not_symlinks(root)?;
-
-    if file_type.is_file() {
-        ensure_regular_provider_transcript_file(root)?;
-        if root.file_name().and_then(|name| name.to_str()) == Some("sessions.json") {
-            collect_zencoder_index_sources(root, sessions)?;
-        } else if zencoder_session_file_path(root) {
-            sessions.push(zencoder_session_source(root, Value::Null)?);
-        }
-        return Ok(());
-    }
-    if !file_type.is_dir() {
-        return Ok(());
-    }
-
-    let chat_root = if root.join("sessions.json").is_file() || root.join("sessions").is_dir() {
-        root.to_path_buf()
-    } else if root.join("zencoder-chat").is_dir() {
-        root.join("zencoder-chat")
-    } else {
-        root.to_path_buf()
-    };
-    let index = chat_root.join("sessions.json");
-    if index.is_file() {
-        collect_zencoder_index_sources(&index, sessions)?;
-    }
-    let sessions_dir = chat_root.join("sessions");
-    if sessions_dir.is_dir() {
-        let mut paths = Vec::new();
-        collect_json_paths(&sessions_dir, &mut paths)?;
-        for path in paths
-            .into_iter()
-            .filter(|path| zencoder_session_file_path(path))
-        {
-            sessions.push(zencoder_session_source(&path, Value::Null)?);
-        }
-    }
-    Ok(())
-}
-
-fn collect_zencoder_index_sources(
-    index_path: &Path,
-    sessions: &mut Vec<ZencoderSessionSource>,
-) -> Result<()> {
-    ensure_regular_provider_transcript_file(index_path)?;
-    let value: Value = serde_json::from_reader(BufReader::new(File::open(index_path)?))?;
-    let base = index_path
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
-    for (fallback_id, entry) in zencoder_index_entries(&value) {
-        let Some(session_id) = zencoder_session_id(&entry).or(fallback_id) else {
-            continue;
-        };
-        let session_path = zencoder_session_path_from_index_entry(&base, &entry, &session_id);
-        if session_path.is_file() {
-            sessions.push(ZencoderSessionSource {
-                path: session_path,
-                provider_session_id: session_id,
-                index_metadata: entry,
-            });
-        }
-    }
-    Ok(())
-}
-
-fn zencoder_index_entries(value: &Value) -> Vec<(Option<String>, Value)> {
-    if let Some(items) = value.as_array() {
-        return items.iter().cloned().map(|entry| (None, entry)).collect();
-    }
-    if let Some(items) = value.get("sessions").and_then(Value::as_array) {
-        return items.iter().cloned().map(|entry| (None, entry)).collect();
-    }
-    let Some(object) = value.as_object() else {
-        return Vec::new();
-    };
-    object
-        .iter()
-        .filter_map(|(key, entry)| {
-            if entry.is_object() {
-                Some((Some(key.clone()), entry.clone()))
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
-fn zencoder_session_path_from_index_entry(base: &Path, entry: &Value, session_id: &str) -> PathBuf {
-    for field in ["path", "file", "filePath", "sessionPath"] {
-        if let Some(raw) = entry.get(field).and_then(Value::as_str) {
-            let path = PathBuf::from(raw);
-            return if path.is_absolute() {
-                path
-            } else {
-                base.join(path)
-            };
-        }
-    }
-    base.join("sessions").join(format!("{session_id}.json"))
-}
-
-fn zencoder_session_file_path(path: &Path) -> bool {
-    path.extension().and_then(|ext| ext.to_str()) == Some("json")
-        && path
-            .parent()
-            .and_then(Path::file_name)
-            .and_then(|name| name.to_str())
-            == Some("sessions")
-}
-
-fn zencoder_session_source(path: &Path, index_metadata: Value) -> Result<ZencoderSessionSource> {
-    let value: Value = serde_json::from_reader(BufReader::new(File::open(path)?))?;
-    let provider_session_id = zencoder_session_id(&value)
-        .or_else(|| {
-            path.file_stem()
-                .and_then(|stem| stem.to_str())
-                .filter(|stem| !stem.trim().is_empty())
-                .map(str::to_owned)
-        })
-        .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
-            path: path.to_path_buf(),
-            reason: "Zencoder session JSON file is missing a session id",
-        })?;
-    Ok(ZencoderSessionSource {
-        path: path.to_path_buf(),
-        provider_session_id,
-        index_metadata,
-    })
-}
-
-fn zencoder_session_id(value: &Value) -> Option<String> {
-    task_json_string_field(value, &["id", "sessionId", "session_id", "conversationId"])
-}
-
-fn normalize_zencoder_session_source(
-    source: &ZencoderSessionSource,
-    context: &ProviderAdapterContext,
-) -> Result<ProviderNormalizationResult> {
-    ensure_regular_provider_transcript_file(&source.path)?;
-    let value: Value = serde_json::from_reader(BufReader::new(File::open(&source.path)?))?;
-    let session_id =
-        zencoder_session_id(&value).unwrap_or_else(|| source.provider_session_id.clone());
-    let mut rows = Vec::new();
-    if let Some(messages) = zencoder_messages(&value) {
-        for (index, message) in messages.iter().enumerate() {
-            if let Some(row) = zencoder_event_row(message.clone(), index, context.imported_at) {
-                rows.push(row);
-            }
-        }
-    }
-
-    let mut result = ProviderNormalizationResult::default();
-    if rows.is_empty() {
-        push_provider_import_failure(
-            &mut result.summary,
-            0,
-            "Zencoder session JSON had no importable messages".to_owned(),
-        );
-        return Ok(result);
-    }
-
-    let started_at = zencoder_time(&value, context.imported_at)
-        .or_else(|| rows.first().map(|row| row.occurred_at))
-        .unwrap_or(context.imported_at);
-    let ended_at = rows.last().map(|row| row.occurred_at);
-    let cwd = task_json_string_field(
-        &value,
-        &[
-            "cwd",
-            "projectPath",
-            "workspacePath",
-            "workspace_path",
-            "folder",
-        ],
-    )
-    .or_else(|| {
-        task_json_string_field(
-            &source.index_metadata,
-            &[
-                "cwd",
-                "projectPath",
-                "workspacePath",
-                "workspace_path",
-                "folder",
-            ],
-        )
-    });
-    let raw_source_path = source.path.display().to_string();
-    let title = task_json_string_field(&value, &["title", "name", "summary"])
-        .or_else(|| task_json_string_field(&source.index_metadata, &["title", "name", "summary"]));
-
-    for row in rows {
-        let event = native_event(NativeEventDraft {
-            provider: CaptureProvider::Zencoder,
-            source_format: ZENCODER_SOURCE_FORMAT,
-            provider_session_id: session_id.clone(),
-            provider_event_index: row.index as u64,
-            provider_event_hash: Some(row.row_id.clone()),
-            cursor: format!("{}:message:{}", source.path.display(), row.index),
-            event_type: row.event_type,
-            role: Some(row.role),
-            occurred_at: row.occurred_at,
-            text: row.text.clone(),
-            body: row.value.clone(),
-            metadata: json!({
-                "source": ZENCODER_SOURCE_FORMAT,
-                "source_format": ZENCODER_SOURCE_FORMAT,
-                "message_index": row.index,
-                "message_id": row.row_id,
-                "message_type": row.row_type,
-            }),
-        });
-        result
-            .files_touched
-            .extend(provider_file_touches_from_raw_value(
-                CaptureProvider::Zencoder,
-                &session_id,
-                ZENCODER_SOURCE_FORMAT,
-                Some(raw_source_path.as_str()),
-                &row.value,
-                &event,
-                row.index + 1,
-            ));
-        result.captures.push((
-            row.index + 1,
-            native_provider_capture(
-                NativeSessionDraft {
-                    provider: CaptureProvider::Zencoder,
-                    source_format: ZENCODER_SOURCE_FORMAT,
-                    provider_session_id: session_id.clone(),
-                    parent_provider_session_id: None,
-                    root_provider_session_id: None,
-                    external_agent_id: None,
-                    agent_type: AgentType::Primary,
-                    role_hint: Some("primary".to_owned()),
-                    is_primary: true,
-                    started_at,
-                    ended_at,
-                    cwd: cwd.clone(),
-                    fidelity: Fidelity::Imported,
-                    raw_source_path: raw_source_path.clone(),
-                    trust: ProviderSourceTrust::ProviderNative,
-                    source_metadata: json!({
-                        "adapter": ZENCODER_SOURCE_FORMAT,
-                        "source_path": raw_source_path,
-                        "storage": "ZencoderAI.zencoder/zencoder-chat/sessions.json",
-                    }),
-                    session_metadata: json!({
-                        "source_format": ZENCODER_SOURCE_FORMAT,
-                        "provider": CaptureProvider::Zencoder.as_str(),
-                        "session_id": session_id,
-                        "title": title,
-                        "index_metadata": provider_capped_json(
-                            &source.index_metadata,
-                            PROVIDER_MAX_PREVIEW_CHARS
-                        ),
-                    }),
-                },
-                context,
-                Some(event),
-            ),
-        ));
-    }
-    Ok(result)
-}
-
-fn zencoder_messages(value: &Value) -> Option<&Vec<Value>> {
-    for field in ["messages", "turns", "items", "conversation", "chat"] {
-        if let Some(messages) = value.get(field).and_then(Value::as_array) {
-            return Some(messages);
-        }
-    }
-    value.as_array()
-}
-
-fn zencoder_event_row(
-    value: Value,
-    index: usize,
-    fallback_time: DateTime<Utc>,
-) -> Option<ZencoderEventRow> {
-    let row_type = value
-        .get("type")
-        .or_else(|| value.get("kind"))
-        .and_then(Value::as_str)
-        .unwrap_or("message")
-        .to_owned();
-    let row_id = task_json_string_field(
-        &value,
-        &["id", "messageId", "message_id", "turnId", "turn_id"],
-    )
-    .unwrap_or_else(|| format!("message-{index}"));
-    let is_summary = matches!(row_type.as_str(), "summary" | "compaction" | "compact");
-    let role = if is_summary {
-        EventRole::Assistant
-    } else {
-        value
-            .get("role")
-            .or_else(|| value.pointer("/message/role"))
-            .and_then(Value::as_str)
-            .map(|role| provider_role(Some(role)))
-            .unwrap_or(EventRole::Unknown)
-    };
-    let text = zencoder_message_text(&value, is_summary)?;
-    let event_type = if is_summary {
-        EventType::Summary
-    } else if role == EventRole::Assistant && opencode_content_has_tool(&value) {
-        EventType::ToolCall
-    } else {
-        EventType::Message
-    };
-    Some(ZencoderEventRow {
-        index,
-        value: value.clone(),
-        occurred_at: zencoder_time(&value, fallback_time).unwrap_or(fallback_time),
-        row_id,
-        row_type,
-        event_type,
-        role,
-        text,
-    })
-}
-
-fn zencoder_message_text(value: &Value, is_summary: bool) -> Option<String> {
-    if is_summary {
-        return value
-            .get("summary")
-            .and_then(provider_value_text)
-            .filter(|text| !text.trim().is_empty());
-    }
-    for field in [
-        "content", "text", "message", "prompt", "response", "answer", "summary",
-    ] {
-        if let Some(text) = value
-            .get(field)
-            .and_then(provider_value_text)
-            .filter(|text| !text.trim().is_empty())
-        {
-            return Some(text);
-        }
-    }
-    value
-        .pointer("/message/content")
-        .and_then(provider_value_text)
-        .filter(|text| !text.trim().is_empty())
-}
-
-fn zencoder_time(value: &Value, fallback: DateTime<Utc>) -> Option<DateTime<Utc>> {
-    for field in [
-        "timestamp",
-        "createdAt",
-        "created_at",
-        "updatedAt",
-        "updated_at",
-        "time",
-    ] {
-        if value.get(field).is_some() {
-            return Some(provider_timestamp_value(value.get(field), fallback));
-        }
-    }
-    None
 }
 
 fn task_json_string_field(value: &Value, fields: &[&str]) -> Option<String> {
@@ -26846,14 +26277,6 @@ mod tests {
         materialized_fixture("provider-history", name)
     }
 
-    fn sqlite_provider_history_fixture(sql_fixture: &str, db_path: &Path) -> PathBuf {
-        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
-        let sql = fs::read_to_string(provider_history_fixture(sql_fixture)).unwrap();
-        let conn = Connection::open(db_path).unwrap();
-        conn.execute_batch(&sql).unwrap();
-        db_path.to_path_buf()
-    }
-
     fn custom_history_fixture(name: &str) -> PathBuf {
         materialized_fixture("custom-history-jsonl", name)
     }
@@ -30037,102 +29460,6 @@ mod tests {
             Some(OPENCODE_SQLITE_SOURCE_FORMAT)
         );
     }
-    #[test]
-    fn native_codearts_agent_reuses_opencode_sqlite_normalizer() {
-        let temp = tempdir();
-        let fixture = sqlite_provider_history_fixture(
-            "codearts-agent/v1/opencode.sql",
-            &temp.path().join("codearts-agent/opencode.db"),
-        );
-        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
-
-        let first = import_codearts_agent_sqlite(
-            &fixture,
-            &mut store,
-            CodeArtsAgentSqliteImportOptions {
-                machine_id: "test-machine".into(),
-                source_path: Some(fixture.clone()),
-                imported_at: DateTime::parse_from_rfc3339("2026-07-05T15:00:00Z")
-                    .unwrap()
-                    .with_timezone(&Utc),
-                allow_partial_failures: true,
-                ..CodeArtsAgentSqliteImportOptions::default()
-            },
-        )
-        .unwrap();
-
-        assert_eq!(first.failed, 0, "{:?}", first.failures);
-        assert_eq!(first.imported_sessions, 1);
-        assert_eq!(first.imported_events, 2);
-        let session_id = provider_session_uuid(CaptureProvider::CodeArtsAgent, "codearts-root");
-        let session = store.get_session(session_id).unwrap();
-        assert_eq!(session.provider, CaptureProvider::CodeArtsAgent);
-        let events = store.events_for_session(session_id).unwrap();
-        assert_eq!(events.len(), 2);
-        assert_eq!(
-            events[0].sync.metadata["source_format"].as_str(),
-            Some(CODEARTS_AGENT_SQLITE_SOURCE_FORMAT)
-        );
-        assert!(store
-            .search_event_hits("CODEARTS_ORACLE_ASSISTANT_TEXT", 10)
-            .unwrap()
-            .iter()
-            .any(|hit| hit.provider == Some(CaptureProvider::CodeArtsAgent)));
-
-        let second = import_codearts_agent_sqlite(
-            &fixture,
-            &mut store,
-            CodeArtsAgentSqliteImportOptions {
-                allow_partial_failures: true,
-                ..CodeArtsAgentSqliteImportOptions::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(second.failed, 0, "{:?}", second.failures);
-        assert_eq!(second.imported_sessions, 0);
-        assert_eq!(second.imported_events, 0);
-        assert_eq!(second.skipped_sessions, 1);
-        assert_eq!(second.skipped_events, 2);
-    }
-
-    #[test]
-    fn zencoder_fixture_imports_searches_and_reimports() {
-        let temp = tempdir();
-        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
-
-        let zencoder = provider_history_fixture("zencoder/ZencoderAI.zencoder/zencoder-chat");
-        let zencoder_first = import_zencoder_history(
-            &zencoder,
-            &mut store,
-            ZencoderImportOptions {
-                source_path: Some(zencoder.clone()),
-                allow_partial_failures: true,
-                ..ZencoderImportOptions::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(zencoder_first.failed, 0, "{:?}", zencoder_first.failures);
-        assert_eq!(zencoder_first.imported_sessions, 1);
-        assert_eq!(zencoder_first.imported_events, 2);
-        assert!(store
-            .search_event_hits("ZENCODER_ORACLE_ASSISTANT_TEXT", 10)
-            .unwrap()
-            .iter()
-            .any(|hit| hit.provider == Some(CaptureProvider::Zencoder)));
-
-        let zencoder_second = import_zencoder_history(
-            &zencoder,
-            &mut store,
-            ZencoderImportOptions {
-                allow_partial_failures: true,
-                ..ZencoderImportOptions::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(zencoder_second.imported_events, 0);
-        assert_eq!(zencoder_second.skipped_events, 2);
-    }
-
     #[test]
     fn native_kilo_imports_opencode_derived_sqlite_fixture_idempotently() {
         let temp = tempdir();

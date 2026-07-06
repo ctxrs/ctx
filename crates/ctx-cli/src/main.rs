@@ -34,40 +34,37 @@ use config::{AppConfig, CONFIG_FILE};
 use ctx_history_capture::{
     catalog_codex_session_tree, discover_provider_sources, discover_provider_sources_for_provider,
     import_antigravity_cli_history, import_astrbot_sqlite, import_auggie_history,
-    import_claude_projects_jsonl_tree, import_cline_task_json_history,
-    import_codearts_agent_sqlite, import_codebuddy_history, import_codex_history_jsonl,
-    import_codex_session_jsonl, import_codex_session_jsonl_tail, import_codex_session_paths,
-    import_codex_session_tree, import_continue_cli_sessions, import_copilot_cli_session_events,
-    import_crush_sqlite, import_cursor_native_history, import_custom_history_jsonl_v1,
-    import_custom_history_jsonl_v1_reader, import_deepagents_sqlite,
-    import_factory_ai_droid_sessions, import_firebender_sqlite, import_forgecode_sqlite,
-    import_gemini_cli_history, import_goose_sessions_sqlite, import_hermes_sqlite,
-    import_junie_history, import_kilo_sqlite, import_kimi_code_cli_history, import_kiro_sqlite,
-    import_lingma_sqlite, import_mistral_vibe_history, import_mux_history, import_nanoclaw_project,
-    import_openclaw_history, import_opencode_sqlite, import_openhands_file_events,
-    import_pi_session_jsonl, import_qoder_history, import_qwen_code_history,
-    import_roo_task_json_history, import_rovodev_history, import_shelley_sqlite,
-    import_tabnine_cli_history, import_trae_history, import_warp_sqlite,
-    import_windsurf_cascade_hook_transcripts, import_zed_threads_sqlite, import_zencoder_history,
-    provider_source_for_path, provider_source_spec, stable_capture_uuid,
-    validate_custom_history_jsonl_v1, validate_custom_history_jsonl_v1_reader,
-    AntigravityCliImportOptions, AstrBotSqliteImportOptions, AuggieImportOptions, CatalogSummary,
-    ClaudeProjectsImportOptions, ClineTaskJsonImportOptions, CodeArtsAgentSqliteImportOptions,
-    CodeBuddyImportOptions, CodexEventImportMode, CodexHistoryImportOptions,
-    CodexSessionCatalogOptions, CodexSessionImportOptions, CodexSessionImportProgress,
-    CodexSessionImportProgressCallback, CodexToolOutputMode, ContinueCliImportOptions,
-    CopilotCliImportOptions, CrushSqliteImportOptions, CursorNativeImportOptions,
-    CustomHistoryJsonlV1ImportOptions, DeepAgentsSqliteImportOptions, FactoryAiDroidImportOptions,
-    FirebenderSqliteImportOptions, ForgeCodeSqliteImportOptions, GeminiCliImportOptions,
-    GooseSessionsSqliteImportOptions, HermesSqliteImportOptions, JunieImportOptions,
-    KiloSqliteImportOptions, KimiCodeCliImportOptions, KiroSqliteImportOptions,
+    import_claude_projects_jsonl_tree, import_cline_task_json_history, import_codebuddy_history,
+    import_codex_history_jsonl, import_codex_session_jsonl, import_codex_session_jsonl_tail,
+    import_codex_session_paths, import_codex_session_tree, import_continue_cli_sessions,
+    import_copilot_cli_session_events, import_crush_sqlite, import_cursor_native_history,
+    import_custom_history_jsonl_v1, import_custom_history_jsonl_v1_reader,
+    import_deepagents_sqlite, import_factory_ai_droid_sessions, import_firebender_sqlite,
+    import_forgecode_sqlite, import_gemini_cli_history, import_goose_sessions_sqlite,
+    import_hermes_sqlite, import_junie_history, import_kilo_sqlite, import_kimi_code_cli_history,
+    import_kiro_sqlite, import_lingma_sqlite, import_mistral_vibe_history, import_mux_history,
+    import_nanoclaw_project, import_openclaw_history, import_opencode_sqlite,
+    import_openhands_file_events, import_pi_session_jsonl, import_qoder_history,
+    import_qwen_code_history, import_roo_task_json_history, import_rovodev_history,
+    import_shelley_sqlite, import_tabnine_cli_history, import_trae_history, import_warp_sqlite,
+    import_windsurf_cascade_hook_transcripts, import_zed_threads_sqlite, provider_source_for_path,
+    provider_source_spec, stable_capture_uuid, validate_custom_history_jsonl_v1,
+    validate_custom_history_jsonl_v1_reader, AntigravityCliImportOptions,
+    AstrBotSqliteImportOptions, AuggieImportOptions, CatalogSummary, ClaudeProjectsImportOptions,
+    ClineTaskJsonImportOptions, CodeBuddyImportOptions, CodexEventImportMode,
+    CodexHistoryImportOptions, CodexSessionCatalogOptions, CodexSessionImportOptions,
+    CodexSessionImportProgress, CodexSessionImportProgressCallback, CodexToolOutputMode,
+    ContinueCliImportOptions, CopilotCliImportOptions, CrushSqliteImportOptions,
+    CursorNativeImportOptions, CustomHistoryJsonlV1ImportOptions, DeepAgentsSqliteImportOptions,
+    FactoryAiDroidImportOptions, FirebenderSqliteImportOptions, ForgeCodeSqliteImportOptions,
+    GeminiCliImportOptions, GooseSessionsSqliteImportOptions, HermesSqliteImportOptions,
+    JunieImportOptions, KiloSqliteImportOptions, KimiCodeCliImportOptions, KiroSqliteImportOptions,
     LingmaSqliteImportOptions, MistralVibeImportOptions, MuxImportOptions, NanoClawImportOptions,
     OpenClawImportOptions, OpenCodeSqliteImportOptions, OpenHandsImportOptions,
     PiSessionImportOptions, ProviderImportSummary, ProviderImportSupport, ProviderSource,
     ProviderSourceStatus, QoderImportOptions, QwenCodeImportOptions, RooTaskJsonImportOptions,
     RovoDevImportOptions, ShelleySqliteImportOptions, TabnineCliImportOptions, TraeImportOptions,
     WarpSqliteImportOptions, WindsurfCascadeHookImportOptions, ZedThreadsSqliteImportOptions,
-    ZencoderImportOptions,
 };
 use ctx_history_core::{
     database_path, default_data_root, utc_now, CaptureProvider, ContextCitation,
@@ -727,13 +724,6 @@ enum NativeProviderArg {
     #[value(name = "opencode", alias = "open-code")]
     OpenCode,
     #[value(
-        name = "codearts-agent",
-        alias = "codearts",
-        alias = "codearts_agent",
-        alias = "codearts-doer"
-    )]
-    CodeArtsAgent,
-    #[value(
         name = "kilo",
         alias = "kilo-code",
         alias = "kilo_code",
@@ -753,8 +743,6 @@ enum NativeProviderArg {
     Cursor,
     #[value(
         name = "windsurf",
-        alias = "devin-desktop",
-        alias = "devin_desktop",
         alias = "windsurf-cascade",
         alias = "windsurf_cascade"
     )]
@@ -791,12 +779,7 @@ enum NativeProviderArg {
     ForgeCode,
     #[value(name = "deepagents", alias = "deep-agents", alias = "dcode")]
     DeepAgents,
-    #[value(
-        name = "mistral-vibe",
-        alias = "vibe",
-        alias = "mistral",
-        alias = "mistral_vibe"
-    )]
+    #[value(name = "mistral-vibe", alias = "mistral", alias = "mistral_vibe")]
     MistralVibe,
     Mux,
     #[value(name = "rovodev", alias = "rovo-dev", alias = "rovo_dev")]
@@ -824,7 +807,6 @@ enum NativeProviderArg {
     CodeBuddy,
     #[value(alias = "trae-cn", alias = "trae_cn")]
     Trae,
-    Zencoder,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -836,13 +818,6 @@ enum ProviderArg {
     #[value(name = "opencode", alias = "open-code")]
     OpenCode,
     #[value(
-        name = "codearts-agent",
-        alias = "codearts",
-        alias = "codearts_agent",
-        alias = "codearts-doer"
-    )]
-    CodeArtsAgent,
-    #[value(
         name = "kilo",
         alias = "kilo-code",
         alias = "kilo_code",
@@ -862,8 +837,6 @@ enum ProviderArg {
     Cursor,
     #[value(
         name = "windsurf",
-        alias = "devin-desktop",
-        alias = "devin_desktop",
         alias = "windsurf-cascade",
         alias = "windsurf_cascade"
     )]
@@ -900,12 +873,7 @@ enum ProviderArg {
     ForgeCode,
     #[value(name = "deepagents", alias = "deep-agents", alias = "dcode")]
     DeepAgents,
-    #[value(
-        name = "mistral-vibe",
-        alias = "vibe",
-        alias = "mistral",
-        alias = "mistral_vibe"
-    )]
+    #[value(name = "mistral-vibe", alias = "mistral", alias = "mistral_vibe")]
     MistralVibe,
     Mux,
     #[value(name = "rovodev", alias = "rovo-dev", alias = "rovo_dev")]
@@ -933,7 +901,6 @@ enum ProviderArg {
     CodeBuddy,
     #[value(alias = "trae-cn", alias = "trae_cn")]
     Trae,
-    Zencoder,
     Custom,
 }
 
@@ -966,7 +933,6 @@ impl NativeProviderArg {
             Self::Pi => CaptureProvider::Pi,
             Self::Claude => CaptureProvider::Claude,
             Self::OpenCode => CaptureProvider::OpenCode,
-            Self::CodeArtsAgent => CaptureProvider::CodeArtsAgent,
             Self::Kilo => CaptureProvider::Kilo,
             Self::KiroCli => CaptureProvider::KiroCli,
             Self::Crush => CaptureProvider::Crush,
@@ -1003,7 +969,6 @@ impl NativeProviderArg {
             Self::Warp => CaptureProvider::Warp,
             Self::CodeBuddy => CaptureProvider::CodeBuddy,
             Self::Trae => CaptureProvider::Trae,
-            Self::Zencoder => CaptureProvider::Zencoder,
         }
     }
 }
@@ -1038,7 +1003,6 @@ impl ProviderArg {
             Self::Pi => CaptureProvider::Pi,
             Self::Claude => CaptureProvider::Claude,
             Self::OpenCode => CaptureProvider::OpenCode,
-            Self::CodeArtsAgent => CaptureProvider::CodeArtsAgent,
             Self::Kilo => CaptureProvider::Kilo,
             Self::KiroCli => CaptureProvider::KiroCli,
             Self::Crush => CaptureProvider::Crush,
@@ -1075,7 +1039,6 @@ impl ProviderArg {
             Self::Warp => CaptureProvider::Warp,
             Self::CodeBuddy => CaptureProvider::CodeBuddy,
             Self::Trae => CaptureProvider::Trae,
-            Self::Zencoder => CaptureProvider::Zencoder,
             Self::Custom => CaptureProvider::Custom,
         }
     }
@@ -1086,7 +1049,6 @@ impl ProviderArg {
             Self::Pi => "pi",
             Self::Claude => "claude",
             Self::OpenCode => "opencode",
-            Self::CodeArtsAgent => "codearts-agent",
             Self::Kilo => "kilo",
             Self::KiroCli => "kiro-cli",
             Self::Crush => "crush",
@@ -1123,7 +1085,6 @@ impl ProviderArg {
             Self::Warp => "warp",
             Self::CodeBuddy => "codebuddy",
             Self::Trae => "trae",
-            Self::Zencoder => "zencoder",
             Self::Custom => "custom",
         }
     }
@@ -1138,7 +1099,6 @@ fn cli_supported_provider(provider: CaptureProvider) -> bool {
             | CaptureProvider::Claude
             | CaptureProvider::Pi
             | CaptureProvider::OpenCode
-            | CaptureProvider::CodeArtsAgent
             | CaptureProvider::Kilo
             | CaptureProvider::KiroCli
             | CaptureProvider::Crush
@@ -1175,7 +1135,6 @@ fn cli_supported_provider(provider: CaptureProvider) -> bool {
             | CaptureProvider::Warp
             | CaptureProvider::CodeBuddy
             | CaptureProvider::Trae
-            | CaptureProvider::Zencoder
             | CaptureProvider::Custom
     )
 }
@@ -6021,17 +5980,6 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
-        CaptureProvider::Zencoder => import_zencoder_history(
-            &source.path,
-            store,
-            ZencoderImportOptions {
-                source_path: Some(source.path.clone()),
-                history_record_id: Some(record_id),
-                allow_partial_failures: true,
-                ..ZencoderImportOptions::default()
-            },
-        )
-        .map_err(anyhow::Error::from),
         CaptureProvider::OpenCode => import_opencode_sqlite(
             &source.path,
             store,
@@ -6040,17 +5988,6 @@ fn import_one_source_inner(
                 history_record_id: Some(record_id),
                 allow_partial_failures: true,
                 ..OpenCodeSqliteImportOptions::default()
-            },
-        )
-        .map_err(anyhow::Error::from),
-        CaptureProvider::CodeArtsAgent => import_codearts_agent_sqlite(
-            &source.path,
-            store,
-            CodeArtsAgentSqliteImportOptions {
-                source_path: Some(source.path.clone()),
-                history_record_id: Some(record_id),
-                allow_partial_failures: true,
-                ..CodeArtsAgentSqliteImportOptions::default()
             },
         )
         .map_err(anyhow::Error::from),
@@ -6520,7 +6457,6 @@ fn source_uses_import_file_manifest(source: &SourceInfo) -> bool {
             | "roo_task_directory_json"
             | "firebender_chat_history_sqlite"
             | "codebuddy_history_json"
-            | "zencoder_chat_sessions_json_tree"
     )
 }
 
@@ -6616,7 +6552,6 @@ fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bool {
                 && path.starts_with(&source.path)
         }
         CaptureProvider::OpenCode
-        | CaptureProvider::CodeArtsAgent
         | CaptureProvider::Kilo
         | CaptureProvider::KiroCli
         | CaptureProvider::ForgeCode
@@ -6686,15 +6621,6 @@ fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bool {
         CaptureProvider::Trae => {
             path.file_name().and_then(|name| name.to_str()) == Some("state.vscdb")
                 && (path == source.path || path.starts_with(&source.path))
-        }
-        CaptureProvider::Zencoder => {
-            path.file_name().and_then(|name| name.to_str()) == Some("sessions.json")
-                || (path.extension().and_then(|ext| ext.to_str()) == Some("json")
-                    && path
-                        .parent()
-                        .and_then(Path::file_name)
-                        .and_then(|name| name.to_str())
-                        == Some("sessions"))
         }
         CaptureProvider::KimiCodeCli => {
             path.file_name().and_then(|name| name.to_str()) == Some("wire.jsonl")
@@ -6983,7 +6909,6 @@ fn source_uses_incremental_event_search(source: &SourceInfo) -> bool {
             | CaptureProvider::Pi
             | CaptureProvider::Cursor
             | CaptureProvider::OpenCode
-            | CaptureProvider::CodeArtsAgent
             | CaptureProvider::Kilo
             | CaptureProvider::KiroCli
             | CaptureProvider::Crush
@@ -7011,7 +6936,6 @@ fn source_uses_incremental_event_search(source: &SourceInfo) -> bool {
             | CaptureProvider::RooCode
             | CaptureProvider::CodeBuddy
             | CaptureProvider::Trae
-            | CaptureProvider::Zencoder
     )
 }
 

@@ -110,7 +110,6 @@ Support means ctx can discover or read that harness's persisted local history an
 | Shelley | Supported |
 | Auggie / Augment | Supported |
 | Cline / Roo Code | Supported |
-| CodeArts Agent | Supported |
 | CodeBuddy | Supported |
 | Continue | Supported |
 | Crush | Supported |
@@ -134,7 +133,6 @@ Support means ctx can discover or read that harness's persisted local history an
 | Warp | Supported |
 | Windsurf | Supported |
 | Zed | Supported |
-| Zencoder | Supported |
 
 ## How ctx compares
 
