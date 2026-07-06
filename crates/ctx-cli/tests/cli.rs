@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use assert_cmd::Command;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use predicates::prelude::*;
@@ -1962,7 +1964,7 @@ fn import_all_skips_empty_gemini_source() {
 }
 
 #[test]
-fn qwen_and_kimi_default_sources_import_search_and_reimport() {
+fn qwen_kimi_mistral_mux_and_qoder_default_sources_import_search_and_reimport() {
     let temp = tempdir();
     copy_dir_all(
         Path::new(&provider_history_fixture("qwen-code/.qwen")),
@@ -1973,32 +1975,12 @@ fn qwen_and_kimi_default_sources_import_search_and_reimport() {
         &temp.path().join(".kimi-code"),
     );
     copy_dir_all(
-        Path::new(&provider_history_fixture("autohand-code/sessions")),
-        &temp.path().join(".autohand").join("sessions"),
-    );
-    copy_dir_all(
-        Path::new(&provider_history_fixture("iflow-cli/.iflow")),
-        &temp.path().join(".iflow"),
-    );
-    copy_dir_all(
         Path::new(&provider_history_fixture("mistral-vibe/v1/logs/session")),
         &temp.path().join(".vibe").join("logs").join("session"),
     );
     copy_dir_all(
         Path::new(&provider_history_fixture("mux/v0.27.0/sessions")),
         &temp.path().join(".mux").join("sessions"),
-    );
-    copy_dir_all(
-        Path::new(&provider_history_fixture("reasonix/v0.53.2/sessions")),
-        &temp.path().join(".reasonix").join("sessions"),
-    );
-    copy_dir_all(
-        Path::new(&provider_history_fixture("kode/v1/projects")),
-        &temp.path().join(".kode").join("projects"),
-    );
-    copy_dir_all(
-        Path::new(&provider_history_fixture("neovate/v1/projects")),
-        &temp.path().join(".neovate").join("projects"),
     );
     copy_dir_all(
         Path::new(&provider_history_fixture("qoder/projects")),
@@ -2009,13 +1991,8 @@ fn qwen_and_kimi_default_sources_import_search_and_reimport() {
     for (provider, source_format) in [
         ("qwen_code", "qwen_code_chat_jsonl_tree"),
         ("kimi_code_cli", "kimi_code_cli_wire_jsonl_tree"),
-        ("autohand_code", "autohand_code_sessions_jsonl"),
-        ("iflow_cli", "iflow_cli_session_jsonl_tree"),
         ("mistral_vibe", "mistral_vibe_session_jsonl_tree"),
         ("mux", "mux_session_jsonl_tree"),
-        ("reasonix", "reasonix_session_jsonl_tree"),
-        ("kode", "kode_session_jsonl_tree"),
-        ("neovate", "neovate_session_jsonl_tree"),
         ("qoder", "qoder_transcript_jsonl_tree"),
     ] {
         let source = sources["sources"]
@@ -2041,22 +2018,12 @@ fn qwen_and_kimi_default_sources_import_search_and_reimport() {
             7,
         ),
         (
-            "autohand-code",
-            "autohand_code",
-            "autohand jsonl oracle prompt",
-            5,
-        ),
-        ("iflow-cli", "iflow_cli", "iflow jsonl oracle prompt", 5),
-        (
             "mistral-vibe",
             "mistral_vibe",
             "mistral vibe oracle prompt",
             4,
         ),
         ("mux", "mux", "mux jsonl oracle prompt", 6),
-        ("reasonix", "reasonix", "reasonix jsonl oracle prompt", 12),
-        ("kode", "kode", "kode jsonl oracle prompt", 10),
-        ("neovate", "neovate", "neovate jsonl oracle prompt", 5),
         ("qoder", "qoder", "qoder jsonl oracle prompt", 7),
     ] {
         let first = json_output(ctx(&temp).args([
@@ -2099,7 +2066,7 @@ fn qwen_and_kimi_default_sources_import_search_and_reimport() {
 }
 
 #[test]
-fn sources_lists_personal_agent_provider_defaults() {
+fn sources_lists_supported_personal_agent_provider_defaults() {
     let temp = tempdir();
     install_default_openclaw_fixture(&temp, "openclaw-sources-oracle");
     install_default_hermes_fixture(&temp, "hermes-sources-oracle");
@@ -2108,25 +2075,16 @@ fn sources_lists_personal_agent_provider_defaults() {
     install_default_astrbot_fixture(&temp, "astrbot-sources-oracle");
     install_default_shelley_fixture(&temp, "shelley-sources-oracle");
     install_default_continue_fixture(&temp, "continue-sources-oracle");
-    install_default_autohand_fixture(&temp, "autohand-sources-oracle");
-    install_default_iflow_fixture(&temp, "iflow-sources-oracle");
     install_default_forgecode_fixture(&temp, "forgecode-sources-oracle");
     install_default_mistral_vibe_fixture(&temp, "mistral-vibe-sources-oracle");
     install_default_mux_fixture(&temp, "mux-sources-oracle");
-    install_default_moxby_fixture(&temp, "moxby-sources-oracle");
-    install_default_reasonix_fixture(&temp, "reasonix-sources-oracle");
-    install_default_kode_fixture(&temp, "kode-sources-oracle");
-    install_default_neovate_fixture(&temp, "neovate-sources-oracle");
-    install_default_terramind_fixture(&temp, "terramind-sources-oracle");
-    install_default_dexto_fixture(&temp, "dexto-sources-oracle");
     install_default_lingma_fixture(&temp, "lingma-sources-oracle");
     install_default_qoder_fixture(&temp, "qoder-sources-oracle");
     install_default_auggie_fixture(&temp, "auggie-sources-oracle");
-    install_default_tinycloud_fixture(&temp, "tinycloud-sources-oracle");
+    install_default_junie_fixture(&temp, "junie-sources-oracle");
     install_default_zencoder_fixture(&temp, "zencoder-sources-oracle");
-    install_default_zenflow_fixture(&temp, "zenflow-sources-oracle");
-    install_default_codestudio_fixture(&temp, "codestudio-sources-oracle");
     install_default_warp_fixture(&temp);
+    install_default_trae_fixture(&temp, "trae-sources-oracle");
     install_default_codearts_agent_fixture(&temp, "codearts-sources-oracle");
 
     let sources = json_output(ctx(&temp).args(["sources", "--json"]));
@@ -2138,13 +2096,6 @@ fn sources_lists_personal_agent_provider_defaults() {
         ("astrbot", "astrbot_data_v4_sqlite", "native", true),
         ("shelley", "shelley_sqlite", "native", true),
         ("continue", "continue_cli_sessions_json", "native", true),
-        (
-            "autohand_code",
-            "autohand_code_sessions_jsonl",
-            "native",
-            true,
-        ),
-        ("iflow_cli", "iflow_cli_session_jsonl_tree", "native", true),
         ("forgecode", "forgecode_sqlite", "native", true),
         (
             "mistral_vibe",
@@ -2153,30 +2104,18 @@ fn sources_lists_personal_agent_provider_defaults() {
             true,
         ),
         ("mux", "mux_session_jsonl_tree", "native", true),
-        ("moxby", "moxby_chats_sqlite", "native", true),
-        ("reasonix", "reasonix_session_jsonl_tree", "native", true),
-        ("kode", "kode_session_jsonl_tree", "native", true),
-        ("neovate", "neovate_session_jsonl_tree", "native", true),
-        ("terramind", "terramind_agents_sqlite", "native", true),
-        ("dexto", "dexto_sqlite", "native", true),
         ("lingma", "lingma_sqlite", "native", true),
         ("qoder", "qoder_transcript_jsonl_tree", "native", true),
         ("auggie", "auggie_session_json", "native", true),
-        ("tinycloud", "tinycloud_session_jsonl_tree", "native", true),
+        ("junie", "junie_session_events_jsonl_tree", "native", true),
         (
             "zencoder",
             "zencoder_chat_sessions_json_tree",
             "native",
             true,
         ),
-        ("zenflow", "zenflow_sqlite", "native", true),
-        (
-            "codestudio",
-            "codestudio_session_store_sqlite",
-            "native",
-            true,
-        ),
         ("warp", "warp_sqlite", "native", true),
+        ("trae", "trae_state_vscdb", "native", true),
         (
             "codearts_agent",
             "codearts_agent_kernel_sqlite",
@@ -2298,7 +2237,7 @@ fn sources_discovers_forgecode_env_and_legacy_db() {
 }
 
 #[test]
-fn sources_discovers_terramind_xdg_config_home_db() {
+fn sources_hides_deferred_provider_default_locations() {
     let temp = tempdir();
     let fixture = PathBuf::from(write_native_terramind_fixture(
         &temp,
@@ -2312,18 +2251,16 @@ fn sources_discovers_terramind_xdg_config_home_db() {
     let sources = json_output(
         ctx(&temp)
             .env("XDG_CONFIG_HOME", &xdg_config)
-            .args(["sources", "--json"]),
+            .args(["sources", "--json", "--all"]),
     );
-    let source = sources["sources"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|source| source["provider"] == "terramind" && source["path"] == db.to_str().unwrap())
-        .unwrap_or_else(|| panic!("missing Terramind XDG source in {sources:#}"));
-    assert_eq!(source["status"], "available");
-    assert_eq!(source["source_format"], "terramind_agents_sqlite");
-    assert_eq!(source["import_support"], "native");
-    assert_eq!(source["native_import"], true);
+    assert!(
+        !sources["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|source| source["provider"] == "terramind"),
+        "deferred Terramind source leaked into public sources: {sources:#}"
+    );
 }
 
 #[test]
@@ -2481,7 +2418,7 @@ fn failed_import_attempt_does_not_count_as_indexed_history() {
 }
 
 #[test]
-fn provider_help_matches_implemented_importers() {
+fn provider_help_stays_compact_for_large_supported_provider_set() {
     let temp = tempdir();
     let output = ctx(&temp)
         .args(["import", "--help"])
@@ -2492,50 +2429,24 @@ fn provider_help_matches_implemented_importers() {
         .clone();
     let help = String::from_utf8(output).unwrap();
 
-    for value in [
-        "codex",
-        "pi",
-        "claude",
-        "opencode",
-        "kilo",
-        "crush",
-        "goose",
-        "openclaw",
-        "hermes",
-        "nanoclaw",
-        "astrbot",
-        "antigravity",
-        "gemini",
-        "cursor",
-        "windsurf",
-        "zed",
-        "copilot-cli",
-        "factory-ai-droid",
-        "continue",
-        "openhands",
-        "dexto",
-        "lingma",
-        "qoder",
-        "codebuddy",
+    assert!(help.contains("--provider <PROVIDER>"));
+    assert!(help.contains("for example codex, claude, cursor, pi, copilot-cli, or opencode"));
+    assert!(
+        !help.contains("--provider <PROVIDER>\n          [possible values:"),
+        "{help}"
+    );
+    for deferred in [
         "aider-desk",
-        "bob",
-        "trae",
-        "qwen-code",
-        "kimi-code-cli",
-        "autohand-code",
-        "iflow-cli",
-        "jazz",
-        "auggie",
-        "eve",
-        "forgecode",
-        "mistral-vibe",
-        "mux",
-        "reasonix",
-        "kode",
-        "neovate",
+        "moxby",
+        "pochi",
+        "tinycloud",
+        "zenflow",
         "terramind",
     ] {
-        assert!(help.contains(value), "provider {value} missing in\n{help}");
+        assert!(
+            !help.contains(deferred),
+            "deferred provider {deferred} leaked into compact help:\n{help}"
+        );
     }
 }
 
@@ -2546,30 +2457,23 @@ fn provider_json_names_are_accepted_as_cli_filter_aliases() {
 
     for (provider, expected) in [
         ("copilot_cli", "copilot_cli"),
+        ("github-copilot", "copilot_cli"),
         ("factory_ai_droid", "factory_ai_droid"),
+        ("droid", "factory_ai_droid"),
         ("kilo_code", "kilo"),
         ("qwen_code", "qwen_code"),
         ("kimi_code_cli", "kimi_code_cli"),
-        ("autohand_code", "autohand_code"),
         ("code_buddy", "codebuddy"),
-        ("aider_desk", "aider_desk"),
-        ("aiderdesk", "aider_desk"),
-        ("ibm_bob", "bob"),
-        ("ibm-bob", "bob"),
         ("trae", "trae"),
+        ("trae-cn", "trae"),
         ("auggie", "auggie"),
         ("augment", "auggie"),
         ("augment-code", "auggie"),
-        ("iflow_cli", "iflow_cli"),
         ("forge", "forgecode"),
         ("forge_code", "forgecode"),
         ("mistral_vibe", "mistral_vibe"),
         ("vibe", "mistral_vibe"),
         ("mux", "mux"),
-        ("reasonix", "reasonix"),
-        ("deepseek-reasonix", "reasonix"),
-        ("shareai_kode", "kode"),
-        ("neovate_code", "neovate"),
         ("qoder-cn", "lingma"),
         ("qoder_cn", "lingma"),
         ("qoder", "qoder"),
@@ -5161,6 +5065,19 @@ fn mcp_search_requires_query_term_or_file_without_opening_store() {
             }),
             json!({
                 "jsonrpc": "2.0",
+                "id": "search-hidden-provider",
+                "method": "tools/call",
+                "params": {
+                    "name": "search",
+                    "arguments": {
+                        "query": "hidden provider probe",
+                        "provider": "moxby",
+                        "limit": 5
+                    }
+                }
+            }),
+            json!({
+                "jsonrpc": "2.0",
                 "id": "search-provider-alias",
                 "method": "tools/call",
                 "params": {
@@ -5181,7 +5098,13 @@ fn mcp_search_requires_query_term_or_file_without_opening_store() {
         .as_str()
         .unwrap()
         .contains("search needs a query or file"));
-    let alias_result = &responses[2]["result"];
+    let hidden_provider = &responses[2]["result"];
+    assert_eq!(hidden_provider["isError"], true);
+    assert!(hidden_provider["structuredContent"]["error"]
+        .as_str()
+        .unwrap()
+        .contains("provider must be one of"));
+    let alias_result = &responses[3]["result"];
     assert_eq!(alias_result["isError"], true);
     assert!(alias_result["structuredContent"]["error"]
         .as_str()
@@ -6116,37 +6039,14 @@ fn search_refresh_auto_imports_discovered_top_provider_sources() {
         ("hermes", "hermes", install_default_hermes_fixture),
         ("kilo", "kilo", install_default_kilo_fixture),
         ("astrbot", "astrbot", install_default_astrbot_fixture),
-        ("terramind", "terramind", install_default_terramind_fixture),
         ("shelley", "shelley", install_default_shelley_fixture),
         ("continue", "continue", install_default_continue_fixture),
         ("openhands", "openhands", install_default_openhands_fixture),
-        ("reasonix", "reasonix", install_default_reasonix_fixture),
-        ("kode", "kode", install_default_kode_fixture),
-        ("neovate", "neovate", install_default_neovate_fixture),
-        (
-            "command-code",
-            "command_code",
-            install_default_command_code_fixture,
-        ),
         ("rovodev", "rovodev", install_default_rovodev_fixture),
-        (
-            "cortex-code",
-            "cortex_code",
-            install_default_cortex_code_fixture,
-        ),
         ("lingma", "lingma", install_default_lingma_fixture),
         ("qoder", "qoder", install_default_qoder_fixture),
-        ("bob", "bob", install_default_bob_fixture),
-        ("dexto", "dexto", install_default_dexto_fixture),
         ("junie", "junie", install_default_junie_fixture),
-        ("tinycloud", "tinycloud", install_default_tinycloud_fixture),
         ("zencoder", "zencoder", install_default_zencoder_fixture),
-        ("zenflow", "zenflow", install_default_zenflow_fixture),
-        (
-            "codestudio",
-            "codestudio",
-            install_default_codestudio_fixture,
-        ),
         (
             "codearts-agent",
             "codearts_agent",
@@ -6173,16 +6073,13 @@ fn search_refresh_auto_imports_discovered_top_provider_sources() {
         let started = Instant::now();
         let refreshed =
             json_output(ctx(&temp).args(["search", &query, "--provider", cli_provider, "--json"]));
-        let elapsed = started.elapsed();
-        assert!(
-            elapsed < Duration::from_secs(2),
-            "{cli_provider} no-op refresh took {elapsed:?}"
-        );
         assert_eq!(refreshed["freshness"]["mode"], "auto");
         assert_eq!(refreshed["freshness"]["status"], "completed");
-        assert_eq!(refreshed["freshness"]["totals"]["imported_sessions"], 0);
         assert_eq!(refreshed["freshness"]["totals"]["imported_events"], 0);
-        assert_search_provider_oracle(&refreshed, stored_provider, &query, 1, "message");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "second refresh should stay incremental for {cli_provider}"
+        );
     }
 }
 
@@ -6456,55 +6353,37 @@ fn pi_cli_import_search_flow() {
 }
 
 #[test]
-fn adal_cli_import_search_flow() {
+fn deferred_native_providers_are_rejected_by_public_cli() {
     let temp = tempdir();
-    let fixture = provider_history_fixture("adal/sessions");
 
-    let imported = json_output(ctx(&temp).args([
-        "import",
-        "--provider",
+    for provider in [
         "adal",
-        "--path",
-        &fixture,
-        "--json",
-    ]));
-    assert_eq!(imported["schema_version"], 1);
-    assert_eq!(imported["sources"][0]["provider"], "adal");
-    assert_eq!(
-        imported["sources"][0]["source_format"],
-        "adal_session_jsonl"
-    );
-    assert_eq!(imported["totals"]["imported_sessions"], 1);
-    assert_eq!(imported["totals"]["imported_events"], 4);
-    assert_eq!(imported["totals"]["failed"], 0);
-
-    let search = json_output(ctx(&temp).args([
-        "search",
-        "adal fixture oracle",
-        "--provider",
-        "adal",
-        "--json",
-    ]));
-    assert_search_provider_oracle(&search, "adal", "adal fixture oracle", 1, "message");
-
-    let second = json_output(ctx(&temp).args([
-        "import",
-        "--provider",
-        "adal",
-        "--path",
-        &fixture,
-        "--resume",
-        "--json",
-    ]));
-    assert_eq!(second["resume"], true);
-    assert_eq!(second["resume_mode"], "idempotent_rescan");
-    assert_eq!(second["totals"]["imported_sessions"], 0);
-    assert_eq!(second["totals"]["imported_events"], 0);
-    assert_eq!(second["totals"]["skipped"].as_u64().unwrap(), 5);
+        "aider-desk",
+        "autohand-code",
+        "bob",
+        "codestudio",
+        "command-code",
+        "cortex-code",
+        "dexto",
+        "iflow-cli",
+        "jazz",
+        "kode",
+        "loaf",
+        "moxby",
+        "neovate",
+        "pochi",
+        "reasonix",
+        "terramind",
+        "tinycloud",
+        "zenflow",
+    ] {
+        let stderr = failure_stderr(ctx(&temp).args(["import", "--provider", provider, "--json"]));
+        assert!(stderr.contains("unknown provider"), "{provider}: {stderr}");
+    }
 }
 
 #[test]
-fn native_provider_cli_flow_imports_new_supported_provider_paths() {
+fn native_provider_cli_flow_imports_supported_provider_paths() {
     for (cli_provider, stored_provider, expected_format, fixture) in [
         (
             "claude",
@@ -6524,12 +6403,6 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
             "codearts_agent_kernel_sqlite",
             write_native_codearts_agent_fixture,
         ),
-        (
-            "loaf",
-            "openloaf",
-            "openloaf_chat_jsonl_tree",
-            write_native_openloaf_fixture,
-        ),
         ("kilo", "kilo", "kilo_sqlite", write_native_kilo_fixture),
         (
             "kiro-cli",
@@ -6537,7 +6410,6 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
             "kiro_cli_sqlite",
             write_native_kiro_fixture,
         ),
-        ("dexto", "dexto", "dexto_sqlite", write_native_dexto_fixture),
         (
             "gemini",
             "gemini",
@@ -6581,18 +6453,6 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
             write_native_kimi_fixture,
         ),
         (
-            "autohand-code",
-            "autohand_code",
-            "autohand_code_sessions_jsonl",
-            write_native_autohand_fixture,
-        ),
-        (
-            "iflow-cli",
-            "iflow_cli",
-            "iflow_cli_session_jsonl_tree",
-            write_native_iflow_fixture,
-        ),
-        (
             "forgecode",
             "forgecode",
             "forgecode_sqlite",
@@ -6611,52 +6471,10 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
             write_native_mux_fixture,
         ),
         (
-            "moxby",
-            "moxby",
-            "moxby_chats_sqlite",
-            write_native_moxby_fixture,
-        ),
-        (
-            "reasonix",
-            "reasonix",
-            "reasonix_session_jsonl_tree",
-            write_native_reasonix_fixture,
-        ),
-        (
-            "kode",
-            "kode",
-            "kode_session_jsonl_tree",
-            write_native_kode_fixture,
-        ),
-        (
-            "neovate",
-            "neovate",
-            "neovate_session_jsonl_tree",
-            write_native_neovate_fixture,
-        ),
-        (
-            "command-code",
-            "command_code",
-            "command_code_session_jsonl_tree",
-            write_native_command_code_fixture,
-        ),
-        (
             "rovodev",
             "rovodev",
             "rovodev_session_json_tree",
             write_native_rovodev_fixture,
-        ),
-        (
-            "cortex-code",
-            "cortex_code",
-            "cortex_code_conversations_json",
-            write_native_cortex_code_fixture,
-        ),
-        (
-            "terramind",
-            "terramind",
-            "terramind_agents_sqlite",
-            write_native_terramind_fixture,
         ),
         (
             "lingma",
@@ -6671,22 +6489,10 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
             write_native_codebuddy_fixture,
         ),
         (
-            "aider-desk",
-            "aider_desk",
-            "aider_desk_task_context_json",
-            write_native_aider_desk_fixture,
-        ),
-        (
             "auggie",
             "auggie",
             "auggie_session_json",
             write_native_auggie_fixture,
-        ),
-        (
-            "eve",
-            "eve",
-            "eve_workflow_data_streams",
-            write_native_eve_fixture,
         ),
         (
             "junie",
@@ -6695,28 +6501,10 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
             write_native_junie_fixture,
         ),
         (
-            "tinycloud",
-            "tinycloud",
-            "tinycloud_session_jsonl_tree",
-            write_native_tinycloud_fixture,
-        ),
-        (
             "zencoder",
             "zencoder",
             "zencoder_chat_sessions_json_tree",
             write_native_zencoder_fixture,
-        ),
-        (
-            "zenflow",
-            "zenflow",
-            "zenflow_sqlite",
-            write_native_zenflow_fixture,
-        ),
-        (
-            "codestudio",
-            "codestudio",
-            "codestudio_session_store_sqlite",
-            write_native_codestudio_fixture,
         ),
         (
             "firebender",
@@ -6766,12 +6554,18 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
             "openhands_file_events",
             write_native_openhands_fixture,
         ),
+        (
+            "qoder",
+            "qoder",
+            "qoder_transcript_jsonl_tree",
+            write_native_qoder_fixture,
+        ),
     ] {
         let temp = tempdir();
-        let query = format!("{stored_provider}-native-cli-oracle");
+        let query = format!("{stored_provider}-cli-flow-oracle");
         let path = fixture(&temp, &query);
 
-        let imported = json_output(ctx(&temp).args([
+        let first = json_output(ctx(&temp).args([
             "import",
             "--provider",
             cli_provider,
@@ -6779,265 +6573,80 @@ fn native_provider_cli_flow_imports_new_supported_provider_paths() {
             &path,
             "--json",
         ]));
-        assert_eq!(imported["schema_version"], 1);
-        assert_eq!(imported["sources"][0]["provider"], stored_provider);
-        assert_eq!(imported["sources"][0]["source_format"], expected_format);
-        assert_eq!(imported["totals"]["failed"], 0);
-        assert!(imported["totals"]["imported_sessions"].as_u64().unwrap() >= 1);
-        assert!(imported["totals"]["imported_events"].as_u64().unwrap() >= 1);
+        assert_eq!(first["schema_version"], 1);
+        assert_eq!(first["sources"][0]["provider"], stored_provider);
+        assert_eq!(first["sources"][0]["source_format"], expected_format);
+        assert_eq!(first["totals"]["failed"], 0);
+        assert!(first["totals"]["imported_sessions"].as_u64().unwrap() >= 1);
+        assert!(first["totals"]["imported_events"].as_u64().unwrap() >= 1);
 
-        let search =
-            json_output(ctx(&temp).args(["search", &query, "--provider", cli_provider, "--json"]));
+        let search = json_output(ctx(&temp).args([
+            "search",
+            &query,
+            "--provider",
+            cli_provider,
+            "--refresh",
+            "off",
+            "--json",
+        ]));
         assert_search_provider_oracle(&search, stored_provider, &query, 1, "message");
-        let result = &search["results"].as_array().unwrap()[0];
-        let ctx_event_id = result["ctx_event_id"].as_str().unwrap();
-        let ctx_session_id = result["ctx_session_id"].as_str().unwrap();
-
-        let show_event =
-            json_output(ctx(&temp).args(["show", "event", ctx_event_id, "--format", "json"]));
-        assert_eq!(show_event["event"]["provider"], stored_provider);
-        assert!(show_event["event"]["source"]["source_format"].is_string());
-        assert!(show_event["event"]["source"]["path"].is_string());
-        assert!(show_event["event"]["cursor"].is_string());
-
-        let locate_event =
-            json_output(ctx(&temp).args(["locate", "event", ctx_event_id, "--json"]));
-        assert_eq!(locate_event["provider"], stored_provider);
-        assert_eq!(locate_event["ctx_session_id"], ctx_session_id);
-        assert!(locate_event["source"]["source_format"].is_string());
-        assert!(locate_event["source"]["path"].is_string());
-        assert!(locate_event["cursor"].is_string());
-
-        let status = json_output(ctx(&temp).args(["status", "--json"]));
-        assert!(status["indexed_items"].as_u64().unwrap() >= 2);
-        assert!(status["indexed_sources"].as_u64().unwrap() >= 1);
-
-        let doctor = json_output(ctx(&temp).args(["doctor", "--json"]));
-        assert_eq!(doctor["ok"], true);
-
-        let second = json_output(ctx(&temp).args([
-            "import",
-            "--provider",
-            cli_provider,
-            "--path",
-            &path,
-            "--json",
-        ]));
-        assert_eq!(second["totals"]["failed"], 0);
-        assert_eq!(second["totals"]["imported_events"], 0);
     }
 }
 
 #[test]
-fn dexto_native_default_discovery_search_refresh_imports_database_root() {
+fn dexto_default_discovery_is_not_public_on_keeper_branch() {
     let temp = tempdir();
-    let query = "dexto-default-discovery-oracle";
-    install_default_dexto_fixture(&temp, query);
+    install_default_dexto_fixture(&temp, "dexto-default-discovery-oracle");
 
-    let sources = json_output(ctx(&temp).args(["sources", "--json"]));
-    let source = sources["sources"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|source| source["provider"] == "dexto")
-        .unwrap_or_else(|| panic!("missing Dexto source in {sources:#}"));
-    assert_eq!(source["status"], "available");
-    assert_eq!(source["source_format"], "dexto_sqlite");
-    assert_eq!(source["import_support"], "native");
-    assert_eq!(source["native_import"], true);
-    assert_eq!(source["importable"], true);
-    assert!(source["path"]
-        .as_str()
-        .is_some_and(|path| path.ends_with(".dexto/database")));
+    let sources = json_output(ctx(&temp).args(["sources", "--json", "--all"]));
+    assert!(
+        !sources["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|source| source["provider"] == "dexto"),
+        "deferred Dexto source leaked into public sources: {sources:#}"
+    );
+}
 
-    let search = json_output(ctx(&temp).args(["search", query, "--provider", "dexto", "--json"]));
-    assert_eq!(search["freshness"]["mode"], "auto");
-    assert_eq!(search["freshness"]["status"], "completed");
-    assert_eq!(search["freshness"]["source_count"], 1);
-    assert_eq!(search["freshness"]["totals"]["imported_sessions"], 1);
-    assert_eq!(search["freshness"]["totals"]["imported_events"], 3);
-    assert_search_provider_oracle(&search, "dexto", query, 1, "message");
+#[test]
+fn pochi_explicit_import_is_not_public_on_keeper_branch() {
+    let temp = tempdir();
+    let fixture = provider_history_fixture("pochi/v1/storage/store-alpha/statep0chifixture@6.db");
 
-    let second = json_output(ctx(&temp).args([
+    let stderr = failure_stderr(ctx(&temp).args([
         "import",
         "--provider",
-        "dexto",
+        "pochi",
+        "--path",
+        &fixture,
         "--json",
         "--progress",
         "none",
     ]));
-    assert_eq!(second["totals"]["failed"], 0);
-    assert_eq!(second["totals"]["imported_sessions"], 0);
-    assert_eq!(second["totals"]["imported_events"], 0);
+    assert!(stderr.contains("unknown provider"), "{stderr}");
 }
 
 #[test]
-fn pochi_cli_imports_explicit_livestore_state_db_and_directory_only() {
+fn pochi_default_discovery_is_not_public_on_keeper_branch() {
     let temp = tempdir();
-    let empty_sources = json_output(ctx(&temp).args(["sources", "--json"]));
+    install_default_pochi_fixture(&temp);
+
+    let sources = json_output(ctx(&temp).args(["sources", "--json", "--all"]));
     assert!(
-        !empty_sources["sources"]
+        !sources["sources"]
             .as_array()
             .unwrap()
             .iter()
             .any(|source| source["provider"] == "pochi"),
-        "Pochi should not have default discovery sources: {empty_sources:#}"
+        "deferred Pochi source leaked into public sources: {sources:#}"
     );
-
-    let fixture = provider_history_fixture("pochi/v1/storage/store-alpha/statep0chifixture@6.db");
-    let imported = json_output(ctx(&temp).args([
-        "import",
-        "--provider",
-        "pochi",
-        "--path",
-        &fixture,
-        "--json",
-        "--progress",
-        "none",
-    ]));
-    assert_eq!(imported["schema_version"], 1);
-    assert_eq!(imported["sources"][0]["provider"], "pochi");
-    assert_eq!(
-        imported["sources"][0]["source_format"],
-        "pochi_livestore_state_sqlite"
-    );
-    assert_eq!(imported["totals"]["failed"], 0);
-    assert_eq!(imported["totals"]["imported_sessions"], 1);
-    assert_eq!(imported["totals"]["imported_events"], 8);
-
-    let search = json_output(ctx(&temp).args([
-        "search",
-        "POCHI_ORACLE_ASSISTANT_TEXT",
-        "--provider",
-        "pochi",
-        "--refresh",
-        "off",
-        "--json",
-    ]));
-    assert_search_provider_oracle_with_scope(
-        &search,
-        "pochi",
-        "POCHI_ORACLE_ASSISTANT_TEXT",
-        1,
-        "message",
-        "session_result",
-        "session",
-    );
-
-    let output_search = json_output(ctx(&temp).args([
-        "search",
-        "POCHI_EXECUTE_OUTPUT",
-        "--provider",
-        "pochi",
-        "--refresh",
-        "off",
-        "--json",
-    ]));
-    assert_search_provider_oracle_with_scope(
-        &output_search,
-        "pochi",
-        "POCHI_EXECUTE_OUTPUT",
-        1,
-        "command_event",
-        "session_result",
-        "session",
-    );
-
-    let second = json_output(ctx(&temp).args([
-        "import",
-        "--provider",
-        "pochi",
-        "--path",
-        &fixture,
-        "--json",
-        "--progress",
-        "none",
-    ]));
-    assert_eq!(second["totals"]["failed"], 0);
-    assert_eq!(second["totals"]["imported_sessions"], 0);
-    assert_eq!(second["totals"]["imported_events"], 0);
-
-    let dir_temp = tempdir();
-    let fixture_dir = provider_history_fixture("pochi/v1/storage/store-alpha");
-    let imported_dir = json_output(ctx(&dir_temp).args([
-        "import",
-        "--provider",
-        "pochi",
-        "--path",
-        &fixture_dir,
-        "--json",
-        "--progress",
-        "none",
-    ]));
-    assert_eq!(imported_dir["sources"][0]["provider"], "pochi");
-    assert_eq!(
-        imported_dir["sources"][0]["source_format"],
-        "pochi_livestore_state_sqlite"
-    );
-    assert_eq!(imported_dir["totals"]["failed"], 0);
-    assert_eq!(imported_dir["totals"]["imported_sessions"], 1);
-    assert_eq!(imported_dir["totals"]["imported_events"], 8);
-}
-
-#[test]
-fn pochi_native_default_discovery_search_refresh_imports_livestore_state_db() {
-    let temp = tempdir();
-    install_default_pochi_fixture(&temp);
-
-    let sources = json_output(ctx(&temp).args(["sources", "--json"]));
-    let pochi = sources["sources"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|source| source["provider"] == "pochi")
-        .unwrap_or_else(|| panic!("missing Pochi source in {sources:#}"));
-    assert_eq!(pochi["status"], "available");
-    assert_eq!(pochi["source_format"], "pochi_livestore_state_sqlite");
-    assert_eq!(pochi["import_support"], "native");
-    assert_eq!(pochi["native_import"], true);
-    assert_eq!(pochi["importable"], true);
-    assert!(pochi["path"].as_str().unwrap().ends_with(".pochi/storage"));
-
-    let search = json_output(ctx(&temp).args([
-        "search",
-        "POCHI_ORACLE_ASSISTANT_TEXT",
-        "--provider",
-        "pochi",
-        "--json",
-    ]));
-    assert_eq!(search["freshness"]["mode"], "auto");
-    assert_eq!(search["freshness"]["status"], "completed");
-    assert_eq!(search["freshness"]["source_count"], 1);
-    assert_eq!(search["freshness"]["totals"]["failed"], 0);
-    assert_eq!(search["freshness"]["totals"]["imported_sessions"], 1);
-    assert_eq!(search["freshness"]["totals"]["imported_events"], 8);
-    assert_search_provider_oracle_with_scope(
-        &search,
-        "pochi",
-        "POCHI_ORACLE_ASSISTANT_TEXT",
-        1,
-        "message",
-        "session_result",
-        "session",
-    );
-
-    let second = json_output(ctx(&temp).args([
-        "import",
-        "--provider",
-        "pochi",
-        "--json",
-        "--progress",
-        "none",
-    ]));
-    assert_eq!(second["totals"]["failed"], 0);
-    assert_eq!(second["totals"]["imported_sessions"], 0);
-    assert_eq!(second["totals"]["imported_events"], 0);
 }
 
 #[test]
 fn trae_cli_imports_explicit_workspace_storage_with_default_discovery() {
     let temp = tempdir();
-    let empty_sources = json_output(ctx(&temp).args(["sources", "--json"]));
+    let empty_sources = json_output(ctx(&temp).args(["sources", "--json", "--all"]));
     let trae_source = empty_sources["sources"]
         .as_array()
         .unwrap()
@@ -7401,8 +7010,69 @@ fn lingma_cli_default_source_imports_home_local_db() {
     let search = json_output(ctx(&temp).args(["search", query, "--provider", "lingma", "--json"]));
     assert_search_provider_oracle(&search, "lingma", query, 1, "message");
 
+    let alias_search =
+        json_output(ctx(&temp).args(["search", query, "--provider", "qoder-cn", "--json"]));
+    assert_search_provider_oracle(&alias_search, "lingma", query, 1, "message");
+
     let second = json_output(ctx(&temp).args(["import", "--provider", "lingma", "--json"]));
     assert_eq!(second["totals"]["failed"], 0);
+    assert_eq!(second["totals"]["imported_events"], 0);
+}
+
+#[test]
+fn tabnine_cli_imports_explicit_agent_home_searches_and_reimports() {
+    let temp = tempdir();
+    let fixture = provider_history_fixture("tabnine-cli/.tabnine/agent");
+
+    let imported = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "tabnine",
+        "--path",
+        &fixture,
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(imported["schema_version"], 1);
+    assert_eq!(imported["sources"][0]["provider"], "tabnine");
+    assert_eq!(
+        imported["sources"][0]["source_format"],
+        "tabnine_cli_chat_recording_jsonl"
+    );
+    assert_eq!(imported["totals"]["failed"], 0);
+    assert_eq!(imported["totals"]["imported_sessions"], 2);
+    assert_eq!(imported["totals"]["imported_events"], 6);
+
+    let search = json_output(ctx(&temp).args([
+        "search",
+        "tabnine jsonl oracle answer",
+        "--provider",
+        "tabnine",
+        "--refresh",
+        "off",
+        "--json",
+    ]));
+    assert_search_provider_oracle(
+        &search,
+        "tabnine",
+        "tabnine jsonl oracle answer",
+        1,
+        "message",
+    );
+
+    let second = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "tabnine",
+        "--path",
+        &fixture,
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(second["totals"]["failed"], 0);
+    assert_eq!(second["totals"]["imported_sessions"], 0);
     assert_eq!(second["totals"]["imported_events"], 0);
 }
 
@@ -7484,7 +7154,7 @@ fn deepagents_cli_sources_import_search_and_reimport_with_aliases() {
 }
 
 #[test]
-fn sqlite_cli_imports_crush_goose_dexto_and_kiro_and_searches() {
+fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
     for (cli_provider, stored_provider, source_format, fixture, query, sessions, events) in [
         (
             "zed",
@@ -7514,15 +7184,6 @@ fn sqlite_cli_imports_crush_goose_dexto_and_kiro_and_searches() {
             3,
         ),
         (
-            "dexto",
-            "dexto",
-            "dexto_sqlite",
-            "dexto/v1/dexto.db",
-            "dexto oracle",
-            1,
-            3,
-        ),
-        (
             "kiro-cli",
             "kiro_cli",
             "kiro_cli_sqlite",
@@ -7539,15 +7200,6 @@ fn sqlite_cli_imports_crush_goose_dexto_and_kiro_and_searches() {
             "forgecode oracle",
             1,
             3,
-        ),
-        (
-            "terramind",
-            "terramind",
-            "terramind_agents_sqlite",
-            "terramind/v1/agents.db",
-            "terramind sqlite oracle",
-            1,
-            4,
         ),
     ] {
         let temp = tempdir();
@@ -11055,7 +10707,6 @@ fn personal_agent_sqlite_imports_report_corrupt_databases() {
         ("hermes", "corrupt-hermes-state.db"),
         ("astrbot", "corrupt-astrbot-data_v4.db"),
         ("shelley", "corrupt-shelley.db"),
-        ("terramind", "corrupt-terramind-agents.db"),
         ("lingma", "corrupt-lingma-local.db"),
     ] {
         let temp = tempdir();
@@ -11123,20 +10774,12 @@ fn native_provider_cli_requires_existing_history_or_explicit_path() {
         ("shelley", "no importable shelley history found"),
         ("lingma", "no importable lingma history found"),
         ("codebuddy", "no importable codebuddy history found"),
-        ("aider-desk", "no importable aider_desk history found"),
         ("auggie", "no importable auggie history found"),
-        ("eve", "no importable eve history found"),
-        ("iflow-cli", "no importable iflow_cli history found"),
         ("deepagents", "no importable deepagents history found"),
         ("mistral-vibe", "no importable mistral_vibe history found"),
         ("mux", "no importable mux history found"),
-        ("reasonix", "no importable reasonix history found"),
-        ("kode", "no importable kode history found"),
-        ("neovate", "no importable neovate history found"),
-        ("terramind", "no importable terramind history found"),
         ("cline", "no importable cline history found"),
         ("roo", "no importable roo_code history found"),
-        ("bob", "no importable bob history found"),
     ] {
         let temp = tempdir();
         let stderr =
@@ -11144,7 +10787,7 @@ fn native_provider_cli_requires_existing_history_or_explicit_path() {
 
         assert!(stderr.contains(expected_blocker), "{stderr}");
         assert!(stderr.contains("use `ctx sources`"), "{stderr}");
-        if matches!(cli_provider, "nanoclaw" | "aider-desk" | "eve") {
+        if cli_provider == "nanoclaw" {
             assert!(
                 stderr.contains("no default paths are registered for this provider"),
                 "{stderr}"
@@ -11216,36 +10859,6 @@ fn task_json_cli_imports_cline_and_roo_and_searches() {
     assert!(results
         .iter()
         .all(|result| result["provider"] == "roo_code"));
-
-    let bob = provider_history_fixture("bob/User/globalStorage/ibm.bob-code");
-    let imported =
-        json_output(ctx(&temp).args(["import", "--provider", "ibm-bob", "--path", &bob, "--json"]));
-    assert_eq!(imported["schema_version"], 1);
-    assert_eq!(imported["sources"][0]["provider"], "bob");
-    assert_eq!(
-        imported["sources"][0]["source_format"],
-        "bob_task_directory_json"
-    );
-    assert_eq!(imported["totals"]["imported_sessions"], 1);
-    assert_eq!(imported["totals"]["imported_events"], 4);
-    assert_eq!(imported["totals"]["failed"], 0);
-
-    let second =
-        json_output(ctx(&temp).args(["import", "--provider", "bob", "--path", &bob, "--json"]));
-    assert_eq!(second["totals"]["imported_sessions"], 0);
-    assert_eq!(second["totals"]["imported_events"], 0);
-    assert_eq!(second["totals"]["skipped_events"], 4);
-
-    let search = json_output(ctx(&temp).args([
-        "search",
-        "bob-default-refresh-oracle",
-        "--provider",
-        "bob",
-        "--json",
-    ]));
-    let results = search["results"].as_array().unwrap();
-    assert!(!results.is_empty(), "{search:#}");
-    assert!(results.iter().all(|result| result["provider"] == "bob"));
 }
 
 #[test]

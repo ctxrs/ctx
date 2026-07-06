@@ -17,12 +17,12 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use super::{
-    compact_json, config::CONFIG_FILE, discovered_plugin_sources_json, discovered_sources,
-    event_window, event_window_json, indexed_history_item_count, mark_share_safe,
-    raw_sql_result_json, search_filters, search_has_intent, session_transcript_json, sources_json,
-    OutputFormat, ProviderArg, RefreshArg, SearchDto, SearchFilterInput, SearchIntentInput,
-    SearchRefreshReport, SourceIdentityFilterArgs, TranscriptMode, MAX_EVENT_WINDOW,
-    MAX_SEARCH_LIMIT,
+    cli_supported_provider, compact_json, config::CONFIG_FILE, discovered_plugin_sources_json,
+    discovered_sources, event_window, event_window_json, indexed_history_item_count,
+    mark_share_safe, raw_sql_result_json, search_filters, search_has_intent,
+    session_transcript_json, sources_json, OutputFormat, ProviderArg, RefreshArg, SearchDto,
+    SearchFilterInput, SearchIntentInput, SearchRefreshReport, SourceIdentityFilterArgs,
+    TranscriptMode, MAX_EVENT_WINDOW, MAX_SEARCH_LIMIT,
 };
 
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
@@ -751,6 +751,7 @@ fn optional_provider(arguments: &Value, key: &str) -> Result<Option<ProviderArg>
         return Ok(None);
     };
     ProviderArg::parse_name(&provider)
+        .filter(|provider| cli_supported_provider(provider.capture_provider()))
         .map(Some)
         .ok_or_else(|| anyhow!("provider must be one of {}", provider_names().join(", ")))
 }

@@ -122,7 +122,7 @@ Support means ctx can discover or read that harness's persisted local history an
 | Kilo Code | Supported |
 | Kimi Code CLI | Supported |
 | Kiro CLI | Supported |
-| Lingma / Qoder CN | Supported |
+| Lingma | Supported |
 | Mistral Vibe | Supported |
 | Mux | Supported |
 | OpenHands | Supported |

@@ -174,9 +174,9 @@ def validate_provider(provider: Any, index: int, seen_ids: set[str]) -> None:
         fail(f"providers[{provider_id}].public_docs does not mention the provider")
 
     support_doc_text = SUPPORT_DOC_PATH.read_text(encoding="utf-8")
-    support_row = f"| {provider['display_name']} | `{status}` |"
+    support_row = f"| {provider['display_name']} | Supported |"
     if support_row not in support_doc_text:
-        fail(f"docs/provider-support.md is missing matrix row for {provider_id} with status {status}")
+        fail(f"docs/provider-support.md is missing supported row for {provider_id}")
 
     tests = require_string_list(provider.get("tests"), f"providers[{provider_id}].tests")
     provider_specific_test = False

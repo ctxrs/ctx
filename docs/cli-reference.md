@@ -186,11 +186,11 @@ Import selection rules:
 - with `--provider <provider> --path <path>`, import exactly that native
   provider path.
 
-Preview providers such as NanoClaw are not included in `--all` or pre-search
-refresh. Import them explicitly with `--provider` when discovery finds the
-desired source, or add `--path` to target a specific source, then search the
-existing index. AstrBot `data_v4.db` sources are supported for bounded default
-locations and remain available for explicit `--path` imports.
+NanoClaw is explicit-import only and is not included in `--all` or pre-search
+refresh. Import it with `--provider` when discovery finds the desired source, or
+add `--path` to target a specific source, then search the existing index. AstrBot
+`data_v4.db` sources are supported for bounded default locations and remain
+available for explicit `--path` imports.
 
 The current `--resume` flag is an idempotent-rescan mode marker. JSON reports
 `resume: true` and `resume_mode: "idempotent_rescan"`, but provider-native

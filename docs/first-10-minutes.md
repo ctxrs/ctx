@@ -49,11 +49,10 @@ ctx sources --json
 
 Expect rows for supported local import providers such as Codex, Pi,
 Antigravity, Claude, OpenCode, Kilo Code, OpenClaw, Hermes, Gemini, Cursor,
-Zed, Copilot CLI, Factory AI Droid, Autohand Code, and Warp Terminal restoration
-SQLite. NanoClaw can appear as a preview/manual row when ctx can discover its
-local project paths; AstrBot appears as supported when a bounded `data_v4.db`
-source exists. Warp is supported from documented local
-`warp.sqlite` paths. A row with
+Zed, Copilot CLI, Factory AI Droid, and Warp Terminal restoration SQLite.
+NanoClaw is supported for explicit project paths; AstrBot appears as supported
+when a bounded `data_v4.db` source exists. Warp is supported from documented
+local `warp.sqlite` paths. A row with
 `exists: false`
 means ctx knows the default path but did not find local history there. A JSON
 row with `status: "empty"` means the path exists but no provider-specific
@@ -83,11 +82,11 @@ ctx import --provider openhands --path ~/.openhands
 ctx import --provider codebuddy --path ~/.codebuddy
 ```
 
-Preview providers such as NanoClaw are explicit-import only. Use
-`ctx import --provider nanoclaw` when discovery finds the desired source, or add
-`--path` to target a specific source. AstrBot `data_v4.db` sources are imported
-by `ctx import --all` and pre-search refresh when they live in bounded default
-locations, and still support explicit `--path` imports.
+NanoClaw is explicit-import only. Use `ctx import --provider nanoclaw` when
+discovery finds the desired source, or add `--path` to target a specific source.
+AstrBot `data_v4.db` sources are imported by `ctx import --all` and pre-search
+refresh when they live in bounded default locations, and still support explicit
+`--path` imports.
 
 After upgrading from an older ctx version, the first refresh or import can
 re-read previously indexed provider transcripts once so the local index includes
