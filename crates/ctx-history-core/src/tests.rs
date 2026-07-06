@@ -198,8 +198,7 @@ fn generated_ids_are_uuid_v7_and_paths_are_centralized() {
 
 #[test]
 fn local_layout_paths_are_flat_under_data_root() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().to_path_buf();
+    let root = std::env::temp_dir();
     assert_eq!(history_dir(root.clone()), root);
     assert_eq!(
         database_path(root.clone()),
@@ -226,9 +225,10 @@ fn local_layout_paths_are_flat_under_data_root() {
         root.join("config.toml")
     );
     assert_eq!(logs_dir(root.clone()), root.join("logs"));
+    let device_expected = root.join("device.json");
     assert_eq!(
         device_path(root),
-        root.join("device.json")
+        device_expected
     );
 }
 
@@ -243,8 +243,7 @@ fn ctx_data_root_env_is_the_ctx_root_itself() {
     let default_root = default_data_root().unwrap();
     assert!(default_root.ends_with(".ctx"));
 
-    let temp = tempfile::tempdir().unwrap();
-    let custom_root = temp.path().join("custom-ctx-root");
+    let custom_root = std::env::temp_dir().join("custom-ctx-root");
     env::set_var("CTX_DATA_ROOT", &custom_root);
 
     assert_eq!(
