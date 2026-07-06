@@ -206,7 +206,7 @@ fn check_upgrade(
     channel_override: Option<&str>,
     command: &'static str,
 ) -> Result<UpgradeOutcome> {
-    let plan = build_upgrade_plan(config, channel_override, false)?;
+    let mut plan = build_upgrade_plan(config, channel_override, false)?;
     write_state_checked(data_root, &plan, "checked")?;
     let status = if plan.update_available {
         "available"
@@ -221,7 +221,7 @@ fn check_upgrade(
     } else {
         format!("ctx {} is up to date.", plan.current_version)
     };
-    let warnings = plan.warnings.clone();
+    let warnings = std::mem::take(&mut plan.warnings);
     Ok(UpgradeOutcome {
         command,
         status,
@@ -257,10 +257,10 @@ fn apply_upgrade(
         }
         Err(error) => return Err(error),
     };
-    let plan = build_upgrade_plan(config, channel_override, true)?;
+    let mut plan = build_upgrade_plan(config, channel_override, true)?;
     if !plan.update_available {
         write_state_checked(data_root, &plan, "up_to_date")?;
-        let warnings = plan.warnings.clone();
+        let warnings = std::mem::take(&mut plan.warnings);
         return Ok(UpgradeOutcome {
             command: "upgrade",
             status: "up_to_date",
@@ -285,7 +285,7 @@ fn apply_upgrade(
     }
     if dry_run {
         write_state_checked(data_root, &plan, "dry_run")?;
-        let warnings = plan.warnings.clone();
+        let warnings = std::mem::take(&mut plan.warnings);
         return Ok(UpgradeOutcome {
             command: "upgrade",
             status: "dry_run",
@@ -303,7 +303,7 @@ fn apply_upgrade(
         .with_context(|| format!("download {}", plan.artifact_url))?;
     verify_artifact_sha(&bytes, &plan.artifact_sha256)?;
     let apply_result = apply_artifact(&plan, &bytes)?;
-    let warnings = plan.warnings.clone();
+    let warnings = std::mem::take(&mut plan.warnings);
     if apply_result == ApplyResult::Scheduled {
         write_state_checked(data_root, &plan, "scheduled")?;
         return Ok(UpgradeOutcome {
