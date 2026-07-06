@@ -54,6 +54,12 @@ REQUIRED_FIDELITY_FIELDS = {
 PROVIDER_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_]*$")
 PRIVATE_TEXT_MARKERS = ("/home/", "ctx-" + "private", "ctx-multi" + "-repo-workspace")
 SUPPORT_DOC_PATH = REPO_ROOT / "docs/provider-support.md"
+PUBLIC_CLI_TEST_PATHS = {
+    "crates/ctx-cli/tests/native_providers.rs",
+    "crates/ctx-cli/tests/search_refresh.rs",
+    "crates/ctx-cli/tests/search_show_locate_sql.rs",
+    "crates/ctx-cli/tests/setup_sources_import.rs",
+}
 
 
 class MatrixError(Exception):
@@ -228,8 +234,9 @@ def validate_provider(provider: Any, index: int, seen_ids: set[str]) -> None:
 
     if status == "local_import" and not fixture_paths:
         fail(f"providers[{provider_id}] is local_import but has no fixture_paths")
-    if status.startswith("local_import") and "crates/ctx-cli/tests/cli.rs" not in tests:
-        fail(f"providers[{provider_id}] needs public CLI coverage in crates/ctx-cli/tests/cli.rs")
+    if status.startswith("local_import") and not PUBLIC_CLI_TEST_PATHS.intersection(tests):
+        paths = ", ".join(sorted(PUBLIC_CLI_TEST_PATHS))
+        fail(f"providers[{provider_id}] needs public CLI coverage in one of: {paths}")
     if status.startswith("local_import") and not provider_specific_test:
         fail(f"providers[{provider_id}] has no provider-specific public test references")
 

@@ -280,7 +280,7 @@ pub fn run_history_source_plugin(
 }
 
 #[cfg(unix)]
-fn collect_child_output_with_timeout(
+pub(crate) fn collect_child_output_with_timeout(
     child: &mut Child,
     mut stdout: ChildStdout,
     mut stderr: ChildStderr,
@@ -348,7 +348,7 @@ fn collect_child_output_with_timeout(
 }
 
 #[cfg(not(unix))]
-fn collect_child_output_with_timeout(
+pub(crate) fn collect_child_output_with_timeout(
     child: &mut Child,
     stdout: ChildStdout,
     stderr: ChildStderr,
@@ -443,7 +443,7 @@ fn collect_child_output_with_timeout(
 }
 
 #[cfg(unix)]
-fn set_nonblocking(fd: std::os::fd::RawFd) -> Result<()> {
+pub(crate) fn set_nonblocking(fd: std::os::fd::RawFd) -> Result<()> {
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     if flags < 0 {
         return Err(std::io::Error::last_os_error()).context("read plugin pipe flags");
@@ -456,7 +456,7 @@ fn set_nonblocking(fd: std::os::fd::RawFd) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn read_available_with_limit<R: Read>(
+pub(crate) fn read_available_with_limit<R: Read>(
     reader: &mut R,
     bytes: &mut Vec<u8>,
     open: &mut bool,
@@ -490,7 +490,7 @@ fn read_available_with_limit<R: Read>(
 }
 
 #[cfg(any(test, not(unix)))]
-fn read_pipe_with_limit<R: Read>(
+pub(crate) fn read_pipe_with_limit<R: Read>(
     mut reader: R,
     max_bytes: usize,
     name: &str,
@@ -512,7 +512,7 @@ fn read_pipe_with_limit<R: Read>(
     }
 }
 
-fn inherit_safe_plugin_env(command: &mut Command) {
+pub(crate) fn inherit_safe_plugin_env(command: &mut Command) {
     for key in SAFE_PLUGIN_ENV {
         if let Some(value) = env::var_os(key) {
             command.env(key, value);
@@ -520,7 +520,7 @@ fn inherit_safe_plugin_env(command: &mut Command) {
     }
 }
 
-fn write_private_temp_file(prefix: &str, contents: &str) -> Result<PathBuf> {
+pub(crate) fn write_private_temp_file(prefix: &str, contents: &str) -> Result<PathBuf> {
     for _ in 0..16 {
         let path = env::temp_dir().join(format!("{prefix}-{}.cursor", Uuid::new_v4()));
         let mut options = OpenOptions::new();
@@ -542,13 +542,13 @@ fn write_private_temp_file(prefix: &str, contents: &str) -> Result<PathBuf> {
     Err(anyhow!("failed to allocate unique private temp file"))
 }
 
-fn cleanup_cursor_file(path: Option<&PathBuf>) {
+pub(crate) fn cleanup_cursor_file(path: Option<&PathBuf>) {
     if let Some(path) = path {
         let _ = fs::remove_file(path);
     }
 }
 
-fn read_plugin_manifest(path: &Path) -> Result<Vec<HistorySourcePluginSource>> {
+pub(crate) fn read_plugin_manifest(path: &Path) -> Result<Vec<HistorySourcePluginSource>> {
     let raw = read_plugin_manifest_text(path)?;
     let manifest: HistorySourcePluginManifest = serde_json::from_str(&raw)
         .with_context(|| format!("parse history source plugin manifest {}", path.display()))?;
@@ -612,7 +612,7 @@ fn read_plugin_manifest(path: &Path) -> Result<Vec<HistorySourcePluginSource>> {
     Ok(sources)
 }
 
-fn read_plugin_manifest_text(path: &Path) -> Result<String> {
+pub(crate) fn read_plugin_manifest_text(path: &Path) -> Result<String> {
     let file = fs::File::open(path)
         .with_context(|| format!("read history source plugin manifest {}", path.display()))?;
     let mut bytes = Vec::new();
@@ -633,7 +633,7 @@ fn read_plugin_manifest_text(path: &Path) -> Result<String> {
     })
 }
 
-fn plugin_manifest_paths(data_root: &Path) -> Vec<PathBuf> {
+pub(crate) fn plugin_manifest_paths(data_root: &Path) -> Vec<PathBuf> {
     let mut candidates = BTreeSet::new();
     collect_manifest_path_candidates(&data_root.join("plugins"), &mut candidates);
     if let Some(paths) = env::var_os("CTX_HISTORY_PLUGIN_PATH") {
@@ -644,7 +644,7 @@ fn plugin_manifest_paths(data_root: &Path) -> Vec<PathBuf> {
     candidates.into_iter().collect()
 }
 
-fn explicit_plugin_manifest_paths(extra_manifests: &[PathBuf]) -> Result<Vec<PathBuf>> {
+pub(crate) fn explicit_plugin_manifest_paths(extra_manifests: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let mut candidates = BTreeSet::new();
     for path in extra_manifests {
         if !path
@@ -666,7 +666,7 @@ fn explicit_plugin_manifest_paths(extra_manifests: &[PathBuf]) -> Result<Vec<Pat
     Ok(candidates.into_iter().collect())
 }
 
-fn collect_manifest_path_candidates(path: &Path, candidates: &mut BTreeSet<PathBuf>) {
+pub(crate) fn collect_manifest_path_candidates(path: &Path, candidates: &mut BTreeSet<PathBuf>) {
     if path.is_file() {
         candidates.insert(path.to_path_buf());
         return;
@@ -701,7 +701,7 @@ fn collect_manifest_path_candidates(path: &Path, candidates: &mut BTreeSet<PathB
     }
 }
 
-fn validate_source_format(value: &str) -> Result<()> {
+pub(crate) fn validate_source_format(value: &str) -> Result<()> {
     let valid =
         !value.trim().is_empty() && value.len() <= 512 && !value.chars().any(char::is_control);
     if valid {
@@ -713,7 +713,7 @@ fn validate_source_format(value: &str) -> Result<()> {
     }
 }
 
-fn validate_plugin_id(label: &str, value: &str) -> Result<()> {
+pub(crate) fn validate_plugin_id(label: &str, value: &str) -> Result<()> {
     let valid = !value.is_empty()
         && value.len() <= 128
         && value.bytes().all(|byte| {
@@ -732,7 +732,7 @@ fn validate_plugin_id(label: &str, value: &str) -> Result<()> {
     }
 }
 
-fn resolve_manifest_path(manifest_dir: &Path, path: &Path) -> PathBuf {
+pub(crate) fn resolve_manifest_path(manifest_dir: &Path, path: &Path) -> PathBuf {
     if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -740,11 +740,11 @@ fn resolve_manifest_path(manifest_dir: &Path, path: &Path) -> PathBuf {
     }
 }
 
-fn shell_like_command(command: &[String]) -> String {
+pub(crate) fn shell_like_command(command: &[String]) -> String {
     command.join(" ")
 }
 
-fn stderr_snippet(value: &str) -> String {
+pub(crate) fn stderr_snippet(value: &str) -> String {
     let mut snippet = value
         .lines()
         .map(str::trim)

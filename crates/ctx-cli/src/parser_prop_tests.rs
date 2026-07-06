@@ -1,7 +1,8 @@
-use super::{
-    normalize_uuid_prefix, parse_event_window_limit, parse_search_limit, parse_since_filter,
-    parse_sql_timeout, MAX_EVENT_WINDOW, MAX_SEARCH_LIMIT,
-};
+use super::{parse_event_window_limit, parse_search_limit, MAX_EVENT_WINDOW, MAX_SEARCH_LIMIT};
+use crate::commands::sql::parse_sql_timeout;
+use crate::search_filters::parse_since_filter;
+use crate::transcript::normalize_uuid_prefix;
+use ctx_history_core::utc_now;
 use proptest::prelude::*;
 use std::panic;
 
@@ -38,7 +39,7 @@ proptest! {
     #[test]
     fn parse_since_filter_rejects_unrepresentable_day_windows(days in any::<i64>()) {
         if chrono::Duration::try_days(days)
-            .and_then(|duration| crate::utc_now().checked_sub_signed(duration))
+            .and_then(|duration| utc_now().checked_sub_signed(duration))
             .is_none()
         {
             let input = format!("{days}d");

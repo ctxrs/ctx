@@ -86,12 +86,12 @@ case "${mode}" in
     run_cargo_test --workspace
     ;;
   cli_contract_tests)
-    run_cargo_test -p ctx --test cli help_exposes_session_retrieval_commands
-    run_cargo_test -p ctx --test cli public_subcommand_help_is_golden_enough_for_session_retrieval
-    run_cargo_test -p ctx --test cli provider_help_matches_implemented_importers
-    run_cargo_test -p ctx --test cli docs_commands_expose_embedded_docs_and_man_pages
-    run_cargo_test -p ctx --test cli upgrade_status_check_and_apply_support_managed_installs
-    run_cargo_test -p ctx --test cli json_commands_do_not_spawn_background_upgrade
+    run_cargo_test -p ctx --test cli_public_help_docs help_exposes_session_retrieval_commands
+    run_cargo_test -p ctx --test cli_public_help_docs public_subcommand_help_is_golden_enough_for_session_retrieval
+    run_cargo_test -p ctx --test cli_public_help_docs provider_help_and_errors_do_not_dump_full_provider_list
+    run_cargo_test -p ctx --test cli_public_help_docs docs_commands_expose_embedded_docs_and_man_pages
+    run_cargo_test -p ctx --test upgrade upgrade_status_check_and_apply_support_managed_installs
+    run_cargo_test -p ctx --test upgrade json_commands_do_not_spawn_background_upgrade
     ;;
   docs_check)
     run bash scripts/check-docs.sh
@@ -101,6 +101,9 @@ case "${mode}" in
     ;;
   buildkite_pipeline_check)
     run bash scripts/check-buildkite-pipeline.sh
+    ;;
+  loc_check)
+    run bash scripts/check-loc.sh
     ;;
   source_diff_check)
     run_source_diff_check
@@ -118,17 +121,17 @@ case "${mode}" in
     run bash scripts/audit-search-mvp-package.sh
     ;;
   fresh_home_e2e)
-    run_cargo_test -p ctx --test cli fresh_home_search_mvp_flow
+    run_cargo_test -p ctx --test search_show_locate_sql fresh_home_search_mvp_flow
     ;;
   provider_fixture_e2e)
-    run_cargo_test -p ctx --test cli codex_cli_provider_oracle_covers_retrieval_and_claimed_fidelity
-    run_cargo_test -p ctx --test cli pi_cli_import_search_flow
-    run_cargo_test -p ctx --test cli native_provider_cli_flow_imports_new_supported_provider_paths
-    run_cargo_test -p ctx --test cli native_provider_cli_requires_existing_history_or_explicit_path
-    run_cargo_test -p ctx --test cli antigravity_cli_imports_native_transcript_tree
+    run_cargo_test -p ctx --test search_show_locate_sql codex_cli_provider_oracle_covers_retrieval_and_claimed_fidelity
+    run_cargo_test -p ctx --test search_show_locate_sql pi_cli_import_search_flow
+    run_cargo_test -p ctx --test native_providers native_provider_cli_flow_imports_supported_provider_paths
+    run_cargo_test -p ctx --test native_providers native_provider_cli_requires_existing_history_or_explicit_path
+    run_cargo_test -p ctx --test native_providers antigravity_cli_imports_native_transcript_tree
     ;;
   local_transcript_oracle)
-    run_cargo_test -p ctx --test cli local_transcript_oracle_preserves_cli_json_and_sqlite
+    run_cargo_test -p ctx --test search_show_locate_sql local_transcript_oracle_preserves_cli_json_and_sqlite
     ;;
   search_determinism_tests)
     run_cargo_test -p ctx-history-search search_packet_is_deterministic_for_large_history_and_equal_ties_use_record_id

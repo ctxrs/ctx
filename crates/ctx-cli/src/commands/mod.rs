@@ -1,0 +1,9 @@
+pub(crate) mod doctor;
+pub(crate) mod import;
+pub(crate) mod locate;
+pub(crate) mod search;
+pub(crate) mod setup;
+pub(crate) mod show;
+pub(crate) mod sources;
+pub(crate) mod sql;
+pub(crate) mod status;

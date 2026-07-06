@@ -29,7 +29,7 @@ pub fn send_cli_event(data_root: &Path, config: &AppConfig, event: AnalyticsEven
     }
 }
 
-fn send_cli_event_inner(
+pub(crate) fn send_cli_event_inner(
     data_root: &Path,
     config: &AppConfig,
     event: AnalyticsEvent<'_>,
@@ -166,7 +166,7 @@ pub fn text_length_bucket(chars: usize) -> &'static str {
     }
 }
 
-fn duration_bucket(duration: Duration) -> &'static str {
+pub(crate) fn duration_bucket(duration: Duration) -> &'static str {
     let ms = duration.as_millis();
     match ms {
         0..=99 => "lt_100ms",

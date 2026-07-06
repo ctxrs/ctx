@@ -19,7 +19,7 @@ pub fn current_exe_install_marker() -> Option<InstallMarker> {
     read_install_marker(&install_marker_path(&exe))
 }
 
-fn read_install_marker(path: &Path) -> Option<InstallMarker> {
+pub(crate) fn read_install_marker(path: &Path) -> Option<InstallMarker> {
     let metadata = fs::metadata(path).ok()?;
     if !metadata.is_file() || metadata.len() > MAX_MARKER_BYTES {
         return None;
@@ -33,7 +33,7 @@ fn read_install_marker(path: &Path) -> Option<InstallMarker> {
     parse_install_marker(&bytes)
 }
 
-fn parse_install_marker(bytes: &[u8]) -> Option<InstallMarker> {
+pub(crate) fn parse_install_marker(bytes: &[u8]) -> Option<InstallMarker> {
     let value: Value = serde_json::from_slice(bytes).ok()?;
     let id = value.get("install_attempt_id")?.as_str()?.trim();
     if is_valid_install_attempt_id(id) {
@@ -45,7 +45,7 @@ fn parse_install_marker(bytes: &[u8]) -> Option<InstallMarker> {
     }
 }
 
-fn is_valid_install_attempt_id(value: &str) -> bool {
+pub(crate) fn is_valid_install_attempt_id(value: &str) -> bool {
     !value.is_empty()
         && value.chars().count() <= MAX_INSTALL_ATTEMPT_ID_CHARS
         && value
@@ -53,7 +53,7 @@ fn is_valid_install_attempt_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
-fn install_marker_path(exe: &Path) -> PathBuf {
+pub(crate) fn install_marker_path(exe: &Path) -> PathBuf {
     let mut marker = exe.as_os_str().to_owned();
     marker.push(".install.json");
     PathBuf::from(marker)

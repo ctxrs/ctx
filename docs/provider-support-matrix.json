@@ -59,7 +59,8 @@
       ],
       "public_docs": "docs/providers.md",
       "tests": [
-        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-cli/tests/native_providers.rs",
+        "crates/ctx-cli/tests/search_show_locate_sql.rs",
         "crates/ctx-history-capture/src/lib.rs",
         "tests/fixtures/provider/codex.jsonl",
         "tests/fixtures/provider-history/codex-sessions",
@@ -118,7 +119,8 @@
       ],
       "public_docs": "docs/providers.md",
       "tests": [
-        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-cli/tests/native_providers.rs",
+        "crates/ctx-cli/tests/search_show_locate_sql.rs",
         "crates/ctx-history-capture/src/lib.rs",
         "tests/fixtures/provider/pi.jsonl",
         "tests/fixtures/provider-history/pi-session.jsonl",
@@ -170,7 +172,7 @@
       "public_docs": "docs/provider-support.md",
       "fixture_paths": [],
       "tests": [
-        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-cli/tests/native_providers.rs",
         "crates/ctx-history-capture/src/lib.rs"
       ]
     },
@@ -214,7 +216,7 @@
       "public_docs": "docs/provider-support.md",
       "fixture_paths": [],
       "tests": [
-        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-cli/tests/native_providers.rs",
         "crates/ctx-history-capture/src/lib.rs"
       ]
     },
@@ -275,9 +277,9 @@
         "tests/fixtures/provider-history/kilo/kilo.db"
       ],
       "tests": [
-        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-cli/tests/native_providers.rs",
         "crates/ctx-history-capture/src/lib.rs",
-        "crates/ctx-history-capture/src/provider_sources.rs"
+        "crates/ctx-history-capture/src/provider_sources/specs.rs"
       ]
     },
     {
@@ -336,9 +338,9 @@
         "tests/fixtures/provider-history/kiro-cli/v2/data.sqlite3"
       ],
       "tests": [
-        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-cli/tests/native_providers.rs",
         "crates/ctx-history-capture/src/lib.rs",
-        "crates/ctx-history-capture/src/provider_sources.rs"
+        "crates/ctx-history-capture/src/provider_sources/specs.rs"
       ]
     },
     {
@@ -398,9 +400,9 @@
         "tests/fixtures/provider-history/crush/v1/crush.db"
       ],
       "tests": [
-        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-cli/tests/native_providers.rs",
         "crates/ctx-history-capture/src/lib.rs",
-        "crates/ctx-history-capture/src/provider_sources.rs"
+        "crates/ctx-history-capture/src/provider_sources/specs.rs"
       ]
     },
     {
@@ -458,9 +460,9 @@
         "tests/fixtures/provider-history/goose/v14/sessions.db"
       ],
       "tests": [
-        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-cli/tests/native_providers.rs",
         "crates/ctx-history-capture/src/lib.rs",
-        "crates/ctx-history-capture/src/provider_sources.rs"
+        "crates/ctx-history-capture/src/provider_sources/specs.rs"
       ]
     },
     {
@@ -518,9 +520,9 @@
         "tests/fixtures/provider-history/lingma"
       ],
       "tests": [
-        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-cli/tests/native_providers.rs",
         "crates/ctx-history-capture/src/lib.rs",
-        "crates/ctx-history-capture/src/provider_sources.rs"
+        "crates/ctx-history-capture/src/provider_sources/specs.rs"
       ],
       "metadata": {
         "aliases": [
@@ -583,9 +585,9 @@
         "tests/fixtures/provider-history/qoder/projects"
       ],
       "tests": [
-        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-cli/tests/native_providers.rs",
         "crates/ctx-history-capture/src/lib.rs",
-        "crates/ctx-history-capture/src/provider_sources.rs"
+        "crates/ctx-history-capture/src/provider_sources/specs.rs"
       ],
       "metadata": {
         "canonical_provider_id": "qoder",
@@ -657,9 +659,9 @@
       ],
       "tests": [
         "crates/ctx-history-capture/src/lib.rs",
-        "crates/ctx-history-capture/src/provider_sources.rs",
+        "crates/ctx-history-capture/src/provider_sources/specs.rs",
         "crates/ctx-cli/src/main.rs",
-        "crates/ctx-cli/tests/cli.rs"
+        "crates/ctx-cli/tests/native_providers.rs"
       ]
     },
     {
@@ -720,9 +722,9 @@
         "tests/fixtures/provider-history/codebuddy"
       ],
       "tests": [
-        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-cli/tests/native_providers.rs",
         "crates/ctx-history-capture/src/lib.rs",
-        "crates/ctx-history-capture/src/provider_sources.rs"
+        "crates/ctx-history-capture/src/provider_sources/specs.rs"
       ]
     },
     {
@@ -795,7 +797,7 @@
         "tests/fixtures/provider-history/trae/README.md"
       ],
       "tests": [
-        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-cli/tests/native_providers.rs",
         "crates/ctx-history-capture/src/lib.rs",
         "tests/fixtures/provider-history/trae"
       ],
@@ -862,7 +864,7 @@
       "public_docs": "docs/providers.md",
       "fixture_paths": [],
       "tests": [
-        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-cli/tests/native_providers.rs",
         "crates/ctx-history-capture/src/lib.rs"
       ]
     },
@@ -914,7 +916,7 @@
       "public_docs": "docs/providers.md",
       "fixture_paths": [],
       "tests": [
-        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-cli/tests/native_providers.rs",
         "crates/ctx-history-capture/src/lib.rs"
       ]
     },
@@ -969,7 +971,7 @@
       "public_docs": "docs/providers.md",
       "fixture_paths": [],
       "tests": [
-        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-cli/tests/native_providers.rs",
         "crates/ctx-history-capture/src/lib.rs"
       ]
     },
@@ -1027,7 +1029,7 @@
         "tests/fixtures/provider-history/astrbot/v1/data/data_v4.db"
       ],
       "tests": [
-        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-cli/tests/native_providers.rs",
         "crates/ctx-history-capture/src/lib.rs",
         "tests/fixtures/provider-history/astrbot/v1/data/data_v4.db"
       ]
@@ -1084,7 +1086,7 @@
       "public_docs": "docs/providers.md",
       "fixture_paths": [],
       "tests": [
-        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-cli/tests/native_providers.rs",
         "crates/ctx-history-capture/src/lib.rs"
       ]
     },
@@ -1140,8 +1142,8 @@
       "public_docs": "docs/providers.md",
       "fixture_paths": [],
       "tests": [
-        "crates/ctx-cli/tests/cli.rs",
-        "crates/ctx-history-capture/src/provider_sources.rs"
+        "crates/ctx-cli/tests/native_providers.rs",
+        "crates/ctx-history-capture/src/provider_sources/specs.rs"
       ]
     },
     {
@@ -1195,8 +1197,8 @@
       "public_docs": "docs/provider-support.md",
       "fixture_paths": [],
       "tests": [
-        "crates/ctx-cli/tests/cli.rs",
-        "crates/ctx-history-capture/src/provider_sources.rs"
+        "crates/ctx-cli/tests/native_providers.rs",
+        "crates/ctx-history-capture/src/provider_sources/specs.rs"
       ]
     },
     {
@@ -1252,7 +1254,7 @@
         "tests/fixtures/provider-history/antigravity/v1"
       ],
       "tests": [
-        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-cli/tests/native_providers.rs",
         "crates/ctx-history-capture/src/lib.rs"
       ]
     },
@@ -1297,7 +1299,7 @@
       "public_docs": "docs/provider-support.md",
       "fixture_paths": [],
       "tests": [
-        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-cli/tests/native_providers.rs",
         "crates/ctx-history-capture/src/lib.rs"
       ]
     },
@@ -1352,7 +1354,7 @@
         "tests/fixtures/provider-history/tabnine-cli"
       ],
       "tests": [
-        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-cli/tests/native_providers.rs",
         "crates/ctx-history-capture/src/lib.rs"
       ]
     },
@@ -1402,7 +1404,7 @@
       ],
       "tests": [
         "crates/ctx-history-capture/tests/cursor_native.rs",
-        "crates/ctx-cli/tests/cli.rs"
+        "crates/ctx-cli/tests/native_providers.rs"
       ]
     },
     {
@@ -1421,7 +1423,7 @@
             "ctx import --provider windsurf",
             "ctx search --provider windsurf",
             "cargo test -p ctx-history-capture native_windsurf",
-            "cargo test -p ctx --test cli windsurf_default_discovery_is_native_and_search_refresh_imports"
+            "cargo test -p ctx --test native_providers windsurf_default_discovery_is_native_and_search_refresh_imports"
           ],
           "notes": [
             "Native importer for official Cascade hook transcript JSONL files under ~/.windsurf/transcripts; search refresh and ctx import --all include this source when transcript JSONL files are present.",
@@ -1462,9 +1464,9 @@
         "tests/fixtures/provider-history/windsurf"
       ],
       "tests": [
-        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-cli/tests/native_providers.rs",
         "crates/ctx-history-capture/src/lib.rs",
-        "crates/ctx-history-capture/src/provider_sources.rs"
+        "crates/ctx-history-capture/src/provider_sources/specs.rs"
       ]
     },
     {
@@ -1518,9 +1520,9 @@
         "tests/fixtures/provider-history/zed/v1/threads.db"
       ],
       "tests": [
-        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-cli/tests/native_providers.rs",
         "crates/ctx-history-capture/src/lib.rs",
-        "crates/ctx-history-capture/src/provider_sources.rs"
+        "crates/ctx-history-capture/src/provider_sources/specs.rs"
       ]
     },
     {
@@ -1564,7 +1566,7 @@
       "public_docs": "docs/provider-support.md",
       "fixture_paths": [],
       "tests": [
-        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-cli/tests/native_providers.rs",
         "crates/ctx-history-capture/src/lib.rs"
       ]
     },
@@ -1608,7 +1610,7 @@
       "public_docs": "docs/provider-support.md",
       "fixture_paths": [],
       "tests": [
-        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-cli/tests/native_providers.rs",
         "crates/ctx-history-capture/src/lib.rs"
       ]
     },
@@ -1660,9 +1662,9 @@
         "tests/fixtures/provider-history/qwen-code"
       ],
       "tests": [
-        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-cli/tests/native_providers.rs",
         "crates/ctx-history-capture/src/lib.rs",
-        "crates/ctx-history-capture/src/provider_sources.rs"
+        "crates/ctx-history-capture/src/provider_sources/specs.rs"
       ]
     },
     {
@@ -1714,9 +1716,9 @@
         "tests/fixtures/provider-history/kimi-code-cli"
       ],
       "tests": [
-        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-cli/tests/native_providers.rs",
         "crates/ctx-history-capture/src/lib.rs",
-        "crates/ctx-history-capture/src/provider_sources.rs"
+        "crates/ctx-history-capture/src/provider_sources/specs.rs"
       ]
     },
     {
@@ -1775,9 +1777,9 @@
         "tests/fixtures/provider-history/auggie/v0.32.0/sessions"
       ],
       "tests": [
-        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-cli/tests/native_providers.rs",
         "crates/ctx-history-capture/src/lib.rs",
-        "crates/ctx-history-capture/src/provider_sources.rs",
+        "crates/ctx-history-capture/src/provider_sources/specs.rs",
         "tests/fixtures/provider-history/auggie/v0.32.0/sessions"
       ]
     },
@@ -1840,9 +1842,9 @@
         "tests/fixtures/provider-history/junie/sessions"
       ],
       "tests": [
-        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-cli/tests/native_providers.rs",
         "crates/ctx-history-capture/src/lib.rs",
-        "crates/ctx-history-capture/src/provider_sources.rs",
+        "crates/ctx-history-capture/src/provider_sources/specs.rs",
         "tests/fixtures/provider-history/junie/sessions"
       ],
       "metadata": {
@@ -1906,9 +1908,9 @@
         "tests/fixtures/provider-history/firebender/v1/.idea/firebender/chat_history.db"
       ],
       "tests": [
-        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-cli/tests/native_providers.rs",
         "crates/ctx-history-capture/src/lib.rs",
-        "crates/ctx-history-capture/src/provider_sources.rs",
+        "crates/ctx-history-capture/src/provider_sources/specs.rs",
         "tests/fixtures/provider-history/firebender/v1/.idea/firebender/chat_history.db"
       ],
       "metadata": {
@@ -1972,9 +1974,9 @@
         "tests/fixtures/provider-history/forgecode/v1/forge.db"
       ],
       "tests": [
-        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-cli/tests/native_providers.rs",
         "crates/ctx-history-capture/src/lib.rs",
-        "crates/ctx-history-capture/src/provider_sources.rs",
+        "crates/ctx-history-capture/src/provider_sources/specs.rs",
         "tests/fixtures/provider-history/forgecode/v1/forge.db"
       ]
     },
@@ -2028,9 +2030,9 @@
         "tests/fixtures/provider-history/deepagents/v1/sessions.db"
       ],
       "tests": [
-        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-cli/tests/native_providers.rs",
         "crates/ctx-history-capture/src/lib.rs",
-        "crates/ctx-history-capture/src/provider_sources.rs",
+        "crates/ctx-history-capture/src/provider_sources/specs.rs",
         "crates/ctx-history-store/src/lib.rs",
         "tests/fixtures/provider-history/deepagents/v1/sessions.db"
       ]
@@ -2086,9 +2088,9 @@
         "tests/fixtures/provider-history/mistral-vibe/v1/logs/session"
       ],
       "tests": [
-        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-cli/tests/native_providers.rs",
         "crates/ctx-history-capture/src/lib.rs",
-        "crates/ctx-history-capture/src/provider_sources.rs",
+        "crates/ctx-history-capture/src/provider_sources/specs.rs",
         "tests/fixtures/provider-history/mistral-vibe/v1/logs/session"
       ]
     },
@@ -2147,9 +2149,9 @@
         "tests/fixtures/provider-history/mux/malformed/sessions"
       ],
       "tests": [
-        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-cli/tests/native_providers.rs",
         "crates/ctx-history-capture/src/lib.rs",
-        "crates/ctx-history-capture/src/provider_sources.rs",
+        "crates/ctx-history-capture/src/provider_sources/specs.rs",
         "tests/fixtures/provider-history/mux/v0.27.0",
         "tests/fixtures/provider-history/mux/malformed"
       ]
@@ -2204,9 +2206,9 @@
         "tests/fixtures/provider-history/rovodev/v1/sessions"
       ],
       "tests": [
-        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-cli/tests/native_providers.rs",
         "crates/ctx-history-capture/src/lib.rs",
-        "crates/ctx-history-capture/src/provider_sources.rs",
+        "crates/ctx-history-capture/src/provider_sources/specs.rs",
         "tests/fixtures/provider-history/rovodev/v1/sessions"
       ]
     },
@@ -2265,9 +2267,9 @@
         "tests/fixtures/provider-history/cline/data"
       ],
       "tests": [
-        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-cli/tests/native_providers.rs",
         "crates/ctx-history-capture/src/lib.rs",
-        "crates/ctx-history-capture/src/provider_sources.rs"
+        "crates/ctx-history-capture/src/provider_sources/specs.rs"
       ]
     },
     {
@@ -2324,9 +2326,9 @@
         "tests/fixtures/provider-history/roo/storage"
       ],
       "tests": [
-        "crates/ctx-cli/tests/cli.rs",
+        "crates/ctx-cli/tests/native_providers.rs",
         "crates/ctx-history-capture/src/lib.rs",
-        "crates/ctx-history-capture/src/provider_sources.rs"
+        "crates/ctx-history-capture/src/provider_sources/specs.rs"
       ]
     }
   ]

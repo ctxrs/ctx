@@ -78,6 +78,13 @@ sh_test(
 )
 
 sh_test(
+    name = "loc_check",
+    srcs = ["scripts/bazel-test.sh"],
+    args = ["loc_check"],
+    data = CTX_GATE_DATA,
+)
+
+sh_test(
     name = "source_diff_check",
     srcs = ["scripts/bazel-test.sh"],
     args = ["source_diff_check"],
@@ -149,6 +156,7 @@ test_suite(
         ":docs_check",
         ":installer_path_smoke",
         ":buildkite_pipeline_check",
+        ":loc_check",
         ":source_diff_check",
         ":package_audit_fast",
         ":sdk_contract_checks",

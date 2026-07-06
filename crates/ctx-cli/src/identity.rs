@@ -73,7 +73,7 @@ pub fn device_path(data_root: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn ensure_device_path_outside_data_root(path: &Path, data_root: &Path) -> Result<()> {
+pub(crate) fn ensure_device_path_outside_data_root(path: &Path, data_root: &Path) -> Result<()> {
     let normalized_path = normalize_for_prefix_check(path);
     let normalized_data_root = normalize_for_prefix_check(data_root);
     if normalized_path.starts_with(&normalized_data_root) {
@@ -85,7 +85,7 @@ fn ensure_device_path_outside_data_root(path: &Path, data_root: &Path) -> Result
     Ok(())
 }
 
-fn normalize_for_prefix_check(path: &Path) -> PathBuf {
+pub(crate) fn normalize_for_prefix_check(path: &Path) -> PathBuf {
     if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -96,7 +96,7 @@ fn normalize_for_prefix_check(path: &Path) -> PathBuf {
 }
 
 #[cfg(target_os = "windows")]
-fn device_state_dir() -> Result<PathBuf> {
+pub(crate) fn device_state_dir() -> Result<PathBuf> {
     if let Some(local_app_data) = non_empty_env_path("LOCALAPPDATA") {
         return Ok(local_app_data.join("ctx"));
     }
@@ -108,7 +108,7 @@ fn device_state_dir() -> Result<PathBuf> {
 }
 
 #[cfg(target_os = "macos")]
-fn device_state_dir() -> Result<PathBuf> {
+pub(crate) fn device_state_dir() -> Result<PathBuf> {
     Ok(home_dir()
         .context("resolve home directory")?
         .join("Library")
@@ -117,7 +117,7 @@ fn device_state_dir() -> Result<PathBuf> {
 }
 
 #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-fn device_state_dir() -> Result<PathBuf> {
+pub(crate) fn device_state_dir() -> Result<PathBuf> {
     if let Some(xdg_state_home) = non_empty_env_path("XDG_STATE_HOME") {
         return Ok(xdg_state_home.join("ctx"));
     }
@@ -128,7 +128,7 @@ fn device_state_dir() -> Result<PathBuf> {
         .join("ctx"))
 }
 
-fn non_empty_env_path(key: &str) -> Option<PathBuf> {
+pub(crate) fn non_empty_env_path(key: &str) -> Option<PathBuf> {
     env::var_os(key)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
@@ -151,7 +151,7 @@ pub(crate) fn home_dir() -> Option<PathBuf> {
 }
 
 #[cfg(unix)]
-fn write_private_file(path: &Path, body: &[u8]) -> Result<()> {
+pub(crate) fn write_private_file(path: &Path, body: &[u8]) -> Result<()> {
     use std::{fs::OpenOptions, io::Write, os::unix::fs::OpenOptionsExt};
 
     let mut file = OpenOptions::new()
@@ -165,7 +165,7 @@ fn write_private_file(path: &Path, body: &[u8]) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn write_private_file(path: &Path, body: &[u8]) -> Result<()> {
+pub(crate) fn write_private_file(path: &Path, body: &[u8]) -> Result<()> {
     fs::write(path, body)?;
     Ok(())
 }

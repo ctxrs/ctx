@@ -44,7 +44,11 @@ pub fn get_bytes_limited(endpoint: &str, max_bytes: usize) -> Result<Vec<u8>> {
     )
 }
 
-fn read_limited(mut reader: impl Read, max_bytes: usize, label: &str) -> Result<Vec<u8>> {
+pub(crate) fn read_limited(
+    mut reader: impl Read,
+    max_bytes: usize,
+    label: &str,
+) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     reader
         .by_ref()
@@ -57,7 +61,7 @@ fn read_limited(mut reader: impl Read, max_bytes: usize, label: &str) -> Result<
     Ok(bytes)
 }
 
-fn file_url_path(url: &str) -> Result<Option<PathBuf>> {
+pub(crate) fn file_url_path(url: &str) -> Result<Option<PathBuf>> {
     let Some(path) = url.strip_prefix("file://") else {
         return Ok(None);
     };
@@ -67,7 +71,7 @@ fn file_url_path(url: &str) -> Result<Option<PathBuf>> {
     Ok(Some(PathBuf::from(path)))
 }
 
-fn require_https_or_localhost(url: &str) -> Result<()> {
+pub(crate) fn require_https_or_localhost(url: &str) -> Result<()> {
     if url.starts_with("https://") {
         return Ok(());
     }
@@ -80,7 +84,7 @@ fn require_https_or_localhost(url: &str) -> Result<()> {
     Err(anyhow!("refusing non-HTTPS endpoint: {url}"))
 }
 
-fn is_localhost_authority(authority: &str) -> bool {
+pub(crate) fn is_localhost_authority(authority: &str) -> bool {
     if authority.contains('@') {
         return false;
     }
