@@ -17394,7 +17394,11 @@ fn opencode_session_messages(
 ) -> Result<Vec<OpenCodeMessageRow>> {
     if sqlite_table_exists(conn, "session_message")? {
         let rows = opencode_session_message_rows(conn, dialect)?;
-        if !rows.is_empty() {
+        if !rows.is_empty()
+            && rows
+                .iter()
+                .any(|r| OPCODE_KNOWN_MESSAGE_TYPES.contains(&r.entry_type.as_str()))
+        {
             return Ok(rows);
         }
     }
@@ -17701,6 +17705,8 @@ fn opencode_event(
         }),
     }
 }
+
+const OPCODE_KNOWN_MESSAGE_TYPES: &[&str] = &["assistant", "user", "system", "shell"];
 
 fn opencode_event_type(entry_type: &str, data: &Value) -> EventType {
     match entry_type {
