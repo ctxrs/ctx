@@ -18,32 +18,28 @@ PROVIDER_MATRIX_PATH = REPO_ROOT / "docs" / "provider-support-matrix.json"
 UPSTREAM_PACKAGE = "skills@1.5.14"
 UPSTREAM_COMMIT = "2adcfe5a4cce0ce5f4d5547a997b2a161ec5d127"
 EXPECTED_COUNTS = {
-    "supported": 63,
-    "not-supported": 9,
+    "supported": 43,
+    "not-supported": 29,
 }
 ALLOWED_STATUSES = set(EXPECTED_COUNTS)
 REQUIRED_SCHEMA_FAMILIES = {
-    "opencode sqlite family",
-    "Cline/Roo/Bob task JSON",
     "JSONL CLI event logs",
-    "project task JSON",
-    "filesystem event JSON",
+    "opencode sqlite family",
     "generic sqlite messages",
-    "OpenLoaf chat JSONL",
-    "Forge conversation SQLite",
-    "Junie event-sourced UI stream",
-    "LangGraph checkpoint SQLite",
-    "LiveStore SQLite state DB",
-    "Warp restoration SQLite",
-    "Workflow local-world streams",
-    "per-agent history JSON",
+    "CLI session JSON",
     "VS Code/Electron storage",
-    "webapp/object-store boundary",
 }
 ALLOWED_SCHEMA_FAMILIES = REQUIRED_SCHEMA_FAMILIES | {
-    "CLI session JSON",
+    "Cline/Roo task JSON",
+    "filesystem event JSON",
+    "Forge conversation SQLite",
+    "LangGraph checkpoint SQLite",
+    "Warp restoration SQLite",
+    "Junie event-sourced UI stream",
+    "hosted/export boundary",
     "unknown native history",
-    "agent skills aggregate",
+    "install-only target",
+    "deferred local history",
 }
 PRIVATE_TEXT_MARKERS = ("/home/", "ctx-private", "ctx-multi-repo-workspace")
 TABLE_HEADER = (

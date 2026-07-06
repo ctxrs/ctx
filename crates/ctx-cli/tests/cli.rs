@@ -1155,20 +1155,18 @@ fn sources_default_hides_long_tail_missing_locations() {
     assert_eq!(all_sources["hidden_missing_sources"], 0);
     let all = all_sources["sources"].as_array().unwrap();
     assert!(all.len() > visible.len());
-    assert!(all.iter().any(|source| source["provider"] == "moxby"));
+    assert!(!all.iter().any(|source| source["provider"] == "moxby"));
 }
 
 #[test]
-fn sources_provider_filter_shows_explicit_long_tail_missing_locations() {
+fn sources_provider_filter_rejects_deferred_providers() {
     let temp = tempdir();
 
-    let sources = json_output(ctx(&temp).args(["sources", "--provider", "moxby", "--json"]));
-    assert_eq!(sources["scope"], "all");
-    assert_eq!(sources["hidden_missing_sources"], 0);
-    let rows = sources["sources"].as_array().unwrap();
-    assert!(!rows.is_empty());
-    assert!(rows.iter().all(|source| source["provider"] == "moxby"));
-    assert!(rows.iter().all(|source| source["status"] == "missing"));
+    ctx(&temp)
+        .args(["sources", "--provider", "moxby", "--json"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown provider"));
 }
 
 #[test]
@@ -2699,7 +2697,6 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
             vec![
                 "Usage: ctx import",
                 "--provider <PROVIDER>",
-                "[possible values: codex, pi, claude, opencode, codearts-agent, openloaf, kilo, kiro-cli, crush, goose, antigravity, gemini, tabnine, cursor, windsurf, zed, copilot-cli, factory-ai-droid, qwen-code, kimi-code-cli, autohand-code, iflow-cli, jazz, auggie, eve, junie, firebender, forgecode, deepagents, mistral-vibe, mux, reasonix, adal, kode, neovate, command-code, terramind, rovodev, cortex-code, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, bob, dexto, lingma, qoder, pochi, warp, codebuddy, aider-desk, trae, tinycloud, zencoder, codestudio]",
                 "--path <PATH>",
                 "--format <FORMAT>",
                 "--resume",
@@ -4756,16 +4753,10 @@ fn mcp_status_and_tools_list_are_read_only_without_initialized_store() {
     assert!(providers.iter().any(|provider| provider == "qwen_code"));
     assert!(providers.iter().any(|provider| provider == "kimi-code-cli"));
     assert!(providers.iter().any(|provider| provider == "kimi_code_cli"));
-    assert!(providers.iter().any(|provider| provider == "autohand-code"));
-    assert!(providers.iter().any(|provider| provider == "autohand_code"));
     assert!(providers.iter().any(|provider| provider == "kiro-cli"));
     assert!(providers.iter().any(|provider| provider == "kiro_cli"));
-    assert!(providers.iter().any(|provider| provider == "iflow-cli"));
-    assert!(providers.iter().any(|provider| provider == "iflow_cli"));
     assert!(providers.iter().any(|provider| provider == "lingma"));
     assert!(providers.iter().any(|provider| provider == "codebuddy"));
-    assert!(providers.iter().any(|provider| provider == "aider-desk"));
-    assert!(providers.iter().any(|provider| provider == "aider_desk"));
     assert!(providers.iter().any(|provider| provider == "auggie"));
     assert!(providers.iter().any(|provider| provider == "zed"));
     assert!(providers.iter().any(|provider| provider == "forgecode"));
@@ -4773,13 +4764,28 @@ fn mcp_status_and_tools_list_are_read_only_without_initialized_store() {
     assert!(providers.iter().any(|provider| provider == "mistral-vibe"));
     assert!(providers.iter().any(|provider| provider == "mistral_vibe"));
     assert!(providers.iter().any(|provider| provider == "mux"));
-    assert!(providers.iter().any(|provider| provider == "reasonix"));
-    assert!(providers.iter().any(|provider| provider == "kode"));
-    assert!(providers.iter().any(|provider| provider == "neovate"));
-    assert!(providers.iter().any(|provider| provider == "terramind"));
+    assert!(providers.iter().any(|provider| provider == "rovodev"));
     assert!(providers.iter().any(|provider| provider == "cline"));
     assert!(providers.iter().any(|provider| provider == "roo"));
     assert!(providers.iter().any(|provider| provider == "roo_code"));
+    for deferred in [
+        "aider-desk",
+        "autohand-code",
+        "bob",
+        "command-code",
+        "dexto",
+        "iflow-cli",
+        "moxby",
+        "reasonix",
+        "terramind",
+        "tinycloud",
+        "zenflow",
+    ] {
+        assert!(
+            !providers.iter().any(|provider| provider == deferred),
+            "deferred provider {deferred} leaked into MCP schema {providers:#?}"
+        );
+    }
 
     let status = &responses[2]["result"]["structuredContent"];
     assert_eq!(status["schema_version"], 1);

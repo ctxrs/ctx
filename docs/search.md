@@ -54,14 +54,12 @@ that support it.
 
 Search filters narrow both human output and JSON:
 
-- `--provider codex|pi|claude|opencode|codearts-agent|zencoder|zenflow|kilo|kiro-cli|forgecode|deepagents|mistral-vibe|mux|reasonix|kode|neovate|junie|tinycloud|codestudio|terramind|crush|goose|dexto|lingma|warp|openclaw|hermes|nanoclaw|astrbot|shelley|continue|openhands|antigravity|gemini|cursor|windsurf|zed|copilot-cli|factory-ai-droid|qwen-code|kimi-code-cli|autohand-code|iflow-cli|codebuddy|aider-desk|cline|roo`;
+- `--provider codex|claude|cursor|pi|opencode|github-copilot|copilot-cli|antigravity|gemini|codearts-agent|kilo|kiro-cli|crush|goose|tabnine|windsurf|zed|factory-ai-droid|qwen-code|kimi-code-cli|auggie|junie|firebender|forgecode|deepagents|mistral-vibe|mux|rovodev|openclaw|hermes|nanoclaw|astrbot|shelley|continue|openhands|cline|roo|lingma|qoder|warp|codebuddy|trae|zencoder`;
 - `--history-source <plugin/source-or-provider_key/source_id>`, for custom
   history imports;
 - `--provider-key <key>`, `--source-id <id>`, and
   `--source-format <format>`, for exact custom history source filters;
 
-Provider matrix rows marked pending should be added to this filter list only
-after the code-worker provider enum/search wiring lands.
 - `--workspace <name-or-path>`, substring match over stored workspace, cwd,
   source path, or repository-name text;
 - `--since <rfc3339-or-days>d`;
@@ -81,11 +79,7 @@ after the code-worker provider enum/search wiring lands.
 
 CLI provider filters use the kebab-case names above. JSON output and stable SQL
 views use provider IDs in ctx output; multiword provider IDs may be snake_case,
-such as `copilot_cli`, `factory_ai_droid`, `qwen_code`, `kimi_code_cli`,
-`autohand_code`, `kiro_cli`, `iflow_cli`, `mistral_vibe`, `codearts_agent`, or
-`aider_desk`, while compact IDs such as `forgecode`, `deepagents`, `mux`,
-`reasonix`, `kode`, `neovate`, `terramind`, `openclaw`, `nanoclaw`, `astrbot`,
-`shelley`, `continue`, `windsurf`, and `openhands` stay compact.
+such as `copilot_cli`, `factory_ai_droid`, `qwen_code`, `kimi_code_cli`, `kiro_cli`, `mistral_vibe`, `codearts_agent`, or `roo_code`.
 
 `--since` accepts RFC 3339 timestamps such as `2026-06-01T00:00:00Z` or a day
 window such as `30d`.
