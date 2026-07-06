@@ -54,6 +54,9 @@ detect_platform() {
     Linux:x86_64|Linux:amd64)
       printf 'linux-x64'
       ;;
+    Linux:aarch64|Linux:arm64)
+      printf 'linux-aarch64'
+      ;;
     Darwin:arm64|Darwin:aarch64)
       printf 'macos-arm64'
       ;;
@@ -468,7 +471,7 @@ if [[ -z "${platform}" ]]; then
 fi
 
 case "${platform}" in
-  linux-x64|macos-arm64|macos-x64|freebsd-x64)
+  linux-x64|linux-aarch64|macos-arm64|macos-x64|freebsd-x64)
     ;;
   *)
     fail "unsupported platform: ${platform}"

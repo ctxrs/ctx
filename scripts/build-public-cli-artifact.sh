@@ -11,7 +11,7 @@ usage() {
 Usage: scripts/build-public-cli-artifact.sh PLATFORM
 
 Builds one public ctx CLI binary and stages it under target/public-cli-artifacts.
-Platforms: linux-x64, macos-arm64, macos-x64, windows-x64, freebsd-x64.
+Platforms: linux-x64, linux-aarch64, macos-arm64, macos-x64, windows-x64, freebsd-x64.
 USAGE
 }
 
@@ -25,6 +25,10 @@ case "${platform}" in
   linux-x64)
     target="x86_64-unknown-linux-gnu"
     binary_name="ctx"
+    ;;
+  linux-aarch64)
+    target="aarch64-unknown-linux-gnu"
+    binary_name="ctx-linux-aarch64"
     ;;
   macos-arm64)
     target="aarch64-apple-darwin"

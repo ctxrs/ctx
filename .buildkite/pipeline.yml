@@ -77,6 +77,22 @@ steps:
       - "target/public-cli-artifacts/ctx.sha256"
       - "target/public-cli-artifacts/ctx.version"
 
+  - label: ":package: public CLI linux-aarch64"
+    key: "public-cli-linux-aarch64"
+    if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1"
+    command: |
+      scripts/build-public-cli-artifact.sh linux-aarch64
+    agents:
+      queue: "release-linux-managed"
+      ctx-runner-class: "release-linux-control"
+      os: "linux"
+      arch: "arm64"
+    timeout_in_minutes: 60
+    artifact_paths:
+      - "target/public-cli-artifacts/ctx-linux-aarch64"
+      - "target/public-cli-artifacts/ctx-linux-aarch64.sha256"
+      - "target/public-cli-artifacts/ctx-linux-aarch64.version"
+
   - label: ":package: public CLI windows-x64"
     key: "public-cli-windows-x64"
     if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1"
