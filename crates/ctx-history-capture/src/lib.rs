@@ -26896,9 +26896,8 @@ mod tests {
                 .join(name),
             _ => panic!("unknown fixture category {category}"),
         };
-        let root = std::env::current_dir()
-            .unwrap()
-            .join("target/test-data/materialized-fixtures");
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/test-data/materialized-fixtures");
         fs::create_dir_all(&root).unwrap();
         let unique = format!(
             "{}-{}-{}-{}",

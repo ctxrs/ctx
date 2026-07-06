@@ -19,7 +19,7 @@ Shared scanner/importer families include `JSONL CLI event logs`, `opencode sqlit
 | --- | --- | --- | --- | --- |
 | `aider-desk` | `not-supported` | `deliberately unsupported` | npx `~/.aider-desk`; no ctx provider on this branch | Deliberately unsupported on this public branch until demand and storage provenance justify native support. |
 | `amp` | `not-supported` | `hosted/export boundary` | npx `~/.config/amp`; no ctx provider on this branch | Requires an explicit hosted/export import design; no default local transcript DB is claimed here. |
-| `antigravity` | `supported` | `JSONL CLI event logs` | ctx `antigravity_cli_transcript_jsonl_tree`; npx `~/.gemini/antigravity` | - |
+| `antigravity` | `supported` | `JSONL CLI event logs` | ctx `antigravity_cli_transcript_jsonl_tree`; proven transcript homes `~/.gemini/antigravity-cli` and `~/.gemini/antigravity-ide`; npx skills advertises `~/.gemini/antigravity` | ctx does not crawl the npx `~/.gemini/antigravity` skill home without separate transcript-storage proof. |
 | `antigravity-cli` | `supported` | `JSONL CLI event logs` | ctx `antigravity_cli_transcript_jsonl_tree`; npx `~/.gemini/antigravity-cli` | - |
 | `astrbot` | `supported` | `generic sqlite messages` | ctx `astrbot_data_v4_sqlite`; npx `~/.astrbot` | - |
 | `autohand-code` | `not-supported` | `deliberately unsupported` | npx `AUTOHAND_HOME or ~/.autohand`; no ctx provider on this branch | Deliberately unsupported on this public branch until demand and storage provenance justify native support. |
@@ -43,7 +43,7 @@ Shared scanner/importer families include `JSONL CLI event logs`, `opencode sqlit
 | `dexto` | `not-supported` | `deliberately unsupported` | npx `~/.dexto`; no ctx provider on this branch | Deliberately unsupported on this public branch until demand and storage provenance justify native support. |
 | `droid` | `supported` | `JSONL CLI event logs` | ctx `factory_ai_droid_sessions_jsonl`; npx `~/.factory` | - |
 | `eve` | `not-supported` | `deliberately unsupported` | npx `agent project marker`; no ctx provider on this branch | Deliberately unsupported on this public branch until demand and storage provenance justify native support. |
-| `firebender` | `supported` | `generic sqlite messages` | ctx `firebender_chat_history_sqlite`; npx `~/.firebender` | - |
+| `firebender` | `supported` | `generic sqlite messages` | ctx `firebender_chat_history_sqlite`; proven transcript DB `<project>/.idea/firebender/chat_history.db`; npx skills advertises `~/.firebender` | ctx does not claim a global `~/.firebender` transcript store; support is for the project-local JetBrains DB. |
 | `forgecode` | `supported` | `Forge conversation SQLite` | ctx `forgecode_sqlite`; npx `FORGE_CONFIG or ~/.forge` | - |
 | `gemini-cli` | `supported` | `JSONL CLI event logs` | ctx `gemini_cli_chat_recording_jsonl`; npx `~/.gemini` | - |
 | `github-copilot` | `supported` | `JSONL CLI event logs` | ctx `copilot_cli_session_events_jsonl`; npx `~/.copilot` | - |

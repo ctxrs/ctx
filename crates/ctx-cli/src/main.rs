@@ -2512,7 +2512,7 @@ fn run_import_internal(
     let mut planned_sources = Vec::new();
     let mut planned_total_bytes = 0u64;
     for source in requests {
-        let stats = source_stats(&source.path)
+        let stats = source_import_stats(&source)
             .with_context(|| format!("scan import source {}", source.path.display()))?;
         planned_total_bytes = planned_total_bytes.saturating_add(stats.bytes);
         planned_sources.push((source, stats));
@@ -7087,6 +7087,17 @@ fn source_stats(path: &Path) -> Result<SourceStats> {
                 stats.bytes = stats.bytes.saturating_add(metadata.len());
             }
         }
+    }
+    Ok(stats)
+}
+
+fn source_import_stats(source: &SourceInfo) -> Result<SourceStats> {
+    let mut stats = SourceStats::default();
+    for path in collect_source_import_paths(source)? {
+        let metadata = fs::metadata(&path)
+            .with_context(|| format!("stat import source file {}", path.display()))?;
+        stats.files += 1;
+        stats.bytes = stats.bytes.saturating_add(metadata.len());
     }
     Ok(stats)
 }
