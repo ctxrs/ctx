@@ -39,7 +39,7 @@ ALLOWED_SCHEMA_FAMILIES = REQUIRED_SCHEMA_FAMILIES | {
     "hosted/export boundary",
     "unknown native history",
     "install-only target",
-    "deferred local history",
+    "deliberately unsupported",
 }
 PRIVATE_TEXT_MARKERS = ("/home/", "ctx-private", "ctx-multi-repo-workspace")
 TABLE_HEADER = (

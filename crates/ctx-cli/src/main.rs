@@ -11,7 +11,6 @@ use std::{
 use anyhow::{anyhow, Context, Result};
 use chrono::{Duration, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Number, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -34,53 +33,41 @@ use analytics::{AnalyticsEvent, AnalyticsProperties};
 use config::{AppConfig, CONFIG_FILE};
 use ctx_history_capture::{
     catalog_codex_session_tree, discover_provider_sources, discover_provider_sources_for_provider,
-    import_adal_history, import_aider_desk_history, import_antigravity_cli_history,
-    import_astrbot_sqlite, import_auggie_history, import_autohand_code_sessions,
-    import_bob_task_json_history, import_claude_projects_jsonl_tree,
-    import_cline_task_json_history, import_codearts_agent_sqlite, import_codebuddy_history,
-    import_codestudio_sqlite, import_codex_history_jsonl, import_codex_session_jsonl,
-    import_codex_session_jsonl_tail, import_codex_session_paths, import_codex_session_tree,
-    import_command_code_history, import_continue_cli_sessions, import_copilot_cli_session_events,
-    import_cortex_code_history, import_crush_sqlite, import_cursor_native_history,
-    import_custom_history_jsonl_v1, import_custom_history_jsonl_v1_reader,
-    import_deepagents_sqlite, import_dexto_sqlite, import_eve_history,
+    import_antigravity_cli_history, import_astrbot_sqlite, import_auggie_history,
+    import_claude_projects_jsonl_tree, import_cline_task_json_history,
+    import_codearts_agent_sqlite, import_codebuddy_history, import_codex_history_jsonl,
+    import_codex_session_jsonl, import_codex_session_jsonl_tail, import_codex_session_paths,
+    import_codex_session_tree, import_continue_cli_sessions, import_copilot_cli_session_events,
+    import_crush_sqlite, import_cursor_native_history, import_custom_history_jsonl_v1,
+    import_custom_history_jsonl_v1_reader, import_deepagents_sqlite,
     import_factory_ai_droid_sessions, import_firebender_sqlite, import_forgecode_sqlite,
     import_gemini_cli_history, import_goose_sessions_sqlite, import_hermes_sqlite,
-    import_iflow_cli_history, import_jazz_history, import_junie_history, import_kilo_sqlite,
-    import_kimi_code_cli_history, import_kiro_sqlite, import_kode_history, import_lingma_sqlite,
-    import_mistral_vibe_history, import_moxby_sqlite, import_mux_history, import_nanoclaw_project,
-    import_neovate_history, import_openclaw_history, import_opencode_sqlite,
-    import_openhands_file_events, import_openloaf_history, import_pi_session_jsonl,
-    import_pochi_livestore_sqlite, import_qoder_history, import_qwen_code_history,
-    import_reasonix_history, import_roo_task_json_history, import_rovodev_history,
-    import_shelley_sqlite, import_tabnine_cli_history, import_terramind_sqlite,
-    import_tinycloud_history, import_trae_history, import_warp_sqlite,
+    import_junie_history, import_kilo_sqlite, import_kimi_code_cli_history, import_kiro_sqlite,
+    import_lingma_sqlite, import_mistral_vibe_history, import_mux_history, import_nanoclaw_project,
+    import_openclaw_history, import_opencode_sqlite, import_openhands_file_events,
+    import_pi_session_jsonl, import_qoder_history, import_qwen_code_history,
+    import_roo_task_json_history, import_rovodev_history, import_shelley_sqlite,
+    import_tabnine_cli_history, import_trae_history, import_warp_sqlite,
     import_windsurf_cascade_hook_transcripts, import_zed_threads_sqlite, import_zencoder_history,
-    import_zenflow_sqlite, provider_source_for_path, provider_source_spec, stable_capture_uuid,
-    validate_custom_history_jsonl_v1, validate_custom_history_jsonl_v1_reader, AdalImportOptions,
-    AiderDeskImportOptions, AntigravityCliImportOptions, AstrBotSqliteImportOptions,
-    AuggieImportOptions, AutohandCodeImportOptions, BobTaskJsonImportOptions, CatalogSummary,
+    provider_source_for_path, provider_source_spec, stable_capture_uuid,
+    validate_custom_history_jsonl_v1, validate_custom_history_jsonl_v1_reader,
+    AntigravityCliImportOptions, AstrBotSqliteImportOptions, AuggieImportOptions, CatalogSummary,
     ClaudeProjectsImportOptions, ClineTaskJsonImportOptions, CodeArtsAgentSqliteImportOptions,
-    CodeBuddyImportOptions, CodeStudioSqliteImportOptions, CodexEventImportMode,
-    CodexHistoryImportOptions, CodexSessionCatalogOptions, CodexSessionImportOptions,
-    CodexSessionImportProgress, CodexSessionImportProgressCallback, CodexToolOutputMode,
-    CommandCodeImportOptions, ContinueCliImportOptions, CopilotCliImportOptions,
-    CortexCodeImportOptions, CrushSqliteImportOptions, CursorNativeImportOptions,
-    CustomHistoryJsonlV1ImportOptions, DeepAgentsSqliteImportOptions, DextoSqliteImportOptions,
-    EveImportOptions, FactoryAiDroidImportOptions, FirebenderSqliteImportOptions,
-    ForgeCodeSqliteImportOptions, GeminiCliImportOptions, GooseSessionsSqliteImportOptions,
-    HermesSqliteImportOptions, IflowCliImportOptions, JazzImportOptions, JunieImportOptions,
-    KiloSqliteImportOptions, KimiCodeCliImportOptions, KiroSqliteImportOptions, KodeImportOptions,
-    LingmaSqliteImportOptions, MistralVibeImportOptions, MoxbySqliteImportOptions,
-    MuxImportOptions, NanoClawImportOptions, NeovateImportOptions, OpenClawImportOptions,
-    OpenCodeSqliteImportOptions, OpenHandsImportOptions, OpenLoafImportOptions,
-    PiSessionImportOptions, PochiLivestoreSqliteImportOptions, ProviderImportSummary,
-    ProviderImportSupport, ProviderSource, ProviderSourceStatus, QoderImportOptions,
-    QwenCodeImportOptions, ReasonixImportOptions, RooTaskJsonImportOptions, RovoDevImportOptions,
-    ShelleySqliteImportOptions, TabnineCliImportOptions, TerramindSqliteImportOptions,
-    TinyCloudImportOptions, TraeImportOptions, WarpSqliteImportOptions,
-    WindsurfCascadeHookImportOptions, ZedThreadsSqliteImportOptions, ZencoderImportOptions,
-    ZenflowSqliteImportOptions,
+    CodeBuddyImportOptions, CodexEventImportMode, CodexHistoryImportOptions,
+    CodexSessionCatalogOptions, CodexSessionImportOptions, CodexSessionImportProgress,
+    CodexSessionImportProgressCallback, CodexToolOutputMode, ContinueCliImportOptions,
+    CopilotCliImportOptions, CrushSqliteImportOptions, CursorNativeImportOptions,
+    CustomHistoryJsonlV1ImportOptions, DeepAgentsSqliteImportOptions, FactoryAiDroidImportOptions,
+    FirebenderSqliteImportOptions, ForgeCodeSqliteImportOptions, GeminiCliImportOptions,
+    GooseSessionsSqliteImportOptions, HermesSqliteImportOptions, JunieImportOptions,
+    KiloSqliteImportOptions, KimiCodeCliImportOptions, KiroSqliteImportOptions,
+    LingmaSqliteImportOptions, MistralVibeImportOptions, MuxImportOptions, NanoClawImportOptions,
+    OpenClawImportOptions, OpenCodeSqliteImportOptions, OpenHandsImportOptions,
+    PiSessionImportOptions, ProviderImportSummary, ProviderImportSupport, ProviderSource,
+    ProviderSourceStatus, QoderImportOptions, QwenCodeImportOptions, RooTaskJsonImportOptions,
+    RovoDevImportOptions, ShelleySqliteImportOptions, TabnineCliImportOptions, TraeImportOptions,
+    WarpSqliteImportOptions, WindsurfCascadeHookImportOptions, ZedThreadsSqliteImportOptions,
+    ZencoderImportOptions,
 };
 use ctx_history_core::{
     database_path, default_data_root, utc_now, CaptureProvider, ContextCitation,
@@ -747,13 +734,6 @@ enum NativeProviderArg {
     )]
     CodeArtsAgent,
     #[value(
-        name = "openloaf",
-        alias = "loaf",
-        alias = "open-loaf",
-        alias = "open_loaf"
-    )]
-    OpenLoaf,
-    #[value(
         name = "kilo",
         alias = "kilo-code",
         alias = "kilo_code",
@@ -793,14 +773,8 @@ enum NativeProviderArg {
     QwenCode,
     #[value(name = "kimi-code-cli", alias = "kimi", alias = "kimi_code_cli")]
     KimiCodeCli,
-    #[value(name = "autohand-code", alias = "autohand", alias = "autohand_code")]
-    AutohandCode,
-    #[value(name = "iflow-cli", alias = "iflow", alias = "iflow_cli")]
-    IflowCli,
-    Jazz,
     #[value(name = "auggie", alias = "augment", alias = "augment-code")]
     Auggie,
-    Eve,
     Junie,
     #[value(
         name = "firebender",
@@ -825,28 +799,8 @@ enum NativeProviderArg {
     )]
     MistralVibe,
     Mux,
-    Moxby,
-    #[value(name = "reasonix", alias = "deepseek-reasonix")]
-    Reasonix,
-    #[value(name = "adal", alias = "adal-cli", alias = "adal_cli")]
-    Adal,
-    #[value(
-        name = "kode",
-        alias = "shareai-kode",
-        alias = "shareai_kode",
-        alias = "shareai-lab-kode",
-        alias = "shareai_lab_kode"
-    )]
-    Kode,
-    #[value(name = "neovate", alias = "neovate-code", alias = "neovate_code")]
-    Neovate,
-    #[value(name = "command-code", alias = "command_code", alias = "commandcode")]
-    CommandCode,
-    Terramind,
     #[value(name = "rovodev", alias = "rovo-dev", alias = "rovo_dev")]
     RovoDev,
-    #[value(name = "cortex-code", alias = "cortex", alias = "cortex_code")]
-    CortexCode,
     #[value(name = "openclaw", alias = "open-claw", alias = "open_claw")]
     OpenClaw,
     Hermes,
@@ -862,32 +816,15 @@ enum NativeProviderArg {
     Cline,
     #[value(name = "roo", alias = "roo-code", alias = "roo_code")]
     RooCode,
-    #[value(name = "bob", alias = "ibm-bob", alias = "ibm_bob")]
-    Bob,
-    Dexto,
     #[value(alias = "qoder-cn", alias = "qoder_cn")]
     Lingma,
     Qoder,
-    Pochi,
     Warp,
     #[value(name = "codebuddy", alias = "code-buddy", alias = "code_buddy")]
     CodeBuddy,
-    #[value(name = "aider-desk", alias = "aider_desk", alias = "aiderdesk")]
-    AiderDesk,
     #[value(alias = "trae-cn", alias = "trae_cn")]
     Trae,
-    #[value(name = "tinycloud", alias = "tiny-cloud", alias = "tiny_cloud")]
-    TinyCloud,
     Zencoder,
-    Zenflow,
-    #[value(
-        name = "codestudio",
-        alias = "code-studio",
-        alias = "code_studio",
-        alias = "syncfusion-code-studio",
-        alias = "syncfusion_code_studio"
-    )]
-    CodeStudio,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -906,13 +843,6 @@ enum ProviderArg {
     )]
     CodeArtsAgent,
     #[value(
-        name = "openloaf",
-        alias = "loaf",
-        alias = "open-loaf",
-        alias = "open_loaf"
-    )]
-    OpenLoaf,
-    #[value(
         name = "kilo",
         alias = "kilo-code",
         alias = "kilo_code",
@@ -952,14 +882,8 @@ enum ProviderArg {
     QwenCode,
     #[value(name = "kimi-code-cli", alias = "kimi", alias = "kimi_code_cli")]
     KimiCodeCli,
-    #[value(name = "autohand-code", alias = "autohand", alias = "autohand_code")]
-    AutohandCode,
-    #[value(name = "iflow-cli", alias = "iflow", alias = "iflow_cli")]
-    IflowCli,
-    Jazz,
     #[value(name = "auggie", alias = "augment", alias = "augment-code")]
     Auggie,
-    Eve,
     Junie,
     #[value(
         name = "firebender",
@@ -984,28 +908,8 @@ enum ProviderArg {
     )]
     MistralVibe,
     Mux,
-    Moxby,
-    #[value(name = "reasonix", alias = "deepseek-reasonix")]
-    Reasonix,
-    #[value(name = "adal", alias = "adal-cli", alias = "adal_cli")]
-    Adal,
-    #[value(
-        name = "kode",
-        alias = "shareai-kode",
-        alias = "shareai_kode",
-        alias = "shareai-lab-kode",
-        alias = "shareai_lab_kode"
-    )]
-    Kode,
-    #[value(name = "neovate", alias = "neovate-code", alias = "neovate_code")]
-    Neovate,
-    #[value(name = "command-code", alias = "command_code", alias = "commandcode")]
-    CommandCode,
-    Terramind,
     #[value(name = "rovodev", alias = "rovo-dev", alias = "rovo_dev")]
     RovoDev,
-    #[value(name = "cortex-code", alias = "cortex", alias = "cortex_code")]
-    CortexCode,
     #[value(name = "openclaw", alias = "open-claw", alias = "open_claw")]
     OpenClaw,
     Hermes,
@@ -1021,32 +925,15 @@ enum ProviderArg {
     Cline,
     #[value(name = "roo", alias = "roo-code", alias = "roo_code")]
     RooCode,
-    #[value(name = "bob", alias = "ibm-bob", alias = "ibm_bob")]
-    Bob,
-    Dexto,
     #[value(alias = "qoder-cn", alias = "qoder_cn")]
     Lingma,
     Qoder,
-    Pochi,
     Warp,
     #[value(name = "codebuddy", alias = "code-buddy", alias = "code_buddy")]
     CodeBuddy,
-    #[value(name = "aider-desk", alias = "aider_desk", alias = "aiderdesk")]
-    AiderDesk,
     #[value(alias = "trae-cn", alias = "trae_cn")]
     Trae,
-    #[value(name = "tinycloud", alias = "tiny-cloud", alias = "tiny_cloud")]
-    TinyCloud,
     Zencoder,
-    Zenflow,
-    #[value(
-        name = "codestudio",
-        alias = "code-studio",
-        alias = "code_studio",
-        alias = "syncfusion-code-studio",
-        alias = "syncfusion_code_studio"
-    )]
-    CodeStudio,
     Custom,
 }
 
@@ -1080,7 +967,6 @@ impl NativeProviderArg {
             Self::Claude => CaptureProvider::Claude,
             Self::OpenCode => CaptureProvider::OpenCode,
             Self::CodeArtsAgent => CaptureProvider::CodeArtsAgent,
-            Self::OpenLoaf => CaptureProvider::OpenLoaf,
             Self::Kilo => CaptureProvider::Kilo,
             Self::KiroCli => CaptureProvider::KiroCli,
             Self::Crush => CaptureProvider::Crush,
@@ -1095,26 +981,14 @@ impl NativeProviderArg {
             Self::FactoryAiDroid => CaptureProvider::FactoryAiDroid,
             Self::QwenCode => CaptureProvider::QwenCode,
             Self::KimiCodeCli => CaptureProvider::KimiCodeCli,
-            Self::AutohandCode => CaptureProvider::AutohandCode,
-            Self::IflowCli => CaptureProvider::IflowCli,
-            Self::Jazz => CaptureProvider::Jazz,
             Self::Auggie => CaptureProvider::Auggie,
-            Self::Eve => CaptureProvider::Eve,
             Self::Junie => CaptureProvider::Junie,
             Self::Firebender => CaptureProvider::Firebender,
             Self::ForgeCode => CaptureProvider::ForgeCode,
             Self::DeepAgents => CaptureProvider::DeepAgents,
             Self::MistralVibe => CaptureProvider::MistralVibe,
             Self::Mux => CaptureProvider::Mux,
-            Self::Moxby => CaptureProvider::Moxby,
-            Self::Reasonix => CaptureProvider::Reasonix,
-            Self::Adal => CaptureProvider::Adal,
-            Self::Kode => CaptureProvider::Kode,
-            Self::Neovate => CaptureProvider::Neovate,
-            Self::CommandCode => CaptureProvider::CommandCode,
-            Self::Terramind => CaptureProvider::Terramind,
             Self::RovoDev => CaptureProvider::RovoDev,
-            Self::CortexCode => CaptureProvider::CortexCode,
             Self::OpenClaw => CaptureProvider::OpenClaw,
             Self::Hermes => CaptureProvider::Hermes,
             Self::NanoClaw => CaptureProvider::NanoClaw,
@@ -1124,19 +998,12 @@ impl NativeProviderArg {
             Self::OpenHands => CaptureProvider::OpenHands,
             Self::Cline => CaptureProvider::Cline,
             Self::RooCode => CaptureProvider::RooCode,
-            Self::Bob => CaptureProvider::Bob,
-            Self::Dexto => CaptureProvider::Dexto,
             Self::Lingma => CaptureProvider::Lingma,
             Self::Qoder => CaptureProvider::Qoder,
-            Self::Pochi => CaptureProvider::Pochi,
             Self::Warp => CaptureProvider::Warp,
             Self::CodeBuddy => CaptureProvider::CodeBuddy,
-            Self::AiderDesk => CaptureProvider::AiderDesk,
             Self::Trae => CaptureProvider::Trae,
-            Self::TinyCloud => CaptureProvider::TinyCloud,
             Self::Zencoder => CaptureProvider::Zencoder,
-            Self::Zenflow => CaptureProvider::Zenflow,
-            Self::CodeStudio => CaptureProvider::CodeStudio,
         }
     }
 }
@@ -1172,7 +1039,6 @@ impl ProviderArg {
             Self::Claude => CaptureProvider::Claude,
             Self::OpenCode => CaptureProvider::OpenCode,
             Self::CodeArtsAgent => CaptureProvider::CodeArtsAgent,
-            Self::OpenLoaf => CaptureProvider::OpenLoaf,
             Self::Kilo => CaptureProvider::Kilo,
             Self::KiroCli => CaptureProvider::KiroCli,
             Self::Crush => CaptureProvider::Crush,
@@ -1187,26 +1053,14 @@ impl ProviderArg {
             Self::FactoryAiDroid => CaptureProvider::FactoryAiDroid,
             Self::QwenCode => CaptureProvider::QwenCode,
             Self::KimiCodeCli => CaptureProvider::KimiCodeCli,
-            Self::AutohandCode => CaptureProvider::AutohandCode,
-            Self::IflowCli => CaptureProvider::IflowCli,
-            Self::Jazz => CaptureProvider::Jazz,
             Self::Auggie => CaptureProvider::Auggie,
-            Self::Eve => CaptureProvider::Eve,
             Self::Junie => CaptureProvider::Junie,
             Self::Firebender => CaptureProvider::Firebender,
             Self::ForgeCode => CaptureProvider::ForgeCode,
             Self::DeepAgents => CaptureProvider::DeepAgents,
             Self::MistralVibe => CaptureProvider::MistralVibe,
             Self::Mux => CaptureProvider::Mux,
-            Self::Moxby => CaptureProvider::Moxby,
-            Self::Reasonix => CaptureProvider::Reasonix,
-            Self::Adal => CaptureProvider::Adal,
-            Self::Kode => CaptureProvider::Kode,
-            Self::Neovate => CaptureProvider::Neovate,
-            Self::CommandCode => CaptureProvider::CommandCode,
-            Self::Terramind => CaptureProvider::Terramind,
             Self::RovoDev => CaptureProvider::RovoDev,
-            Self::CortexCode => CaptureProvider::CortexCode,
             Self::OpenClaw => CaptureProvider::OpenClaw,
             Self::Hermes => CaptureProvider::Hermes,
             Self::NanoClaw => CaptureProvider::NanoClaw,
@@ -1216,19 +1070,12 @@ impl ProviderArg {
             Self::OpenHands => CaptureProvider::OpenHands,
             Self::Cline => CaptureProvider::Cline,
             Self::RooCode => CaptureProvider::RooCode,
-            Self::Bob => CaptureProvider::Bob,
-            Self::Dexto => CaptureProvider::Dexto,
             Self::Lingma => CaptureProvider::Lingma,
             Self::Qoder => CaptureProvider::Qoder,
-            Self::Pochi => CaptureProvider::Pochi,
             Self::Warp => CaptureProvider::Warp,
             Self::CodeBuddy => CaptureProvider::CodeBuddy,
-            Self::AiderDesk => CaptureProvider::AiderDesk,
             Self::Trae => CaptureProvider::Trae,
-            Self::TinyCloud => CaptureProvider::TinyCloud,
             Self::Zencoder => CaptureProvider::Zencoder,
-            Self::Zenflow => CaptureProvider::Zenflow,
-            Self::CodeStudio => CaptureProvider::CodeStudio,
             Self::Custom => CaptureProvider::Custom,
         }
     }
@@ -1240,7 +1087,6 @@ impl ProviderArg {
             Self::Claude => "claude",
             Self::OpenCode => "opencode",
             Self::CodeArtsAgent => "codearts-agent",
-            Self::OpenLoaf => "openloaf",
             Self::Kilo => "kilo",
             Self::KiroCli => "kiro-cli",
             Self::Crush => "crush",
@@ -1255,26 +1101,14 @@ impl ProviderArg {
             Self::FactoryAiDroid => "factory-ai-droid",
             Self::QwenCode => "qwen-code",
             Self::KimiCodeCli => "kimi-code-cli",
-            Self::AutohandCode => "autohand-code",
-            Self::IflowCli => "iflow-cli",
-            Self::Jazz => "jazz",
             Self::Auggie => "auggie",
-            Self::Eve => "eve",
             Self::Junie => "junie",
             Self::Firebender => "firebender",
             Self::ForgeCode => "forgecode",
             Self::DeepAgents => "deepagents",
             Self::MistralVibe => "mistral-vibe",
             Self::Mux => "mux",
-            Self::Moxby => "moxby",
-            Self::Reasonix => "reasonix",
-            Self::Adal => "adal",
-            Self::Kode => "kode",
-            Self::Neovate => "neovate",
-            Self::CommandCode => "command-code",
-            Self::Terramind => "terramind",
             Self::RovoDev => "rovodev",
-            Self::CortexCode => "cortex-code",
             Self::OpenClaw => "openclaw",
             Self::Hermes => "hermes",
             Self::NanoClaw => "nanoclaw",
@@ -1284,19 +1118,12 @@ impl ProviderArg {
             Self::OpenHands => "openhands",
             Self::Cline => "cline",
             Self::RooCode => "roo",
-            Self::Bob => "bob",
-            Self::Dexto => "dexto",
             Self::Lingma => "lingma",
             Self::Qoder => "qoder",
-            Self::Pochi => "pochi",
             Self::Warp => "warp",
             Self::CodeBuddy => "codebuddy",
-            Self::AiderDesk => "aider-desk",
             Self::Trae => "trae",
-            Self::TinyCloud => "tinycloud",
             Self::Zencoder => "zencoder",
-            Self::Zenflow => "zenflow",
-            Self::CodeStudio => "codestudio",
             Self::Custom => "custom",
         }
     }
@@ -6000,7 +5827,6 @@ fn validate_source_import_supported(source: &SourceInfo) -> Result<()> {
     match source.import_support {
         ProviderImportSupport::Native => Ok(()),
         ProviderImportSupport::Explicit => Ok(()),
-        ProviderImportSupport::Preview => Ok(()),
         ProviderImportSupport::Unsupported => {
             let reason = source
                 .unsupported_reason
@@ -6173,17 +5999,6 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
-        CaptureProvider::Bob => import_bob_task_json_history(
-            &source.path,
-            store,
-            BobTaskJsonImportOptions {
-                source_path: Some(source.path.clone()),
-                history_record_id: Some(record_id),
-                allow_partial_failures: true,
-                ..BobTaskJsonImportOptions::default()
-            },
-        )
-        .map_err(anyhow::Error::from),
         CaptureProvider::CodeBuddy => import_codebuddy_history(
             &source.path,
             store,
@@ -6192,17 +6007,6 @@ fn import_one_source_inner(
                 history_record_id: Some(record_id),
                 allow_partial_failures: true,
                 ..CodeBuddyImportOptions::default()
-            },
-        )
-        .map_err(anyhow::Error::from),
-        CaptureProvider::AiderDesk => import_aider_desk_history(
-            &source.path,
-            store,
-            AiderDeskImportOptions {
-                source_path: Some(source.path.clone()),
-                history_record_id: Some(record_id),
-                allow_partial_failures: true,
-                ..AiderDeskImportOptions::default()
             },
         )
         .map_err(anyhow::Error::from),
@@ -6217,17 +6021,6 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
-        CaptureProvider::TinyCloud => import_tinycloud_history(
-            &source.path,
-            store,
-            TinyCloudImportOptions {
-                source_path: Some(source.path.clone()),
-                history_record_id: Some(record_id),
-                allow_partial_failures: true,
-                ..TinyCloudImportOptions::default()
-            },
-        )
-        .map_err(anyhow::Error::from),
         CaptureProvider::Zencoder => import_zencoder_history(
             &source.path,
             store,
@@ -6236,17 +6029,6 @@ fn import_one_source_inner(
                 history_record_id: Some(record_id),
                 allow_partial_failures: true,
                 ..ZencoderImportOptions::default()
-            },
-        )
-        .map_err(anyhow::Error::from),
-        CaptureProvider::Zenflow => import_zenflow_sqlite(
-            &source.path,
-            store,
-            ZenflowSqliteImportOptions {
-                source_path: Some(source.path.clone()),
-                history_record_id: Some(record_id),
-                allow_partial_failures: true,
-                ..ZenflowSqliteImportOptions::default()
             },
         )
         .map_err(anyhow::Error::from),
@@ -6269,28 +6051,6 @@ fn import_one_source_inner(
                 history_record_id: Some(record_id),
                 allow_partial_failures: true,
                 ..CodeArtsAgentSqliteImportOptions::default()
-            },
-        )
-        .map_err(anyhow::Error::from),
-        CaptureProvider::CodeStudio => import_codestudio_sqlite(
-            &source.path,
-            store,
-            CodeStudioSqliteImportOptions {
-                source_path: Some(source.path.clone()),
-                history_record_id: Some(record_id),
-                allow_partial_failures: true,
-                ..CodeStudioSqliteImportOptions::default()
-            },
-        )
-        .map_err(anyhow::Error::from),
-        CaptureProvider::OpenLoaf => import_openloaf_history(
-            &source.path,
-            store,
-            OpenLoafImportOptions {
-                source_path: Some(source.path.clone()),
-                history_record_id: Some(record_id),
-                allow_partial_failures: true,
-                ..OpenLoafImportOptions::default()
             },
         )
         .map_err(anyhow::Error::from),
@@ -6357,28 +6117,6 @@ fn import_one_source_inner(
                 history_record_id: Some(record_id),
                 allow_partial_failures: true,
                 ..GooseSessionsSqliteImportOptions::default()
-            },
-        )
-        .map_err(anyhow::Error::from),
-        CaptureProvider::Reasonix => import_reasonix_history(
-            &source.path,
-            store,
-            ReasonixImportOptions {
-                source_path: Some(source.path.clone()),
-                history_record_id: Some(record_id),
-                allow_partial_failures: true,
-                ..ReasonixImportOptions::default()
-            },
-        )
-        .map_err(anyhow::Error::from),
-        CaptureProvider::Adal => import_adal_history(
-            &source.path,
-            store,
-            AdalImportOptions {
-                source_path: Some(source.path.clone()),
-                history_record_id: Some(record_id),
-                allow_partial_failures: true,
-                ..AdalImportOptions::default()
             },
         )
         .map_err(anyhow::Error::from),
@@ -6459,17 +6197,6 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
-        CaptureProvider::Dexto => import_dexto_sqlite(
-            &source.path,
-            store,
-            DextoSqliteImportOptions {
-                source_path: Some(source.path.clone()),
-                history_record_id: Some(record_id),
-                allow_partial_failures: true,
-                ..DextoSqliteImportOptions::default()
-            },
-        )
-        .map_err(anyhow::Error::from),
         CaptureProvider::Lingma => import_lingma_sqlite(
             &source.path,
             store,
@@ -6489,17 +6216,6 @@ fn import_one_source_inner(
                 history_record_id: Some(record_id),
                 allow_partial_failures: true,
                 ..QoderImportOptions::default()
-            },
-        )
-        .map_err(anyhow::Error::from),
-        CaptureProvider::Pochi => import_pochi_livestore_sqlite(
-            &source.path,
-            store,
-            PochiLivestoreSqliteImportOptions {
-                source_path: Some(source.path.clone()),
-                history_record_id: Some(record_id),
-                allow_partial_failures: true,
-                ..PochiLivestoreSqliteImportOptions::default()
             },
         )
         .map_err(anyhow::Error::from),
@@ -6613,39 +6329,6 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
-        CaptureProvider::AutohandCode => import_autohand_code_sessions(
-            &source.path,
-            store,
-            AutohandCodeImportOptions {
-                source_path: Some(source.path.clone()),
-                history_record_id: Some(record_id),
-                allow_partial_failures: true,
-                ..AutohandCodeImportOptions::default()
-            },
-        )
-        .map_err(anyhow::Error::from),
-        CaptureProvider::IflowCli => import_iflow_cli_history(
-            &source.path,
-            store,
-            IflowCliImportOptions {
-                source_path: Some(source.path.clone()),
-                history_record_id: Some(record_id),
-                allow_partial_failures: true,
-                ..IflowCliImportOptions::default()
-            },
-        )
-        .map_err(anyhow::Error::from),
-        CaptureProvider::Jazz => import_jazz_history(
-            &source.path,
-            store,
-            JazzImportOptions {
-                source_path: Some(source.path.clone()),
-                history_record_id: Some(record_id),
-                allow_partial_failures: true,
-                ..JazzImportOptions::default()
-            },
-        )
-        .map_err(anyhow::Error::from),
         CaptureProvider::Auggie => import_auggie_history(
             &source.path,
             store,
@@ -6654,17 +6337,6 @@ fn import_one_source_inner(
                 history_record_id: Some(record_id),
                 allow_partial_failures: true,
                 ..AuggieImportOptions::default()
-            },
-        )
-        .map_err(anyhow::Error::from),
-        CaptureProvider::Eve => import_eve_history(
-            &source.path,
-            store,
-            EveImportOptions {
-                source_path: Some(source.path.clone()),
-                history_record_id: Some(record_id),
-                allow_partial_failures: true,
-                ..EveImportOptions::default()
             },
         )
         .map_err(anyhow::Error::from),
@@ -6690,39 +6362,6 @@ fn import_one_source_inner(
             },
         )
         .map_err(anyhow::Error::from),
-        CaptureProvider::Kode => import_kode_history(
-            &source.path,
-            store,
-            KodeImportOptions {
-                source_path: Some(source.path.clone()),
-                history_record_id: Some(record_id),
-                allow_partial_failures: true,
-                ..KodeImportOptions::default()
-            },
-        )
-        .map_err(anyhow::Error::from),
-        CaptureProvider::Neovate => import_neovate_history(
-            &source.path,
-            store,
-            NeovateImportOptions {
-                source_path: Some(source.path.clone()),
-                history_record_id: Some(record_id),
-                allow_partial_failures: true,
-                ..NeovateImportOptions::default()
-            },
-        )
-        .map_err(anyhow::Error::from),
-        CaptureProvider::CommandCode => import_command_code_history(
-            &source.path,
-            store,
-            CommandCodeImportOptions {
-                source_path: Some(source.path.clone()),
-                history_record_id: Some(record_id),
-                allow_partial_failures: true,
-                ..CommandCodeImportOptions::default()
-            },
-        )
-        .map_err(anyhow::Error::from),
         CaptureProvider::RovoDev => import_rovodev_history(
             &source.path,
             store,
@@ -6731,17 +6370,6 @@ fn import_one_source_inner(
                 history_record_id: Some(record_id),
                 allow_partial_failures: true,
                 ..RovoDevImportOptions::default()
-            },
-        )
-        .map_err(anyhow::Error::from),
-        CaptureProvider::CortexCode => import_cortex_code_history(
-            &source.path,
-            store,
-            CortexCodeImportOptions {
-                source_path: Some(source.path.clone()),
-                history_record_id: Some(record_id),
-                allow_partial_failures: true,
-                ..CortexCodeImportOptions::default()
             },
         )
         .map_err(anyhow::Error::from),
@@ -6764,28 +6392,6 @@ fn import_one_source_inner(
                 history_record_id: Some(record_id),
                 allow_partial_failures: true,
                 ..MuxImportOptions::default()
-            },
-        )
-        .map_err(anyhow::Error::from),
-        CaptureProvider::Moxby => import_moxby_sqlite(
-            &source.path,
-            store,
-            MoxbySqliteImportOptions {
-                source_path: Some(source.path.clone()),
-                history_record_id: Some(record_id),
-                allow_partial_failures: true,
-                ..MoxbySqliteImportOptions::default()
-            },
-        )
-        .map_err(anyhow::Error::from),
-        CaptureProvider::Terramind => import_terramind_sqlite(
-            &source.path,
-            store,
-            TerramindSqliteImportOptions {
-                source_path: Some(source.path.clone()),
-                history_record_id: Some(record_id),
-                allow_partial_failures: true,
-                ..TerramindSqliteImportOptions::default()
             },
         )
         .map_err(anyhow::Error::from),
@@ -6912,13 +6518,8 @@ fn source_uses_import_file_manifest(source: &SourceInfo) -> bool {
             | "shelley_sqlite"
             | "cline_task_directory_json"
             | "roo_task_directory_json"
-            | "bob_task_directory_json"
-            | "reasonix_session_jsonl_tree"
-            | "openloaf_chat_jsonl_tree"
-            | "eve_workflow_data_streams"
             | "firebender_chat_history_sqlite"
             | "codebuddy_history_json"
-            | "tinycloud_session_jsonl_tree"
             | "zencoder_chat_sessions_json_tree"
     )
 }
@@ -7007,34 +6608,24 @@ fn collect_source_import_paths(source: &SourceInfo) -> Result<Vec<PathBuf>> {
 
 fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bool {
     match source.provider {
+        CaptureProvider::Codex | CaptureProvider::Pi | CaptureProvider::FactoryAiDroid => {
+            path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
+        }
+        CaptureProvider::Claude => {
+            path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
+                && path.starts_with(&source.path)
+        }
         CaptureProvider::OpenCode
         | CaptureProvider::CodeArtsAgent
-        | CaptureProvider::OpenLoaf
         | CaptureProvider::Kilo
         | CaptureProvider::KiroCli
         | CaptureProvider::ForgeCode
-        | CaptureProvider::Terramind
         | CaptureProvider::DeepAgents
         | CaptureProvider::Crush
         | CaptureProvider::Goose
         | CaptureProvider::Lingma
         | CaptureProvider::Warp
-        | CaptureProvider::Zenflow
         | CaptureProvider::Zed => path == source.path,
-        CaptureProvider::Dexto => {
-            path == source.path
-                || (path.starts_with(&source.path)
-                    && path.extension().and_then(|ext| ext.to_str()) == Some("db")
-                    && source_dexto_sqlite_matches(path))
-        }
-        CaptureProvider::Pochi => {
-            path == source.path
-                || (path.starts_with(&source.path)
-                    && path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .is_some_and(|name| name.starts_with("state") && name.ends_with(".db")))
-        }
         CaptureProvider::MistralVibe => {
             path == source.path
                 || (path.file_name().and_then(|name| name.to_str()) == Some("messages.jsonl")
@@ -7047,45 +6638,8 @@ fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bool {
                     Some("chat.jsonl" | "partial.json")
                 ) && path.starts_with(&source.path))
         }
-        CaptureProvider::Moxby => path == source.path,
-        CaptureProvider::Reasonix => {
-            path == source.path
-                || (path.starts_with(&source.path)
-                    && path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .is_some_and(|name| {
-                            (name.ends_with(".jsonl") && !name.ends_with(".jsonl.bak"))
-                                || name.ends_with(".meta.json")
-                                || name.ends_with(".pending.json")
-                                || name.ends_with(".plan.json")
-                        }))
-        }
-        CaptureProvider::Adal => path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("conversation_") && name.ends_with(".jsonl")),
-        CaptureProvider::CommandCode => {
-            path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
-                && path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| {
-                        !name.ends_with(".checkpoints.jsonl")
-                            && !name.contains(".checkpoints.")
-                            && !name.contains(".prompts.")
-                    })
-        }
         CaptureProvider::RovoDev => {
             path.file_name().and_then(|name| name.to_str()) == Some("session_context.json")
-        }
-        CaptureProvider::CortexCode => {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| {
-                    (name.ends_with(".json") && !name.ends_with(".history.json"))
-                        || name.ends_with(".history.jsonl")
-                })
         }
         CaptureProvider::CopilotCli => {
             path.file_name().and_then(|name| name.to_str()) == Some("events.jsonl")
@@ -7129,21 +6683,9 @@ fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bool {
                     .components()
                     .any(|component| component.as_os_str() == "history")
         }
-        CaptureProvider::AiderDesk => {
-            path.file_name().and_then(|name| name.to_str()) == Some("context.json")
-                && path.starts_with(&source.path)
-        }
         CaptureProvider::Trae => {
             path.file_name().and_then(|name| name.to_str()) == Some("state.vscdb")
                 && (path == source.path || path.starts_with(&source.path))
-        }
-        CaptureProvider::TinyCloud => {
-            path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
-                && path
-                    .parent()
-                    .and_then(Path::file_name)
-                    .and_then(|name| name.to_str())
-                    == Some("sessions")
         }
         CaptureProvider::Zencoder => {
             path.file_name().and_then(|name| name.to_str()) == Some("sessions.json")
@@ -7154,47 +6696,15 @@ fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bool {
                         .and_then(|name| name.to_str())
                         == Some("sessions"))
         }
-        CaptureProvider::CodeStudio => {
-            path.file_name().and_then(|name| name.to_str()) == Some("session-store.db")
-                && (path == source.path || path.starts_with(&source.path))
-        }
         CaptureProvider::KimiCodeCli => {
             path.file_name().and_then(|name| name.to_str()) == Some("wire.jsonl")
                 && path
                     .components()
                     .any(|component| component.as_os_str() == "agents")
         }
-        CaptureProvider::AutohandCode => {
-            path.file_name().and_then(|name| name.to_str()) == Some("conversation.jsonl")
-                && path
-                    .parent()
-                    .is_some_and(|parent| parent.join("metadata.json").is_file())
-        }
-        CaptureProvider::IflowCli => path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("session-") && name.ends_with(".jsonl")),
-        CaptureProvider::Jazz => {
-            path.extension().and_then(|ext| ext.to_str()) == Some("json")
-                && path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| !name.starts_with(".history-"))
-        }
         CaptureProvider::Auggie => {
             path.extension().and_then(|ext| ext.to_str()) == Some("json")
                 && path.starts_with(&source.path)
-        }
-        CaptureProvider::Eve => {
-            path == source.path
-                || (path.starts_with(&source.path)
-                    && matches!(
-                        path.extension().and_then(|ext| ext.to_str()),
-                        Some("json" | "bin")
-                    )
-                    && path.components().any(|component| {
-                        matches!(component.as_os_str().to_str(), Some("runs" | "chunks"))
-                    }))
         }
         CaptureProvider::Junie => {
             path.file_name()
@@ -7206,53 +6716,24 @@ fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bool {
             path.file_name().and_then(|name| name.to_str()) == Some("chat_history.db")
                 && (path == source.path || path.starts_with(&source.path))
         }
-        CaptureProvider::Kode => {
+        CaptureProvider::OpenClaw => {
             path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
-                && path
-                    .components()
-                    .any(|component| component.as_os_str() == "projects")
-                && !path.components().any(|component| {
-                    matches!(
-                        component.as_os_str().to_str(),
-                        Some("requests" | "file-history")
-                    )
-                })
+                && path.starts_with(&source.path)
         }
-        CaptureProvider::Neovate => {
-            path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
-                && path
-                    .components()
-                    .any(|component| component.as_os_str() == "projects")
-                && !path.components().any(|component| {
-                    matches!(
-                        component.as_os_str().to_str(),
-                        Some("requests" | "file-history")
-                    )
-                })
-        }
-        _ => path.extension().and_then(|ext| ext.to_str()) == Some("jsonl"),
+        CaptureProvider::Hermes
+        | CaptureProvider::NanoClaw
+        | CaptureProvider::AstrBot
+        | CaptureProvider::Shelley
+        | CaptureProvider::OpenHands
+        | CaptureProvider::Cline
+        | CaptureProvider::RooCode
+        | CaptureProvider::Shell
+        | CaptureProvider::Git
+        | CaptureProvider::Jj
+        | CaptureProvider::Gh
+        | CaptureProvider::Custom
+        | CaptureProvider::Unknown => false,
     }
-}
-
-fn source_dexto_sqlite_matches(path: &Path) -> bool {
-    matches!(
-        Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .and_then(|conn| {
-            conn.query_row(
-                "select \
-                    (select count(*) from pragma_table_info('kv_store') \
-                     where name in ('key', 'value')), \
-                    (select count(*) from pragma_table_info('list_store') \
-                     where name in ('key', 'value', 'sequence'))",
-                [],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-            )
-        }),
-        Ok((2, 3))
-    )
 }
 
 fn system_time_ms(time: SystemTime) -> i64 {
@@ -7503,13 +6984,10 @@ fn source_uses_incremental_event_search(source: &SourceInfo) -> bool {
             | CaptureProvider::Cursor
             | CaptureProvider::OpenCode
             | CaptureProvider::CodeArtsAgent
-            | CaptureProvider::OpenLoaf
             | CaptureProvider::Kilo
             | CaptureProvider::KiroCli
             | CaptureProvider::Crush
             | CaptureProvider::Goose
-            | CaptureProvider::Dexto
-            | CaptureProvider::Pochi
             | CaptureProvider::Warp
             | CaptureProvider::Antigravity
             | CaptureProvider::Gemini
@@ -7521,34 +6999,19 @@ fn source_uses_incremental_event_search(source: &SourceInfo) -> bool {
             | CaptureProvider::Continue
             | CaptureProvider::QwenCode
             | CaptureProvider::KimiCodeCli
-            | CaptureProvider::AutohandCode
-            | CaptureProvider::IflowCli
-            | CaptureProvider::Jazz
             | CaptureProvider::Auggie
-            | CaptureProvider::Eve
             | CaptureProvider::Junie
             | CaptureProvider::Firebender
-            | CaptureProvider::Kode
-            | CaptureProvider::Neovate
             | CaptureProvider::ForgeCode
             | CaptureProvider::DeepAgents
             | CaptureProvider::MistralVibe
             | CaptureProvider::Mux
-            | CaptureProvider::Moxby
-            | CaptureProvider::Reasonix
-            | CaptureProvider::CommandCode
             | CaptureProvider::RovoDev
-            | CaptureProvider::CortexCode
-            | CaptureProvider::Terramind
             | CaptureProvider::Cline
             | CaptureProvider::RooCode
             | CaptureProvider::CodeBuddy
-            | CaptureProvider::AiderDesk
             | CaptureProvider::Trae
-            | CaptureProvider::TinyCloud
             | CaptureProvider::Zencoder
-            | CaptureProvider::Zenflow
-            | CaptureProvider::CodeStudio
     )
 }
 
@@ -7825,7 +7288,6 @@ fn import_support_json(support: ProviderImportSupport) -> &'static str {
     match support {
         ProviderImportSupport::Native => "native",
         ProviderImportSupport::Explicit => "explicit",
-        ProviderImportSupport::Preview => "preview",
         ProviderImportSupport::Unsupported => "unsupported",
     }
 }

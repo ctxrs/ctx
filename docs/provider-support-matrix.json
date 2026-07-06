@@ -1073,8 +1073,8 @@
             "ctx import --provider nanoclaw --path <project-root>"
           ],
           "notes": [
-            "Preview importer for a NanoClaw project root containing data/v2.db and data/v2-sessions/*/*/{inbound.db,outbound.db}.",
-            "Project roots are discovered from the current working directory and ancestors, but preview sources are not imported by ctx import --all or pre-search refresh."
+            "Explicit-path importer for a NanoClaw project root containing data/v2.db and data/v2-sessions/*/*/{inbound.db,outbound.db}.",
+            "Project roots are discovered from the current working directory and ancestors, but explicit-only sources are not imported by ctx import --all or pre-search refresh."
           ]
         }
       ],
@@ -1100,7 +1100,7 @@
         "parent_child_session_edges": false
       },
       "redaction_notes": [
-        "Manual preview imports may include IM/chat channel identifiers stored in NanoClaw project databases."
+        "Explicit NanoClaw imports may include IM/chat channel identifiers stored in NanoClaw project databases."
       ],
       "blockers": [
         "Automatic refresh is intentionally disabled until more real-world NanoClaw project layout drift is validated."

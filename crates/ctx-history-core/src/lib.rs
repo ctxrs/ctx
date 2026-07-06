@@ -186,7 +186,6 @@ text_enum! {
         Claude => "claude",
         Pi => "pi",
         OpenCode => "opencode",
-        OpenLoaf => "openloaf",
         Kilo => "kilo",
         KiroCli => "kiro_cli",
         Antigravity => "antigravity",
@@ -199,24 +198,13 @@ text_enum! {
         FactoryAiDroid => "factory_ai_droid",
         QwenCode => "qwen_code",
         KimiCodeCli => "kimi_code_cli",
-        AutohandCode => "autohand_code",
-        IflowCli => "iflow_cli",
-        Jazz => "jazz",
         Auggie => "auggie",
-        Eve => "eve",
         Junie => "junie",
         Firebender => "firebender",
         ForgeCode => "forgecode",
         DeepAgents => "deepagents",
         MistralVibe => "mistral_vibe",
         Mux => "mux",
-        Moxby => "moxby",
-        Reasonix => "reasonix",
-        Adal => "adal",
-        Kode => "kode",
-        Neovate => "neovate",
-        CommandCode => "command_code",
-        Terramind => "terramind",
         RovoDev => "rovodev",
         OpenClaw => "openclaw",
         Hermes => "hermes",
@@ -227,23 +215,15 @@ text_enum! {
         OpenHands => "openhands",
         Cline => "cline",
         RooCode => "roo_code",
-        Bob => "bob",
         Crush => "crush",
         Goose => "goose",
-        Dexto => "dexto",
         Lingma => "lingma",
         Qoder => "qoder",
-        Pochi => "pochi",
         Warp => "warp",
-        CortexCode => "cortex_code",
         CodeBuddy => "codebuddy",
-        AiderDesk => "aider_desk",
         Trae => "trae",
-        TinyCloud => "tinycloud",
         CodeArtsAgent => "codearts_agent",
         Zencoder => "zencoder",
-        Zenflow => "zenflow",
-        CodeStudio => "codestudio",
         Shell => "shell",
         Git => "git",
         Jj => "jj",
@@ -1569,72 +1549,24 @@ mod tests {
             CaptureProvider::KimiCodeCli
         );
         assert_eq!(
-            serde_json::from_str::<CaptureProvider>("\"autohand_code\"").unwrap(),
-            CaptureProvider::AutohandCode
-        );
-        assert_eq!(
-            serde_json::from_str::<CaptureProvider>("\"iflow_cli\"").unwrap(),
-            CaptureProvider::IflowCli
-        );
-        assert_eq!(
-            serde_json::from_str::<CaptureProvider>("\"jazz\"").unwrap(),
-            CaptureProvider::Jazz
-        );
-        assert_eq!(
             serde_json::from_str::<CaptureProvider>("\"forgecode\"").unwrap(),
             CaptureProvider::ForgeCode
-        );
-        assert_eq!(
-            serde_json::from_str::<CaptureProvider>("\"terramind\"").unwrap(),
-            CaptureProvider::Terramind
         );
         assert_eq!(
             serde_json::from_str::<CaptureProvider>("\"mistral_vibe\"").unwrap(),
             CaptureProvider::MistralVibe
         );
         assert_eq!(
-            serde_json::from_str::<CaptureProvider>("\"aider_desk\"").unwrap(),
-            CaptureProvider::AiderDesk
-        );
-        assert_eq!(
             serde_json::from_str::<CaptureProvider>("\"mux\"").unwrap(),
             CaptureProvider::Mux
-        );
-        assert_eq!(
-            serde_json::from_str::<CaptureProvider>("\"reasonix\"").unwrap(),
-            CaptureProvider::Reasonix
-        );
-        assert_eq!(
-            serde_json::from_str::<CaptureProvider>("\"adal\"").unwrap(),
-            CaptureProvider::Adal
-        );
-        assert_eq!(
-            serde_json::from_str::<CaptureProvider>("\"kode\"").unwrap(),
-            CaptureProvider::Kode
-        );
-        assert_eq!(
-            serde_json::from_str::<CaptureProvider>("\"neovate\"").unwrap(),
-            CaptureProvider::Neovate
-        );
-        assert_eq!(
-            serde_json::from_str::<CaptureProvider>("\"command_code\"").unwrap(),
-            CaptureProvider::CommandCode
         );
         assert_eq!(
             serde_json::from_str::<CaptureProvider>("\"rovodev\"").unwrap(),
             CaptureProvider::RovoDev
         );
         assert_eq!(
-            serde_json::from_str::<CaptureProvider>("\"cortex_code\"").unwrap(),
-            CaptureProvider::CortexCode
-        );
-        assert_eq!(
             serde_json::from_str::<CaptureProvider>("\"lingma\"").unwrap(),
             CaptureProvider::Lingma
-        );
-        assert_eq!(
-            serde_json::from_str::<CaptureProvider>("\"bob\"").unwrap(),
-            CaptureProvider::Bob
         );
 
         let sync: SyncMetadata = serde_json::from_value(json!({})).unwrap();
