@@ -455,7 +455,7 @@ fn native_opencode_reports_malformed_and_corrupt_db() {
 }
 
 #[test]
-fn native_opencode_accepts_schema_without_model_column() {
+fn native_opencode_rejects_empty_current_schema_without_model_column() {
     let temp = tempdir();
     let fixture = write_opencode_current_schema_db(&temp, false);
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
@@ -470,9 +470,13 @@ fn native_opencode_accepts_schema_without_model_column() {
     )
     .unwrap();
 
-    assert_eq!(summary.failed, 0);
+    assert_eq!(summary.failed, 1);
+    assert!(summary.failures[0]
+        .error
+        .contains("no real conversational message rows"));
     assert_eq!(summary.imported_sessions, 0);
     assert_eq!(summary.imported_events, 0);
+    assert!(store.list_sessions().unwrap().is_empty());
 }
 
 #[test]
@@ -502,6 +506,204 @@ fn native_opencode_imports_legacy_message_table_when_session_message_is_absent()
         events[0].sync.metadata["source_format"].as_str(),
         Some(OPENCODE_SQLITE_SOURCE_FORMAT)
     );
+    assert!(events[0].payload.to_string().contains("legacy hello"));
+}
+
+#[test]
+fn native_opencode_falls_back_when_session_message_is_metadata_only() {
+    let temp = tempdir();
+    let fixture = write_opencode_session_message_metadata_with_legacy_message_db(&temp);
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let summary = import_opencode_sqlite(
+        &fixture,
+        &mut store,
+        OpenCodeSqliteImportOptions {
+            allow_partial_failures: true,
+            ..OpenCodeSqliteImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+    assert_eq!(summary.imported_sessions, 1);
+    assert_eq!(summary.imported_events, 1);
+    let session_id = store
+        .session_by_external_session(CaptureProvider::OpenCode, "strict-root")
+        .unwrap()
+        .unwrap()
+        .id;
+    let events = store.events_for_session(session_id).unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(events[0]
+        .payload
+        .to_string()
+        .contains("legacy fallback prompt"));
+    let session = store.get_session(session_id).unwrap();
+    assert_eq!(
+        session.sync.metadata["metadata"]["legacy_projection"]["selected_message_table"].as_str(),
+        Some("message")
+    );
+}
+
+#[test]
+fn native_opencode_rejects_malformed_authoritative_rows_without_legacy_fallback() {
+    let temp = tempdir();
+    let fixture = write_opencode_session_message_malformed_with_legacy_message_db(&temp);
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let summary = import_opencode_sqlite(
+        &fixture,
+        &mut store,
+        OpenCodeSqliteImportOptions {
+            allow_partial_failures: true,
+            ..OpenCodeSqliteImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 1, "{:?}", summary.failures);
+    assert!(summary.failures[0].error.contains("invalid JSON"));
+    assert_eq!(summary.imported_sessions, 0);
+    assert_eq!(summary.imported_events, 0);
+    assert!(store.list_sessions().unwrap().is_empty());
+}
+
+#[test]
+fn native_opencode_rejects_malformed_metadata_authoritative_rows_without_legacy_fallback() {
+    let temp = tempdir();
+    let fixture = write_opencode_session_message_metadata_bad_seq_with_legacy_message_db(&temp);
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let summary = import_opencode_sqlite(
+        &fixture,
+        &mut store,
+        OpenCodeSqliteImportOptions {
+            allow_partial_failures: true,
+            ..OpenCodeSqliteImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 1, "{summary:?}");
+    assert!(summary.failures[0]
+        .error
+        .contains("OpenCode session_message seq must be nonnegative"));
+    assert_eq!(summary.imported_sessions, 0);
+    assert_eq!(summary.imported_events, 0);
+    assert!(store.list_sessions().unwrap().is_empty());
+}
+
+#[test]
+fn native_opencode_rejects_tool_only_sqlite_rows() {
+    let temp = tempdir();
+    let fixture = write_opencode_tool_only_db(&temp, "opencode-tool-only.db");
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let summary = import_opencode_sqlite(
+        &fixture,
+        &mut store,
+        OpenCodeSqliteImportOptions {
+            allow_partial_failures: true,
+            ..OpenCodeSqliteImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 1);
+    assert!(summary.failures[0]
+        .error
+        .contains("no real conversational message rows"));
+    assert_eq!(summary.imported_sessions, 0);
+    assert_eq!(summary.imported_events, 0);
+    assert!(store.list_sessions().unwrap().is_empty());
+}
+
+#[test]
+fn native_opencode_falls_back_when_session_entry_is_metadata_only() {
+    let temp = tempdir();
+    let fixture = write_opencode_session_entry_metadata_with_legacy_message_db(&temp);
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let summary = import_opencode_sqlite(
+        &fixture,
+        &mut store,
+        OpenCodeSqliteImportOptions {
+            allow_partial_failures: true,
+            ..OpenCodeSqliteImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+    assert_eq!(summary.imported_sessions, 1);
+    assert_eq!(summary.imported_events, 1);
+    let session_id = store
+        .session_by_external_session(CaptureProvider::OpenCode, "strict-root")
+        .unwrap()
+        .unwrap()
+        .id;
+    let events = store.events_for_session(session_id).unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(events[0]
+        .payload
+        .to_string()
+        .contains("legacy fallback prompt"));
+    let session = store.get_session(session_id).unwrap();
+    assert_eq!(
+        session.sync.metadata["metadata"]["legacy_projection"]["selected_message_table"].as_str(),
+        Some("message")
+    );
+}
+
+#[test]
+fn native_kilo_rejects_metadata_only_sqlite_rows() {
+    let temp = tempdir();
+    let fixture = write_opencode_all_metadata_db(&temp, "kilo-all-metadata.db");
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let summary = import_kilo_sqlite(
+        &fixture,
+        &mut store,
+        KiloSqliteImportOptions {
+            allow_partial_failures: true,
+            ..KiloSqliteImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 1);
+    assert!(summary.failures[0]
+        .error
+        .contains("no real conversational message rows"));
+    assert_eq!(summary.imported_sessions, 0);
+    assert_eq!(summary.imported_events, 0);
+    assert!(store.list_sessions().unwrap().is_empty());
+}
+
+#[test]
+fn native_kilo_rejects_tool_only_sqlite_rows() {
+    let temp = tempdir();
+    let fixture = write_opencode_tool_only_db(&temp, "kilo-tool-only.db");
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let summary = import_kilo_sqlite(
+        &fixture,
+        &mut store,
+        KiloSqliteImportOptions {
+            allow_partial_failures: true,
+            ..KiloSqliteImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 1);
+    assert!(summary.failures[0]
+        .error
+        .contains("no real conversational message rows"));
+    assert_eq!(summary.imported_sessions, 0);
+    assert_eq!(summary.imported_events, 0);
+    assert!(store.list_sessions().unwrap().is_empty());
 }
 
 #[test]

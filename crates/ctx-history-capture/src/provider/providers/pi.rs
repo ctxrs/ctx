@@ -14,6 +14,7 @@ use ctx_history_core::{
 use serde_json::{json, Value};
 
 use crate::provider::providers::native_jsonl::native_jsonl_missing_reason;
+use crate::provider::providers::real_content::event_has_real_conversation_content;
 
 use crate::common::io::{
     collect_jsonl_paths, ensure_regular_provider_transcript_file, read_provider_jsonl_line,
@@ -92,6 +93,8 @@ pub(crate) fn normalize_pi_session_jsonl_file(
     let mut reader = BufReader::new(file);
     let mut result = ProviderNormalizationResult::default();
     let mut header = None;
+    let mut captures = Vec::new();
+    let mut has_real_message_content = false;
     let mut line = Vec::new();
     let mut line_number = 0usize;
 
@@ -119,9 +122,7 @@ pub(crate) fn normalize_pi_session_jsonl_file(
         if entry_type == "session" {
             match pi_session_header(value) {
                 Ok(parsed) => {
-                    let capture = pi_session_capture(&parsed, None, line_number, context)?;
                     header = Some(parsed);
-                    result.captures.push((line_number, capture));
                 }
                 Err(err) => {
                     result.summary.failed += 1;
@@ -143,7 +144,16 @@ pub(crate) fn normalize_pi_session_jsonl_file(
             continue;
         };
         match pi_session_capture(header, Some(value), line_number, context) {
-            Ok(capture) => result.captures.push((line_number, capture)),
+            Ok(capture) => {
+                if capture
+                    .event
+                    .as_ref()
+                    .is_some_and(pi_event_has_real_message_content)
+                {
+                    has_real_message_content = true;
+                }
+                captures.push((line_number, capture));
+            }
             Err(err) => {
                 result.summary.failed += 1;
                 result.summary.failures.push(ProviderImportFailure {
@@ -154,8 +164,26 @@ pub(crate) fn normalize_pi_session_jsonl_file(
         }
     }
 
+    if has_real_message_content {
+        result.captures = captures;
+    } else if result.summary.failed == 0 {
+        result.summary.failed += 1;
+        result.summary.failures.push(ProviderImportFailure {
+            line: line_number,
+            error: "pi session JSONL contained no real message content".to_owned(),
+        });
+    }
+
     Ok(result)
 }
+
+pub(crate) fn pi_event_has_real_message_content(event: &ProviderEventEnvelope) -> bool {
+    event_has_real_conversation_content(
+        event.event_type,
+        event.payload.get("text").and_then(Value::as_str),
+    )
+}
+
 pub(crate) fn pi_session_header(value: Value) -> Result<PiSessionHeader> {
     let id = value
         .get("id")

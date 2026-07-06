@@ -734,6 +734,175 @@ pub(super) fn write_opencode_current_schema_db(temp: &TempDir, with_message: boo
     path
 }
 
+pub(super) fn write_opencode_session_message_metadata_with_legacy_message_db(
+    temp: &TempDir,
+) -> PathBuf {
+    write_opencode_strict_real_content_db(
+        temp,
+        "opencode-session-message-metadata-legacy.db",
+        true,
+        false,
+        true,
+        false,
+    )
+}
+
+pub(super) fn write_opencode_session_message_malformed_with_legacy_message_db(
+    temp: &TempDir,
+) -> PathBuf {
+    let path = write_opencode_strict_real_content_db(
+        temp,
+        "opencode-session-message-malformed-legacy.db",
+        true,
+        false,
+        true,
+        false,
+    );
+    let conn = Connection::open(&path).unwrap();
+    conn.execute(
+        "update session_message set data = ?1 where id = 'metadata-session-message'",
+        ["{\"time\":{\"created\":1782259200000},\"text\":"],
+    )
+    .unwrap();
+    path
+}
+
+pub(super) fn write_opencode_session_message_metadata_bad_seq_with_legacy_message_db(
+    temp: &TempDir,
+) -> PathBuf {
+    let path = write_opencode_session_message_metadata_with_legacy_message_db(temp);
+    let conn = Connection::open(&path).unwrap();
+    conn.execute(
+        "update session_message set seq = -1 where id = 'metadata-session-message'",
+        [],
+    )
+    .unwrap();
+    path
+}
+
+pub(super) fn write_opencode_session_entry_metadata_with_legacy_message_db(
+    temp: &TempDir,
+) -> PathBuf {
+    write_opencode_strict_real_content_db(
+        temp,
+        "opencode-session-entry-metadata-legacy.db",
+        false,
+        true,
+        true,
+        false,
+    )
+}
+
+pub(super) fn write_opencode_all_metadata_db(temp: &TempDir, name: &str) -> PathBuf {
+    write_opencode_strict_real_content_db(temp, name, true, true, false, true)
+}
+
+pub(super) fn write_opencode_tool_only_db(temp: &TempDir, name: &str) -> PathBuf {
+    let path = write_opencode_strict_real_content_db(temp, name, false, false, false, false);
+    let conn = Connection::open(&path).unwrap();
+    conn.execute(
+        "insert into session_message values (
+                'tool-only-session-message', 'strict-root', 'assistant', 1,
+                1782259200000, 1782259200000, ?1
+            )",
+        ["{\"time\":{\"created\":1782259200000},\"content\":[{\"type\":\"tool\",\"name\":\"bash\",\"input\":{\"command\":\"true\"}}]}"],
+    )
+    .unwrap();
+    path
+}
+
+fn write_opencode_strict_real_content_db(
+    temp: &TempDir,
+    name: &str,
+    session_message_metadata: bool,
+    session_entry_metadata: bool,
+    legacy_real_message: bool,
+    legacy_metadata_message: bool,
+) -> PathBuf {
+    let path = temp.path().join(name);
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "create table session (
+                id text primary key,
+                title text not null,
+                directory text not null,
+                time_created integer not null,
+                time_updated integer not null
+            );
+            create table session_message (
+                id text primary key,
+                session_id text not null,
+                type text not null,
+                seq integer not null,
+                time_created integer not null,
+                time_updated integer not null,
+                data text not null
+            );
+            create table session_entry (
+                id text primary key,
+                session_id text not null,
+                type text not null,
+                time_created integer not null,
+                time_updated integer not null,
+                data text not null
+            );
+            create table message (
+                id text primary key,
+                session_id text not null,
+                time_created integer not null,
+                time_updated integer not null,
+                data text not null
+            );",
+    )
+    .unwrap();
+    conn.execute(
+        "insert into session values (
+                'strict-root', 'strict root', '/workspace', 1782259200000, 1782259200000
+            )",
+        [],
+    )
+    .unwrap();
+    if session_message_metadata {
+        conn.execute(
+                "insert into session_message values (
+                    'metadata-session-message', 'strict-root', 'model_change', 1,
+                    1782259200000, 1782259200000, ?1
+                )",
+                ["{\"time\":{\"created\":1782259200000},\"provider\":\"openai\",\"model\":\"metadata-only\"}"],
+            )
+            .unwrap();
+    }
+    if session_entry_metadata {
+        conn.execute(
+            "insert into session_entry values (
+                    'metadata-session-entry', 'strict-root', 'label',
+                    1782259200001, 1782259200001, ?1
+                )",
+            ["{\"time\":{\"created\":1782259200001},\"label\":\"metadata-only\"}"],
+        )
+        .unwrap();
+    }
+    if legacy_real_message {
+        conn.execute(
+            "insert into message values (
+                    'legacy-real-message', 'strict-root', 1782259200002, 1782259200002, ?1
+                )",
+            ["{\"role\":\"user\",\"time\":{\"created\":1782259200002},\"text\":\"legacy fallback prompt\"}"],
+        )
+        .unwrap();
+    }
+    if legacy_metadata_message {
+        conn.execute(
+            "insert into message values (
+                    'legacy-metadata-message', 'strict-root', 1782259200002, 1782259200002, ?1
+                )",
+            ["{\"type\":\"model_change\",\"time\":{\"created\":1782259200002},\"model\":\"metadata-only-legacy\"}"],
+        )
+        .unwrap();
+    }
+    path
+}
+
 pub(super) fn write_opencode_future_incomplete_schema_db(temp: &TempDir) -> PathBuf {
     let path = temp.path().join("opencode-future-incomplete.db");
     let conn = Connection::open(&path).unwrap();

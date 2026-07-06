@@ -24,6 +24,7 @@ use crate::provider::native::{
     provider_line_from_index, provider_local_preview, provider_nonnegative_i64_to_u64,
     provider_required_timestamp_millis, provider_role, provider_value_text,
 };
+use crate::provider::providers::real_content::text_has_real_content;
 use crate::{
     CaptureError, ProviderAdapterContext, ProviderNormalizationResult, Result,
     KILO_SQLITE_SOURCE_FORMAT, OPENCODE_SQLITE_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS,
@@ -60,6 +61,13 @@ pub(crate) const KILO_SQLITE_DIALECT: OpenCodeSqliteDialect = OpenCodeSqliteDial
     event_time_created_field: "Kilo event time.created",
 };
 
+#[derive(Debug, Clone)]
+pub(crate) struct OpenCodeMessageSelection {
+    pub(crate) rows: Vec<OpenCodeMessageRow>,
+    pub(crate) source_table: Option<&'static str>,
+    pub(crate) skipped_non_conversational_rows: usize,
+}
+
 pub(crate) fn normalize_opencode_sqlite(
     path: &Path,
     context: &ProviderAdapterContext,
@@ -71,8 +79,23 @@ pub(crate) fn normalize_opencode_sqlite(
     let legacy_message_rows = opencode_count(&conn, "message").unwrap_or(0);
     let legacy_part_rows = opencode_count(&conn, "part").unwrap_or(0);
     let sessions = opencode_sessions(&conn, dialect)?;
-    let messages = opencode_session_messages(&conn, dialect)?;
+    let session_ids = sessions
+        .iter()
+        .map(|session| session.id.clone())
+        .collect::<BTreeSet<_>>();
+    let message_selection = opencode_session_messages(&conn, dialect, &session_ids)?;
     let mut result = ProviderNormalizationResult::default();
+    if message_selection.rows.is_empty() {
+        push_provider_import_failure(
+            &mut result.summary,
+            0,
+            format!(
+                "{} SQLite database contained no real conversational message rows",
+                dialect.display_name
+            ),
+        );
+        return Ok(result);
+    }
     let mut session_started = BTreeMap::new();
     for session in &sessions {
         session_started.insert(
@@ -88,8 +111,10 @@ pub(crate) fn normalize_opencode_sqlite(
         .map(|session| (session.id.clone(), session))
         .collect::<BTreeMap<_, _>>();
     let raw_source_path = path.display().to_string();
+    let message_source_table = message_selection.source_table;
+    let skipped_non_conversational_rows = message_selection.skipped_non_conversational_rows;
 
-    for row in messages {
+    for row in message_selection.rows {
         let provider_event_index =
             match provider_nonnegative_i64_to_u64(row.seq, dialect.session_message_seq_field) {
                 Ok(value) => value,
@@ -236,7 +261,9 @@ pub(crate) fn normalize_opencode_sqlite(
                         "legacy_projection": {
                             "message_rows": legacy_message_rows,
                             "part_rows": legacy_part_rows,
-                            "import_policy": "session_message is authoritative; legacy message/part rows are retained as schema reference rows to avoid duplicate turn import"
+                            "selected_message_table": message_source_table,
+                            "skipped_non_conversational_rows": skipped_non_conversational_rows,
+                            "import_policy": "session_message/session_entry are authoritative only when they contain real conversational content; otherwise legacy message rows may be used"
                         },
                     }),
                 },
@@ -318,23 +345,68 @@ pub(crate) fn opencode_sessions(
 pub(crate) fn opencode_session_messages(
     conn: &Connection,
     dialect: &OpenCodeSqliteDialect,
-) -> Result<Vec<OpenCodeMessageRow>> {
+    session_ids: &BTreeSet<String>,
+) -> Result<OpenCodeMessageSelection> {
+    let mut skipped_non_conversational_rows = 0usize;
     if sqlite_table_exists(conn, "session_message")? {
         let rows = opencode_session_message_rows(conn, dialect)?;
-        if !rows.is_empty() {
-            return Ok(rows);
+        if opencode_rows_have_import_blocking_errors(&rows, session_ids, dialect) {
+            return Ok(OpenCodeMessageSelection {
+                rows,
+                source_table: Some("session_message"),
+                skipped_non_conversational_rows,
+            });
         }
+        if opencode_rows_have_real_message_content(&rows) {
+            return Ok(OpenCodeMessageSelection {
+                rows,
+                source_table: Some("session_message"),
+                skipped_non_conversational_rows,
+            });
+        }
+        skipped_non_conversational_rows += rows.len();
     }
     if sqlite_table_exists(conn, "session_entry")? {
         let rows = opencode_session_entry_rows(conn, dialect)?;
-        if !rows.is_empty() {
-            return Ok(rows);
+        if opencode_rows_have_import_blocking_errors(&rows, session_ids, dialect) {
+            return Ok(OpenCodeMessageSelection {
+                rows,
+                source_table: Some("session_entry"),
+                skipped_non_conversational_rows,
+            });
         }
+        if opencode_rows_have_real_message_content(&rows) {
+            return Ok(OpenCodeMessageSelection {
+                rows,
+                source_table: Some("session_entry"),
+                skipped_non_conversational_rows,
+            });
+        }
+        skipped_non_conversational_rows += rows.len();
     }
     if sqlite_table_exists(conn, "message")? {
-        return opencode_message_rows(conn, dialect);
+        let rows = opencode_message_rows(conn, dialect)?;
+        if opencode_rows_have_import_blocking_errors(&rows, session_ids, dialect) {
+            return Ok(OpenCodeMessageSelection {
+                rows,
+                source_table: Some("message"),
+                skipped_non_conversational_rows,
+            });
+        }
+        if opencode_rows_have_real_message_content(&rows) {
+            return Ok(OpenCodeMessageSelection {
+                rows,
+                source_table: Some("message"),
+                skipped_non_conversational_rows,
+            });
+        }
+        skipped_non_conversational_rows += rows.len();
     }
-    Ok(Vec::new())
+    Ok(OpenCodeMessageSelection {
+        rows: Vec::new(),
+        source_table: None,
+        skipped_non_conversational_rows,
+    })
 }
 
 pub(crate) fn opencode_session_message_rows(
@@ -380,6 +452,7 @@ pub(crate) fn opencode_session_message_rows(
     let mut next_seq_by_session = BTreeMap::<String, i64>::new();
     for (id, session_id, entry_type, seq, time_created, time_updated, data) in rows {
         let seq = seq.unwrap_or_else(|| next_opencode_seq(&mut next_seq_by_session, &session_id));
+        let entry_type = opencode_entry_type_from_data(&entry_type, &data);
         messages.push(OpenCodeMessageRow {
             id,
             session_id,
@@ -391,6 +464,16 @@ pub(crate) fn opencode_session_message_rows(
         });
     }
     Ok(messages)
+}
+
+pub(crate) fn opencode_entry_type_from_data(fallback: &str, data: &str) -> String {
+    if !fallback.trim().is_empty() && fallback != "message" {
+        return fallback.to_owned();
+    }
+    serde_json::from_str::<Value>(data)
+        .ok()
+        .and_then(|value| opencode_message_type_from_data(&value))
+        .unwrap_or_else(|| fallback.to_owned())
 }
 
 pub(crate) fn opencode_session_entry_rows(
@@ -505,6 +588,88 @@ pub(crate) fn opencode_message_type_from_data(data: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .map(str::to_owned)
+}
+
+pub(crate) fn opencode_rows_have_real_message_content(rows: &[OpenCodeMessageRow]) -> bool {
+    rows.iter().any(opencode_message_row_has_real_content)
+}
+
+pub(crate) fn opencode_rows_have_import_blocking_errors(
+    rows: &[OpenCodeMessageRow],
+    session_ids: &BTreeSet<String>,
+    dialect: &OpenCodeSqliteDialect,
+) -> bool {
+    rows.iter().any(|row| {
+        provider_nonnegative_i64_to_u64(row.seq, dialect.session_message_seq_field).is_err()
+            || !session_ids.contains(&row.session_id)
+            || opencode_row_has_invalid_time_or_json(row, dialect)
+    })
+}
+
+pub(crate) fn opencode_row_has_invalid_time_or_json(
+    row: &OpenCodeMessageRow,
+    dialect: &OpenCodeSqliteDialect,
+) -> bool {
+    let Ok(data) = serde_json::from_str::<Value>(&row.data) else {
+        return true;
+    };
+    match opencode_event_time(&data, dialect) {
+        Ok(Some(_)) => false,
+        Ok(None) => provider_required_timestamp_millis(
+            row.time_created,
+            dialect.session_message_time_created_field,
+        )
+        .is_err(),
+        Err(_) => true,
+    }
+}
+
+pub(crate) fn opencode_message_row_has_real_content(row: &OpenCodeMessageRow) -> bool {
+    let Ok(data) = serde_json::from_str::<Value>(&row.data) else {
+        return false;
+    };
+    opencode_data_has_real_message_content(&row.entry_type, &data)
+}
+
+pub(crate) fn opencode_data_has_real_message_content(entry_type: &str, data: &Value) -> bool {
+    if !matches!(entry_type, "assistant" | "user" | "system") {
+        return false;
+    }
+    ["text", "content", "message"]
+        .into_iter()
+        .any(|key| data.get(key).is_some_and(opencode_value_has_real_content))
+}
+
+pub(crate) fn opencode_value_has_real_content(value: &Value) -> bool {
+    match value {
+        Value::String(text) => text_has_real_content(Some(text)),
+        Value::Array(values) => values.iter().any(opencode_value_has_real_content),
+        Value::Object(object) => {
+            if object
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| {
+                    matches!(
+                        kind,
+                        "tool"
+                            | "tool_use"
+                            | "toolCall"
+                            | "function_call"
+                            | "agent"
+                            | "tool_result"
+                    )
+                })
+            {
+                return false;
+            }
+            [
+                "text", "content", "output", "summary", "thinking", "command",
+            ]
+            .into_iter()
+            .any(|key| object.get(key).is_some_and(opencode_value_has_real_content))
+        }
+        Value::Number(_) | Value::Bool(_) | Value::Null => false,
+    }
 }
 
 pub(crate) fn sqlite_table_exists(conn: &Connection, table: &str) -> Result<bool> {

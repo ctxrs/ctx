@@ -274,6 +274,34 @@ fn pi_session_import_replays_documented_session_jsonl_and_is_idempotent() {
 }
 
 #[test]
+fn pi_session_import_rejects_header_only_session_jsonl() {
+    let temp = tempdir();
+    let path = temp.path().join("header-only-pi.jsonl");
+    fs::write(
+        &path,
+        jsonl_line(json!({
+            "type": "session",
+            "id": "pi-header-only",
+            "timestamp": "2026-07-03T12:00:00Z",
+            "version": 1
+        })),
+    )
+    .unwrap();
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let summary =
+        import_pi_session_jsonl(&path, &mut store, PiSessionImportOptions::default()).unwrap();
+
+    assert_eq!(summary.failed, 1);
+    assert!(summary.failures[0]
+        .error
+        .contains("no real message content"));
+    assert_eq!(summary.imported_sessions, 0);
+    assert_eq!(summary.imported_events, 0);
+    assert!(store.list_sessions().unwrap().is_empty());
+}
+
+#[test]
 fn pi_session_import_rejects_malformed_event_timestamp() {
     let temp = tempdir();
     let path = temp.path().join("bad-timestamp-pi.jsonl");
@@ -557,13 +585,86 @@ fn pi_session_import_reuses_legacy_line_indexed_event_by_entry_id_after_line_shi
 }
 
 #[test]
-fn pi_session_import_extracts_text_from_non_message_entries() {
+fn pi_session_import_rejects_non_message_only_entries() {
+    let temp = tempdir();
+    let fixture = temp.path().join("pi-non-message-only.jsonl");
+    fs::write(
+        &fixture,
+        concat!(
+            "{\"type\":\"session\",\"version\":3,\"id\":\"pi-non-message-only\",\"timestamp\":\"2026-06-24T12:00:00Z\",\"cwd\":\"/workspace\"}\n",
+            "{\"type\":\"compaction\",\"id\":\"compact-entry\",\"timestamp\":\"2026-06-24T12:00:01Z\",\"summary\":\"compacted plan only\"}\n",
+            "{\"type\":\"model_change\",\"id\":\"model-entry\",\"timestamp\":\"2026-06-24T12:00:02Z\",\"provider\":\"google\",\"modelId\":\"gemini-2.5-flash\"}\n",
+            "{\"type\":\"label\",\"id\":\"label-entry\",\"timestamp\":\"2026-06-24T12:00:03Z\",\"label\":\"label only\"}\n",
+        ),
+    )
+    .unwrap();
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let summary = import_pi_session_jsonl(
+        &fixture,
+        &mut store,
+        PiSessionImportOptions {
+            source_path: Some(fixture.clone()),
+            imported_at: "2026-06-24T16:00:00Z".parse().unwrap(),
+            ..PiSessionImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 1);
+    assert!(summary.failures[0]
+        .error
+        .contains("no real message content"));
+    assert_eq!(summary.imported_sessions, 0);
+    assert_eq!(summary.imported_events, 0);
+    assert!(store.list_sessions().unwrap().is_empty());
+}
+
+#[test]
+fn pi_session_import_rejects_tool_only_entries() {
+    let temp = tempdir();
+    let fixture = temp.path().join("pi-tool-only.jsonl");
+    fs::write(
+        &fixture,
+        concat!(
+            "{\"type\":\"session\",\"version\":3,\"id\":\"pi-tool-only\",\"timestamp\":\"2026-06-24T12:00:00Z\",\"cwd\":\"/workspace\"}\n",
+            "{\"type\":\"message\",\"id\":\"tool-call-entry\",\"timestamp\":\"2026-06-24T12:00:01Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"toolCall\",\"name\":\"bash\",\"input\":{\"command\":\"true\"}}]}}\n",
+            "{\"type\":\"message\",\"id\":\"tool-result-entry\",\"timestamp\":\"2026-06-24T12:00:02Z\",\"message\":{\"role\":\"toolResult\",\"content\":\"ok\"}}\n",
+            "{\"type\":\"message\",\"id\":\"bash-entry\",\"timestamp\":\"2026-06-24T12:00:03Z\",\"message\":{\"role\":\"bashExecution\",\"command\":\"true\",\"output\":\"ok\"}}\n",
+        ),
+    )
+    .unwrap();
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let summary = import_pi_session_jsonl(
+        &fixture,
+        &mut store,
+        PiSessionImportOptions {
+            source_path: Some(fixture.clone()),
+            imported_at: "2026-06-24T16:00:00Z".parse().unwrap(),
+            ..PiSessionImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 1);
+    assert!(summary.failures[0]
+        .error
+        .contains("no real message content"));
+    assert_eq!(summary.imported_sessions, 0);
+    assert_eq!(summary.imported_events, 0);
+    assert!(store.list_sessions().unwrap().is_empty());
+}
+
+#[test]
+fn pi_session_import_keeps_metadata_entries_when_real_messages_exist() {
     let temp = tempdir();
     let fixture = temp.path().join("pi-non-message-text.jsonl");
     fs::write(
             &fixture,
             concat!(
                 "{\"type\":\"session\",\"version\":3,\"id\":\"pi-non-message-text\",\"timestamp\":\"2026-06-24T12:00:00Z\",\"cwd\":\"/workspace\"}\n",
+                "{\"type\":\"message\",\"id\":\"real-user-entry\",\"timestamp\":\"2026-06-24T12:00:00.500Z\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"mixed real prompt\"}]}}\n",
                 "{\"type\":\"compaction\",\"id\":\"compact-entry\",\"timestamp\":\"2026-06-24T12:00:01Z\",\"summary\":\"compacted plan oracle\"}\n",
                 "{\"type\":\"branch_summary\",\"id\":\"branch-entry\",\"timestamp\":\"2026-06-24T12:00:02Z\",\"summary\":\"branch summary oracle\"}\n",
                 "{\"type\":\"custom_message\",\"id\":\"custom-message-entry\",\"timestamp\":\"2026-06-24T12:00:03Z\",\"content\":[{\"type\":\"text\",\"text\":\"custom message oracle\"}]}\n",
@@ -589,7 +690,7 @@ fn pi_session_import_extracts_text_from_non_message_entries() {
     .unwrap();
 
     assert_eq!(summary.failed, 0, "{:?}", summary.failures);
-    assert_eq!(summary.imported_events, 8);
+    assert_eq!(summary.imported_events, 9);
     let session_id = provider_session_uuid(CaptureProvider::Pi, "pi-non-message-text");
     let events = store.events_for_session(session_id).unwrap();
     let texts = events
@@ -597,6 +698,7 @@ fn pi_session_import_extracts_text_from_non_message_entries() {
         .filter_map(|event| event.payload.pointer("/body/text").and_then(Value::as_str))
         .collect::<Vec<_>>();
     for expected in [
+        "mixed real prompt",
         "compacted plan oracle",
         "branch summary oracle",
         "custom message oracle",
