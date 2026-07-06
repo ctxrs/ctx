@@ -3131,6 +3131,37 @@ fn provider_session_lookup_requires_explicit_provider_flags_in_help() {
 }
 
 #[test]
+fn provider_session_rejects_whitespace_only_value() {
+    let temp = tempdir();
+    ctx(&temp).arg("setup").assert().success();
+
+    for args in [
+        vec![
+            "show",
+            "session",
+            "--provider",
+            "codex",
+            "--provider-session",
+            " ",
+        ],
+        vec![
+            "locate",
+            "session",
+            "--provider",
+            "codex",
+            "--provider-session",
+            " ",
+        ],
+    ] {
+        let stderr = failure_stderr(ctx(&temp).args(&args));
+        assert!(
+            stderr.contains("--provider-session cannot be empty"),
+            "expected empty-value error for {args:?}, got: {stderr}"
+        );
+    }
+}
+
+#[test]
 fn analytics_sends_coarse_cli_metadata_when_enabled() {
     let temp = tempdir();
     let events_path = temp.path().join("analytics.jsonl");

@@ -3103,12 +3103,17 @@ fn resolve_session(
             "session lookup requires either a ctx session id or --provider with --provider-session"
         )
     })?;
-    let provider_session = provider_session
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            anyhow!("session lookup requires --provider-session when no ctx session id is provided")
-        })?;
+    let provider_session = match provider_session {
+        Some(v) => v.trim(),
+        None => {
+            return Err(anyhow!(
+                "session lookup requires --provider-session when no ctx session id is provided"
+            ))
+        }
+    };
+    if provider_session.is_empty() {
+        return Err(anyhow!("--provider-session cannot be empty"));
+    }
     let matches = store.sessions_by_external_session_limited(provider, provider_session, 2)?;
     match matches.as_slice() {
         [session] => Ok(session.clone()),
