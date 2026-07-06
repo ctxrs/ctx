@@ -26,8 +26,8 @@ fn native_crush_fixture_imports_searches_and_reimports() {
     assert_eq!(first.imported_sessions, 2);
     assert_eq!(first.imported_events, 4);
     assert_eq!(first.imported_edges, 1);
-    let parent_id = provider_session_uuid(CaptureProvider::Crush, "crush-root");
-    let child_id = provider_session_uuid(CaptureProvider::Crush, "crush-child");
+    let parent_id = stored_provider_session_id(&store, CaptureProvider::Crush, "crush-root");
+    let child_id = stored_provider_session_id(&store, CaptureProvider::Crush, "crush-child");
     assert_eq!(
         store.get_session(child_id).unwrap().parent_session_id,
         Some(parent_id)
@@ -90,7 +90,7 @@ fn native_goose_fixture_imports_searches_and_reimports() {
     assert_eq!(first.failed, 0, "{:?}", first.failures);
     assert_eq!(first.imported_sessions, 1);
     assert_eq!(first.imported_events, 3);
-    let session_id = provider_session_uuid(CaptureProvider::Goose, "goose-root");
+    let session_id = stored_provider_session_id(&store, CaptureProvider::Goose, "goose-root");
     store.get_session(session_id).unwrap();
     let source = store
         .capture_source_by_external_session(CaptureProvider::Goose, "goose-root")
@@ -159,7 +159,8 @@ fn native_kiro_fixture_imports_searches_and_reimports() {
     assert_eq!(first.failed, 0, "{:?}", first.failures);
     assert_eq!(first.imported_sessions, 1);
     assert_eq!(first.imported_events, 3);
-    let session_id = provider_session_uuid(
+    let session_id = stored_provider_session_id(
+        &store,
         CaptureProvider::KiroCli,
         "00000000-0000-4000-8000-000000000001",
     );
@@ -237,7 +238,7 @@ fn native_astrbot_fixture_imports_searches_and_reimports() {
     assert_eq!(first.imported_sessions, 1);
     assert_eq!(first.imported_events, 3);
 
-    let session_id = provider_session_uuid(CaptureProvider::AstrBot, "umo-astrbot-1");
+    let session_id = stored_provider_session_id(&store, CaptureProvider::AstrBot, "umo-astrbot-1");
     let session = store.get_session(session_id).unwrap();
     assert_eq!(session.provider, CaptureProvider::AstrBot);
     let source = store
@@ -315,7 +316,8 @@ fn native_junie_fixture_imports_searches_reimports_and_file_touches() {
     assert_eq!(first.imported_sessions, 1);
     assert_eq!(first.imported_events, 5);
 
-    let session_id = provider_session_uuid(CaptureProvider::Junie, "session-260607-100000-acme");
+    let session_id =
+        stored_provider_session_id(&store, CaptureProvider::Junie, "session-260607-100000-acme");
     let session = store.get_session(session_id).unwrap();
     assert_eq!(session.provider, CaptureProvider::Junie);
     let source = store
@@ -455,8 +457,8 @@ fn native_zed_fixture_imports_searches_and_reimports() {
     assert_eq!(first.imported_events, 5);
     assert_eq!(first.imported_edges, 1);
 
-    let parent_id = provider_session_uuid(CaptureProvider::Zed, "zed-root");
-    let child_id = provider_session_uuid(CaptureProvider::Zed, "zed-child");
+    let parent_id = stored_provider_session_id(&store, CaptureProvider::Zed, "zed-root");
+    let child_id = stored_provider_session_id(&store, CaptureProvider::Zed, "zed-child");
     assert_eq!(
         store.get_session(child_id).unwrap().parent_session_id,
         Some(parent_id)
@@ -598,7 +600,7 @@ fn native_forgecode_fixture_imports_searches_reimports_and_file_metrics() {
     assert_eq!(first.failed, 0, "{:?}", first.failures);
     assert_eq!(first.imported_sessions, 1);
     assert_eq!(first.imported_events, 3);
-    let session_id = provider_session_uuid(CaptureProvider::ForgeCode, "forge-root");
+    let session_id = stored_provider_session_id(&store, CaptureProvider::ForgeCode, "forge-root");
     let events = store.events_for_session(session_id).unwrap();
     assert_eq!(events.len(), 3);
     assert!(events
@@ -677,8 +679,11 @@ fn native_deepagents_fixture_imports_searches_and_reimports() {
     assert_eq!(first.failed, 0, "{:?}", first.failures);
     assert_eq!(first.imported_sessions, 1);
     assert_eq!(first.imported_events, 3);
-    let session_id =
-        provider_session_uuid(CaptureProvider::DeepAgents, "deepagents-fixture-thread");
+    let session_id = stored_provider_session_id(
+        &store,
+        CaptureProvider::DeepAgents,
+        "deepagents-fixture-thread",
+    );
     let events = store.events_for_session(session_id).unwrap();
     assert_eq!(events.len(), 3);
     assert!(events
@@ -801,7 +806,8 @@ fn native_mistral_vibe_fixture_imports_searches_and_reimports() {
     assert_eq!(first.failed, 0, "{:?}", first.failures);
     assert_eq!(first.imported_sessions, 1);
     assert_eq!(first.imported_events, 4);
-    let session_id = provider_session_uuid(CaptureProvider::MistralVibe, "mistral-vibe-native");
+    let session_id =
+        stored_provider_session_id(&store, CaptureProvider::MistralVibe, "mistral-vibe-native");
     let events = store.events_for_session(session_id).unwrap();
     assert_eq!(events.len(), 4);
     assert!(events
@@ -863,7 +869,7 @@ fn native_mux_fixture_imports_searches_reimports_and_subagents() {
     assert_eq!(first.imported_events, 6);
     assert_eq!(first.imported_edges, 1);
 
-    let parent_id = provider_session_uuid(CaptureProvider::Mux, "mux-parent-session");
+    let parent_id = stored_provider_session_id(&store, CaptureProvider::Mux, "mux-parent-session");
     let parent_events = store.events_for_session(parent_id).unwrap();
     assert_eq!(parent_events.len(), 4);
     assert!(parent_events
@@ -877,7 +883,7 @@ fn native_mux_fixture_imports_searches_reimports_and_subagents() {
     assert!(parent_rendered.contains("mux partial response still searchable"));
     assert!(parent_rendered.contains("src/mux_oracle.txt"));
 
-    let child_id = provider_session_uuid(CaptureProvider::Mux, "mux-child-session");
+    let child_id = stored_provider_session_id(&store, CaptureProvider::Mux, "mux-child-session");
     let child = store.get_session(child_id).unwrap();
     assert_eq!(child.parent_session_id, Some(parent_id));
     assert_eq!(child.agent_type, AgentType::Subagent);
@@ -1066,7 +1072,8 @@ fn native_jsonl_tree_imports_gemini_droid_and_copilot_smokes() {
     assert_eq!(tabnine_summary.imported_edges, 1);
 
     let tabnine_events = store
-        .events_for_session(provider_session_uuid(
+        .events_for_session(stored_provider_session_id(
+            &store,
             CaptureProvider::Tabnine,
             "tabnine-root",
         ))
@@ -1082,8 +1089,10 @@ fn native_jsonl_tree_imports_gemini_droid_and_copilot_smokes() {
     assert!(tabnine_rendered.contains("tabnine jsonl oracle answer"));
     assert!(tabnine_rendered.contains("src/tabnine_oracle.txt"));
 
-    let tabnine_child = provider_session_uuid(CaptureProvider::Tabnine, "tabnine-child");
-    let tabnine_parent = provider_session_uuid(CaptureProvider::Tabnine, "tabnine-root");
+    let tabnine_child =
+        stored_provider_session_id(&store, CaptureProvider::Tabnine, "tabnine-child");
+    let tabnine_parent =
+        stored_provider_session_id(&store, CaptureProvider::Tabnine, "tabnine-root");
     assert_eq!(
         store.get_session(tabnine_child).unwrap().parent_session_id,
         Some(tabnine_parent)
@@ -1138,7 +1147,8 @@ fn native_jsonl_tree_imports_qwen_and_kimi_smokes_are_idempotent() {
     assert_eq!(qwen_summary.imported_events, 3);
 
     let qwen_events = store
-        .events_for_session(provider_session_uuid(
+        .events_for_session(stored_provider_session_id(
+            &store,
             CaptureProvider::QwenCode,
             "qwen-smoke",
         ))
@@ -1183,7 +1193,8 @@ fn native_jsonl_tree_imports_qwen_and_kimi_smokes_are_idempotent() {
     assert_eq!(kimi_summary.imported_edges, 1);
 
     let kimi_events = store
-        .events_for_session(provider_session_uuid(
+        .events_for_session(stored_provider_session_id(
+            &store,
             CaptureProvider::KimiCodeCli,
             "kimi-smoke",
         ))
@@ -1199,9 +1210,13 @@ fn native_jsonl_tree_imports_qwen_and_kimi_smokes_are_idempotent() {
     assert!(kimi_rendered.contains("kimi jsonl oracle prompt"));
     assert!(kimi_rendered.contains("src/kimi_oracle.txt"));
 
-    let kimi_child =
-        provider_session_uuid(CaptureProvider::KimiCodeCli, "kimi-smoke/agents/agent-1");
-    let kimi_parent = provider_session_uuid(CaptureProvider::KimiCodeCli, "kimi-smoke");
+    let kimi_child = stored_provider_session_id(
+        &store,
+        CaptureProvider::KimiCodeCli,
+        "kimi-smoke/agents/agent-1",
+    );
+    let kimi_parent =
+        stored_provider_session_id(&store, CaptureProvider::KimiCodeCli, "kimi-smoke");
     assert_eq!(
         store.get_session(kimi_child).unwrap().parent_session_id,
         Some(kimi_parent)

@@ -26,8 +26,8 @@ fn native_opencode_imports_read_only_sqlite() {
     assert_eq!(summary.imported_sessions, 2);
     assert_eq!(summary.imported_events, 3);
     assert_eq!(summary.imported_edges, 1);
-    let parent_id = provider_session_uuid(CaptureProvider::OpenCode, "opencode-root");
-    let child_id = provider_session_uuid(CaptureProvider::OpenCode, "opencode-child");
+    let parent_id = stored_provider_session_id(&store, CaptureProvider::OpenCode, "opencode-root");
+    let child_id = stored_provider_session_id(&store, CaptureProvider::OpenCode, "opencode-child");
     assert_eq!(
         store.get_session(child_id).unwrap().parent_session_id,
         Some(parent_id)
@@ -66,7 +66,7 @@ fn native_kilo_imports_opencode_derived_sqlite_fixture_idempotently() {
     assert_eq!(first.imported_sessions, 1);
     assert_eq!(first.imported_events, 2);
 
-    let session_id = provider_session_uuid(CaptureProvider::Kilo, "kilo-root");
+    let session_id = stored_provider_session_id(&store, CaptureProvider::Kilo, "kilo-root");
     let session = store.get_session(session_id).unwrap();
     assert_eq!(session.provider, CaptureProvider::Kilo);
     let events = store.events_for_session(session_id).unwrap();
@@ -125,7 +125,8 @@ fn native_warp_imports_sqlite_fixture_idempotently() {
     assert_eq!(first.imported_sessions, 1);
     assert_eq!(first.imported_events, 4);
 
-    let session_id = provider_session_uuid(CaptureProvider::Warp, "warp-conversation-1");
+    let session_id =
+        stored_provider_session_id(&store, CaptureProvider::Warp, "warp-conversation-1");
     let session = store.get_session(session_id).unwrap();
     assert_eq!(session.provider, CaptureProvider::Warp);
     let rendered_session = serde_json::to_string(&session.sync.metadata).unwrap();
@@ -202,7 +203,8 @@ fn native_warp_import_reads_committed_wal_content() {
     assert_eq!(summary.failed, 0, "{:?}", summary.failures);
     assert_eq!(summary.imported_sessions, 1);
     assert_eq!(summary.imported_events, 4);
-    let session_id = provider_session_uuid(CaptureProvider::Warp, "warp-conversation-1");
+    let session_id =
+        stored_provider_session_id(&store, CaptureProvider::Warp, "warp-conversation-1");
     let session = store.get_session(session_id).unwrap();
     let rendered_session = serde_json::to_string(&session.sync.metadata).unwrap();
     assert!(rendered_session.contains("Warp WAL Agent"));
@@ -318,7 +320,8 @@ fn native_opencode_synthesizes_session_message_seq_when_missing() {
     assert_eq!(summary.imported_sessions, 1);
     assert_eq!(summary.imported_events, 2);
 
-    let session_id = provider_session_uuid(CaptureProvider::OpenCode, "opencode-no-seq");
+    let session_id =
+        stored_provider_session_id(&store, CaptureProvider::OpenCode, "opencode-no-seq");
     let events = store.events_for_session(session_id).unwrap();
     assert_eq!(events.len(), 2);
     assert_eq!(
@@ -360,7 +363,7 @@ fn native_opencode_rejects_negative_session_message_seq() {
         .error
         .contains("OpenCode session_message seq must be nonnegative"));
     assert_eq!(summary.imported_events, 2);
-    let session_id = provider_session_uuid(CaptureProvider::OpenCode, "opencode-root");
+    let session_id = stored_provider_session_id(&store, CaptureProvider::OpenCode, "opencode-root");
     let events = store.events_for_session(session_id).unwrap();
     assert!(events.iter().all(|event| {
         event.payload["body"]["session_message_seq"]
@@ -499,7 +502,7 @@ fn native_opencode_imports_legacy_message_table_when_session_message_is_absent()
     assert_eq!(summary.imported_sessions, 1);
     assert_eq!(summary.imported_events, 1);
 
-    let session_id = provider_session_uuid(CaptureProvider::OpenCode, "current-root");
+    let session_id = stored_provider_session_id(&store, CaptureProvider::OpenCode, "current-root");
     let events = store.events_for_session(session_id).unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(
@@ -765,7 +768,8 @@ fn openclaw_import_ignores_oversized_session_index_sidecar() {
     assert_eq!(summary.failed, 0);
     assert_eq!(summary.imported_sessions, 1);
     assert_eq!(summary.imported_events, 1);
-    let session_id = provider_session_uuid(
+    let session_id = stored_provider_session_id(
+        &store,
         CaptureProvider::OpenClaw,
         "personal-agent/openclaw-oversized-index",
     );
@@ -802,8 +806,8 @@ fn native_shelley_imports_sessions_messages_metadata_and_citations() {
     assert_eq!(summary.imported_events, 4);
     assert_eq!(summary.imported_edges, 1);
 
-    let parent_id = provider_session_uuid(CaptureProvider::Shelley, "shelley-root");
-    let child_id = provider_session_uuid(CaptureProvider::Shelley, "shelley-child");
+    let parent_id = stored_provider_session_id(&store, CaptureProvider::Shelley, "shelley-root");
+    let child_id = stored_provider_session_id(&store, CaptureProvider::Shelley, "shelley-child");
     assert_eq!(
         store.get_session(child_id).unwrap().parent_session_id,
         Some(parent_id)
@@ -857,11 +861,16 @@ fn native_shelley_imports_sessions_messages_metadata_and_citations() {
         .to_string()
         .contains("conversation:shelley-root:sequence:1:message:msg-user"));
 
+    let source_path = fixture.display().to_string();
     let cursor = store
         .get_sync_cursor(
             None,
             "test-machine",
-            &provider_cursor_stream(CaptureProvider::Shelley, SHELLEY_SQLITE_SOURCE_FORMAT),
+            &provider_source_cursor_stream(
+                CaptureProvider::Shelley,
+                SHELLEY_SQLITE_SOURCE_FORMAT,
+                Some(&source_path),
+            ),
         )
         .unwrap()
         .unwrap();
@@ -925,7 +934,8 @@ fn native_shelley_handles_duplicate_sequences_and_nonchat_rows() {
     assert_eq!(summary.imported_sessions, 1);
     assert_eq!(summary.imported_events, 5);
 
-    let session_id = provider_session_uuid(CaptureProvider::Shelley, "shelley-adversarial");
+    let session_id =
+        stored_provider_session_id(&store, CaptureProvider::Shelley, "shelley-adversarial");
     let events = store.events_for_session(session_id).unwrap();
     assert_eq!(events.len(), 5);
     assert_eq!(

@@ -27,6 +27,9 @@ fn search_filters_and_citations_expose_source_metadata() {
             process_id: None,
             cwd: Some("/workspace/ctx".into()),
             raw_source_path: Some("/definitely/missing/source-filter.jsonl".into()),
+            source_format: Some("codex_session_jsonl".into()),
+            source_root: Some("/definitely/missing".into()),
+            source_identity: None,
             external_session_id: Some("source-filter-session".into()),
         },
         started_at: fixed_time(),
@@ -191,6 +194,117 @@ fn search_filters_and_citations_expose_source_metadata() {
 }
 
 #[test]
+fn source_only_results_do_not_fallback_to_other_source_scoped_sessions() {
+    let (_temp, store) = test_store();
+    let record = HistoryRecord::new(
+        "Source collision import",
+        "ordinary body",
+        Vec::new(),
+        "session",
+        Some("/workspace/ctx".into()),
+    );
+    store.insert_record(&record).unwrap();
+
+    let external_session_id = "reused-provider-session";
+    let first_source_id = Uuid::parse_str("018f45d0-0000-7000-8000-000000000441").unwrap();
+    let second_source_id = Uuid::parse_str("018f45d0-0000-7000-8000-000000000442").unwrap();
+    for (source_id, raw_source_path, source_root) in [
+        (
+            first_source_id,
+            "/tmp/source-collision/first/session.jsonl",
+            "/tmp/source-collision/first",
+        ),
+        (
+            second_source_id,
+            "/tmp/source-collision/second/session.jsonl",
+            "/tmp/source-collision/second",
+        ),
+    ] {
+        store
+            .upsert_capture_source(&CaptureSource {
+                id: source_id,
+                descriptor: CaptureSourceDescriptor {
+                    kind: CaptureSourceKind::ProviderImport,
+                    provider: CaptureProvider::Codex,
+                    machine_id: "machine-1".into(),
+                    process_id: None,
+                    cwd: Some("/workspace/ctx".into()),
+                    raw_source_path: Some(raw_source_path.into()),
+                    source_format: Some("codex_session_jsonl".into()),
+                    source_root: Some(source_root.into()),
+                    source_identity: None,
+                    external_session_id: Some(external_session_id.into()),
+                },
+                started_at: fixed_time(),
+                ended_at: None,
+                sync: sync_metadata(),
+            })
+            .unwrap();
+    }
+
+    let first_session = Session {
+        id: Uuid::parse_str("018f45d0-0000-7000-8000-000000000443").unwrap(),
+        history_record_id: Some(record.id),
+        parent_session_id: None,
+        root_session_id: None,
+        capture_source_id: Some(first_source_id),
+        provider: CaptureProvider::Codex,
+        external_session_id: Some(external_session_id.into()),
+        external_agent_id: None,
+        agent_type: AgentType::Primary,
+        role_hint: Some("primary".into()),
+        is_primary: true,
+        status: SessionStatus::Imported,
+        transcript_blob_id: None,
+        started_at: fixed_time(),
+        ended_at: None,
+        timestamps: timestamps(),
+        sync: sync_metadata(),
+    };
+    store.upsert_session(&first_session).unwrap();
+
+    let file = FileTouched {
+        id: Uuid::parse_str("018f45d0-0000-7000-8000-000000000444").unwrap(),
+        history_record_id: Some(record.id),
+        run_id: None,
+        event_id: None,
+        vcs_workspace_id: None,
+        path: "src/source_collision_second.rs".into(),
+        change_kind: Some(FileChangeKind::Modified),
+        old_path: None,
+        line_count_delta: Some(1),
+        confidence: Confidence::Explicit,
+        timestamps: timestamps(),
+        source_id: Some(second_source_id),
+        sync: sync_metadata(),
+    };
+    store.upsert_file_touched(&file).unwrap();
+
+    let packet = search_packet(
+        &store,
+        "",
+        &PacketOptions {
+            limit: 10,
+            filters: SearchFilters {
+                provider: Some(CaptureProvider::Codex),
+                file: Some("source_collision_second.rs".into()),
+                ..SearchFilters::default()
+            },
+            ..PacketOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(packet.results.len(), 1);
+    let result = &packet.results[0];
+    assert_eq!(result.session_id, None);
+    assert_eq!(
+        result.raw_source_path.as_deref(),
+        Some("/tmp/source-collision/second/session.jsonl")
+    );
+}
+
+#[test]
 fn search_filters_custom_history_source_identity() {
     let (_temp, store) = test_store();
     let record = HistoryRecord::new(
@@ -212,6 +326,9 @@ fn search_filters_custom_history_source_identity() {
             process_id: None,
             cwd: Some("/workspace/custom".into()),
             raw_source_path: Some("/tmp/dorkos-plugin/ctx-history-plugin.json".into()),
+            source_format: Some("ctx-history-jsonl-v1".into()),
+            source_root: Some("/tmp/dorkos-plugin".into()),
+            source_identity: None,
             external_session_id: Some("ctx-history-jsonl-v1-session".into()),
         },
         started_at: fixed_time(),

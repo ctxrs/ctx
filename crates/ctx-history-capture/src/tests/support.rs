@@ -10,8 +10,10 @@ pub(super) use crate::provider::importer::{
     import_normalized_provider_captures, provider_command_run_from_event, provider_cursor_stream,
     provider_event_import_identity, provider_event_seq, provider_event_uuid,
     provider_file_touch_uuid, provider_scoped_source_uuid, provider_session_uuid,
+    provider_source_cursor_stream, provider_source_edge_uuid,
     provider_source_event_import_identity, provider_source_event_seq, provider_source_event_uuid,
-    provider_source_uuid, provider_sync_metadata, timestamps, ProviderCommandRunInput,
+    provider_source_root_identity, provider_source_session_uuid, provider_source_uuid,
+    provider_sync_metadata, timestamps, ProviderCommandRunInput,
 };
 pub(super) use crate::provider::native::ShelleyMessageRow;
 pub(super) use crate::provider::providers::{
@@ -418,6 +420,48 @@ pub(super) fn fixed_import_options(path: PathBuf) -> ProviderFixtureImportOption
         allow_partial_failures: false,
         ..ProviderFixtureImportOptions::default()
     }
+}
+
+pub(super) fn provider_fixture_session_id(
+    provider: CaptureProvider,
+    provider_session_id: &str,
+    source_path: &Path,
+) -> Uuid {
+    provider_import_session_id_for_path(
+        provider,
+        "normalized_provider_fixture_jsonl",
+        source_path,
+        provider_session_id,
+    )
+}
+
+pub(super) fn provider_import_session_id_for_path(
+    provider: CaptureProvider,
+    source_format: &str,
+    source_path: &Path,
+    provider_session_id: &str,
+) -> Uuid {
+    let source_path = source_path.display().to_string();
+    let source_identity = provider_source_root_identity(provider, source_format, &source_path);
+    provider_source_session_uuid(&source_identity, provider_session_id)
+}
+
+pub(super) fn stored_provider_session_id(
+    store: &Store,
+    provider: CaptureProvider,
+    provider_session_id: &str,
+) -> Uuid {
+    let sessions = store
+        .sessions_by_external_session_limited(provider, provider_session_id, 10)
+        .unwrap();
+    assert_eq!(
+        sessions.len(),
+        1,
+        "expected exactly one stored session for {}/{}",
+        provider.as_str(),
+        provider_session_id
+    );
+    sessions[0].id
 }
 
 pub(super) fn write_minimal_provider_fixture(
@@ -1351,7 +1395,12 @@ pub(super) fn assert_provider_source_collision_is_distinct(
         second_source_format,
         Some(second_source_path),
     );
+    let first_source_identity =
+        provider_source_root_identity(provider, first_source_format, first_source_path);
+    let second_source_identity =
+        provider_source_root_identity(provider, second_source_format, second_source_path);
     assert_ne!(first_source_id, second_source_id);
+    assert_ne!(first_source_identity, second_source_identity);
 
     let normalization = ProviderNormalizationResult {
         summary: ProviderImportSummary::default(),
@@ -1422,6 +1471,10 @@ pub(super) fn assert_provider_source_collision_is_distinct(
         Some(first_source_format)
     );
     assert_eq!(
+        first_source.descriptor.source_identity.as_deref(),
+        Some(first_source_identity.as_str())
+    );
+    assert_eq!(
         second_source.descriptor.raw_source_path.as_deref(),
         Some(second_source_path)
     );
@@ -1429,18 +1482,40 @@ pub(super) fn assert_provider_source_collision_is_distinct(
         second_source.sync.metadata["source_format"].as_str(),
         Some(second_source_format)
     );
+    assert_eq!(
+        second_source.descriptor.source_identity.as_deref(),
+        Some(second_source_identity.as_str())
+    );
 
-    let session_id = provider_session_uuid(provider, provider_session_id);
-    let event_source_ids = store
-        .events_for_session(session_id)
+    let first_session_id =
+        provider_source_session_uuid(&first_source_identity, provider_session_id);
+    let second_session_id =
+        provider_source_session_uuid(&second_source_identity, provider_session_id);
+    let sessions = store
+        .sessions_by_external_session_limited(provider, provider_session_id, 10)
+        .unwrap()
+        .into_iter()
+        .map(|session| session.id)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        sessions,
+        BTreeSet::from([first_session_id, second_session_id])
+    );
+
+    let first_event_source_ids = store
+        .events_for_session(first_session_id)
         .unwrap()
         .into_iter()
         .map(|event| event.capture_source_id.unwrap())
         .collect::<BTreeSet<_>>();
-    assert_eq!(
-        event_source_ids,
-        BTreeSet::from([first_source_id, second_source_id])
-    );
+    assert_eq!(first_event_source_ids, BTreeSet::from([first_source_id]));
+    let second_event_source_ids = store
+        .events_for_session(second_session_id)
+        .unwrap()
+        .into_iter()
+        .map(|event| event.capture_source_id.unwrap())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(second_event_source_ids, BTreeSet::from([second_source_id]));
 
     let archive = store.export_archive().unwrap();
     assert_eq!(archive.files_touched.len(), 2);
@@ -1477,6 +1552,7 @@ pub(super) fn provider_collision_capture(
             machine_id: "test-machine".to_owned(),
             observed_at: occurred_at,
             raw_source_path: Some(raw_source_path.to_owned()),
+            source_root: Some(raw_source_path.to_owned()),
             raw_retention: ProviderRawRetention::PathReference,
             redaction_boundary: ProviderRedactionBoundary::BeforeExport,
             trust: ProviderSourceTrust::ProviderExport,
@@ -1545,6 +1621,7 @@ pub(super) fn provider_collision_file_touch(
         provider_touch_index: 0,
         provider_event_index: Some(0),
         raw_source_path: Some(raw_source_path.to_owned()),
+        source_root: Some(raw_source_path.to_owned()),
         path: "src/lib.rs".to_owned(),
         change_kind: Some(FileChangeKind::Modified),
         old_path: None,

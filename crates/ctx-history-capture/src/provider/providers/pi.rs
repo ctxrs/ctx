@@ -246,6 +246,7 @@ pub(crate) fn pi_session_capture(
                 .source_path
                 .as_ref()
                 .map(|path| path.display().to_string()),
+            source_root: context.source_root_display(),
             raw_retention: ProviderRawRetention::PathReference,
             redaction_boundary: ProviderRedactionBoundary::BeforeExport,
             trust: ProviderSourceTrust::ProviderExport,

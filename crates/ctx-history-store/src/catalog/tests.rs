@@ -2,9 +2,9 @@ use std::{fs, time::Duration};
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    new_id, AgentType, Artifact, ArtifactKind, CaptureProvider, EntityTimestamps, Event, EventRole,
-    EventType, Fidelity, RedactionState, Session, SessionStatus, SyncMetadata, SyncState,
-    Visibility,
+    new_id, AgentType, Artifact, ArtifactKind, CaptureProvider, CaptureSource,
+    CaptureSourceDescriptor, CaptureSourceKind, EntityTimestamps, Event, EventRole, EventType,
+    Fidelity, RedactionState, Session, SessionStatus, SyncMetadata, SyncState, Visibility,
 };
 use rusqlite::{ffi::ErrorCode, params};
 use uuid::Uuid;
@@ -86,6 +86,18 @@ fn catalog_session(source_path: &str, external_session_id: &str, mtime_ms: i64) 
     }
 }
 
+fn catalog_session_for_root(
+    source_root: &str,
+    source_path: &str,
+    external_session_id: &str,
+    mtime_ms: i64,
+) -> CatalogSession {
+    CatalogSession {
+        source_root: source_root.into(),
+        ..catalog_session(source_path, external_session_id, mtime_ms)
+    }
+}
+
 fn imported_session(external_session_id: &str) -> Session {
     Session {
         id: new_id(),
@@ -104,6 +116,34 @@ fn imported_session(external_session_id: &str) -> Session {
         started_at: fixed_time(),
         ended_at: None,
         timestamps: timestamps(),
+        sync: sync_metadata(),
+    }
+}
+
+fn source_scoped_imported_session(external_session_id: &str, source_id: Uuid) -> Session {
+    Session {
+        capture_source_id: Some(source_id),
+        ..imported_session(external_session_id)
+    }
+}
+
+fn imported_source(source_id: Uuid, source_root: &str, external_session_id: &str) -> CaptureSource {
+    CaptureSource {
+        id: source_id,
+        descriptor: CaptureSourceDescriptor {
+            kind: CaptureSourceKind::ProviderImport,
+            provider: CaptureProvider::Codex,
+            machine_id: "test-machine".into(),
+            process_id: None,
+            cwd: Some("/repo".into()),
+            raw_source_path: Some(format!("{source_root}/session.jsonl")),
+            source_format: Some("codex_session_jsonl".into()),
+            source_root: Some(source_root.into()),
+            source_identity: None,
+            external_session_id: Some(external_session_id.into()),
+        },
+        started_at: fixed_time(),
+        ended_at: None,
         sync: sync_metadata(),
     }
 }
@@ -382,6 +422,73 @@ fn catalog_import_planning_requires_current_index_state_and_matching_session() {
     let counts = store.catalog_session_counts().unwrap();
     assert_eq!(counts.indexed, 1);
     assert_eq!(counts.pending, 0);
+}
+
+#[test]
+fn catalog_import_planning_scopes_matching_sessions_by_source_root() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let cataloged_at_ms = timestamp_ms(fixed_time());
+    let first_root = "/home/user/.codex/first/sessions";
+    let second_root = "/home/user/.codex/second/sessions";
+    let first_path = "/home/user/.codex/first/sessions/rollout.jsonl";
+    let second_path = "/home/user/.codex/second/sessions/rollout.jsonl";
+    let external_session_id = "shared-provider-session";
+    store
+        .upsert_catalog_sessions(&[
+            catalog_session_for_root(first_root, first_path, external_session_id, cataloged_at_ms),
+            catalog_session_for_root(
+                second_root,
+                second_path,
+                external_session_id,
+                cataloged_at_ms,
+            ),
+        ])
+        .unwrap();
+    for (source_root, source_path) in [(first_root, first_path), (second_root, second_path)] {
+        store
+            .mark_catalog_source_indexed(
+                CaptureProvider::Codex,
+                CatalogSourceIndexUpdate {
+                    source_root,
+                    source_path,
+                    file_size_bytes: 42,
+                    file_modified_at_ms: cataloged_at_ms,
+                    file_sha256: None,
+                    event_count: Some(3),
+                    indexed_at_ms: cataloged_at_ms + 10,
+                },
+            )
+            .unwrap();
+    }
+
+    let first_source_id = new_id();
+    store
+        .upsert_capture_source(&imported_source(
+            first_source_id,
+            first_root,
+            external_session_id,
+        ))
+        .unwrap();
+    store
+        .upsert_session(&source_scoped_imported_session(
+            external_session_id,
+            first_source_id,
+        ))
+        .unwrap();
+
+    assert!(store
+        .list_pending_catalog_sessions(CaptureProvider::Codex, first_root)
+        .unwrap()
+        .is_empty());
+    let second_pending = store
+        .list_pending_catalog_sessions(CaptureProvider::Codex, second_root)
+        .unwrap();
+    assert_eq!(second_pending.len(), 1);
+    assert_eq!(second_pending[0].source_path, second_path);
+    let counts = store.catalog_session_counts().unwrap();
+    assert_eq!(counts.indexed, 1);
+    assert_eq!(counts.pending, 1);
 }
 
 #[test]

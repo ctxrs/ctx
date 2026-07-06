@@ -26,10 +26,11 @@ pub(super) fn upsert_capture_source_tx(
         INSERT INTO capture_sources
         (
             id, kind, provider, machine_id, process_id, cwd, raw_source_path,
-            external_session_id, started_at_ms, ended_at_ms, fidelity,
+            source_format, source_root, source_identity, external_session_id,
+            started_at_ms, ended_at_ms, fidelity,
             visibility, sync_state, sync_version, metadata_json
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, ?10, 'local_only', 'local_only', 0, '{}')
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, NULL, ?13, 'local_only', 'local_only', 0, '{}')
         ON CONFLICT(id) DO UPDATE SET
             kind = excluded.kind,
             provider = excluded.provider,
@@ -37,6 +38,9 @@ pub(super) fn upsert_capture_source_tx(
             process_id = excluded.process_id,
             cwd = excluded.cwd,
             raw_source_path = excluded.raw_source_path,
+            source_format = excluded.source_format,
+            source_root = excluded.source_root,
+            source_identity = excluded.source_identity,
             external_session_id = excluded.external_session_id,
             started_at_ms = excluded.started_at_ms,
             fidelity = excluded.fidelity
@@ -49,6 +53,9 @@ pub(super) fn upsert_capture_source_tx(
             source.process_id.map(i64::from),
             source.cwd.as_deref(),
             source.raw_source_path.as_deref(),
+            source.source_format.as_deref(),
+            source.source_root.as_deref(),
+            source.source_identity.as_deref(),
             source.external_session_id.as_deref(),
             occurred_at_ms,
             fidelity.as_str(),
@@ -106,8 +113,8 @@ fn upsert_imported_capture_source_tx(tx: &Transaction<'_>, source: &CaptureSourc
     tx.execute(
         r#"
         INSERT INTO capture_sources
-        (id, kind, provider, machine_id, process_id, cwd, raw_source_path, external_session_id, started_at_ms, ended_at_ms, fidelity, visibility, sync_state, sync_version, metadata_json)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+        (id, kind, provider, machine_id, process_id, cwd, raw_source_path, source_format, source_root, source_identity, external_session_id, started_at_ms, ended_at_ms, fidelity, visibility, sync_state, sync_version, metadata_json)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
         ON CONFLICT(id) DO UPDATE SET
             kind = excluded.kind,
             provider = excluded.provider,
@@ -115,6 +122,9 @@ fn upsert_imported_capture_source_tx(tx: &Transaction<'_>, source: &CaptureSourc
             process_id = excluded.process_id,
             cwd = excluded.cwd,
             raw_source_path = excluded.raw_source_path,
+            source_format = excluded.source_format,
+            source_root = excluded.source_root,
+            source_identity = excluded.source_identity,
             external_session_id = excluded.external_session_id,
             started_at_ms = excluded.started_at_ms,
             ended_at_ms = excluded.ended_at_ms,
@@ -132,6 +142,9 @@ fn upsert_imported_capture_source_tx(tx: &Transaction<'_>, source: &CaptureSourc
             source.descriptor.process_id.map(i64::from),
             source.descriptor.cwd.as_deref(),
             source.descriptor.raw_source_path.as_deref(),
+            source.descriptor.source_format.as_deref(),
+            source.descriptor.source_root.as_deref(),
+            source.descriptor.source_identity.as_deref(),
             source.descriptor.external_session_id.as_deref(),
             timestamp_ms(source.started_at),
             optional_timestamp_ms(source.ended_at),

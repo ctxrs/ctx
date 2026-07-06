@@ -269,6 +269,9 @@ pub(crate) fn normalize_native_jsonl_session_file(
                     machine_id: context.machine_id.clone(),
                     observed_at: context.imported_at,
                     raw_source_path: Some(raw_source_path.clone()),
+                    source_root: context
+                        .source_root_display()
+                        .or_else(|| Some(raw_source_path.clone())),
                     raw_retention: ProviderRawRetention::PathReference,
                     redaction_boundary: ProviderRedactionBoundary::BeforeExport,
                     trust: ProviderSourceTrust::ProviderNative,

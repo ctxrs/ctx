@@ -32,8 +32,11 @@ mod identity;
 mod ids;
 
 pub(crate) use commands::{provider_command_run_from_event, ProviderCommandRunInput};
+#[cfg(test)]
+pub(crate) use cursors::provider_source_cursor_stream;
 pub(crate) use cursors::{
     effective_event_redaction_state, persist_provider_cursor, provider_cursor_stream,
+    provider_source_cursor_range,
 };
 pub(crate) use identity::{
     pi_existing_event_identity_by_entry_id, provider_event_exists, provider_event_import_identity,
@@ -42,11 +45,14 @@ pub(crate) use identity::{
 };
 pub(crate) use ids::{
     provider_edge_uuid, provider_scoped_source_identity_key, provider_scoped_source_uuid,
-    provider_session_uuid, provider_sync_metadata, timestamps,
+    provider_session_uuid, provider_source_edge_uuid, provider_source_identity,
+    provider_source_root, provider_source_session_uuid, provider_sync_metadata, timestamps,
 };
 
 #[cfg(test)]
 pub(crate) use identity::provider_source_event_import_identity;
+#[cfg(test)]
+pub(crate) use ids::provider_source_root_identity;
 #[cfg(test)]
 pub(crate) use ids::{
     provider_event_seq, provider_event_uuid, provider_file_touch_uuid, provider_source_event_seq,
@@ -57,6 +63,7 @@ pub(crate) struct NativeJsonlTreeImport<'a> {
     pub(crate) path: &'a Path,
     pub(crate) machine_id: String,
     pub(crate) source_path: Option<PathBuf>,
+    pub(crate) source_root: Option<PathBuf>,
     pub(crate) imported_at: DateTime<Utc>,
     pub(crate) history_record_id: Option<Uuid>,
     pub(crate) allow_partial_failures: bool,
@@ -75,6 +82,7 @@ pub(crate) fn import_native_jsonl_tree<A: ProviderCaptureAdapter>(
         &ProviderAdapterContext {
             machine_id: request.machine_id,
             source_path: Some(source_path),
+            source_root: request.source_root,
             imported_at: request.imported_at,
             tool_output_mode: CodexToolOutputMode::Full,
             event_mode: CodexEventImportMode::Rich,
@@ -131,6 +139,7 @@ pub(crate) fn import_provider_capture_lines(
                 &capture.session.provider_session_id,
                 &capture.source.source_format,
                 capture.source.raw_source_path.as_deref(),
+                capture.source.source_root.as_deref(),
                 event,
                 *line_number,
             ));
@@ -193,13 +202,29 @@ pub(crate) fn import_provider_file_touched_line(
     file: &ProviderFileTouchedEnvelope,
     options: &NormalizedProviderImportOptions,
 ) -> Result<()> {
-    let session_id = provider_session_uuid(file.provider, &file.provider_session_id);
     let source_id = provider_scoped_source_uuid(
         file.provider,
         &file.provider_session_id,
         &file.source_format,
         file.raw_source_path.as_deref(),
     );
+    let source_root =
+        provider_source_root(file.source_root.as_deref(), file.raw_source_path.as_deref());
+    let source_identity = provider_source_identity(
+        file.provider,
+        &file.source_format,
+        file.source_root.as_deref(),
+        file.raw_source_path.as_deref(),
+        None,
+        &file.metadata,
+    );
+    let session_id = provider_import_session_uuid(
+        store,
+        file.provider,
+        &file.provider_session_id,
+        source_id,
+        source_identity.as_deref(),
+    )?;
     let event_id = match file.provider_event_index {
         Some(index) => provider_file_touch_event_id(
             store,
@@ -207,6 +232,7 @@ pub(crate) fn import_provider_file_touched_line(
             &file.provider_session_id,
             source_id,
             index,
+            session_id == provider_session_uuid(file.provider, &file.provider_session_id),
         )?,
         None => None,
     };
@@ -216,6 +242,7 @@ pub(crate) fn import_provider_file_touched_line(
         &file.provider_session_id,
         source_id,
         file.provider_touch_index,
+        session_id == provider_session_uuid(file.provider, &file.provider_session_id),
     )?;
     let touched = FileTouched {
         id: touch_id,
@@ -240,6 +267,7 @@ pub(crate) fn import_provider_file_touched_line(
                 "raw_source_path": file.raw_source_path,
                 "source_id": source_id,
                 "source_format": file.source_format,
+                "source_root": source_root,
                 "metadata": file.metadata,
                 "session_id": session_id,
             }),
@@ -276,6 +304,104 @@ pub(crate) struct PendingProviderEdge {
     pub(crate) line_number: usize,
 }
 
+pub(crate) fn provider_import_session_uuid(
+    store: &Store,
+    provider: CaptureProvider,
+    provider_session_id: &str,
+    source_id: Uuid,
+    source_identity: Option<&str>,
+) -> Result<Uuid> {
+    let legacy_session_id = provider_session_uuid(provider, provider_session_id);
+    let Some(source_identity) = source_identity else {
+        return Ok(legacy_session_id);
+    };
+    if provider == CaptureProvider::Custom {
+        return Ok(legacy_session_id);
+    }
+
+    let source_session_id = provider_source_session_uuid(source_identity, provider_session_id);
+    match store.get_session(source_session_id) {
+        Ok(_) => return Ok(source_session_id),
+        Err(StoreError::NotFound(_)) => {}
+        Err(err) => return Err(CaptureError::Store(err)),
+    }
+
+    match store.get_session(legacy_session_id) {
+        Ok(existing)
+            if legacy_session_matches_source(store, &existing, source_id, source_identity)? =>
+        {
+            Ok(legacy_session_id)
+        }
+        Ok(_) => Ok(source_session_id),
+        Err(StoreError::NotFound(_)) => Ok(source_session_id),
+        Err(err) => Err(CaptureError::Store(err)),
+    }
+}
+
+fn legacy_session_matches_source(
+    store: &Store,
+    session: &Session,
+    source_id: Uuid,
+    source_identity: &str,
+) -> Result<bool> {
+    let Some(existing_source_id) = session.capture_source_id else {
+        return Ok(false);
+    };
+    if existing_source_id == source_id {
+        return Ok(true);
+    }
+    match store.get_capture_source(existing_source_id) {
+        Ok(source) => {
+            if source.descriptor.source_identity.as_deref() == Some(source_identity) {
+                return Ok(true);
+            }
+            let existing_source_format = source
+                .descriptor
+                .source_format
+                .as_deref()
+                .or_else(|| source.sync.metadata["source_format"].as_str());
+            let Some(existing_source_format) = existing_source_format else {
+                return Ok(false);
+            };
+            let source_metadata = source
+                .sync
+                .metadata
+                .get("source_metadata")
+                .unwrap_or(&source.sync.metadata);
+            let source_idempotency_key = source.sync.metadata["source_idempotency_key"].as_str();
+            Ok(provider_source_identity(
+                source.descriptor.provider,
+                existing_source_format,
+                source.descriptor.source_root.as_deref(),
+                source.descriptor.raw_source_path.as_deref(),
+                source_idempotency_key,
+                source_metadata,
+            )
+            .as_deref()
+                == Some(source_identity))
+        }
+        Err(StoreError::NotFound(_)) => Ok(false),
+        Err(err) => Err(CaptureError::Store(err)),
+    }
+}
+
+fn provider_import_edge_uuid(
+    provider: CaptureProvider,
+    provider_session_id: &str,
+    source_identity: Option<&str>,
+    session_id: Uuid,
+    edge_kind: &str,
+) -> Uuid {
+    if provider != CaptureProvider::Custom
+        && session_id != provider_session_uuid(provider, provider_session_id)
+    {
+        if let Some(source_identity) = source_identity {
+            return provider_source_edge_uuid(source_identity, provider_session_id, edge_kind);
+        }
+    }
+    provider_edge_uuid(provider, provider_session_id, edge_kind)
+}
+
 pub(crate) fn import_provider_capture_line(
     store: &mut Store,
     capture: &ProviderCaptureEnvelope,
@@ -295,7 +421,6 @@ pub(crate) fn import_provider_capture_line(
     let session = &capture.session;
     let source = &capture.source;
     let imported_at = source.observed_at;
-    let session_id = provider_session_uuid(provider, &session.provider_session_id);
     let source_identity_key = provider_scoped_source_identity_key(
         provider,
         &session.provider_session_id,
@@ -303,10 +428,33 @@ pub(crate) fn import_provider_capture_line(
         source.raw_source_path.as_deref(),
     );
     let source_id = stable_capture_uuid(&source_identity_key, "source");
+    let source_root = provider_source_root(
+        source.source_root.as_deref(),
+        source.raw_source_path.as_deref(),
+    );
+    let source_identity = provider_source_identity(
+        provider,
+        &source.source_format,
+        source.source_root.as_deref(),
+        source.raw_source_path.as_deref(),
+        source.idempotency_key.as_deref(),
+        &source.metadata,
+    );
+    let session_id = provider_import_session_uuid(
+        store,
+        provider,
+        &session.provider_session_id,
+        source_id,
+        source_identity.as_deref(),
+    )?;
+    let source_cursor = provider_source_cursor_range(capture);
     let requested_parent_session_id = session
         .parent_provider_session_id
         .as_ref()
-        .map(|id| provider_session_uuid(provider, id));
+        .map(|id| {
+            provider_import_session_uuid(store, provider, id, source_id, source_identity.as_deref())
+        })
+        .transpose()?;
     let parent_session_id = match requested_parent_session_id {
         Some(parent_id)
             if provider_session_exists_cached(store, parent_id, &mut caches.session_exists)? =>
@@ -318,7 +466,10 @@ pub(crate) fn import_provider_capture_line(
     let requested_root_session_id = session
         .root_provider_session_id
         .as_ref()
-        .map(|id| provider_session_uuid(provider, id))
+        .map(|id| {
+            provider_import_session_uuid(store, provider, id, source_id, source_identity.as_deref())
+        })
+        .transpose()?
         .or_else(|| requested_parent_session_id.map(|_| session_id));
     let root_session_id = match requested_root_session_id {
         Some(root_id)
@@ -341,6 +492,9 @@ pub(crate) fn import_provider_capture_line(
             process_id: None,
             cwd: session.cwd.clone(),
             raw_source_path: source.raw_source_path.clone(),
+            source_format: Some(source.source_format.clone()),
+            source_root: source_root.clone(),
+            source_identity: source_identity.clone(),
             external_session_id: Some(session.provider_session_id.clone()),
         },
         started_at: session.started_at,
@@ -353,10 +507,12 @@ pub(crate) fn import_provider_capture_line(
                 "source_trust": source.trust,
                 "raw_retention": source.raw_retention,
                 "redaction_boundary": source.redaction_boundary,
-                "cursor": source.cursor,
+                "cursor": source_cursor,
                 "fixture_line": line_number,
                 "imported_at": imported_at,
                 "source_idempotency_key": source.idempotency_key,
+                "source_identity": source_identity.clone(),
+                "source_root": source_root.clone(),
                 "source_identity_key": source_identity_key,
                 "source_metadata": source_metadata,
                 "session_metadata": session_metadata,
@@ -425,7 +581,13 @@ pub(crate) fn import_provider_capture_line(
     }
 
     if let Some(parent_id) = parent_session_id {
-        let edge_id = provider_edge_uuid(provider, &session.provider_session_id, "parent_child");
+        let edge_id = provider_import_edge_uuid(
+            provider,
+            &session.provider_session_id,
+            source_identity.as_deref(),
+            session_id,
+            "parent_child",
+        );
         if caches.processed_edges.insert(edge_id) {
             let was_present = store.session_edge_exists(edge_id)?;
             let edge = SessionEdge {
@@ -457,7 +619,13 @@ pub(crate) fn import_provider_capture_line(
             }
         }
     } else if requested_parent_session_id.is_some() {
-        let edge_id = provider_edge_uuid(provider, &session.provider_session_id, "parent_child");
+        let edge_id = provider_import_edge_uuid(
+            provider,
+            &session.provider_session_id,
+            source_identity.as_deref(),
+            session_id,
+            "parent_child",
+        );
         if let Some(parent_session_id) = requested_parent_session_id {
             caches
                 .pending_edges
@@ -516,6 +684,7 @@ pub(crate) fn import_provider_capture_line(
                 event.provider_event_index,
                 &event_hash,
                 legacy_provider_event_index,
+                session_id == provider_session_uuid(provider, &session.provider_session_id),
             )?,
         };
         let command_run = provider_command_run_from_event(ProviderCommandRunInput {
@@ -752,6 +921,7 @@ pub(crate) fn fixture_line_to_capture(
                 .source_path
                 .as_ref()
                 .map(|path| path.display().to_string()),
+            source_root: context.source_root_display(),
             raw_retention: ProviderRawRetention::PathReference,
             redaction_boundary: ProviderRedactionBoundary::BeforeExport,
             trust: ProviderSourceTrust::Fixture,

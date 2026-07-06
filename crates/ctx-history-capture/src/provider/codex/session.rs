@@ -146,6 +146,7 @@ impl ProviderCaptureAdapter for CodexSessionJsonlAdapter {
                     tool_output_mode: context.tool_output_mode,
                     event_mode: context.event_mode,
                     raw_source_path: raw_source_path.as_deref(),
+                    source_root: context.source_root_display().as_deref(),
                 },
             );
             if let Some(event) = line_capture.event.take() {
@@ -294,6 +295,7 @@ pub fn import_codex_session_jsonl(
         &ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
+            source_root: None,
             imported_at: options.imported_at,
             tool_output_mode: options.tool_output_mode,
             event_mode: options.event_mode,
@@ -334,6 +336,7 @@ pub fn import_codex_session_jsonl_tail(
     let context = ProviderAdapterContext {
         machine_id: options.machine_id.clone(),
         source_path: Some(path.to_path_buf()),
+        source_root: None,
         imported_at: options.imported_at,
         tool_output_mode: options.tool_output_mode,
         event_mode: options.event_mode,
@@ -462,6 +465,7 @@ pub fn import_codex_session_jsonl_tail(
                     tool_output_mode: options.tool_output_mode,
                     event_mode: options.event_mode,
                     raw_source_path: raw_source_path.as_deref(),
+                    source_root: context.source_root_display().as_deref(),
                 },
             );
             if let Some(event) = line_capture.event.take() {
@@ -469,6 +473,7 @@ pub fn import_codex_session_jsonl_tail(
                     summary.skipped += 1;
                     summary.skipped_events += 1;
                 } else {
+                    let source_root = context.source_root_display();
                     summary.merge(import_codex_provider_event_fast(
                         store,
                         &header,
@@ -477,6 +482,7 @@ pub fn import_codex_session_jsonl_tail(
                         line_number,
                         context.imported_at,
                         raw_source_path.as_deref(),
+                        source_root.as_deref(),
                     )?);
                 }
             }
@@ -540,10 +546,13 @@ pub fn import_codex_session_jsonl_tail(
 pub fn import_codex_session_paths(
     paths: Vec<PathBuf>,
     store: &mut Store,
-    options: CodexSessionImportOptions,
+    mut options: CodexSessionImportOptions,
 ) -> Result<ProviderImportSummary> {
     for path in &paths {
         ensure_regular_provider_transcript_file(path)?;
+    }
+    if options.source_path.is_none() {
+        options.source_path = codex_common_source_root(&paths);
     }
     if options.fast_event_inserts && paths.len() <= 1 {
         return import_codex_session_paths_fast(paths, store, options, 0);
@@ -554,9 +563,12 @@ pub fn import_codex_session_paths(
 pub fn import_codex_session_tree(
     root: impl AsRef<Path>,
     store: &mut Store,
-    options: CodexSessionImportOptions,
+    mut options: CodexSessionImportOptions,
 ) -> Result<ProviderImportSummary> {
     let root = root.as_ref();
+    if options.source_path.is_none() {
+        options.source_path = Some(root.to_path_buf());
+    }
     let mut paths = Vec::new();
     collect_jsonl_paths(root, &mut paths)?;
     let skipped_by_bounds = apply_codex_session_import_bounds(
@@ -569,6 +581,19 @@ pub fn import_codex_session_tree(
     }
 
     import_codex_session_paths_parallel_normalized(paths, store, options, skipped_by_bounds)
+}
+
+fn codex_common_source_root(paths: &[PathBuf]) -> Option<PathBuf> {
+    let mut parents = paths.iter().filter_map(|path| path.parent());
+    let mut root = parents.next()?.to_path_buf();
+    for parent in parents {
+        while !parent.starts_with(&root) {
+            if !root.pop() {
+                return None;
+            }
+        }
+    }
+    Some(root)
 }
 pub(crate) fn import_codex_session_paths_parallel_normalized(
     paths: Vec<PathBuf>,
@@ -752,6 +777,7 @@ pub(crate) fn normalize_codex_session_path(
         &ProviderAdapterContext {
             machine_id: options.machine_id.clone(),
             source_path: Some(path.to_path_buf()),
+            source_root: options.source_path.clone(),
             imported_at: options.imported_at,
             tool_output_mode: options.tool_output_mode,
             event_mode: options.event_mode,

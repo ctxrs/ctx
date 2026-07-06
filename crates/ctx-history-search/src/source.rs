@@ -32,7 +32,8 @@ pub(crate) fn associated_session_for_source(
         .or_else(|| {
             let source = context.sources.get(&source_id)?;
             context.sessions.iter().find(|session| {
-                session.provider == source.descriptor.provider
+                session.capture_source_id.is_none()
+                    && session.provider == source.descriptor.provider
                     && session.external_session_id == source.descriptor.external_session_id
             })
         })

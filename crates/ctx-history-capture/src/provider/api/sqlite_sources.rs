@@ -9,6 +9,7 @@ use crate::provider::adapter::{
     ProviderCaptureAdapter, ShelleySqliteAdapter,
 };
 use crate::provider::importer::import_normalized_provider_captures;
+use crate::provider::providers::firebender::firebender_source_root;
 use crate::{
     AstrBotSqliteImportOptions, CodexEventImportMode, CodexToolOutputMode,
     ContinueCliImportOptions, DeepAgentsSqliteImportOptions, FirebenderSqliteImportOptions,
@@ -28,11 +29,13 @@ pub fn import_firebender_sqlite(
         .source_path
         .clone()
         .unwrap_or_else(|| path.to_path_buf());
+    let source_root = firebender_source_root(path)?;
     let normalization = FirebenderSqliteAdapter.normalize_path(
         path,
         &ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
+            source_root: Some(source_root),
             imported_at: options.imported_at,
             tool_output_mode: CodexToolOutputMode::Full,
             event_mode: CodexEventImportMode::Rich,
@@ -68,6 +71,7 @@ pub fn import_opencode_sqlite(
         &ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
+            source_root: None,
             imported_at: options.imported_at,
             tool_output_mode: CodexToolOutputMode::Full,
             event_mode: CodexEventImportMode::Rich,
@@ -103,6 +107,7 @@ pub fn import_kilo_sqlite(
         &ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
+            source_root: None,
             imported_at: options.imported_at,
             tool_output_mode: CodexToolOutputMode::Full,
             event_mode: CodexEventImportMode::Rich,
@@ -138,6 +143,7 @@ pub fn import_forgecode_sqlite(
         &ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
+            source_root: None,
             imported_at: options.imported_at,
             tool_output_mode: CodexToolOutputMode::Full,
             event_mode: CodexEventImportMode::Rich,
@@ -173,6 +179,7 @@ pub fn import_deepagents_sqlite(
         &ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
+            source_root: None,
             imported_at: options.imported_at,
             tool_output_mode: CodexToolOutputMode::Full,
             event_mode: CodexEventImportMode::Rich,
@@ -208,6 +215,7 @@ pub fn import_nanoclaw_project(
         &ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
+            source_root: None,
             imported_at: options.imported_at,
             tool_output_mode: CodexToolOutputMode::Full,
             event_mode: CodexEventImportMode::Rich,
@@ -242,6 +250,7 @@ pub fn import_kiro_sqlite(
         &ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
+            source_root: None,
             imported_at: options.imported_at,
             tool_output_mode: CodexToolOutputMode::Full,
             event_mode: CodexEventImportMode::Rich,
@@ -277,6 +286,7 @@ pub fn import_astrbot_sqlite(
         &ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
+            source_root: None,
             imported_at: options.imported_at,
             tool_output_mode: CodexToolOutputMode::Full,
             event_mode: CodexEventImportMode::Rich,
@@ -311,6 +321,7 @@ pub fn import_shelley_sqlite(
         &ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
+            source_root: None,
             imported_at: options.imported_at,
             tool_output_mode: CodexToolOutputMode::Full,
             event_mode: CodexEventImportMode::Rich,
@@ -345,6 +356,7 @@ pub fn import_continue_cli_sessions(
         &ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
+            source_root: None,
             imported_at: options.imported_at,
             tool_output_mode: CodexToolOutputMode::Full,
             event_mode: CodexEventImportMode::Rich,
@@ -379,6 +391,7 @@ pub fn import_openhands_file_events(
         &ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
+            source_root: None,
             imported_at: options.imported_at,
             tool_output_mode: CodexToolOutputMode::Full,
             event_mode: CodexEventImportMode::Rich,

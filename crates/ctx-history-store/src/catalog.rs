@@ -831,9 +831,15 @@ fn catalog_pending_import_condition_sql(alias: &str) -> String {
             OR NOT EXISTS (
                 SELECT 1
                 FROM sessions AS session
+                LEFT JOIN capture_sources AS source
+                  ON source.id = session.capture_source_id
                 WHERE session.provider = {alias}.provider
                   AND {alias}.external_session_id IS NOT NULL
                   AND session.external_session_id = {alias}.external_session_id
+                  AND (
+                      session.capture_source_id IS NULL
+                      OR source.source_root = {alias}.source_root
+                  )
                 LIMIT 1
             )
         )
@@ -852,9 +858,15 @@ fn catalog_indexed_count_sql() -> String {
       AND EXISTS (
         SELECT 1
         FROM sessions AS session
+        LEFT JOIN capture_sources AS source
+          ON source.id = session.capture_source_id
         WHERE session.provider = catalog.provider
           AND catalog.external_session_id IS NOT NULL
           AND session.external_session_id = catalog.external_session_id
+          AND (
+              session.capture_source_id IS NULL
+              OR source.source_root = catalog.source_root
+          )
         LIMIT 1
       )
     "#

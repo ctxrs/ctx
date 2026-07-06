@@ -524,6 +524,9 @@ pub(crate) fn codebuddy_capture(
             machine_id: context.machine_id.clone(),
             observed_at: context.imported_at,
             raw_source_path: Some(raw_source_path.to_owned()),
+            source_root: context
+                .source_root_display()
+                .or_else(|| Some(raw_source_path.to_owned())),
             raw_retention: ProviderRawRetention::PathReference,
             redaction_boundary: ProviderRedactionBoundary::BeforeExport,
             trust: ProviderSourceTrust::ProviderNative,

@@ -21,7 +21,10 @@ SELECT
     s.started_at_ms AS started_at_ms,
     s.ended_at_ms AS ended_at_ms,
     cs.cwd AS cwd,
-    cs.raw_source_path AS source_path
+    cs.raw_source_path AS source_path,
+    cs.source_format AS source_format,
+    cs.source_root AS source_root,
+    cs.source_identity AS source_identity
 FROM sessions s
 LEFT JOIN capture_sources cs ON cs.id = s.capture_source_id
 WHERE s.deleted_at_ms IS NULL;
@@ -42,7 +45,10 @@ SELECT
     e.redaction_state AS redaction_state,
     e.fidelity AS fidelity,
     cs.cwd AS cwd,
-    cs.raw_source_path AS source_path
+    cs.raw_source_path AS source_path,
+    cs.source_format AS source_format,
+    cs.source_root AS source_root,
+    cs.source_identity AS source_identity
 FROM events e
 LEFT JOIN sessions s ON s.id = e.session_id
 LEFT JOIN capture_sources cs ON cs.id = e.capture_source_id
@@ -69,6 +75,9 @@ SELECT
     ) AS history_record_id,
     COALESCE(s.provider, cs.provider) AS provider,
     COALESCE(s.external_session_id, cs.external_session_id) AS provider_session_id,
+    cs.source_format AS source_format,
+    cs.source_root AS source_root,
+    cs.source_identity AS source_identity,
     ft.created_at_ms AS created_at_ms,
     ft.updated_at_ms AS updated_at_ms
 FROM files_touched ft

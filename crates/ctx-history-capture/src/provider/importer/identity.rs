@@ -102,6 +102,7 @@ pub(crate) fn provider_event_import_identity(
     provider_event_sequence_index: u64,
     event_hash: &str,
     legacy_provider_event_index: Option<u64>,
+    allow_legacy_provider_identity: bool,
 ) -> Result<ProviderEventImportIdentity> {
     let source_identity = provider_source_event_import_identity_with_seq(
         source_id,
@@ -122,41 +123,45 @@ pub(crate) fn provider_event_import_identity(
         return Ok(source_identity);
     }
 
-    if let Some(legacy_index) = legacy_provider_event_index {
-        let legacy_source_identity =
-            provider_source_event_import_identity(source_id, legacy_index, event_hash);
-        if provider_event_exists(store, &legacy_source_identity.dedupe_key)?
-            || provider_event_id_exists(store, legacy_source_identity.id)?
-        {
-            return Ok(legacy_source_identity);
-        }
+    if allow_legacy_provider_identity {
+        if let Some(legacy_index) = legacy_provider_event_index {
+            let legacy_source_identity =
+                provider_source_event_import_identity(source_id, legacy_index, event_hash);
+            if provider_event_exists(store, &legacy_source_identity.dedupe_key)?
+                || provider_event_id_exists(store, legacy_source_identity.id)?
+            {
+                return Ok(legacy_source_identity);
+            }
 
-        let legacy_provider_identity = provider_legacy_event_import_identity(
+            let legacy_provider_identity = provider_legacy_event_import_identity(
+                provider,
+                provider_session_id,
+                legacy_index,
+                event_hash,
+            );
+            if provider_event_exists(store, &legacy_provider_identity.dedupe_key)?
+                || provider_event_id_exists(store, legacy_provider_identity.id)?
+            {
+                return Ok(legacy_provider_identity);
+            }
+        }
+    }
+
+    if allow_legacy_provider_identity {
+        let legacy_identity = provider_legacy_event_import_identity(
             provider,
             provider_session_id,
-            legacy_index,
+            provider_event_index,
             event_hash,
         );
-        if provider_event_exists(store, &legacy_provider_identity.dedupe_key)?
-            || provider_event_id_exists(store, legacy_provider_identity.id)?
+        if provider_event_exists(store, &legacy_identity.dedupe_key)?
+            || provider_event_id_exists(store, legacy_identity.id)?
         {
-            return Ok(legacy_provider_identity);
+            return Ok(legacy_identity);
         }
     }
 
-    let legacy_identity = provider_legacy_event_import_identity(
-        provider,
-        provider_session_id,
-        provider_event_index,
-        event_hash,
-    );
-    if provider_event_exists(store, &legacy_identity.dedupe_key)?
-        || provider_event_id_exists(store, legacy_identity.id)?
-    {
-        Ok(legacy_identity)
-    } else {
-        Ok(source_identity)
-    }
+    Ok(source_identity)
 }
 
 pub(crate) fn provider_source_event_import_identity(
@@ -262,12 +267,16 @@ pub(crate) fn provider_file_touch_event_id(
     provider_session_id: &str,
     source_id: Uuid,
     provider_event_index: u64,
+    allow_legacy_provider_identity: bool,
 ) -> Result<Option<Uuid>> {
     let source_event_id = provider_source_event_uuid(source_id, provider_event_index);
     if provider_event_id_exists(store, source_event_id)? {
         return Ok(Some(source_event_id));
     }
 
+    if !allow_legacy_provider_identity {
+        return Ok(None);
+    }
     let legacy_event_id = provider_event_uuid(provider, provider_session_id, provider_event_index);
     if provider_event_id_exists(store, legacy_event_id)? {
         Ok(Some(legacy_event_id))
@@ -282,12 +291,16 @@ pub(crate) fn provider_file_touch_import_id(
     provider_session_id: &str,
     source_id: Uuid,
     provider_touch_index: u64,
+    allow_legacy_provider_identity: bool,
 ) -> Result<Uuid> {
     let source_touch_id = provider_source_file_touch_uuid(source_id, provider_touch_index);
     if store.file_touched_exists(source_touch_id)? {
         return Ok(source_touch_id);
     }
 
+    if !allow_legacy_provider_identity {
+        return Ok(source_touch_id);
+    }
     let legacy_touch_id =
         provider_file_touch_uuid(provider, provider_session_id, provider_touch_index);
     if store.file_touched_exists(legacy_touch_id)? {

@@ -147,6 +147,7 @@ pub(crate) fn codex_session_capture(
                 .source_path
                 .as_ref()
                 .map(|path| path.display().to_string()),
+            source_root: context.source_root_display(),
             raw_retention: ProviderRawRetention::PathReference,
             redaction_boundary: ProviderRedactionBoundary::BeforeExport,
             trust: ProviderSourceTrust::ProviderExport,
@@ -212,6 +213,7 @@ pub(crate) struct CodexSessionLineContext<'a> {
     pub(crate) tool_output_mode: CodexToolOutputMode,
     pub(crate) event_mode: CodexEventImportMode,
     pub(crate) raw_source_path: Option<&'a str>,
+    pub(crate) source_root: Option<&'a str>,
 }
 pub(crate) fn codex_session_line_capture(
     header: &CodexSessionHeader,
@@ -225,6 +227,7 @@ pub(crate) fn codex_session_line_capture(
         tool_output_mode,
         event_mode,
         raw_source_path,
+        source_root,
     } = context;
     let event = codex_session_event(
         value,
@@ -250,6 +253,7 @@ pub(crate) fn codex_session_line_capture(
             provider_session_id: &header.id,
             source_format: CODEX_SESSION_SOURCE_FORMAT,
             raw_source_path,
+            source_root,
             occurred_at,
             provider_event_index: event.as_ref().map(|event| event.provider_event_index),
             provider_touch_base_index: (line_number as u64) << 16,

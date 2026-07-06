@@ -71,10 +71,20 @@ pub struct ProviderEventDto {
 pub struct ProviderAdapterContext {
     pub machine_id: String,
     pub source_path: Option<PathBuf>,
+    pub source_root: Option<PathBuf>,
     pub imported_at: DateTime<Utc>,
     pub tool_output_mode: CodexToolOutputMode,
     pub event_mode: CodexEventImportMode,
     pub include_notices: bool,
+}
+
+impl ProviderAdapterContext {
+    pub(crate) fn source_root_display(&self) -> Option<String> {
+        self.source_root
+            .as_ref()
+            .or(self.source_path.as_ref())
+            .map(|path| path.display().to_string())
+    }
 }
 
 impl Default for ProviderAdapterContext {
@@ -82,6 +92,7 @@ impl Default for ProviderAdapterContext {
         Self {
             machine_id: default_machine_id(),
             source_path: None,
+            source_root: None,
             imported_at: utc_now(),
             tool_output_mode: CodexToolOutputMode::Full,
             event_mode: CodexEventImportMode::Rich,
@@ -127,6 +138,8 @@ pub struct ProviderFileTouchedEnvelope {
     pub provider_event_index: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_source_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_root: Option<String>,
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub change_kind: Option<FileChangeKind>,

@@ -1,8 +1,8 @@
 use rusqlite::Connection;
 
 use crate::schema::ddl::{
-    ensure_columns, table_exists, table_has_column, CATALOG_SESSION_IMPORT_STATE_COLUMNS,
-    CREATE_TABLES_SQL, HISTORY_RECORD_COLUMNS,
+    ensure_columns, table_exists, table_has_column, CAPTURE_SOURCE_IDENTITY_COLUMNS,
+    CATALOG_SESSION_IMPORT_STATE_COLUMNS, CREATE_TABLES_SQL, HISTORY_RECORD_COLUMNS,
 };
 use crate::schema::indexes::INDEXES_SQL;
 use crate::schema::views::{
@@ -62,6 +62,9 @@ pub(crate) fn run_migrations(conn: &Connection, user_version: i64) -> Result<()>
     }
     if user_version < 42 {
         migrate_to_v42(conn)?;
+    }
+    if user_version < 43 {
+        migrate_to_v43(conn)?;
     }
     Ok(())
 }
@@ -574,6 +577,58 @@ fn migrate_to_v42(conn: &Connection) -> Result<()> {
     }
 }
 
+fn migrate_to_v43(conn: &Connection) -> Result<()> {
+    let foreign_keys_enabled: i64 = conn.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
+    conn.execute_batch("PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;")?;
+    let migration = (|| -> Result<()> {
+        conn.execute_batch(CREATE_TABLES_SQL)?;
+        ensure_columns(conn, "capture_sources", CAPTURE_SOURCE_IDENTITY_COLUMNS)?;
+        backfill_capture_source_identity_columns(conn)?;
+        if stable_sql_views_exist(conn)? {
+            drop_stable_sql_views(conn)?;
+        }
+        conn.execute_batch(INDEXES_SQL)?;
+        create_stable_sql_views(conn)?;
+        conn.execute_batch("PRAGMA user_version = 43;")?;
+        Ok(())
+    })();
+
+    match migration {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;")?;
+            if foreign_keys_enabled != 0 {
+                conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+            }
+            Ok(())
+        }
+        Err(err) => {
+            if let Err(rollback_err) = conn.execute_batch("ROLLBACK;") {
+                return Err(StoreError::Sql(rollback_err));
+            }
+            if foreign_keys_enabled != 0 {
+                conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+            }
+            Err(err)
+        }
+    }
+}
+
+fn backfill_capture_source_identity_columns(conn: &Connection) -> Result<()> {
+    if !table_exists(conn, "capture_sources")? {
+        return Ok(());
+    }
+    conn.execute(
+        r#"
+        UPDATE capture_sources
+        SET source_root = raw_source_path
+        WHERE source_root IS NULL
+          AND raw_source_path IS NOT NULL
+        "#,
+        [],
+    )?;
+    Ok(())
+}
+
 fn invalidate_provider_import_indexes(conn: &Connection) -> Result<()> {
     if table_exists(conn, "catalog_sessions")? {
         conn.execute(
@@ -706,6 +761,7 @@ pub(crate) fn rebuild_capture_sources_provider_check(conn: &Connection) -> Resul
     if recreate_views {
         drop_stable_sql_views(conn)?;
     }
+    ensure_columns(conn, "capture_sources", CAPTURE_SOURCE_IDENTITY_COLUMNS)?;
     conn.execute_batch(
         r#"
         DROP TABLE IF EXISTS capture_sources_new;
@@ -719,6 +775,9 @@ pub(crate) fn rebuild_capture_sources_provider_check(conn: &Connection) -> Resul
             process_id INTEGER,
             cwd TEXT,
             raw_source_path TEXT,
+            source_format TEXT,
+            source_root TEXT,
+            source_identity TEXT,
             external_session_id TEXT,
             started_at_ms INTEGER NOT NULL,
             ended_at_ms INTEGER,
@@ -729,8 +788,8 @@ pub(crate) fn rebuild_capture_sources_provider_check(conn: &Connection) -> Resul
             metadata_json TEXT NOT NULL DEFAULT '{}'
         );
         INSERT INTO capture_sources_new
-        (id, kind, provider, machine_id, process_id, cwd, raw_source_path, external_session_id, started_at_ms, ended_at_ms, fidelity, visibility, sync_state, sync_version, metadata_json)
-        SELECT id, kind, provider, machine_id, process_id, cwd, raw_source_path, external_session_id, started_at_ms, ended_at_ms, fidelity, visibility, sync_state, sync_version, metadata_json
+        (id, kind, provider, machine_id, process_id, cwd, raw_source_path, source_format, source_root, source_identity, external_session_id, started_at_ms, ended_at_ms, fidelity, visibility, sync_state, sync_version, metadata_json)
+        SELECT id, kind, provider, machine_id, process_id, cwd, raw_source_path, source_format, source_root, source_identity, external_session_id, started_at_ms, ended_at_ms, fidelity, visibility, sync_state, sync_version, metadata_json
         FROM capture_sources;
         DROP TABLE capture_sources;
         ALTER TABLE capture_sources_new RENAME TO capture_sources;

@@ -270,6 +270,8 @@ pub struct ProviderSourceEnvelope {
     pub observed_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_source_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_root: Option<String>,
     #[serde(default)]
     pub raw_retention: ProviderRawRetention,
     #[serde(default)]

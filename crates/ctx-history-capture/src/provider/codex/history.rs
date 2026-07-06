@@ -117,6 +117,7 @@ impl ProviderCaptureAdapter for CodexHistoryJsonlAdapter {
                                 .source_path
                                 .as_ref()
                                 .map(|path| path.display().to_string()),
+                            source_root: context.source_root_display(),
                             raw_retention: ProviderRawRetention::PathReference,
                             redaction_boundary: ProviderRedactionBoundary::BeforeExport,
                             trust: ProviderSourceTrust::ProviderExport,
@@ -223,6 +224,7 @@ pub fn import_codex_history_jsonl(
         &ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
+            source_root: None,
             imported_at: options.imported_at,
             tool_output_mode: CodexToolOutputMode::Full,
             event_mode: CodexEventImportMode::Rich,

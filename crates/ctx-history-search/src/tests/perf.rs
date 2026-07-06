@@ -329,6 +329,9 @@ fn synthetic_perf_archive(event_count: usize, events_per_record: usize) -> Sessi
                 raw_source_path: Some(format!(
                     "/workspace/ctx/.ctx/synthetic/perf-session-{record_index:05}.jsonl"
                 )),
+                source_format: Some("synthetic_perf_jsonl".into()),
+                source_root: Some("/workspace/ctx/.ctx/synthetic".into()),
+                source_identity: None,
                 external_session_id: Some(format!("perf-session-{record_index:05}")),
             },
             started_at: time,

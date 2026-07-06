@@ -14,7 +14,8 @@ fn provider_fixture_replay_supports_claude_cursor_metadata() {
     assert_eq!(summary.failed, 0);
     assert_eq!(summary.imported_sessions, 1);
     assert_eq!(summary.imported_events, 2);
-    let session_id = provider_session_uuid(CaptureProvider::Claude, "claude-session-1");
+    let session_id =
+        stored_provider_session_id(&store, CaptureProvider::Claude, "claude-session-1");
     let events = store.events_for_session(session_id).unwrap();
     assert_eq!(events[1].event_type, EventType::Summary);
     assert_eq!(
@@ -38,8 +39,13 @@ fn provider_fixture_replay_supports_opencode_fixture() {
     assert_eq!(summary.imported_sessions, 2);
     assert_eq!(summary.imported_events, 3);
     assert_eq!(summary.imported_edges, 1);
-    let parent_id = provider_session_uuid(CaptureProvider::OpenCode, "opencode-session-1");
-    let child_id = provider_session_uuid(CaptureProvider::OpenCode, "opencode-session-1-scout");
+    let parent_id =
+        stored_provider_session_id(&store, CaptureProvider::OpenCode, "opencode-session-1");
+    let child_id = stored_provider_session_id(
+        &store,
+        CaptureProvider::OpenCode,
+        "opencode-session-1-scout",
+    );
     let parent = store.get_session(parent_id).unwrap();
     let child = store.get_session(child_id).unwrap();
     assert_eq!(parent.provider, CaptureProvider::OpenCode);
@@ -101,8 +107,10 @@ fn native_claude_projects_imports_jsonl_tree() {
     assert_eq!(summary.imported_sessions, 2);
     assert_eq!(summary.imported_events, 5);
     assert_eq!(summary.imported_edges, 1);
-    let parent_id = provider_session_uuid(CaptureProvider::Claude, "claude-native-parent");
-    let child_id = provider_session_uuid(
+    let parent_id =
+        stored_provider_session_id(&store, CaptureProvider::Claude, "claude-native-parent");
+    let child_id = stored_provider_session_id(
+        &store,
         CaptureProvider::Claude,
         "claude-native-parent/subagents/agent-scout",
     );
@@ -142,7 +150,8 @@ fn antigravity_native_history_imports_transcripts_and_preserves_previews() {
     assert_eq!(summary.imported_sessions, 4);
     assert_eq!(summary.imported_events, 11);
 
-    let success_session = provider_session_uuid(CaptureProvider::Antigravity, "agy-success");
+    let success_session =
+        stored_provider_session_id(&store, CaptureProvider::Antigravity, "agy-success");
     let success = store.events_for_session(success_session).unwrap();
     assert_eq!(success.len(), 3);
     let tool = success
@@ -173,7 +182,8 @@ fn antigravity_native_history_imports_transcripts_and_preserves_previews() {
         .iter()
         .any(|path| path.contains("transcript_full.jsonl")));
 
-    let future_session = provider_session_uuid(CaptureProvider::Antigravity, "agy-future");
+    let future_session =
+        stored_provider_session_id(&store, CaptureProvider::Antigravity, "agy-future");
     let future = store.events_for_session(future_session).unwrap();
     assert!(future
         .iter()
@@ -226,7 +236,11 @@ fn native_windsurf_fixture_imports_searches_reimports_and_file_touches() {
         .iter()
         .any(|hit| hit.provider == Some(CaptureProvider::Windsurf)));
 
-    let session_id = provider_session_uuid(CaptureProvider::Windsurf, "windsurf-hook-trajectory-1");
+    let session_id = stored_provider_session_id(
+        &store,
+        CaptureProvider::Windsurf,
+        "windsurf-hook-trajectory-1",
+    );
     let events = store.events_for_session(session_id).unwrap();
     let code_action = events
         .iter()
@@ -302,7 +316,7 @@ fn native_qoder_fixture_imports_documented_transcript_jsonl() {
         .iter()
         .any(|hit| hit.provider == Some(CaptureProvider::Qoder)));
 
-    let session_id = provider_session_uuid(CaptureProvider::Qoder, "qoder-session-1");
+    let session_id = stored_provider_session_id(&store, CaptureProvider::Qoder, "qoder-session-1");
     let events = store.events_for_session(session_id).unwrap();
     assert!(
         events
@@ -421,7 +435,7 @@ fn native_task_json_imports_cline_and_roo_task_directories() {
     assert_eq!(cline_first.imported_sessions, 1);
     assert_eq!(cline_first.imported_events, 3);
 
-    let cline_session = provider_session_uuid(CaptureProvider::Cline, "cline-task-1");
+    let cline_session = stored_provider_session_id(&store, CaptureProvider::Cline, "cline-task-1");
     let cline_events = store.events_for_session(cline_session).unwrap();
     assert_eq!(cline_events.len(), 3);
     assert!(cline_events
@@ -466,13 +480,14 @@ fn native_task_json_imports_cline_and_roo_task_directories() {
     assert_eq!(roo_first.imported_sessions, 2);
     assert_eq!(roo_first.imported_events, 5);
 
-    let roo_session = provider_session_uuid(CaptureProvider::RooCode, "roo-task-1");
+    let roo_session = stored_provider_session_id(&store, CaptureProvider::RooCode, "roo-task-1");
     let roo_events = store.events_for_session(roo_session).unwrap();
     assert_eq!(roo_events.len(), 3);
     assert!(roo_events
         .iter()
         .any(|event| event.event_type == EventType::ToolCall));
-    let fallback = provider_session_uuid(CaptureProvider::RooCode, "roo-fallback-task");
+    let fallback =
+        stored_provider_session_id(&store, CaptureProvider::RooCode, "roo-fallback-task");
     assert_eq!(store.events_for_session(fallback).unwrap().len(), 2);
     assert!(store
         .export_archive()
@@ -540,7 +555,8 @@ fn native_codebuddy_fixture_imports_searches_and_reimports() {
     assert_eq!(first.imported_sessions, 2);
     assert_eq!(first.imported_events, 3);
 
-    let alpha = provider_session_uuid(
+    let alpha = stored_provider_session_id(
+        &store,
         CaptureProvider::CodeBuddy,
         "11112222333344445555666677778888/session-alpha",
     );
@@ -621,7 +637,8 @@ fn native_trae_fixture_imports_searches_and_reimports() {
     assert_eq!(source.source_format, TRAE_STATE_VSCDB_SOURCE_FORMAT);
     assert_eq!(source.status, ProviderSourceStatus::Available);
 
-    let session_id = provider_session_uuid(
+    let session_id = stored_provider_session_id(
+        &store,
         CaptureProvider::Trae,
         "trae-workspace-1/trae-fixture-session",
     );
@@ -775,8 +792,11 @@ fn native_trae_cn_input_history_key_imports_user_messages() {
     assert_eq!(summary.imported_sessions, 1);
     assert_eq!(summary.imported_events, 2);
 
-    let session_id =
-        provider_session_uuid(CaptureProvider::Trae, "cn-workspace/trae-cn-input-history");
+    let session_id = stored_provider_session_id(
+        &store,
+        CaptureProvider::Trae,
+        "cn-workspace/trae-cn-input-history",
+    );
     let session = store.get_session(session_id).unwrap();
     assert_eq!(
         session.sync.metadata["metadata"]["workspace_folder"].as_str(),
@@ -821,7 +841,11 @@ fn native_auggie_fixture_imports_searches_and_reimports() {
     assert_eq!(first.imported_sessions, 1);
     assert_eq!(first.imported_events, 4);
 
-    let session_id = provider_session_uuid(CaptureProvider::Auggie, "01K0AUGGIESESSION0000000000");
+    let session_id = stored_provider_session_id(
+        &store,
+        CaptureProvider::Auggie,
+        "01K0AUGGIESESSION0000000000",
+    );
     let events = store.events_for_session(session_id).unwrap();
     assert_eq!(events.len(), 4);
     assert_eq!(events[0].role, Some(EventRole::User));
@@ -896,8 +920,11 @@ fn native_firebender_fixture_imports_project_root_db_and_reimports() {
     assert_eq!(first.failed, 0, "{:?}", first.failures);
     assert_eq!(first.imported_sessions, 1);
     assert_eq!(first.imported_events, 3);
-    let session_id =
-        provider_session_uuid(CaptureProvider::Firebender, "firebender-fixture-session");
+    let session_id = stored_provider_session_id(
+        &store,
+        CaptureProvider::Firebender,
+        "firebender-fixture-session",
+    );
     let events = store.events_for_session(session_id).unwrap();
     assert_eq!(events.len(), 3);
     assert!(events
@@ -993,7 +1020,7 @@ fn native_lingma_fixture_imports_searches_and_reimports() {
     assert_eq!(first.imported_sessions, 2);
     assert_eq!(first.imported_events, 6);
 
-    let alpha = provider_session_uuid(CaptureProvider::Lingma, "lingma-session-1");
+    let alpha = stored_provider_session_id(&store, CaptureProvider::Lingma, "lingma-session-1");
     let events = store.events_for_session(alpha).unwrap();
     assert_eq!(events.len(), 4);
     assert_eq!(events[0].role, Some(EventRole::User));
@@ -1016,7 +1043,8 @@ fn native_lingma_fixture_imports_searches_and_reimports() {
         .iter()
         .any(|hit| hit.provider == Some(CaptureProvider::Lingma)));
 
-    let error_session = provider_session_uuid(CaptureProvider::Lingma, "lingma-session-2");
+    let error_session =
+        stored_provider_session_id(&store, CaptureProvider::Lingma, "lingma-session-2");
     let error_events = store.events_for_session(error_session).unwrap();
     assert_eq!(error_events.len(), 2);
     assert_eq!(error_events[1].event_type, EventType::Notice);

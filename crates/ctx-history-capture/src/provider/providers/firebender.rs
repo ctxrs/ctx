@@ -171,6 +171,23 @@ pub(crate) fn firebender_chat_history_db_path(path: &Path) -> Result<PathBuf> {
     })
 }
 
+pub(crate) fn firebender_source_root(path: &Path) -> Result<PathBuf> {
+    let db_path = firebender_chat_history_db_path(path)?;
+    let Some(firebender_dir) = db_path.parent() else {
+        return Ok(db_path);
+    };
+    if firebender_dir.file_name().and_then(|name| name.to_str()) != Some("firebender") {
+        return Ok(db_path);
+    }
+    let Some(idea_dir) = firebender_dir.parent() else {
+        return Ok(db_path);
+    };
+    if idea_dir.file_name().and_then(|name| name.to_str()) != Some(".idea") {
+        return Ok(db_path);
+    }
+    Ok(idea_dir.parent().unwrap_or(&db_path).to_path_buf())
+}
+
 pub(crate) fn firebender_chat_session_rows(
     conn: &Connection,
     columns: &BTreeSet<String>,

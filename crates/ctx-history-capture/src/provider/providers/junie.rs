@@ -861,6 +861,9 @@ pub(crate) fn junie_emit_file_changes(
                     .saturating_add(change_index as u64),
                 provider_event_index: Some(event_index),
                 raw_source_path: Some(base_draft.raw_source_path.clone()),
+                source_root: context
+                    .source_root_display()
+                    .or_else(|| Some(base_draft.raw_source_path.clone())),
                 path: path.to_owned(),
                 change_kind: Some(change_kind),
                 old_path: before_path

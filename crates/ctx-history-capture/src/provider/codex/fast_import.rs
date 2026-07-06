@@ -15,15 +15,16 @@ use uuid::Uuid;
 
 use crate::compute_payload_hash;
 use crate::provider::importer::{
-    provider_command_run_from_event, provider_event_import_identity, ProviderCommandRunInput,
+    provider_command_run_from_event, provider_event_import_identity, provider_import_session_uuid,
+    provider_session_uuid, provider_source_identity, provider_source_root, ProviderCommandRunInput,
 };
 
 use crate::common::io::{ensure_regular_provider_transcript_file, read_provider_jsonl_line};
 use crate::common::json::sanitize_value;
 use crate::provider::importer::{
     effective_event_redaction_state, import_provider_capture_line,
-    import_provider_file_touched_line, provider_scoped_source_uuid, provider_session_uuid,
-    provider_sync_metadata, resolve_pending_provider_edges, ProviderImportCaches,
+    import_provider_file_touched_line, provider_scoped_source_uuid, provider_sync_metadata,
+    resolve_pending_provider_edges, ProviderImportCaches,
 };
 use crate::{
     CodexSessionImportOptions, CodexSessionImportProgress, NormalizedProviderImportOptions,
@@ -197,6 +198,7 @@ pub(crate) fn import_codex_session_path_fast(
     let context = ProviderAdapterContext {
         machine_id: options.machine_id.clone(),
         source_path: Some(path.to_path_buf()),
+        source_root: options.source_path.clone(),
         imported_at: options.imported_at,
         tool_output_mode: options.tool_output_mode,
         event_mode: options.event_mode,
@@ -320,6 +322,7 @@ pub(crate) fn import_codex_session_path_fast(
                 tool_output_mode: options.tool_output_mode,
                 event_mode: options.event_mode,
                 raw_source_path: raw_source_path.as_deref(),
+                source_root: context.source_root_display().as_deref(),
             },
         );
         if let Some(event) = line_capture.event.take() {
@@ -327,6 +330,7 @@ pub(crate) fn import_codex_session_path_fast(
                 summary.skipped += 1;
                 summary.skipped_events += 1;
             } else {
+                let source_root = context.source_root_display();
                 let line_summary = import_codex_provider_event_fast(
                     store,
                     header,
@@ -335,6 +339,7 @@ pub(crate) fn import_codex_session_path_fast(
                     line_number,
                     context.imported_at,
                     raw_source_path.as_deref(),
+                    source_root.as_deref(),
                 )?;
                 summary.merge(line_summary);
             }
@@ -353,16 +358,32 @@ pub(crate) fn import_codex_provider_event_fast(
     line_number: usize,
     imported_at: DateTime<Utc>,
     raw_source_path: Option<&str>,
+    source_root: Option<&str>,
 ) -> Result<ProviderImportSummary> {
     let mut summary = ProviderImportSummary::default();
     let provider = CaptureProvider::Codex;
-    let session_id = provider_session_uuid(provider, &header.id);
     let source_id = provider_scoped_source_uuid(
         provider,
         &header.id,
         CODEX_SESSION_SOURCE_FORMAT,
         raw_source_path,
     );
+    let source_root = provider_source_root(source_root, raw_source_path);
+    let source_identity = provider_source_identity(
+        provider,
+        CODEX_SESSION_SOURCE_FORMAT,
+        source_root.as_deref(),
+        raw_source_path,
+        None,
+        &Value::Null,
+    );
+    let session_id = provider_import_session_uuid(
+        store,
+        provider,
+        &header.id,
+        source_id,
+        source_identity.as_deref(),
+    )?;
     let (payload, redacted_payload) = sanitize_value(event.payload.clone());
     let (event_metadata, redacted_metadata) = sanitize_value(event.metadata.clone());
     let event_hash = event
@@ -378,6 +399,7 @@ pub(crate) fn import_codex_provider_event_fast(
         event.provider_event_index,
         &event_hash,
         None,
+        session_id == provider_session_uuid(provider, &header.id),
     )?;
     let command_run = provider_command_run_from_event(ProviderCommandRunInput {
         provider,

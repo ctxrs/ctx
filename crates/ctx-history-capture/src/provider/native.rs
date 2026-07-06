@@ -193,6 +193,7 @@ pub(crate) fn native_provider_capture(
             machine_id: context.machine_id.clone(),
             observed_at: context.imported_at,
             raw_source_path: Some(draft.raw_source_path),
+            source_root: context.source_root_display(),
             raw_retention: ProviderRawRetention::PathReference,
             redaction_boundary: ProviderRedactionBoundary::BeforeExport,
             trust: draft.trust,

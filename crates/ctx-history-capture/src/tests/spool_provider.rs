@@ -131,8 +131,9 @@ fn provider_fixture_replay_imports_codex_session_tree_and_is_idempotent() {
     assert_eq!(second.skipped_sessions, 2);
     assert_eq!(second.skipped_edges, 1);
 
-    let parent_id = provider_session_uuid(CaptureProvider::Codex, "codex-session-1");
-    let child_id = provider_session_uuid(CaptureProvider::Codex, "codex-session-1-subagent-a");
+    let parent_id = stored_provider_session_id(&store, CaptureProvider::Codex, "codex-session-1");
+    let child_id =
+        stored_provider_session_id(&store, CaptureProvider::Codex, "codex-session-1-subagent-a");
     let parent = store.get_session(parent_id).unwrap();
     let child = store.get_session(child_id).unwrap();
     assert_eq!(
@@ -179,8 +180,8 @@ fn provider_fixture_replay_defers_child_edges_until_parent_is_known() {
     assert_eq!(summary.imported_edges, 1);
     assert_eq!(summary.skipped_edges, 0);
 
-    let parent_id = provider_session_uuid(CaptureProvider::Codex, "out-of-order-root");
-    let child_id = provider_session_uuid(CaptureProvider::Codex, "out-of-order-child");
+    let parent_id = stored_provider_session_id(&store, CaptureProvider::Codex, "out-of-order-root");
+    let child_id = stored_provider_session_id(&store, CaptureProvider::Codex, "out-of-order-child");
     let child = store.get_session(child_id).unwrap();
     assert_eq!(child.parent_session_id, Some(parent_id));
     assert_eq!(child.root_session_id, Some(parent_id));
@@ -205,7 +206,7 @@ fn provider_fixture_replay_supports_pi_and_preserves_metadata() {
     assert_eq!(summary.imported_sessions, 1);
     assert_eq!(summary.imported_events, 2);
     assert_eq!(summary.redacted, 0);
-    let session_id = provider_session_uuid(CaptureProvider::Pi, "pi-session-1");
+    let session_id = stored_provider_session_id(&store, CaptureProvider::Pi, "pi-session-1");
     let events = store.events_for_session(session_id).unwrap();
     assert_eq!(events.len(), 2);
     assert_eq!(events[1].redaction_state, RedactionState::LocalPreview);
@@ -252,7 +253,7 @@ fn pi_session_import_replays_documented_session_jsonl_and_is_idempotent() {
     assert_eq!(second.imported_events, 0);
     assert_eq!(second.skipped_events, 6);
 
-    let session_id = provider_session_uuid(CaptureProvider::Pi, "pi-session-docs-1");
+    let session_id = stored_provider_session_id(&store, CaptureProvider::Pi, "pi-session-docs-1");
     let session = store.get_session(session_id).unwrap();
     assert_eq!(session.sync.fidelity, Fidelity::Imported);
     assert_eq!(
@@ -372,7 +373,7 @@ fn pi_session_import_uses_entry_ids_when_lines_shift() {
     .unwrap();
     assert_eq!(first.imported_events, 1);
 
-    let session_id = provider_session_uuid(CaptureProvider::Pi, "pi-line-shift");
+    let session_id = stored_provider_session_id(&store, CaptureProvider::Pi, "pi-line-shift");
     let first_event_id = store.events_for_session(session_id).unwrap()[0].id;
 
     fs::write(
@@ -456,6 +457,7 @@ fn pi_session_identity_resolver_reuses_legacy_line_indexed_events() {
         legacy_index + 1,
         event_hash,
         Some(legacy_index as u64),
+        true,
     )
     .unwrap();
 
@@ -476,6 +478,8 @@ fn pi_session_import_reuses_legacy_line_indexed_event_by_entry_id_after_line_shi
         Some(&raw_path),
     );
     let session_id = provider_session_uuid(CaptureProvider::Pi, provider_session_id);
+    let source_identity =
+        provider_source_root_identity(CaptureProvider::Pi, "pi_session_jsonl", &raw_path);
     let legacy_identity = provider_source_event_import_identity(source_id, 1, "legacy-hash");
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
     let started_at = "2026-06-24T12:00:00Z".parse().unwrap();
@@ -489,6 +493,9 @@ fn pi_session_import_reuses_legacy_line_indexed_event_by_entry_id_after_line_shi
                 process_id: None,
                 cwd: Some("/workspace".to_owned()),
                 raw_source_path: Some(raw_path.clone()),
+                source_format: Some("pi_session_jsonl".to_owned()),
+                source_root: Some(raw_path.clone()),
+                source_identity: Some(source_identity),
                 external_session_id: Some(provider_session_id.to_owned()),
             },
             started_at,
@@ -502,7 +509,7 @@ fn pi_session_import_reuses_legacy_line_indexed_event_by_entry_id_after_line_shi
             history_record_id: None,
             parent_session_id: None,
             root_session_id: None,
-            capture_source_id: None,
+            capture_source_id: Some(source_id),
             provider: CaptureProvider::Pi,
             external_session_id: Some(provider_session_id.to_owned()),
             external_agent_id: None,
@@ -691,7 +698,7 @@ fn pi_session_import_keeps_metadata_entries_when_real_messages_exist() {
 
     assert_eq!(summary.failed, 0, "{:?}", summary.failures);
     assert_eq!(summary.imported_events, 9);
-    let session_id = provider_session_uuid(CaptureProvider::Pi, "pi-non-message-text");
+    let session_id = stored_provider_session_id(&store, CaptureProvider::Pi, "pi-non-message-text");
     let events = store.events_for_session(session_id).unwrap();
     let texts = events
         .iter()
@@ -767,8 +774,8 @@ fn pi_session_import_replays_default_session_directory_tree() {
     assert_eq!(second.imported_events, 0);
     assert_eq!(second.skipped_events, 2);
 
-    let alpha = provider_session_uuid(CaptureProvider::Pi, "pi-dir-alpha");
-    let beta = provider_session_uuid(CaptureProvider::Pi, "pi-dir-beta");
+    let alpha = stored_provider_session_id(&store, CaptureProvider::Pi, "pi-dir-alpha");
+    let beta = stored_provider_session_id(&store, CaptureProvider::Pi, "pi-dir-beta");
     assert_eq!(store.events_for_session(alpha).unwrap().len(), 1);
     assert_eq!(store.events_for_session(beta).unwrap().len(), 1);
 }

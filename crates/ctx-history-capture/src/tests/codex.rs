@@ -38,8 +38,10 @@ fn codex_session_tree_imports_messages_and_subagent_edges() {
     assert_eq!(second.skipped_events, 8);
     assert_eq!(second.skipped_edges, 1);
 
-    let parent_id = provider_session_uuid(CaptureProvider::Codex, "codex-session-root");
-    let child_id = provider_session_uuid(CaptureProvider::Codex, "codex-session-child");
+    let parent_id =
+        stored_provider_session_id(&store, CaptureProvider::Codex, "codex-session-root");
+    let child_id =
+        stored_provider_session_id(&store, CaptureProvider::Codex, "codex-session-child");
     let parent = store.get_session(parent_id).unwrap();
     let child = store.get_session(child_id).unwrap();
     assert_eq!(parent.sync.fidelity, Fidelity::Imported);
@@ -410,8 +412,10 @@ fn codex_session_tree_defers_cross_file_child_edges_until_parent_is_known() {
     assert_eq!(summary.imported_events, 2);
     assert_eq!(summary.imported_edges, 1);
 
-    let parent_id = provider_session_uuid(CaptureProvider::Codex, "codex-out-of-order-root");
-    let child_id = provider_session_uuid(CaptureProvider::Codex, "codex-out-of-order-child");
+    let parent_id =
+        stored_provider_session_id(&store, CaptureProvider::Codex, "codex-out-of-order-root");
+    let child_id =
+        stored_provider_session_id(&store, CaptureProvider::Codex, "codex-out-of-order-child");
     let child = store.get_session(child_id).unwrap();
     assert_eq!(child.parent_session_id, Some(parent_id));
     assert_eq!(child.root_session_id, Some(parent_id));
@@ -449,8 +453,13 @@ fn codex_session_paths_imports_only_explicit_subset() {
     assert_eq!(summary.imported_events, 6);
     assert_eq!(summary.imported_edges, 0);
     assert_eq!(store.list_sessions().unwrap().len(), 1);
-    let root_id = provider_session_uuid(CaptureProvider::Codex, "codex-session-root");
-    let child_id = provider_session_uuid(CaptureProvider::Codex, "codex-session-child");
+    let root_id = stored_provider_session_id(&store, CaptureProvider::Codex, "codex-session-root");
+    let child_id = provider_import_session_id_for_path(
+        CaptureProvider::Codex,
+        "codex_session_jsonl",
+        &fixture,
+        "codex-session-child",
+    );
     assert_eq!(store.events_for_session(root_id).unwrap().len(), 6);
     assert!(store.events_for_session(child_id).unwrap().is_empty());
 
@@ -875,7 +884,8 @@ fn codex_session_tree_imports_rich_tool_outputs_and_preserves_previews() {
     assert_eq!(summary.imported_sessions, 1);
     assert_eq!(summary.imported_events, 12);
 
-    let session_id = provider_session_uuid(CaptureProvider::Codex, "codex-rich-session");
+    let session_id =
+        stored_provider_session_id(&store, CaptureProvider::Codex, "codex-rich-session");
     let events = store.events_for_session(session_id).unwrap();
     assert!(events
         .iter()
@@ -1004,7 +1014,8 @@ fn codex_search_event_mode_persists_file_touches_without_tool_events() {
     assert_eq!(summary.failed, 0, "{:?}", summary.failures);
     assert_eq!(summary.imported_events, 1);
 
-    let session_id = provider_session_uuid(CaptureProvider::Codex, "codex-search-file-touch");
+    let session_id =
+        stored_provider_session_id(&store, CaptureProvider::Codex, "codex-search-file-touch");
     let events = store.events_for_session(session_id).unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].event_type, EventType::Message);

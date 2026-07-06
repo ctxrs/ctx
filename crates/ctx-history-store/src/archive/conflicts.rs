@@ -82,6 +82,12 @@ fn reject_rich_import_conflicts(
         return Ok(());
     }
 
+    let archive_sources = archive
+        .capture_sources
+        .iter()
+        .map(|source| (source.id, source))
+        .collect::<HashMap<_, _>>();
+
     for source in &archive.capture_sources {
         reject_entity_conflict(
             existing_capture_source_by_id(tx, source.id)?,
@@ -125,9 +131,9 @@ fn reject_rich_import_conflicts(
             "session",
             session.id,
         )?;
-        if let Some(external_session_id) = &session.external_session_id {
+        if session.external_session_id.is_some() {
             reject_entity_conflict(
-                existing_session_by_external_session(tx, session.provider, external_session_id)?,
+                existing_source_scoped_session_by_external_session(tx, &archive_sources, session)?,
                 session,
                 "session",
                 session.id,
@@ -270,7 +276,7 @@ fn reject_entity_conflict<T: PartialEq>(
 
 fn existing_capture_source_by_id(tx: &Transaction<'_>, id: Uuid) -> Result<Option<CaptureSource>> {
     tx.query_row(
-        "SELECT id, kind, provider, machine_id, process_id, cwd, raw_source_path, external_session_id, started_at_ms, ended_at_ms, fidelity, visibility, sync_state, sync_version, metadata_json FROM capture_sources WHERE id = ?1",
+        "SELECT id, kind, provider, machine_id, process_id, cwd, raw_source_path, source_format, source_root, source_identity, external_session_id, started_at_ms, ended_at_ms, fidelity, visibility, sync_state, sync_version, metadata_json FROM capture_sources WHERE id = ?1",
         params![id.to_string()],
         capture_source_from_row,
     )
@@ -292,17 +298,106 @@ fn existing_session_by_external_session(
     tx: &Transaction<'_>,
     provider: CaptureProvider,
     external_session_id: &str,
-) -> Result<Option<Session>> {
-    tx.query_row(
+) -> Result<Vec<Session>> {
+    let mut stmt = tx.prepare(
         session_select_sql(
-            "WHERE provider = ?1 AND external_session_id = ?2 ORDER BY started_at_ms DESC LIMIT 1",
+            "WHERE provider = ?1 AND external_session_id = ?2 ORDER BY started_at_ms DESC",
         )
         .as_str(),
+    )?;
+    let rows = stmt.query_map(
         params![provider.as_str(), external_session_id],
         session_from_row,
-    )
-    .optional()
-    .map_err(StoreError::from)
+    )?;
+    crate::connection::collect_rows(rows)
+}
+
+fn existing_source_scoped_session_by_external_session(
+    tx: &Transaction<'_>,
+    archive_sources: &HashMap<Uuid, &CaptureSource>,
+    session: &Session,
+) -> Result<Option<Session>> {
+    let Some(external_session_id) = session.external_session_id.as_deref() else {
+        return Ok(None);
+    };
+    let incoming_source = session_source(tx, archive_sources, session.capture_source_id)?;
+    for existing in existing_session_by_external_session(tx, session.provider, external_session_id)?
+    {
+        if sessions_share_external_source(tx, incoming_source.as_ref(), session, &existing)? {
+            return Ok(Some(existing));
+        }
+    }
+    Ok(None)
+}
+
+fn session_source(
+    tx: &Transaction<'_>,
+    archive_sources: &HashMap<Uuid, &CaptureSource>,
+    source_id: Option<Uuid>,
+) -> Result<Option<CaptureSource>> {
+    let Some(source_id) = source_id else {
+        return Ok(None);
+    };
+    if let Some(source) = archive_sources.get(&source_id) {
+        return Ok(Some((*source).clone()));
+    }
+    existing_capture_source_by_id(tx, source_id)
+}
+
+fn sessions_share_external_source(
+    tx: &Transaction<'_>,
+    incoming_source: Option<&CaptureSource>,
+    incoming: &Session,
+    existing: &Session,
+) -> Result<bool> {
+    let Some(incoming_source_id) = incoming.capture_source_id else {
+        return Ok(true);
+    };
+    let Some(existing_source_id) = existing.capture_source_id else {
+        return Ok(true);
+    };
+    if incoming_source_id == existing_source_id {
+        return Ok(true);
+    }
+    let Some(incoming_source) = incoming_source else {
+        return Ok(true);
+    };
+    let Some(existing_source) = existing_capture_source_by_id(tx, existing_source_id)? else {
+        return Ok(true);
+    };
+    Ok(capture_sources_share_identity(
+        incoming_source,
+        &existing_source,
+    ))
+}
+
+fn capture_sources_share_identity(left: &CaptureSource, right: &CaptureSource) -> bool {
+    let left = &left.descriptor;
+    let right = &right.descriptor;
+    if left.provider != right.provider {
+        return false;
+    }
+    if left.source_format != right.source_format {
+        return false;
+    }
+    if let (Some(left), Some(right)) = (
+        left.source_identity.as_deref(),
+        right.source_identity.as_deref(),
+    ) {
+        if left == right {
+            return true;
+        }
+    }
+    if let (Some(left), Some(right)) = (
+        left.raw_source_path.as_deref(),
+        right.raw_source_path.as_deref(),
+    ) {
+        return left == right;
+    }
+    match (left.source_root.as_deref(), right.source_root.as_deref()) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
 }
 
 fn existing_run_by_id(tx: &Transaction<'_>, id: Uuid) -> Result<Option<Run>> {

@@ -121,6 +121,21 @@ pub(crate) const CATALOG_SESSION_IMPORT_STATE_COLUMNS: &[ColumnSpec] = &[
     },
 ];
 
+pub(crate) const CAPTURE_SOURCE_IDENTITY_COLUMNS: &[ColumnSpec] = &[
+    ColumnSpec {
+        name: "source_format",
+        definition: "source_format TEXT",
+    },
+    ColumnSpec {
+        name: "source_root",
+        definition: "source_root TEXT",
+    },
+    ColumnSpec {
+        name: "source_identity",
+        definition: "source_identity TEXT",
+    },
+];
+
 pub(crate) const CREATE_TABLES_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS capture_sources (
     id TEXT PRIMARY KEY NOT NULL,
@@ -132,6 +147,9 @@ CREATE TABLE IF NOT EXISTS capture_sources (
     process_id INTEGER,
     cwd TEXT,
     raw_source_path TEXT,
+    source_format TEXT,
+    source_root TEXT,
+    source_identity TEXT,
     external_session_id TEXT,
     started_at_ms INTEGER NOT NULL,
     ended_at_ms INTEGER,

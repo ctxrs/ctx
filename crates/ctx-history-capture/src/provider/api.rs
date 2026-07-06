@@ -59,6 +59,7 @@ pub fn import_provider_fixture_jsonl(
         &ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
+            source_root: None,
             imported_at: options.imported_at,
             tool_output_mode: CodexToolOutputMode::Full,
             event_mode: CodexEventImportMode::Rich,
@@ -94,6 +95,7 @@ pub fn import_custom_history_jsonl_v1(
         &ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
+            source_root: None,
             imported_at: options.imported_at,
             tool_output_mode: CodexToolOutputMode::Full,
             event_mode: CodexEventImportMode::Rich,
@@ -139,6 +141,7 @@ pub fn import_custom_history_jsonl_v1_reader(
         &ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: options.source_path,
+            source_root: None,
             imported_at: options.imported_at,
             tool_output_mode: CodexToolOutputMode::Full,
             event_mode: CodexEventImportMode::Rich,
@@ -180,6 +183,7 @@ pub fn validate_custom_history_jsonl_v1(path: impl AsRef<Path>) -> Result<Provid
         path,
         &ProviderAdapterContext {
             source_path: Some(path.to_path_buf()),
+            source_root: None,
             ..ProviderAdapterContext::default()
         },
     )?;

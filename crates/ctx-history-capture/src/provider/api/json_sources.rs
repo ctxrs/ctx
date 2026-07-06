@@ -36,6 +36,7 @@ pub fn import_pi_session_jsonl(
         &ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
+            source_root: None,
             imported_at: options.imported_at,
             tool_output_mode: CodexToolOutputMode::Full,
             event_mode: CodexEventImportMode::Rich,
@@ -71,6 +72,7 @@ pub fn import_claude_projects_jsonl_tree(
         &ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
+            source_root: None,
             imported_at: options.imported_at,
             tool_output_mode: CodexToolOutputMode::Full,
             event_mode: CodexEventImportMode::Rich,
@@ -106,6 +108,7 @@ pub fn import_cline_task_json_history(
         &ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
+            source_root: None,
             imported_at: options.imported_at,
             tool_output_mode: CodexToolOutputMode::Full,
             event_mode: CodexEventImportMode::Rich,
@@ -141,6 +144,7 @@ pub fn import_roo_task_json_history(
         &ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
+            source_root: None,
             imported_at: options.imported_at,
             tool_output_mode: CodexToolOutputMode::Full,
             event_mode: CodexEventImportMode::Rich,
@@ -176,6 +180,7 @@ pub fn import_codebuddy_history(
         &ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
+            source_root: None,
             imported_at: options.imported_at,
             tool_output_mode: CodexToolOutputMode::Full,
             event_mode: CodexEventImportMode::Rich,
@@ -211,6 +216,7 @@ pub fn import_trae_history(
         &ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
+            source_root: None,
             imported_at: options.imported_at,
             tool_output_mode: CodexToolOutputMode::Full,
             event_mode: CodexEventImportMode::Rich,
@@ -246,6 +252,7 @@ pub fn import_crush_sqlite(
         &ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
+            source_root: None,
             imported_at: options.imported_at,
             tool_output_mode: CodexToolOutputMode::Full,
             event_mode: CodexEventImportMode::Rich,
@@ -281,6 +288,7 @@ pub fn import_goose_sessions_sqlite(
         &ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
+            source_root: None,
             imported_at: options.imported_at,
             tool_output_mode: CodexToolOutputMode::Full,
             event_mode: CodexEventImportMode::Rich,
@@ -312,6 +320,7 @@ pub fn import_openclaw_history(
             path: path.as_ref(),
             machine_id: options.machine_id,
             source_path: options.source_path,
+            source_root: None,
             imported_at: options.imported_at,
             history_record_id: options.history_record_id,
             allow_partial_failures: options.allow_partial_failures,
@@ -335,6 +344,7 @@ pub fn import_hermes_sqlite(
         &ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
+            source_root: None,
             imported_at: options.imported_at,
             tool_output_mode: CodexToolOutputMode::Full,
             event_mode: CodexEventImportMode::Rich,
@@ -369,6 +379,7 @@ pub fn import_auggie_history(
         &ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
+            source_root: None,
             imported_at: options.imported_at,
             tool_output_mode: CodexToolOutputMode::Full,
             event_mode: CodexEventImportMode::Rich,
@@ -404,6 +415,7 @@ pub fn import_junie_history(
         &ProviderAdapterContext {
             machine_id: options.machine_id,
             source_path: Some(source_path),
+            source_root: None,
             imported_at: options.imported_at,
             tool_output_mode: CodexToolOutputMode::Full,
             event_mode: CodexEventImportMode::Rich,

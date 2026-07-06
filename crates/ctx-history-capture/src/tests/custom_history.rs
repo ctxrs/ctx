@@ -37,7 +37,12 @@ fn codex_history_import_is_prompt_only_summary_fidelity_and_idempotent() {
     assert_eq!(second.imported_events, 0);
     assert_eq!(second.skipped_events, 3);
 
-    let session_id = provider_session_uuid(CaptureProvider::Codex, "codex-history-session-1");
+    let session_id = provider_import_session_id_for_path(
+        CaptureProvider::Codex,
+        "codex_history_jsonl",
+        &fixture,
+        "codex-history-session-1",
+    );
     let session = store.get_session(session_id).unwrap();
     assert_eq!(session.sync.fidelity, Fidelity::SummaryOnly);
     assert_eq!(
@@ -57,11 +62,16 @@ fn codex_history_import_is_prompt_only_summary_fidelity_and_idempotent() {
         events[0].sync.metadata["source_format"].as_str(),
         Some("codex_history_jsonl")
     );
+    let source_path = fixture.display().to_string();
     let cursor = store
         .get_sync_cursor(
             None,
             &CodexHistoryImportOptions::default().machine_id,
-            &provider_cursor_stream(CaptureProvider::Codex, "codex_history_jsonl"),
+            &provider_source_cursor_stream(
+                CaptureProvider::Codex,
+                "codex_history_jsonl",
+                Some(&source_path),
+            ),
         )
         .unwrap()
         .unwrap();
@@ -501,7 +511,11 @@ fn provider_fixture_replay_rejects_malformed_lines_without_partial_import_by_def
     assert_eq!(summary.imported_sessions, 0);
     assert_eq!(summary.imported_events, 0);
     assert_eq!(summary.failed, 1);
-    let session_id = provider_session_uuid(CaptureProvider::Codex, "malformed-partial-session");
+    let session_id = provider_fixture_session_id(
+        CaptureProvider::Codex,
+        "malformed-partial-session",
+        &fixture,
+    );
     assert!(store.events_for_session(session_id).unwrap().is_empty());
 }
 
@@ -520,7 +534,11 @@ fn provider_fixture_replay_allows_explicit_partial_import() {
     assert_eq!(summary.failed, 1);
     assert_eq!(summary.failures.len(), 1);
     assert_eq!(summary.failures[0].line, 3);
-    let session_id = provider_session_uuid(CaptureProvider::Codex, "malformed-partial-session");
+    let session_id = provider_fixture_session_id(
+        CaptureProvider::Codex,
+        "malformed-partial-session",
+        &fixture,
+    );
     let events = store.events_for_session(session_id).unwrap();
     assert_eq!(events.len(), 2);
     assert!(events[0]

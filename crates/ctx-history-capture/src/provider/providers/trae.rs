@@ -496,6 +496,10 @@ pub(crate) fn trae_capture(input: TraeCaptureInput<'_>) -> ProviderCaptureEnvelo
             machine_id: input.context.machine_id.clone(),
             observed_at: input.context.imported_at,
             raw_source_path: Some(input.raw_source_path.to_owned()),
+            source_root: input
+                .context
+                .source_root_display()
+                .or_else(|| Some(input.raw_source_path.to_owned())),
             raw_retention: ProviderRawRetention::PathReference,
             redaction_boundary: ProviderRedactionBoundary::BeforeExport,
             trust: ProviderSourceTrust::ProviderNative,

@@ -80,6 +80,12 @@ pub struct CaptureSourceDescriptor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_source_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_session_id: Option<String>,
 }
 

@@ -603,6 +603,10 @@ pub(crate) fn custom_history_session_capture(
                 .unwrap_or_else(|| context.machine_id.clone()),
             observed_at: source.observed_at.unwrap_or(context.imported_at),
             raw_source_path: custom_history_effective_raw_source_path(source, context),
+            source_root: context
+                .source_root_display()
+                .or_else(|| source.raw_source_path.clone())
+                .or_else(|| source.raw_uri.clone()),
             raw_retention: source.raw_retention,
             redaction_boundary: source.redaction_boundary,
             trust: match source.trust {
@@ -725,6 +729,10 @@ pub(crate) fn custom_history_file_touch_envelope(
         provider_touch_index: file_touch.touch_index,
         provider_event_index: file_touch.event_index,
         raw_source_path: custom_history_effective_raw_source_path(source, context),
+        source_root: context
+            .source_root_display()
+            .or_else(|| source.raw_source_path.clone())
+            .or_else(|| source.raw_uri.clone()),
         path: file_touch.path.clone(),
         change_kind: file_touch.change_kind,
         old_path: file_touch.old_path.clone(),

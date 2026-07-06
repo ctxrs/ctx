@@ -140,7 +140,10 @@ Current adapters are safe to re-run. They rescan sources idempotently and keep
 source paths or cursors when available. Imports are source-atomic by default:
 malformed rows fail that source without committing its valid rows. Use
 `--partial` to opt into committing valid rows from a malformed source while row
-failures are reported.
+failures are reported. Native provider cursor progress is scoped by provider,
+source format, and an opaque source identity derived from the configured root or
+source path, so two roots for the same provider do not overwrite each other's
+progress.
 Custom history JSONL imports follow the same v1 lifecycle: ctx rescans the
 explicit file, upserts already-imported records, stores supplied source cursor
 metadata under ctx-owned custom cursor streams, and preserves event native
