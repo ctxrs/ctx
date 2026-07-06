@@ -861,6 +861,27 @@ fn help_exposes_session_retrieval_commands() {
 }
 
 #[test]
+fn provider_help_and_errors_do_not_dump_full_provider_list() {
+    let temp = tempdir();
+    let help = ctx(&temp)
+        .args(["import", "--help"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let help = String::from_utf8(help).unwrap();
+    assert!(help.contains("for example codex, claude, cursor, pi"));
+    assert!(!help.contains("factory-ai-droid"));
+
+    let stderr = failure_stderr(ctx(&temp).args(["import", "--provider", "nope"]));
+    assert!(stderr.contains("invalid value 'nope'"));
+    assert!(stderr.contains("examples: codex, claude, cursor, pi"));
+    assert!(!stderr.contains("[possible values:"));
+    assert!(!stderr.contains("factory-ai-droid"));
+}
+
+#[test]
 fn root_version_reports_package_version() {
     let temp = tempdir();
     ctx(&temp)
@@ -1095,6 +1116,59 @@ fn setup_skips_empty_codex_session_tree() {
         .unwrap();
     assert_eq!(codex_sessions["status"], "empty");
     assert_eq!(codex_sessions["importable"], false);
+}
+
+#[test]
+fn sources_default_hides_long_tail_missing_locations() {
+    let temp = tempdir();
+
+    let sources = json_output(ctx(&temp).args(["sources", "--json"]));
+    assert_eq!(sources["scope"], "default");
+    assert!(sources["hidden_missing_sources"].as_u64().unwrap() > 0);
+    let visible = sources["sources"].as_array().unwrap();
+    assert!(visible.iter().any(|source| source["provider"] == "codex"));
+    assert!(visible.iter().any(|source| source["provider"] == "claude"));
+    assert!(visible.iter().any(|source| source["provider"] == "cursor"));
+    assert!(visible.iter().any(|source| source["provider"] == "pi"));
+    assert!(visible
+        .iter()
+        .any(|source| source["provider"] == "opencode"));
+    assert!(visible
+        .iter()
+        .any(|source| source["provider"] == "copilot_cli"));
+    assert!(!visible.iter().any(|source| source["provider"] == "moxby"));
+
+    let text = ctx(&temp)
+        .arg("sources")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text).unwrap();
+    assert!(text.contains("missing provider locations hidden"));
+    assert!(text.contains("ctx sources --all"));
+    assert!(!text.contains("moxby "));
+
+    let all_sources = json_output(ctx(&temp).args(["sources", "--json", "--all"]));
+    assert_eq!(all_sources["scope"], "all");
+    assert_eq!(all_sources["hidden_missing_sources"], 0);
+    let all = all_sources["sources"].as_array().unwrap();
+    assert!(all.len() > visible.len());
+    assert!(all.iter().any(|source| source["provider"] == "moxby"));
+}
+
+#[test]
+fn sources_provider_filter_shows_explicit_long_tail_missing_locations() {
+    let temp = tempdir();
+
+    let sources = json_output(ctx(&temp).args(["sources", "--provider", "moxby", "--json"]));
+    assert_eq!(sources["scope"], "all");
+    assert_eq!(sources["hidden_missing_sources"], 0);
+    let rows = sources["sources"].as_array().unwrap();
+    assert!(!rows.is_empty());
+    assert!(rows.iter().all(|source| source["provider"] == "moxby"));
+    assert!(rows.iter().all(|source| source["status"] == "missing"));
 }
 
 #[test]

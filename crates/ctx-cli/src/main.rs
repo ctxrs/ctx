@@ -105,6 +105,14 @@ const LARGE_IMPORT_SOURCE_BYTES_WARNING: u64 = 1024 * 1024 * 1024;
 const MAX_SEARCH_LIMIT: usize = 200;
 pub(crate) const MAX_EVENT_WINDOW: usize = 50;
 const MAX_HISTORY_SOURCE_PLUGIN_JSONL_LINE_BYTES: usize = 16 * 1024 * 1024;
+const DEFAULT_VISIBLE_SOURCE_PROVIDERS: &[CaptureProvider] = &[
+    CaptureProvider::Claude,
+    CaptureProvider::Codex,
+    CaptureProvider::Cursor,
+    CaptureProvider::Pi,
+    CaptureProvider::CopilotCli,
+    CaptureProvider::OpenCode,
+];
 
 #[derive(Debug, Parser)]
 #[command(name = "ctx", version, about = "Search local agent history")]
@@ -122,7 +130,7 @@ enum CommandRoot {
     #[command(about = "Show local ctx index status")]
     Status(JsonArgs),
     #[command(about = "List configured and discovered agent history sources")]
-    Sources(JsonArgs),
+    Sources(SourcesArgs),
     #[command(about = "Index provider history into local search")]
     Import(ImportArgs),
     #[command(about = "Show an indexed session transcript or event")]
@@ -162,6 +170,22 @@ struct JsonArgs {
 }
 
 #[derive(Debug, Args, Clone)]
+struct SourcesArgs {
+    #[arg(long)]
+    json: bool,
+    #[arg(
+        long,
+        value_parser = parse_provider_arg,
+        help = "Show sources for one provider, for example codex, claude, cursor, pi, copilot-cli, or opencode"
+    )]
+    provider: Option<ProviderArg>,
+    #[arg(long, help = "Show every known provider location")]
+    all: bool,
+    #[arg(long, help = "Show missing locations for every known provider")]
+    show_missing: bool,
+}
+
+#[derive(Debug, Args, Clone)]
 struct DoctorArgs {
     #[arg(long)]
     json: bool,
@@ -171,7 +195,11 @@ struct DoctorArgs {
 
 #[derive(Debug, Args)]
 struct ImportArgs {
-    #[arg(long, value_enum)]
+    #[arg(
+        long,
+        value_parser = parse_native_provider_arg,
+        help = "Import one provider, for example codex, claude, cursor, pi, copilot-cli, or opencode"
+    )]
     provider: Option<NativeProviderArg>,
     #[arg(
         long,
@@ -222,7 +250,7 @@ enum ShowTarget {
 struct ShowSessionArgs {
     #[arg(help = "ctx session id or unambiguous id prefix")]
     id: Option<String>,
-    #[arg(long, value_enum)]
+    #[arg(long, value_parser = parse_provider_arg)]
     provider: Option<ProviderArg>,
     #[arg(long = "provider-session")]
     provider_session: Option<String>,
@@ -270,7 +298,7 @@ enum LocateTarget {
 struct LocateSessionArgs {
     #[arg(help = "ctx session id or unambiguous id prefix")]
     id: Option<String>,
-    #[arg(long, value_enum)]
+    #[arg(long, value_parser = parse_provider_arg)]
     provider: Option<ProviderArg>,
     #[arg(long = "provider-session")]
     provider_session: Option<String>,
@@ -306,7 +334,11 @@ struct SearchArgs {
         help = "Maximum results to return, from 1 to 200"
     )]
     limit: usize,
-    #[arg(long, help = "Search only one provider")]
+    #[arg(
+        long,
+        value_parser = parse_provider_arg,
+        help = "Search only one provider, for example codex, claude, cursor, pi, copilot-cli, or opencode"
+    )]
     provider: Option<ProviderArg>,
     #[arg(
         long = "history-source",
@@ -2373,14 +2405,23 @@ fn run_status(
 }
 
 fn run_sources(
-    args: JsonArgs,
+    args: SourcesArgs,
     data_root: PathBuf,
     analytics_properties: &mut AnalyticsProperties,
 ) -> Result<()> {
-    let sources = discovered_sources();
+    let provider_filter = args.provider.map(ProviderArg::capture_provider);
+    let sources = match provider_filter {
+        Some(CaptureProvider::Custom) => Vec::new(),
+        Some(provider) => discovered_sources_for_provider(provider),
+        None => discovered_sources(),
+    };
     let plugin_discovery = discover_history_source_plugins_with_diagnostics(&data_root, &[])?;
-    let plugin_sources = plugin_discovery.sources;
-    let plugin_failures = plugin_discovery.failures;
+    let (plugin_sources, plugin_failures) = if matches!(provider_filter, Some(provider) if provider != CaptureProvider::Custom)
+    {
+        (Vec::new(), Vec::new())
+    } else {
+        (plugin_discovery.sources, plugin_discovery.failures)
+    };
     let existing = sources.iter().filter(|source| source.exists).count();
     let importable = sources
         .iter()
@@ -2408,19 +2449,28 @@ fn run_sources(
         "providers_importable_bucket",
         importable as u64,
     );
+    let show_all_sources = args.all || args.show_missing || provider_filter.is_some();
+    let visible_sources = sources
+        .iter()
+        .filter(|source| show_all_sources || source_visible_by_default(source))
+        .cloned()
+        .collect::<Vec<_>>();
+    let hidden_missing_sources = sources.len().saturating_sub(visible_sources.len());
     if args.json {
-        let mut source_values = sources_json(&sources);
+        let mut source_values = sources_json(&visible_sources);
         source_values.extend(plugin_sources_json(&plugin_sources));
         source_values.extend(plugin_manifest_failures_json(&plugin_failures));
         print_json(json!({
             "schema_version": 1,
+            "scope": if show_all_sources { "all" } else { "default" },
+            "hidden_missing_sources": hidden_missing_sources,
             "sources": source_values,
         }))?;
     } else {
-        for source in sources {
+        for source in visible_sources {
             println!(
                 "{} {} {} ({})",
-                source.provider.as_str(),
+                source_provider_cli_name(source.provider),
                 source.path.display(),
                 source.status.as_str(),
                 source.source_format
@@ -2440,8 +2490,26 @@ fn run_sources(
                 source.source_format
             );
         }
+        if hidden_missing_sources > 0 {
+            println!(
+                "{} missing provider locations hidden. Run `ctx sources --all` to show every known provider location.",
+                hidden_missing_sources
+            );
+        }
     }
     Ok(())
+}
+
+fn source_visible_by_default(source: &SourceInfo) -> bool {
+    source.exists
+        || source.status != ProviderSourceStatus::Missing
+        || DEFAULT_VISIBLE_SOURCE_PROVIDERS.contains(&source.provider)
+}
+
+fn source_provider_cli_name(provider: CaptureProvider) -> &'static str {
+    ProviderArg::parse_name(provider.as_str())
+        .map(ProviderArg::cli_name)
+        .unwrap_or_else(|| provider.as_str())
 }
 
 pub(crate) fn discovered_plugin_sources_json(data_root: &Path) -> Result<Vec<Value>> {
@@ -4482,6 +4550,20 @@ fn parse_search_limit(value: &str) -> std::result::Result<usize, String> {
         ));
     }
     Ok(limit)
+}
+
+fn parse_native_provider_arg(value: &str) -> std::result::Result<NativeProviderArg, String> {
+    NativeProviderArg::from_str(value, false).map_err(|_| compact_provider_error(value))
+}
+
+fn parse_provider_arg(value: &str) -> std::result::Result<ProviderArg, String> {
+    ProviderArg::from_str(value, false).map_err(|_| compact_provider_error(value))
+}
+
+fn compact_provider_error(value: &str) -> String {
+    format!(
+        "unknown provider {value:?}; examples: codex, claude, cursor, pi, copilot-cli, opencode; run `ctx sources --all` to inspect every supported provider location"
+    )
 }
 
 fn parse_event_window_limit(value: &str) -> std::result::Result<usize, String> {
