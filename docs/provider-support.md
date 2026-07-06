@@ -22,8 +22,6 @@ is:
 | Qoder | Supported | `qoder_transcript_jsonl_tree` | Public fixture smoke. |
 | Warp | Supported | `warp_sqlite` | Public fixture smoke. |
 | CodeBuddy | Supported | `codebuddy_history_json` | Public fixture smoke. |
-| CodeArts Agent | Supported | `codearts_agent_kernel_sqlite` | Public fixture smoke. |
-| Zencoder | Supported | `zencoder_chat_sessions_json_tree` | Public fixture smoke. |
 | Trae | Supported | `trae_state_vscdb` | Public fixture smoke. |
 | OpenClaw | Supported | `openclaw_session_jsonl_tree` | Public CLI coverage. |
 | Hermes Agent | Supported | `hermes_state_sqlite` | Public CLI coverage. |

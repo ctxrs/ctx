@@ -2077,10 +2077,8 @@ fn sources_lists_supported_personal_agent_provider_defaults() {
     install_default_qoder_fixture(&temp, "qoder-sources-oracle");
     install_default_auggie_fixture(&temp, "auggie-sources-oracle");
     install_default_junie_fixture(&temp, "junie-sources-oracle");
-    install_default_zencoder_fixture(&temp, "zencoder-sources-oracle");
     install_default_warp_fixture(&temp);
     install_default_trae_fixture(&temp, "trae-sources-oracle");
-    install_default_codearts_agent_fixture(&temp, "codearts-sources-oracle");
 
     let sources = json_output(ctx(&temp).args(["sources", "--json"]));
     for (provider, source_format, import_support, native_import) in [
@@ -2103,20 +2101,8 @@ fn sources_lists_supported_personal_agent_provider_defaults() {
         ("qoder", "qoder_transcript_jsonl_tree", "native", true),
         ("auggie", "auggie_session_json", "native", true),
         ("junie", "junie_session_events_jsonl_tree", "native", true),
-        (
-            "zencoder",
-            "zencoder_chat_sessions_json_tree",
-            "native",
-            true,
-        ),
         ("warp", "warp_sqlite", "native", true),
         ("trae", "trae_state_vscdb", "native", true),
-        (
-            "codearts_agent",
-            "codearts_agent_kernel_sqlite",
-            "native",
-            true,
-        ),
     ] {
         let source = sources["sources"]
             .as_array()
@@ -2426,7 +2412,6 @@ fn provider_json_names_are_accepted_as_cli_filter_aliases() {
         ("forge", "forgecode"),
         ("forge_code", "forgecode"),
         ("mistral_vibe", "mistral_vibe"),
-        ("vibe", "mistral_vibe"),
         ("mux", "mux"),
         ("qoder-cn", "lingma"),
         ("qoder_cn", "lingma"),
@@ -2434,7 +2419,6 @@ fn provider_json_names_are_accepted_as_cli_filter_aliases() {
         ("open_claw", "openclaw"),
         ("nano_claw", "nanoclaw"),
         ("astr_bot", "astrbot"),
-        ("devin_desktop", "windsurf"),
         ("windsurf_cascade", "windsurf"),
         ("open_hands", "openhands"),
     ] {
@@ -5981,12 +5965,6 @@ fn search_refresh_auto_imports_discovered_top_provider_sources() {
         ("lingma", "lingma", install_default_lingma_fixture),
         ("qoder", "qoder", install_default_qoder_fixture),
         ("junie", "junie", install_default_junie_fixture),
-        ("zencoder", "zencoder", install_default_zencoder_fixture),
-        (
-            "codearts-agent",
-            "codearts_agent",
-            install_default_codearts_agent_fixture,
-        ),
     ] {
         let temp = tempdir();
         let query = format!("{stored_provider}-default-refresh-oracle");
@@ -6312,12 +6290,6 @@ fn native_provider_cli_flow_imports_supported_provider_paths() {
             "opencode_sqlite",
             write_native_opencode_fixture,
         ),
-        (
-            "codearts-agent",
-            "codearts_agent",
-            "codearts_agent_kernel_sqlite",
-            write_native_codearts_agent_fixture,
-        ),
         ("kilo", "kilo", "kilo_sqlite", write_native_kilo_fixture),
         (
             "kiro-cli",
@@ -6414,12 +6386,6 @@ fn native_provider_cli_flow_imports_supported_provider_paths() {
             "junie",
             "junie_session_events_jsonl_tree",
             write_native_junie_fixture,
-        ),
-        (
-            "zencoder",
-            "zencoder",
-            "zencoder_chat_sessions_json_tree",
-            write_native_zencoder_fixture,
         ),
         (
             "firebender",
@@ -7389,17 +7355,6 @@ fn install_default_trae_fixture(temp: &TempDir, query: &str) {
     .unwrap();
 }
 
-fn install_default_codearts_agent_fixture(temp: &TempDir, query: &str) {
-    write_codearts_agent_fixture_at(
-        &temp
-            .path()
-            .join(".codeartsdoer")
-            .join("vscode-data")
-            .join("opencode.db"),
-        query,
-    );
-}
-
 fn install_default_shelley_fixture(temp: &TempDir, query: &str) {
     let source = PathBuf::from(write_native_shelley_fixture(temp, query));
     let target = temp.path().join(".config/shelley");
@@ -7457,15 +7412,6 @@ fn install_default_auggie_fixture(temp: &TempDir, query: &str) {
 fn install_default_junie_fixture(temp: &TempDir, query: &str) {
     let source = PathBuf::from(write_native_junie_fixture(temp, query));
     copy_dir_all(&source, &temp.path().join(".junie").join("sessions"));
-}
-fn install_default_zencoder_fixture(temp: &TempDir, query: &str) {
-    let source = PathBuf::from(write_native_zencoder_fixture(temp, query));
-    copy_dir_all(
-        &source,
-        &temp
-            .path()
-            .join(".config/Code/User/globalStorage/ZencoderAI.zencoder/zencoder-chat"),
-    );
 }
 fn install_default_openhands_fixture(temp: &TempDir, query: &str) {
     let source = PathBuf::from(write_native_openhands_fixture(temp, query));
@@ -8024,27 +7970,6 @@ fn write_native_firebender_fixture(temp: &TempDir, query: &str) -> String {
     .unwrap();
     project.to_str().unwrap().to_owned()
 }
-fn write_native_codearts_agent_fixture(temp: &TempDir, query: &str) -> String {
-    let path = temp.path().join("native-codearts/opencode.db");
-    write_codearts_agent_fixture_at(&path, query);
-    path.to_str().unwrap().to_owned()
-}
-
-fn write_codearts_agent_fixture_at(path: &Path, query: &str) {
-    write_sqlite_fixture_from_sql("codearts-agent/v1/opencode.sql", path);
-    let conn = Connection::open(path).unwrap();
-    conn.execute(
-        "UPDATE session_message SET data = ?1 WHERE id = 'codearts-user-1'",
-        [json!({"time":{"created":1783263600000i64},"text":query}).to_string()],
-    )
-    .unwrap();
-    conn.execute(
-        "UPDATE session_message SET data = ?1 WHERE id = 'codearts-assistant-1'",
-        [json!({"time":{"created":1783263601000i64},"text":format!("CodeArts answered {query}")}).to_string()],
-    )
-    .unwrap();
-}
-
 fn write_native_junie_fixture(temp: &TempDir, query: &str) -> String {
     let sessions = temp.path().join("native-junie/sessions");
     let session_id = "session-260607-120000-native";
@@ -8087,52 +8012,6 @@ fn write_native_junie_fixture(temp: &TempDir, query: &str) -> String {
     )
     .unwrap();
     sessions.to_str().unwrap().to_owned()
-}
-fn write_native_zencoder_fixture(temp: &TempDir, query: &str) -> String {
-    let root = temp
-        .path()
-        .join("native-zencoder/ZencoderAI.zencoder/zencoder-chat");
-    let sessions = root.join("sessions");
-    fs::create_dir_all(&sessions).unwrap();
-    fs::write(
-        root.join("sessions.json"),
-        serde_json::to_string_pretty(&json!([
-            {
-                "id": "zencoder-native",
-                "title": "Zencoder native fixture",
-                "updatedAt": 1783263601000i64,
-                "isAgent": true
-            }
-        ]))
-        .unwrap(),
-    )
-    .unwrap();
-    fs::write(
-        sessions.join("zencoder-native.json"),
-        serde_json::to_string_pretty(&json!({
-            "id": "zencoder-native",
-            "title": "Zencoder native fixture",
-            "workspacePath": "/workspace/zencoder-native",
-            "updatedAt": 1783263601000i64,
-            "messages": [
-                {
-                    "id": "zencoder-native-user",
-                    "role": "user",
-                    "createdAt": 1783263600000i64,
-                    "content": [{"type": "text", "text": query}]
-                },
-                {
-                    "id": "zencoder-native-assistant",
-                    "role": "assistant",
-                    "createdAt": 1783263601000i64,
-                    "content": [{"type": "text", "text": format!("Zencoder answered {query}")}]
-                }
-            ]
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    root.to_str().unwrap().to_owned()
 }
 fn write_native_mux_fixture(temp: &TempDir, query: &str) -> String {
     let root = temp.path().join("native-mux/sessions");

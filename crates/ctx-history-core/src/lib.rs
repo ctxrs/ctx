@@ -222,8 +222,6 @@ text_enum! {
         Warp => "warp",
         CodeBuddy => "codebuddy",
         Trae => "trae",
-        CodeArtsAgent => "codearts_agent",
-        Zencoder => "zencoder",
         Shell => "shell",
         Git => "git",
         Jj => "jj",

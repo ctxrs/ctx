@@ -43,14 +43,6 @@ pub enum ProviderId {
     ClaudeCliCrp,
     Pi,
     OpenCode,
-    #[serde(
-        rename = "codearts_agent",
-        alias = "codearts",
-        alias = "codearts-agent",
-        alias = "codearts_doer",
-        alias = "codearts-doer"
-    )]
-    CodeArtsAgent,
     Cursor,
     AntigravityCli,
     GeminiCli,
@@ -59,8 +51,6 @@ pub enum ProviderId {
     Copilot,
     #[serde(
         rename = "windsurf",
-        alias = "devin_desktop",
-        alias = "devin-desktop",
         alias = "windsurf_cascade",
         alias = "windsurf-cascade"
     )]
@@ -92,8 +82,6 @@ pub enum ProviderId {
     CodeBuddy,
     #[serde(rename = "trae", alias = "trae-cn", alias = "trae_cn")]
     Trae,
-    #[serde(rename = "zencoder", alias = "zen-coder", alias = "zen_coder")]
-    Zencoder,
     #[serde(rename = "openhands")]
     OpenHands,
     Cagent,
@@ -110,12 +98,7 @@ pub enum ProviderId {
     ForgeCode,
     #[serde(rename = "deepagents", alias = "deep-agents", alias = "dcode")]
     DeepAgents,
-    #[serde(
-        rename = "mistral_vibe",
-        alias = "mistral-vibe",
-        alias = "mistral",
-        alias = "vibe"
-    )]
+    #[serde(rename = "mistral_vibe", alias = "mistral-vibe", alias = "mistral")]
     MistralVibe,
     #[serde(rename = "tabnine", alias = "tabnine-cli", alias = "tabnine_cli")]
     Tabnine,
@@ -141,13 +124,12 @@ pub enum ProviderId {
 }
 
 impl ProviderId {
-    pub const ALL: [Self; 52] = [
+    pub const ALL: [Self; 50] = [
         Self::Codex,
         Self::ClaudeCode,
         Self::ClaudeCliCrp,
         Self::Pi,
         Self::OpenCode,
-        Self::CodeArtsAgent,
         Self::Cursor,
         Self::AntigravityCli,
         Self::GeminiCli,
@@ -175,7 +157,6 @@ impl ProviderId {
         Self::Warp,
         Self::CodeBuddy,
         Self::Trae,
-        Self::Zencoder,
         Self::OpenHands,
         Self::Cagent,
         Self::QwenCode,
@@ -496,9 +477,7 @@ mod tests {
             ProviderId::Cline,
             ProviderId::Codex,
             ProviderId::CodeBuddy,
-            ProviderId::CodeArtsAgent,
             ProviderId::Trae,
-            ProviderId::Zencoder,
             ProviderId::Continue,
             ProviderId::Crush,
             ProviderId::Cursor,

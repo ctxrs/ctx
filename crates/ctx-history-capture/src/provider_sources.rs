@@ -131,24 +131,6 @@ const OPENCODE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation 
     source_kind: ProviderSourceKind::NativeHistory,
 }];
 
-const CODEARTS_AGENT_DEFAULTS: &[ProviderDefaultLocation] = &[
-    ProviderDefaultLocation {
-        path_components: &[".codeartsdoer", "vscode-data", "opencode.db"],
-        source_format: "codearts_agent_kernel_sqlite",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &[".codeartsdoer", "codearts-data", "opencode.db"],
-        source_format: "codearts_agent_kernel_sqlite",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &[".local", "share", "codeartsdoer", "opencode.db"],
-        source_format: "codearts_agent_kernel_sqlite",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-];
-
 const KILO_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     path_components: &[".local", "share", "kilo", "kilo.db"],
     source_format: "kilo_sqlite",
@@ -264,161 +246,6 @@ const TRAE_DEFAULTS: &[ProviderDefaultLocation] = &[
             "workspaceStorage",
         ],
         source_format: TRAE_STATE_VSCDB_SOURCE_FORMAT,
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-];
-
-const ZENCODER_DEFAULTS: &[ProviderDefaultLocation] = &[
-    ProviderDefaultLocation {
-        path_components: &[
-            ".config",
-            "Code",
-            "User",
-            "globalStorage",
-            "ZencoderAI.zencoder",
-            "zencoder-chat",
-        ],
-        source_format: "zencoder_chat_sessions_json_tree",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &[
-            ".config",
-            "Code - Insiders",
-            "User",
-            "globalStorage",
-            "ZencoderAI.zencoder",
-            "zencoder-chat",
-        ],
-        source_format: "zencoder_chat_sessions_json_tree",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &[
-            ".config",
-            "VSCodium",
-            "User",
-            "globalStorage",
-            "ZencoderAI.zencoder",
-            "zencoder-chat",
-        ],
-        source_format: "zencoder_chat_sessions_json_tree",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &[
-            ".config",
-            "Code - OSS",
-            "User",
-            "globalStorage",
-            "ZencoderAI.zencoder",
-            "zencoder-chat",
-        ],
-        source_format: "zencoder_chat_sessions_json_tree",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &[
-            "Library",
-            "Application Support",
-            "Code",
-            "User",
-            "globalStorage",
-            "ZencoderAI.zencoder",
-            "zencoder-chat",
-        ],
-        source_format: "zencoder_chat_sessions_json_tree",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &[
-            "Library",
-            "Application Support",
-            "Code - Insiders",
-            "User",
-            "globalStorage",
-            "ZencoderAI.zencoder",
-            "zencoder-chat",
-        ],
-        source_format: "zencoder_chat_sessions_json_tree",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &[
-            "Library",
-            "Application Support",
-            "VSCodium",
-            "User",
-            "globalStorage",
-            "ZencoderAI.zencoder",
-            "zencoder-chat",
-        ],
-        source_format: "zencoder_chat_sessions_json_tree",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &[
-            "Library",
-            "Application Support",
-            "Code - OSS",
-            "User",
-            "globalStorage",
-            "ZencoderAI.zencoder",
-            "zencoder-chat",
-        ],
-        source_format: "zencoder_chat_sessions_json_tree",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &[
-            "AppData",
-            "Roaming",
-            "Code",
-            "User",
-            "globalStorage",
-            "ZencoderAI.zencoder",
-            "zencoder-chat",
-        ],
-        source_format: "zencoder_chat_sessions_json_tree",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &[
-            "AppData",
-            "Roaming",
-            "Code - Insiders",
-            "User",
-            "globalStorage",
-            "ZencoderAI.zencoder",
-            "zencoder-chat",
-        ],
-        source_format: "zencoder_chat_sessions_json_tree",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &[
-            "AppData",
-            "Roaming",
-            "VSCodium",
-            "User",
-            "globalStorage",
-            "ZencoderAI.zencoder",
-            "zencoder-chat",
-        ],
-        source_format: "zencoder_chat_sessions_json_tree",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &[
-            "AppData",
-            "Roaming",
-            "Code - OSS",
-            "User",
-            "globalStorage",
-            "ZencoderAI.zencoder",
-            "zencoder-chat",
-        ],
-        source_format: "zencoder_chat_sessions_json_tree",
         source_kind: ProviderSourceKind::NativeHistory,
     },
 ];
@@ -705,16 +532,6 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         provider: CaptureProvider::OpenCode,
         display_name: "OpenCode",
         default_locations: OPENCODE_DEFAULTS,
-        import_support: ProviderImportSupport::Native,
-        catalog_support: ProviderCatalogSupport::None,
-        raw_retention: ProviderRawRetention::PathReference,
-        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
-        unsupported_reason: None,
-    },
-    ProviderSourceSpec {
-        provider: CaptureProvider::CodeArtsAgent,
-        display_name: "CodeArts Agent",
-        default_locations: CODEARTS_AGENT_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         raw_retention: ProviderRawRetention::PathReference,
@@ -1052,16 +869,6 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         unsupported_reason: None,
     },
     ProviderSourceSpec {
-        provider: CaptureProvider::Zencoder,
-        display_name: "Zencoder",
-        default_locations: ZENCODER_DEFAULTS,
-        import_support: ProviderImportSupport::Native,
-        catalog_support: ProviderCatalogSupport::None,
-        raw_retention: ProviderRawRetention::PathReference,
-        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
-        unsupported_reason: None,
-    },
-    ProviderSourceSpec {
         provider: CaptureProvider::Qoder,
         display_name: "Qoder",
         default_locations: QODER_DEFAULTS,
@@ -1157,16 +964,6 @@ fn discover_provider_sources_for_spec(
                     spec,
                     path,
                     "openclaw_session_jsonl_tree",
-                    ProviderSourceKind::NativeHistory,
-                ));
-            }
-        }
-        CaptureProvider::CodeArtsAgent => {
-            if let Some(path) = env_path("XDG_DATA_HOME") {
-                sources.push(provider_source_from_parts(
-                    spec,
-                    path.join("codeartsdoer").join("opencode.db"),
-                    "codearts_agent_kernel_sqlite",
                     ProviderSourceKind::NativeHistory,
                 ));
             }
@@ -1464,14 +1261,6 @@ fn discover_provider_sources_for_spec(
                 ));
             }
         }
-        CaptureProvider::Zencoder => {
-            if let Some(path) = env_path("XDG_CONFIG_HOME") {
-                sources.extend(zencoder_app_data_dirs(path, spec));
-            }
-            if let Some(path) = env_path("APPDATA") {
-                sources.extend(zencoder_app_data_dirs(path, spec));
-            }
-        }
         _ => {}
     }
 
@@ -1612,24 +1401,6 @@ fn discover_roo_task_json_sources(home: &Path, spec: &ProviderSourceSpec) -> Vec
         }
     }
     sources
-}
-
-fn zencoder_app_data_dirs(base: PathBuf, spec: &ProviderSourceSpec) -> Vec<ProviderSource> {
-    ["Code", "Code - Insiders", "VSCodium", "Code - OSS"]
-        .into_iter()
-        .map(|app_name| {
-            provider_source_from_parts(
-                spec,
-                base.join(app_name)
-                    .join("User")
-                    .join("globalStorage")
-                    .join("ZencoderAI.zencoder")
-                    .join("zencoder-chat"),
-                "zencoder_chat_sessions_json_tree",
-                ProviderSourceKind::NativeHistory,
-            )
-        })
-        .collect()
 }
 
 fn task_json_source(spec: &ProviderSourceSpec, path: PathBuf) -> ProviderSource {
@@ -1895,7 +1666,6 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::Pi => "pi_session_jsonl",
         CaptureProvider::Claude => "claude_projects_jsonl_tree",
         CaptureProvider::OpenCode => "opencode_sqlite",
-        CaptureProvider::CodeArtsAgent => "codearts_agent_kernel_sqlite",
         CaptureProvider::Kilo => "kilo_sqlite",
         CaptureProvider::KiroCli => "kiro_cli_sqlite",
         CaptureProvider::Crush => "crush_sqlite",
@@ -1949,14 +1719,6 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::Qoder => "qoder_transcript_jsonl",
         CaptureProvider::Warp => "warp_sqlite",
         CaptureProvider::CodeBuddy => "codebuddy_history_json",
-        CaptureProvider::Zencoder if path.is_dir() => "zencoder_chat_sessions_json_tree",
-        CaptureProvider::Zencoder => {
-            if path.file_name().and_then(|name| name.to_str()) == Some("sessions.json") {
-                "zencoder_chat_sessions_json_tree"
-            } else {
-                "zencoder_chat_session_json"
-            }
-        }
         _ => "unsupported",
     };
     let explicit_import_support = spec.import_support;
@@ -2046,9 +1808,6 @@ fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
             Some("path exists but no Claude project JSONL transcripts were found")
         }
         CaptureProvider::OpenCode => Some("path exists but no OpenCode SQLite database was found"),
-        CaptureProvider::CodeArtsAgent => {
-            Some("path exists but no CodeArts Agent opencode.db database was found")
-        }
         CaptureProvider::Kilo => Some("path exists but no Kilo SQLite database was found"),
         CaptureProvider::Crush => Some("path exists but no Crush SQLite database was found"),
         CaptureProvider::Goose => {
@@ -2133,9 +1892,6 @@ fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::CodeBuddy => {
             Some("path exists but no CodeBuddy history sessions were found")
         }
-        CaptureProvider::Zencoder => {
-            Some("path exists but no Zencoder sessions.json or sessions/*.json files were found")
-        }
         _ => None,
     }
 }
@@ -2163,7 +1919,6 @@ fn unknown_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::Cursor => {
             Some("path exists but the Cursor transcript probe hit its scan budget")
         }
-        CaptureProvider::CodeArtsAgent => None,
         CaptureProvider::Zed => None,
         CaptureProvider::CopilotCli => {
             Some("path exists but the Copilot CLI transcript probe hit its scan budget")
@@ -2211,9 +1966,6 @@ fn unknown_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::CodeBuddy => {
             Some("path exists but the CodeBuddy history probe hit its scan budget")
         }
-        CaptureProvider::Zencoder => {
-            Some("path exists but the Zencoder session probe hit its scan budget")
-        }
         CaptureProvider::Trae => {
             Some("path exists but the Trae workspaceStorage probe hit its scan budget")
         }
@@ -2237,9 +1989,6 @@ fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'static str> {
         }
         CaptureProvider::OpenCode => {
             Some("path exists but the OpenCode database could not be read; check permissions")
-        }
-        CaptureProvider::CodeArtsAgent => {
-            Some("path exists but the CodeArts Agent database could not be read; check permissions")
         }
         CaptureProvider::Kilo => {
             Some("path exists but the Kilo database could not be read; check permissions")
@@ -2343,9 +2092,6 @@ fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::CodeBuddy => Some(
             "path exists but CodeBuddy history JSON files could not be read; check permissions",
         ),
-        CaptureProvider::Zencoder => {
-            Some("path exists but Zencoder session JSON files could not be read; check permissions")
-        }
         _ => None,
     }
 }
@@ -2362,7 +2108,6 @@ fn default_location_import_probe(
         CaptureProvider::Codex => has_jsonl_file_under_matching(path, 10_000, |_| true),
         CaptureProvider::Pi => has_jsonl_file_under_matching(path, 10_000, |_| true),
         CaptureProvider::OpenCode => path_is_file_probe(path),
-        CaptureProvider::CodeArtsAgent => path_is_file_probe(path),
         CaptureProvider::Kilo => path_is_file_probe(path),
         CaptureProvider::KiroCli => path_is_file_probe(path),
         CaptureProvider::Crush => path_is_file_probe(path),
@@ -2443,7 +2188,6 @@ fn default_location_import_probe(
         CaptureProvider::Trae => has_trae_state_vscdb_chat_history(path, 10_000),
         CaptureProvider::Warp => path_is_file_probe(path),
         CaptureProvider::CodeBuddy => has_codebuddy_history_json(path, 10_000),
-        CaptureProvider::Zencoder => has_zencoder_session_json(path, 10_000),
         CaptureProvider::Shell
         | CaptureProvider::Git
         | CaptureProvider::Jj
@@ -2451,37 +2195,6 @@ fn default_location_import_probe(
         | CaptureProvider::Custom
         | CaptureProvider::Unknown => BoundedProbe::NotFound,
     }
-}
-
-fn has_zencoder_session_json(root: &Path, max_entries: usize) -> BoundedProbe {
-    match path_metadata_probe(root) {
-        PathProbe::File => {
-            return BoundedProbe::from_bool(
-                root.file_name().and_then(|name| name.to_str()) == Some("sessions.json")
-                    || (root.extension().and_then(|ext| ext.to_str()) == Some("json")
-                        && root
-                            .parent()
-                            .and_then(Path::file_name)
-                            .and_then(|name| name.to_str())
-                            == Some("sessions")),
-            );
-        }
-        PathProbe::Dir => {}
-        PathProbe::Missing | PathProbe::Other => return BoundedProbe::NotFound,
-        PathProbe::IoError => return BoundedProbe::IoError,
-    }
-    let index_probe = path_is_file_probe(&root.join("sessions.json"));
-    if matches!(index_probe, BoundedProbe::Found | BoundedProbe::IoError) {
-        return index_probe;
-    }
-    has_json_file_under_matching(root, max_entries, |candidate| {
-        candidate.extension().and_then(|ext| ext.to_str()) == Some("json")
-            && candidate
-                .parent()
-                .and_then(Path::file_name)
-                .and_then(|name| name.to_str())
-                == Some("sessions")
-    })
 }
 
 fn has_gemini_chat_jsonl(root: &Path, max_entries: usize) -> BoundedProbe {
@@ -3154,45 +2867,6 @@ mod tests {
             })
             .unwrap();
         assert_eq!(source.status, ProviderSourceStatus::Available);
-    }
-
-    #[test]
-    fn codearts_agent_discovers_kernel_opencode_dbs_as_native_sources() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let temp = tempfile::tempdir().unwrap();
-        let xdg = temp.path().join("xdg-data");
-        let _xdg_data_home = EnvGuard::set("XDG_DATA_HOME", &xdg);
-
-        for db in [
-            temp.path()
-                .join(".codeartsdoer")
-                .join("vscode-data")
-                .join("opencode.db"),
-            temp.path()
-                .join(".codeartsdoer")
-                .join("codearts-data")
-                .join("opencode.db"),
-            temp.path()
-                .join(".local")
-                .join("share")
-                .join("codeartsdoer")
-                .join("opencode.db"),
-            xdg.join("codeartsdoer").join("opencode.db"),
-        ] {
-            std::fs::create_dir_all(db.parent().unwrap()).unwrap();
-            std::fs::write(db, b"sqlite fixture marker").unwrap();
-        }
-
-        let sources =
-            discover_provider_sources_for_provider(temp.path(), CaptureProvider::CodeArtsAgent);
-        assert_eq!(sources.len(), 4, "{sources:#?}");
-        for source in sources {
-            assert_eq!(source.status, ProviderSourceStatus::Available);
-            assert_eq!(source.source_format, "codearts_agent_kernel_sqlite");
-            assert_eq!(source.import_support, ProviderImportSupport::Native);
-            assert!(source.import_support.is_auto_importable());
-            assert!(source.unsupported_reason.is_none());
-        }
     }
 
     #[test]
@@ -3951,40 +3625,6 @@ mod tests {
     }
 
     #[test]
-    fn zencoder_discovery_uses_vscode_app_data_session_trees_as_native_sources() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let temp = tempfile::tempdir().unwrap();
-        let xdg = temp.path().join("xdg-config");
-        let appdata = temp.path().join("appdata");
-        let _xdg_config_home = EnvGuard::set("XDG_CONFIG_HOME", xdg.as_os_str());
-        let _appdata = EnvGuard::set("APPDATA", appdata.as_os_str());
-
-        let home_root = temp
-            .path()
-            .join(".config/Code/User/globalStorage/ZencoderAI.zencoder/zencoder-chat");
-        let xdg_root = xdg.join("Code/User/globalStorage/ZencoderAI.zencoder/zencoder-chat");
-        let appdata_root =
-            appdata.join("Code/User/globalStorage/ZencoderAI.zencoder/zencoder-chat");
-        for root in [&home_root, &xdg_root, &appdata_root] {
-            write_zencoder_discovery_session(root);
-        }
-
-        let sources =
-            discover_provider_sources_for_provider(temp.path(), CaptureProvider::Zencoder);
-        for path in [&home_root, &xdg_root, &appdata_root] {
-            let source = sources
-                .iter()
-                .find(|source| source.path == *path)
-                .unwrap_or_else(|| panic!("missing Zencoder source {path:?} in {sources:#?}"));
-            assert_eq!(source.status, ProviderSourceStatus::Available);
-            assert_eq!(source.source_format, "zencoder_chat_sessions_json_tree");
-            assert_eq!(source.import_support, ProviderImportSupport::Native);
-            assert!(source.import_support.is_auto_importable());
-            assert!(source.unsupported_reason.is_none());
-        }
-    }
-
-    #[test]
     fn trae_discovery_uses_workspace_storage_roots_as_native_sources() {
         let _lock = ENV_LOCK.lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
@@ -4362,21 +4002,6 @@ mod tests {
         conn.execute(
             "INSERT INTO ItemTable ([key], value) VALUES ('workbench.view.extension', '{}')",
             [],
-        )
-        .unwrap();
-    }
-
-    fn write_zencoder_discovery_session(root: &Path) {
-        let sessions = root.join("sessions");
-        std::fs::create_dir_all(&sessions).unwrap();
-        std::fs::write(
-            root.join("sessions.json"),
-            r#"[{"id":"zencoder-discovery"}]"#,
-        )
-        .unwrap();
-        std::fs::write(
-            sessions.join("zencoder-discovery.json"),
-            r#"{"id":"zencoder-discovery","messages":[]}"#,
         )
         .unwrap();
     }
