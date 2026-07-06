@@ -19,6 +19,14 @@ CTX_GATE_DATA = glob([
     "sdks/**",
     "skills/**",
     "tests/**",
+], exclude = [
+    "**/target/**",
+    "bazel-*/**",
+    "sdks/dotnet/**/bin/**",
+    "sdks/dotnet/**/obj/**",
+    "sdks/jvm/build/**",
+    "sdks/swift/.build/**",
+    "sdks/typescript/node_modules/**",
 ])
 
 sh_test(
@@ -74,6 +82,13 @@ sh_test(
     name = "buildkite_pipeline_check",
     srcs = ["scripts/bazel-test.sh"],
     args = ["buildkite_pipeline_check"],
+    data = CTX_GATE_DATA,
+)
+
+sh_test(
+    name = "loc_gate",
+    srcs = ["scripts/bazel-test.sh"],
+    args = ["loc_gate"],
     data = CTX_GATE_DATA,
 )
 
@@ -149,6 +164,7 @@ test_suite(
         ":docs_check",
         ":installer_path_smoke",
         ":buildkite_pipeline_check",
+        ":loc_gate",
         ":source_diff_check",
         ":package_audit_fast",
         ":sdk_contract_checks",

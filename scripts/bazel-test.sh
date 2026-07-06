@@ -102,6 +102,9 @@ case "${mode}" in
   buildkite_pipeline_check)
     run bash scripts/check-buildkite-pipeline.sh
     ;;
+  loc_gate)
+    run bash scripts/check-loc.sh
+    ;;
   source_diff_check)
     run_source_diff_check
     ;;

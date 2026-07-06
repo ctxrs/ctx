@@ -54,6 +54,8 @@ REQUIRED_FIDELITY_FIELDS = {
 PROVIDER_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_]*$")
 PRIVATE_TEXT_MARKERS = ("/home/", "ctx-" + "private", "ctx-multi" + "-repo-workspace")
 SUPPORT_DOC_PATH = REPO_ROOT / "docs/provider-support.md"
+RUST_INCLUDE_RE = re.compile(r'include!\("([^"]+)"\);')
+RUST_PATH_MOD_RE = re.compile(r'#\[path\s*=\s*"([^"]+)"\]\s*mod\s+[A-Za-z0-9_]+;')
 
 
 class MatrixError(Exception):
@@ -121,6 +123,24 @@ def text_mentions_provider(text: str, provider: dict[str, Any]) -> bool:
     return any(needle and needle.lower() in lowered for needle in needles)
 
 
+def read_text_with_rust_includes(path: Path, seen: set[Path] | None = None) -> str:
+    """Read a public proof file plus simple Rust include! shards it references."""
+    if seen is None:
+        seen = set()
+    path = path.resolve()
+    if path in seen:
+        return ""
+    seen.add(path)
+
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    included = [text]
+    for match in list(RUST_INCLUDE_RE.finditer(text)) + list(RUST_PATH_MOD_RE.finditer(text)):
+        include_path = (path.parent / match.group(1)).resolve()
+        if include_path.is_file() and REPO_ROOT in include_path.parents:
+            included.append(read_text_with_rust_includes(include_path, seen))
+    return "\n".join(included)
+
+
 def validate_implemented_path(path: Any, provider_id: str, index: int) -> None:
     label = f"providers[{provider_id}].implemented_paths[{index}]"
     expect_type(path, dict, label)
@@ -183,7 +203,7 @@ def validate_provider(provider: Any, index: int, seen_ids: set[str]) -> None:
     for test_index, test_path in enumerate(tests):
         resolved_test_path = require_repo_path(test_path, f"providers[{provider_id}].tests[{test_index}]")
         if resolved_test_path.is_file() and text_mentions_provider(
-            resolved_test_path.read_text(encoding="utf-8", errors="ignore"),
+            read_text_with_rust_includes(resolved_test_path),
             provider,
         ):
             provider_specific_test = True
