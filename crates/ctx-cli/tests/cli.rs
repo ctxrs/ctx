@@ -557,6 +557,29 @@ fn mcp_raw_roundtrip_bytes(temp: &TempDir, stdin: Vec<u8>) -> Vec<Value> {
         .collect()
 }
 
+fn mcp_content_text(result: &Value) -> &str {
+    result["content"][0]["text"].as_str().unwrap()
+}
+
+fn assert_useful_mcp_text<'a>(result: &'a Value, expected: &[&str]) -> &'a str {
+    let text = mcp_content_text(result);
+    assert!(
+        !text.trim_start().starts_with('{'),
+        "MCP content text should not be raw JSON:\n{text}"
+    );
+    assert!(
+        !text.contains("ctx returned structured JSON"),
+        "MCP content text should not be the old stub:\n{text}"
+    );
+    for needle in expected {
+        assert!(
+            text.contains(needle),
+            "MCP content text missing {needle:?}:\n{text}"
+        );
+    }
+    text
+}
+
 fn assert_omits_keys(value: &Value, forbidden_keys: &[&str]) {
     match value {
         Value::Object(map) => {
@@ -4614,6 +4637,17 @@ fn mcp_status_and_tools_list_are_read_only_without_initialized_store() {
     assert_eq!(status["schema_version"], 1);
     assert_eq!(status["initialized"], false);
     assert_eq!(status["read_only"], true);
+    assert_useful_mcp_text(
+        &responses[2]["result"],
+        &[
+            "ctx status",
+            "initialized: false",
+            "database_path:",
+            "indexed_items: 0",
+            "read_only: true",
+            "local_only: true",
+        ],
+    );
     assert!(
         !temp.path().join("work.sqlite").exists(),
         "MCP status should not initialize the ctx store"
@@ -4749,6 +4783,16 @@ fn mcp_sql_tool_returns_structured_json_and_rejects_writes() {
     assert_eq!(sql["share_safe"], false);
     assert_eq!(sql["columns"], json!(["sessions"]));
     assert_eq!(sql["rows"], json!([[0]]));
+    assert_useful_mcp_text(
+        &responses[1]["result"],
+        &[
+            "ctx sql",
+            "returned_rows: 1",
+            "truncated: rows=false, values=false",
+            "| sessions |",
+            "| 0 |",
+        ],
+    );
 
     let write = &responses[2]["result"];
     assert_eq!(write["isError"], true);
@@ -4756,6 +4800,7 @@ fn mcp_sql_tool_returns_structured_json_and_rejects_writes() {
         .as_str()
         .unwrap()
         .contains("SQL query must be read-only"));
+    assert!(mcp_content_text(write).contains("SQL query must be read-only"));
 
     let budget = &responses[3]["result"];
     assert_eq!(budget["isError"], true);
@@ -4763,6 +4808,7 @@ fn mcp_sql_tool_returns_structured_json_and_rejects_writes() {
         .as_str()
         .unwrap()
         .contains("SQL result preview budget"));
+    assert!(mcp_content_text(budget).contains("SQL result preview budget"));
 }
 
 #[test]
@@ -4839,6 +4885,21 @@ fn mcp_show_session_caps_transcript_events() {
     assert_eq!(transcript["truncated"]["events"], true);
     assert_eq!(transcript["truncated"]["max_events"], 200);
     assert_eq!(transcript["events"].as_array().unwrap().len(), 200);
+    let text = assert_useful_mcp_text(
+        &responses[1]["result"],
+        &[
+            "ctx show session",
+            session_id,
+            "events: 200",
+            "structuredContent.events truncated at 200 events",
+            "mcp transcript event 0",
+            "... 192 more events omitted from text",
+        ],
+    );
+    assert!(
+        !text.contains("mcp transcript event 199"),
+        "session text should summarize rather than dump all events:\n{text}"
+    );
 }
 
 #[test]
@@ -4891,9 +4952,19 @@ fn mcp_search_and_show_tools_return_structured_json_without_refresh() {
     assert_eq!(search["freshness"]["mode"], "off");
     assert_eq!(search["freshness"]["status"], "skipped");
     assert_eq!(search["share_safe"], false);
-    assert_eq!(
-        search_responses[1]["result"]["content"][0]["text"],
-        "ctx returned structured JSON in structuredContent. Treat it as private local history."
+    assert_useful_mcp_text(
+        &search_responses[1]["result"],
+        &[
+            "ctx search",
+            "query: onboarding",
+            "freshness: off/skipped",
+            "filters: provider=codex",
+            "results: 1",
+            "ctx_session_id:",
+            "ctx_event_id:",
+            "snippet:",
+            "next: ctx show",
+        ],
     );
     let first_result = &search["results"][0];
     let ctx_session_id = first_result["ctx_session_id"].as_str().unwrap();
@@ -4946,12 +5017,36 @@ fn mcp_search_and_show_tools_return_structured_json_without_refresh() {
     assert!(session["events"].as_array().unwrap().iter().all(|event| {
         event["ctx_session_id"] == ctx_session_id && event["ctx_event_id"].is_string()
     }));
+    assert_useful_mcp_text(
+        &show_responses[1]["result"],
+        &[
+            "ctx show session",
+            ctx_session_id,
+            "provider: codex",
+            "mode: lite",
+            "events:",
+            "ctx_event_id:",
+            "text:",
+        ],
+    );
 
     let event = &show_responses[2]["result"]["structuredContent"];
     assert_eq!(event["item_type"], "event_window");
     assert_eq!(event["ctx_event_id"], ctx_event_id);
     assert_eq!(event["ctx_session_id"], ctx_session_id);
     assert!(!event["events"].as_array().unwrap().is_empty());
+    assert_useful_mcp_text(
+        &show_responses[2]["result"],
+        &[
+            "ctx show event",
+            ctx_event_id,
+            ctx_session_id,
+            "selected event",
+            "window",
+            "ctx_event_id:",
+            "text:",
+        ],
+    );
 }
 
 #[test]
@@ -5017,18 +5112,21 @@ fn mcp_search_requires_query_term_or_file_without_opening_store() {
         .as_str()
         .unwrap()
         .contains("search needs a query or file"));
+    assert!(mcp_content_text(result).contains("search needs a query or file"));
     let hidden_provider = &responses[2]["result"];
     assert_eq!(hidden_provider["isError"], true);
     assert!(hidden_provider["structuredContent"]["error"]
         .as_str()
         .unwrap()
         .contains("provider must be one of"));
+    assert!(mcp_content_text(hidden_provider).contains("provider must be one of"));
     let alias_result = &responses[3]["result"];
     assert_eq!(alias_result["isError"], true);
     assert!(alias_result["structuredContent"]["error"]
         .as_str()
         .unwrap()
         .contains("ctx store is not initialized"));
+    assert!(mcp_content_text(alias_result).contains("ctx store is not initialized"));
     assert!(
         !temp.path().join("work.sqlite").exists(),
         "invalid MCP search should fail before opening the ctx store"
@@ -5101,11 +5199,33 @@ fn mcp_sources_and_search_support_history_source_plugins() {
     assert!(sources
         .iter()
         .any(|source| source["history_source"] == "hermes/default"));
+    assert_useful_mcp_text(
+        &responses[1]["result"],
+        &[
+            "ctx sources",
+            "sources:",
+            "available:",
+            "importable:",
+            "custom",
+            "available",
+            "hermes/default",
+        ],
+    );
 
     let search = &responses[2]["result"]["structuredContent"];
     assert_eq!(search["filters"]["provider"], "custom");
     assert_eq!(search["filters"]["history_source"], "hermes/default");
     assert_eq!(search["results"][0]["history_source"], "hermes/default");
+    assert_useful_mcp_text(
+        &responses[2]["result"],
+        &[
+            "ctx search",
+            "query: hermes plugin initial marker",
+            "filters: provider=custom, history_source=hermes/default",
+            "hermes/default",
+            "snippet:",
+        ],
+    );
 }
 
 #[test]
