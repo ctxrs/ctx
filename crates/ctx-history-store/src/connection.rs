@@ -24,11 +24,27 @@ impl Store {
 
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
+        Self::open_read_only_connection(path, false)
+    }
+
+    pub fn open_read_only_snapshot(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        Self::open_read_only_connection(path, true)
+    }
+
+    fn open_read_only_connection(path: PathBuf, immutable_snapshot: bool) -> Result<Self> {
         let object_dir = path
             .parent()
             .map(|parent| parent.join(OBJECTS_DIR))
             .unwrap_or_else(|| PathBuf::from(OBJECTS_DIR));
-        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let conn = if immutable_snapshot {
+            Connection::open_with_flags(
+                sqlite_read_only_immutable_uri(&path),
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+            )?
+        } else {
+            Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?
+        };
         configure_read_only_connection(&conn, BUSY_TIMEOUT)?;
         let user_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         if user_version != SCHEMA_VERSION {
@@ -176,6 +192,23 @@ pub(crate) fn configure_connection(conn: &Connection, busy_timeout: Duration) ->
         "#,
     )?;
     Ok(())
+}
+
+pub(crate) fn sqlite_read_only_immutable_uri(path: &Path) -> String {
+    let mut uri = String::from("file:");
+    for byte in path.to_string_lossy().as_bytes() {
+        match *byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b':' | b'.' | b'_' | b'-' => {
+                uri.push(*byte as char)
+            }
+            byte => {
+                uri.push('%');
+                uri.push_str(&format!("{byte:02X}"));
+            }
+        }
+    }
+    uri.push_str("?mode=ro&immutable=1");
+    uri
 }
 
 pub(crate) fn configure_read_only_connection(

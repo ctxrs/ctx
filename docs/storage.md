@@ -80,7 +80,7 @@ analytics marker described under network behavior.
 | Command | Reads | Writes |
 | --- | --- | --- |
 | `ctx setup` | provider transcript files and home path metadata for source discovery | data root, `work.sqlite`, `config.toml`, and SQLite index |
-| `ctx status` | data root metadata and existing SQLite store | none |
+| `ctx status` | data root metadata and existing SQLite store, opened read-only when present | none |
 | `ctx sources` | known provider paths under the user's home and local history-source plugin manifests | none |
 | `ctx import` | provider transcript files and path metadata, the explicit custom history JSONL file passed with `--format ctx-history-jsonl-v1 --path`, or stdout from an explicit history-source plugin command | data root, `config.toml` if missing, and SQLite index |
 | `ctx show` | SQLite index | selected `--out` path for `show session` when provided |
@@ -178,8 +178,9 @@ does not express, such as exact counts, joins, audits, and one-off scripts. It
 opens the existing SQLite store in read-only mode, rejects writes, rejects
 multiple statements, enforces row/column/value caps, and times out long-running
 queries. It also applies SQLite runtime limits to bound SQL text and generated
-value allocation. It does not initialize or migrate the store; run `ctx
-status`, `ctx setup`, or `ctx import` first when a schema migration is required.
+value allocation. It does not initialize or migrate the store; run a writable
+command such as `ctx setup` or `ctx import` first when a schema migration is
+required.
 
 Stable read-only views are the preferred compatibility surface:
 
@@ -246,11 +247,12 @@ behavior.
 
 Official installer-managed binaries can contact the signed release metadata
 endpoint for `ctx upgrade` and for background auto-upgrade checks after
-successful normal commands. These checks are skipped for JSON commands, MCP,
-`ctx docs`, `ctx sql`, `ctx upgrade`, CI, unmanaged installs, and process-level
-opt-outs such as `CTX_UPGRADE_OFF=1` or `CTX_DISABLE_AUTO_UPGRADE=1`. Upgrade
-metadata checks do not send provider transcript text, search queries, result
-snippets, source paths, repository names, or command output.
+successful normal commands. These checks are skipped for `ctx status`, JSON
+commands, MCP, `ctx docs`, `ctx sql`, `ctx upgrade`, CI, unmanaged installs, and
+process-level opt-outs such as `CTX_UPGRADE_OFF=1` or
+`CTX_DISABLE_AUTO_UPGRADE=1`. Upgrade metadata checks do not send provider
+transcript text, search queries, result snippets, source paths, repository
+names, or command output.
 
 First-party analytics are default-on and may create `install.json` plus a
 separate device identity file in OS user state, then send coarse product

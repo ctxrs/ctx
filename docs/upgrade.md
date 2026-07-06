@@ -25,9 +25,9 @@ warns when another binary shadows the managed install.
 Official installer-managed installs default to background auto-upgrade after
 successful normal commands when signed release metadata explicitly allows
 auto-upgrade. Background checks never run for `--json` commands, MCP,
-`ctx docs`, `ctx sql`, `ctx upgrade`, CI, unmanaged installs, or process-level
-opt-outs. They write state and logs under the ctx data root and do not write to
-stdout or stderr.
+`ctx status`, `ctx docs`, `ctx sql`, `ctx upgrade`, CI, unmanaged installs, or
+process-level opt-outs. They write state and logs under the ctx data root and do
+not write to stdout or stderr.
 
 Use `CTX_UPGRADE_OFF=1` or `CTX_DISABLE_AUTO_UPGRADE=1` for process-level
 opt-out, or `ctx upgrade disable` to write `upgrade.auto = "off"` in

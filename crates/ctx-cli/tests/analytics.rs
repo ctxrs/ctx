@@ -12,7 +12,7 @@ fn analytics_sends_coarse_cli_metadata_when_enabled() {
     fs::create_dir_all(&home).unwrap();
 
     ctx(&temp)
-        .arg("status")
+        .arg("doctor")
         .env("CTX_DATA_ROOT", &data_root)
         .env("HOME", &home)
         .env("XDG_STATE_HOME", &state)
@@ -37,29 +37,15 @@ fn analytics_sends_coarse_cli_metadata_when_enabled() {
         event["events"][0]["origin_device_id"],
         event["broker_device_id"]
     );
-    assert_eq!(event["events"][0]["properties"]["action"], "status");
+    assert_eq!(event["events"][0]["properties"]["action"], "doctor");
     assert_eq!(
         event["events"][0]["properties"]["analytics_client"],
         "ctx-cli"
     );
-    assert_eq!(event["events"][0]["properties"]["initialized"], false);
     assert_eq!(
-        event["events"][0]["properties"]["indexed_items_bucket"],
-        "0"
+        event["events"][0]["properties"]["finding_count_bucket"],
+        "2-5"
     );
-    assert_eq!(
-        event["events"][0]["properties"]["cataloged_sessions_bucket"],
-        "0"
-    );
-    assert_eq!(
-        event["events"][0]["properties"]["indexed_sessions_bucket"],
-        "0"
-    );
-    assert_eq!(
-        event["events"][0]["properties"]["indexed_events_bucket"],
-        "0"
-    );
-    assert_eq!(event["events"][0]["properties"]["db_size_bucket"], "0");
     assert_analytics_properties_are_allowlisted(analytics_event_properties(&event));
     for forbidden in [
         "command",
@@ -83,6 +69,41 @@ fn analytics_sends_coarse_cli_metadata_when_enabled() {
 }
 
 #[test]
+fn status_does_not_emit_analytics_or_create_identities_when_enabled() {
+    let temp = tempdir();
+    let events_path = temp.path().join("analytics.jsonl");
+    let home = temp.path().join("home");
+    let state = temp.path().join("state");
+    let data_root = temp.path().join("data");
+    fs::create_dir_all(&home).unwrap();
+
+    ctx(&temp)
+        .arg("status")
+        .env("CTX_DATA_ROOT", &data_root)
+        .env("HOME", &home)
+        .env("XDG_STATE_HOME", &state)
+        .env("LOCALAPPDATA", &state)
+        .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
+        .env("CTX_UPGRADE_OFF", "1")
+        .assert()
+        .success();
+
+    assert!(
+        !events_path.exists(),
+        "status must not write analytics events"
+    );
+    assert!(
+        !data_root.exists(),
+        "status must not create the data root for install identity"
+    );
+    assert!(
+        !expected_device_path(&home, &state).exists(),
+        "status must not create a device identity"
+    );
+}
+
+#[test]
 fn analytics_device_id_persists_across_data_roots() {
     let temp = tempdir();
     let home = temp.path().join("home");
@@ -94,7 +115,7 @@ fn analytics_device_id_persists_across_data_roots() {
 
     for data_root in [&data_root_a, &data_root_b] {
         ctx(&temp)
-            .arg("status")
+            .arg("doctor")
             .env("CTX_DATA_ROOT", data_root)
             .env("HOME", &home)
             .env("XDG_STATE_HOME", &state)
@@ -291,7 +312,7 @@ fn hosted_install_marker_enriches_analytics_event_without_properties_leak() {
     .unwrap();
 
     ctx_from_binary(&temp, &binary)
-        .arg("status")
+        .arg("doctor")
         .env("CTX_DATA_ROOT", &data_root)
         .env("HOME", &home)
         .env("XDG_STATE_HOME", &state)
@@ -333,7 +354,7 @@ fn malformed_hosted_install_marker_is_ignored() {
     .unwrap();
 
     ctx_from_binary(&temp, &binary)
-        .arg("status")
+        .arg("doctor")
         .env("CTX_DATA_ROOT", &data_root)
         .env("HOME", &home)
         .env("XDG_STATE_HOME", &state)
@@ -479,7 +500,7 @@ fn analytics_config_opt_out_suppresses_delivery() {
     let events_path = temp.path().join("analytics.jsonl");
 
     ctx(&temp)
-        .arg("status")
+        .arg("doctor")
         .env("XDG_STATE_HOME", &state)
         .env("LOCALAPPDATA", &state)
         .env_remove("CTX_ANALYTICS_OFF")
@@ -508,7 +529,7 @@ fn analytics_env_opt_out_wins_over_enable_flag() {
     let events_path = temp.path().join("analytics.jsonl");
 
     ctx(&temp)
-        .arg("status")
+        .arg("doctor")
         .env("XDG_STATE_HOME", &state)
         .env("LOCALAPPDATA", &state)
         .env("CTX_ANALYTICS_OFF", "1")
@@ -535,7 +556,7 @@ fn analytics_refuses_device_identity_under_data_root() {
     let events_path = temp.path().join("analytics.jsonl");
 
     ctx(&temp)
-        .arg("status")
+        .arg("doctor")
         .env("CTX_DATA_ROOT", &data_root)
         .env("XDG_STATE_HOME", &state)
         .env("LOCALAPPDATA", &state)

@@ -404,3 +404,56 @@ fn json_commands_do_not_spawn_background_upgrade() {
         "JSON status must not start a background upgrade"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn status_command_does_not_spawn_background_upgrade_even_for_managed_installs() {
+    let temp = tempdir();
+    let release = fake_release(&temp, "9.9.9");
+    let binary = copied_ctx_binary(&temp);
+    let before = fs::read(&binary).unwrap();
+    let current_sha = sha256_hex(&before);
+    fs::write(
+        install_marker_path(&binary),
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": 1,
+            "manager": "ctx-hosted-installer",
+            "install_attempt_id": "ia_test_status_no_background",
+            "install_path": binary.display().to_string(),
+            "platform": test_platform_key().replace('_', "-"),
+            "channel": "stable",
+            "version": env!("CARGO_PKG_VERSION"),
+            "sha256": current_sha,
+            "metadata_url": null,
+            "artifact_url": null,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    ctx_from_binary(&temp, &binary)
+        .arg("status")
+        .env("CTX_RELEASE_METADATA_URL", file_url(&release.metadata))
+        .env(
+            "CTX_RELEASE_METADATA_SIGNATURE_URL",
+            file_url(&release.signature),
+        )
+        .env(
+            "CTX_RELEASE_METADATA_PUBLIC_KEY_PEM",
+            TEST_RELEASE_PUBLIC_KEY_PEM,
+        )
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("read_only: true"));
+
+    std::thread::sleep(Duration::from_millis(1_000));
+    assert_eq!(
+        fs::read(&binary).unwrap(),
+        before,
+        "status must not spawn a background upgrade that replaces the binary"
+    );
+    assert!(
+        !temp.path().join("upgrade-state.json").exists(),
+        "status must not write background upgrade state"
+    );
+}

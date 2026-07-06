@@ -61,8 +61,8 @@ CTX_DATA_ROOT=/tmp/ctx-demo ctx status
 
 Setup does not write to source repositories, call model APIs, or require API
 keys. Official installer-managed binaries can run a signed background
-auto-upgrade check after later successful non-JSON commands; that updater does
-not collect provider history.
+auto-upgrade check after later successful non-JSON commands other than
+`ctx status`; that updater does not collect provider history.
 
 ## 3. See Available Sources
 

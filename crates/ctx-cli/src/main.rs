@@ -445,7 +445,7 @@ impl CommandRoot {
 
     fn sends_analytics(&self) -> bool {
         match self {
-            Self::Sql(_) | Self::Mcp(_) => false,
+            Self::Status(_) | Self::Sql(_) | Self::Mcp(_) => false,
             Self::Upgrade(args) if args.background() => false,
             _ => true,
         }
@@ -472,7 +472,7 @@ impl CommandRoot {
     fn allows_background_upgrade(&self) -> bool {
         !matches!(
             self,
-            Self::Docs(_) | Self::Mcp(_) | Self::Sql(_) | Self::Upgrade(_)
+            Self::Status(_) | Self::Docs(_) | Self::Mcp(_) | Self::Sql(_) | Self::Upgrade(_)
         )
     }
 }
@@ -526,7 +526,7 @@ fn main() -> Result<()> {
 
     let result = match cli.command {
         CommandRoot::Setup(args) => run_setup(args, data_root.clone(), &mut analytics_properties),
-        CommandRoot::Status(args) => run_status(args, data_root.clone(), &mut analytics_properties),
+        CommandRoot::Status(args) => run_status(args, data_root.clone()),
         CommandRoot::Sources(args) => {
             run_sources(args, data_root.clone(), &mut analytics_properties)
         }

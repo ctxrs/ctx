@@ -52,6 +52,7 @@
       "properties": {
         "initialized": { "type": "boolean" },
         "localOnly": { "type": "boolean" },
+        "readOnly": { "type": "boolean" },
         "dataRoot": { "type": ["string", "null"] },
         "indexedItems": { "type": "integer", "minimum": 0 },
         "indexedSources": { "type": "integer", "minimum": 0 },

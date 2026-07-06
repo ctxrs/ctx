@@ -35,15 +35,16 @@ ctx doctor --json
   fast inventory or troubleshooting, but it does not make history searchable.
 - `status` reports the ctx root, database path, config path, indexed item
   count, indexed source count, catalog session counters, initialization state,
-  and local-only marker.
+  local-only marker, and read-only marker. It does not initialize, migrate, or
+  repair the store.
 - `doctor` opens local storage and reports validation findings.
 
 Setup and health checks do not change shell startup files, install repository
 integrations, write into source repositories, call model APIs, or require API
 keys. Core storage checks use the configured data root, and JSON stdout remains
 structured. Installer-managed binaries can run a signed background upgrade
-check after successful non-JSON commands; that check is separate from provider
-history indexing.
+check after successful non-JSON commands other than `ctx status`; that check is
+separate from provider history indexing.
 
 ## Agent Skill
 
@@ -338,8 +339,8 @@ ctx sql "SELECT ctx_session_id FROM ctx_sessions LIMIT 5" --format raw
 `sql` runs one read-only SQL statement against the existing local ctx SQLite
 index. It does not create or migrate the store, refresh provider history, import
 sources, run background upgrade checks, or write provider files or source
-repositories. If the store is missing or uses an old schema, run `ctx setup`,
-`ctx import`, or `ctx status` first.
+repositories. If the store is missing or uses an old schema, run a writable
+command such as `ctx setup` or `ctx import` first.
 
 Prefer stable read-only `ctx_*` views for scripts:
 
@@ -442,11 +443,11 @@ install or multiple `ctx` binaries are present.
 
 Official installer-managed installs default to background auto-upgrade after
 successful normal commands when signed release metadata explicitly allows
-auto-upgrade. Background checks never run for `--json` commands, MCP, `ctx
-docs`, `ctx upgrade`, CI, or unmanaged installs. They write state and logs under
-the ctx data root and do not write to stdout or stderr. Use `CTX_UPGRADE_OFF=1`
-or `CTX_DISABLE_AUTO_UPGRADE=1` for process-level opt-out, or `ctx upgrade
-disable` to write `upgrade.auto = "off"` in `config.toml`.
+auto-upgrade. Background checks never run for `ctx status`, `--json` commands,
+MCP, `ctx docs`, `ctx sql`, `ctx upgrade`, CI, or unmanaged installs. They write
+state and logs under the ctx data root and do not write to stdout or stderr. Use
+`CTX_UPGRADE_OFF=1` or `CTX_DISABLE_AUTO_UPGRADE=1` for process-level opt-out,
+or `ctx upgrade disable` to write `upgrade.auto = "off"` in `config.toml`.
 
 Manual `ctx upgrade` can print progress and errors. It verifies signed release
 metadata, explicit self-upgrade policy, artifact SHA-256, the current managed

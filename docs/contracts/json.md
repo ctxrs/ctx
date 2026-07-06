@@ -52,7 +52,8 @@ Reads local storage state and returns:
 - `pending_catalog_sessions`;
 - `failed_catalog_sessions`;
 - `stale_catalog_sessions`;
-- `local_only: true`.
+- `local_only: true`;
+- `read_only: true`.
 
 ## Sources
 

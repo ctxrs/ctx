@@ -5,8 +5,8 @@ when normal `ctx search` does not express the question: counts, audits, joins,
 file/session metadata lookups, or scripts that need structured output.
 
 `ctx sql` does not refresh provider history, import files, initialize storage, or
-migrate schemas. Run `ctx status`, `ctx setup`, or `ctx import` first if the
-local store needs to be created or migrated.
+migrate schemas. Run a writable command such as `ctx setup` or `ctx import` first
+if the local store needs to be created or migrated.
 
 ## Examples
 

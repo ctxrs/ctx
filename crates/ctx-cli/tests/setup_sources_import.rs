@@ -85,6 +85,155 @@ fn malformed_present_config_fails_before_setup_and_analytics_side_effects() {
 }
 
 #[test]
+fn status_missing_store_is_read_only_and_does_not_initialize_files() {
+    let temp = tempdir();
+    let data_root = temp.path().join("ctx-data");
+
+    let status = json_output(
+        ctx(&temp)
+            .args(["status", "--json"])
+            .env("CTX_DATA_ROOT", &data_root),
+    );
+    assert_eq!(status["schema_version"], 1);
+    assert_eq!(status["initialized"], false);
+    assert_eq!(status["local_only"], true);
+    assert_eq!(status["read_only"], true);
+    assert_eq!(status["indexed_items"], 0);
+    assert_eq!(status["indexed_sources"], 0);
+    assert_eq!(status["cataloged_sessions"], 0);
+
+    let output = ctx(&temp)
+        .arg("status")
+        .env("CTX_DATA_ROOT", &data_root)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("initialized: false"), "{output}");
+    assert!(output.contains("local_only: true"), "{output}");
+    assert!(output.contains("read_only: true"), "{output}");
+
+    assert!(
+        !data_root.exists(),
+        "status must not create the missing data root"
+    );
+    assert!(!data_root.join("work.sqlite").exists());
+    assert!(!data_root.join("config.toml").exists());
+    assert!(!data_root.join("objects").exists());
+    assert!(!data_root.join("spool").exists());
+}
+
+#[test]
+fn status_existing_wal_mode_store_does_not_create_sqlite_sidecars() {
+    let temp = tempdir();
+    ctx(&temp).arg("setup").assert().success();
+    let db_path = temp.path().join("work.sqlite");
+    let wal_path = sqlite_sidecar_path(&db_path, "-wal");
+    let shm_path = sqlite_sidecar_path(&db_path, "-shm");
+    assert!(db_path.exists());
+    assert!(
+        !wal_path.exists(),
+        "setup should close a clean checkpointed store"
+    );
+    assert!(
+        !shm_path.exists(),
+        "setup should close a clean checkpointed store"
+    );
+
+    let status = json_output(ctx(&temp).args(["status", "--json"]));
+
+    assert_eq!(status["initialized"], true);
+    assert_eq!(status["read_only"], true);
+    assert!(
+        !wal_path.exists(),
+        "status must not create a SQLite WAL sidecar"
+    );
+    assert!(
+        !shm_path.exists(),
+        "status must not create a SQLite SHM sidecar"
+    );
+}
+
+fn sqlite_sidecar_path(db_path: &Path, suffix: &str) -> PathBuf {
+    let mut path = db_path.as_os_str().to_os_string();
+    path.push(suffix);
+    PathBuf::from(path)
+}
+
+#[test]
+fn status_rejects_unsupported_schema_without_migrating_or_creating_side_dirs() {
+    let temp = tempdir();
+    let db_path = temp.path().join("work.sqlite");
+    let conn = Connection::open(&db_path).unwrap();
+    conn.pragma_update(None, "user_version", 1).unwrap();
+    drop(conn);
+
+    let stderr = failure_stderr(ctx(&temp).args(["status", "--json"]));
+    assert!(stderr.contains("schema version 1"), "{stderr}");
+    assert!(stderr.contains("writable command"), "{stderr}");
+    assert!(!stderr.contains("ctx status"), "{stderr}");
+
+    let conn = Connection::open(&db_path).unwrap();
+    let user_version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(user_version, 1);
+    assert!(!temp.path().join("config.toml").exists());
+    assert!(!temp.path().join("objects").exists());
+    assert!(!temp.path().join("spool").exists());
+}
+
+#[test]
+fn status_does_not_repair_empty_search_projection() {
+    let temp = tempdir();
+    let fixture = custom_history_fixture("basic.jsonl");
+
+    let imported = json_output(ctx(&temp).args([
+        "import",
+        "--format",
+        "ctx-history-jsonl-v1",
+        "--path",
+        &fixture,
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert!(imported["totals"]["imported_events"].as_u64().unwrap() > 0);
+
+    let db_path = temp.path().join("work.sqlite");
+    let conn = Connection::open(&db_path).unwrap();
+    assert!(
+        sqlite_count(&conn, "SELECT COUNT(*) FROM event_search") > 0,
+        "fixture import should create searchable event projections"
+    );
+    conn.execute_batch(
+        "DELETE FROM ctx_history_search;\
+         DELETE FROM event_search;\
+         DELETE FROM artifact_search;",
+    )
+    .unwrap();
+    drop(conn);
+
+    let status = json_output(ctx(&temp).args(["status", "--json"]));
+    assert_eq!(status["initialized"], true);
+    assert_eq!(status["read_only"], true);
+    assert!(status["indexed_items"].as_u64().unwrap() > 0);
+
+    let conn = Connection::open(&db_path).unwrap();
+    assert_eq!(
+        sqlite_count(&conn, "SELECT COUNT(*) FROM ctx_history_search"),
+        0
+    );
+    assert_eq!(sqlite_count(&conn, "SELECT COUNT(*) FROM event_search"), 0);
+    assert_eq!(
+        sqlite_count(&conn, "SELECT COUNT(*) FROM artifact_search"),
+        0
+    );
+}
+
+#[test]
 fn setup_catalog_only_catalogs_codex_sessions_without_import() {
     let temp = tempdir();
     let sessions = temp
@@ -109,6 +258,7 @@ fn setup_catalog_only_catalogs_codex_sessions_without_import() {
     assert_eq!(status["cataloged_sessions"], 1);
     assert_eq!(status["indexed_catalog_sessions"], 0);
     assert_eq!(status["indexed_items"], 0);
+    assert_eq!(status["read_only"], true);
 
     let human_setup = ctx(&temp)
         .args(["setup", "--catalog-only", "--progress", "none"])
@@ -120,7 +270,7 @@ fn setup_catalog_only_catalogs_codex_sessions_without_import() {
     let human_setup = String::from_utf8(human_setup).unwrap();
     assert!(human_setup.contains("ctx catalog is ready; import is still pending"));
     assert!(human_setup.contains("  ctx import --all"));
-    assert!(!human_setup.contains("ctx search \"what failed before\""));
+    assert!(!human_setup.contains("ctx search \"test failure\""));
 }
 
 #[test]
@@ -160,6 +310,7 @@ fn setup_imports_discovered_codex_sessions_by_default() {
     assert_eq!(status["indexed_catalog_sessions"], 1);
     assert_eq!(status["pending_catalog_sessions"], 0);
     assert!(status["indexed_items"].as_u64().unwrap() > 0);
+    assert_eq!(status["read_only"], true);
 
     let human_setup = ctx(&temp)
         .args(["setup", "--progress", "none"])
@@ -170,8 +321,8 @@ fn setup_imports_discovered_codex_sessions_by_default() {
         .clone();
     let human_setup = String::from_utf8(human_setup).unwrap();
     assert!(human_setup.contains("ctx local agent history search is ready"));
-    assert!(human_setup.contains("imported_sources: 1"));
-    assert!(human_setup.contains("  ctx search \"what failed before\""));
+    assert!(human_setup.contains("from 1 source(s)."));
+    assert!(human_setup.contains("  ctx search \"test failure\""));
 }
 
 #[test]
