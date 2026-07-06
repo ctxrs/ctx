@@ -19,13 +19,12 @@ pub enum ProviderSourceKind {
 pub enum ProviderImportSupport {
     Native,
     Explicit,
-    Preview,
     Unsupported,
 }
 
 impl ProviderImportSupport {
     pub fn is_importable(self) -> bool {
-        matches!(self, Self::Native | Self::Explicit | Self::Preview)
+        matches!(self, Self::Native | Self::Explicit)
     }
 
     pub fn is_auto_importable(self) -> bool {
@@ -150,19 +149,6 @@ const CODEARTS_AGENT_DEFAULTS: &[ProviderDefaultLocation] = &[
     },
 ];
 
-const OPENLOAF_DEFAULTS: &[ProviderDefaultLocation] = &[
-    ProviderDefaultLocation {
-        path_components: &[".openloaf", "chat-history"],
-        source_format: "openloaf_chat_jsonl_tree",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &["OpenLoafData", "projects"],
-        source_format: "openloaf_chat_jsonl_tree",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-];
-
 const KILO_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     path_components: &[".local", "share", "kilo", "kilo.db"],
     source_format: "kilo_sqlite",
@@ -207,14 +193,6 @@ const GOOSE_DEFAULTS: &[ProviderDefaultLocation] = &[
         source_kind: ProviderSourceKind::NativeHistory,
     },
 ];
-
-const DEXTO_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".dexto", "database"],
-    source_format: "dexto_sqlite",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
-
-const POCHI_DEFAULTS: &[ProviderDefaultLocation] = &[];
 
 const WARP_DEFAULTS: &[ProviderDefaultLocation] = &[
     ProviderDefaultLocation {
@@ -289,12 +267,6 @@ const TRAE_DEFAULTS: &[ProviderDefaultLocation] = &[
         source_kind: ProviderSourceKind::NativeHistory,
     },
 ];
-
-const TINYCLOUD_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".tinycloud"],
-    source_format: "tinycloud_session_jsonl_tree",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
 
 const ZENCODER_DEFAULTS: &[ProviderDefaultLocation] = &[
     ProviderDefaultLocation {
@@ -451,84 +423,9 @@ const ZENCODER_DEFAULTS: &[ProviderDefaultLocation] = &[
     },
 ];
 
-const ZENFLOW_SQLITE_SOURCE_FORMAT: &str = "zenflow_sqlite";
-const ZENFLOW_DEFAULTS: &[ProviderDefaultLocation] = &[
-    ProviderDefaultLocation {
-        path_components: &[".local", "share", "zenflow", "db.sqlite"],
-        source_format: ZENFLOW_SQLITE_SOURCE_FORMAT,
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &[
-            "Library",
-            "Application Support",
-            "ai.forgoodai.zenflow",
-            "db.sqlite",
-        ],
-        source_format: ZENFLOW_SQLITE_SOURCE_FORMAT,
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &[
-            "AppData",
-            "Roaming",
-            "forgoodai",
-            "zenflow",
-            "data",
-            "db.sqlite",
-        ],
-        source_format: ZENFLOW_SQLITE_SOURCE_FORMAT,
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-];
-
-const CODESTUDIO_DEFAULTS: &[ProviderDefaultLocation] = &[
-    ProviderDefaultLocation {
-        path_components: &[
-            ".config",
-            "Code Studio",
-            "User",
-            "globalStorage",
-            "session-store.db",
-        ],
-        source_format: "codestudio_session_store_sqlite",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &[
-            "Library",
-            "Application Support",
-            "Code Studio",
-            "User",
-            "globalStorage",
-            "session-store.db",
-        ],
-        source_format: "codestudio_session_store_sqlite",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &[
-            "AppData",
-            "Roaming",
-            "Code Studio",
-            "User",
-            "globalStorage",
-            "session-store.db",
-        ],
-        source_format: "codestudio_session_store_sqlite",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-];
-
 const QODER_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     path_components: &[".qoder", "projects"],
     source_format: "qoder_transcript_jsonl_tree",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
-
-const CORTEX_CODE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".snowflake", "cortex", "conversations"],
-    source_format: "cortex_code_conversations_json",
     source_kind: ProviderSourceKind::NativeHistory,
 }];
 
@@ -605,37 +502,11 @@ const KIMI_CODE_CLI_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLoca
     source_kind: ProviderSourceKind::NativeHistory,
 }];
 
-const AUTOHAND_CODE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".autohand", "sessions"],
-    source_format: "autohand_code_sessions_jsonl",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
-
-const ADAL_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".adal", "sessions"],
-    source_format: "adal_session_jsonl",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
-
-const IFLOW_CLI_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".iflow", "projects"],
-    source_format: "iflow_cli_session_jsonl_tree",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
-
-const JAZZ_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".jazz", "history"],
-    source_format: "jazz_history_json",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
-
 const AUGGIE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     path_components: &[".augment", "sessions"],
     source_format: "auggie_session_json",
     source_kind: ProviderSourceKind::NativeHistory,
 }];
-
-const EVE_DEFAULTS: &[ProviderDefaultLocation] = &[];
 
 const JUNIE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     path_components: &[".junie", "sessions"],
@@ -644,24 +515,6 @@ const JUNIE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
 }];
 
 const FIREBENDER_DEFAULTS: &[ProviderDefaultLocation] = &[];
-
-const KODE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".kode", "projects"],
-    source_format: "kode_session_jsonl_tree",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
-
-const NEOVATE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".neovate", "projects"],
-    source_format: "neovate_session_jsonl_tree",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
-
-const COMMAND_CODE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".commandcode", "projects"],
-    source_format: "command_code_session_jsonl_tree",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
 
 const FORGECODE_DEFAULTS: &[ProviderDefaultLocation] = &[];
 
@@ -682,59 +535,6 @@ const MUX_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     source_format: "mux_session_jsonl_tree",
     source_kind: ProviderSourceKind::NativeHistory,
 }];
-
-const MOXBY_DEFAULTS: &[ProviderDefaultLocation] = &[
-    ProviderDefaultLocation {
-        path_components: &[".local", "share", "com.moxby.agent", "moxby_chats.db"],
-        source_format: "moxby_chats_sqlite",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &[
-            "Library",
-            "Application Support",
-            "com.moxby.agent",
-            "moxby_chats.db",
-        ],
-        source_format: "moxby_chats_sqlite",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &["AppData", "Roaming", "com.moxby.agent", "moxby_chats.db"],
-        source_format: "moxby_chats_sqlite",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-];
-
-const REASONIX_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".reasonix", "sessions"],
-    source_format: "reasonix_session_jsonl_tree",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
-
-const TERRAMIND_DEFAULTS: &[ProviderDefaultLocation] = &[
-    ProviderDefaultLocation {
-        path_components: &[".config", "Nucleus", "data", "agents.db"],
-        source_format: "terramind_agents_sqlite",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &[
-            "Library",
-            "Application Support",
-            "Nucleus",
-            "data",
-            "agents.db",
-        ],
-        source_format: "terramind_agents_sqlite",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &["AppData", "Roaming", "Nucleus", "data", "agents.db"],
-        source_format: "terramind_agents_sqlite",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-];
 
 const OPENCLAW_DEFAULTS: &[ProviderDefaultLocation] = &[
     ProviderDefaultLocation {
@@ -852,79 +652,6 @@ const ROO_DEFAULTS: &[ProviderDefaultLocation] = &[
     },
 ];
 
-const BOB_DEFAULTS: &[ProviderDefaultLocation] = &[
-    ProviderDefaultLocation {
-        path_components: &[
-            ".config",
-            "IBM Bob",
-            "User",
-            "globalStorage",
-            "ibm.bob-code",
-        ],
-        source_format: "bob_task_directory_json",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &[
-            ".config",
-            "Bob-IDE",
-            "User",
-            "globalStorage",
-            "ibm.bob-code",
-        ],
-        source_format: "bob_task_directory_json",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &[
-            "Library",
-            "Application Support",
-            "IBM Bob",
-            "User",
-            "globalStorage",
-            "ibm.bob-code",
-        ],
-        source_format: "bob_task_directory_json",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &[
-            "Library",
-            "Application Support",
-            "Bob-IDE",
-            "User",
-            "globalStorage",
-            "ibm.bob-code",
-        ],
-        source_format: "bob_task_directory_json",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &[
-            "AppData",
-            "Roaming",
-            "IBM Bob",
-            "User",
-            "globalStorage",
-            "ibm.bob-code",
-        ],
-        source_format: "bob_task_directory_json",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &[
-            "AppData",
-            "Roaming",
-            "Bob-IDE",
-            "User",
-            "globalStorage",
-            "ibm.bob-code",
-        ],
-        source_format: "bob_task_directory_json",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-];
-
 const CODEBUDDY_DEFAULTS: &[ProviderDefaultLocation] = &[
     ProviderDefaultLocation {
         path_components: &[".codebuddy"],
@@ -942,8 +669,6 @@ const CODEBUDDY_DEFAULTS: &[ProviderDefaultLocation] = &[
         source_kind: ProviderSourceKind::NativeHistory,
     },
 ];
-
-const AIDER_DESK_DEFAULTS: &[ProviderDefaultLocation] = &[];
 
 const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
     ProviderSourceSpec {
@@ -990,16 +715,6 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         provider: CaptureProvider::CodeArtsAgent,
         display_name: "CodeArts Agent",
         default_locations: CODEARTS_AGENT_DEFAULTS,
-        import_support: ProviderImportSupport::Native,
-        catalog_support: ProviderCatalogSupport::None,
-        raw_retention: ProviderRawRetention::PathReference,
-        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
-        unsupported_reason: None,
-    },
-    ProviderSourceSpec {
-        provider: CaptureProvider::OpenLoaf,
-        display_name: "OpenLoaf",
-        default_locations: OPENLOAF_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         raw_retention: ProviderRawRetention::PathReference,
@@ -1147,49 +862,9 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         unsupported_reason: None,
     },
     ProviderSourceSpec {
-        provider: CaptureProvider::AutohandCode,
-        display_name: "Autohand Code",
-        default_locations: AUTOHAND_CODE_DEFAULTS,
-        import_support: ProviderImportSupport::Native,
-        catalog_support: ProviderCatalogSupport::None,
-        raw_retention: ProviderRawRetention::PathReference,
-        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
-        unsupported_reason: None,
-    },
-    ProviderSourceSpec {
-        provider: CaptureProvider::IflowCli,
-        display_name: "iFlow CLI",
-        default_locations: IFLOW_CLI_DEFAULTS,
-        import_support: ProviderImportSupport::Native,
-        catalog_support: ProviderCatalogSupport::None,
-        raw_retention: ProviderRawRetention::PathReference,
-        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
-        unsupported_reason: None,
-    },
-    ProviderSourceSpec {
-        provider: CaptureProvider::Jazz,
-        display_name: "Jazz",
-        default_locations: JAZZ_DEFAULTS,
-        import_support: ProviderImportSupport::Native,
-        catalog_support: ProviderCatalogSupport::None,
-        raw_retention: ProviderRawRetention::PathReference,
-        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
-        unsupported_reason: None,
-    },
-    ProviderSourceSpec {
         provider: CaptureProvider::Auggie,
         display_name: "Auggie",
         default_locations: AUGGIE_DEFAULTS,
-        import_support: ProviderImportSupport::Native,
-        catalog_support: ProviderCatalogSupport::None,
-        raw_retention: ProviderRawRetention::PathReference,
-        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
-        unsupported_reason: None,
-    },
-    ProviderSourceSpec {
-        provider: CaptureProvider::Eve,
-        display_name: "Eve",
-        default_locations: EVE_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         raw_retention: ProviderRawRetention::PathReference,
@@ -1210,36 +885,6 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         provider: CaptureProvider::Firebender,
         display_name: "Firebender",
         default_locations: FIREBENDER_DEFAULTS,
-        import_support: ProviderImportSupport::Native,
-        catalog_support: ProviderCatalogSupport::None,
-        raw_retention: ProviderRawRetention::PathReference,
-        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
-        unsupported_reason: None,
-    },
-    ProviderSourceSpec {
-        provider: CaptureProvider::Kode,
-        display_name: "Kode",
-        default_locations: KODE_DEFAULTS,
-        import_support: ProviderImportSupport::Native,
-        catalog_support: ProviderCatalogSupport::None,
-        raw_retention: ProviderRawRetention::PathReference,
-        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
-        unsupported_reason: None,
-    },
-    ProviderSourceSpec {
-        provider: CaptureProvider::Neovate,
-        display_name: "Neovate",
-        default_locations: NEOVATE_DEFAULTS,
-        import_support: ProviderImportSupport::Native,
-        catalog_support: ProviderCatalogSupport::None,
-        raw_retention: ProviderRawRetention::PathReference,
-        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
-        unsupported_reason: None,
-    },
-    ProviderSourceSpec {
-        provider: CaptureProvider::CommandCode,
-        display_name: "Command Code",
-        default_locations: COMMAND_CODE_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         raw_retention: ProviderRawRetention::PathReference,
@@ -1287,46 +932,6 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         unsupported_reason: None,
     },
     ProviderSourceSpec {
-        provider: CaptureProvider::Moxby,
-        display_name: "Moxby",
-        default_locations: MOXBY_DEFAULTS,
-        import_support: ProviderImportSupport::Native,
-        catalog_support: ProviderCatalogSupport::None,
-        raw_retention: ProviderRawRetention::PathReference,
-        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
-        unsupported_reason: None,
-    },
-    ProviderSourceSpec {
-        provider: CaptureProvider::Reasonix,
-        display_name: "Reasonix",
-        default_locations: REASONIX_DEFAULTS,
-        import_support: ProviderImportSupport::Native,
-        catalog_support: ProviderCatalogSupport::None,
-        raw_retention: ProviderRawRetention::PathReference,
-        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
-        unsupported_reason: None,
-    },
-    ProviderSourceSpec {
-        provider: CaptureProvider::Adal,
-        display_name: "AdaL",
-        default_locations: ADAL_DEFAULTS,
-        import_support: ProviderImportSupport::Native,
-        catalog_support: ProviderCatalogSupport::None,
-        raw_retention: ProviderRawRetention::PathReference,
-        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
-        unsupported_reason: None,
-    },
-    ProviderSourceSpec {
-        provider: CaptureProvider::Terramind,
-        display_name: "Terramind",
-        default_locations: TERRAMIND_DEFAULTS,
-        import_support: ProviderImportSupport::Native,
-        catalog_support: ProviderCatalogSupport::None,
-        raw_retention: ProviderRawRetention::PathReference,
-        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
-        unsupported_reason: None,
-    },
-    ProviderSourceSpec {
         provider: CaptureProvider::RovoDev,
         display_name: "Rovo Dev",
         default_locations: ROVODEV_DEFAULTS,
@@ -1360,7 +965,7 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         provider: CaptureProvider::NanoClaw,
         display_name: "NanoClaw",
         default_locations: NANOCLAW_DEFAULTS,
-        import_support: ProviderImportSupport::Preview,
+        import_support: ProviderImportSupport::Explicit,
         catalog_support: ProviderCatalogSupport::None,
         raw_retention: ProviderRawRetention::PathReference,
         redaction_boundary: ProviderRedactionBoundary::BeforeExport,
@@ -1427,26 +1032,6 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         unsupported_reason: None,
     },
     ProviderSourceSpec {
-        provider: CaptureProvider::Bob,
-        display_name: "IBM Bob",
-        default_locations: BOB_DEFAULTS,
-        import_support: ProviderImportSupport::Native,
-        catalog_support: ProviderCatalogSupport::None,
-        raw_retention: ProviderRawRetention::PathReference,
-        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
-        unsupported_reason: None,
-    },
-    ProviderSourceSpec {
-        provider: CaptureProvider::Dexto,
-        display_name: "Dexto",
-        default_locations: DEXTO_DEFAULTS,
-        import_support: ProviderImportSupport::Native,
-        catalog_support: ProviderCatalogSupport::None,
-        raw_retention: ProviderRawRetention::PathReference,
-        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
-        unsupported_reason: None,
-    },
-    ProviderSourceSpec {
         provider: CaptureProvider::Lingma,
         display_name: "Lingma",
         default_locations: LINGMA_DEFAULTS,
@@ -1467,39 +1052,9 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         unsupported_reason: None,
     },
     ProviderSourceSpec {
-        provider: CaptureProvider::TinyCloud,
-        display_name: "TinyCloud",
-        default_locations: TINYCLOUD_DEFAULTS,
-        import_support: ProviderImportSupport::Native,
-        catalog_support: ProviderCatalogSupport::None,
-        raw_retention: ProviderRawRetention::PathReference,
-        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
-        unsupported_reason: None,
-    },
-    ProviderSourceSpec {
         provider: CaptureProvider::Zencoder,
         display_name: "Zencoder",
         default_locations: ZENCODER_DEFAULTS,
-        import_support: ProviderImportSupport::Native,
-        catalog_support: ProviderCatalogSupport::None,
-        raw_retention: ProviderRawRetention::PathReference,
-        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
-        unsupported_reason: None,
-    },
-    ProviderSourceSpec {
-        provider: CaptureProvider::Zenflow,
-        display_name: "Zenflow",
-        default_locations: ZENFLOW_DEFAULTS,
-        import_support: ProviderImportSupport::Native,
-        catalog_support: ProviderCatalogSupport::None,
-        raw_retention: ProviderRawRetention::PathReference,
-        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
-        unsupported_reason: None,
-    },
-    ProviderSourceSpec {
-        provider: CaptureProvider::CodeStudio,
-        display_name: "Syncfusion Code Studio",
-        default_locations: CODESTUDIO_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         raw_retention: ProviderRawRetention::PathReference,
@@ -1517,16 +1072,6 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         unsupported_reason: None,
     },
     ProviderSourceSpec {
-        provider: CaptureProvider::Pochi,
-        display_name: "Pochi",
-        default_locations: POCHI_DEFAULTS,
-        import_support: ProviderImportSupport::Native,
-        catalog_support: ProviderCatalogSupport::None,
-        raw_retention: ProviderRawRetention::PathReference,
-        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
-        unsupported_reason: None,
-    },
-    ProviderSourceSpec {
         provider: CaptureProvider::Warp,
         display_name: "Warp",
         default_locations: WARP_DEFAULTS,
@@ -1537,29 +1082,9 @@ const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         unsupported_reason: None,
     },
     ProviderSourceSpec {
-        provider: CaptureProvider::CortexCode,
-        display_name: "Cortex Code",
-        default_locations: CORTEX_CODE_DEFAULTS,
-        import_support: ProviderImportSupport::Native,
-        catalog_support: ProviderCatalogSupport::None,
-        raw_retention: ProviderRawRetention::PathReference,
-        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
-        unsupported_reason: None,
-    },
-    ProviderSourceSpec {
         provider: CaptureProvider::CodeBuddy,
         display_name: "CodeBuddy",
         default_locations: CODEBUDDY_DEFAULTS,
-        import_support: ProviderImportSupport::Native,
-        catalog_support: ProviderCatalogSupport::None,
-        raw_retention: ProviderRawRetention::PathReference,
-        redaction_boundary: ProviderRedactionBoundary::BeforeExport,
-        unsupported_reason: None,
-    },
-    ProviderSourceSpec {
-        provider: CaptureProvider::AiderDesk,
-        display_name: "Aider Desk",
-        default_locations: AIDER_DESK_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         raw_retention: ProviderRawRetention::PathReference,
@@ -1762,51 +1287,7 @@ fn discover_provider_sources_for_spec(
                 ));
             }
         }
-        CaptureProvider::AutohandCode => {
-            if let Some(path) = env_path_resolved("AUTOHAND_HOME", home) {
-                sources.push(provider_source_from_parts(
-                    spec,
-                    path.join("sessions"),
-                    "autohand_code_sessions_jsonl",
-                    ProviderSourceKind::NativeHistory,
-                ));
-            }
-        }
-        CaptureProvider::IflowCli => {
-            if let Some(path) = env_path_resolved("IFLOW_HOME", home) {
-                sources.push(provider_source_from_parts(
-                    spec,
-                    path.join("projects"),
-                    "iflow_cli_session_jsonl_tree",
-                    ProviderSourceKind::NativeHistory,
-                ));
-            }
-        }
-        CaptureProvider::Jazz => {
-            if let Some(path) = env_path_resolved("JAZZ_HOME", home) {
-                sources.push(provider_source_from_parts(
-                    spec,
-                    path.join("history"),
-                    "jazz_history_json",
-                    ProviderSourceKind::NativeHistory,
-                ));
-            }
-        }
         CaptureProvider::Auggie => {}
-        CaptureProvider::Eve => {
-            if let Some(path) = env_path_resolved("WORKFLOW_LOCAL_DATA_DIR", home) {
-                sources.push(eve_workflow_data_source(spec, path));
-            }
-            for root in current_dir_ancestors_with(|candidate| {
-                candidate
-                    .join(".workflow-data")
-                    .join("streams")
-                    .join("runs")
-                    .is_dir()
-            }) {
-                sources.push(eve_workflow_data_source(spec, root.join(".workflow-data")));
-            }
-        }
         CaptureProvider::Junie => {
             if let Some(path) = env_path_resolved("JUNIE_SESSIONS_DIR", home) {
                 sources.push(provider_source_from_parts(
@@ -1843,18 +1324,6 @@ fn discover_provider_sources_for_spec(
                 ));
             }
         }
-        CaptureProvider::Kode => {
-            for env_name in ["KODE_CONFIG_DIR", "CLAUDE_CONFIG_DIR"] {
-                if let Some(path) = env_path_resolved(env_name, home) {
-                    sources.push(provider_source_from_parts(
-                        spec,
-                        path.join("projects"),
-                        "kode_session_jsonl_tree",
-                        ProviderSourceKind::NativeHistory,
-                    ));
-                }
-            }
-        }
         CaptureProvider::MistralVibe => {
             if let Some(path) = env_path_resolved("VIBE_HOME", home) {
                 sources.push(provider_source_from_parts(
@@ -1873,67 +1342,6 @@ fn discover_provider_sources_for_spec(
                     "mux_session_jsonl_tree",
                     ProviderSourceKind::NativeHistory,
                 ));
-            }
-        }
-        CaptureProvider::Moxby => {
-            if let Some(path) = env_path_resolved("MOXBY_STATE_DIR", home) {
-                sources.push(provider_source_from_parts(
-                    spec,
-                    path.join("moxby_chats.db"),
-                    "moxby_chats_sqlite",
-                    ProviderSourceKind::NativeHistory,
-                ));
-            }
-            if let Some(path) = env_path("XDG_DATA_HOME") {
-                sources.push(provider_source_from_parts(
-                    spec,
-                    path.join("com.moxby.agent").join("moxby_chats.db"),
-                    "moxby_chats_sqlite",
-                    ProviderSourceKind::NativeHistory,
-                ));
-            }
-            if let Some(path) = env_path("APPDATA") {
-                sources.push(provider_source_from_parts(
-                    spec,
-                    path.join("com.moxby.agent").join("moxby_chats.db"),
-                    "moxby_chats_sqlite",
-                    ProviderSourceKind::NativeHistory,
-                ));
-            }
-        }
-        CaptureProvider::Terramind => {
-            if let Some(path) = env_path("XDG_CONFIG_HOME") {
-                sources.push(terramind_db_source(
-                    spec,
-                    path.join("Nucleus").join("data").join("agents.db"),
-                ));
-            }
-            if let Some(path) = env_path("APPDATA") {
-                sources.push(terramind_db_source(
-                    spec,
-                    path.join("Nucleus").join("data").join("agents.db"),
-                ));
-            }
-            if env::var_os("NUCLEUS_DEV").is_some() {
-                sources.push(terramind_db_source(
-                    spec,
-                    home.join(".config")
-                        .join("Nucleus Dev")
-                        .join("data")
-                        .join("agents.db"),
-                ));
-                if let Some(path) = env_path("XDG_CONFIG_HOME") {
-                    sources.push(terramind_db_source(
-                        spec,
-                        path.join("Nucleus Dev").join("data").join("agents.db"),
-                    ));
-                }
-                if let Some(path) = env_path("APPDATA") {
-                    sources.push(terramind_db_source(
-                        spec,
-                        path.join("Nucleus Dev").join("data").join("agents.db"),
-                    ));
-                }
             }
         }
         CaptureProvider::NanoClaw => {
@@ -2007,37 +1415,11 @@ fn discover_provider_sources_for_spec(
                 ));
             }
         }
-        CaptureProvider::Dexto => {
-            for root in current_dir_ancestors_with(|candidate| {
-                candidate.join(".dexto").join("database").is_dir()
-            }) {
-                sources.push(provider_source_from_parts(
-                    spec,
-                    root.join(".dexto").join("database"),
-                    "dexto_sqlite",
-                    ProviderSourceKind::NativeHistory,
-                ));
-            }
-        }
         CaptureProvider::Cline => {
             sources.extend(discover_cline_task_json_sources(home, spec));
         }
         CaptureProvider::RooCode => {
             sources.extend(discover_roo_task_json_sources(home, spec));
-        }
-        CaptureProvider::Bob => {
-            sources.extend(discover_bob_task_json_sources(home, spec));
-        }
-        CaptureProvider::Pochi => {
-            let storage = home.join(".pochi").join("storage");
-            if storage.exists() {
-                sources.push(provider_source_from_parts(
-                    spec,
-                    storage,
-                    "pochi_livestore_state_sqlite",
-                    ProviderSourceKind::NativeHistory,
-                ));
-            }
         }
         CaptureProvider::Warp => {
             if let Some(path) = env_path("XDG_STATE_HOME") {
@@ -2082,58 +1464,12 @@ fn discover_provider_sources_for_spec(
                 ));
             }
         }
-        CaptureProvider::TinyCloud => {
-            if let Some(path) = env_path_resolved("TINYCLOUD_HOME", home) {
-                sources.push(provider_source_from_parts(
-                    spec,
-                    path,
-                    "tinycloud_session_jsonl_tree",
-                    ProviderSourceKind::NativeHistory,
-                ));
-            }
-        }
         CaptureProvider::Zencoder => {
             if let Some(path) = env_path("XDG_CONFIG_HOME") {
                 sources.extend(zencoder_app_data_dirs(path, spec));
             }
             if let Some(path) = env_path("APPDATA") {
                 sources.extend(zencoder_app_data_dirs(path, spec));
-            }
-        }
-        CaptureProvider::Zenflow => {
-            if let Some(path) = env_path("ZENFLOW_DATA_DIR") {
-                sources.push(zenflow_db_source(spec, path.join("db.sqlite")));
-            }
-            if let Some(path) = env_path("XDG_DATA_HOME") {
-                sources.push(zenflow_db_source(
-                    spec,
-                    path.join("zenflow").join("db.sqlite"),
-                ));
-            }
-            if let Some(path) = env_path("APPDATA") {
-                sources.push(zenflow_db_source(
-                    spec,
-                    path.join("forgoodai")
-                        .join("zenflow")
-                        .join("data")
-                        .join("db.sqlite"),
-                ));
-            }
-        }
-        CaptureProvider::AiderDesk => {
-            let aider_dir = env::var_os("AIDER_DESK_DIR")
-                .filter(|value| !value.is_empty())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from(".aider-desk"));
-            for root in current_dir_ancestors_with(|candidate| {
-                candidate.join(&aider_dir).join("tasks").is_dir()
-            }) {
-                sources.push(provider_source_from_parts(
-                    spec,
-                    root.join(&aider_dir).join("tasks"),
-                    "aider_desk_task_context_json",
-                    ProviderSourceKind::NativeHistory,
-                ));
             }
         }
         _ => {}
@@ -2161,15 +1497,6 @@ fn forgecode_db_source(spec: &ProviderSourceSpec, path: PathBuf) -> ProviderSour
         spec,
         path,
         "forgecode_sqlite",
-        ProviderSourceKind::NativeHistory,
-    )
-}
-
-fn eve_workflow_data_source(spec: &ProviderSourceSpec, path: PathBuf) -> ProviderSource {
-    provider_source_from_parts(
-        spec,
-        path,
-        "eve_workflow_data_streams",
         ProviderSourceKind::NativeHistory,
     )
 }
@@ -2287,32 +1614,6 @@ fn discover_roo_task_json_sources(home: &Path, spec: &ProviderSourceSpec) -> Vec
     sources
 }
 
-fn discover_bob_task_json_sources(_home: &Path, spec: &ProviderSourceSpec) -> Vec<ProviderSource> {
-    let mut sources = Vec::new();
-    if let Some(path) = env_path("XDG_CONFIG_HOME") {
-        sources.extend(bob_app_data_dirs(path, spec));
-    }
-    if let Some(path) = env_path("APPDATA") {
-        sources.extend(bob_app_data_dirs(path, spec));
-    }
-    sources
-}
-
-fn bob_app_data_dirs(base: PathBuf, spec: &ProviderSourceSpec) -> Vec<ProviderSource> {
-    ["IBM Bob", "Bob-IDE"]
-        .into_iter()
-        .map(|app_name| {
-            task_json_source(
-                spec,
-                base.join(app_name)
-                    .join("User")
-                    .join("globalStorage")
-                    .join("ibm.bob-code"),
-            )
-        })
-        .collect()
-}
-
 fn zencoder_app_data_dirs(base: PathBuf, spec: &ProviderSourceSpec) -> Vec<ProviderSource> {
     ["Code", "Code - Insiders", "VSCodium", "Code - OSS"]
         .into_iter()
@@ -2331,22 +1632,12 @@ fn zencoder_app_data_dirs(base: PathBuf, spec: &ProviderSourceSpec) -> Vec<Provi
         .collect()
 }
 
-fn zenflow_db_source(spec: &ProviderSourceSpec, path: PathBuf) -> ProviderSource {
-    provider_source_from_parts(
-        spec,
-        path,
-        ZENFLOW_SQLITE_SOURCE_FORMAT,
-        ProviderSourceKind::NativeHistory,
-    )
-}
-
 fn task_json_source(spec: &ProviderSourceSpec, path: PathBuf) -> ProviderSource {
     provider_source_from_parts(
         spec,
         path,
         match spec.provider {
             CaptureProvider::RooCode => "roo_task_directory_json",
-            CaptureProvider::Bob => "bob_task_directory_json",
             _ => "cline_task_directory_json",
         },
         ProviderSourceKind::NativeHistory,
@@ -2447,15 +1738,6 @@ fn goose_db_source(spec: &ProviderSourceSpec, path: PathBuf) -> ProviderSource {
         spec,
         path,
         "goose_sessions_sqlite",
-        ProviderSourceKind::NativeHistory,
-    )
-}
-
-fn terramind_db_source(spec: &ProviderSourceSpec, path: PathBuf) -> ProviderSource {
-    provider_source_from_parts(
-        spec,
-        path,
-        "terramind_agents_sqlite",
         ProviderSourceKind::NativeHistory,
     )
 }
@@ -2614,8 +1896,6 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::Claude => "claude_projects_jsonl_tree",
         CaptureProvider::OpenCode => "opencode_sqlite",
         CaptureProvider::CodeArtsAgent => "codearts_agent_kernel_sqlite",
-        CaptureProvider::OpenLoaf if path.is_dir() => "openloaf_chat_jsonl_tree",
-        CaptureProvider::OpenLoaf => "openloaf_chat_jsonl",
         CaptureProvider::Kilo => "kilo_sqlite",
         CaptureProvider::KiroCli => "kiro_cli_sqlite",
         CaptureProvider::Crush => "crush_sqlite",
@@ -2642,32 +1922,16 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::QwenCode => "qwen_code_chat_jsonl",
         CaptureProvider::KimiCodeCli if path.is_dir() => "kimi_code_cli_wire_jsonl_tree",
         CaptureProvider::KimiCodeCli => "kimi_code_cli_wire_jsonl",
-        CaptureProvider::AutohandCode => "autohand_code_sessions_jsonl",
-        CaptureProvider::IflowCli if path.is_dir() => "iflow_cli_session_jsonl_tree",
-        CaptureProvider::IflowCli => "iflow_cli_session_jsonl",
-        CaptureProvider::Jazz => "jazz_history_json",
         CaptureProvider::Auggie => "auggie_session_json",
-        CaptureProvider::Eve => "eve_workflow_data_streams",
         CaptureProvider::Junie if path.is_dir() => "junie_session_events_jsonl_tree",
         CaptureProvider::Junie => "junie_session_events_jsonl",
         CaptureProvider::Firebender => "firebender_chat_history_sqlite",
-        CaptureProvider::Kode if path.is_dir() => "kode_session_jsonl_tree",
-        CaptureProvider::Kode => "kode_session_jsonl",
-        CaptureProvider::Neovate if path.is_dir() => "neovate_session_jsonl_tree",
-        CaptureProvider::Neovate => "neovate_session_jsonl",
-        CaptureProvider::CommandCode if path.is_dir() => "command_code_session_jsonl_tree",
-        CaptureProvider::CommandCode => "command_code_session_jsonl",
         CaptureProvider::ForgeCode => "forgecode_sqlite",
         CaptureProvider::DeepAgents => "deepagents_sessions_sqlite",
         CaptureProvider::MistralVibe if path.is_dir() => "mistral_vibe_session_jsonl_tree",
         CaptureProvider::MistralVibe => "mistral_vibe_session_jsonl",
         CaptureProvider::Mux if path.is_dir() => "mux_session_jsonl_tree",
         CaptureProvider::Mux => "mux_session_jsonl",
-        CaptureProvider::Moxby => "moxby_chats_sqlite",
-        CaptureProvider::Reasonix if path.is_dir() => "reasonix_session_jsonl_tree",
-        CaptureProvider::Reasonix => "reasonix_session_jsonl",
-        CaptureProvider::Adal => "adal_session_jsonl",
-        CaptureProvider::Terramind => "terramind_agents_sqlite",
         CaptureProvider::RovoDev if path.is_dir() => "rovodev_session_json_tree",
         CaptureProvider::RovoDev => "rovodev_session_json",
         CaptureProvider::OpenClaw => "openclaw_session_jsonl_tree",
@@ -2679,29 +1943,12 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::OpenHands => "openhands_file_events",
         CaptureProvider::Cline => "cline_task_directory_json",
         CaptureProvider::RooCode => "roo_task_directory_json",
-        CaptureProvider::Bob => "bob_task_directory_json",
-        CaptureProvider::Dexto => "dexto_sqlite",
         CaptureProvider::Lingma => "lingma_sqlite",
         CaptureProvider::Trae => "trae_state_vscdb",
         CaptureProvider::Qoder if path.is_dir() => "qoder_transcript_jsonl_tree",
         CaptureProvider::Qoder => "qoder_transcript_jsonl",
-        CaptureProvider::Pochi => "pochi_livestore_state_sqlite",
         CaptureProvider::Warp => "warp_sqlite",
-        CaptureProvider::CortexCode if path.is_dir() => "cortex_code_conversations_json",
-        CaptureProvider::CortexCode => {
-            if path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.ends_with(".history.jsonl"))
-            {
-                "cortex_code_history_jsonl"
-            } else {
-                "cortex_code_session_json"
-            }
-        }
         CaptureProvider::CodeBuddy => "codebuddy_history_json",
-        CaptureProvider::AiderDesk => "aider_desk_task_context_json",
-        CaptureProvider::TinyCloud => "tinycloud_session_jsonl_tree",
         CaptureProvider::Zencoder if path.is_dir() => "zencoder_chat_sessions_json_tree",
         CaptureProvider::Zencoder => {
             if path.file_name().and_then(|name| name.to_str()) == Some("sessions.json") {
@@ -2710,8 +1957,6 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
                 "zencoder_chat_session_json"
             }
         }
-        CaptureProvider::Zenflow => ZENFLOW_SQLITE_SOURCE_FORMAT,
-        CaptureProvider::CodeStudio => "codestudio_session_store_sqlite",
         _ => "unsupported",
     };
     let explicit_import_support = spec.import_support;
@@ -2804,9 +2049,6 @@ fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::CodeArtsAgent => {
             Some("path exists but no CodeArts Agent opencode.db database was found")
         }
-        CaptureProvider::OpenLoaf => Some(
-            "path exists but no OpenLoaf chat-history messages.jsonl session directories were found",
-        ),
         CaptureProvider::Kilo => Some("path exists but no Kilo SQLite database was found"),
         CaptureProvider::Crush => Some("path exists but no Crush SQLite database was found"),
         CaptureProvider::Goose => {
@@ -2837,32 +2079,11 @@ fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::KimiCodeCli => {
             Some("path exists but no Kimi Code CLI agents/*/wire.jsonl files were found")
         }
-        CaptureProvider::AutohandCode => {
-            Some("path exists but no Autohand Code session conversation.jsonl files were found")
-        }
-        CaptureProvider::IflowCli => {
-            Some("path exists but no iFlow CLI session-*.jsonl files were found under projects")
-        }
-        CaptureProvider::Jazz => {
-            Some("path exists but no Jazz agent history JSON files were found")
-        }
         CaptureProvider::Auggie => {
             Some("path exists but no Auggie session JSON files with chatHistory were found")
         }
-        CaptureProvider::Eve => {
-            Some("path exists but no Eve .workflow-data default session streams were found")
-        }
         CaptureProvider::Firebender => {
             Some("path exists but no Firebender chat_sessions table was found")
-        }
-        CaptureProvider::Kode => {
-            Some("path exists but no Kode session JSONL files were found under projects")
-        }
-        CaptureProvider::Neovate => {
-            Some("path exists but no Neovate session JSONL files were found under projects")
-        }
-        CaptureProvider::CommandCode => {
-            Some("path exists but no Command Code session JSONL files were found under projects")
         }
         CaptureProvider::ForgeCode => {
             Some("path exists but no ForgeCode conversations table was found")
@@ -2878,18 +2099,6 @@ fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         }
         CaptureProvider::Mux => {
             Some("path exists but no Mux chat.jsonl or partial.json session files were found")
-        }
-        CaptureProvider::Moxby => {
-            Some("path exists but no Moxby moxby_chats.db chat_messages schema was found")
-        }
-        CaptureProvider::Reasonix => {
-            Some("path exists but no Reasonix session JSONL files were found")
-        }
-        CaptureProvider::Adal => {
-            Some("path exists but no AdaL conversation_*.jsonl files were found")
-        }
-        CaptureProvider::Terramind => {
-            Some("path exists but no Terramind agents.db chat tables were found")
         }
         CaptureProvider::RovoDev => {
             Some("path exists but no Rovo Dev session_context.json files were found")
@@ -2911,8 +2120,6 @@ fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         }
         CaptureProvider::Cline => Some("path exists but no Cline task JSON files were found"),
         CaptureProvider::RooCode => Some("path exists but no Roo Code task JSON files were found"),
-        CaptureProvider::Bob => Some("path exists but no IBM Bob IDE task JSON files were found"),
-        CaptureProvider::Dexto => Some("path exists but no Dexto SQLite database was found"),
         CaptureProvider::Lingma => {
             Some("path exists but no Lingma chat_record table with the expected columns was found")
         }
@@ -2922,27 +2129,12 @@ fn empty_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::Qoder => {
             Some("path exists but no Qoder transcript JSONL files were found")
         }
-        CaptureProvider::Pochi => {
-            Some("path exists but no Pochi LiveStore state SQLite database was found")
-        }
         CaptureProvider::Warp => Some("path exists but no Warp SQLite database was found"),
-        CaptureProvider::CortexCode => {
-            Some("path exists but no Cortex Code session JSON or history JSONL files were found")
-        }
         CaptureProvider::CodeBuddy => {
             Some("path exists but no CodeBuddy history sessions were found")
         }
-        CaptureProvider::AiderDesk => {
-            Some("path exists but no Aider Desk task context.json files were found")
-        }
-        CaptureProvider::TinyCloud => {
-            Some("path exists but no TinyCloud session JSONL files were found")
-        }
         CaptureProvider::Zencoder => {
             Some("path exists but no Zencoder sessions.json or sessions/*.json files were found")
-        }
-        CaptureProvider::CodeStudio => {
-            Some("path exists but no Syncfusion Code Studio session-store.db database was found")
         }
         _ => None,
     }
@@ -2971,9 +2163,6 @@ fn unknown_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::Cursor => {
             Some("path exists but the Cursor transcript probe hit its scan budget")
         }
-        CaptureProvider::OpenLoaf => {
-            Some("path exists but the OpenLoaf chat-history probe hit its scan budget")
-        }
         CaptureProvider::CodeArtsAgent => None,
         CaptureProvider::Zed => None,
         CaptureProvider::CopilotCli => {
@@ -2994,20 +2183,8 @@ fn unknown_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::KimiCodeCli => {
             Some("path exists but the Kimi Code CLI wire transcript probe hit its scan budget")
         }
-        CaptureProvider::AutohandCode => {
-            Some("path exists but the Autohand Code session probe hit its scan budget")
-        }
-        CaptureProvider::IflowCli => {
-            Some("path exists but the iFlow CLI session probe hit its scan budget")
-        }
-        CaptureProvider::Jazz => {
-            Some("path exists but the Jazz history JSON probe hit its scan budget")
-        }
         CaptureProvider::Auggie => {
             Some("path exists but the Auggie session JSON probe hit its scan budget")
-        }
-        CaptureProvider::Eve => {
-            Some("path exists but the Eve .workflow-data stream probe hit its scan budget")
         }
         CaptureProvider::Firebender => {
             Some("path exists but the Firebender database could not be fully probed")
@@ -3019,16 +2196,6 @@ fn unknown_source_reason(provider: CaptureProvider) -> Option<&'static str> {
             Some("path exists but the Junie session index probe hit its scan budget")
         }
         CaptureProvider::Mux => Some("path exists but the Mux session probe hit its scan budget"),
-        CaptureProvider::Reasonix => {
-            Some("path exists but the Reasonix session probe hit its scan budget")
-        }
-        CaptureProvider::Adal => Some("path exists but the AdaL session probe hit its scan budget"),
-        CaptureProvider::CommandCode => {
-            Some("path exists but the Command Code session probe hit its scan budget")
-        }
-        CaptureProvider::Bob => {
-            Some("path exists but the IBM Bob IDE task JSON probe hit its scan budget")
-        }
         CaptureProvider::RovoDev => {
             Some("path exists but the Rovo Dev session probe hit its scan budget")
         }
@@ -3044,16 +2211,9 @@ fn unknown_source_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::CodeBuddy => {
             Some("path exists but the CodeBuddy history probe hit its scan budget")
         }
-        CaptureProvider::AiderDesk => {
-            Some("path exists but the Aider Desk task context probe hit its scan budget")
-        }
-        CaptureProvider::TinyCloud => {
-            Some("path exists but the TinyCloud session probe hit its scan budget")
-        }
         CaptureProvider::Zencoder => {
             Some("path exists but the Zencoder session probe hit its scan budget")
         }
-        CaptureProvider::CodeStudio => None,
         CaptureProvider::Trae => {
             Some("path exists but the Trae workspaceStorage probe hit its scan budget")
         }
@@ -3081,9 +2241,6 @@ fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::CodeArtsAgent => {
             Some("path exists but the CodeArts Agent database could not be read; check permissions")
         }
-        CaptureProvider::OpenLoaf => Some(
-            "path exists but OpenLoaf chat-history files could not be read; check permissions",
-        ),
         CaptureProvider::Kilo => {
             Some("path exists but the Kilo database could not be read; check permissions")
         }
@@ -3123,20 +2280,8 @@ fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::KimiCodeCli => Some(
             "path exists but Kimi Code CLI wire transcripts could not be read; check permissions",
         ),
-        CaptureProvider::AutohandCode => Some(
-            "path exists but Autohand Code session transcripts could not be read; check permissions",
-        ),
-        CaptureProvider::IflowCli => {
-            Some("path exists but iFlow CLI session transcripts could not be read; check permissions")
-        }
-        CaptureProvider::Jazz => {
-            Some("path exists but Jazz history JSON files could not be read; check permissions")
-        }
         CaptureProvider::Auggie => {
             Some("path exists but Auggie session JSON files could not be read; check permissions")
-        }
-        CaptureProvider::Eve => {
-            Some("path exists but Eve .workflow-data streams could not be read; check permissions")
         }
         CaptureProvider::Junie => {
             Some("path exists but Junie session files could not be read; check permissions")
@@ -3144,9 +2289,6 @@ fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::Firebender => {
             Some("path exists but the Firebender chat history database could not be read; check permissions")
         }
-        CaptureProvider::CommandCode => Some(
-            "path exists but Command Code session transcripts could not be read; check permissions",
-        ),
         CaptureProvider::ForgeCode => {
             Some("path exists but the ForgeCode database could not be read; check permissions")
         }
@@ -3158,15 +2300,6 @@ fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'static str> {
         }
         CaptureProvider::Mux => {
             Some("path exists but Mux session files could not be read; check permissions")
-        }
-        CaptureProvider::Reasonix => {
-            Some("path exists but Reasonix session files could not be read; check permissions")
-        }
-        CaptureProvider::Adal => {
-            Some("path exists but AdaL session files could not be read; check permissions")
-        }
-        CaptureProvider::Terramind => {
-            Some("path exists but the Terramind agents database could not be read; check permissions")
         }
         CaptureProvider::RovoDev => {
             Some("path exists but Rovo Dev session files could not be read; check permissions")
@@ -3198,9 +2331,6 @@ fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::RooCode => {
             Some("path exists but Roo Code task JSON files could not be read; check permissions")
         }
-        CaptureProvider::Dexto => {
-            Some("path exists but the Dexto database could not be read; check permissions")
-        }
         CaptureProvider::Lingma => {
             Some("path exists but the Lingma chat_record SQLite database could not be read")
         }
@@ -3210,26 +2340,11 @@ fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'static str> {
         CaptureProvider::Qoder => {
             Some("path exists but Qoder transcript JSONL files could not be read; check permissions")
         }
-        CaptureProvider::Pochi => {
-            Some("path exists but the Pochi LiveStore state database could not be read")
-        }
         CaptureProvider::CodeBuddy => Some(
             "path exists but CodeBuddy history JSON files could not be read; check permissions",
         ),
-        CaptureProvider::AiderDesk => Some(
-            "path exists but Aider Desk task context JSON files could not be read; check permissions",
-        ),
-        CaptureProvider::TinyCloud => {
-            Some("path exists but TinyCloud session JSONL files could not be read; check permissions")
-        }
         CaptureProvider::Zencoder => {
             Some("path exists but Zencoder session JSON files could not be read; check permissions")
-        }
-        CaptureProvider::CodeStudio => {
-            Some("path exists but the Syncfusion Code Studio database could not be read; check permissions")
-        }
-        CaptureProvider::Bob => {
-            Some("path exists but IBM Bob IDE task JSON files could not be read; check permissions")
         }
         _ => None,
     }
@@ -3248,7 +2363,6 @@ fn default_location_import_probe(
         CaptureProvider::Pi => has_jsonl_file_under_matching(path, 10_000, |_| true),
         CaptureProvider::OpenCode => path_is_file_probe(path),
         CaptureProvider::CodeArtsAgent => path_is_file_probe(path),
-        CaptureProvider::OpenLoaf => has_openloaf_session_files(path, 10_000),
         CaptureProvider::Kilo => path_is_file_probe(path),
         CaptureProvider::KiroCli => path_is_file_probe(path),
         CaptureProvider::Crush => path_is_file_probe(path),
@@ -3263,8 +2377,6 @@ fn default_location_import_probe(
             candidate.file_name().and_then(|name| name.to_str()) != Some("sessions.json")
         }),
         CaptureProvider::OpenHands => has_openhands_event_json(path, 10_000),
-        CaptureProvider::Dexto => has_dexto_sqlite_db(path, 10_000),
-        CaptureProvider::Pochi => has_pochi_state_db(path, 10_000),
         CaptureProvider::Antigravity => has_jsonl_file_under_matching(path, 10_000, |candidate| {
             matches!(
                 candidate.file_name().and_then(|name| name.to_str()),
@@ -3291,49 +2403,11 @@ fn default_location_import_probe(
             candidate.file_name().and_then(|name| name.to_str()) == Some("wire.jsonl")
                 && path_has_component(candidate, "agents")
         }),
-        CaptureProvider::AutohandCode => has_jsonl_file_under_matching(path, 10_000, |candidate| {
-            candidate.file_name().and_then(|name| name.to_str()) == Some("conversation.jsonl")
-                && candidate
-                    .parent()
-                    .is_some_and(|parent| parent.join("metadata.json").is_file())
-        }),
-        CaptureProvider::IflowCli => has_jsonl_file_under_matching(path, 10_000, |candidate| {
-            candidate
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("session-") && name.ends_with(".jsonl"))
-        }),
-        CaptureProvider::Jazz => has_json_file_under_matching(path, 10_000, |candidate| {
-            candidate
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| !name.starts_with(".history-") && name.ends_with(".json"))
-        }),
         CaptureProvider::Auggie => has_json_file_under_matching(path, 10_000, |candidate| {
             candidate.extension().and_then(|ext| ext.to_str()) == Some("json")
         }),
-        CaptureProvider::Eve => has_eve_workflow_stream(path, 10_000),
         CaptureProvider::Junie => has_junie_session_events(path, 10_000),
         CaptureProvider::Firebender => has_firebender_chat_sessions_table(path),
-        CaptureProvider::Kode => has_jsonl_file_under_matching(path, 10_000, |candidate| {
-            !path_has_component(candidate, "requests")
-                && !path_has_component(candidate, "file-history")
-        }),
-        CaptureProvider::Neovate => has_jsonl_file_under_matching(path, 10_000, |candidate| {
-            !path_has_component(candidate, "requests")
-                && !path_has_component(candidate, "file-history")
-        }),
-        CaptureProvider::CommandCode => has_jsonl_file_under_matching(path, 10_000, |candidate| {
-            candidate
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| {
-                    name.ends_with(".jsonl")
-                        && !name.ends_with(".checkpoints.jsonl")
-                        && !name.contains(".checkpoints.")
-                        && !name.contains(".prompts.")
-                })
-        }),
         CaptureProvider::ForgeCode => has_forgecode_conversations_table(path),
         CaptureProvider::DeepAgents => has_deepagents_checkpoint_tables(path),
         CaptureProvider::MistralVibe => has_jsonl_file_under_matching(path, 10_000, |candidate| {
@@ -3343,15 +2417,6 @@ fn default_location_import_probe(
                     .is_some_and(|parent| parent.join("meta.json").is_file())
         }),
         CaptureProvider::Mux => has_mux_session_files(path, 10_000),
-        CaptureProvider::Moxby => has_moxby_chat_tables(path),
-        CaptureProvider::Reasonix => has_jsonl_file_under_matching(path, 10_000, |candidate| {
-            candidate
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.ends_with(".jsonl") && !name.ends_with(".events.jsonl"))
-        }),
-        CaptureProvider::Adal => has_adal_session_jsonl(path, 10_000),
-        CaptureProvider::Terramind => has_terramind_chat_tables(path),
         CaptureProvider::RovoDev => has_json_file_under_matching(path, 10_000, |candidate| {
             candidate.file_name().and_then(|name| name.to_str()) == Some("session_context.json")
         }),
@@ -3374,24 +2439,11 @@ fn default_location_import_probe(
                     | "claude_messages.json"
             )
         }),
-        CaptureProvider::Bob => has_task_json_file_under_matching(path, 10_000, |name| {
-            matches!(
-                name,
-                "api_conversation_history.json" | "ui_messages.json" | "task_metadata.json"
-            )
-        }),
         CaptureProvider::Lingma => has_lingma_chat_record_table(path),
         CaptureProvider::Trae => has_trae_state_vscdb_chat_history(path, 10_000),
         CaptureProvider::Warp => path_is_file_probe(path),
-        CaptureProvider::CortexCode => has_cortex_code_session_files(path, 10_000),
         CaptureProvider::CodeBuddy => has_codebuddy_history_json(path, 10_000),
-        CaptureProvider::AiderDesk => {
-            has_task_json_file_under_matching(path, 10_000, |name| name == "context.json")
-        }
-        CaptureProvider::TinyCloud => has_tinycloud_session_jsonl(path, 10_000),
         CaptureProvider::Zencoder => has_zencoder_session_json(path, 10_000),
-        CaptureProvider::Zenflow => path_is_file_probe(path),
-        CaptureProvider::CodeStudio => has_codestudio_session_store(path),
         CaptureProvider::Shell
         | CaptureProvider::Git
         | CaptureProvider::Jj
@@ -3399,16 +2451,6 @@ fn default_location_import_probe(
         | CaptureProvider::Custom
         | CaptureProvider::Unknown => BoundedProbe::NotFound,
     }
-}
-
-fn has_tinycloud_session_jsonl(root: &Path, max_entries: usize) -> BoundedProbe {
-    has_jsonl_file_under_matching(root, max_entries, |candidate| {
-        candidate
-            .parent()
-            .and_then(Path::file_name)
-            .and_then(|name| name.to_str())
-            == Some("sessions")
-    })
 }
 
 fn has_zencoder_session_json(root: &Path, max_entries: usize) -> BoundedProbe {
@@ -3442,40 +2484,6 @@ fn has_zencoder_session_json(root: &Path, max_entries: usize) -> BoundedProbe {
     })
 }
 
-fn has_codestudio_session_store(path: &Path) -> BoundedProbe {
-    match path_is_file_probe(path) {
-        BoundedProbe::Found => {}
-        other => return other,
-    }
-    match Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .and_then(|conn| {
-        conn.query_row(
-            "select \
-                (select count(*) from sqlite_schema \
-                 where type = 'table' and name = 'schema_version'), \
-                (select count(*) from pragma_table_info('sessions') \
-                 where name in ('id')), \
-                (select count(*) from pragma_table_info('turns') \
-                 where name in ('id', 'session_id', 'role', 'content'))",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            },
-        )
-    }) {
-        Ok((1, 1, 4)) => BoundedProbe::Found,
-        Ok(_) => BoundedProbe::NotFound,
-        Err(_) => BoundedProbe::IoError,
-    }
-}
-
 fn has_gemini_chat_jsonl(root: &Path, max_entries: usize) -> BoundedProbe {
     let tmp = root.join("tmp");
     match path_is_dir_probe(&tmp) {
@@ -3484,167 +2492,6 @@ fn has_gemini_chat_jsonl(root: &Path, max_entries: usize) -> BoundedProbe {
         _ => return BoundedProbe::NotFound,
     }
     has_jsonl_file_under_matching(&tmp, max_entries, |path| path_has_component(path, "chats"))
-}
-
-fn has_dexto_sqlite_db(root: &Path, max_entries: usize) -> BoundedProbe {
-    match path_metadata_probe(root) {
-        PathProbe::File => return has_dexto_sqlite_store(root),
-        PathProbe::Dir => {}
-        PathProbe::Missing | PathProbe::Other => return BoundedProbe::NotFound,
-        PathProbe::IoError => return BoundedProbe::IoError,
-    }
-
-    let mut stack = vec![root.to_path_buf()];
-    let mut visited = 0usize;
-    let mut saw_io_error = false;
-    while let Some(dir) = stack.pop() {
-        let entries = match fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(_) => return BoundedProbe::IoError,
-        };
-        for entry in entries {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(_) => continue,
-            };
-            visited = visited.saturating_add(1);
-            if visited > max_entries {
-                return BoundedProbe::BudgetExhausted;
-            }
-
-            let path = entry.path();
-            let file_type = match entry.file_type() {
-                Ok(file_type) => file_type,
-                Err(_) => continue,
-            };
-            if file_type.is_dir() {
-                stack.push(path);
-            } else if file_type.is_file()
-                && path.extension().and_then(|ext| ext.to_str()) == Some("db")
-            {
-                match has_dexto_sqlite_store(&path) {
-                    BoundedProbe::Found => return BoundedProbe::Found,
-                    BoundedProbe::IoError => saw_io_error = true,
-                    BoundedProbe::NotFound | BoundedProbe::BudgetExhausted => {}
-                }
-            }
-        }
-    }
-
-    if saw_io_error {
-        BoundedProbe::IoError
-    } else {
-        BoundedProbe::NotFound
-    }
-}
-
-fn has_dexto_sqlite_store(path: &Path) -> BoundedProbe {
-    match path_is_file_probe(path) {
-        BoundedProbe::Found => {}
-        other => return other,
-    }
-    match Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .and_then(|conn| {
-        conn.query_row(
-            "select \
-                (select count(*) from pragma_table_info('kv_store') \
-                 where name in ('key', 'value')), \
-                (select count(*) from pragma_table_info('list_store') \
-                 where name in ('key', 'value', 'sequence'))",
-            [],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-        )
-    }) {
-        Ok((2, 3)) => BoundedProbe::Found,
-        Ok(_) => BoundedProbe::NotFound,
-        Err(_) => BoundedProbe::IoError,
-    }
-}
-
-fn has_openloaf_session_files(root: &Path, max_entries: usize) -> BoundedProbe {
-    match path_metadata_probe(root) {
-        PathProbe::File => {
-            return BoundedProbe::from_bool(
-                root.file_name().and_then(|name| name.to_str()) == Some("messages.jsonl"),
-            );
-        }
-        PathProbe::Dir => {}
-        PathProbe::Missing | PathProbe::Other => return BoundedProbe::NotFound,
-        PathProbe::IoError => return BoundedProbe::IoError,
-    }
-
-    if openloaf_is_projects_root(root) {
-        return has_openloaf_project_chat_histories(root, max_entries);
-    }
-
-    has_jsonl_file_under_matching(root, max_entries, |candidate| {
-        candidate.file_name().and_then(|name| name.to_str()) == Some("messages.jsonl")
-            && path_has_component(candidate, "chat-history")
-    })
-}
-
-fn openloaf_is_projects_root(path: &Path) -> bool {
-    path.file_name().and_then(|name| name.to_str()) == Some("projects")
-        && path
-            .parent()
-            .and_then(Path::file_name)
-            .and_then(|name| name.to_str())
-            == Some("OpenLoafData")
-}
-
-fn has_openloaf_project_chat_histories(root: &Path, max_entries: usize) -> BoundedProbe {
-    let entries = match std::fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(_) => return BoundedProbe::IoError,
-    };
-    let mut visited = 0usize;
-    let mut saw_budget = false;
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(_) => continue,
-        };
-        visited = visited.saturating_add(1);
-        if visited > max_entries {
-            return BoundedProbe::BudgetExhausted;
-        }
-        let path = entry.path();
-        let file_type = match entry.file_type() {
-            Ok(file_type) => file_type,
-            Err(_) => continue,
-        };
-        if !file_type.is_dir() {
-            continue;
-        }
-        match has_openloaf_session_files(&path.join(".openloaf").join("chat-history"), max_entries)
-        {
-            BoundedProbe::Found => return BoundedProbe::Found,
-            BoundedProbe::BudgetExhausted => saw_budget = true,
-            BoundedProbe::IoError | BoundedProbe::NotFound => {}
-        }
-    }
-    if saw_budget {
-        BoundedProbe::BudgetExhausted
-    } else {
-        BoundedProbe::NotFound
-    }
-}
-
-fn has_adal_session_jsonl(root: &Path, max_entries: usize) -> BoundedProbe {
-    has_jsonl_file_under_matching(root, max_entries, |candidate| {
-        let Some(name) = candidate.file_name().and_then(|name| name.to_str()) else {
-            return false;
-        };
-        if !name.starts_with("conversation_") || !name.ends_with(".jsonl") {
-            return false;
-        }
-        fs::metadata(candidate)
-            .map(|metadata| metadata.len() > 0)
-            .unwrap_or(false)
-    })
 }
 
 fn has_firebender_chat_sessions_table(path: &Path) -> BoundedProbe {
@@ -3678,139 +2525,6 @@ fn has_firebender_chat_sessions_table(path: &Path) -> BoundedProbe {
         Err(_) => BoundedProbe::IoError,
     }
 }
-
-fn has_eve_workflow_stream(root: &Path, max_entries: usize) -> BoundedProbe {
-    let data_dir = if root.file_name().and_then(|name| name.to_str()) == Some(".workflow-data") {
-        root.to_path_buf()
-    } else {
-        let nested = root.join(".workflow-data");
-        if nested.is_dir() {
-            nested
-        } else {
-            root.to_path_buf()
-        }
-    };
-
-    match path_is_dir_probe(&data_dir) {
-        BoundedProbe::Found => {}
-        other => return other,
-    }
-    let runs_dir = data_dir.join("streams").join("runs");
-    let chunks_dir = data_dir.join("streams").join("chunks");
-    match (path_is_dir_probe(&runs_dir), path_is_dir_probe(&chunks_dir)) {
-        (BoundedProbe::Found, BoundedProbe::Found) => {}
-        (BoundedProbe::IoError, _) | (_, BoundedProbe::IoError) => return BoundedProbe::IoError,
-        _ => return BoundedProbe::NotFound,
-    }
-
-    let entries = match fs::read_dir(&runs_dir) {
-        Ok(entries) => entries,
-        Err(_) => return BoundedProbe::IoError,
-    };
-    let mut visited = 0usize;
-    let mut candidate_streams = HashSet::new();
-    let mut saw_read_error = false;
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(_) => continue,
-        };
-        visited = visited.saturating_add(1);
-        if visited > max_entries {
-            return BoundedProbe::BudgetExhausted;
-        }
-        let path = entry.path();
-        let file_type = match entry.file_type() {
-            Ok(file_type) => file_type,
-            Err(_) => continue,
-        };
-        if !file_type.is_file() || path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-            continue;
-        }
-        let Some(stream_name) = eve_default_workflow_stream_name(&path) else {
-            continue;
-        };
-        match eve_stream_map_contains(&path, &stream_name) {
-            Ok(true) => {
-                candidate_streams.insert(stream_name);
-            }
-            Ok(false) => {}
-            Err(_) => saw_read_error = true,
-        }
-    }
-    if candidate_streams.is_empty() {
-        return if saw_read_error {
-            BoundedProbe::IoError
-        } else {
-            BoundedProbe::NotFound
-        };
-    }
-
-    let entries = match fs::read_dir(&chunks_dir) {
-        Ok(entries) => entries,
-        Err(_) => return BoundedProbe::IoError,
-    };
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(_) => continue,
-        };
-        visited = visited.saturating_add(1);
-        if visited > max_entries {
-            return BoundedProbe::BudgetExhausted;
-        }
-        let path = entry.path();
-        let file_type = match entry.file_type() {
-            Ok(file_type) => file_type,
-            Err(_) => continue,
-        };
-        if !file_type.is_file() {
-            continue;
-        }
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if candidate_streams.iter().any(|stream_name| {
-            name.starts_with(&format!("{stream_name}-"))
-                && (name.ends_with(".bin") || name.ends_with(".json"))
-        }) {
-            return BoundedProbe::Found;
-        }
-    }
-
-    BoundedProbe::NotFound
-}
-
-fn eve_default_workflow_stream_name(stream_map_path: &Path) -> Option<String> {
-    let run_id = stream_map_path
-        .file_stem()
-        .and_then(|stem| stem.to_str())?
-        .split('.')
-        .next()
-        .unwrap_or_default();
-    let suffix = run_id.strip_prefix("wrun_")?;
-    if suffix.is_empty() {
-        None
-    } else {
-        Some(format!("strm_{suffix}_user"))
-    }
-}
-
-fn eve_stream_map_contains(path: &Path, stream_name: &str) -> std::io::Result<bool> {
-    let text = fs::read_to_string(path)?;
-    let Ok(value) = serde_json::from_str::<Value>(&text) else {
-        return Ok(false);
-    };
-    Ok(value
-        .get("streams")
-        .and_then(Value::as_array)
-        .is_some_and(|streams| {
-            streams
-                .iter()
-                .any(|stream| stream.as_str() == Some(stream_name))
-        }))
-}
-
 fn has_junie_session_events(root: &Path, max_entries: usize) -> BoundedProbe {
     match path_metadata_probe(root) {
         PathProbe::File => {
@@ -3874,40 +2588,6 @@ fn junie_session_id_is_safe(session_id: &str) -> bool {
         && !session_id.contains('\\')
 }
 
-fn has_cortex_code_session_files(root: &Path, max_entries: usize) -> BoundedProbe {
-    let json_probe = has_json_file_under_matching(root, max_entries, |candidate| {
-        candidate
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| !name.ends_with(".history.json"))
-    });
-    if json_probe == BoundedProbe::Found {
-        return json_probe;
-    }
-    let jsonl_probe = has_jsonl_file_under_matching(root, max_entries, |candidate| {
-        candidate
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.ends_with(".history.jsonl"))
-    });
-    if jsonl_probe == BoundedProbe::Found {
-        return jsonl_probe;
-    }
-    if matches!(
-        (json_probe, jsonl_probe),
-        (BoundedProbe::IoError, _) | (_, BoundedProbe::IoError)
-    ) {
-        return BoundedProbe::IoError;
-    }
-    if matches!(
-        (json_probe, jsonl_probe),
-        (BoundedProbe::BudgetExhausted, _) | (_, BoundedProbe::BudgetExhausted)
-    ) {
-        return BoundedProbe::BudgetExhausted;
-    }
-    BoundedProbe::NotFound
-}
-
 fn has_forgecode_conversations_table(path: &Path) -> BoundedProbe {
     match path_is_file_probe(path) {
         BoundedProbe::Found => {}
@@ -3925,53 +2605,6 @@ fn has_forgecode_conversations_table(path: &Path) -> BoundedProbe {
         )
     }) {
         Ok(count) if count > 0 => BoundedProbe::Found,
-        Ok(_) => BoundedProbe::NotFound,
-        Err(_) => BoundedProbe::IoError,
-    }
-}
-
-fn has_terramind_chat_tables(path: &Path) -> BoundedProbe {
-    match path_is_file_probe(path) {
-        BoundedProbe::Found => {}
-        other => return other,
-    }
-    match Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .and_then(|conn| {
-        conn.query_row(
-            "select count(*) from sqlite_schema where type = 'table' and name in ('projects', 'chats', 'sub_chats')",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-    }) {
-        Ok(3) => BoundedProbe::Found,
-        Ok(_) => BoundedProbe::NotFound,
-        Err(_) => BoundedProbe::IoError,
-    }
-}
-
-fn has_moxby_chat_tables(path: &Path) -> BoundedProbe {
-    match path_is_file_probe(path) {
-        BoundedProbe::Found => {}
-        other => return other,
-    }
-    match Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .and_then(|conn| {
-        conn.query_row(
-            "select \
-             (select count(*) from sqlite_schema where type = 'table' and name in ('chats', 'chat_threads', 'chat_messages')) as table_count, \
-             (select count(*) from pragma_table_info('chat_messages') \
-                where name in ('id', 'chat_id', 'thread_id', 'message_index', 'role', 'content_json', 'text', 'created_at', 'updated_at')) as column_count",
-            [],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-        )
-    }) {
-        Ok((3, count)) if count >= 9 => BoundedProbe::Found,
         Ok(_) => BoundedProbe::NotFound,
         Err(_) => BoundedProbe::IoError,
     }
@@ -4181,95 +2814,6 @@ fn has_codebuddy_history_json(root: &Path, max_entries: usize) -> BoundedProbe {
         path.file_name().and_then(|name| name.to_str()) == Some("index.json")
             && path_has_component(path, "history")
     })
-}
-
-fn has_pochi_state_db(root: &Path, max_entries: usize) -> BoundedProbe {
-    match fs::symlink_metadata(root) {
-        Ok(metadata) if metadata.file_type().is_symlink() => return BoundedProbe::NotFound,
-        Ok(metadata) if metadata.is_file() => {
-            if !root
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("state") && name.ends_with(".db"))
-            {
-                return BoundedProbe::NotFound;
-            }
-            return has_pochi_livestore_state_db(root);
-        }
-        Ok(metadata) if metadata.is_dir() => {}
-        Ok(_) => return BoundedProbe::NotFound,
-        Err(err) if err.kind() == ErrorKind::NotFound => return BoundedProbe::NotFound,
-        Err(_) => return BoundedProbe::IoError,
-    }
-
-    let mut saw_io_error = false;
-    let mut visited = 0usize;
-    let mut stack = vec![(root.to_path_buf(), true)];
-    while let Some((dir, is_root)) = stack.pop() {
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(_) if is_root => return BoundedProbe::IoError,
-            Err(_) => continue,
-        };
-        for entry in entries {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(_) => continue,
-            };
-            visited = visited.saturating_add(1);
-            if visited > max_entries {
-                return BoundedProbe::BudgetExhausted;
-            }
-            let path = entry.path();
-            let file_type = match entry.file_type() {
-                Ok(file_type) => file_type,
-                Err(_) => continue,
-            };
-            if file_type.is_dir() {
-                stack.push((path, false));
-            } else if file_type.is_file()
-                && path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with("state") && name.ends_with(".db"))
-            {
-                match has_pochi_livestore_state_db(&path) {
-                    BoundedProbe::Found => return BoundedProbe::Found,
-                    BoundedProbe::IoError => saw_io_error = true,
-                    _ => {}
-                }
-            }
-        }
-    }
-    if saw_io_error {
-        BoundedProbe::IoError
-    } else {
-        BoundedProbe::NotFound
-    }
-}
-
-fn has_pochi_livestore_state_db(path: &Path) -> BoundedProbe {
-    match path_is_file_probe(path) {
-        BoundedProbe::Found => {}
-        other => return other,
-    }
-    match Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .and_then(|conn| {
-        conn.query_row(
-            "select \
-                (select count(*) from pragma_table_info('tasks') where name in ('id')), \
-                (select count(*) from pragma_table_info('messages') where name in ('id', 'taskId', 'data'))",
-            [],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-        )
-    }) {
-        Ok((1, 3)) => BoundedProbe::Found,
-        Ok(_) => BoundedProbe::NotFound,
-        Err(_) => BoundedProbe::IoError,
-    }
 }
 
 fn has_nanoclaw_project(root: &Path) -> BoundedProbe {
@@ -4777,76 +3321,6 @@ mod tests {
             ProviderSourceStatus::Available,
         );
 
-        let iflow = temp.path().join(".iflow/projects/project");
-        std::fs::create_dir_all(&iflow).unwrap();
-        assert_source_status(
-            temp.path(),
-            CaptureProvider::IflowCli,
-            ProviderSourceStatus::Empty,
-        );
-        std::fs::write(iflow.join("not-session.jsonl"), "{}\n").unwrap();
-        assert_source_status(
-            temp.path(),
-            CaptureProvider::IflowCli,
-            ProviderSourceStatus::Empty,
-        );
-        std::fs::write(iflow.join("session-iflow-discovery.jsonl"), "{}\n").unwrap();
-        assert_source_status(
-            temp.path(),
-            CaptureProvider::IflowCli,
-            ProviderSourceStatus::Available,
-        );
-
-        let kode = temp.path().join(".kode/projects/-workspace-kode");
-        std::fs::create_dir_all(&kode).unwrap();
-        assert_source_status(
-            temp.path(),
-            CaptureProvider::Kode,
-            ProviderSourceStatus::Empty,
-        );
-        std::fs::write(kode.join("kode-session.jsonl"), "{}\n").unwrap();
-        assert_source_status(
-            temp.path(),
-            CaptureProvider::Kode,
-            ProviderSourceStatus::Available,
-        );
-
-        let neovate = temp.path().join(".neovate/projects/-workspace-neovate");
-        std::fs::create_dir_all(neovate.join("requests")).unwrap();
-        std::fs::create_dir_all(neovate.join("file-history")).unwrap();
-        std::fs::write(neovate.join("requests/request.jsonl"), "{}\n").unwrap();
-        std::fs::write(neovate.join("file-history/snapshot.jsonl"), "{}\n").unwrap();
-        assert_source_status(
-            temp.path(),
-            CaptureProvider::Neovate,
-            ProviderSourceStatus::Empty,
-        );
-        std::fs::write(neovate.join("neovate-session.jsonl"), "{}\n").unwrap();
-        assert_source_status(
-            temp.path(),
-            CaptureProvider::Neovate,
-            ProviderSourceStatus::Available,
-        );
-
-        let command_code = temp.path().join(".commandcode/projects/-workspace-command");
-        std::fs::create_dir_all(&command_code).unwrap();
-        std::fs::write(
-            command_code.join("command-session.checkpoints.jsonl"),
-            "{}\n",
-        )
-        .unwrap();
-        assert_source_status(
-            temp.path(),
-            CaptureProvider::CommandCode,
-            ProviderSourceStatus::Empty,
-        );
-        std::fs::write(command_code.join("command-session.jsonl"), "{}\n").unwrap();
-        assert_source_status(
-            temp.path(),
-            CaptureProvider::CommandCode,
-            ProviderSourceStatus::Available,
-        );
-
         let rovodev = temp.path().join(".rovodev/sessions/rovo-session");
         std::fs::create_dir_all(&rovodev).unwrap();
         std::fs::write(rovodev.join("metadata.json"), "{}\n").unwrap();
@@ -4859,21 +3333,6 @@ mod tests {
         assert_source_status(
             temp.path(),
             CaptureProvider::RovoDev,
-            ProviderSourceStatus::Available,
-        );
-
-        let cortex = temp.path().join(".snowflake/cortex/conversations");
-        std::fs::create_dir_all(&cortex).unwrap();
-        std::fs::write(cortex.join("cortex-session.history.json"), "{}\n").unwrap();
-        assert_source_status(
-            temp.path(),
-            CaptureProvider::CortexCode,
-            ProviderSourceStatus::Empty,
-        );
-        std::fs::write(cortex.join("cortex-session.history.jsonl"), "{}\n").unwrap();
-        assert_source_status(
-            temp.path(),
-            CaptureProvider::CortexCode,
             ProviderSourceStatus::Available,
         );
 
@@ -5170,42 +3629,6 @@ mod tests {
     }
 
     #[test]
-    fn autohand_code_discovery_uses_default_and_home_env_sessions() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let temp = tempfile::tempdir().unwrap();
-        let _home = EnvGuard::remove("AUTOHAND_HOME");
-
-        let default_sessions = temp.path().join(".autohand/sessions");
-        std::fs::create_dir_all(&default_sessions).unwrap();
-        let empty_source =
-            discover_provider_sources_for_provider(temp.path(), CaptureProvider::AutohandCode)
-                .into_iter()
-                .find(|source| source.path == default_sessions)
-                .unwrap();
-        assert_eq!(empty_source.status, ProviderSourceStatus::Empty);
-
-        write_autohand_discovery_session(&default_sessions);
-        let source =
-            discover_provider_sources_for_provider(temp.path(), CaptureProvider::AutohandCode)
-                .into_iter()
-                .find(|source| source.path == default_sessions)
-                .unwrap();
-        assert_eq!(source.status, ProviderSourceStatus::Available);
-        assert_eq!(source.source_format, "autohand_code_sessions_jsonl");
-        assert_eq!(source.import_support, ProviderImportSupport::Native);
-
-        let custom_home = temp.path().join("custom-autohand");
-        let custom_sessions = custom_home.join("sessions");
-        write_autohand_discovery_session(&custom_sessions);
-        let _home = EnvGuard::set("AUTOHAND_HOME", custom_home.as_os_str());
-        let sources =
-            discover_provider_sources_for_provider(temp.path(), CaptureProvider::AutohandCode);
-        assert!(sources.iter().any(|source| {
-            source.path == custom_sessions && source.status == ProviderSourceStatus::Available
-        }));
-    }
-
-    #[test]
     fn codebuddy_discovery_uses_localappdata_override() {
         let _lock = ENV_LOCK.lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
@@ -5237,103 +3660,6 @@ mod tests {
 
         assert_eq!(source.status, ProviderSourceStatus::Available);
         assert_eq!(source.import_support, ProviderImportSupport::Native);
-    }
-
-    #[test]
-    fn aider_desk_discovery_uses_current_project_tasks_root() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let temp = tempfile::tempdir().unwrap();
-        let project = temp.path().join("project");
-        let task = project.join(".aider-desk/tasks/aider-task-1");
-        std::fs::create_dir_all(&task).unwrap();
-        std::fs::write(
-            task.join("context.json"),
-            r#"{"version":2,"contextMessages":[],"contextFiles":[]}"#,
-        )
-        .unwrap();
-        let _aider_dir = EnvGuard::remove("AIDER_DESK_DIR");
-        let _cwd = CwdGuard::set(&project);
-
-        let sources =
-            discover_provider_sources_for_provider(temp.path(), CaptureProvider::AiderDesk);
-        let expected = project.join(".aider-desk/tasks");
-        let source = sources
-            .iter()
-            .find(|source| source.provider == CaptureProvider::AiderDesk && source.path == expected)
-            .unwrap_or_else(|| panic!("missing Aider Desk cwd source in {sources:#?}"));
-
-        assert_eq!(source.status, ProviderSourceStatus::Available);
-        assert_eq!(source.source_format, "aider_desk_task_context_json");
-        assert_eq!(source.import_support, ProviderImportSupport::Native);
-    }
-
-    #[test]
-    fn iflow_cli_discovery_uses_default_and_home_env_projects() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let temp = tempfile::tempdir().unwrap();
-        let _home = EnvGuard::remove("IFLOW_HOME");
-
-        let default_projects = temp.path().join(".iflow/projects");
-        std::fs::create_dir_all(&default_projects).unwrap();
-        let empty_source =
-            discover_provider_sources_for_provider(temp.path(), CaptureProvider::IflowCli)
-                .into_iter()
-                .find(|source| source.path == default_projects)
-                .unwrap();
-        assert_eq!(empty_source.status, ProviderSourceStatus::Empty);
-
-        write_iflow_discovery_session(&default_projects);
-        let source = discover_provider_sources_for_provider(temp.path(), CaptureProvider::IflowCli)
-            .into_iter()
-            .find(|source| source.path == default_projects)
-            .unwrap();
-        assert_eq!(source.status, ProviderSourceStatus::Available);
-        assert_eq!(source.source_format, "iflow_cli_session_jsonl_tree");
-        assert_eq!(source.import_support, ProviderImportSupport::Native);
-
-        let custom_home = temp.path().join("custom-iflow");
-        let custom_projects = custom_home.join("projects");
-        write_iflow_discovery_session(&custom_projects);
-        let _home = EnvGuard::set("IFLOW_HOME", custom_home.as_os_str());
-        let sources =
-            discover_provider_sources_for_provider(temp.path(), CaptureProvider::IflowCli);
-        assert!(sources.iter().any(|source| {
-            source.path == custom_projects && source.status == ProviderSourceStatus::Available
-        }));
-    }
-
-    #[test]
-    fn jazz_discovery_uses_default_and_home_env_history() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let temp = tempfile::tempdir().unwrap();
-        let _home = EnvGuard::remove("JAZZ_HOME");
-
-        let default_history = temp.path().join(".jazz/history");
-        std::fs::create_dir_all(&default_history).unwrap();
-        let empty_source =
-            discover_provider_sources_for_provider(temp.path(), CaptureProvider::Jazz)
-                .into_iter()
-                .find(|source| source.path == default_history)
-                .unwrap();
-        assert_eq!(empty_source.status, ProviderSourceStatus::Empty);
-
-        write_jazz_discovery_history(&default_history);
-        let source = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Jazz)
-            .into_iter()
-            .find(|source| source.path == default_history)
-            .unwrap();
-        assert_eq!(source.status, ProviderSourceStatus::Available);
-        assert_eq!(source.source_format, "jazz_history_json");
-        assert_eq!(source.import_support, ProviderImportSupport::Native);
-
-        let custom_home = temp.path().join("custom-jazz");
-        let custom_history = custom_home.join("history");
-        write_jazz_discovery_history(&custom_history);
-        let _home = EnvGuard::set("JAZZ_HOME", custom_home.as_os_str());
-        let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Jazz);
-        assert!(sources.iter().any(|source| {
-            source.path == custom_history && source.status == ProviderSourceStatus::Available
-        }));
     }
 
     #[test]
@@ -5369,49 +3695,6 @@ mod tests {
         assert_eq!(source.source_format, "firebender_chat_history_sqlite");
         assert_eq!(source.import_support, ProviderImportSupport::Native);
     }
-
-    #[test]
-    fn eve_discovery_uses_workflow_data_env_and_current_project() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let temp = tempfile::tempdir().unwrap();
-        let _workflow_data = EnvGuard::remove("WORKFLOW_LOCAL_DATA_DIR");
-
-        let env_data = temp.path().join("custom-workflow-data");
-        std::fs::create_dir_all(&env_data).unwrap();
-        let _workflow_data = EnvGuard::set("WORKFLOW_LOCAL_DATA_DIR", env_data.as_os_str());
-        let empty_source =
-            discover_provider_sources_for_provider(temp.path(), CaptureProvider::Eve)
-                .into_iter()
-                .find(|source| source.path == env_data)
-                .unwrap();
-        assert_eq!(empty_source.status, ProviderSourceStatus::Empty);
-
-        write_eve_discovery_workflow_data(&env_data, "envdiscovery");
-        let source = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Eve)
-            .into_iter()
-            .find(|source| source.path == env_data)
-            .unwrap();
-        assert_eq!(source.status, ProviderSourceStatus::Available);
-        assert_eq!(source.source_format, "eve_workflow_data_streams");
-        assert_eq!(source.import_support, ProviderImportSupport::Native);
-
-        let project = temp.path().join("project");
-        let nested = project.join("agent");
-        std::fs::create_dir_all(&nested).unwrap();
-        let project_data = project.join(".workflow-data");
-        write_eve_discovery_workflow_data(&project_data, "projectdiscovery");
-        let _cwd = CwdGuard::set(&nested);
-
-        let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Eve);
-        let project_source = sources
-            .iter()
-            .find(|source| source.path == project_data)
-            .unwrap_or_else(|| panic!("missing Eve project source in {sources:#?}"));
-        assert_eq!(project_source.status, ProviderSourceStatus::Available);
-        assert_eq!(project_source.source_format, "eve_workflow_data_streams");
-        assert_eq!(project_source.import_support, ProviderImportSupport::Native);
-    }
-
     #[test]
     fn junie_discovery_uses_default_sessions_and_env_overrides() {
         let _lock = ENV_LOCK.lock().unwrap();
@@ -5459,106 +3742,6 @@ mod tests {
             assert_eq!(source.source_format, "junie_session_events_jsonl_tree");
             assert_eq!(source.import_support, ProviderImportSupport::Native);
         }
-    }
-
-    #[test]
-    fn openloaf_discovery_uses_global_chat_history_and_bounded_data_projects() {
-        let temp = tempfile::tempdir().unwrap();
-
-        let global_history = temp.path().join(".openloaf/chat-history");
-        std::fs::create_dir_all(&global_history).unwrap();
-        let empty_source =
-            discover_provider_sources_for_provider(temp.path(), CaptureProvider::OpenLoaf)
-                .into_iter()
-                .find(|source| source.path == global_history)
-                .unwrap();
-        assert_eq!(empty_source.status, ProviderSourceStatus::Empty);
-        assert_eq!(empty_source.source_format, "openloaf_chat_jsonl_tree");
-
-        write_openloaf_discovery_session(&global_history, "openloaf-global-discovery");
-        let source = discover_provider_sources_for_provider(temp.path(), CaptureProvider::OpenLoaf)
-            .into_iter()
-            .find(|source| source.path == global_history)
-            .unwrap();
-        assert_eq!(source.status, ProviderSourceStatus::Available);
-        assert_eq!(source.import_support, ProviderImportSupport::Native);
-
-        let projects = temp.path().join("OpenLoafData/projects");
-        let project_history = projects.join("project-a/.openloaf/chat-history");
-        write_openloaf_discovery_session(&project_history, "openloaf-project-discovery");
-        let project_source =
-            discover_provider_sources_for_provider(temp.path(), CaptureProvider::OpenLoaf)
-                .into_iter()
-                .find(|source| source.path == projects)
-                .unwrap();
-        assert_eq!(project_source.status, ProviderSourceStatus::Available);
-        assert_eq!(project_source.source_format, "openloaf_chat_jsonl_tree");
-
-        let explicit_file = provider_source_for_path(
-            CaptureProvider::OpenLoaf,
-            project_history
-                .join("openloaf-project-discovery")
-                .join("messages.jsonl"),
-        );
-        assert_eq!(explicit_file.source_format, "openloaf_chat_jsonl");
-        assert_eq!(explicit_file.status, ProviderSourceStatus::Available);
-    }
-
-    #[test]
-    fn kode_and_neovate_discovery_use_default_and_env_project_roots() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let temp = tempfile::tempdir().unwrap();
-        let _kode_config = EnvGuard::remove("KODE_CONFIG_DIR");
-        let _claude_config = EnvGuard::remove("CLAUDE_CONFIG_DIR");
-
-        let default_kode_projects = temp.path().join(".kode/projects");
-        write_generic_project_jsonl(&default_kode_projects, "kode-session.jsonl");
-        let source = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Kode)
-            .into_iter()
-            .find(|source| source.path == default_kode_projects)
-            .unwrap();
-        assert_eq!(source.status, ProviderSourceStatus::Available);
-        assert_eq!(source.source_format, "kode_session_jsonl_tree");
-        assert_eq!(source.import_support, ProviderImportSupport::Native);
-
-        let custom_kode = temp.path().join("custom-kode");
-        let custom_kode_projects = custom_kode.join("projects");
-        write_generic_project_jsonl(&custom_kode_projects, "custom-kode.jsonl");
-        let _kode_config = EnvGuard::set("KODE_CONFIG_DIR", custom_kode.as_os_str());
-        let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Kode);
-        assert!(sources.iter().any(|source| {
-            source.path == custom_kode_projects && source.status == ProviderSourceStatus::Available
-        }));
-
-        let claude_config = temp.path().join("claude-config-for-kode");
-        let claude_projects = claude_config.join("projects");
-        write_generic_project_jsonl(&claude_projects, "claude-fallback.jsonl");
-        let _claude_config = EnvGuard::set("CLAUDE_CONFIG_DIR", claude_config.as_os_str());
-        let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Kode);
-        assert!(sources.iter().any(|source| {
-            source.path == claude_projects && source.status == ProviderSourceStatus::Available
-        }));
-
-        let neovate_projects = temp.path().join(".neovate/projects");
-        let project = neovate_projects.join("-workspace-neovate");
-        std::fs::create_dir_all(project.join("requests")).unwrap();
-        std::fs::create_dir_all(project.join("file-history")).unwrap();
-        std::fs::write(project.join("requests/request-only.jsonl"), "{}\n").unwrap();
-        std::fs::write(project.join("file-history/snapshot.jsonl"), "{}\n").unwrap();
-        let source = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Neovate)
-            .into_iter()
-            .find(|source| source.path == neovate_projects)
-            .unwrap();
-        assert_eq!(source.status, ProviderSourceStatus::Empty);
-
-        std::fs::write(project.join("neovate-session.jsonl"), "{}\n").unwrap();
-        let source = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Neovate)
-            .into_iter()
-            .find(|source| source.path == neovate_projects)
-            .unwrap();
-        assert_eq!(source.status, ProviderSourceStatus::Available);
-        assert_eq!(source.source_format, "neovate_session_jsonl_tree");
-        assert_eq!(source.import_support, ProviderImportSupport::Native);
     }
 
     #[test]
@@ -5629,106 +3812,6 @@ mod tests {
         assert!(sources.iter().any(|source| {
             source.path == custom_sessions && source.status == ProviderSourceStatus::Available
         }));
-    }
-
-    #[test]
-    fn moxby_discovery_uses_default_and_state_dir_db() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let temp = tempfile::tempdir().unwrap();
-        let _state_dir = EnvGuard::remove("MOXBY_STATE_DIR");
-
-        let default_db = temp
-            .path()
-            .join(".local/share/com.moxby.agent/moxby_chats.db");
-        std::fs::create_dir_all(default_db.parent().unwrap()).unwrap();
-        std::fs::copy(
-            shared_provider_history_fixture("moxby/v2.3.0/moxby_chats.db"),
-            &default_db,
-        )
-        .unwrap();
-        let source = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Moxby)
-            .into_iter()
-            .find(|source| source.path == default_db)
-            .unwrap();
-        assert_eq!(source.status, ProviderSourceStatus::Available);
-        assert_eq!(source.source_format, "moxby_chats_sqlite");
-        assert_eq!(source.import_support, ProviderImportSupport::Native);
-
-        let custom_state = temp.path().join("custom-moxby-state");
-        let custom_db = custom_state.join("moxby_chats.db");
-        std::fs::create_dir_all(&custom_state).unwrap();
-        std::fs::copy(
-            shared_provider_history_fixture("moxby/v2.3.0/moxby_chats.db"),
-            &custom_db,
-        )
-        .unwrap();
-        let _state_dir = EnvGuard::set("MOXBY_STATE_DIR", custom_state.as_os_str());
-        let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Moxby);
-        assert!(sources.iter().any(|source| {
-            source.path == custom_db && source.status == ProviderSourceStatus::Available
-        }));
-    }
-
-    #[test]
-    fn reasonix_discovery_uses_default_sessions() {
-        let temp = tempfile::tempdir().unwrap();
-        let default_sessions = temp.path().join(".reasonix/sessions");
-        std::fs::create_dir_all(&default_sessions).unwrap();
-        std::fs::write(
-            default_sessions.join("reasonix-discovery.events.jsonl"),
-            "{}\n",
-        )
-        .unwrap();
-        let empty_source =
-            discover_provider_sources_for_provider(temp.path(), CaptureProvider::Reasonix)
-                .into_iter()
-                .find(|source| source.path == default_sessions)
-                .unwrap();
-        assert_eq!(empty_source.status, ProviderSourceStatus::Empty);
-
-        write_reasonix_discovery_session(&default_sessions);
-        let source = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Reasonix)
-            .into_iter()
-            .find(|source| source.path == default_sessions)
-            .unwrap();
-        assert_eq!(source.status, ProviderSourceStatus::Available);
-        assert_eq!(source.source_format, "reasonix_session_jsonl_tree");
-        assert_eq!(source.import_support, ProviderImportSupport::Native);
-    }
-
-    #[test]
-    fn adal_discovery_uses_default_sessions_and_ignores_empty_bootstrap_jsonl() {
-        let temp = tempfile::tempdir().unwrap();
-        let default_sessions = temp.path().join(".adal/sessions");
-        std::fs::create_dir_all(&default_sessions).unwrap();
-
-        let empty_source =
-            discover_provider_sources_for_provider(temp.path(), CaptureProvider::Adal)
-                .into_iter()
-                .find(|source| source.path == default_sessions)
-                .unwrap();
-        assert_eq!(empty_source.status, ProviderSourceStatus::Empty);
-
-        std::fs::write(default_sessions.join("conversation_empty.jsonl"), "").unwrap();
-        let still_empty =
-            discover_provider_sources_for_provider(temp.path(), CaptureProvider::Adal)
-                .into_iter()
-                .find(|source| source.path == default_sessions)
-                .unwrap();
-        assert_eq!(still_empty.status, ProviderSourceStatus::Empty);
-
-        std::fs::write(
-            default_sessions.join("conversation_adal-discovery.jsonl"),
-            r#"{"type":"message","message_id":"m","turn_id":"t","role":"user","content":"adal discovery oracle","metadata":{},"timestamp":"2026-07-01T00:00:00Z"}"#,
-        )
-        .unwrap();
-        let source = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Adal)
-            .into_iter()
-            .find(|source| source.path == default_sessions)
-            .unwrap();
-        assert_eq!(source.status, ProviderSourceStatus::Available);
-        assert_eq!(source.source_format, "adal_session_jsonl");
-        assert_eq!(source.import_support, ProviderImportSupport::Native);
     }
 
     #[test]
@@ -5814,131 +3897,7 @@ mod tests {
         assert_eq!(source.source_format, "goose_sessions_sqlite");
     }
 
-    #[test]
-    fn dexto_discovery_uses_home_database_root_when_schema_matches() {
-        let temp = tempfile::tempdir().unwrap();
-        let database_root = temp.path().join(".dexto").join("database");
-        std::fs::create_dir_all(&database_root).unwrap();
-        let unrelated = database_root.join("not-dexto.db");
-        Connection::open(&unrelated).unwrap();
-
-        let discovered =
-            discover_provider_sources_for_provider(temp.path(), CaptureProvider::Dexto);
-        let source = discovered
-            .iter()
-            .find(|source| source.path == database_root)
-            .unwrap_or_else(|| panic!("missing Dexto database root in {discovered:#?}"));
-        assert_eq!(source.status, ProviderSourceStatus::Empty);
-        assert_eq!(source.source_format, "dexto_sqlite");
-        assert_eq!(source.import_support, ProviderImportSupport::Native);
-        assert!(source.import_support.is_auto_importable());
-
-        let db = database_root.join("coding-agent.db");
-        std::fs::copy(shared_provider_history_fixture("dexto/v1/dexto.db"), &db).unwrap();
-        let discovered =
-            discover_provider_sources_for_provider(temp.path(), CaptureProvider::Dexto);
-        let source = discovered
-            .iter()
-            .find(|source| source.path == database_root)
-            .unwrap_or_else(|| panic!("missing Dexto database root in {discovered:#?}"));
-        assert_eq!(source.status, ProviderSourceStatus::Available);
-        assert_eq!(source.source_format, "dexto_sqlite");
-        assert_eq!(source.import_support, ProviderImportSupport::Native);
-        assert!(source.import_support.is_auto_importable());
-
-        let source = provider_source_for_path(CaptureProvider::Dexto, db.clone());
-        assert_eq!(source.path, db);
-        assert_eq!(source.status, ProviderSourceStatus::Available);
-        assert_eq!(source.source_format, "dexto_sqlite");
-        assert_eq!(source.import_support, ProviderImportSupport::Native);
-        assert!(source.import_support.is_auto_importable());
-    }
-
-    #[test]
-    fn dexto_discovery_uses_current_project_database_root() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let temp = tempfile::tempdir().unwrap();
-        let home = temp.path().join("home");
-        let project = temp.path().join("project");
-        let database_root = project.join(".dexto").join("database");
-        std::fs::create_dir_all(&database_root).unwrap();
-        std::fs::copy(
-            shared_provider_history_fixture("dexto/v1/dexto.db"),
-            database_root.join("custom-agent.db"),
-        )
-        .unwrap();
-        let _cwd = CwdGuard::set(&project);
-
-        let discovered = discover_provider_sources_for_provider(&home, CaptureProvider::Dexto);
-        let source = discovered
-            .iter()
-            .find(|source| source.path == database_root)
-            .unwrap_or_else(|| panic!("missing Dexto project database root in {discovered:#?}"));
-        assert_eq!(source.status, ProviderSourceStatus::Available);
-        assert_eq!(source.source_format, "dexto_sqlite");
-        assert_eq!(source.import_support, ProviderImportSupport::Native);
-        assert!(source.import_support.is_auto_importable());
-    }
-
-    #[test]
-    fn pochi_discovery_uses_synced_storage_root_when_present() {
-        let temp = tempfile::tempdir().unwrap();
-
-        let discovered =
-            discover_provider_sources_for_provider(temp.path(), CaptureProvider::Pochi);
-        assert!(discovered.is_empty(), "{discovered:#?}");
-
-        let storage = temp.path().join(".pochi/storage");
-        std::fs::create_dir_all(storage.join("store-alpha")).unwrap();
-        let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Pochi);
-        let source = sources
-            .iter()
-            .find(|source| source.path == storage)
-            .unwrap_or_else(|| panic!("missing Pochi storage source in {sources:#?}"));
-        assert_eq!(source.status, ProviderSourceStatus::Empty);
-        assert_eq!(source.source_format, "pochi_livestore_state_sqlite");
-        assert_eq!(source.import_support, ProviderImportSupport::Native);
-        assert!(source.import_support.is_auto_importable());
-
-        std::fs::copy(
-            shared_provider_history_fixture("pochi/v1/storage/store-alpha/statep0chifixture@6.db"),
-            temp.path()
-                .join(".pochi/storage/store-alpha/statep0chifixture@6.db"),
-        )
-        .unwrap();
-        let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Pochi);
-        let source = sources
-            .iter()
-            .find(|source| source.path == storage)
-            .unwrap_or_else(|| panic!("missing Pochi storage source in {sources:#?}"));
-        assert_eq!(source.status, ProviderSourceStatus::Available);
-        assert_eq!(source.import_support, ProviderImportSupport::Native);
-        assert!(source.import_support.is_auto_importable());
-    }
-
     #[cfg(unix)]
-    #[test]
-    fn pochi_discovery_does_not_follow_storage_symlink() {
-        let temp = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        let outside_db = outside.path().join("store-alpha/statep0chifixture@6.db");
-        std::fs::create_dir_all(outside_db.parent().unwrap()).unwrap();
-        std::fs::write(&outside_db, b"sqlite fixture marker").unwrap();
-        std::fs::create_dir_all(temp.path().join(".pochi")).unwrap();
-        std::os::unix::fs::symlink(outside.path(), temp.path().join(".pochi/storage")).unwrap();
-
-        let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Pochi);
-        let source = sources
-            .iter()
-            .find(|source| source.path == temp.path().join(".pochi/storage"))
-            .unwrap_or_else(|| panic!("missing Pochi storage source in {sources:#?}"));
-        assert_eq!(source.status, ProviderSourceStatus::Empty);
-        assert_eq!(
-            source.unsupported_reason,
-            Some("path exists but no Pochi LiveStore state SQLite database was found")
-        );
-    }
-
     #[test]
     fn warp_discovery_uses_documented_state_and_localappdata_paths() {
         let _lock = ENV_LOCK.lock().unwrap();
@@ -5989,42 +3948,6 @@ mod tests {
             assert_eq!(source.source_format, "lingma_sqlite");
             assert_eq!(source.import_support, ProviderImportSupport::Native);
         }
-    }
-
-    #[test]
-    fn codestudio_discovery_uses_app_data_session_store_with_schema_probe() {
-        let temp = tempfile::tempdir().unwrap();
-        let stable = temp
-            .path()
-            .join(".config/Code Studio/User/globalStorage/session-store.db");
-        let drifted = temp
-            .path()
-            .join("Library/Application Support/Code Studio/User/globalStorage/session-store.db");
-        write_codestudio_discovery_db(&stable);
-        write_codestudio_schema_drift_db(&drifted);
-
-        let sources =
-            discover_provider_sources_for_provider(temp.path(), CaptureProvider::CodeStudio);
-        let source = sources
-            .iter()
-            .find(|source| source.provider == CaptureProvider::CodeStudio && source.path == stable)
-            .unwrap_or_else(|| panic!("missing Code Studio source {stable:?} in {sources:#?}"));
-        assert_eq!(source.status, ProviderSourceStatus::Available);
-        assert_eq!(source.source_format, "codestudio_session_store_sqlite");
-        assert_eq!(source.import_support, ProviderImportSupport::Native);
-        assert!(source.import_support.is_auto_importable());
-
-        let drifted_source = sources
-            .iter()
-            .find(|source| source.provider == CaptureProvider::CodeStudio && source.path == drifted)
-            .unwrap_or_else(|| {
-                panic!("missing drifted Code Studio source {drifted:?} in {sources:#?}")
-            });
-        assert_eq!(drifted_source.status, ProviderSourceStatus::Empty);
-        assert_eq!(
-            drifted_source.unsupported_reason,
-            Some("path exists but no Syncfusion Code Studio session-store.db database was found")
-        );
     }
 
     #[test]
@@ -6225,44 +4148,6 @@ mod tests {
     }
 
     #[test]
-    fn bob_discovery_uses_ide_app_data_task_storage() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let temp = tempfile::tempdir().unwrap();
-        let _xdg_config_home = EnvGuard::remove("XDG_CONFIG_HOME");
-        let _appdata = EnvGuard::remove("APPDATA");
-        let ibm_bob = temp
-            .path()
-            .join(".config/IBM Bob/User/globalStorage/ibm.bob-code");
-        let preview_bob = temp
-            .path()
-            .join(".config/Bob-IDE/User/globalStorage/ibm.bob-code");
-        write_task_json_discovery_task(&ibm_bob, "bob-ga-task", "ui_messages.json");
-        write_task_json_discovery_task(
-            &preview_bob,
-            "bob-preview-task",
-            "api_conversation_history.json",
-        );
-
-        let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Bob);
-        for path in [&ibm_bob, &preview_bob] {
-            let source = sources
-                .iter()
-                .find(|source| source.provider == CaptureProvider::Bob && source.path == *path)
-                .unwrap_or_else(|| panic!("missing Bob source {path:?} in {sources:#?}"));
-            assert_eq!(source.source_format, "bob_task_directory_json");
-            assert_eq!(source.status, ProviderSourceStatus::Available);
-            assert_eq!(source.import_support, ProviderImportSupport::Native);
-        }
-        assert!(
-            sources.iter().all(|source| !source
-                .path
-                .components()
-                .any(|component| { component.as_os_str().to_str() == Some(".bob") })),
-            "Bob IDE discovery must not scan Bob Shell ~/.bob paths: {sources:#?}"
-        );
-    }
-
-    #[test]
     fn bounded_probe_reports_budget_exhausted_source_as_unknown() {
         let temp = tempfile::tempdir().unwrap();
         let claude = temp.path().join(".claude/projects");
@@ -6382,52 +4267,6 @@ mod tests {
         std::fs::create_dir_all(&agent).unwrap();
         std::fs::write(agent.join("wire.jsonl"), "{}\n").unwrap();
     }
-
-    fn write_autohand_discovery_session(sessions: &Path) {
-        let session = sessions.join("autohand-discovery");
-        std::fs::create_dir_all(&session).unwrap();
-        std::fs::write(
-            session.join("metadata.json"),
-            r#"{"sessionId":"autohand-discovery","createdAt":"2026-07-01T12:00:00Z","lastActiveAt":"2026-07-01T12:00:01Z","projectPath":"/workspace","projectName":"workspace","model":"fixture","messageCount":1,"status":"completed"}"#,
-        )
-        .unwrap();
-        std::fs::write(session.join("conversation.jsonl"), "{}\n").unwrap();
-    }
-
-    fn write_iflow_discovery_session(projects: &Path) {
-        let project = projects.join("sanitized-workspace");
-        std::fs::create_dir_all(&project).unwrap();
-        std::fs::write(project.join("session-iflow-discovery.jsonl"), "{}\n").unwrap();
-    }
-
-    fn write_jazz_discovery_history(history: &Path) {
-        std::fs::create_dir_all(history).unwrap();
-        std::fs::write(
-            history.join("jazz-agent.json"),
-            r#"{"agentId":"jazz-agent","conversations":[]}"#,
-        )
-        .unwrap();
-    }
-
-    fn write_eve_discovery_workflow_data(data_dir: &Path, suffix: &str) {
-        let run_id = format!("wrun_{suffix}");
-        let stream_name = format!("strm_{suffix}_user");
-        std::fs::create_dir_all(data_dir.join("streams/runs")).unwrap();
-        std::fs::create_dir_all(data_dir.join("streams/chunks")).unwrap();
-        std::fs::write(
-            data_dir.join("streams/runs").join(format!("{run_id}.json")),
-            format!(r#"{{"streams":["{stream_name}"]}}"#),
-        )
-        .unwrap();
-        std::fs::write(
-            data_dir
-                .join("streams/chunks")
-                .join(format!("{stream_name}-chnk_01.bin")),
-            b"\0",
-        )
-        .unwrap();
-    }
-
     fn write_junie_discovery_session(sessions: &Path, session_id: &str) {
         std::fs::create_dir_all(sessions.join(session_id)).unwrap();
         std::fs::write(
@@ -6441,30 +4280,6 @@ mod tests {
         )
         .unwrap();
     }
-
-    fn write_openloaf_discovery_session(history: &Path, session_id: &str) {
-        let session = history.join(session_id);
-        std::fs::create_dir_all(&session).unwrap();
-        std::fs::write(
-            session.join("session.json"),
-            format!(r#"{{"id":"{session_id}","createdAt":"2026-07-04T19:00:00Z"}}"#),
-        )
-        .unwrap();
-        std::fs::write(
-            session.join("messages.jsonl"),
-            format!(
-                r#"{{"id":"{session_id}-msg","role":"user","messageKind":"message","parts":[{{"type":"text","text":"openloaf discovery"}}],"createdAt":"2026-07-04T19:00:01Z"}}"#
-            ),
-        )
-        .unwrap();
-    }
-
-    fn write_generic_project_jsonl(projects: &Path, file_name: &str) {
-        let project = projects.join("sanitized-workspace");
-        std::fs::create_dir_all(&project).unwrap();
-        std::fs::write(project.join(file_name), "{}\n").unwrap();
-    }
-
     fn write_mistral_vibe_discovery_session(sessions: &Path) {
         let session = sessions.join("session_20260704_120000_vibe1234");
         std::fs::create_dir_all(&session).unwrap();
@@ -6482,15 +4297,6 @@ mod tests {
         std::fs::write(
             session.join("chat.jsonl"),
             r#"{"id":"msg-mux-discovery","role":"user","parts":[{"type":"text","text":"mux discovery"}],"metadata":{"historySequence":0},"workspaceId":"mux-discovery"}"#,
-        )
-        .unwrap();
-    }
-
-    fn write_reasonix_discovery_session(sessions: &Path) {
-        std::fs::create_dir_all(sessions).unwrap();
-        std::fs::write(
-            sessions.join("reasonix-discovery.jsonl"),
-            r#"{"role":"user","content":"reasonix discovery"}"#,
         )
         .unwrap();
     }
@@ -6571,41 +4377,6 @@ mod tests {
         std::fs::write(
             sessions.join("zencoder-discovery.json"),
             r#"{"id":"zencoder-discovery","messages":[]}"#,
-        )
-        .unwrap();
-    }
-
-    fn write_codestudio_discovery_db(path: &Path) {
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let conn = Connection::open(path).unwrap();
-        conn.execute_batch(
-            r#"
-            CREATE TABLE schema_version (version INTEGER NOT NULL);
-            CREATE TABLE sessions (id TEXT PRIMARY KEY);
-            CREATE TABLE turns (
-                id TEXT PRIMARY KEY,
-                session_id TEXT NOT NULL,
-                role TEXT NOT NULL,
-                content TEXT NOT NULL
-            );
-            "#,
-        )
-        .unwrap();
-    }
-
-    fn write_codestudio_schema_drift_db(path: &Path) {
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let conn = Connection::open(path).unwrap();
-        conn.execute_batch(
-            r#"
-            CREATE TABLE schema_version (version INTEGER NOT NULL);
-            CREATE TABLE sessions (id TEXT PRIMARY KEY);
-            CREATE TABLE turns (
-                id TEXT PRIMARY KEY,
-                session_id TEXT NOT NULL,
-                role TEXT NOT NULL
-            );
-            "#,
         )
         .unwrap();
     }

@@ -91,7 +91,7 @@ machine. Current rows include:
 - native rows for supported Claude Code, Codex, Cursor, Pi, GitHub Copilot CLI, OpenCode, Gemini CLI/Antigravity, Kilo Code, Kiro CLI, Crush, Goose, Tabnine, Windsurf, Zed, Factory AI Droid, Qwen Code, Kimi Code CLI, Auggie, Junie, Firebender, ForgeCode, Deep Agents, Mistral Vibe, Mux, Rovo Dev, Cline, Roo Code, Lingma, Qoder, Warp, CodeBuddy, Trae, Zencoder, OpenClaw, Hermes, NanoClaw, AstrBot, Shelley, Continue, and OpenHands local history locations;
 - CodeArts Agent kernel `opencode.db` history from proven default paths or an explicit DB path;
 - AstrBot `data_v4.db` history when those files exist;
-- preview rows for NanoClaw project roots when those paths are discoverable;
+- explicit-import rows for NanoClaw project roots when those paths are discoverable;
 - local history-source plugin manifests under `$CTX_DATA_ROOT/plugins` or
   `CTX_HISTORY_PLUGIN_PATH`.
 
@@ -260,7 +260,7 @@ indexes, `auto` serves current results without a foreground catch-up scan; use
 `--refresh strict` or `ctx import --all` when you need a full catch-up before
 querying. Use `--refresh off` to search the existing index without refreshing, or
 `--refresh strict` to fail when the pre-search refresh cannot run or import
-successfully. Preview native sources such as NanoClaw are searched from the
+successfully. Explicit-only native sources such as NanoClaw are searched from the
 existing index until they are explicitly imported through a supported path.
 Search requires a
 non-empty query, at least one non-empty `--term`, or

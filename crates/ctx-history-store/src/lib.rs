@@ -484,7 +484,7 @@ CREATE TABLE IF NOT EXISTS capture_sources (
     id TEXT PRIMARY KEY NOT NULL,
     kind TEXT NOT NULL CHECK (kind IN ('provider_import', 'provider_hook', 'direct_cli', 'manual')),
 
-    provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'openloaf', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'tabnine', 'cursor', 'windsurf', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'iflow_cli', 'jazz', 'forgecode', 'deepagents', 'mistral_vibe', 'mux', 'moxby', 'reasonix', 'adal', 'kode', 'neovate', 'command_code', 'terramind', 'rovodev', 'cortex_code', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'bob', 'dexto', 'lingma', 'qoder', 'pochi', 'warp', 'codebuddy', 'aider_desk', 'auggie', 'firebender', 'eve', 'junie', 'trae', 'tinycloud', 'codearts_agent', 'zencoder', 'zenflow', 'codestudio', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
+    provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'tabnine', 'cursor', 'windsurf', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'forgecode', 'deepagents', 'mistral_vibe', 'mux', 'rovodev', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'lingma', 'qoder', 'warp', 'codebuddy', 'auggie', 'firebender', 'junie', 'trae', 'codearts_agent', 'zencoder', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
 
     machine_id TEXT NOT NULL,
     process_id INTEGER,
@@ -503,7 +503,7 @@ CREATE TABLE IF NOT EXISTS capture_sources (
 CREATE TABLE IF NOT EXISTS catalog_sessions (
     source_path TEXT PRIMARY KEY NOT NULL,
 
-    provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'openloaf', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'tabnine', 'cursor', 'windsurf', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'iflow_cli', 'jazz', 'forgecode', 'deepagents', 'mistral_vibe', 'mux', 'moxby', 'reasonix', 'adal', 'kode', 'neovate', 'command_code', 'terramind', 'rovodev', 'cortex_code', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'bob', 'dexto', 'lingma', 'qoder', 'pochi', 'warp', 'codebuddy', 'aider_desk', 'auggie', 'firebender', 'eve', 'junie', 'trae', 'tinycloud', 'codearts_agent', 'zencoder', 'zenflow', 'codestudio', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
+    provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'tabnine', 'cursor', 'windsurf', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'forgecode', 'deepagents', 'mistral_vibe', 'mux', 'rovodev', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'lingma', 'qoder', 'warp', 'codebuddy', 'auggie', 'firebender', 'junie', 'trae', 'codearts_agent', 'zencoder', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
 
     source_format TEXT NOT NULL,
     source_root TEXT NOT NULL,
@@ -534,7 +534,7 @@ CREATE TABLE IF NOT EXISTS catalog_sessions (
 
 CREATE TABLE IF NOT EXISTS source_import_files (
 
-    provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'openloaf', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'tabnine', 'cursor', 'windsurf', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'iflow_cli', 'jazz', 'forgecode', 'deepagents', 'mistral_vibe', 'mux', 'moxby', 'reasonix', 'adal', 'kode', 'neovate', 'command_code', 'terramind', 'rovodev', 'cortex_code', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'bob', 'dexto', 'lingma', 'qoder', 'pochi', 'warp', 'codebuddy', 'aider_desk', 'auggie', 'firebender', 'eve', 'junie', 'trae', 'tinycloud', 'codearts_agent', 'zencoder', 'zenflow', 'codestudio', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
+    provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'tabnine', 'cursor', 'windsurf', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'forgecode', 'deepagents', 'mistral_vibe', 'mux', 'rovodev', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'lingma', 'qoder', 'warp', 'codebuddy', 'auggie', 'firebender', 'junie', 'trae', 'codearts_agent', 'zencoder', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
 
     source_format TEXT NOT NULL,
     source_root TEXT NOT NULL,
@@ -6349,7 +6349,7 @@ fn rebuild_capture_sources_provider_check(conn: &Connection) -> Result<()> {
             id TEXT PRIMARY KEY NOT NULL,
             kind TEXT NOT NULL CHECK (kind IN ('provider_import', 'provider_hook', 'direct_cli', 'manual')),
 
-            provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'openloaf', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'tabnine', 'cursor', 'windsurf', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'iflow_cli', 'jazz', 'forgecode', 'deepagents', 'mistral_vibe', 'mux', 'moxby', 'reasonix', 'adal', 'kode', 'neovate', 'command_code', 'terramind', 'rovodev', 'cortex_code', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'bob', 'dexto', 'lingma', 'qoder', 'pochi', 'warp', 'codebuddy', 'aider_desk', 'auggie', 'firebender', 'eve', 'junie', 'trae', 'tinycloud', 'codearts_agent', 'zencoder', 'zenflow', 'codestudio', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
+            provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'tabnine', 'cursor', 'windsurf', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'forgecode', 'deepagents', 'mistral_vibe', 'mux', 'rovodev', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'lingma', 'qoder', 'warp', 'codebuddy', 'auggie', 'firebender', 'junie', 'trae', 'codearts_agent', 'zencoder', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
 
             machine_id TEXT NOT NULL,
             process_id INTEGER,
@@ -6399,7 +6399,7 @@ fn rebuild_catalog_sessions_provider_check(conn: &Connection) -> Result<()> {
         CREATE TABLE catalog_sessions_new (
             source_path TEXT PRIMARY KEY NOT NULL,
 
-            provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'openloaf', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'tabnine', 'cursor', 'windsurf', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'iflow_cli', 'jazz', 'forgecode', 'deepagents', 'mistral_vibe', 'mux', 'moxby', 'reasonix', 'adal', 'kode', 'neovate', 'command_code', 'terramind', 'rovodev', 'cortex_code', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'bob', 'dexto', 'lingma', 'qoder', 'pochi', 'warp', 'codebuddy', 'aider_desk', 'auggie', 'firebender', 'eve', 'junie', 'trae', 'tinycloud', 'codearts_agent', 'zencoder', 'zenflow', 'codestudio', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
+            provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'tabnine', 'cursor', 'windsurf', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'forgecode', 'deepagents', 'mistral_vibe', 'mux', 'rovodev', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'lingma', 'qoder', 'warp', 'codebuddy', 'auggie', 'firebender', 'junie', 'trae', 'codearts_agent', 'zencoder', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
 
             source_format TEXT NOT NULL,
             source_root TEXT NOT NULL,
@@ -6456,7 +6456,7 @@ fn rebuild_source_import_files_provider_check(conn: &Connection) -> Result<()> {
         DROP TABLE IF EXISTS source_import_files_new;
         CREATE TABLE source_import_files_new (
 
-            provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'openloaf', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'tabnine', 'cursor', 'windsurf', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'iflow_cli', 'jazz', 'forgecode', 'deepagents', 'mistral_vibe', 'mux', 'moxby', 'reasonix', 'adal', 'kode', 'neovate', 'command_code', 'terramind', 'rovodev', 'cortex_code', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'bob', 'dexto', 'lingma', 'qoder', 'pochi', 'warp', 'codebuddy', 'aider_desk', 'auggie', 'firebender', 'eve', 'junie', 'trae', 'tinycloud', 'codearts_agent', 'zencoder', 'zenflow', 'codestudio', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
+            provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'tabnine', 'cursor', 'windsurf', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'forgecode', 'deepagents', 'mistral_vibe', 'mux', 'rovodev', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'lingma', 'qoder', 'warp', 'codebuddy', 'auggie', 'firebender', 'junie', 'trae', 'codearts_agent', 'zencoder', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown')),
 
             source_format TEXT NOT NULL,
             source_root TEXT NOT NULL,
@@ -10301,58 +10301,64 @@ mod catalog_tests {
     }
 
     #[test]
-    fn provider_check_constraints_accept_search_only_providers() {
+    fn provider_check_constraints_accept_supported_providers() {
         let temp = tempdir();
         let store = Store::open(temp.path().join("work.sqlite")).unwrap();
         rebuild_capture_sources_provider_check(&store.conn).unwrap();
         rebuild_catalog_sessions_provider_check(&store.conn).unwrap();
 
         let schema = store.schema().unwrap();
-        for (provider, source_format) in [
+        let providers = [
+            ("codex", "codex_rollout_jsonl"),
+            ("claude", "claude_projects_jsonl"),
+            ("pi", "pi_sessions_jsonl"),
+            ("opencode", "opencode_sqlite"),
             ("kilo", "kilo_sqlite"),
+            ("kiro_cli", "kiro_cli_sqlite"),
             ("crush", "crush_sqlite"),
             ("goose", "goose_sessions_sqlite"),
-            ("dexto", "dexto_sqlite"),
-            ("lingma", "lingma_sqlite"),
-            ("qoder", "qoder_transcript_jsonl_tree"),
-            ("pochi", "pochi_livestore_state_sqlite"),
-            ("warp", "warp_sqlite"),
-            ("openloaf", "openloaf_chat_jsonl"),
-            ("auggie", "auggie_session_json"),
-            ("firebender", "firebender_chat_history_sqlite"),
-            ("junie", "junie_session_events_jsonl_tree"),
+            ("antigravity", "antigravity_history"),
+            ("gemini", "gemini_history"),
+            ("tabnine", "tabnine_history"),
+            ("cursor", "cursor_sqlite"),
+            ("windsurf", "windsurf_cascade_hook_transcript_jsonl"),
+            ("zed", "zed_threads_sqlite"),
             ("copilot_cli", "copilot_cli_session_events_jsonl"),
             ("factory_ai_droid", "factory_ai_droid_sessions_jsonl"),
-            ("continue", "continue_cli_sessions_json"),
-            ("openhands", "openhands_file_events"),
             ("qwen_code", "qwen_code_chat_jsonl"),
             ("kimi_code_cli", "kimi_code_cli_wire_jsonl"),
-            ("autohand_code", "autohand_code_sessions_jsonl"),
-            ("kiro_cli", "kiro_cli_sqlite"),
-            ("iflow_cli", "iflow_cli_session_jsonl"),
-            ("jazz", "jazz_history_json"),
             ("forgecode", "forgecode_sqlite"),
             ("deepagents", "deepagents_sessions_sqlite"),
             ("mistral_vibe", "mistral_vibe_session_jsonl"),
             ("mux", "mux_session_jsonl"),
-            ("moxby", "moxby_chats_sqlite"),
-            ("reasonix", "reasonix_session_jsonl"),
-            ("adal", "adal_session_jsonl"),
-            ("kode", "kode_session_jsonl"),
-            ("neovate", "neovate_session_jsonl"),
-            ("command_code", "command_code_session_jsonl"),
-            ("terramind", "terramind_agents_sqlite"),
             ("rovodev", "rovodev_session_json"),
-            ("cortex_code", "cortex_code_session_json"),
+            ("openclaw", "openclaw_session_jsonl_tree"),
+            ("hermes", "hermes_state_sqlite"),
+            ("nanoclaw", "nanoclaw_project"),
+            ("astrbot", "astrbot_data_v4_sqlite"),
+            ("shelley", "shelley_sqlite"),
+            ("continue", "continue_cli_sessions_json"),
+            ("openhands", "openhands_file_events"),
+            ("cline", "cline_task_directory_json"),
+            ("roo_code", "cline_task_directory_json"),
+            ("lingma", "lingma_sqlite"),
+            ("qoder", "qoder_transcript_jsonl_tree"),
+            ("warp", "warp_sqlite"),
             ("codebuddy", "codebuddy_history_json"),
-            ("aider_desk", "aider_desk_task_context_json"),
-            ("bob", "bob_task_directory_json"),
+            ("auggie", "auggie_session_json"),
+            ("firebender", "firebender_chat_history_sqlite"),
+            ("junie", "junie_session_events_jsonl_tree"),
             ("trae", "trae_state_vscdb"),
-            ("windsurf", "windsurf_cascade_hook_transcript_jsonl"),
-            ("zed", "zed_threads_sqlite"),
-            ("zenflow", "zenflow_sqlite"),
+            ("codearts_agent", "codearts_agent_kernel_sqlite"),
+            ("zencoder", "zencoder_chat_sessions_json_tree"),
+            ("shell", "shell_history"),
+            ("git", "git_history"),
+            ("jj", "jj_history"),
+            ("gh", "gh_history"),
             ("custom", "ctx_history_jsonl_v1"),
-        ] {
+            ("unknown", "unknown"),
+        ];
+        for (provider, source_format) in providers {
             assert!(
                 schema.contains(provider),
                 "schema provider checks should include {provider}"
@@ -10383,26 +10389,16 @@ mod catalog_tests {
 
         let source_count: i64 = store
             .conn
-            .query_row(
-
-                "SELECT COUNT(*) FROM capture_sources WHERE provider IN ('kilo', 'crush', 'goose', 'dexto', 'lingma', 'qoder', 'pochi', 'warp', 'openloaf', 'copilot_cli', 'factory_ai_droid', 'continue', 'openhands', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'kiro_cli', 'iflow_cli', 'jazz', 'auggie', 'firebender', 'junie', 'forgecode', 'deepagents', 'mistral_vibe', 'mux', 'moxby', 'reasonix', 'adal', 'kode', 'neovate', 'command_code', 'terramind', 'rovodev', 'cortex_code', 'codebuddy', 'aider_desk', 'bob', 'trae', 'windsurf', 'zed', 'zenflow', 'custom')",
-
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM capture_sources", [], |row| row.get(0))
             .unwrap();
         let catalog_count: i64 = store
             .conn
-            .query_row(
-
-                "SELECT COUNT(*) FROM catalog_sessions WHERE provider IN ('kilo', 'crush', 'goose', 'dexto', 'lingma', 'qoder', 'pochi', 'warp', 'openloaf', 'copilot_cli', 'factory_ai_droid', 'continue', 'openhands', 'qwen_code', 'kimi_code_cli', 'autohand_code', 'kiro_cli', 'iflow_cli', 'jazz', 'auggie', 'firebender', 'junie', 'forgecode', 'deepagents', 'mistral_vibe', 'mux', 'moxby', 'reasonix', 'adal', 'kode', 'neovate', 'command_code', 'terramind', 'rovodev', 'cortex_code', 'codebuddy', 'aider_desk', 'bob', 'trae', 'windsurf', 'zed', 'zenflow', 'custom')",
-
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM catalog_sessions", [], |row| {
+                row.get(0)
+            })
             .unwrap();
-        assert_eq!(source_count, 43);
-        assert_eq!(catalog_count, 43);
+        assert_eq!(source_count, providers.len() as i64);
+        assert_eq!(catalog_count, providers.len() as i64);
     }
 
     #[test]
@@ -10561,13 +10557,13 @@ mod catalog_tests {
     }
 
     #[test]
-    fn schema_v17_adds_jsonl_longtail_provider_checks() {
+    fn schema_v17_adds_jsonl_provider_checks() {
         let temp = tempdir();
         let path = temp.path().join("work.sqlite");
         {
             let conn = Connection::open(&path).unwrap();
             let legacy_sql = CREATE_TABLES_SQL.replace(
-                ", 'qwen_code', 'kimi_code_cli', 'autohand_code', 'iflow_cli', 'jazz', 'forgecode', 'deepagents', 'mistral_vibe'",
+                ", 'qwen_code', 'kimi_code_cli', 'forgecode', 'deepagents', 'mistral_vibe'",
                 "",
             );
             conn.execute_batch(&legacy_sql).unwrap();
@@ -10585,7 +10581,6 @@ mod catalog_tests {
         for (provider, source_format) in [
             ("qwen_code", "qwen_code_chat_jsonl"),
             ("kimi_code_cli", "kimi_code_cli_wire_jsonl"),
-            ("autohand_code", "autohand_code_sessions_jsonl"),
         ] {
             store
                 .conn
@@ -10800,60 +10795,6 @@ mod catalog_tests {
     }
 
     #[test]
-    fn schema_v21_adds_iflow_provider_checks() {
-        let temp = tempdir();
-        let path = temp.path().join("work.sqlite");
-        {
-            let conn = Connection::open(&path).unwrap();
-            let legacy_sql = CREATE_TABLES_SQL.replace(", 'iflow_cli'", "");
-            conn.execute_batch(&legacy_sql).unwrap();
-            conn.execute_batch(INDEXES_SQL).unwrap();
-            conn.execute_batch("PRAGMA user_version = 20;").unwrap();
-        }
-
-        let store = Store::open(&path).unwrap();
-        let version: i64 = store
-            .conn
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(version, SCHEMA_VERSION);
-
-        store
-            .conn
-            .execute(
-                r#"
-                INSERT INTO capture_sources
-                (id, kind, provider, machine_id, started_at_ms, fidelity)
-                VALUES (?1, 'provider_import', 'iflow_cli', 'test-machine', 0, 'imported')
-                "#,
-                params![new_id().to_string()],
-            )
-            .unwrap();
-        store
-            .conn
-            .execute(
-                r#"
-                INSERT INTO catalog_sessions
-                (source_path, provider, source_format, source_root, agent_type, file_size_bytes, file_modified_at_ms, cataloged_at_ms)
-                VALUES ('/tmp/provider/iflow.jsonl', 'iflow_cli', 'iflow_cli_session_jsonl', '/tmp/provider', 'primary', 1, 0, 0)
-                "#,
-                [],
-            )
-            .unwrap();
-        store
-            .conn
-            .execute(
-                r#"
-                INSERT INTO source_import_files
-                (provider, source_format, source_root, source_path, file_size_bytes, file_modified_at_ms, observed_at_ms)
-                VALUES ('iflow_cli', 'iflow_cli_session_jsonl', '/tmp/provider', '/tmp/provider/iflow.jsonl', 1, 0, 0)
-                "#,
-                [],
-            )
-            .unwrap();
-    }
-
-    #[test]
     fn schema_v22_adds_forgecode_provider_checks() {
         let temp = tempdir();
         let path = temp.path().join("work.sqlite");
@@ -10962,20 +10903,14 @@ mod catalog_tests {
     }
 
     #[test]
-    fn schema_v24_adds_aider_desk_deepagents_mux_reasonix_kode_neovate_terramind_and_lingma_provider_checks(
-    ) {
+    fn schema_v24_adds_deepagents_mux_and_lingma_provider_checks() {
         let temp = tempdir();
         let path = temp.path().join("work.sqlite");
         {
             let conn = Connection::open(&path).unwrap();
             let legacy_sql = CREATE_TABLES_SQL
-                .replace(", 'aider_desk'", "")
                 .replace(", 'deepagents'", "")
                 .replace(", 'mux'", "")
-                .replace(", 'reasonix'", "")
-                .replace(", 'kode'", "")
-                .replace(", 'neovate'", "")
-                .replace(", 'terramind'", "")
                 .replace(", 'lingma'", "");
             conn.execute_batch(&legacy_sql).unwrap();
             conn.execute_batch(INDEXES_SQL).unwrap();
@@ -10989,16 +10924,7 @@ mod catalog_tests {
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
 
-        for provider in [
-            "aider_desk",
-            "deepagents",
-            "mux",
-            "reasonix",
-            "kode",
-            "neovate",
-            "terramind",
-            "lingma",
-        ] {
+        for provider in ["deepagents", "mux", "lingma"] {
             store
                 .conn
                 .execute(
@@ -11014,12 +10940,6 @@ mod catalog_tests {
 
         for (source_path, provider, source_format, source_root) in [
             (
-                "/tmp/aider/.aider-desk/tasks/task-1/context.json",
-                "aider_desk",
-                "aider_desk_task_context_json",
-                "/tmp/aider/.aider-desk/tasks",
-            ),
-            (
                 "/tmp/deepagents/sessions.db",
                 "deepagents",
                 "deepagents_sessions_sqlite",
@@ -11030,30 +10950,6 @@ mod catalog_tests {
                 "mux",
                 "mux_session_jsonl",
                 "/tmp/mux",
-            ),
-            (
-                "/tmp/reasonix/reasonix-session-1.jsonl",
-                "reasonix",
-                "reasonix_session_jsonl",
-                "/tmp/reasonix",
-            ),
-            (
-                "/tmp/kode/kode-session-1.jsonl",
-                "kode",
-                "kode_session_jsonl",
-                "/tmp/kode",
-            ),
-            (
-                "/tmp/neovate/neovate-session-1.jsonl",
-                "neovate",
-                "neovate_session_jsonl",
-                "/tmp/neovate",
-            ),
-            (
-                "/tmp/Nucleus/data/agents.db",
-                "terramind",
-                "terramind_agents_sqlite",
-                "/tmp/Nucleus/data",
             ),
             (
                 "/tmp/lingma/local.db",
@@ -11077,12 +10973,6 @@ mod catalog_tests {
 
         for (provider, source_format, source_root, source_path) in [
             (
-                "aider_desk",
-                "aider_desk_task_context_json",
-                "/tmp/aider/.aider-desk/tasks",
-                "/tmp/aider/.aider-desk/tasks/task-1/context.json",
-            ),
-            (
                 "deepagents",
                 "deepagents_sessions_sqlite",
                 "/tmp/deepagents",
@@ -11093,30 +10983,6 @@ mod catalog_tests {
                 "mux_session_jsonl",
                 "/tmp/mux",
                 "/tmp/mux/chat.jsonl",
-            ),
-            (
-                "reasonix",
-                "reasonix_session_jsonl",
-                "/tmp/reasonix",
-                "/tmp/reasonix/reasonix-session-1.jsonl",
-            ),
-            (
-                "kode",
-                "kode_session_jsonl",
-                "/tmp/kode",
-                "/tmp/kode/kode-session-1.jsonl",
-            ),
-            (
-                "neovate",
-                "neovate_session_jsonl",
-                "/tmp/neovate",
-                "/tmp/neovate/neovate-session-1.jsonl",
-            ),
-            (
-                "terramind",
-                "terramind_agents_sqlite",
-                "/tmp/Nucleus/data",
-                "/tmp/Nucleus/data/agents.db",
             ),
             (
                 "lingma",
@@ -11140,15 +11006,12 @@ mod catalog_tests {
     }
 
     #[test]
-    fn schema_v25_adds_command_code_rovodev_and_cortex_code_provider_checks() {
+    fn schema_v25_adds_rovodev_provider_checks() {
         let temp = tempdir();
         let path = temp.path().join("work.sqlite");
         {
             let conn = Connection::open(&path).unwrap();
-            let legacy_sql = CREATE_TABLES_SQL
-                .replace(", 'command_code'", "")
-                .replace(", 'rovodev'", "")
-                .replace(", 'cortex_code'", "");
+            let legacy_sql = CREATE_TABLES_SQL.replace(", 'rovodev'", "");
             conn.execute_batch(&legacy_sql).unwrap();
             conn.execute_batch(INDEXES_SQL).unwrap();
             conn.execute_batch("PRAGMA user_version = 24;").unwrap();
@@ -11161,40 +11024,24 @@ mod catalog_tests {
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
 
-        for provider in ["command_code", "rovodev", "cortex_code"] {
-            store
-                .conn
-                .execute(
-                    r#"
-                    INSERT INTO capture_sources
-                    (id, kind, provider, machine_id, started_at_ms, fidelity)
-                    VALUES (?1, 'provider_import', ?2, 'test-machine', 0, 'imported')
-                    "#,
-                    params![new_id().to_string(), provider],
-                )
-                .unwrap();
-        }
+        store
+            .conn
+            .execute(
+                r#"
+                INSERT INTO capture_sources
+                (id, kind, provider, machine_id, started_at_ms, fidelity)
+                VALUES (?1, 'provider_import', 'rovodev', 'test-machine', 0, 'imported')
+                "#,
+                params![new_id().to_string()],
+            )
+            .unwrap();
 
-        for (source_path, provider, source_format, source_root) in [
-            (
-                "/tmp/commandcode/projects/workspace/session.jsonl",
-                "command_code",
-                "command_code_session_jsonl",
-                "/tmp/commandcode/projects",
-            ),
-            (
-                "/tmp/rovodev/sessions/session/session_context.json",
-                "rovodev",
-                "rovodev_session_json",
-                "/tmp/rovodev/sessions",
-            ),
-            (
-                "/tmp/snowflake/cortex/conversations/session.history.jsonl",
-                "cortex_code",
-                "cortex_code_session_json",
-                "/tmp/snowflake/cortex/conversations",
-            ),
-        ] {
+        for (source_path, provider, source_format, source_root) in [(
+            "/tmp/rovodev/sessions/session/session_context.json",
+            "rovodev",
+            "rovodev_session_json",
+            "/tmp/rovodev/sessions",
+        )] {
             store
                 .conn
                 .execute(
@@ -11219,61 +11066,6 @@ mod catalog_tests {
                 .unwrap();
         }
     }
-
-    #[test]
-    fn schema_v26_adds_jazz_provider_checks() {
-        let temp = tempdir();
-        let path = temp.path().join("work.sqlite");
-        {
-            let conn = Connection::open(&path).unwrap();
-            let legacy_sql = CREATE_TABLES_SQL.replace(", 'jazz'", "");
-            conn.execute_batch(&legacy_sql).unwrap();
-            conn.execute_batch(INDEXES_SQL).unwrap();
-            conn.execute_batch("PRAGMA user_version = 25;").unwrap();
-        }
-
-        let store = Store::open(&path).unwrap();
-        let version: i64 = store
-            .conn
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(version, SCHEMA_VERSION);
-
-        store
-            .conn
-            .execute(
-                r#"
-                INSERT INTO capture_sources
-                (id, kind, provider, machine_id, started_at_ms, fidelity)
-                VALUES (?1, 'provider_import', 'jazz', 'test-machine', 0, 'imported')
-                "#,
-                params![new_id().to_string()],
-            )
-            .unwrap();
-        store
-            .conn
-            .execute(
-                r#"
-                INSERT INTO catalog_sessions
-                (source_path, provider, source_format, source_root, agent_type, file_size_bytes, file_modified_at_ms, cataloged_at_ms)
-                VALUES ('/tmp/jazz/history/jazz-agent.json', 'jazz', 'jazz_history_json', '/tmp/jazz/history', 'primary', 1, 0, 0)
-                "#,
-                [],
-            )
-            .unwrap();
-        store
-            .conn
-            .execute(
-                r#"
-                INSERT INTO source_import_files
-                (provider, source_format, source_root, source_path, file_size_bytes, file_modified_at_ms, observed_at_ms)
-                VALUES ('jazz', 'jazz_history_json', '/tmp/jazz/history', '/tmp/jazz/history/jazz-agent.json', 1, 0, 0)
-                "#,
-                [],
-            )
-            .unwrap();
-    }
-
     #[test]
     fn schema_v27_adds_windsurf_provider_checks() {
         assert_provider_migration_accepts(
@@ -11284,29 +11076,6 @@ mod catalog_tests {
             "/tmp/windsurf/transcripts/trajectory.jsonl",
         );
     }
-
-    #[test]
-    fn schema_v28_adds_pochi_provider_checks() {
-        assert_provider_migration_accepts(
-            27,
-            "pochi",
-            "pochi_livestore_state_sqlite",
-            "/tmp/pochi/storage/store",
-            "/tmp/pochi/storage/store/state@6.db",
-        );
-    }
-
-    #[test]
-    fn schema_v29_adds_openloaf_provider_checks() {
-        assert_provider_migration_accepts(
-            28,
-            "openloaf",
-            "openloaf_chat_jsonl",
-            "/tmp/openloaf/chat-history",
-            "/tmp/openloaf/chat-history/session/messages.jsonl",
-        );
-    }
-
     #[test]
     fn schema_v30_adds_auggie_provider_checks() {
         assert_provider_migration_accepts(
@@ -11328,18 +11097,6 @@ mod catalog_tests {
             "/tmp/project/.idea/firebender/chat_history.db",
         );
     }
-
-    #[test]
-    fn schema_v32_adds_eve_provider_checks() {
-        assert_provider_migration_accepts(
-            31,
-            "eve",
-            "eve_workflow_data_streams",
-            "/tmp/eve/.workflow-data",
-            "/tmp/eve/.workflow-data/streams/chunks/strm_01_user-chnk_01.bin",
-        );
-    }
-
     #[test]
     fn schema_v35_adds_trae_provider_checks() {
         assert_provider_migration_accepts(
@@ -11372,29 +11129,6 @@ mod catalog_tests {
             "/tmp/qoder/projects/workspace/transcript/session.jsonl",
         );
     }
-
-    #[test]
-    fn schema_v38_adds_adal_provider_checks() {
-        assert_provider_migration_accepts(
-            37,
-            "adal",
-            "adal_session_jsonl",
-            "/tmp/adal/sessions",
-            "/tmp/adal/sessions/conversation_adal-session-1.jsonl",
-        );
-    }
-
-    #[test]
-    fn schema_v39_adds_bob_provider_checks() {
-        assert_provider_migration_accepts(
-            38,
-            "bob",
-            "bob_task_directory_json",
-            "/tmp/IBM Bob/User/globalStorage/ibm.bob-code",
-            "/tmp/IBM Bob/User/globalStorage/ibm.bob-code/tasks/bob-task-1/ui_messages.json",
-        );
-    }
-
     #[test]
     fn schema_v40_adds_junie_provider_checks() {
         assert_provider_migration_accepts(
@@ -11403,13 +11137,6 @@ mod catalog_tests {
             "junie_session_events_jsonl_tree",
             "/tmp/junie/sessions",
             "/tmp/junie/sessions/session-260607-100000-acme/events.jsonl",
-        );
-        assert_provider_migration_accepts(
-            39,
-            "tinycloud",
-            "tinycloud_session_jsonl_tree",
-            "/tmp/tinycloud",
-            "/tmp/tinycloud/projects/acme/sessions/session.jsonl",
         );
     }
 
@@ -11428,18 +11155,6 @@ mod catalog_tests {
                 "/tmp/zencoder/zencoder-chat",
                 "/tmp/zencoder/zencoder-chat/sessions/zen-session.json",
             ),
-            (
-                "codestudio",
-                "codestudio_session_store_sqlite",
-                "/tmp/codestudio/session-store.db",
-                "/tmp/codestudio/session-store.db",
-            ),
-            (
-                "moxby",
-                "moxby_chats_sqlite",
-                "/tmp/moxby/moxby_chats.db",
-                "/tmp/moxby/moxby_chats.db",
-            ),
         ] {
             assert_provider_migration_accepts(
                 40,
@@ -11450,18 +11165,6 @@ mod catalog_tests {
             );
         }
     }
-
-    #[test]
-    fn schema_v42_adds_zenflow_provider_checks() {
-        assert_provider_migration_accepts(
-            41,
-            "zenflow",
-            "zenflow_sqlite",
-            "/tmp/zenflow/db.sqlite",
-            "/tmp/zenflow/db.sqlite",
-        );
-    }
-
     fn assert_provider_migration_accepts(
         legacy_version: i64,
         provider: &str,

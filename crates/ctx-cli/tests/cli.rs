@@ -1121,7 +1121,7 @@ fn setup_skips_empty_codex_session_tree() {
 }
 
 #[test]
-fn sources_default_hides_long_tail_missing_locations() {
+fn sources_default_hides_unsupported_missing_locations() {
     let temp = tempdir();
 
     let sources = json_output(ctx(&temp).args(["sources", "--json"]));
@@ -1161,7 +1161,7 @@ fn sources_default_hides_long_tail_missing_locations() {
 }
 
 #[test]
-fn sources_provider_filter_rejects_deferred_providers() {
+fn sources_provider_filter_rejects_unsupported_providers() {
     let temp = tempdir();
 
     ctx(&temp)
@@ -2235,38 +2235,10 @@ fn sources_discovers_forgecode_env_and_legacy_db() {
     assert_eq!(source["source_format"], "forgecode_sqlite");
     assert_eq!(source["path"], legacy_db.to_str().unwrap());
 }
-
 #[test]
-fn sources_hides_deferred_provider_default_locations() {
+fn explicit_native_sources_are_listed_but_not_auto_imported() {
     let temp = tempdir();
-    let fixture = PathBuf::from(write_native_terramind_fixture(
-        &temp,
-        "terramind-xdg-sources-oracle",
-    ));
-    let xdg_config = temp.path().join("xdg-config");
-    let db = xdg_config.join("Nucleus").join("data").join("agents.db");
-    fs::create_dir_all(db.parent().unwrap()).unwrap();
-    fs::copy(fixture, &db).unwrap();
-
-    let sources = json_output(
-        ctx(&temp)
-            .env("XDG_CONFIG_HOME", &xdg_config)
-            .args(["sources", "--json", "--all"]),
-    );
-    assert!(
-        !sources["sources"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|source| source["provider"] == "terramind"),
-        "deferred Terramind source leaked into public sources: {sources:#}"
-    );
-}
-
-#[test]
-fn preview_native_sources_are_listed_but_not_auto_imported() {
-    let temp = tempdir();
-    let query = "nanoclaw-preview-auto-refresh-oracle";
+    let query = "nanoclaw-explicit-auto-refresh-oracle";
     let project = PathBuf::from(write_native_nanoclaw_fixture(&temp, query));
 
     let mut sources_command = ctx(&temp);
@@ -2279,7 +2251,7 @@ fn preview_native_sources_are_listed_but_not_auto_imported() {
         .find(|source| source["provider"] == "nanoclaw")
         .unwrap();
     assert_eq!(nanoclaw["status"], "available");
-    assert_eq!(nanoclaw["import_support"], "preview");
+    assert_eq!(nanoclaw["import_support"], "explicit");
     assert_eq!(nanoclaw["native_import"], false);
     assert_eq!(nanoclaw["importable"], true);
     assert!(nanoclaw["unsupported_reason"].is_null());
@@ -2435,7 +2407,7 @@ fn provider_help_stays_compact_for_large_supported_provider_set() {
         !help.contains("--provider <PROVIDER>\n          [possible values:"),
         "{help}"
     );
-    for deferred in [
+    for unsupported in [
         "aider-desk",
         "moxby",
         "pochi",
@@ -2444,8 +2416,8 @@ fn provider_help_stays_compact_for_large_supported_provider_set() {
         "terramind",
     ] {
         assert!(
-            !help.contains(deferred),
-            "deferred provider {deferred} leaked into compact help:\n{help}"
+            !help.contains(unsupported),
+            "unsupported provider {unsupported} leaked into compact help:\n{help}"
         );
     }
 }
@@ -4672,7 +4644,7 @@ fn mcp_status_and_tools_list_are_read_only_without_initialized_store() {
     assert!(providers.iter().any(|provider| provider == "cline"));
     assert!(providers.iter().any(|provider| provider == "roo"));
     assert!(providers.iter().any(|provider| provider == "roo_code"));
-    for deferred in [
+    for unsupported in [
         "aider-desk",
         "autohand-code",
         "bob",
@@ -4686,8 +4658,8 @@ fn mcp_status_and_tools_list_are_read_only_without_initialized_store() {
         "zenflow",
     ] {
         assert!(
-            !providers.iter().any(|provider| provider == deferred),
-            "deferred provider {deferred} leaked into MCP schema {providers:#?}"
+            !providers.iter().any(|provider| provider == unsupported),
+            "unsupported provider {unsupported} leaked into MCP schema {providers:#?}"
         );
     }
 
@@ -6353,7 +6325,7 @@ fn pi_cli_import_search_flow() {
 }
 
 #[test]
-fn deferred_native_providers_are_rejected_by_public_cli() {
+fn unsupported_native_providers_are_rejected_by_public_cli() {
     let temp = tempdir();
 
     for provider in [
@@ -6592,57 +6564,6 @@ fn native_provider_cli_flow_imports_supported_provider_paths() {
         assert_search_provider_oracle(&search, stored_provider, &query, 1, "message");
     }
 }
-
-#[test]
-fn dexto_default_discovery_is_not_public_on_keeper_branch() {
-    let temp = tempdir();
-    install_default_dexto_fixture(&temp, "dexto-default-discovery-oracle");
-
-    let sources = json_output(ctx(&temp).args(["sources", "--json", "--all"]));
-    assert!(
-        !sources["sources"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|source| source["provider"] == "dexto"),
-        "deferred Dexto source leaked into public sources: {sources:#}"
-    );
-}
-
-#[test]
-fn pochi_explicit_import_is_not_public_on_keeper_branch() {
-    let temp = tempdir();
-    let fixture = provider_history_fixture("pochi/v1/storage/store-alpha/statep0chifixture@6.db");
-
-    let stderr = failure_stderr(ctx(&temp).args([
-        "import",
-        "--provider",
-        "pochi",
-        "--path",
-        &fixture,
-        "--json",
-        "--progress",
-        "none",
-    ]));
-    assert!(stderr.contains("unknown provider"), "{stderr}");
-}
-
-#[test]
-fn pochi_default_discovery_is_not_public_on_keeper_branch() {
-    let temp = tempdir();
-    install_default_pochi_fixture(&temp);
-
-    let sources = json_output(ctx(&temp).args(["sources", "--json", "--all"]));
-    assert!(
-        !sources["sources"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|source| source["provider"] == "pochi"),
-        "deferred Pochi source leaked into public sources: {sources:#}"
-    );
-}
-
 #[test]
 fn trae_cli_imports_explicit_workspace_storage_with_default_discovery() {
     let temp = tempdir();
@@ -7397,19 +7318,6 @@ fn install_default_qoder_fixture(temp: &TempDir, query: &str) {
     let source = PathBuf::from(write_native_qoder_fixture(temp, query));
     copy_dir_all(&source, &temp.path().join(".qoder").join("projects"));
 }
-
-fn install_default_bob_fixture(temp: &TempDir, _query: &str) {
-    let source = PathBuf::from(provider_history_fixture(
-        "bob/User/globalStorage/ibm.bob-code",
-    ));
-    copy_dir_all(
-        &source,
-        &temp
-            .path()
-            .join(".config/IBM Bob/User/globalStorage/ibm.bob-code"),
-    );
-}
-
 fn install_default_openclaw_fixture(temp: &TempDir, query: &str) {
     let source = PathBuf::from(write_native_openclaw_fixture(temp, query));
     copy_dir_all(&source, &temp.path().join(".openclaw"));
@@ -7435,27 +7343,12 @@ fn install_default_kiro_fixture(temp: &TempDir, query: &str) {
     fs::create_dir_all(&target).unwrap();
     fs::copy(source, target.join("data.sqlite3")).unwrap();
 }
-
-fn install_default_dexto_fixture(temp: &TempDir, query: &str) {
-    let source = PathBuf::from(write_native_dexto_fixture(temp, query));
-    let target = temp.path().join(".dexto").join("database");
-    fs::create_dir_all(&target).unwrap();
-    fs::copy(source, target.join("coding-agent.db")).unwrap();
-}
-
 fn install_default_astrbot_fixture(temp: &TempDir, query: &str) {
     let source = PathBuf::from(write_native_astrbot_fixture(temp, query));
     let target = temp.path().join(".astrbot/data");
     fs::create_dir_all(&target).unwrap();
     fs::copy(source, target.join("data_v4.db")).unwrap();
 }
-
-fn install_default_pochi_fixture(temp: &TempDir) {
-    let fixture = provider_history_fixture("pochi/v1/storage/store-alpha");
-    let target = temp.path().join(".pochi/storage/store-alpha");
-    copy_dir_all(Path::new(&fixture), &target);
-}
-
 fn install_default_warp_fixture(temp: &TempDir) {
     let target = temp.path().join(".local/state/warp-terminal");
     fs::create_dir_all(&target).unwrap();
@@ -7583,17 +7476,6 @@ fn install_default_continue_fixture(temp: &TempDir, query: &str) {
         }
     }
 }
-
-fn install_default_autohand_fixture(temp: &TempDir, query: &str) {
-    let source = PathBuf::from(write_native_autohand_fixture(temp, query));
-    copy_dir_all(&source, &temp.path().join(".autohand").join("sessions"));
-}
-
-fn install_default_iflow_fixture(temp: &TempDir, query: &str) {
-    let source = PathBuf::from(write_native_iflow_fixture(temp, query));
-    copy_dir_all(&source, &temp.path().join(".iflow").join("projects"));
-}
-
 fn install_default_forgecode_fixture(temp: &TempDir, query: &str) {
     let source = PathBuf::from(write_native_forgecode_fixture(temp, query));
     let target = temp.path().join(".forge");
@@ -7613,60 +7495,10 @@ fn install_default_mux_fixture(temp: &TempDir, query: &str) {
     let source = PathBuf::from(write_native_mux_fixture(temp, query));
     copy_dir_all(&source, &temp.path().join(".mux").join("sessions"));
 }
-
-fn install_default_moxby_fixture(temp: &TempDir, query: &str) {
-    let source = PathBuf::from(write_native_moxby_fixture(temp, query));
-    let target = temp
-        .path()
-        .join(".local/share/com.moxby.agent/moxby_chats.db");
-    fs::create_dir_all(target.parent().unwrap()).unwrap();
-    fs::copy(source, target).unwrap();
-}
-
-fn install_default_reasonix_fixture(temp: &TempDir, query: &str) {
-    let source = PathBuf::from(write_native_reasonix_fixture(temp, query));
-    copy_dir_all(&source, &temp.path().join(".reasonix").join("sessions"));
-}
-
-fn install_default_kode_fixture(temp: &TempDir, query: &str) {
-    let source = PathBuf::from(write_native_kode_fixture(temp, query));
-    copy_dir_all(&source, &temp.path().join(".kode").join("projects"));
-}
-
-fn install_default_neovate_fixture(temp: &TempDir, query: &str) {
-    let source = PathBuf::from(write_native_neovate_fixture(temp, query));
-    copy_dir_all(&source, &temp.path().join(".neovate").join("projects"));
-}
-
-fn install_default_command_code_fixture(temp: &TempDir, query: &str) {
-    let source = PathBuf::from(write_native_command_code_fixture(temp, query));
-    copy_dir_all(&source, &temp.path().join(".commandcode").join("projects"));
-}
-
 fn install_default_rovodev_fixture(temp: &TempDir, query: &str) {
     let source = PathBuf::from(write_native_rovodev_fixture(temp, query));
     copy_dir_all(&source, &temp.path().join(".rovodev").join("sessions"));
 }
-
-fn install_default_cortex_code_fixture(temp: &TempDir, query: &str) {
-    let source = PathBuf::from(write_native_cortex_code_fixture(temp, query));
-    copy_dir_all(
-        &source,
-        &temp
-            .path()
-            .join(".snowflake")
-            .join("cortex")
-            .join("conversations"),
-    );
-}
-
-fn install_default_terramind_fixture(temp: &TempDir, query: &str) {
-    let source = PathBuf::from(write_native_terramind_fixture(temp, query));
-    let target = temp.path().join(".config").join("Nucleus").join("data");
-    fs::create_dir_all(&target).unwrap();
-    fs::copy(source, target.join("agents.db")).unwrap();
-}
-
 fn install_default_lingma_fixture(temp: &TempDir, query: &str) {
     let target = temp
         .path()
@@ -7683,12 +7515,6 @@ fn install_default_junie_fixture(temp: &TempDir, query: &str) {
     let source = PathBuf::from(write_native_junie_fixture(temp, query));
     copy_dir_all(&source, &temp.path().join(".junie").join("sessions"));
 }
-
-fn install_default_tinycloud_fixture(temp: &TempDir, query: &str) {
-    let source = PathBuf::from(write_native_tinycloud_fixture(temp, query));
-    copy_dir_all(&source, &temp.path().join(".tinycloud"));
-}
-
 fn install_default_zencoder_fixture(temp: &TempDir, query: &str) {
     let source = PathBuf::from(write_native_zencoder_fixture(temp, query));
     copy_dir_all(
@@ -7698,21 +7524,6 @@ fn install_default_zencoder_fixture(temp: &TempDir, query: &str) {
             .join(".config/Code/User/globalStorage/ZencoderAI.zencoder/zencoder-chat"),
     );
 }
-
-fn install_default_zenflow_fixture(temp: &TempDir, query: &str) {
-    let source = PathBuf::from(write_native_zenflow_fixture(temp, query));
-    let target = temp.path().join(".local/share/zenflow");
-    fs::create_dir_all(&target).unwrap();
-    fs::copy(source, target.join("db.sqlite")).unwrap();
-}
-
-fn install_default_codestudio_fixture(temp: &TempDir, query: &str) {
-    let source = PathBuf::from(write_native_codestudio_fixture(temp, query));
-    let target = temp.path().join(".config/Code Studio/User/globalStorage");
-    fs::create_dir_all(&target).unwrap();
-    fs::copy(source, target.join("session-store.db")).unwrap();
-}
-
 fn install_default_openhands_fixture(temp: &TempDir, query: &str) {
     let source = PathBuf::from(write_native_openhands_fixture(temp, query));
     copy_dir_all(&source, &temp.path().join(".openhands"));
@@ -7815,55 +7626,6 @@ fn write_native_opencode_fixture(temp: &TempDir, query: &str) -> String {
     .unwrap();
     path.to_str().unwrap().to_owned()
 }
-
-fn write_native_openloaf_fixture(temp: &TempDir, query: &str) -> String {
-    let projects = temp.path().join("OpenLoafData/projects");
-    let session = projects.join("sample-project/.openloaf/chat-history/openloaf-cli-session");
-    fs::create_dir_all(&session).unwrap();
-    fs::write(
-        session.join("session.json"),
-        serde_json::to_vec_pretty(&json!({
-            "id": "openloaf-cli-session",
-            "title": "OpenLoaf CLI Fixture",
-            "projectPath": "/workspace/openloaf-cli",
-            "createdAt": "2026-07-04T20:00:00Z",
-            "updatedAt": "2026-07-04T20:01:00Z",
-            "messageCount": 2
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    let messages = [
-        json!({
-            "id": "openloaf-cli-user",
-            "parentMessageId": null,
-            "role": "user",
-            "messageKind": "message",
-            "parts": [{"type": "text", "text": query}],
-            "metadata": {"source": "cli-fixture"},
-            "createdAt": "2026-07-04T20:00:00Z"
-        })
-        .to_string(),
-        json!({
-            "id": "openloaf-cli-assistant",
-            "parentMessageId": "openloaf-cli-user",
-            "role": "assistant",
-            "messageKind": "message",
-            "parts": [{
-                "type": "action",
-                "name": "write_file",
-                "input": {"path": "src/openloaf_cli_fixture.rs", "content": query}
-            }],
-            "metadata": {"fileTouches": [{"path": "src/openloaf_cli_fixture.rs", "operation": "write"}]},
-            "createdAt": "2026-07-04T20:01:00Z"
-        })
-        .to_string(),
-    ]
-    .join("\n");
-    fs::write(session.join("messages.jsonl"), format!("{messages}\n")).unwrap();
-    projects.to_str().unwrap().to_owned()
-}
-
 fn write_native_kilo_fixture(temp: &TempDir, query: &str) -> String {
     let path = temp.path().join("native-kilo.db");
     let conn = Connection::open(&path).unwrap();
@@ -8016,96 +7778,6 @@ fn write_native_kiro_fixture(temp: &TempDir, query: &str) -> String {
     .unwrap();
     path.to_str().unwrap().to_owned()
 }
-
-fn write_native_dexto_fixture(temp: &TempDir, query: &str) -> String {
-    let path = temp.path().join("native-dexto.db");
-    let conn = Connection::open(&path).unwrap();
-    conn.execute_batch(
-        "create table kv_store (
-            key text primary key,
-            value text not null,
-            created_at text not null default current_timestamp,
-            updated_at text not null default current_timestamp
-        );
-        create table list_store (
-            key text not null,
-            value text not null,
-            sequence integer not null,
-            created_at text not null default current_timestamp,
-            primary key (key, sequence)
-        );
-        create index idx_list_store_key_sequence on list_store(key, sequence);",
-    )
-    .unwrap();
-    let session_id = "dexto-cli-native";
-    conn.execute(
-        "insert into kv_store (key, value, created_at, updated_at)
-         values (?1, ?2, '2026-06-24T12:00:00Z', '2026-06-24T12:00:03Z')",
-        params![
-            format!("session:{session_id}"),
-            json!({
-                "id": session_id,
-                "userId": "user-1",
-                "createdAt": "2026-06-24T12:00:00Z",
-                "lastActivity": "2026-06-24T12:00:03Z",
-                "messageCount": 3,
-                "metadata": {"workspace": "/workspace/dexto-cli"}
-            })
-            .to_string()
-        ],
-    )
-    .unwrap();
-    for (sequence, created_at, value) in [
-        (
-            1_i64,
-            "2026-06-24T12:00:01Z",
-            json!({
-                "id": "dexto-cli-native-user",
-                "role": "user",
-                "content": query,
-                "createdAt": "2026-06-24T12:00:01Z"
-            }),
-        ),
-        (
-            2_i64,
-            "2026-06-24T12:00:02Z",
-            json!({
-                "id": "dexto-cli-native-assistant",
-                "role": "assistant",
-                "content": [{"type": "text", "text": format!("Dexto native import ok for {query}")}],
-                "toolCalls": [{
-                    "name": "read_file",
-                    "arguments": {"path": "/workspace/dexto-cli/README.md"}
-                }],
-                "createdAt": "2026-06-24T12:00:02Z"
-            }),
-        ),
-        (
-            3_i64,
-            "2026-06-24T12:00:03Z",
-            json!({
-                "id": "dexto-cli-native-tool",
-                "role": "tool",
-                "content": "Dexto tool output fixture",
-                "toolResult": {"ok": true},
-                "createdAt": "2026-06-24T12:00:03Z"
-            }),
-        ),
-    ] {
-        conn.execute(
-            "insert into list_store (key, value, sequence, created_at) values (?1, ?2, ?3, ?4)",
-            params![
-                format!("messages:{session_id}"),
-                value.to_string(),
-                sequence,
-                created_at
-            ],
-        )
-        .unwrap();
-    }
-    path.to_str().unwrap().to_owned()
-}
-
 fn write_native_forgecode_fixture(temp: &TempDir, query: &str) -> String {
     let path = temp.path().join("native-forgecode.db");
     let conn = Connection::open(&path).unwrap();
@@ -8265,268 +7937,6 @@ fn write_native_mistral_vibe_fixture(temp: &TempDir, query: &str) -> String {
         .unwrap()
         .to_owned()
 }
-
-fn write_native_reasonix_fixture(temp: &TempDir, query: &str) -> String {
-    let sessions = temp.path().join("native-reasonix/sessions");
-    fs::create_dir_all(&sessions).unwrap();
-    fs::write(
-        sessions.join("reasonix-cli-native.jsonl"),
-        format!(
-            "{}\n{}\n{}\n{}\n",
-            json!({"role":"user","content":query}),
-            json!({
-                "role": "assistant",
-                "content": "reasonix native import ok",
-                "tool_calls": [{
-                    "id": "call-reasonix-cli",
-                    "type": "function",
-                    "function": {
-                        "name": "write_file",
-                        "arguments": "{\"path\":\"src/reasonix_native.rs\",\"content\":\"proof\"}"
-                    }
-                }]
-            }),
-            json!({
-                "role": "tool",
-                "content": "wrote src/reasonix_native.rs",
-                "tool_call_id": "call-reasonix-cli",
-                "name": "write_file"
-            }),
-            json!({"role":"assistant","content":"Reasonix import finished"})
-        ),
-    )
-    .unwrap();
-    fs::write(
-        sessions.join("reasonix-cli-native.events.jsonl"),
-        format!(
-            "{}\n{}\n{}\n",
-            json!({
-                "ts": "2026-07-04T16:10:00Z",
-                "turn": 1,
-                "type": "user.message",
-                "content": query
-            }),
-            json!({
-                "ts": "2026-07-04T16:10:01Z",
-                "turn": 1,
-                "type": "effect.file.touched",
-                "path": "src/reasonix_native.rs",
-                "mode": "edit",
-                "bytes": 5
-            }),
-            json!({
-                "ts": "2026-07-04T16:10:02Z",
-                "turn": 1,
-                "type": "model.final",
-                "content": "Reasonix import finished",
-                "toolCalls": [],
-                "usage": {"prompt_tokens": 9, "completion_tokens": 4, "total_tokens": 13},
-                "costUsd": 0.00001
-            })
-        ),
-    )
-    .unwrap();
-    fs::write(
-        sessions.join("reasonix-cli-native.meta.json"),
-        json!({
-            "branch": "main",
-            "summary": "Reasonix CLI native",
-            "totalCostUsd": 0.00001,
-            "turnCount": 1,
-            "workspace": "/workspace/reasonix-cli",
-            "balanceCurrency": "USD",
-            "cacheHitTokens": 1,
-            "cacheMissTokens": 8,
-        })
-        .to_string(),
-    )
-    .unwrap();
-    temp.path()
-        .join("native-reasonix/sessions")
-        .to_str()
-        .unwrap()
-        .to_owned()
-}
-
-fn write_native_kode_fixture(temp: &TempDir, query: &str) -> String {
-    let project = temp.path().join("native-kode/projects/sanitized-workspace");
-    fs::create_dir_all(&project).unwrap();
-    fs::write(
-        project.join("kode-cli-native.jsonl"),
-        format!(
-            "{}\n{}\n{}\n",
-            json!({
-                "uuid": "kode-cli-native-user",
-                "parentUuid": null,
-                "sessionId": "kode-cli-native",
-                "timestamp": "2026-07-04T17:00:00Z",
-                "type": "user",
-                "cwd": "/workspace/kode",
-                "version": "2.2.1",
-                "message": {"role": "user", "content": [{"type": "text", "text": query}]}
-            }),
-            json!({
-                "uuid": "kode-cli-native-assistant",
-                "parentUuid": "kode-cli-native-user",
-                "sessionId": "kode-cli-native",
-                "timestamp": "2026-07-04T17:00:01Z",
-                "type": "assistant",
-                "cwd": "/workspace/kode",
-                "message": {"role": "assistant", "content": [
-                    {"type": "text", "text": "kode native import ok"},
-                    {"type": "tool_use", "id": "tool-kode-cli", "name": "Write", "input": {"path": "src/kode_cli_native.txt", "content": "proof"}}
-                ]}
-            }),
-            json!({
-                "uuid": "kode-cli-native-tool",
-                "parentUuid": "kode-cli-native-assistant",
-                "sessionId": "kode-cli-native",
-                "timestamp": "2026-07-04T17:00:02Z",
-                "type": "user",
-                "cwd": "/workspace/kode",
-                "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tool-kode-cli", "content": "wrote src/kode_cli_native.txt"}]},
-                "toolUseResult": {"tool": "Write", "path": "src/kode_cli_native.txt", "output": "ok"}
-            })
-        ),
-    )
-    .unwrap();
-    fs::write(
-        project.join("agent-reviewer.jsonl"),
-        format!(
-            "{}\n",
-            json!({
-                "uuid": "kode-cli-agent-user",
-                "parentUuid": "kode-cli-native-assistant",
-                "sessionId": "kode-cli-native",
-                "timestamp": "2026-07-04T17:01:00Z",
-                "type": "user",
-                "cwd": "/workspace/kode",
-                "isSidechain": true,
-                "agentId": "reviewer",
-                "message": {"role": "user", "content": [{"type": "text", "text": "kode cli sidechain"}]}
-            })
-        ),
-    )
-    .unwrap();
-    temp.path()
-        .join("native-kode/projects")
-        .to_str()
-        .unwrap()
-        .to_owned()
-}
-
-fn write_native_neovate_fixture(temp: &TempDir, query: &str) -> String {
-    let project = temp
-        .path()
-        .join("native-neovate/projects/sanitized-workspace");
-    fs::create_dir_all(project.join("requests")).unwrap();
-    fs::create_dir_all(project.join("file-history")).unwrap();
-    fs::write(
-        project.join("neovate-cli-native.jsonl"),
-        format!(
-            "{}\n{}\n{}\n",
-            json!({
-                "type": "message",
-                "role": "user",
-                "content": [{"type": "text", "text": query}],
-                "uuid": "neovate-cli-native-user",
-                "parentUuid": null,
-                "timestamp": "2026-07-04T18:00:00Z",
-                "sessionId": "neovate-cli-native"
-            }),
-            json!({
-                "type": "message",
-                "role": "assistant",
-                "content": [
-                    {"type": "text", "text": "neovate native import ok"},
-                    {"type": "tool_use", "id": "tool-neovate-cli", "name": "Write", "input": {"path": "src/neovate_cli_native.txt", "content": "proof"}}
-                ],
-                "uuid": "neovate-cli-native-assistant",
-                "parentUuid": "neovate-cli-native-user",
-                "timestamp": "2026-07-04T18:00:01Z",
-                "sessionId": "neovate-cli-native"
-            }),
-            json!({
-                "type": "message",
-                "role": "tool",
-                "content": [{"type": "tool_result", "tool_use_id": "tool-neovate-cli", "content": "wrote src/neovate_cli_native.txt", "path": "src/neovate_cli_native.txt"}],
-                "uuid": "neovate-cli-native-tool",
-                "parentUuid": "neovate-cli-native-assistant",
-                "timestamp": "2026-07-04T18:00:02Z",
-                "sessionId": "neovate-cli-native"
-            })
-        ),
-    )
-    .unwrap();
-    fs::write(
-        project.join("requests/request-only.jsonl"),
-        "{\"type\":\"request\",\"body\":{\"prompt\":\"neovate request-only sidecar\"}}\n",
-    )
-    .unwrap();
-    fs::write(
-        project.join("file-history/snapshot.jsonl"),
-        "{\"type\":\"file-history-snapshot\",\"content\":\"neovate file-history sidecar\"}\n",
-    )
-    .unwrap();
-    temp.path()
-        .join("native-neovate/projects")
-        .to_str()
-        .unwrap()
-        .to_owned()
-}
-
-fn write_native_command_code_fixture(temp: &TempDir, query: &str) -> String {
-    let project = temp
-        .path()
-        .join("native-command-code/projects/sanitized-workspace");
-    fs::create_dir_all(&project).unwrap();
-    fs::write(
-        project.join("command-code-cli-native.jsonl"),
-        format!(
-            "{}\n{}\n{}\n",
-            json!({
-                "id": "command-code-cli-native-user",
-                "sessionId": "command-code-cli-native",
-                "timestamp": "2026-07-04T18:10:00Z",
-                "role": "user",
-                "content": query,
-                "gitBranch": "main",
-                "metadata": {"version": 2, "entrypoint": "cli", "cwd": "/workspace/command-code"}
-            }),
-            json!({
-                "id": "command-code-cli-native-assistant",
-                "sessionId": "command-code-cli-native",
-                "timestamp": "2026-07-04T18:10:01Z",
-                "role": "assistant",
-                "content": [
-                    {"type": "text", "text": "command code native import ok"},
-                    {"type": "tool_use", "name": "Write", "input": {"path": "src/command_code_cli_native.txt", "content": "proof"}}
-                ],
-                "model": "openrouter/free-model",
-                "metadata": {"usage": {"input_tokens": 7, "output_tokens": 11}}
-            }),
-            json!({
-                "id": "command-code-cli-native-tool",
-                "sessionId": "command-code-cli-native",
-                "timestamp": "2026-07-04T18:10:02Z",
-                "role": "tool",
-                "content": [{"type": "tool_result", "content": "wrote src/command_code_cli_native.txt"}]
-            })
-        ),
-    )
-    .unwrap();
-    fs::write(
-        project.join("command-code-cli-native.checkpoints.jsonl"),
-        "{\"type\":\"file-history-snapshot\",\"content\":\"sidecar\"}\n",
-    )
-    .unwrap();
-    temp.path()
-        .join("native-command-code/projects")
-        .to_str()
-        .unwrap()
-        .to_owned()
-}
-
 fn write_native_rovodev_fixture(temp: &TempDir, query: &str) -> String {
     let session = temp
         .path()
@@ -8580,141 +7990,6 @@ fn write_native_rovodev_fixture(temp: &TempDir, query: &str) -> String {
         .unwrap()
         .to_owned()
 }
-
-fn write_native_cortex_code_fixture(temp: &TempDir, query: &str) -> String {
-    let conversations = temp.path().join("native-cortex-code/conversations");
-    fs::create_dir_all(&conversations).unwrap();
-    fs::write(
-        conversations.join("cortex-code-cli-native.json"),
-        json!({
-            "session_id": "cortex-code-cli-native",
-            "title": "Cortex Code CLI native",
-            "created_at": "2026-07-04T18:30:00Z",
-            "last_updated": "2026-07-04T18:30:02Z",
-            "connection_name": "fixture-connection",
-            "working_directory": "/workspace/cortex",
-            "history": []
-        })
-        .to_string(),
-    )
-    .unwrap();
-    fs::write(
-        conversations.join("cortex-code-cli-native.history.jsonl"),
-        format!(
-            "{}\n{}\n{}\n",
-            json!({
-                "id": "cortex-code-cli-native-user",
-                "role": "user",
-                "user_sent_time": "2026-07-04T18:30:00Z",
-                "content": [{"type": "text", "text": query}]
-            }),
-            json!({
-                "id": "cortex-code-cli-native-assistant",
-                "role": "assistant",
-                "user_sent_time": "2026-07-04T18:30:01Z",
-                "content": [
-                    {"type": "text", "text": "cortex code native import ok"},
-                    {"type": "tool_use", "name": "Write", "input": {"path": "src/cortex_code_cli_native.txt", "content": "proof"}}
-                ]
-            }),
-            json!({
-                "id": "cortex-code-cli-native-tool",
-                "role": "tool",
-                "user_sent_time": "2026-07-04T18:30:02Z",
-                "content": [{"type": "tool_result", "content": "wrote src/cortex_code_cli_native.txt"}]
-            })
-        ),
-    )
-    .unwrap();
-    conversations.to_str().unwrap().to_owned()
-}
-
-fn write_native_aider_desk_fixture(temp: &TempDir, query: &str) -> String {
-    let task = temp
-        .path()
-        .join("native-aider-desk/project/.aider-desk/tasks/aider-task-cli");
-    fs::create_dir_all(&task).unwrap();
-    fs::write(
-        task.join("settings.json"),
-        json!({
-            "id": "aider-task-cli",
-            "baseDir": "/workspace/aider-desk",
-            "createdAt": "2026-07-04T17:00:00Z",
-            "updatedAt": "2026-07-04T17:00:04Z",
-            "agentProfileId": "default",
-            "model": "openai/gpt-5-mini"
-        })
-        .to_string(),
-    )
-    .unwrap();
-    fs::write(
-        task.join("context.json"),
-        json!({
-            "version": 2,
-            "contextFiles": [{
-                "path": "src/aider_desk_native.rs",
-                "content": "previous content",
-                "type": "text"
-            }],
-            "contextMessages": [
-                {
-                    "id": "msg-aider-cli-user",
-                    "role": "user",
-                    "timestamp": "2026-07-04T17:00:01Z",
-                    "content": [{"type": "text", "text": query}]
-                },
-                {
-                    "id": "msg-aider-cli-assistant-tool",
-                    "role": "assistant",
-                    "timestamp": "2026-07-04T17:00:02Z",
-                    "content": [
-                        {"type": "text", "text": "aider desk native import ok"},
-                        {
-                            "type": "tool-call",
-                            "toolName": "aider---write_file",
-                            "input": {
-                                "path": "src/aider_desk_native.rs",
-                                "content": "proof"
-                            }
-                        }
-                    ],
-                    "usageReport": {
-                        "sentTokens": 11,
-                        "receivedTokens": 13,
-                        "messageCost": 0.0,
-                        "agentTotalCost": 0.0
-                    }
-                },
-                {
-                    "id": "msg-aider-cli-tool-result",
-                    "role": "tool",
-                    "timestamp": "2026-07-04T17:00:03Z",
-                    "content": [{
-                        "type": "tool-result",
-                        "toolName": "aider---write_file",
-                        "output": "wrote src/aider_desk_native.rs"
-                    }]
-                },
-                {
-                    "id": "msg-aider-cli-assistant-final",
-                    "role": "assistant",
-                    "timestamp": "2026-07-04T17:00:04Z",
-                    "content": [{"type": "text", "text": "Aider Desk import finished"}],
-                    "editedFiles": ["src/aider_desk_native.rs"],
-                    "commitHash": "3333333333333333333333333333333333333333"
-                }
-            ]
-        })
-        .to_string(),
-    )
-    .unwrap();
-    temp.path()
-        .join("native-aider-desk/project/.aider-desk/tasks")
-        .to_str()
-        .unwrap()
-        .to_owned()
-}
-
 fn write_native_auggie_fixture(temp: &TempDir, query: &str) -> String {
     let root = temp.path().join("native-auggie/sessions");
     fs::create_dir_all(&root).unwrap();
@@ -8806,109 +8081,6 @@ fn write_native_firebender_fixture(temp: &TempDir, query: &str) -> String {
     .unwrap();
     project.to_str().unwrap().to_owned()
 }
-
-fn write_native_eve_fixture(temp: &TempDir, query: &str) -> String {
-    let root = temp.path().join("native-eve/.workflow-data");
-    let run_id = "wrun_eveclifixture";
-    let stream_name = "strm_eveclifixture_user";
-    let chunks = root.join("streams/chunks");
-    fs::create_dir_all(root.join("runs")).unwrap();
-    fs::create_dir_all(root.join("streams/runs")).unwrap();
-    fs::create_dir_all(&chunks).unwrap();
-    fs::write(
-        root.join("streams/runs").join(format!("{run_id}.json")),
-        serde_json::to_string_pretty(&json!({
-            "streams": [stream_name, format!("{stream_name}_ZXZlLnNlc3Npb24")]
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    fs::write(
-        root.join("runs").join(format!("{run_id}.json")),
-        serde_json::to_string_pretty(&json!({
-            "runId": run_id,
-            "status": "completed",
-            "workflowName": "eve.workflowEntry",
-            "createdAt": "2026-07-05T00:00:00.000Z",
-            "startedAt": "2026-07-05T00:00:00.000Z",
-            "completedAt": "2026-07-05T00:00:03.000Z",
-            "attributes": {
-                "eve.sessionId": run_id
-            }
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-
-    for (index, event) in [
-        json!({
-            "type": "session.started",
-            "data": {
-                "sessionId": run_id,
-                "runtime": {
-                    "agentId": "eve-cli-fixture-agent",
-                    "agentName": "Eve CLI Fixture",
-                    "eveVersion": "0.19.0"
-                }
-            },
-            "meta": {"at": "2026-07-05T00:00:00.000Z"}
-        }),
-        json!({
-            "type": "message.received",
-            "data": {
-                "turnId": "turn-eve-cli-fixture",
-                "sequence": 1,
-                "message": query
-            },
-            "meta": {"at": "2026-07-05T00:00:01.000Z"}
-        }),
-        json!({
-            "type": "message.completed",
-            "data": {
-                "turnId": "turn-eve-cli-fixture",
-                "sequence": 2,
-                "message": "native Eve CLI import ok",
-                "finishReason": "stop"
-            },
-            "meta": {"at": "2026-07-05T00:00:02.000Z"}
-        }),
-        json!({
-            "type": "session.completed",
-            "data": {
-                "sessionId": run_id,
-                "status": "completed"
-            },
-            "meta": {"at": "2026-07-05T00:00:03.000Z"}
-        }),
-    ]
-    .iter()
-    .enumerate()
-    {
-        write_eve_workflow_chunk(&chunks, stream_name, index + 1, event);
-    }
-
-    root.to_str().unwrap().to_owned()
-}
-
-fn write_eve_workflow_chunk(chunks: &Path, stream_name: &str, index: usize, event: &Value) {
-    let ndjson = format!("{event}\n");
-    let devalue = format!(
-        "devl{}",
-        json!([["Uint8Array", 1], BASE64.encode(ndjson.as_bytes())])
-    );
-    let mut bytes = Vec::with_capacity(1 + 4 + devalue.len());
-    bytes.push(0);
-    bytes.extend_from_slice(&(devalue.len() as u32).to_be_bytes());
-    bytes.extend_from_slice(devalue.as_bytes());
-    fs::write(
-        chunks.join(format!(
-            "{stream_name}-chnk_01K0EVECLI{index:02}0000000000.bin"
-        )),
-        bytes,
-    )
-    .unwrap();
-}
-
 fn write_native_codearts_agent_fixture(temp: &TempDir, query: &str) -> String {
     let path = temp.path().join("native-codearts/opencode.db");
     write_codearts_agent_fixture_at(&path, query);
@@ -8973,55 +8145,6 @@ fn write_native_junie_fixture(temp: &TempDir, query: &str) -> String {
     .unwrap();
     sessions.to_str().unwrap().to_owned()
 }
-
-fn write_native_tinycloud_fixture(temp: &TempDir, query: &str) -> String {
-    let root = temp.path().join("native-tinycloud");
-    let session_dir = root.join("projects/acme/sessions");
-    let legacy_dir = root.join("sessions");
-    fs::create_dir_all(&session_dir).unwrap();
-    fs::create_dir_all(&legacy_dir).unwrap();
-    fs::write(
-        session_dir.join("tinycloud-native.jsonl"),
-        format!(
-            "{}\n{}\n{}\n",
-            json!({
-                "type": "message",
-                "id": "tinycloud-native-user",
-                "timestamp": "2026-07-05T14:00:00Z",
-                "cwd": "/workspace/tinycloud-native",
-                "message": {"role": "user", "content": query}
-            }),
-            json!({
-                "type": "message",
-                "id": "tinycloud-native-assistant",
-                "timestamp": "2026-07-05T14:00:01Z",
-                "message": {"role": "assistant", "content": format!("TinyCloud answered {query}")}
-            }),
-            json!({
-                "type": "compaction",
-                "id": "tinycloud-native-summary",
-                "timestamp": "2026-07-05T14:00:02Z",
-                "summary": format!("TinyCloud compacted {query}")
-            })
-        ),
-    )
-    .unwrap();
-    fs::write(
-        legacy_dir.join("tinycloud-legacy.jsonl"),
-        format!(
-            "{}\n",
-            json!({
-                "type": "message",
-                "id": "tinycloud-legacy-user",
-                "timestamp": "2026-07-05T14:01:00Z",
-                "message": {"role": "user", "content": format!("legacy {query}")}
-            })
-        ),
-    )
-    .unwrap();
-    root.to_str().unwrap().to_owned()
-}
-
 fn write_native_zencoder_fixture(temp: &TempDir, query: &str) -> String {
     let root = temp
         .path()
@@ -9068,46 +8191,6 @@ fn write_native_zencoder_fixture(temp: &TempDir, query: &str) -> String {
     .unwrap();
     root.to_str().unwrap().to_owned()
 }
-
-fn write_native_zenflow_fixture(temp: &TempDir, query: &str) -> String {
-    let path = temp.path().join("native-zenflow/db.sqlite");
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::copy(provider_history_fixture("zenflow/v2.3.1/db.sqlite"), &path).unwrap();
-    let conn = Connection::open(&path).unwrap();
-    conn.execute(
-        "UPDATE chats SET initial_prompt = ?1 WHERE id = X'22222222222222222222222222222222'",
-        [query],
-    )
-    .unwrap();
-    conn.execute(
-        "UPDATE executor_sessions SET prompt = ?1, summary = ?2 \
-         WHERE id = X'44444444444444444444444444444444'",
-        [
-            format!("zenflow executor prompt {query}"),
-            format!("Zenflow answered {query}"),
-        ],
-    )
-    .unwrap();
-    path.to_str().unwrap().to_owned()
-}
-
-fn write_native_codestudio_fixture(temp: &TempDir, query: &str) -> String {
-    let path = temp.path().join("native-codestudio/session-store.db");
-    write_sqlite_fixture_from_sql("codestudio/v1/session-store.sql", &path);
-    let conn = Connection::open(&path).unwrap();
-    conn.execute(
-        "UPDATE turns SET content = ?1 WHERE id = 'codestudio-user-1'",
-        [query],
-    )
-    .unwrap();
-    conn.execute(
-        "UPDATE turns SET content = ?1 WHERE id = 'codestudio-assistant-1'",
-        [format!("Code Studio answered {query}")],
-    )
-    .unwrap();
-    path.to_str().unwrap().to_owned()
-}
-
 fn write_native_mux_fixture(temp: &TempDir, query: &str) -> String {
     let root = temp.path().join("native-mux/sessions");
     let session_dir = root.join("mux-cli-native");
@@ -9223,194 +8306,6 @@ fn write_native_mux_fixture(temp: &TempDir, query: &str) -> String {
     .unwrap();
     root.to_str().unwrap().to_owned()
 }
-
-fn write_native_moxby_fixture(temp: &TempDir, query: &str) -> String {
-    let state = temp.path().join("native-moxby");
-    fs::create_dir_all(&state).unwrap();
-    let db = state.join("moxby_chats.db");
-    let conn = Connection::open(&db).unwrap();
-    conn.execute_batch(
-        r#"
-        CREATE TABLE chats (
-            id TEXT PRIMARY KEY,
-            workspace_id TEXT,
-            title TEXT,
-            created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL,
-            archived INTEGER NOT NULL DEFAULT 0,
-            chat_type TEXT,
-            mission_id TEXT,
-            folder_id TEXT,
-            title_user_set INTEGER,
-            pinned INTEGER,
-            pinned_tab_target_id TEXT,
-            entity_kind TEXT,
-            entity_ref TEXT,
-            bound_tab_id TEXT
-        );
-        CREATE TABLE chat_threads (
-            id TEXT PRIMARY KEY,
-            chat_id TEXT NOT NULL,
-            parent_thread_id TEXT,
-            origin TEXT,
-            external_thread_id TEXT,
-            title TEXT,
-            status TEXT,
-            spawned_by_agent_id TEXT,
-            assigned_agent_id TEXT,
-            created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL,
-            latest_turn_index INTEGER,
-            latest_event_seq INTEGER,
-            compaction_epoch INTEGER
-        );
-        CREATE TABLE chat_messages (
-            id TEXT PRIMARY KEY,
-            chat_id TEXT NOT NULL,
-            thread_id TEXT NOT NULL,
-            turn_id TEXT,
-            first_event_id TEXT NOT NULL,
-            last_event_id TEXT NOT NULL,
-            first_event_seq INTEGER NOT NULL,
-            last_event_seq INTEGER NOT NULL,
-            message_index INTEGER NOT NULL,
-            role TEXT NOT NULL,
-            content_json TEXT NOT NULL DEFAULT '[]',
-            text TEXT NOT NULL DEFAULT '',
-            token_estimate INTEGER NOT NULL DEFAULT 0,
-            provider TEXT,
-            model TEXT,
-            created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL
-        );
-        "#,
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO chats (
-            id, workspace_id, title, created_at, updated_at, archived, chat_type
-        ) VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
-        params![
-            "moxby-cli-chat",
-            "moxby-cli-workspace",
-            "Moxby CLI fixture",
-            1783180800000_i64,
-            1783180801000_i64,
-            "chat"
-        ],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO chat_threads (
-            id, chat_id, origin, title, status, assigned_agent_id, created_at, updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        params![
-            "moxby-cli-thread",
-            "moxby-cli-chat",
-            "user",
-            "Main",
-            "completed",
-            "moxby-cli-agent",
-            1783180800000_i64,
-            1783180801000_i64
-        ],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO chat_messages (
-            id, chat_id, thread_id, turn_id, first_event_id, last_event_id,
-            first_event_seq, last_event_seq, message_index, role, content_json,
-            text, token_estimate, provider, model, created_at, updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
-        params![
-            "moxby-cli-msg-user",
-            "moxby-cli-chat",
-            "moxby-cli-thread",
-            "moxby-cli-turn-1",
-            "moxby-cli-event-user",
-            "moxby-cli-event-user",
-            1_i64,
-            1_i64,
-            0_i64,
-            "user",
-            serde_json::to_string(&json!([{"type":"text","text":query}])).unwrap(),
-            query,
-            8_i64,
-            "openrouter",
-            "synthetic-moxby-model",
-            1783180800000_i64,
-            1783180800000_i64
-        ],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO chat_messages (
-            id, chat_id, thread_id, turn_id, first_event_id, last_event_id,
-            first_event_seq, last_event_seq, message_index, role, content_json,
-            text, token_estimate, provider, model, created_at, updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
-        params![
-            "moxby-cli-msg-assistant",
-            "moxby-cli-chat",
-            "moxby-cli-thread",
-            "moxby-cli-turn-1",
-            "moxby-cli-event-assistant",
-            "moxby-cli-event-assistant",
-            2_i64,
-            2_i64,
-            1_i64,
-            "assistant",
-            serde_json::to_string(&json!([{"type":"text","text":"Moxby CLI import ok"}])).unwrap(),
-            "Moxby CLI import ok",
-            6_i64,
-            "openrouter",
-            "synthetic-moxby-model",
-            1783180801000_i64,
-            1783180801000_i64
-        ],
-    )
-    .unwrap();
-    db.to_str().unwrap().to_owned()
-}
-
-fn write_native_terramind_fixture(temp: &TempDir, query: &str) -> String {
-    let path = temp.path().join("native-terramind-agents.db");
-    fs::copy(provider_history_fixture("terramind/v1/agents.db"), &path).unwrap();
-    let conn = Connection::open(&path).unwrap();
-    let messages: String = conn
-        .query_row(
-            "SELECT messages FROM sub_chats WHERE id = 'tm-sub-main'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let messages = messages
-        .replace("terramind sqlite oracle", query)
-        .replace("terramind final oracle", query);
-    conn.execute(
-        "UPDATE sub_chats SET messages = ?1 WHERE id = 'tm-sub-main'",
-        [&messages],
-    )
-    .unwrap();
-    let output: String = conn
-        .query_row(
-            "SELECT full_output FROM tool_outputs WHERE id = 'tm-tool-output-large'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let output = output.replace(
-        "terramind large tool output oracle",
-        &format!("{query} split tool output oracle"),
-    );
-    conn.execute(
-        "UPDATE tool_outputs SET full_output = ?1 WHERE id = 'tm-tool-output-large'",
-        [&output],
-    )
-    .unwrap();
-    path.to_str().unwrap().to_owned()
-}
-
 fn write_native_gemini_fixture(temp: &TempDir, query: &str) -> String {
     let chats = temp.path().join("native-gemini/.gemini/tmp/project/chats");
     fs::create_dir_all(&chats).unwrap();
@@ -9854,72 +8749,6 @@ fn write_native_kimi_fixture(temp: &TempDir, query: &str) -> String {
     .unwrap();
     home.to_str().unwrap().to_owned()
 }
-
-fn write_native_autohand_fixture(temp: &TempDir, query: &str) -> String {
-    let sessions = temp.path().join("native-autohand/.autohand/sessions");
-    let session = sessions.join("autohand-cli-native");
-    fs::create_dir_all(&session).unwrap();
-    fs::write(
-        sessions.join("index.json"),
-        json!({
-            "sessions": [{
-                "id": "autohand-cli-native",
-                "projectPath": "/workspace/autohand",
-                "createdAt": "2026-07-04T14:00:00Z"
-            }],
-            "byProject": {"/workspace/autohand": ["autohand-cli-native"]}
-        })
-        .to_string(),
-    )
-    .unwrap();
-    fs::write(
-        session.join("metadata.json"),
-        json!({
-            "sessionId": "autohand-cli-native",
-            "createdAt": "2026-07-04T14:00:00Z",
-            "lastActiveAt": "2026-07-04T14:00:04Z",
-            "closedAt": "2026-07-04T14:00:04Z",
-            "projectPath": "/workspace/autohand",
-            "projectName": "autohand",
-            "model": "openai/gpt-5-mini",
-            "messageCount": 4,
-            "summary": "Autohand native CLI fixture",
-            "status": "completed",
-            "client": "terminal"
-        })
-        .to_string(),
-    )
-    .unwrap();
-    fs::write(
-        session.join("conversation.jsonl"),
-        format!(
-            "{}\n{}\n{}\n{}\n",
-            json!({"role": "user", "content": query, "timestamp": "2026-07-04T14:00:01Z"}),
-            json!({
-                "role": "assistant",
-                "content": "native Autohand import ok",
-                "timestamp": "2026-07-04T14:00:02Z",
-                "toolCalls": [{
-                    "id": "tool-1",
-                    "type": "function",
-                    "name": "write_file",
-                    "arguments": {"path": "src/autohand_cli_native.txt", "content": "proof"}
-                }]
-            }),
-            json!({
-                "role": "tool",
-                "name": "write_file",
-                "tool_call_id": "tool-1",
-                "content": "wrote src/autohand_cli_native.txt",
-                "timestamp": "2026-07-04T14:00:03Z"
-            }),
-            json!({"role": "assistant", "content": "done", "timestamp": "2026-07-04T14:00:04Z"})
-        ),
-    )
-    .unwrap();
-    sessions.to_str().unwrap().to_owned()
-}
-
 fn write_native_codebuddy_fixture(temp: &TempDir, query: &str) -> String {
     let root = temp.path().join("native-codebuddy/CodeBuddyExtension");
     let project = root.join("Data/VSCode/default/history/11112222333344445555666677778888");
@@ -10022,89 +8851,6 @@ fn write_lingma_sqlite_fixture(path: &Path, query: &str) {
     )
     .unwrap();
 }
-
-fn write_native_iflow_fixture(temp: &TempDir, query: &str) -> String {
-    let projects = temp
-        .path()
-        .join("native-iflow/.iflow/projects/sanitized-workspace");
-    fs::create_dir_all(&projects).unwrap();
-    fs::write(
-        projects.join("session-iflow-cli-native.jsonl"),
-        format!(
-            "{}\n{}\n{}\n{}\n{}\n",
-            json!({
-                "uuid": "iflow-cli-native-user",
-                "parentUuid": null,
-                "sessionId": "iflow-cli-native",
-                "timestamp": "2026-07-04T15:00:00Z",
-                "type": "user",
-                "userType": "external",
-                "message": {"role": "user", "content": query},
-                "cwd": "/workspace/iflow",
-                "gitBranch": "main",
-                "version": "0.5.19"
-            }),
-            json!({
-                "uuid": "iflow-cli-native-assistant",
-                "parentUuid": "iflow-cli-native-user",
-                "sessionId": "iflow-cli-native",
-                "timestamp": "2026-07-04T15:00:01Z",
-                "type": "assistant",
-                "userType": "external",
-                "message": {
-                    "id": "msg-iflow-cli-native",
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [
-                        {"type": "text", "text": "native iFlow import ok"},
-                        {"type": "tool_use", "id": "tool-1", "name": "Write", "input": {"path": "src/iflow_cli_native.txt", "content": "proof"}}
-                    ],
-                    "model": "kimi-k2",
-                    "usage": {"input_tokens": 11, "output_tokens": 13}
-                }
-            }),
-            json!({
-                "uuid": "iflow-cli-native-tool",
-                "parentUuid": "iflow-cli-native-assistant",
-                "sessionId": "iflow-cli-native",
-                "timestamp": "2026-07-04T15:00:02Z",
-                "type": "user",
-                "userType": "external",
-                "message": {"role": "user", "content": [{"tool_use_id": "tool-1", "type": "tool_result", "content": "wrote src/iflow_cli_native.txt"}]},
-                "cwd": "/workspace/iflow",
-                "gitBranch": "main",
-                "version": "0.5.19",
-                "toolUseResult": {"toolName": "Write", "status": "success", "timestamp": 1783177202000i64, "path": "src/iflow_cli_native.txt", "output": "ok"}
-            }),
-            json!({
-                "uuid": "iflow-cli-native-summary",
-                "parentUuid": "iflow-cli-native-tool",
-                "sessionId": "iflow-cli-native",
-                "timestamp": "2026-07-04T15:00:03Z",
-                "type": "user",
-                "message": {"role": "user", "content": "native iFlow summary"},
-                "isCompactSummary": true,
-                "compressionInfo": {"originalTokenCount": 1200, "compressedTokenCount": 120}
-            }),
-            json!({
-                "uuid": "iflow-cli-native-meta",
-                "parentUuid": "iflow-cli-native-summary",
-                "sessionId": "iflow-cli-native",
-                "timestamp": "2026-07-04T15:00:04Z",
-                "type": "user",
-                "message": {"role": "user", "content": "native iFlow meta"},
-                "isMeta": true
-            })
-        ),
-    )
-    .unwrap();
-    temp.path()
-        .join("native-iflow/.iflow/projects")
-        .to_str()
-        .unwrap()
-        .to_owned()
-}
-
 fn write_native_openclaw_fixture(temp: &TempDir, query: &str) -> String {
     let root = temp.path().join("native-openclaw");
     let sessions = root.join("agents/personal-agent/sessions");
