@@ -75,6 +75,7 @@ pub(crate) fn run_setup(
             format: None,
             all: true,
             resume: false,
+            partial: false,
             json: args.json,
             progress: args.progress,
         };

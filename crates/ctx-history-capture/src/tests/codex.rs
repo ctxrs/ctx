@@ -690,6 +690,149 @@ fn codex_session_jsonl_rejects_malformed_event_timestamp() {
 }
 
 #[test]
+fn codex_session_jsonl_fast_rejects_malformed_event_timestamp_atomically() {
+    let temp = tempdir();
+    let path = temp.path().join("bad-timestamp-codex-fast.jsonl");
+    fs::write(
+        &path,
+        [
+            jsonl_line(json!({
+                "timestamp": "2026-07-03T12:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "codex-fast-bad-timestamp",
+                    "timestamp": "2026-07-03T12:00:00Z",
+                    "cwd": "/workspace",
+                    "originator": "codex-cli"
+                }
+            })),
+            jsonl_line(json!({
+                "timestamp": "not-rfc3339",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "fast bad timestamp should not import"}
+                    ]
+                }
+            })),
+        ]
+        .concat(),
+    )
+    .unwrap();
+
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let summary = import_codex_session_jsonl(
+        &path,
+        &mut store,
+        CodexSessionImportOptions {
+            imported_at: "2026-07-03T12:30:00Z".parse().unwrap(),
+            ..CodexSessionImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 1, "{:?}", summary.failures);
+    assert!(summary.failures[0]
+        .error
+        .contains("timestamp is not a valid RFC3339 timestamp"));
+    assert!(store.list_sessions().unwrap().is_empty());
+    assert!(store
+        .search_event_hits("fast bad timestamp should not import", 10)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn codex_session_tail_rejects_malformed_append_atomically() {
+    let temp = tempdir();
+    let path = temp.path().join("tail-bad-timestamp-codex.jsonl");
+    let initial = [
+        jsonl_line(json!({
+            "timestamp": "2026-07-03T12:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "codex-tail-bad-timestamp",
+                "timestamp": "2026-07-03T12:00:00Z",
+                "cwd": "/workspace",
+                "originator": "codex-cli"
+            }
+        })),
+        jsonl_line(json!({
+            "timestamp": "2026-07-03T12:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "initial tail event"}]
+            }
+        })),
+    ]
+    .concat();
+    fs::write(&path, &initial).unwrap();
+    let tail_start = initial.len() as u64;
+
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let first = import_codex_session_jsonl(
+        &path,
+        &mut store,
+        CodexSessionImportOptions {
+            imported_at: "2026-07-03T12:30:00Z".parse().unwrap(),
+            ..CodexSessionImportOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(first.failed, 0, "{:?}", first.failures);
+
+    fs::write(
+        &path,
+        [
+            initial,
+            jsonl_line(json!({
+                "timestamp": "2026-07-03T12:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "tail valid should rollback"}]
+                }
+            })),
+            jsonl_line(json!({
+                "timestamp": "not-rfc3339",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "tail bad timestamp"}]
+                }
+            })),
+        ]
+        .concat(),
+    )
+    .unwrap();
+
+    let summary = import_codex_session_jsonl_tail(
+        &path,
+        tail_start,
+        &mut store,
+        CodexSessionImportOptions {
+            imported_at: "2026-07-03T12:31:00Z".parse().unwrap(),
+            ..CodexSessionImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 1, "{:?}", summary.failures);
+    let session_id = provider_session_uuid(CaptureProvider::Codex, "codex-tail-bad-timestamp");
+    assert_eq!(store.events_for_session(session_id).unwrap().len(), 1);
+    assert!(store
+        .search_event_hits("tail valid should rollback", 10)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn provider_command_run_rejects_negative_duration() {
     let event = test_provider_event(EventType::CommandOutput);
     let err = provider_command_run_from_event(ProviderCommandRunInput {

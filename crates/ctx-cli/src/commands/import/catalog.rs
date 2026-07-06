@@ -15,6 +15,7 @@ pub(crate) fn import_incremental_codex_session_tree(
     event_mode: CodexEventImportMode,
     include_notices: bool,
     progress: Option<CodexSessionImportProgressCallback>,
+    allow_partial_failures: bool,
 ) -> Result<ProviderImportSummary> {
     let source_root = source.path.display().to_string();
     catalog_codex_session_tree(
@@ -22,7 +23,7 @@ pub(crate) fn import_incremental_codex_session_tree(
         store,
         CodexSessionCatalogOptions {
             source_root: Some(source.path.clone()),
-            allow_partial_failures: true,
+            allow_partial_failures,
             ..CodexSessionCatalogOptions::default()
         },
     )
@@ -64,7 +65,7 @@ pub(crate) fn import_incremental_codex_session_tree(
                 CodexSessionImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures: true,
+                    allow_partial_failures,
                     tool_output_mode,
                     event_mode,
                     include_notices,
@@ -91,6 +92,9 @@ pub(crate) fn import_incremental_codex_session_tree(
                     "tail import failed for one or more appended events",
                 )?;
                 merge_provider_import_summary(&mut summary, tail_summary);
+                if !allow_partial_failures {
+                    return Ok(summary);
+                }
                 continue;
             }
             let tail_event_count = tail_summary
@@ -123,7 +127,7 @@ pub(crate) fn import_incremental_codex_session_tree(
             CodexSessionImportOptions {
                 source_path: Some(source.path.clone()),
                 history_record_id: Some(record_id),
-                allow_partial_failures: true,
+                allow_partial_failures,
                 tool_output_mode,
                 event_mode,
                 include_notices,
@@ -139,6 +143,15 @@ pub(crate) fn import_incremental_codex_session_tree(
                 return Err(err);
             }
         };
+        if !allow_partial_failures && full_summary.failed > 0 {
+            mark_catalog_sessions_failed(
+                store,
+                &full_import_sessions,
+                "full import failed for one or more sessions",
+            )?;
+            merge_provider_import_summary(&mut summary, full_summary);
+            return Ok(summary);
+        }
         mark_catalog_sessions_indexed(store, &full_import_sessions, &full_summary)?;
         merge_provider_import_summary(&mut summary, full_summary);
     }

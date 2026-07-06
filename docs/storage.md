@@ -130,13 +130,17 @@ Re-import or update the index:
 ```bash
 ctx import --all
 ctx import --resume
+ctx import --partial
 ctx import --provider codex --path ~/.codex/sessions
 ctx import --format ctx-history-jsonl-v1 --path ./history.jsonl
 ctx import --history-source example-agent/default
 ```
 
 Current adapters are safe to re-run. They rescan sources idempotently and keep
-source paths or cursors when available.
+source paths or cursors when available. Imports are source-atomic by default:
+malformed rows fail that source without committing its valid rows. Use
+`--partial` to opt into committing valid rows from a malformed source while row
+failures are reported.
 Custom history JSONL imports follow the same v1 lifecycle: ctx rescans the
 explicit file, upserts already-imported records, stores supplied source cursor
 metadata under ctx-owned custom cursor streams, and preserves event native

@@ -50,6 +50,33 @@ fn provider_fixture_replay_supports_opencode_fixture() {
 }
 
 #[test]
+fn native_pi_malformed_file_is_atomic_without_partial_failures() {
+    let temp = tempdir();
+    let fixture = provider_history_fixture("pi-malformed-partial.jsonl");
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let summary = import_pi_session_jsonl(
+        &fixture,
+        &mut store,
+        PiSessionImportOptions {
+            source_path: Some(fixture.clone()),
+            imported_at: "2026-07-03T12:30:00Z".parse().unwrap(),
+            ..PiSessionImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 2, "{:?}", summary.failures);
+    assert_eq!(summary.imported_sessions, 0);
+    assert_eq!(summary.imported_events, 0);
+    assert!(store.list_sessions().unwrap().is_empty());
+    assert!(store
+        .search_event_hits("after malformed line", 10)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn native_claude_projects_imports_jsonl_tree() {
     let temp = tempdir();
     let fixture = write_claude_smoke_fixture(&temp);

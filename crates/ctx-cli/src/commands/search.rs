@@ -17,7 +17,8 @@ use ctx_history_store::Store;
 use crate::analytics::AnalyticsProperties;
 use crate::commands::import::{
     error_summary, import_history_source_plugin, import_one_source_without_search_refresh,
-    import_totals_json, should_parallelize_import, ImportSourceOutcome, ImportTotals, SourceStats,
+    import_totals_json, one_line_error, should_parallelize_import, ImportSourceOutcome,
+    ImportTotals, SourceStats,
 };
 use crate::commands::setup::{
     indexed_history_item_count, insert_db_size_bucket, insert_store_analytics_counts,
@@ -419,6 +420,7 @@ pub(crate) fn refresh_sources_for_search(
     };
     let progress = ProgressReporter::new(progress_arg, json_output, "search-refresh", 0);
     let mut totals = ImportTotals::default();
+    let mut first_refresh_failure = None::<String>;
     if should_parallelize_import(&planned_sources) {
         let source_states = Arc::new(Mutex::new(
             planned_sources
@@ -446,6 +448,7 @@ pub(crate) fn refresh_sources_for_search(
                         &source,
                         progress_callback,
                         false,
+                        false,
                     )?;
                     Ok(ImportSourceOutcome {
                         index,
@@ -459,10 +462,17 @@ pub(crate) fn refresh_sources_for_search(
 
         let mut outcomes = Vec::with_capacity(handles.len());
         for handle in handles {
-            let outcome = handle
+            let result = handle
                 .join()
-                .map_err(|_| anyhow!("provider import worker panicked"))??;
-            outcomes.push(outcome);
+                .map_err(|_| anyhow!("provider import worker panicked"))?;
+            match result {
+                Ok(outcome) => outcomes.push(outcome),
+                Err(err) if refresh == RefreshArg::Auto => {
+                    first_refresh_failure.get_or_insert_with(|| error_summary(&err));
+                    totals.add_source_failure(&SourceStats::default());
+                }
+                Err(err) => return Err(err),
+            }
         }
         outcomes.sort_by_key(|outcome| outcome.index);
         for outcome in outcomes {
@@ -478,18 +488,38 @@ pub(crate) fn refresh_sources_for_search(
             );
             let source_progress = progress.codex_import_callback(&source, completed_source_bytes);
             completed_source_bytes = completed_source_bytes.saturating_add(stats.bytes);
-            let summary = import_one_source_without_search_refresh(
+            let import_result = import_one_source_without_search_refresh(
                 &mut store,
                 &source,
                 source_progress,
                 false,
-            )?;
-            totals.add(&summary, &stats);
-            progress.done(
-                "refreshing",
-                format!("refreshed {}", source.provider.as_str()),
-                completed_source_bytes,
+                false,
             );
+            match import_result {
+                Ok(summary) => {
+                    totals.add(&summary, &stats);
+                    progress.done(
+                        "refreshing",
+                        format!("refreshed {}", source.provider.as_str()),
+                        completed_source_bytes,
+                    );
+                }
+                Err(err) if refresh == RefreshArg::Auto => {
+                    let error = error_summary(&err);
+                    first_refresh_failure.get_or_insert_with(|| error.clone());
+                    totals.add_source_failure(&stats);
+                    progress.done(
+                        "refreshing",
+                        format!(
+                            "skipped {}: {}",
+                            source.provider.as_str(),
+                            one_line_error(&error)
+                        ),
+                        completed_source_bytes,
+                    );
+                }
+                Err(err) => return Err(err),
+            }
         }
     }
 
@@ -500,18 +530,44 @@ pub(crate) fn refresh_sources_for_search(
                 "refreshing",
                 format!("running history source plugin {}", plugin_source.label()),
             );
-            let (summary, stats) =
-                import_history_source_plugin(&mut store, &plugin_source, data_root, false)
+            let import_result =
+                import_history_source_plugin(&mut store, &plugin_source, data_root, false, false)
                     .with_context(|| {
                         format!("refresh history source plugin {}", plugin_source.label())
-                    })?;
-            totals.add(&summary, &stats);
-            progress.done(
-                "refreshing",
-                format!("refreshed history source plugin {}", plugin_source.label()),
-                0,
-            );
+                    });
+            match import_result {
+                Ok((summary, stats)) => {
+                    totals.add(&summary, &stats);
+                    progress.done(
+                        "refreshing",
+                        format!("refreshed history source plugin {}", plugin_source.label()),
+                        0,
+                    );
+                }
+                Err(err) if refresh == RefreshArg::Auto => {
+                    let error = error_summary(&err);
+                    first_refresh_failure.get_or_insert_with(|| error.clone());
+                    totals.add_source_failure(&SourceStats::default());
+                    progress.done(
+                        "refreshing",
+                        format!(
+                            "skipped history source plugin {}: {}",
+                            plugin_source.label(),
+                            one_line_error(&error)
+                        ),
+                        0,
+                    );
+                }
+                Err(err) => return Err(err),
+            }
         }
+    }
+
+    if refresh == RefreshArg::Auto && totals.imported_sources == 0 && totals.failed_sources > 0 {
+        let detail = first_refresh_failure
+            .map(|error| format!("; first failure: {error}"))
+            .unwrap_or_default();
+        return Err(anyhow!("all search refresh sources failed{detail}"));
     }
 
     Store::open(&db_path)?.checkpoint_wal_truncate_if_larger_than(WAL_TRUNCATE_MIN_BYTES)?;

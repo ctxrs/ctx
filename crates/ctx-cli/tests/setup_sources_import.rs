@@ -364,6 +364,42 @@ fn import_custom_history_jsonl_format_rejects_malformed_atomically() {
 }
 
 #[test]
+fn import_custom_history_jsonl_format_partial_commits_valid_rows() {
+    let temp = tempdir();
+    let fixture = custom_history_fixture("malformed-partial.jsonl");
+
+    let import = json_output(ctx(&temp).args([
+        "import",
+        "--format",
+        "ctx-history-jsonl-v1",
+        "--path",
+        &fixture,
+        "--partial",
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(import["totals"]["imported_sessions"], 1);
+    assert_eq!(import["totals"]["imported_events"], 1);
+    assert_eq!(import["totals"]["failed"], 1);
+    assert_eq!(import["sources"][0]["failed"], 1);
+
+    let search = json_output(ctx(&temp).args([
+        "search",
+        "Valid event before malformed record.",
+        "--provider",
+        "custom",
+        "--refresh",
+        "off",
+        "--json",
+    ]));
+    assert!(
+        !search["results"].as_array().unwrap().is_empty(),
+        "partial custom import was not searchable: {search:#}"
+    );
+}
+
+#[test]
 fn import_custom_history_format_is_not_a_native_provider_importer() {
     let temp = tempdir();
     let stderr = failure_stderr(ctx(&temp).args(["import", "--provider", "custom"]));

@@ -146,6 +146,7 @@ ctx import --history-source example-agent/default
 ctx import --history-source-manifest ./ctx-history-plugin.json
 ctx import --history-source example-agent/default --reset-cursor
 ctx import --resume
+ctx import --partial
 ctx import --json
 ctx import --progress json --json
 ```
@@ -157,6 +158,11 @@ Use `import` to repair, re-run, resume, or target a specific provider/path. It
 creates the data root and default config if needed, reads provider transcript
 files, and writes indexed source metadata, sessions, events, searchable text,
 citations, and import totals to SQLite.
+
+Imports are source-atomic by default. If a source contains malformed rows, ctx
+reports that source as failed and does not commit the valid rows from that same
+source. Use `--partial` only when you explicitly want ctx to commit valid rows
+and report malformed or skipped rows in the import summary.
 
 Custom history can be imported from an explicit JSONL file with
 `--format ctx-history-jsonl-v1 --path <file>`. This path is not discovered or

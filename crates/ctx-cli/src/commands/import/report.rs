@@ -196,6 +196,7 @@ pub(crate) fn print_source_imported(source: &SourceInfo, summary: &ProviderImpor
         summary.skipped,
         summary.failed
     );
+    print_provider_failures(summary);
 }
 
 pub(crate) fn print_history_source_plugin_imported(
@@ -211,6 +212,22 @@ pub(crate) fn print_history_source_plugin_imported(
         summary.skipped,
         summary.failed
     );
+    print_provider_failures(summary);
+}
+
+pub(crate) fn print_provider_failures(summary: &ProviderImportSummary) {
+    if summary.failed == 0 {
+        return;
+    }
+    for failure in summary.failures.iter().take(5) {
+        println!("  failure line {}: {}", failure.line, failure.error);
+    }
+    if summary.failures.len() > 5 {
+        println!(
+            "  ... {} more failure(s)",
+            summary.failures.len().saturating_sub(5)
+        );
+    }
 }
 
 pub(crate) fn print_source_failed(failure: &ImportSourceFailure) {

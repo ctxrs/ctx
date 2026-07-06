@@ -1335,6 +1335,7 @@ fn codex_cli_reports_malformed_partial_import_progress() {
         "codex",
         "--path",
         &fixture,
+        "--partial",
         "--json",
     ]));
     assert_eq!(imported["schema_version"], 1);
@@ -1348,12 +1349,40 @@ fn codex_cli_reports_malformed_partial_import_progress() {
 }
 
 #[test]
+fn codex_cli_malformed_default_import_is_atomic() {
+    let temp = tempdir();
+    let fixture = provider_history_fixture("codex-malformed-session.jsonl");
+
+    let stderr = failure_stderr(ctx(&temp).args([
+        "import",
+        "--provider",
+        "codex",
+        "--path",
+        &fixture,
+        "--json",
+    ]));
+    assert!(stderr.contains("failed with 1 failure"), "{stderr}");
+    assert_import_store_empty_after_atomic_failure(&temp);
+
+    let search =
+        json_output(ctx(&temp).args(["search", "after malformed", "--refresh", "off", "--json"]));
+    assert!(search["results"].as_array().unwrap().is_empty());
+}
+
+#[test]
 fn pi_cli_reports_malformed_partial_and_schema_failures() {
     let temp = tempdir();
     let fixture = provider_history_fixture("pi-malformed-partial.jsonl");
 
-    let imported =
-        json_output(ctx(&temp).args(["import", "--provider", "pi", "--path", &fixture, "--json"]));
+    let imported = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "pi",
+        "--path",
+        &fixture,
+        "--partial",
+        "--json",
+    ]));
     assert_eq!(imported["schema_version"], 1);
     assert_eq!(imported["totals"]["imported_sessions"], 1);
     assert_eq!(imported["totals"]["imported_events"], 2);
@@ -1367,4 +1396,130 @@ fn pi_cli_reports_malformed_partial_and_schema_failures() {
     let query = "after malformed line";
     let search = json_output(ctx(&temp).args(["search", query, "--provider", "pi", "--json"]));
     assert_search_provider_oracle(&search, "pi", query, 1, "message");
+}
+
+#[test]
+fn pi_cli_malformed_default_import_is_atomic() {
+    let temp = tempdir();
+    let fixture = provider_history_fixture("pi-malformed-partial.jsonl");
+
+    let stderr = failure_stderr(ctx(&temp).args([
+        "import",
+        "--provider",
+        "pi",
+        "--path",
+        &fixture,
+        "--json",
+    ]));
+    assert!(stderr.contains("failed with 2 failure"), "{stderr}");
+    assert_import_store_empty_after_atomic_failure(&temp);
+
+    let search = json_output(ctx(&temp).args([
+        "search",
+        "after malformed line",
+        "--provider",
+        "pi",
+        "--refresh",
+        "off",
+        "--json",
+    ]));
+    assert!(search["results"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn import_all_continues_after_atomic_source_failure_without_bad_rows() {
+    let temp = tempdir();
+    let codex_dir = temp.path().join(".codex/sessions/2026/07/03");
+    fs::create_dir_all(&codex_dir).unwrap();
+    fs::copy(
+        provider_history_fixture("codex-malformed-session.jsonl"),
+        codex_dir.join("bad.jsonl"),
+    )
+    .unwrap();
+    let pi_query = "pi import all survives malformed codex";
+    install_default_pi_fixture(&temp, pi_query);
+
+    let imported =
+        json_output(ctx(&temp).args(["import", "--all", "--json", "--progress", "none"]));
+    assert_eq!(imported["totals"]["failed_sources"], 1, "{imported:#}");
+    assert!(imported["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|source| { source["provider"] == "codex" && source["status"] == "failed" }));
+    assert!(imported["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|source| { source["provider"] == "pi" && source["status"] == "imported" }));
+
+    let pi_search = json_output(ctx(&temp).args([
+        "search",
+        pi_query,
+        "--provider",
+        "pi",
+        "--refresh",
+        "off",
+        "--json",
+    ]));
+    assert_search_provider_oracle(&pi_search, "pi", pi_query, 1, "message");
+    let codex_search = json_output(ctx(&temp).args([
+        "search",
+        "after malformed",
+        "--provider",
+        "codex",
+        "--refresh",
+        "off",
+        "--json",
+    ]));
+    assert!(codex_search["results"].as_array().unwrap().is_empty());
+    assert_no_history_record_for_provider(&temp, "codex");
+}
+
+fn assert_import_store_empty_after_atomic_failure(temp: &TempDir) {
+    let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
+    for table in [
+        "history_records",
+        "sessions",
+        "events",
+        "ctx_history_search",
+        "event_search",
+    ] {
+        let count: i64 = conn
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            count, 0,
+            "{table} should be empty after atomic import failure"
+        );
+    }
+}
+
+fn assert_no_history_record_for_provider(temp: &TempDir, provider: &str) {
+    let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
+    let title = format!("{provider} agent history");
+    let record_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM history_records WHERE title = ?1",
+            params![&title],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        record_count, 0,
+        "{provider} source record should not persist"
+    );
+    let search_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM ctx_history_search WHERE title = ?1",
+            params![&title],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        search_count, 0,
+        "{provider} source search row should not persist"
+    );
 }

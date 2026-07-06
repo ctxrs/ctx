@@ -57,7 +57,7 @@ pub(crate) fn run_explicit_format_import(
             validate_custom_history_jsonl_v1(path).map_err(anyhow::Error::from)?
         }
     };
-    if validation.failed > 0 {
+    if validation.failed > 0 && !args.partial {
         return Err(explicit_format_import_failure(format, &validation));
     }
 
@@ -72,13 +72,13 @@ pub(crate) fn run_explicit_format_import(
             CustomHistoryJsonlV1ImportOptions {
                 source_path: Some(path.clone()),
                 history_record_id: Some(record_id),
-                allow_partial_failures: false,
+                allow_partial_failures: args.partial,
                 ..CustomHistoryJsonlV1ImportOptions::default()
             },
         )
         .map_err(anyhow::Error::from)?,
     };
-    if summary.failed > 0 {
+    if summary.failed > 0 && !args.partial {
         return Err(explicit_format_import_failure(format, &summary));
     }
 

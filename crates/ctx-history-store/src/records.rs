@@ -106,6 +106,32 @@ impl Store {
         Ok(())
     }
 
+    pub fn delete_orphan_record(&self, record_id: Uuid) -> Result<bool> {
+        let record_id = record_id.to_string();
+        let deleted = self.conn.execute(
+            r#"
+            DELETE FROM history_records
+            WHERE id = ?1
+              AND NOT EXISTS (SELECT 1 FROM sessions WHERE history_record_id = ?1)
+              AND NOT EXISTS (SELECT 1 FROM runs WHERE history_record_id = ?1)
+              AND NOT EXISTS (SELECT 1 FROM events WHERE history_record_id = ?1)
+              AND NOT EXISTS (SELECT 1 FROM history_record_links WHERE history_record_id = ?1)
+              AND NOT EXISTS (SELECT 1 FROM summaries WHERE history_record_id = ?1)
+              AND NOT EXISTS (SELECT 1 FROM files_touched WHERE history_record_id = ?1)
+              AND NOT EXISTS (SELECT 1 FROM history_record_tags WHERE history_record_id = ?1)
+              AND NOT EXISTS (SELECT 1 FROM record_edges WHERE from_record_id = ?1 OR to_record_id = ?1)
+            "#,
+            params![&record_id],
+        )?;
+        if deleted > 0 && table_exists(&self.conn, "ctx_history_search")? {
+            self.conn.execute(
+                "DELETE FROM ctx_history_search WHERE record_id = ?1",
+                params![&record_id],
+            )?;
+        }
+        Ok(deleted > 0)
+    }
+
     pub fn upsert_records(&self, records: &[HistoryRecord]) -> Result<()> {
         if records.is_empty() {
             return Ok(());

@@ -186,6 +186,11 @@ struct ImportArgs {
     all: bool,
     #[arg(long)]
     resume: bool,
+    #[arg(
+        long,
+        help = "Allow valid rows in a source to commit when malformed rows are encountered"
+    )]
+    partial: bool,
     #[arg(long)]
     json: bool,
     #[arg(long, value_enum, default_value_t = ProgressArg::Auto)]

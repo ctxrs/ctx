@@ -90,11 +90,10 @@ use native::{import_one_source, validate_source_import_supported};
 use report::{
     custom_format_import_json, history_source_plugin_failure_json,
     history_source_plugin_import_json, import_error_is_systemic, low_disk_space_warning,
-    one_line_error, print_history_source_plugin_failed, print_history_source_plugin_imported,
-    print_import_report, print_source_failed, print_source_imported, source_failure_json,
-    source_import_json,
+    print_history_source_plugin_failed, print_history_source_plugin_imported, print_import_report,
+    print_source_failed, print_source_imported, source_failure_json, source_import_json,
 };
-pub(crate) use report::{error_summary, import_totals_json, source_error_reason};
+pub(crate) use report::{error_summary, import_totals_json, one_line_error, source_error_reason};
 pub(crate) use requests::import_history_source_plugin;
 use requests::{history_source_plugin_import_requests, import_requests, validate_import_args};
 
@@ -324,6 +323,7 @@ pub(crate) fn run_import_internal(
             &plugin_source,
             &data_root,
             args.reset_cursor,
+            args.partial,
         ) {
             Ok((summary, stats)) => {
                 totals.add(&summary, &stats);
@@ -410,6 +410,7 @@ pub(crate) fn run_import_internal(
                     Arc::clone(&source_states),
                 );
                 let full_rescan = args.resume;
+                let allow_partial_failures = args.partial;
                 let join_source = source.clone();
                 let join_stats = stats;
                 let handle = thread::spawn(move || -> ImportSourceRun {
@@ -420,6 +421,7 @@ pub(crate) fn run_import_internal(
                             &source,
                             progress_callback,
                             full_rescan,
+                            allow_partial_failures,
                         )
                         .with_context(|| {
                             format!(
@@ -549,7 +551,13 @@ pub(crate) fn run_import_internal(
             }
             let source_progress = progress.codex_import_callback(&source, completed_source_bytes);
             completed_source_bytes = completed_source_bytes.saturating_add(stats.bytes);
-            match import_one_source(&mut store, &source, source_progress, args.resume) {
+            match import_one_source(
+                &mut store,
+                &source,
+                source_progress,
+                args.resume,
+                args.partial,
+            ) {
                 Ok(summary) => {
                     totals.add(&summary, &stats);
                     progress.done(

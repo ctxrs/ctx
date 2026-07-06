@@ -115,6 +115,9 @@ pub fn import_custom_history_jsonl_v1(
             fast_event_inserts: true,
         },
     )?;
+    if summary.failed > 0 && !options.allow_partial_failures {
+        return Ok(summary);
+    }
     import_custom_history_edges(
         store,
         &normalization.edges,
@@ -157,6 +160,9 @@ pub fn import_custom_history_jsonl_v1_reader(
             fast_event_inserts: true,
         },
     )?;
+    if summary.failed > 0 && !options.allow_partial_failures {
+        return Ok(summary);
+    }
     import_custom_history_edges(
         store,
         &normalization.edges,

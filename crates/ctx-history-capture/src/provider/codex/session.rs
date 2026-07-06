@@ -500,6 +500,21 @@ pub fn import_codex_session_jsonl_tail(
 
     match import {
         Ok(summary) => {
+            if summary.failed > 0 && !options.allow_partial_failures {
+                if began_transaction {
+                    let _ = store.rollback_batch();
+                }
+                report_codex_import_progress(
+                    &options,
+                    1,
+                    total_bytes - start_offset,
+                    1,
+                    total_bytes - start_offset,
+                    &summary,
+                    true,
+                );
+                return Ok(summary);
+            }
             if began_transaction {
                 store.commit_batch()?;
             }
@@ -632,6 +647,21 @@ pub(crate) fn import_codex_session_paths_parallel_normalized(
             }
         };
         merged.merge(summary);
+        if merged.failed > 0 && !options.allow_partial_failures {
+            if in_transaction {
+                let _ = store.rollback_batch();
+            }
+            report_codex_import_progress(
+                &options,
+                total_files,
+                total_bytes,
+                completed_files,
+                completed_bytes,
+                &merged,
+                true,
+            );
+            return Ok(merged);
+        }
         completed_files += chunk.len();
         completed_bytes = completed_bytes.saturating_add(chunk_bytes);
         report_codex_import_progress(

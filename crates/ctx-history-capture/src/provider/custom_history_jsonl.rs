@@ -86,10 +86,7 @@ pub(crate) fn normalize_custom_history_jsonl_v1_reader(
             Err(err) => push_provider_import_failure(&mut summary, line_number, err.to_string()),
         }
     }
-
-    if summary.failed > 0 {
-        return Ok(custom_history_failed_normalization(summary));
-    }
+    let parse_failures = summary.failed;
 
     let mut manifest_line = None;
     let mut sources = BTreeMap::<String, (usize, CtxHistoryJsonlSourceRecord)>::new();
@@ -273,7 +270,7 @@ pub(crate) fn normalize_custom_history_jsonl_v1_reader(
         edges: &edges,
     };
     validate_custom_history_references(&mut summary, reference_index);
-    if summary.failed > 0 {
+    if summary.failed > parse_failures {
         return Ok(custom_history_failed_normalization(summary));
     }
 

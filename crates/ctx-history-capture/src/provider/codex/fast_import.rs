@@ -84,8 +84,25 @@ pub(crate) fn import_codex_session_paths_fast(
             }
             return Err(err);
         }
+        if summary.failed > 0 && !options.allow_partial_failures {
+            if in_transaction {
+                let _ = store.rollback_batch();
+            }
+            report_codex_import_progress(
+                &options,
+                total_files,
+                total_bytes,
+                completed_files,
+                completed_bytes,
+                &summary,
+                true,
+            );
+            return Ok(summary);
+        }
         files_in_transaction += 1;
-        if files_in_transaction >= CODEX_FAST_IMPORT_TRANSACTION_FILES {
+        if options.allow_partial_failures
+            && files_in_transaction >= CODEX_FAST_IMPORT_TRANSACTION_FILES
+        {
             if let Err(err) = store.commit_batch() {
                 let _ = store.rollback_batch();
                 return Err(err.into());

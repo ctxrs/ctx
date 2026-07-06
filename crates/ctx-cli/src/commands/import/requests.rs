@@ -173,6 +173,7 @@ pub(crate) fn import_history_source_plugin(
     source: &HistorySourcePluginSource,
     data_root: &Path,
     full_rescan: bool,
+    allow_partial_failures: bool,
 ) -> Result<(ProviderImportSummary, SourceStats)> {
     let record = import_record_for_history_source_plugin(source);
     let record_id = record.id;
@@ -197,11 +198,18 @@ pub(crate) fn import_history_source_plugin(
         },
     )?;
     let _plugin_stderr = &run.stderr;
-    validate_history_source_plugin_output(source, &run.stdout, &machine_id, full_rescan)?;
-    let stdout = annotate_history_source_plugin_output(source, &run.stdout)?;
+    validate_history_source_plugin_output(
+        source,
+        &run.stdout,
+        &machine_id,
+        full_rescan,
+        allow_partial_failures,
+    )?;
+    let stdout =
+        annotate_history_source_plugin_output(source, &run.stdout, allow_partial_failures)?;
     let validation = validate_custom_history_jsonl_v1_reader(Cursor::new(stdout.as_slice()))
         .map_err(anyhow::Error::from)?;
-    if validation.failed > 0 {
+    if validation.failed > 0 && !allow_partial_failures {
         return Err(history_source_plugin_import_failure(source, &validation));
     }
     let stats = SourceStats {
@@ -216,12 +224,12 @@ pub(crate) fn import_history_source_plugin(
             machine_id,
             source_path: Some(source.manifest_path.clone()),
             history_record_id: Some(record_id),
-            allow_partial_failures: false,
+            allow_partial_failures,
             ..options
         },
     )
     .map_err(anyhow::Error::from)?;
-    if summary.failed > 0 {
+    if summary.failed > 0 && !allow_partial_failures {
         return Err(history_source_plugin_import_failure(source, &summary));
     }
     Ok((summary, stats))
@@ -230,18 +238,30 @@ pub(crate) fn import_history_source_plugin(
 pub(crate) fn annotate_history_source_plugin_output(
     source: &HistorySourcePluginSource,
     stdout: &[u8],
+    allow_partial_failures: bool,
 ) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(stdout.len());
     for (line_number, line) in history_source_plugin_stdout_lines(source, stdout)? {
         if line.trim().is_empty() {
             continue;
         }
-        let mut record: CtxHistoryJsonlRecord = serde_json::from_str(line).with_context(|| {
-            format!(
-                "history source plugin {} emitted invalid ctx-history-jsonl-v1 at line {line_number}",
-                source.label()
-            )
-        })?;
+        let mut record: CtxHistoryJsonlRecord = match serde_json::from_str(line) {
+            Ok(record) => record,
+            Err(err) if allow_partial_failures => {
+                out.extend_from_slice(line.as_bytes());
+                out.push(b'\n');
+                let _ = err;
+                continue;
+            }
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "history source plugin {} emitted invalid ctx-history-jsonl-v1 at line {line_number}",
+                        source.label()
+                    )
+                });
+            }
+        };
         if let CtxHistoryJsonlRecord::Source(source_record) = &mut record {
             let mut metadata = match std::mem::take(&mut source_record.metadata) {
                 Value::Object(map) => map,
@@ -284,6 +304,7 @@ pub(crate) fn validate_history_source_plugin_output(
     stdout: &[u8],
     machine_id: &str,
     require_after_cursor: bool,
+    allow_partial_failures: bool,
 ) -> Result<()> {
     let mut saw_source = false;
     let mut saw_after_cursor = false;
@@ -291,12 +312,21 @@ pub(crate) fn validate_history_source_plugin_output(
         if line.trim().is_empty() {
             continue;
         }
-        let record: CtxHistoryJsonlRecord = serde_json::from_str(line).with_context(|| {
-            format!(
-                "history source plugin {} emitted invalid ctx-history-jsonl-v1 at line {line_number}",
-                source.label()
-            )
-        })?;
+        let record: CtxHistoryJsonlRecord = match serde_json::from_str(line) {
+            Ok(record) => record,
+            Err(err) if allow_partial_failures => {
+                let _ = err;
+                continue;
+            }
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "history source plugin {} emitted invalid ctx-history-jsonl-v1 at line {line_number}",
+                        source.label()
+                    )
+                });
+            }
+        };
         let CtxHistoryJsonlRecord::Source(source_record) = record else {
             continue;
         };
