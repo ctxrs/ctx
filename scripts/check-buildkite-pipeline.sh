@@ -22,9 +22,9 @@ if command -v ruby >/dev/null 2>&1; then
     abort "pipeline step must be a mapping" unless smoke.is_a?(Hash)
     abort "pipeline public smoke step must be keyed" unless smoke.key?("key")
     abort "missing public-smoke step" unless smoke["key"] == "public-smoke"
-    abort "public-smoke must use Buildkite hosted linux-small queue" unless smoke.dig("agents", "queue") == "linux-small"
+    abort "public-smoke must use the Buildkite hosted default queue" unless smoke.dig("agents", "queue") == "default"
     abort "public-smoke must not require self-hosted runner tags" if smoke.dig("agents", "ctx-runner-class") || smoke.dig("agents", "os") || smoke.dig("agents", "arch")
-    abort "public-smoke should run one hosted Linux job at a time" unless smoke["concurrency"] == 1 && smoke["concurrency_group"].to_s.include?("linux-small")
+    abort "public-smoke should run one hosted Linux job at a time" unless smoke["concurrency"] == 1 && smoke["concurrency_group"].to_s.include?("default-hosted")
     command = smoke["command"].to_s
     abort "public-smoke must run the Buildkite public CI script" unless command.include?("scripts/buildkite-public-ci.sh")
     required_keys = %w[
@@ -72,10 +72,10 @@ fi
 
 for required in \
   'key: "public-smoke"' \
-  'queue: "linux-small"' \
+  'queue: "default"' \
   'bash scripts/buildkite-public-ci.sh' \
   'target/ctx-artifacts/check/**' \
-  'concurrency_group: "ctx/public-smoke/linux-small"' \
+  'concurrency_group: "ctx/public-smoke/default-hosted"' \
   'CTX_RUST_TOOLCHAIN: "1.86.0"' \
   'CTX_BAZELISK_VERSION: "v1.29.0"' \
   'rustup toolchain install "${CTX_RUST_TOOLCHAIN}" --profile minimal --component rustfmt --component clippy' \

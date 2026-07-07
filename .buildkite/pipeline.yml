@@ -12,12 +12,12 @@ steps:
     command: |
       bash scripts/buildkite-public-ci.sh
     agents:
-      queue: "linux-small"
+      queue: "default"
     env:
       CARGO_BUILD_JOBS: "1"
       RUST_TEST_THREADS: "1"
     concurrency: 1
-    concurrency_group: "ctx/public-smoke/linux-small"
+    concurrency_group: "ctx/public-smoke/default-hosted"
     timeout_in_minutes: 60
     artifact_paths:
       - "bazel-testlogs/**/*.log"
