@@ -459,11 +459,7 @@ impl CommandRoot {
     }
 
     fn sends_analytics(&self) -> bool {
-        match self {
-            Self::Status(_) | Self::Sql(_) | Self::Mcp(_) => false,
-            Self::Upgrade(args) if args.background() => false,
-            _ => true,
-        }
+        !matches!(self, Self::Status(_) | Self::Sql(_) | Self::Mcp(_))
     }
 
     fn json_output(&self) -> bool {
@@ -515,6 +511,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let action = cli.command.name();
     let sends_analytics = cli.command.sends_analytics();
+    let is_setup = matches!(&cli.command, CommandRoot::Setup(_));
     let json_output = cli.command.json_output();
     let allow_background_upgrade = cli.command.allows_background_upgrade();
     let mut analytics_properties = command_analytics_properties(&cli.command);
@@ -526,7 +523,7 @@ fn main() -> Result<()> {
         .unwrap_or_else(default_data_root)
         .context("resolve ctx data root")?;
     let config = AppConfig::load(&data_root)?;
-    if matches!(&cli.command, CommandRoot::Setup(_)) && sends_analytics {
+    if is_setup && sends_analytics {
         analytics::send_cli_event(
             &data_root,
             &config,
@@ -556,9 +553,30 @@ fn main() -> Result<()> {
         CommandRoot::Docs(args) => docs::run(args),
         CommandRoot::Skill(args) => skill::run(args, &mut analytics_properties),
         CommandRoot::Mcp(args) => mcp::run(args, data_root.clone()),
-        CommandRoot::Upgrade(args) => upgrade::run(args, data_root.clone(), config.clone()),
+        CommandRoot::Upgrade(args) => upgrade::run(
+            args,
+            data_root.clone(),
+            config.clone(),
+            &mut analytics_properties,
+        ),
         CommandRoot::Doctor(args) => run_doctor(args, data_root.clone(), &mut analytics_properties),
     };
+    if is_setup {
+        analytics::insert_bool(&mut analytics_properties, "setup_completed", result.is_ok());
+        analytics::insert_str(
+            &mut analytics_properties,
+            "setup_result",
+            if result.is_ok() { "success" } else { "failure" },
+        );
+    }
+    if result.is_ok() && allow_background_upgrade {
+        upgrade::maybe_spawn_auto_upgrade(
+            &data_root,
+            &config,
+            json_output,
+            &mut analytics_properties,
+        );
+    }
     if sends_analytics {
         analytics::send_cli_event(
             &data_root,
@@ -571,9 +589,6 @@ fn main() -> Result<()> {
                 properties: analytics_properties,
             },
         );
-    }
-    if result.is_ok() && allow_background_upgrade {
-        upgrade::maybe_spawn_auto_upgrade(&data_root, &config, json_output);
     }
     result
 }
@@ -717,6 +732,8 @@ fn command_analytics_properties(command: &CommandRoot) -> AnalyticsProperties {
         CommandRoot::Upgrade(args) => {
             analytics::insert_bool(&mut properties, "dry_run", args.dry_run);
             analytics::insert_bool(&mut properties, "background", args.background());
+            analytics::insert_str(&mut properties, "upgrade_mode", args.mode());
+            analytics::insert_str(&mut properties, "upgrade_operation", args.operation());
         }
     }
     properties

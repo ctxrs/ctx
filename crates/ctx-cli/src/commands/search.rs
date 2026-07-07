@@ -122,6 +122,26 @@ pub(crate) fn run_search(
 
     let db_path = database_path(data_root.clone());
     let had_existing_store = db_path.exists();
+    let indexed_content_before_search = if had_existing_store {
+        existing_store_indexed_content(&db_path)
+    } else {
+        Some(false)
+    };
+    analytics::insert_bool(
+        analytics_properties,
+        "had_existing_store_before_search",
+        had_existing_store,
+    );
+    analytics::insert_bool(
+        analytics_properties,
+        "indexed_content_before_search_known",
+        indexed_content_before_search.is_some(),
+    );
+    analytics::insert_bool(
+        analytics_properties,
+        "had_indexed_content_before_search",
+        indexed_content_before_search.unwrap_or(false),
+    );
     let refresh_started = Instant::now();
     let refresh = refresh_before_search(&args, &data_root)?;
     analytics::insert_duration(
@@ -160,7 +180,17 @@ pub(crate) fn run_search(
     } else {
         Store::open(&db_path)?
     };
+    analytics::insert_bool(
+        analytics_properties,
+        "store_created_by_search",
+        !had_existing_store && db_path.exists(),
+    );
     insert_store_analytics_counts(analytics_properties, &store)?;
+    analytics::insert_bool(
+        analytics_properties,
+        "has_indexed_content_after_search",
+        indexed_history_item_count(&store)? > 0,
+    );
     let source_identity = SourceIdentityFilterArgs::from(&args);
     let query = args.query.unwrap_or_default();
     let query_term_count = query
@@ -299,6 +329,14 @@ pub(crate) fn run_search(
     );
     Ok(())
 }
+
+fn existing_store_indexed_content(db_path: &Path) -> Option<bool> {
+    open_existing_store_read_only(db_path, "ctx search analytics preflight")
+        .and_then(|store| indexed_history_item_count(&store))
+        .ok()
+        .map(|indexed_items| indexed_items > 0)
+}
+
 pub(crate) fn refresh_before_search(
     args: &SearchArgs,
     data_root: &Path,

@@ -6,9 +6,10 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Args, Subcommand};
+use ctx_history_core::utc_now;
 use serde_json::{json, Value};
 
-use crate::{config::AppConfig, net};
+use crate::{analytics, analytics::AnalyticsProperties, config::AppConfig, net};
 
 use super::install::{
     apply_artifact, current_install_path, install_marker_for_plan,
@@ -20,8 +21,8 @@ use super::metadata::{
 };
 use super::path::{path_diagnostics, PathDiagnostics};
 use super::state::{
-    append_upgrade_log, read_json_file, set_auto_mode, should_check_now, write_state_checked,
-    write_state_error, UpgradeLock, STATE_FILE,
+    append_upgrade_log, atomic_write_json, now_unix_s, read_json_file, set_auto_mode,
+    should_check_now, write_state_checked, write_state_error, UpgradeLock, STATE_FILE,
 };
 use super::{env_flag, platform_key, version_gt, UpgradePlan};
 
@@ -86,6 +87,24 @@ impl UpgradeArgs {
     pub fn background(&self) -> bool {
         self.background
     }
+
+    pub fn mode(&self) -> &'static str {
+        if self.background {
+            "auto"
+        } else {
+            "manual"
+        }
+    }
+
+    pub fn operation(&self) -> &'static str {
+        match &self.command {
+            Some(UpgradeCommand::Check(_)) => "check",
+            Some(UpgradeCommand::Status(_)) => "status",
+            Some(UpgradeCommand::Enable) => "enable",
+            Some(UpgradeCommand::Disable) => "disable",
+            None => "apply",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -125,65 +144,158 @@ impl UpgradeOutcome {
     }
 }
 
-pub fn run(args: UpgradeArgs, data_root: PathBuf, config: AppConfig) -> Result<()> {
+pub fn run(
+    args: UpgradeArgs,
+    data_root: PathBuf,
+    config: AppConfig,
+    analytics_properties: &mut AnalyticsProperties,
+) -> Result<()> {
     if args.background {
-        return run_background_apply(&data_root, &config);
+        return run_background_apply(&data_root, &config, analytics_properties);
     }
-    match &args.command {
-        Some(UpgradeCommand::Check(check)) => {
-            let channel = check.channel.as_deref().or(args.channel.as_deref());
-            let outcome = check_upgrade(&data_root, &config, channel, "upgrade_check")?;
-            render_outcome(&outcome, check.json || args.json)
+    let result = (|| -> Result<()> {
+        match &args.command {
+            Some(UpgradeCommand::Check(check)) => {
+                let channel = check.channel.as_deref().or(args.channel.as_deref());
+                let outcome = check_upgrade(&data_root, &config, channel, "upgrade_check")?;
+                insert_upgrade_outcome_analytics(analytics_properties, &outcome);
+                render_outcome(&outcome, check.json || args.json)
+            }
+            Some(UpgradeCommand::Status(status)) => {
+                insert_upgrade_simple_analytics(analytics_properties, "status_checked");
+                render_status(&data_root, status.json || args.json)
+            }
+            Some(UpgradeCommand::Enable) => {
+                insert_upgrade_simple_analytics(analytics_properties, "auto_enabled");
+                set_auto_mode(&data_root, "apply")
+            }
+            Some(UpgradeCommand::Disable) => {
+                insert_upgrade_simple_analytics(analytics_properties, "auto_disabled");
+                set_auto_mode(&data_root, "off")
+            }
+            None => {
+                let outcome = apply_upgrade(
+                    &data_root,
+                    &config,
+                    args.channel.as_deref(),
+                    args.dry_run,
+                    false,
+                )?;
+                insert_upgrade_outcome_analytics(analytics_properties, &outcome);
+                render_outcome(&outcome, args.json)
+            }
         }
-        Some(UpgradeCommand::Status(status)) => render_status(&data_root, status.json || args.json),
-        Some(UpgradeCommand::Enable) => set_auto_mode(&data_root, "apply"),
-        Some(UpgradeCommand::Disable) => set_auto_mode(&data_root, "off"),
-        None => {
-            let outcome = apply_upgrade(
-                &data_root,
-                &config,
-                args.channel.as_deref(),
-                args.dry_run,
-                false,
-            )?;
-            render_outcome(&outcome, args.json)
-        }
+    })();
+    if let Err(error) = &result {
+        insert_upgrade_error_analytics(analytics_properties, error);
     }
+    result
 }
 
-pub fn maybe_spawn_auto_upgrade(data_root: &Path, config: &AppConfig, json_output: bool) {
-    if json_output || !auto_mode_is_apply(config) || env_flag("CI") || env_flag("CTX_UPGRADE_OFF") {
+pub fn maybe_spawn_auto_upgrade(
+    data_root: &Path,
+    config: &AppConfig,
+    json_output: bool,
+    analytics_properties: &mut AnalyticsProperties,
+) {
+    analytics::insert_bool(analytics_properties, "auto_upgrade_probe", true);
+    analytics::insert_bool(analytics_properties, "auto_upgrade_due", false);
+    analytics::insert_bool(analytics_properties, "auto_upgrade_spawned", false);
+    analytics::insert_str(
+        analytics_properties,
+        "upgrade_channel",
+        upgrade_channel_bucket(&config.upgrade.channel),
+    );
+    if json_output {
+        analytics::insert_str(
+            analytics_properties,
+            "auto_upgrade_spawn_status",
+            "json_output",
+        );
         return;
     }
-    if env_flag("CTX_DISABLE_AUTO_UPGRADE") || env_flag("CTX_UPGRADE_BACKGROUND_CHILD") {
+    if !auto_mode_is_apply(config) {
+        analytics::insert_str(
+            analytics_properties,
+            "auto_upgrade_spawn_status",
+            "auto_disabled",
+        );
+        return;
+    }
+    if env_flag("CI") {
+        analytics::insert_str(analytics_properties, "auto_upgrade_spawn_status", "ci");
+        return;
+    }
+    if env_flag("CTX_UPGRADE_OFF") || env_flag("CTX_DISABLE_AUTO_UPGRADE") {
+        analytics::insert_str(
+            analytics_properties,
+            "auto_upgrade_spawn_status",
+            "env_disabled",
+        );
+        return;
+    }
+    if env_flag("CTX_UPGRADE_BACKGROUND_CHILD") {
+        analytics::insert_str(
+            analytics_properties,
+            "auto_upgrade_spawn_status",
+            "background_child",
+        );
         return;
     }
     if !should_check_now(data_root, config.upgrade.interval) {
+        analytics::insert_str(analytics_properties, "auto_upgrade_spawn_status", "not_due");
         return;
     }
+    analytics::insert_bool(analytics_properties, "auto_upgrade_due", true);
     if read_verified_install_marker_for_current_exe().is_err() {
+        analytics::insert_str(
+            analytics_properties,
+            "auto_upgrade_spawn_status",
+            "marker_invalid",
+        );
         return;
     }
     let Ok(current_exe) = current_install_path() else {
+        analytics::insert_str(
+            analytics_properties,
+            "auto_upgrade_spawn_status",
+            "current_exe_error",
+        );
         return;
     };
     let mut command = Command::new(current_exe);
     command.arg("--data-root").arg(data_root);
-    let _ = command
+    let spawn_result = command
         .args(["upgrade", "--background"])
         .env("CTX_UPGRADE_BACKGROUND_CHILD", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn();
+    if spawn_result.is_ok() {
+        analytics::insert_bool(analytics_properties, "auto_upgrade_spawned", true);
+        analytics::insert_str(analytics_properties, "auto_upgrade_spawn_status", "spawned");
+    } else {
+        analytics::insert_str(
+            analytics_properties,
+            "auto_upgrade_spawn_status",
+            "spawn_failed",
+        );
+    }
 }
 
-fn run_background_apply(data_root: &Path, config: &AppConfig) -> Result<()> {
+fn run_background_apply(
+    data_root: &Path,
+    config: &AppConfig,
+    analytics_properties: &mut AnalyticsProperties,
+) -> Result<()> {
     if !auto_mode_is_apply(config) || env_flag("CI") {
+        insert_upgrade_simple_analytics(analytics_properties, "skipped");
         return Ok(());
     }
     match apply_upgrade(data_root, config, None, false, true) {
         Ok(outcome) => {
+            insert_upgrade_outcome_analytics(analytics_properties, &outcome);
             append_upgrade_log(data_root, &outcome.message);
             Ok(())
         }
@@ -191,13 +303,119 @@ fn run_background_apply(data_root: &Path, config: &AppConfig) -> Result<()> {
             let message = format!("{error:#}");
             let _ = write_state_error(data_root, &message);
             append_upgrade_log(data_root, &format!("background upgrade failed: {message}"));
-            Ok(())
+            insert_upgrade_error_analytics(analytics_properties, &error);
+            Err(error)
         }
+    }
+}
+
+fn insert_upgrade_outcome_analytics(
+    analytics_properties: &mut AnalyticsProperties,
+    outcome: &UpgradeOutcome,
+) {
+    analytics::insert_str(analytics_properties, "upgrade_status", outcome.status);
+    analytics::insert_bool(analytics_properties, "upgrade_applied", outcome.applied);
+    analytics::insert_bool(
+        analytics_properties,
+        "upgrade_scheduled",
+        outcome.status == "scheduled",
+    );
+    analytics::insert_bool(analytics_properties, "update_available", false);
+    analytics::insert_bool(analytics_properties, "managed_install", false);
+    analytics::insert_bool(analytics_properties, "self_upgrade_allowed", false);
+    analytics::insert_bool(analytics_properties, "auto_upgrade_allowed", false);
+    analytics::insert_count_bucket(
+        analytics_properties,
+        "upgrade_warning_count_bucket",
+        outcome.warnings.len() as u64,
+    );
+    if let Some(plan) = &outcome.plan {
+        analytics::insert_str(
+            analytics_properties,
+            "upgrade_channel",
+            upgrade_channel_bucket(&plan.channel),
+        );
+        analytics::insert_bool(
+            analytics_properties,
+            "update_available",
+            plan.update_available,
+        );
+        analytics::insert_bool(analytics_properties, "managed_install", plan.managed);
+        analytics::insert_bool(
+            analytics_properties,
+            "self_upgrade_allowed",
+            plan.metadata.self_upgrade_allowed,
+        );
+        analytics::insert_bool(
+            analytics_properties,
+            "auto_upgrade_allowed",
+            plan.metadata.auto_upgrade_allowed,
+        );
+    }
+}
+
+fn insert_upgrade_simple_analytics(
+    analytics_properties: &mut AnalyticsProperties,
+    status: &'static str,
+) {
+    analytics::insert_str(analytics_properties, "upgrade_status", status);
+    analytics::insert_bool(analytics_properties, "upgrade_applied", false);
+    analytics::insert_bool(analytics_properties, "upgrade_scheduled", false);
+    analytics::insert_bool(analytics_properties, "update_available", false);
+}
+
+fn insert_upgrade_error_analytics(
+    analytics_properties: &mut AnalyticsProperties,
+    error: &anyhow::Error,
+) {
+    analytics::insert_str(analytics_properties, "upgrade_status", "failed");
+    analytics::insert_bool(analytics_properties, "upgrade_applied", false);
+    analytics::insert_bool(analytics_properties, "upgrade_scheduled", false);
+    analytics::insert_str(
+        analytics_properties,
+        "upgrade_failure_kind",
+        upgrade_failure_kind(error),
+    );
+}
+
+fn upgrade_failure_kind(error: &anyhow::Error) -> &'static str {
+    let text = format!("{error:#}").to_ascii_lowercase();
+    if text.contains("upgrade lock") {
+        "lock_failed"
+    } else if text.contains("not installed by the hosted installer")
+        || text.contains("install marker")
+        || text.contains("unmanaged")
+    {
+        "unmanaged_install"
+    } else if text.contains("metadata") && text.contains("download") {
+        "metadata_fetch"
+    } else if text.contains("signature") {
+        "signature_verify"
+    } else if text.contains("metadata") {
+        "metadata_invalid"
+    } else if text.contains("checksum") || text.contains("sha") {
+        "artifact_verify"
+    } else if text.contains("download") {
+        "artifact_download"
+    } else if text.contains("does not allow") {
+        "policy_disallowed"
+    } else {
+        "apply_failed"
     }
 }
 
 fn auto_mode_is_apply(config: &AppConfig) -> bool {
     config.upgrade.auto.eq_ignore_ascii_case("apply")
+}
+
+fn upgrade_channel_bucket(channel: &str) -> &'static str {
+    match channel.trim().to_ascii_lowercase().as_str() {
+        "stable" => "stable",
+        "beta" => "beta",
+        "canary" => "canary",
+        "dev" => "dev",
+        _ => "other",
+    }
 }
 
 fn check_upgrade(
@@ -245,6 +463,7 @@ fn apply_upgrade(
         Ok(lock) => lock,
         Err(error) if background => {
             append_upgrade_log(data_root, &format!("background upgrade skipped: {error}"));
+            let _ = write_background_skip_state(data_root, "locked");
             return Ok(UpgradeOutcome {
                 command: "upgrade",
                 status: "locked",
@@ -337,6 +556,17 @@ fn apply_upgrade(
         dry_run: false,
         warnings,
     })
+}
+
+fn write_background_skip_state(data_root: &Path, status: &str) -> Result<()> {
+    let body = json!({
+        "schema_version": 1,
+        "status": status,
+        "checked_at": utc_now(),
+        "last_checked_unix_s": now_unix_s(),
+        "update_available": false,
+    });
+    atomic_write_json(&data_root.join(STATE_FILE), &body)
 }
 
 fn build_upgrade_plan(

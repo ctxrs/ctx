@@ -124,6 +124,12 @@ pub(crate) fn run_setup(
         inventory_totals.source_bytes,
     );
     let indexed_items = indexed_history_item_count(&setup_store)?;
+    insert_store_analytics_counts(analytics_properties, &setup_store)?;
+    analytics::insert_bool(
+        analytics_properties,
+        "has_indexed_content_after_setup",
+        setup_has_indexed_content(indexed_items),
+    );
 
     if args.json {
         print_json(json!({
