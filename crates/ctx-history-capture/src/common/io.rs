@@ -100,29 +100,61 @@ pub(crate) fn read_provider_jsonl_line(
     reader: &mut impl BufRead,
     buffer: &mut Vec<u8>,
 ) -> Result<bool> {
+    match read_provider_jsonl_line_or_skip_oversized(reader, buffer)? {
+        ProviderJsonlLineRead::Eof => Ok(false),
+        ProviderJsonlLineRead::Line { .. } => Ok(true),
+        ProviderJsonlLineRead::Oversized { .. } => Err(provider_jsonl_line_too_large()),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProviderJsonlLineRead {
+    Eof,
+    Line { bytes: usize },
+    Oversized { bytes: usize },
+}
+
+pub(crate) fn read_provider_jsonl_line_or_skip_oversized(
+    reader: &mut impl BufRead,
+    buffer: &mut Vec<u8>,
+) -> Result<ProviderJsonlLineRead> {
     buffer.clear();
     let mut total = 0usize;
     loop {
         let available = reader.fill_buf()?;
         if available.is_empty() {
-            return Ok(total > 0);
+            return Ok(if total > 0 {
+                ProviderJsonlLineRead::Line { bytes: total }
+            } else {
+                ProviderJsonlLineRead::Eof
+            });
         }
         if let Some(newline_index) = available.iter().position(|byte| *byte == b'\n') {
             let bytes_to_consume = newline_index + 1;
             if total.saturating_add(bytes_to_consume) > MAX_PROVIDER_JSONL_LINE_BYTES {
                 reader.consume(bytes_to_consume);
-                return Err(provider_jsonl_line_too_large());
+                buffer.clear();
+                return Ok(ProviderJsonlLineRead::Oversized {
+                    bytes: total.saturating_add(bytes_to_consume),
+                });
             }
             buffer.extend_from_slice(&available[..bytes_to_consume]);
             reader.consume(bytes_to_consume);
-            return Ok(true);
+            return Ok(ProviderJsonlLineRead::Line {
+                bytes: total.saturating_add(bytes_to_consume),
+            });
         }
 
         let bytes_to_consume = available.len();
         if total.saturating_add(bytes_to_consume) > MAX_PROVIDER_JSONL_LINE_BYTES {
             reader.consume(bytes_to_consume);
-            discard_provider_jsonl_line(reader)?;
-            return Err(provider_jsonl_line_too_large());
+            let discarded = discard_provider_jsonl_line(reader)?;
+            buffer.clear();
+            return Ok(ProviderJsonlLineRead::Oversized {
+                bytes: total
+                    .saturating_add(bytes_to_consume)
+                    .saturating_add(discarded),
+            });
         }
         buffer.extend_from_slice(available);
         reader.consume(bytes_to_consume);
@@ -130,11 +162,12 @@ pub(crate) fn read_provider_jsonl_line(
     }
 }
 
-pub(crate) fn discard_provider_jsonl_line(reader: &mut impl BufRead) -> Result<()> {
+pub(crate) fn discard_provider_jsonl_line(reader: &mut impl BufRead) -> Result<usize> {
+    let mut discarded = 0usize;
     loop {
         let available = reader.fill_buf()?;
         if available.is_empty() {
-            return Ok(());
+            return Ok(discarded);
         }
         let bytes_to_consume = available
             .iter()
@@ -145,8 +178,9 @@ pub(crate) fn discard_provider_jsonl_line(reader: &mut impl BufRead) -> Result<(
             .get(bytes_to_consume.saturating_sub(1))
             .is_some_and(|byte| *byte == b'\n');
         reader.consume(bytes_to_consume);
+        discarded = discarded.saturating_add(bytes_to_consume);
         if found_newline {
-            return Ok(());
+            return Ok(discarded);
         }
     }
 }

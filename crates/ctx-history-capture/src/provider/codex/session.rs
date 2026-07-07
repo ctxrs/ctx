@@ -14,6 +14,7 @@ use crate::CodexSessionJsonlAdapter;
 
 use crate::common::io::{
     collect_jsonl_paths, ensure_regular_provider_transcript_file, read_provider_jsonl_line,
+    read_provider_jsonl_line_or_skip_oversized, ProviderJsonlLineRead,
 };
 use crate::provider::importer::{
     import_normalized_provider_captures, import_provider_capture_line,
@@ -64,8 +65,19 @@ impl ProviderCaptureAdapter for CodexSessionJsonlAdapter {
 
         let mut line_number = 0usize;
         let mut line = Vec::new();
-        while read_provider_jsonl_line(&mut reader, &mut line)? {
-            line_number += 1;
+        loop {
+            match read_provider_jsonl_line_or_skip_oversized(&mut reader, &mut line)? {
+                ProviderJsonlLineRead::Eof => break,
+                ProviderJsonlLineRead::Line { .. } => {
+                    line_number += 1;
+                }
+                ProviderJsonlLineRead::Oversized { .. } => {
+                    line_number += 1;
+                    result.summary.skipped += 1;
+                    result.summary.skipped_events += 1;
+                    continue;
+                }
+            }
             if line.iter().all(u8::is_ascii_whitespace) {
                 continue;
             }
@@ -445,12 +457,20 @@ pub fn import_codex_session_jsonl_tail(
         let header = codex_session_header(header_value)?;
 
         while position < start_offset {
-            if !read_provider_jsonl_line(&mut reader, &mut line)? {
-                return Ok(summary);
+            match read_provider_jsonl_line_or_skip_oversized(&mut reader, &mut line)? {
+                ProviderJsonlLineRead::Eof => return Ok(summary),
+                ProviderJsonlLineRead::Line { bytes } => {
+                    line_number += 1;
+                    position = position.saturating_add(bytes as u64);
+                }
+                ProviderJsonlLineRead::Oversized { bytes } => {
+                    line_number += 1;
+                    position = position.saturating_add(bytes as u64);
+                    summary.skipped += 1;
+                    summary.skipped_events += 1;
+                    continue;
+                }
             }
-            line_number += 1;
-            let read = line.len();
-            position = position.saturating_add(read as u64);
         }
 
         store.begin_immediate_batch()?;
@@ -467,10 +487,30 @@ pub fn import_codex_session_jsonl_tail(
 
         let mut call_contexts: BTreeMap<String, CodexToolCallContext> = BTreeMap::new();
         let mut completed_bytes = 0u64;
-        while read_provider_jsonl_line(&mut reader, &mut line)? {
-            line_number += 1;
-            let read = line.len();
-            completed_bytes = completed_bytes.saturating_add(read as u64);
+        loop {
+            match read_provider_jsonl_line_or_skip_oversized(&mut reader, &mut line)? {
+                ProviderJsonlLineRead::Eof => break,
+                ProviderJsonlLineRead::Line { bytes } => {
+                    line_number += 1;
+                    completed_bytes = completed_bytes.saturating_add(bytes as u64);
+                }
+                ProviderJsonlLineRead::Oversized { bytes } => {
+                    line_number += 1;
+                    completed_bytes = completed_bytes.saturating_add(bytes as u64);
+                    summary.skipped += 1;
+                    summary.skipped_events += 1;
+                    report_codex_import_progress(
+                        &options,
+                        1,
+                        total_bytes - start_offset,
+                        0,
+                        completed_bytes,
+                        &summary,
+                        false,
+                    );
+                    continue;
+                }
+            }
             if line.iter().all(u8::is_ascii_whitespace) {
                 continue;
             }

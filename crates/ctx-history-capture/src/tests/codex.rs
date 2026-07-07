@@ -627,16 +627,108 @@ fn codex_session_tree_rejects_symlinked_jsonl_files() {
     assert!(store.list_sessions().unwrap().is_empty());
 }
 
+fn write_codex_session_with_oversized_event(path: &Path) {
+    fs::write(
+        path,
+        [
+            jsonl_line(json!({
+                "timestamp": "2026-07-03T12:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "codex-oversized-skip",
+                    "timestamp": "2026-07-03T12:00:00Z",
+                    "cwd": "/workspace",
+                    "originator": "codex-cli"
+                }
+            })),
+            jsonl_line(json!({
+                "timestamp": "2026-07-03T12:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "before oversized event"}]
+                }
+            })),
+            jsonl_line(json!({
+                "timestamp": "2026-07-03T12:00:02Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "patch_apply_end",
+                    "stdout": "x".repeat(MAX_PROVIDER_JSONL_LINE_BYTES + 1),
+                    "stderr": "",
+                    "success": true
+                }
+            })),
+            jsonl_line(json!({
+                "timestamp": "2026-07-03T12:00:03Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "after oversized event"}]
+                }
+            })),
+        ]
+        .concat(),
+    )
+    .unwrap();
+}
+
 #[test]
-fn codex_session_jsonl_rejects_oversized_line() {
+fn codex_session_jsonl_skips_oversized_line_and_normalizes_remaining_events() {
     let temp = tempdir();
     let path = temp.path().join("oversized-codex.jsonl");
-    write_oversized_jsonl_line(&path);
+    write_codex_session_with_oversized_event(&path);
 
-    let err = CodexSessionJsonlAdapter
+    let normalized = CodexSessionJsonlAdapter
         .normalize_path(&path, &ProviderAdapterContext::default())
-        .unwrap_err();
-    assert!(err.to_string().contains("provider JSONL line exceeds"));
+        .unwrap();
+
+    assert_eq!(
+        normalized.summary.failed, 0,
+        "{:?}",
+        normalized.summary.failures
+    );
+    assert_eq!(normalized.summary.skipped, 1);
+    assert_eq!(normalized.summary.skipped_events, 1);
+    assert_eq!(normalized.captures.len(), 3);
+}
+
+#[test]
+fn codex_session_jsonl_fast_import_skips_one_oversized_line() {
+    let temp = tempdir();
+    let path = temp.path().join("oversized-codex.jsonl");
+    write_codex_session_with_oversized_event(&path);
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let summary = import_codex_session_jsonl(
+        &path,
+        &mut store,
+        CodexSessionImportOptions {
+            imported_at: "2026-07-03T12:30:00Z".parse().unwrap(),
+            ..CodexSessionImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+    assert_eq!(summary.skipped_events, 1);
+    assert_eq!(summary.imported_sessions, 1);
+    assert_eq!(summary.imported_events, 2);
+
+    let session_id =
+        stored_provider_session_id(&store, CaptureProvider::Codex, "codex-oversized-skip");
+    let events = store.events_for_session(session_id).unwrap();
+    assert_eq!(events.len(), 2);
+    let payloads = events
+        .iter()
+        .map(|event| event.payload.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(payloads.contains("before oversized event"), "{payloads}");
+    assert!(payloads.contains("after oversized event"), "{payloads}");
+    assert!(!payloads.contains("patch_apply_end"), "{payloads}");
 }
 
 #[test]

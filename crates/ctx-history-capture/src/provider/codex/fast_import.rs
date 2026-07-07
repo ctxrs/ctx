@@ -19,7 +19,10 @@ use crate::provider::importer::{
     provider_session_uuid, provider_source_identity, provider_source_root, ProviderCommandRunInput,
 };
 
-use crate::common::io::{ensure_regular_provider_transcript_file, read_provider_jsonl_line};
+use crate::common::io::{
+    ensure_regular_provider_transcript_file, read_provider_jsonl_line_or_skip_oversized,
+    ProviderJsonlLineRead,
+};
 use crate::provider::importer::{
     import_provider_capture_line, import_provider_file_touched_line, provider_scoped_source_uuid,
     provider_sync_metadata, resolve_pending_provider_edges, ProviderImportCaches,
@@ -224,8 +227,19 @@ pub(crate) fn import_codex_session_path_fast(
     let mut call_contexts: BTreeMap<String, CodexToolCallContext> = BTreeMap::new();
     let mut line_number = 0usize;
     let mut line = Vec::new();
-    while read_provider_jsonl_line(&mut reader, &mut line)? {
-        line_number += 1;
+    loop {
+        match read_provider_jsonl_line_or_skip_oversized(&mut reader, &mut line)? {
+            ProviderJsonlLineRead::Eof => break,
+            ProviderJsonlLineRead::Line { .. } => {
+                line_number += 1;
+            }
+            ProviderJsonlLineRead::Oversized { .. } => {
+                line_number += 1;
+                summary.skipped += 1;
+                summary.skipped_events += 1;
+                continue;
+            }
+        }
         if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
