@@ -32,7 +32,6 @@ install_ubuntu_tools() {
     golang-go \
     jq \
     nodejs \
-    npm \
     openssl \
     pkg-config \
     python3 \
