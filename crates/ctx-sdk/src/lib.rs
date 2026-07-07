@@ -816,7 +816,7 @@ exit 2
             Some(&json!(2))
         );
         assert!(
-            search.extra.get("retrieval").is_none(),
+            !search.extra.contains_key("retrieval"),
             "top-level retrieval should be typed, not left in extra"
         );
         assert_eq!(

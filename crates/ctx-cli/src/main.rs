@@ -585,7 +585,11 @@ impl CommandRoot {
     }
 
     fn sends_analytics(&self) -> bool {
-        !matches!(self, Self::Status(_) | Self::Sql(_) | Self::Mcp(_))
+        match self {
+            Self::Status(_) | Self::Sql(_) | Self::Mcp(_) => false,
+            Self::Daemon(args) => !matches!(&args.command, DaemonCommand::Status(_)),
+            _ => true,
+        }
     }
 
     fn json_output(&self) -> bool {

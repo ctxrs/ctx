@@ -209,10 +209,8 @@ pub(crate) fn candidate_display_hit(
         let hit = event_hit(event, &candidate.context);
         filters
             .provider
-            .map_or(true, |provider| hit.provider == Some(provider))
-            && filters
-                .session
-                .map_or(true, |id| hit.session_id == Some(id))
+            .is_none_or(|provider| hit.provider == Some(provider))
+            && filters.session.is_none_or(|id| hit.session_id == Some(id))
             && hit_matches_history_source_filter(&hit, filters)
     }) {
         return Some(event_hit(event, &candidate.context));
@@ -229,8 +227,8 @@ pub(crate) fn candidate_display_hit(
         .find(|session| {
             filters
                 .provider
-                .map_or(true, |provider| session.provider == provider)
-                && filters.session.map_or(true, |id| session.id == id)
+                .is_none_or(|provider| session.provider == provider)
+                && filters.session.is_none_or(|id| session.id == id)
                 && hit_matches_history_source_filter(
                     &session_hit(session, &candidate.context),
                     filters,

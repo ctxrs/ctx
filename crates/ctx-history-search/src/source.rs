@@ -51,8 +51,8 @@ pub(crate) fn record_context_display_hit(
             session_matches_agent_scope(session, filters)
                 && filters
                     .provider
-                    .map_or(true, |provider| session.provider == provider)
-                && filters.session.map_or(true, |id| session.id == id)
+                    .is_none_or(|provider| session.provider == provider)
+                && filters.session.is_none_or(|id| session.id == id)
                 && hit_matches_history_source_filter(&session_hit(session, context), filters)
         })
         .or_else(|| {

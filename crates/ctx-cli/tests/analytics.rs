@@ -114,6 +114,41 @@ fn status_does_not_emit_analytics_or_create_identities_when_enabled() {
 }
 
 #[test]
+fn daemon_status_does_not_emit_analytics_or_create_identities_when_enabled() {
+    let temp = tempdir();
+    let events_path = temp.path().join("analytics.jsonl");
+    let home = temp.path().join("home");
+    let state = temp.path().join("state");
+    let data_root = temp.path().join("data");
+    fs::create_dir_all(&home).unwrap();
+
+    ctx(&temp)
+        .args(["daemon", "status"])
+        .env("CTX_DATA_ROOT", &data_root)
+        .env("HOME", &home)
+        .env("XDG_STATE_HOME", &state)
+        .env("LOCALAPPDATA", &state)
+        .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
+        .env("CTX_UPGRADE_OFF", "1")
+        .assert()
+        .success();
+
+    assert!(
+        !events_path.exists(),
+        "daemon status must not write analytics events"
+    );
+    assert!(
+        !data_root.exists(),
+        "daemon status must not create the data root for install identity"
+    );
+    assert!(
+        !expected_device_path(&home, &state).exists(),
+        "daemon status must not create a device identity"
+    );
+}
+
+#[test]
 fn analytics_device_id_persists_across_data_roots() {
     let temp = tempdir();
     let home = temp.path().join("home");

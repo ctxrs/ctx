@@ -603,7 +603,7 @@ pub(crate) fn format_count(value: usize) -> String {
     for (index, ch) in digits.chars().enumerate() {
         if index > 0
             && (index == first_group_len
-                || (index > first_group_len && (index - first_group_len) % 3 == 0))
+                || (index > first_group_len && (index - first_group_len).is_multiple_of(3)))
         {
             out.push(',');
         }

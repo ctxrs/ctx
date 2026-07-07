@@ -18,7 +18,10 @@ use std::sync::{
 
 use anyhow::{anyhow, Context, Result};
 #[cfg(ctx_semantic_fastembed)]
-use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
+use fastembed::{
+    EmbeddingModel, InitOptionsUserDefined, Pooling, TextEmbedding, TokenizerFiles,
+    UserDefinedEmbeddingModel,
+};
 use rusqlite::{
     params, params_from_iter, types::Value as SqlValue, Connection, OpenFlags, OptionalExtension,
 };
@@ -35,7 +38,7 @@ use crate::commands::{
 };
 use crate::config::{self, AppConfig, CONFIG_FILE};
 use crate::output::{compact_json, print_json};
-use crate::store_util::open_existing_store_read_only;
+use crate::store_util::{open_existing_store_read_only, open_existing_store_snapshot_read_only};
 use crate::{
     DaemonArgs, DaemonCommand, DaemonRunArgs, DaemonStartModeArg, DaemonTriggerCommandArg,
     JsonArgs, SearchBackendArg,
@@ -321,6 +324,7 @@ impl SemanticRetrievalDiagnostics {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn search_packet_with_backend(
     store: &Store,
     data_root: &Path,
@@ -457,6 +461,7 @@ pub(crate) fn search_packet_with_backend(
     Ok((packet, retrieval))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn auto_search_packet(
     store: &Store,
     options: &ctx_history_search::PacketOptions,
@@ -506,6 +511,12 @@ fn auto_search_packet(
             return Ok(lexical_packet);
         }
     };
+
+    if auto_candidate_ids.is_empty() && !semantic_worker_coverage_ready(worker_report) {
+        auto_diagnostics.auto_hybrid_skipped = Some("semantic_coverage_not_ready");
+        retrieval.diagnostics = Some(auto_diagnostics);
+        return Ok(lexical_packet);
+    }
 
     if !worker_report.model_cache_available || !semantic_model_cache_available(semantic_cache_dir) {
         auto_diagnostics.auto_hybrid_skipped = Some("model_cache_missing");
@@ -638,6 +649,7 @@ fn auto_search_packet(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn semantic_or_hybrid_search_packet(
     store: &Store,
     options: &ctx_history_search::PacketOptions,
@@ -850,8 +862,15 @@ fn register_sqlite_vec_auto_extension() -> bool {
 
     REGISTER.call_once(|| {
         let rc = unsafe {
-            rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
-                sqlite_vec::sqlite3_vec_init as *const (),
+            rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<
+                *const (),
+                unsafe extern "C" fn(
+                    *mut rusqlite::ffi::sqlite3,
+                    *mut *mut i8,
+                    *const rusqlite::ffi::sqlite3_api_routines,
+                ) -> i32,
+            >(
+                sqlite_vec::sqlite3_vec_init as *const ()
             )))
         };
         AVAILABLE.store(rc == rusqlite::ffi::SQLITE_OK, Ordering::Relaxed);
@@ -1292,7 +1311,30 @@ impl SemanticVectorStore {
             .optional()?
             .unwrap_or(0)
             .max(0) as usize;
-        Ok(missing_or_stale_meta.saturating_add(orphan_meta))
+        let missing_or_stale_vector = self
+            .conn
+            .query_row(
+                r#"
+	                SELECT COUNT(*)
+	                FROM event_embedding_chunks AS c
+	                LEFT JOIN event_embedding_vec0 AS v
+	                  ON v.rowid = c.rowid
+	                WHERE c.model_key = ?1
+	                  AND c.dimensions = ?2
+	                  AND (
+	                        v.rowid IS NULL
+	                     OR v.embedding != c.embedding_f32
+	                  )
+	                "#,
+                params![SEMANTIC_MODEL_KEY, SEMANTIC_DIMENSIONS as i64],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .unwrap_or(0)
+            .max(0) as usize;
+        Ok(missing_or_stale_meta
+            .saturating_add(orphan_meta)
+            .saturating_add(missing_or_stale_vector))
     }
 
     fn drop_sqlite_vec0_schema(&self) -> Result<()> {
@@ -2087,12 +2129,11 @@ impl SemanticVectorStore {
         let scan_started = Instant::now();
         let query_blob = serialize_f32_blob(query_embedding);
         let stats = self.cached_or_exact_stats()?;
-        let limit = limit.max(1).min(SEMANTIC_SQLITE_VEC0_MAX_K);
+        let limit = limit.clamp(1, SEMANTIC_SQLITE_VEC0_MAX_K);
         let max_k = stats
             .embedded_chunks
             .max(limit)
-            .min(SEMANTIC_SQLITE_VEC0_MAX_K)
-            .max(1);
+            .clamp(1, SEMANTIC_SQLITE_VEC0_MAX_K);
         let mut k = limit.min(max_k);
         let mut best_by_event = HashMap::<Uuid, SemanticVectorHit>::new();
         let mut rows_returned: usize;
@@ -2395,9 +2436,9 @@ fn write_private_json_file(path: &Path, value: &Value) -> Result<()> {
     file.sync_all()
         .with_context(|| format!("sync private status file {}", tmp_path.display()))?;
     drop(file);
-    fs::rename(&tmp_path, &path)
+    fs::rename(&tmp_path, path)
         .with_context(|| format!("replace private status file {}", path.display()))?;
-    secure_private_file_permissions(&path)?;
+    secure_private_file_permissions(path)?;
     Ok(())
 }
 
@@ -2519,17 +2560,12 @@ pub(crate) fn semantic_worker_report(
         } else {
             "pending".to_owned()
         };
-        status = if status == "budget_exhausted" && queued_items_estimate > 0 {
-            status
-        } else if status == "failed"
-            && sidecar_error.is_none()
-            && embedded_items == 0
-            && queued_items_estimate > 0
-        {
-            status
-        } else {
-            live_status
-        };
+        let preserve_status = (status == "budget_exhausted" && queued_items_estimate > 0)
+            || (status == "failed"
+                && sidecar_error.is_none()
+                && embedded_items == 0
+                && queued_items_estimate > 0);
+        status = if preserve_status { status } else { live_status };
     }
     if running {
         status = "running".to_owned();
@@ -3453,7 +3489,7 @@ fn write_daemon_lifecycle_status(
 fn semantic_worker_report_for_daemon(data_root: &Path) -> SemanticWorkerReport {
     let db_path = database_path(data_root.to_path_buf());
     if db_path.exists() {
-        match open_existing_store_read_only(&db_path, "ctx daemon status") {
+        match open_existing_store_snapshot_read_only(&db_path, "ctx daemon status") {
             Ok(store) => {
                 return semantic_worker_report(data_root, Some(&store)).unwrap_or_else(|error| {
                     SemanticWorkerReport::unavailable(data_root, format!("{error:#}"))
@@ -4112,19 +4148,55 @@ struct SemanticEmbedder;
 
 #[cfg(ctx_semantic_fastembed)]
 fn new_semantic_embedder(cache_dir: &Path) -> Result<SemanticEmbedder> {
-    let options = TextInitOptions::new(EmbeddingModel::AllMiniLML6V2)
-        .with_show_download_progress(false)
-        .with_intra_threads(semantic_embedder_threads())
-        .with_cache_dir(cache_dir.to_path_buf());
-    let previous_hf_home = env::var_os("HF_HOME");
-    env::set_var("HF_HOME", cache_dir);
-    let model_result = TextEmbedding::try_new(options);
-    if let Some(previous_hf_home) = previous_hf_home {
-        env::set_var("HF_HOME", previous_hf_home);
-    } else {
-        env::remove_var("HF_HOME");
-    }
-    let model = model_result
+    let snapshot = semantic_model_cache_snapshot_dir(cache_dir).ok_or_else(|| {
+        anyhow!(
+            "semantic model cache is incomplete at {}",
+            cache_dir.display()
+        )
+    })?;
+    let model_info = TextEmbedding::get_model_info(&EmbeddingModel::AllMiniLML6V2)?;
+    let tokenizer_files = TokenizerFiles {
+        tokenizer_file: fs::read(snapshot.join("tokenizer.json"))
+            .with_context(|| format!("read semantic tokenizer.json from {}", snapshot.display()))?,
+        config_file: fs::read(snapshot.join("config.json"))
+            .with_context(|| format!("read semantic config.json from {}", snapshot.display()))?,
+        special_tokens_map_file: fs::read(snapshot.join("special_tokens_map.json")).with_context(
+            || {
+                format!(
+                    "read semantic special_tokens_map.json from {}",
+                    snapshot.display()
+                )
+            },
+        )?,
+        tokenizer_config_file: fs::read(snapshot.join("tokenizer_config.json")).with_context(
+            || {
+                format!(
+                    "read semantic tokenizer_config.json from {}",
+                    snapshot.display()
+                )
+            },
+        )?,
+    };
+    let mut user_model = UserDefinedEmbeddingModel::new(
+        fs::read(snapshot.join(&model_info.model_file)).with_context(|| {
+            format!(
+                "read semantic model file {} from {}",
+                model_info.model_file,
+                snapshot.display()
+            )
+        })?,
+        tokenizer_files,
+    )
+    .with_pooling(
+        TextEmbedding::get_default_pooling_method(&EmbeddingModel::AllMiniLML6V2)
+            .unwrap_or(Pooling::Mean),
+    )
+    .with_quantization(TextEmbedding::get_quantization_mode(
+        &EmbeddingModel::AllMiniLML6V2,
+    ));
+    user_model.output_key = model_info.output_key.clone();
+    let options = InitOptionsUserDefined::new().with_intra_threads(semantic_embedder_threads());
+    let model = TextEmbedding::try_new_from_user_defined(user_model, options)
         .with_context(|| format!("initialize semantic embedding model {SEMANTIC_MODEL_ID}"))?;
     Ok(SemanticEmbedder {
         model,
@@ -4146,7 +4218,7 @@ fn semantic_embedder_threads() -> usize {
         .or_else(|| {
             std::thread::available_parallelism()
                 .ok()
-                .map(|threads| threads.get().min(SEMANTIC_EMBED_THREADS_DEFAULT).max(1))
+                .map(|threads| threads.get().clamp(1, SEMANTIC_EMBED_THREADS_DEFAULT))
         })
         .unwrap_or(SEMANTIC_EMBED_THREADS_DEFAULT)
 }
@@ -4184,16 +4256,18 @@ fn semantic_worker_cache_dir(data_root: &Path) -> PathBuf {
 }
 
 fn semantic_model_cache_available(cache_dir: &Path) -> bool {
+    semantic_model_cache_snapshot_dir(cache_dir).is_some()
+}
+
+fn semantic_model_cache_snapshot_dir(cache_dir: &Path) -> Option<PathBuf> {
     if !semantic_embedding_supported() {
-        return false;
+        return None;
     }
     if cache_dir.as_os_str().is_empty() {
-        return false;
+        return None;
     }
     let model_root = cache_dir.join(SEMANTIC_HF_MODEL_CACHE_DIR);
-    let Ok(snapshot_ref) = fs::read_to_string(model_root.join("refs").join("main")) else {
-        return false;
-    };
+    let snapshot_ref = fs::read_to_string(model_root.join("refs").join("main")).ok()?;
     let snapshot_ref = snapshot_ref.trim();
     if snapshot_ref.is_empty()
         || snapshot_ref.contains('/')
@@ -4201,17 +4275,21 @@ fn semantic_model_cache_available(cache_dir: &Path) -> bool {
         || snapshot_ref == "."
         || snapshot_ref == ".."
     {
-        return false;
+        return None;
     }
     let snapshot = model_root.join("snapshots").join(snapshot_ref);
     if !snapshot.is_dir() {
-        return false;
+        return None;
     }
-    SEMANTIC_REQUIRED_MODEL_FILES.iter().all(|file| {
+    if SEMANTIC_REQUIRED_MODEL_FILES.iter().all(|file| {
         fs::metadata(snapshot.join(file))
             .map(|metadata| metadata.is_file() && metadata.len() > 0)
             .unwrap_or(false)
-    })
+    }) {
+        Some(snapshot)
+    } else {
+        None
+    }
 }
 
 #[cfg(ctx_semantic_fastembed)]
@@ -4257,6 +4335,7 @@ fn embed_texts(_embedder: &mut SemanticEmbedder, _texts: Vec<String>) -> Result<
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn backfill_semantic_embeddings(
     store: &Store,
     vector_store: &mut SemanticVectorStore,
@@ -4386,6 +4465,7 @@ fn extend_existing_hashes_for_docs(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn index_semantic_documents(
     vector_store: &mut SemanticVectorStore,
     embedder: &mut Option<SemanticEmbedder>,
@@ -4453,7 +4533,7 @@ fn index_semantic_documents(
     let embeddings = embed_texts(embedder, texts)?;
     let items = pending
         .into_iter()
-        .zip(embeddings.into_iter())
+        .zip(embeddings)
         .map(|(doc, embedding)| {
             existing_hashes.insert(doc.event_id, doc.source_text_hash.clone());
             (doc, embedding)
@@ -4768,7 +4848,7 @@ fn serialize_f32_blob(values: &[f32]) -> Vec<u8> {
 }
 
 fn dot_product_f32_blob(left: &[f32], right_blob: &[u8]) -> Result<Option<f32>> {
-    if right_blob.len() % 4 != 0 {
+    if !right_blob.len().is_multiple_of(4) {
         return Err(anyhow!(
             "invalid semantic vector blob length {}",
             right_blob.len()
@@ -5125,6 +5205,45 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_vec0_payload_drift_falls_back_and_rebuilds() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let mut store = SemanticVectorStore::open(&temp.path().join("vectors.sqlite"))?;
+        let close_event = Uuid::new_v4();
+        let far_event = Uuid::new_v4();
+        store.upsert_chunk_embeddings(&[
+            (
+                test_chunk(close_event, 2, "close"),
+                test_embedding(1.0, 0.0),
+            ),
+            (test_chunk(far_event, 1, "far"), test_embedding(0.0, 1.0)),
+        ])?;
+        assert!(store.sqlite_vec0_ready()?);
+
+        let close_rowid = store.conn.query_row(
+            "SELECT rowid FROM event_embedding_chunks WHERE event_id = ?1 AND model_key = ?2",
+            params![close_event.to_string(), SEMANTIC_MODEL_KEY],
+            |row| row.get::<_, i64>(0),
+        )?;
+        store.conn.execute(
+            "DELETE FROM event_embedding_vec0 WHERE rowid = ?1",
+            params![close_rowid],
+        )?;
+        store.conn.execute(
+            "INSERT INTO event_embedding_vec0(rowid, embedding) VALUES (?1, ?2)",
+            params![close_rowid, serialize_f32_blob(&test_embedding(0.0, 1.0))],
+        )?;
+
+        assert!(!store.sqlite_vec0_ready()?);
+        let search = store.search(&test_embedding(1.0, 0.0), 2)?;
+        assert_eq!(search.stats.backend, Some(SEMANTIC_VECTOR_BACKEND_RUST));
+        assert_eq!(search.hits[0].event_id, close_event);
+
+        store.sync_sqlite_vec0_from_chunks_if_needed()?;
+        assert!(store.sqlite_vec0_ready()?);
+        Ok(())
+    }
+
+    #[test]
     fn auto_does_not_use_partial_coverage_as_empty_lexical_veto() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let data_root = temp.path();
@@ -5147,7 +5266,7 @@ mod tests {
             embedded_chunks: 1,
             dirty_items: 0,
             queued_items_estimate: 9,
-            model_cache_available: false,
+            model_cache_available: true,
             vector_path: vector_path.clone(),
             lock_path: semantic_worker_lock_path(data_root),
             status_path: semantic_worker_status_path(data_root),
@@ -5179,7 +5298,7 @@ mod tests {
                 .diagnostics
                 .as_ref()
                 .and_then(|diagnostics| diagnostics.auto_hybrid_skipped),
-            Some("model_cache_missing")
+            Some("semantic_coverage_not_ready")
         );
         Ok(())
     }
