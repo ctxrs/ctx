@@ -27,6 +27,11 @@ pub(crate) fn apply_hermetic_env(command: &mut Command, temp: &TempDir) {
     command.env("HOME", temp.path());
     command.env("CTX_ANALYTICS_OFF", "1");
     command.env_remove("CTX_QUIET");
+    // Tests set CI explicitly when they need CI-only behavior.
+    command.env_remove("CI");
+    command.env_remove("GITHUB_ACTIONS");
+    command.env_remove("BUILDKITE");
+    command.env_remove("BUILDKITE_BUILD_ID");
     // Drop provider override variables inherited from the developer
     // machine so discovery never escapes the temp directory.
     command.env_remove("OPENCLAW_STATE_DIR");

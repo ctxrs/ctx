@@ -37,6 +37,7 @@ install_ubuntu_tools() {
     python3 \
     python3-build \
     python3-pip \
+    python3-venv \
     ripgrep \
     ruby \
     unzip \

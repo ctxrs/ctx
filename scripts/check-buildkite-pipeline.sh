@@ -83,6 +83,7 @@ for required in \
   'default-jdk-headless' \
   'golang-go' \
   'python3-build' \
+  'python3-venv' \
   'ctx_bootstrap_bazelisk' \
   'bash scripts/check.sh --mode=ci' \
   'queue: "release-linux-managed"' \
