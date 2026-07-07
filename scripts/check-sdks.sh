@@ -9,6 +9,16 @@ run() {
   "$@"
 }
 
+run_in_dir() {
+  local dir="$1"
+  shift
+  printf '\n==> (cd %s && %s)\n' "$dir" "$*"
+  (
+    cd "$dir"
+    "$@"
+  )
+}
+
 skipped=0
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/ctx-sdk-check.XXXXXX")"
 trap 'rm -rf "$tmp_dir"' EXIT
@@ -38,7 +48,7 @@ else
 fi
 
 if command -v go >/dev/null 2>&1 && [ -f sdks/go/go.mod ]; then
-  run go -C sdks/go test ./...
+  run_in_dir sdks/go go test ./...
 else
   skip "Go SDK tests (go unavailable or SDK absent)"
 fi

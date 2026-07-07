@@ -9,6 +9,16 @@ run() {
   "$@"
 }
 
+run_in_dir() {
+  local dir="$1"
+  shift
+  printf '\n==> (cd %s && %s)\n' "$dir" "$*"
+  (
+    cd "$dir"
+    "$@"
+  )
+}
+
 skip() {
   printf '\n==> skip: %s\n' "$*"
 }
@@ -46,7 +56,7 @@ else
 fi
 
 if command -v go >/dev/null 2>&1; then
-  run go -C sdks/go list ./...
+  run_in_dir sdks/go go list ./...
 else
   skip "Go module dry-run (go unavailable)"
 fi
