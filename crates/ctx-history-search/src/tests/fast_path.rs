@@ -222,27 +222,25 @@ fn clustered_fast_search_pages_past_dominant_first_session() {
     store.upsert_session(&later_session).unwrap();
 
     for index in 0..=(LARGE_EVENT_CORPUS_THRESHOLD as u64) {
-        let (record_id, session_id, text, occurred_at) = if index < 600 {
-            (
+        let (record_id, session_id, text, occurred_at) = match index.cmp(&600) {
+            std::cmp::Ordering::Less => (
                 dominant_record.id,
                 dominant_session.id,
                 "cluster-paging-needle dominant hit",
                 fixed_time() + chrono::Duration::milliseconds(2_000 - index as i64),
-            )
-        } else if index == 600 {
-            (
+            ),
+            std::cmp::Ordering::Equal => (
                 later_record.id,
                 later_session.id,
                 "cluster-paging-needle later hit",
                 fixed_time(),
-            )
-        } else {
-            (
+            ),
+            std::cmp::Ordering::Greater => (
                 dominant_record.id,
                 dominant_session.id,
                 "ordinary large history event",
                 fixed_time() - chrono::Duration::milliseconds(index as i64),
-            )
+            ),
         };
         store
             .upsert_event(&Event {

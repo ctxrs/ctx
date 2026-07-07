@@ -271,7 +271,7 @@ pub(crate) fn error_summary(error: &anyhow::Error) -> String {
     let top = error.to_string();
     let root = error
         .chain()
-        .last()
+        .next_back()
         .map(ToString::to_string)
         .unwrap_or_else(|| top.clone());
     if is_sqlite_busy_text(&top) || is_sqlite_busy_text(&root) {
