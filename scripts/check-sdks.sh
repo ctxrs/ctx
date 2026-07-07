@@ -10,6 +10,8 @@ run() {
 }
 
 skipped=0
+tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/ctx-sdk-check.XXXXXX")"
+trap 'rm -rf "$tmp_dir"' EXIT
 
 skip() {
   printf '\n==> skip: %s\n' "$*"
@@ -54,7 +56,7 @@ else
 fi
 
 if command -v swift >/dev/null 2>&1 && [ -f sdks/swift/Package.swift ]; then
-  run swift test --package-path sdks/swift
+  run swift test --package-path sdks/swift --scratch-path "$tmp_dir/swift-build"
 else
   skip "Swift SDK tests (swift unavailable or SDK absent)"
 fi

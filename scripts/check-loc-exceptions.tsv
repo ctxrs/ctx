@@ -1,4 +1,5 @@
 path	max_lines	kind	reason	review_after
-crates/ctx-history-capture/src/tests/support.rs	1638	test	shared capture test fixture support plus hermetic fixture roots; splitting now would add indirection without narrowing callers	2026-10-01
+crates/ctx-history-capture/src/tests/support.rs	1800	test	shared capture test fixture support plus hermetic fixture roots; splitting now would add indirection without narrowing callers	2026-10-01
+crates/ctx-history-capture/src/provider/providers/opencode.rs	1500	source	OpenCode/Kilo provider import compatibility spans legacy and message-part transcript formats; split after provider parser boundaries settle	2026-10-01
 crates/ctx-cli/tests/native_providers.rs	1589	test	native provider public CLI scenario matrix; fixtures are already modular and splitting would scatter end-to-end coverage	2026-10-01
 crates/ctx-cli/src/commands/import/native.rs	1110	source	native provider dispatcher plus manifest helpers inherited over source cap; immediate split would couple CI gate to importer redesign	2026-10-01
