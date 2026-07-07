@@ -169,7 +169,8 @@ if [[ "${CTX_AUDIT_SKIP_RELEASE_BUILD:-0}" != "1" ]]; then
   case "$(uname -s 2>/dev/null || true)" in
     MINGW*|MSYS*|CYGWIN*) suffix=".exe" ;;
   esac
-  binary="target/release/ctx${suffix}"
+  target_dir="${CARGO_TARGET_DIR:-target}"
+  binary="${target_dir%/}/release/ctx${suffix}"
   if [[ ! -f "${binary}" ]]; then
     fail "release binary missing: ${binary}"
   elif command -v strings >/dev/null 2>&1; then
