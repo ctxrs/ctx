@@ -404,51 +404,77 @@ fn native_opencode_rejects_out_of_range_message_timestamp() {
 }
 
 #[test]
-fn native_opencode_skips_oversized_sqlite_text_value_and_imports_other_rows() {
+fn native_opencode_truncates_oversized_sqlite_text_value_and_preserves_other_rows() {
     let temp = tempdir();
     let fixture = write_opencode_smoke_db(&temp, false);
     let conn = Connection::open(&fixture).unwrap();
+    let oversized_byte_count = MAX_PROVIDER_SQLITE_VALUE_BYTES + 1;
     let oversized_data = format!(
         "{{\"time\":{{\"created\":1782259200000}},\"text\":\"{}\"}}",
-        "x".repeat(MAX_PROVIDER_SQLITE_VALUE_BYTES + 1)
+        "x".repeat(oversized_byte_count)
     );
     conn.execute(
         "update session_message set data = ?1 where id = 'msg-user'",
         [&oversized_data],
     )
     .unwrap();
-    let other_conversational: i64 = conn
-        .query_row(
-            "select count(*) from session_message where id != 'msg-user'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert!(
-        other_conversational > 0,
-        "test fixture must contain at least one non-oversized conversational row"
-    );
     drop(conn);
 
-    let summary = import_opencode_sqlite(
-        &fixture,
-        &mut Store::open(temp.path().join("work.sqlite")).unwrap(),
-        OpenCodeSqliteImportOptions::default(),
-    )
-    .expect("oversized rows should be skipped, not abort the whole import");
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let summary = import_opencode_sqlite(&fixture, &mut store, OpenCodeSqliteImportOptions::default())
+        .expect("oversized rows should be imported as truncated synthetic events");
 
     assert_eq!(
         summary.failed, 0,
-        "oversized rows must not be counted as failures, got failures: {:?}",
+        "truncated oversized rows should not count as import failures, got failures: {:?}",
         summary.failures
     );
     assert!(
-        summary.skipped >= 1,
-        "oversized row should be reflected in summary.skipped, got summary: {summary:?}"
+        summary.imported_sessions >= 1,
+        "session should still import, got summary: {summary:?}"
     );
     assert!(
         summary.imported_events >= 1,
         "non-oversized rows should still import, got summary: {summary:?}"
+    );
+
+    let session_id =
+        stored_provider_session_id(&store, CaptureProvider::OpenCode, "opencode-root");
+    let events = store.events_for_session(session_id).unwrap();
+    let marker_event = events
+        .iter()
+        .find(|event| event.payload.get("body").and_then(|b| b.get("ctx_oversized")).is_some())
+        .expect("expected one event carrying the top-level `ctx_oversized` marker");
+    let marker = marker_event
+        .payload
+        .get("body")
+        .and_then(|b| b.get("ctx_oversized"))
+        .and_then(|m| m.as_object())
+        .expect("ctx_oversized marker should be an object");
+    assert_eq!(
+        marker.get("message_id"),
+        None,
+        "ctx_oversized marker should not carry message_id; verify the marker_event payload"
+    );
+    assert_eq!(
+        marker_event.payload.get("body").and_then(|b| b.get("message_id")),
+        Some(&serde_json::Value::from("msg-user")),
+        "the oversized synthetic event should preserve the original provider row id"
+    );
+    assert_eq!(
+        marker.get("original_bytes"),
+        Some(&serde_json::Value::from(oversized_data.len() as i64)),
+        "marker should record the original byte size of the oversized row"
+    );
+    assert_eq!(
+        marker.get("source_table"),
+        Some(&serde_json::Value::from("session_message")),
+        "marker should record the source table"
+    );
+    assert_eq!(
+        marker.get("source_format"),
+        Some(&serde_json::Value::from("opencode_sqlite")),
+        "marker should record the source format"
     );
 }
 

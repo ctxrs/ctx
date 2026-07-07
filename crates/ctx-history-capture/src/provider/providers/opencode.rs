@@ -114,8 +114,7 @@ pub(crate) fn normalize_opencode_sqlite(
     let raw_source_path = path.display().to_string();
     let message_source_table = message_selection.source_table;
     let skipped_non_conversational_rows = message_selection.skipped_non_conversational_rows;
-    let skipped_oversized_rows = message_selection.skipped_oversized_rows;
-    result.summary.skipped += skipped_oversized_rows;
+    let _skipped_oversized_rows = message_selection.skipped_oversized_rows;
 
     for row in message_selection.rows {
         let provider_event_index =
@@ -462,6 +461,77 @@ fn oversized_message_row_ids(path: &Path, table: &str) -> Result<std::collection
     Ok(ids)
 }
 
+fn truncated_oversized_message_rows(
+    path: &Path,
+    table: &str,
+    dialect: &OpenCodeSqliteDialect,
+    has_type_column: bool,
+    has_seq_column: bool,
+) -> Result<Vec<OpenCodeMessageRow>> {
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    let type_expr: &str = if has_type_column { "type" } else { "'message'" };
+    let seq_expr: &str = if has_seq_column { "seq" } else { "NULL" };
+    let sql = format!(
+        "select id, session_id, {type_expr}, {seq_expr}, time_created, time_updated, \
+         substr(data, 1, ?), length(cast(data as blob)) \
+         from {table} \
+         where length(cast(data as blob)) > ? \
+         order by session_id, time_created, id"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query([
+        PROVIDER_MAX_TEXT_CHARS as i64,
+        MAX_PROVIDER_SQLITE_VALUE_BYTES as i64,
+    ])?;
+    let mut messages = Vec::new();
+    let mut next_seq_by_session = BTreeMap::<String, i64>::new();
+    while let Some(row) = rows.next()? {
+        let id = row.get::<_, String>(0)?;
+        let session_id = row.get::<_, String>(1)?;
+        let entry_type_raw = row.get::<_, Option<String>>(2)?;
+        let seq = row.get::<_, Option<i64>>(3)?;
+        let time_created = row.get::<_, i64>(4)?;
+        let time_updated = row.get::<_, i64>(5)?;
+        let preview: String = row.get::<_, String>(6)?;
+        let original_bytes: i64 = row.get::<_, i64>(7)?;
+        let preview_value: Option<Value> = serde_json::from_str(&preview).ok();
+        let role = preview_value
+            .as_ref()
+            .and_then(opencode_message_type_from_data)
+            .unwrap_or_else(|| "user".to_string());
+        let entry_type = entry_type_raw
+            .filter(|s| !s.is_empty() && s != "message")
+            .or_else(|| Some(role.clone()))
+            .unwrap_or_else(|| "message".to_string());
+        let seq = seq.unwrap_or_else(|| next_opencode_seq(&mut next_seq_by_session, &session_id));
+        let preview_truncated = preview_value.is_none();
+        let synthetic_data = json!({
+            "role": role,
+            "text": preview,
+            "_ctx_oversized": {
+                "original_bytes": original_bytes,
+                "preview_chars": PROVIDER_MAX_TEXT_CHARS,
+                "source_table": table,
+                "source_format": dialect.source_format,
+                "preview_truncated": preview_truncated,
+            }
+        });
+        messages.push(OpenCodeMessageRow {
+            id,
+            session_id,
+            entry_type,
+            seq,
+            time_created,
+            time_updated,
+            data: synthetic_data.to_string(),
+        });
+    }
+    Ok(messages)
+}
+
 pub(crate) fn opencode_session_message_rows(
     path: &Path,
     conn: &Connection,
@@ -520,6 +590,13 @@ pub(crate) fn opencode_session_message_rows(
             data,
         });
     }
+    messages.extend(truncated_oversized_message_rows(
+        path,
+        "session_message",
+        dialect,
+        columns.contains("type"),
+        columns.contains("seq"),
+    )?);
     Ok((messages, skipped_oversized))
 }
 
@@ -586,6 +663,13 @@ pub(crate) fn opencode_session_entry_rows(
             data,
         });
     }
+    messages.extend(truncated_oversized_message_rows(
+        path,
+        "session_entry",
+        dialect,
+        true,
+        false,
+    )?);
     Ok((messages, skipped_oversized))
 }
 
@@ -638,6 +722,13 @@ pub(crate) fn opencode_message_rows(
             data,
         });
     }
+    messages.extend(truncated_oversized_message_rows(
+        path,
+        "message",
+        dialect,
+        false,
+        false,
+    )?);
     Ok((messages, skipped_oversized))
 }
 
@@ -825,6 +916,7 @@ pub(crate) fn opencode_event(
     let role = Some(provider_role(Some(&row.entry_type)));
     let text = opencode_event_text(&row.entry_type, data, event_type, dialect);
     let (text, truncated) = provider_local_preview(&text, PROVIDER_MAX_TEXT_CHARS);
+    let ctx_oversized = data.get("_ctx_oversized").cloned();
     ProviderEventEnvelope {
         provider_event_index,
         provider_event_hash: Some(row.id.clone()),
@@ -851,6 +943,7 @@ pub(crate) fn opencode_event(
             "text": text,
             "truncated": truncated,
             "body": provider_capped_json(data, PROVIDER_MAX_PREVIEW_CHARS),
+            "ctx_oversized": ctx_oversized,
         }),
         metadata: json!({
             "source": dialect.source_format,
