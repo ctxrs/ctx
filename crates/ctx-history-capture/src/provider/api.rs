@@ -9,9 +9,8 @@ use crate::provider::custom_history_jsonl::{
 };
 use crate::provider::importer::import_normalized_provider_captures;
 use crate::{
-    CodexEventImportMode, CodexToolOutputMode, CustomHistoryJsonlV1ImportOptions,
-    NormalizedProviderImportOptions, ProviderAdapterContext, ProviderFixtureImportOptions,
-    ProviderImportSummary, Result,
+    CustomHistoryJsonlV1ImportOptions, NormalizedProviderImportOptions, ProviderAdapterContext,
+    ProviderFixtureImportOptions, ProviderImportSummary, Result,
 };
 
 mod json_sources;
@@ -61,9 +60,6 @@ pub fn import_provider_fixture_jsonl(
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
-            tool_output_mode: CodexToolOutputMode::Full,
-            event_mode: CodexEventImportMode::Rich,
-            include_notices: true,
         },
     )?;
 
@@ -97,9 +93,6 @@ pub fn import_custom_history_jsonl_v1(
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
-            tool_output_mode: CodexToolOutputMode::Full,
-            event_mode: CodexEventImportMode::Rich,
-            include_notices: true,
         },
     )?;
     if normalization.provider.summary.failed > 0 && !options.allow_partial_failures {
@@ -143,9 +136,6 @@ pub fn import_custom_history_jsonl_v1_reader(
             source_path: options.source_path,
             source_root: None,
             imported_at: options.imported_at,
-            tool_output_mode: CodexToolOutputMode::Full,
-            event_mode: CodexEventImportMode::Rich,
-            include_notices: true,
         },
     )?;
     if normalization.provider.summary.failed > 0 && !options.allow_partial_failures {

@@ -15,13 +15,12 @@ use serde_json::{json, Value};
 use crate::common::io::{ensure_regular_provider_transcript_file, read_json_file_limited};
 use crate::provider::importer::provider_cursor_stream;
 use crate::provider::native::{
-    provider_capped_json, provider_local_preview, provider_role, task_json_string_field,
-    task_json_time_field,
+    provider_capped_json, provider_policy_body, provider_policy_event_text, provider_role,
+    task_json_string_field, task_json_time_field,
 };
 use crate::{
     CaptureError, ProviderAdapterContext, ProviderImportFailure, ProviderNormalizationResult,
     Result, CODEBUDDY_SOURCE_FORMAT, MAX_PROVIDER_JSONL_LINE_BYTES, PROVIDER_MAX_PREVIEW_CHARS,
-    PROVIDER_MAX_TEXT_CHARS,
 };
 
 pub(crate) fn normalize_codebuddy_history(
@@ -45,6 +44,13 @@ pub(crate) fn normalize_codebuddy_history(
         merged.summary.merge(result.summary);
         merged.captures.append(&mut result.captures);
         merged.files_touched.append(&mut result.files_touched);
+    }
+    if merged.captures.is_empty() && merged.summary.failed == 0 {
+        merged.summary.failed += 1;
+        merged.summary.failures.push(ProviderImportFailure {
+            line: 0,
+            error: "CodeBuddy history contained no real conversation messages".to_owned(),
+        });
     }
     Ok(merged)
 }
@@ -206,6 +212,8 @@ pub(crate) fn normalize_codebuddy_session_dir(
         .cloned()
         .unwrap_or_default();
     if messages.is_empty() {
+        result.summary.skipped += 1;
+        result.summary.skipped_sessions += 1;
         return Ok(result);
     }
 
@@ -277,6 +285,10 @@ pub(crate) fn normalize_codebuddy_session_dir(
     }
 
     if events.is_empty() {
+        if result.summary.failed == 0 {
+            result.summary.skipped += 1;
+            result.summary.skipped_sessions += 1;
+        }
         return Ok(result);
     }
 
@@ -597,14 +609,16 @@ pub(crate) fn codebuddy_event(
     project_hash: &str,
     event: &CodeBuddyEventInput,
 ) -> ProviderEventEnvelope {
-    let (text, truncated) = provider_local_preview(&event.text, PROVIDER_MAX_TEXT_CHARS);
+    let event_type = EventType::Message;
+    let (text, truncated, retention) =
+        provider_policy_event_text(event_type, &event.text, &event.raw_message);
     let event_id = format!("{provider_session_id}:{}", event.native_message_id);
     let role = provider_role(event.role.as_deref());
     ProviderEventEnvelope {
         provider_event_index: event.provider_event_index,
         provider_event_hash: Some(event_id.clone()),
         cursor: Some(event_id.clone()),
-        event_type: EventType::Message,
+        event_type,
         role: Some(role),
         occurred_at: event.occurred_at,
         fidelity: Fidelity::Imported,
@@ -619,8 +633,9 @@ pub(crate) fn codebuddy_event(
             "native_message_id": event.native_message_id,
             "text": text,
             "truncated": truncated,
-            "body": provider_capped_json(&event.raw_message, PROVIDER_MAX_PREVIEW_CHARS),
-            "decoded_body": provider_capped_json(&event.decoded_message, PROVIDER_MAX_PREVIEW_CHARS),
+            "body": provider_capped_json(&provider_policy_body(event_type, &event.raw_message), PROVIDER_MAX_PREVIEW_CHARS),
+            "decoded_body": provider_capped_json(&provider_policy_body(event_type, &event.decoded_message), PROVIDER_MAX_PREVIEW_CHARS),
+            "content_retention": retention.as_str(),
         }),
         metadata: json!({
             "source": "codebuddy_messages_json",

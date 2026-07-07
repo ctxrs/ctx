@@ -11,7 +11,7 @@ pub(crate) fn windsurf_event_text(value: &Value, entry_type: &str) -> String {
             .and_then(Value::as_str)
             .map(str::to_owned)
             .or_else(|| value.get("user_input").and_then(windsurf_extract_text))
-            .unwrap_or_else(|| "Windsurf user input".to_owned()),
+            .unwrap_or_default(),
         "planner_response" => value
             .pointer("/planner_response/response")
             .and_then(Value::as_str)
@@ -21,16 +21,16 @@ pub(crate) fn windsurf_event_text(value: &Value, entry_type: &str) -> String {
                     .get("planner_response")
                     .and_then(windsurf_extract_text)
             })
-            .unwrap_or_else(|| "Windsurf planner response".to_owned()),
+            .unwrap_or_default(),
         "code_action" => value
             .pointer("/code_action/path")
             .and_then(Value::as_str)
             .filter(|path| !path.trim().is_empty())
             .map(|path| format!("Windsurf code action: {path}"))
-            .unwrap_or_else(|| "Windsurf code action".to_owned()),
+            .unwrap_or_default(),
         _ => windsurf_extract_text(value)
             .filter(|text| !text.trim().is_empty())
-            .unwrap_or_else(|| format!("Windsurf event: {entry_type}")),
+            .unwrap_or_default(),
     }
 }
 

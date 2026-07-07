@@ -432,13 +432,11 @@ pub(crate) fn forgecode_message_text(
         "text" => forgecode_text_message_text(parts.body, event_type),
         "tool" => forgecode_tool_result_text(parts.body),
         "image" => forgecode_image_text(parts.body),
-        _ => {
-            provider_value_text(parts.body).unwrap_or_else(|| "ForgeCode conversation event".into())
-        }
+        _ => provider_value_text(parts.body).unwrap_or_default(),
     }
 }
 
-pub(crate) fn forgecode_text_message_text(body: &Value, event_type: EventType) -> String {
+pub(crate) fn forgecode_text_message_text(body: &Value, _event_type: EventType) -> String {
     let mut parts = Vec::new();
     if let Some(content) = body
         .get("content")
@@ -458,17 +456,6 @@ pub(crate) fn forgecode_text_message_text(body: &Value, event_type: EventType) -
         if let Some(raw_content) = body.get("raw_content").and_then(provider_value_text) {
             parts.push(raw_content);
         }
-    }
-    if parts.is_empty() {
-        let role = body
-            .get("role")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        parts.push(if event_type == EventType::ToolCall {
-            format!("ForgeCode {role} tool call")
-        } else {
-            format!("ForgeCode {role} message")
-        });
     }
     parts.join("\n")
 }

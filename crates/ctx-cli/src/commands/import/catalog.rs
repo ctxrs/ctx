@@ -12,9 +12,6 @@ pub(crate) fn import_incremental_codex_session_tree(
     store: &mut Store,
     source: &SourceInfo,
     record_id: Uuid,
-    tool_output_mode: CodexToolOutputMode,
-    event_mode: CodexEventImportMode,
-    include_notices: bool,
     progress: Option<CodexSessionImportProgressCallback>,
     allow_partial_failures: bool,
     catalog_before_import: bool,
@@ -70,9 +67,6 @@ pub(crate) fn import_incremental_codex_session_tree(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
-                    tool_output_mode,
-                    event_mode,
-                    include_notices,
                     progress: progress.clone(),
                     ..CodexSessionImportOptions::default()
                 },
@@ -132,9 +126,6 @@ pub(crate) fn import_incremental_codex_session_tree(
                 source_path: Some(source.path.clone()),
                 history_record_id: Some(record_id),
                 allow_partial_failures,
-                tool_output_mode,
-                event_mode,
-                include_notices,
                 progress,
                 ..CodexSessionImportOptions::default()
             },
@@ -293,43 +284,6 @@ pub(crate) fn source_uses_incremental_event_search(source: &SourceInfo) -> bool 
             | CaptureProvider::CodeBuddy
             | CaptureProvider::Trae
     )
-}
-
-pub(crate) fn codex_tool_output_mode() -> Result<CodexToolOutputMode> {
-    if let Some(raw) = env::var_os("CTX_CODEX_TOOL_OUTPUT_MODE") {
-        let raw = raw.to_string_lossy();
-        return match raw.as_ref() {
-            "full" => Ok(CodexToolOutputMode::Full),
-            "metadata" => Ok(CodexToolOutputMode::Metadata),
-            "failures" | "failure" | "errors" | "error" => Ok(CodexToolOutputMode::Failures),
-            "skip" => Ok(CodexToolOutputMode::Skip),
-            other => Err(anyhow!(
-                "unsupported CTX_CODEX_TOOL_OUTPUT_MODE={other:?}; expected full, metadata, failures, or skip"
-            )),
-        };
-    }
-    if env::var_os("CTX_EXPERIMENTAL_SKIP_TOOL_OUTPUTS").is_some() {
-        return Ok(CodexToolOutputMode::Skip);
-    }
-    Ok(CodexToolOutputMode::Skip)
-}
-
-pub(crate) fn codex_event_import_mode() -> Result<CodexEventImportMode> {
-    if let Some(raw) = env::var_os("CTX_CODEX_EVENT_MODE") {
-        let raw = raw.to_string_lossy();
-        return match raw.as_ref() {
-            "search" | "message" | "messages" => Ok(CodexEventImportMode::Search),
-            "rich" | "full" => Ok(CodexEventImportMode::Rich),
-            other => Err(anyhow!(
-                "unsupported CTX_CODEX_EVENT_MODE={other:?}; expected search or rich"
-            )),
-        };
-    }
-    Ok(CodexEventImportMode::Search)
-}
-
-pub(crate) fn codex_include_notices() -> bool {
-    env::var_os("CTX_CODEX_INCLUDE_NOTICES").is_some()
 }
 
 pub(crate) fn source_stats(path: &Path) -> Result<SourceStats> {

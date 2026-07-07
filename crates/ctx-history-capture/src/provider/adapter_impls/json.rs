@@ -26,11 +26,11 @@ use crate::provider::providers::{
     task_json::{normalize_task_json_history, task_json_provider},
 };
 use crate::{
-    CaptureError, ProviderAdapterContext, ProviderCaptureAdapter, ProviderNormalizationResult,
-    Result, AUGGIE_SESSION_JSON_SOURCE_FORMAT, CLAUDE_PROJECTS_SOURCE_FORMAT,
-    CLINE_TASK_JSON_SOURCE_FORMAT, CODEBUDDY_SOURCE_FORMAT, CONTINUE_CLI_SOURCE_FORMAT,
-    JUNIE_SESSION_EVENTS_SOURCE_FORMAT, KIMI_CODE_CLI_SOURCE_FORMAT, MISTRAL_VIBE_SOURCE_FORMAT,
-    MUX_SOURCE_FORMAT, NANOCLAW_SOURCE_FORMAT, OPENCLAW_SOURCE_FORMAT,
+    CaptureError, ProviderAdapterContext, ProviderCaptureAdapter, ProviderImportFailure,
+    ProviderNormalizationResult, Result, AUGGIE_SESSION_JSON_SOURCE_FORMAT,
+    CLAUDE_PROJECTS_SOURCE_FORMAT, CLINE_TASK_JSON_SOURCE_FORMAT, CODEBUDDY_SOURCE_FORMAT,
+    CONTINUE_CLI_SOURCE_FORMAT, JUNIE_SESSION_EVENTS_SOURCE_FORMAT, KIMI_CODE_CLI_SOURCE_FORMAT,
+    MISTRAL_VIBE_SOURCE_FORMAT, MUX_SOURCE_FORMAT, NANOCLAW_SOURCE_FORMAT, OPENCLAW_SOURCE_FORMAT,
     OPENHANDS_FILE_EVENTS_SOURCE_FORMAT, QODER_SOURCE_FORMAT, ROO_TASK_JSON_SOURCE_FORMAT,
     ROVODEV_SOURCE_FORMAT,
 };
@@ -65,6 +65,14 @@ impl ProviderCaptureAdapter for ClaudeProjectsJsonlAdapter {
             merged.summary.merge(result.summary);
             merged.captures.append(&mut result.captures);
             merged.files_touched.append(&mut result.files_touched);
+        }
+        if merged.captures.is_empty() && merged.summary.failed == 0 {
+            merged.summary.failed += 1;
+            merged.summary.failures.push(ProviderImportFailure {
+                line: 0,
+                error: "Claude Code project JSONL contained no real conversation messages"
+                    .to_owned(),
+            });
         }
         Ok(merged)
     }

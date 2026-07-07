@@ -1,4 +1,5 @@
 pub(super) use crate::provider::adapter::ProviderCaptureAdapter;
+pub(super) use crate::provider::codex::events::codex_tool_output_event;
 pub(super) use crate::provider::codex::session::{
     should_parse_codex_session_line, should_skip_codex_tool_output_line,
 };
@@ -17,6 +18,7 @@ pub(super) use crate::provider::importer::{
 };
 pub(super) use crate::provider::native::ShelleyMessageRow;
 pub(super) use crate::provider::providers::{
+    forgecode::forgecode_text_message_text,
     lingma::normalize_lingma_sqlite,
     opencode::{normalize_opencode_sqlite, OPENCODE_SQLITE_DIALECT},
     pi::{pi_provider_event_identity_index, PiSessionHeader},
@@ -29,27 +31,27 @@ pub(super) use crate::{
     fixture_envelope, import_antigravity_cli_history, import_astrbot_sqlite, import_auggie_history,
     import_claude_projects_jsonl_tree, import_cline_task_json_history, import_codebuddy_history,
     import_codex_history_jsonl, import_codex_session_jsonl, import_codex_session_jsonl_tail,
-    import_codex_session_paths, import_codex_session_tree, import_copilot_cli_session_events,
-    import_crush_sqlite, import_custom_history_jsonl_v1, import_custom_history_jsonl_v1_reader,
-    import_deepagents_sqlite, import_factory_ai_droid_sessions, import_firebender_sqlite,
-    import_forgecode_sqlite, import_gemini_cli_history, import_goose_sessions_sqlite,
-    import_hermes_sqlite, import_junie_history, import_kilo_sqlite, import_kimi_code_cli_history,
-    import_kiro_sqlite, import_lingma_sqlite, import_mistral_vibe_history, import_mux_history,
-    import_openclaw_history, import_opencode_sqlite, import_pi_session_jsonl,
-    import_provider_fixture_jsonl, import_qoder_history, import_qwen_code_history,
-    import_roo_task_json_history, import_rovodev_history, import_shelley_sqlite, import_spool,
-    import_tabnine_cli_history, import_trae_history, import_warp_sqlite,
-    import_windsurf_cascade_hook_transcripts, import_zed_threads_sqlite, provider_source_for_path,
-    read_jsonl, spool_counts, stable_capture_uuid, AntigravityCliImportOptions,
-    AstrBotSqliteImportOptions, AuggieImportOptions, CaptureError, CatalogSummary,
-    ClaudeProjectsImportOptions, ClineTaskJsonImportOptions, CodeBuddyImportOptions,
-    CodexEventImportMode, CodexHistoryImportOptions, CodexSessionCatalogOptions,
-    CodexSessionImportOptions, CodexSessionJsonlAdapter, CodexToolOutputMode,
-    CopilotCliImportOptions, CrushSqliteImportOptions, CustomHistoryJsonlV1ImportOptions,
-    DeepAgentsSqliteImportOptions, FactoryAiDroidImportOptions, FirebenderSqliteImportOptions,
-    FixtureOptions, ForgeCodeSqliteImportOptions, GeminiCliImportOptions,
-    GooseSessionsSqliteImportOptions, HermesSqliteImportOptions, JunieImportOptions,
-    KiloSqliteImportOptions, KimiCodeCliImportOptions, KiroSqliteImportOptions,
+    import_codex_session_paths, import_codex_session_tree, import_continue_cli_sessions,
+    import_copilot_cli_session_events, import_crush_sqlite, import_custom_history_jsonl_v1,
+    import_custom_history_jsonl_v1_reader, import_deepagents_sqlite,
+    import_factory_ai_droid_sessions, import_firebender_sqlite, import_forgecode_sqlite,
+    import_gemini_cli_history, import_goose_sessions_sqlite, import_hermes_sqlite,
+    import_junie_history, import_kilo_sqlite, import_kimi_code_cli_history, import_kiro_sqlite,
+    import_lingma_sqlite, import_mistral_vibe_history, import_mux_history, import_openclaw_history,
+    import_opencode_sqlite, import_pi_session_jsonl, import_provider_fixture_jsonl,
+    import_qoder_history, import_qwen_code_history, import_roo_task_json_history,
+    import_rovodev_history, import_shelley_sqlite, import_spool, import_tabnine_cli_history,
+    import_trae_history, import_warp_sqlite, import_windsurf_cascade_hook_transcripts,
+    import_zed_threads_sqlite, provider_source_for_path, read_jsonl, spool_counts,
+    stable_capture_uuid, AntigravityCliImportOptions, AstrBotSqliteImportOptions,
+    AuggieImportOptions, CaptureError, CatalogSummary, ClaudeProjectsImportOptions,
+    ClineTaskJsonImportOptions, CodeBuddyImportOptions, CodexHistoryImportOptions,
+    CodexSessionCatalogOptions, CodexSessionImportOptions, CodexSessionJsonlAdapter,
+    ContinueCliImportOptions, CopilotCliImportOptions, CrushSqliteImportOptions,
+    CustomHistoryJsonlV1ImportOptions, DeepAgentsSqliteImportOptions, FactoryAiDroidImportOptions,
+    FirebenderSqliteImportOptions, FixtureOptions, ForgeCodeSqliteImportOptions,
+    GeminiCliImportOptions, GooseSessionsSqliteImportOptions, HermesSqliteImportOptions,
+    JunieImportOptions, KiloSqliteImportOptions, KimiCodeCliImportOptions, KiroSqliteImportOptions,
     LingmaSqliteImportOptions, MistralVibeImportOptions, MuxImportOptions,
     NormalizedProviderImportOptions, OpenClawImportOptions, OpenCodeSqliteImportOptions,
     PiSessionImportOptions, ProviderAdapterContext, ProviderFileTouchedEnvelope,
@@ -530,6 +532,10 @@ pub(super) fn write_unimportable_copilot_siblings(root: &Path) {
 pub(super) fn assert_provider_failures_include_headerless_and_malformed(
     summary: &ProviderImportSummary,
 ) {
+    assert!(summary
+        .failures
+        .iter()
+        .any(|failure| failure.error.contains("transcripts found")));
     assert!(summary.failures.iter().any(|failure| failure
         .error
         .contains("no importable native JSONL session header")));

@@ -4,8 +4,20 @@ Provider support is intentionally conservative. A provider is documented as
 supported only when the public CLI can read existing local history for that
 provider from a bounded source format.
 
+The provider import policy in
+[`provider-import-policy.md`](provider-import-policy.md) defines the native
+storage families and the rules for real conversation text, tool output, raw
+diffs, oversized rows, and fixtures.
+
 Machine-readable provider metadata lives in
 [`provider-support-matrix.json`](provider-support-matrix.json). The public
+matrix's `tool_output` and `command_output` fidelity flags describe structured
+metadata and failed-output diagnostic support; successful stdout/stderr and raw
+tool result bodies are still excluded by the provider import policy. The public
+source formats below identify discovery/import source shapes; stored event
+metadata may use the corresponding per-file adapter format, such as
+`codex_session_jsonl` for files discovered under `codex_session_jsonl_tree`.
+The public
 support matrix is:
 
 | Provider | Support | Source format |

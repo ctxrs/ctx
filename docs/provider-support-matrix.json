@@ -797,7 +797,7 @@
           "notes": [
             "Reads Continue CLI session JSON files from CONTINUE_GLOBAL_DIR/sessions or ~/.continue/sessions.",
             "Uses sessions.json as optional metadata and imports each session JSON history item as a stable event.",
-            "Indexes message content, context item text, tool call names/status, and tool output previews when present."
+            "Indexes message content, context item text, tool call names/status, and failed-output diagnostics when present."
           ]
         }
       ],

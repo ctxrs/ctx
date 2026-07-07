@@ -251,6 +251,15 @@ const TOPICS: &[DocTopic] = &[
         body: include_str!("../../../docs/provider-support.md"),
     },
     DocTopic {
+        id: "provider-import-policy",
+        title: "Provider Import Policy",
+        audience: "integrator-agent",
+        summary: "Native provider content policy, storage families, and fixture expectations.",
+        tags: &["providers", "imports", "policy", "testing"],
+        source_path: "docs/provider-import-policy.md",
+        body: include_str!("../../../docs/provider-import-policy.md"),
+    },
+    DocTopic {
         id: "troubleshooting",
         title: "Troubleshooting",
         audience: "human-agent",

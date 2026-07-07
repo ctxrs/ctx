@@ -266,7 +266,7 @@ fn pi_session_import_replays_documented_session_jsonl_and_is_idempotent() {
     assert_eq!(events[4].role, Some(EventRole::Assistant));
     assert_eq!(events[5].event_type, EventType::Summary);
     assert!(events[3].payload.to_string().contains("cargo test"));
-    assert!(events[3].payload.to_string().contains("fixture-secret"));
+    assert!(!events[3].payload.to_string().contains("fixture-secret"));
 }
 
 #[test]
@@ -696,21 +696,59 @@ fn pi_session_import_keeps_metadata_entries_when_real_messages_exist() {
     let texts = events
         .iter()
         .filter_map(|event| event.payload.pointer("/body/text").and_then(Value::as_str))
+        .filter(|text| !text.is_empty())
         .collect::<Vec<_>>();
+    assert_eq!(
+        texts,
+        [
+            "mixed real prompt",
+            "compacted plan oracle",
+            "branch summary oracle",
+        ]
+    );
+    let payloads = serde_json::to_string(&events).unwrap();
     for expected in [
-        "mixed real prompt",
-        "compacted plan oracle",
-        "branch summary oracle",
-        "custom message oracle",
         "session info oracle",
-        "google/gemini-2.5-flash",
+        "gemini-2.5-flash",
         "high",
         "label oracle",
         "custom type oracle",
     ] {
         assert!(
-            texts.contains(&expected),
-            "missing {expected:?} in texts {texts:?}"
+            payloads.contains(expected),
+            "missing metadata {expected:?} in payloads {payloads}"
+        );
+    }
+    assert!(!payloads.contains("custom message oracle"));
+    for expected in [
+        "mixed real prompt",
+        "compacted plan oracle",
+        "branch summary oracle",
+    ] {
+        assert!(
+            store
+                .search_event_hits(expected, 10)
+                .unwrap()
+                .iter()
+                .any(|hit| hit.provider == Some(CaptureProvider::Pi)),
+            "missing searchable real text {expected:?}"
+        );
+    }
+    for omitted in [
+        "custom message oracle",
+        "session info oracle",
+        "gemini-2.5-flash",
+        "high",
+        "label oracle",
+        "custom type oracle",
+    ] {
+        assert!(
+            !store
+                .search_event_hits(omitted, 10)
+                .unwrap()
+                .iter()
+                .any(|hit| hit.provider == Some(CaptureProvider::Pi)),
+            "unexpected searchable metadata/non-message text {omitted:?}"
         );
     }
 }

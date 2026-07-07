@@ -179,6 +179,14 @@ pub(crate) fn normalize_openclaw_history(
         merged.captures.append(&mut result.captures);
         merged.files_touched.append(&mut result.files_touched);
     }
+    if merged.captures.is_empty() && merged.summary.failed == 0 {
+        merged.summary.failed += 1;
+        merged.summary.failures.push(ProviderImportFailure {
+            line: 0,
+            error: "OpenClaw session JSONL transcripts contained no real conversation messages"
+                .to_owned(),
+        });
+    }
     Ok(merged)
 }
 
@@ -305,6 +313,10 @@ pub(crate) fn normalize_openclaw_jsonl_file(
             ),
         ));
     }
+    if line_number == 0 && result.summary.failed == 0 {
+        result.summary.skipped += 1;
+        result.summary.skipped_sessions += 1;
+    }
     Ok(result)
 }
 
@@ -410,7 +422,7 @@ pub(crate) fn openclaw_event(
         .or_else(|| message.get("text"))
         .or_else(|| message.get("output"))
         .and_then(provider_value_text)
-        .unwrap_or_else(|| format!("OpenClaw {row_type}"));
+        .unwrap_or_default();
     native_event(NativeEventDraft {
         provider: CaptureProvider::OpenClaw,
         source_format: OPENCLAW_SOURCE_FORMAT,

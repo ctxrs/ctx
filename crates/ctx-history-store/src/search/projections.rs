@@ -327,7 +327,21 @@ fn populate_event_search_projection(conn: &Connection) -> Result<()> {
     )?;
     for row in rows {
         let (event_id, history_record_id, session_id, role, event_type, payload_json) = row?;
-        let preview = event_search_preview(&payload_json)?;
+        let event_type = event_type.parse::<EventType>().map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(err))
+        })?;
+        let role = role
+            .as_deref()
+            .map(str::parse::<EventRole>)
+            .transpose()
+            .map_err(|err| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    3,
+                    rusqlite::types::Type::Text,
+                    Box::new(err),
+                )
+            })?;
+        let preview = event_search_preview(event_type, role, &payload_json)?;
         if preview.trim().is_empty() {
             continue;
         }
@@ -335,9 +349,9 @@ fn populate_event_search_projection(conn: &Connection) -> Result<()> {
             event_id,
             history_record_id,
             session_id,
-            role,
+            role.map(|role| role.as_str()),
             preview,
-            event_type
+            event_type.as_str()
         ])?;
     }
     Ok(())
@@ -373,7 +387,7 @@ pub(crate) fn insert_event_search_projection_for_event_id(
     if !table_exists(conn, "event_search")? {
         return Ok(());
     }
-    let preview = event_search_preview_from_payload(&event.payload);
+    let preview = event_search_preview_from_payload(event.event_type, event.role, &event.payload);
     if preview.trim().is_empty() {
         return Ok(());
     }
@@ -395,21 +409,36 @@ pub(crate) fn insert_event_search_projection_for_event_id(
     Ok(())
 }
 
-fn event_search_preview(payload_json: &str) -> Result<String> {
+fn event_search_preview(
+    event_type: EventType,
+    role: Option<EventRole>,
+    payload_json: &str,
+) -> Result<String> {
     let payload: serde_json::Value = serde_json::from_str(payload_json)?;
-    Ok(event_search_preview_from_payload(&payload))
+    Ok(event_search_preview_from_payload(
+        event_type, role, &payload,
+    ))
 }
 
-fn event_search_preview_from_payload(payload: &serde_json::Value) -> String {
-    let preview = event_payload_preview(payload)
-        .or_else(|| {
-            if payload.is_object() || payload.is_array() {
-                Some(payload.to_string())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_default();
+fn event_search_preview_from_payload(
+    event_type: EventType,
+    role: Option<EventRole>,
+    payload: &serde_json::Value,
+) -> String {
+    let preview = match event_type {
+        EventType::Message if event_role_is_searchable_conversation(role) => {
+            event_payload_text_preview(payload)
+        }
+        EventType::Summary => event_payload_text_preview(payload),
+        EventType::ToolCall | EventType::CommandStarted | EventType::CommandFinished => {
+            event_tool_call_preview(payload)
+        }
+        EventType::ToolOutput | EventType::CommandOutput if event_output_is_failure(payload) => {
+            event_failed_output_preview(payload)
+        }
+        _ => None,
+    }
+    .unwrap_or_default();
     local_preview(&preview, 2048)
 }
 
@@ -417,32 +446,51 @@ fn local_preview(text: &str, max_chars: usize) -> String {
     text.chars().take(max_chars).collect()
 }
 
-fn event_payload_preview(payload: &serde_json::Value) -> Option<String> {
+fn event_role_is_searchable_conversation(role: Option<EventRole>) -> bool {
+    matches!(
+        role,
+        Some(EventRole::User | EventRole::Assistant | EventRole::System) | None
+    )
+}
+
+fn event_payload_text_preview(payload: &serde_json::Value) -> Option<String> {
     if let Some(body) = payload.get("body") {
-        if let Some(preview) = event_value_preview(body) {
+        if let Some(preview) = event_text_value_preview(body) {
             return Some(preview);
         }
     }
-    event_value_preview(payload)
+    event_text_value_preview(payload)
 }
 
-fn event_value_preview(value: &serde_json::Value) -> Option<String> {
+fn event_text_value_preview(value: &serde_json::Value) -> Option<String> {
     if let Some(value) = value.as_str() {
         return non_blank(value);
     }
     let object = value.as_object()?;
-    for key in [
-        "text",
-        "preview",
-        "summary",
-        "command",
-        "output_preview",
-        "output",
-        "message",
-    ] {
+    for key in ["text", "preview", "summary", "message"] {
         if let Some(value) = object.get(key).and_then(event_preview_fragment) {
             return Some(value);
         }
+    }
+    None
+}
+
+fn event_tool_call_preview(payload: &serde_json::Value) -> Option<String> {
+    if let Some(body) = payload.get("body") {
+        if let Some(preview) = event_tool_call_preview_fields(body) {
+            return Some(preview);
+        }
+    }
+    event_tool_call_preview_fields(payload)
+}
+
+fn event_tool_call_preview_fields(payload: &serde_json::Value) -> Option<String> {
+    let object = payload.as_object()?;
+    if let Some(command) = object.get("command").and_then(event_preview_fragment) {
+        return Some(command);
+    }
+    if let Some(text) = object.get("text").and_then(event_preview_fragment) {
+        return Some(text);
     }
     let structured = ["tool", "name", "arguments_preview", "status"]
         .into_iter()
@@ -458,6 +506,49 @@ fn event_value_preview(value: &serde_json::Value) -> Option<String> {
     } else {
         Some(structured.join(" | "))
     }
+}
+
+fn event_failed_output_preview(payload: &serde_json::Value) -> Option<String> {
+    if let Some(output_preview) = payload
+        .get("output_preview")
+        .and_then(event_preview_fragment)
+    {
+        return Some(output_preview);
+    }
+    if let Some(output_preview) = payload
+        .get("body")
+        .and_then(|body| body.get("output_preview"))
+        .and_then(event_preview_fragment)
+    {
+        return Some(output_preview);
+    }
+    event_payload_text_preview(payload)
+}
+
+fn event_output_is_failure(payload: &serde_json::Value) -> bool {
+    event_output_fields_indicate_failure(payload)
+        || payload
+            .get("body")
+            .is_some_and(event_output_fields_indicate_failure)
+}
+
+fn event_output_fields_indicate_failure(payload: &serde_json::Value) -> bool {
+    payload
+        .get("timed_out")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+        || payload
+            .get("exit_code")
+            .and_then(serde_json::Value::as_i64)
+            .is_some_and(|code| code != 0)
+        || payload
+            .get("output_retention")
+            .and_then(serde_json::Value::as_str)
+            == Some("failed_preview")
+        || payload
+            .get("content_retention")
+            .and_then(serde_json::Value::as_str)
+            == Some("failed_output_preview")
 }
 
 fn event_preview_fragment(value: &serde_json::Value) -> Option<String> {

@@ -56,6 +56,29 @@ fn local_preview_event(seq: u64, text: &str) -> Event {
     }
 }
 
+fn policy_event(
+    seq: u64,
+    event_type: EventType,
+    role: Option<EventRole>,
+    payload: serde_json::Value,
+) -> Event {
+    Event {
+        id: new_id(),
+        seq,
+        history_record_id: None,
+        session_id: None,
+        run_id: None,
+        event_type,
+        role,
+        occurred_at: fixed_time(),
+        capture_source_id: None,
+        payload,
+        payload_blob_id: None,
+        dedupe_key: None,
+        sync: sync_metadata(),
+    }
+}
+
 #[test]
 fn indexed_history_item_count_uses_sessions_and_events() {
     let temp = tempdir();
@@ -242,6 +265,156 @@ fn event_search_preserves_local_payload_text() {
 
     let hits = store.search_event_hits("rawmarker", 10).unwrap();
     assert!(hits.iter().any(|hit| hit.event_id == raw_event.id));
+}
+
+#[test]
+fn event_search_indexes_policy_allowed_agent_content_only() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let events = vec![
+        policy_event(
+            1,
+            EventType::Message,
+            Some(EventRole::User),
+            serde_json::json!({ "text": "conversation-oracle" }),
+        ),
+        policy_event(
+            2,
+            EventType::ToolCall,
+            Some(EventRole::Assistant),
+            serde_json::json!({
+                "tool": "exec_command",
+                "command": "cargo test policy-command-oracle",
+                "arguments_preview": "{\"cmd\":\"cargo test policy-command-oracle\"}"
+            }),
+        ),
+        policy_event(
+            3,
+            EventType::ToolCall,
+            Some(EventRole::Assistant),
+            serde_json::json!({ "text": "tooltoporacle" }),
+        ),
+        policy_event(
+            4,
+            EventType::ToolCall,
+            Some(EventRole::Assistant),
+            serde_json::json!({
+                "body": {
+                    "text": "toolnestoracle"
+                }
+            }),
+        ),
+        policy_event(
+            5,
+            EventType::CommandOutput,
+            Some(EventRole::Tool),
+            serde_json::json!({
+                "exit_code": 0,
+                "output_preview": "success-output-oracle"
+            }),
+        ),
+        policy_event(
+            6,
+            EventType::CommandOutput,
+            Some(EventRole::Tool),
+            serde_json::json!({
+                "exit_code": 101,
+                "output_preview": "failure-output-oracle"
+            }),
+        ),
+        policy_event(
+            7,
+            EventType::CommandOutput,
+            Some(EventRole::Tool),
+            serde_json::json!({
+                "text": "success-native-output-oracle",
+                "content_retention": "metadata_only",
+                "body": {
+                    "content_retention": "metadata_only"
+                }
+            }),
+        ),
+        policy_event(
+            8,
+            EventType::CommandOutput,
+            Some(EventRole::Tool),
+            serde_json::json!({
+                "content_retention": "failed_output_preview",
+                "body": {
+                    "content_retention": "failed_output_preview",
+                    "output_preview": "failed-native-output-oracle"
+                }
+            }),
+        ),
+        policy_event(
+            9,
+            EventType::Notice,
+            Some(EventRole::System),
+            serde_json::json!({ "text": "notice-oracle" }),
+        ),
+        policy_event(
+            10,
+            EventType::Message,
+            Some(EventRole::Assistant),
+            serde_json::json!({ "unexpected_field": "json-fallback-oracle" }),
+        ),
+    ];
+    for event in &events {
+        store.upsert_event(event).unwrap();
+    }
+
+    assert_eq!(
+        store
+            .search_event_hits("conversation-oracle", 10)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .search_event_hits("policy-command-oracle", 10)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        store.search_event_hits("tooltoporacle", 10).unwrap().len(),
+        1
+    );
+    assert_eq!(
+        store.search_event_hits("toolnestoracle", 10).unwrap().len(),
+        1
+    );
+    assert_eq!(
+        store
+            .search_event_hits("failure-output-oracle", 10)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .search_event_hits("failed-native-output-oracle", 10)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(store
+        .search_event_hits("success-output-oracle", 10)
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .search_event_hits("success-native-output-oracle", 10)
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .search_event_hits("notice-oracle", 10)
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .search_event_hits("json-fallback-oracle", 10)
+        .unwrap()
+        .is_empty());
 }
 
 #[test]

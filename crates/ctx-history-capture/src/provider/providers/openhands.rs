@@ -425,6 +425,6 @@ pub(crate) fn openhands_event_text(
     if event_type == EventType::Notice {
         format!("OpenHands event: {entry_type}")
     } else {
-        serde_json::to_string(value).unwrap_or_else(|_| entry_type.to_owned())
+        String::new()
     }
 }

@@ -56,6 +56,44 @@ fn provider_fixture_replay_supports_opencode_fixture() {
 }
 
 #[test]
+fn continue_cli_empty_history_rejects_metadata_only_session() {
+    let temp = tempdir();
+    let root = temp.path().join("continue-sessions");
+    fs::create_dir_all(&root).unwrap();
+    let fixture = root.join("empty-session.json");
+    fs::write(
+        &fixture,
+        json!({
+            "sessionId": "continue-empty-session",
+            "title": "Empty Continue session",
+            "createdAt": "2026-07-04T16:00:00Z",
+            "history": []
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let summary = import_continue_cli_sessions(
+        &root,
+        &mut store,
+        ContinueCliImportOptions {
+            source_path: Some(root.clone()),
+            imported_at: "2026-07-04T16:00:00Z".parse().unwrap(),
+            ..ContinueCliImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 1, "{:?}", summary.failures);
+    assert_eq!(summary.skipped_sessions, 1);
+    assert!(summary.failures[0]
+        .error
+        .contains("no real conversation messages"));
+    assert!(store.list_sessions().unwrap().is_empty());
+}
+
+#[test]
 fn native_pi_malformed_file_is_atomic_without_partial_failures() {
     let temp = tempdir();
     let fixture = provider_history_fixture("pi-malformed-partial.jsonl");
@@ -127,6 +165,31 @@ fn native_claude_projects_imports_jsonl_tree() {
 }
 
 #[test]
+fn native_claude_empty_project_jsonl_rejects_no_real_message() {
+    let temp = tempdir();
+    let root = temp.path().join("claude/projects/-workspace");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("empty.jsonl"), "").unwrap();
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let summary = import_claude_projects_jsonl_tree(
+        temp.path().join("claude/projects"),
+        &mut store,
+        ClaudeProjectsImportOptions {
+            allow_partial_failures: true,
+            ..ClaudeProjectsImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 1, "{:?}", summary.failures);
+    assert!(summary.failures[0]
+        .error
+        .contains("no real conversation messages"));
+    assert!(store.list_sessions().unwrap().is_empty());
+}
+
+#[test]
 fn antigravity_native_history_imports_transcripts_and_preserves_previews() {
     let temp = tempdir();
     let fixture = provider_history_fixture("antigravity/v1/brain");
@@ -147,8 +210,8 @@ fn antigravity_native_history_imports_transcripts_and_preserves_previews() {
     assert_eq!(summary.failed, 1, "{:?}", summary.failures);
     assert_eq!(summary.failures[0].line, 3);
     assert!(summary.failures[0].error.contains("malformed JSONL"));
-    assert_eq!(summary.imported_sessions, 4);
-    assert_eq!(summary.imported_events, 11);
+    assert_eq!(summary.imported_sessions, 3);
+    assert_eq!(summary.imported_events, 9);
 
     let success_session =
         stored_provider_session_id(&store, CaptureProvider::Antigravity, "agy-success");
@@ -182,16 +245,10 @@ fn antigravity_native_history_imports_transcripts_and_preserves_previews() {
         .iter()
         .any(|path| path.contains("transcript_full.jsonl")));
 
-    let future_session =
-        stored_provider_session_id(&store, CaptureProvider::Antigravity, "agy-future");
-    let future = store.events_for_session(future_session).unwrap();
-    assert!(future
-        .iter()
-        .any(|event| event.event_type == EventType::Notice
-            && event.payload["body"]["entry_type"] == "FUTURE_EVENT_KIND"));
-    let rendered = serde_json::to_string(&future).unwrap();
-    assert!(rendered.contains("ghp_1234567890abcdef"));
-    assert!(rendered.contains("/home/example/private.txt"));
+    assert!(store
+        .sessions_by_external_session_limited(CaptureProvider::Antigravity, "agy-future", 10)
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -232,8 +289,7 @@ fn native_windsurf_fixture_imports_searches_reimports_and_file_touches() {
     assert!(store
         .search_event_hits("windsurf unknown typed payload oracle", 10)
         .unwrap()
-        .iter()
-        .any(|hit| hit.provider == Some(CaptureProvider::Windsurf)));
+        .is_empty());
 
     let session_id = stored_provider_session_id(
         &store,
@@ -245,15 +301,9 @@ fn native_windsurf_fixture_imports_searches_reimports_and_file_touches() {
         .iter()
         .find(|event| event.event_type == EventType::ToolCall)
         .unwrap();
-    assert_eq!(
-        code_action.payload["body"]["body"]["code_action"]["path"].as_str(),
-        Some("src/windsurf_hook_oracle.py")
-    );
-    assert_eq!(
-        code_action.payload["body"]["body"]["code_action"]["new_content"].as_str(),
-        Some("print('windsurf cascade hook oracle')\n")
-    );
-    assert!(code_action.payload.to_string().contains("print("));
+    let code_action_payload = code_action.payload.to_string();
+    assert!(code_action_payload.contains("src/windsurf_hook_oracle.py"));
+    assert!(!code_action_payload.contains("print('windsurf cascade hook oracle')"));
 
     let archive = store.export_archive().unwrap();
     assert!(archive.files_touched.iter().any(|file| {
@@ -327,13 +377,13 @@ fn native_qoder_fixture_imports_documented_transcript_jsonl() {
         .iter()
         .any(|event| event.event_type == EventType::ToolCall
             && event.role == Some(EventRole::Assistant)));
-    assert!(events
+    let tool_output = events
         .iter()
-        .any(|event| event.event_type == EventType::ToolOutput
-            && event.role == Some(EventRole::User)
-            && event.payload["body"]["text"]
-                .as_str()
-                .is_some_and(|text| text.contains("qoder import ok"))));
+        .find(|event| {
+            event.event_type == EventType::ToolOutput && event.role == Some(EventRole::User)
+        })
+        .expect("tool output metadata event imported");
+    assert!(!tool_output.payload.to_string().contains("qoder import ok"));
 
     let second = import_qoder_history(
         &fixture,
@@ -608,6 +658,99 @@ fn native_codebuddy_fixture_imports_searches_and_reimports() {
 }
 
 #[test]
+fn native_codebuddy_empty_messages_rejects_no_real_message() {
+    let temp = tempdir();
+    let session_dir = temp.path().join("codebuddy/project/session-empty");
+    fs::create_dir_all(session_dir.join("messages")).unwrap();
+    fs::write(
+        session_dir.join("index.json"),
+        json!({"messages": []}).to_string(),
+    )
+    .unwrap();
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let summary = import_codebuddy_history(
+        temp.path().join("codebuddy/project"),
+        &mut store,
+        CodeBuddyImportOptions {
+            allow_partial_failures: true,
+            ..CodeBuddyImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 1, "{:?}", summary.failures);
+    assert!(summary.failures[0]
+        .error
+        .contains("no real conversation messages"));
+    assert!(store.list_sessions().unwrap().is_empty());
+}
+
+#[test]
+fn native_openclaw_empty_session_jsonl_rejects_no_real_message() {
+    let temp = tempdir();
+    let root = temp.path().join("openclaw/sessions");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("empty.jsonl"), "").unwrap();
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let summary = import_openclaw_history(
+        temp.path().join("openclaw"),
+        &mut store,
+        OpenClawImportOptions {
+            allow_partial_failures: true,
+            ..OpenClawImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 1, "{:?}", summary.failures);
+    assert!(summary.failures[0]
+        .error
+        .contains("no real conversation messages"));
+    assert!(store.list_sessions().unwrap().is_empty());
+}
+
+#[test]
+fn native_openclaw_contentless_message_does_not_fabricate_search_text() {
+    let temp = tempdir();
+    let root = temp.path().join("openclaw/sessions");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        root.join("contentless.jsonl"),
+        json!({
+            "type": "message",
+            "id": "openclaw-contentless",
+            "role": "assistant"
+        })
+        .to_string()
+            + "\n",
+    )
+    .unwrap();
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let summary = import_openclaw_history(
+        temp.path().join("openclaw"),
+        &mut store,
+        OpenClawImportOptions {
+            allow_partial_failures: true,
+            ..OpenClawImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 1, "{:?}", summary.failures);
+    assert!(summary.failures[0]
+        .error
+        .contains("no real conversation message"));
+    assert!(store
+        .search_event_hits("OpenClaw message", 10)
+        .unwrap()
+        .is_empty());
+    assert!(store.list_sessions().unwrap().is_empty());
+}
+
+#[test]
 fn native_trae_fixture_imports_searches_and_reimports() {
     let temp = tempdir();
     let fixture = provider_history_fixture("trae/User/workspaceStorage");
@@ -647,6 +790,9 @@ fn native_trae_fixture_imports_searches_and_reimports() {
         session.sync.metadata["metadata"]["workspace_folder"].as_str(),
         Some("/workspace/trae-fixture")
     );
+    let session_metadata = session.sync.metadata["metadata"].to_string();
+    assert!(!session_metadata.contains("\"messages\""));
+    assert!(!session_metadata.contains("trae oracle answer from state vscdb"));
 
     let events = store.events_for_session(session_id).unwrap();
     let rendered = serde_json::to_string(&events).unwrap();

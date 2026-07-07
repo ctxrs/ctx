@@ -86,18 +86,8 @@ pub(crate) fn normalize_continue_cli_sessions(
             .unwrap_or_default();
 
         if history.is_empty() {
-            result.captures.push((
-                source_line,
-                continue_capture(
-                    &provider_session_id,
-                    &session,
-                    indexed_metadata,
-                    started_at,
-                    &raw_source_path,
-                    context,
-                    None,
-                ),
-            ));
+            result.summary.skipped += 1;
+            result.summary.skipped_sessions += 1;
             continue;
         }
 
@@ -139,6 +129,14 @@ pub(crate) fn normalize_continue_cli_sessions(
                 ),
             ));
         }
+    }
+
+    if result.captures.is_empty() && result.summary.failed == 0 {
+        push_provider_import_failure(
+            &mut result.summary,
+            0,
+            "Continue CLI sessions contained no real conversation messages".to_owned(),
+        );
     }
 
     Ok(result)
@@ -339,8 +337,7 @@ pub(crate) fn continue_history_item_event(
         event_type,
         role,
         occurred_at,
-        text: continue_history_item_text(item)
-            .unwrap_or_else(|| "Continue CLI history item".to_owned()),
+        text: continue_history_item_text(item).unwrap_or_default(),
         body: item.clone(),
         metadata: json!({
             "source": CONTINUE_CLI_SOURCE_FORMAT,
@@ -409,10 +406,7 @@ pub(crate) fn continue_tool_states_text(value: &Value) -> Option<String> {
             .get("status")
             .and_then(Value::as_str)
             .unwrap_or("unknown");
-        parts.push(format!("tool call: {name} ({status})"));
-        if let Some(output) = state.get("output").and_then(provider_value_text) {
-            parts.push(output);
-        }
+        parts.push(format!("tool: {name} | status: {status}"));
     }
     (!parts.is_empty()).then(|| parts.join("\n"))
 }

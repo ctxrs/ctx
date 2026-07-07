@@ -332,9 +332,7 @@ pub(crate) fn kimi_event_type(record_type: &str, value: &Value) -> EventType {
                 _ => EventType::Notice,
             }
         }
-        "usage.record" | "context.apply_compaction" | "full_compaction.complete" => {
-            EventType::Summary
-        }
+        "context.apply_compaction" | "full_compaction.complete" => EventType::Summary,
         _ => EventType::Notice,
     }
 }
@@ -372,12 +370,12 @@ pub(crate) fn kimi_event_text(record_type: &str, value: &Value, event_type: Even
         "turn.prompt" | "turn.steer" => value
             .get("input")
             .and_then(provider_value_text)
-            .unwrap_or_else(|| format!("Kimi Code CLI {record_type}")),
+            .unwrap_or_default(),
         "context.append_message" => value
             .pointer("/message/content")
             .or_else(|| value.get("message"))
             .and_then(provider_value_text)
-            .unwrap_or_else(|| "Kimi Code CLI message".to_owned()),
+            .unwrap_or_default(),
         "context.append_loop_event" => value
             .pointer("/event/content")
             .or_else(|| value.pointer("/event/text"))
@@ -396,12 +394,8 @@ pub(crate) fn kimi_event_text(record_type: &str, value: &Value, event_type: Even
                         _ => format!("tool: {tool}"),
                     })
             })
-            .unwrap_or_else(|| format!("Kimi Code CLI {record_type}")),
-        "usage.record" => value
-            .get("model")
-            .and_then(Value::as_str)
-            .map(|model| format!("usage record: {model}"))
-            .unwrap_or_else(|| "usage record".to_owned()),
+            .unwrap_or_default(),
+        "usage.record" => String::new(),
         "tools.set_active_tools" => value
             .get("names")
             .and_then(Value::as_array)
@@ -419,7 +413,7 @@ pub(crate) fn kimi_event_text(record_type: &str, value: &Value, event_type: Even
             .and_then(Value::as_str)
             .map(|mode| format!("permission mode: {mode}"))
             .unwrap_or_else(|| "permission mode updated".to_owned()),
-        _ => format!("Kimi Code CLI {record_type}"),
+        _ => String::new(),
     }
 }
 

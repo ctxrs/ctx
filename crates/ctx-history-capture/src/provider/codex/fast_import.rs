@@ -37,7 +37,8 @@ use crate::provider::codex::events::{
     CodexToolCallContext,
 };
 use crate::provider::codex::session::{
-    should_parse_codex_session_line, should_skip_codex_tool_output_line,
+    codex_session_file_has_real_conversation, should_parse_codex_session_line,
+    should_skip_codex_tool_output_line,
 };
 
 pub(crate) fn import_codex_session_paths_fast(
@@ -191,6 +192,14 @@ pub(crate) fn import_codex_session_path_fast(
     caches: &mut ProviderImportCaches,
 ) -> Result<()> {
     ensure_regular_provider_transcript_file(path)?;
+    if !codex_session_file_has_real_conversation(path)? {
+        summary.failed += 1;
+        summary.failures.push(ProviderImportFailure {
+            line: 0,
+            error: "codex session JSONL contained no real message content".to_owned(),
+        });
+        return Ok(());
+    }
     let file = File::open(path)?;
     let mut reader = BufReader::new(file);
     let context = ProviderAdapterContext {
@@ -198,9 +207,6 @@ pub(crate) fn import_codex_session_path_fast(
         source_path: Some(path.to_path_buf()),
         source_root: options.source_path.clone(),
         imported_at: options.imported_at,
-        tool_output_mode: options.tool_output_mode,
-        event_mode: options.event_mode,
-        include_notices: options.include_notices,
     };
     let import_options = NormalizedProviderImportOptions {
         history_record_id: options.history_record_id,
@@ -223,10 +229,10 @@ pub(crate) fn import_codex_session_path_fast(
         if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        if !should_parse_codex_session_line(&line, options.event_mode) {
+        if !should_parse_codex_session_line(&line) {
             continue;
         }
-        if should_skip_codex_tool_output_line(&line, options.tool_output_mode) {
+        if should_skip_codex_tool_output_line(&line) {
             summary.skipped += 1;
             summary.skipped_events += 1;
             continue;
@@ -317,14 +323,12 @@ pub(crate) fn import_codex_session_path_fast(
             CodexSessionLineContext {
                 line_number,
                 occurred_at,
-                tool_output_mode: options.tool_output_mode,
-                event_mode: options.event_mode,
                 raw_source_path: raw_source_path.as_deref(),
                 source_root: context.source_root_display().as_deref(),
             },
         );
         if let Some(event) = line_capture.event.take() {
-            if !options.include_notices && event.event_type == EventType::Notice {
+            if event.event_type == EventType::Notice {
                 summary.skipped += 1;
                 summary.skipped_events += 1;
             } else {

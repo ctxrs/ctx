@@ -139,9 +139,6 @@ pub struct CodexSessionImportOptions {
     pub allow_partial_failures: bool,
     pub max_session_files: Option<usize>,
     pub max_total_bytes: Option<u64>,
-    pub tool_output_mode: CodexToolOutputMode,
-    pub event_mode: CodexEventImportMode,
-    pub include_notices: bool,
     pub fast_event_inserts: bool,
     pub progress: Option<CodexSessionImportProgressCallback>,
 }
@@ -156,9 +153,6 @@ impl Default for CodexSessionImportOptions {
             allow_partial_failures: false,
             max_session_files: None,
             max_total_bytes: None,
-            tool_output_mode: CodexToolOutputMode::Full,
-            event_mode: CodexEventImportMode::Rich,
-            include_notices: true,
             fast_event_inserts: true,
             progress: None,
         }
@@ -175,9 +169,6 @@ impl std::fmt::Debug for CodexSessionImportOptions {
             .field("allow_partial_failures", &self.allow_partial_failures)
             .field("max_session_files", &self.max_session_files)
             .field("max_total_bytes", &self.max_total_bytes)
-            .field("tool_output_mode", &self.tool_output_mode)
-            .field("event_mode", &self.event_mode)
-            .field("include_notices", &self.include_notices)
             .field("fast_event_inserts", &self.fast_event_inserts)
             .field("progress", &self.progress.as_ref().map(|_| "<callback>"))
             .finish()
@@ -200,20 +191,6 @@ pub struct CodexSessionImportProgress {
     pub skipped: usize,
     pub failed: usize,
     pub done: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CodexEventImportMode {
-    Search,
-    Rich,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CodexToolOutputMode {
-    Full,
-    Metadata,
-    Failures,
-    Skip,
 }
 
 #[derive(Debug, Clone)]

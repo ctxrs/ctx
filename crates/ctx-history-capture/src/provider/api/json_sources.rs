@@ -14,11 +14,10 @@ use crate::provider::importer::{
 use crate::provider::providers::trae::normalize_trae_history;
 use crate::{
     AuggieImportOptions, ClaudeProjectsImportOptions, ClineTaskJsonImportOptions,
-    CodeBuddyImportOptions, CodexEventImportMode, CodexToolOutputMode, CrushSqliteImportOptions,
-    GooseSessionsSqliteImportOptions, HermesSqliteImportOptions, JunieImportOptions,
-    NormalizedProviderImportOptions, OpenClawImportOptions, PiSessionImportOptions,
-    ProviderAdapterContext, ProviderImportSummary, Result, RooTaskJsonImportOptions,
-    TraeImportOptions,
+    CodeBuddyImportOptions, CrushSqliteImportOptions, GooseSessionsSqliteImportOptions,
+    HermesSqliteImportOptions, JunieImportOptions, NormalizedProviderImportOptions,
+    OpenClawImportOptions, PiSessionImportOptions, ProviderAdapterContext, ProviderImportSummary,
+    Result, RooTaskJsonImportOptions, TraeImportOptions,
 };
 
 pub fn import_pi_session_jsonl(
@@ -38,9 +37,6 @@ pub fn import_pi_session_jsonl(
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
-            tool_output_mode: CodexToolOutputMode::Full,
-            event_mode: CodexEventImportMode::Rich,
-            include_notices: true,
         },
     )?;
 
@@ -74,9 +70,6 @@ pub fn import_claude_projects_jsonl_tree(
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
-            tool_output_mode: CodexToolOutputMode::Full,
-            event_mode: CodexEventImportMode::Rich,
-            include_notices: true,
         },
     )?;
 
@@ -110,9 +103,6 @@ pub fn import_cline_task_json_history(
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
-            tool_output_mode: CodexToolOutputMode::Full,
-            event_mode: CodexEventImportMode::Rich,
-            include_notices: true,
         },
     )?;
 
@@ -146,9 +136,6 @@ pub fn import_roo_task_json_history(
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
-            tool_output_mode: CodexToolOutputMode::Full,
-            event_mode: CodexEventImportMode::Rich,
-            include_notices: true,
         },
     )?;
 
@@ -182,9 +169,6 @@ pub fn import_codebuddy_history(
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
-            tool_output_mode: CodexToolOutputMode::Full,
-            event_mode: CodexEventImportMode::Rich,
-            include_notices: true,
         },
     )?;
 
@@ -218,9 +202,6 @@ pub fn import_trae_history(
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
-            tool_output_mode: CodexToolOutputMode::Full,
-            event_mode: CodexEventImportMode::Rich,
-            include_notices: true,
         },
     )?;
 
@@ -254,9 +235,6 @@ pub fn import_crush_sqlite(
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
-            tool_output_mode: CodexToolOutputMode::Full,
-            event_mode: CodexEventImportMode::Rich,
-            include_notices: true,
         },
     )?;
 
@@ -290,9 +268,6 @@ pub fn import_goose_sessions_sqlite(
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
-            tool_output_mode: CodexToolOutputMode::Full,
-            event_mode: CodexEventImportMode::Rich,
-            include_notices: true,
         },
     )?;
 
@@ -346,9 +321,6 @@ pub fn import_hermes_sqlite(
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
-            tool_output_mode: CodexToolOutputMode::Full,
-            event_mode: CodexEventImportMode::Rich,
-            include_notices: true,
         },
     )?;
     import_normalized_provider_captures(
@@ -381,9 +353,6 @@ pub fn import_auggie_history(
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
-            tool_output_mode: CodexToolOutputMode::Full,
-            event_mode: CodexEventImportMode::Rich,
-            include_notices: true,
         },
     )?;
 
@@ -417,9 +386,6 @@ pub fn import_junie_history(
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
-            tool_output_mode: CodexToolOutputMode::Full,
-            event_mode: CodexEventImportMode::Rich,
-            include_notices: true,
         },
     )?;
     import_normalized_provider_captures(

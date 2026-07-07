@@ -22,11 +22,11 @@ use crate::provider::file_touches::provider_file_touches_from_raw_value;
 use crate::provider::importer::provider_cursor_stream;
 use crate::provider::native::{
     antigravity_tool_call_text, provider_capped_json, provider_capped_json_value,
-    provider_local_preview, provider_role, provider_value_text,
+    provider_policy_body, provider_policy_event_text, provider_role, provider_value_text,
 };
 use crate::{
     CaptureError, ProviderAdapterContext, ProviderImportFailure, ProviderNormalizationResult,
-    Result, PROVIDER_MAX_PREVIEW_CHARS, PROVIDER_MAX_TEXT_CHARS,
+    Result, PROVIDER_MAX_PREVIEW_CHARS,
 };
 
 mod windsurf;
@@ -201,6 +201,13 @@ pub(crate) fn normalize_native_jsonl_session_file(
         0
     } else {
         if rows.is_empty() {
+            if result.summary.failed == 0 {
+                result.summary.failed += 1;
+                result.summary.failures.push(ProviderImportFailure {
+                    line: 0,
+                    error: native_jsonl_missing_reason(provider).to_owned(),
+                });
+            }
             return Ok(result);
         }
         let Some(header_index) = rows
@@ -527,20 +534,27 @@ pub(crate) fn native_jsonl_event(
     let entry_type = native_jsonl_entry_type(provider, value);
     let role = native_jsonl_role(provider, value);
     let text = native_jsonl_event_text(provider, value, event_type, &entry_type);
-    let (text, truncated) = provider_local_preview(&text, PROVIDER_MAX_TEXT_CHARS);
+    let body_value = if provider == CaptureProvider::Windsurf {
+        windsurf_event_body(value)
+    } else {
+        value.clone()
+    };
+    let (text, truncated, retention) = provider_policy_event_text(event_type, &text, &body_value);
     let event_id = native_jsonl_event_id(provider, value, line_number);
     let tool_calls = if provider == CaptureProvider::Antigravity {
-        value
-            .get("tool_calls")
-            .map(|calls| provider_capped_json_value(calls, PROVIDER_MAX_PREVIEW_CHARS))
+        value.get("tool_calls").map(|calls| {
+            provider_capped_json_value(
+                &provider_policy_body(EventType::ToolCall, calls),
+                PROVIDER_MAX_PREVIEW_CHARS,
+            )
+        })
     } else {
         None
     };
-    let body = if provider == CaptureProvider::Windsurf {
-        windsurf_event_body(value)
-    } else {
-        provider_capped_json(value, PROVIDER_MAX_PREVIEW_CHARS)
-    };
+    let body = provider_capped_json(
+        &provider_policy_body(event_type, &body_value),
+        PROVIDER_MAX_PREVIEW_CHARS,
+    );
 
     Some(ProviderEventEnvelope {
         provider_event_index: (line_number - 1) as u64,
@@ -563,6 +577,7 @@ pub(crate) fn native_jsonl_event(
             "truncated": truncated,
             "tool_calls": tool_calls,
             "body": body,
+            "content_retention": retention.as_str(),
         }),
         metadata: json!({
             "source": source_format,
@@ -789,7 +804,7 @@ pub(crate) fn native_jsonl_event_text(
             })
             .or_else(|| value.get("thinking").and_then(provider_value_text))
             .or_else(|| value.get("tool_calls").and_then(antigravity_tool_call_text))
-            .unwrap_or_else(|| format!("Antigravity event: {entry_type}")),
+            .unwrap_or_default(),
         CaptureProvider::Gemini | CaptureProvider::Tabnine => value
             .get("content")
             .and_then(provider_value_text)
@@ -801,14 +816,7 @@ pub(crate) fn native_jsonl_event_text(
                     .and_then(Value::as_str)
                     .map(|id| format!("rewind to {id}"))
             })
-            .unwrap_or_else(|| {
-                let name = if provider == CaptureProvider::Tabnine {
-                    "Tabnine"
-                } else {
-                    "Gemini"
-                };
-                format!("{name} event: {entry_type}")
-            }),
+            .unwrap_or_default(),
         CaptureProvider::FactoryAiDroid => value
             .get("content")
             .and_then(provider_value_text)
@@ -819,7 +827,7 @@ pub(crate) fn native_jsonl_event_text(
                     .map(str::to_owned)
             })
             .or_else(|| value.get("items").and_then(provider_value_text))
-            .unwrap_or_else(|| format!("Factory AI Droid event: {entry_type}")),
+            .unwrap_or_default(),
         CaptureProvider::CopilotCli => value
             .pointer("/data/content")
             .and_then(Value::as_str)
@@ -842,13 +850,13 @@ pub(crate) fn native_jsonl_event_text(
                     .and_then(Value::as_str)
                     .map(|tool| format!("tool {tool}"))
             })
-            .unwrap_or_else(|| format!("Copilot CLI event: {entry_type}")),
+            .unwrap_or_default(),
         CaptureProvider::Cursor => value
             .pointer("/message/content")
             .or_else(|| value.get("content"))
             .and_then(provider_value_text)
             .or_else(|| value.get("text").and_then(Value::as_str).map(str::to_owned))
-            .unwrap_or_else(|| format!("Cursor event: {entry_type}")),
+            .unwrap_or_default(),
         CaptureProvider::Windsurf => windsurf_event_text(value, entry_type),
         CaptureProvider::Qoder => {
             let primary = if event_type == EventType::ToolOutput {
@@ -863,7 +871,7 @@ pub(crate) fn native_jsonl_event_text(
             primary
                 .or_else(|| value.pointer("/data/content"))
                 .and_then(provider_value_text)
-                .unwrap_or_else(|| format!("Qoder event: {entry_type}"))
+                .unwrap_or_default()
         }
         CaptureProvider::QwenCode => value
             .pointer("/message/content")
@@ -871,8 +879,8 @@ pub(crate) fn native_jsonl_event_text(
             .and_then(provider_value_text)
             .or_else(|| value.get("toolCallResult").and_then(provider_value_text))
             .or_else(|| value.get("content").and_then(provider_value_text))
-            .unwrap_or_else(|| format!("Qwen Code event: {entry_type}")),
-        _ => serde_json::to_string(value).unwrap_or_else(|_| entry_type.to_owned()),
+            .unwrap_or_default(),
+        _ => String::new(),
     }
 }
 

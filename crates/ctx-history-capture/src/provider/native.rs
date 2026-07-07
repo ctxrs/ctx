@@ -375,7 +375,9 @@ pub(crate) struct NativeEventDraft {
 }
 
 pub(crate) fn native_event(draft: NativeEventDraft) -> ProviderEventEnvelope {
-    let (text, truncated) = provider_local_preview(&draft.text, PROVIDER_MAX_TEXT_CHARS);
+    let (text, truncated, retention) =
+        provider_policy_event_text(draft.event_type, &draft.text, &draft.body);
+    let body = provider_policy_body(draft.event_type, &draft.body);
     ProviderEventEnvelope {
         provider_event_index: draft.provider_event_index,
         provider_event_hash: draft.provider_event_hash,
@@ -395,9 +397,294 @@ pub(crate) fn native_event(draft: NativeEventDraft) -> ProviderEventEnvelope {
             "text": text,
             "truncated": truncated,
             "source_format": draft.source_format,
-            "body": provider_capped_json(&draft.body, PROVIDER_MAX_PREVIEW_CHARS),
+            "body": provider_capped_json(&body, PROVIDER_MAX_PREVIEW_CHARS),
+            "content_retention": retention.as_str(),
         }),
         metadata: draft.metadata,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NativeEventRetention {
+    FullText,
+    Metadata,
+    MetadataOnly,
+    FailedOutputPreview,
+}
+
+impl NativeEventRetention {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::FullText => "full_text",
+            Self::Metadata => "metadata",
+            Self::MetadataOnly => "metadata_only",
+            Self::FailedOutputPreview => "failed_output_preview",
+        }
+    }
+}
+
+pub(crate) fn native_event_retention(event_type: EventType, body: &Value) -> NativeEventRetention {
+    match event_type {
+        EventType::Message | EventType::Summary => NativeEventRetention::FullText,
+        EventType::ToolCall | EventType::CommandStarted | EventType::CommandFinished => {
+            NativeEventRetention::Metadata
+        }
+        EventType::ToolOutput | EventType::CommandOutput => {
+            if provider_output_event_is_failure(body) {
+                NativeEventRetention::FailedOutputPreview
+            } else {
+                NativeEventRetention::MetadataOnly
+            }
+        }
+        EventType::FileTouched | EventType::VcsChange | EventType::Artifact | EventType::Notice => {
+            NativeEventRetention::MetadataOnly
+        }
+    }
+}
+
+pub(crate) fn provider_policy_event_text(
+    event_type: EventType,
+    text: &str,
+    body: &Value,
+) -> (String, bool, NativeEventRetention) {
+    let retention = native_event_retention(event_type, body);
+    let text = match retention {
+        NativeEventRetention::FailedOutputPreview => {
+            provider_sanitized_output_preview_value(body, text)
+        }
+        _ => text.to_owned(),
+    };
+    let text_limit = match retention {
+        NativeEventRetention::FullText => PROVIDER_MAX_TEXT_CHARS,
+        NativeEventRetention::Metadata | NativeEventRetention::FailedOutputPreview => {
+            PROVIDER_MAX_PREVIEW_CHARS
+        }
+        NativeEventRetention::MetadataOnly => 0,
+    };
+    let (text, truncated) = if text_limit == 0 {
+        (String::new(), false)
+    } else {
+        provider_local_preview(&text, text_limit)
+    };
+    (text, truncated, retention)
+}
+
+pub(crate) fn provider_policy_body(event_type: EventType, body: &Value) -> Value {
+    let mut sanitized = provider_sanitize_body_value(event_type, body, None);
+    if let Value::Object(object) = &mut sanitized {
+        object.insert(
+            "content_retention".to_owned(),
+            Value::String(native_event_retention(event_type, body).as_str().to_owned()),
+        );
+    }
+    sanitized
+}
+
+fn provider_sanitize_body_value(event_type: EventType, value: &Value, key: Option<&str>) -> Value {
+    if key.is_some_and(|key| provider_policy_redact_key(event_type, key, value)) {
+        return provider_redacted_body_value(value);
+    }
+    match value {
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| provider_sanitize_body_value(event_type, item, key))
+                .collect(),
+        ),
+        Value::Object(object) => Value::Object(
+            object
+                .iter()
+                .map(|(key, value)| {
+                    (
+                        key.clone(),
+                        provider_sanitize_body_value(event_type, value, Some(key)),
+                    )
+                })
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
+}
+
+fn provider_policy_redact_key(event_type: EventType, key: &str, value: &Value) -> bool {
+    let key = provider_normalized_key(key);
+    if matches!(
+        event_type,
+        EventType::Notice | EventType::FileTouched | EventType::VcsChange | EventType::Artifact
+    ) && matches!(
+        key.as_str(),
+        "text" | "content" | "message" | "prompt" | "summary" | "details"
+    ) {
+        return true;
+    }
+    if matches!(event_type, EventType::ToolOutput | EventType::CommandOutput)
+        && (matches!(
+            key.as_str(),
+            "details" | "text" | "content" | "outputpreview"
+        ) || (key == "message" && !value.is_object()))
+    {
+        return true;
+    }
+    matches!(
+        key.as_str(),
+        "output"
+            | "stdout"
+            | "stderr"
+            | "tooloutput"
+            | "toolresult"
+            | "toolresults"
+            | "tooluseresult"
+            | "toolcallstates"
+            | "commandoutput"
+            | "executionoutput"
+            | "result"
+            | "results"
+            | "diff"
+            | "patch"
+            | "oldstring"
+            | "newstring"
+            | "oldcontent"
+            | "newcontent"
+            | "beforecontent"
+            | "aftercontent"
+            | "beforetext"
+            | "aftertext"
+    ) || (matches!(key.as_str(), "input" | "arguments" | "args" | "params")
+        && provider_value_contains_patch_or_diff(value))
+}
+
+fn provider_redacted_body_value(value: &Value) -> Value {
+    json!({
+        "content_retention": "metadata_only",
+        "omitted_bytes": provider_value_approx_bytes(value),
+        "contains_patch_or_diff": provider_value_contains_patch_or_diff(value),
+    })
+}
+
+fn provider_normalized_key(key: &str) -> String {
+    key.chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn provider_value_approx_bytes(value: &Value) -> usize {
+    match value {
+        Value::String(text) => text.len(),
+        _ => serde_json::to_string(value)
+            .map(|text| text.len())
+            .unwrap_or_default(),
+    }
+}
+
+pub(crate) fn provider_value_contains_patch_or_diff(value: &Value) -> bool {
+    match value {
+        Value::String(text) => provider_text_contains_patch_or_diff(text),
+        Value::Array(items) => items.iter().any(provider_value_contains_patch_or_diff),
+        Value::Object(object) => object.values().any(provider_value_contains_patch_or_diff),
+        _ => false,
+    }
+}
+
+fn provider_text_contains_patch_or_diff(text: &str) -> bool {
+    text.contains("*** Begin Patch")
+        || text.contains("diff --git ")
+        || text.starts_with("@@")
+        || text.starts_with("+++ ")
+        || text.starts_with("--- ")
+        || text.contains("\n@@")
+        || text.contains("\n+++ ")
+        || text.contains("\n--- ")
+}
+
+pub(crate) fn provider_sanitized_output_preview_value(value: &Value, text: &str) -> String {
+    if provider_value_contains_patch_or_diff(value) {
+        format!(
+            "[output omitted: contains patch or diff content; bytes={}]",
+            provider_value_approx_bytes(value)
+        )
+    } else {
+        provider_sanitized_output_preview(text)
+    }
+}
+
+pub(crate) fn provider_sanitized_output_preview(text: &str) -> String {
+    if provider_text_contains_patch_or_diff(text) {
+        format!(
+            "[output omitted: contains patch or diff content; bytes={}]",
+            text.len()
+        )
+    } else {
+        text.to_owned()
+    }
+}
+
+pub(crate) fn provider_output_event_is_failure(body: &Value) -> bool {
+    match body {
+        Value::Object(object) => {
+            provider_output_object_indicates_failure(object)
+                || object.values().any(provider_output_event_is_failure)
+        }
+        Value::Array(items) => items.iter().any(provider_output_event_is_failure),
+        _ => false,
+    }
+}
+
+fn provider_output_object_indicates_failure(object: &serde_json::Map<String, Value>) -> bool {
+    object
+        .get("timed_out")
+        .or_else(|| object.get("timedOut"))
+        .or_else(|| object.get("timeout"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || object
+            .get("success")
+            .and_then(Value::as_bool)
+            .is_some_and(|success| !success)
+        || object
+            .get("isError")
+            .or_else(|| object.get("is_error"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        || ["exit_code", "exitCode"].iter().any(|key| {
+            object
+                .get(*key)
+                .and_then(Value::as_i64)
+                .is_some_and(|code| code != 0)
+        })
+        || ["status_code", "statusCode"].iter().any(|key| {
+            object
+                .get(*key)
+                .and_then(Value::as_i64)
+                .is_some_and(|code| code >= 400)
+        })
+        || ["status", "state", "outcome"].iter().any(|key| {
+            object
+                .get(*key)
+                .and_then(Value::as_str)
+                .is_some_and(provider_status_text_is_failure)
+        })
+        || object
+            .get("error")
+            .is_some_and(provider_error_value_indicates_failure)
+}
+
+fn provider_status_text_is_failure(status: &str) -> bool {
+    let status = status.trim().to_ascii_lowercase();
+    matches!(
+        status.as_str(),
+        "failed" | "failure" | "error" | "errored" | "timeout" | "timed_out" | "timedout"
+    )
+}
+
+fn provider_error_value_indicates_failure(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(value) => *value,
+        Value::String(value) => !value.trim().is_empty(),
+        Value::Number(value) => value.as_i64().is_some_and(|number| number != 0),
+        Value::Array(values) => !values.is_empty(),
+        Value::Object(values) => !values.is_empty(),
     }
 }
 
@@ -713,5 +1000,150 @@ pub(crate) fn task_json_timestamp_number(value: i64) -> Option<DateTime<Utc>> {
         DateTime::<Utc>::from_timestamp_millis(value)
     } else {
         DateTime::<Utc>::from_timestamp(value, 0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_native_event(event_type: EventType, text: &str, body: Value) -> ProviderEventEnvelope {
+        native_event(NativeEventDraft {
+            provider: CaptureProvider::Codex,
+            source_format: "test_provider",
+            provider_session_id: "session-1".to_owned(),
+            provider_event_index: 1,
+            provider_event_hash: None,
+            cursor: "line:1".to_owned(),
+            event_type,
+            role: Some(EventRole::Assistant),
+            occurred_at: "2026-07-07T12:00:00Z".parse().unwrap(),
+            text: text.to_owned(),
+            body,
+            metadata: json!({}),
+        })
+    }
+
+    #[test]
+    fn native_event_retains_real_text_and_redacts_noisy_body_fields() {
+        let event = test_native_event(
+            EventType::Message,
+            "real conversation oracle",
+            json!({
+                "content": "real conversation oracle",
+                "toolCallStates": {
+                    "output": "successful-output-oracle"
+                },
+                "diff": "*** Begin Patch\n- secret old\n+ secret new\n*** End Patch"
+            }),
+        );
+        let rendered = event.payload.to_string();
+
+        assert!(rendered.contains("real conversation oracle"));
+        assert!(rendered.contains("metadata_only"));
+        assert!(!rendered.contains("successful-output-oracle"));
+        assert!(!rendered.contains("*** Begin Patch"));
+        assert!(!rendered.contains("secret old"));
+        assert!(!rendered.contains("secret new"));
+    }
+
+    #[test]
+    fn native_event_output_policy_keeps_only_failed_diagnostics() {
+        let success = test_native_event(
+            EventType::CommandOutput,
+            "successful-output-oracle",
+            json!({
+                "exit_code": 0,
+                "output": "successful-output-oracle"
+            }),
+        );
+        let failed = test_native_event(
+            EventType::CommandOutput,
+            "failed-output-oracle",
+            json!({
+                "exit_code": 2,
+                "output": "failed-output-oracle"
+            }),
+        );
+        let nested_failed = test_native_event(
+            EventType::CommandOutput,
+            "nested-failed-output-oracle",
+            json!({
+                "message": {
+                    "exitCode": 2,
+                    "output": "nested-failed-output-oracle"
+                }
+            }),
+        );
+        let http_success = test_native_event(
+            EventType::CommandOutput,
+            "http-success-output-oracle",
+            json!({
+                "statusCode": 200,
+                "error": false,
+                "output": "http-success-output-oracle"
+            }),
+        );
+        let http_failed = test_native_event(
+            EventType::CommandOutput,
+            "http-failed-output-oracle",
+            json!({
+                "statusCode": 500,
+                "output": "http-failed-output-oracle"
+            }),
+        );
+        let failed_diff = test_native_event(
+            EventType::CommandOutput,
+            "diff --git a/src/lib.rs b/src/lib.rs\n@@\n-old raw diff\n+new raw diff\n",
+            json!({
+                "exit_code": 1,
+                "output": "diff --git a/src/lib.rs b/src/lib.rs\n@@\n-old raw diff\n+new raw diff\n"
+            }),
+        );
+
+        let success_payload = success.payload.to_string();
+        assert!(success_payload.contains("metadata_only"));
+        assert!(!success_payload.contains("successful-output-oracle"));
+
+        let failed_payload = failed.payload.to_string();
+        assert!(failed_payload.contains("failed_output_preview"));
+        assert!(failed_payload.contains("failed-output-oracle"));
+
+        let nested_failed_payload = nested_failed.payload.to_string();
+        assert!(nested_failed_payload.contains("failed_output_preview"));
+        assert!(nested_failed_payload.contains("nested-failed-output-oracle"));
+
+        let http_success_payload = http_success.payload.to_string();
+        assert!(http_success_payload.contains("metadata_only"));
+        assert!(!http_success_payload.contains("http-success-output-oracle"));
+
+        let http_failed_payload = http_failed.payload.to_string();
+        assert!(http_failed_payload.contains("failed_output_preview"));
+        assert!(http_failed_payload.contains("http-failed-output-oracle"));
+
+        let failed_diff_payload = failed_diff.payload.to_string();
+        assert!(failed_diff_payload.contains("output omitted"));
+        assert!(!failed_diff_payload.contains("diff --git"));
+        assert!(!failed_diff_payload.contains("old raw diff"));
+        assert!(!failed_diff_payload.contains("new raw diff"));
+    }
+
+    #[test]
+    fn native_event_redacts_patch_arguments_from_tool_metadata_body() {
+        let event = test_native_event(
+            EventType::ToolCall,
+            "apply_patch file touches: modified:src/main.rs",
+            json!({
+                "tool_name": "Edit",
+                "input": "*** Begin Patch\n*** Update File: src/main.rs\n@@\n-old\n+new\n*** End Patch"
+            }),
+        );
+        let rendered = event.payload.to_string();
+
+        assert!(rendered.contains("apply_patch file touches: modified:src/main.rs"));
+        assert!(rendered.contains("metadata_only"));
+        assert!(!rendered.contains("*** Begin Patch"));
+        assert!(!rendered.contains("-old"));
+        assert!(!rendered.contains("+new"));
     }
 }

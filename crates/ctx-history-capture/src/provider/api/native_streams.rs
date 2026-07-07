@@ -14,13 +14,13 @@ use crate::provider::importer::{
 };
 use crate::provider::providers::warp::normalize_warp_sqlite;
 use crate::{
-    AntigravityCliImportOptions, CodexEventImportMode, CodexToolOutputMode,
-    CopilotCliImportOptions, CursorNativeImportOptions, FactoryAiDroidImportOptions,
-    GeminiCliImportOptions, KimiCodeCliImportOptions, LingmaSqliteImportOptions,
-    MistralVibeImportOptions, MuxImportOptions, NormalizedProviderImportOptions,
-    ProviderAdapterContext, ProviderImportSummary, QoderImportOptions, QwenCodeImportOptions,
-    Result, RovoDevImportOptions, TabnineCliImportOptions, WarpSqliteImportOptions,
-    WindsurfCascadeHookImportOptions, ZedThreadsSqliteImportOptions,
+    AntigravityCliImportOptions, CopilotCliImportOptions, CursorNativeImportOptions,
+    FactoryAiDroidImportOptions, GeminiCliImportOptions, KimiCodeCliImportOptions,
+    LingmaSqliteImportOptions, MistralVibeImportOptions, MuxImportOptions,
+    NormalizedProviderImportOptions, ProviderAdapterContext, ProviderImportSummary,
+    QoderImportOptions, QwenCodeImportOptions, Result, RovoDevImportOptions,
+    TabnineCliImportOptions, WarpSqliteImportOptions, WindsurfCascadeHookImportOptions,
+    ZedThreadsSqliteImportOptions,
 };
 
 pub fn import_antigravity_cli_history(
@@ -140,9 +140,6 @@ pub fn import_warp_sqlite(
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
-            tool_output_mode: CodexToolOutputMode::Full,
-            event_mode: CodexEventImportMode::Rich,
-            include_notices: true,
         },
     )?;
     import_normalized_provider_captures(
@@ -195,9 +192,6 @@ pub fn import_zed_threads_sqlite(
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
-            tool_output_mode: CodexToolOutputMode::Full,
-            event_mode: CodexEventImportMode::Rich,
-            include_notices: true,
         },
     )?;
     import_normalized_provider_captures(
@@ -230,9 +224,6 @@ pub fn import_lingma_sqlite(
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
-            tool_output_mode: CodexToolOutputMode::Full,
-            event_mode: CodexEventImportMode::Rich,
-            include_notices: true,
         },
     )?;
     import_normalized_provider_captures(
@@ -345,9 +336,6 @@ pub fn import_rovodev_history(
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
-            tool_output_mode: CodexToolOutputMode::Full,
-            event_mode: CodexEventImportMode::Rich,
-            include_notices: true,
         },
     )?;
     import_normalized_provider_captures(

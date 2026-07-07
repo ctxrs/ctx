@@ -11,12 +11,11 @@ use crate::provider::adapter::{
 use crate::provider::importer::import_normalized_provider_captures;
 use crate::provider::providers::firebender::firebender_source_root;
 use crate::{
-    AstrBotSqliteImportOptions, CodexEventImportMode, CodexToolOutputMode,
-    ContinueCliImportOptions, DeepAgentsSqliteImportOptions, FirebenderSqliteImportOptions,
-    ForgeCodeSqliteImportOptions, KiloSqliteImportOptions, KiroSqliteImportOptions,
-    NanoClawImportOptions, NormalizedProviderImportOptions, OpenCodeSqliteImportOptions,
-    OpenHandsImportOptions, ProviderAdapterContext, ProviderImportSummary, Result,
-    ShelleySqliteImportOptions,
+    AstrBotSqliteImportOptions, ContinueCliImportOptions, DeepAgentsSqliteImportOptions,
+    FirebenderSqliteImportOptions, ForgeCodeSqliteImportOptions, KiloSqliteImportOptions,
+    KiroSqliteImportOptions, NanoClawImportOptions, NormalizedProviderImportOptions,
+    OpenCodeSqliteImportOptions, OpenHandsImportOptions, ProviderAdapterContext,
+    ProviderImportSummary, Result, ShelleySqliteImportOptions,
 };
 
 pub fn import_firebender_sqlite(
@@ -37,9 +36,6 @@ pub fn import_firebender_sqlite(
             source_path: Some(source_path),
             source_root: Some(source_root),
             imported_at: options.imported_at,
-            tool_output_mode: CodexToolOutputMode::Full,
-            event_mode: CodexEventImportMode::Rich,
-            include_notices: true,
         },
     )?;
 
@@ -73,9 +69,6 @@ pub fn import_opencode_sqlite(
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
-            tool_output_mode: CodexToolOutputMode::Full,
-            event_mode: CodexEventImportMode::Rich,
-            include_notices: true,
         },
     )?;
 
@@ -109,9 +102,6 @@ pub fn import_kilo_sqlite(
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
-            tool_output_mode: CodexToolOutputMode::Full,
-            event_mode: CodexEventImportMode::Rich,
-            include_notices: true,
         },
     )?;
 
@@ -145,9 +135,6 @@ pub fn import_forgecode_sqlite(
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
-            tool_output_mode: CodexToolOutputMode::Full,
-            event_mode: CodexEventImportMode::Rich,
-            include_notices: true,
         },
     )?;
 
@@ -181,9 +168,6 @@ pub fn import_deepagents_sqlite(
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
-            tool_output_mode: CodexToolOutputMode::Full,
-            event_mode: CodexEventImportMode::Rich,
-            include_notices: true,
         },
     )?;
 
@@ -217,9 +201,6 @@ pub fn import_nanoclaw_project(
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
-            tool_output_mode: CodexToolOutputMode::Full,
-            event_mode: CodexEventImportMode::Rich,
-            include_notices: true,
         },
     )?;
     import_normalized_provider_captures(
@@ -252,9 +233,6 @@ pub fn import_kiro_sqlite(
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
-            tool_output_mode: CodexToolOutputMode::Full,
-            event_mode: CodexEventImportMode::Rich,
-            include_notices: true,
         },
     )?;
 
@@ -288,9 +266,6 @@ pub fn import_astrbot_sqlite(
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
-            tool_output_mode: CodexToolOutputMode::Full,
-            event_mode: CodexEventImportMode::Rich,
-            include_notices: true,
         },
     )?;
     import_normalized_provider_captures(
@@ -323,9 +298,6 @@ pub fn import_shelley_sqlite(
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
-            tool_output_mode: CodexToolOutputMode::Full,
-            event_mode: CodexEventImportMode::Rich,
-            include_notices: true,
         },
     )?;
     import_normalized_provider_captures(
@@ -358,9 +330,6 @@ pub fn import_continue_cli_sessions(
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
-            tool_output_mode: CodexToolOutputMode::Full,
-            event_mode: CodexEventImportMode::Rich,
-            include_notices: true,
         },
     )?;
     import_normalized_provider_captures(
@@ -393,9 +362,6 @@ pub fn import_openhands_file_events(
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
-            tool_output_mode: CodexToolOutputMode::Full,
-            event_mode: CodexEventImportMode::Rich,
-            include_notices: true,
         },
     )?;
     import_normalized_provider_captures(

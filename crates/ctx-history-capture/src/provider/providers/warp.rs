@@ -12,7 +12,7 @@ use crate::common::time::parse_rfc3339_utc;
 use crate::provider::custom_history_jsonl::push_provider_import_failure;
 use crate::provider::native::{
     native_provider_capture, open_provider_sqlite_readonly, provider_line_from_index,
-    provider_local_preview, NativeSessionDraft,
+    provider_local_preview, provider_policy_body, provider_policy_event_text, NativeSessionDraft,
 };
 use crate::provider::sqlite::{
     ensure_sqlite_table_columns, opencode_schema_fingerprint, sqlite_table_columns,
@@ -20,7 +20,7 @@ use crate::provider::sqlite::{
 };
 use crate::{
     CaptureError, ProviderAdapterContext, ProviderNormalizationResult, Result,
-    PROVIDER_MAX_PREVIEW_CHARS, PROVIDER_MAX_TEXT_CHARS, WARP_SQLITE_SOURCE_FORMAT,
+    PROVIDER_MAX_PREVIEW_CHARS, WARP_SQLITE_SOURCE_FORMAT,
 };
 
 pub(crate) struct WarpConversationRow {
@@ -386,7 +386,12 @@ pub(crate) fn warp_message_event(
     provider_event_index: u64,
     occurred_at: DateTime<Utc>,
 ) -> ProviderEventEnvelope {
-    let (text, truncated) = provider_local_preview(&message.text, PROVIDER_MAX_TEXT_CHARS);
+    let body = json!({
+        "text": message.text,
+        "message_index": message_index,
+    });
+    let (text, truncated, retention) =
+        provider_policy_event_text(message.event_type, &message.text, &body);
     let message_id = if message.id.is_empty() {
         format!("{task_id}:{message_index}")
     } else {
@@ -411,10 +416,8 @@ pub(crate) fn warp_message_event(
             "request_id": if message.request_id.is_empty() { Value::Null } else { json!(message.request_id) },
             "text": text,
             "truncated": truncated,
-            "body": {
-                "text": text,
-                "message_index": message_index,
-            },
+            "body": provider_policy_body(message.event_type, &body),
+            "content_retention": retention.as_str(),
         }),
         metadata: json!({
             "source": WARP_SQLITE_SOURCE_FORMAT,

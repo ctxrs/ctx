@@ -351,7 +351,7 @@ pub(crate) fn rovodev_event(
         event_type: provider_block_event_type(message, role_text),
         role: Some(provider_role_from_message(message, role_text)),
         occurred_at,
-        text: provider_block_text(message).unwrap_or_else(|| "Rovo Dev message".to_owned()),
+        text: provider_block_text(message).unwrap_or_default(),
         body: message.clone(),
         metadata: json!({
             "source": ROVODEV_SOURCE_FORMAT,

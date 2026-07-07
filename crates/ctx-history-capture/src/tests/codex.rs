@@ -19,7 +19,7 @@ fn codex_session_tree_imports_messages_and_subagent_edges() {
     .unwrap();
     assert_eq!(first.failed, 0, "{:?}", first.failures);
     assert_eq!(first.imported_sessions, 2);
-    assert_eq!(first.imported_events, 8);
+    assert_eq!(first.imported_events, 7);
     assert_eq!(first.imported_edges, 1);
 
     let second = import_codex_session_tree(
@@ -55,7 +55,15 @@ fn codex_session_tree_imports_messages_and_subagent_edges() {
     assert_eq!(child.role_hint.as_deref(), Some("worker"));
 
     let parent_events = store.events_for_session(parent_id).unwrap();
-    assert_eq!(parent_events.len(), 6);
+    assert_eq!(parent_events.len(), 5);
+    assert!(parent_events
+        .iter()
+        .any(|event| event.event_type == EventType::Message
+            && event.role == Some(EventRole::System)
+            && event
+                .payload
+                .to_string()
+                .contains("Follow repo instructions")));
     assert!(parent_events
         .iter()
         .any(|event| event.event_type == EventType::Message
@@ -69,19 +77,8 @@ fn codex_session_tree_imports_messages_and_subagent_edges() {
                 .contains("checking the setup flow")));
     assert!(parent_events
         .iter()
-        .any(|event| event.event_type == EventType::Notice
-            && event.payload.to_string().contains("task_complete")));
-    assert!(parent_events
-        .iter()
         .any(|event| event.event_type == EventType::ToolCall
             && event.payload.to_string().contains("exec_command")));
-    assert!(parent_events
-        .iter()
-        .any(|event| event.event_type == EventType::CommandOutput
-            && event
-                .payload
-                .to_string()
-                .contains("all onboarding tests passed")));
     assert!(parent_events
         .iter()
         .any(|event| event.event_type == EventType::Summary
@@ -446,7 +443,7 @@ fn codex_session_paths_imports_only_explicit_subset() {
 
     assert_eq!(summary.failed, 0, "{:?}", summary.failures);
     assert_eq!(summary.imported_sessions, 1);
-    assert_eq!(summary.imported_events, 6);
+    assert_eq!(summary.imported_events, 5);
     assert_eq!(summary.imported_edges, 0);
     assert_eq!(store.list_sessions().unwrap().len(), 1);
     let root_id = stored_provider_session_id(&store, CaptureProvider::Codex, "codex-session-root");
@@ -456,7 +453,7 @@ fn codex_session_paths_imports_only_explicit_subset() {
         &fixture,
         "codex-session-child",
     );
-    assert_eq!(store.events_for_session(root_id).unwrap().len(), 6);
+    assert_eq!(store.events_for_session(root_id).unwrap().len(), 5);
     assert!(store.events_for_session(child_id).unwrap().is_empty());
 
     let progress = progress.lock().unwrap();
@@ -484,7 +481,7 @@ fn codex_session_paths_reimport_skips_existing_events() {
     .unwrap();
     assert_eq!(first.failed, 0, "{:?}", first.failures);
     assert_eq!(first.imported_sessions, 2);
-    assert_eq!(first.imported_events, 8);
+    assert_eq!(first.imported_events, 7);
     assert_eq!(first.imported_edges, 1);
 
     let second = import_codex_session_paths(
@@ -695,6 +692,111 @@ fn codex_session_jsonl_rejects_malformed_event_timestamp() {
 }
 
 #[test]
+fn codex_session_jsonl_rejects_metadata_only_without_real_messages() {
+    let temp = tempdir();
+    let path = temp.path().join("metadata-only-codex.jsonl");
+    fs::write(
+        &path,
+        [
+            jsonl_line(json!({
+                "timestamp": "2026-07-03T12:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "codex-metadata-only",
+                    "timestamp": "2026-07-03T12:00:00Z",
+                    "cwd": "/workspace",
+                    "originator": "codex-cli"
+                }
+            })),
+            jsonl_line(json!({
+                "timestamp": "2026-07-03T12:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "shell",
+                    "call_id": "call-tool-only",
+                    "arguments": "{\"cmd\":\"echo tool-only\"}"
+                }
+            })),
+        ]
+        .concat(),
+    )
+    .unwrap();
+
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let summary = import_codex_session_jsonl(
+        &path,
+        &mut store,
+        CodexSessionImportOptions {
+            imported_at: "2026-07-03T12:30:00Z".parse().unwrap(),
+            fast_event_inserts: false,
+            ..CodexSessionImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 1, "{:?}", summary.failures);
+    assert!(summary.failures[0]
+        .error
+        .contains("no real message content"));
+    assert!(store.list_sessions().unwrap().is_empty());
+}
+
+#[test]
+fn codex_session_jsonl_fast_rejects_metadata_only_without_real_messages() {
+    let temp = tempdir();
+    let path = temp.path().join("metadata-only-codex-fast.jsonl");
+    fs::write(
+        &path,
+        [
+            jsonl_line(json!({
+                "timestamp": "2026-07-03T12:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "codex-fast-metadata-only",
+                    "timestamp": "2026-07-03T12:00:00Z",
+                    "cwd": "/workspace",
+                    "originator": "codex-cli"
+                }
+            })),
+            jsonl_line(json!({
+                "timestamp": "2026-07-03T12:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "shell",
+                    "call_id": "call-tool-only",
+                    "arguments": "{\"cmd\":\"echo tool-only\"}"
+                }
+            })),
+        ]
+        .concat(),
+    )
+    .unwrap();
+
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let summary = import_codex_session_jsonl(
+        &path,
+        &mut store,
+        CodexSessionImportOptions {
+            imported_at: "2026-07-03T12:30:00Z".parse().unwrap(),
+            ..CodexSessionImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 1, "{:?}", summary.failures);
+    assert!(summary.failures[0]
+        .error
+        .contains("no real message content"));
+    assert!(store.list_sessions().unwrap().is_empty());
+    assert!(store
+        .search_event_hits("echo tool-only", 10)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn codex_session_jsonl_fast_rejects_malformed_event_timestamp_atomically() {
     let temp = tempdir();
     let path = temp.path().join("bad-timestamp-codex-fast.jsonl");
@@ -872,7 +974,7 @@ fn provider_command_run_rejects_negative_duration() {
 }
 
 #[test]
-fn codex_session_tree_imports_rich_tool_outputs_and_preserves_previews() {
+fn codex_session_tree_applies_default_import_policy_to_tool_outputs() {
     let temp = tempdir();
     let fixture = provider_history_fixture("codex-rich-sessions");
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
@@ -890,7 +992,8 @@ fn codex_session_tree_imports_rich_tool_outputs_and_preserves_previews() {
 
     assert_eq!(summary.failed, 0, "{:?}", summary.failures);
     assert_eq!(summary.imported_sessions, 1);
-    assert_eq!(summary.imported_events, 12);
+    assert_eq!(summary.imported_events, 5);
+    assert_eq!(summary.skipped_events, 3);
 
     let session_id =
         stored_provider_session_id(&store, CaptureProvider::Codex, "codex-rich-session");
@@ -901,62 +1004,43 @@ fn codex_session_tree_imports_rich_tool_outputs_and_preserves_previews() {
             && event.payload.to_string().contains("apply_patch")));
     assert!(events
         .iter()
-        .any(|event| event.event_type == EventType::CommandOutput
-            && event.payload.to_string().contains("unit tests passed")));
-    assert!(events
-        .iter()
         .any(|event| event.event_type == EventType::Summary
             && event
                 .payload
                 .to_string()
                 .contains("sample command completed")));
-    assert!(events
-        .iter()
-        .any(|event| event.event_type == EventType::Notice
-            && event.payload.to_string().contains("patch_apply_end")));
 
     let rendered = serde_json::to_string(&events).unwrap();
     assert!(rendered.contains("cargo test -p sample -- --token fixture-secret-token"));
-    assert!(rendered.contains("unit tests passed in /workspace/ctx-rich-fixture"));
+    assert!(!rendered.contains("unit tests passed in /workspace/ctx-rich-fixture"));
+    assert!(!rendered.contains("*** Begin Patch"));
+    assert!(!rendered.contains("old_fixture"));
+    assert!(!rendered.contains("new_fixture"));
+    assert!(!rendered.contains("patch_apply_end"));
     assert!(!rendered.contains("opaque-private-reasoning-payload"));
 }
 
 #[test]
-fn codex_failures_output_mode_skips_success_and_keeps_failures() {
+fn codex_default_output_policy_skips_success_and_keeps_failures() {
     let success = br#"{"timestamp":"2026-06-24T01:00:04.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-success","output":"Chunk ID: ok\nProcess exited with code 0\nOutput:\nunit tests passed\n"}}"#;
     let failure = br#"{"timestamp":"2026-06-24T01:00:04.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-failure","output":"Chunk ID: fail\nProcess exited with code 101\nOutput:\ntest failed\n"}}"#;
     let timeout = br#"{"timestamp":"2026-06-24T01:00:04.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-timeout","timed_out":true,"output":"timed out"}}"#;
 
-    assert!(should_skip_codex_tool_output_line(
-        success,
-        CodexToolOutputMode::Failures
-    ));
-    assert!(!should_skip_codex_tool_output_line(
-        failure,
-        CodexToolOutputMode::Failures
-    ));
-    assert!(!should_skip_codex_tool_output_line(
-        timeout,
-        CodexToolOutputMode::Failures
-    ));
-    assert!(!should_skip_codex_tool_output_line(
-        success,
-        CodexToolOutputMode::Metadata
-    ));
-    assert!(should_skip_codex_tool_output_line(
-        failure,
-        CodexToolOutputMode::Skip
-    ));
+    assert!(should_skip_codex_tool_output_line(success));
+    assert!(!should_skip_codex_tool_output_line(failure));
+    assert!(!should_skip_codex_tool_output_line(timeout));
 }
 
 #[test]
-fn codex_search_event_mode_only_parses_search_relevant_lines() {
+fn codex_default_line_filter_parses_policy_relevant_lines() {
     let session_meta =
         br#"{"timestamp":"2026-06-24T01:00:00.000Z","type":"session_meta","payload":{"id":"s"}}"#;
     let user_message = br#"{"timestamp":"2026-06-24T01:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"question"}]}}"#;
     let assistant_message = br#"{"timestamp":"2026-06-24T01:00:02.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]}}"#;
+    let developer_message = br#"{"timestamp":"2026-06-24T01:00:02.500Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"instruction"}]}}"#;
     let tool_call = br#"{"timestamp":"2026-06-24T01:00:03.000Z","type":"response_item","payload":{"type":"function_call","call_id":"call-1","name":"shell","arguments":"cargo test"}}"#;
     let tool_output = br#"{"timestamp":"2026-06-24T01:00:04.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-1","output":"passed"}}"#;
+    let structured_failed_tool_output = br#"{"timestamp":"2026-06-24T01:00:04.500Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-2","output":{"message":{"exitCode":1,"output":"failed"}}}}"#;
     let reasoning = br#"{"timestamp":"2026-06-24T01:00:05.000Z","type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"thinking"}]}}"#;
     let notice = br#"{"timestamp":"2026-06-24T01:00:06.000Z","type":"event_msg","payload":{"type":"task_complete"}}"#;
     let apply_patch = br#"{"timestamp":"2026-06-24T01:00:07.000Z","type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","input":"*** Begin Patch\n*** Update File: crates/ctx-cli/src/main.rs\n@@\n-old\n+new\n*** End Patch","call_id":"call-patch","status":"completed"}}"#;
@@ -965,32 +1049,106 @@ fn codex_search_event_mode_only_parses_search_relevant_lines() {
         session_meta.as_slice(),
         user_message.as_slice(),
         assistant_message.as_slice(),
-        apply_patch.as_slice(),
-    ] {
-        assert!(should_parse_codex_session_line(
-            line,
-            CodexEventImportMode::Search
-        ));
-    }
-    for line in [
+        developer_message.as_slice(),
         tool_call.as_slice(),
-        tool_output.as_slice(),
+        apply_patch.as_slice(),
         reasoning.as_slice(),
-        notice.as_slice(),
     ] {
-        assert!(!should_parse_codex_session_line(
-            line,
-            CodexEventImportMode::Search
-        ));
-        assert!(should_parse_codex_session_line(
-            line,
-            CodexEventImportMode::Rich
-        ));
+        assert!(should_parse_codex_session_line(line));
     }
+    assert!(should_parse_codex_session_line(tool_output));
+    assert!(should_skip_codex_tool_output_line(tool_output));
+    assert!(should_parse_codex_session_line(
+        structured_failed_tool_output
+    ));
+    assert!(!should_skip_codex_tool_output_line(
+        structured_failed_tool_output
+    ));
+    assert!(!should_parse_codex_session_line(notice));
 }
 
 #[test]
-fn codex_search_event_mode_persists_file_touches_without_tool_events() {
+fn codex_structured_failed_tool_output_creates_failed_diagnostic_event() {
+    let payload = json!({
+        "type": "function_call_output",
+        "call_id": "call-structured-failure",
+        "output": {
+            "message": {
+                "exitCode": 1,
+                "output": "structured failed output oracle"
+            }
+        }
+    });
+    let event = codex_tool_output_event(
+        &payload,
+        12,
+        DateTime::parse_from_rfc3339("2026-06-24T01:00:04.500Z")
+            .unwrap()
+            .with_timezone(&Utc),
+        &std::collections::BTreeMap::new(),
+    )
+    .expect("structured failed output should be retained");
+
+    assert_eq!(event.event_type, EventType::ToolOutput);
+    let rendered = event.payload.to_string();
+    assert!(rendered.contains("structured failed output oracle"));
+    assert!(rendered.contains("failed_preview"));
+}
+
+#[test]
+fn codex_failed_diff_output_omits_raw_diff_preview() {
+    let payload = json!({
+        "type": "function_call_output",
+        "call_id": "call-failed-diff",
+        "output": "Process exited with code 1\nOutput:\ndiff --git a/src/lib.rs b/src/lib.rs\n@@\n-old raw diff\n+new raw diff\n"
+    });
+    let event = codex_tool_output_event(
+        &payload,
+        13,
+        DateTime::parse_from_rfc3339("2026-06-24T01:00:05.000Z")
+            .unwrap()
+            .with_timezone(&Utc),
+        &std::collections::BTreeMap::new(),
+    )
+    .expect("failed diff output should keep a diagnostic event");
+
+    let rendered = event.payload.to_string();
+    assert!(rendered.contains("output omitted"));
+    assert!(!rendered.contains("diff --git"));
+    assert!(!rendered.contains("old raw diff"));
+    assert!(!rendered.contains("new raw diff"));
+}
+
+#[test]
+fn codex_nested_failed_diff_output_omits_raw_diff_preview() {
+    let payload = json!({
+        "type": "function_call_output",
+        "call_id": "call-nested-failed-diff",
+        "output": {
+            "message": {
+                "exitCode": 1,
+                "output": "@@ -1 +1\n-old nested diff\n+new nested diff\n"
+            }
+        }
+    });
+    let event = codex_tool_output_event(
+        &payload,
+        14,
+        DateTime::parse_from_rfc3339("2026-06-24T01:00:05.500Z")
+            .unwrap()
+            .with_timezone(&Utc),
+        &std::collections::BTreeMap::new(),
+    )
+    .expect("nested failed diff output should keep a diagnostic event");
+
+    let rendered = event.payload.to_string();
+    assert!(rendered.contains("output omitted"));
+    assert!(!rendered.contains("old nested diff"));
+    assert!(!rendered.contains("new nested diff"));
+}
+
+#[test]
+fn codex_default_policy_persists_file_touches_without_raw_patch_text() {
     let temp = tempdir();
     let root = temp.path().join("codex-sessions/2026/06/24");
     fs::create_dir_all(&root).unwrap();
@@ -1012,31 +1170,85 @@ fn codex_search_event_mode_persists_file_touches_without_tool_events() {
         CodexSessionImportOptions {
             source_path: Some(temp.path().join("codex-sessions")),
             imported_at: "2026-06-24T02:00:00Z".parse().unwrap(),
-            event_mode: CodexEventImportMode::Search,
-            tool_output_mode: CodexToolOutputMode::Skip,
             ..CodexSessionImportOptions::default()
         },
     )
     .unwrap();
 
     assert_eq!(summary.failed, 0, "{:?}", summary.failures);
-    assert_eq!(summary.imported_events, 1);
+    assert_eq!(summary.imported_events, 2);
 
     let session_id =
         stored_provider_session_id(&store, CaptureProvider::Codex, "codex-search-file-touch");
     let events = store.events_for_session(session_id).unwrap();
-    assert_eq!(events.len(), 1);
+    assert_eq!(events.len(), 2);
     assert_eq!(events[0].event_type, EventType::Message);
+    assert_eq!(events[1].event_type, EventType::ToolCall);
+    let rendered = serde_json::to_string(&events).unwrap();
+    assert!(rendered.contains("file touches: modified:crates/ctx-cli/src/main.rs"));
+    assert!(!rendered.contains("*** Begin Patch"));
+    assert!(!rendered.contains("-old"));
+    assert!(!rendered.contains("+new"));
 
     let archive = store.export_archive().unwrap();
     let touched = archive
         .files_touched
         .iter()
         .find(|file| file.path == "crates/ctx-cli/src/main.rs")
-        .expect("apply_patch should create file touch metadata in search mode");
+        .expect("apply_patch should create file touch metadata");
     assert_eq!(touched.change_kind, Some(FileChangeKind::Modified));
-    assert_eq!(touched.event_id, None);
+    assert!(touched.event_id.is_some());
     assert_eq!(touched.history_record_id, None);
+}
+
+#[test]
+fn codex_default_policy_redacts_non_patch_edit_tool_arguments() {
+    let temp = tempdir();
+    let root = temp.path().join("codex-sessions/2026/06/24");
+    fs::create_dir_all(&root).unwrap();
+    let fixture = root.join("edit-tool.jsonl");
+    fs::write(
+        &fixture,
+        concat!(
+            "{\"timestamp\":\"2026-06-24T01:00:00.000Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"codex-edit-tool\",\"cwd\":\"/workspace/ctx\"}}\n",
+            "{\"timestamp\":\"2026-06-24T01:00:01.000Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Please edit the file.\"}]}}\n",
+            "{\"timestamp\":\"2026-06-24T01:00:02.000Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"edit_file\",\"arguments\":{\"path\":\"src/edit_tool.rs\",\"old_string\":\"old-edit-tool-secret\",\"new_string\":\"new-edit-tool-secret\"},\"call_id\":\"call-edit\"}}\n",
+        ),
+    )
+    .unwrap();
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let summary = import_codex_session_tree(
+        temp.path().join("codex-sessions"),
+        &mut store,
+        CodexSessionImportOptions {
+            source_path: Some(temp.path().join("codex-sessions")),
+            imported_at: "2026-06-24T02:00:00Z".parse().unwrap(),
+            ..CodexSessionImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+    assert_eq!(summary.imported_events, 2);
+
+    let session_id = stored_provider_session_id(&store, CaptureProvider::Codex, "codex-edit-tool");
+    let events = store.events_for_session(session_id).unwrap();
+    let rendered = serde_json::to_string(&events).unwrap();
+    assert!(rendered.contains("file touches:"));
+    assert!(rendered.contains("src/edit_tool.rs"));
+    assert!(!rendered.contains("old-edit-tool-secret"));
+    assert!(!rendered.contains("new-edit-tool-secret"));
+    assert!(store
+        .search_event_hits("old-edit-tool-secret", 10)
+        .unwrap()
+        .is_empty());
+
+    let archive = store.export_archive().unwrap();
+    assert!(archive
+        .files_touched
+        .iter()
+        .any(|file| file.path == "src/edit_tool.rs"));
 }
 
 #[test]

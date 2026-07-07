@@ -80,7 +80,7 @@ fn imports_cursor_agent_transcript_jsonl_tree() {
     )
     .unwrap();
 
-    assert_eq!(summary.failed, 3, "{:?}", summary.failures);
+    assert_eq!(summary.failed, 4, "{:?}", summary.failures);
     assert_eq!(summary.imported_sessions, 2);
     assert_eq!(summary.imported_events, 6);
     drop(store);
@@ -162,7 +162,7 @@ fn reports_all_malformed_cursor_agent_transcript_when_partial_disallowed() {
 }
 
 #[test]
-fn ignores_empty_cursor_agent_transcript_when_partial_disallowed() {
+fn reports_empty_cursor_agent_transcript_when_partial_disallowed() {
     let temp = tempdir();
     let fixture = temp
         .path()
@@ -175,8 +175,11 @@ fn ignores_empty_cursor_agent_transcript_when_partial_disallowed() {
         import_cursor_native_history(&fixture, &mut store, CursorNativeImportOptions::default())
             .unwrap();
 
-    assert_eq!(summary.failed, 0);
+    assert_eq!(summary.failed, 1);
     assert_eq!(summary.imported_events, 0);
+    assert!(summary.failures[0]
+        .error
+        .contains("no Cursor agent transcript JSONL files found"));
 }
 
 #[test]

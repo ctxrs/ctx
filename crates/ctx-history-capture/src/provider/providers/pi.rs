@@ -22,9 +22,12 @@ use crate::common::io::{
 use crate::common::time::parse_optional_rfc3339_field;
 use crate::provider::adapter::PiSessionJsonlAdapter;
 use crate::provider::importer::provider_cursor_stream;
+use crate::provider::native::{
+    provider_capped_json, provider_policy_body, provider_policy_event_text,
+};
 use crate::{
     fnv1a64, CaptureError, ProviderAdapterContext, ProviderCaptureAdapter, ProviderImportFailure,
-    ProviderNormalizationResult, Result,
+    ProviderNormalizationResult, Result, PROVIDER_MAX_PREVIEW_CHARS,
 };
 
 pub(crate) struct PiSessionHeader {
@@ -306,7 +309,8 @@ pub(crate) fn pi_session_event(
     })?;
     let event_type = pi_event_type(entry_type, message);
     let role = message_role.map(pi_event_role);
-    let text = pi_entry_text(entry, message);
+    let text = pi_entry_text(entry, message).unwrap_or_default();
+    let (text, truncated, retention) = provider_policy_event_text(event_type, &text, entry);
     let provider_event_index = (line_number - 1) as u64;
     let provider_event_identity_index =
         pi_provider_event_identity_index(header, entry).unwrap_or(provider_event_index);
@@ -328,7 +332,9 @@ pub(crate) fn pi_session_event(
             "parent_id": entry.get("parentId").and_then(Value::as_str),
             "message_role": message_role,
             "text": text,
-            "body": entry,
+            "truncated": truncated,
+            "body": provider_capped_json(&provider_policy_body(event_type, entry), PROVIDER_MAX_PREVIEW_CHARS),
+            "content_retention": retention.as_str(),
         }),
         metadata: json!({
             "source": "pi_session",

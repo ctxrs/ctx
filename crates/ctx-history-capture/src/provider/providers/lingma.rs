@@ -10,7 +10,7 @@ use serde_json::json;
 
 use crate::provider::native::{
     native_provider_capture, open_provider_sqlite_readonly, provider_capped_json,
-    provider_json_text, provider_line_from_index, provider_local_preview,
+    provider_json_text, provider_line_from_index, provider_policy_body, provider_policy_event_text,
     provider_timestamp_seconds, text_id_index, NativeSessionDraft,
 };
 use crate::provider::sqlite::{
@@ -19,7 +19,7 @@ use crate::provider::sqlite::{
 };
 use crate::{
     CaptureError, ProviderAdapterContext, ProviderNormalizationResult, Result,
-    LINGMA_SQLITE_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS, PROVIDER_MAX_TEXT_CHARS,
+    LINGMA_SQLITE_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS,
 };
 
 pub(crate) struct LingmaChatRecordRow {
@@ -188,7 +188,6 @@ pub(crate) fn lingma_event(
     row: &LingmaChatRecordRow,
     draft: LingmaEventDraft,
 ) -> ProviderEventEnvelope {
-    let (text, truncated) = provider_local_preview(&draft.text, PROVIDER_MAX_TEXT_CHARS);
     let role_name = match draft.role {
         EventRole::User => "user",
         EventRole::Assistant => "assistant",
@@ -196,6 +195,20 @@ pub(crate) fn lingma_event(
         EventRole::Tool => "tool",
         EventRole::Unknown => "unknown",
     };
+    let body = json!({
+        "rowid": row.rowid,
+        "session_id": row.session_id,
+        "request_id": row.request_id,
+        "role": role_name,
+        "body_kind": draft.body_kind,
+        "chat_prompt": row.chat_prompt,
+        "summary": row.summary,
+        "error_result": row.error_result,
+        "gmt_create": row.gmt_create,
+        "extra": row.extra.as_deref().map(provider_json_text),
+    });
+    let (text, truncated, retention) =
+        provider_policy_event_text(draft.event_type, &draft.text, &body);
     ProviderEventEnvelope {
         provider_event_index: draft.provider_event_index,
         provider_event_hash: Some(format!(
@@ -222,21 +235,8 @@ pub(crate) fn lingma_event(
             "text": text,
             "truncated": truncated,
             "source_format": LINGMA_SQLITE_SOURCE_FORMAT,
-            "body": provider_capped_json(
-                &json!({
-                    "rowid": row.rowid,
-                    "session_id": row.session_id,
-                    "request_id": row.request_id,
-                    "role": role_name,
-                    "body_kind": draft.body_kind,
-                    "chat_prompt": row.chat_prompt,
-                    "summary": row.summary,
-                    "error_result": row.error_result,
-                    "gmt_create": row.gmt_create,
-                    "extra": row.extra.as_deref().map(provider_json_text),
-                }),
-                PROVIDER_MAX_PREVIEW_CHARS,
-            ),
+            "body": provider_capped_json(&provider_policy_body(draft.event_type, &body), PROVIDER_MAX_PREVIEW_CHARS),
+            "content_retention": retention.as_str(),
         }),
         metadata: json!({
             "source": "lingma_chat_record",

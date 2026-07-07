@@ -360,6 +360,96 @@ fn native_provider_cli_flow_imports_supported_provider_paths() {
         assert_search_provider_oracle(&search, stored_provider, &query, 1, "message");
     }
 }
+
+#[test]
+fn native_provider_cli_policy_excludes_success_tool_outputs_from_search_and_payloads() {
+    let temp = tempdir();
+    let qoder_query = "qoder-policy-real-message-oracle";
+    let qoder_path = write_native_qoder_fixture(&temp, qoder_query);
+    let openhands_query = "openhands-policy-real-message-oracle";
+    let openhands_path = write_native_openhands_fixture(&temp, openhands_query);
+    let continue_query = "continue-policy-real-message-oracle";
+    let continue_path = write_native_continue_fixture(&temp, continue_query);
+
+    for (provider, path, query) in [
+        ("qoder", qoder_path.as_str(), qoder_query),
+        ("openhands", openhands_path.as_str(), openhands_query),
+        ("continue", continue_path.as_str(), continue_query),
+    ] {
+        let imported = json_output(ctx(&temp).args([
+            "import",
+            "--provider",
+            provider,
+            "--path",
+            path,
+            "--json",
+            "--progress",
+            "none",
+        ]));
+        assert_eq!(imported["totals"]["failed"], 0, "{imported:#}");
+
+        let search = json_output(ctx(&temp).args([
+            "search",
+            query,
+            "--provider",
+            provider,
+            "--refresh",
+            "off",
+            "--json",
+        ]));
+        assert_search_provider_oracle(&search, provider, query, 1, "message");
+    }
+
+    for (provider, sentinel) in [
+        ("qoder", "native qoder fixture result"),
+        ("openhands", "Edited openhands-cli-native-oracle.txt"),
+        ("continue", "Continue tool output marker"),
+    ] {
+        let search = json_output(ctx(&temp).args([
+            "search",
+            sentinel,
+            "--provider",
+            provider,
+            "--refresh",
+            "off",
+            "--json",
+        ]));
+        assert!(
+            search["results"].as_array().unwrap().is_empty(),
+            "{provider} success tool output leaked into search: {search:#}"
+        );
+    }
+
+    let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
+    assert_eq!(
+        sqlite_count(
+            &conn,
+            "SELECT COUNT(*) FROM events WHERE payload_json LIKE '%native qoder fixture result%'",
+        ),
+        0
+    );
+    assert_eq!(
+        sqlite_count(
+            &conn,
+            "SELECT COUNT(*) FROM events WHERE payload_json LIKE '%Edited openhands-cli-native-oracle.txt%'",
+        ),
+        0
+    );
+    assert_eq!(
+        sqlite_count(
+            &conn,
+            "SELECT COUNT(*) FROM events WHERE payload_json LIKE '%Continue tool output marker%'",
+        ),
+        0
+    );
+    assert!(
+        sqlite_count(
+            &conn,
+            "SELECT COUNT(*) FROM files_touched WHERE path = 'openhands-cli-native-oracle.txt'",
+        ) > 0
+    );
+}
+
 #[test]
 fn trae_cli_imports_explicit_workspace_storage_with_default_discovery() {
     let temp = tempdir();
@@ -888,8 +978,8 @@ fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
             "crush_sqlite",
             "crush/v1/crush.db",
             "crush oracle",
-            2,
-            4,
+            1,
+            3,
         ),
         (
             "goose",
@@ -1311,9 +1401,9 @@ fn antigravity_cli_imports_native_transcript_tree() {
         imported["sources"][0]["source_format"],
         "antigravity_cli_transcript_jsonl_tree"
     );
-    assert_eq!(imported["totals"]["imported_sessions"], 4);
-    assert_eq!(imported["totals"]["imported_events"], 11);
-    assert_eq!(imported["totals"]["failed"], 1);
+    assert_eq!(imported["totals"]["imported_sessions"], 3);
+    assert_eq!(imported["totals"]["imported_events"], 9);
+    assert_eq!(imported["totals"]["failed"], 2);
 
     let search = json_output(ctx(&temp).args([
         "search",

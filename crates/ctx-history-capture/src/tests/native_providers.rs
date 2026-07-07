@@ -23,15 +23,14 @@ fn native_crush_fixture_imports_searches_and_reimports() {
     .unwrap();
 
     assert_eq!(first.failed, 0, "{:?}", first.failures);
-    assert_eq!(first.imported_sessions, 2);
-    assert_eq!(first.imported_events, 4);
-    assert_eq!(first.imported_edges, 1);
+    assert_eq!(first.imported_sessions, 1);
+    assert_eq!(first.imported_events, 3);
+    assert_eq!(first.imported_edges, 0);
     let parent_id = stored_provider_session_id(&store, CaptureProvider::Crush, "crush-root");
-    let child_id = stored_provider_session_id(&store, CaptureProvider::Crush, "crush-child");
-    assert_eq!(
-        store.get_session(child_id).unwrap().parent_session_id,
-        Some(parent_id)
-    );
+    assert!(store
+        .sessions_by_external_session_limited(CaptureProvider::Crush, "crush-child", 10)
+        .unwrap()
+        .is_empty());
     let events = store.events_for_session(parent_id).unwrap();
     assert!(events
         .iter()
@@ -63,7 +62,7 @@ fn native_crush_fixture_imports_searches_and_reimports() {
     assert_eq!(second.imported_edges, 0);
     assert_eq!(second.skipped_sessions, 2);
     assert_eq!(second.skipped_events, 4);
-    assert_eq!(second.skipped_edges, 1);
+    assert_eq!(second.skipped_edges, 0);
 }
 
 #[test]
@@ -346,8 +345,8 @@ fn native_junie_fixture_imports_searches_reimports_and_file_touches() {
         .any(|event| event.event_type == EventType::CommandOutput));
     let rendered = serde_json::to_string(&events).unwrap();
     assert!(rendered.contains("JUNIE_ORACLE_USER_TEXT violet cedar compass"));
-    assert!(rendered.contains("JUNIE_TERMINAL_OUTPUT saffron harbor"));
-    assert!(rendered.contains("JUNIE_FILE_CHANGE_TEXT cobalt lantern"));
+    assert!(!rendered.contains("JUNIE_TERMINAL_OUTPUT saffron harbor"));
+    assert!(!rendered.contains("JUNIE_FILE_CHANGE_TEXT cobalt lantern"));
     assert!(rendered.contains("JUNIE_RESULT_TEXT copper lantern atlas"));
 
     assert!(store
@@ -358,8 +357,7 @@ fn native_junie_fixture_imports_searches_reimports_and_file_touches() {
     assert!(store
         .search_event_hits("JUNIE_TERMINAL_OUTPUT", 10)
         .unwrap()
-        .iter()
-        .any(|hit| hit.provider == Some(CaptureProvider::Junie)));
+        .is_empty());
 
     let archive = store.export_archive().unwrap();
     let touched = archive
@@ -651,6 +649,12 @@ fn native_forgecode_fixture_imports_searches_reimports_and_file_metrics() {
 }
 
 #[test]
+fn native_forgecode_empty_text_message_does_not_fabricate_search_text() {
+    let text = forgecode_text_message_text(&json!({"role": "assistant"}), EventType::Message);
+    assert!(text.is_empty());
+}
+
+#[test]
 fn native_deepagents_fixture_imports_searches_and_reimports() {
     let temp = tempdir();
     let fixture = provider_history_fixture("deepagents/v1/sessions.db");
@@ -766,7 +770,7 @@ fn native_deepagents_reports_malformed_writes_and_corrupt_db() {
     assert!(summary.failures[0]
         .error
         .contains("invalid Deep Agents msgpack payload"));
-    assert_eq!(summary.imported_sessions, 1);
+    assert_eq!(summary.imported_sessions, 0);
     assert_eq!(summary.imported_events, 0);
 
     let err = import_deepagents_sqlite(
@@ -1209,6 +1213,11 @@ fn native_jsonl_tree_imports_qwen_and_kimi_smokes_are_idempotent() {
     let kimi_rendered = serde_json::to_string(&kimi_events).unwrap();
     assert!(kimi_rendered.contains("kimi jsonl oracle prompt"));
     assert!(kimi_rendered.contains("src/kimi_oracle.txt"));
+    assert!(!kimi_rendered.contains("usage record"));
+    assert!(store
+        .search_event_hits("usage record", 10)
+        .unwrap()
+        .is_empty());
 
     let kimi_child = stored_provider_session_id(
         &store,
@@ -1266,6 +1275,30 @@ fn native_jsonl_tree_skips_headerless_native_files() {
 }
 
 #[test]
+fn native_jsonl_tree_rejects_empty_native_files() {
+    let temp = tempdir();
+    let root = temp.path().join("gemini/.gemini/tmp/project/chats");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("empty.jsonl"), "").unwrap();
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let summary = import_gemini_cli_history(
+        temp.path().join("gemini/.gemini"),
+        &mut store,
+        GeminiCliImportOptions {
+            allow_partial_failures: true,
+            ..GeminiCliImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 1);
+    assert_eq!(summary.imported_events, 0);
+    assert!(summary.failures[0].error.contains("transcripts found"));
+    assert!(store.list_sessions().unwrap().is_empty());
+}
+
+#[test]
 fn native_jsonl_tree_tolerates_unimportable_siblings_for_shared_providers() {
     let temp = tempdir();
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
@@ -1284,7 +1317,7 @@ fn native_jsonl_tree_tolerates_unimportable_siblings_for_shared_providers() {
         },
     )
     .unwrap();
-    assert_eq!(gemini_summary.failed, 2, "{:?}", gemini_summary.failures);
+    assert_eq!(gemini_summary.failed, 3, "{:?}", gemini_summary.failures);
     assert_eq!(gemini_summary.imported_sessions, 2);
     assert_eq!(gemini_summary.imported_events, 5);
     assert_provider_failures_include_headerless_and_malformed(&gemini_summary);
@@ -1300,7 +1333,7 @@ fn native_jsonl_tree_tolerates_unimportable_siblings_for_shared_providers() {
         },
     )
     .unwrap();
-    assert_eq!(droid_summary.failed, 2, "{:?}", droid_summary.failures);
+    assert_eq!(droid_summary.failed, 3, "{:?}", droid_summary.failures);
     assert_eq!(droid_summary.imported_sessions, 2);
     assert_eq!(droid_summary.imported_events, 5);
     assert_provider_failures_include_headerless_and_malformed(&droid_summary);
@@ -1316,7 +1349,7 @@ fn native_jsonl_tree_tolerates_unimportable_siblings_for_shared_providers() {
         },
     )
     .unwrap();
-    assert_eq!(copilot_summary.failed, 2, "{:?}", copilot_summary.failures);
+    assert_eq!(copilot_summary.failed, 3, "{:?}", copilot_summary.failures);
     assert_eq!(copilot_summary.imported_sessions, 1);
     assert_eq!(copilot_summary.imported_events, 5);
     assert_provider_failures_include_headerless_and_malformed(&copilot_summary);

@@ -24,15 +24,15 @@ use crate::provider::file_touches::{
 use crate::provider::importer::provider_cursor_stream;
 use crate::provider::native::{
     open_provider_sqlite_readonly, parse_json_object_string, provider_capped_json,
-    provider_line_from_index, provider_local_preview, provider_nonnegative_i64_to_u64,
-    provider_required_timestamp_millis, provider_role, provider_value_text,
+    provider_line_from_index, provider_nonnegative_i64_to_u64, provider_policy_body,
+    provider_policy_event_text, provider_required_timestamp_millis, provider_role,
+    provider_value_text,
 };
 use crate::provider::providers::real_content::text_has_real_content;
 use crate::provider::sqlite::{sqlite_is_too_big, sqlite_row_ids_with_oversized_value};
 use crate::{
     CaptureError, ProviderAdapterContext, ProviderNormalizationResult, Result,
     KILO_SQLITE_SOURCE_FORMAT, OPENCODE_SQLITE_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS,
-    PROVIDER_MAX_TEXT_CHARS,
 };
 
 pub(crate) struct OpenCodeSqliteDialect {
@@ -1163,7 +1163,12 @@ pub(crate) fn opencode_event(
     let event_type = opencode_event_type(&row.entry_type, data);
     let role = Some(provider_role(Some(&row.entry_type)));
     let text = opencode_event_text(&row.entry_type, data, event_type, dialect);
-    let (text, truncated) = provider_local_preview(&text, PROVIDER_MAX_TEXT_CHARS);
+    let body = if is_message_part {
+        opencode_message_part_event_body(data)
+    } else {
+        data.clone()
+    };
+    let (text, truncated, retention) = provider_policy_event_text(event_type, &text, &body);
     let payload = if is_message_part {
         json!({
             "entry_type": row.entry_type,
@@ -1176,7 +1181,8 @@ pub(crate) fn opencode_event(
             "session_message_seq": row.seq,
             "text": text,
             "truncated": truncated,
-            "body": provider_capped_json(&opencode_message_part_event_body(data), PROVIDER_MAX_PREVIEW_CHARS),
+            "body": provider_capped_json(&provider_policy_body(event_type, &body), PROVIDER_MAX_PREVIEW_CHARS),
+            "content_retention": retention.as_str(),
         })
     } else {
         json!({
@@ -1185,7 +1191,8 @@ pub(crate) fn opencode_event(
             "session_message_seq": row.seq,
             "text": text,
             "truncated": truncated,
-            "body": provider_capped_json(data, PROVIDER_MAX_PREVIEW_CHARS),
+            "body": provider_capped_json(&provider_policy_body(event_type, &body), PROVIDER_MAX_PREVIEW_CHARS),
+            "content_retention": retention.as_str(),
         })
     };
     let metadata = if is_message_part {
@@ -1301,7 +1308,7 @@ pub(crate) fn opencode_event_text(
     if event_type == EventType::Notice {
         format!("{} event: {entry_type}", dialect.display_name)
     } else {
-        serde_json::to_string(data).unwrap_or_else(|_| entry_type.to_owned())
+        String::new()
     }
 }
 

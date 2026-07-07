@@ -6,7 +6,7 @@ use std::{
     thread,
 };
 
-use ctx_history_core::{CaptureProvider, EventType};
+use ctx_history_core::{CaptureProvider, EventRole, EventType, ProviderEventEnvelope};
 use ctx_history_store::Store;
 use serde_json::Value;
 
@@ -20,11 +20,11 @@ use crate::provider::importer::{
     import_provider_capture_lines, import_provider_file_touched_line,
     resolve_pending_provider_edges, ProviderImportCaches,
 };
+use crate::provider::native::provider_output_event_is_failure;
 use crate::{
-    CaptureError, CodexEventImportMode, CodexSessionImportOptions, CodexToolOutputMode,
-    NormalizedProviderImportOptions, ProviderAdapterContext, ProviderCaptureAdapter,
-    ProviderImportFailure, ProviderImportSummary, ProviderNormalizationResult, Result,
-    CODEX_FAST_IMPORT_PASSIVE_CHECKPOINT_MIN_BYTES,
+    CaptureError, CodexSessionImportOptions, NormalizedProviderImportOptions,
+    ProviderAdapterContext, ProviderCaptureAdapter, ProviderImportFailure, ProviderImportSummary,
+    ProviderNormalizationResult, Result, CODEX_FAST_IMPORT_PASSIVE_CHECKPOINT_MIN_BYTES,
 };
 
 use crate::provider::codex::events::{
@@ -56,6 +56,7 @@ impl ProviderCaptureAdapter for CodexSessionJsonlAdapter {
         let mut result = ProviderNormalizationResult::default();
         let mut header = None;
         let mut call_contexts: BTreeMap<String, CodexToolCallContext> = BTreeMap::new();
+        let mut has_real_message_content = false;
         let raw_source_path = context
             .source_path
             .as_ref()
@@ -68,10 +69,10 @@ impl ProviderCaptureAdapter for CodexSessionJsonlAdapter {
             if line.iter().all(u8::is_ascii_whitespace) {
                 continue;
             }
-            if !should_parse_codex_session_line(&line, context.event_mode) {
+            if !should_parse_codex_session_line(&line) {
                 continue;
             }
-            if should_skip_codex_tool_output_line(&line, context.tool_output_mode) {
+            if should_skip_codex_tool_output_line(&line) {
                 result.summary.skipped += 1;
                 result.summary.skipped_events += 1;
                 continue;
@@ -143,14 +144,15 @@ impl ProviderCaptureAdapter for CodexSessionJsonlAdapter {
                 CodexSessionLineContext {
                     line_number,
                     occurred_at,
-                    tool_output_mode: context.tool_output_mode,
-                    event_mode: context.event_mode,
                     raw_source_path: raw_source_path.as_deref(),
                     source_root: context.source_root_display().as_deref(),
                 },
             );
             if let Some(event) = line_capture.event.take() {
-                if !context.include_notices && event.event_type == EventType::Notice {
+                if codex_event_has_real_conversation_content(&event) {
+                    has_real_message_content = true;
+                }
+                if event.event_type == EventType::Notice {
                     result.summary.skipped += 1;
                     result.summary.skipped_events += 1;
                 } else {
@@ -169,21 +171,81 @@ impl ProviderCaptureAdapter for CodexSessionJsonlAdapter {
             result.files_touched.append(&mut line_capture.files_touched);
         }
 
+        if !has_real_message_content {
+            result.captures.clear();
+            result.files_touched.clear();
+            if result.summary.failed == 0 {
+                result.summary.failed += 1;
+                result.summary.failures.push(ProviderImportFailure {
+                    line: line_number,
+                    error: "codex session JSONL contained no real message content".to_owned(),
+                });
+            }
+        }
+
         Ok(result)
     }
 }
-pub(crate) fn should_parse_codex_session_line(
-    line: &[u8],
-    event_mode: CodexEventImportMode,
-) -> bool {
+
+pub(crate) fn codex_event_has_real_conversation_content(event: &ProviderEventEnvelope) -> bool {
+    event.event_type == EventType::Message
+        && matches!(
+            event.role,
+            Some(EventRole::User | EventRole::Assistant | EventRole::System)
+        )
+        && event
+            .payload
+            .get("text")
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.trim().is_empty())
+}
+
+pub(crate) fn codex_session_file_has_real_conversation(path: &Path) -> Result<bool> {
+    ensure_regular_provider_transcript_file(path)?;
+    let file = File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+    while read_provider_jsonl_line(&mut reader, &mut line)? {
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let Ok(value) = serde_json::from_slice::<Value>(&line) else {
+            continue;
+        };
+        let Some(payload) = value
+            .get("payload")
+            .filter(|_| value.get("type").and_then(Value::as_str) == Some("response_item"))
+        else {
+            continue;
+        };
+        if payload.get("type").and_then(Value::as_str) != Some("message") {
+            continue;
+        }
+        let Some(role) = payload.get("role").and_then(Value::as_str) else {
+            continue;
+        };
+        if !matches!(role, "user" | "assistant" | "system" | "developer") {
+            continue;
+        }
+        if payload
+            .get("content")
+            .and_then(crate::provider::codex::events::codex_content_text)
+            .is_some_and(|text| !text.trim().is_empty())
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+pub(crate) fn should_parse_codex_session_line(line: &[u8]) -> bool {
     if contains_bytes(line, br#""type":"session_meta""#)
         || contains_bytes(line, br#""type":"compacted""#)
     {
         return true;
     }
 
-    if event_mode == CodexEventImportMode::Rich && contains_bytes(line, br#""type":"event_msg""#) {
-        return true;
+    if contains_bytes(line, br#""type":"event_msg""#) {
+        return codex_session_event_msg_may_touch_file(line);
     }
 
     if !contains_bytes(line, br#""type":"response_item""#) {
@@ -192,7 +254,9 @@ pub(crate) fn should_parse_codex_session_line(
 
     if contains_bytes(line, br#""type":"message""#)
         && (contains_bytes(line, br#""role":"user""#)
-            || contains_bytes(line, br#""role":"assistant""#))
+            || contains_bytes(line, br#""role":"assistant""#)
+            || contains_bytes(line, br#""role":"system""#)
+            || contains_bytes(line, br#""role":"developer""#))
     {
         return true;
     }
@@ -201,15 +265,20 @@ pub(crate) fn should_parse_codex_session_line(
         return true;
     }
 
-    event_mode == CodexEventImportMode::Rich
-        && (contains_bytes(line, br#""type":"function_call""#)
-            || contains_bytes(line, br#""type":"custom_tool_call""#)
-            || contains_bytes(line, br#""type":"web_search_call""#)
-            || contains_bytes(line, br#""type":"tool_search_call""#)
-            || contains_bytes(line, br#""type":"function_call_output""#)
-            || contains_bytes(line, br#""type":"custom_tool_call_output""#)
-            || contains_bytes(line, br#""type":"tool_search_output""#)
-            || contains_bytes(line, br#""type":"reasoning""#))
+    contains_bytes(line, br#""type":"function_call""#)
+        || contains_bytes(line, br#""type":"custom_tool_call""#)
+        || contains_bytes(line, br#""type":"web_search_call""#)
+        || contains_bytes(line, br#""type":"tool_search_call""#)
+        || contains_bytes(line, br#""type":"function_call_output""#)
+        || contains_bytes(line, br#""type":"custom_tool_call_output""#)
+        || contains_bytes(line, br#""type":"tool_search_output""#)
+        || contains_bytes(line, br#""type":"reasoning""#)
+}
+pub(crate) fn codex_session_event_msg_may_touch_file(line: &[u8]) -> bool {
+    contains_bytes(line, br#""patch_apply_end""#)
+        || contains_bytes(line, b"apply_patch")
+        || contains_bytes(line, b"*** Begin Patch")
+        || contains_bytes(line, b"changes")
 }
 pub(crate) fn codex_session_line_may_touch_file(line: &[u8]) -> bool {
     contains_bytes(line, br#""type":"response_item""#)
@@ -226,21 +295,21 @@ pub(crate) fn is_codex_tool_output_line(line: &[u8]) -> bool {
         || contains_bytes(line, br#""type":"custom_tool_call_output""#)
         || contains_bytes(line, br#""type":"tool_search_output""#)
 }
-pub(crate) fn should_skip_codex_tool_output_line(line: &[u8], mode: CodexToolOutputMode) -> bool {
+pub(crate) fn should_skip_codex_tool_output_line(line: &[u8]) -> bool {
     if !is_codex_tool_output_line(line) {
         return false;
     }
-    match mode {
-        CodexToolOutputMode::Full | CodexToolOutputMode::Metadata => false,
-        CodexToolOutputMode::Skip => true,
-        CodexToolOutputMode::Failures => !codex_tool_output_line_looks_important(line),
-    }
+    !codex_tool_output_line_looks_important(line)
 }
 pub(crate) fn codex_tool_output_line_looks_important(line: &[u8]) -> bool {
     contains_bytes(line, br#""timed_out":true"#)
         || contains_bytes(line, b"timed_out=true")
         || contains_bytes(line, b"timed out")
         || codex_tool_output_line_has_nonzero_exit_code(line)
+        || serde_json::from_slice::<Value>(line)
+            .ok()
+            .and_then(|value| value.get("payload").cloned())
+            .is_some_and(|payload| provider_output_event_is_failure(&payload))
 }
 pub(crate) fn codex_tool_output_line_has_nonzero_exit_code(line: &[u8]) -> bool {
     let marker = b"Process exited with code ";
@@ -297,9 +366,6 @@ pub fn import_codex_session_jsonl(
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
-            tool_output_mode: options.tool_output_mode,
-            event_mode: options.event_mode,
-            include_notices: options.include_notices,
         },
     )?;
 
@@ -338,9 +404,6 @@ pub fn import_codex_session_jsonl_tail(
         source_path: Some(path.to_path_buf()),
         source_root: None,
         imported_at: options.imported_at,
-        tool_output_mode: options.tool_output_mode,
-        event_mode: options.event_mode,
-        include_notices: options.include_notices,
     };
     let import_options = NormalizedProviderImportOptions {
         history_record_id: options.history_record_id,
@@ -411,10 +474,10 @@ pub fn import_codex_session_jsonl_tail(
             if line.iter().all(u8::is_ascii_whitespace) {
                 continue;
             }
-            if !should_parse_codex_session_line(&line, options.event_mode) {
+            if !should_parse_codex_session_line(&line) {
                 continue;
             }
-            if should_skip_codex_tool_output_line(&line, options.tool_output_mode) {
+            if should_skip_codex_tool_output_line(&line) {
                 summary.skipped += 1;
                 summary.skipped_events += 1;
                 continue;
@@ -462,14 +525,12 @@ pub fn import_codex_session_jsonl_tail(
                 CodexSessionLineContext {
                     line_number,
                     occurred_at,
-                    tool_output_mode: options.tool_output_mode,
-                    event_mode: options.event_mode,
                     raw_source_path: raw_source_path.as_deref(),
                     source_root: context.source_root_display().as_deref(),
                 },
             );
             if let Some(event) = line_capture.event.take() {
-                if !options.include_notices && event.event_type == EventType::Notice {
+                if event.event_type == EventType::Notice {
                     summary.skipped += 1;
                     summary.skipped_events += 1;
                 } else {
@@ -779,9 +840,6 @@ pub(crate) fn normalize_codex_session_path(
             source_path: Some(path.to_path_buf()),
             source_root: options.source_path.clone(),
             imported_at: options.imported_at,
-            tool_output_mode: options.tool_output_mode,
-            event_mode: options.event_mode,
-            include_notices: options.include_notices,
         },
     )
 }

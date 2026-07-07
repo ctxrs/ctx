@@ -17,14 +17,13 @@ use crate::common::io::ensure_regular_provider_transcript_file;
 use crate::provider::file_touches::provider_file_touches_from_raw_value;
 use crate::provider::importer::provider_cursor_stream;
 use crate::provider::native::{
-    provider_capped_json, provider_local_preview, provider_role, provider_value_text,
-    task_json_string_field, task_json_time_field,
+    provider_capped_json, provider_policy_body, provider_policy_event_text, provider_role,
+    provider_value_text, task_json_string_field, task_json_time_field,
 };
 use crate::{
     CaptureError, ProviderAdapterContext, ProviderImportFailure, ProviderImportSummary,
     ProviderNormalizationResult, Result, CLINE_TASK_JSON_SOURCE_FORMAT,
-    MAX_PROVIDER_JSONL_LINE_BYTES, PROVIDER_MAX_PREVIEW_CHARS, PROVIDER_MAX_TEXT_CHARS,
-    ROO_TASK_JSON_SOURCE_FORMAT,
+    MAX_PROVIDER_JSONL_LINE_BYTES, PROVIDER_MAX_PREVIEW_CHARS, ROO_TASK_JSON_SOURCE_FORMAT,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -732,7 +731,7 @@ pub(crate) fn task_json_event(
     let event_type = task_json_event_type(&input.raw, input.source);
     let role = Some(task_json_event_role(&input.raw, input.source));
     let text = task_json_event_text(&input.raw, input.source, event_type);
-    let (text, truncated) = provider_local_preview(&text, PROVIDER_MAX_TEXT_CHARS);
+    let (text, truncated, retention) = provider_policy_event_text(event_type, &text, &input.raw);
     let native_id = task_json_string_field(&input.raw, &["id", "uuid", "messageId"])
         .unwrap_or_else(|| format!("{}-{}", input.source, input.native_index));
     let event_id = format!("{task_id}:{}:{native_id}", input.source);
@@ -757,7 +756,8 @@ pub(crate) fn task_json_event(
             "native_index": input.native_index,
             "text": text,
             "truncated": truncated,
-            "body": provider_capped_json(&input.raw, PROVIDER_MAX_PREVIEW_CHARS),
+            "body": provider_capped_json(&provider_policy_body(event_type, &input.raw), PROVIDER_MAX_PREVIEW_CHARS),
+            "content_retention": retention.as_str(),
         }),
         metadata: json!({
             "source": input.source,

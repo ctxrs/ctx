@@ -14,11 +14,12 @@ use crate::common::time::parse_rfc3339_utc;
 use crate::provider::file_touches::provider_file_touches_from_raw_value;
 use crate::provider::importer::provider_cursor_stream;
 use crate::provider::native::{
-    provider_capped_json, provider_local_preview, provider_role, provider_value_text,
+    provider_capped_json, provider_policy_body, provider_policy_event_text, provider_role,
+    provider_value_text,
 };
 use crate::{
     ProviderAdapterContext, ProviderImportFailure, ProviderNormalizationResult, Result,
-    CLAUDE_PROJECTS_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS, PROVIDER_MAX_TEXT_CHARS,
+    CLAUDE_PROJECTS_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS,
 };
 
 pub(crate) fn normalize_claude_projects_jsonl_file(
@@ -57,6 +58,10 @@ pub(crate) fn normalize_claude_projects_jsonl_file(
         rows.push((line_number, value, timestamp));
     }
     if rows.is_empty() {
+        if result.summary.failed == 0 {
+            result.summary.skipped += 1;
+            result.summary.skipped_sessions += 1;
+        }
         return Ok(result);
     }
 
@@ -238,7 +243,7 @@ pub(crate) fn claude_event(
             String::new()
         }
     });
-    let (text, truncated) = provider_local_preview(&text, PROVIDER_MAX_TEXT_CHARS);
+    let (text, truncated, retention) = provider_policy_event_text(event_type, &text, content);
 
     Some(ProviderEventEnvelope {
         provider_event_index: (line_number - 1) as u64,
@@ -262,7 +267,8 @@ pub(crate) fn claude_event(
             "role": message_role,
             "text": text,
             "truncated": truncated,
-            "content_preview": provider_capped_json(content, PROVIDER_MAX_PREVIEW_CHARS),
+            "content_preview": provider_capped_json(&provider_policy_body(event_type, content), PROVIDER_MAX_PREVIEW_CHARS),
+            "content_retention": retention.as_str(),
         }),
         metadata: json!({
             "source": "claude_projects_jsonl",
@@ -273,7 +279,7 @@ pub(crate) fn claude_event(
             "usage": message.get("usage").cloned(),
             "stop_reason": message.get("stop_reason").and_then(Value::as_str),
             "is_sidechain": value.get("isSidechain").and_then(Value::as_bool),
-            "tool_use_result": value.get("toolUseResult").cloned(),
+            "tool_use_result": value.get("toolUseResult").map(|value| provider_policy_body(EventType::ToolOutput, value)),
         }),
     })
 }

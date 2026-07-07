@@ -16,9 +16,9 @@ use crate::CodexHistoryJsonlAdapter;
 use crate::common::io::{ensure_regular_provider_transcript_file, read_provider_jsonl_line};
 use crate::provider::importer::{import_normalized_provider_captures, provider_cursor_stream};
 use crate::{
-    CodexEventImportMode, CodexHistoryImportOptions, CodexToolOutputMode,
-    NormalizedProviderImportOptions, ProviderAdapterContext, ProviderCaptureAdapter,
-    ProviderImportFailure, ProviderImportSummary, ProviderNormalizationResult, Result,
+    CodexHistoryImportOptions, NormalizedProviderImportOptions, ProviderAdapterContext,
+    ProviderCaptureAdapter, ProviderImportFailure, ProviderImportSummary,
+    ProviderNormalizationResult, Result,
 };
 
 #[derive(Debug, Deserialize)]
@@ -223,9 +223,6 @@ pub fn import_codex_history_jsonl(
             source_path: Some(source_path),
             source_root: None,
             imported_at: options.imported_at,
-            tool_output_mode: CodexToolOutputMode::Full,
-            event_mode: CodexEventImportMode::Rich,
-            include_notices: true,
         },
     )?;
 

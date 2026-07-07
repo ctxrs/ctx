@@ -51,9 +51,6 @@ pub(crate) const FORGECODE_SQLITE_SOURCE_FORMAT: &str = "forgecode_sqlite";
 pub(crate) const DEEPAGENTS_SQLITE_SOURCE_FORMAT: &str = "deepagents_sessions_sqlite";
 pub(crate) const MISTRAL_VIBE_SOURCE_FORMAT: &str = "mistral_vibe_session_jsonl";
 pub(crate) const MUX_SOURCE_FORMAT: &str = "mux_session_jsonl";
-pub(crate) const CODEX_MAX_TEXT_CHARS: usize = 16_000;
-pub(crate) const CODEX_MAX_METADATA_TEXT_CHARS: usize = 4_000;
-pub(crate) const CODEX_MAX_OUTPUT_PREVIEW_CHARS: usize = 4_000;
 pub(crate) const PROVIDER_MAX_TEXT_CHARS: usize = 16_000;
 pub(crate) const PROVIDER_MAX_PREVIEW_CHARS: usize = 4_000;
 pub(crate) const CODEX_FAST_IMPORT_TRANSACTION_FILES: usize = 512;
@@ -72,14 +69,13 @@ mod options;
 pub use options::{
     AntigravityCliImportOptions, AstrBotSqliteImportOptions, AuggieImportOptions,
     ClaudeProjectsImportOptions, ClineTaskJsonImportOptions, CodeBuddyImportOptions,
-    CodexEventImportMode, CodexHistoryImportOptions, CodexSessionCatalogOptions,
-    CodexSessionImportOptions, CodexSessionImportProgress, CodexSessionImportProgressCallback,
-    CodexToolOutputMode, ContinueCliImportOptions, CopilotCliImportOptions,
-    CrushSqliteImportOptions, CursorNativeImportOptions, CustomHistoryJsonlV1ImportOptions,
-    DeepAgentsSqliteImportOptions, FactoryAiDroidImportOptions, FirebenderSqliteImportOptions,
-    FixtureOptions, ForgeCodeSqliteImportOptions, GeminiCliImportOptions,
-    GooseSessionsSqliteImportOptions, HermesSqliteImportOptions, JunieImportOptions,
-    KiloSqliteImportOptions, KimiCodeCliImportOptions, KiroSqliteImportOptions,
+    CodexHistoryImportOptions, CodexSessionCatalogOptions, CodexSessionImportOptions,
+    CodexSessionImportProgress, CodexSessionImportProgressCallback, ContinueCliImportOptions,
+    CopilotCliImportOptions, CrushSqliteImportOptions, CursorNativeImportOptions,
+    CustomHistoryJsonlV1ImportOptions, DeepAgentsSqliteImportOptions, FactoryAiDroidImportOptions,
+    FirebenderSqliteImportOptions, FixtureOptions, ForgeCodeSqliteImportOptions,
+    GeminiCliImportOptions, GooseSessionsSqliteImportOptions, HermesSqliteImportOptions,
+    JunieImportOptions, KiloSqliteImportOptions, KimiCodeCliImportOptions, KiroSqliteImportOptions,
     LingmaSqliteImportOptions, MistralVibeImportOptions, MuxImportOptions, NanoClawImportOptions,
     OpenClawImportOptions, OpenCodeSqliteImportOptions, OpenHandsImportOptions,
     PiSessionImportOptions, ProviderFixtureImportOptions, QoderImportOptions,

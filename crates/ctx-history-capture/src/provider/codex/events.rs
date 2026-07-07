@@ -17,11 +17,12 @@ use crate::provider::file_touches::{
 use crate::common::time::{parse_optional_rfc3339_field, parse_rfc3339_utc};
 use crate::provider::file_touches::event_type_supports_structured_file_touches;
 use crate::provider::importer::provider_cursor_stream;
-use crate::provider::native::capped_text;
+use crate::provider::native::{
+    capped_text, provider_output_event_is_failure, provider_sanitized_output_preview_value,
+};
 use crate::{
-    CaptureError, CodexEventImportMode, CodexToolOutputMode, ProviderAdapterContext,
-    ProviderFileTouchedEnvelope, Result, CODEX_MAX_METADATA_TEXT_CHARS,
-    CODEX_MAX_OUTPUT_PREVIEW_CHARS, CODEX_MAX_TEXT_CHARS, CODEX_SESSION_SOURCE_FORMAT,
+    CaptureError, ProviderAdapterContext, ProviderFileTouchedEnvelope, Result,
+    CODEX_SESSION_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS, PROVIDER_MAX_TEXT_CHARS,
 };
 
 #[derive(Debug, Clone)]
@@ -190,14 +191,10 @@ pub(crate) fn codex_session_capture(
                 "model_provider": header.model_provider,
                 "parent_session": header.parent_session,
                 "raw_session_meta_keys": header.raw.as_object().map(|object| object.keys().cloned().collect::<Vec<_>>()),
-                "import_profile": match context.event_mode {
-                    CodexEventImportMode::Search => "search",
-                    CodexEventImportMode::Rich => "rich",
-                },
+                "import_profile": "default",
                 "limitations": [
-                    "search profile indexes session metadata, user and assistant messages, compacted context summaries, and parent-child session edges where present",
-                    "rich profile can additionally index tool call previews, command output previews, reasoning summaries, and lifecycle notices",
-                    "full raw tool arguments, complete command output, encrypted reasoning content, bootstrap context, and binary artifacts remain in the raw transcript referenced by raw_source_path",
+                    "default profile indexes session metadata, user and assistant messages, compacted context summaries, reasoning summaries, tool-call metadata, failed-output diagnostics, file touches, and parent-child session edges where present",
+                    "successful command output, raw diffs, complete tool output, encrypted reasoning content, bootstrap context, lifecycle notices, and binary artifacts remain in the raw transcript referenced by raw_source_path",
                     "previews are capped before local indexing/export"
                 ],
             }),
@@ -208,8 +205,6 @@ pub(crate) fn codex_session_capture(
 pub(crate) struct CodexSessionLineContext<'a> {
     pub(crate) line_number: usize,
     pub(crate) occurred_at: DateTime<Utc>,
-    pub(crate) tool_output_mode: CodexToolOutputMode,
-    pub(crate) event_mode: CodexEventImportMode,
     pub(crate) raw_source_path: Option<&'a str>,
     pub(crate) source_root: Option<&'a str>,
 }
@@ -222,19 +217,10 @@ pub(crate) fn codex_session_line_capture(
     let CodexSessionLineContext {
         line_number,
         occurred_at,
-        tool_output_mode,
-        event_mode,
         raw_source_path,
         source_root,
     } = context;
-    let event = codex_session_event(
-        value,
-        line_number,
-        occurred_at,
-        call_contexts,
-        tool_output_mode,
-        event_mode,
-    );
+    let event = codex_session_event(value, line_number, occurred_at, call_contexts);
     let mut drafts = Vec::new();
     collect_patch_file_touches(value, &mut drafts);
     if drafts.is_empty()
@@ -279,8 +265,6 @@ pub(crate) fn codex_session_event(
     line_number: usize,
     occurred_at: DateTime<Utc>,
     call_contexts: &mut BTreeMap<String, CodexToolCallContext>,
-    tool_output_mode: CodexToolOutputMode,
-    event_mode: CodexEventImportMode,
 ) -> Option<ProviderEventEnvelope> {
     let entry_type = value
         .get("type")
@@ -289,21 +273,11 @@ pub(crate) fn codex_session_event(
     match entry_type {
         "response_item" => {
             let payload = value.get("payload")?;
-            codex_response_item_event(
-                payload,
-                line_number,
-                occurred_at,
-                call_contexts,
-                tool_output_mode,
-                event_mode,
-            )
+            codex_response_item_event(payload, line_number, occurred_at, call_contexts)
         }
         "compacted" => {
-            let text = value
-                .get("payload")
-                .and_then(codex_json_text)
-                .unwrap_or_else(|| "context compacted".to_owned());
-            let (text, truncated) = codex_local_preview(&text, CODEX_MAX_TEXT_CHARS);
+            let text = value.get("payload").and_then(codex_content_text)?;
+            let (text, truncated) = codex_local_preview(&text, PROVIDER_MAX_TEXT_CHARS);
             Some(codex_provider_event(
                 line_number,
                 occurred_at,
@@ -323,9 +297,6 @@ pub(crate) fn codex_session_event(
             ))
         }
         "event_msg" => {
-            if event_mode == CodexEventImportMode::Search {
-                return None;
-            }
             let payload = value.get("payload")?;
             let msg_type = payload
                 .get("type")
@@ -372,8 +343,6 @@ pub(crate) fn codex_response_item_event(
     line_number: usize,
     occurred_at: DateTime<Utc>,
     call_contexts: &mut BTreeMap<String, CodexToolCallContext>,
-    tool_output_mode: CodexToolOutputMode,
-    event_mode: CodexEventImportMode,
 ) -> Option<ProviderEventEnvelope> {
     let item_type = payload
         .get("type")
@@ -381,18 +350,11 @@ pub(crate) fn codex_response_item_event(
         .unwrap_or("unknown");
     match item_type {
         "message" => codex_message_event(payload, line_number, occurred_at),
-        _ if event_mode == CodexEventImportMode::Search => None,
         "function_call" | "custom_tool_call" | "web_search_call" | "tool_search_call" => {
             codex_tool_call_event(payload, line_number, occurred_at, call_contexts)
         }
         "function_call_output" | "custom_tool_call_output" | "tool_search_output" => {
-            codex_tool_output_event(
-                payload,
-                line_number,
-                occurred_at,
-                call_contexts,
-                tool_output_mode,
-            )
+            codex_tool_output_event(payload, line_number, occurred_at, call_contexts)
         }
         "reasoning" => codex_reasoning_event(payload, line_number, occurred_at),
         _ => Some(codex_provider_event(
@@ -402,7 +364,7 @@ pub(crate) fn codex_response_item_event(
             None,
             json!({
                 "item_type": item_type,
-                "body": codex_capped_json(payload, CODEX_MAX_METADATA_TEXT_CHARS),
+                "body": codex_capped_json(payload, PROVIDER_MAX_PREVIEW_CHARS),
             }),
             json!({
                 "source": "codex_session",
@@ -431,9 +393,9 @@ pub(crate) fn codex_tool_call_event(
         .or_else(|| payload.get("action"))
         .or_else(|| payload.get("execution"));
     let command_preview = codex_command_preview(&tool_name, argument_value);
-    let (arguments_preview, arguments_truncated) = argument_value
-        .map(|value| codex_value_preview(value, CODEX_MAX_METADATA_TEXT_CHARS))
-        .unwrap_or_else(|| (String::new(), false));
+    let (arguments_preview, arguments_truncated, raw_arguments_retained) = argument_value
+        .map(codex_tool_arguments_preview)
+        .unwrap_or_else(|| (String::new(), false, false));
     let text = command_preview
         .as_ref()
         .map(|command| format!("{tool_name}: {command}"))
@@ -444,7 +406,7 @@ pub(crate) fn codex_tool_call_event(
                 format!("{tool_name}: {arguments_preview}")
             }
         });
-    let (text, text_truncated) = codex_local_preview(&text, CODEX_MAX_METADATA_TEXT_CHARS);
+    let (text, text_truncated) = codex_local_preview(&text, PROVIDER_MAX_PREVIEW_CHARS);
 
     if let Some(call_id) = call_id {
         call_contexts.insert(
@@ -471,6 +433,7 @@ pub(crate) fn codex_tool_call_event(
             "command": command_preview,
             "arguments_preview": arguments_preview,
             "arguments_truncated": arguments_truncated,
+            "raw_arguments_retained": raw_arguments_retained,
             "text": text,
             "truncated": text_truncated || arguments_truncated,
         }),
@@ -488,11 +451,7 @@ pub(crate) fn codex_tool_output_event(
     line_number: usize,
     occurred_at: DateTime<Utc>,
     call_contexts: &BTreeMap<String, CodexToolCallContext>,
-    tool_output_mode: CodexToolOutputMode,
 ) -> Option<ProviderEventEnvelope> {
-    if tool_output_mode == CodexToolOutputMode::Skip {
-        return None;
-    }
     let item_type = payload
         .get("type")
         .and_then(Value::as_str)
@@ -509,14 +468,14 @@ pub(crate) fn codex_tool_output_event(
     let output_text = output_value.map(codex_output_text);
     let command_preview = context.and_then(|context| context.command_preview.clone());
     let output_text_ref = output_text.as_deref();
-    let exit_code = output_text_ref.and_then(codex_exit_code);
+    let exit_code = output_text_ref
+        .and_then(codex_exit_code)
+        .or_else(|| codex_output_exit_code(payload));
     let duration_ms = output_text_ref.and_then(codex_wall_time_ms);
     let output_bytes = output_text_ref.map(str::len).unwrap_or(0);
     let timed_out = codex_timed_out(payload).unwrap_or(false);
-    if tool_output_mode == CodexToolOutputMode::Failures
-        && !timed_out
-        && !exit_code.is_some_and(|code| code != 0)
-    {
+    let structured_failure = provider_output_event_is_failure(payload);
+    if !timed_out && !exit_code.is_some_and(|code| code != 0) && !structured_failure {
         return None;
     }
     let event_type = if codex_is_command_tool(&tool_name) {
@@ -524,52 +483,32 @@ pub(crate) fn codex_tool_output_event(
     } else {
         EventType::ToolOutput
     };
-    let keep_preview = tool_output_mode == CodexToolOutputMode::Full
-        || timed_out
-        || exit_code.is_some_and(|code| code != 0);
-    let preview_limit = if tool_output_mode == CodexToolOutputMode::Full {
-        CODEX_MAX_OUTPUT_PREVIEW_CHARS
+    let sanitized_output_text =
+        output_text_ref.map(|text| provider_sanitized_output_preview_value(payload, text));
+    let (output_preview, output_truncated) = sanitized_output_text
+        .as_deref()
+        .map(|text| codex_local_preview(text, PROVIDER_MAX_PREVIEW_CHARS))
+        .unwrap_or_else(|| (String::new(), false));
+    let command = command_preview
+        .as_deref()
+        .map(|command| format!(" for `{command}`"))
+        .unwrap_or_default();
+    let status = exit_code
+        .map(|code| format!("exit_code={code}"))
+        .unwrap_or_else(|| "exit_code=unknown".to_owned());
+    let duration = duration_ms
+        .map(|ms| format!(", duration_ms={ms}"))
+        .unwrap_or_default();
+    let timeout = if timed_out { ", timed_out=true" } else { "" };
+    let preview = if output_preview.is_empty() {
+        String::new()
     } else {
-        512
+        format!(": {output_preview}")
     };
-    let (output_preview, output_truncated) = if keep_preview {
-        output_text_ref
-            .map(|text| codex_local_preview(text, preview_limit))
-            .unwrap_or_else(|| (String::new(), false))
-    } else {
-        (String::new(), output_bytes > 0)
-    };
-    let text = match tool_output_mode {
-        CodexToolOutputMode::Full => {
-            if let Some(command) = command_preview.as_deref() {
-                format!("{tool_name} output for `{command}`: {output_preview}")
-            } else {
-                format!("{tool_name} output: {output_preview}")
-            }
-        }
-        CodexToolOutputMode::Metadata
-        | CodexToolOutputMode::Failures
-        | CodexToolOutputMode::Skip => {
-            let command = command_preview
-                .as_deref()
-                .map(|command| format!(" for `{command}`"))
-                .unwrap_or_default();
-            let status = exit_code
-                .map(|code| format!("exit_code={code}"))
-                .unwrap_or_else(|| "exit_code=unknown".to_owned());
-            let duration = duration_ms
-                .map(|ms| format!(", duration_ms={ms}"))
-                .unwrap_or_default();
-            let timeout = if timed_out { ", timed_out=true" } else { "" };
-            let preview = if output_preview.is_empty() {
-                String::new()
-            } else {
-                format!(": {output_preview}")
-            };
-            format!("{tool_name} output{command}: {status}{duration}, output_bytes={output_bytes}{timeout}{preview}")
-        }
-    };
-    let (text, text_truncated) = codex_local_preview(&text, CODEX_MAX_OUTPUT_PREVIEW_CHARS);
+    let text = format!(
+        "{tool_name} output{command}: {status}{duration}, output_bytes={output_bytes}{timeout}{preview}"
+    );
+    let (text, text_truncated) = codex_local_preview(&text, PROVIDER_MAX_PREVIEW_CHARS);
 
     Some(codex_provider_event(
         line_number,
@@ -583,9 +522,8 @@ pub(crate) fn codex_tool_output_event(
             "call_id": call_id,
             "command": command_preview,
             "arguments_preview": context.and_then(|context| context.arguments_preview.clone()),
-            "output": if tool_output_mode == CodexToolOutputMode::Full { Some(output_preview.clone()) } else { None },
             "output_preview": output_preview,
-            "output_retention": if tool_output_mode == CodexToolOutputMode::Full { "preview" } else { "raw_transcript" },
+            "output_retention": "failed_preview",
             "output_bytes": output_bytes,
             "output_truncated": output_truncated,
             "exit_code": exit_code,
@@ -610,6 +548,25 @@ pub(crate) fn codex_output_text(value: &Value) -> Cow<'_, str> {
         other => Cow::Owned(serde_json::to_string(other).unwrap_or_else(|_| other.to_string())),
     }
 }
+
+fn codex_output_exit_code(value: &Value) -> Option<i32> {
+    match value {
+        Value::Object(object) => {
+            for key in ["exit_code", "exitCode"] {
+                if let Some(code) = object
+                    .get(key)
+                    .and_then(Value::as_i64)
+                    .and_then(|code| i32::try_from(code).ok())
+                {
+                    return Some(code);
+                }
+            }
+            object.values().find_map(codex_output_exit_code)
+        }
+        Value::Array(items) => items.iter().find_map(codex_output_exit_code),
+        _ => None,
+    }
+}
 pub(crate) fn codex_reasoning_event(
     payload: &Value,
     line_number: usize,
@@ -624,7 +581,7 @@ pub(crate) fn codex_reasoning_event(
                 .and_then(Value::as_str)
                 .map(str::to_owned)
         })?;
-    let (summary, truncated) = codex_local_preview(&summary, CODEX_MAX_TEXT_CHARS);
+    let (summary, truncated) = codex_local_preview(&summary, PROVIDER_MAX_TEXT_CHARS);
     Some(codex_provider_event(
         line_number,
         occurred_at,
@@ -654,11 +611,11 @@ pub(crate) fn codex_message_event(
         .get("role")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
-    if matches!(role_text, "developer" | "system") {
+    if !matches!(role_text, "user" | "assistant" | "developer" | "system") {
         return None;
     }
     let text = payload.get("content").and_then(codex_content_text)?;
-    let (text, truncated) = capped_text(&text, CODEX_MAX_TEXT_CHARS);
+    let (text, truncated) = capped_text(&text, PROVIDER_MAX_TEXT_CHARS);
     Some(codex_provider_event(
         line_number,
         occurred_at,
@@ -711,7 +668,7 @@ pub(crate) fn codex_lifecycle_body(payload: &Value, msg_type: &str) -> Value {
         .or_else(|| payload.get("stderr"))
         .and_then(codex_json_text)
         .unwrap_or_else(|| format!("Codex lifecycle: {msg_type}"));
-    let (text, truncated) = codex_local_preview(&preview, CODEX_MAX_METADATA_TEXT_CHARS);
+    let (text, truncated) = codex_local_preview(&preview, PROVIDER_MAX_PREVIEW_CHARS);
     json!({
         "text": text,
         "event_msg_type": msg_type,
@@ -749,7 +706,7 @@ pub(crate) fn codex_command_preview(
         .or_else(|| parsed.get("shell_command"))
         .and_then(Value::as_str)
         .or_else(|| value.as_str())?;
-    Some(codex_local_preview(command, CODEX_MAX_METADATA_TEXT_CHARS).0)
+    Some(codex_local_preview(command, PROVIDER_MAX_PREVIEW_CHARS).0)
 }
 pub(crate) fn codex_value_preview(value: &Value, max_chars: usize) -> (String, bool) {
     let rendered = match value {
@@ -758,6 +715,138 @@ pub(crate) fn codex_value_preview(value: &Value, max_chars: usize) -> (String, b
         _ => serde_json::to_string(value).unwrap_or_else(|_| value.to_string()),
     };
     codex_local_preview(&rendered, max_chars)
+}
+pub(crate) fn codex_tool_arguments_preview(value: &Value) -> (String, bool, bool) {
+    let parsed = codex_parse_embedded_json(value).unwrap_or_else(|| value.clone());
+    let mut file_touches = Vec::new();
+    collect_patch_file_touches(&parsed, &mut file_touches);
+    collect_structured_file_touches(&parsed, &mut file_touches);
+    if !file_touches.is_empty() {
+        return codex_file_touch_arguments_preview(&file_touches);
+    }
+    let (sanitized, redacted) = codex_sanitized_tool_argument_value(&parsed, None);
+    let (preview, truncated) = codex_value_preview(&sanitized, PROVIDER_MAX_PREVIEW_CHARS);
+    (preview, truncated, !redacted)
+}
+pub(crate) fn codex_file_touch_arguments_preview(
+    file_touches: &[crate::provider::file_touches::FileTouchDraft],
+) -> (String, bool, bool) {
+    let paths = file_touches
+        .iter()
+        .take(12)
+        .map(|touch| match touch.change_kind {
+            Some(kind) => format!("{}:{}", kind.as_str(), touch.path),
+            None => touch.path.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let omitted = file_touches.len().saturating_sub(12);
+    let suffix = if omitted == 0 {
+        String::new()
+    } else {
+        format!(", +{omitted} more")
+    };
+    (format!("file touches: {paths}{suffix}"), omitted > 0, false)
+}
+pub(crate) fn codex_sanitized_tool_argument_value(
+    value: &Value,
+    key: Option<&str>,
+) -> (Value, bool) {
+    if key.is_some_and(|key| codex_tool_argument_key_should_redact(key, value)) {
+        return (codex_redacted_argument_value(value), true);
+    }
+    match value {
+        Value::Array(items) => {
+            let mut redacted = false;
+            let items = items
+                .iter()
+                .map(|item| {
+                    let (item, item_redacted) = codex_sanitized_tool_argument_value(item, key);
+                    redacted |= item_redacted;
+                    item
+                })
+                .collect();
+            (Value::Array(items), redacted)
+        }
+        Value::Object(object) => {
+            let mut redacted = false;
+            let object = object
+                .iter()
+                .map(|(key, value)| {
+                    let (value, value_redacted) =
+                        codex_sanitized_tool_argument_value(value, Some(key));
+                    redacted |= value_redacted;
+                    (key.clone(), value)
+                })
+                .collect();
+            (Value::Object(object), redacted)
+        }
+        _ => (value.clone(), false),
+    }
+}
+pub(crate) fn codex_tool_argument_key_should_redact(key: &str, value: &Value) -> bool {
+    let key = codex_normalized_key(key);
+    matches!(
+        key.as_str(),
+        "content"
+            | "text"
+            | "body"
+            | "diff"
+            | "patch"
+            | "oldstring"
+            | "newstring"
+            | "oldcontent"
+            | "newcontent"
+            | "beforecontent"
+            | "aftercontent"
+            | "beforetext"
+            | "aftertext"
+            | "replacement"
+            | "oldstr"
+            | "newstr"
+            | "inputtext"
+            | "outputtext"
+    ) || (matches!(key.as_str(), "input" | "arguments" | "args" | "params")
+        && codex_value_contains_patch_or_diff(value))
+}
+pub(crate) fn codex_redacted_argument_value(value: &Value) -> Value {
+    json!({
+        "content_retention": "metadata_only",
+        "omitted_bytes": codex_value_approx_bytes(value),
+        "contains_patch_or_diff": codex_value_contains_patch_or_diff(value),
+    })
+}
+pub(crate) fn codex_normalized_key(key: &str) -> String {
+    key.chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+pub(crate) fn codex_value_approx_bytes(value: &Value) -> usize {
+    match value {
+        Value::String(text) => text.len(),
+        _ => serde_json::to_string(value)
+            .map(|text| text.len())
+            .unwrap_or_default(),
+    }
+}
+pub(crate) fn codex_value_contains_patch_or_diff(value: &Value) -> bool {
+    match value {
+        Value::String(text) => codex_text_contains_patch_or_diff(text),
+        Value::Array(items) => items.iter().any(codex_value_contains_patch_or_diff),
+        Value::Object(object) => object.values().any(codex_value_contains_patch_or_diff),
+        _ => false,
+    }
+}
+pub(crate) fn codex_text_contains_patch_or_diff(text: &str) -> bool {
+    text.contains("*** Begin Patch")
+        || text.contains("diff --git ")
+        || text.starts_with("@@")
+        || text.starts_with("+++ ")
+        || text.starts_with("--- ")
+        || text.contains("\n@@")
+        || text.contains("\n+++ ")
+        || text.contains("\n--- ")
 }
 pub(crate) fn codex_local_preview(value: &str, max_chars: usize) -> (String, bool) {
     capped_text(value, max_chars)
@@ -835,12 +924,6 @@ pub(crate) fn codex_content_text(value: &Value) -> Option<String> {
                     parts.push(text.to_owned());
                     continue;
                 }
-                if let Some(kind) = block.get("type").and_then(Value::as_str) {
-                    if matches!(kind, "tool_call" | "function_call" | "custom_tool_call") {
-                        let name = block.get("name").and_then(Value::as_str).unwrap_or("tool");
-                        parts.push(format!("tool call: {name}"));
-                    }
-                }
             }
             if parts.is_empty() {
                 None
@@ -848,7 +931,23 @@ pub(crate) fn codex_content_text(value: &Value) -> Option<String> {
                 Some(parts.join("\n"))
             }
         }
-        Value::Object(_) => codex_json_text(value),
+        Value::Object(object) => {
+            for key in [
+                "text",
+                "input_text",
+                "output_text",
+                "summary_text",
+                "content",
+            ] {
+                if let Some(text) = object.get(key).and_then(Value::as_str) {
+                    return Some(text.to_owned());
+                }
+                if let Some(text) = object.get(key).and_then(codex_content_text) {
+                    return Some(text);
+                }
+            }
+            None
+        }
         _ => None,
     }
 }

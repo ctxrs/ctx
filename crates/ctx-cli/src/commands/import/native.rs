@@ -1,9 +1,7 @@
 use std::collections::BTreeMap;
 
 use super::*;
-use crate::commands::import::catalog::{
-    codex_event_import_mode, codex_include_notices, codex_tool_output_mode, system_time_ms,
-};
+use crate::commands::import::catalog::system_time_ms;
 
 pub(crate) fn validate_source_import_supported(source: &SourceInfo) -> Result<()> {
     match source.import_support {
@@ -71,9 +69,6 @@ pub(crate) fn import_one_source_inner(
     allow_partial_failures: bool,
     preinventory: &SourcePreinventory,
 ) -> Result<ProviderImportSummary> {
-    let tool_output_mode = codex_tool_output_mode()?;
-    let event_mode = codex_event_import_mode()?;
-    let include_notices = codex_include_notices();
     let record = import_record_for_source(source);
     let record_id = record.id;
     store.upsert_record(&record)?;
@@ -82,9 +77,6 @@ pub(crate) fn import_one_source_inner(
             store,
             source,
             record_id,
-            tool_output_mode,
-            event_mode,
-            include_notices,
             progress,
             allow_partial_failures,
             preinventory.source_import_files(),
@@ -101,9 +93,6 @@ pub(crate) fn import_one_source_inner(
                                 source_path: Some(source.path.clone()),
                                 history_record_id: Some(record_id),
                                 allow_partial_failures,
-                                tool_output_mode,
-                                event_mode,
-                                include_notices,
                                 progress: progress.clone(),
                                 ..CodexSessionImportOptions::default()
                             },
@@ -114,9 +103,6 @@ pub(crate) fn import_one_source_inner(
                             store,
                             source,
                             record_id,
-                            tool_output_mode,
-                            event_mode,
-                            include_notices,
                             progress.clone(),
                             allow_partial_failures,
                             !preinventory.codex_session_tree_cataloged(),
@@ -147,9 +133,6 @@ pub(crate) fn import_one_source_inner(
                             source_path: Some(source.path.clone()),
                             history_record_id: Some(record_id),
                             allow_partial_failures,
-                            tool_output_mode,
-                            event_mode,
-                            include_notices,
                             progress,
                             ..CodexSessionImportOptions::default()
                         },
@@ -682,9 +665,6 @@ pub(crate) fn import_manifested_source(
     store: &mut Store,
     source: &SourceInfo,
     record_id: Uuid,
-    tool_output_mode: CodexToolOutputMode,
-    event_mode: CodexEventImportMode,
-    include_notices: bool,
     progress: Option<CodexSessionImportProgressCallback>,
     allow_partial_failures: bool,
     preinventoried_files: Option<&[SourceImportFile]>,
@@ -798,9 +778,6 @@ pub(crate) fn import_manifested_source(
     }
 
     let _ = record_id;
-    let _ = tool_output_mode;
-    let _ = event_mode;
-    let _ = include_notices;
     Ok(summary)
 }
 

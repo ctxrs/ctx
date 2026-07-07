@@ -20,15 +20,15 @@ use crate::common::io::{
 use crate::provider::custom_history_jsonl::push_provider_import_failure;
 use crate::provider::importer::provider_cursor_stream;
 use crate::provider::native::{
-    open_provider_sqlite_readonly, provider_capped_json, provider_local_preview, provider_role,
-    task_json_string_field, task_json_time_field,
+    open_provider_sqlite_readonly, provider_capped_json, provider_policy_body,
+    provider_policy_event_text, provider_role, task_json_string_field, task_json_time_field,
 };
 use crate::provider::sqlite::{
     ensure_sqlite_table_columns, sqlite_table_columns, sqlite_table_exists,
 };
 use crate::{
     CaptureError, ProviderAdapterContext, ProviderNormalizationResult, Result,
-    MAX_PROVIDER_JSONL_LINE_BYTES, PROVIDER_MAX_PREVIEW_CHARS, PROVIDER_MAX_TEXT_CHARS,
+    MAX_PROVIDER_JSONL_LINE_BYTES, PROVIDER_MAX_PREVIEW_CHARS,
 };
 
 pub(crate) const TRAE_STATE_VSCDB_SOURCE_FORMAT: &str = "trae_state_vscdb";
@@ -555,7 +555,10 @@ pub(crate) fn trae_capture(input: TraeCaptureInput<'_>) -> ProviderCaptureEnvelo
                 "native_session_id": input.native_session_id,
                 "workspace_folder": input.workspace_folder,
                 "chat_key": input.chat_key,
-                "session": provider_capped_json(input.session, PROVIDER_MAX_PREVIEW_CHARS),
+                "session": provider_capped_json(
+                    &trae_session_metadata_preview(input.session),
+                    PROVIDER_MAX_PREVIEW_CHARS,
+                ),
                 "limitations": [
                     "Importer is based on public exporter source and synthetic fixture; no real local Trae run fixture is bundled",
                     "Only known Trae and Trae CN ItemTable chat keys and direct message arrays are imported",
@@ -567,19 +570,31 @@ pub(crate) fn trae_capture(input: TraeCaptureInput<'_>) -> ProviderCaptureEnvelo
     }
 }
 
+fn trae_session_metadata_preview(session: &Value) -> Value {
+    let mut preview = session.clone();
+    if let Value::Object(object) = &mut preview {
+        for key in ["messages", "chatMessages", "bubbles", "items"] {
+            object.remove(key);
+        }
+    }
+    provider_policy_body(EventType::Notice, &preview)
+}
+
 pub(crate) fn trae_event(
     provider_session_id: &str,
     workspace_id: &str,
     chat_key: &str,
     event: &TraeEventInput,
 ) -> ProviderEventEnvelope {
-    let (text, truncated) = provider_local_preview(&event.text, PROVIDER_MAX_TEXT_CHARS);
+    let event_type = EventType::Message;
+    let (text, truncated, retention) =
+        provider_policy_event_text(event_type, &event.text, &event.raw_message);
     let event_id = format!("{provider_session_id}:{}", event.native_message_id);
     ProviderEventEnvelope {
         provider_event_index: event.provider_event_index,
         provider_event_hash: Some(event_id.clone()),
         cursor: Some(format!("{chat_key}:{event_id}")),
-        event_type: EventType::Message,
+        event_type,
         role: Some(provider_role(event.role.as_deref())),
         occurred_at: event.occurred_at,
         fidelity: Fidelity::Partial,
@@ -593,7 +608,8 @@ pub(crate) fn trae_event(
             "native_message_id": event.native_message_id,
             "text": text,
             "truncated": truncated,
-            "body": provider_capped_json(&event.raw_message, PROVIDER_MAX_PREVIEW_CHARS),
+            "body": provider_capped_json(&provider_policy_body(event_type, &event.raw_message), PROVIDER_MAX_PREVIEW_CHARS),
+            "content_retention": retention.as_str(),
         }),
         metadata: json!({
             "source": "trae_state_vscdb_itemtable",

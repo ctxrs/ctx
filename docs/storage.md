@@ -39,8 +39,9 @@ The SQLite store may contain:
 - source file paths and import cursors when available;
 - session IDs and event IDs;
 - timestamps and working-directory metadata when known;
-- normalized user, assistant, tool, command, and lifecycle event text;
-- bounded command or tool-output previews;
+- normalized user, assistant, system, and developer conversation text;
+- tool-call, command, file-touch, and lifecycle metadata;
+- bounded diagnostic previews for failed or timed-out command/tool output;
 - FTS-indexable text required for search;
 - citations and offsets or line/cursor metadata when available;
 - compatibility rows used by the current search implementation.
@@ -52,9 +53,12 @@ provider transcript files may still remain in provider-owned locations such as
 ## What ctx Avoids By Default
 
 The current CLI avoids copying unbounded stdout, stderr, binary artifacts, image
-payloads, and provider-private blobs into SQLite. When a provider transcript has
-large raw payloads, ctx should store a bounded preview plus a citation back to
-the raw source path when available.
+payloads, raw diffs, and provider-private blobs into SQLite. When a provider
+transcript has large raw payloads, ctx should store metadata, a citation back to
+the raw source path when available, and only bounded diagnostic previews that
+are useful for local search. See
+[`provider-import-policy.md`](provider-import-policy.md) for the native adapter
+content policy.
 
 Provider-specific sensitive handles should stay out of normalized metadata when
 they are not needed for local search. For example, the Warp SQLite importer
@@ -229,9 +233,9 @@ not remove provider-owned history such as `~/.codex/sessions`.
 
 ## Privacy Truth
 
-Indexed prompts, code, commands, file paths, and output previews may contain
-credentials, customer data, private repository names, or proprietary design
-notes.
+Indexed prompts, code, commands, file paths, and failed-output diagnostic
+previews may contain credentials, customer data, private repository names, or
+proprietary design notes.
 
 Recommended handling:
 

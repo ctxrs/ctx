@@ -86,8 +86,10 @@ pub(crate) fn normalize_astrbot_sqlite(
                     continue;
                 }
                 let role = astrbot_role(item);
-                let text = astrbot_item_text(item)
-                    .unwrap_or_else(|| "AstrBot conversation item".to_owned());
+                let Some(text) = astrbot_item_text(item).filter(|text| !text.trim().is_empty())
+                else {
+                    continue;
+                };
                 let event = native_event(NativeEventDraft {
                     provider: CaptureProvider::AstrBot,
                     source_format: ASTRBOT_SQLITE_SOURCE_FORMAT,
@@ -128,8 +130,10 @@ pub(crate) fn normalize_astrbot_sqlite(
                 ));
             }
         } else {
-            let text =
-                provider_value_text(&content).unwrap_or_else(|| "AstrBot conversation".to_owned());
+            let Some(text) = provider_value_text(&content).filter(|text| !text.trim().is_empty())
+            else {
+                continue;
+            };
             let event = native_event(NativeEventDraft {
                 provider: CaptureProvider::AstrBot,
                 source_format: ASTRBOT_SQLITE_SOURCE_FORMAT,
@@ -203,8 +207,10 @@ pub(crate) fn normalize_astrbot_sqlite(
             .as_deref()
             .map(provider_json_text)
             .unwrap_or(Value::Null);
-        let text =
-            provider_value_text(&content).unwrap_or_else(|| "AstrBot platform message".to_owned());
+        let Some(text) = provider_value_text(&content).filter(|text| !text.trim().is_empty())
+        else {
+            continue;
+        };
         let role = if message.sender_id.as_deref() == message.user_id.as_deref() {
             Some(EventRole::User)
         } else {

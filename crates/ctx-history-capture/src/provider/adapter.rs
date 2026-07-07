@@ -9,9 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::{
-    default_machine_id, CodexEventImportMode, CodexToolOutputMode, ProviderImportSummary, Result,
-};
+use crate::{default_machine_id, ProviderImportSummary, Result};
 
 use crate::common::json::default_metadata;
 
@@ -73,9 +71,6 @@ pub struct ProviderAdapterContext {
     pub source_path: Option<PathBuf>,
     pub source_root: Option<PathBuf>,
     pub imported_at: DateTime<Utc>,
-    pub tool_output_mode: CodexToolOutputMode,
-    pub event_mode: CodexEventImportMode,
-    pub include_notices: bool,
 }
 
 impl ProviderAdapterContext {
@@ -94,9 +89,6 @@ impl Default for ProviderAdapterContext {
             source_path: None,
             source_root: None,
             imported_at: utc_now(),
-            tool_output_mode: CodexToolOutputMode::Full,
-            event_mode: CodexEventImportMode::Rich,
-            include_notices: true,
         }
     }
 }

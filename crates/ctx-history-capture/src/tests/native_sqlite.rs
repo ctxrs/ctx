@@ -362,9 +362,14 @@ fn native_opencode_rejects_negative_session_message_seq() {
     assert!(summary.failures[0]
         .error
         .contains("OpenCode session_message seq must be nonnegative"));
-    assert_eq!(summary.imported_events, 2);
-    let session_id = stored_provider_session_id(&store, CaptureProvider::OpenCode, "opencode-root");
-    let events = store.events_for_session(session_id).unwrap();
+    assert_eq!(summary.imported_events, 1);
+    let events = store
+        .list_sessions()
+        .unwrap()
+        .into_iter()
+        .flat_map(|session| store.events_for_session(session.id).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(events.len(), summary.imported_events);
     assert!(events.iter().all(|event| {
         event.payload["body"]["session_message_seq"]
             .as_i64()
@@ -400,7 +405,7 @@ fn native_opencode_rejects_out_of_range_message_timestamp() {
     assert!(summary.failures[0]
         .error
         .contains("OpenCode session_message time_created"));
-    assert_eq!(summary.imported_events, 2);
+    assert_eq!(summary.imported_events, 1);
 }
 
 fn oversized_opencode_text_payload() -> String {
@@ -446,8 +451,12 @@ fn native_opencode_skips_oversized_sqlite_text_value_and_imports_other_rows() {
         "oversized rows must not be counted as failures, got failures: {:?}",
         summary.failures
     );
-    assert_eq!(summary.skipped, 1, "unexpected summary: {summary:?}");
-    assert_eq!(summary.skipped_events, 1, "unexpected summary: {summary:?}");
+    assert_eq!(summary.skipped, 3, "unexpected summary: {summary:?}");
+    assert_eq!(summary.skipped_events, 2, "unexpected summary: {summary:?}");
+    assert_eq!(
+        summary.skipped_sessions, 1,
+        "unexpected summary: {summary:?}"
+    );
     assert!(
         summary.imported_events >= 1,
         "non-oversized rows should still import, got summary: {summary:?}"
@@ -1044,7 +1053,7 @@ fn native_shelley_imports_sessions_messages_metadata_and_citations() {
     .unwrap();
 
     assert_eq!(summary.failed, 0, "{:?}", summary.failures);
-    assert_eq!(summary.imported_sessions, 3);
+    assert_eq!(summary.imported_sessions, 2);
     assert_eq!(summary.imported_events, 4);
     assert_eq!(summary.imported_edges, 1);
 
@@ -1090,7 +1099,7 @@ fn native_shelley_imports_sessions_messages_metadata_and_citations() {
     assert!(rendered.contains("shelley search oracle"));
     assert!(rendered.contains("thinking through the search"));
     assert!(rendered.contains("tool call: bash"));
-    assert!(rendered.contains("tool output oracle"));
+    assert!(!rendered.contains("tool output oracle"));
     assert!(rendered.contains("claude-opus-4-7"));
     assert!(rendered.contains("https://api.anthropic.com/v1/messages"));
     let user_event = events
