@@ -6,6 +6,7 @@ cd "${repo_root}"
 
 export CTX_BOOTSTRAP_BAZELISK="${CTX_BOOTSTRAP_BAZELISK:-1}"
 export CTX_BAZELISK_VERSION="${CTX_BAZELISK_VERSION:-v1.29.0}"
+export CTX_GO_VERSION="${CTX_GO_VERSION:-1.22.12}"
 export CTX_RUST_TOOLCHAIN="${CTX_RUST_TOOLCHAIN:-1.86.0}"
 
 run_apt_get() {
@@ -29,7 +30,6 @@ install_ubuntu_tools() {
     curl \
     default-jdk-headless \
     git \
-    golang-go \
     jq \
     nodejs \
     openssl \
@@ -42,6 +42,47 @@ install_ubuntu_tools() {
     ruby \
     unzip \
     zip
+}
+
+install_go() {
+  local go_arch
+  case "$(uname -m)" in
+    x86_64 | amd64)
+      go_arch="amd64"
+      ;;
+    aarch64 | arm64)
+      go_arch="arm64"
+      ;;
+    *)
+      printf 'unsupported Go install architecture: %s\n' "$(uname -m)" >&2
+      exit 1
+      ;;
+  esac
+
+  local go_sha256
+  case "${CTX_GO_VERSION}:${go_arch}" in
+    1.22.12:amd64)
+      go_sha256="4fa4f869b0f7fc6bb1eb2660e74657fbf04cdd290b5aef905585c86051b34d43"
+      ;;
+    1.22.12:arm64)
+      go_sha256="fd017e647ec28525e86ae8203236e0653242722a7436929b1f775744e26278e7"
+      ;;
+    *)
+      printf 'unsupported CTX_GO_VERSION/architecture pair: %s/%s\n' "${CTX_GO_VERSION}" "${go_arch}" >&2
+      exit 1
+      ;;
+  esac
+
+  local go_tarball
+  go_tarball="$(mktemp "${TMPDIR:-/tmp}/ctx-go.XXXXXX.tar.gz")"
+  curl -fsSL "https://go.dev/dl/go${CTX_GO_VERSION}.linux-${go_arch}.tar.gz" -o "${go_tarball}"
+  printf '%s  %s\n' "${go_sha256}" "${go_tarball}" | sha256sum -c -
+  rm -rf "${HOME}/.local/go"
+  mkdir -p "${HOME}/.local"
+  tar -C "${HOME}/.local" -xzf "${go_tarball}"
+  rm -f "${go_tarball}"
+  export PATH="${HOME}/.local/go/bin:${PATH}"
+  go version
 }
 
 install_rust() {
@@ -93,6 +134,7 @@ print_tool_versions() {
 }
 
 install_ubuntu_tools
+install_go
 install_rust
 configure_bazelisk
 print_tool_versions

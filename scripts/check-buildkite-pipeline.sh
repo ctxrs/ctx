@@ -78,10 +78,13 @@ for required in \
   'concurrency_group: "ctx/public-smoke/default-hosted"' \
   'CTX_RUST_TOOLCHAIN: "1.86.0"' \
   'CTX_BAZELISK_VERSION: "v1.29.0"' \
+  'CTX_GO_VERSION: "1.22.12"' \
   'rustup toolchain install "${CTX_RUST_TOOLCHAIN}" --profile minimal --component rustfmt --component clippy' \
   'apt-get install -y --no-install-recommends' \
   'default-jdk-headless' \
-  'golang-go' \
+  'install_go' \
+  'go${CTX_GO_VERSION}.linux-${go_arch}.tar.gz' \
+  'sha256sum -c -' \
   'python3-build' \
   'python3-venv' \
   'ctx_bootstrap_bazelisk' \
@@ -109,6 +112,11 @@ for required in \
     continue
   fi
 done
+
+if grep -F -q 'golang-go' "${public_ci_script}"; then
+  printf 'Buildkite hosted public CI must install pinned Go instead of Ubuntu golang-go\n' >&2
+  exit 1
+fi
 
 if awk '
     index($0, "key: \"public-smoke\"") { in_step = 1 }
