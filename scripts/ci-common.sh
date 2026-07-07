@@ -7,6 +7,88 @@ ctx_positive_int() {
   [[ "${1:-}" =~ ^[0-9]+$ ]] && (( "$1" > 0 ))
 }
 
+ctx_truthy() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|on|ON)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+ctx_is_ci() {
+  [[ -n "${CI:-}" || -n "${GITHUB_ACTIONS:-}" || -n "${BUILDKITE:-}" || -n "${BUILDKITE_BUILD_ID:-}" ]]
+}
+
+ctx_default_tmpdir() {
+  if [[ -n "${TEST_TMPDIR:-}" ]]; then
+    printf '%s\n' "${TEST_TMPDIR}/tmp"
+  else
+    printf '%s\n' "${CTX_REPO_ROOT}/target/tmp"
+  fi
+}
+
+ctx_init_tool_env_defaults() {
+  local root
+
+  root="${CTX_TOOL_ENV_ROOT:-${CTX_REPO_ROOT}/target/tool-env}"
+  export HOME="${HOME:-${root}/home}"
+  export TMPDIR="${TMPDIR:-$(ctx_default_tmpdir)}"
+  export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${root}/cargo-target}"
+  if ctx_truthy "${CTX_ISOLATE_TOOL_ENV:-0}"; then
+    export CARGO_HOME="${CARGO_HOME:-${root}/cargo-home}"
+    export RUSTUP_HOME="${RUSTUP_HOME:-${root}/rustup-home}"
+  fi
+  mkdir -p "${HOME}" "${TMPDIR}" "${CARGO_TARGET_DIR}"
+  if [[ -n "${CARGO_HOME:-}" ]]; then
+    mkdir -p "${CARGO_HOME}"
+  fi
+  if [[ -n "${RUSTUP_HOME:-}" ]]; then
+    mkdir -p "${RUSTUP_HOME}"
+  fi
+}
+
+ctx_init_bazel_test_env() {
+  local root isolated_home
+
+  if [[ -n "${CTX_BAZEL_TEST_ENV_ROOT:-}" ]]; then
+    root="${CTX_BAZEL_TEST_ENV_ROOT}"
+  elif [[ -n "${TEST_TMPDIR:-}" ]]; then
+    root="${TEST_TMPDIR}/ctx-env"
+  else
+    root="${CTX_REPO_ROOT}/target-local/bazel-test-env"
+  fi
+
+  isolated_home=0
+  if [[ -z "${HOME:-}" || "${HOME}" == "${CTX_REPO_ROOT}/target/tool-env/home" || "${HOME}" == "${CTX_REPO_ROOT}/target/bazel-home" ]]; then
+    export HOME="${root}/home"
+    isolated_home=1
+  fi
+  if [[ -z "${TMPDIR:-}" || "${TMPDIR}" == "${CTX_REPO_ROOT}/target/tmp" || "${TMPDIR}" == "${CTX_REPO_ROOT}/target/tool-env/tmp" ]]; then
+    export TMPDIR="${root}/tmp"
+  fi
+  if [[ -z "${CARGO_HOME:-}" ]] && { ctx_truthy "${CTX_ISOLATE_TOOL_ENV:-0}" || (( isolated_home == 1 )); }; then
+    export CARGO_HOME="${root}/cargo-home"
+  fi
+  if [[ -z "${RUSTUP_HOME:-}" ]] && { ctx_truthy "${CTX_ISOLATE_TOOL_ENV:-0}" || (( isolated_home == 1 )); }; then
+    export RUSTUP_HOME="${root}/rustup-home"
+  fi
+  if [[ -n "${TEST_TMPDIR:-}" ]] && ! ctx_truthy "${CTX_SHARED_CARGO_TARGET_DIR:-0}"; then
+    export CARGO_TARGET_DIR="${root}/cargo-target"
+  else
+    export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${root}/cargo-target}"
+  fi
+  mkdir -p "${HOME}" "${TMPDIR}" "${CARGO_TARGET_DIR}"
+  if [[ -n "${CARGO_HOME:-}" ]]; then
+    mkdir -p "${CARGO_HOME}"
+  fi
+  if [[ -n "${RUSTUP_HOME:-}" ]]; then
+    mkdir -p "${RUSTUP_HOME}"
+  fi
+}
+
 ctx_detect_cpu_count() {
   local cores
 
@@ -183,6 +265,11 @@ ctx_ensure_rust_toolchain() {
     return 0
   fi
 
+  if ! ctx_truthy "${CTX_BOOTSTRAP_RUSTUP:-0}"; then
+    printf 'Rust toolchain is incomplete; cargo, rustc, rustfmt, and clippy are required. Set CTX_BOOTSTRAP_RUSTUP=1 for explicit local rustup bootstrap.\n' >&2
+    return 127
+  fi
+
   lock_file="${CTX_RUSTUP_LOCK:-${TMPDIR:-${CTX_REPO_ROOT}/target/tmp}/ctx-rustup.lock}"
   mkdir -p "$(dirname "${lock_file}")"
   if command -v flock >/dev/null 2>&1; then
@@ -212,6 +299,11 @@ ctx_ensure_rust_build_toolchain() {
 
   if ctx_rust_build_tools_available; then
     return 0
+  fi
+
+  if ! ctx_truthy "${CTX_BOOTSTRAP_RUSTUP:-0}"; then
+    printf 'Rust build toolchain is missing; cargo and rustc are required. Set CTX_BOOTSTRAP_RUSTUP=1 for explicit local rustup bootstrap.\n' >&2
+    return 127
   fi
 
   ctx_ensure_rust_toolchain
@@ -249,7 +341,7 @@ ctx_init_resource_env() {
 
   export CTX_CPU_COUNT="${cpu_count}"
   export CTX_TOTAL_MEMORY_GB="${memory_gb}"
-  export TMPDIR="${TMPDIR:-${CTX_REPO_ROOT}/target/tmp}"
+  export TMPDIR="${TMPDIR:-$(ctx_default_tmpdir)}"
   export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-${CTX_CARGO_JOBS:-${default_jobs}}}"
   export RUST_TEST_THREADS="${RUST_TEST_THREADS:-${CTX_TEST_THREADS:-${CARGO_BUILD_JOBS}}}"
   export CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-always}"
@@ -440,7 +532,8 @@ ctx_find_bazel() {
     command -v bazelisk
     return 0
   fi
-  if [[ "${CTX_REQUIRE_BAZEL:-0}" == "1" || "${CTX_BOOTSTRAP_BAZELISK:-0}" == "1" ]]; then
+  if ctx_truthy "${CTX_BOOTSTRAP_BAZELISK:-0}"; then
+    printf 'Bazelisk network bootstrap explicitly enabled with CTX_BOOTSTRAP_BAZELISK=1\n' >&2
     ctx_bootstrap_bazelisk
     return $?
   fi

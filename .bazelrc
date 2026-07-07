@@ -16,12 +16,19 @@ test:ci --flaky_test_attempts=1
 test:ci --test_env=BUILDKITE
 test:ci --test_env=BUILDKITE_BUILD_ID
 test:ci --test_env=CI
+test:ci --test_env=GITHUB_ACTIONS
 test:ci --test_env=CTX_CARGO_LOCKED=1
 test:ci --test_env=CTX_LOCAL_RESOURCE_CAP=1
+test:ci --test_env=CTX_ISOLATE_TOOL_ENV
+test:ci --test_env=CTX_SHARED_CARGO_TARGET_DIR
+# CI may provide isolated tool roots; bazel-test.sh supplies TEST_TMPDIR defaults when these are unset.
 test:ci --test_env=HOME
 test:ci --test_env=PATH
+test:ci --test_env=CARGO_BUILD_JOBS
 test:ci --test_env=CARGO_HOME
+test:ci --test_env=CARGO_TARGET_DIR
 test:ci --test_env=RUSTUP_HOME
+test:ci --test_env=RUST_TEST_THREADS
 test:ci --test_env=TMPDIR
 test:ci --test_env=CARGO_TERM_COLOR=always
 test:ci --test_output=errors

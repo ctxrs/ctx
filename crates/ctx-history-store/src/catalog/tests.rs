@@ -34,7 +34,9 @@ type CatalogSessionCheckpointRow = (
 );
 
 fn tempdir() -> tempfile::TempDir {
-    let root = std::env::current_dir().unwrap().join("target/test-data");
+    let root = std::env::var_os("TEST_TMPDIR")
+        .map(|path| std::path::PathBuf::from(path).join("test-data"))
+        .unwrap_or_else(|| std::env::current_dir().unwrap().join("target/test-data"));
     fs::create_dir_all(&root).unwrap();
     tempfile::Builder::new()
         .prefix("ctx-history-store-catalog-")

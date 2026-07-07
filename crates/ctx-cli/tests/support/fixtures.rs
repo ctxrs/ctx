@@ -33,9 +33,13 @@ pub(crate) fn materialized_fixture(category: &str, name: &str) -> String {
             .join(name),
         _ => panic!("unknown fixture category {category}"),
     };
-    let materialized_root = std::env::current_dir()
-        .unwrap()
-        .join("target/test-data/materialized-fixtures");
+    let materialized_root = std::env::var_os("TEST_TMPDIR")
+        .map(|path| PathBuf::from(path).join("test-data/materialized-fixtures"))
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .unwrap()
+                .join("target/test-data/materialized-fixtures")
+        });
     fs::create_dir_all(&materialized_root).unwrap();
     let unique = format!(
         "{}-{}-{}-{}",

@@ -35,6 +35,7 @@ require_cmd python3
 
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/ctx-install-path-smoke.XXXXXX")"
 server_pid=""
+port=""
 
 cleanup() {
   if [[ -n "${server_pid}" ]]; then
@@ -63,31 +64,44 @@ openssl req -x509 -newkey rsa:2048 -nodes \
   -addext 'subjectAltName=IP:127.0.0.1,DNS:localhost' \
   -days 1 >/dev/null 2>&1
 
-port="$(
-  python3 - <<'PY'
-import socket
-sock = socket.socket()
-sock.bind(("127.0.0.1", 0))
-print(sock.getsockname()[1])
-sock.close()
-PY
-)"
-
-python3 - "${tmp_dir}" "${port}" "${tmp_dir}/cert.pem" "${tmp_dir}/key.pem" <<'PY' >"${tmp_dir}/server.log" 2>&1 &
+port_file="${tmp_dir}/server.port"
+python3 - "${tmp_dir}" "${tmp_dir}/cert.pem" "${tmp_dir}/key.pem" "${port_file}" <<'PY' >"${tmp_dir}/server.log" 2>&1 &
 import functools
 import http.server
+import os
 import ssl
 import sys
 
-root, port, cert, key = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+root, cert, key, port_file = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=root)
-server = http.server.ThreadingHTTPServer(("127.0.0.1", port), handler)
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
 context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 context.load_cert_chain(certfile=cert, keyfile=key)
 server.socket = context.wrap_socket(server.socket, server_side=True)
+tmp_port_file = port_file + ".tmp"
+with open(tmp_port_file, "w", encoding="utf-8") as handle:
+    print(server.server_address[1], file=handle)
+os.replace(tmp_port_file, port_file)
 server.serve_forever()
 PY
 server_pid="$!"
+
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  if [[ -s "${port_file}" ]]; then
+    port="$(cat "${port_file}")"
+    break
+  fi
+  if ! kill -0 "${server_pid}" 2>/dev/null; then
+    cat "${tmp_dir}/server.log" >&2 || true
+    exit 1
+  fi
+  sleep 0.2
+done
+if [[ -z "${port}" ]]; then
+  printf 'install path smoke server did not publish a port\n' >&2
+  cat "${tmp_dir}/server.log" >&2 || true
+  exit 1
+fi
 
 for _ in 1 2 3 4 5 6 7 8 9 10; do
   if CURL_CA_BUNDLE="${tmp_dir}/cert.pem" curl -fsS "https://127.0.0.1:${port}/ctx-linux-x64" >/dev/null 2>&1; then

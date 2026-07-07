@@ -4,11 +4,6 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_root}"
 
-if [[ -z "${HOME:-}" ]]; then
-  export HOME="${repo_root}/target/bazel-home"
-fi
-mkdir -p "${HOME}"
-
 # shellcheck source=scripts/ci-common.sh
 source "${repo_root}/scripts/ci-common.sh"
 
@@ -19,6 +14,7 @@ init_bazel() {
     return 0
   fi
 
+  ctx_init_tool_env_defaults
   ctx_init_resource_env
   ctx_print_resource_env
 

@@ -21,18 +21,12 @@ find_repo_root() {
 
 init_env() {
   find_repo_root
+  # shellcheck source=scripts/ci-common.sh
+  source "${PWD}/scripts/ci-common.sh"
+  ctx_init_bazel_test_env
+  ctx_init_resource_env
   export CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-always}"
   export RUST_TEST_THREADS="${RUST_TEST_THREADS:-2}"
-  if [[ -z "${HOME:-}" ]]; then
-    local user_home
-    user_home="$(getent passwd "$(id -un)" | cut -d: -f6 || true)"
-    if [[ -n "${user_home}" && -d "${user_home}" ]]; then
-      export HOME="${user_home}"
-    else
-      export HOME="${PWD}/target/bazel-home"
-    fi
-  fi
-  mkdir -p "${HOME}"
 }
 
 run() {

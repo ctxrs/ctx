@@ -158,8 +158,12 @@ pub(super) fn materialized_fixture(category: &str, name: &str) -> PathBuf {
             .join(name),
         _ => panic!("unknown fixture category {category}"),
     };
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/test-data/materialized-fixtures");
+    let root = std::env::var_os("TEST_TMPDIR")
+        .map(|path| PathBuf::from(path).join("test-data/materialized-fixtures"))
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/test-data/materialized-fixtures")
+        });
     fs::create_dir_all(&root).unwrap();
     let unique = format!(
         "{}-{}-{}-{}",
