@@ -326,8 +326,7 @@ pub(crate) fn zed_decode_zstd(data: &[u8]) -> Result<Vec<u8>> {
     limited.read_to_end(&mut out)?;
     if out.len() > MAX_PROVIDER_SQLITE_VALUE_BYTES {
         return Err(CaptureError::InvalidPayload(format!(
-            "Zed compressed thread JSON exceeds {} decompressed bytes",
-            MAX_PROVIDER_SQLITE_VALUE_BYTES
+            "Zed compressed thread JSON exceeds {MAX_PROVIDER_SQLITE_VALUE_BYTES} decompressed bytes"
         )));
     }
     Ok(out)

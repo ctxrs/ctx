@@ -240,7 +240,7 @@ impl Store {
         if let Some(records) = self.search_records_fts(query, limit, offset)? {
             return Ok(records);
         }
-        let like = format!("%{}%", query);
+        let like = format!("%{query}%");
         let mut stmt = self.conn.prepare(
                 record_select_sql(
                     "WHERE title LIKE ?1 OR body LIKE ?1 OR tags_json LIKE ?1 ORDER BY created_at DESC, id LIMIT ?2 OFFSET ?3",

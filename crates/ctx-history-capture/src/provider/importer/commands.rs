@@ -59,8 +59,7 @@ pub(crate) fn provider_command_run_from_event(
                 .checked_sub_signed(duration)
                 .ok_or_else(|| {
                     CaptureError::InvalidPayload(format!(
-                        "duration_ms moves command start before representable time: {}",
-                        duration_value
+                        "duration_ms moves command start before representable time: {duration_value}"
                     ))
                 })?
         }

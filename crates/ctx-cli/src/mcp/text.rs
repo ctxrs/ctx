@@ -497,8 +497,7 @@ fn push_event_summary(out: &mut String, index: usize, event: &Value) {
         format!(" {occurred_at}")
     };
     out.push_str(&format!(
-        "\n{}. {sequence}{role} {event_type}{suffix}\n",
-        index
+        "\n{index}. {sequence}{role} {event_type}{suffix}\n"
     ));
     push_indented_key_value(out, "ctx_event_id", event.get("ctx_event_id"));
     if let Some(text) = value_field(event, "text")

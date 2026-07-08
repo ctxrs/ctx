@@ -104,8 +104,7 @@ pub(crate) fn run_sources(
         }
         if hidden_missing_sources > 0 {
             println!(
-                "{} missing provider locations hidden. Run `ctx sources --all` to show every known provider location.",
-                hidden_missing_sources
+                "{hidden_missing_sources} missing provider locations hidden. Run `ctx sources --all` to show every known provider location."
             );
         }
     }

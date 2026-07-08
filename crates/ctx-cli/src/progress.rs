@@ -333,7 +333,7 @@ impl ProgressReporter {
             ProgressRenderMode::Plain { interactive } => {
                 let rendered = render_progress_line(&line, elapsed);
                 if interactive {
-                    eprint!("\r\u{1b}[2K{}", rendered);
+                    eprint!("\r\u{1b}[2K{rendered}");
                     if line.done {
                         eprintln!();
                         state.last_line_len = 0;
@@ -420,12 +420,9 @@ fn render_progress_line_for_width(
     };
     let target_width = target_width.clamp(36, 76);
     let candidates = [
-        format!(
-            "{phase} [{bar}] {:>3.0}%  {bytes}{files}  {remaining}",
-            percent
-        ),
-        format!("{phase} [{bar}] {:>3.0}%  {bytes}  {remaining}", percent),
-        format!("{phase} [{bar}] {:>3.0}%  {remaining}", percent),
+        format!("{phase} [{bar}] {percent:>3.0}%  {bytes}{files}  {remaining}"),
+        format!("{phase} [{bar}] {percent:>3.0}%  {bytes}  {remaining}"),
+        format!("{phase} [{bar}] {percent:>3.0}%  {remaining}"),
     ];
     candidates
         .into_iter()
@@ -433,7 +430,7 @@ fn render_progress_line_for_width(
         .map(|line| truncate_progress_line(&line, target_width))
         .unwrap_or_else(|| {
             truncate_progress_line(
-                &format!("{phase} {:>3.0}% {remaining}", percent),
+                &format!("{phase} {percent:>3.0}% {remaining}"),
                 target_width,
             )
         })

@@ -62,6 +62,7 @@ pub(crate) fn write_history_source_plugin_at_with_refresh(
                 .expect("cursor log path is JSON-serializable")
         })
         .unwrap_or_else(|| "None".to_owned());
+    #[allow(clippy::uninlined_format_args)]
     let script_body = format!(
         r#"#!/usr/bin/env python3
 import json
