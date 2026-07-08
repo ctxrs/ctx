@@ -374,7 +374,6 @@ class LocalCliAdapter:
                 command,
                 cwd=str(self.config.cwd) if self.config.cwd is not None else None,
                 env=env,
-                text=True,
                 capture_output=True,
                 timeout=self.config.timeout,
                 check=False,
@@ -392,8 +391,8 @@ class LocalCliAdapter:
                 "ctx CLI timed out",
                 details={
                     "command": command,
-                    "stderr": exc.stderr or "",
-                    "stdout": exc.stdout or "",
+                    "stderr": _decode_process_output(exc.stderr),
+                    "stdout": _decode_process_output(exc.stdout),
                     "timeout": self.config.timeout,
                 },
                 cause=exc,
@@ -403,10 +402,26 @@ class LocalCliAdapter:
                 "ctx CLI command failed",
                 command=command,
                 exit_code=completed.returncode,
-                stderr=completed.stderr,
-                stdout=completed.stdout,
+                stderr=_decode_process_output(completed.stderr),
+                stdout=_decode_process_output(completed.stdout),
             )
-        return completed
+        try:
+            stdout = _decode_process_output_strict(completed.stdout)
+            stderr = _decode_process_output_strict(completed.stderr)
+        except UnicodeDecodeError as exc:
+            raise CtxAgentHistoryProtocolError(
+                "ctx returned invalid UTF-8",
+                details={
+                    "command": command,
+                },
+                cause=exc,
+            ) from exc
+        return subprocess.CompletedProcess(
+            command,
+            completed.returncode,
+            stdout=stdout,
+            stderr=stderr,
+        )
 
     def _command(self, args: Sequence[str]) -> list[str]:
         command = [self.config.ctx_binary]
@@ -478,3 +493,23 @@ class HostedAdapter:
 def _extend_option(args: list[str], flag: str, value: Optional[str]) -> None:
     if value is not None:
         args.extend([flag, value])
+
+
+def _decode_process_output(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _decode_process_output_strict(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="strict")
+    return str(value)

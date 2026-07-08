@@ -145,6 +145,37 @@ class LocalCliAdapterTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "decode_error")
 
+    def test_invalid_utf8_raises_protocol_error(self) -> None:
+        with fake_ctx(invalid_utf8=True) as cli:
+            client = AgentHistoryClient.local(ctx_binary=str(cli))
+
+            with self.assertRaises(CtxAgentHistoryProtocolError) as raised:
+                client.status()
+
+        self.assertEqual(raised.exception.code, "decode_error")
+        self.assertEqual(raised.exception.message, "ctx returned invalid UTF-8")
+        self.assertIsInstance(raised.exception.cause, UnicodeDecodeError)
+        self.assertIn("command", raised.exception.details)
+
+    def test_invalid_utf8_stderr_on_failed_cli_preserves_cli_error(self) -> None:
+        with fake_ctx(invalid_utf8_stderr=True) as cli:
+            client = AgentHistoryClient.local(ctx_binary=str(cli))
+
+            with self.assertRaises(CtxAgentHistoryCliError) as raised:
+                client.status()
+
+        self.assertEqual(raised.exception.code, "adapter_error")
+        self.assertEqual(raised.exception.exit_code, 42)
+        self.assertIn("\ufffd", raised.exception.stderr)
+
+    def test_invalid_utf8_ctx_version_returns_none(self) -> None:
+        with fake_ctx(invalid_utf8=True) as cli:
+            client = AgentHistoryClient.local(ctx_binary=str(cli))
+
+            version = client.version()
+
+        self.assertIsNone(version.ctx_version)
+
     def test_timeout_raises_contract_timeout_error(self) -> None:
         with fake_ctx(sleep=True) as cli:
             client = AgentHistoryClient.local(
@@ -225,10 +256,14 @@ class fake_ctx:
         *,
         fail: bool = False,
         invalid_json: bool = False,
+        invalid_utf8: bool = False,
+        invalid_utf8_stderr: bool = False,
         sleep: bool = False,
     ) -> None:
         self.fail = fail
         self.invalid_json = invalid_json
+        self.invalid_utf8 = invalid_utf8
+        self.invalid_utf8_stderr = invalid_utf8_stderr
         self.sleep = sleep
         self._tmp: tempfile.TemporaryDirectory[str] | None = None
         self.path: Path | None = None
@@ -236,7 +271,13 @@ class fake_ctx:
     def __enter__(self) -> Path:
         self._tmp = tempfile.TemporaryDirectory()
         self.path = Path(self._tmp.name) / "ctx"
-        script = _fake_ctx_script(fail=self.fail, invalid_json=self.invalid_json, sleep=self.sleep)
+        script = _fake_ctx_script(
+            fail=self.fail,
+            invalid_json=self.invalid_json,
+            invalid_utf8=self.invalid_utf8,
+            invalid_utf8_stderr=self.invalid_utf8_stderr,
+            sleep=self.sleep,
+        )
         self.path.write_text(script, encoding="utf-8")
         self.path.chmod(self.path.stat().st_mode | stat.S_IXUSR)
         return self.path
@@ -246,11 +287,22 @@ class fake_ctx:
             self._tmp.cleanup()
 
 
-def _fake_ctx_script(*, fail: bool, invalid_json: bool, sleep: bool) -> str:
+def _fake_ctx_script(
+    *,
+    fail: bool,
+    invalid_json: bool,
+    invalid_utf8: bool,
+    invalid_utf8_stderr: bool,
+    sleep: bool,
+) -> str:
     if fail:
         return "#!/usr/bin/env python3\nimport sys\nsys.stderr.write('boom\\n')\nsys.exit(42)\n"
     if invalid_json:
         return "#!/usr/bin/env python3\nprint('not json')\n"
+    if invalid_utf8:
+        return "#!/usr/bin/env python3\nimport sys\nsys.stdout.buffer.write(b'\\xff\\xfe')\n"
+    if invalid_utf8_stderr:
+        return "#!/usr/bin/env python3\nimport sys\nsys.stderr.buffer.write(b'\\xff\\xfe')\nsys.exit(42)\n"
     if sleep:
         return "#!/usr/bin/env python3\nimport time\ntime.sleep(1)\nprint('{}')\n"
 
