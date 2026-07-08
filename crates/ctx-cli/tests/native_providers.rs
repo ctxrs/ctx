@@ -849,7 +849,7 @@ fn tabnine_cli_imports_explicit_agent_home_searches_and_reimports() {
     );
     assert_eq!(imported["totals"]["failed"], 0);
     assert_eq!(imported["totals"]["imported_sessions"], 2);
-    assert_eq!(imported["totals"]["imported_events"], 6);
+    assert_eq!(imported["totals"]["imported_events"], 7);
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -970,7 +970,7 @@ fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
             "zed/v1/threads.db",
             "zed sqlite oracle",
             2,
-            5,
+            6,
         ),
         (
             "crush",
@@ -1333,20 +1333,18 @@ fn task_json_cli_imports_cline_and_roo_and_searches() {
         "cline_task_directory_json"
     );
     assert_eq!(imported["totals"]["imported_sessions"], 1);
-    assert_eq!(imported["totals"]["imported_events"], 3);
+    assert_eq!(imported["totals"]["imported_events"], 4);
     assert_eq!(imported["totals"]["failed"], 0);
 
     let second =
         json_output(ctx(&temp).args(["import", "--provider", "cline", "--path", &cline, "--json"]));
     assert_eq!(second["totals"]["imported_sessions"], 0);
     assert_eq!(second["totals"]["imported_events"], 0);
-    assert_eq!(second["totals"]["skipped_events"], 3);
+    assert_eq!(second["totals"]["skipped_events"], 4);
 
     let search =
         json_output(ctx(&temp).args(["search", "parser note", "--provider", "cline", "--json"]));
-    let results = search["results"].as_array().unwrap();
-    assert!(!results.is_empty(), "{search:#}");
-    assert!(results.iter().all(|result| result["provider"] == "cline"));
+    assert_search_provider_oracle(&search, "cline", "parser note", 1, "message");
 
     let roo = provider_history_fixture("roo/storage");
     let imported = json_output(ctx(&temp).args([
@@ -1364,7 +1362,7 @@ fn task_json_cli_imports_cline_and_roo_and_searches() {
         "roo_task_directory_json"
     );
     assert_eq!(imported["totals"]["imported_sessions"], 2);
-    assert_eq!(imported["totals"]["imported_events"], 5);
+    assert_eq!(imported["totals"]["imported_events"], 6);
     assert_eq!(imported["totals"]["failed"], 0);
 
     let search = json_output(ctx(&temp).args([
@@ -1374,11 +1372,13 @@ fn task_json_cli_imports_cline_and_roo_and_searches() {
         "roo",
         "--json",
     ]));
-    let results = search["results"].as_array().unwrap();
-    assert!(!results.is_empty(), "{search:#}");
-    assert!(results
-        .iter()
-        .all(|result| result["provider"] == "roo_code"));
+    assert_search_provider_oracle(
+        &search,
+        "roo_code",
+        "fallback claude_messages",
+        1,
+        "message",
+    );
 }
 
 #[test]

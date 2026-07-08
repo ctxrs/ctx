@@ -10,12 +10,13 @@ use ctx_history_core::{
     ProviderSourceEnvelope, ProviderSourceTrust, SessionStatus,
     PROVIDER_CAPTURE_ENVELOPE_SCHEMA_VERSION,
 };
-use rusqlite::{limits::Limit, Connection, OpenFlags};
+use rusqlite::limits::Limit;
 use serde_json::{json, Value};
 
 use crate::common::io::{ensure_regular_provider_transcript_file, read_text_file_limited};
 use crate::common::time::parse_rfc3339_utc;
 use crate::provider::importer::provider_cursor_stream;
+use crate::provider::sqlite::{open_sqlite_readonly_source, ReadOnlySqliteConnection};
 use crate::{
     fnv1a64, CaptureError, ProviderAdapterContext, Result, MAX_PROVIDER_JSONL_LINE_BYTES,
     MAX_PROVIDER_SQLITE_VALUE_BYTES, PROVIDER_MAX_PREVIEW_CHARS, PROVIDER_MAX_TEXT_CHARS,
@@ -239,12 +240,8 @@ pub(crate) fn native_provider_capture(
     }
 }
 
-pub(crate) fn open_provider_sqlite_readonly(path: &Path) -> Result<Connection> {
-    ensure_regular_provider_transcript_file(path)?;
-    let conn = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
+pub(crate) fn open_provider_sqlite_readonly(path: &Path) -> Result<ReadOnlySqliteConnection> {
+    let conn = open_sqlite_readonly_source(path)?;
     let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES).map_err(|_| {
         CaptureError::InvalidPayload(format!(
             "provider SQLite value byte limit is unrepresentable: {MAX_PROVIDER_SQLITE_VALUE_BYTES}"

@@ -27,5 +27,15 @@
       }
     ],
     "model": "claude-sonnet-4"
+  },
+  {
+    "role": "user",
+    "content": [
+      {
+        "type": "tool_result",
+        "tool_use_id": "toolu_roo_fixture",
+        "content": "ROO_RAW_TOOL_RESULT_NEEDLE"
+      }
+    ]
   }
 ]

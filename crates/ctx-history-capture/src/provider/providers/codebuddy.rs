@@ -92,7 +92,20 @@ pub(crate) fn collect_codebuddy_session_dirs(path: &Path) -> Result<Vec<PathBuf>
 }
 
 pub(crate) fn codebuddy_is_session_dir(path: &Path) -> bool {
-    path.join("index.json").is_file() && path.join("messages").is_dir()
+    codebuddy_is_regular_file(&path.join("index.json"))
+        && codebuddy_is_directory(&path.join("messages"))
+}
+
+fn codebuddy_is_regular_file(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_file())
+        .unwrap_or(false)
+}
+
+fn codebuddy_is_directory(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_dir())
+        .unwrap_or(false)
 }
 
 pub(crate) fn codebuddy_collect_project_sessions(project_dir: &Path, out: &mut Vec<PathBuf>) {
@@ -171,21 +184,24 @@ pub(crate) fn normalize_codebuddy_session_dir(
 ) -> Result<ProviderNormalizationResult> {
     let mut result = ProviderNormalizationResult::default();
     let session_index_path = session_dir.join("index.json");
-    let session_index = match read_json_file_limited(
-        &session_index_path,
-        MAX_PROVIDER_JSONL_LINE_BYTES,
-        "CodeBuddy session index.json",
-    ) {
-        Ok(value) => value,
-        Err(err) => {
-            result.summary.failed += 1;
-            result.summary.failures.push(ProviderImportFailure {
-                line: session_ordinal,
-                error: format!("index.json: {err}"),
-            });
-            return Ok(result);
-        }
-    };
+    let session_index =
+        match ensure_regular_provider_transcript_file(&session_index_path).and_then(|_| {
+            read_json_file_limited(
+                &session_index_path,
+                MAX_PROVIDER_JSONL_LINE_BYTES,
+                "CodeBuddy session index.json",
+            )
+        }) {
+            Ok(value) => value,
+            Err(err) => {
+                result.summary.failed += 1;
+                result.summary.failures.push(ProviderImportFailure {
+                    line: session_ordinal,
+                    error: format!("index.json: {err}"),
+                });
+                return Ok(result);
+            }
+        };
 
     let project_dir = session_dir.parent().unwrap_or(session_dir);
     let project_hash = project_dir
@@ -238,21 +254,24 @@ pub(crate) fn normalize_codebuddy_session_dir(
         let message_path = session_dir
             .join("messages")
             .join(format!("{message_id}.json"));
-        let raw_message = match read_json_file_limited(
-            &message_path,
-            MAX_PROVIDER_JSONL_LINE_BYTES,
-            "CodeBuddy message JSON",
-        ) {
-            Ok(value) => value,
-            Err(err) => {
-                result.summary.failed += 1;
-                result.summary.failures.push(ProviderImportFailure {
-                    line: line_number,
-                    error: format!("messages/{message_id}.json: {err}"),
-                });
-                continue;
-            }
-        };
+        let raw_message =
+            match ensure_regular_provider_transcript_file(&message_path).and_then(|_| {
+                read_json_file_limited(
+                    &message_path,
+                    MAX_PROVIDER_JSONL_LINE_BYTES,
+                    "CodeBuddy message JSON",
+                )
+            }) {
+                Ok(value) => value,
+                Err(err) => {
+                    result.summary.failed += 1;
+                    result.summary.failures.push(ProviderImportFailure {
+                        line: line_number,
+                        error: format!("messages/{message_id}.json: {err}"),
+                    });
+                    continue;
+                }
+            };
         let decoded_message = codebuddy_decoded_message(&raw_message);
         let text = codebuddy_message_text(&decoded_message, &raw_message);
         if text.trim().is_empty() {
@@ -362,15 +381,25 @@ pub(crate) fn codebuddy_project_index_and_conversation(
     line: usize,
 ) -> (Option<Value>, Option<Value>) {
     let path = project_dir.join("index.json");
-    if !path.exists() {
-        return (None, None);
-    }
-    let value = match read_json_file_limited(
-        &path,
-        MAX_PROVIDER_JSONL_LINE_BYTES,
-        "CodeBuddy project index.json",
-    ) {
-        Ok(value) => value,
+    let value = match fs::symlink_metadata(&path) {
+        Ok(_) => match ensure_regular_provider_transcript_file(&path).and_then(|_| {
+            read_json_file_limited(
+                &path,
+                MAX_PROVIDER_JSONL_LINE_BYTES,
+                "CodeBuddy project index.json",
+            )
+        }) {
+            Ok(value) => value,
+            Err(err) => {
+                result.summary.failed += 1;
+                result.summary.failures.push(ProviderImportFailure {
+                    line,
+                    error: format!("project index.json: {err}"),
+                });
+                return (None, None);
+            }
+        },
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return (None, None),
         Err(err) => {
             result.summary.failed += 1;
             result.summary.failures.push(ProviderImportFailure {

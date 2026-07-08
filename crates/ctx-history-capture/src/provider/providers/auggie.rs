@@ -309,6 +309,7 @@ pub(crate) fn auggie_event(input: AuggieEventInput<'_>) -> ProviderEventEnvelope
     let event_hash = request_id
         .map(|id| format!("{id}:{}", input.label))
         .unwrap_or_else(|| format!("chat-{}:{}", input.chat_index, input.label));
+    let body = auggie_event_body(&input, request_id);
     native_event(NativeEventDraft {
         provider: CaptureProvider::Auggie,
         source_format: AUGGIE_SESSION_JSON_SOURCE_FORMAT,
@@ -320,11 +321,7 @@ pub(crate) fn auggie_event(input: AuggieEventInput<'_>) -> ProviderEventEnvelope
         role: Some(input.role),
         occurred_at: input.occurred_at,
         text: input.text,
-        body: json!({
-            "chat_history_entry": input.entry,
-            "exchange": input.exchange,
-            "message_kind": input.label,
-        }),
+        body,
         metadata: json!({
             "source": "auggie_chat_history",
             "source_format": AUGGIE_SESSION_JSON_SOURCE_FORMAT,
@@ -340,6 +337,52 @@ pub(crate) fn auggie_event(input: AuggieEventInput<'_>) -> ProviderEventEnvelope
             "source_kind": input.entry.get("source").and_then(Value::as_str),
         }),
     })
+}
+
+pub(crate) fn auggie_event_body(input: &AuggieEventInput<'_>, request_id: Option<&str>) -> Value {
+    json!({
+        "message_kind": input.label,
+        "request_id": request_id,
+        "raw_exchange_retention": "metadata_only",
+        "sequence_id": input
+            .entry
+            .get("sequenceId")
+            .or_else(|| input.entry.get("sequence_id"))
+            .and_then(Value::as_u64),
+        "completed": input.entry.get("completed").and_then(Value::as_bool),
+        "source_kind": input.entry.get("source").and_then(Value::as_str),
+        "request_node_count": auggie_node_count(
+            input
+                .exchange
+                .get("request_nodes")
+                .or_else(|| input.exchange.get("requestNodes")),
+        ),
+        "response_node_count": auggie_node_count(
+            input
+                .exchange
+                .get("response_nodes")
+                .or_else(|| input.exchange.get("responseNodes")),
+        ),
+        "tool_node_count": auggie_tool_node_count(input.exchange),
+    })
+}
+
+fn auggie_node_count(value: Option<&Value>) -> Option<usize> {
+    value.and_then(Value::as_array).map(Vec::len)
+}
+
+fn auggie_tool_node_count(exchange: &Value) -> usize {
+    [
+        "request_nodes",
+        "requestNodes",
+        "response_nodes",
+        "responseNodes",
+    ]
+    .iter()
+    .filter_map(|key| exchange.get(*key).and_then(Value::as_array))
+    .flatten()
+    .filter(|node| auggie_node_is_tool_metadata(node))
+    .count()
 }
 
 pub(crate) fn auggie_entry_time(entry: &Value, exchange: Option<&Value>) -> Option<DateTime<Utc>> {
@@ -404,15 +447,39 @@ pub(crate) fn auggie_nodes_text(value: Option<&Value>) -> Option<String> {
 }
 
 pub(crate) fn auggie_node_text(node: &Value) -> Option<String> {
+    if auggie_node_is_tool_metadata(node) {
+        return None;
+    }
     node.pointer("/text_node/content")
         .or_else(|| node.pointer("/textNode/content"))
         .and_then(Value::as_str)
         .map(str::to_owned)
         .or_else(|| provider_block_text(node))
-        .or_else(|| {
-            node.get("tool_name")
-                .or_else(|| node.get("toolName"))
-                .and_then(Value::as_str)
-                .map(|name| format!("tool: {name}"))
-        })
+}
+
+pub(crate) fn auggie_node_is_tool_metadata(node: &Value) -> bool {
+    let tool_kind = node
+        .get("type")
+        .or_else(|| node.get("kind"))
+        .and_then(Value::as_str)
+        .is_some_and(|kind| {
+            matches!(
+                kind,
+                "tool"
+                    | "tool_call"
+                    | "tool-call"
+                    | "tool_use"
+                    | "tool-use"
+                    | "tool_result"
+                    | "tool-result"
+                    | "tool_use_result"
+                    | "function_call"
+                    | "function_result"
+            )
+        });
+    tool_kind
+        || node.get("tool_name").is_some()
+        || node.get("toolName").is_some()
+        || node.get("tool_call").is_some()
+        || node.get("toolCall").is_some()
 }

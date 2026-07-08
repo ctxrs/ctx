@@ -290,20 +290,27 @@ pub(crate) fn warp_session_metadata(conversation_data: &Value, decoded_tasks: &[
             .cloned()
             .unwrap_or(Value::Null),
         "run_id": conversation_data.get("run_id").cloned().unwrap_or(Value::Null),
-        "server_conversation_token": conversation_data
-            .get("server_conversation_token")
-            .cloned()
-            .unwrap_or(Value::Null),
-        "forked_from_server_conversation_token": conversation_data
-            .get("forked_from_server_conversation_token")
-            .cloned()
-            .unwrap_or(Value::Null),
+        "server_conversation_token_present": warp_nonempty_string_field(
+            conversation_data,
+            "server_conversation_token",
+        ),
+        "forked_from_server_conversation_token_present": warp_nonempty_string_field(
+            conversation_data,
+            "forked_from_server_conversation_token",
+        ),
         "conversation_usage_metadata": conversation_data
             .get("conversation_usage_metadata")
             .cloned()
             .unwrap_or(Value::Null),
         "task_summaries": decoded_tasks,
     })
+}
+
+fn warp_nonempty_string_field(value: &Value, field: &str) -> bool {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .is_some_and(|text| !text.trim().is_empty())
 }
 
 pub(crate) fn warp_conversation_rows(conn: &Connection) -> Result<Vec<WarpConversationRow>> {

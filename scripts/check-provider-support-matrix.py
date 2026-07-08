@@ -38,6 +38,21 @@ REQUIRED_FIDELITY_FIELDS = {
 }
 PROVIDER_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_]*$")
 PRIVATE_TEXT_MARKERS = ("/home/", "ctx-" + "private", "ctx-multi" + "-repo-workspace")
+PUBLIC_DOCS_WITH_SELF_CONTAINED_CLAIMS = (
+    REPO_ROOT / "README.md",
+    REPO_ROOT / "docs/providers.md",
+    REPO_ROOT / "docs/provider-support.md",
+    REPO_ROOT / "docs/security-checks.md",
+)
+PUBLIC_PRIVATE_BOUNDARY_SCAN_PATHS = PUBLIC_DOCS_WITH_SELF_CONTAINED_CLAIMS + (
+    REPO_ROOT / "crates/ctx-history-search/src/tests/perf.rs",
+    REPO_ROOT / "crates/ctx-history-capture/src/tests/codex.rs",
+)
+FORBIDDEN_PUBLIC_CLAIM_RE = re.compile(
+    r"ctx-" + r"private|private\s+conformance|conformance\s+evidence|"
+    r"proof\s+packet|fixture-backed|source-backed|schema\s+confidence|Full\s+GA",
+    re.IGNORECASE,
+)
 FORBIDDEN_PUBLIC_WORDS = (
     "pro" + "of",
     "evi" + "dence",
@@ -131,6 +146,19 @@ def scan_public_text(value: Any, field: str) -> None:
     if isinstance(value, dict):
         for key, item in value.items():
             scan_public_text(item, f"{field}.{key}")
+
+
+def validate_public_claim_docs() -> None:
+    for doc_path in PUBLIC_PRIVATE_BOUNDARY_SCAN_PATHS:
+        if not doc_path.exists():
+            fail(f"public claim doc does not exist: {doc_path.relative_to(REPO_ROOT)}")
+        text = doc_path.read_text(encoding="utf-8")
+        match = FORBIDDEN_PUBLIC_CLAIM_RE.search(text)
+        if match:
+            fail(
+                f"{doc_path.relative_to(REPO_ROOT)} contains non-public support-claim wording: "
+                f"{match.group(0)}",
+            )
 
 
 def text_mentions_provider(text: str, provider: dict[str, Any]) -> bool:
@@ -261,6 +289,7 @@ def main() -> int:
         providers = expect_type(matrix.get("providers"), list, "providers")
         if not providers:
             fail("providers must not be empty")
+        validate_public_claim_docs()
 
         seen_ids: set[str] = set()
         for index, provider in enumerate(providers):

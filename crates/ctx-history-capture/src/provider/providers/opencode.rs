@@ -842,6 +842,17 @@ pub(crate) fn opencode_message_part_rows(
             continue;
         }
         let Some(text) = opencode_text_part_text(&part) else {
+            if let Some(data) = opencode_tool_part_event_data(&part) {
+                out.push(OpenCodeMessageRow {
+                    id: format!("{}:{}", part.message_id, part.part_id),
+                    session_id: part.session_id,
+                    entry_type: "tool".to_owned(),
+                    seq: part.seq,
+                    time_created: part.time_created,
+                    time_updated: part.time_updated,
+                    data: data.to_string(),
+                });
+            }
             continue;
         };
         if !matches!(part.role.as_str(), "assistant" | "user" | "system") {
@@ -906,6 +917,70 @@ fn opencode_text_part_text(part: &OpenCodePartRow) -> Option<String> {
         .then(|| part.data.get("text").and_then(Value::as_str))
         .flatten()
         .map(str::to_owned)
+}
+
+fn opencode_tool_part_event_data(part: &OpenCodePartRow) -> Option<Value> {
+    if !matches!(part.part_type.as_str(), "tool" | "tool_result" | "result") {
+        return None;
+    }
+    let tool_name = opencode_tool_part_name(&part.data);
+    let status = opencode_tool_part_status(&part.data);
+    let exit_code = opencode_tool_part_exit_code(&part.data);
+    let is_error = opencode_tool_part_is_error(&part.data, status.as_deref(), exit_code);
+    Some(json!({
+        "role": "tool",
+        "time": { "created": part.time_created },
+        "source_table": "message+part",
+        "message_id": part.message_id.clone(),
+        "part_id": part.part_id.clone(),
+        "part_type": part.part_type.clone(),
+        "tool_name": tool_name,
+        "status": status,
+        "exit_code": exit_code,
+        "is_error": is_error,
+        "output_retention": "metadata_only",
+    }))
+}
+
+fn opencode_tool_part_name(data: &Value) -> String {
+    data.get("tool")
+        .or_else(|| data.get("tool_name"))
+        .or_else(|| data.get("name"))
+        .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or("tool")
+        .to_owned()
+}
+
+fn opencode_tool_part_status(data: &Value) -> Option<String> {
+    data.pointer("/state/status")
+        .or_else(|| data.get("status"))
+        .and_then(Value::as_str)
+        .filter(|status| !status.trim().is_empty())
+        .map(str::to_owned)
+}
+
+fn opencode_tool_part_exit_code(data: &Value) -> Option<i64> {
+    data.pointer("/state/metadata/exit")
+        .or_else(|| data.pointer("/state/metadata/exit_code"))
+        .or_else(|| data.pointer("/state/metadata/exitCode"))
+        .or_else(|| data.get("exit_code"))
+        .or_else(|| data.get("exitCode"))
+        .and_then(Value::as_i64)
+}
+
+fn opencode_tool_part_is_error(data: &Value, status: Option<&str>, exit_code: Option<i64>) -> bool {
+    data.get("is_error")
+        .or_else(|| data.get("isError"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || exit_code.is_some_and(|code| code != 0)
+        || status.is_some_and(|status| {
+            matches!(
+                status.trim().to_ascii_lowercase().as_str(),
+                "failed" | "failure" | "error" | "errored" | "timeout" | "timed_out" | "timedout"
+            )
+        })
 }
 
 fn opencode_message_part_identity_index(message_id: &str, part_id: &str) -> i64 {
@@ -1256,6 +1331,11 @@ fn opencode_message_part_event_body(data: &Value) -> Value {
         "message_id": data.get("message_id").cloned(),
         "part_id": data.get("part_id").cloned(),
         "part_type": data.get("part_type").cloned(),
+        "tool_name": data.get("tool_name").cloned(),
+        "status": data.get("status").cloned(),
+        "exit_code": data.get("exit_code").cloned(),
+        "is_error": data.get("is_error").cloned(),
+        "output_retention": data.get("output_retention").cloned(),
     })
 }
 
@@ -1278,6 +1358,7 @@ pub(crate) fn opencode_event_type(entry_type: &str, data: &Value) -> EventType {
     match entry_type {
         "assistant" if opencode_content_has_tool(data) => EventType::ToolCall,
         "assistant" | "user" | "system" => EventType::Message,
+        "tool" | "tool_result" => EventType::ToolOutput,
         "shell" => EventType::CommandOutput,
         _ => EventType::Notice,
     }
@@ -1299,6 +1380,18 @@ pub(crate) fn opencode_event_text(
             .unwrap_or("shell");
         let output = data.get("output").and_then(Value::as_str).unwrap_or("");
         return format!("{command}\n{output}");
+    }
+    if matches!(entry_type, "tool" | "tool_result") {
+        let tool_name = data
+            .get("tool_name")
+            .and_then(Value::as_str)
+            .unwrap_or("tool");
+        let status = data
+            .get("status")
+            .and_then(Value::as_str)
+            .map(|status| format!("\nstatus: {status}"))
+            .unwrap_or_default();
+        return format!("tool result: {tool_name}{status}");
     }
     if let Some(content) = data.get("content") {
         if let Some(text) = provider_value_text(content) {

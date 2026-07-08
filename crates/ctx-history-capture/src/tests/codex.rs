@@ -231,7 +231,7 @@ fn codex_session_catalog_marks_deleted_paths_stale_when_additions_outnumber_dele
 }
 
 #[test]
-#[ignore = "manual perf benchmark; private release gates run scripts/public-ctx/perf-smoke.sh from ctx-private"]
+#[ignore = "manual perf benchmark; release gates run scripts/public-ctx/perf-smoke.sh from the validation workspace"]
 fn synthetic_codex_incremental_import_perf_records_thresholded_evidence() {
     let out_dir = std::env::var_os("CTX_ARTIFACT_DIR")
         .map(PathBuf::from)

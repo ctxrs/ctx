@@ -7,7 +7,7 @@ use super::{
 };
 
 #[test]
-#[ignore = "manual perf benchmark; private release gates run scripts/public-ctx/perf-smoke.sh from ctx-private"]
+#[ignore = "manual perf benchmark; release gates run scripts/public-ctx/perf-smoke.sh from the validation workspace"]
 fn synthetic_search_perf_records_thresholded_evidence() {
     let out_dir = std::env::var_os("CTX_ARTIFACT_DIR")
         .map(std::path::PathBuf::from)

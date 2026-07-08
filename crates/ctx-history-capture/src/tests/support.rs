@@ -32,13 +32,14 @@ pub(super) use crate::{
     import_claude_projects_jsonl_tree, import_cline_task_json_history, import_codebuddy_history,
     import_codex_history_jsonl, import_codex_session_jsonl, import_codex_session_jsonl_tail,
     import_codex_session_paths, import_codex_session_tree, import_continue_cli_sessions,
-    import_copilot_cli_session_events, import_crush_sqlite, import_custom_history_jsonl_v1,
-    import_custom_history_jsonl_v1_reader, import_deepagents_sqlite,
-    import_factory_ai_droid_sessions, import_firebender_sqlite, import_forgecode_sqlite,
-    import_gemini_cli_history, import_goose_sessions_sqlite, import_hermes_sqlite,
-    import_junie_history, import_kilo_sqlite, import_kimi_code_cli_history, import_kiro_sqlite,
-    import_lingma_sqlite, import_mistral_vibe_history, import_mux_history, import_openclaw_history,
-    import_opencode_sqlite, import_pi_session_jsonl, import_provider_fixture_jsonl,
+    import_copilot_cli_session_events, import_crush_sqlite, import_cursor_native_history,
+    import_custom_history_jsonl_v1, import_custom_history_jsonl_v1_reader,
+    import_deepagents_sqlite, import_factory_ai_droid_sessions, import_firebender_sqlite,
+    import_forgecode_sqlite, import_gemini_cli_history, import_goose_sessions_sqlite,
+    import_hermes_sqlite, import_junie_history, import_kilo_sqlite, import_kimi_code_cli_history,
+    import_kiro_sqlite, import_lingma_sqlite, import_mistral_vibe_history, import_mux_history,
+    import_nanoclaw_project, import_openclaw_history, import_opencode_sqlite,
+    import_openhands_file_events, import_pi_session_jsonl, import_provider_fixture_jsonl,
     import_qoder_history, import_qwen_code_history, import_roo_task_json_history,
     import_rovodev_history, import_shelley_sqlite, import_spool, import_tabnine_cli_history,
     import_trae_history, import_warp_sqlite, import_windsurf_cascade_hook_transcripts,
@@ -48,26 +49,28 @@ pub(super) use crate::{
     ClineTaskJsonImportOptions, CodeBuddyImportOptions, CodexHistoryImportOptions,
     CodexSessionCatalogOptions, CodexSessionImportOptions, CodexSessionJsonlAdapter,
     ContinueCliImportOptions, CopilotCliImportOptions, CrushSqliteImportOptions,
-    CustomHistoryJsonlV1ImportOptions, DeepAgentsSqliteImportOptions, FactoryAiDroidImportOptions,
-    FirebenderSqliteImportOptions, FixtureOptions, ForgeCodeSqliteImportOptions,
-    GeminiCliImportOptions, GooseSessionsSqliteImportOptions, HermesSqliteImportOptions,
-    JunieImportOptions, KiloSqliteImportOptions, KimiCodeCliImportOptions, KiroSqliteImportOptions,
-    LingmaSqliteImportOptions, MistralVibeImportOptions, MuxImportOptions,
+    CursorNativeImportOptions, CustomHistoryJsonlV1ImportOptions, DeepAgentsSqliteImportOptions,
+    FactoryAiDroidImportOptions, FirebenderSqliteImportOptions, FixtureOptions,
+    ForgeCodeSqliteImportOptions, GeminiCliImportOptions, GooseSessionsSqliteImportOptions,
+    HermesSqliteImportOptions, JunieImportOptions, KiloSqliteImportOptions,
+    KimiCodeCliImportOptions, KiroSqliteImportOptions, LingmaSqliteImportOptions,
+    MistralVibeImportOptions, MuxImportOptions, NanoClawImportOptions,
     NormalizedProviderImportOptions, OpenClawImportOptions, OpenCodeSqliteImportOptions,
-    PiSessionImportOptions, ProviderAdapterContext, ProviderFileTouchedEnvelope,
-    ProviderFixtureImportOptions, ProviderImportSummary, ProviderImportSupport,
-    ProviderNormalizationResult, ProviderSourceStatus, QoderImportOptions, QwenCodeImportOptions,
-    RooTaskJsonImportOptions, RovoDevImportOptions, ShelleySqliteImportOptions, SpoolWriter,
-    TabnineCliImportOptions, TraeImportOptions, WarpSqliteImportOptions,
-    WindsurfCascadeHookImportOptions, ZedThreadsSqliteImportOptions, ANTIGRAVITY_CLI_SOURCE_FORMAT,
-    ASTRBOT_SQLITE_SOURCE_FORMAT, AUGGIE_SESSION_JSON_SOURCE_FORMAT, CLAUDE_PROJECTS_SOURCE_FORMAT,
-    CODEBUDDY_SOURCE_FORMAT, COPILOT_CLI_SOURCE_FORMAT, CRUSH_SQLITE_SOURCE_FORMAT,
-    CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT, DEEPAGENTS_SQLITE_SOURCE_FORMAT,
-    FACTORY_DROID_SOURCE_FORMAT, FIREBENDER_SQLITE_SOURCE_FORMAT, FORGECODE_SQLITE_SOURCE_FORMAT,
-    GEMINI_CLI_SOURCE_FORMAT, JUNIE_SESSION_EVENTS_SOURCE_FORMAT, KILO_SQLITE_SOURCE_FORMAT,
-    KIRO_SQLITE_SOURCE_FORMAT, LINGMA_SQLITE_SOURCE_FORMAT, MAX_OPENCLAW_SESSION_INDEX_BYTES,
-    MAX_PROVIDER_JSONL_LINE_BYTES, MAX_PROVIDER_SQLITE_VALUE_BYTES, OPENCODE_SQLITE_SOURCE_FORMAT,
-    PROVIDER_MAX_TEXT_CHARS, SHELLEY_SQLITE_SOURCE_FORMAT, ZED_THREADS_SQLITE_SOURCE_FORMAT,
+    OpenHandsImportOptions, PiSessionImportOptions, ProviderAdapterContext,
+    ProviderFileTouchedEnvelope, ProviderFixtureImportOptions, ProviderImportSummary,
+    ProviderImportSupport, ProviderNormalizationResult, ProviderSourceStatus, QoderImportOptions,
+    QwenCodeImportOptions, RooTaskJsonImportOptions, RovoDevImportOptions,
+    ShelleySqliteImportOptions, SpoolWriter, TabnineCliImportOptions, TraeImportOptions,
+    WarpSqliteImportOptions, WindsurfCascadeHookImportOptions, ZedThreadsSqliteImportOptions,
+    ANTIGRAVITY_CLI_SOURCE_FORMAT, ASTRBOT_SQLITE_SOURCE_FORMAT, AUGGIE_SESSION_JSON_SOURCE_FORMAT,
+    CLAUDE_PROJECTS_SOURCE_FORMAT, CODEBUDDY_SOURCE_FORMAT, COPILOT_CLI_SOURCE_FORMAT,
+    CRUSH_SQLITE_SOURCE_FORMAT, CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT,
+    DEEPAGENTS_SQLITE_SOURCE_FORMAT, FACTORY_DROID_SOURCE_FORMAT, FIREBENDER_SQLITE_SOURCE_FORMAT,
+    FORGECODE_SQLITE_SOURCE_FORMAT, GEMINI_CLI_SOURCE_FORMAT, GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT,
+    JUNIE_SESSION_EVENTS_SOURCE_FORMAT, KILO_SQLITE_SOURCE_FORMAT, KIRO_SQLITE_SOURCE_FORMAT,
+    LINGMA_SQLITE_SOURCE_FORMAT, MAX_OPENCLAW_SESSION_INDEX_BYTES, MAX_PROVIDER_JSONL_LINE_BYTES,
+    MAX_PROVIDER_SQLITE_VALUE_BYTES, OPENCODE_SQLITE_SOURCE_FORMAT, PROVIDER_MAX_TEXT_CHARS,
+    SHELLEY_SQLITE_SOURCE_FORMAT, ZED_THREADS_SQLITE_SOURCE_FORMAT,
 };
 pub(super) use chrono::{DateTime, Utc};
 pub(super) use ctx_history_core::{
@@ -94,6 +97,119 @@ pub(super) fn tempdir() -> TempDir {
         .prefix("ctx-history-capture-")
         .tempdir()
         .unwrap()
+}
+
+pub(super) fn assert_sqlite_source_file_unchanged(
+    source_file: &Path,
+    run_import: impl FnOnce(&mut Store) -> ProviderImportSummary,
+) -> ProviderImportSummary {
+    assert!(
+        source_file.is_file(),
+        "missing SQLite source file: {}",
+        source_file.display()
+    );
+    let before = sqlite_file_snapshot(source_file);
+    let temp = tempdir();
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let summary = run_import(&mut store);
+    let after = sqlite_file_snapshot(source_file);
+    assert_eq!(before.len(), after.len());
+    for ((path, before_bytes), (after_path, after_bytes)) in before.iter().zip(after.iter()) {
+        assert_eq!(path, after_path);
+        assert_eq!(
+            before_bytes.as_ref().map(Vec::len),
+            after_bytes.as_ref().map(Vec::len),
+            "SQLite source sidecar size changed for {}",
+            path.display()
+        );
+        assert!(
+            before_bytes == after_bytes,
+            "SQLite source file or sidecar was mutated: {}",
+            path.display()
+        );
+    }
+    summary
+}
+
+pub(super) fn assert_provider_source_unchanged(
+    source: &Path,
+    run_import: impl FnOnce(&mut Store) -> ProviderImportSummary,
+) -> ProviderImportSummary {
+    assert!(
+        source.exists(),
+        "missing provider source: {}",
+        source.display()
+    );
+    let before = provider_source_snapshot(source);
+    let temp = tempdir();
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let summary = run_import(&mut store);
+    let after = provider_source_snapshot(source);
+    assert_eq!(
+        before,
+        after,
+        "provider source was mutated: {}",
+        source.display()
+    );
+    summary
+}
+
+pub(super) fn provider_source_snapshot(root: &Path) -> Vec<(String, Vec<u8>)> {
+    fn visit(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {
+        let mut entries = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        entries.sort();
+        for path in entries {
+            let metadata = fs::symlink_metadata(&path).unwrap();
+            if metadata.file_type().is_dir() {
+                visit(root, &path, out);
+            } else if metadata.file_type().is_file() {
+                out.push((
+                    path.strip_prefix(root).unwrap().display().to_string(),
+                    fs::read(&path).unwrap(),
+                ));
+            } else if metadata.file_type().is_symlink() {
+                out.push((
+                    path.strip_prefix(root).unwrap().display().to_string(),
+                    fs::read_link(&path)
+                        .unwrap()
+                        .display()
+                        .to_string()
+                        .into_bytes(),
+                ));
+            }
+        }
+    }
+
+    if root.is_file() {
+        return vec![(".".to_owned(), fs::read(root).unwrap())];
+    }
+
+    let mut out = Vec::new();
+    visit(root, root, &mut out);
+    out
+}
+
+pub(super) fn sqlite_file_snapshot(source_file: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+    sqlite_file_snapshot_paths(source_file)
+        .into_iter()
+        .map(|path| {
+            let bytes = fs::read(&path).ok();
+            (path, bytes)
+        })
+        .collect()
+}
+
+fn sqlite_file_snapshot_paths(source_file: &Path) -> Vec<PathBuf> {
+    let mut paths = vec![source_file.to_path_buf()];
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let mut sidecar = source_file.as_os_str().to_os_string();
+        sidecar.push(suffix);
+        paths.push(PathBuf::from(sidecar));
+    }
+    paths
 }
 
 pub(super) fn fixture_options(dedupe_key: &str, title: &str) -> FixtureOptions {
@@ -473,6 +589,71 @@ pub(super) fn stored_provider_session_id(
     sessions[0].id
 }
 
+pub(super) fn assert_event_type_count(events: &[Event], event_type: EventType, expected: usize) {
+    let actual = events
+        .iter()
+        .filter(|event| event.event_type == event_type)
+        .count();
+    let event_types = events
+        .iter()
+        .map(|event| event.event_type.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual,
+        expected,
+        "expected {expected} {} event(s), found {actual} in {event_types:?}",
+        event_type.as_str()
+    );
+}
+
+pub(super) fn assert_event_with_role(events: &[Event], event_type: EventType, role: EventRole) {
+    assert!(
+        events
+            .iter()
+            .any(|event| event.event_type == event_type && event.role == Some(role)),
+        "missing {} event with {} role",
+        event_type.as_str(),
+        role.as_str()
+    );
+}
+
+pub(super) fn assert_events_have_provider_citations(events: &[Event]) {
+    assert!(!events.is_empty(), "expected at least one event");
+    for event in events {
+        assert!(
+            event.capture_source_id.is_some(),
+            "event {} is missing a capture source",
+            event.id
+        );
+        assert!(
+            event.sync.metadata["source_format"].as_str().is_some(),
+            "event {} is missing source_format metadata",
+            event.id
+        );
+        assert!(
+            event.sync.metadata["cursor"].as_str().is_some(),
+            "event {} is missing cursor metadata",
+            event.id
+        );
+    }
+}
+
+pub(super) fn assert_search_hits_provider(store: &Store, query: &str, provider: CaptureProvider) {
+    let hits = store.search_event_hits(query, 10).unwrap();
+    assert!(
+        hits.iter().any(|hit| hit.provider == Some(provider)),
+        "expected {provider:?} search hit for {query:?}, got {hits:?}"
+    );
+}
+
+pub(super) fn assert_search_misses(store: &Store, query: &str) {
+    let hits = store.search_event_hits(query, 10).unwrap();
+    assert!(
+        hits.is_empty(),
+        "expected no hits for {query:?}, got {hits:?}"
+    );
+}
+
 pub(super) fn write_minimal_provider_fixture(
     temp: &TempDir,
     provider: CaptureProvider,
@@ -669,6 +850,117 @@ pub(super) fn write_hermes_smoke_db(temp: &TempDir) -> PathBuf {
         )
         .unwrap();
     path
+}
+
+pub(super) fn write_nanoclaw_smoke_project(temp: &TempDir, query: &str) -> PathBuf {
+    let root = temp.path().join("native-nanoclaw");
+    let data = root.join("data");
+    let session_dir = data.join("v2-sessions/ag-1/session-1");
+    fs::create_dir_all(&session_dir).unwrap();
+    let central = Connection::open(data.join("v2.db")).unwrap();
+    central
+        .execute_batch(
+            "create table agent_groups (
+                id text primary key,
+                name text,
+                folder text,
+                agent_provider text
+            );
+            create table messaging_groups (
+                id text primary key,
+                channel_type text,
+                platform_id text,
+                instance text,
+                name text
+            );
+            create table sessions (
+                id text primary key,
+                agent_group_id text not null,
+                messaging_group_id text,
+                thread_id text,
+                agent_provider text,
+                status text,
+                container_status text,
+                last_active integer,
+                created_at integer
+            );",
+        )
+        .unwrap();
+    central
+        .execute(
+            "insert into agent_groups values ('ag-1', 'Personal', '/workspace/nanoclaw', 'codex')",
+            [],
+        )
+        .unwrap();
+    central
+        .execute(
+            "insert into messaging_groups values ('mg-1', 'telegram', 'chat-1', 'default', 'DM')",
+            [],
+        )
+        .unwrap();
+    central
+        .execute(
+            "insert into sessions values (
+                'session-1', 'ag-1', 'mg-1', 'thread-1', 'codex', 'active',
+                'running', 1782259202000, 1782259200000
+            )",
+            [],
+        )
+        .unwrap();
+    let inbound = Connection::open(session_dir.join("inbound.db")).unwrap();
+    inbound
+        .execute_batch(
+            "create table messages_in (
+                id text primary key,
+                seq integer,
+                kind text,
+                timestamp integer,
+                status text,
+                trigger text,
+                platform_id text,
+                channel_type text,
+                thread_id text,
+                content text,
+                source_session_id text,
+                on_wake integer
+            );",
+        )
+        .unwrap();
+    inbound
+        .execute(
+            "insert into messages_in values (
+                'in-1', 1, 'chat', 1782259201000, 'done', 'message',
+                'chat-1', 'telegram', 'thread-1', ?1, null, 0
+            )",
+            [json!({"text": query}).to_string()],
+        )
+        .unwrap();
+    let outbound = Connection::open(session_dir.join("outbound.db")).unwrap();
+    outbound
+        .execute_batch(
+            "create table messages_out (
+                id text primary key,
+                seq integer,
+                in_reply_to text,
+                timestamp integer,
+                kind text,
+                platform_id text,
+                channel_type text,
+                thread_id text,
+                content text
+            );",
+        )
+        .unwrap();
+    outbound
+        .execute(
+            "insert into messages_out values (
+                'out-1', 2, 'in-1', 1782259202000, 'chat',
+                'chat-1', 'telegram', 'thread-1', ?1
+            )",
+            [json!({"text": "nanoclaw native import ok"}).to_string()],
+        )
+        .unwrap();
+    root
 }
 
 pub(super) fn write_opencode_session_message_without_seq_db(temp: &TempDir) -> PathBuf {
@@ -1379,16 +1671,17 @@ pub(super) fn write_gemini_smoke_fixture(temp: &TempDir) -> PathBuf {
             chats.join("session-root.jsonl"),
             concat!(
                 "{\"sessionId\":\"gemini-root\",\"startTime\":\"2026-06-24T12:00:00Z\",\"kind\":\"main\",\"directories\":[\"/workspace\"]}\n",
-                "{\"id\":\"gemini-user\",\"timestamp\":\"2026-06-24T12:00:01Z\",\"type\":\"user\",\"content\":\"hi\"}\n",
+                "{\"id\":\"gemini-user\",\"timestamp\":\"2026-06-24T12:00:01Z\",\"type\":\"user\",\"content\":\"gemini jsonl oracle prompt\"}\n",
                 "{\"id\":\"gemini-tool\",\"timestamp\":\"2026-06-24T12:00:02Z\",\"type\":\"gemini\",\"toolCalls\":[{\"id\":\"call-1\",\"name\":\"run_subagent\"}]}\n",
+                "{\"id\":\"gemini-tool-result\",\"timestamp\":\"2026-06-24T12:00:03Z\",\"type\":\"gemini\",\"toolCalls\":[{\"id\":\"call-1\",\"name\":\"run_subagent\",\"result\":{\"content\":\"GEMINI_RAW_TOOL_OUTPUT_SHOULD_NOT_SEARCH\"}}]}\n",
             ),
         )
         .unwrap();
     fs::write(
             child_dir.join("gemini-child.jsonl"),
             concat!(
-                "{\"sessionId\":\"gemini-child\",\"startTime\":\"2026-06-24T12:00:03Z\",\"kind\":\"subagent\",\"directories\":[\"/workspace\"]}\n",
-                "{\"id\":\"gemini-child-user\",\"timestamp\":\"2026-06-24T12:00:04Z\",\"type\":\"user\",\"content\":\"inspect\"}\n",
+                "{\"sessionId\":\"gemini-child\",\"startTime\":\"2026-06-24T12:00:04Z\",\"kind\":\"subagent\",\"directories\":[\"/workspace\"]}\n",
+                "{\"id\":\"gemini-child-user\",\"timestamp\":\"2026-06-24T12:00:05Z\",\"type\":\"user\",\"content\":\"gemini child oracle prompt\"}\n",
             ),
         )
         .unwrap();
@@ -1402,16 +1695,17 @@ pub(super) fn write_droid_smoke_fixture(temp: &TempDir) -> PathBuf {
             root.join("droid-root.jsonl"),
             concat!(
                 "{\"type\":\"session_start\",\"sessionId\":\"droid-root\",\"timestamp\":\"2026-06-24T12:00:00Z\",\"cwd\":\"/workspace\",\"model\":\"factory/droid\"}\n",
-                "{\"type\":\"message\",\"id\":\"droid-user\",\"timestamp\":\"2026-06-24T12:00:01Z\",\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"delegate\"}]}\n",
+                "{\"type\":\"message\",\"id\":\"droid-user\",\"timestamp\":\"2026-06-24T12:00:01Z\",\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"droid jsonl oracle prompt\"}]}\n",
                 "{\"type\":\"message\",\"id\":\"droid-tool\",\"timestamp\":\"2026-06-24T12:00:02Z\",\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"tool-1\",\"name\":\"droid_worker\"}]}\n",
+                "{\"type\":\"message\",\"id\":\"droid-tool-result\",\"timestamp\":\"2026-06-24T12:00:03Z\",\"role\":\"tool\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"tool-1\",\"content\":\"DROID_RAW_TOOL_OUTPUT_SHOULD_NOT_SEARCH\"}]}\n",
             ),
         )
         .unwrap();
     fs::write(
             root.join("droid-child.jsonl"),
             concat!(
-                "{\"type\":\"session_start\",\"sessionId\":\"droid-child\",\"timestamp\":\"2026-06-24T12:00:03Z\",\"cwd\":\"/workspace\",\"model\":\"factory/droid\",\"parent\":\"droid-root\",\"decompSessionType\":\"worker\"}\n",
-                "{\"type\":\"message\",\"id\":\"droid-child-user\",\"timestamp\":\"2026-06-24T12:00:04Z\",\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"inspect\"}]}\n",
+                "{\"type\":\"session_start\",\"sessionId\":\"droid-child\",\"timestamp\":\"2026-06-24T12:00:04Z\",\"cwd\":\"/workspace\",\"model\":\"factory/droid\",\"parent\":\"droid-root\",\"decompSessionType\":\"worker\"}\n",
+                "{\"type\":\"message\",\"id\":\"droid-child-user\",\"timestamp\":\"2026-06-24T12:00:05Z\",\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"droid child oracle prompt\"}]}\n",
             ),
         )
         .unwrap();
@@ -1428,7 +1722,17 @@ pub(super) fn write_copilot_smoke_fixture(temp: &TempDir) -> PathBuf {
                 "{\"id\":\"copilot-2\",\"timestamp\":\"2026-06-24T12:00:01Z\",\"type\":\"user.message\",\"data\":{\"content\":\"status\"}}\n",
                 "{\"id\":\"copilot-3\",\"timestamp\":\"2026-06-24T12:00:02Z\",\"type\":\"assistant.message\",\"data\":{\"content\":\"running\",\"toolRequests\":[{\"toolCallId\":\"tool-1\",\"name\":\"bash\"}]}}\n",
                 "{\"id\":\"copilot-4\",\"timestamp\":\"2026-06-24T12:00:03Z\",\"type\":\"tool.execution_start\",\"data\":{\"toolCallId\":\"tool-1\",\"toolName\":\"bash\"}}\n",
-                "{\"id\":\"copilot-5\",\"timestamp\":\"2026-06-24T12:00:04Z\",\"type\":\"tool.execution_complete\",\"data\":{\"toolCallId\":\"tool-1\",\"success\":true,\"result\":{\"content\":\"ok\"}}}\n",
+                "{\"id\":\"copilot-5\",\"timestamp\":\"2026-06-24T12:00:04Z\",\"type\":\"tool.execution_complete\",\"data\":{\"toolCallId\":\"tool-1\",\"success\":true,\"result\":{\"content\":\"COPILOT_RAW_TOOL_OUTPUT_SHOULD_NOT_SEARCH\"}}}\n",
+            ),
+        )
+        .unwrap();
+    let child = temp.path().join("copilot/session-state/copilot-child");
+    fs::create_dir_all(&child).unwrap();
+    fs::write(
+            child.join("events.jsonl"),
+            concat!(
+                "{\"id\":\"copilot-child-1\",\"timestamp\":\"2026-06-24T12:00:05Z\",\"type\":\"session.start\",\"data\":{\"sessionId\":\"copilot-child\",\"startTime\":\"2026-06-24T12:00:05Z\",\"selectedModel\":\"gpt-5-mini\",\"context\":{\"cwd\":\"/workspace\"}}}\n",
+                "{\"id\":\"copilot-child-2\",\"timestamp\":\"2026-06-24T12:00:06Z\",\"type\":\"user.message\",\"data\":{\"content\":\"copilot child oracle prompt\"}}\n",
             ),
         )
         .unwrap();
@@ -1443,7 +1747,7 @@ pub(super) fn write_qwen_smoke_fixture(temp: &TempDir) -> PathBuf {
             concat!(
                 "{\"uuid\":\"qwen-1\",\"parentUuid\":null,\"sessionId\":\"qwen-smoke\",\"timestamp\":\"2026-07-04T12:00:00Z\",\"type\":\"user\",\"cwd\":\"/workspace/qwen\",\"version\":\"test\",\"gitBranch\":\"main\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"qwen jsonl oracle prompt\"}]},\"model\":\"qwen3-coder\"}\n",
                 "{\"uuid\":\"qwen-2\",\"parentUuid\":\"qwen-1\",\"sessionId\":\"qwen-smoke\",\"timestamp\":\"2026-07-04T12:00:01Z\",\"type\":\"assistant\",\"cwd\":\"/workspace/qwen\",\"version\":\"test\",\"gitBranch\":\"main\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"qwen jsonl oracle answer\"},{\"type\":\"tool_use\",\"id\":\"tool-1\",\"name\":\"Write\",\"input\":{\"path\":\"src/qwen_oracle.txt\",\"content\":\"proof\"}}]},\"usageMetadata\":{\"inputTokens\":5,\"outputTokens\":7},\"model\":\"qwen3-coder\"}\n",
-                "{\"uuid\":\"qwen-3\",\"parentUuid\":\"qwen-2\",\"sessionId\":\"qwen-smoke\",\"timestamp\":\"2026-07-04T12:00:02Z\",\"type\":\"tool_result\",\"cwd\":\"/workspace/qwen\",\"version\":\"test\",\"gitBranch\":\"main\",\"message\":{\"role\":\"tool\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"tool-1\",\"content\":\"wrote src/qwen_oracle.txt\"}]},\"toolCallResult\":{\"tool\":\"Write\",\"path\":\"src/qwen_oracle.txt\",\"output\":\"ok\"},\"model\":\"qwen3-coder\"}\n",
+                "{\"uuid\":\"qwen-3\",\"parentUuid\":\"qwen-2\",\"sessionId\":\"qwen-smoke\",\"timestamp\":\"2026-07-04T12:00:02Z\",\"type\":\"tool_result\",\"cwd\":\"/workspace/qwen\",\"version\":\"test\",\"gitBranch\":\"main\",\"message\":{\"role\":\"tool\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"tool-1\",\"content\":\"QWEN_RAW_TOOL_OUTPUT_SHOULD_NOT_SEARCH\"}]},\"toolCallResult\":{\"tool\":\"Write\",\"path\":\"src/qwen_oracle.txt\",\"output\":\"QWEN_RAW_TOOL_OUTPUT_SHOULD_NOT_SEARCH\"},\"model\":\"qwen3-coder\"}\n",
             ),
         )
         .unwrap();
@@ -1491,7 +1795,7 @@ pub(super) fn write_kimi_smoke_fixture(temp: &TempDir) -> PathBuf {
                 "{\"type\":\"turn.prompt\",\"time\":1783170001000,\"input\":[{\"type\":\"text\",\"text\":\"kimi jsonl oracle prompt\"}],\"origin\":{\"kind\":\"user\"}}\n",
                 "{\"type\":\"context.append_message\",\"time\":1783170002000,\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"kimi jsonl oracle answer\"}]}}\n",
                 "{\"type\":\"context.append_loop_event\",\"time\":1783170003000,\"event\":{\"type\":\"tool.call\",\"toolName\":\"Write\",\"input\":{\"path\":\"src/kimi_oracle.txt\",\"content\":\"proof\"}}}\n",
-                "{\"type\":\"context.append_loop_event\",\"time\":1783170004000,\"event\":{\"type\":\"tool.result\",\"toolName\":\"Write\",\"output\":\"wrote src/kimi_oracle.txt\"}}\n",
+                "{\"type\":\"context.append_loop_event\",\"time\":1783170004000,\"event\":{\"type\":\"tool.result\",\"toolName\":\"Write\",\"output\":\"KIMI_RAW_TOOL_OUTPUT_SHOULD_NOT_SEARCH\"}}\n",
                 "{\"type\":\"usage.record\",\"time\":1783170005000,\"model\":\"kimi-k2\",\"usage\":{\"input_tokens\":11,\"output_tokens\":13}}\n",
             ),
         )

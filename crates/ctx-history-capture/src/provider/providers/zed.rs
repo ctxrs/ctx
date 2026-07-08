@@ -14,8 +14,8 @@ use crate::common::time::parse_rfc3339_utc;
 use crate::provider::custom_history_jsonl::push_provider_import_failure;
 use crate::provider::file_touches::provider_file_touches_from_raw_value;
 use crate::provider::native::{
-    native_event, native_provider_capture, open_provider_sqlite_readonly, provider_capped_json,
-    provider_line_from_index, provider_value_text, NativeEventDraft, NativeSessionDraft,
+    native_event, native_provider_capture, open_provider_sqlite_readonly, provider_line_from_index,
+    provider_value_text, NativeEventDraft, NativeSessionDraft,
 };
 use crate::provider::sqlite::{
     ensure_sqlite_table_columns, opencode_schema_fingerprint, optional_column_expr,
@@ -23,7 +23,7 @@ use crate::provider::sqlite::{
 };
 use crate::{
     CaptureError, ProviderAdapterContext, ProviderNormalizationResult, Result,
-    MAX_PROVIDER_SQLITE_VALUE_BYTES, PROVIDER_MAX_PREVIEW_CHARS, ZED_THREADS_SQLITE_SOURCE_FORMAT,
+    MAX_PROVIDER_SQLITE_VALUE_BYTES, ZED_THREADS_SQLITE_SOURCE_FORMAT,
 };
 
 pub(crate) struct ZedThreadRow {
@@ -120,44 +120,49 @@ pub(crate) fn normalize_zed_threads_sqlite(
         }
 
         for (message_index, message) in messages.iter().enumerate() {
-            let line = zed_line_number(row.rowid, message_index as u64);
-            let event = match zed_message_event(&row.id, message, message_index, thread_updated_at)
-            {
-                Ok(event) => event,
-                Err(err) => {
-                    push_provider_import_failure(&mut result.summary, line, err.to_string());
-                    continue;
+            let events =
+                match zed_message_events(&row.id, message, message_index, thread_updated_at) {
+                    Ok(events) => events,
+                    Err(err) => {
+                        let line = zed_line_number(row.rowid, message_index as u64);
+                        push_provider_import_failure(&mut result.summary, line, err.to_string());
+                        continue;
+                    }
+                };
+            for (event_ordinal, event) in events.into_iter().enumerate() {
+                let line = zed_line_number(row.rowid, event.provider_event_index);
+                if event_ordinal == 0 {
+                    result
+                        .files_touched
+                        .extend(provider_file_touches_from_raw_value(
+                            CaptureProvider::Zed,
+                            &row.id,
+                            ZED_THREADS_SQLITE_SOURCE_FORMAT,
+                            Some(raw_source_path.as_str()),
+                            message,
+                            &event,
+                            line,
+                        ));
                 }
-            };
-            result
-                .files_touched
-                .extend(provider_file_touches_from_raw_value(
-                    CaptureProvider::Zed,
-                    &row.id,
-                    ZED_THREADS_SQLITE_SOURCE_FORMAT,
-                    Some(raw_source_path.as_str()),
-                    message,
-                    &event,
+                result.captures.push((
                     line,
+                    zed_capture(
+                        ZedCaptureDraft {
+                            row: &row,
+                            thread: &thread,
+                            started_at: created_at,
+                            ended_at: Some(thread_updated_at),
+                            cwd: cwd.clone(),
+                            folder_paths: folder_paths.clone(),
+                            raw_source_path: &raw_source_path,
+                            user_version,
+                            schema_fingerprint: &schema_fingerprint,
+                            event: Some(event),
+                        },
+                        context,
+                    ),
                 ));
-            result.captures.push((
-                line,
-                zed_capture(
-                    ZedCaptureDraft {
-                        row: &row,
-                        thread: &thread,
-                        started_at: created_at,
-                        ended_at: Some(thread_updated_at),
-                        cwd: cwd.clone(),
-                        folder_paths: folder_paths.clone(),
-                        raw_source_path: &raw_source_path,
-                        user_version,
-                        schema_fingerprint: &schema_fingerprint,
-                        event: Some(event),
-                    },
-                    context,
-                ),
-            ));
+            }
         }
     }
 
@@ -366,40 +371,108 @@ pub(crate) fn zed_ordered_folder_paths(paths: &[String], order: Option<&str>) ->
     ordered.sort_by_key(|(_, index)| *index);
     ordered.into_iter().map(|(path, _)| path).collect()
 }
+const ZED_EVENTS_PER_MESSAGE: u64 = 2;
+const ZED_SPLIT_EVENT_IDENTITY_INDEX_OFFSET: u64 = 1_000_000;
+
+pub(crate) fn zed_message_events(
+    provider_session_id: &str,
+    message: &Value,
+    message_index: usize,
+    occurred_at: DateTime<Utc>,
+) -> Result<Vec<ProviderEventEnvelope>> {
+    let kind = zed_message_kind(message).unwrap_or("Unknown");
+    if kind == "Agent" && zed_has_tool_use(message) && zed_has_tool_result(message) {
+        return Ok(vec![
+            zed_message_event(
+                provider_session_id,
+                message,
+                message_index,
+                occurred_at,
+                EventType::ToolCall,
+                "tool_call",
+                0,
+            )?,
+            zed_message_event(
+                provider_session_id,
+                message,
+                message_index,
+                occurred_at,
+                EventType::ToolOutput,
+                "tool_output",
+                1,
+            )?,
+        ]);
+    }
+    let event_type = zed_message_event_type(kind, message);
+    Ok(vec![zed_message_event(
+        provider_session_id,
+        message,
+        message_index,
+        occurred_at,
+        event_type,
+        "message",
+        0,
+    )?])
+}
+
 pub(crate) fn zed_message_event(
     provider_session_id: &str,
     message: &Value,
     message_index: usize,
     occurred_at: DateTime<Utc>,
+    event_type: EventType,
+    event_suffix: &str,
+    split_index: u64,
 ) -> Result<ProviderEventEnvelope> {
     let kind = zed_message_kind(message).unwrap_or("Unknown");
-    let text = zed_message_text(message).unwrap_or_else(|| format!("Zed {kind} message"));
-    let event_type = zed_message_event_type(kind, message);
+    let text = zed_message_text_for_event_type(kind, message, event_type)
+        .unwrap_or_else(|| format!("Zed {kind} message"));
     let role = zed_message_role(kind);
-    let provider_event_index = u64::try_from(message_index).map_err(|_| {
+    let message_event_index = u64::try_from(message_index).map_err(|_| {
         CaptureError::InvalidPayload(format!("Zed message index is too large: {message_index}"))
     })?;
-    let message_hash = compute_payload_hash(message)?;
+    let provider_event_index = message_event_index
+        .saturating_mul(ZED_EVENTS_PER_MESSAGE)
+        .saturating_add(split_index);
+    let provider_event_identity_index = if split_index == 0 {
+        message_event_index
+    } else {
+        message_event_index
+            .saturating_add(ZED_SPLIT_EVENT_IDENTITY_INDEX_OFFSET.saturating_mul(split_index))
+    };
+    let message_hash = if split_index == 0 && event_suffix == "message" {
+        compute_payload_hash(message)?
+    } else {
+        compute_payload_hash(&json!({
+            "event_suffix": event_suffix,
+            "message": message,
+        }))?
+    };
+    let cursor = if split_index == 0 && event_suffix == "message" {
+        format!("thread:{provider_session_id}:message:{message_index}")
+    } else {
+        format!("thread:{provider_session_id}:message:{message_index}:{event_suffix}")
+    };
     Ok(native_event(NativeEventDraft {
         provider: CaptureProvider::Zed,
         source_format: ZED_THREADS_SQLITE_SOURCE_FORMAT,
         provider_session_id: provider_session_id.to_owned(),
         provider_event_index,
         provider_event_hash: Some(format!("zed-message:{message_hash}")),
-        cursor: format!("thread:{provider_session_id}:message:{message_index}"),
+        cursor,
         event_type,
         role,
         occurred_at,
         text,
-        body: json!({
-            "message_kind": kind,
-            "message": message,
-        }),
+        body: zed_message_body(kind, message, event_type),
         metadata: json!({
             "source": "zed_threads_db",
             "source_format": ZED_THREADS_SQLITE_SOURCE_FORMAT,
             "message_index": message_index,
             "message_kind": kind,
+            "event_suffix": event_suffix,
+            "split_index": split_index,
+            "provider_event_identity_index": provider_event_identity_index,
             "timestamp_source": "thread.updated_at",
         }),
     }))
@@ -431,8 +504,8 @@ pub(crate) fn zed_message_role(kind: &str) -> Option<EventRole> {
 
 pub(crate) fn zed_message_event_type(kind: &str, message: &Value) -> EventType {
     match kind {
-        "Agent" if zed_has_tool_use(message) => EventType::ToolCall,
         "Agent" if zed_has_tool_result(message) => EventType::ToolOutput,
+        "Agent" if zed_has_tool_use(message) => EventType::ToolCall,
         "User" | "Agent" | "Resume" => EventType::Message,
         "Compaction" => EventType::Summary,
         _ => EventType::Notice,
@@ -448,6 +521,41 @@ pub(crate) fn zed_message_text(message: &Value) -> Option<String> {
         "Resume" => Some("[resume]".to_owned()),
         "Compaction" => zed_compaction_text(inner.unwrap_or(message)),
         _ => provider_value_text(message),
+    }
+}
+
+pub(crate) fn zed_message_text_for_event_type(
+    kind: &str,
+    message: &Value,
+    event_type: EventType,
+) -> Option<String> {
+    if kind == "Agent" {
+        let inner = zed_message_inner(message, kind)?;
+        return match event_type {
+            EventType::ToolCall => zed_content_array_text(inner.get("content")),
+            EventType::ToolOutput => zed_tool_results_text(inner.get("tool_results")),
+            _ => zed_agent_message_text(inner),
+        };
+    }
+    zed_message_text(message)
+}
+
+pub(crate) fn zed_message_body(kind: &str, message: &Value, event_type: EventType) -> Value {
+    match event_type {
+        EventType::ToolCall => json!({
+            "message_kind": kind,
+            "raw_message_retention": "metadata_only",
+            "tool_uses": zed_tool_use_summaries(message),
+        }),
+        EventType::ToolOutput => json!({
+            "message_kind": kind,
+            "raw_message_retention": "metadata_only",
+            "tool_results": zed_tool_result_summaries(message),
+        }),
+        _ => json!({
+            "message_kind": kind,
+            "message": message,
+        }),
     }
 }
 
@@ -506,19 +614,105 @@ pub(crate) fn zed_content_item_text(value: &Value) -> Option<String> {
 pub(crate) fn zed_tool_use_text(value: &Value) -> String {
     let name = value.get("name").and_then(Value::as_str).unwrap_or("tool");
     let mut parts = vec![format!("tool call: {name}")];
-    if let Some(input) = value.get("input") {
-        if !input.is_null() {
-            parts.push(format!(
-                "tool input: {}",
-                provider_capped_json(input, PROVIDER_MAX_PREVIEW_CHARS)
-            ));
-        }
-    } else if let Some(raw_input) = value.get("raw_input").and_then(Value::as_str) {
-        if !raw_input.trim().is_empty() {
-            parts.push(format!("tool input: {raw_input}"));
-        }
+    if value.get("input").is_some_and(|input| !input.is_null())
+        || value
+            .get("raw_input")
+            .and_then(Value::as_str)
+            .is_some_and(|raw_input| !raw_input.trim().is_empty())
+    {
+        parts.push("tool input: present".to_owned());
     }
     parts.join("\n")
+}
+
+pub(crate) fn zed_tool_use_summaries(value: &Value) -> Vec<Value> {
+    let mut summaries = Vec::new();
+    zed_collect_tool_use_summaries(value, &mut summaries);
+    summaries
+}
+
+fn zed_collect_tool_use_summaries(value: &Value, summaries: &mut Vec<Value>) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                zed_collect_tool_use_summaries(item, summaries);
+            }
+        }
+        Value::Object(object) => {
+            if let Some(tool_use) = object.get("ToolUse") {
+                summaries.push(zed_tool_use_summary(tool_use));
+            }
+            for nested in object.values() {
+                zed_collect_tool_use_summaries(nested, summaries);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn zed_tool_use_summary(value: &Value) -> Value {
+    let input = value.get("input").filter(|input| !input.is_null());
+    json!({
+        "id": value.get("id").and_then(Value::as_str),
+        "name": value.get("name").and_then(Value::as_str),
+        "input_present": input.is_some(),
+        "input_kind": input.map(zed_value_kind),
+        "raw_input_present": value
+            .get("raw_input")
+            .and_then(Value::as_str)
+            .is_some_and(|raw_input| !raw_input.trim().is_empty()),
+    })
+}
+
+pub(crate) fn zed_tool_result_summaries(value: &Value) -> Vec<Value> {
+    let mut summaries = Vec::new();
+    zed_collect_tool_result_summaries(value, &mut summaries);
+    summaries
+}
+
+fn zed_collect_tool_result_summaries(value: &Value, summaries: &mut Vec<Value>) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                zed_collect_tool_result_summaries(item, summaries);
+            }
+        }
+        Value::Object(object) => {
+            if let Some(tool_result) = object.get("ToolResult") {
+                summaries.push(zed_tool_result_summary(tool_result));
+            }
+            if let Some(results) = object.get("tool_results").and_then(Value::as_object) {
+                for result in results.values() {
+                    summaries.push(zed_tool_result_summary(result));
+                }
+            }
+            for nested in object.values() {
+                zed_collect_tool_result_summaries(nested, summaries);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn zed_tool_result_summary(value: &Value) -> Value {
+    json!({
+        "id": value.get("id").and_then(Value::as_str),
+        "tool_name": value.get("tool_name").and_then(Value::as_str),
+        "is_error": value.get("is_error").and_then(Value::as_bool).unwrap_or(false),
+        "content_present": value.get("content").is_some_and(|content| !content.is_null()),
+        "output_present": value.get("output").is_some_and(|output| !output.is_null()),
+    })
+}
+
+fn zed_value_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 pub(crate) fn zed_mention_text(value: &Value) -> Option<String> {

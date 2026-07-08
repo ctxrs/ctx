@@ -131,8 +131,8 @@ fn native_warp_imports_sqlite_fixture_idempotently() {
     assert_eq!(session.provider, CaptureProvider::Warp);
     let rendered_session = serde_json::to_string(&session.sync.metadata).unwrap();
     assert!(rendered_session.contains("Sanitized Warp Agent"));
-    assert!(rendered_session.contains("server_conversation_token"));
-    assert!(rendered_session.contains("warp-server-token-fixture"));
+    assert!(rendered_session.contains("server_conversation_token_present"));
+    assert!(!rendered_session.contains("warp-server-token-fixture"));
 
     let events = store.events_for_session(session_id).unwrap();
     assert_eq!(events.len(), 4);
@@ -187,6 +187,7 @@ fn native_warp_import_reads_committed_wal_content() {
             rusqlite::params![conversation_data, "warp-conversation-1"],
         )
         .unwrap();
+    let before_import = sqlite_file_snapshot(&live_db);
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
 
     let summary = import_warp_sqlite(
@@ -208,7 +209,9 @@ fn native_warp_import_reads_committed_wal_content() {
     let session = store.get_session(session_id).unwrap();
     let rendered_session = serde_json::to_string(&session.sync.metadata).unwrap();
     assert!(rendered_session.contains("Warp WAL Agent"));
-    assert!(rendered_session.contains("warp-server-token-preserved"));
+    assert!(rendered_session.contains("server_conversation_token_present"));
+    assert!(!rendered_session.contains("warp-server-token-preserved"));
+    assert_eq!(sqlite_file_snapshot(&live_db), before_import);
     drop(writer);
 }
 
@@ -274,6 +277,321 @@ fn native_hermes_rejects_out_of_range_message_timestamp() {
         .error
         .contains("Hermes message timestamp"));
     assert_eq!(summary.imported_events, 1);
+}
+
+#[test]
+fn native_sqlite_imports_do_not_mutate_provider_databases() {
+    let temp = tempdir();
+
+    let opencode = write_opencode_smoke_db(&temp, false);
+    assert_sqlite_clean_import_preserves_file("OpenCode", &opencode, |store| {
+        import_opencode_sqlite(
+            &opencode,
+            store,
+            OpenCodeSqliteImportOptions {
+                allow_partial_failures: true,
+                ..OpenCodeSqliteImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+
+    let kilo = provider_history_fixture("kilo/kilo.db");
+    assert_sqlite_clean_import_preserves_file("Kilo", &kilo, |store| {
+        import_kilo_sqlite(
+            &kilo,
+            store,
+            KiloSqliteImportOptions {
+                allow_partial_failures: true,
+                ..KiloSqliteImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+
+    let kiro = provider_history_fixture("kiro-cli/v2/data.sqlite3");
+    assert_sqlite_clean_import_preserves_file("Kiro CLI", &kiro, |store| {
+        import_kiro_sqlite(
+            &kiro,
+            store,
+            KiroSqliteImportOptions {
+                allow_partial_failures: true,
+                ..KiroSqliteImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+
+    let crush = provider_history_fixture("crush/v1/crush.db");
+    assert_sqlite_clean_import_preserves_file("Crush", &crush, |store| {
+        import_crush_sqlite(
+            &crush,
+            store,
+            CrushSqliteImportOptions {
+                allow_partial_failures: true,
+                ..CrushSqliteImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+
+    let goose = provider_history_fixture("goose/v14/sessions.db");
+    assert_sqlite_clean_import_preserves_file("Goose", &goose, |store| {
+        import_goose_sessions_sqlite(
+            &goose,
+            store,
+            GooseSessionsSqliteImportOptions {
+                allow_partial_failures: true,
+                ..GooseSessionsSqliteImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+
+    let lingma = provider_history_fixture("lingma/v1/local.db");
+    assert_sqlite_clean_import_preserves_file("Lingma", &lingma, |store| {
+        import_lingma_sqlite(
+            &lingma,
+            store,
+            LingmaSqliteImportOptions {
+                allow_partial_failures: true,
+                ..LingmaSqliteImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+
+    let warp = provider_history_fixture("warp/v1/warp.sqlite");
+    assert_sqlite_clean_import_preserves_file("Warp", &warp, |store| {
+        import_warp_sqlite(
+            &warp,
+            store,
+            WarpSqliteImportOptions {
+                allow_partial_failures: true,
+                ..WarpSqliteImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+
+    let zed = provider_history_fixture("zed/v1/threads.db");
+    assert_sqlite_clean_import_preserves_file("Zed", &zed, |store| {
+        import_zed_threads_sqlite(
+            &zed,
+            store,
+            ZedThreadsSqliteImportOptions {
+                allow_partial_failures: true,
+                ..ZedThreadsSqliteImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+
+    let hermes = write_hermes_smoke_db(&temp);
+    assert_sqlite_clean_import_preserves_file("Hermes", &hermes, |store| {
+        import_hermes_sqlite(
+            &hermes,
+            store,
+            HermesSqliteImportOptions {
+                allow_partial_failures: true,
+                ..HermesSqliteImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+
+    let astrbot = provider_history_fixture("astrbot/v1/data/data_v4.db");
+    assert_sqlite_clean_import_preserves_file("AstrBot", &astrbot, |store| {
+        import_astrbot_sqlite(
+            &astrbot,
+            store,
+            AstrBotSqliteImportOptions {
+                allow_partial_failures: true,
+                ..AstrBotSqliteImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+
+    let shelley = write_shelley_smoke_db(&temp);
+    assert_sqlite_clean_import_preserves_file("Shelley", &shelley, |store| {
+        import_shelley_sqlite(
+            &shelley,
+            store,
+            ShelleySqliteImportOptions {
+                allow_partial_failures: true,
+                ..ShelleySqliteImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+
+    let firebender_root = provider_history_fixture("firebender/v1");
+    let firebender_db = firebender_root
+        .join(".idea")
+        .join("firebender")
+        .join("chat_history.db");
+    assert_sqlite_clean_import_preserves_file("Firebender", &firebender_db, |store| {
+        import_firebender_sqlite(
+            &firebender_root,
+            store,
+            FirebenderSqliteImportOptions {
+                allow_partial_failures: true,
+                ..FirebenderSqliteImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+
+    let forgecode = provider_history_fixture("forgecode/v1/forge.db");
+    assert_sqlite_clean_import_preserves_file("ForgeCode", &forgecode, |store| {
+        import_forgecode_sqlite(
+            &forgecode,
+            store,
+            ForgeCodeSqliteImportOptions {
+                allow_partial_failures: true,
+                ..ForgeCodeSqliteImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+
+    let deepagents = provider_history_fixture("deepagents/v1/sessions.db");
+    assert_sqlite_clean_import_preserves_file("DeepAgents", &deepagents, |store| {
+        import_deepagents_sqlite(
+            &deepagents,
+            store,
+            DeepAgentsSqliteImportOptions {
+                allow_partial_failures: true,
+                ..DeepAgentsSqliteImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+}
+
+#[test]
+fn native_sqlite_successful_tool_outputs_are_metadata_only_and_not_searchable() {
+    let temp = tempdir();
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let goose = provider_history_fixture("goose/v14/sessions.db");
+    let goose_summary = import_goose_sessions_sqlite(
+        &goose,
+        &mut store,
+        GooseSessionsSqliteImportOptions {
+            source_path: Some(goose.clone()),
+            allow_partial_failures: true,
+            ..GooseSessionsSqliteImportOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(goose_summary.failed, 0, "{:?}", goose_summary.failures);
+    assert_successful_output_metadata_only(
+        &store,
+        CaptureProvider::Goose,
+        "goose-root",
+        EventType::ToolOutput,
+        "goose tool output oracle",
+    );
+    assert_search_hit_cites_source(
+        &store,
+        CaptureProvider::Goose,
+        GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT,
+        "goose sqlite search oracle request",
+    );
+
+    let forgecode = provider_history_fixture("forgecode/v1/forge.db");
+    let forge_summary = import_forgecode_sqlite(
+        &forgecode,
+        &mut store,
+        ForgeCodeSqliteImportOptions {
+            source_path: Some(forgecode.clone()),
+            allow_partial_failures: true,
+            ..ForgeCodeSqliteImportOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(forge_summary.failed, 0, "{:?}", forge_summary.failures);
+    assert_successful_output_metadata_only(
+        &store,
+        CaptureProvider::ForgeCode,
+        "forge-root",
+        EventType::ToolOutput,
+        "wrote src/forge_oracle.rs",
+    );
+    assert!(store.search_event_hits("wrote", 10).unwrap().is_empty());
+    assert_search_hit_cites_source(
+        &store,
+        CaptureProvider::ForgeCode,
+        FORGECODE_SQLITE_SOURCE_FORMAT,
+        "forgecode oracle prompt",
+    );
+}
+
+fn assert_sqlite_clean_import_preserves_file(
+    label: &str,
+    source_file: &Path,
+    run_import: impl FnOnce(&mut Store) -> ProviderImportSummary,
+) {
+    let summary = assert_sqlite_source_file_unchanged(source_file, run_import);
+    assert_eq!(summary.failed, 0, "{label}: {:?}", summary.failures);
+    assert!(
+        summary.imported_sessions > 0,
+        "{label}: expected imported sessions, got {summary:?}"
+    );
+    assert!(
+        summary.imported_events > 0,
+        "{label}: expected imported events, got {summary:?}"
+    );
+}
+
+fn assert_successful_output_metadata_only(
+    store: &Store,
+    provider: CaptureProvider,
+    provider_session_id: &str,
+    event_type: EventType,
+    forbidden_output: &str,
+) {
+    let session_id = stored_provider_session_id(store, provider, provider_session_id);
+    let events = store.events_for_session(session_id).unwrap();
+    let event = events
+        .iter()
+        .find(|event| event.event_type == event_type)
+        .unwrap_or_else(|| panic!("missing {provider:?} {event_type:?} event"));
+    assert_eq!(event.payload["body"]["text"].as_str(), Some(""));
+    assert_eq!(
+        event.payload["body"]["content_retention"].as_str(),
+        Some("metadata_only")
+    );
+    let rendered = serde_json::to_string(event).unwrap();
+    assert!(
+        !rendered.contains(forbidden_output),
+        "{provider:?} leaked raw output into sanitized event payload"
+    );
+    assert!(
+        store
+            .search_event_hits(forbidden_output, 10)
+            .unwrap()
+            .is_empty(),
+        "{provider:?} raw output should not be indexed"
+    );
+}
+
+fn assert_search_hit_cites_source(
+    store: &Store,
+    provider: CaptureProvider,
+    source_format: &str,
+    query: &str,
+) {
+    let hits = store.search_event_hits(query, 10).unwrap();
+    let hit = hits
+        .iter()
+        .find(|hit| hit.provider == Some(provider))
+        .unwrap_or_else(|| panic!("missing {provider:?} search hit for {query:?}"));
+    assert_eq!(hit.source_format.as_deref(), Some(source_format));
+    assert!(hit.raw_source_path.is_some());
+    assert!(hit.cursor.is_some());
 }
 
 #[cfg(unix)]
@@ -542,7 +860,7 @@ fn native_opencode_imports_message_part_text_and_metadata() {
 
     assert_eq!(summary.failed, 0, "{:?}", summary.failures);
     assert_eq!(summary.imported_sessions, 1);
-    assert_eq!(summary.imported_events, 1);
+    assert_eq!(summary.imported_events, 2);
     assert_message_part_import(
         &store,
         CaptureProvider::OpenCode,
@@ -575,7 +893,7 @@ fn native_kilo_imports_message_part_text_and_metadata() {
 
     assert_eq!(summary.failed, 0, "{:?}", summary.failures);
     assert_eq!(summary.imported_sessions, 1);
-    assert_eq!(summary.imported_events, 1);
+    assert_eq!(summary.imported_events, 2);
     assert_message_part_import(
         &store,
         CaptureProvider::Kilo,
@@ -622,8 +940,11 @@ fn assert_message_part_import(
 ) {
     let session_id = stored_provider_session_id(store, provider, provider_session_id);
     let events = store.events_for_session(session_id).unwrap();
-    assert_eq!(events.len(), 1);
-    let event = &events[0];
+    assert_eq!(events.len(), 2);
+    let event = events
+        .iter()
+        .find(|event| event.event_type == EventType::Message)
+        .expect("message part event imported");
     assert_eq!(event.event_type, EventType::Message);
     assert_eq!(event.payload["body"]["text"].as_str(), Some(oracle_text));
     assert_eq!(
@@ -645,6 +966,21 @@ fn assert_message_part_import(
     assert!(!rendered.contains("opencode_part_from_files"));
     assert!(!rendered.contains("*** Begin Patch"));
     assert!(!rendered.contains("raw-opencode-patch-needle"));
+
+    let tool_output = events
+        .iter()
+        .find(|event| event.event_type == EventType::ToolOutput)
+        .expect("tool part metadata-only output event imported");
+    assert_eq!(tool_output.payload["body"]["text"].as_str(), Some(""));
+    assert_eq!(
+        tool_output.payload["body"]["content_retention"].as_str(),
+        Some("metadata_only")
+    );
+    let rendered_tool = serde_json::to_string(tool_output).unwrap();
+    assert!(rendered_tool.contains("write_file"));
+    assert!(rendered_tool.contains("completed"));
+    assert!(!rendered_tool.contains("outputPath"));
+    assert!(!rendered_tool.contains("tool_arg_should_not_touch"));
 
     assert!(store
         .search_event_hits(oracle_text, 10)

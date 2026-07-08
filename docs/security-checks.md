@@ -35,8 +35,8 @@ the local retrieval product.
   transcript text by default, including absolute paths and secret-shaped
   strings. They must be treated as private local data.
 - The public provider support matrix contains only supported providers and uses
-  only the `supported` status. Unsupported-provider rationale belongs in
-  private conformance evidence, not public tiers.
+  only the `supported` status. Unsupported-provider rationale is outside the
+  public support matrix.
 
 ## Static Docs Checks
 

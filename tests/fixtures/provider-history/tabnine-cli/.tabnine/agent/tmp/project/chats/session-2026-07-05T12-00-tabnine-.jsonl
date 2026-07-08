@@ -1,4 +1,5 @@
 {"sessionId":"tabnine-root","projectHash":"tabnine-project-hash","startTime":"2026-07-05T12:00:00Z","lastUpdated":"2026-07-05T12:00:03Z","kind":"main","directories":["/workspace/tabnine"]}
 {"id":"tabnine-user","timestamp":"2026-07-05T12:00:01Z","type":"user","content":"tabnine jsonl oracle prompt"}
 {"id":"tabnine-tool","timestamp":"2026-07-05T12:00:02Z","type":"tabnine","toolCalls":[{"id":"call-1","name":"read_file","args":{"file_path":"src/tabnine_oracle.txt"}}],"model":"tabnine-agent"}
+{"id":"tabnine-tool-result","timestamp":"2026-07-05T12:00:02.500Z","type":"tabnine","toolCalls":[{"id":"call-1","name":"read_file","result":"TABNINE_RAW_TOOL_RESULT_SHOULD_NOT_SEARCH"}],"model":"tabnine-agent"}
 {"id":"tabnine-assistant","timestamp":"2026-07-05T12:00:03Z","type":"tabnine","content":"tabnine jsonl oracle answer","model":"tabnine-agent","tokens":{"input":10,"output":5,"total":15}}

@@ -56,6 +56,428 @@ fn provider_fixture_replay_supports_opencode_fixture() {
 }
 
 #[test]
+fn native_file_tree_imports_do_not_mutate_provider_sources() {
+    let temp = tempdir();
+
+    let codex_sessions = provider_history_fixture("codex-sessions");
+    assert_native_source_clean_import_preserves_source(
+        "Codex sessions",
+        &codex_sessions,
+        |store| {
+            import_codex_session_tree(
+                &codex_sessions,
+                store,
+                CodexSessionImportOptions {
+                    source_path: Some(codex_sessions.clone()),
+                    allow_partial_failures: true,
+                    ..CodexSessionImportOptions::default()
+                },
+            )
+            .unwrap()
+        },
+    );
+
+    let codex_history = provider_history_fixture("codex-history.jsonl");
+    assert_native_source_clean_import_preserves_source("Codex history", &codex_history, |store| {
+        import_codex_history_jsonl(
+            &codex_history,
+            store,
+            CodexHistoryImportOptions {
+                source_path: Some(codex_history.clone()),
+                ..CodexHistoryImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+
+    let pi = provider_history_fixture("pi-session.jsonl");
+    assert_native_source_clean_import_preserves_source("Pi", &pi, |store| {
+        import_pi_session_jsonl(
+            &pi,
+            store,
+            PiSessionImportOptions {
+                source_path: Some(pi.clone()),
+                allow_partial_failures: true,
+                ..PiSessionImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+
+    let claude = write_claude_smoke_fixture(&temp);
+    assert_native_source_clean_import_preserves_source("Claude", &claude, |store| {
+        import_claude_projects_jsonl_tree(
+            &claude,
+            store,
+            ClaudeProjectsImportOptions {
+                source_path: Some(claude.clone()),
+                allow_partial_failures: true,
+                ..ClaudeProjectsImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+
+    let qoder = provider_history_fixture("qoder/projects");
+    assert_native_source_clean_import_preserves_source("Qoder", &qoder, |store| {
+        import_qoder_history(
+            &qoder,
+            store,
+            QoderImportOptions {
+                source_path: Some(qoder.clone()),
+                allow_partial_failures: true,
+                ..QoderImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+
+    let codebuddy = provider_history_fixture("codebuddy/Data");
+    assert_native_source_clean_import_preserves_source("CodeBuddy", &codebuddy, |store| {
+        import_codebuddy_history(
+            &codebuddy,
+            store,
+            CodeBuddyImportOptions {
+                source_path: Some(codebuddy.clone()),
+                allow_partial_failures: true,
+                ..CodeBuddyImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+
+    let continue_root = temp.path().join("continue-sessions-readonly");
+    fs::create_dir_all(&continue_root).unwrap();
+    fs::write(
+        continue_root.join("continue-readonly.json"),
+        json!({
+            "sessionId": "continue-readonly",
+            "title": "Continue readonly",
+            "createdAt": "2026-07-04T16:00:00Z",
+            "history": [
+                {"message": {"role": "user", "content": "continue readonly oracle"}},
+                {"message": {"role": "assistant", "content": "continue readonly answer"}}
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    assert_native_source_clean_import_preserves_source("Continue", &continue_root, |store| {
+        import_continue_cli_sessions(
+            &continue_root,
+            store,
+            ContinueCliImportOptions {
+                source_path: Some(continue_root.clone()),
+                allow_partial_failures: true,
+                ..ContinueCliImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+
+    let openclaw_root = temp.path().join("openclaw-readonly");
+    fs::create_dir_all(openclaw_root.join("sessions")).unwrap();
+    fs::write(
+        openclaw_root.join("sessions/session-1.jsonl"),
+        format!(
+            "{}\n{}\n",
+            json!({
+                "type": "session",
+                "id": "openclaw-readonly",
+                "timestamp": "2026-07-04T16:00:00Z"
+            }),
+            json!({
+                "type": "message",
+                "id": "openclaw-readonly-user",
+                "timestamp": "2026-07-04T16:00:01Z",
+                "message": {"role": "user", "content": "openclaw readonly oracle"}
+            })
+        ),
+    )
+    .unwrap();
+    assert_native_source_clean_import_preserves_source("OpenClaw", &openclaw_root, |store| {
+        import_openclaw_history(
+            &openclaw_root,
+            store,
+            OpenClawImportOptions {
+                source_path: Some(openclaw_root.clone()),
+                allow_partial_failures: true,
+                ..OpenClawImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+
+    let trae = provider_history_fixture("trae/User/workspaceStorage");
+    assert_native_source_clean_import_preserves_source("Trae", &trae, |store| {
+        import_trae_history(
+            &trae,
+            store,
+            TraeImportOptions {
+                source_path: Some(trae.clone()),
+                allow_partial_failures: true,
+                ..TraeImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+
+    let antigravity = provider_history_fixture("antigravity/v1/brain");
+    assert_native_source_clean_import_preserves_source("Antigravity", &antigravity, |store| {
+        import_antigravity_cli_history(
+            &antigravity,
+            store,
+            AntigravityCliImportOptions {
+                source_path: Some(antigravity.clone()),
+                allow_partial_failures: true,
+                ..AntigravityCliImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+
+    let gemini = write_gemini_smoke_fixture(&temp);
+    assert_native_source_clean_import_preserves_source("Gemini", &gemini, |store| {
+        import_gemini_cli_history(
+            &gemini,
+            store,
+            GeminiCliImportOptions {
+                source_path: Some(gemini.clone()),
+                allow_partial_failures: true,
+                ..GeminiCliImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+
+    let tabnine = provider_history_fixture("tabnine-cli/.tabnine/agent");
+    assert_native_source_clean_import_preserves_source("Tabnine", &tabnine, |store| {
+        import_tabnine_cli_history(
+            &tabnine,
+            store,
+            TabnineCliImportOptions {
+                source_path: Some(tabnine.clone()),
+                allow_partial_failures: true,
+                ..TabnineCliImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+
+    let cursor = provider_history_fixture("cursor/2026.06.24");
+    assert_native_source_clean_import_preserves_source("Cursor", &cursor, |store| {
+        import_cursor_native_history(
+            &cursor,
+            store,
+            CursorNativeImportOptions {
+                source_path: Some(cursor.clone()),
+                allow_partial_failures: true,
+                ..CursorNativeImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+
+    let windsurf = provider_history_fixture("windsurf/transcripts");
+    assert_native_source_clean_import_preserves_source("Windsurf", &windsurf, |store| {
+        import_windsurf_cascade_hook_transcripts(
+            &windsurf,
+            store,
+            WindsurfCascadeHookImportOptions {
+                source_path: Some(windsurf.clone()),
+                allow_partial_failures: true,
+                ..WindsurfCascadeHookImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+
+    let droid = write_droid_smoke_fixture(&temp);
+    assert_native_source_clean_import_preserves_source("Factory Droid", &droid, |store| {
+        import_factory_ai_droid_sessions(
+            &droid,
+            store,
+            FactoryAiDroidImportOptions {
+                source_path: Some(droid.clone()),
+                allow_partial_failures: true,
+                ..FactoryAiDroidImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+
+    let copilot = write_copilot_smoke_fixture(&temp);
+    assert_native_source_clean_import_preserves_source("Copilot CLI", &copilot, |store| {
+        import_copilot_cli_session_events(
+            &copilot,
+            store,
+            CopilotCliImportOptions {
+                source_path: Some(copilot.clone()),
+                allow_partial_failures: true,
+                ..CopilotCliImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+
+    let qwen = provider_history_fixture("qwen-code/.qwen/projects");
+    assert_native_source_clean_import_preserves_source("Qwen Code", &qwen, |store| {
+        import_qwen_code_history(
+            &qwen,
+            store,
+            QwenCodeImportOptions {
+                source_path: Some(qwen.clone()),
+                allow_partial_failures: true,
+                ..QwenCodeImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+
+    let kimi = provider_history_fixture("kimi-code-cli/.kimi-code");
+    assert_native_source_clean_import_preserves_source("Kimi Code CLI", &kimi, |store| {
+        import_kimi_code_cli_history(
+            &kimi,
+            store,
+            KimiCodeCliImportOptions {
+                source_path: Some(kimi.clone()),
+                allow_partial_failures: true,
+                ..KimiCodeCliImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+
+    let auggie = provider_history_fixture("auggie/v0.32.0/sessions");
+    assert_native_source_clean_import_preserves_source("Auggie", &auggie, |store| {
+        import_auggie_history(
+            &auggie,
+            store,
+            AuggieImportOptions {
+                source_path: Some(auggie.clone()),
+                allow_partial_failures: true,
+                ..AuggieImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+
+    let junie = provider_history_fixture("junie/sessions");
+    assert_native_source_clean_import_preserves_source("Junie", &junie, |store| {
+        import_junie_history(
+            &junie,
+            store,
+            JunieImportOptions {
+                source_path: Some(junie.clone()),
+                allow_partial_failures: true,
+                ..JunieImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+
+    let nanoclaw = write_nanoclaw_smoke_project(&temp, "nanoclaw readonly oracle");
+    assert_native_source_clean_import_preserves_source("NanoClaw", &nanoclaw, |store| {
+        import_nanoclaw_project(
+            &nanoclaw,
+            store,
+            NanoClawImportOptions {
+                source_path: Some(nanoclaw.clone()),
+                allow_partial_failures: true,
+                ..NanoClawImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+
+    let mistral = provider_history_fixture("mistral-vibe/v1/logs/session");
+    assert_native_source_clean_import_preserves_source("Mistral Vibe", &mistral, |store| {
+        import_mistral_vibe_history(
+            &mistral,
+            store,
+            MistralVibeImportOptions {
+                source_path: Some(mistral.clone()),
+                allow_partial_failures: true,
+                ..MistralVibeImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+
+    let mux = provider_history_fixture("mux/v0.27.0/sessions");
+    assert_native_source_clean_import_preserves_source("Mux", &mux, |store| {
+        import_mux_history(
+            &mux,
+            store,
+            MuxImportOptions {
+                source_path: Some(mux.clone()),
+                allow_partial_failures: true,
+                ..MuxImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+
+    let rovodev = provider_history_fixture("rovodev/v1/sessions");
+    assert_native_source_clean_import_preserves_source("Rovo Dev", &rovodev, |store| {
+        import_rovodev_history(
+            &rovodev,
+            store,
+            RovoDevImportOptions {
+                source_path: Some(rovodev.clone()),
+                allow_partial_failures: true,
+                ..RovoDevImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+
+    let cline = provider_history_fixture("cline/data");
+    assert_native_source_clean_import_preserves_source("Cline", &cline, |store| {
+        import_cline_task_json_history(
+            &cline,
+            store,
+            ClineTaskJsonImportOptions {
+                source_path: Some(cline.clone()),
+                allow_partial_failures: true,
+                ..ClineTaskJsonImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+
+    let roo = provider_history_fixture("roo/storage");
+    assert_native_source_clean_import_preserves_source("Roo Code", &roo, |store| {
+        import_roo_task_json_history(
+            &roo,
+            store,
+            RooTaskJsonImportOptions {
+                source_path: Some(roo.clone()),
+                allow_partial_failures: true,
+                ..RooTaskJsonImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+}
+
+fn assert_native_source_clean_import_preserves_source(
+    label: &str,
+    source: &Path,
+    run_import: impl FnOnce(&mut Store) -> ProviderImportSummary,
+) {
+    let summary = assert_provider_source_unchanged(source, run_import);
+    assert!(
+        summary.imported_sessions > 0,
+        "{label}: expected imported sessions, got {summary:?}"
+    );
+    assert!(
+        summary.imported_events > 0,
+        "{label}: expected imported events, got {summary:?}"
+    );
+}
+
+#[test]
 fn continue_cli_empty_history_rejects_metadata_only_session() {
     let temp = tempdir();
     let root = temp.path().join("continue-sessions");
@@ -91,6 +513,197 @@ fn continue_cli_empty_history_rejects_metadata_only_session() {
         .error
         .contains("no real conversation messages"));
     assert!(store.list_sessions().unwrap().is_empty());
+}
+
+#[test]
+fn continue_cli_tool_call_redacts_raw_outputs_and_reimports_file_touches() {
+    let temp = tempdir();
+    let root = temp.path().join("continue-sessions");
+    fs::create_dir_all(&root).unwrap();
+    let raw_output = "CONTINUE_RAW_TOOL_OUTPUT_NEEDLE";
+    let raw_old = "CONTINUE_RAW_DIFF_OLD_NEEDLE";
+    let raw_new = "CONTINUE_RAW_DIFF_NEW_NEEDLE";
+    let patch = format!(
+        "*** Begin Patch\n*** Update File: src/continue_policy.rs\n- {raw_old}\n+ {raw_new}\n*** End Patch\n"
+    );
+    fs::write(
+        root.join("continue-tool-boundary.json"),
+        json!({
+            "sessionId": "continue-tool-boundary",
+            "title": "Continue tool policy",
+            "createdAt": "2026-07-04T16:00:00Z",
+            "history": [
+                {
+                    "id": "continue-user-1",
+                    "timestamp": "2026-07-04T16:00:00Z",
+                    "message": {
+                        "role": "user",
+                        "content": "continue tool policy oracle prompt"
+                    }
+                },
+                {
+                    "id": "continue-tool-1",
+                    "timestamp": "2026-07-04T16:00:01Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": ""
+                    },
+                    "toolCallStates": [
+                        {
+                            "status": "done",
+                            "toolCall": {
+                                "function": {
+                                    "name": "apply_patch",
+                                    "arguments": patch
+                                }
+                            },
+                            "output": raw_output
+                        }
+                    ]
+                }
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let first = import_continue_cli_sessions(
+        &root,
+        &mut store,
+        ContinueCliImportOptions {
+            source_path: Some(root.clone()),
+            imported_at: "2026-07-04T16:05:00Z".parse().unwrap(),
+            allow_partial_failures: true,
+            ..ContinueCliImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(first.failed, 0, "{:?}", first.failures);
+    assert_eq!(first.imported_sessions, 1);
+    assert_eq!(first.imported_events, 2);
+    let session_id =
+        stored_provider_session_id(&store, CaptureProvider::Continue, "continue-tool-boundary");
+    let events = store.events_for_session(session_id).unwrap();
+    let tool = events
+        .iter()
+        .find(|event| event.event_type == EventType::ToolCall)
+        .expect("tool call metadata event imported");
+    assert_eq!(
+        tool.payload["body"]["content_retention"].as_str(),
+        Some("metadata")
+    );
+    let rendered_tool = serde_json::to_string(tool).unwrap();
+    assert!(rendered_tool.contains("apply_patch"));
+    assert!(!rendered_tool.contains(raw_output));
+    assert!(!rendered_tool.contains(raw_old));
+    assert!(!rendered_tool.contains(raw_new));
+    assert!(store
+        .search_event_hits("continue tool policy oracle prompt", 10)
+        .unwrap()
+        .iter()
+        .any(|hit| hit.provider == Some(CaptureProvider::Continue)));
+    assert!(store.search_event_hits(raw_output, 10).unwrap().is_empty());
+    assert!(store.search_event_hits(raw_old, 10).unwrap().is_empty());
+    assert!(store.search_event_hits(raw_new, 10).unwrap().is_empty());
+    assert!(store
+        .export_archive()
+        .unwrap()
+        .files_touched
+        .iter()
+        .any(|file| {
+            file.sync.metadata["provider"].as_str() == Some(CaptureProvider::Continue.as_str())
+                && file.path == "src/continue_policy.rs"
+                && file.confidence == Confidence::Explicit
+        }));
+
+    let second = import_continue_cli_sessions(
+        &root,
+        &mut store,
+        ContinueCliImportOptions {
+            source_path: Some(root.clone()),
+            imported_at: "2026-07-04T16:06:00Z".parse().unwrap(),
+            allow_partial_failures: true,
+            ..ContinueCliImportOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(second.failed, 0, "{:?}", second.failures);
+    assert_eq!(second.imported_sessions, 0);
+    assert_eq!(second.imported_events, 0);
+    assert_eq!(second.skipped_sessions, 1);
+    assert_eq!(second.skipped_events, 2);
+}
+
+#[test]
+fn native_pi_fixture_imports_event_types_searches_and_reimports() {
+    let temp = tempdir();
+    let fixture = provider_history_fixture("pi-session.jsonl");
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let source = provider_source_for_path(CaptureProvider::Pi, fixture.clone());
+    assert_eq!(source.source_format, "pi_session_jsonl");
+    assert_eq!(source.import_support, ProviderImportSupport::Native);
+    assert_eq!(source.status, ProviderSourceStatus::Available);
+
+    let first = import_pi_session_jsonl(
+        &fixture,
+        &mut store,
+        PiSessionImportOptions {
+            source_path: Some(fixture.clone()),
+            imported_at: "2026-06-23T16:10:00Z".parse().unwrap(),
+            allow_partial_failures: true,
+            ..PiSessionImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(first.failed, 0, "{:?}", first.failures);
+    assert_eq!(first.imported_sessions, 1);
+    assert_eq!(first.imported_events, 6);
+
+    let session_id = stored_provider_session_id(&store, CaptureProvider::Pi, "pi-session-docs-1");
+    let events = store.events_for_session(session_id).unwrap();
+    assert_eq!(events.len(), 6);
+    assert_event_type_count(&events, EventType::Message, 2);
+    assert_event_type_count(&events, EventType::ToolCall, 1);
+    assert_event_type_count(&events, EventType::ToolOutput, 1);
+    assert_event_type_count(&events, EventType::CommandOutput, 1);
+    assert_event_type_count(&events, EventType::Summary, 1);
+    assert_event_with_role(&events, EventType::ToolOutput, EventRole::Tool);
+    assert_event_with_role(&events, EventType::CommandOutput, EventRole::Tool);
+    assert_events_have_provider_citations(&events);
+
+    assert_search_hits_provider(
+        &store,
+        "Inspect the provider metadata rows",
+        CaptureProvider::Pi,
+    );
+    assert_search_hits_provider(
+        &store,
+        "Provider metadata import fixture",
+        CaptureProvider::Pi,
+    );
+    assert_search_misses(&store, "tests passed");
+    assert_search_misses(&store, "ok token=fixture-secret");
+
+    let second = import_pi_session_jsonl(
+        &fixture,
+        &mut store,
+        PiSessionImportOptions {
+            source_path: Some(fixture.clone()),
+            imported_at: "2026-06-23T16:15:00Z".parse().unwrap(),
+            allow_partial_failures: true,
+            ..PiSessionImportOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(second.failed, 0, "{:?}", second.failures);
+    assert_eq!(second.imported_sessions, 0);
+    assert_eq!(second.imported_events, 0);
+    assert_eq!(second.skipped_sessions, 1);
+    assert_eq!(second.skipped_events, 6);
 }
 
 #[test]
@@ -462,6 +1075,90 @@ fn native_qoder_fixture_imports_documented_transcript_jsonl() {
 }
 
 #[test]
+fn native_cursor_fixture_imports_searches_reports_malformed_and_reimports() {
+    let temp = tempdir();
+    let fixture = provider_history_fixture("cursor/2026.06.24");
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let source = provider_source_for_path(CaptureProvider::Cursor, fixture.clone());
+    assert_eq!(source.source_format, "cursor_agent_transcript_jsonl_tree");
+    assert_eq!(source.import_support, ProviderImportSupport::Native);
+    assert_eq!(source.status, ProviderSourceStatus::Available);
+
+    let first = import_cursor_native_history(
+        &fixture,
+        &mut store,
+        CursorNativeImportOptions {
+            source_path: Some(fixture.clone()),
+            allow_partial_failures: true,
+            imported_at: "2026-06-24T12:20:00Z".parse().unwrap(),
+            ..CursorNativeImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(first.failed, 1, "{first:?}");
+    assert_eq!(first.failures[0].line, 2);
+    assert!(first.failures[0].error.contains("malformed JSONL"));
+    assert_eq!(first.imported_sessions, 2);
+    assert_eq!(first.imported_events, 6);
+
+    let session_id =
+        stored_provider_session_id(&store, CaptureProvider::Cursor, "cursor-native-session-1");
+    let events = store.events_for_session(session_id).unwrap();
+    assert_eq!(events.len(), 5);
+    assert_event_type_count(&events, EventType::Message, 2);
+    assert_event_type_count(&events, EventType::ToolCall, 1);
+    assert_event_type_count(&events, EventType::ToolOutput, 1);
+    assert_event_type_count(&events, EventType::Summary, 1);
+    assert_event_with_role(&events, EventType::ToolOutput, EventRole::User);
+    assert_events_have_provider_citations(&events);
+
+    let partial_id =
+        stored_provider_session_id(&store, CaptureProvider::Cursor, "cursor-malformed-session");
+    let partial_events = store.events_for_session(partial_id).unwrap();
+    assert_eq!(partial_events.len(), 1);
+    assert_event_type_count(&partial_events, EventType::Message, 1);
+    assert_events_have_provider_citations(&partial_events);
+
+    assert_search_hits_provider(
+        &store,
+        "Create cursor-native-cli-oracle",
+        CaptureProvider::Cursor,
+    );
+    assert_search_hits_provider(
+        &store,
+        "This valid line should import",
+        CaptureProvider::Cursor,
+    );
+    assert_search_misses(&store, "wrote cursor-native-cli-oracle.txt");
+    assert_search_misses(&store, "cursor native fixture proof");
+
+    let archive = store.export_archive().unwrap();
+    assert!(archive
+        .files_touched
+        .iter()
+        .any(|file| file.path == "cursor-native-cli-oracle.txt"));
+
+    let second = import_cursor_native_history(
+        &fixture,
+        &mut store,
+        CursorNativeImportOptions {
+            source_path: Some(fixture.clone()),
+            allow_partial_failures: true,
+            imported_at: "2026-06-24T12:25:00Z".parse().unwrap(),
+            ..CursorNativeImportOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(second.failed, 1, "{second:?}");
+    assert_eq!(second.imported_sessions, 0);
+    assert_eq!(second.imported_events, 0);
+    assert_eq!(second.skipped_sessions, 2);
+    assert_eq!(second.skipped_events, 6);
+}
+
+#[test]
 fn native_windsurf_reports_malformed_jsonl_partially() {
     let temp = tempdir();
     let fixture = provider_history_fixture("windsurf/malformed/transcripts");
@@ -540,14 +1237,24 @@ fn native_task_json_imports_cline_and_roo_task_directories() {
     .unwrap();
     assert_eq!(cline_first.failed, 0, "{:?}", cline_first.failures);
     assert_eq!(cline_first.imported_sessions, 1);
-    assert_eq!(cline_first.imported_events, 3);
+    assert_eq!(cline_first.imported_events, 4);
 
     let cline_session = stored_provider_session_id(&store, CaptureProvider::Cline, "cline-task-1");
     let cline_events = store.events_for_session(cline_session).unwrap();
-    assert_eq!(cline_events.len(), 3);
-    assert!(cline_events
-        .iter()
-        .any(|event| event.event_type == EventType::ToolCall));
+    assert_eq!(cline_events.len(), 4);
+    assert_event_type_count(&cline_events, EventType::ToolCall, 1);
+    assert_event_type_count(&cline_events, EventType::ToolOutput, 1);
+    assert_event_with_role(&cline_events, EventType::ToolOutput, EventRole::User);
+    assert_events_have_provider_citations(&cline_events);
+    assert_search_hits_provider(
+        &store,
+        "Write a short parser note for Cline task JSON support.",
+        CaptureProvider::Cline,
+    );
+    assert_search_misses(&store, "CLINE_RAW_TOOL_RESULT_NEEDLE");
+    assert!(!serde_json::to_string(&cline_events)
+        .unwrap()
+        .contains("CLINE_RAW_TOOL_RESULT_NEEDLE"));
     assert!(store
         .export_archive()
         .unwrap()
@@ -569,7 +1276,7 @@ fn native_task_json_imports_cline_and_roo_task_directories() {
     assert_eq!(cline_second.imported_sessions, 0);
     assert_eq!(cline_second.imported_events, 0);
     assert_eq!(cline_second.skipped_sessions, 1);
-    assert_eq!(cline_second.skipped_events, 3);
+    assert_eq!(cline_second.skipped_events, 4);
 
     let roo = provider_history_fixture("roo/storage");
     let roo_first = import_roo_task_json_history(
@@ -585,14 +1292,24 @@ fn native_task_json_imports_cline_and_roo_task_directories() {
     .unwrap();
     assert_eq!(roo_first.failed, 0, "{:?}", roo_first.failures);
     assert_eq!(roo_first.imported_sessions, 2);
-    assert_eq!(roo_first.imported_events, 5);
+    assert_eq!(roo_first.imported_events, 6);
 
     let roo_session = stored_provider_session_id(&store, CaptureProvider::RooCode, "roo-task-1");
     let roo_events = store.events_for_session(roo_session).unwrap();
-    assert_eq!(roo_events.len(), 3);
-    assert!(roo_events
-        .iter()
-        .any(|event| event.event_type == EventType::ToolCall));
+    assert_eq!(roo_events.len(), 4);
+    assert_event_type_count(&roo_events, EventType::ToolCall, 1);
+    assert_event_type_count(&roo_events, EventType::ToolOutput, 1);
+    assert_event_with_role(&roo_events, EventType::ToolOutput, EventRole::User);
+    assert_events_have_provider_citations(&roo_events);
+    assert_search_hits_provider(
+        &store,
+        "Add a Roo Code task JSON import smoke test.",
+        CaptureProvider::RooCode,
+    );
+    assert_search_misses(&store, "ROO_RAW_TOOL_RESULT_NEEDLE");
+    assert!(!serde_json::to_string(&roo_events)
+        .unwrap()
+        .contains("ROO_RAW_TOOL_RESULT_NEEDLE"));
     let fallback =
         stored_provider_session_id(&store, CaptureProvider::RooCode, "roo-fallback-task");
     assert_eq!(store.events_for_session(fallback).unwrap().len(), 2);
@@ -602,6 +1319,22 @@ fn native_task_json_imports_cline_and_roo_task_directories() {
         .files_touched
         .iter()
         .any(|file| file.path == "tests/roo-task-json.txt"));
+
+    let roo_second = import_roo_task_json_history(
+        &roo,
+        &mut store,
+        RooTaskJsonImportOptions {
+            source_path: Some(roo.clone()),
+            allow_partial_failures: true,
+            imported_at: "2026-06-30T12:15:00Z".parse().unwrap(),
+            ..RooTaskJsonImportOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(roo_second.imported_sessions, 0);
+    assert_eq!(roo_second.imported_events, 0);
+    assert_eq!(roo_second.skipped_sessions, 2);
+    assert_eq!(roo_second.skipped_events, 6);
 }
 #[test]
 fn native_task_json_malformed_file_is_atomic_without_partial_failures() {
@@ -635,6 +1368,83 @@ fn native_task_json_malformed_file_is_atomic_without_partial_failures() {
         .contains("api_conversation_history.json"));
     let session_id = provider_session_uuid(CaptureProvider::Cline, "cline-bad");
     assert!(store.get_session(session_id).is_err());
+}
+
+#[test]
+fn native_task_json_metadata_only_task_rejects_no_real_message() {
+    let temp = tempdir();
+    let task = temp.path().join("cline-data/tasks/cline-metadata-only");
+    fs::create_dir_all(&task).unwrap();
+    fs::write(
+        task.join("task_metadata.json"),
+        json!({
+            "taskId": "cline-metadata-only",
+            "createdAt": "2026-06-30T12:00:00Z",
+            "task": "metadata only should not import"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let summary = import_cline_task_json_history(
+        temp.path().join("cline-data"),
+        &mut store,
+        ClineTaskJsonImportOptions {
+            allow_partial_failures: true,
+            ..ClineTaskJsonImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 1, "{:?}", summary.failures);
+    assert_eq!(summary.imported_sessions, 0);
+    assert_eq!(summary.imported_events, 0);
+    assert!(summary.failures[0]
+        .error
+        .contains("no real conversation message"));
+    assert!(store.list_sessions().unwrap().is_empty());
+}
+
+#[test]
+fn native_roo_non_array_message_history_rejects_no_real_message() {
+    let temp = tempdir();
+    let task = temp.path().join("roo-storage/tasks/roo-non-array");
+    fs::create_dir_all(&task).unwrap();
+    fs::write(
+        task.join("api_conversation_history.json"),
+        json!({
+            "messages": {
+                "role": "user",
+                "content": "roo non-array history should not import"
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let summary = import_roo_task_json_history(
+        temp.path().join("roo-storage"),
+        &mut store,
+        RooTaskJsonImportOptions {
+            allow_partial_failures: true,
+            ..RooTaskJsonImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 1, "{:?}", summary.failures);
+    assert_eq!(summary.imported_sessions, 0);
+    assert_eq!(summary.imported_events, 0);
+    assert!(summary.failures[0]
+        .error
+        .contains("no real conversation message"));
+    assert!(store
+        .search_event_hits("roo non-array history should not import", 10)
+        .unwrap()
+        .is_empty());
+    assert!(store.list_sessions().unwrap().is_empty());
 }
 
 #[test]
@@ -745,6 +1555,289 @@ fn native_codebuddy_empty_messages_rejects_no_real_message() {
 }
 
 #[test]
+fn native_codebuddy_non_array_messages_rejects_orphan_message_file() {
+    let temp = tempdir();
+    let session_dir = temp.path().join("codebuddy/project/session-non-array");
+    fs::create_dir_all(session_dir.join("messages")).unwrap();
+    fs::write(
+        session_dir.join("index.json"),
+        json!({"messages": {"id": "message-1", "role": "user"}}).to_string(),
+    )
+    .unwrap();
+    fs::write(
+        session_dir.join("messages/message-1.json"),
+        json!({"content": "codebuddy orphan message should not import"}).to_string(),
+    )
+    .unwrap();
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let summary = import_codebuddy_history(
+        temp.path().join("codebuddy/project"),
+        &mut store,
+        CodeBuddyImportOptions {
+            allow_partial_failures: true,
+            ..CodeBuddyImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 1, "{:?}", summary.failures);
+    assert_eq!(summary.imported_sessions, 0);
+    assert_eq!(summary.imported_events, 0);
+    assert!(summary.failures[0]
+        .error
+        .contains("no real conversation messages"));
+    assert!(store
+        .search_event_hits("codebuddy orphan message should not import", 10)
+        .unwrap()
+        .is_empty());
+    assert!(store.list_sessions().unwrap().is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn native_codebuddy_symlinked_messages_dir_is_not_imported() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempdir();
+    let project = temp.path().join("codebuddy/project");
+    let session_dir = project.join("session-linked");
+    let real_messages = temp.path().join("real-messages");
+    fs::create_dir_all(&session_dir).unwrap();
+    fs::create_dir_all(&real_messages).unwrap();
+    fs::write(
+        session_dir.join("index.json"),
+        json!({"messages": [{"id": "message-1", "role": "user"}]}).to_string(),
+    )
+    .unwrap();
+    fs::write(
+        real_messages.join("message-1.json"),
+        json!({"content": "symlinked CodeBuddy content must not import"}).to_string(),
+    )
+    .unwrap();
+    symlink(&real_messages, session_dir.join("messages")).unwrap();
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let err = import_codebuddy_history(
+        &project,
+        &mut store,
+        CodeBuddyImportOptions {
+            allow_partial_failures: true,
+            ..CodeBuddyImportOptions::default()
+        },
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CaptureError::InvalidProviderTranscriptPath { path, reason }
+            if path.ends_with("project")
+                && reason.contains("no CodeBuddy history sessions")
+    ));
+    assert!(store.list_sessions().unwrap().is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn native_codebuddy_symlinked_message_file_is_not_imported() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempdir();
+    let project = temp.path().join("codebuddy/project");
+    let session_dir = project.join("session-linked-message");
+    let messages_dir = session_dir.join("messages");
+    let outside_message = temp.path().join("outside-message.json");
+    fs::create_dir_all(&messages_dir).unwrap();
+    fs::write(
+        session_dir.join("index.json"),
+        json!({"messages": [{"id": "message-1", "role": "user"}]}).to_string(),
+    )
+    .unwrap();
+    fs::write(
+        &outside_message,
+        json!({"content": "symlinked CodeBuddy message file must not import"}).to_string(),
+    )
+    .unwrap();
+    symlink(&outside_message, messages_dir.join("message-1.json")).unwrap();
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let summary = import_codebuddy_history(
+        &project,
+        &mut store,
+        CodeBuddyImportOptions {
+            allow_partial_failures: true,
+            ..CodeBuddyImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 1, "{:?}", summary.failures);
+    assert_eq!(summary.imported_sessions, 0);
+    assert_eq!(summary.imported_events, 0);
+    assert!(summary.failures[0]
+        .error
+        .contains("symlinked provider transcript files are rejected"));
+    assert!(store
+        .search_event_hits("symlinked CodeBuddy message file must not import", 10)
+        .unwrap()
+        .is_empty());
+    assert!(store.list_sessions().unwrap().is_empty());
+}
+
+#[test]
+fn native_openhands_file_events_redact_outputs_cite_source_and_leave_tree_readonly() {
+    let temp = tempdir();
+    let root = temp.path().join("openhands");
+    let conversation = root
+        .join("user-a")
+        .join("v1_conversations")
+        .join("conversation-1");
+    fs::create_dir_all(&conversation).unwrap();
+    let raw_output = "OPENHANDS_RAW_COMMAND_OUTPUT_NEEDLE";
+    let raw_old = "OPENHANDS_RAW_DIFF_OLD_NEEDLE";
+    let raw_new = "OPENHANDS_RAW_DIFF_NEW_NEEDLE";
+    fs::write(
+        conversation.join("0001-message.json"),
+        json!({
+            "id": "openhands-message-1",
+            "timestamp": "2026-07-04T17:00:00Z",
+            "source": "user",
+            "llm_message": {
+                "role": "user",
+                "content": "openhands file event oracle prompt"
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        conversation.join("0002-action.json"),
+        json!({
+            "id": "openhands-action-1",
+            "timestamp": "2026-07-04T17:00:01Z",
+            "source": "agent",
+            "action": {
+                "kind": "FileEditorAction",
+                "command": "write",
+                "path": "src/openhands_policy.py",
+                "diff": format!(
+                    "diff --git a/src/openhands_policy.py b/src/openhands_policy.py\n@@\n- {raw_old}\n+ {raw_new}\n"
+                )
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        conversation.join("0003-output.json"),
+        json!({
+            "id": "openhands-output-1",
+            "timestamp": "2026-07-04T17:00:02Z",
+            "source": "environment",
+            "observation": {
+                "kind": "ExecuteBashObservation",
+                "output": raw_output,
+                "exit_code": 0
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let before_tree = provider_source_snapshot(&root);
+    let source = provider_source_for_path(CaptureProvider::OpenHands, root.clone());
+    assert_eq!(source.source_format, "openhands_file_events");
+    assert_eq!(source.status, ProviderSourceStatus::Available);
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let first = import_openhands_file_events(
+        &root,
+        &mut store,
+        OpenHandsImportOptions {
+            source_path: Some(root.clone()),
+            imported_at: "2026-07-04T17:05:00Z".parse().unwrap(),
+            allow_partial_failures: true,
+            ..OpenHandsImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(provider_source_snapshot(&root), before_tree);
+    assert_eq!(first.failed, 0, "{:?}", first.failures);
+    assert_eq!(first.imported_sessions, 1);
+    assert_eq!(first.imported_events, 3);
+    let session_id =
+        stored_provider_session_id(&store, CaptureProvider::OpenHands, "conversation-1");
+    let events = store.events_for_session(session_id).unwrap();
+    assert_eq!(events.len(), 3);
+    let action = events
+        .iter()
+        .find(|event| event.event_type == EventType::ToolCall)
+        .expect("file editor action imported");
+    let rendered_action = serde_json::to_string(action).unwrap();
+    assert!(rendered_action.contains("src/openhands_policy.py"));
+    assert!(!rendered_action.contains(raw_old));
+    assert!(!rendered_action.contains(raw_new));
+    let output = events
+        .iter()
+        .find(|event| event.event_type == EventType::CommandOutput)
+        .expect("successful command output metadata imported");
+    assert_eq!(
+        output.payload["content_retention"]
+            .as_str()
+            .or_else(|| output.payload["body"]["content_retention"].as_str())
+            .or_else(|| output.payload["body"]["body"]["content_retention"].as_str()),
+        Some("metadata_only")
+    );
+    let rendered_output = serde_json::to_string(output).unwrap();
+    assert!(!rendered_output.contains(raw_output));
+    assert!(store
+        .search_event_hits("openhands file event oracle prompt", 10)
+        .unwrap()
+        .iter()
+        .any(|hit| hit.provider == Some(CaptureProvider::OpenHands)));
+    assert!(store.search_event_hits(raw_output, 10).unwrap().is_empty());
+    assert!(store.search_event_hits(raw_old, 10).unwrap().is_empty());
+    assert!(store.search_event_hits(raw_new, 10).unwrap().is_empty());
+    assert!(store
+        .export_archive()
+        .unwrap()
+        .files_touched
+        .iter()
+        .any(|file| {
+            file.sync.metadata["provider"].as_str() == Some(CaptureProvider::OpenHands.as_str())
+                && file.path == "src/openhands_policy.py"
+                && file.confidence == Confidence::High
+        }));
+    let source = store
+        .capture_source_by_external_session(CaptureProvider::OpenHands, "conversation-1")
+        .unwrap()
+        .unwrap();
+    assert!(source
+        .descriptor
+        .raw_source_path
+        .as_deref()
+        .unwrap()
+        .ends_with("v1_conversations/conversation-1"));
+
+    let second = import_openhands_file_events(
+        &root,
+        &mut store,
+        OpenHandsImportOptions {
+            source_path: Some(root.clone()),
+            imported_at: "2026-07-04T17:06:00Z".parse().unwrap(),
+            allow_partial_failures: true,
+            ..OpenHandsImportOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(second.failed, 0, "{:?}", second.failures);
+    assert_eq!(second.imported_sessions, 0);
+    assert_eq!(second.imported_events, 0);
+    assert_eq!(second.skipped_sessions, 1);
+    assert_eq!(second.skipped_events, 3);
+}
+
+#[test]
 fn native_openclaw_empty_session_jsonl_rejects_no_real_message() {
     let temp = tempdir();
     let root = temp.path().join("openclaw/sessions");
@@ -806,6 +1899,78 @@ fn native_openclaw_contentless_message_does_not_fabricate_search_text() {
         .unwrap()
         .is_empty());
     assert!(store.list_sessions().unwrap().is_empty());
+}
+
+#[test]
+fn native_openclaw_tool_output_is_metadata_only_and_not_searchable() {
+    let temp = tempdir();
+    let root = temp.path().join("openclaw/sessions");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        root.join("openclaw-tool-output.jsonl"),
+        [
+            json!({
+                "type": "session",
+                "id": "openclaw-tool-output",
+                "timestamp": "2026-07-04T12:00:00Z",
+                "cwd": "/workspace/openclaw"
+            })
+            .to_string(),
+            json!({
+                "type": "message",
+                "id": "openclaw-tool-user",
+                "timestamp": "2026-07-04T12:00:01Z",
+                "message": {
+                    "role": "user",
+                    "content": "openclaw tool output policy oracle"
+                }
+            })
+            .to_string(),
+            json!({
+                "type": "message",
+                "id": "openclaw-tool-result",
+                "timestamp": "2026-07-04T12:00:02Z",
+                "message": {
+                    "role": "tool",
+                    "content": "OPENCLAW_RAW_TOOL_OUTPUT_SHOULD_NOT_SEARCH"
+                }
+            })
+            .to_string(),
+        ]
+        .join("\n")
+            + "\n",
+    )
+    .unwrap();
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let summary = import_openclaw_history(
+        temp.path().join("openclaw"),
+        &mut store,
+        OpenClawImportOptions {
+            allow_partial_failures: true,
+            ..OpenClawImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+    assert_eq!(summary.imported_sessions, 1);
+    assert_eq!(summary.imported_events, 2);
+    let session_id =
+        stored_provider_session_id(&store, CaptureProvider::OpenClaw, "openclaw-tool-output");
+    let events = store.events_for_session(session_id).unwrap();
+    assert_event_type_count(&events, EventType::ToolOutput, 1);
+    assert_event_with_role(&events, EventType::ToolOutput, EventRole::Tool);
+    assert_events_have_provider_citations(&events);
+    assert_search_hits_provider(
+        &store,
+        "openclaw tool output policy oracle",
+        CaptureProvider::OpenClaw,
+    );
+    assert_search_misses(&store, "OPENCLAW_RAW_TOOL_OUTPUT_SHOULD_NOT_SEARCH");
+    assert!(!serde_json::to_string(&events)
+        .unwrap()
+        .contains("OPENCLAW_RAW_TOOL_OUTPUT_SHOULD_NOT_SEARCH"));
 }
 
 #[test]
@@ -1089,13 +2254,232 @@ fn native_auggie_fixture_imports_searches_and_reimports() {
 }
 
 #[test]
+fn native_auggie_tool_only_nodes_reject_no_real_message() {
+    let temp = tempdir();
+    let root = temp.path().join("auggie/sessions");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        root.join("auggie-tool-only.json"),
+        json!({
+            "sessionId": "auggie-tool-only",
+            "created": "2026-07-04T20:00:00Z",
+            "chatHistory": [
+                {
+                    "exchange": {
+                        "request_id": "req-tool-only",
+                        "request_nodes": [
+                            {
+                                "type": "tool_call",
+                                "name": "read_file",
+                                "args": {
+                                    "path": "src/auggie_tool_only.rs"
+                                }
+                            }
+                        ],
+                        "response_nodes": [
+                            {
+                                "type": "tool_result",
+                                "content": "AUGGIE_RAW_TOOL_OUTPUT_NEEDLE"
+                            },
+                            {
+                                "type": "tool_result",
+                                "text_node": {
+                                    "content": "AUGGIE_RAW_TEXT_NODE_TOOL_OUTPUT_NEEDLE"
+                                }
+                            }
+                        ]
+                    },
+                    "finishedAt": "2026-07-04T20:00:01Z"
+                }
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let summary = import_auggie_history(
+        &root,
+        &mut store,
+        AuggieImportOptions {
+            source_path: Some(root.clone()),
+            allow_partial_failures: true,
+            imported_at: "2026-07-04T20:05:00Z".parse().unwrap(),
+            ..AuggieImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 1, "{:?}", summary.failures);
+    assert_eq!(summary.imported_sessions, 0);
+    assert_eq!(summary.imported_events, 0);
+    assert!(summary.failures[0]
+        .error
+        .contains("no real conversation message"));
+    assert!(store.search_event_hits("read_file", 10).unwrap().is_empty());
+    assert!(store
+        .search_event_hits("AUGGIE_RAW_TOOL_OUTPUT_NEEDLE", 10)
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .search_event_hits("AUGGIE_RAW_TEXT_NODE_TOOL_OUTPUT_NEEDLE", 10)
+        .unwrap()
+        .is_empty());
+    assert!(store.list_sessions().unwrap().is_empty());
+}
+
+#[test]
+fn native_auggie_mixed_tool_nodes_do_not_store_raw_tool_output() {
+    let temp = tempdir();
+    let root = temp.path().join("auggie/sessions");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        root.join("auggie-mixed-tool.json"),
+        json!({
+            "sessionId": "auggie-mixed-tool",
+            "created": "2026-07-04T20:10:00Z",
+            "chatHistory": [
+                {
+                    "exchange": {
+                        "request_id": "req-mixed-tool",
+                        "request_message": "Auggie mixed request oracle",
+                        "response_nodes": [
+                            {
+                                "text_node": {
+                                    "content": "Auggie mixed response oracle"
+                                }
+                            },
+                            {
+                                "type": "tool_result",
+                                "content": "AUGGIE_MIXED_RAW_TOOL_OUTPUT_NEEDLE"
+                            }
+                        ]
+                    },
+                    "finishedAt": "2026-07-04T20:10:01Z"
+                }
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let summary = import_auggie_history(
+        &root,
+        &mut store,
+        AuggieImportOptions {
+            source_path: Some(root.clone()),
+            allow_partial_failures: true,
+            imported_at: "2026-07-04T20:15:00Z".parse().unwrap(),
+            ..AuggieImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+    assert_eq!(summary.imported_sessions, 1);
+    assert_eq!(summary.imported_events, 2);
+    let session_id =
+        stored_provider_session_id(&store, CaptureProvider::Auggie, "auggie-mixed-tool");
+    let events = store.events_for_session(session_id).unwrap();
+    let rendered = serde_json::to_string(&events).unwrap();
+    assert!(rendered.contains("Auggie mixed request oracle"));
+    assert!(rendered.contains("Auggie mixed response oracle"));
+    assert!(rendered.contains("tool_node_count"));
+    assert!(!rendered.contains("AUGGIE_MIXED_RAW_TOOL_OUTPUT_NEEDLE"));
+    assert!(store
+        .search_event_hits("AUGGIE_MIXED_RAW_TOOL_OUTPUT_NEEDLE", 10)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn native_rovodev_non_array_message_history_rejects_no_real_message() {
+    let temp = tempdir();
+    let session_dir = temp.path().join("rovodev/sessions/rovodev-non-array");
+    fs::create_dir_all(&session_dir).unwrap();
+    fs::write(
+        session_dir.join("session_context.json"),
+        json!({
+            "session_id": "rovodev-non-array",
+            "message_history": {
+                "role": "user",
+                "content": "rovodev non-array history should not import"
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let summary = import_rovodev_history(
+        temp.path().join("rovodev/sessions"),
+        &mut store,
+        RovoDevImportOptions {
+            source_path: Some(temp.path().join("rovodev/sessions")),
+            allow_partial_failures: true,
+            imported_at: "2026-07-04T20:10:00Z".parse().unwrap(),
+            ..RovoDevImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 1, "{:?}", summary.failures);
+    assert_eq!(summary.imported_sessions, 0);
+    assert_eq!(summary.imported_events, 0);
+    assert!(summary.failures[0]
+        .error
+        .contains("missing message_history array"));
+    assert!(store
+        .search_event_hits("rovodev non-array history should not import", 10)
+        .unwrap()
+        .is_empty());
+    assert!(store.list_sessions().unwrap().is_empty());
+}
+
+#[test]
 fn native_firebender_fixture_imports_project_root_db_and_reimports() {
     let temp = tempdir();
-    let project_root = provider_history_fixture("firebender/v1");
+    let source_project = provider_history_fixture("firebender/v1");
+    let project_root = temp.path().join("firebender-project");
     let fixture = project_root
         .join(".idea")
         .join("firebender")
         .join("chat_history.db");
+    fs::create_dir_all(fixture.parent().unwrap()).unwrap();
+    fs::copy(
+        source_project
+            .join(".idea")
+            .join("firebender")
+            .join("chat_history.db"),
+        &fixture,
+    )
+    .unwrap();
+    {
+        let conn = rusqlite::Connection::open(&fixture).unwrap();
+        let messages_json: String = conn
+            .query_row(
+                "select messages_json from chat_sessions where id = 'firebender-fixture-session'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut messages: Vec<Value> = serde_json::from_str(&messages_json).unwrap();
+        messages.push(json!({
+            "id": "firebender-tool-result",
+            "role": "tool",
+            "tool_call_id": "call-firebender-1",
+            "content": {
+                "type": "text",
+                "text": "FIREBENDER_RAW_TOOL_OUTPUT_SHOULD_NOT_SEARCH"
+            }
+        }));
+        conn.execute(
+            "update chat_sessions set messages_json = ?1 where id = 'firebender-fixture-session'",
+            [serde_json::to_string(&messages).unwrap()],
+        )
+        .unwrap();
+    }
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
 
     let root_source = provider_source_for_path(CaptureProvider::Firebender, project_root.clone());
@@ -1122,31 +2506,34 @@ fn native_firebender_fixture_imports_project_root_db_and_reimports() {
 
     assert_eq!(first.failed, 0, "{:?}", first.failures);
     assert_eq!(first.imported_sessions, 1);
-    assert_eq!(first.imported_events, 3);
+    assert_eq!(first.imported_events, 4);
     let session_id = stored_provider_session_id(
         &store,
         CaptureProvider::Firebender,
         "firebender-fixture-session",
     );
     let events = store.events_for_session(session_id).unwrap();
-    assert_eq!(events.len(), 3);
+    assert_eq!(events.len(), 4);
     assert!(events
         .iter()
         .any(|event| event.role == Some(EventRole::User)));
     assert!(events
         .iter()
         .any(|event| event.role == Some(EventRole::Assistant)));
-    assert!(events
-        .iter()
-        .any(|event| event.event_type == EventType::ToolCall));
+    assert_event_type_count(&events, EventType::ToolCall, 1);
+    assert_event_type_count(&events, EventType::ToolOutput, 1);
+    assert_event_with_role(&events, EventType::ToolOutput, EventRole::Tool);
+    assert_events_have_provider_citations(&events);
     let rendered = serde_json::to_string(&events).unwrap();
     assert!(rendered.contains("firebender fixture oracle prompt"));
     assert!(rendered.contains("Firebender fixture oracle response"));
+    assert!(!rendered.contains("FIREBENDER_RAW_TOOL_OUTPUT_SHOULD_NOT_SEARCH"));
     assert!(store
         .search_event_hits("firebender fixture oracle", 10)
         .unwrap()
         .iter()
         .any(|hit| hit.provider == Some(CaptureProvider::Firebender)));
+    assert_search_misses(&store, "FIREBENDER_RAW_TOOL_OUTPUT_SHOULD_NOT_SEARCH");
 
     let source = store
         .capture_source_by_external_session(
@@ -1174,7 +2561,7 @@ fn native_firebender_fixture_imports_project_root_db_and_reimports() {
     assert_eq!(second.imported_sessions, 0);
     assert_eq!(second.imported_events, 0);
     assert_eq!(second.skipped_sessions, 1);
-    assert_eq!(second.skipped_events, 3);
+    assert_eq!(second.skipped_events, 4);
 }
 #[test]
 fn provider_sources_discovers_auggie_default_sessions() {
