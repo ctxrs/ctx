@@ -117,8 +117,6 @@ const DAEMON_SEMANTIC_BOOTSTRAP_PASSES_BEFORE_REFRESH: usize = 1;
 const DAEMON_LOCK_STALE_AFTER_MS: i64 = 25 * 60 * 60 * 1_000;
 const DAEMON_SEMANTIC_RESERVE_GRACE_SECS: u64 = 10;
 const DAEMON_MIN_REMAINING_FOR_JOB_SECS: u64 = 2;
-const SEMANTIC_HYBRID_MIN_EMBEDDED_ITEMS: usize = 1_000;
-const SEMANTIC_HYBRID_MIN_COVERAGE_RATIO: f64 = 0.01;
 
 #[derive(Debug, Clone)]
 pub(crate) struct SemanticWorkerReport {
@@ -529,10 +527,17 @@ fn semantic_or_hybrid_search_packet(
                 return lexical_search_packet();
             }
 
+            if effective_backend == SearchBackendArg::Semantic && worker_report.running {
+                return Err(anyhow!(
+                    "semantic worker is currently indexing; semantic-only search will not initialize a query embedding model while background indexing is active; retry when indexing is idle or use --backend hybrid"
+                ));
+            }
+
             if effective_backend == SearchBackendArg::Hybrid
                 && !semantic_hybrid_coverage_ready(
                     worker_report.embedded_items,
                     worker_report.searchable_items,
+                    worker_report.dirty_items,
                 )
             {
                 retrieval.effective_mode = SearchBackendArg::Lexical;
@@ -541,13 +546,15 @@ fn semantic_or_hybrid_search_packet(
                 retrieval.set_semantic_fallback(
                     "semantic_coverage_not_ready",
                     format!(
-                        "semantic coverage is too low for hybrid ranking ({}/{} events embedded)",
-                        worker_report.embedded_items, worker_report.searchable_items
+                        "semantic coverage is incomplete or dirty for hybrid ranking ({}/{} items embedded, {} dirty)",
+                        worker_report.embedded_items,
+                        worker_report.searchable_items,
+                        worker_report.dirty_items
                     ),
                 );
                 warn_if(
                     emit_warnings,
-                    "warning: semantic coverage is too low for hybrid ranking; falling back to lexical search",
+                    "warning: semantic coverage is incomplete or dirty for hybrid ranking; falling back to lexical search",
                 );
                 return lexical_search_packet();
             }

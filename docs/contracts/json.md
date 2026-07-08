@@ -41,7 +41,7 @@ sources. It includes `sources`, `units`, `source_files`, `source_bytes`,
 `catalog` and `catalog_sources` blocks are retained for Codex session catalog
 consumers.
 
-Non-JSON `ctx setup` may opportunistically start a short one-pass local daemon
+Non-JSON `ctx setup` may opportunistically start the ctx-owned background daemon
 maintenance profile after foreground setup work when `[daemon].enabled` is true.
 `ctx setup --no-daemon`, `ctx setup --catalog-only`, and any `ctx setup --json`
 run do not autostart daemon maintenance. The daemon, when started, reports
@@ -215,8 +215,8 @@ and failed counts. `resume_mode` is currently `idempotent_rescan` when
 `--resume` is passed and `normal_scan` otherwise.
 
 Non-JSON native imports that target discovered/default provider sources may
-opportunistically start a short one-pass local daemon maintenance profile after
-foreground import work when `[daemon].enabled` is true. `ctx import --no-daemon`, custom JSONL
+opportunistically start the ctx-owned background daemon maintenance profile
+after foreground import work when `[daemon].enabled` is true. `ctx import --no-daemon`, custom JSONL
 imports, explicit history-source-only imports, and any `ctx import --json` run
 do not autostart daemon maintenance. The daemon, when started, reports
 `start_mode: "auto"` and `trigger_command: "import"` through status surfaces.
@@ -403,7 +403,8 @@ Search JSON is local/private by default.
 - `unavailable`, the semantic sidecar is missing, empty, unreadable, or otherwise
   not usable for the request;
 - `partial`, some but not all searchable items have embeddings;
-- `ready`, sidecar coverage is complete for the current searchable item count.
+- `ready`, sidecar coverage is complete for the current searchable item count
+  and dirty work is drained.
 
 `retrieval.semantic_fallback_code`, when present, is the stable machine-readable
 reason why the requested semantic/hybrid path degraded to lexical.

@@ -225,15 +225,15 @@ fn semantic_filters_require_lexical_fallback(filters: &ctx_history_search::Searc
             .is_some_and(|value| !value.trim().is_empty())
 }
 
-fn semantic_hybrid_coverage_ready(embedded_items: usize, searchable_items: usize) -> bool {
-    if embedded_items == 0 {
-        return false;
-    }
+fn semantic_hybrid_coverage_ready(
+    embedded_items: usize,
+    searchable_items: usize,
+    dirty_items: usize,
+) -> bool {
     if searchable_items == 0 {
         return true;
     }
-    embedded_items >= SEMANTIC_HYBRID_MIN_EMBEDDED_ITEMS
-        || (embedded_items as f64 / searchable_items as f64) >= SEMANTIC_HYBRID_MIN_COVERAGE_RATIO
+    embedded_items >= searchable_items && dirty_items == 0
 }
 
 fn semantic_status_needs_exact_sidecar_stats(
@@ -245,7 +245,7 @@ fn semantic_status_needs_exact_sidecar_stats(
         return false;
     }
     stats.embedded_items >= searchable_items
-        || !semantic_hybrid_coverage_ready(stats.embedded_items, searchable_items)
+        || !semantic_hybrid_coverage_ready(stats.embedded_items, searchable_items, dirty_items)
 }
 
 fn semantic_hits_for_text_query(

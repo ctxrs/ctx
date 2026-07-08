@@ -24,8 +24,8 @@ to manage `PATH` yourself.
 The install script installs `ctx`, runs the bundled agent-history skill
 installer, and runs `ctx setup` so discovered local history is indexed before it
 exits. When the default daemon config is enabled, that setup run can also start
-an opportunistic short one-pass local maintenance profile for native-history
-freshness and semantic status. The skill installer opens an agent picker when interactive;
+the ctx-owned background daemon for native-history freshness and semantic
+catch-up. The skill installer opens an agent picker when interactive;
 otherwise it installs the universal `~/.agents/skills` copy plus detected
 agent-specific folders for tools that need them. Use `sh -s -- --no-setup` on
 Unix, or set `CTX_INSTALL_NO_SETUP=1` on Windows, for install-only CI or
@@ -60,10 +60,9 @@ Setup creates the configured ctx data root, initializes SQLite, writes
 local history sources, imports discovered native provider sources, optimizes
 the local search index, and prints next steps. It does not execute
 history-source plugin commands. The default data root is `~/.ctx`. The daemon
-is enabled by default;
-when enabled, setup may start a short one-pass ctx-owned maintenance profile
-after its foreground indexing work. Use `ctx setup --no-daemon` for a one-run
-opt-out, or disable it with `ctx daemon disable` when you want only explicit
+is enabled by default; when enabled, setup may start the ctx-owned background
+daemon after its foreground indexing work. Use `ctx setup --no-daemon` for a
+one-run opt-out, or disable it with `ctx daemon disable` when you want only explicit
 foreground maintenance. `ctx setup --catalog-only` and `ctx setup --json` do
 not autostart daemon maintenance.
 
@@ -117,8 +116,8 @@ native cursor-resume API. Imports are source-atomic by default; use `--partial`
 only when you want valid rows from a malformed source to commit while row
 failures are reported.
 
-When daemon maintenance is enabled, `ctx import` can start the same
-opportunistic short one-pass local maintenance profile after the foreground import finishes.
+When daemon maintenance is enabled, `ctx import` can start the same ctx-owned
+background daemon profile after the foreground import finishes.
 The daemon refreshes native history within local budgets and performs semantic
 catch-up only when the required local model cache already exists; it does not
 download models. Use `ctx import --no-daemon` for a one-run opt-out. JSON import
@@ -160,9 +159,12 @@ session or its subagent work is the history you want to search. Use
 index.
 
 Semantic and hybrid search read existing local sidecar coverage. Search never
-starts the daemon, runs semantic catch-up, or downloads embedding models. If the
-local model cache is missing, hybrid falls back to lexical search and explicit
-semantic search reports a local error.
+starts the daemon, runs semantic catch-up, or downloads embedding models.
+Hybrid uses semantic evidence only after coverage is complete and dirty work is
+drained; until then it falls back to lexical search with a structured reason.
+Explicit semantic search can query partial coverage for diagnostics, but reports
+a local error when the model cache is missing or the semantic worker is actively
+indexing.
 
 ## 6. Use JSON For Scripts
 

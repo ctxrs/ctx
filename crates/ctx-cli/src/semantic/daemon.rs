@@ -7,7 +7,6 @@ struct DaemonIteration {
 #[derive(Default)]
 struct DaemonRuntime {
     semantic_embedder: Option<SemanticEmbedder>,
-    recent_semantic_work_enqueued: bool,
     semantic_bootstrap_passes_since_refresh: usize,
 }
 
@@ -172,6 +171,13 @@ fn print_daemon_status_human(daemon: &Value) {
 }
 
 fn run_daemon(args: DaemonRunArgs, data_root: PathBuf, config: &AppConfig) -> Result<()> {
+    if (args.start_mode.is_some() || args.trigger_command.is_some())
+        && !semantic_env_flag(DAEMON_BACKGROUND_CHILD_ENV)
+    {
+        return Err(anyhow!(
+            "daemon autostart metadata flags are internal; run `ctx daemon run` without --start-mode or --trigger-command"
+        ));
+    }
     lower_semantic_worker_priority();
     let report = match run_daemon_inner(args.clone(), &data_root, config.daemon.enabled) {
         Ok(report) => report,
@@ -347,10 +353,7 @@ fn semantic_bootstrap_should_run_first(
         return Ok(false);
     }
     let store = open_existing_store_read_only(&db_path, "ctx daemon semantic bootstrap")?;
-    if !runtime.recent_semantic_work_enqueued {
-        let _ = queue_recent_semantic_work(data_root, &store, "daemon_recent");
-        runtime.recent_semantic_work_enqueued = true;
-    }
+    let _ = queue_recent_semantic_work(data_root, &store, "daemon_recent");
     let report = semantic_worker_report(data_root, Some(&store))?;
     Ok(report.searchable_items > 0
         && report.queued_items_estimate > 0
@@ -543,10 +546,7 @@ fn run_daemon_semantic_job(
     }
 
     let store = open_existing_store_read_only(&db_path, "ctx daemon semantic job")?;
-    if !runtime.recent_semantic_work_enqueued {
-        let _ = queue_recent_semantic_work(data_root, &store, "daemon_recent");
-        runtime.recent_semantic_work_enqueued = true;
-    }
+    let _ = queue_recent_semantic_work(data_root, &store, "daemon_recent");
     let before = semantic_worker_report(data_root, Some(&store))?;
     if before.searchable_items == 0 {
         return Ok(daemon_semantic_job_json(

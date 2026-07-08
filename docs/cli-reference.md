@@ -45,9 +45,8 @@ ctx daemon enable
   inventories local history sources, imports discovered native provider sources,
   optimizes the local search index, and prints next steps. It does not execute
   history-source plugin commands. When `[daemon].enabled` is true, setup may
-  opportunistically start a short one-pass ctx-owned maintenance run after
-  foreground setup work completes. Use `setup --no-daemon` for a one-run
-  opt-out.
+  opportunistically start the ctx-owned background daemon after foreground setup
+  work completes. Use `setup --no-daemon` for a one-run opt-out.
 - `setup --catalog-only` stops after source discovery and inventory. The flag
   name is kept for compatibility; it is useful for fast troubleshooting, but it
   does not make history searchable and does not autostart daemon maintenance.
@@ -438,12 +437,13 @@ Filters:
 - `--term <query-or-keyword>`, repeatable broadening terms merged with OR-style semantics;
 - `--events`, for dense event-level results instead of the default session-diverse results;
 - `--backend hybrid|semantic|lexical`, where `hybrid` blends lexical and
-  semantic evidence when existing sidecar coverage is ready enough, and falls
-  back to lexical with a structured fallback reason when semantic prerequisites
-  are missing. Explicit `semantic` reports a local error instead of downloading
-  a model during search when the cache is missing, when filters/terms cannot be
+  semantic evidence only when existing sidecar coverage is complete and dirty
+  work is drained, and falls back to lexical with a structured fallback reason
+  when semantic prerequisites are missing. Explicit `semantic` reports a local
+  error instead of downloading a model during search when the cache is missing,
+  when the semantic worker is actively indexing, when filters/terms cannot be
   honored, or when the installed build target does not include a compatible
-  local embedding backend;
+  local embedding/vector backend for the requested sidecar;
 - `--semantic-weight <0.0-1.0>`, for hybrid ranking;
 - `--include-subagents`;
 - `--limit <n>`, capped at `200`;
@@ -463,10 +463,9 @@ plugin catch-up. Foreground refresh may write newly discovered provider or
 plugin history into the local `work.sqlite` index before querying. Semantic retrieval reads the
 `vectors.sqlite` sidecar when it already exists; search itself does not start
 semantic indexing, start a daemon, download models, or write semantic worker
-status. Setup/import can opportunistically start a short one-pass ctx-owned
-daemon profile when `[daemon].enabled` is true. Use `ctx daemon run` for explicit
-foreground local native history refresh and semantic catch-up. JSON status
-includes a top-level `semantic` object with worker
+status. Setup/import can opportunistically start the ctx-owned background daemon
+when `[daemon].enabled` is true. Use `ctx daemon run` for explicit foreground
+local native history refresh and semantic catch-up. JSON status includes a top-level `semantic` object with worker
 `status`, `running`, `pid`, heartbeat/error timestamps, `indexed_chunks`, and a
 `coverage` object with `searchable_items`, `embedded_items`, `embedded_chunks`,
 `dirty_items`, `queued_items_estimate`, and `coverage_ratio`, plus the private

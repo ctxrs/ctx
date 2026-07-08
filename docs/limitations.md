@@ -25,8 +25,9 @@ shipped.
 
 - Imports are explicit unless non-JSON `ctx setup`, native-provider
   `ctx import`, or `ctx daemon run` starts ctx-owned local daemon maintenance.
-  Setup/import autostart uses a short one-pass profile; explicit
-  `ctx daemon run` keeps the normal bounded daemon defaults. Use
+  Setup/import autostart uses the normal background daemon profile and exits
+  after it becomes idle; explicit `ctx daemon run` runs the same coordinator in
+  the foreground. Use
   `ctx setup --no-daemon` or `ctx import --no-daemon` for a one-run autostart
   opt-out. Semantic catch-up runs only when the required local model cache
   already exists.

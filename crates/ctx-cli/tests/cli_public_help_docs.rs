@@ -417,6 +417,21 @@ fn daemon_run_rejects_public_runtime_cap() {
 }
 
 #[test]
+fn daemon_run_rejects_internal_autostart_metadata_flags() {
+    let temp = tempdir();
+    for args in [
+        ["daemon", "run", "--start-mode", "auto"],
+        ["daemon", "run", "--trigger-command", "setup"],
+    ] {
+        let stderr = failure_stderr(ctx(&temp).args(args));
+        assert!(
+            stderr.contains("daemon autostart metadata flags are internal"),
+            "daemon run must reject internal metadata flags; stderr:\n{stderr}"
+        );
+    }
+}
+
+#[test]
 fn docs_commands_expose_embedded_docs_and_man_pages() {
     let temp = tempdir();
 

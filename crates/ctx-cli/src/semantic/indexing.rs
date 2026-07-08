@@ -268,6 +268,24 @@ fn semantic_source_text(text: &str) -> String {
     text.chars().take(SEMANTIC_SOURCE_MAX_CHARS).collect()
 }
 
+fn semantic_rust_full_scan_chunk_limit() -> usize {
+    let bytes_per_vector = SEMANTIC_DIMENSIONS.saturating_mul(std::mem::size_of::<f32>());
+    let byte_limited_chunks = if bytes_per_vector == 0 {
+        SEMANTIC_FULL_SCAN_MAX_CHUNKS
+    } else {
+        SEMANTIC_FULL_SCAN_MAX_VECTOR_BYTES / bytes_per_vector
+    };
+    SEMANTIC_FULL_SCAN_MAX_CHUNKS.min(byte_limited_chunks)
+}
+
+fn semantic_full_corpus_vector_scan_ready(vector_store: &SemanticVectorStore) -> Result<bool> {
+    if vector_store.sqlite_vec0_ready().unwrap_or(false) {
+        return Ok(true);
+    }
+    let stats = vector_store.cached_or_exact_stats()?;
+    Ok(stats.embedded_chunks <= semantic_rust_full_scan_chunk_limit())
+}
+
 fn semantic_chunks_for_document(
     doc: &EventEmbeddingDocument,
     source_text: &str,
@@ -570,6 +588,14 @@ fn semantic_hits_for_query(
     limit: usize,
     event_filter: Option<&[Uuid]>,
 ) -> Result<SemanticHitSearch> {
+    if event_filter.is_none() && !semantic_full_corpus_vector_scan_ready(vector_store)? {
+        let stats = vector_store.cached_or_exact_stats()?;
+        return Err(anyhow!(
+            "semantic vector backend cannot scan full sidecar locally ({} chunks exceed rust scan cap of {} and sqlite-vec is unavailable)",
+            stats.embedded_chunks,
+            semantic_rust_full_scan_chunk_limit()
+        ));
+    }
     let sqlite_vec0_full_scan_ready =
         event_filter.is_none() && vector_store.sqlite_vec0_ready().unwrap_or(false);
     let vector_limit = if sqlite_vec0_full_scan_ready {

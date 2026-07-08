@@ -11,8 +11,8 @@ product boundary is retrieval, not interpretation.
 ## In Scope
 
 - `ctx setup` initializes local storage, indexes discovered supported local
-  transcript formats, and can opportunistically start a short one-pass ctx-owned
-  local maintenance profile when `[daemon].enabled` is true.
+  transcript formats, and can opportunistically start the ctx-owned background
+  daemon maintenance profile when `[daemon].enabled` is true.
   `ctx setup --no-daemon`,
   `ctx setup --catalog-only`, and `ctx setup --json` do not autostart
   maintenance.
@@ -29,7 +29,9 @@ product boundary is retrieval, not interpretation.
   hits from the local index, with event IDs when a hit maps to an indexed event.
   Semantic and hybrid search read existing local sidecar coverage only; search
   does not start daemon maintenance, run vector backfill, or download embedding
-  models.
+  models. Hybrid uses semantic evidence only after sidecar coverage is complete
+  and dirty work is drained; explicit semantic search may query partial coverage
+  for diagnostics.
 - `ctx show session` and `ctx show event` render transcripts, hits, and context
   windows using ctx-owned IDs, and `ctx show session --out` writes transcript
   artifacts.

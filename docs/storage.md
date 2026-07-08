@@ -100,17 +100,19 @@ analytics marker described under network behavior.
 
 Setup, import, and default search do not require source repository writes, model
 APIs, API keys, remote accounts, or model downloads. Non-JSON setup and native
-provider imports may opportunistically start a short one-pass local daemon
+provider imports may opportunistically start the ctx-owned background daemon
 maintenance profile when `[daemon].enabled` is true; use
 `ctx setup --no-daemon` or `ctx import --no-daemon` for a one-run opt-out.
 `ctx setup --catalog-only`, `ctx setup --json`, and `ctx import --json` do not
 autostart daemon maintenance.
 `ctx search --refresh off` does not refresh providers, run plugins, start
 semantic workers, schedule semantic indexing, or write the main store or
-semantic sidecar. Default `--backend hybrid --refresh off` may read existing
-semantic coverage and otherwise falls back to lexical. Explicit semantic or hybrid searches may initialize an already-cached
-local embedding model to embed the query and read the existing sidecar, but
-they do not download a model or write semantic catch-up work during search.
+semantic sidecar. Default `--backend hybrid --refresh off` uses semantic
+evidence only when sidecar coverage is complete and dirty work is drained, and
+otherwise falls back to lexical. Explicit semantic searches may initialize an
+already-cached local embedding model to embed the query and read partial
+existing sidecar coverage, but they do not download a model or write semantic
+catch-up work during search.
 Explicit imports may best-effort mark recent semantic-eligible items dirty in
 the semantic sidecar when the sidecar already exists; this does not create the
 sidecar, initialize the model, or embed text.
@@ -122,12 +124,12 @@ auto history-source plugin refresh when possible; use `--refresh wait` or
 
 When `ctx daemon run` or setup/import autostart runs the ctx-owned background
 coordinator, it stores private lock/status files under `daemon/` in the ctx data
-root. Setup/import autostart uses a short one-pass profile and reports semantic
-status read-only; explicit `ctx daemon run` keeps the normal bounded daemon
-defaults and may perform semantic catch-up. The current coordinator status
-surface is local-only: bounded native provider-history refresh updates the
-local SQLite index, semantic indexing is bounded by the local model cache, and
-cloud sync reports `disabled` with `enabled: false` and `network_allowed: false`.
+root. Setup/import autostart uses the normal background daemon profile and exits
+after it becomes idle; explicit `ctx daemon run` runs the same coordinator in
+the foreground. The current coordinator status surface is local-only: bounded
+native provider-history refresh updates the local SQLite index, semantic
+indexing is bounded by the local model cache, and cloud sync reports `disabled`
+with `enabled: false` and `network_allowed: false`.
 A looping daemon may keep the
 local embedding model resident between passes and uses the sidecar dirty queue
 to prioritize recent/stale events. Search observes existing daemon/semantic
@@ -156,7 +158,7 @@ binaries with a valid install sidecar. Unmanaged installs do not self-upgrade.
 Set `auto = "off"` or use `ctx upgrade disable` to disable background
 auto-upgrade for the configured data root.
 `daemon.enabled = true` allows non-JSON setup and native provider imports to
-opportunistically start a short one-pass local daemon maintenance profile. Use
+opportunistically start the ctx-owned background daemon maintenance profile. Use
 `ctx setup --no-daemon` or `ctx import --no-daemon` for a one-run opt-out, or
 `ctx daemon disable` to update the config.
 

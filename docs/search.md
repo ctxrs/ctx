@@ -9,9 +9,10 @@ Search itself does not import provider history when `[daemon].enabled` is true,
 start vector backfill, download models, create the semantic sidecar, or start a
 daemon. Use `ctx setup --no-daemon` or `ctx import --no-daemon` to keep a
 foreground command from starting the daemon after it completes.
-The default `hybrid` backend blends lexical and semantic evidence when existing
-sidecar coverage is ready enough, and falls back to lexical with explicit
-retrieval metadata when semantic prerequisites are missing.
+The default `hybrid` backend blends lexical and semantic evidence only when
+existing sidecar coverage is complete and dirty work is drained, and falls back
+to lexical with explicit retrieval metadata when semantic prerequisites are
+missing.
 
 ## Search
 
@@ -139,9 +140,9 @@ require the local embedding model cache to already exist. If the cache is
 missing, hybrid falls back to lexical and explicit semantic search fails with an
 explicit local error instead of initializing or downloading a model during
 search. Explicit `semantic` also fails when filters or repeatable `--term`
-semantics cannot be honored by vector lookup. `hybrid` falls back to lexical in
-those cases and when semantic coverage is too thin to justify foreground query
-embedding. Results still return
+semantics cannot be honored by vector lookup, or when the installed local vector
+backend cannot safely scan the full sidecar. `hybrid` falls back to lexical in
+those cases and when semantic coverage is incomplete or dirty. Results still return
 the normal ctx result shape with concrete indexed local evidence, and default
 search remains session-diverse unless
 `--events` or `--session` asks for dense event results. The displayed semantic
@@ -190,17 +191,19 @@ Use `ctx setup --no-daemon` or `ctx import --no-daemon` for one foreground run
 without autostart, `ctx daemon run` for the same work in the foreground,
 `ctx daemon disable` to prevent automatic starts, and `ctx daemon run --force`
 for explicit troubleshooting while disabled. Catalog-only setup and JSON-output
-setup/import do not autostart daemon maintenance. Setup/import autostart uses a
-short one-pass profile; explicit `ctx daemon run` keeps the normal bounded
-daemon defaults for larger semantic catch-up.
+setup/import do not autostart daemon maintenance. Setup/import autostart runs
+the normal ctx-owned background daemon profile and exits after it becomes idle;
+explicit `ctx daemon run` runs the same coordinator in the foreground.
 
 `ctx search` reads the sidecar coverage that already exists and reports semantic
 coverage and worker state in JSON. Search never starts the daemon, queues vector
 backfill, waits for full semantic coverage, or downloads an embedding model.
-Explicit semantic or hybrid queries can initialize an already-cached local model
-to embed the query and read `vectors.sqlite`; when the cache is missing, hybrid
-falls back to lexical search and explicit semantic search fails with a local
-error.
+`hybrid` uses semantic evidence only after sidecar coverage is complete and the
+dirty queue is empty; otherwise it serves lexical results with a structured
+fallback reason. Explicit `semantic` can query partial sidecar coverage for
+diagnostics and dogfood, but it still requires an already-cached local model and
+fails locally when that cache is missing or the semantic worker is actively
+indexing.
 
 `ctx status` reports whether a worker is running, whether the model cache is
 available, recent heartbeat/error timestamps, counts for searchable, embedded,
@@ -219,9 +222,10 @@ place for semantic and daemon diagnostics when local status needs
 troubleshooting.
 
 Search never starts the daemon or waits for full semantic coverage. Explicit
-semantic or hybrid queries read the sidecar coverage that already exists.
-Default `hybrid` uses semantic evidence when prerequisites are met and otherwise
-serves lexical results with a structured fallback reason.
+semantic queries may read partial sidecar coverage. Default and explicit
+`hybrid` use semantic evidence only when sidecar coverage is complete and dirty
+work is drained, and otherwise serve lexical results with a structured fallback
+reason.
 
 ## History Reports
 

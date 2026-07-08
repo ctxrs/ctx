@@ -727,6 +727,62 @@ fn semantic_embedding_documents_use_user_assistant_lite_turns() {
 }
 
 #[test]
+fn semantic_lite_turn_count_ignores_payloads_without_preview_text() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let session_id = Uuid::parse_str("018f45d0-0000-7000-8000-000000080005").unwrap();
+    insert_session(&store, session_id);
+
+    let mut user_without_preview = session_event(
+        1,
+        session_id,
+        EventType::Message,
+        Some(EventRole::User),
+        "placeholder",
+    );
+    user_without_preview.payload = serde_json::json!({ "opaque": ["not", "previewable"] });
+    let assistant_without_preview = session_event(
+        2,
+        session_id,
+        EventType::Message,
+        Some(EventRole::Assistant),
+        "assistant should not leak through raw JSON fallback",
+    );
+    let valid_user = session_event(
+        3,
+        session_id,
+        EventType::Message,
+        Some(EventRole::User),
+        "Valid semantic user prompt",
+    );
+    let mut opaque_assistant = session_event(
+        4,
+        session_id,
+        EventType::Message,
+        Some(EventRole::Assistant),
+        "placeholder",
+    );
+    opaque_assistant.payload = serde_json::json!({ "opaque": ["assistant", "object"] });
+
+    for event in [
+        &user_without_preview,
+        &assistant_without_preview,
+        &valid_user,
+        &opaque_assistant,
+    ] {
+        store.upsert_event(event).unwrap();
+    }
+
+    assert_eq!(store.count_event_embedding_documents_exact().unwrap(), 1);
+    let docs = store.recent_event_embedding_documents(None, 10).unwrap();
+    assert_eq!(docs.len(), 1);
+    assert_eq!(docs[0].event_id, valid_user.id);
+    assert!(docs[0].text.contains("user:\nValid semantic user prompt"));
+    assert!(!docs[0].text.contains("assistant:\n"));
+    assert!(!docs[0].text.contains("opaque"));
+}
+
+#[test]
 fn semantic_lite_turn_uses_last_assistant_before_next_user() {
     let temp = tempdir();
     let store = Store::open(temp.path().join("work.sqlite")).unwrap();

@@ -2,7 +2,8 @@
 mod tests {
     use super::*;
     use ctx_history_core::{
-        new_id, Event, EventRole, EventType, Fidelity, SyncMetadata, SyncState, Visibility,
+        new_id, AgentType, CaptureProvider, EntityTimestamps, Event, EventRole, EventType,
+        Fidelity, Session, SessionStatus, SyncMetadata, SyncState, Visibility,
     };
 
     fn test_embedding(first: f32, second: f32) -> Vec<f32> {
@@ -58,6 +59,41 @@ mod tests {
             dedupe_key: None,
             sync: test_sync_metadata(),
         }
+    }
+
+    fn insert_test_session(store: &Store, session_id: Uuid) -> Result<()> {
+        let now = utc_now();
+        store.upsert_session(&Session {
+            id: session_id,
+            history_record_id: None,
+            parent_session_id: None,
+            root_session_id: None,
+            capture_source_id: None,
+            provider: CaptureProvider::Codex,
+            external_session_id: Some(format!("session-{session_id}")),
+            external_agent_id: None,
+            agent_type: AgentType::Primary,
+            role_hint: None,
+            is_primary: true,
+            status: SessionStatus::Imported,
+            transcript_blob_id: None,
+            started_at: now,
+            ended_at: None,
+            timestamps: EntityTimestamps {
+                created_at: now,
+                updated_at: now,
+            },
+            sync: test_sync_metadata(),
+        })?;
+        Ok(())
+    }
+
+    fn test_session_message(seq: u64, session_id: Uuid, role: EventRole, text: &str) -> Event {
+        let mut event = test_searchable_event(seq);
+        event.session_id = Some(session_id);
+        event.role = Some(role);
+        event.payload = json!({ "text": text });
+        event
     }
 
     fn write_searchable_store(
@@ -212,6 +248,93 @@ mod tests {
         assert_eq!(report["embed_policy"]["source"], "fixture");
         assert_eq!(report["embed_policy"]["threads"], 7);
         assert_eq!(report["coverage"]["embedded_chunks"], 4);
+        Ok(())
+    }
+
+    #[test]
+    fn hybrid_semantic_readiness_requires_complete_coverage() {
+        assert!(semantic_hybrid_coverage_ready(0, 0, 0));
+        assert!(semantic_hybrid_coverage_ready(10, 10, 0));
+        assert!(semantic_hybrid_coverage_ready(11, 10, 0));
+
+        assert!(!semantic_hybrid_coverage_ready(0, 10, 0));
+        assert!(!semantic_hybrid_coverage_ready(1_000, 100_000, 0));
+        assert!(!semantic_hybrid_coverage_ready(99_999, 100_000, 0));
+        assert!(!semantic_hybrid_coverage_ready(10, 10, 1));
+    }
+
+    #[test]
+    fn daemon_recent_queue_marks_user_anchor_dirty_when_assistant_changes() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let data_root = temp.path();
+        let store = Store::open(database_path(data_root.to_path_buf()))?;
+        let session_id = Uuid::new_v4();
+        insert_test_session(&store, session_id)?;
+        let user = test_session_message(1, session_id, EventRole::User, "semantic anchor prompt");
+        let assistant = test_session_message(
+            2,
+            session_id,
+            EventRole::Assistant,
+            "original assistant answer",
+        );
+        store.upsert_event(&user)?;
+        store.upsert_event(&assistant)?;
+        store.refresh_event_embedding_document_count_cache()?;
+        let docs = store.event_embedding_documents_by_ids(&[user.id])?;
+        let doc = docs.first().expect("user lite-turn document");
+        let source_text = semantic_source_text(&doc.text);
+        let source_hash = semantic_document_hash(doc, &source_text);
+
+        let vector_path = semantic_vector_path(data_root);
+        let mut vector_store = SemanticVectorStore::open(&vector_path)?;
+        vector_store.upsert_chunk_embeddings(&[(
+            test_chunk(user.id, user.seq, &source_hash),
+            test_embedding(1.0, 0.0),
+        )])?;
+        assert_eq!(vector_store.dirty_event_count()?, 0);
+        drop(vector_store);
+
+        let mut updated_assistant = assistant.clone();
+        updated_assistant.payload = json!({ "text": "updated assistant answer" });
+        updated_assistant.occurred_at = utc_now();
+        store.upsert_event(&updated_assistant)?;
+
+        assert_eq!(queue_recent_semantic_work(data_root, &store, "test_recent")?, 1);
+        let vector_store = SemanticVectorStore::open(&vector_path)?;
+        assert_eq!(vector_store.queued_dirty_event_ids(10)?, vec![user.id]);
+        Ok(())
+    }
+
+    #[test]
+    fn semantic_only_search_fails_fast_while_worker_is_running() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let docs = write_searchable_store(temp.path(), 1)?;
+        let doc = docs.first().expect("searchable fixture doc");
+        let source_text = semantic_source_text(&doc.text);
+        let source_hash = semantic_document_hash(doc, &source_text);
+        let mut vector_store = SemanticVectorStore::open(&semantic_vector_path(temp.path()))?;
+        vector_store.upsert_chunk_embeddings(&[(
+            test_chunk(doc.event_id, doc.seq, &source_hash),
+            test_embedding(1.0, 0.0),
+        )])?;
+        drop(vector_store);
+
+        let _lock = SemanticWorkerLock::acquire(temp.path())?
+            .expect("test should acquire semantic worker lock");
+        let store = Store::open(database_path(temp.path().to_path_buf()))?;
+        let err = search_packet_with_backend(
+            &store,
+            temp.path(),
+            "semantic daemon scheduling fixture",
+            &[],
+            &ctx_history_search::PacketOptions::default(),
+            SearchBackendArg::Semantic,
+            1.0,
+            RefreshArg::Off,
+            false,
+        )
+        .expect_err("semantic-only search should fail while worker is running");
+        assert!(format!("{err:#}").contains("semantic worker is currently indexing"));
         Ok(())
     }
 
@@ -463,6 +586,34 @@ mod tests {
         );
         assert_eq!(search.hits.len(), 2);
         assert_eq!(search.hits[0].event_id, close_event);
+        Ok(())
+    }
+
+    #[test]
+    fn rust_full_scan_requires_sidecar_within_cap_without_vec0() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = SemanticVectorStore::open(&temp.path().join("vectors.sqlite"))?;
+        let chunk_limit = semantic_rust_full_scan_chunk_limit();
+        store.conn.execute(
+            r#"
+            INSERT INTO semantic_index_stats
+                (model_key, embedded_items, embedded_chunks, updated_at_ms)
+            VALUES (?1, 1, ?2, 1)
+            "#,
+            params![SEMANTIC_MODEL_KEY, (chunk_limit + 1) as i64],
+        )?;
+
+        assert!(!semantic_full_corpus_vector_scan_ready(&store)?);
+
+        store.conn.execute(
+            r#"
+            UPDATE semantic_index_stats
+            SET embedded_chunks = ?2
+            WHERE model_key = ?1
+            "#,
+            params![SEMANTIC_MODEL_KEY, chunk_limit as i64],
+        )?;
+        assert!(semantic_full_corpus_vector_scan_ready(&store)?);
         Ok(())
     }
 

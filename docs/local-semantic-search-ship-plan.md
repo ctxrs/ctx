@@ -123,6 +123,10 @@ safe to ship by default.
 - New local work is prioritized before historical backfill.
 - Search output always exposes requested/effective backend and semantic fallback
   reason; common unsupported filters should fail clearly or fall back explicitly.
+- Default and explicit `hybrid` use semantic evidence only when semantic
+  sidecar coverage is complete and dirty work is drained; partial coverage is
+  available through explicit `semantic` for diagnostics and dogfood, not default
+  ranking.
 - Local dogfood on this corpus meets:
   - lexical initial refresh: under 5 minutes;
   - semantic initial backfill: acceptable as multi-hour daemon work if it is

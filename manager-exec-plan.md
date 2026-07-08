@@ -14,7 +14,7 @@ Coordinate subagents and verification to harden `codex/semantic-hybrid-search` u
 - Readiness reviewer result: no-ship yet, mainly because the branch is dirty/uncommitted, behind `origin/main`, and the first-class daemon/default background story is not yet a managed default.
 - Contract worker patch is present in the worktree and verified by SDK/contract checks.
 - Latest review agents:
-  - Noether: no-ship until default daemon cannot do expensive cached-model semantic work, default `auto` cannot rescue from tiny partial coverage, and eval/soak gates are stricter.
+  - Noether: no-ship until default daemon cannot do expensive cached-model semantic work, default search cannot rescue from tiny partial coverage, and eval/soak gates are stricter.
   - Zeno: sqlite-vec promising but not default-safe unless derived vec0 tables cannot become active while partial/stale and deletes/prunes maintain vec0.
   - Dalton: setup/import autostart should be history-refresh/status only; semantic catch-up should require explicit `ctx daemon run`.
 
@@ -25,7 +25,7 @@ Coordinate subagents and verification to harden `codex/semantic-hybrid-search` u
   - Initial setup from real `/home/daddy/.codex` indexed 146,755 events / 3,711 sessions before returning, with 28,781 catalog sessions still pending.
   - Store size after setup: about 719 MB before moving out of `/tmp`.
 - Search dogfood on isolated corpus:
-  - `auto`, `lexical`, and `hybrid` with missing semantic model cache were fast, about 0.3-0.6s on representative indexed queries.
+  - default search, `lexical`, and `hybrid` with missing semantic model cache were fast, about 0.3-0.6s on representative indexed queries.
   - `hybrid` fell back to lexical with `semantic_fallback_code=semantic_index_missing`.
   - strict `semantic` failed fast and local-only when model cache/sidecar were unavailable.
 - Bounded daemon dogfood:
@@ -37,7 +37,7 @@ Coordinate subagents and verification to harden `codex/semantic-hybrid-search` u
   - A process-timeout bounded `ctx daemon run --once --max-chunks 5000
     --json` pass completed in 2:05.75 with max RSS about 1.25 GiB.
   - Imported 8,166 events / 124 sessions and embedded 1,610 items / 1,974 chunks before `budget_exhausted`.
-  - Coverage after the pass was about 1.02% of the isolated corpus; explicit hybrid/semantic worked, while default `auto` correctly stayed lexical because candidate coverage was not ready.
+  - Coverage after the pass was about 1.02% of the isolated corpus; explicit hybrid/semantic worked, while the then-current default search path correctly stayed lexical because semantic coverage was not complete.
 
 ## Verification Passed
 
@@ -53,10 +53,10 @@ Coordinate subagents and verification to harden `codex/semantic-hybrid-search` u
 ## Current Gates Before Ship
 
 1. Completed: rebased/replayed branch onto current `origin/main`; new WIP commit is `a01899e8`, with backup ref `backup/semantic-hybrid-before-rebase-20260706`.
-2. Completed: daemon default rollout is now a short one-pass setup/import autostart after successful full `ctx setup` and native `ctx import` when `[daemon].enabled` is true. It skips catalog-only setup, JSON output, disabled config/env, CI, search, and live daemon locks.
+2. Superseded: daemon default rollout initially used a short setup/import autostart profile after successful full `ctx setup` and native `ctx import` when `[daemon].enabled` is true. The current product direction is daemon-owned background indexing until idle, with search kept as a read path.
 3. Completed: daemon lifecycle JSON now reports `start_mode` and `trigger_command`; `doctor --json` includes the daemon block.
-4. Completed: setup/import autostart is semantic-status-only and reports `autostart_semantic_disabled`; it does not create/update `vectors.sqlite` even with a warm local model cache.
-5. Completed: default `auto` only does no-candidate semantic rescue when semantic coverage is fully ready and dirty queue is empty; partial/dirty coverage stays lexical.
+4. Superseded: setup/import autostart was temporarily semantic-status-only. The current default daemon path may perform semantic catch-up when the local model cache exists.
+5. Completed: default search only does no-candidate semantic rescue when semantic coverage is fully ready and dirty queue is empty; partial/dirty coverage stays lexical.
 6. Completed: sqlite-vec vec0 exact search is only active when derived vec0 rows are in parity with canonical BLOB chunks, and prune/delete paths maintain vec0 rows.
 7. In progress: rebase onto latest `origin/main` again before merge because this branch is still behind upstream.
 8. Run longer soak on the hardened default behavior after latest rebase and review.
@@ -92,7 +92,7 @@ Coordinate subagents and verification to harden `codex/semantic-hybrid-search` u
   - Cloud sync `disabled`, `network_allowed: false`.
   - Semantic skipped locally with `model_cache_missing`; no runaway process remained.
 - Full-corpus searches:
-  - Representative auto searches returned in about 0.6-0.7s with refresh enabled.
+  - Representative default searches returned in about 0.6-0.7s with refresh enabled.
   - The then-current default search path imported a tiny live delta after setup
     and correctly stayed lexical while the semantic model cache was missing.
   - Explicit hybrid with no semantic index/model fell back to lexical in 0.75s.
@@ -132,9 +132,8 @@ Coordinate subagents and verification to harden `codex/semantic-hybrid-search` u
 ## Latest Hardening Pass 2026-07-06
 
 - Default daemon/autostart:
-  - Added explicit `daemon_semantic_allowed_for_run`; setup/import autostart returns semantic job `skipped` with reason `autostart_semantic_disabled`.
-  - Autostart no longer reserves time for semantic work, queues dirty semantic work, opens/creates `vectors.sqlite`, or initializes the embedding model.
-  - `queue_recent_semantic_work` is sidecar-existing-only, so imports with a warm model cache do not introduce semantic storage.
+  - Historical note: this pass made setup/import autostart semantic-status-only with `autostart_semantic_disabled`.
+  - Superseded by the current product direction: setup/import autostart runs the normal background daemon profile and may create/update `vectors.sqlite` when the local model cache exists.
 - Default hybrid search:
   - No-candidate semantic rescue now requires `semantic_worker_coverage_ready` (full coverage and `dirty_items == 0`).
   - Candidate rerank remains allowed only when every lexical candidate has vector coverage.
@@ -165,7 +164,7 @@ Coordinate subagents and verification to harden `codex/semantic-hybrid-search` u
 - Rebase this large branch onto current `origin/main` and rerun the full gate set.
 - Run a longer soak with the hardened default behavior, focusing on:
   - setup/import autostart never creating semantic sidecars;
-  - search p50/p95 for default `auto`;
+  - search p50/p95 for default `hybrid`;
   - daemon status transitions and lock recovery;
   - explicit daemon RSS/CPU on a warm model;
   - sqlite-vec parity staying clean across prune/delete/VACUUM.
@@ -266,3 +265,15 @@ Coordinate subagents and verification to harden `codex/semantic-hybrid-search` u
     materially beyond the current 7.6% coverage;
   - 30-50 query golden eval at meaningful semantic coverage;
   - final rebase onto latest `origin/main` and rerun gates.
+
+## Active 2026-07-07 Review Fixes
+
+- Default and explicit `hybrid` now require complete semantic sidecar coverage
+  and `dirty_items == 0`; partial or dirty coverage stays lexical with a
+  structured fallback.
+- Search no longer autostarts daemon maintenance. Setup/import remain the
+  default places where background daemon indexing is kicked off.
+- Lite-turn counts now use the same projection CTE as embedding, and semantic
+  text no longer falls back to serializing arbitrary JSON payloads.
+- The daemon rechecks recent semantic dirty candidates on every semantic pass so
+  assistant-only changes can requeue their user-anchor lite-turn documents.

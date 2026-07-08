@@ -390,6 +390,12 @@ impl Store {
                           AND candidate.visibility != 'withheld'
                           AND candidate.sync_state != 'withheld'
                           AND length(trim(candidate.payload_json)) > 2
+                          AND EXISTS (
+                              SELECT 1
+                              FROM event_search AS candidate_search
+                              WHERE candidate_search.event_id = candidate.id
+                                AND length(trim(candidate_search.preview_text)) > 0
+                          )
                           AND lower(candidate.payload_json) LIKE ? ESCAPE '\'
                           AND (
                                 (anchor.run_id IS NOT NULL AND candidate.run_id = anchor.run_id)
@@ -797,21 +803,18 @@ fn semantic_searchable_item_count_exact(conn: &Connection) -> Result<usize> {
     if !table_exists(conn, "event_search")? {
         return Ok(0);
     }
-    let count = conn.query_row(
+    let sql = format!(
         r#"
+        {}
         SELECT COUNT(*)
-        FROM event_search AS anchor_search
-        JOIN events AS anchor ON anchor.id = anchor_search.event_id
-        WHERE anchor.event_type = 'message'
-          AND anchor.role = 'user'
-          AND anchor.deleted_at_ms IS NULL
-          AND anchor.visibility != 'withheld'
-          AND anchor.sync_state != 'withheld'
-          AND length(trim(anchor_search.preview_text)) > 0
+        FROM semantic_lite_turn_docs
         "#,
-        [],
-        |row| row.get::<_, i64>(0),
-    )?;
+        semantic_lite_turn_cte_sql(&format!(
+            "WHERE {}",
+            semantic_lite_turn_anchor_eligible_predicate()
+        ))
+    );
+    let count = conn.query_row(&sql, [], |row| row.get::<_, i64>(0))?;
     Ok(count.max(0) as usize)
 }
 
@@ -944,6 +947,12 @@ fn semantic_lite_turn_anchor_eligible_predicate() -> &'static str {
     AND anchor.visibility != 'withheld'
     AND anchor.sync_state != 'withheld'
     AND length(trim(anchor.payload_json)) > 2
+    AND EXISTS (
+        SELECT 1
+        FROM event_search AS anchor_search
+        WHERE anchor_search.event_id = anchor.id
+          AND length(trim(anchor_search.preview_text)) > 0
+    )
     "#
 }
 
@@ -1045,6 +1054,12 @@ fn semantic_lite_turn_cte_sql(anchor_tail: &str) -> String {
                       AND candidate.visibility != 'withheld'
                       AND candidate.sync_state != 'withheld'
                       AND length(trim(candidate.payload_json)) > 2
+                      AND EXISTS (
+                          SELECT 1
+                          FROM event_search AS candidate_search
+                          WHERE candidate_search.event_id = candidate.id
+                            AND length(trim(candidate_search.preview_text)) > 0
+                      )
                       AND (
                             candidate.occurred_at_ms > anchor.occurred_at_ms
                             OR (candidate.occurred_at_ms = anchor.occurred_at_ms AND candidate.seq > anchor.seq)
@@ -1070,6 +1085,12 @@ fn semantic_lite_turn_cte_sql(anchor_tail: &str) -> String {
                       AND candidate.visibility != 'withheld'
                       AND candidate.sync_state != 'withheld'
                       AND length(trim(candidate.payload_json)) > 2
+                      AND EXISTS (
+                          SELECT 1
+                          FROM event_search AS candidate_search
+                          WHERE candidate_search.event_id = candidate.id
+                            AND length(trim(candidate_search.preview_text)) > 0
+                      )
                       AND (
                             candidate.occurred_at_ms > anchor.occurred_at_ms
                             OR (candidate.occurred_at_ms = anchor.occurred_at_ms AND candidate.seq > anchor.seq)
@@ -1680,15 +1701,7 @@ fn event_semantic_source_text(
     }
     let payload: serde_json::Value = serde_json::from_str(payload_json)
         .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?;
-    let preview = event_payload_text_preview(&payload)
-        .or_else(|| {
-            if payload.is_object() || payload.is_array() {
-                Some(payload.to_string())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_default();
+    let preview = event_payload_text_preview(&payload).unwrap_or_default();
     Ok(local_preview(&preview, SEMANTIC_TURN_TEXT_MAX_CHARS))
 }
 

@@ -378,6 +378,8 @@ fn search_analytics_reports_when_search_creates_empty_store() {
     assert_eq!(properties["had_indexed_content_before_search"], false);
     assert_eq!(properties["store_created_by_search"], true);
     assert_eq!(properties["has_indexed_content_after_search"], false);
+    assert!(!data_root.join("daemon/status.json").exists());
+    assert!(!data_root.join("daemon/daemon.lock").exists());
     assert_analytics_properties_are_allowlisted(properties);
 }
 

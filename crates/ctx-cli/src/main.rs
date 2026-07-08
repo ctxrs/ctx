@@ -516,7 +516,6 @@ impl DaemonStartModeArg {
 pub(crate) enum DaemonTriggerCommandArg {
     Setup,
     Import,
-    Search,
 }
 
 impl DaemonTriggerCommandArg {
@@ -524,7 +523,6 @@ impl DaemonTriggerCommandArg {
         match self {
             Self::Setup => "setup",
             Self::Import => "import",
-            Self::Search => "search",
         }
     }
 }
@@ -641,9 +639,6 @@ impl CommandRoot {
             }
             Self::Import(args) if args.should_autostart_daemon() => {
                 Some(DaemonTriggerCommandArg::Import)
-            }
-            Self::Search(args) if args.refresh == RefreshArg::Background => {
-                Some(DaemonTriggerCommandArg::Search)
             }
             _ => None,
         }
