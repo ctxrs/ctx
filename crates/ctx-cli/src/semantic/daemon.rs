@@ -829,7 +829,7 @@ fn run_daemon_semantic_job(
     };
     let worker_result = {
         let mut embedder = lock_daemon_runtime_embedder(runtime)?;
-        run_semantic_worker_inner_with_embedder(worker_args, data_root, None, &mut *embedder)
+        run_semantic_worker_inner_with_embedder(worker_args, data_root, None, &mut embedder)
     };
     if let Err(error) = worker_result {
         let message = format!("{error:#}");

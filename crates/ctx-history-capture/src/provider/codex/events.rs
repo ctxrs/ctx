@@ -475,7 +475,7 @@ pub(crate) fn codex_tool_output_event(
     let output_bytes = output_text_ref.map(str::len).unwrap_or(0);
     let timed_out = codex_timed_out(payload).unwrap_or(false);
     let structured_failure = provider_output_event_is_failure(payload);
-    if !timed_out && !exit_code.is_some_and(|code| code != 0) && !structured_failure {
+    if !timed_out && exit_code.is_none_or(|code| code == 0) && !structured_failure {
         return None;
     }
     let event_type = if codex_is_command_tool(&tool_name) {

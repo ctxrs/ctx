@@ -366,9 +366,7 @@ fn semantic_worker_report_with_count_mode(
     let mut status = current_status_value
         .and_then(|value| json_string(value, "status"))
         .unwrap_or_else(|| {
-            if !searchable_items_known {
-                "unknown".to_owned()
-            } else if store.is_none() {
+            if !searchable_items_known || store.is_none() {
                 "unknown".to_owned()
             } else if searchable_items == 0 {
                 "empty".to_owned()

@@ -407,8 +407,8 @@ and private relevance evals justify flipping the default.
 
 ### Default-On Flip Gate
 
-- Private judged eval lives outside this public repo, preferably in
-  `ctx-private` or an untracked local eval package.
+- Private judged eval lives outside this public repo, preferably in an internal
+  private repo or an untracked local eval package.
 - Eval has at least 30-50 task-shaped queries from real local work, covering
   recent and older sessions, exact terms, fuzzy/natural-language searches,
   filtered searches, and negative/no-result cases.
@@ -544,14 +544,15 @@ and private relevance evals justify flipping the default.
 ### 5. Evaluation Harness
 
 - Decision: keep the judged relevance eval and real dogfood manifests out of
-  this public repo to avoid reverse-engineering surface area. Use `ctx-private`
-  or local-only artifacts for judged query sets.
+  this public repo to avoid reverse-engineering surface area. Use an internal
+  private repo or local-only artifacts for judged query sets.
 - Remaining outside this repo:
   - add a small JSONL manifest runner for private local dogfood/evals that
     records query, backend requested/effective, fallback code, elapsed ms,
     semantic diagnostics, and top result ids/snippets;
   - keep the harness read-only with `--refresh off` by default;
-  - store real judged manifests in `ctx-private` or an untracked local path;
+  - store real judged manifests in an internal private repo or an untracked
+    local path;
   - make the default-on decision depend on the private eval gate above.
 
 ### 6. Prerelease Feature Flag Rollout
@@ -574,7 +575,8 @@ and private relevance evals justify flipping the default.
   - if remote rollout is added, it should only populate/override an internal
     default for users who have not explicitly set `[search] semantic`.
   - before flipping the default, ship at least one prerelease build with
-    opt-in telemetry/relevance dogfood and clear `ctx index status` guidance.
+    opt-in dogfood feedback, relevance review, and clear `ctx index status`
+    guidance.
 
 ### 7. Daemon Query Service
 

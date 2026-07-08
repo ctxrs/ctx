@@ -304,11 +304,9 @@ fn semantic_source_text(text: &str) -> String {
 
 fn semantic_rust_full_scan_chunk_limit() -> usize {
     let bytes_per_vector = SEMANTIC_DIMENSIONS.saturating_mul(std::mem::size_of::<f32>());
-    let byte_limited_chunks = if bytes_per_vector == 0 {
-        SEMANTIC_FULL_SCAN_MAX_CHUNKS
-    } else {
-        SEMANTIC_FULL_SCAN_MAX_VECTOR_BYTES / bytes_per_vector
-    };
+    let byte_limited_chunks = SEMANTIC_FULL_SCAN_MAX_VECTOR_BYTES
+        .checked_div(bytes_per_vector)
+        .unwrap_or(SEMANTIC_FULL_SCAN_MAX_CHUNKS);
     SEMANTIC_FULL_SCAN_MAX_CHUNKS.min(byte_limited_chunks)
 }
 

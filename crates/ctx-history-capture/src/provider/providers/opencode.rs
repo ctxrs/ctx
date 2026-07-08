@@ -898,8 +898,7 @@ pub(crate) fn opencode_message_part_rows(
 }
 
 fn placeholders(count: usize) -> String {
-    std::iter::repeat("?")
-        .take(count)
+    std::iter::repeat_n("?", count)
         .collect::<Vec<_>>()
         .join(", ")
 }
