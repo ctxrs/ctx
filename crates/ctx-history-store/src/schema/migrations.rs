@@ -4,9 +4,10 @@ use crate::schema::ddl::{
     ensure_columns, table_exists, table_has_column, CAPTURE_SOURCE_IDENTITY_COLUMNS,
     CATALOG_SESSION_IMPORT_STATE_COLUMNS, CREATE_TABLES_SQL, HISTORY_RECORD_COLUMNS,
 };
-use crate::schema::fts::create_fts_tables_if_supported;
+use crate::schema::fts::{create_fts_tables_if_supported, drop_fts_table_if_exists};
 use crate::schema::indexes::INDEXES_SQL;
 use crate::schema::rebuild::rebuild_v44_current_schema_tables;
+use crate::schema::scriptgram::migrate_to_v45;
 use crate::schema::views::{
     create_stable_sql_views, drop_stable_sql_views, stable_sql_views_exist,
 };
@@ -661,31 +662,6 @@ fn migrate_to_v44(conn: &Connection, rebuild_search_projection_now: bool) -> Res
     }
 }
 
-fn migrate_to_v45(conn: &Connection) -> Result<()> {
-    conn.execute_batch("BEGIN IMMEDIATE;")?;
-    let migration = (|| -> Result<()> {
-        drop_fts_table_if_exists(conn, "ctx_history_search_scriptgram")?;
-        drop_fts_table_if_exists(conn, "event_search_scriptgram")?;
-        create_fts_tables_if_supported(conn)?;
-        rebuild_search_projection(conn)?;
-        conn.execute_batch("PRAGMA user_version = 45;")?;
-        Ok(())
-    })();
-
-    match migration {
-        Ok(()) => {
-            conn.execute_batch("COMMIT;")?;
-            Ok(())
-        }
-        Err(err) => {
-            if let Err(rollback_err) = conn.execute_batch("ROLLBACK;") {
-                return Err(StoreError::Sql(rollback_err));
-            }
-            Err(err)
-        }
-    }
-}
-
 fn backfill_capture_source_identity_columns(conn: &Connection) -> Result<()> {
     if !table_exists(conn, "capture_sources")? {
         return Ok(());
@@ -819,13 +795,6 @@ fn rewrite_history_table_names(conn: &Connection, table: &str, column: &str) -> 
 
 fn drop_fts_table_if_column_exists(conn: &Connection, table: &str, column: &str) -> Result<()> {
     if table_exists(conn, table)? && table_has_column(conn, table, column)? {
-        conn.execute(&format!("DROP TABLE {table}"), [])?;
-    }
-    Ok(())
-}
-
-fn drop_fts_table_if_exists(conn: &Connection, table: &str) -> Result<()> {
-    if table_exists(conn, table)? {
         conn.execute(&format!("DROP TABLE {table}"), [])?;
     }
     Ok(())

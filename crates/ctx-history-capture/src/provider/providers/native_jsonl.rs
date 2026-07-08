@@ -185,7 +185,7 @@ pub(crate) fn normalize_native_jsonl_session_file(
                 result.summary.failed += 1;
                 result.summary.failures.push(ProviderImportFailure {
                     line: line_number,
-                    error: format!("malformed JSONL: {err}"),
+                    error: native_jsonl_file_failure(path, format!("malformed JSONL: {err}")),
                 });
                 continue;
             }
@@ -193,10 +193,19 @@ pub(crate) fn normalize_native_jsonl_session_file(
         rows.push((line_number, value));
     }
 
-    let header_index = if matches!(
-        provider,
-        CaptureProvider::Antigravity | CaptureProvider::Windsurf
-    ) {
+    let header_index = if provider == CaptureProvider::Antigravity {
+        if rows.is_empty() {
+            if result.summary.failed == 0 {
+                result.summary.failed += 1;
+                result.summary.failures.push(ProviderImportFailure {
+                    line: 0,
+                    error: native_jsonl_file_failure(path, native_jsonl_missing_reason(provider)),
+                });
+            }
+            return Ok(result);
+        }
+        0
+    } else if provider == CaptureProvider::Windsurf {
         if rows.is_empty() {
             return Err(CaptureError::InvalidProviderTranscriptPath {
                 path: path.to_path_buf(),
@@ -330,6 +339,10 @@ pub(crate) fn normalize_native_jsonl_session_file(
     }
 
     Ok(result)
+}
+
+fn native_jsonl_file_failure(path: &Path, reason: impl AsRef<str>) -> String {
+    format!("{}: {}", path.display(), reason.as_ref())
 }
 
 pub(crate) fn native_jsonl_header_session_id(

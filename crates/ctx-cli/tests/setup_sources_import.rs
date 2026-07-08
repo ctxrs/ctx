@@ -437,6 +437,49 @@ fn setup_imports_discovered_codex_sessions_by_default() {
 }
 
 #[test]
+fn setup_partial_import_isolates_empty_codex_session_file() {
+    let temp = tempdir();
+    write_codex_setup_session(&temp);
+    let sessions = temp
+        .path()
+        .join(".codex")
+        .join("sessions")
+        .join("2026/06/24");
+    fs::write(sessions.join("rollout-empty-codex-session.jsonl"), "").unwrap();
+
+    let setup = json_output(ctx(&temp).args(["setup", "--json", "--progress", "none"]));
+    assert_eq!(setup["inventory"]["sources"], 1, "{setup:#}");
+    assert_eq!(setup["inventory"]["units"], 2, "{setup:#}");
+    assert_eq!(setup["catalog"]["cataloged_sessions"], 2, "{setup:#}");
+    assert_eq!(setup["import"]["totals"]["failed_sources"], 0, "{setup:#}");
+    assert_eq!(
+        setup["import"]["totals"]["imported_sessions"], 1,
+        "{setup:#}"
+    );
+    assert_eq!(setup["import"]["totals"]["failed"], 1, "{setup:#}");
+    assert!(setup["import"]["sources"][0]["failures"][0]["error"]
+        .as_str()
+        .unwrap()
+        .contains("rollout-empty-codex-session.jsonl"));
+
+    let status = json_output(ctx(&temp).args(["status", "--json"]));
+    assert_eq!(status["cataloged_sessions"], 2, "{status:#}");
+    assert_eq!(status["indexed_catalog_sessions"], 1, "{status:#}");
+    assert_eq!(status["failed_catalog_sessions"], 1, "{status:#}");
+    assert_eq!(status["pending_catalog_sessions"], 1, "{status:#}");
+    assert!(status["indexed_items"].as_u64().unwrap() > 0);
+
+    let search = json_output(ctx(&temp).args([
+        "search",
+        "setup should import",
+        "--provider",
+        "codex",
+        "--json",
+    ]));
+    assert_search_provider_oracle(&search, "codex", "setup should import", 1, "message");
+}
+
+#[test]
 fn setup_inventories_and_imports_claude_sources_by_default() {
     let temp = tempdir();
     let project = temp.path().join(".claude").join("projects").join("-repo");

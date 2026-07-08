@@ -9,9 +9,12 @@ use crate::{analytics, AnalyticsProperties};
 
 use super::{
     paths::{bundled_hash, ensure_path_inside, sha256_hex},
-    selection::{install_agent_selection, status_agent_selection, SkillAgentSelection},
+    selection::{
+        install_agent_selection, status_agent_selection, SkillAgentSelection, SkillSelectionSource,
+    },
     target::{resolve_targets_for_agents, SkillTarget},
-    SkillInstallArgs, SkillStatusArgs, BUNDLED_SKILL_BODY, BUNDLED_SKILL_NAME, METADATA_FILE,
+    SkillInstallArgs, SkillStatusArgs, BUNDLED_SKILL_BODY, BUNDLED_SKILL_NAME,
+    LEGACY_BUNDLED_SKILL_HASHES, METADATA_FILE,
 };
 
 pub(super) fn run_install(
@@ -23,16 +26,25 @@ pub(super) fn run_install(
     insert_selection_analytics(analytics_properties, &selection);
     let targets = resolve_targets_for_agents(&selection.agents, args.project, context)?;
     let mut results = Vec::with_capacity(targets.len());
+    let modified_preserve_is_fatal = modified_preserve_is_fatal(selection.source);
     for target in &targets {
-        results.push(install_target(target, args.force)?);
+        results.push(install_target(
+            target,
+            args.force,
+            modified_preserve_is_fatal,
+        )?);
     }
-    let failed = results.iter().filter(|result| !result.success).count();
+    let fatal_failures = results.iter().filter(|result| result.fatal).count();
     let already_installed = results.iter().all(|result| result.already_installed);
     let updated = results.iter().any(|result| result.updated);
     analytics::insert_str(
         analytics_properties,
         "install_result",
-        if failed == 0 { "ok" } else { "partial_error" },
+        if fatal_failures == 0 {
+            "ok"
+        } else {
+            "partial_error"
+        },
     );
     analytics::insert_bool(analytics_properties, "already_installed", already_installed);
     analytics::insert_bool(analytics_properties, "updated", updated);
@@ -48,8 +60,10 @@ pub(super) fn run_install(
     } else {
         print_install_results(&results);
     }
-    if failed > 0 {
-        return Err(anyhow!("failed to install skill for {failed} target(s)"));
+    if fatal_failures > 0 {
+        return Err(anyhow!(
+            "failed to install skill for {fatal_failures} target(s)"
+        ));
     }
     Ok(())
 }
@@ -168,6 +182,7 @@ impl StatusResult {
 struct InstallResult {
     target: SkillTarget,
     success: bool,
+    fatal: bool,
     previous_status: SkillInstallStatus,
     status: SkillInstallStatus,
     already_installed: bool,
@@ -215,7 +230,11 @@ impl SkillMetadata {
     }
 }
 
-fn install_target(target: &SkillTarget, force: bool) -> Result<InstallResult> {
+fn install_target(
+    target: &SkillTarget,
+    force: bool,
+    modified_preserve_is_fatal: bool,
+) -> Result<InstallResult> {
     let previous = status_target(target)?;
     if previous.status == SkillInstallStatus::Current {
         if !metadata_is_current(previous.metadata.as_ref()) {
@@ -224,6 +243,7 @@ fn install_target(target: &SkillTarget, force: bool) -> Result<InstallResult> {
         return Ok(InstallResult {
             target: target.clone(),
             success: true,
+            fatal: false,
             previous_status: previous.status,
             status: SkillInstallStatus::Current,
             already_installed: true,
@@ -235,17 +255,22 @@ fn install_target(target: &SkillTarget, force: bool) -> Result<InstallResult> {
         return Ok(InstallResult {
             target: target.clone(),
             success: false,
+            fatal: modified_preserve_is_fatal,
             previous_status: previous.status,
             status: previous.status,
             already_installed: false,
             updated: false,
-            error: Some("local skill edits detected; rerun with --force to overwrite".to_owned()),
+            error: Some(format!(
+                "preserved existing {} skill; use --force to replace",
+                target.agent.display_name()
+            )),
         });
     }
     write_skill_dir(target)?;
     Ok(InstallResult {
         target: target.clone(),
         success: true,
+        fatal: false,
         previous_status: previous.status,
         status: SkillInstallStatus::Current,
         already_installed: false,
@@ -269,6 +294,7 @@ pub(super) fn status_target(target: &SkillTarget) -> Result<StatusResult> {
     let status = match installed_hash.as_deref() {
         None => SkillInstallStatus::Missing,
         Some(hash) if hash == bundled_hash() => SkillInstallStatus::Current,
+        Some(hash) if is_legacy_bundled_hash(hash) => SkillInstallStatus::Stale,
         Some(hash) => match metadata.as_ref() {
             Some(metadata) if metadata.skill_hash == hash => SkillInstallStatus::Stale,
             _ => SkillInstallStatus::Modified,
@@ -280,6 +306,17 @@ pub(super) fn status_target(target: &SkillTarget) -> Result<StatusResult> {
         metadata,
         installed_hash,
     })
+}
+
+fn modified_preserve_is_fatal(source: SkillSelectionSource) -> bool {
+    !matches!(
+        source,
+        SkillSelectionSource::Detected | SkillSelectionSource::Fallback
+    )
+}
+
+fn is_legacy_bundled_hash(hash: &str) -> bool {
+    LEGACY_BUNDLED_SKILL_HASHES.contains(&hash)
 }
 
 fn read_metadata(skill_dir: &Path) -> Option<SkillMetadata> {
@@ -294,6 +331,7 @@ fn metadata_is_current(metadata: Option<&SkillMetadata>) -> bool {
             && metadata.installer == "ctx-cli"
             && metadata.skill_name == BUNDLED_SKILL_NAME
             && metadata.skill_hash == bundled_hash()
+            && metadata.ctx_cli_version == env!("CARGO_PKG_VERSION")
     })
 }
 

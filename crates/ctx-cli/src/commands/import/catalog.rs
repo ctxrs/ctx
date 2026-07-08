@@ -1,5 +1,6 @@
 use super::*;
-use crate::commands::import::native::{collect_source_import_paths, merge_provider_import_summary};
+use crate::commands::import::manifest::collect_source_import_paths;
+use crate::commands::import::native::merge_provider_import_summary;
 
 pub(crate) fn system_time_ms(time: SystemTime) -> i64 {
     time.duration_since(UNIX_EPOCH)
@@ -114,7 +115,48 @@ pub(crate) fn import_incremental_codex_session_tree(
         }
     }
 
-    if !full_import_sessions.is_empty() {
+    if !full_import_sessions.is_empty() && allow_partial_failures {
+        for session in &full_import_sessions {
+            let paths = vec![PathBuf::from(&session.source_path)];
+            let file_summary = match import_codex_session_paths(
+                paths,
+                store,
+                CodexSessionImportOptions {
+                    source_path: Some(source.path.clone()),
+                    history_record_id: Some(record_id),
+                    allow_partial_failures,
+                    progress: progress.clone(),
+                    ..CodexSessionImportOptions::default()
+                },
+            )
+            .map_err(anyhow::Error::from)
+            {
+                Ok(file_summary) => file_summary,
+                Err(err) => {
+                    let error = error_summary(&err);
+                    mark_catalog_sessions_failed(store, std::slice::from_ref(session), &error)?;
+                    if import_error_is_systemic(&error) {
+                        return Err(err);
+                    }
+                    summary.failed += 1;
+                    summary
+                        .failures
+                        .push(ProviderImportFailure { line: 0, error });
+                    continue;
+                }
+            };
+            if file_summary.failed > 0 {
+                mark_catalog_sessions_failed(
+                    store,
+                    std::slice::from_ref(session),
+                    &catalog_session_import_failure(&file_summary),
+                )?;
+            } else {
+                mark_catalog_sessions_indexed(store, std::slice::from_ref(session), &file_summary)?;
+            }
+            merge_provider_import_summary(&mut summary, file_summary);
+        }
+    } else if !full_import_sessions.is_empty() {
         let paths = full_import_sessions
             .iter()
             .map(|session| PathBuf::from(&session.source_path))
@@ -151,6 +193,20 @@ pub(crate) fn import_incremental_codex_session_tree(
         merge_provider_import_summary(&mut summary, full_summary);
     }
     Ok(summary)
+}
+
+fn catalog_session_import_failure(summary: &ProviderImportSummary) -> String {
+    summary
+        .failures
+        .first()
+        .map(|failure| {
+            if failure.line == 0 {
+                failure.error.clone()
+            } else {
+                format!("line {}: {}", failure.line, failure.error)
+            }
+        })
+        .unwrap_or_else(|| "session import failed".to_owned())
 }
 
 pub(crate) fn mark_catalog_sessions_indexed(

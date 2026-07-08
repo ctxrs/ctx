@@ -328,22 +328,7 @@ impl ProgressReporter {
         match self.mode {
             ProgressRenderMode::None => {}
             ProgressRenderMode::Json => {
-                let value = json!({
-                    "type": "ctx_progress",
-                    "operation": self.operation,
-                    "phase": line.phase,
-                    "message": line.message,
-                    "completed_bytes": line.completed_bytes,
-                    "total_bytes": line.total_bytes,
-                    "percent": progress_percent(line.completed_bytes, line.total_bytes),
-                    "elapsed_seconds": elapsed.as_secs_f64(),
-                    "eta_seconds": eta_seconds(line.completed_bytes, line.total_bytes, elapsed),
-                    "completed_files": line.completed_files,
-                    "total_files": line.total_files,
-                    "imported_events": line.imported_events,
-                    "done": line.done,
-                });
-                eprintln!("{value}");
+                eprintln!("{}", progress_json(self.operation, &line, elapsed));
             }
             ProgressRenderMode::Plain { interactive } => {
                 let rendered = render_progress_line(&line, elapsed);
@@ -416,10 +401,11 @@ fn render_progress_line_for_width(
     elapsed: StdDuration,
     target_width: usize,
 ) -> String {
-    let percent = progress_percent(line.completed_bytes, line.total_bytes);
+    let (completed_bytes, total_bytes) = progress_line_bytes(line);
+    let percent = progress_line_percent(line);
     let phase = progress_phase_label(line.phase);
     let bar = progress_bar(percent, 10);
-    let bytes = format_byte_range(line.completed_bytes, line.total_bytes);
+    let bytes = format_byte_range(completed_bytes, total_bytes);
     let files = line
         .completed_files
         .filter(|_| !line.done)
@@ -427,7 +413,7 @@ fn render_progress_line_for_width(
         .unwrap_or_default();
     let remaining = if line.done {
         "done".to_owned()
-    } else if let Some(eta) = eta_seconds(line.completed_bytes, line.total_bytes, elapsed) {
+    } else if let Some(eta) = progress_line_eta_seconds(line, elapsed) {
         format_eta_compact(eta)
     } else {
         "working".to_owned()
@@ -454,16 +440,17 @@ fn render_progress_line_for_width(
 }
 
 fn progress_json(operation: &'static str, line: &ProgressLine, elapsed: StdDuration) -> String {
+    let (completed_bytes, total_bytes) = progress_line_bytes(line);
     json!({
         "type": "ctx_progress",
         "operation": operation,
         "phase": line.phase,
         "message": line.message,
-        "completed_bytes": line.completed_bytes,
-        "total_bytes": line.total_bytes,
-        "percent": progress_percent(line.completed_bytes, line.total_bytes),
+        "completed_bytes": completed_bytes,
+        "total_bytes": total_bytes,
+        "percent": progress_line_percent(line),
         "elapsed_seconds": elapsed.as_secs_f64(),
-        "eta_seconds": eta_seconds(line.completed_bytes, line.total_bytes, elapsed),
+        "eta_seconds": progress_line_eta_seconds(line, elapsed),
         "completed_files": line.completed_files,
         "total_files": line.total_files,
         "imported_events": line.imported_events,
@@ -505,6 +492,34 @@ fn progress_percent(completed: u64, total: u64) -> f64 {
         return 0.0;
     }
     ((completed as f64 / total as f64) * 100.0).clamp(0.0, 100.0)
+}
+
+fn progress_line_bytes(line: &ProgressLine) -> (u64, u64) {
+    let total_bytes = line.total_bytes.max(line.completed_bytes);
+    let completed_bytes = if line.done {
+        total_bytes
+    } else {
+        line.completed_bytes.min(total_bytes)
+    };
+    (completed_bytes, total_bytes)
+}
+
+fn progress_line_percent(line: &ProgressLine) -> f64 {
+    if line.done {
+        100.0
+    } else {
+        let (completed_bytes, total_bytes) = progress_line_bytes(line);
+        progress_percent(completed_bytes, total_bytes)
+    }
+}
+
+fn progress_line_eta_seconds(line: &ProgressLine, elapsed: StdDuration) -> Option<f64> {
+    if line.done {
+        None
+    } else {
+        let (completed_bytes, total_bytes) = progress_line_bytes(line);
+        eta_seconds(completed_bytes, total_bytes, elapsed)
+    }
 }
 
 fn eta_seconds(completed: u64, total: u64, elapsed: StdDuration) -> Option<f64> {
@@ -652,5 +667,41 @@ mod tests {
         assert!(rendered.chars().count() <= 45, "{rendered}");
         assert!(rendered.starts_with("Indexing ["), "{rendered}");
         assert!(!rendered.contains("files"), "{rendered}");
+    }
+
+    #[test]
+    fn done_progress_line_forces_complete_percent_with_incomplete_bytes() {
+        let mut line = sample_line();
+        line.phase = "finalizing";
+        line.completed_bytes = 0;
+        line.total_bytes = 4 * 1024;
+        line.done = true;
+
+        let rendered = render_progress_line_for_width(&line, StdDuration::from_secs(120), 76);
+
+        assert!(rendered.contains("[##########]"), "{rendered}");
+        assert!(rendered.contains("100%"), "{rendered}");
+        assert!(rendered.contains("4.0/4.0 KiB"), "{rendered}");
+        assert!(rendered.ends_with("done"), "{rendered}");
+        assert!(!rendered.contains("  0%"), "{rendered}");
+    }
+
+    #[test]
+    fn done_progress_json_forces_complete_bytes_with_incomplete_bytes() {
+        let mut line = sample_line();
+        line.phase = "finalizing";
+        line.completed_bytes = 0;
+        line.total_bytes = 4 * 1024;
+        line.done = true;
+
+        let value: serde_json::Value =
+            serde_json::from_str(&progress_json("setup", &line, StdDuration::from_secs(120)))
+                .expect("progress json should parse");
+
+        assert_eq!(value["completed_bytes"], 4 * 1024);
+        assert_eq!(value["total_bytes"], 4 * 1024);
+        assert_eq!(value["percent"], 100.0);
+        assert_eq!(value["eta_seconds"], serde_json::Value::Null);
+        assert_eq!(value["done"], true);
     }
 }

@@ -14,7 +14,7 @@ use ctx_history_core::CaptureProvider;
 use ctx_history_store::{SourceImportFile, Store};
 
 use crate::commands::import::catalog::{source_import_stats, source_stats, system_time_ms};
-use crate::commands::import::native::{
+use crate::commands::import::manifest::{
     collect_source_import_files, persist_source_import_files, source_uses_import_file_manifest,
 };
 use crate::commands::import::{

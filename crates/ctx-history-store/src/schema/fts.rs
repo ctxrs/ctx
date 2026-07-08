@@ -55,6 +55,13 @@ pub(crate) fn create_fts_tables_if_supported(conn: &Connection) -> Result<()> {
     }
 }
 
+pub(crate) fn drop_fts_table_if_exists(conn: &Connection, table: &str) -> Result<()> {
+    if crate::schema::ddl::table_exists(conn, table)? {
+        conn.execute(&format!("DROP TABLE {table}"), [])?;
+    }
+    Ok(())
+}
+
 fn is_missing_fts_module(extended_code: i32, message: Option<&str>) -> bool {
     extended_code == rusqlite::ffi::SQLITE_ERROR
         && message

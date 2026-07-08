@@ -217,7 +217,10 @@ pub(crate) fn import_codex_session_path_fast(
         summary.failed += 1;
         summary.failures.push(ProviderImportFailure {
             line: 0,
-            error: "codex session JSONL contained no real message content".to_owned(),
+            error: codex_session_file_failure(
+                path,
+                "codex session JSONL contained no real message content",
+            ),
         });
         return Ok(());
     }
@@ -280,7 +283,7 @@ pub(crate) fn import_codex_session_path_fast(
                 summary.failed += 1;
                 summary.failures.push(ProviderImportFailure {
                     line: line_number,
-                    error: err.to_string(),
+                    error: codex_session_file_failure(path, err.to_string()),
                 });
                 if !options.allow_partial_failures {
                     return Ok(());
@@ -317,7 +320,7 @@ pub(crate) fn import_codex_session_path_fast(
                     summary.failed += 1;
                     summary.failures.push(ProviderImportFailure {
                         line: line_number,
-                        error: err.to_string(),
+                        error: codex_session_file_failure(path, err.to_string()),
                     });
                     if !options.allow_partial_failures {
                         return Ok(());
@@ -331,7 +334,10 @@ pub(crate) fn import_codex_session_path_fast(
             summary.failed += 1;
             summary.failures.push(ProviderImportFailure {
                 line: line_number,
-                error: "codex session entry appeared before session_meta".to_owned(),
+                error: codex_session_file_failure(
+                    path,
+                    "codex session entry appeared before session_meta",
+                ),
             });
             if !options.allow_partial_failures {
                 return Ok(());
@@ -344,7 +350,7 @@ pub(crate) fn import_codex_session_path_fast(
                 summary.failed += 1;
                 summary.failures.push(ProviderImportFailure {
                     line: line_number,
-                    error: err.to_string(),
+                    error: codex_session_file_failure(path, err.to_string()),
                 });
                 if !options.allow_partial_failures {
                     return Ok(());
@@ -388,6 +394,11 @@ pub(crate) fn import_codex_session_path_fast(
     }
     Ok(())
 }
+
+fn codex_session_file_failure(path: &Path, reason: impl AsRef<str>) -> String {
+    format!("{}: {}", path.display(), reason.as_ref())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn import_codex_provider_event_fast(
     store: &mut Store,

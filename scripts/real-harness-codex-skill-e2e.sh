@@ -136,12 +136,12 @@ main() {
 
   require_contains "${stdout_file}" 'fixture-ctx-skill-ok'
   require_contains "${stderr_file}" "/bin/bash -lc 'ctx --version'"
-  require_contains "${stderr_file}" 'ctx 0.22.0'
+  require_contains "${stderr_file}" 'ctx 0.23.0'
   require_contains "${log_file}" '"has_ctx_skill":true'
   require_contains "${log_file}" '"has_ctx_skill_description":true'
   require_contains "${log_file}" '"has_ctx_skill_path":true'
   require_contains "${log_file}" '"call_id":"call_ctx_version"'
-  require_contains "${log_file}" 'ctx 0.22.0'
+  require_contains "${log_file}" 'ctx 0.23.0'
 
   printf 'real Codex skill harness E2E passed: %s\n' "${run_root}"
 }

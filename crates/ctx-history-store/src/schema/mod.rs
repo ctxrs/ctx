@@ -3,6 +3,7 @@ pub(crate) mod fts;
 pub(crate) mod indexes;
 pub(crate) mod migrations;
 pub(crate) mod rebuild;
+pub(crate) mod scriptgram;
 #[cfg(test)]
 mod tests;
 pub(crate) mod views;

@@ -61,7 +61,7 @@ pub(crate) fn run_setup(
             format: None,
             all: true,
             resume: false,
-            partial: false,
+            partial: true,
             json: args.json,
             progress: progress_arg,
         };

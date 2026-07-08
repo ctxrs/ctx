@@ -41,8 +41,8 @@ use ctx_history_capture::{
     KimiCodeCliImportOptions, KiroSqliteImportOptions, LingmaSqliteImportOptions,
     MistralVibeImportOptions, MuxImportOptions, NanoClawImportOptions, OpenClawImportOptions,
     OpenCodeSqliteImportOptions, OpenHandsImportOptions, PiSessionImportOptions,
-    ProviderImportSummary, ProviderImportSupport, ProviderSourceStatus, QoderImportOptions,
-    QwenCodeImportOptions, RooTaskJsonImportOptions, RovoDevImportOptions,
+    ProviderImportFailure, ProviderImportSummary, ProviderImportSupport, ProviderSourceStatus,
+    QoderImportOptions, QwenCodeImportOptions, RooTaskJsonImportOptions, RovoDevImportOptions,
     ShelleySqliteImportOptions, TabnineCliImportOptions, TraeImportOptions,
     WarpSqliteImportOptions, WindsurfCascadeHookImportOptions, ZedThreadsSqliteImportOptions,
 };
@@ -76,6 +76,7 @@ use crate::{
 mod catalog;
 mod explicit;
 mod inventory;
+mod manifest;
 mod native;
 mod report;
 mod requests;
