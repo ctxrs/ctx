@@ -40,7 +40,7 @@ use crate::provider::codex::events::{
     CodexToolCallContext,
 };
 use crate::provider::codex::session::{
-    codex_session_file_has_real_conversation, should_parse_codex_session_line,
+    codex_session_file_conversation_scan, should_parse_codex_session_line,
     should_skip_codex_tool_output_line,
 };
 
@@ -195,7 +195,25 @@ pub(crate) fn import_codex_session_path_fast(
     caches: &mut ProviderImportCaches,
 ) -> Result<()> {
     ensure_regular_provider_transcript_file(path)?;
-    if !codex_session_file_has_real_conversation(path)? {
+    let conversation_scan = codex_session_file_conversation_scan(path)?;
+    if !conversation_scan.has_real_conversation
+        && !conversation_scan.has_malformed_header
+        && !conversation_scan.has_malformed_relevant_line
+    {
+        if conversation_scan.oversized_required_header {
+            summary.skipped += 1;
+            summary.skipped_sessions += 1;
+            return Ok(());
+        }
+        if conversation_scan.oversized_events > 0 {
+            summary.skipped = summary
+                .skipped
+                .saturating_add(conversation_scan.oversized_events);
+            summary.skipped_events = summary
+                .skipped_events
+                .saturating_add(conversation_scan.oversized_events);
+            return Ok(());
+        }
         summary.failed += 1;
         summary.failures.push(ProviderImportFailure {
             line: 0,
@@ -236,6 +254,10 @@ pub(crate) fn import_codex_session_path_fast(
             ProviderJsonlLineRead::Oversized { .. } => {
                 line_number += 1;
                 summary.skipped += 1;
+                if header.is_none() {
+                    summary.skipped_sessions += 1;
+                    return Ok(());
+                }
                 summary.skipped_events += 1;
                 continue;
             }

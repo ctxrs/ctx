@@ -1,7 +1,8 @@
 pub(super) use crate::provider::adapter::ProviderCaptureAdapter;
 pub(super) use crate::provider::codex::events::codex_tool_output_event;
 pub(super) use crate::provider::codex::session::{
-    should_parse_codex_session_line, should_skip_codex_tool_output_line,
+    codex_session_file_conversation_scan, should_parse_codex_session_line,
+    should_skip_codex_tool_output_line,
 };
 pub(super) use crate::provider::custom_history_jsonl::{
     custom_history_internal_session_id, custom_history_jsonl_v1_cursor_stream,
