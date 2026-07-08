@@ -17,7 +17,7 @@ use crate::schema::ddl::{table_exists, table_has_column};
 use crate::search::analyzer::{scriptgram_index_text, scriptgram_match_query};
 use crate::{Result, Store};
 
-const SEMANTIC_SEARCHABLE_ITEMS_STAT_KEY: &str = "semantic_searchable_lite_turn_items";
+const SEMANTIC_SEARCHABLE_ITEMS_STAT_KEY: &str = "semantic_searchable_lite_turn_items_v2";
 const SEMANTIC_TURN_TEXT_MAX_CHARS: usize = 64 * 1024;
 const SEMANTIC_LITE_TURN_RANK_BUCKET: &str = "lite_turn";
 
@@ -336,11 +336,11 @@ impl Store {
         if let Some(count) = self.cached_event_embedding_document_count()? {
             return Ok(count);
         }
-        self.count_event_embedding_documents_exact()
+        semantic_searchable_item_count_exact(&self.conn)
     }
 
     pub fn refresh_event_embedding_document_count_cache(&self) -> Result<()> {
-        refresh_semantic_searchable_item_stats(&self.conn)
+        refresh_semantic_searchable_item_stats(&self.conn).map(|_| ())
     }
 
     pub fn recent_event_embedding_documents(
@@ -384,10 +384,13 @@ impl Store {
         if terms.is_empty() {
             return Ok(Vec::new());
         }
+        let next_user_predicate =
+            semantic_lite_turn_user_eligible_predicate("next_user", "next_user_search");
         let clauses = terms
             .iter()
             .map(|_| {
-                r#"
+                format!(
+                    r#"
                 (
                     lower(anchor_search.preview_text) LIKE ? ESCAPE '\'
                     OR EXISTS (
@@ -420,9 +423,10 @@ impl Store {
                           AND NOT EXISTS (
                               SELECT 1
                               FROM events AS next_user
-                              WHERE next_user.event_type = 'message'
-                                AND next_user.role = 'user'
-                                AND next_user.deleted_at_ms IS NULL
+                              JOIN event_search_lookup AS next_user_search
+                                ON next_user_search.event_id = next_user.id
+                               AND length(trim(next_user_search.preview_text)) > 0
+                              WHERE {next_user_predicate}
                                 AND (
                                       (anchor.run_id IS NOT NULL AND next_user.run_id = anchor.run_id)
                                       OR (
@@ -446,6 +450,7 @@ impl Store {
                     )
                 )
                 "#
+                )
             })
             .collect::<Vec<_>>()
             .join(" OR ");
@@ -923,7 +928,7 @@ fn ensure_search_projection_stats_table(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn refresh_semantic_searchable_item_stats(conn: &Connection) -> Result<()> {
+fn refresh_semantic_searchable_item_stats(conn: &Connection) -> Result<usize> {
     ensure_search_projection_stats_table(conn)?;
     let count = semantic_searchable_item_count_exact(conn)?;
     conn.execute(
@@ -940,7 +945,7 @@ fn refresh_semantic_searchable_item_stats(conn: &Connection) -> Result<()> {
             utc_now().timestamp_millis(),
         ],
     )?;
-    Ok(())
+    Ok(count)
 }
 
 pub(crate) fn adjust_semantic_searchable_item_stats(
@@ -952,10 +957,10 @@ pub(crate) fn adjust_semantic_searchable_item_stats(
         return Ok(());
     }
     if !table_exists(conn, "search_projection_stats")? {
-        return refresh_semantic_searchable_item_stats(conn);
+        return refresh_semantic_searchable_item_stats(conn).map(|_| ());
     }
     if cached_semantic_searchable_item_count(conn)?.is_none() {
-        return refresh_semantic_searchable_item_stats(conn);
+        return refresh_semantic_searchable_item_stats(conn).map(|_| ());
     }
     let delta = current_count as i64 - previous_count as i64;
     conn.execute(
@@ -1016,18 +1021,38 @@ fn semantic_lite_turn_document_select_sql(anchor_tail: &str, document_tail: &str
     )
 }
 
-fn semantic_lite_turn_anchor_eligible_predicate() -> &'static str {
-    r#"
-    anchor.event_type = 'message'
-    AND anchor.role = 'user'
-    AND anchor.deleted_at_ms IS NULL
-    AND anchor.visibility != 'withheld'
-    AND anchor.sync_state != 'withheld'
-    AND length(trim(anchor.payload_json)) > 2
+fn semantic_lite_turn_anchor_eligible_predicate() -> String {
+    semantic_lite_turn_user_eligible_predicate("anchor", "anchor_search")
+}
+
+fn semantic_lite_turn_user_eligible_predicate(event_alias: &str, search_alias: &str) -> String {
+    format!(
+        r#"
+    {event_alias}.event_type = 'message'
+    AND {event_alias}.role = 'user'
+    AND {event_alias}.deleted_at_ms IS NULL
+    AND {event_alias}.visibility != 'withheld'
+    AND {event_alias}.sync_state != 'withheld'
+    AND length(trim({event_alias}.payload_json)) > 2
+    AND trim({search_alias}.preview_text) NOT LIKE '<environment_context>%'
+    AND trim({search_alias}.preview_text) NOT LIKE '<turn_aborted>%'
+    AND trim({search_alias}.preview_text) NOT LIKE '<subagent_notification>%'
+    AND trim({search_alias}.preview_text) NOT LIKE 'Warning: The maximum number of unified exec processes%'
     "#
+    )
+}
+
+fn semantic_lite_turn_preview_is_control(preview: &str) -> bool {
+    let trimmed = preview.trim();
+    trimmed.starts_with("<environment_context>")
+        || trimmed.starts_with("<turn_aborted>")
+        || trimmed.starts_with("<subagent_notification>")
+        || trimmed.starts_with("Warning: The maximum number of unified exec processes")
 }
 
 fn semantic_lite_turn_cte_sql(anchor_tail: &str) -> String {
+    let candidate_user_predicate =
+        semantic_lite_turn_user_eligible_predicate("candidate_user", "candidate_user_search");
     format!(
         r#"
         WITH semantic_anchor_page AS MATERIALIZED (
@@ -1088,6 +1113,13 @@ fn semantic_lite_turn_cte_sql(anchor_tail: &str) -> String {
                       AND candidate_user.deleted_at_ms IS NULL
                       AND candidate_user.visibility != 'withheld'
                       AND candidate_user.sync_state != 'withheld'
+                      AND EXISTS (
+                          SELECT 1
+                          FROM event_search_lookup AS candidate_user_search
+                          WHERE candidate_user_search.event_id = candidate_user.id
+                            AND length(trim(candidate_user_search.preview_text)) > 0
+                            AND {candidate_user_predicate}
+                      )
                       AND (
                             candidate_user.occurred_at_ms > anchor.occurred_at_ms
                             OR (candidate_user.occurred_at_ms = anchor.occurred_at_ms AND candidate_user.seq > anchor.seq)
@@ -1106,6 +1138,13 @@ fn semantic_lite_turn_cte_sql(anchor_tail: &str) -> String {
                       AND candidate_user.deleted_at_ms IS NULL
                       AND candidate_user.visibility != 'withheld'
                       AND candidate_user.sync_state != 'withheld'
+                      AND EXISTS (
+                          SELECT 1
+                          FROM event_search_lookup AS candidate_user_search
+                          WHERE candidate_user_search.event_id = candidate_user.id
+                            AND length(trim(candidate_user_search.preview_text)) > 0
+                            AND {candidate_user_predicate}
+                      )
                       AND (
                             candidate_user.occurred_at_ms > anchor.occurred_at_ms
                             OR (candidate_user.occurred_at_ms = anchor.occurred_at_ms AND candidate_user.seq > anchor.seq)
@@ -1549,17 +1588,22 @@ fn semantic_searchable_event_parts(
     sync_state: SyncState,
     deleted: bool,
 ) -> bool {
-    event_type == EventType::Message
-        && role == Some(EventRole::User)
-        && event_searchable_event_parts(
-            payload,
-            redaction_state,
-            event_type,
-            role,
-            visibility,
-            sync_state,
-            deleted,
-        )
+    if event_type != EventType::Message || role != Some(EventRole::User) {
+        return false;
+    }
+    if !event_searchable_event_parts(
+        payload,
+        redaction_state,
+        event_type,
+        role,
+        visibility,
+        sync_state,
+        deleted,
+    ) {
+        return false;
+    }
+    let preview = event_search_preview_from_payload(event_type, role, payload, redaction_state);
+    !semantic_lite_turn_preview_is_control(&preview)
 }
 
 fn event_searchable_event_parts(

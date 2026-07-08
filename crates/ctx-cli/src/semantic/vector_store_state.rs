@@ -111,6 +111,42 @@ impl SemanticVectorStore {
         Ok(())
     }
 
+    fn delete_maintenance_state_keys(&self, keys: &[&str]) -> Result<()> {
+        if keys.is_empty() || !sqlite_table_exists(&self.conn, "semantic_maintenance_state")? {
+            return Ok(());
+        }
+        for key in keys {
+            self.conn
+                .execute("DELETE FROM semantic_maintenance_state WHERE key = ?1", [key])?;
+        }
+        Ok(())
+    }
+
+    fn backfill_cursor(&self) -> Result<Option<(i64, u64)>> {
+        let Some(occurred_at_ms) = self.maintenance_state_i64("backfill_occurred_at_ms_before")?
+        else {
+            return Ok(None);
+        };
+        let Some(seq) = self.maintenance_state_i64("backfill_seq_before")? else {
+            return Ok(None);
+        };
+        Ok(Some((occurred_at_ms, seq.max(0) as u64)))
+    }
+
+    fn set_backfill_cursor(&self, cursor: Option<(i64, u64)>) -> Result<()> {
+        match cursor {
+            Some((occurred_at_ms, seq)) => {
+                self.set_maintenance_state_i64("backfill_occurred_at_ms_before", occurred_at_ms)?;
+                self.set_maintenance_state_i64("backfill_seq_before", seq as i64)?;
+            }
+            None => self.delete_maintenance_state_keys(&[
+                "backfill_occurred_at_ms_before",
+                "backfill_seq_before",
+            ])?,
+        }
+        Ok(())
+    }
+
     fn dirty_event_count(&self) -> Result<usize> {
         if !sqlite_table_exists(&self.conn, "semantic_dirty_events")? {
             return Ok(0);

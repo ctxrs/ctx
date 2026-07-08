@@ -41,6 +41,7 @@ fn backfill_semantic_embeddings(
     let mut before = None;
     let mut indexed = 0_usize;
     let mut scanned = 0_usize;
+    let mut recent_probe_done = false;
 
     let dirty_ids =
         vector_store.queued_dirty_event_ids(max_to_index.min(SEMANTIC_DIRTY_QUEUE_RECENT_LIMIT))?;
@@ -73,6 +74,9 @@ fn backfill_semantic_embeddings(
             eprintln!(
                 "semantic index: embedded {indexed} dirty-priority chunks (scanned {scanned} events)"
             );
+        }
+        if !continue_past_indexed_pages {
+            return Ok(indexed);
         }
     }
 
@@ -110,9 +114,15 @@ fn backfill_semantic_embeddings(
         }
         let docs = store.recent_event_embedding_documents(before, 512)?;
         if docs.is_empty() {
+            if continue_past_indexed_pages {
+                vector_store.set_backfill_cursor(None)?;
+            }
             break;
         }
-        before = docs.last().map(|doc| (doc.occurred_at_ms, doc.seq));
+        let doc_cursors = docs
+            .iter()
+            .map(|doc| (doc.event_id, (doc.occurred_at_ms, doc.seq)))
+            .collect::<Vec<_>>();
         extend_existing_hashes_for_docs(vector_store, &mut existing_hashes, &docs)?;
         scanned = scanned.saturating_add(docs.len());
         let outcome = index_semantic_documents(
@@ -127,11 +137,35 @@ fn backfill_semantic_embeddings(
         )?;
         let added = outcome.indexed_chunks;
         indexed = indexed.saturating_add(added);
+        let consumed_event_ids = outcome
+            .consumed_event_ids
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+        let consumed_cursor = doc_cursors
+            .iter()
+            .rev()
+            .find(|(event_id, _)| consumed_event_ids.contains(event_id))
+            .map(|(_, cursor)| *cursor);
         if !json_output {
             eprintln!("semantic index: embedded {indexed} chunks (scanned {scanned} events)");
         }
-        if added == 0 && !continue_past_indexed_pages {
+        if !continue_past_indexed_pages {
             break;
+        }
+        if consumed_cursor.is_none() && added == 0 {
+            break;
+        }
+        if !recent_probe_done {
+            recent_probe_done = true;
+            let stored_cursor = vector_store.backfill_cursor()?;
+            before = stored_cursor.or(consumed_cursor);
+            if stored_cursor.is_none() {
+                vector_store.set_backfill_cursor(before)?;
+            }
+        } else {
+            before = consumed_cursor;
+            vector_store.set_backfill_cursor(before)?;
         }
     }
     Ok(indexed)
@@ -184,7 +218,7 @@ fn index_semantic_documents(
         }
         let chunks = semantic_chunks_for_document(&doc, &source_text, &text_hash);
         if chunks.len() > limit && pending.is_empty() {
-            continue;
+            break;
         }
         if pending.len().saturating_add(chunks.len()) > limit && !pending.is_empty() {
             break;
@@ -279,7 +313,7 @@ fn semantic_rust_full_scan_chunk_limit() -> usize {
 }
 
 fn semantic_full_corpus_vector_scan_ready(vector_store: &SemanticVectorStore) -> Result<bool> {
-    if vector_store.sqlite_vec0_ready().unwrap_or(false) {
+    if vector_store.sqlite_vec0_search_ready().unwrap_or(false) {
         return Ok(true);
     }
     let stats = vector_store.cached_or_exact_stats()?;
@@ -597,7 +631,7 @@ fn semantic_hits_for_query(
         ));
     }
     let sqlite_vec0_full_scan_ready =
-        event_filter.is_none() && vector_store.sqlite_vec0_ready().unwrap_or(false);
+        event_filter.is_none() && vector_store.sqlite_vec0_search_ready().unwrap_or(false);
     let vector_limit = if sqlite_vec0_full_scan_ready {
         limit.max(1)
     } else {

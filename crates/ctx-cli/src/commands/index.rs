@@ -13,7 +13,7 @@ use ctx_history_core::database_path;
 use crate::config::CONFIG_FILE;
 use crate::output::{compact_json, print_json};
 use crate::progress::format_count;
-use crate::semantic::{daemon_report, semantic_worker_report};
+use crate::semantic::{daemon_report, semantic_worker_report_cached};
 use crate::store_util::open_existing_store_snapshot_read_only;
 
 #[derive(Debug, Args)]
@@ -181,7 +181,7 @@ fn index_status_snapshot(data_root: &Path) -> Result<Value> {
         let stale_inventory_units = catalog_counts
             .stale
             .saturating_add(source_import_file_counts.stale);
-        let semantic_report = semantic_worker_report(data_root, Some(&store))?;
+        let semantic_report = semantic_worker_report_cached(data_root, Some(&store))?;
         let daemon = daemon_report(data_root, &semantic_report);
         (
             indexed_counts.items(),
@@ -195,7 +195,7 @@ fn index_status_snapshot(data_root: &Path) -> Result<Value> {
             daemon,
         )
     } else {
-        let semantic_report = semantic_worker_report(data_root, None)?;
+        let semantic_report = semantic_worker_report_cached(data_root, None)?;
         let daemon = daemon_report(data_root, &semantic_report);
         (0, 0, 0, 0, 0, 0, 0, semantic_report.to_json(), daemon)
     };

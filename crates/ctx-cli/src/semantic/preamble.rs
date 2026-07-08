@@ -40,14 +40,14 @@ use crate::commands::{
 };
 use crate::config::{self, AppConfig, CONFIG_FILE};
 use crate::output::{compact_json, print_json};
-use crate::store_util::{open_existing_store_read_only, open_existing_store_snapshot_read_only};
+use crate::store_util::open_existing_store_snapshot_read_only;
 use crate::{
     DaemonArgs, DaemonCommand, DaemonRunArgs, DaemonStartModeArg, DaemonTriggerCommandArg,
     JsonArgs, SearchBackendArg,
 };
 
 const SEMANTIC_BACKEND: &str = "fastembed";
-const SEMANTIC_MODEL_KEY: &str = "fastembed:all-MiniLM-L6-v2:semantic-lite-turn-1200-200-v1";
+const SEMANTIC_MODEL_KEY: &str = "fastembed:all-MiniLM-L6-v2:semantic-lite-turn-1200-200-v2";
 const SEMANTIC_MODEL_ID: &str = "sentence-transformers/all-MiniLM-L6-v2";
 const SEMANTIC_HF_MODEL_CACHE_DIR: &str = "models--Qdrant--all-MiniLM-L6-v2-onnx";
 const SEMANTIC_REQUIRED_MODEL_FILES: &[&str] = &[
@@ -59,7 +59,7 @@ const SEMANTIC_REQUIRED_MODEL_FILES: &[&str] = &[
 ];
 const SEMANTIC_DIMENSIONS: usize = 384;
 const SEMANTIC_SEARCH_CANDIDATES: usize = 200;
-const SEMANTIC_FILTERED_SEARCH_CANDIDATES: usize = 1_000;
+const SEMANTIC_SOFT_FILTER_SEARCH_CANDIDATES: usize = 1_000;
 const SEMANTIC_CHUNK_TARGET_CHARS: usize = 1_200;
 pub(crate) const SEMANTIC_CHUNK_OVERLAP_CHARS: usize = 200;
 const SEMANTIC_SOURCE_MAX_CHARS: usize = 64 * 1024;
@@ -119,6 +119,12 @@ const DAEMON_LOCK_STALE_AFTER_MS: i64 = 25 * 60 * 60 * 1_000;
 const DAEMON_SEMANTIC_RESERVE_GRACE_SECS: u64 = 10;
 const DAEMON_MIN_REMAINING_FOR_JOB_SECS: u64 = 2;
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum SemanticReportCountMode {
+    ExactOnCacheMiss,
+    CachedOrStatusFile,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct SemanticWorkerReport {
     status: String,
@@ -131,6 +137,7 @@ pub(crate) struct SemanticWorkerReport {
     model_init_ms: Option<usize>,
     last_error: Option<String>,
     searchable_items: usize,
+    searchable_items_known: bool,
     embedded_items: usize,
     embedded_chunks: usize,
     dirty_items: usize,
@@ -155,6 +162,7 @@ impl SemanticWorkerReport {
             model_init_ms: None,
             last_error: Some(error.to_string()),
             searchable_items: 0,
+            searchable_items_known: false,
             embedded_items: 0,
             embedded_chunks: 0,
             dirty_items: 0,
@@ -170,7 +178,7 @@ impl SemanticWorkerReport {
     }
 
     fn coverage_ratio(&self) -> Option<f64> {
-        if self.searchable_items == 0 {
+        if !self.searchable_items_known || self.searchable_items == 0 {
             None
         } else {
             Some((self.embedded_items as f64 / self.searchable_items as f64).min(1.0))
@@ -180,6 +188,7 @@ impl SemanticWorkerReport {
     pub(crate) fn to_json(&self) -> Value {
         compact_json(json!({
             "status": self.status,
+            "model_key": SEMANTIC_MODEL_KEY,
             "running": self.running,
             "pid": self.pid,
             "started_at_ms": self.started_at_ms,
@@ -190,6 +199,7 @@ impl SemanticWorkerReport {
             "last_error": self.last_error,
             "coverage": {
                 "searchable_items": self.searchable_items,
+                "searchable_items_known": self.searchable_items_known,
                 "embedded_items": self.embedded_items,
                 "embedded_chunks": self.embedded_chunks,
                 "dirty_items": self.dirty_items,
@@ -272,6 +282,7 @@ impl SemanticRetrievalReport {
                 "embedded_items": self.embedded_items,
                 "embedded_chunks": self.embedded_chunks,
                 "searchable_items": self.searchable_items,
+                "searchable_items_known": self.worker.as_ref().map(|worker| worker.searchable_items_known),
                 "indexed_now": self.indexed_now,
                 "dirty_items": self.worker.as_ref().map(|worker| worker.dirty_items),
             },
@@ -287,7 +298,7 @@ impl SemanticRetrievalReport {
 }
 
 fn semantic_status_from_worker(worker: &SemanticWorkerReport) -> &'static str {
-    if worker.searchable_items == 0 || worker.embedded_items == 0 {
+    if !worker.searchable_items_known || worker.searchable_items == 0 || worker.embedded_items == 0 {
         "unavailable"
     } else if semantic_worker_coverage_ready(worker) {
         "ready"
@@ -297,7 +308,8 @@ fn semantic_status_from_worker(worker: &SemanticWorkerReport) -> &'static str {
 }
 
 fn semantic_worker_coverage_ready(worker: &SemanticWorkerReport) -> bool {
-    worker.searchable_items > 0
+    worker.searchable_items_known
+        && worker.searchable_items > 0
         && worker.embedded_items >= worker.searchable_items
         && worker.dirty_items == 0
 }
@@ -376,7 +388,7 @@ pub(crate) fn search_packet_with_backend(
         effective_backend,
         SearchBackendArg::Semantic | SearchBackendArg::Hybrid
     ) {
-        semantic_worker_report(data_root, Some(store))?
+        semantic_worker_report_cached(data_root, Some(store))?
     } else {
         semantic_worker_report_best_effort(data_root)
     };
@@ -535,24 +547,32 @@ fn semantic_or_hybrid_search_packet(
             }
 
             if effective_backend == SearchBackendArg::Hybrid
-                && !semantic_hybrid_coverage_ready(
-                    worker_report.embedded_items,
-                    worker_report.searchable_items,
-                    worker_report.dirty_items,
-                )
+                && (!worker_report.searchable_items_known
+                    || !semantic_hybrid_coverage_ready(
+                        worker_report.embedded_items,
+                        worker_report.searchable_items,
+                        worker_report.dirty_items,
+                    ))
             {
                 retrieval.effective_mode = SearchBackendArg::Lexical;
                 retrieval.semantic_weight = 0.0;
                 retrieval.embedding_model = None;
-                retrieval.set_semantic_fallback(
-                    "semantic_coverage_not_ready",
-                    format!(
-                        "semantic coverage is incomplete or dirty for hybrid ranking ({}/{} items embedded, {} dirty)",
-                        worker_report.embedded_items,
-                        worker_report.searchable_items,
-                        worker_report.dirty_items
-                    ),
-                );
+                if worker_report.searchable_items_known {
+                    retrieval.set_semantic_fallback(
+                        "semantic_coverage_not_ready",
+                        format!(
+                            "semantic coverage is incomplete or dirty for hybrid ranking ({}/{} items embedded, {} dirty)",
+                            worker_report.embedded_items,
+                            worker_report.searchable_items,
+                            worker_report.dirty_items
+                        ),
+                    );
+                } else {
+                    retrieval.set_semantic_fallback(
+                        "semantic_coverage_unknown",
+                        "semantic coverage is not cached yet; wait for the daemon to refresh indexing status",
+                    );
+                }
                 warn_if(
                     emit_warnings,
                     "warning: semantic coverage is incomplete or dirty for hybrid ranking; falling back to lexical search",
@@ -583,7 +603,7 @@ fn semantic_or_hybrid_search_packet(
             }
 
             let semantic_candidate_limit = if semantic_filters_need_overfetch(&options.filters) {
-                SEMANTIC_FILTERED_SEARCH_CANDIDATES.max(options.limit.saturating_mul(100))
+                SEMANTIC_SOFT_FILTER_SEARCH_CANDIDATES.max(options.limit.saturating_mul(100))
             } else {
                 SEMANTIC_SEARCH_CANDIDATES.max(options.limit.saturating_mul(8))
             };

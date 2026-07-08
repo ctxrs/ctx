@@ -352,7 +352,8 @@ fn semantic_bootstrap_should_run_first(
     {
         return Ok(false);
     }
-    let store = open_existing_store_read_only(&db_path, "ctx daemon semantic bootstrap")?;
+    let store = Store::open(&db_path).context("open ctx store for daemon semantic bootstrap")?;
+    refresh_semantic_document_count_cache(&store)?;
     let report = semantic_worker_report(data_root, Some(&store))?;
     Ok(report.searchable_items > 0
         && report.queued_items_estimate > 0
@@ -363,6 +364,11 @@ fn semantic_report_should_queue_recent_work(report: &SemanticWorkerReport) -> bo
     report.searchable_items > 0
         && report.embedded_items >= report.searchable_items
         && report.dirty_items == 0
+}
+
+fn refresh_semantic_document_count_cache(store: &Store) -> Result<()> {
+    store.refresh_event_embedding_document_count_cache()?;
+    Ok(())
 }
 
 fn daemon_semantic_job_did_work(value: &Value) -> bool {
@@ -550,7 +556,8 @@ fn run_daemon_semantic_job(
         ));
     }
 
-    let store = open_existing_store_read_only(&db_path, "ctx daemon semantic job")?;
+    let store = Store::open(&db_path).context("open ctx store for daemon semantic job")?;
+    refresh_semantic_document_count_cache(&store)?;
     let mut before = semantic_worker_report(data_root, Some(&store))?;
     if semantic_report_should_queue_recent_work(&before)
         && queue_recent_semantic_work(data_root, &store, "daemon_recent").unwrap_or(0) > 0
@@ -713,6 +720,7 @@ fn daemon_semantic_job_json(
     compact_json(json!({
         "schema_version": 1,
         "status": status,
+        "model_key": SEMANTIC_MODEL_KEY,
         "enabled": true,
         "reason": reason,
         "last_run_at_ms": last_run_at_ms,
@@ -775,7 +783,7 @@ fn semantic_worker_report_for_daemon(data_root: &Path) -> SemanticWorkerReport {
     if db_path.exists() {
         match open_existing_store_snapshot_read_only(&db_path, "ctx daemon status") {
             Ok(store) => {
-                return semantic_worker_report(data_root, Some(&store)).unwrap_or_else(|error| {
+                return semantic_worker_report_cached(data_root, Some(&store)).unwrap_or_else(|error| {
                     SemanticWorkerReport::unavailable(data_root, format!("{error:#}"))
                 });
             }
@@ -794,6 +802,7 @@ fn write_semantic_worker_failure_status(data_root: &Path, message: String) -> Re
         &json!({
             "schema_version": 1,
             "status": "failed",
+            "model_key": SEMANTIC_MODEL_KEY,
             "pid": process::id(),
             "heartbeat_at_ms": now,
             "finished_at_ms": now,
@@ -825,7 +834,8 @@ fn run_semantic_worker_inner_with_embedder(
             "semantic model is not available in the local cache; background indexing will not initialize or download {SEMANTIC_MODEL_ID}"
         ));
     }
-    let store = open_existing_store_read_only(&db_path, "ctx semantic worker")?;
+    let store = Store::open(&db_path).context("open ctx store for semantic worker")?;
+    refresh_semantic_document_count_cache(&store)?;
     let vector_path = semantic_vector_path(data_root);
     let mut vector_store = SemanticVectorStore::open(&vector_path)?;
     let prune_outcome = vector_store.prune_ineligible_events(&store)?;
@@ -835,12 +845,20 @@ fn run_semantic_worker_inner_with_embedder(
         .unwrap_or_else(SemanticSidecarStats::default);
     let initial_dirty_items = vector_store.dirty_event_count()?;
     let searchable_items = store.event_embedding_document_count_cached_or_exact()?;
+    let initial_queued_items_estimate = searchable_items
+        .saturating_sub(initial_stats.embedded_items)
+        .max(initial_dirty_items);
+    let was_ready_before_worker =
+        semantic_worker_status_was_ready_for_stats(data_root, initial_stats);
+    let continue_past_indexed_pages = !was_ready_before_worker
+        || initial_queued_items_estimate > SEMANTIC_DIRTY_QUEUE_RECENT_LIMIT;
     let starting_embed_policy = semantic_embedder_policy_status_json(embedder);
     write_semantic_worker_status(
         data_root,
         &json!({
             "schema_version": 1,
             "status": "running",
+            "model_key": SEMANTIC_MODEL_KEY,
             "pid": process::id(),
             "started_at_ms": started_at_ms,
             "heartbeat_at_ms": started_at_ms,
@@ -872,7 +890,7 @@ fn run_semantic_worker_inner_with_embedder(
             query_hint.as_deref(),
             max_chunks,
             true,
-            true,
+            continue_past_indexed_pages,
             Some(deadline),
         )?
     };
@@ -883,11 +901,13 @@ fn run_semantic_worker_inner_with_embedder(
         .cached_stats()?
         .unwrap_or_else(SemanticSidecarStats::default);
     let final_dirty_items = vector_store.dirty_event_count()?;
+    refresh_semantic_document_count_cache(&store)?;
     let searchable_items = store.event_embedding_document_count_cached_or_exact()?;
     let status = if searchable_items > 0
         && final_stats.embedded_items >= searchable_items
         && final_dirty_items == 0
     {
+        vector_store.set_backfill_cursor(None)?;
         "ready"
     } else if elapsed >= StdDuration::from_secs(max_seconds) {
         "budget_exhausted"
@@ -900,6 +920,7 @@ fn run_semantic_worker_inner_with_embedder(
         &json!({
             "schema_version": 1,
             "status": status,
+            "model_key": SEMANTIC_MODEL_KEY,
             "pid": process::id(),
             "started_at_ms": started_at_ms,
             "heartbeat_at_ms": finished_at_ms,
@@ -938,6 +959,26 @@ fn semantic_worker_seconds_budget(args: &SemanticWorkerArgs) -> u64 {
         })
         .map(|value| value.min(SEMANTIC_WORKER_MAX_SECONDS_CAP))
         .unwrap_or(SEMANTIC_WORKER_MAX_SECONDS_DEFAULT)
+}
+
+fn semantic_worker_status_was_ready_for_stats(
+    data_root: &Path,
+    stats: SemanticSidecarStats,
+) -> bool {
+    let Some(value) = read_semantic_worker_status(data_root) else {
+        return false;
+    };
+    if !semantic_status_file_model_matches(Some(&value)) {
+        return false;
+    }
+    let status_ready = json_string(&value, "status").is_some_and(|status| status == "ready");
+    let dirty_items = json_usize(&value, "dirty_items").unwrap_or(usize::MAX);
+    let embedded_items = json_usize(&value, "embedded_items").unwrap_or(0);
+    let searchable_items = json_usize(&value, "searchable_items").unwrap_or(usize::MAX);
+    status_ready
+        && dirty_items == 0
+        && embedded_items == stats.embedded_items
+        && embedded_items >= searchable_items
 }
 
 fn queue_recent_semantic_work(data_root: &Path, store: &Store, reason: &str) -> Result<usize> {

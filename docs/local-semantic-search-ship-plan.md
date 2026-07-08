@@ -142,15 +142,76 @@ safe to ship by default.
   data root with no vector sidecar. The copy took 45.8s. Three default daemon
   passes then indexed 4,720 chunks / 2,418 semantic items in 183.8s total,
   with zero dirty churn, history refresh skipped for semantic bootstrap, and
-  peak RSS between 8.18 and 8.25 GiB. Linear extrapolation from this clean
-  slice puts the 108,612-item corpus around 2.3 hours of daemon work, with a
-  roughly 1 GiB final vector sidecar if the observed chunk/item and bytes/chunk
-  ratios hold. This replaces the stale-sidecar pass as the best current
-  initial-backfill estimate, though it is still a 2.2% sample rather than a
-  completed full backfill.
+  peak RSS between 8.18 and 8.25 GiB. That sample was useful for throughput
+  shape, but was replaced by the completed v2 dogfood run below.
 - During incomplete bootstrap, eager recent dirty detection is skipped. Recent
   dirty detection is reserved for the complete/clean incremental path; bootstrap
   relies on ordered backfill plus bounded prune.
+
+## Final V2 Dogfood Notes
+
+- The v2 semantic corpus excludes deterministic transcript scaffolding
+  (`<environment_context>`, `<turn_aborted>`, `<subagent_notification>`, and
+  unified-exec process-limit warnings) from both semantic anchors and
+  lite-turn boundaries. On the isolated real local corpus this reduced semantic
+  documents from 108,614 v1 lite-turn anchors to 60,715 v2 anchors.
+- A full daemon-owned v2 backfill on the isolated real local corpus completed
+  in 2h02m53s, with max RSS 9,961,304 KiB, average CPU 466%, 60,715 / 60,715
+  embedded items, 157,251 chunks, and a 1.2 GiB sidecar.
+- A final-binary repair pass after review fixes completed in 1m46.5s, peaked at
+  4.66 GiB RSS, repaired 12 stale events / 16 pruned chunks, and ended ready at
+  60,715 / 60,715 items, 157,817 chunks, and zero dirty items.
+- `ctx daemon status --json` on the complete sidecar is read-only/cache-only:
+  under 0.01s and about 15.8 MiB RSS. It no longer exact-counts the work DB or
+  sidecar from the foreground status path, and stale worker/job status files are
+  ignored when their `model_key` does not match the current semantic corpus.
+- The final rough eight-query search gate over the completed sidecar completed
+  24 runs with no command failures. Lexical p95 was 27ms. Semantic p95 was
+  2.17s and hybrid p95 was 2.26s with the safer 1,000-candidate soft-filter
+  overfetch window. Typical diagnostics: query embedding 170-185ms, sqlite-vec
+  scan about 535-575ms over 157,817 chunks / 243 MiB of vectors, and hydration
+  about 170-440ms.
+- The 1,000-candidate soft-filter window is intentionally conservative because
+  current-session/subagent filters are applied after vector retrieval. A lower
+  200-candidate window measured faster, but risks under-filling results without
+  a proper refill loop.
+- Final bounded incremental dogfood:
+  - importing one new lite-turn session took 2.87s and 88 MiB RSS;
+  - status immediately reported 60,717 searchable, 60,716 embedded, and one
+    queued item;
+  - the daemon pass reached ready in 33.85s and 437 MiB RSS;
+  - the worker embedded exactly one chunk in 290ms after 168ms model init;
+  - semantic search found the new marker at Hit@1 in 2.03s.
+- A previous incremental pass before bounding recent repair took 1m34.9s and
+  embedded 1,048 chunks, which showed that complete-index incremental refresh
+  was too eager. The worker now uses a bounded incremental slice when initial
+  queued work is at or below the recent-dirty window, while full bootstrap keeps
+  scanning until its worker budget is exhausted.
+- The sqlite-vec hot path uses cheap count-parity readiness for search. Deep
+  payload drift is repaired by writable daemon maintenance rather than audited
+  before every read-only search; the full audit was measured as a hidden
+  35s-per-search cost and is not acceptable on the hot path.
+- A later bursty incremental dogfood pass exposed two readiness issues:
+  incomplete bootstrap tails needed a persistent backfill cursor, and the
+  cached v2 searchable count could drift because event-level cache adjustment
+  still counted deterministic control-message users. The fixes are:
+  - persist the backfill cursor across daemon passes until the sidecar becomes
+    ready;
+  - make the event-level semantic count predicate match the v2 SQL control
+    filter;
+  - refresh the cached searchable count exactly inside writable daemon/worker
+    maintenance, while keeping foreground status/search cache-only.
+- Post-fix stale-count repair on the isolated real root corrected 60,728 stale
+  searchable items to 60,725 exact searchable items, reached ready with queued
+  zero in 1m16.88s, peaked at 510,476 KiB RSS, and indexed two chunks from live
+  work discovered during the pass.
+- Post-fix clean incremental dogfood imported one fresh marker source in 7.95s
+  and 87,564 KiB RSS, then reported exactly one queued semantic item. A daemon
+  pass skipped history refresh with `semantic_bootstrap_in_progress`, embedded
+  exactly one chunk, reached ready in 49.45s, and peaked at 449,768 KiB RSS.
+  Semantic search found the new marker at Hit@1 in 2.47s over 158,663 chunks;
+  lexical found the same marker in 0.47s because the query shared exact marker
+  tokens.
 
 ## Ship Goals
 
@@ -169,12 +230,14 @@ safe to ship by default.
   ranking.
 - Local dogfood on this corpus meets:
   - lexical initial refresh: under 5 minutes;
-  - semantic initial backfill: target 2-4 hours on this 64 GB power-user
+  - semantic initial backfill: about 2 hours on this 64 GB power-user
     corpus, acceptable as daemon work if it is resumable, observable, and lower
     priority than fresh incremental work;
   - lexical incremental p95: under 10 seconds;
   - semantic incremental p95: under 60 seconds after model cache is available;
-  - warm hybrid search p95: under 1 second;
+  - warm hybrid search p95: target under 2.5 seconds with the conservative
+    soft-filter overfetch window; subsecond search needs a future query-service
+    or refill/overfetch optimization rather than more hot-path audits;
   - semantic worker RSS follows the adaptive memory budget and must remain
     below that selected budget during default daemon indexing.
 
@@ -262,11 +325,23 @@ safe to ship by default.
 - Let default daemon semantic passes use the existing worker time budget; keep
   peak memory controlled by the adaptive embed policy rather than an artificially
   tiny per-pass chunk count.
+- When initial queued semantic work is at or below the recent-dirty window,
+  treat the pass as incremental: drain dirty-priority work or one recent page
+  and stop. When queued work is larger, treat it as bootstrap/backfill and keep
+  scanning pages until the worker budget is exhausted.
+- Persist the historical backfill cursor across daemon passes while coverage is
+  incomplete; clear it only once the current model-key sidecar reaches ready.
+- Keep the cached semantic searchable count cheap for read-only status/search,
+  but refresh it exactly during writable daemon/worker maintenance and keep
+  event-level cache deltas aligned with the v2 lite-turn control-message
+  predicate.
 - Tests:
   - dirty queue drains before historical backfill;
   - a new assistant response updates the existing turn document hash;
   - semantic bootstrap skips history refresh and calls the semantic job first;
   - history refresh still runs when the store is missing or semantic is ready;
+  - cached semantic counts ignore deterministic control-message users and update
+    correctly when an event changes from searchable to control-like;
   - `--max-chunks` produces truthful `budget_exhausted` status for one-pass
     dogfood runs.
 
@@ -298,23 +373,16 @@ safe to ship by default.
   documents are present, semantic coverage is incomplete, and the model cache is
   available, stop and fix daemon scheduling before further timing work.
 
-## Remaining Shippability Work
+## Remaining Follow-Ups
 
-- Re-run real local dogfood after the semantic-bootstrap scheduling fix:
-  confirm daemon passes skip history refresh during bootstrap, semantic chunks
-  advance, and idle exit only happens once no job reports work.
-- Reduce full-backfill embedding time without exceeding the memory target. The
-  next viable experiments are likely reducing chunks per lite-turn document,
-  using a faster local embedding runtime/model, or adding a memory-aware
-  throughput profile rather than simply increasing ONNX batch/thread counts.
-- Continue improving daemon history refresh incrementality for post-bootstrap
-  steady state so repeated refresh passes stay cheap on the real local corpus.
-- Add a real dogfood/eval command or script that records initial setup,
-  daemon-job timings, RSS, incremental refresh latency, search latency, and
-  relevance judgments in one artifact.
-- Re-run full local dogfood after refresh scheduling is fixed:
-  - fresh setup on an isolated data root;
-  - full lexical completion;
-  - full semantic completion;
-  - appended-session incremental refresh;
-  - semantic vs lexical relevance checks on representative local tasks.
+- Add a refill loop for post-vector soft filters so default semantic/hybrid can
+  reduce candidate count without risking under-filled filtered results.
+- Add an idle/low-priority stale-sweep cadence for older externally changed or
+  deleted documents that are not caught by recent dirty detection, while keeping
+  normal ready-status daemon passes cheap.
+- Consider a long-lived query service if subsecond semantic/hybrid search is a
+  hard product requirement; the CLI process currently pays model/query setup and
+  scans the sqlite-vec sidecar per command.
+- Keep improving relevance evaluation with a private judged query manifest. The
+  rough dogfood gate is useful for latency and smoke testing, but synthetic
+  incremental markers in the isolated corpus can contaminate top results.

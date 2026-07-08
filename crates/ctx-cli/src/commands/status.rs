@@ -7,7 +7,7 @@ use ctx_history_core::database_path;
 
 use crate::config::CONFIG_FILE;
 use crate::output::print_json;
-use crate::semantic::{daemon_report, semantic_worker_report};
+use crate::semantic::{daemon_report, semantic_worker_report_cached};
 use crate::store_util::open_existing_store_snapshot_read_only;
 use crate::JsonArgs;
 
@@ -27,7 +27,7 @@ pub(crate) fn run_status(args: JsonArgs, data_root: PathBuf, quiet: bool) -> Res
     ) = if initialized {
         let store = open_existing_store_snapshot_read_only(&db_path, "status")?;
         let counts = store.indexed_history_counts()?;
-        let semantic_report = semantic_worker_report(&data_root, Some(&store))?;
+        let semantic_report = semantic_worker_report_cached(&data_root, Some(&store))?;
         let daemon = daemon_report(&data_root, &semantic_report);
         (
             counts.items(),
@@ -40,7 +40,7 @@ pub(crate) fn run_status(args: JsonArgs, data_root: PathBuf, quiet: bool) -> Res
             daemon,
         )
     } else {
-        let semantic_report = semantic_worker_report(&data_root, None)?;
+        let semantic_report = semantic_worker_report_cached(&data_root, None)?;
         let daemon = daemon_report(&data_root, &semantic_report);
         (
             0,

@@ -21,7 +21,7 @@ impl SemanticVectorStore {
         limit: usize,
         event_ids: Option<&[Uuid]>,
     ) -> Result<SemanticVectorSearch> {
-        if event_ids.is_none() && self.sqlite_vec0_ready()? {
+        if event_ids.is_none() && self.sqlite_vec0_search_ready()? {
             if let Ok(search) = self.search_sqlite_vec0(query_embedding, limit) {
                 return Ok(search);
             }

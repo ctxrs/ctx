@@ -230,6 +230,7 @@ mod tests {
             &json!({
                 "schema_version": 1,
                 "status": "budget_exhausted",
+                "model_key": SEMANTIC_MODEL_KEY,
                 "pid": 1234,
                 "searchable_items": 10,
                 "embedded_items": 2,
@@ -248,6 +249,109 @@ mod tests {
         assert_eq!(report["embed_policy"]["source"], "fixture");
         assert_eq!(report["embed_policy"]["threads"], 7);
         assert_eq!(report["coverage"]["embedded_chunks"], 4);
+        Ok(())
+    }
+
+    #[test]
+    fn semantic_worker_report_ignores_status_from_old_model_key() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_semantic_worker_status(
+            temp.path(),
+            &json!({
+                "schema_version": 1,
+                "status": "ready",
+                "model_key": "fastembed:old-model-key",
+                "pid": 999,
+                "last_error": "old failure",
+                "searchable_items": 10,
+                "embedded_items": 10,
+                "embedded_chunks": 20,
+                "dirty_items": 0,
+                "embed_policy": {
+                    "source": "old-fixture"
+                },
+            }),
+        )?;
+
+        let report = semantic_worker_report_best_effort(temp.path()).to_json();
+        assert_eq!(report["status"], "unknown");
+        assert_eq!(report["pid"], Value::Null);
+        assert_eq!(report["last_error"], Value::Null);
+        assert_ne!(report["embed_policy"]["source"], "old-fixture");
+        assert_eq!(report["coverage"]["searchable_items"], 0);
+        assert_eq!(report["coverage"]["searchable_items_known"], false);
+        assert_eq!(report["coverage"]["embedded_items"], 0);
+        Ok(())
+    }
+
+    #[test]
+    fn semantic_incremental_slice_requires_previous_ready_status() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let stats = SemanticSidecarStats {
+            embedded_items: 10,
+            embedded_chunks: 20,
+        };
+        assert!(!semantic_worker_status_was_ready_for_stats(
+            temp.path(),
+            stats
+        ));
+
+        write_semantic_worker_status(
+            temp.path(),
+            &json!({
+                "schema_version": 1,
+                "status": "completed",
+                "model_key": SEMANTIC_MODEL_KEY,
+                "searchable_items": 11,
+                "embedded_items": 10,
+                "embedded_chunks": 20,
+                "dirty_items": 0,
+            }),
+        )?;
+        assert!(!semantic_worker_status_was_ready_for_stats(
+            temp.path(),
+            stats
+        ));
+
+        write_semantic_worker_status(
+            temp.path(),
+            &json!({
+                "schema_version": 1,
+                "status": "ready",
+                "model_key": SEMANTIC_MODEL_KEY,
+                "searchable_items": 10,
+                "embedded_items": 10,
+                "embedded_chunks": 20,
+                "dirty_items": 0,
+            }),
+        )?;
+        assert!(semantic_worker_status_was_ready_for_stats(
+            temp.path(),
+            stats
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn daemon_semantic_status_ignores_job_from_old_model_key() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_daemon_job_status(
+            &daemon_semantic_job_path(temp.path()),
+            &json!({
+                "schema_version": 1,
+                "status": "ready",
+                "model_key": "fastembed:old-model-key",
+                "last_run_at_ms": 1234,
+                "indexed_chunks": 99,
+            }),
+        )?;
+
+        let daemon = daemon_report(temp.path(), &semantic_worker_report_best_effort(temp.path()));
+        let semantic = &daemon["jobs"]["semantic_index"];
+        assert_eq!(semantic["status"], "unknown");
+        assert_eq!(semantic["reason"], "searchable_items_unknown");
+        assert_eq!(semantic["last_run_status"], Value::Null);
+        assert_eq!(semantic["indexed_chunks"], Value::Null);
         Ok(())
     }
 
@@ -784,7 +888,7 @@ mod tests {
     }
 
     #[test]
-    fn sqlite_vec0_payload_drift_falls_back_and_rebuilds() -> Result<()> {
+    fn sqlite_vec0_payload_drift_is_repaired_by_maintenance() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let mut store = SemanticVectorStore::open(&temp.path().join("vectors.sqlite"))?;
         let close_event = Uuid::new_v4();
@@ -813,9 +917,10 @@ mod tests {
         )?;
 
         assert!(!store.sqlite_vec0_ready()?);
-        let search = store.search(&test_embedding(1.0, 0.0), 2)?;
-        assert_eq!(search.stats.backend, Some(SEMANTIC_VECTOR_BACKEND_RUST));
-        assert_eq!(search.hits[0].event_id, close_event);
+        assert!(
+            store.sqlite_vec0_search_ready()?,
+            "search hot path should use cheap count readiness and leave deep integrity checks to maintenance"
+        );
 
         store.sync_sqlite_vec0_from_chunks_if_needed()?;
         assert!(store.sqlite_vec0_ready()?);

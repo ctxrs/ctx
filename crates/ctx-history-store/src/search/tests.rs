@@ -682,6 +682,16 @@ fn semantic_embedding_documents_use_user_assistant_lite_turns() {
 
     assert_eq!(store.count_event_embedding_documents_exact().unwrap(), 1);
     store
+        .conn
+        .execute(
+            "DELETE FROM search_projection_stats WHERE key = 'semantic_searchable_lite_turn_items_v2'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(store.cached_event_embedding_document_count().unwrap(), None);
+    assert_eq!(store.count_event_embedding_documents().unwrap(), 1);
+    assert_eq!(store.cached_event_embedding_document_count().unwrap(), None);
+    store
         .refresh_event_embedding_document_count_cache()
         .unwrap();
     assert_eq!(store.count_event_embedding_documents().unwrap(), 1);
@@ -788,6 +798,161 @@ fn semantic_lite_turn_count_ignores_payloads_without_preview_text() {
     assert!(docs[0].text.contains("user:\nValid semantic user prompt"));
     assert!(!docs[0].text.contains("assistant:\n"));
     assert!(!docs[0].text.contains("opaque"));
+}
+
+#[test]
+fn semantic_lite_turn_ignores_transcript_control_user_messages() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let session_id = Uuid::parse_str("018f45d0-0000-7000-8000-000000080009").unwrap();
+    insert_session(&store, session_id);
+
+    let control_messages = [
+        "<environment_context>\n  <cwd>/tmp</cwd>\n</environment_context>",
+        "<turn_aborted>\nThe user interrupted the previous turn on purpose.\n</turn_aborted>",
+        "<subagent_notification>\n{\"status\":\"shutdown\"}\n</subagent_notification>",
+        "Warning: The maximum number of unified exec processes you can keep open is 60",
+    ];
+    let mut control_ids = Vec::new();
+    for (index, text) in control_messages.iter().enumerate() {
+        let event = session_event(
+            (index + 1) as u64,
+            session_id,
+            EventType::Message,
+            Some(EventRole::User),
+            text,
+        );
+        control_ids.push(event.id);
+        store.upsert_event(&event).unwrap();
+    }
+
+    let valid = session_event(
+        10,
+        session_id,
+        EventType::Message,
+        Some(EventRole::User),
+        "Please remember this ordinary semantic user request.",
+    );
+    store.upsert_event(&valid).unwrap();
+
+    assert_eq!(store.count_event_embedding_documents_exact().unwrap(), 1);
+    let docs = store.recent_event_embedding_documents(None, 10).unwrap();
+    assert_eq!(docs.len(), 1);
+    assert_eq!(docs[0].event_id, valid.id);
+
+    let mut ids = control_ids;
+    ids.push(valid.id);
+    let eligible = store.semantic_eligible_event_ids(&ids).unwrap();
+    assert_eq!(eligible.len(), 1);
+    assert!(eligible.contains(&valid.id));
+}
+
+#[test]
+fn semantic_lite_turn_cached_count_ignores_control_user_messages() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    store
+        .refresh_event_embedding_document_count_cache()
+        .unwrap();
+    assert_eq!(
+        store.cached_event_embedding_document_count().unwrap(),
+        Some(0)
+    );
+
+    let control = local_preview_event(
+        1,
+        "<environment_context>\n{\"cwd\":\"/tmp\"}\n</environment_context>",
+    );
+    store.upsert_event(&control).unwrap();
+    assert_eq!(
+        store.cached_event_embedding_document_count().unwrap(),
+        Some(0)
+    );
+    assert_eq!(store.count_event_embedding_documents_exact().unwrap(), 0);
+
+    let mut valid = local_preview_event(2, "Real semantic indexing task.");
+    store.upsert_event(&valid).unwrap();
+    assert_eq!(
+        store.cached_event_embedding_document_count().unwrap(),
+        Some(1)
+    );
+    assert_eq!(store.count_event_embedding_documents_exact().unwrap(), 1);
+
+    valid.payload = serde_json::json!({
+        "text": "<subagent_notification>\n{\"status\":\"completed\"}\n</subagent_notification>",
+    });
+    store.upsert_event(&valid).unwrap();
+    assert_eq!(
+        store.cached_event_embedding_document_count().unwrap(),
+        Some(0)
+    );
+    assert_eq!(store.count_event_embedding_documents_exact().unwrap(), 0);
+}
+
+#[test]
+fn semantic_lite_turn_control_user_messages_do_not_split_turns() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let session_id = Uuid::parse_str("018f45d0-0000-7000-8000-000000080010").unwrap();
+    insert_session(&store, session_id);
+
+    let user = session_event(
+        1,
+        session_id,
+        EventType::Message,
+        Some(EventRole::User),
+        "Find the semantic indexing status bug.",
+    );
+    let draft = session_event(
+        2,
+        session_id,
+        EventType::Message,
+        Some(EventRole::Assistant),
+        "Initial draft should be replaced.",
+    );
+    let control = session_event(
+        3,
+        session_id,
+        EventType::Message,
+        Some(EventRole::User),
+        "<subagent_notification>\n{\"status\":\"completed\"}\n</subagent_notification>",
+    );
+    let final_answer = session_event(
+        4,
+        session_id,
+        EventType::Message,
+        Some(EventRole::Assistant),
+        "Final answer includes the actual status cache fix.",
+    );
+    let next_user = session_event(
+        5,
+        session_id,
+        EventType::Message,
+        Some(EventRole::User),
+        "Start the next real turn.",
+    );
+
+    for event in [&user, &draft, &control, &final_answer, &next_user] {
+        store.upsert_event(event).unwrap();
+    }
+
+    let docs = store.recent_event_embedding_documents(None, 10).unwrap();
+    let user_doc = docs
+        .iter()
+        .find(|doc| doc.event_id == user.id)
+        .expect("user semantic doc");
+    assert!(user_doc
+        .text
+        .contains("assistant:\nFinal answer includes the actual status cache fix."));
+    assert!(!user_doc.text.contains("Initial draft should be replaced."));
+    assert!(!docs.iter().any(|doc| doc.event_id == control.id));
+
+    let term_docs = store
+        .event_embedding_documents_matching_terms(&["actual".to_owned(), "cache".to_owned()], 10)
+        .unwrap();
+    assert!(term_docs.iter().any(|doc| doc.event_id == user.id));
+    assert!(!term_docs.iter().any(|doc| doc.event_id == control.id));
 }
 
 #[test]

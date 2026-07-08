@@ -245,7 +245,23 @@ fn read_daemon_job_status(path: &Path) -> Option<Value> {
     serde_json::from_str(&text).ok()
 }
 
+fn semantic_status_file_model_matches(status_value: Option<&Value>) -> bool {
+    status_value
+        .and_then(|value| json_string(value, "model_key"))
+        .is_some_and(|model_key| model_key == SEMANTIC_MODEL_KEY)
+}
+
+fn semantic_status_file_searchable_items(status_value: Option<&Value>) -> Option<usize> {
+    if !semantic_status_file_model_matches(status_value) {
+        return None;
+    }
+    status_value.and_then(|value| json_usize(value, "searchable_items"))
+}
+
 fn semantic_status_file_stats(status_value: Option<&Value>) -> SemanticSidecarStats {
+    if !semantic_status_file_model_matches(status_value) {
+        return SemanticSidecarStats::default();
+    }
     SemanticSidecarStats {
         embedded_items: status_value
             .and_then(|value| json_usize(value, "embedded_items"))
@@ -260,13 +276,39 @@ pub(crate) fn semantic_worker_report(
     data_root: &Path,
     store: Option<&Store>,
 ) -> Result<SemanticWorkerReport> {
+    semantic_worker_report_with_count_mode(data_root, store, SemanticReportCountMode::ExactOnCacheMiss)
+}
+
+pub(crate) fn semantic_worker_report_cached(
+    data_root: &Path,
+    store: Option<&Store>,
+) -> Result<SemanticWorkerReport> {
+    semantic_worker_report_with_count_mode(data_root, store, SemanticReportCountMode::CachedOrStatusFile)
+}
+
+fn semantic_worker_report_with_count_mode(
+    data_root: &Path,
+    store: Option<&Store>,
+    count_mode: SemanticReportCountMode,
+) -> Result<SemanticWorkerReport> {
     let status_value = read_semantic_worker_status(data_root);
-    let searchable_items = match store {
-        Some(store) => store.event_embedding_document_count_cached_or_exact()?,
-        None => status_value
-            .as_ref()
-            .and_then(|value| json_usize(value, "searchable_items"))
-            .unwrap_or(0),
+    let status_file_model_matches = semantic_status_file_model_matches(status_value.as_ref());
+    let current_status_value = status_value.as_ref().filter(|_| status_file_model_matches);
+    let (searchable_items, searchable_items_known) = match store {
+        Some(store) if count_mode == SemanticReportCountMode::ExactOnCacheMiss => {
+            (store.event_embedding_document_count_cached_or_exact()?, true)
+        }
+        Some(store) => match store
+            .cached_event_embedding_document_count()?
+            .or_else(|| semantic_status_file_searchable_items(status_value.as_ref()))
+        {
+            Some(count) => (count, true),
+            None => (0, false),
+        },
+        None => match semantic_status_file_searchable_items(status_value.as_ref()) {
+            Some(count) => (count, true),
+            None => (0, false),
+        },
     };
     let vector_path = semantic_vector_path(data_root);
     let model_cache_available =
@@ -274,15 +316,22 @@ pub(crate) fn semantic_worker_report(
     let sidecar_state_result = (|| -> Result<(SemanticSidecarStats, usize)> {
         if let Some(vector_store) = SemanticVectorStore::open_read_only(&vector_path)? {
             let dirty_items = vector_store.dirty_event_count()?;
-            let mut stats = vector_store.cached_or_exact_stats()?;
-            if semantic_status_needs_exact_sidecar_stats(searchable_items, dirty_items, stats) {
+            let mut stats = match count_mode {
+                SemanticReportCountMode::ExactOnCacheMiss => vector_store.cached_or_exact_stats()?,
+                SemanticReportCountMode::CachedOrStatusFile => vector_store
+                    .cached_stats()?
+                    .unwrap_or_else(|| semantic_status_file_stats(current_status_value)),
+            };
+            if count_mode == SemanticReportCountMode::ExactOnCacheMiss
+                && semantic_status_needs_exact_sidecar_stats(searchable_items, dirty_items, stats)
+            {
                 stats = vector_store.exact_stats()?;
             }
             Ok((stats, dirty_items))
         } else if store.is_some() {
             Ok((SemanticSidecarStats::default(), 0))
         } else {
-            Ok((semantic_status_file_stats(status_value.as_ref()), 0))
+            Ok((semantic_status_file_stats(current_status_value), 0))
         }
     })();
     let (sidecar_stats, dirty_items, sidecar_error) = match sidecar_state_result {
@@ -305,18 +354,17 @@ pub(crate) fn semantic_worker_report(
     let pid = if running {
         lock_pid
     } else {
-        status_value
-            .as_ref()
-            .and_then(|value| json_u32(value, "pid"))
+        current_status_value.and_then(|value| json_u32(value, "pid"))
     };
     let queued_items_estimate = searchable_items
         .saturating_sub(embedded_items)
         .max(dirty_items);
-    let mut status = status_value
-        .as_ref()
+    let mut status = current_status_value
         .and_then(|value| json_string(value, "status"))
         .unwrap_or_else(|| {
-            if store.is_none() {
+            if !searchable_items_known {
+                "unknown".to_owned()
+            } else if store.is_none() {
                 "unknown".to_owned()
             } else if searchable_items == 0 {
                 "empty".to_owned()
@@ -327,7 +375,9 @@ pub(crate) fn semantic_worker_report(
             }
         });
     if store.is_some() {
-        let live_status = if searchable_items == 0 {
+        let live_status = if !searchable_items_known {
+            "unknown".to_owned()
+        } else if searchable_items == 0 {
             "empty".to_owned()
         } else if sidecar_error.is_some() {
             "unavailable".to_owned()
@@ -352,34 +402,22 @@ pub(crate) fn semantic_worker_report(
         status,
         running,
         pid,
-        started_at_ms: status_value
-            .as_ref()
-            .and_then(|value| json_i64(value, "started_at_ms")),
-        heartbeat_at_ms: status_value
-            .as_ref()
-            .and_then(|value| json_i64(value, "heartbeat_at_ms")),
-        finished_at_ms: status_value
-            .as_ref()
-            .and_then(|value| json_i64(value, "finished_at_ms")),
-        indexed_chunks: status_value
-            .as_ref()
-            .and_then(|value| json_usize(value, "indexed_chunks")),
-        model_init_ms: status_value
-            .as_ref()
-            .and_then(|value| json_usize(value, "model_init_ms")),
+        started_at_ms: current_status_value.and_then(|value| json_i64(value, "started_at_ms")),
+        heartbeat_at_ms: current_status_value.and_then(|value| json_i64(value, "heartbeat_at_ms")),
+        finished_at_ms: current_status_value.and_then(|value| json_i64(value, "finished_at_ms")),
+        indexed_chunks: current_status_value.and_then(|value| json_usize(value, "indexed_chunks")),
+        model_init_ms: current_status_value.and_then(|value| json_usize(value, "model_init_ms")),
         last_error: sidecar_error.or_else(|| {
-            status_value
-                .as_ref()
-                .and_then(|value| json_string(value, "last_error"))
+            current_status_value.and_then(|value| json_string(value, "last_error"))
         }),
         searchable_items,
+        searchable_items_known,
         embedded_items,
         embedded_chunks,
         dirty_items,
         queued_items_estimate,
         model_cache_available,
-        embed_policy: status_value
-            .as_ref()
+        embed_policy: current_status_value
             .and_then(|value| value.get("embed_policy").cloned())
             .or_else(|| Some(semantic_embed_policy_status_json())),
         vector_path,
@@ -389,7 +427,7 @@ pub(crate) fn semantic_worker_report(
 }
 
 pub(crate) fn semantic_worker_report_best_effort(data_root: &Path) -> SemanticWorkerReport {
-    semantic_worker_report(data_root, None)
+    semantic_worker_report_cached(data_root, None)
         .unwrap_or_else(|error| SemanticWorkerReport::unavailable(data_root, format!("{error:#}")))
 }
 
@@ -528,7 +566,8 @@ fn daemon_semantic_job_report(
     disabled_overrides_lifecycle: bool,
 ) -> Value {
     let daemon_enabled = daemon_enabled_for_status(data_root);
-    let status_value = read_daemon_job_status(&daemon_semantic_job_path(data_root));
+    let status_value = read_daemon_job_status(&daemon_semantic_job_path(data_root))
+        .filter(|value| semantic_status_file_model_matches(Some(value)));
     let disabled = !daemon_enabled && disabled_overrides_lifecycle && !semantic_report.running;
     let current_status = if disabled {
         "disabled"
@@ -538,6 +577,8 @@ fn daemon_semantic_job_report(
         "stale_lock"
     } else if semantic_report.status == "unavailable" {
         "unavailable"
+    } else if !semantic_report.searchable_items_known {
+        "unknown"
     } else if semantic_report.searchable_items == 0 {
         "empty"
     } else if semantic_report.queued_items_estimate == 0 {
@@ -555,6 +596,8 @@ fn daemon_semantic_job_report(
         Some("worker_lock_stale".to_owned())
     } else if semantic_report.status == "unavailable" {
         Some("sidecar_unavailable".to_owned())
+    } else if !semantic_report.searchable_items_known {
+        Some("searchable_items_unknown".to_owned())
     } else if semantic_report.searchable_items == 0 {
         Some("no_searchable_items".to_owned())
     } else if semantic_report.queued_items_estimate > 0 && !semantic_report.model_cache_available {
@@ -588,6 +631,7 @@ fn daemon_semantic_job_report(
         "worker_status": semantic_report.status,
         "coverage": {
             "searchable_items": semantic_report.searchable_items,
+            "searchable_items_known": semantic_report.searchable_items_known,
             "completed_items": semantic_report.embedded_items,
             "embedded_items": semantic_report.embedded_items,
             "embedded_chunks": semantic_report.embedded_chunks,

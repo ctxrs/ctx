@@ -28,7 +28,7 @@ use super::{
     SearchRefreshReport, SourceIdentityFilterArgs, TranscriptMode, MAX_EVENT_WINDOW,
     MAX_SEARCH_LIMIT,
 };
-use crate::semantic::{daemon_report, search_packet_with_backend, semantic_worker_report};
+use crate::semantic::{daemon_report, search_packet_with_backend, semantic_worker_report_cached};
 use crate::store_util::open_existing_store_read_only;
 
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
@@ -394,7 +394,7 @@ fn tool_status(data_root: &Path) -> Result<Value> {
         let catalog_counts = store.catalog_session_counts()?;
         let source_import_file_counts = store.source_import_file_counts()?;
         let indexed_counts = store.indexed_history_counts()?;
-        let semantic_report = semantic_worker_report(data_root, Some(&store))?;
+        let semantic_report = semantic_worker_report_cached(data_root, Some(&store))?;
         let daemon = daemon_report(data_root, &semantic_report);
         let semantic = semantic_report.to_json();
         (
@@ -416,7 +416,7 @@ fn tool_status(data_root: &Path) -> Result<Value> {
             daemon,
         )
     } else {
-        let semantic_report = semantic_worker_report(data_root, None)?;
+        let semantic_report = semantic_worker_report_cached(data_root, None)?;
         let daemon = daemon_report(data_root, &semantic_report);
         (
             0,

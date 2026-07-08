@@ -439,6 +439,7 @@ impl SemanticVectorStore {
         Ok(Some((canonical_chunks, meta_rows, vec_rows)))
     }
 
+    #[cfg(test)]
     fn sqlite_vec0_ready(&self) -> Result<bool> {
         let Some((canonical_chunks, meta_rows, vec_rows)) = self.sqlite_vec0_counts()? else {
             return Ok(false);
@@ -447,6 +448,13 @@ impl SemanticVectorStore {
             return Ok(false);
         }
         Ok(self.sqlite_vec0_mismatch_count()? == 0)
+    }
+
+    fn sqlite_vec0_search_ready(&self) -> Result<bool> {
+        let Some((canonical_chunks, meta_rows, vec_rows)) = self.sqlite_vec0_counts()? else {
+            return Ok(false);
+        };
+        Ok(canonical_chunks > 0 && meta_rows == canonical_chunks && vec_rows == canonical_chunks)
     }
 
     fn sync_sqlite_vec0_from_chunks_if_needed(&mut self) -> Result<()> {
