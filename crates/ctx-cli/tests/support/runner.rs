@@ -36,6 +36,9 @@ pub(crate) fn apply_hermetic_env(command: &mut Command, temp: &TempDir) {
     command.env_remove("KILO_DB");
     command.env_remove("FORGE_CONFIG");
     command.env_remove("VIBE_HOME");
+    command.env_remove("CODEX_HOME");
+    command.env_remove("CLAUDE_CONFIG_DIR");
+    command.env_remove("COPILOT_HOME");
     command.env_remove("XDG_CONFIG_HOME");
     command.env_remove("XDG_DATA_HOME");
     command.env_remove("XDG_STATE_HOME");

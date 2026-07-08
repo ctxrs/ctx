@@ -34,6 +34,7 @@ Useful starting points:
 - `ctx docs show search` for search filters and output behavior;
 - `ctx docs show sql` for stable read-only SQL views;
 - `ctx docs show mcp` for read-only MCP tools;
+- `ctx docs show mcp-integrations` for MCP client config installation;
 - `ctx docs show upgrade` for managed upgrade and auto-upgrade behavior;
 - `ctx docs show unmanaged-installs` for GitHub release binaries, mise,
   Homebrew, and source builds;

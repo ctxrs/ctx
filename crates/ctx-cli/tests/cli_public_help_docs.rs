@@ -20,8 +20,20 @@ fn help_exposes_session_retrieval_commands() {
         .unwrap_or(&help);
 
     for expected in [
-        "setup", "status", "sources", "import", "show", "search", "docs", "locate", "mcp", "sql",
-        "upgrade", "doctor",
+        "setup",
+        "status",
+        "sources",
+        "import",
+        "show",
+        "search",
+        "docs",
+        "locate",
+        "mcp",
+        "sql",
+        "skill",
+        "integrations",
+        "upgrade",
+        "doctor",
     ] {
         assert!(
             commands.contains(expected),
@@ -222,6 +234,15 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
         ),
         ("mcp", vec!["Usage: ctx mcp", "serve"]),
         (
+            "integrations",
+            vec![
+                "Usage: ctx integrations",
+                "install",
+                "status",
+                "Install or inspect ctx integrations",
+            ],
+        ),
+        (
             "sql",
             vec![
                 "Usage: ctx sql",
@@ -328,7 +349,14 @@ fn docs_commands_expose_embedded_docs_and_man_pages() {
     assert_eq!(sql_search["results"][0]["id"], "sql");
 
     let mcp_search = json_output(ctx(&temp).args(["docs", "search", "mcp", "--json"]));
-    assert_eq!(mcp_search["results"][0]["id"], "mcp");
+    let mcp_result_ids = mcp_search["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|topic| topic["id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(mcp_result_ids.contains(&"mcp"));
+    assert!(mcp_result_ids.contains(&"mcp-integrations"));
 
     let upgrade_search = json_output(ctx(&temp).args(["docs", "search", "upgrade", "--json"]));
     assert_eq!(upgrade_search["results"][0]["id"], "upgrade");
@@ -348,6 +376,13 @@ fn docs_commands_expose_embedded_docs_and_man_pages() {
 
     let mcp = json_output(ctx(&temp).args(["docs", "show", "mcp", "--format", "json"]));
     assert!(mcp["body"].as_str().unwrap().contains("ctx mcp serve"));
+
+    let mcp_integrations =
+        json_output(ctx(&temp).args(["docs", "show", "mcp-integrations", "--format", "json"]));
+    assert!(mcp_integrations["body"]
+        .as_str()
+        .unwrap()
+        .contains("ctx integrations install mcp"));
 
     let upgrade = json_output(ctx(&temp).args(["docs", "show", "upgrade", "--format", "json"]));
     assert!(upgrade["body"]

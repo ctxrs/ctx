@@ -152,6 +152,15 @@ const TOPICS: &[DocTopic] = &[
         body: include_str!("../../../docs/mcp.md"),
     },
     DocTopic {
+        id: "mcp-integrations",
+        title: "MCP Integrations",
+        audience: "human-agent",
+        summary: "Install ctx MCP server config for supported coding-agent clients.",
+        tags: &["mcp", "integrations", "agents", "install"],
+        source_path: "docs/mcp-integrations.md",
+        body: include_str!("../../../docs/mcp-integrations.md"),
+    },
+    DocTopic {
         id: "upgrade",
         title: "Upgrade",
         audience: "human-agent",

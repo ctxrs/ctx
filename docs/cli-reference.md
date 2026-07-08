@@ -89,6 +89,37 @@ automatically, but it refuses to overwrite locally modified skill files unless
 you pass `--force`. The command only manages the bundled ctx skill and does not
 fetch arbitrary remote skills.
 
+## Integrations
+
+```bash
+ctx integrations install mcp
+ctx integrations install mcp --agent codex
+ctx integrations install mcp --provider cursor --project
+ctx integrations install mcp --all-agents --json
+ctx integrations install mcp --agent cursor --force
+ctx integrations status mcp
+ctx integrations status mcp --agent codex --json
+```
+
+`integrations install mcp` adds a local MCP server named `ctx` to supported
+coding-agent client configs. The server command is `ctx mcp serve`. With no
+target flags, it installs for supported agents detected on the machine.
+`--agent` targets one or more coding-agent clients, and `--provider` is accepted
+as an alias for compatibility with provider-oriented workflows. `--project`
+writes a project-scoped MCP config when that agent has a documented project
+config location; without explicit agent flags, project mode only targets
+project MCP config locations that already exist.
+
+The command parses structured config files, preserves unrelated settings, and
+is idempotent. If a config already contains a `ctx` MCP server with a different
+command or args, install reports a conflict and leaves the file untouched
+unless `--force` is passed. Invalid JSON, TOML, or YAML configs are reported and
+left untouched. `integrations status mcp` reports `current`, `missing`,
+`conflict`, `invalid_config`, or `unsupported`.
+
+Run `ctx docs show mcp-integrations` for the full support matrix, config paths,
+and manual snippets.
+
 ## Sources
 
 ```bash
@@ -418,6 +449,7 @@ that is easier for agents to quote and inspect.
 
 ```bash
 ctx mcp serve
+ctx integrations install mcp
 ```
 
 `mcp serve` starts a read-only MCP server over newline-delimited stdio JSON-RPC.
@@ -435,6 +467,8 @@ tool when the active session tree itself is the target.
 
 The MCP server is optional. The CLI remains the primary interface, and MCP is
 intended for agents or hosts that prefer tool discovery over shell commands.
+Use `ctx integrations install mcp` to add the server to supported coding-agent
+MCP configs.
 
 ## Upgrade
 
@@ -508,6 +542,8 @@ ctx sql "SELECT COUNT(*) FROM ctx_sessions" --json
 ctx docs list --json
 ctx docs search <query> --json
 ctx docs show <topic> --format json
+ctx integrations install mcp --json
+ctx integrations status mcp --json
 ctx upgrade --json
 ctx upgrade check --json
 ctx upgrade status --json

@@ -24,7 +24,9 @@ clap_mangen.workspace = true
 ring.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml = "0.9"
 sha2.workspace = true
+toml_edit = "0.22"
 rusqlite.workspace = true
 ureq = { version = "2.10", default-features = true }
 uuid.workspace = true

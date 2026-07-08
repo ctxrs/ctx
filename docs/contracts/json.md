@@ -330,6 +330,39 @@ active Codex session tree by default when `CODEX_THREAD_ID` is set; pass
 The MCP `sql` tool uses the same `sql_result` JSON contract as `ctx sql
 --json`, always read-only.
 
+## Integrations
+
+```bash
+ctx integrations install mcp --json
+ctx integrations status mcp --json
+```
+
+MCP integration JSON returns:
+
+- `integration`, currently `mcp`;
+- `server.name`, `server.command`, and `server.args`;
+- `scope`, either `global` or `project`;
+- `results[]`.
+
+Each install result includes:
+
+- `agent`;
+- `agent_display_name`;
+- `scope`;
+- `path`, or null for unsupported targets;
+- `detected`;
+- `supported`;
+- `success`;
+- `previous_status`;
+- `status`;
+- `already_installed`;
+- `modified`;
+- `error`.
+
+Each status result uses the same target fields and includes `status` and
+`error`. Status values are `current`, `missing`, `conflict`, `invalid_config`,
+and `unsupported`.
+
 ## Docs
 
 ```bash

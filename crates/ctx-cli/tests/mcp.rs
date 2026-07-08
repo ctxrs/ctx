@@ -115,6 +115,28 @@ fn mcp_status_and_tools_list_are_read_only_without_initialized_store() {
 }
 
 #[test]
+fn mcp_initialize_negotiates_client_supported_protocol_version() {
+    let temp = tempdir();
+    let responses = mcp_roundtrip(
+        &temp,
+        &[json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": { "name": "gemini-cli", "version": "0.49.0" }
+            }
+        })],
+    );
+
+    assert_eq!(responses.len(), 1);
+    assert_eq!(responses[0]["result"]["protocolVersion"], "2025-06-18");
+    assert_eq!(responses[0]["result"]["serverInfo"]["name"], "ctx");
+}
+
+#[test]
 fn mcp_rejects_oversized_input_line_and_continues() {
     let temp = tempdir();
     let initialize = json!({

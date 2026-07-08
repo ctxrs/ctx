@@ -91,6 +91,24 @@ case "${mode}" in
   docs_check)
     run bash scripts/check-docs.sh
     ;;
+  mcp_integration_e2e)
+    run_cargo_test -p ctx --test mcp_integration_e2e
+    ;;
+  real_harness_codex_mcp_e2e)
+    run bash scripts/real-harness-codex-mcp-e2e.sh
+    ;;
+  real_harness_qwen_mcp_e2e)
+    run bash scripts/real-harness-qwen-mcp-e2e.sh
+    ;;
+  real_harness_claude_mcp_e2e)
+    run bash scripts/real-harness-claude-mcp-e2e.sh
+    ;;
+  real_harness_gemini_mcp_e2e)
+    run bash scripts/real-harness-gemini-mcp-e2e.sh
+    ;;
+  real_harness_opencode_mcp_e2e)
+    run bash scripts/real-harness-opencode-mcp-e2e.sh
+    ;;
   installer_path_smoke)
     run bash scripts/install-path-smoke.sh
     ;;
