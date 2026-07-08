@@ -10,7 +10,7 @@ resolve_ctx_bin() {
   fi
 
   export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable}"
-  run cargo build --locked -p ctx
+  run cargo build --locked -p ctx >&2
   configured="${CARGO_TARGET_DIR:-${PWD}/target}/debug/ctx"
   [[ -x "${configured}" ]] || fail "built ctx binary not found at ${configured}"
   printf '%s\n' "${configured}"
