@@ -14,6 +14,7 @@ mod docs;
 mod history_source_plugins;
 mod identity;
 mod install_marker;
+mod integrations;
 mod mcp;
 mod net;
 mod output;
@@ -109,6 +110,8 @@ enum CommandRoot {
     Docs(docs::DocsArgs),
     #[command(about = "Install or inspect the bundled ctx agent skill")]
     Skill(skill::SkillArgs),
+    #[command(about = "Install ctx integrations for agent harnesses")]
+    Integrations(integrations::IntegrationsArgs),
     #[command(about = "Serve read-only ctx tools over MCP")]
     Mcp(mcp::McpArgs),
     #[command(about = "Check or apply signed ctx CLI upgrades")]
@@ -452,6 +455,7 @@ impl CommandRoot {
             Self::Sql(_) => "sql",
             Self::Docs(_) => "docs",
             Self::Skill(_) => "skill",
+            Self::Integrations(_) => "integrations",
             Self::Mcp(_) => "mcp",
             Self::Upgrade(_) => "upgrade",
             Self::Doctor(_) => "doctor",
@@ -474,6 +478,7 @@ impl CommandRoot {
             Self::Sql(args) => args.json_output(),
             Self::Docs(args) => args.json_output(),
             Self::Skill(args) => args.json_output(),
+            Self::Integrations(args) => args.json_output(),
             Self::Mcp(_) => false,
             Self::Upgrade(args) => args.json_output(),
             Self::Doctor(args) => args.json,
@@ -552,6 +557,7 @@ fn main() -> Result<()> {
         CommandRoot::Sql(args) => run_sql(args, data_root.clone()),
         CommandRoot::Docs(args) => docs::run(args),
         CommandRoot::Skill(args) => skill::run(args, &mut analytics_properties),
+        CommandRoot::Integrations(args) => integrations::run(args, &mut analytics_properties),
         CommandRoot::Mcp(args) => mcp::run(args, data_root.clone()),
         CommandRoot::Upgrade(args) => upgrade::run(
             args,
@@ -727,6 +733,9 @@ fn command_analytics_properties(command: &CommandRoot) -> AnalyticsProperties {
         CommandRoot::Mcp(_) => {}
         CommandRoot::Docs(_) => {}
         CommandRoot::Skill(args) => {
+            args.add_initial_analytics(&mut properties);
+        }
+        CommandRoot::Integrations(args) => {
             args.add_initial_analytics(&mut properties);
         }
         CommandRoot::Upgrade(args) => {

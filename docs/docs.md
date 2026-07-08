@@ -37,4 +37,6 @@ Useful starting points:
 - `ctx docs show upgrade` for managed upgrade and auto-upgrade behavior;
 - `ctx docs show unmanaged-installs` for GitHub release binaries, mise,
   Homebrew, and source builds;
+- `ctx docs show slash-command-integrations` for slash-command and skill
+  invocation support by agent harness;
 - `ctx docs show json-contracts` for structured output contracts.

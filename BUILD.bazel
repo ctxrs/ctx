@@ -95,6 +95,34 @@ sh_test(
 )
 
 sh_test(
+    name = "slash_command_e2e",
+    srcs = ["scripts/bazel-test.sh"],
+    args = ["slash_command_e2e"],
+    data = CTX_GATE_DATA,
+)
+
+sh_test(
+    name = "real_harness_codex_skill_e2e",
+    srcs = ["scripts/bazel-test.sh"],
+    args = ["real_harness_codex_skill_e2e"],
+    data = CTX_GATE_DATA,
+)
+
+sh_test(
+    name = "real_harness_gemini_slash_e2e",
+    srcs = ["scripts/bazel-test.sh"],
+    args = ["real_harness_gemini_slash_e2e"],
+    data = CTX_GATE_DATA,
+)
+
+sh_test(
+    name = "real_harness_qwen_slash_e2e",
+    srcs = ["scripts/bazel-test.sh"],
+    args = ["real_harness_qwen_slash_e2e"],
+    data = CTX_GATE_DATA,
+)
+
+sh_test(
     name = "docs_check",
     srcs = ["scripts/bazel-test.sh"],
     args = ["docs_check"],
@@ -224,11 +252,21 @@ test_suite(
 )
 
 test_suite(
+    name = "real_harness",
+    tests = [
+        ":real_harness_codex_skill_e2e",
+        ":real_harness_gemini_slash_e2e",
+        ":real_harness_qwen_slash_e2e",
+    ],
+)
+
+test_suite(
     name = "fast",
     tests = [
         ":cargo_fmt_check",
         ":cargo_check",
         ":cli_contract_tests",
+        ":slash_command_e2e",
         ":docs_check",
         ":installer_path_smoke",
         ":buildkite_pipeline_check",

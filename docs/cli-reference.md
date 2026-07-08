@@ -89,6 +89,36 @@ automatically, but it refuses to overwrite locally modified skill files unless
 you pass `--force`. The command only manages the bundled ctx skill and does not
 fetch arbitrary remote skills.
 
+## Integrations
+
+```bash
+ctx integrations install slash-commands
+ctx integrations install slash-commands --agent opencode
+ctx integrations install slash-commands --agent gemini-cli --project
+ctx integrations install slash-commands --agent qwen-code
+ctx integrations install slash-commands --agent windsurf
+ctx integrations install slash-commands --all-agents
+ctx integrations install slash-commands --force
+ctx integrations install slash-commands --json
+```
+
+`integrations install slash-commands` installs a `/ctx-history` entry point only
+for providers where ctx has a documented, file-based command surface it can
+manage safely: OpenCode, Gemini CLI, Qwen Code, and Windsurf. With no explicit
+agent flag, it writes detected file-based targets only. `--project` installs
+into the current repository's command folder instead of the user/global folder.
+
+The installer writes `.ctx-slash-commands.json` metadata beside generated
+command files. Re-running the command is idempotent, stale ctx-owned files are
+refreshed automatically, and locally modified command files are preserved unless
+you pass `--force`.
+
+For Codex, Claude Code, Cursor, GitHub Copilot CLI, Pi, and other
+skill-first agents, use `ctx skill install`; those providers expose the bundled
+skill through their own skill invocation surface rather than a separate
+`/ctx-history` command file. See `ctx docs show slash-command-integrations` for
+the provider matrix and rationale.
+
 ## Sources
 
 ```bash

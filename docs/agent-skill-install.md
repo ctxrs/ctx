@@ -140,3 +140,22 @@ scripts/sync-plugin-skills.sh --write
 The plugin also includes a `/ctx-history` command. The command is a thin entry
 point that delegates to the `ctx-agent-history-search` skill instead of
 duplicating the full workflow instructions.
+
+## Slash Command Entry Points
+
+Many agent harnesses now expose skills directly through slash-style commands.
+For those providers, installing the ctx skill is the right integration. Codex
+uses `/skills` or skill references, and Claude Code and Cursor expose skills as
+slash commands.
+
+Use the separate slash-command installer only for providers that still have a
+documented command-file location:
+
+```bash
+ctx integrations install slash-commands --agent opencode
+ctx integrations install slash-commands --agent gemini-cli
+ctx integrations install slash-commands --agent qwen-code
+ctx integrations install slash-commands --agent windsurf
+```
+
+See `ctx docs show slash-command-integrations` for the full provider matrix.

@@ -88,6 +88,18 @@ case "${mode}" in
     run_cargo_test -p ctx --test upgrade upgrade_status_check_and_apply_support_managed_installs
     run_cargo_test -p ctx --test upgrade json_commands_do_not_spawn_background_upgrade
     ;;
+  slash_command_e2e)
+    run_cargo_test -p ctx --test slash_command_e2e
+    ;;
+  real_harness_codex_skill_e2e)
+    run bash scripts/real-harness-codex-skill-e2e.sh
+    ;;
+  real_harness_gemini_slash_e2e)
+    run bash scripts/real-harness-gemini-slash-e2e.sh
+    ;;
+  real_harness_qwen_slash_e2e)
+    run bash scripts/real-harness-qwen-slash-e2e.sh
+    ;;
   docs_check)
     run bash scripts/check-docs.sh
     ;;

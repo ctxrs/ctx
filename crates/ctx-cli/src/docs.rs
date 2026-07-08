@@ -188,6 +188,15 @@ const TOPICS: &[DocTopic] = &[
         body: include_str!("../../../docs/agent-skill-install.md"),
     },
     DocTopic {
+        id: "slash-command-integrations",
+        title: "Slash Command Integrations",
+        audience: "human-agent",
+        summary: "Provider matrix and installer behavior for ctx slash-command entry points.",
+        tags: &["integrations", "slash-commands", "skills", "agents"],
+        source_path: "docs/slash-command-integrations.md",
+        body: include_str!("../../../docs/slash-command-integrations.md"),
+    },
+    DocTopic {
         id: "sdks",
         title: "SDKs",
         audience: "human-agent",
