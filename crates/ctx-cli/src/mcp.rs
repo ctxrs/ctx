@@ -29,6 +29,7 @@ use super::{
 };
 
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
+const MCP_SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &[MCP_PROTOCOL_VERSION, "2025-06-18"];
 const MCP_MAX_LINE_BYTES: usize = 1024 * 1024;
 const MCP_MAX_SESSION_EVENTS: usize = 200;
 
@@ -220,7 +221,7 @@ fn handle_message(message: Value, data_root: &Path, initialized: &mut bool) -> O
     let result = match method {
         "initialize" => {
             *initialized = true;
-            Ok(initialize_result())
+            Ok(initialize_result(&params))
         }
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tool_definitions() })),
@@ -245,9 +246,10 @@ fn handle_message(message: Value, data_root: &Path, initialized: &mut bool) -> O
     })
 }
 
-fn initialize_result() -> Value {
+fn initialize_result(params: &Value) -> Value {
+    let protocol_version = negotiate_protocol_version(params);
     json!({
-        "protocolVersion": MCP_PROTOCOL_VERSION,
+        "protocolVersion": protocol_version,
         "capabilities": {
             "tools": {
                 "listChanged": false
@@ -259,6 +261,17 @@ fn initialize_result() -> Value {
         },
         "instructions": "Read-only access to the local ctx index. Tool output may include absolute paths, source metadata, snippets, transcript text, and raw SQL query results; MCP hosts may log or forward it. This minimal server supports initialize, ping, tools/list, and tools/call over newline-delimited stdio. It does not expose MCP resources or prompts, and tools do not import provider history, write provider files, or write repositories."
     })
+}
+
+fn negotiate_protocol_version(params: &Value) -> &'static str {
+    let Some(requested) = params.get("protocolVersion").and_then(Value::as_str) else {
+        return MCP_PROTOCOL_VERSION;
+    };
+    MCP_SUPPORTED_PROTOCOL_VERSIONS
+        .iter()
+        .copied()
+        .find(|version| *version == requested)
+        .unwrap_or(MCP_PROTOCOL_VERSION)
 }
 
 fn handle_tools_call(params: Value, data_root: &Path) -> Result<Value, Value> {

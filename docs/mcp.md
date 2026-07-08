@@ -6,7 +6,13 @@ commands. The CLI remains the primary interface.
 
 ```bash
 ctx mcp serve
+ctx integrations install mcp
+ctx integrations status mcp
 ```
+
+`ctx integrations install mcp` can add this local server to supported
+file-backed coding-agent MCP configs. Run `ctx docs show mcp-integrations` for
+the support matrix, config paths, and manual snippets.
 
 The server exposes these tools:
 
