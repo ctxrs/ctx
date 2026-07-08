@@ -26,7 +26,7 @@ init_env() {
   ctx_init_bazel_test_env
   ctx_init_resource_env
   export CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-always}"
-  export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable}"
+  export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-${CTX_RUST_TOOLCHAIN:-stable}}"
   export RUST_TEST_THREADS="${RUST_TEST_THREADS:-2}"
 }
 

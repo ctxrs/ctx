@@ -21,6 +21,7 @@ test:ci --test_env=CTX_CARGO_LOCKED=1
 test:ci --test_env=CTX_LOCAL_RESOURCE_CAP=1
 test:ci --test_env=CTX_ISOLATE_TOOL_ENV
 test:ci --test_env=CTX_SHARED_CARGO_TARGET_DIR
+test:ci --test_env=CTX_RUST_TOOLCHAIN
 # CI may provide isolated tool roots; bazel-test.sh supplies TEST_TMPDIR defaults when these are unset.
 test:ci --test_env=HOME
 test:ci --test_env=PATH

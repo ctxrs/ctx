@@ -90,11 +90,12 @@ install_rust() {
   export RUSTUP_HOME="${RUSTUP_HOME:-${HOME}/.rustup}"
   export PATH="${CARGO_HOME}/bin:${PATH}"
 
-  if ! command -v rustup >/dev/null 2>&1; then
+  if [[ ! -x "${CARGO_HOME}/bin/rustup" ]]; then
     rustup_installer="$(mktemp "${TMPDIR:-/tmp}/ctx-rustup-init.XXXXXX")"
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o "${rustup_installer}"
     sh "${rustup_installer}" -y --profile minimal --default-toolchain none
     rm -f "${rustup_installer}"
+    export PATH="${CARGO_HOME}/bin:${PATH}"
   fi
 
   rustup toolchain install "${CTX_RUST_TOOLCHAIN}" --profile minimal --component rustfmt --component clippy
