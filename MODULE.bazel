@@ -1,4 +1,4 @@
-module(name = "ctx_search", version = "0.21.0")
+module(name = "ctx_search", version = "0.22.0")
 
 bazel_dep(name = "rules_rust", version = "0.71.3")
 

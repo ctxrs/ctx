@@ -3,16 +3,20 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-usage: scripts/install.sh --metadata PATH_OR_URL [--platform PLATFORM] [--bin-dir DIR] [--no-modify-path] [--no-setup] [--no-skill] [--skill-agent AGENT] [--all-skill-agents] [--no-man]
+usage: scripts/dev-install-from-metadata.sh --metadata PATH_OR_URL [--platform PLATFORM] [--bin-dir DIR] [--no-modify-path] [--no-setup] [--no-skill] [--skill-agent AGENT] [--all-skill-agents] [--no-man]
 
-Installs the ctx binary from explicit release metadata with pinned SHA-256
-checksums, installs the bundled ctx agent skill, then runs ctx setup to index
-discovered local history. The installer never evaluates remote scripts or
-metadata as shell.
+Development/CI installer for explicit ctx release metadata.
 
-This helper is for local development and explicit-metadata testing. The
-production hosted installer is https://cli.ctx.rs/install and verifies detached
-metadata signatures before trusting artifact URLs or checksums.
+For normal user installs, use:
+  curl -fsSL https://ctx.rs/install | sh
+
+This script is for release testing, CI smoke tests, and local artifact
+validation. It installs the ctx binary from explicit metadata with pinned
+SHA-256 checksums, installs the bundled ctx agent skill, then runs ctx setup to
+index discovered local history. It is not the production hosted installer.
+
+The production hosted installer is https://cli.ctx.rs/install and verifies
+detached metadata signatures before trusting artifact URLs or checksums.
 
 Options:
   --metadata PATH_OR_URL  Required. Local metadata file or HTTPS URL.
@@ -35,13 +39,12 @@ Options:
   -h, --help             Show this help.
 
 Local launch pattern:
-  curl -fsSLO https://example.invalid/ctx/install.sh
-  bash install.sh --metadata ./ctx-release-metadata.env
+  bash scripts/dev-install-from-metadata.sh --metadata ./ctx-release-metadata.env
 USAGE
 }
 
 fail() {
-  printf 'install.sh: %s\n' "$*" >&2
+  printf 'dev-install-from-metadata.sh: %s\n' "$*" >&2
   exit 1
 }
 

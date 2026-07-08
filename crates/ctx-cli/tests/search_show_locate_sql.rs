@@ -589,7 +589,7 @@ fn codex_cli_resume_is_idempotent_rescan_and_filters_subagents() {
     assert_eq!(first["resume"], false);
     assert_eq!(first["resume_mode"], "normal_scan");
     assert_eq!(first["totals"]["imported_sessions"], 2);
-    assert_eq!(first["totals"]["imported_events"], 4);
+    assert_eq!(first["totals"]["imported_events"], 7);
     assert_eq!(first["totals"]["imported_edges"], 1);
 
     let primary_default = json_output(ctx(&temp).args(["search", "subagent", "--json"]));
@@ -693,7 +693,7 @@ fn codex_cli_default_import_uses_catalog_state_for_incremental_catch_up() {
     assert_eq!(first["resume"], false);
     assert_eq!(first["resume_mode"], "normal_scan");
     assert_eq!(first["totals"]["imported_sessions"], 2);
-    assert_eq!(first["totals"]["imported_events"], 4);
+    assert_eq!(first["totals"]["imported_events"], 7);
     assert_eq!(first["totals"]["failed"], 0);
 
     let status = json_output(ctx(&temp).args(["status", "--json"]));
@@ -734,7 +734,7 @@ fn codex_cli_provider_oracle_covers_retrieval_and_claimed_fidelity() {
         "--json",
     ]));
     assert_eq!(basic["totals"]["imported_sessions"], 2);
-    assert_eq!(basic["totals"]["imported_events"], 4);
+    assert_eq!(basic["totals"]["imported_events"], 7);
     assert_eq!(basic["totals"]["imported_edges"], 1);
 
     let rich = json_output(ctx(&temp).args([
@@ -746,7 +746,7 @@ fn codex_cli_provider_oracle_covers_retrieval_and_claimed_fidelity() {
         "--json",
     ]));
     assert_eq!(rich["totals"]["imported_sessions"], 1);
-    assert_eq!(rich["totals"]["imported_events"], 1);
+    assert_eq!(rich["totals"]["imported_events"], 5);
 
     let query = "setup flow";
     let search = json_output(ctx(&temp).args(["search", query, "--provider", "codex", "--json"]));
@@ -765,7 +765,7 @@ fn codex_cli_provider_oracle_covers_retrieval_and_claimed_fidelity() {
             &conn,
             "SELECT COUNT(*) FROM events e JOIN sessions s ON e.session_id = s.id WHERE s.provider = 'codex' AND e.fidelity = 'imported'"
         ),
-        5
+        12
     );
     assert_eq!(
         sqlite_count(
@@ -786,7 +786,7 @@ fn codex_cli_provider_oracle_covers_retrieval_and_claimed_fidelity() {
             &conn,
             "SELECT COUNT(*) FROM events e JOIN sessions s ON e.session_id = s.id WHERE s.provider = 'codex' AND e.event_type = 'tool_call'"
         ),
-        0
+        4
     );
     assert_eq!(
         sqlite_count(
@@ -1260,7 +1260,7 @@ fn codex_cli_marks_deleted_raw_source_citations_unavailable() {
         &copied_text,
         "--json",
     ]));
-    assert_eq!(imported["totals"]["imported_events"], 4);
+    assert_eq!(imported["totals"]["imported_events"], 7);
 
     fs::remove_dir_all(&copied).unwrap();
 

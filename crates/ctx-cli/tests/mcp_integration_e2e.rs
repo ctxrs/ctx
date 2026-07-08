@@ -47,6 +47,9 @@ struct CommandServer {
     args: Vec<String>,
 }
 
+type CommandServerReader = fn(&Path) -> Option<CommandServer>;
+type PlainMcpCase = (&'static str, CommandServerReader, CommandServerReader);
+
 #[derive(Debug, PartialEq, Eq)]
 struct OpenCodeServer {
     command: Vec<String>,
@@ -458,11 +461,7 @@ fn cursor_global_and_project_configs_are_stdio_mcp_servers() {
 
 #[test]
 fn gemini_kiro_and_warp_global_and_project_configs_are_plain_mcp_servers() {
-    let cases: &[(
-        &str,
-        fn(&Path) -> Option<CommandServer>,
-        fn(&Path) -> Option<CommandServer>,
-    )] = &[
+    let cases: &[PlainMcpCase] = &[
         ("gemini-cli", fake_gemini_global, fake_gemini_project),
         ("kiro", fake_kiro_global, fake_kiro_project),
         ("warp", fake_warp_global, fake_warp_project),
@@ -756,7 +755,7 @@ fn fake_codex_trusts_project(codex_home: &Path, project: &Path) -> bool {
     let doc = read_toml(&codex_home.join("config.toml"));
     doc.get("projects")
         .and_then(toml_edit::Item::as_table)
-        .and_then(|projects| projects.get(&project.to_string_lossy().to_string()))
+        .and_then(|projects| projects.get(project.to_string_lossy().as_ref()))
         .and_then(toml_edit::Item::as_table)
         .and_then(|project| project.get("trust_level"))
         .and_then(toml_edit::Item::as_str)
@@ -1050,7 +1049,7 @@ fn continue_yaml_server(path: &Path) -> Option<CommandServer> {
 fn yaml_mapping_get<'a>(value: &'a serde_yaml::Value, key: &str) -> Option<&'a serde_yaml::Value> {
     value
         .as_mapping()?
-        .get(&serde_yaml::Value::String(key.to_owned()))
+        .get(serde_yaml::Value::String(key.to_owned()))
 }
 
 fn read_json_leaked(path: &Path) -> &'static Value {

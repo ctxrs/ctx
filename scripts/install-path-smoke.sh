@@ -126,7 +126,7 @@ metadata="${tmp_dir}/metadata.env"
 } > "${metadata}"
 
 base_env=(CURL_CA_BUNDLE="${tmp_dir}/cert.pem" CTX_INSTALL_NO_MAN=1)
-installer=(bash "${repo_root}/scripts/install.sh" --metadata "${metadata}" --platform linux-x64)
+installer=(bash "${repo_root}/scripts/dev-install-from-metadata.sh" --metadata "${metadata}" --platform linux-x64)
 
 home_dry_run="${tmp_dir}/home-dry-run"
 mkdir -p "${home_dry_run}"
@@ -135,7 +135,7 @@ grep -F 'Dry run: would install ctx 0.0.0-smoke (linux-x64)' "${tmp_dir}/dry-run
 ! grep -F 'Installing ctx 0.0.0-smoke (linux-x64)' "${tmp_dir}/dry-run.out" >/dev/null
 ! grep -F 'Installed ctx binary.' "${tmp_dir}/dry-run.out" >/dev/null
 
-installer_aarch64=(bash "${repo_root}/scripts/install.sh" --metadata "${metadata}" --platform linux-aarch64)
+installer_aarch64=(bash "${repo_root}/scripts/dev-install-from-metadata.sh" --metadata "${metadata}" --platform linux-aarch64)
 home_dry_run_aarch64="${tmp_dir}/home-dry-run-aarch64"
 mkdir -p "${home_dry_run_aarch64}"
 env -u GITHUB_PATH -u CI "${base_env[@]}" PATH="/usr/bin:/bin" HOME="${home_dry_run_aarch64}" SHELL="/bin/bash" "${installer_aarch64[@]}" --dry-run --no-setup > "${tmp_dir}/dry-run-aarch64.out"

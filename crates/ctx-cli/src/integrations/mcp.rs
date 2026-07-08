@@ -1028,7 +1028,7 @@ fn update_json(body: &str, root: JsonRoot, shape: JsonServerShape, force: bool) 
         .ok_or_else(|| anyhow!("{} must be an object", root.key()))?;
     if let Some(existing) = servers.get(SERVER_NAME) {
         if json_server_is_current(existing) {
-            return Ok(format_json(&doc)?);
+            return format_json(&doc);
         }
         if !force {
             return Err(anyhow!(
@@ -1276,10 +1276,10 @@ fn continue_server_is_current(value: &serde_yaml::Value) -> bool {
         return false;
     };
     let command = mapping
-        .get(&serde_yaml::Value::String("command".to_owned()))
+        .get(serde_yaml::Value::String("command".to_owned()))
         .and_then(serde_yaml::Value::as_str);
     let args = mapping
-        .get(&serde_yaml::Value::String("args".to_owned()))
+        .get(serde_yaml::Value::String("args".to_owned()))
         .and_then(serde_yaml::Value::as_sequence);
     command == Some(SERVER_COMMAND) && yaml_args_are_current(args)
 }
@@ -1341,7 +1341,7 @@ fn format_yaml(value: &serde_yaml::Value) -> Result<String> {
 fn yaml_mapping_get<'a>(value: &'a serde_yaml::Value, key: &str) -> Option<&'a serde_yaml::Value> {
     value
         .as_mapping()?
-        .get(&serde_yaml::Value::String(key.to_owned()))
+        .get(serde_yaml::Value::String(key.to_owned()))
 }
 
 fn goose_server_value() -> serde_yaml::Value {
@@ -1387,15 +1387,15 @@ fn goose_server_is_current(value: &serde_yaml::Value) -> bool {
         return false;
     };
     let cmd = mapping
-        .get(&serde_yaml::Value::String("cmd".to_owned()))
+        .get(serde_yaml::Value::String("cmd".to_owned()))
         .and_then(serde_yaml::Value::as_str)
         .or_else(|| {
             mapping
-                .get(&serde_yaml::Value::String("command".to_owned()))
+                .get(serde_yaml::Value::String("command".to_owned()))
                 .and_then(serde_yaml::Value::as_str)
         });
     let args = mapping
-        .get(&serde_yaml::Value::String("args".to_owned()))
+        .get(serde_yaml::Value::String("args".to_owned()))
         .and_then(serde_yaml::Value::as_sequence);
     cmd == Some(SERVER_COMMAND) && yaml_args_are_current(args)
 }
