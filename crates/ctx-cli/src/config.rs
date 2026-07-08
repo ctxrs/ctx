@@ -34,7 +34,9 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             analytics: AnalyticsConfig {
-                enabled: true,
+                // Privacy default: analytics are opt-in. Enable with
+                // `ctx analytics enable` or `[analytics] enabled = true`.
+                enabled: false,
                 endpoint: "https://cli.ctx.rs/functions/v1/analytics".to_owned(),
             },
             upgrade: UpgradeConfig {
@@ -304,6 +306,64 @@ fn env_flag(key: &str) -> bool {
     })
 }
 
+pub(crate) fn set_analytics_enabled(data_root: &Path, enabled: bool) -> Result<()> {
+    fs::create_dir_all(data_root)?;
+    let config_path = data_root.join(CONFIG_FILE);
+    let existing = fs::read_to_string(&config_path).unwrap_or_default();
+    let next = set_toml_section_value(
+        &existing,
+        "analytics",
+        "enabled",
+        if enabled { "true" } else { "false" },
+    );
+    fs::write(&config_path, next).with_context(|| format!("write {}", config_path.display()))?;
+    println!(
+        "ctx analytics {}",
+        if enabled { "enabled" } else { "disabled" }
+    );
+    Ok(())
+}
+
+pub(crate) fn set_toml_section_value(input: &str, section: &str, key: &str, value: &str) -> String {
+    let mut lines = Vec::new();
+    let mut in_section = false;
+    let mut saw_section = false;
+    let mut wrote_key = false;
+    for raw in input.lines() {
+        let trimmed = raw.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            if in_section && !wrote_key {
+                lines.push(format!("{key} = {value}"));
+                wrote_key = true;
+            }
+            in_section = trimmed == format!("[{section}]");
+            saw_section |= in_section;
+            lines.push(raw.to_owned());
+            continue;
+        }
+        if in_section
+            && (trimmed.starts_with(&format!("{key} ")) || trimmed.starts_with(&format!("{key}=")))
+        {
+            lines.push(format!("{key} = {value}"));
+            wrote_key = true;
+        } else {
+            lines.push(raw.to_owned());
+        }
+    }
+    if saw_section {
+        if in_section && !wrote_key {
+            lines.push(format!("{key} = {value}"));
+        }
+    } else {
+        if !lines.is_empty() && lines.last().is_some_and(|line| !line.is_empty()) {
+            lines.push(String::new());
+        }
+        lines.push(format!("[{section}]"));
+        lines.push(format!("{key} = {value}"));
+    }
+    lines.join("\n") + "\n"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,7 +373,7 @@ mod tests {
         let values = parse_toml_subset(
             r#"
 [analytics]
-enabled = false
+enabled = true
 
 [upgrade]
 auto = "off"
@@ -327,10 +387,10 @@ interval_seconds = 60
             config.analytics.endpoint,
             "https://cli.ctx.rs/functions/v1/analytics"
         );
-        assert!(config.analytics.enabled);
+        assert!(!config.analytics.enabled);
         assert_eq!(config.upgrade.auto, "apply");
         config.apply_values(&values).unwrap();
-        assert!(!config.analytics.enabled);
+        assert!(config.analytics.enabled);
         assert_eq!(config.upgrade.auto, "off");
         assert_eq!(config.upgrade.channel, "beta");
         assert_eq!(config.upgrade.interval, Duration::from_secs(60));
@@ -342,10 +402,23 @@ interval_seconds = 60
 
         let config = AppConfig::load(temp.path()).unwrap();
 
-        assert!(config.analytics.enabled);
+        assert!(!config.analytics.enabled, "analytics must be opt-in");
         assert_eq!(config.upgrade.auto, "apply");
         assert_eq!(config.upgrade.channel, "stable");
         assert_eq!(config.upgrade.interval, Duration::from_secs(24 * 60 * 60));
+    }
+
+    #[test]
+    fn set_analytics_enabled_writes_and_round_trips() {
+        let temp = tempfile::tempdir().unwrap();
+
+        set_analytics_enabled(temp.path(), true).unwrap();
+        let config = AppConfig::load(temp.path()).unwrap();
+        assert!(config.analytics.enabled);
+
+        set_analytics_enabled(temp.path(), false).unwrap();
+        let config = AppConfig::load(temp.path()).unwrap();
+        assert!(!config.analytics.enabled);
     }
 
     #[test]
@@ -355,7 +428,7 @@ interval_seconds = 60
             temp.path().join(CONFIG_FILE),
             r#"
 [analytics]
-enabled = false
+enabled = true
 endpoint = "file:///tmp/ctx-analytics.jsonl"
 
 [upgrade]
@@ -369,7 +442,7 @@ functions_base = "https://example.test/functions/v1"
 
         let config = AppConfig::load(temp.path()).unwrap();
 
-        assert!(!config.analytics.enabled);
+        assert!(config.analytics.enabled);
         assert_eq!(config.analytics.endpoint, "file:///tmp/ctx-analytics.jsonl");
         assert_eq!(config.upgrade.auto, "off");
         assert_eq!(config.upgrade.channel, "beta");

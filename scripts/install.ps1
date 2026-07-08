@@ -9,6 +9,7 @@ param(
     [string[]]$SkillAgent = @(),
     [switch]$AllSkillAgents,
     [string]$SetupProgress = "",
+    [switch]$EnableAnalytics,
     [switch]$DryRun
 )
 
@@ -250,6 +251,13 @@ try {
         $runSkill = $false
     }
     $modifyPath = -not $NoModifyPath -and $env:CTX_INSTALL_NO_MODIFY_PATH -ne "1"
+    $optInAnalytics = $EnableAnalytics -or $env:CTX_INSTALL_ENABLE_ANALYTICS -eq "1"
+
+    # Disclose before doing anything: what stays local, what (optionally) does not.
+    Write-Host "Privacy:"
+    Write-Host "  history index: built and searched locally; transcript content never leaves this machine"
+    Write-Host "  usage analytics: opt-in, disabled by default (coarse product metadata only when enabled)"
+    Write-Host "  auto-upgrade: managed installs check for signed releases daily (ctx upgrade disable to stop)"
 
     if ($DryRun) {
         Write-Host "Dry run: would install ctx $version ($Platform)"
@@ -310,6 +318,15 @@ try {
     [System.IO.File]::WriteAllText($markerPath, $markerJson + [Environment]::NewLine, $utf8NoBom)
     Write-Host ""
     Write-Host "Installed ctx binary."
+
+    if ($optInAnalytics) {
+        & $installPath analytics enable
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "could not record the analytics opt-in; run $installPath analytics enable to retry"
+        }
+    } else {
+        Write-Host "Anonymous usage analytics: disabled (opt in later with $installPath analytics enable)"
+    }
 
     if ($runSkill) {
         $skillArgs = @("integrations", "install", "skills")

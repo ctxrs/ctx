@@ -42,6 +42,16 @@ ctx is written in Rust and stores a local SQLite index, so searches are fast, sc
 
 The index is local and private by default. Transcript text is preserved rather than hiding local paths or secret-shaped strings, so review copied output before sharing it outside the machine.
 
+## Private by default
+
+Your agent history is sensitive, and ctx treats it that way:
+
+- Indexing, search, and SQL run entirely on your machine. Transcript content, search queries, and file paths never leave it.
+- Anonymous usage analytics are **opt-in and off by default**. If you want to help improve ctx, run `ctx analytics enable` — this shares coarse product metadata only (command name, success state, bucketed counts), never session text, queries, or paths. Opt back out anytime with `ctx analytics disable`.
+- Installer-managed binaries check for signed upgrades once a day. Disable with `ctx upgrade disable`.
+
+The full storage and privacy contract, including the exact analytics payload when enabled, is documented in [docs/storage.md](docs/storage.md).
+
 ```bash
 # Index all of your existing local agent sessions
 ctx setup

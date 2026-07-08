@@ -259,48 +259,9 @@ pub(super) fn set_auto_mode(data_root: &Path, mode: &str) -> Result<()> {
     fs::create_dir_all(data_root)?;
     let config_path = data_root.join(crate::config::CONFIG_FILE);
     let existing = fs::read_to_string(&config_path).unwrap_or_default();
-    let next = set_toml_section_value(&existing, "upgrade", "auto", &format!("\"{mode}\""));
+    let next =
+        crate::config::set_toml_section_value(&existing, "upgrade", "auto", &format!("\"{mode}\""));
     fs::write(&config_path, next).with_context(|| format!("write {}", config_path.display()))?;
     println!("ctx background auto-upgrade {mode}");
     Ok(())
-}
-
-fn set_toml_section_value(input: &str, section: &str, key: &str, value: &str) -> String {
-    let mut lines = Vec::new();
-    let mut in_section = false;
-    let mut saw_section = false;
-    let mut wrote_key = false;
-    for raw in input.lines() {
-        let trimmed = raw.trim();
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            if in_section && !wrote_key {
-                lines.push(format!("{key} = {value}"));
-                wrote_key = true;
-            }
-            in_section = trimmed == format!("[{section}]");
-            saw_section |= in_section;
-            lines.push(raw.to_owned());
-            continue;
-        }
-        if in_section
-            && (trimmed.starts_with(&format!("{key} ")) || trimmed.starts_with(&format!("{key}=")))
-        {
-            lines.push(format!("{key} = {value}"));
-            wrote_key = true;
-        } else {
-            lines.push(raw.to_owned());
-        }
-    }
-    if saw_section {
-        if in_section && !wrote_key {
-            lines.push(format!("{key} = {value}"));
-        }
-    } else {
-        if !lines.is_empty() && lines.last().is_some_and(|line| !line.is_empty()) {
-            lines.push(String::new());
-        }
-        lines.push(format!("[{section}]"));
-        lines.push(format!("{key} = {value}"));
-    }
-    lines.join("\n") + "\n"
 }

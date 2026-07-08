@@ -18,6 +18,7 @@ fn analytics_sends_coarse_cli_metadata_when_enabled() {
         .env("XDG_STATE_HOME", &state)
         .env("LOCALAPPDATA", &state)
         .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENABLED", "true")
         .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .assert()
         .success();
@@ -94,6 +95,7 @@ fn status_does_not_emit_analytics_or_create_identities_when_enabled() {
         .env("XDG_STATE_HOME", &state)
         .env("LOCALAPPDATA", &state)
         .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENABLED", "true")
         .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .env("CTX_UPGRADE_OFF", "1")
         .assert()
@@ -131,6 +133,7 @@ fn analytics_device_id_persists_across_data_roots() {
             .env("XDG_STATE_HOME", &state)
             .env("LOCALAPPDATA", &state)
             .env_remove("CTX_ANALYTICS_OFF")
+            .env("CTX_ANALYTICS_ENABLED", "true")
             .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
             .assert()
             .success();
@@ -197,6 +200,7 @@ fn analytics_payloads_omit_sensitive_command_data() {
         .env("XDG_STATE_HOME", &state)
         .env("LOCALAPPDATA", &state)
         .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENABLED", "true")
         .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .assert()
         .success();
@@ -208,6 +212,7 @@ fn analytics_payloads_omit_sensitive_command_data() {
         .env("XDG_STATE_HOME", &state)
         .env("LOCALAPPDATA", &state)
         .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENABLED", "true")
         .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .assert()
         .success();
@@ -219,6 +224,7 @@ fn analytics_payloads_omit_sensitive_command_data() {
         .env("XDG_STATE_HOME", &state)
         .env("LOCALAPPDATA", &state)
         .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENABLED", "true")
         .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .assert()
         .success();
@@ -230,6 +236,7 @@ fn analytics_payloads_omit_sensitive_command_data() {
         .env("XDG_STATE_HOME", &state)
         .env("LOCALAPPDATA", &state)
         .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENABLED", "true")
         .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .assert()
         .failure();
@@ -327,6 +334,7 @@ fn search_analytics_reports_when_search_creates_empty_store() {
         .env("XDG_STATE_HOME", &state)
         .env("LOCALAPPDATA", &state)
         .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENABLED", "true")
         .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .env("CTX_UPGRADE_OFF", "1")
         .assert()
@@ -380,6 +388,7 @@ fn search_analytics_reports_existing_indexed_content() {
         .env("XDG_STATE_HOME", &state)
         .env("LOCALAPPDATA", &state)
         .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENABLED", "true")
         .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .env("CTX_UPGRADE_OFF", "1")
         .assert()
@@ -416,6 +425,7 @@ fn upgrade_analytics_reports_manual_dry_run_outcome() {
         .env("XDG_STATE_HOME", &state)
         .env("LOCALAPPDATA", &state)
         .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENABLED", "true")
         .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .env("CTX_UPGRADE_OFF", "1");
     fake_release_env(&mut command, &release).assert().success();
@@ -460,6 +470,7 @@ fn upgrade_analytics_reports_manual_apply_success() {
         .env("XDG_STATE_HOME", &state)
         .env("LOCALAPPDATA", &state)
         .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENABLED", "true")
         .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .env("CTX_UPGRADE_OFF", "1");
     fake_release_env(&mut command, &release).assert().success();
@@ -515,6 +526,7 @@ fn upgrade_analytics_reports_manual_failure_kind() {
         .env("XDG_STATE_HOME", &state)
         .env("LOCALAPPDATA", &state)
         .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENABLED", "true")
         .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .env("CTX_UPGRADE_OFF", "1");
     fake_release_env(&mut command, &release).assert().failure();
@@ -552,6 +564,7 @@ fn upgrade_analytics_reports_background_auto_upgrade_outcome() {
         .env("XDG_STATE_HOME", &state)
         .env("LOCALAPPDATA", &state)
         .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENABLED", "true")
         .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path));
     fake_release_env(&mut command, &release).assert().success();
 
@@ -605,6 +618,7 @@ fn upgrade_analytics_reports_background_failure_kind() {
         .env("XDG_STATE_HOME", &state)
         .env("LOCALAPPDATA", &state)
         .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENABLED", "true")
         .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path));
     fake_release_env(&mut command, &release).assert().failure();
 
@@ -652,6 +666,7 @@ fn upgrade_analytics_reports_background_locked_skip_and_backs_off() {
         .env("XDG_STATE_HOME", &state)
         .env("LOCALAPPDATA", &state)
         .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENABLED", "true")
         .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path));
     fake_release_env(&mut command, &release).assert().success();
 
@@ -692,6 +707,7 @@ fn upgrade_analytics_reports_background_skipped_in_ci() {
         .env("LOCALAPPDATA", &state)
         .env("CI", "1")
         .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENABLED", "true")
         .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .assert()
         .success();
@@ -738,6 +754,7 @@ fn hosted_install_marker_enriches_analytics_event_without_properties_leak() {
         .env("XDG_STATE_HOME", &state)
         .env("LOCALAPPDATA", &state)
         .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENABLED", "true")
         .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .env("CTX_UPGRADE_OFF", "1")
         .assert()
@@ -780,6 +797,7 @@ fn malformed_hosted_install_marker_is_ignored() {
         .env("XDG_STATE_HOME", &state)
         .env("LOCALAPPDATA", &state)
         .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENABLED", "true")
         .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .env("CTX_UPGRADE_OFF", "1")
         .assert()
@@ -813,6 +831,7 @@ fn setup_analytics_emits_start_and_completion_events() {
         .env("XDG_STATE_HOME", &state)
         .env("LOCALAPPDATA", &state)
         .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENABLED", "true")
         .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .env("CTX_UPGRADE_OFF", "1")
         .assert()
@@ -870,6 +889,7 @@ fn setup_analytics_emits_failure_completion_event() {
         .env("XDG_STATE_HOME", &state)
         .env("LOCALAPPDATA", &state)
         .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENABLED", "true")
         .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .env("CTX_UPGRADE_OFF", "1")
         .assert()
@@ -944,6 +964,7 @@ fn setup_analytics_dry_run_suppresses_start_completion_and_identities() {
         .env("XDG_STATE_HOME", &state)
         .env("LOCALAPPDATA", &state)
         .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENABLED", "true")
         .env("CTX_ANALYTICS_DRY_RUN", "1")
         .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .env("CTX_UPGRADE_OFF", "1")
@@ -980,6 +1001,7 @@ fn analytics_config_opt_out_suppresses_delivery() {
         .env("XDG_STATE_HOME", &state)
         .env("LOCALAPPDATA", &state)
         .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENABLED", "true")
         .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .assert()
         .success();
@@ -1037,6 +1059,7 @@ fn analytics_refuses_device_identity_under_data_root() {
         .env("XDG_STATE_HOME", &state)
         .env("LOCALAPPDATA", &state)
         .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENABLED", "true")
         .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .assert()
         .success();
@@ -1049,4 +1072,45 @@ fn analytics_refuses_device_identity_under_data_root() {
         !state.join("ctx").join("device.json").exists(),
         "device identity must not be created under CTX_DATA_ROOT"
     );
+}
+
+#[test]
+fn analytics_disabled_by_default_without_opt_in() {
+    let temp = tempdir();
+    let state = temp.path().join("state");
+    let events_path = temp.path().join("analytics.jsonl");
+
+    ctx(&temp)
+        .arg("doctor")
+        .env("XDG_STATE_HOME", &state)
+        .env("LOCALAPPDATA", &state)
+        .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
+        .assert()
+        .success();
+
+    assert!(
+        !events_path.exists(),
+        "analytics must be opt-in: no events may be sent without explicit enablement"
+    );
+    assert!(
+        !state.join("ctx").join("device.json").exists(),
+        "no device identity may be created without an analytics opt-in"
+    );
+}
+
+#[test]
+fn analytics_settings_command_writes_config_opt_in_and_out() {
+    let temp = tempdir();
+
+    ctx(&temp).args(["analytics", "enable"]).assert().success();
+    let config = fs::read_to_string(temp.path().join("config.toml")).unwrap();
+    assert!(config.contains("[analytics]"), "{config}");
+    assert!(config.contains("enabled = true"), "{config}");
+
+    ctx(&temp).args(["analytics", "disable"]).assert().success();
+    let config = fs::read_to_string(temp.path().join("config.toml")).unwrap();
+    assert!(config.contains("enabled = false"), "{config}");
+
+    ctx(&temp).args(["analytics", "status"]).assert().success();
 }

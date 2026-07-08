@@ -114,8 +114,26 @@ enum CommandRoot {
     Mcp(mcp::McpArgs),
     #[command(about = "Check or apply signed ctx CLI upgrades")]
     Upgrade(upgrade::UpgradeArgs),
+    #[command(about = "Show, enable, or disable anonymous usage analytics (opt-in)")]
+    Analytics(AnalyticsSettingsArgs),
     #[command(about = "Check local ctx health")]
     Doctor(DoctorArgs),
+}
+
+#[derive(Debug, Args)]
+struct AnalyticsSettingsArgs {
+    #[command(subcommand)]
+    command: Option<AnalyticsSettingsCommand>,
+}
+
+#[derive(Debug, Subcommand)]
+enum AnalyticsSettingsCommand {
+    #[command(about = "Opt in to sending anonymous usage analytics")]
+    Enable,
+    #[command(about = "Opt out of sending anonymous usage analytics")]
+    Disable,
+    #[command(about = "Show whether anonymous usage analytics are enabled")]
+    Status,
 }
 
 #[derive(Debug, Args)]
@@ -455,12 +473,16 @@ impl CommandRoot {
             Self::Integrations(_) => "integrations",
             Self::Mcp(_) => "mcp",
             Self::Upgrade(_) => "upgrade",
+            Self::Analytics(_) => "analytics",
             Self::Doctor(_) => "doctor",
         }
     }
 
     fn sends_analytics(&self) -> bool {
-        !matches!(self, Self::Status(_) | Self::Sql(_) | Self::Mcp(_))
+        !matches!(
+            self,
+            Self::Status(_) | Self::Sql(_) | Self::Mcp(_) | Self::Analytics(_)
+        )
     }
 
     fn json_output(&self) -> bool {
@@ -477,6 +499,7 @@ impl CommandRoot {
             Self::Integrations(args) => args.json_output(),
             Self::Mcp(_) => false,
             Self::Upgrade(args) => args.json_output(),
+            Self::Analytics(_) => false,
             Self::Doctor(args) => args.json,
         }
     }
@@ -484,7 +507,12 @@ impl CommandRoot {
     fn allows_background_upgrade(&self) -> bool {
         !matches!(
             self,
-            Self::Status(_) | Self::Docs(_) | Self::Mcp(_) | Self::Sql(_) | Self::Upgrade(_)
+            Self::Status(_)
+                | Self::Docs(_)
+                | Self::Mcp(_)
+                | Self::Sql(_)
+                | Self::Upgrade(_)
+                | Self::Analytics(_)
         )
     }
 }
@@ -560,6 +588,7 @@ fn main() -> Result<()> {
             config.clone(),
             &mut analytics_properties,
         ),
+        CommandRoot::Analytics(args) => run_analytics_settings(args, &data_root, &config),
         CommandRoot::Doctor(args) => run_doctor(args, data_root.clone(), &mut analytics_properties),
     };
     if is_setup {
@@ -594,6 +623,28 @@ fn main() -> Result<()> {
     result
 }
 
+fn run_analytics_settings(
+    args: AnalyticsSettingsArgs,
+    data_root: &PathBuf,
+    config: &AppConfig,
+) -> Result<()> {
+    match args.command {
+        Some(AnalyticsSettingsCommand::Enable) => config::set_analytics_enabled(data_root, true),
+        Some(AnalyticsSettingsCommand::Disable) => config::set_analytics_enabled(data_root, false),
+        Some(AnalyticsSettingsCommand::Status) | None => {
+            println!(
+                "ctx analytics {}",
+                if config.analytics.enabled {
+                    "enabled"
+                } else {
+                    "disabled (default; opt in with `ctx analytics enable`)"
+                }
+            );
+            Ok(())
+        }
+    }
+}
+
 fn command_analytics_properties(command: &CommandRoot) -> AnalyticsProperties {
     let mut properties = analytics::empty_properties();
     match command {
@@ -608,6 +659,7 @@ fn command_analytics_properties(command: &CommandRoot) -> AnalyticsProperties {
         CommandRoot::Status(_)
         | CommandRoot::Sources(_)
         | CommandRoot::Sql(_)
+        | CommandRoot::Analytics(_)
         | CommandRoot::Doctor(_) => {}
         CommandRoot::Import(args) => {
             analytics::insert_bool(&mut properties, "resume", args.resume);

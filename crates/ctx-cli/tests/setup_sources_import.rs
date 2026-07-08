@@ -78,6 +78,7 @@ fn malformed_present_config_fails_before_setup_and_analytics_side_effects() {
         .env("XDG_STATE_HOME", &state)
         .env("LOCALAPPDATA", &state)
         .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENABLED", "true")
         .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
         .assert()
         .failure()

@@ -35,8 +35,17 @@ Options:
   --all-skill-agents     Install the skill into all supported agent skill dirs.
   --no-man               Do not install generated man pages.
   --man-dir DIR          Man page directory. Defaults to $HOME/.local/share/man/man1.
+  --enable-analytics     Opt in to anonymous usage analytics (coarse product
+                         metadata only; never transcripts, queries, or paths).
+  --no-analytics         Skip the interactive analytics question; leave
+                         analytics disabled (the default).
   --dry-run              Validate metadata and print the planned install.
   -h, --help             Show this help.
+
+Privacy: indexing and search are fully local. Anonymous usage analytics are
+opt-in and disabled by default; an interactive install asks once, and
+non-interactive installs leave them off unless --enable-analytics or
+CTX_INSTALL_ENABLE_ANALYTICS=1 is passed. Details: docs/storage.md.
 
 Local launch pattern:
   bash scripts/dev-install-from-metadata.sh --metadata ./ctx-release-metadata.env
@@ -410,6 +419,7 @@ explicit_skill_request=0
 all_skill_agents=0
 skill_agents=()
 install_man=1
+enable_analytics=""
 
 while (($# > 0)); do
   case "$1" in
@@ -451,6 +461,12 @@ while (($# > 0)); do
     --man-dir)
       shift
       man_dir="${1:-}"
+      ;;
+    --enable-analytics)
+      enable_analytics=1
+      ;;
+    --no-analytics)
+      enable_analytics=0
       ;;
     --dry-run)
       dry_run=1
@@ -528,6 +544,12 @@ if [[ "${CTX_INSTALL_NO_SETUP:-0}" == "1" ]]; then
   run_setup=0
 fi
 
+if [[ "${CTX_INSTALL_ENABLE_ANALYTICS:-}" == "1" ]]; then
+  enable_analytics=1
+elif [[ "${CTX_INSTALL_ENABLE_ANALYTICS:-}" == "0" ]]; then
+  enable_analytics=0
+fi
+
 if [[ "${CTX_INSTALL_ALL_SKILL_AGENTS:-0}" == "1" ]]; then
   all_skill_agents=1
   explicit_skill_request=1
@@ -561,6 +583,29 @@ fi
 
 if ((! run_setup && ! explicit_skill_request)); then
   run_skill=0
+fi
+
+# Disclose before doing anything: what stays local, what (optionally) does not.
+printf 'Privacy:\n'
+printf '  history index: built and searched locally; transcript content never leaves this machine\n'
+printf '  usage analytics: opt-in, disabled by default (coarse product metadata only when enabled)\n'
+printf '  auto-upgrade: managed installs check for signed releases daily (ctx upgrade disable to stop)\n'
+
+# Ask once when interactive and undecided; default and non-interactive answer is No.
+if [[ -z "${enable_analytics}" ]] && ((! dry_run)) && [[ -r /dev/tty && -w /dev/tty ]]; then
+  printf 'Share anonymous usage analytics to help improve ctx? [y/N] ' >/dev/tty
+  if IFS= read -r analytics_answer </dev/tty; then
+    case "${analytics_answer}" in
+      [Yy]|[Yy][Ee][Ss])
+        enable_analytics=1
+        ;;
+      *)
+        enable_analytics=0
+        ;;
+    esac
+  else
+    enable_analytics=0
+  fi
 fi
 
 if ((dry_run)); then
@@ -611,6 +656,14 @@ if ((install_man)); then
   fi
 fi
 printf '\nInstalled ctx binary.\n'
+
+if [[ "${enable_analytics}" == "1" ]]; then
+  if ! "${install_path}" analytics enable; then
+    printf 'warning: could not record the analytics opt-in; run %s analytics enable to retry\n' "${install_path}" >&2
+  fi
+else
+  printf 'Anonymous usage analytics: disabled (opt in later with %s analytics enable)\n' "${install_path}"
+fi
 
 if ((run_skill)); then
   skill_args=(integrations install skills)

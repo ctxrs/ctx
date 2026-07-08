@@ -57,9 +57,12 @@ public_docs=(
   plugins/ctx-agent-history-search/commands/ctx-history.md
 )
 
+# Analytics disclosure is allowed in the README (user-facing consent copy),
+# docs/storage.md (the full contract), and docs/cli-reference.md (the
+# `ctx analytics` command); all other public copy must stay analytics-free.
 analytics_scope=()
 for path in "${public_docs[@]}"; do
-  if [[ "${path}" != "docs/storage.md" ]]; then
+  if [[ "${path}" != "docs/storage.md" && "${path}" != "README.md" && "${path}" != "docs/cli-reference.md" ]]; then
     analytics_scope+=("${path}")
   fi
 done
@@ -89,7 +92,7 @@ if scan_docs "${private_path_pattern}" "${public_docs[@]}"; then
 fi
 
 if scan_docs 'analytics|telemetry' "${analytics_scope[@]}"; then
-  printf 'public analytics copy must stay limited to docs/storage.md\n' >&2
+  printf 'public analytics copy must stay limited to README.md, docs/storage.md, and docs/cli-reference.md\n' >&2
   exit 1
 fi
 

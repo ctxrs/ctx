@@ -533,6 +533,21 @@ the installed binary. On Windows, replacement may be scheduled by a helper that
 finishes after the running `ctx.exe` exits; JSON reports `status: "scheduled"`
 and `applied: false` until replacement completes.
 
+## Analytics
+
+```bash
+ctx analytics status
+ctx analytics enable
+ctx analytics disable
+```
+
+Anonymous usage analytics are opt-in and disabled by default. `enable` writes
+`[analytics] enabled = true` to `config.toml` under the configured data root;
+`disable` writes `enabled = false`; `status` (also the bare `ctx analytics`)
+reports the current state. The `ctx analytics` command itself never emits an
+analytics event. See the storage documentation for exactly what enabled
+analytics do and do not send.
+
 ## Progress Output
 
 `setup` and `import` accept `--progress auto|plain|json|none`. `auto` writes

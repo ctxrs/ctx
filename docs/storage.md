@@ -262,14 +262,16 @@ process-level opt-outs such as `CTX_UPGRADE_OFF=1` or
 transcript text, search queries, result snippets, source paths, repository
 names, or command output.
 
-First-party analytics are default-on and may create `install.json` plus a
-separate device identity file in OS user state, then send coarse product
-metadata. They do not send session text, prompts, transcripts, search queries,
-result snippets, source paths, repository or branch names, native session IDs,
-command text, command output, usernames, hostnames, raw IP addresses, or
-hardware-derived machine fingerprints.
+First-party analytics are opt-in and disabled by default: a fresh install sends
+no analytics events. When explicitly enabled with `ctx analytics enable` (or
+`[analytics] enabled = true` in `config.toml`), ctx may create `install.json`
+plus a separate device identity file in OS user state, then send coarse product
+metadata. Enabled analytics do not send session text, prompts, transcripts,
+search queries, result snippets, source paths, repository or branch names,
+native session IDs, command text, command output, usernames, hostnames, raw IP
+addresses, or hardware-derived machine fingerprints.
 
-Analytics may include:
+When enabled, analytics may include:
 
 - generated random install and device identifiers that are hashed server-side;
 - ctx version, OS, architecture, command name, success state, and duration
@@ -290,13 +292,17 @@ the ctx data root in OS user state, such as `$XDG_STATE_HOME/ctx/device.json` or
 
 `ctx sql` and MCP do not send first-party analytics events.
 
-To disable analytics, add:
+To opt in and help improve ctx, run `ctx analytics enable`, or add:
 
 ```toml
 [analytics]
-enabled = false
+enabled = true
 ```
 
-Equivalent environment opt-outs are `CTX_ANALYTICS_OFF=1`,
-`CTX_DISABLE_ANALYTICS=1`, or `CTX_ANALYTICS_ENABLED=false`. Use an opt-out when
-a strict local-only no-network mode is required.
+To opt back out, run `ctx analytics disable` (equivalent to
+`[analytics] enabled = false`), and `ctx analytics status` reports the current
+state. The environment opt-outs `CTX_ANALYTICS_OFF=1`,
+`CTX_DISABLE_ANALYTICS=1`, and `CTX_ANALYTICS_ENABLED=false` force analytics
+off for a single process regardless of config. For a strict local-only
+no-network mode, leave analytics disabled and also disable background
+auto-upgrade with `ctx upgrade disable`.
