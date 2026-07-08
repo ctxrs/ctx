@@ -9,6 +9,16 @@ run() {
   "$@"
 }
 
+run_in_dir() {
+  local dir="$1"
+  shift
+  printf '\n==> (cd %s && %s)\n' "$dir" "$*"
+  (
+    cd "$dir"
+    "$@"
+  )
+}
+
 skip() {
   printf '\n==> skip: %s\n' "$*"
 }
@@ -27,9 +37,9 @@ else
 fi
 
 if command -v python3 >/dev/null 2>&1; then
-  run python3 -m compileall -q sdks/python/src sdks/python/tests
+  run env PYTHONPYCACHEPREFIX="$tmp_dir/python-pycache" python3 -m compileall -q sdks/python/src sdks/python/tests
   if python3 -c 'import build' >/dev/null 2>&1; then
-    run python3 -m build sdks/python --outdir "$tmp_dir/python"
+    run env PYTHONPYCACHEPREFIX="$tmp_dir/python-pycache" python3 -m build sdks/python --outdir "$tmp_dir/python"
   else
     skip "Python wheel/sdist dry-run (python build module unavailable)"
   fi
@@ -46,7 +56,7 @@ else
 fi
 
 if command -v go >/dev/null 2>&1; then
-  run go -C sdks/go list ./...
+  run_in_dir sdks/go go list ./...
 else
   skip "Go module dry-run (go unavailable)"
 fi
@@ -58,8 +68,8 @@ else
 fi
 
 if command -v swift >/dev/null 2>&1; then
-  run swift package --package-path sdks/swift describe
-  run swift test --package-path sdks/swift
+  run swift package --package-path sdks/swift --scratch-path "$tmp_dir/swift-build" describe
+  run swift test --package-path sdks/swift --scratch-path "$tmp_dir/swift-build"
 else
   skip "Swift package describe (swift unavailable)"
 fi

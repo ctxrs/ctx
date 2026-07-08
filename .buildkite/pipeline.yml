@@ -3,60 +3,28 @@ env:
   CARGO_BUILD_JOBS: "2"
   RUST_TEST_THREADS: "2"
   CTX_BOOTSTRAP_BAZELISK: "1"
+  CTX_BAZELISK_VERSION: "v1.29.0"
+  CTX_GO_VERSION: "1.22.12"
+  CTX_RUST_TOOLCHAIN: "1.86.0"
 
 steps:
   - label: ":bazel: public smoke gate"
     key: "public-smoke"
     command: |
-      apt_get_updated=0
-
-      run_apt_get() {
-        if command -v sudo >/dev/null 2>&1; then
-          sudo "$$@"
-        else
-          "$$@"
-        fi
-      }
-
-      install_ubuntu_package() {
-        command -v apt-get >/dev/null 2>&1 || {
-          echo "$$1 is missing and apt-get is unavailable on this Buildkite agent" >&2
-          exit 127
-        }
-        if [ "$${apt_get_updated}" -eq 0 ]; then
-          run_apt_get apt-get update
-          apt_get_updated=1
-        fi
-        run_apt_get env DEBIAN_FRONTEND=noninteractive apt-get install -y "$$1"
-      }
-
-      ensure_runner_tool() {
-        tool_binary="$$1"
-        apt_package="$$2"
-        required_message="$$3"
-
-        if ! command -v "$${tool_binary}" >/dev/null 2>&1; then
-          install_ubuntu_package "$${apt_package}"
-        fi
-        command -v "$${tool_binary}" >/dev/null 2>&1 || {
-          echo "$${required_message}" >&2
-          exit 127
-        }
-      }
-
-      ensure_runner_tool zip zip "zip is required for Bazel undeclared test output packaging"
-      ensure_runner_tool rg ripgrep "ripgrep (rg) is required for static package audits"
-      ./scripts/check.sh --mode=ci
+      bash scripts/buildkite-public-ci.sh
     agents:
-      queue: "release-linux-managed"
-      ctx-runner-class: "release-linux-control"
-      os: "linux"
-      arch: "x86_64"
+      queue: "default"
+    env:
+      CARGO_BUILD_JOBS: "1"
+      RUST_TEST_THREADS: "1"
+    concurrency: 1
+    concurrency_group: "ctx/public-smoke/default-hosted"
     timeout_in_minutes: 60
     artifact_paths:
       - "bazel-testlogs/**/*.log"
       - "bazel-testlogs/**/test.outputs/**/*"
       - "bazel-testlogs/**/*.zip"
+      - "target/ctx-artifacts/check/**"
 
   - wait: ~
     if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1"

@@ -2,7 +2,14 @@
 set -euo pipefail
 
 pipeline=".buildkite/pipeline.yml"
+public_ci_script="scripts/buildkite-public-ci.sh"
 test -f "${pipeline}"
+test -f "${public_ci_script}"
+
+if [[ -e ".github/workflows/public-ci.yml" ]]; then
+  printf 'public GitHub Actions CI workflow should be migrated to Buildkite\n' >&2
+  exit 1
+fi
 
 if command -v ruby >/dev/null 2>&1; then
   ruby -e '
@@ -15,12 +22,11 @@ if command -v ruby >/dev/null 2>&1; then
     abort "pipeline step must be a mapping" unless smoke.is_a?(Hash)
     abort "pipeline public smoke step must be keyed" unless smoke.key?("key")
     abort "missing public-smoke step" unless smoke["key"] == "public-smoke"
-    abort "public-smoke must use the release-linux-managed queue" unless smoke.dig("agents", "queue") == "release-linux-managed"
-    abort "public-smoke must use the release-linux-control runner" unless smoke.dig("agents", "ctx-runner-class") == "release-linux-control"
+    abort "public-smoke must use the Buildkite hosted default queue" unless smoke.dig("agents", "queue") == "default"
+    abort "public-smoke must not require self-hosted runner tags" if smoke.dig("agents", "ctx-runner-class") || smoke.dig("agents", "os") || smoke.dig("agents", "arch")
+    abort "public-smoke should run one hosted Linux job at a time" unless smoke["concurrency"] == 1 && smoke["concurrency_group"].to_s.include?("default-hosted")
     command = smoke["command"].to_s
-    abort "public-smoke must run scripts/check.sh --mode=ci" unless command.include?("./scripts/check.sh --mode=ci")
-    abort "public-smoke must install missing Ubuntu runner packages before Bazel tests" unless command.include?("apt-get install -y")
-    abort "public-smoke must verify runner tools before Bazel tests" unless command.include?("command -v \"$${tool_binary}\"")
+    abort "public-smoke must run the Buildkite public CI script" unless command.include?("scripts/buildkite-public-ci.sh")
     required_keys = %w[
       public-cli-linux-x64
       public-cli-linux-aarch64
@@ -66,11 +72,25 @@ fi
 
 for required in \
   'key: "public-smoke"' \
+  'queue: "default"' \
+  'bash scripts/buildkite-public-ci.sh' \
+  'target/ctx-artifacts/check/**' \
+  'concurrency_group: "ctx/public-smoke/default-hosted"' \
+  'CTX_RUST_TOOLCHAIN: "1.86.0"' \
+  'CTX_BAZELISK_VERSION: "v1.29.0"' \
+  'CTX_GO_VERSION: "1.22.12"' \
+  'rustup toolchain install "${CTX_RUST_TOOLCHAIN}" --profile minimal --component rustfmt --component clippy' \
+  'apt-get install -y --no-install-recommends' \
+  'default-jdk-headless' \
+  'install_go' \
+  'go${CTX_GO_VERSION}.linux-${go_arch}.tar.gz' \
+  'sha256sum -c -' \
+  'python3-build' \
+  'python3-venv' \
+  'ctx_bootstrap_bazelisk' \
+  'bash scripts/check.sh --mode=ci' \
   'queue: "release-linux-managed"' \
   'ctx-runner-class: "release-linux-control"' \
-  'ensure_runner_tool zip zip' \
-  'ensure_runner_tool rg ripgrep' \
-  './scripts/check.sh --mode=ci' \
   'CTX_PUBLIC_CLI_ARTIFACT_MATRIX' \
   'scripts/build-public-cli-artifact.sh linux-x64' \
   'scripts/build-public-cli-artifact.sh linux-aarch64' \
@@ -82,13 +102,31 @@ for required in \
   'CARGO_ZIGBUILD_VERSION' \
   'ZIG_LINUX_X64_SHA256'; do
   if ! grep -F -q "${required}" "${pipeline}"; then
-    if ! grep -F -q "${required}" scripts/build-public-cli-artifact.sh; then
-      printf 'pipeline or artifact script missing required snippet: %s\n' "${required}" >&2
-      exit 1
+    if ! grep -F -q "${required}" "${public_ci_script}"; then
+      if ! grep -F -q "${required}" scripts/build-public-cli-artifact.sh; then
+        printf 'pipeline, public CI script, or artifact script missing required snippet: %s\n' "${required}" >&2
+        exit 1
+      fi
+      continue
     fi
     continue
   fi
 done
+
+if grep -F -q 'golang-go' "${public_ci_script}"; then
+  printf 'Buildkite hosted public CI must install pinned Go instead of Ubuntu golang-go\n' >&2
+  exit 1
+fi
+
+if awk '
+    index($0, "key: \"public-smoke\"") { in_step = 1 }
+    in_step && /^  - label:/ && index($0, "public smoke gate") == 0 { in_step = 0 }
+    in_step && /release-linux-managed|ctx-runner-class|arch:|os:/ { found = 1 }
+    END { exit found ? 0 : 1 }
+  ' "${pipeline}"; then
+  printf 'public-smoke must not target self-hosted runner tags\n' >&2
+  exit 1
+fi
 
 for required in \
   'queue: "release-linux-managed"' \
