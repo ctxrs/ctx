@@ -372,7 +372,7 @@ fn print_install_results(results: &[InstallResult]) {
 }
 
 fn print_status_results(results: &[StatusResult]) {
-    println!("ctx skill status: {BUNDLED_SKILL_NAME}");
+    println!("ctx integrations status skills: {BUNDLED_SKILL_NAME}");
     for result in results {
         println!(
             "  {}: {} ({}) -> {}",

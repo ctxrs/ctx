@@ -1,4 +1,13 @@
 path	max_lines	kind	reason	review_after
-crates/ctx-history-capture/src/tests/support.rs	1638	test	shared capture test fixture support plus hermetic fixture roots; splitting now would add indirection without narrowing callers	2026-10-01
-crates/ctx-cli/tests/native_providers.rs	1589	test	native provider public CLI scenario matrix; fixtures are already modular and splitting would scatter end-to-end coverage	2026-10-01
+crates/ctx-history-capture/src/tests/native_json.rs	2694	test	native JSON import regression matrix with shared fixtures; split after provider fixture consolidation lands	2026-10-01
+crates/ctx-history-capture/src/tests/native_providers.rs	2400	test	native provider parser matrix with cross-provider fixture setup; split after provider fixture consolidation lands	2026-10-01
+crates/ctx-cli/src/integrations/mcp.rs	1638	source	MCP config writer matrix spans many agent formats; split after the initial integrations installer surface stabilizes	2026-10-01
+crates/ctx-history-capture/src/tests/support.rs	2074	test	shared capture test fixture support plus hermetic fixture roots; splitting now would add indirection without narrowing callers	2026-10-01
+crates/ctx-history-capture/src/provider/providers/opencode.rs	1436	source	OpenCode native import parser covers multiple transcript shapes; split after provider parser stabilization	2026-10-01
+crates/ctx-history-capture/src/tests/codex.rs	1844	test	Codex parser regression matrix covers oversized JSONL and session semantics; split after fixture helpers are shared	2026-10-01
+crates/ctx-history-capture/src/tests/native_sqlite.rs	1656	test	native SQLite provider regression matrix shares setup across formats; split after fixture helpers are shared	2026-10-01
+crates/ctx-history-capture/src/provider/native.rs	1146	source	native provider discovery dispatcher remains centralized until provider registry extraction lands	2026-10-01
+crates/ctx-history-capture/src/provider/importer.rs	1127	source	native provider import orchestration remains centralized until importer phase extraction lands	2026-10-01
+crates/ctx-cli/tests/native_providers.rs	1679	test	native provider public CLI scenario matrix; fixtures are already modular and splitting would scatter end-to-end coverage	2026-10-01
+crates/ctx-history-capture/src/provider/codex/session.rs	1008	source	Codex session parser recently grew oversized-record semantics; keep bounded while follow-up parser split is scoped	2026-10-01
 crates/ctx-cli/src/commands/import/native.rs	1110	source	native provider dispatcher plus manifest helpers inherited over source cap; immediate split would couple CI gate to importer redesign	2026-10-01

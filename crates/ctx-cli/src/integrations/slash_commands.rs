@@ -204,12 +204,12 @@ impl SlashCommandAgentArg {
             Self::Codex | Self::ClaudeCode | Self::Cursor | Self::Antigravity => {
                 SlashCommandPlan::SkillOnly {
                     agent: self,
-                    note: "slash-style invocation is covered by Agent Skills; run `ctx skill install --agent <agent>`",
+                    note: "slash-style invocation is covered by Agent Skills; run `ctx integrations install skills --agent <agent>`",
                 }
             }
             Self::GitHubCopilot | Self::Pi => SlashCommandPlan::SkillOnly {
                 agent: self,
-                note: "ctx supports this provider through the bundled Agent Skill; run `ctx skill install --agent <agent>`",
+                note: "ctx supports this provider through the bundled Agent Skill; run `ctx integrations install skills --agent <agent>`",
             },
             Self::Goose => SlashCommandPlan::ManualOnly {
                 agent: self,
@@ -680,7 +680,7 @@ fn print_install_results(results: &[InstallResult]) {
         println!(
             "Use --agent opencode, --agent gemini-cli, --agent qwen-code, or --agent windsurf to install explicitly."
         );
-        println!("For skill-based agents, run `ctx skill install`.");
+        println!("For skill-based agents, run `ctx integrations install skills`.");
         return;
     }
     println!("ctx slash commands: /{COMMAND_NAME}");

@@ -610,7 +610,7 @@ fi
 printf '\nInstalled ctx binary.\n'
 
 if ((run_skill)); then
-  skill_args=(skill install)
+  skill_args=(integrations install skills)
   if ((all_skill_agents)); then
     skill_args+=(--all-agents)
   elif ((${#skill_agents[@]} > 0)); then
@@ -620,10 +620,10 @@ if ((run_skill)); then
   fi
   printf '\n'
   if ! "${install_path}" "${skill_args[@]}"; then
-    printf 'warning: ctx skill install failed after install; run %s skill install to retry\n' "${install_path}" >&2
+    printf 'warning: ctx integrations install skills failed after install; run %s integrations install skills to retry\n' "${install_path}" >&2
   fi
 else
-  printf '\nAgent skill skipped. Run %s skill install to install it later.\n' "${install_path}"
+  printf '\nAgent skill skipped. Run %s integrations install skills to install it later.\n' "${install_path}"
 fi
 
 if ((run_setup)); then

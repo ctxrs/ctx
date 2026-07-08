@@ -30,7 +30,6 @@ fn help_exposes_session_retrieval_commands() {
         "locate",
         "mcp",
         "sql",
-        "skill",
         "integrations",
         "upgrade",
         "doctor",
@@ -64,6 +63,7 @@ fn help_exposes_session_retrieval_commands() {
         "context",
         "update",
         "uninstall",
+        "skill",
     ] {
         assert!(
             !commands.contains(&format!("  {forbidden}")),

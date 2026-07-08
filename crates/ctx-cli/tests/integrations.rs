@@ -63,7 +63,7 @@ fn slash_commands_install_codex_is_skill_only_without_deprecated_prompts() {
     assert!(output["results"][0]["note"]
         .as_str()
         .unwrap()
-        .contains("ctx skill install --agent codex"));
+        .contains("ctx integrations install skills --agent codex"));
     assert!(!temp.path().join(".codex").join("prompts").exists());
 }
 

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::{Args, Subcommand};
 
-use crate::{analytics, AnalyticsProperties};
+use crate::{analytics, skill, AnalyticsProperties};
 
 mod mcp;
 mod slash_commands;
@@ -32,6 +32,8 @@ struct IntegrationInstallArgs {
 enum IntegrationInstallTarget {
     #[command(about = "Install the local ctx MCP server into coding-agent clients")]
     Mcp(mcp::McpInstallArgs),
+    #[command(about = "Install or refresh the bundled ctx agent-history skill")]
+    Skills(skill::SkillInstallArgs),
     #[command(
         name = "slash-commands",
         about = "Install ctx slash-command entry points"
@@ -49,6 +51,8 @@ struct IntegrationStatusArgs {
 enum IntegrationStatusTarget {
     #[command(about = "Inspect local ctx MCP server integration state")]
     Mcp(mcp::McpStatusArgs),
+    #[command(about = "Check whether the bundled ctx agent-history skill is installed")]
+    Skills(skill::SkillStatusArgs),
 }
 
 impl IntegrationsArgs {
@@ -56,10 +60,12 @@ impl IntegrationsArgs {
         match &self.command {
             IntegrationCommand::Install(args) => match &args.target {
                 IntegrationInstallTarget::Mcp(args) => args.json,
+                IntegrationInstallTarget::Skills(args) => args.json_output(),
                 IntegrationInstallTarget::SlashCommands(args) => args.json,
             },
             IntegrationCommand::Status(args) => match &args.target {
                 IntegrationStatusTarget::Mcp(args) => args.json,
+                IntegrationStatusTarget::Skills(args) => args.json_output(),
             },
         }
     }
@@ -70,6 +76,10 @@ impl IntegrationsArgs {
                 analytics::insert_str(properties, "integration_action", "install");
                 match &args.target {
                     IntegrationInstallTarget::Mcp(args) => args.add_initial_analytics(properties),
+                    IntegrationInstallTarget::Skills(args) => {
+                        analytics::insert_str(properties, "integration_target", "skills");
+                        args.add_initial_analytics(properties);
+                    }
                     IntegrationInstallTarget::SlashCommands(args) => {
                         analytics::insert_str(properties, "integration_target", "slash_commands");
                         slash_commands::insert_install_analytics(properties, args);
@@ -80,6 +90,10 @@ impl IntegrationsArgs {
                 analytics::insert_str(properties, "integration_action", "status");
                 match &args.target {
                     IntegrationStatusTarget::Mcp(args) => args.add_initial_analytics(properties),
+                    IntegrationStatusTarget::Skills(args) => {
+                        analytics::insert_str(properties, "integration_target", "skills");
+                        args.add_initial_analytics(properties);
+                    }
                 }
             }
         }
@@ -96,6 +110,9 @@ pub(crate) fn run(
                 let context = mcp::McpPathContext::from_env()?;
                 run_mcp_install(args, &context, analytics_properties)
             }
+            IntegrationInstallTarget::Skills(args) => {
+                skill::run_install_command(args, analytics_properties)
+            }
             IntegrationInstallTarget::SlashCommands(args) => {
                 let context = slash_commands::PathContext::from_env()?;
                 slash_commands::run_install(args, &context, analytics_properties)
@@ -105,6 +122,9 @@ pub(crate) fn run(
             IntegrationStatusTarget::Mcp(args) => {
                 let context = mcp::McpPathContext::from_env()?;
                 run_mcp_status(args, &context)
+            }
+            IntegrationStatusTarget::Skills(args) => {
+                skill::run_status_command(args, analytics_properties)
             }
         },
     }

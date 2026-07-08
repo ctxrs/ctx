@@ -11,7 +11,7 @@ build.
 After any unmanaged install, run:
 
 ```bash
-ctx skill install
+ctx integrations install skills
 ctx setup
 ```
 
@@ -88,7 +88,7 @@ For a pinned install, replace `latest` with a release version:
 mise use -g 'github:ctxrs/ctx[bin=ctx]@0.21.0'
 ```
 
-mise owns upgrades for this install. Re-run `ctx skill install` after upgrading
+mise owns upgrades for this install. Re-run `ctx integrations install skills` after upgrading
 when you want to refresh the bundled agent skill.
 
 ## Homebrew
@@ -99,7 +99,7 @@ The ctx org maintains a Homebrew tap:
 brew install ctxrs/tap/ctx
 ```
 
-Homebrew owns upgrades for this install. Run `ctx skill install` and
+Homebrew owns upgrades for this install. Run `ctx integrations install skills` and
 `ctx setup` after installing.
 
 ## Source Builds

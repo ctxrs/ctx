@@ -1,5 +1,5 @@
 use anyhow::Result;
-use clap::{Args, Subcommand};
+use clap::Args;
 
 use crate::{analytics, AnalyticsProperties};
 
@@ -22,21 +22,7 @@ const BUNDLED_SKILL_BODY: &str = include_str!("../../../skills/ctx-agent-history
 const METADATA_FILE: &str = ".ctx-skill.json";
 
 #[derive(Debug, Args)]
-pub(crate) struct SkillArgs {
-    #[command(subcommand)]
-    command: SkillCommand,
-}
-
-#[derive(Debug, Subcommand)]
-enum SkillCommand {
-    #[command(about = "Install or refresh the bundled ctx agent-history skill")]
-    Install(SkillInstallArgs),
-    #[command(about = "Check whether the bundled ctx agent-history skill is installed")]
-    Status(SkillStatusArgs),
-}
-
-#[derive(Debug, Args)]
-struct SkillInstallArgs {
+pub(crate) struct SkillInstallArgs {
     #[arg(long = "agent", value_enum, conflicts_with = "all_agents")]
     agent: Vec<SkillAgentArg>,
     #[arg(long, conflicts_with = "agent")]
@@ -53,7 +39,7 @@ struct SkillInstallArgs {
 }
 
 #[derive(Debug, Args)]
-struct SkillStatusArgs {
+pub(crate) struct SkillStatusArgs {
     #[arg(long = "agent", value_enum, conflicts_with = "all_agents")]
     agent: Vec<SkillAgentArg>,
     #[arg(long, conflicts_with = "agent")]
@@ -67,33 +53,42 @@ struct SkillStatusArgs {
     json: bool,
 }
 
-impl SkillArgs {
+impl SkillInstallArgs {
     pub(crate) fn json_output(&self) -> bool {
-        match &self.command {
-            SkillCommand::Install(args) => args.json,
-            SkillCommand::Status(args) => args.json,
-        }
+        self.json
     }
 
     pub(crate) fn add_initial_analytics(&self, properties: &mut AnalyticsProperties) {
         analytics::insert_str(properties, "skill_name", BUNDLED_SKILL_NAME);
-        match &self.command {
-            SkillCommand::Install(args) => {
-                analytics::insert_str(properties, "skill_action", "install");
-                insert_target_analytics(properties, &args.agent, args.all_agents, args.project);
-            }
-            SkillCommand::Status(args) => {
-                analytics::insert_str(properties, "skill_action", "status");
-                insert_target_analytics(properties, &args.agent, args.all_agents, args.project);
-            }
-        }
+        analytics::insert_str(properties, "skill_action", "install");
+        insert_target_analytics(properties, &self.agent, self.all_agents, self.project);
     }
 }
 
-pub(crate) fn run(args: SkillArgs, analytics_properties: &mut AnalyticsProperties) -> Result<()> {
-    let context = PathContext::from_env()?;
-    match args.command {
-        SkillCommand::Install(args) => run_install(args, &context, analytics_properties),
-        SkillCommand::Status(args) => run_status(args, &context, analytics_properties),
+impl SkillStatusArgs {
+    pub(crate) fn json_output(&self) -> bool {
+        self.json
     }
+
+    pub(crate) fn add_initial_analytics(&self, properties: &mut AnalyticsProperties) {
+        analytics::insert_str(properties, "skill_name", BUNDLED_SKILL_NAME);
+        analytics::insert_str(properties, "skill_action", "status");
+        insert_target_analytics(properties, &self.agent, self.all_agents, self.project);
+    }
+}
+
+pub(crate) fn run_install_command(
+    args: SkillInstallArgs,
+    analytics_properties: &mut AnalyticsProperties,
+) -> Result<()> {
+    let context = PathContext::from_env()?;
+    run_install(args, &context, analytics_properties)
+}
+
+pub(crate) fn run_status_command(
+    args: SkillStatusArgs,
+    analytics_properties: &mut AnalyticsProperties,
+) -> Result<()> {
+    let context = PathContext::from_env()?;
+    run_status(args, &context, analytics_properties)
 }

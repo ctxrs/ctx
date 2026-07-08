@@ -13,7 +13,7 @@ use super::{
         install_agent_selection, parse_picker_selection, SkillSelectionSource,
     },
     target::resolve_targets,
-    SkillArgs, SkillCommand, SkillInstallArgs, BUNDLED_SKILL_NAME, METADATA_FILE,
+    SkillInstallArgs, BUNDLED_SKILL_NAME, METADATA_FILE,
 };
 use crate::analytics;
 
@@ -210,14 +210,12 @@ fn status_distinguishes_current_stale_modified_and_missing() {
 
 #[test]
 fn analytics_properties_are_coarse_and_path_free() {
-    let args = SkillArgs {
-        command: SkillCommand::Install(SkillInstallArgs {
-            agent: vec![SkillAgentArg::Codex, SkillAgentArg::ClaudeCode],
-            all_agents: false,
-            project: true,
-            json: true,
-            force: false,
-        }),
+    let args = SkillInstallArgs {
+        agent: vec![SkillAgentArg::Codex, SkillAgentArg::ClaudeCode],
+        all_agents: false,
+        project: true,
+        json: true,
+        force: false,
     };
     let mut properties = analytics::empty_properties();
     args.add_initial_analytics(&mut properties);

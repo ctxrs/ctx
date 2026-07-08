@@ -10,7 +10,7 @@ fn skill_install_defaults_to_global_canonical_agents_dir_and_is_idempotent() {
     let first = json_output(
         ctx(&temp)
             .env("CODEX_HOME", temp.path().join("missing-codex"))
-            .args(["skill", "install", "--json"]),
+            .args(["integrations", "install", "skills", "--json"]),
     );
     assert_eq!(first["skill"], "ctx-agent-history-search");
     assert_eq!(first["results"][0]["agent"], "universal");
@@ -29,7 +29,7 @@ fn skill_install_defaults_to_global_canonical_agents_dir_and_is_idempotent() {
     let second = json_output(
         ctx(&temp)
             .env("CODEX_HOME", temp.path().join("missing-codex"))
-            .args(["skill", "install", "--json"]),
+            .args(["integrations", "install", "skills", "--json"]),
     );
     assert_eq!(second["results"][0]["previous_status"], "current");
     assert_eq!(second["results"][0]["already_installed"], true);
@@ -38,7 +38,7 @@ fn skill_install_defaults_to_global_canonical_agents_dir_and_is_idempotent() {
     let status = json_output(
         ctx(&temp)
             .env("CODEX_HOME", temp.path().join("missing-codex"))
-            .args(["skill", "status", "--json"]),
+            .args(["integrations", "status", "skills", "--json"]),
     );
     assert_eq!(status["results"][0]["status"], "current");
 }
@@ -51,7 +51,7 @@ fn skill_install_auto_targets_universal_and_detected_claude_code() {
     let install = json_output(
         ctx(&temp)
             .env("CODEX_HOME", temp.path().join("missing-codex"))
-            .args(["skill", "install", "--json"]),
+            .args(["integrations", "install", "skills", "--json"]),
     );
     assert_eq!(install["results"].as_array().unwrap().len(), 2);
     assert_eq!(install["results"][0]["agent"], "universal");
@@ -100,11 +100,24 @@ fn skill_install_refreshes_stale_bundled_copy() {
     )
     .unwrap();
 
-    let stale = json_output(ctx(&temp).args(["skill", "status", "--agent", "universal", "--json"]));
+    let stale = json_output(ctx(&temp).args([
+        "integrations",
+        "status",
+        "skills",
+        "--agent",
+        "universal",
+        "--json",
+    ]));
     assert_eq!(stale["results"][0]["status"], "stale");
 
-    let install =
-        json_output(ctx(&temp).args(["skill", "install", "--agent", "universal", "--json"]));
+    let install = json_output(ctx(&temp).args([
+        "integrations",
+        "install",
+        "skills",
+        "--agent",
+        "universal",
+        "--json",
+    ]));
     assert_eq!(install["results"][0]["previous_status"], "stale");
     assert_eq!(install["results"][0]["updated"], true);
     assert!(fs::read_to_string(skill_dir.join("SKILL.md"))
@@ -124,7 +137,14 @@ fn skill_install_preserves_modified_copy_unless_forced() {
     fs::write(skill_dir.join("SKILL.md"), "local custom instructions\n").unwrap();
 
     let output = ctx(&temp)
-        .args(["skill", "install", "--agent", "universal", "--json"])
+        .args([
+            "integrations",
+            "install",
+            "skills",
+            "--agent",
+            "universal",
+            "--json",
+        ])
         .assert()
         .failure()
         .get_output()
@@ -143,8 +163,9 @@ fn skill_install_preserves_modified_copy_unless_forced() {
     );
 
     let forced = json_output(ctx(&temp).args([
-        "skill",
+        "integrations",
         "install",
+        "skills",
         "--agent",
         "universal",
         "--force",
@@ -172,8 +193,9 @@ fn skill_install_agent_paths_respect_env_xdg_and_project_scope() {
             .env("CODEX_HOME", &codex_home)
             .env("CLAUDE_CONFIG_DIR", &claude_home)
             .args([
-                "skill",
+                "integrations",
                 "install",
+                "skills",
                 "--agent",
                 "codex",
                 "--agent",
@@ -205,8 +227,9 @@ fn skill_install_agent_paths_respect_env_xdg_and_project_scope() {
     fs::create_dir_all(&project).unwrap();
     let mut command = ctx(&temp);
     command.current_dir(&project).args([
-        "skill",
+        "integrations",
         "install",
+        "skills",
         "--project",
         "--agent",
         "codex",
