@@ -69,7 +69,10 @@ pub(crate) fn run_migrations(conn: &Connection, user_version: i64) -> Result<()>
         migrate_to_v43(conn)?;
     }
     if user_version < 44 {
-        migrate_to_v44(conn)?;
+        migrate_to_v44(conn, false)?;
+    }
+    if user_version < 45 {
+        migrate_to_v45(conn)?;
     }
     Ok(())
 }
@@ -618,7 +621,7 @@ fn migrate_to_v43(conn: &Connection) -> Result<()> {
     }
 }
 
-fn migrate_to_v44(conn: &Connection) -> Result<()> {
+fn migrate_to_v44(conn: &Connection, rebuild_search_projection_now: bool) -> Result<()> {
     let foreign_keys_enabled: i64 = conn.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
     conn.execute_batch("PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;")?;
     let migration = (|| -> Result<()> {
@@ -631,7 +634,9 @@ fn migrate_to_v44(conn: &Connection) -> Result<()> {
         create_fts_tables_if_supported(conn)?;
         conn.execute_batch(INDEXES_SQL)?;
         create_stable_sql_views(conn)?;
-        rebuild_search_projection(conn)?;
+        if rebuild_search_projection_now {
+            rebuild_search_projection(conn)?;
+        }
         conn.execute_batch("PRAGMA user_version = 44;")?;
         Ok(())
     })();
@@ -650,6 +655,31 @@ fn migrate_to_v44(conn: &Connection) -> Result<()> {
             }
             if foreign_keys_enabled != 0 {
                 conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+            }
+            Err(err)
+        }
+    }
+}
+
+fn migrate_to_v45(conn: &Connection) -> Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE;")?;
+    let migration = (|| -> Result<()> {
+        drop_fts_table_if_exists(conn, "ctx_history_search_scriptgram")?;
+        drop_fts_table_if_exists(conn, "event_search_scriptgram")?;
+        create_fts_tables_if_supported(conn)?;
+        rebuild_search_projection(conn)?;
+        conn.execute_batch("PRAGMA user_version = 45;")?;
+        Ok(())
+    })();
+
+    match migration {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;")?;
+            Ok(())
+        }
+        Err(err) => {
+            if let Err(rollback_err) = conn.execute_batch("ROLLBACK;") {
+                return Err(StoreError::Sql(rollback_err));
             }
             Err(err)
         }

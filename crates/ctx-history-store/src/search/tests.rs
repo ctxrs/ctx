@@ -177,6 +177,20 @@ fn stable_tie_record(index: u16) -> HistoryRecord {
     record
 }
 
+fn record_with_id(id: &str, title: &str, body: &str) -> HistoryRecord {
+    let mut record = HistoryRecord::new(
+        title,
+        body,
+        Vec::new(),
+        "task",
+        Some("/workspace/multilingual".into()),
+    );
+    record.id = Uuid::parse_str(id).unwrap();
+    record.created_at = fixed_time();
+    record.updated_at = fixed_time();
+    record
+}
+
 fn assert_search_order(store: &Store, expected: &[Uuid]) {
     let actual = store
         .search_records("stabletie", 10)
@@ -227,6 +241,90 @@ fn search_records_empty_or_no_token_query_returns_empty() {
 }
 
 #[test]
+fn search_records_still_matches_latin_code_tokens() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let record = record_with_id(
+        "018f45d0-0000-7000-8000-000000080001",
+        "Latin code search",
+        "SearchResultScope Event remains discoverable through normal Latin code tokens.",
+    );
+    store.insert_record(&record).unwrap();
+
+    let hits = store.search_records("SearchResultScope", 10).unwrap();
+    assert!(hits.iter().any(|hit| hit.id == record.id));
+    let sidecar_rows: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM ctx_history_search_scriptgram",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(sidecar_rows, 0);
+}
+
+#[test]
+fn search_records_recalls_unspaced_cjk_and_mixed_script_terms() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let record = record_with_id(
+        "018f45d0-0000-7000-8000-000000080002",
+        "Multilingual script search",
+        "OAuth認証の検索状態を確認し、寿司APIの状態を保存します。中文登录态异常需要重新认证。Korean OAuth인증오류를 재현했습니다.",
+    );
+    store.insert_record(&record).unwrap();
+
+    let mut missing = Vec::new();
+    for (label, query) in [
+        ("japanese auth", "認証"),
+        ("japanese search", "検索"),
+        ("japanese sushi", "寿司"),
+        ("mixed oauth auth", "OAuth 認証"),
+        ("mixed api status", "API 状態"),
+        ("chinese two-char", "认证"),
+        ("chinese three-char", "登录态"),
+        ("korean particle stem", "오류"),
+        ("korean auth", "인증"),
+    ] {
+        let hits = store.search_records(query, 10).unwrap();
+        if !hits.iter().any(|hit| hit.id == record.id) {
+            missing.push(format!("{label}: {query}"));
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "missing multilingual record hits for {}",
+        missing.join(", ")
+    );
+}
+
+#[test]
+fn search_records_merges_fts_and_scriptgram_hits_for_same_query() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let spaced = record_with_id(
+        "018f45d0-0000-7000-8000-000000080003",
+        "Spaced Japanese auth",
+        "認証 検索 tokens remain discoverable through the default FTS tokenizer.",
+    );
+    let unspaced = record_with_id(
+        "018f45d0-0000-7000-8000-000000080004",
+        "Unspaced Japanese auth",
+        "OAuth認証の検索状態を確認します。",
+    );
+    store.insert_record(&spaced).unwrap();
+    store.insert_record(&unspaced).unwrap();
+
+    let hits = store.search_records("認証", 10).unwrap();
+    let hit_ids = hits.iter().map(|hit| hit.id).collect::<Vec<_>>();
+
+    assert!(hit_ids.contains(&spaced.id), "missing default FTS hit");
+    assert!(hit_ids.contains(&unspaced.id), "missing scriptgram hit");
+}
+
+#[test]
 fn event_search_preserves_local_payload_text() {
     let temp = tempdir();
     let store = Store::open(temp.path().join("work.sqlite")).unwrap();
@@ -265,6 +363,57 @@ fn event_search_preserves_local_payload_text() {
 
     let hits = store.search_event_hits("rawmarker", 10).unwrap();
     assert!(hits.iter().any(|hit| hit.event_id == raw_event.id));
+}
+
+#[test]
+fn event_search_recalls_unspaced_cjk_and_mixed_script_terms() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let japanese = local_preview_event(
+        1,
+        "OAuth認証の検索状態を確認し、寿司APIの状態を保存します。",
+    );
+    let chinese = local_preview_event(2, "中文登录态异常需要重新认证并检查搜索索引。");
+    let korean = local_preview_event(3, "OAuth인증오류를 재현하고 API상태를 기록했습니다.");
+    let latin = local_preview_event(
+        4,
+        "SearchResultScope Event remains discoverable through normal Latin code tokens.",
+    );
+    for event in [&japanese, &chinese, &korean, &latin] {
+        store.upsert_event(event).unwrap();
+    }
+    let sidecar_rows: i64 = store
+        .conn
+        .query_row("SELECT COUNT(*) FROM event_search_scriptgram", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(sidecar_rows, 3);
+
+    let mut missing = Vec::new();
+    for (label, query, expected_event_id) in [
+        ("japanese auth", "認証", japanese.id),
+        ("japanese search", "検索", japanese.id),
+        ("japanese sushi", "寿司", japanese.id),
+        ("mixed oauth auth", "OAuth 認証", japanese.id),
+        ("mixed api status", "API 状態", japanese.id),
+        ("chinese two-char", "认证", chinese.id),
+        ("chinese three-char", "登录态", chinese.id),
+        ("korean particle stem", "오류", korean.id),
+        ("korean auth", "인증", korean.id),
+        ("latin code", "SearchResultScope", latin.id),
+    ] {
+        let hits = store.search_event_hits(query, 10).unwrap();
+        if !hits.iter().any(|hit| hit.event_id == expected_event_id) {
+            missing.push(format!("{label}: {query}"));
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "missing multilingual event hits for {}",
+        missing.join(", ")
+    );
 }
 
 #[test]

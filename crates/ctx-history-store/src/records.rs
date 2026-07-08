@@ -7,7 +7,11 @@ use crate::connection::{
     parse_text_enum, parse_time, parse_uuid, timestamp_ms,
 };
 use crate::schema::ddl::table_exists;
-use crate::search::projections::{fts_match_query, upsert_record_search_projection};
+use crate::search::analyzer::scriptgram_match_query;
+use crate::search::projections::{
+    event_scriptgram_table_ready, fts_match_query, record_scriptgram_table_ready,
+    upsert_record_search_projection,
+};
 use crate::sync::sync_metadata_from_row;
 use crate::{Result, Store, StoreError};
 
@@ -230,7 +234,7 @@ impl Store {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<HistoryRecord>> {
-        if fts_match_query(query).is_none() {
+        if fts_match_query(query).is_none() && scriptgram_match_query(query).is_none() {
             return Ok(Vec::new());
         }
         if let Some(records) = self.search_records_fts(query, limit, offset)? {
@@ -256,25 +260,160 @@ impl Store {
         if !table_exists(&self.conn, "ctx_history_search")? {
             return Ok(None);
         }
-        let Some(match_query) = fts_match_query(query) else {
-            return Ok(Some(Vec::new()));
-        };
+        let match_query = fts_match_query(query);
         let has_event_search = table_exists(&self.conn, "event_search")?;
         let has_artifact_search = table_exists(&self.conn, "artifact_search")?;
-        let sql = if has_event_search && has_artifact_search {
-            r#"
-                WITH matches(record_id, score) AS (
+        let has_record_scriptgram = record_scriptgram_table_ready(&self.conn)?;
+        let has_event_scriptgram = event_scriptgram_table_ready(&self.conn)?;
+        let scriptgram_query = if has_record_scriptgram || has_event_scriptgram {
+            scriptgram_match_query(query)
+        } else {
+            None
+        };
+        match (match_query, scriptgram_query) {
+            (Some(match_query), Some(scriptgram_query)) => {
+                let mut selects = vec![r#"
                     SELECT record_id, bm25(ctx_history_search)
                     FROM ctx_history_search
                     WHERE ctx_history_search MATCH ?1
+                    "#
+                .to_owned()];
+                if has_event_search && has_artifact_search {
+                    selects.push(
+                        r#"
+                        SELECT history_record_id, bm25(event_search)
+                        FROM event_search
+                        WHERE event_search MATCH ?1 AND history_record_id IS NOT NULL
+                        "#
+                        .to_owned(),
+                    );
+                    selects.push(
+                        r#"
+                        SELECT history_record_id, bm25(artifact_search)
+                        FROM artifact_search
+                        WHERE artifact_search MATCH ?1 AND history_record_id IS NOT NULL
+                        "#
+                        .to_owned(),
+                    );
+                }
+                if has_record_scriptgram {
+                    selects.push(
+                        r#"
+                        SELECT record_id, bm25(ctx_history_search_scriptgram) + 0.35
+                        FROM ctx_history_search_scriptgram
+                        WHERE ctx_history_search_scriptgram MATCH ?2
+                        "#
+                        .to_owned(),
+                    );
+                }
+                if has_event_scriptgram {
+                    selects.push(
+                        r#"
+                        SELECT history_record_id, bm25(event_search_scriptgram) + 0.35
+                        FROM event_search_scriptgram
+                        WHERE event_search_scriptgram MATCH ?2 AND history_record_id IS NOT NULL
+                        "#
+                        .to_owned(),
+                    );
+                }
+                let sql = format!(
+                    r#"
+                    WITH matches(record_id, score) AS (
+                        {}
+                    )
+                    SELECT record_id
+                    FROM matches
+                    WHERE record_id IS NOT NULL
+                    GROUP BY record_id
+                    ORDER BY MIN(score), record_id
+                    LIMIT ?3 OFFSET ?4
+                    "#,
+                    selects.join(" UNION ALL ")
+                );
+                let mut stmt = self.conn.prepare(&sql)?;
+                let rows = stmt.query_map(
+                    params![match_query, scriptgram_query, limit as i64, offset as i64],
+                    |row| row.get::<_, String>(0),
+                )?;
+                let mut records = Vec::new();
+                for row in rows {
+                    records.push(self.get_record(parse_uuid(row?)?)?);
+                }
+                Ok(Some(records))
+            }
+            (Some(match_query), None) => {
+                let records = if has_event_search && has_artifact_search {
+                    r#"
+                    WITH matches(record_id, score) AS (
+                        SELECT record_id, bm25(ctx_history_search)
+                        FROM ctx_history_search
+                        WHERE ctx_history_search MATCH ?1
+                        UNION ALL
+                        SELECT history_record_id, bm25(event_search)
+                        FROM event_search
+                        WHERE event_search MATCH ?1 AND history_record_id IS NOT NULL
+                        UNION ALL
+                        SELECT history_record_id, bm25(artifact_search)
+                        FROM artifact_search
+                        WHERE artifact_search MATCH ?1 AND history_record_id IS NOT NULL
+                    )
+                    SELECT record_id
+                    FROM matches
+                    WHERE record_id IS NOT NULL
+                    GROUP BY record_id
+                    ORDER BY MIN(score), record_id
+                    LIMIT ?2 OFFSET ?3
+                    "#
+                } else {
+                    r#"
+                    SELECT record_id
+                    FROM ctx_history_search
+                    WHERE ctx_history_search MATCH ?1
+                    ORDER BY bm25(ctx_history_search), record_id
+                    LIMIT ?2 OFFSET ?3
+                    "#
+                };
+                let mut stmt = self.conn.prepare(records)?;
+                let rows = stmt
+                    .query_map(params![match_query, limit as i64, offset as i64], |row| {
+                        row.get::<_, String>(0)
+                    })?;
+                let mut records = Vec::new();
+                for row in rows {
+                    records.push(self.get_record(parse_uuid(row?)?)?);
+                }
+                Ok(Some(records))
+            }
+            (None, Some(_)) => self.search_records_scriptgram(query, limit, offset),
+            (None, None) => Ok(Some(Vec::new())),
+        }
+    }
+
+    fn search_records_scriptgram(
+        &self,
+        query: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Option<Vec<HistoryRecord>>> {
+        let has_record_scriptgram = record_scriptgram_table_ready(&self.conn)?;
+        let has_event_scriptgram = event_scriptgram_table_ready(&self.conn)?;
+        if !has_record_scriptgram && !has_event_scriptgram {
+            return Ok(Some(Vec::new()));
+        }
+        let Some(match_query) = scriptgram_match_query(query) else {
+            return Ok(Some(Vec::new()));
+        };
+        let sql = match (has_record_scriptgram, has_event_scriptgram) {
+            (true, true) => {
+                r#"
+                WITH matches(record_id, score) AS (
+                    SELECT record_id, bm25(ctx_history_search_scriptgram) + 0.35
+                    FROM ctx_history_search_scriptgram
+                    WHERE ctx_history_search_scriptgram MATCH ?1
                     UNION ALL
-                    SELECT history_record_id, bm25(event_search)
-                    FROM event_search
-                    WHERE event_search MATCH ?1 AND history_record_id IS NOT NULL
-                    UNION ALL
-                    SELECT history_record_id, bm25(artifact_search)
-                    FROM artifact_search
-                    WHERE artifact_search MATCH ?1 AND history_record_id IS NOT NULL
+                    SELECT history_record_id, bm25(event_search_scriptgram) + 0.35
+                    FROM event_search_scriptgram
+                    WHERE event_search_scriptgram MATCH ?1 AND history_record_id IS NOT NULL
                 )
                 SELECT record_id
                 FROM matches
@@ -283,14 +422,27 @@ impl Store {
                 ORDER BY MIN(score), record_id
                 LIMIT ?2 OFFSET ?3
                 "#
-        } else {
-            r#"
+            }
+            (true, false) => {
+                r#"
                 SELECT record_id
-                FROM ctx_history_search
-                WHERE ctx_history_search MATCH ?1
-                ORDER BY bm25(ctx_history_search), record_id
+                FROM ctx_history_search_scriptgram
+                WHERE ctx_history_search_scriptgram MATCH ?1
+                ORDER BY bm25(ctx_history_search_scriptgram), record_id
                 LIMIT ?2 OFFSET ?3
                 "#
+            }
+            (false, true) => {
+                r#"
+                SELECT history_record_id
+                FROM event_search_scriptgram
+                WHERE event_search_scriptgram MATCH ?1 AND history_record_id IS NOT NULL
+                GROUP BY history_record_id
+                ORDER BY MIN(bm25(event_search_scriptgram)), history_record_id
+                LIMIT ?2 OFFSET ?3
+                "#
+            }
+            (false, false) => unreachable!("scriptgram tables checked above"),
         };
         let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt.query_map(params![match_query, limit as i64, offset as i64], |row| {

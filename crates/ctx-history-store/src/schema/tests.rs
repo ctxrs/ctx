@@ -118,6 +118,96 @@ fn schema_v8_migrates_legacy_history_record_table_names() {
 }
 
 #[test]
+fn schema_v45_rebuilds_scriptgram_sidecars() {
+    let temp = tempdir();
+    let path = temp.path().join("work.sqlite");
+    let record_id = new_id().to_string();
+    let event_id = new_id().to_string();
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(CREATE_TABLES_SQL).unwrap();
+        conn.execute_batch(FTS_TABLES_SQL).unwrap();
+        conn.execute_batch(INDEXES_SQL).unwrap();
+        conn.execute(
+            r#"
+            INSERT INTO history_records (id, title, body, created_at, updated_at)
+            VALUES (?1, 'v44 multilingual record', 'OAuth認証の検索状態を確認します。', '2026-06-23T12:00:00+00:00', '2026-06-23T12:00:00+00:00')
+            "#,
+            [record_id.as_str()],
+        )
+        .unwrap();
+        conn.execute(
+            r#"
+            INSERT INTO events (id, seq, history_record_id, event_type, role, occurred_at_ms, payload_json)
+            VALUES (?1, 1, ?2, 'message', 'user', 0, '{"text":"OAuth認証の検索状態をイベントにも残します。"}')
+            "#,
+            params![event_id.as_str(), record_id.as_str()],
+        )
+        .unwrap();
+        conn.execute_batch(
+            r#"
+            DROP TABLE IF EXISTS ctx_history_search_scriptgram;
+            DROP TABLE IF EXISTS event_search_scriptgram;
+            CREATE VIRTUAL TABLE ctx_history_search_scriptgram USING fts5(record_id UNINDEXED, body);
+            CREATE VIRTUAL TABLE event_search_scriptgram USING fts5(event_id UNINDEXED, token_text);
+            PRAGMA user_version = 44;
+            "#,
+        )
+        .unwrap();
+    }
+
+    let store = Store::open(&path).unwrap();
+    let version: i64 = store
+        .conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, SCHEMA_VERSION);
+    for column in ["record_id", "token_text"] {
+        assert!(table_has_column(&store.conn, "ctx_history_search_scriptgram", column).unwrap());
+    }
+    for column in [
+        "event_id",
+        "history_record_id",
+        "session_id",
+        "role",
+        "token_text",
+        "rank_bucket",
+    ] {
+        assert!(table_has_column(&store.conn, "event_search_scriptgram", column).unwrap());
+    }
+
+    let record_tokens: String = store
+        .conn
+        .query_row(
+            "SELECT token_text FROM ctx_history_search_scriptgram WHERE record_id = ?1",
+            [record_id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(record_tokens
+        .split_whitespace()
+        .any(|token| token == "認証"));
+    let event_tokens: String = store
+        .conn
+        .query_row(
+            "SELECT token_text FROM event_search_scriptgram WHERE event_id = ?1",
+            [event_id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(event_tokens.split_whitespace().any(|token| token == "認証"));
+
+    let record_hits = store.search_records("認証", 10).unwrap();
+    assert!(record_hits
+        .iter()
+        .any(|record| record.id.to_string() == record_id));
+    let event_hits = store.search_event_hits("認証", 10).unwrap();
+    assert!(event_hits
+        .iter()
+        .any(|hit| hit.event_id.to_string() == event_id));
+}
+
+#[test]
 fn schema_v12_invalidates_provider_import_indexes_for_reimport() {
     let temp = tempdir();
     let path = temp.path().join("work.sqlite");

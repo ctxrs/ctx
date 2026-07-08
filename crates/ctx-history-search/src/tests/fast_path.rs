@@ -160,6 +160,96 @@ fn large_agent_history_search_returns_event_hits() {
 }
 
 #[test]
+fn large_event_fast_search_recalls_cjk_preview_term() {
+    let (_temp, store) = test_store();
+    let record = HistoryRecord::new(
+        "Large multilingual provider history",
+        "single imported agent-history record",
+        Vec::new(),
+        "agent_history",
+        Some("/workspace/ctx".into()),
+    );
+    store.insert_record(&record).unwrap();
+
+    let session = Session {
+        id: Uuid::parse_str("018f45d0-0000-7000-8000-000000000611").unwrap(),
+        history_record_id: Some(record.id),
+        parent_session_id: None,
+        root_session_id: None,
+        capture_source_id: None,
+        provider: CaptureProvider::Codex,
+        external_session_id: Some("large-multilingual-history-session".into()),
+        external_agent_id: None,
+        agent_type: AgentType::Primary,
+        role_hint: Some("primary".into()),
+        is_primary: true,
+        status: SessionStatus::Imported,
+        transcript_blob_id: None,
+        started_at: fixed_time(),
+        ended_at: None,
+        timestamps: timestamps(),
+        sync: sync_metadata(),
+    };
+    store.upsert_session(&session).unwrap();
+
+    let target_event_id = Uuid::parse_str("018f45d0-0000-7000-8000-0000000006fe").unwrap();
+    for index in 0..=(LARGE_EVENT_CORPUS_THRESHOLD as u64) {
+        let event_id = if index == LARGE_EVENT_CORPUS_THRESHOLD as u64 {
+            target_event_id
+        } else {
+            Uuid::parse_str(&format!("018f45d0-0000-7000-8000-0000003{index:05x}")).unwrap()
+        };
+        let text = if event_id == target_event_id {
+            "OAuth認証の検索状態をfast path previewから見つける"
+        } else {
+            "ordinary large multilingual history event"
+        };
+        store
+            .upsert_event(&Event {
+                id: event_id,
+                seq: 50_000 + index,
+                history_record_id: Some(record.id),
+                session_id: Some(session.id),
+                run_id: None,
+                event_type: EventType::Message,
+                role: Some(EventRole::Assistant),
+                occurred_at: fixed_time() + chrono::Duration::milliseconds(index as i64),
+                capture_source_id: None,
+                payload: serde_json::json!({
+                    "cursor": format!("line:{index}"),
+                    "body": { "text": text }
+                }),
+                payload_blob_id: None,
+                dedupe_key: Some(format!("large-multilingual-history-{index}")),
+                sync: sync_metadata(),
+            })
+            .unwrap();
+    }
+    store.refresh_search_index().unwrap();
+
+    let packet = search_packet(
+        &store,
+        "認証",
+        &PacketOptions {
+            limit: 5,
+            snippet_chars: 200,
+            result_mode: SearchResultMode::Events,
+            ..PacketOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert!(
+        !packet.results.is_empty(),
+        "large fast-path search should not return zero results for a literal CJK preview term"
+    );
+    assert!(packet
+        .results
+        .iter()
+        .any(|result| result.event_id == Some(target_event_id)));
+}
+
+#[test]
 fn clustered_fast_search_pages_past_dominant_first_session() {
     let (_temp, store) = test_store();
     let dominant_record = HistoryRecord::new(

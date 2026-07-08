@@ -9,6 +9,7 @@ use crate::connection::{
 };
 use crate::records::{record_from_row, record_select_sql};
 use crate::schema::ddl::table_exists;
+use crate::search::analyzer::{scriptgram_index_text, scriptgram_match_query};
 use crate::{Result, Store};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -48,7 +49,13 @@ impl Store {
     }
 
     pub fn optimize_search_index(&self) -> Result<()> {
-        for table in ["ctx_history_search", "event_search", "artifact_search"] {
+        for table in [
+            "ctx_history_search",
+            "event_search",
+            "artifact_search",
+            "ctx_history_search_scriptgram",
+            "event_search_scriptgram",
+        ] {
             if table_exists(&self.conn, table)? {
                 self.conn.execute(
                     format!("INSERT INTO {table}({table}) VALUES ('optimize')").as_str(),
@@ -80,87 +87,85 @@ impl Store {
         if !table_exists(&self.conn, "event_search")? {
             return Ok(Vec::new());
         }
-        let Some(match_query) = fts_match_query(query) else {
-            return Ok(Vec::new());
+        let match_query = fts_match_query(query);
+        let scriptgram_query = if event_scriptgram_table_ready(&self.conn)? {
+            scriptgram_match_query(query)
+        } else {
+            None
         };
-        let mut stmt = self.conn.prepare(
-                r#"
-                SELECT event_search.event_id,
-                       COALESCE(e.history_record_id, event_search.history_record_id, s.history_record_id, rs.history_record_id),
-                       COALESCE(e.session_id, event_search.session_id, s.id, rs.id),
-                       e.run_id,
-                       e.seq,
-                       e.event_type,
-                       e.role,
-                       e.occurred_at_ms,
-                       event_search.preview_text,
-                       bm25(event_search),
-                       COALESCE(s.provider, rs.provider, event_source.provider, session_source.provider, run_source.provider),
-                       COALESCE(s.external_session_id, rs.external_session_id),
-                       COALESCE(s.parent_session_id, rs.parent_session_id),
-                       COALESCE(s.root_session_id, rs.root_session_id),
-                       COALESCE(s.agent_type, rs.agent_type),
-                       COALESCE(s.is_primary, rs.is_primary),
-                       COALESCE(event_source.cwd, session_source.cwd, run_source.cwd),
-                       COALESCE(event_source.raw_source_path, session_source.raw_source_path, run_source.raw_source_path),
-                       e.payload_json,
-                       COALESCE(event_source.metadata_json, session_source.metadata_json, run_source.metadata_json),
-                       wr.title,
-                       wr.kind,
-                       wr.workspace
-                FROM event_search
-                JOIN events e ON e.id = event_search.event_id
-                LEFT JOIN runs r ON r.id = e.run_id
-                LEFT JOIN sessions s ON s.id = COALESCE(e.session_id, event_search.session_id)
-                LEFT JOIN sessions rs ON rs.id = r.session_id
-                LEFT JOIN capture_sources event_source ON event_source.id = e.capture_source_id
-                LEFT JOIN capture_sources session_source ON session_source.id = COALESCE(s.capture_source_id, rs.capture_source_id)
-                LEFT JOIN capture_sources run_source ON run_source.id = r.source_id
-                LEFT JOIN history_records wr ON wr.id = COALESCE(e.history_record_id, event_search.history_record_id, s.history_record_id, rs.history_record_id, r.history_record_id)
-                WHERE event_search MATCH ?1
-                ORDER BY bm25(event_search), e.occurred_at_ms DESC, e.seq DESC, event_search.event_id
-                LIMIT ?2 OFFSET ?3
-                "#,
-            )?;
-        let rows = stmt.query_map(
-            params![match_query, limit.max(1) as i64, offset as i64],
-            |row| {
-                let payload_json = row.get::<_, String>(18)?;
-                let source_metadata_json = row.get::<_, Option<String>>(19)?;
-                let source_identity =
-                    event_search_source_identity(source_metadata_json.as_deref())?;
-                Ok(EventSearchHit {
-                    event_id: parse_uuid(row.get::<_, String>(0)?)?,
-                    history_record_id: parse_optional_uuid(row.get(1)?)?,
-                    session_id: parse_optional_uuid(row.get(2)?)?,
-                    run_id: parse_optional_uuid(row.get(3)?)?,
-                    seq: nonnegative_i64_to_u64(row.get(4)?)?,
-                    event_type: parse_text_enum::<EventType>(row.get::<_, String>(5)?)?,
-                    role: parse_optional_text_enum::<EventRole>(row.get(6)?)?,
-                    occurred_at: ms_to_time(row.get(7)?)?,
-                    preview: row.get(8)?,
-                    score: row.get(9)?,
-                    provider: parse_optional_text_enum::<CaptureProvider>(row.get(10)?)?,
-                    session_external_session_id: row.get(11)?,
-                    history_source: source_identity.history_source,
-                    history_source_plugin: source_identity.history_source_plugin,
-                    provider_key: source_identity.provider_key,
-                    source_id: source_identity.source_id,
-                    source_format: source_identity.source_format,
-                    session_parent_session_id: parse_optional_uuid(row.get(12)?)?,
-                    session_root_session_id: parse_optional_uuid(row.get(13)?)?,
-                    agent_type: parse_optional_text_enum::<AgentType>(row.get(14)?)?,
-                    session_is_primary: row.get::<_, Option<i64>>(15)?.map(|value| value != 0),
-                    cwd: row.get(16)?,
-                    raw_source_path: row.get(17)?,
-                    cursor: event_search_cursor(&payload_json, source_metadata_json.as_deref())?,
-                    record_title: row.get(20)?,
-                    record_kind: row.get(21)?,
-                    record_workspace: row.get(22)?,
-                })
-            },
-        )?;
-        collect_rows(rows)
+        match (match_query, scriptgram_query) {
+            (Some(match_query), Some(scriptgram_query)) => {
+                let sql = format!(
+                    r#"
+                    WITH matches(event_id, score) AS (
+                        SELECT event_search.event_id, bm25(event_search)
+                        FROM event_search
+                        WHERE event_search MATCH ?1
+                        UNION ALL
+                        SELECT event_search_scriptgram.event_id, bm25(event_search_scriptgram) + 0.35
+                        FROM event_search_scriptgram
+                        WHERE event_search_scriptgram MATCH ?2
+                    ),
+                    ranked(event_id, score) AS (
+                        SELECT event_id, MIN(score)
+                        FROM matches
+                        GROUP BY event_id
+                    )
+                    {}
+                    LIMIT ?3 OFFSET ?4
+                    "#,
+                    event_search_hit_sql(
+                        "ranked JOIN event_search ON event_search.event_id = ranked.event_id",
+                        "ranked.score",
+                        "ORDER BY ranked.score, e.occurred_at_ms DESC, e.seq DESC, event_search.event_id",
+                    )
+                );
+                let mut stmt = self.conn.prepare(&sql)?;
+                let rows = stmt.query_map(
+                    params![
+                        match_query,
+                        scriptgram_query,
+                        limit.max(1) as i64,
+                        offset as i64
+                    ],
+                    event_search_hit_from_row,
+                )?;
+                collect_rows(rows)
+            }
+            (Some(match_query), None) => {
+                let sql = format!(
+                    "{} LIMIT ?2 OFFSET ?3",
+                    event_search_hit_sql(
+                        "event_search",
+                        "bm25(event_search)",
+                        "WHERE event_search MATCH ?1 ORDER BY search_score, e.occurred_at_ms DESC, e.seq DESC, event_search.event_id",
+                    )
+                );
+                let mut stmt = self.conn.prepare(&sql)?;
+                let rows = stmt.query_map(
+                    params![match_query, limit.max(1) as i64, offset as i64],
+                    event_search_hit_from_row,
+                )?;
+                collect_rows(rows)
+            }
+            (None, Some(scriptgram_query)) => {
+                let sql = format!(
+                    "{} LIMIT ?2 OFFSET ?3",
+                    event_search_hit_sql(
+                        "event_search_scriptgram JOIN event_search ON event_search.event_id = event_search_scriptgram.event_id",
+                        "bm25(event_search_scriptgram) + 0.35",
+                        "WHERE event_search_scriptgram MATCH ?1 ORDER BY search_score, e.occurred_at_ms DESC, e.seq DESC, event_search.event_id",
+                    )
+                );
+                let mut stmt = self.conn.prepare(&sql)?;
+                let rows = stmt.query_map(
+                    params![scriptgram_query, limit.max(1) as i64, offset as i64],
+                    event_search_hit_from_row,
+                )?;
+                collect_rows(rows)
+            }
+            (None, None) => Ok(Vec::new()),
+        }
     }
 
     pub(crate) fn rebuild_search_projection(&self) -> Result<()> {
@@ -180,15 +185,97 @@ impl Store {
     }
 }
 
+fn event_search_hit_sql(from_sql: &str, score_sql: &str, tail_sql: &str) -> String {
+    format!(
+        r#"
+        SELECT event_search.event_id,
+               COALESCE(e.history_record_id, event_search.history_record_id, s.history_record_id, rs.history_record_id),
+               COALESCE(e.session_id, event_search.session_id, s.id, rs.id),
+               e.run_id,
+               e.seq,
+               e.event_type,
+               e.role,
+               e.occurred_at_ms,
+               event_search.preview_text,
+               {score_sql} AS search_score,
+               COALESCE(s.provider, rs.provider, event_source.provider, session_source.provider, run_source.provider),
+               COALESCE(s.external_session_id, rs.external_session_id),
+               COALESCE(s.parent_session_id, rs.parent_session_id),
+               COALESCE(s.root_session_id, rs.root_session_id),
+               COALESCE(s.agent_type, rs.agent_type),
+               COALESCE(s.is_primary, rs.is_primary),
+               COALESCE(event_source.cwd, session_source.cwd, run_source.cwd),
+               COALESCE(event_source.raw_source_path, session_source.raw_source_path, run_source.raw_source_path),
+               e.payload_json,
+               COALESCE(event_source.metadata_json, session_source.metadata_json, run_source.metadata_json),
+               wr.title,
+               wr.kind,
+               wr.workspace
+        FROM {from_sql}
+        JOIN events e ON e.id = event_search.event_id
+        LEFT JOIN runs r ON r.id = e.run_id
+        LEFT JOIN sessions s ON s.id = COALESCE(e.session_id, event_search.session_id)
+        LEFT JOIN sessions rs ON rs.id = r.session_id
+        LEFT JOIN capture_sources event_source ON event_source.id = e.capture_source_id
+        LEFT JOIN capture_sources session_source ON session_source.id = COALESCE(s.capture_source_id, rs.capture_source_id)
+        LEFT JOIN capture_sources run_source ON run_source.id = r.source_id
+        LEFT JOIN history_records wr ON wr.id = COALESCE(e.history_record_id, event_search.history_record_id, s.history_record_id, rs.history_record_id, r.history_record_id)
+        {tail_sql}
+        "#
+    )
+}
+
+fn event_search_hit_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EventSearchHit> {
+    let payload_json = row.get::<_, String>(18)?;
+    let source_metadata_json = row.get::<_, Option<String>>(19)?;
+    let source_identity = event_search_source_identity(source_metadata_json.as_deref())?;
+    Ok(EventSearchHit {
+        event_id: parse_uuid(row.get::<_, String>(0)?)?,
+        history_record_id: parse_optional_uuid(row.get(1)?)?,
+        session_id: parse_optional_uuid(row.get(2)?)?,
+        run_id: parse_optional_uuid(row.get(3)?)?,
+        seq: nonnegative_i64_to_u64(row.get(4)?)?,
+        event_type: parse_text_enum::<EventType>(row.get::<_, String>(5)?)?,
+        role: parse_optional_text_enum::<EventRole>(row.get(6)?)?,
+        occurred_at: ms_to_time(row.get(7)?)?,
+        preview: row.get(8)?,
+        score: row.get(9)?,
+        provider: parse_optional_text_enum::<CaptureProvider>(row.get(10)?)?,
+        session_external_session_id: row.get(11)?,
+        history_source: source_identity.history_source,
+        history_source_plugin: source_identity.history_source_plugin,
+        provider_key: source_identity.provider_key,
+        source_id: source_identity.source_id,
+        source_format: source_identity.source_format,
+        session_parent_session_id: parse_optional_uuid(row.get(12)?)?,
+        session_root_session_id: parse_optional_uuid(row.get(13)?)?,
+        agent_type: parse_optional_text_enum::<AgentType>(row.get(14)?)?,
+        session_is_primary: row.get::<_, Option<i64>>(15)?.map(|value| value != 0),
+        cwd: row.get(16)?,
+        raw_source_path: row.get(17)?,
+        cursor: event_search_cursor(&payload_json, source_metadata_json.as_deref())?,
+        record_title: row.get(20)?,
+        record_kind: row.get(21)?,
+        record_workspace: row.get(22)?,
+    })
+}
+
 pub(crate) fn rebuild_search_projection(conn: &Connection) -> Result<()> {
     if !table_exists(conn, "ctx_history_search")? {
         return Ok(());
     }
 
     conn.execute("DELETE FROM ctx_history_search", [])?;
+    let has_record_scriptgram = record_scriptgram_table_ready(conn)?;
+    if has_record_scriptgram {
+        conn.execute("DELETE FROM ctx_history_search_scriptgram", [])?;
+    }
     let has_event_search = table_exists(conn, "event_search")?;
     if has_event_search {
         conn.execute("DELETE FROM event_search", [])?;
+        if event_scriptgram_table_ready(conn)? {
+            conn.execute("DELETE FROM event_search_scriptgram", [])?;
+        }
         populate_event_search_projection(conn)?;
     }
     if table_exists(conn, "artifact_search")? {
@@ -208,6 +295,17 @@ pub(crate) fn rebuild_search_projection(conn: &Connection) -> Result<()> {
         VALUES (?1, ?2, ?3, ?4, '', ?5, ?6)
         "#,
     )?;
+    let mut insert_record_scriptgram = if has_record_scriptgram {
+        Some(conn.prepare(
+            r#"
+            INSERT INTO ctx_history_search_scriptgram
+            (record_id, token_text)
+            VALUES (?1, ?2)
+            "#,
+        )?)
+    } else {
+        None
+    };
     for record in records {
         insert_record_search.execute(params![
             record.id.to_string(),
@@ -217,6 +315,12 @@ pub(crate) fn rebuild_search_projection(conn: &Connection) -> Result<()> {
             "",
             local_preview(&record.tags.join(" "), 1024),
         ])?;
+        if let Some(insert_record_scriptgram) = insert_record_scriptgram.as_mut() {
+            let token_text = scriptgram_index_text(&record_search_scriptgram_source(&record));
+            if !token_text.is_empty() {
+                insert_record_scriptgram.execute(params![record.id.to_string(), token_text])?;
+            }
+        }
     }
 
     Ok(())
@@ -233,6 +337,12 @@ pub(crate) fn upsert_record_search_projection(
         "DELETE FROM ctx_history_search WHERE record_id = ?1",
         params![record.id.to_string()],
     )?;
+    if record_scriptgram_table_ready(conn)? {
+        conn.execute(
+            "DELETE FROM ctx_history_search_scriptgram WHERE record_id = ?1",
+            params![record.id.to_string()],
+        )?;
+    }
     conn.execute(
         r#"
         INSERT INTO ctx_history_search
@@ -248,7 +358,67 @@ pub(crate) fn upsert_record_search_projection(
             local_preview(&record.tags.join(" "), 1024),
         ],
     )?;
+    if record_scriptgram_table_ready(conn)? {
+        let token_text = scriptgram_index_text(&record_search_scriptgram_source(record));
+        if !token_text.is_empty() {
+            conn.execute(
+                r#"
+                INSERT INTO ctx_history_search_scriptgram
+                (record_id, token_text)
+                VALUES (?1, ?2)
+                "#,
+                params![record.id.to_string(), token_text],
+            )?;
+        }
+    }
     Ok(())
+}
+
+fn record_search_scriptgram_source(record: &HistoryRecord) -> String {
+    [
+        local_preview(&record.title, 512),
+        local_preview(&record.body, 2048),
+        local_preview(&record.tags.join(" "), 1024),
+    ]
+    .into_iter()
+    .filter(|part| !part.trim().is_empty())
+    .collect::<Vec<_>>()
+    .join(" ")
+}
+
+pub(crate) fn record_scriptgram_table_ready(conn: &Connection) -> Result<bool> {
+    fts_table_has_columns(
+        conn,
+        "ctx_history_search_scriptgram",
+        &["record_id", "token_text"],
+    )
+}
+
+pub(crate) fn event_scriptgram_table_ready(conn: &Connection) -> Result<bool> {
+    fts_table_has_columns(
+        conn,
+        "event_search_scriptgram",
+        &[
+            "event_id",
+            "history_record_id",
+            "session_id",
+            "role",
+            "token_text",
+            "rank_bucket",
+        ],
+    )
+}
+
+fn fts_table_has_columns(conn: &Connection, table: &str, required: &[&str]) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    let mut columns = Vec::new();
+    for row in rows {
+        columns.push(row?);
+    }
+    Ok(required
+        .iter()
+        .all(|required| columns.iter().any(|column| column == required)))
 }
 
 fn ensure_search_projection_initialized(conn: &Connection) -> Result<()> {
@@ -259,6 +429,9 @@ fn ensure_search_projection_initialized(conn: &Connection) -> Result<()> {
     let mut projection_rows = table_row_count(conn, "ctx_history_search")?;
     if table_exists(conn, "event_search")? {
         projection_rows += table_row_count(conn, "event_search")?;
+    }
+    if event_scriptgram_table_ready(conn)? {
+        projection_rows += table_row_count(conn, "event_search_scriptgram")?;
     }
     if table_exists(conn, "artifact_search")? {
         projection_rows += table_row_count(conn, "artifact_search")?;
@@ -279,8 +452,14 @@ fn ensure_search_projection_initialized(conn: &Connection) -> Result<()> {
 
 fn table_row_count(conn: &Connection, table: &str) -> Result<i64> {
     match table {
-        "artifacts" | "artifact_search" | "events" | "event_search" | "history_records"
-        | "ctx_history_search" => {}
+        "artifacts"
+        | "artifact_search"
+        | "events"
+        | "event_search"
+        | "event_search_scriptgram"
+        | "history_records"
+        | "ctx_history_search"
+        | "ctx_history_search_scriptgram" => {}
         _ => unreachable!("invalid table {table}"),
     }
     let sql = format!("SELECT COUNT(*) FROM {table}");
@@ -325,6 +504,18 @@ fn populate_event_search_projection(conn: &Connection) -> Result<()> {
         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
         "#,
     )?;
+    let has_event_scriptgram = event_scriptgram_table_ready(conn)?;
+    let mut insert_event_scriptgram = if has_event_scriptgram {
+        Some(conn.prepare(
+            r#"
+            INSERT INTO event_search_scriptgram
+            (event_id, history_record_id, session_id, role, token_text, rank_bucket)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
+        )?)
+    } else {
+        None
+    };
     for row in rows {
         let (event_id, history_record_id, session_id, role, event_type, payload_json) = row?;
         let event_type = event_type.parse::<EventType>().map_err(|err| {
@@ -353,6 +544,19 @@ fn populate_event_search_projection(conn: &Connection) -> Result<()> {
             preview,
             event_type.as_str()
         ])?;
+        if let Some(insert_event_scriptgram) = insert_event_scriptgram.as_mut() {
+            let token_text = scriptgram_index_text(&preview);
+            if !token_text.is_empty() {
+                insert_event_scriptgram.execute(params![
+                    event_id,
+                    history_record_id,
+                    session_id,
+                    role.map(|role| role.as_str()),
+                    token_text,
+                    event_type.as_str()
+                ])?;
+            }
+        }
     }
     Ok(())
 }
@@ -361,7 +565,16 @@ pub(crate) fn insert_event_search_projection_for_event(
     conn: &Connection,
     event: &Event,
 ) -> Result<()> {
-    insert_event_search_projection_for_event_id(conn, event.id, event)
+    if !table_exists(conn, "event_search")? {
+        return Ok(());
+    }
+    let has_event_scriptgram = event_scriptgram_table_ready(conn)?;
+    insert_event_search_projection_for_event_id_with_sidecar(
+        conn,
+        event.id,
+        event,
+        has_event_scriptgram,
+    )
 }
 
 pub(crate) fn upsert_event_search_projection_for_event(
@@ -372,21 +585,31 @@ pub(crate) fn upsert_event_search_projection_for_event(
     if !table_exists(conn, "event_search")? {
         return Ok(());
     }
+    let has_event_scriptgram = event_scriptgram_table_ready(conn)?;
     conn.execute(
         "DELETE FROM event_search WHERE event_id = ?1",
         params![event_id.to_string()],
     )?;
-    insert_event_search_projection_for_event_id(conn, event_id, event)
+    if has_event_scriptgram {
+        conn.execute(
+            "DELETE FROM event_search_scriptgram WHERE event_id = ?1",
+            params![event_id.to_string()],
+        )?;
+    }
+    insert_event_search_projection_for_event_id_with_sidecar(
+        conn,
+        event_id,
+        event,
+        has_event_scriptgram,
+    )
 }
 
-pub(crate) fn insert_event_search_projection_for_event_id(
+fn insert_event_search_projection_for_event_id_with_sidecar(
     conn: &Connection,
     event_id: Uuid,
     event: &Event,
+    has_event_scriptgram: bool,
 ) -> Result<()> {
-    if !table_exists(conn, "event_search")? {
-        return Ok(());
-    }
     let preview = event_search_preview_from_payload(event.event_type, event.role, &event.payload);
     if preview.trim().is_empty() {
         return Ok(());
@@ -406,6 +629,26 @@ pub(crate) fn insert_event_search_projection_for_event_id(
         preview,
         event.event_type.as_str(),
     ])?;
+    if has_event_scriptgram {
+        let token_text = scriptgram_index_text(&preview);
+        if !token_text.is_empty() {
+            conn.prepare_cached(
+                r#"
+                INSERT INTO event_search_scriptgram
+                (event_id, history_record_id, session_id, role, token_text, rank_bucket)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                "#,
+            )?
+            .execute(params![
+                event_id.to_string(),
+                optional_uuid_string(event.history_record_id),
+                optional_uuid_string(event.session_id),
+                event.role.map(|role| role.as_str()),
+                token_text,
+                event.event_type.as_str(),
+            ])?;
+        }
+    }
     Ok(())
 }
 

@@ -27,6 +27,20 @@ CREATE VIRTUAL TABLE IF NOT EXISTS artifact_search USING fts5(
     history_record_id UNINDEXED,
     preview_text
 );
+
+CREATE VIRTUAL TABLE IF NOT EXISTS ctx_history_search_scriptgram USING fts5(
+    record_id UNINDEXED,
+    token_text
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS event_search_scriptgram USING fts5(
+    event_id UNINDEXED,
+    history_record_id UNINDEXED,
+    session_id UNINDEXED,
+    role UNINDEXED,
+    token_text,
+    rank_bucket UNINDEXED
+);
 "#;
 
 pub(crate) fn create_fts_tables_if_supported(conn: &Connection) -> Result<()> {
