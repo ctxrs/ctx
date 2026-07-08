@@ -6,7 +6,7 @@ VERSION="0.143.0"
 MODEL="gpt-5.5"
 
 fail() {
-  printf 'real Codex harness E2E failed: %s\n' "$*" >&2
+  printf 'real Codex skill E2E failed: %s\n' "$*" >&2
   exit 1
 }
 
@@ -70,13 +70,13 @@ require_contains() {
 main() {
   find_repo_root
   local codex_bin ctx_bin run_root home codex_home project data_root port_file log_file server_pid port
-  local stdout_file stderr_file install_json mcp_list_json
+  local stdout_file stderr_file install_json skill_path
 
   codex_bin="$(ensure_codex)"
   run "${codex_bin}" --version
   ctx_bin="$(resolve_ctx_bin)"
 
-  run_root="${CTX_REAL_HARNESS_RUN_ROOT:-${PWD}/target-local/real-harness-runs}/codex-mcp-$$"
+  run_root="${CTX_REAL_HARNESS_RUN_ROOT:-${PWD}/target-local/real-harness-runs}/codex-skill-$$"
   rm -rf "${run_root}"
   mkdir -p "${run_root}"
   home="${run_root}/home"
@@ -85,30 +85,25 @@ main() {
   data_root="${run_root}/ctx-data"
   mkdir -p "${codex_home}" "${project}" "${data_root}"
 
-  install_json="${run_root}/mcp-install.json"
-  mcp_list_json="${run_root}/codex-mcp-list.json"
+  install_json="${run_root}/skill-install.json"
   stdout_file="${run_root}/codex.stdout"
   stderr_file="${run_root}/codex.stderr"
   port_file="${run_root}/fixture.port"
   log_file="${run_root}/fixture-requests.jsonl"
+  skill_path="${codex_home}/skills/ctx-agent-history-search/SKILL.md"
 
   PATH="$(dirname "${ctx_bin}"):${PATH}" \
     CODEX_HOME="${codex_home}" \
     HOME="${home}" \
     CTX_DATA_ROOT="${data_root}" \
     CTX_ANALYTICS_OFF=1 \
-    run "${ctx_bin}" integrations install mcp --agent codex --json > "${install_json}"
+    run "${ctx_bin}" skill install --agent codex --json > "${install_json}"
   require_contains "${install_json}" '"agent":"codex"'
   require_contains "${install_json}" '"status":"current"'
+  require_contains "${skill_path}" 'name: ctx-agent-history-search'
+  require_contains "${skill_path}" 'Use ctx to search local coding-agent history'
 
-  PATH="$(dirname "${ctx_bin}"):${PATH}" \
-    CODEX_HOME="${codex_home}" \
-    HOME="${home}" \
-    run "${codex_bin}" mcp list --json > "${mcp_list_json}"
-  require_contains "${mcp_list_json}" '"name": "ctx"'
-  require_contains "${mcp_list_json}" '"command": "ctx"'
-
-  run python3 scripts/real-harness-codex-fixture-server.py "${port_file}" "${log_file}" &
+  run python3 scripts/real-harness-codex-skill-fixture-server.py "${port_file}" "${log_file}" &
   server_pid=$!
   for _ in {1..100}; do
     [[ -s "${port_file}" ]] && break
@@ -134,20 +129,21 @@ main() {
       -c 'model_providers.fixture.env_key="OPENAI_API_KEY"' \
       -c 'model_providers.fixture.wire_api="responses"' \
       -C "${project}" \
-      'Discover ctx MCP tools, call ctx status, then report success.' \
+      'Use the ctx-agent-history-search skill and verify ctx is available.' \
       > "${stdout_file}" 2> "${stderr_file}"
 
   wait "${server_pid}"
 
-  require_contains "${stdout_file}" 'fixture-ctx-status-ok'
-  require_contains "${stderr_file}" 'mcp: ctx/status (completed)'
-  require_contains "${log_file}" '"type":"tool_search_output"'
-  require_contains "${log_file}" '"namespace":"mcp__ctx"'
-  require_contains "${log_file}" '"name":"status"'
-  require_contains "${log_file}" '"call_id":"call_ctx_status"'
-  require_contains "${log_file}" '\"initialized\":false'
+  require_contains "${stdout_file}" 'fixture-ctx-skill-ok'
+  require_contains "${stderr_file}" "/bin/bash -lc 'ctx --version'"
+  require_contains "${stderr_file}" 'ctx 0.21.0'
+  require_contains "${log_file}" '"has_ctx_skill":true'
+  require_contains "${log_file}" '"has_ctx_skill_description":true'
+  require_contains "${log_file}" '"has_ctx_skill_path":true'
+  require_contains "${log_file}" '"call_id":"call_ctx_version"'
+  require_contains "${log_file}" 'ctx 0.21.0'
 
-  printf 'real Codex MCP harness E2E passed: %s\n' "${run_root}"
+  printf 'real Codex skill harness E2E passed: %s\n' "${run_root}"
 }
 
 main "$@"

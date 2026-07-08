@@ -17,6 +17,9 @@ run() {
   "$@"
 }
 
+# shellcheck source=scripts/real-harness-common.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/real-harness-common.sh"
+
 find_repo_root() {
   local candidate
   for candidate in "${BUILD_WORKSPACE_DIRECTORY:-}" "$(pwd)" "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; do
@@ -71,10 +74,7 @@ main() {
 
   qwen_bin="$(ensure_qwen)"
   run "${qwen_bin}" --version
-  export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable}"
-  run cargo build --locked -p ctx
-  ctx_bin="${CARGO_TARGET_DIR:-${PWD}/target}/debug/ctx"
-  [[ -x "${ctx_bin}" ]] || fail "built ctx binary not found at ${ctx_bin}"
+  ctx_bin="$(resolve_ctx_bin)"
 
   run_root="${CTX_REAL_HARNESS_RUN_ROOT:-${PWD}/target-local/real-harness-runs}/qwen-mcp-$$"
   rm -rf "${run_root}"

@@ -18,6 +18,7 @@ required_paths=(
   docs/provider-support.md
   docs/provider-support-matrix.json
   docs/search.md
+  docs/slash-command-integrations.md
   docs/limitations.md
   docs/security-checks.md
   docs/agent-usage.md

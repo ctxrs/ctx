@@ -4,6 +4,7 @@ use clap::{Args, Subcommand};
 use crate::{analytics, AnalyticsProperties};
 
 mod mcp;
+mod slash_commands;
 
 use mcp::{run_install as run_mcp_install, run_status as run_mcp_status};
 
@@ -31,6 +32,11 @@ struct IntegrationInstallArgs {
 enum IntegrationInstallTarget {
     #[command(about = "Install the local ctx MCP server into coding-agent clients")]
     Mcp(mcp::McpInstallArgs),
+    #[command(
+        name = "slash-commands",
+        about = "Install ctx slash-command entry points"
+    )]
+    SlashCommands(slash_commands::SlashCommandInstallArgs),
 }
 
 #[derive(Debug, Args)]
@@ -50,6 +56,7 @@ impl IntegrationsArgs {
         match &self.command {
             IntegrationCommand::Install(args) => match &args.target {
                 IntegrationInstallTarget::Mcp(args) => args.json,
+                IntegrationInstallTarget::SlashCommands(args) => args.json,
             },
             IntegrationCommand::Status(args) => match &args.target {
                 IntegrationStatusTarget::Mcp(args) => args.json,
@@ -63,6 +70,10 @@ impl IntegrationsArgs {
                 analytics::insert_str(properties, "integration_action", "install");
                 match &args.target {
                     IntegrationInstallTarget::Mcp(args) => args.add_initial_analytics(properties),
+                    IntegrationInstallTarget::SlashCommands(args) => {
+                        analytics::insert_str(properties, "integration_target", "slash_commands");
+                        slash_commands::insert_install_analytics(properties, args);
+                    }
                 }
             }
             IntegrationCommand::Status(args) => {
@@ -79,15 +90,22 @@ pub(crate) fn run(
     args: IntegrationsArgs,
     analytics_properties: &mut AnalyticsProperties,
 ) -> Result<()> {
-    let context = mcp::McpPathContext::from_env()?;
     match args.command {
         IntegrationCommand::Install(args) => match args.target {
             IntegrationInstallTarget::Mcp(args) => {
+                let context = mcp::McpPathContext::from_env()?;
                 run_mcp_install(args, &context, analytics_properties)
+            }
+            IntegrationInstallTarget::SlashCommands(args) => {
+                let context = slash_commands::PathContext::from_env()?;
+                slash_commands::run_install(args, &context, analytics_properties)
             }
         },
         IntegrationCommand::Status(args) => match args.target {
-            IntegrationStatusTarget::Mcp(args) => run_mcp_status(args, &context),
+            IntegrationStatusTarget::Mcp(args) => {
+                let context = mcp::McpPathContext::from_env()?;
+                run_mcp_status(args, &context)
+            }
         },
     }
 }

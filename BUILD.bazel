@@ -29,6 +29,10 @@ CTX_GATE_DATA = glob([
     "//crates/ctx-sdk:cargo_package_data",
 ]
 
+REAL_HARNESS_DATA = CTX_GATE_DATA + [
+    "//crates/ctx-cli:ctx",
+]
+
 filegroup(
     name = "agent_history_contract_fixtures",
     srcs = glob(["contracts/agent-history-v1/fixtures/*.json"]),
@@ -95,6 +99,43 @@ sh_test(
 )
 
 sh_test(
+    name = "slash_command_e2e",
+    srcs = ["scripts/bazel-test.sh"],
+    args = ["slash_command_e2e"],
+    data = CTX_GATE_DATA,
+)
+
+sh_test(
+    name = "real_harness_codex_skill_e2e",
+    srcs = ["scripts/bazel-test.sh"],
+    args = [
+        "real_harness_codex_skill_e2e",
+        "$(rootpath //crates/ctx-cli:ctx)",
+    ],
+    data = REAL_HARNESS_DATA,
+)
+
+sh_test(
+    name = "real_harness_gemini_slash_e2e",
+    srcs = ["scripts/bazel-test.sh"],
+    args = [
+        "real_harness_gemini_slash_e2e",
+        "$(rootpath //crates/ctx-cli:ctx)",
+    ],
+    data = REAL_HARNESS_DATA,
+)
+
+sh_test(
+    name = "real_harness_qwen_slash_e2e",
+    srcs = ["scripts/bazel-test.sh"],
+    args = [
+        "real_harness_qwen_slash_e2e",
+        "$(rootpath //crates/ctx-cli:ctx)",
+    ],
+    data = REAL_HARNESS_DATA,
+)
+
+sh_test(
     name = "docs_check",
     srcs = ["scripts/bazel-test.sh"],
     args = ["docs_check"],
@@ -111,36 +152,51 @@ sh_test(
 sh_test(
     name = "real_harness_codex_mcp_e2e",
     srcs = ["scripts/bazel-test.sh"],
-    args = ["real_harness_codex_mcp_e2e"],
-    data = CTX_GATE_DATA,
+    args = [
+        "real_harness_codex_mcp_e2e",
+        "$(rootpath //crates/ctx-cli:ctx)",
+    ],
+    data = REAL_HARNESS_DATA,
 )
 
 sh_test(
     name = "real_harness_qwen_mcp_e2e",
     srcs = ["scripts/bazel-test.sh"],
-    args = ["real_harness_qwen_mcp_e2e"],
-    data = CTX_GATE_DATA,
+    args = [
+        "real_harness_qwen_mcp_e2e",
+        "$(rootpath //crates/ctx-cli:ctx)",
+    ],
+    data = REAL_HARNESS_DATA,
 )
 
 sh_test(
     name = "real_harness_claude_mcp_e2e",
     srcs = ["scripts/bazel-test.sh"],
-    args = ["real_harness_claude_mcp_e2e"],
-    data = CTX_GATE_DATA,
+    args = [
+        "real_harness_claude_mcp_e2e",
+        "$(rootpath //crates/ctx-cli:ctx)",
+    ],
+    data = REAL_HARNESS_DATA,
 )
 
 sh_test(
     name = "real_harness_gemini_mcp_e2e",
     srcs = ["scripts/bazel-test.sh"],
-    args = ["real_harness_gemini_mcp_e2e"],
-    data = CTX_GATE_DATA,
+    args = [
+        "real_harness_gemini_mcp_e2e",
+        "$(rootpath //crates/ctx-cli:ctx)",
+    ],
+    data = REAL_HARNESS_DATA,
 )
 
 sh_test(
     name = "real_harness_opencode_mcp_e2e",
     srcs = ["scripts/bazel-test.sh"],
-    args = ["real_harness_opencode_mcp_e2e"],
-    data = CTX_GATE_DATA,
+    args = [
+        "real_harness_opencode_mcp_e2e",
+        "$(rootpath //crates/ctx-cli:ctx)",
+    ],
+    data = REAL_HARNESS_DATA,
 )
 
 sh_test(
@@ -269,6 +325,9 @@ test_suite(
     name = "real_harness",
     tests = [
         ":real_harness_codex_mcp_e2e",
+        ":real_harness_codex_skill_e2e",
+        ":real_harness_gemini_slash_e2e",
+        ":real_harness_qwen_slash_e2e",
         ":real_harness_qwen_mcp_e2e",
         ":real_harness_claude_mcp_e2e",
         ":real_harness_gemini_mcp_e2e",
@@ -282,6 +341,7 @@ test_suite(
         ":cargo_fmt_check",
         ":cargo_check",
         ":cli_contract_tests",
+        ":slash_command_e2e",
         ":docs_check",
         ":mcp_integration_e2e",
         ":installer_path_smoke",
