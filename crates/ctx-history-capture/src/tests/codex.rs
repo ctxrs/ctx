@@ -732,6 +732,279 @@ fn codex_session_jsonl_fast_import_skips_one_oversized_line() {
 }
 
 #[test]
+fn codex_session_jsonl_skips_oversized_required_header_without_failure() {
+    let temp = tempdir();
+    let path = temp.path().join("oversized-header-codex.jsonl");
+    let mut bytes = oversized_jsonl_line();
+    bytes.extend_from_slice(
+        jsonl_line(json!({
+            "timestamp": "2026-07-03T12:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "should not import without header"}]
+            }
+        }))
+        .as_bytes(),
+    );
+    fs::write(&path, bytes).unwrap();
+
+    let normalized = CodexSessionJsonlAdapter
+        .normalize_path(&path, &ProviderAdapterContext::default())
+        .unwrap();
+    assert_eq!(
+        normalized.summary.failed, 0,
+        "{:?}",
+        normalized.summary.failures
+    );
+    assert_eq!(normalized.summary.skipped, 1);
+    assert_eq!(normalized.summary.skipped_sessions, 1);
+    assert!(normalized.captures.is_empty());
+
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let summary = import_codex_session_jsonl(
+        &path,
+        &mut store,
+        CodexSessionImportOptions {
+            imported_at: "2026-07-03T12:30:00Z".parse().unwrap(),
+            ..CodexSessionImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+    assert_eq!(summary.skipped, 1);
+    assert_eq!(summary.skipped_sessions, 1);
+    assert_eq!(summary.imported_sessions, 0);
+    assert_eq!(summary.imported_events, 0);
+    assert!(store.list_sessions().unwrap().is_empty());
+}
+
+#[test]
+fn codex_session_jsonl_skips_only_oversized_events_without_fake_session() {
+    let temp = tempdir();
+    let path = temp.path().join("only-oversized-event-codex.jsonl");
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(
+        jsonl_line(json!({
+            "timestamp": "2026-07-03T12:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "codex-only-oversized-event",
+                "timestamp": "2026-07-03T12:00:00Z",
+                "cwd": "/workspace",
+                "originator": "codex-cli"
+            }
+        }))
+        .as_bytes(),
+    );
+    bytes.extend_from_slice(&oversized_jsonl_line());
+    fs::write(&path, bytes).unwrap();
+
+    let normalized = CodexSessionJsonlAdapter
+        .normalize_path(&path, &ProviderAdapterContext::default())
+        .unwrap();
+    assert_eq!(
+        normalized.summary.failed, 0,
+        "{:?}",
+        normalized.summary.failures
+    );
+    assert_eq!(normalized.summary.skipped, 1);
+    assert_eq!(normalized.summary.skipped_events, 1);
+    assert!(normalized.captures.is_empty());
+
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let summary = import_codex_session_jsonl(
+        &path,
+        &mut store,
+        CodexSessionImportOptions {
+            imported_at: "2026-07-03T12:30:00Z".parse().unwrap(),
+            ..CodexSessionImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+    assert_eq!(summary.skipped, 1);
+    assert_eq!(summary.skipped_events, 1);
+    assert_eq!(summary.imported_sessions, 0);
+    assert_eq!(summary.imported_events, 0);
+    assert!(store.list_sessions().unwrap().is_empty());
+
+    let mut slow_store = Store::open(temp.path().join("slow-work.sqlite")).unwrap();
+    let slow_summary = import_codex_session_jsonl(
+        &path,
+        &mut slow_store,
+        CodexSessionImportOptions {
+            imported_at: "2026-07-03T12:31:00Z".parse().unwrap(),
+            fast_event_inserts: false,
+            ..CodexSessionImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(slow_summary.failed, 0, "{:?}", slow_summary.failures);
+    assert_eq!(slow_summary.skipped, 1);
+    assert_eq!(slow_summary.skipped_events, 1);
+    assert_eq!(slow_summary.imported_sessions, 0);
+    assert_eq!(slow_summary.imported_events, 0);
+    assert!(slow_store.list_sessions().unwrap().is_empty());
+}
+
+#[test]
+fn codex_session_jsonl_malformed_header_is_not_hidden_by_oversized_line() {
+    let temp = tempdir();
+    let path = temp
+        .path()
+        .join("malformed-header-before-oversized-codex.jsonl");
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(
+        jsonl_line(json!({
+            "timestamp": "2026-07-03T12:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "timestamp": "2026-07-03T12:00:00Z",
+                "cwd": "/workspace",
+                "originator": "codex-cli"
+            }
+        }))
+        .as_bytes(),
+    );
+    bytes.extend_from_slice(&oversized_jsonl_line());
+    fs::write(&path, bytes).unwrap();
+
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let summary = import_codex_session_jsonl(
+        &path,
+        &mut store,
+        CodexSessionImportOptions {
+            imported_at: "2026-07-03T12:30:00Z".parse().unwrap(),
+            ..CodexSessionImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 1, "{:?}", summary.failures);
+    assert!(summary.failures[0]
+        .error
+        .contains("codex session_meta missing id"));
+    assert_eq!(summary.imported_sessions, 0);
+    assert_eq!(summary.imported_events, 0);
+    assert!(store.list_sessions().unwrap().is_empty());
+}
+
+#[test]
+fn codex_session_jsonl_malformed_relevant_line_is_not_hidden_by_oversized_line() {
+    let temp = tempdir();
+    let path = temp
+        .path()
+        .join("malformed-relevant-before-oversized-codex.jsonl");
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(
+        jsonl_line(json!({
+            "timestamp": "2026-07-03T12:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "codex-malformed-before-oversized",
+                "timestamp": "2026-07-03T12:00:00Z",
+                "cwd": "/workspace",
+                "originator": "codex-cli"
+            }
+        }))
+        .as_bytes(),
+    );
+    bytes.extend_from_slice(
+        br#"{"timestamp":"2026-07-03T12:00:01Z","type":"response_item","payload":{"type":"message","role":"assistant","content":["unterminated"]"#,
+    );
+    bytes.push(b'\n');
+    bytes.extend_from_slice(&oversized_jsonl_line());
+    fs::write(&path, bytes).unwrap();
+
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let summary = import_codex_session_jsonl(
+        &path,
+        &mut store,
+        CodexSessionImportOptions {
+            imported_at: "2026-07-03T12:30:00Z".parse().unwrap(),
+            ..CodexSessionImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 1, "{:?}", summary.failures);
+    assert!(
+        summary.failures[0].error.contains("EOF while parsing")
+            || summary.failures[0].error.contains("expected")
+    );
+    assert_eq!(summary.imported_events, 0);
+    assert!(store.list_sessions().unwrap().is_empty());
+}
+
+#[test]
+fn codex_session_probe_skips_oversized_line_before_first_real_message() {
+    let temp = tempdir();
+    let path = temp.path().join("oversized-before-message-codex.jsonl");
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(
+        jsonl_line(json!({
+            "timestamp": "2026-07-03T12:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "codex-oversized-before-message",
+                "timestamp": "2026-07-03T12:00:00Z",
+                "cwd": "/workspace",
+                "originator": "codex-cli"
+            }
+        }))
+        .as_bytes(),
+    );
+    bytes.extend_from_slice(&oversized_jsonl_line());
+    bytes.extend_from_slice(
+        jsonl_line(json!({
+            "timestamp": "2026-07-03T12:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "message after oversized probe line"}]
+            }
+        }))
+        .as_bytes(),
+    );
+    fs::write(&path, bytes).unwrap();
+
+    assert!(
+        codex_session_file_conversation_scan(&path)
+            .unwrap()
+            .has_real_conversation
+    );
+
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let summary = import_codex_session_jsonl(
+        &path,
+        &mut store,
+        CodexSessionImportOptions {
+            imported_at: "2026-07-03T12:30:00Z".parse().unwrap(),
+            ..CodexSessionImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+    assert_eq!(summary.skipped_events, 1);
+    assert_eq!(summary.imported_sessions, 1);
+    assert_eq!(summary.imported_events, 1);
+    assert_eq!(
+        store
+            .search_event_hits("message after oversized probe line", 10)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn codex_session_jsonl_rejects_malformed_event_timestamp() {
     let temp = tempdir();
     let path = temp.path().join("bad-timestamp-codex.jsonl");
@@ -1041,6 +1314,46 @@ fn codex_session_tail_rejects_malformed_append_atomically() {
         .search_event_hits("tail valid should rollback", 10)
         .unwrap()
         .is_empty());
+}
+
+#[test]
+fn codex_session_tail_skips_oversized_required_header_without_failure() {
+    let temp = tempdir();
+    let path = temp.path().join("tail-oversized-header-codex.jsonl");
+    let mut bytes = oversized_jsonl_line();
+    let tail_start = bytes.len() as u64;
+    bytes.extend_from_slice(
+        jsonl_line(json!({
+            "timestamp": "2026-07-03T12:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "tail should not invent header"}]
+            }
+        }))
+        .as_bytes(),
+    );
+    fs::write(&path, bytes).unwrap();
+
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let summary = import_codex_session_jsonl_tail(
+        &path,
+        tail_start,
+        &mut store,
+        CodexSessionImportOptions {
+            imported_at: "2026-07-03T12:31:00Z".parse().unwrap(),
+            ..CodexSessionImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+    assert_eq!(summary.skipped, 1);
+    assert_eq!(summary.skipped_sessions, 1);
+    assert_eq!(summary.imported_sessions, 0);
+    assert_eq!(summary.imported_events, 0);
+    assert!(store.list_sessions().unwrap().is_empty());
 }
 
 #[test]
