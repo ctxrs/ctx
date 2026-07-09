@@ -7,7 +7,49 @@ use crate::support::{provider_history_fixture, sqlite_column_text};
 
 pub(crate) fn write_native_opencode_fixture(temp: &TempDir, query: &str) -> String {
     let path = temp.path().join("native-opencode.db");
-    let conn = Connection::open(&path).unwrap();
+    write_opencode_family_sqlite_fixture(
+        &path,
+        query,
+        "opencode-cli-native",
+        "opencode",
+        "opencode-test",
+        "OpenCode assistant response",
+        "src/opencode_native.rs",
+    );
+    path.to_str().unwrap().to_owned()
+}
+
+pub(crate) fn write_native_mimocode_fixture(temp: &TempDir, query: &str) -> String {
+    let path = temp.path().join("native-mimocode.db");
+    write_mimocode_sqlite_fixture(&path, query, "mimocode-cli-native");
+    path.to_str().unwrap().to_owned()
+}
+
+pub(crate) fn write_mimocode_sqlite_fixture(path: &Path, query: &str, session_id: &str) {
+    write_opencode_family_sqlite_fixture(
+        path,
+        query,
+        session_id,
+        "mimo",
+        "mimo-code-test",
+        "MiMo Code assistant response",
+        "src/mimocode_native.rs",
+    );
+}
+
+fn write_opencode_family_sqlite_fixture(
+    path: &Path,
+    query: &str,
+    session_id: &str,
+    provider_id: &str,
+    model_id: &str,
+    assistant_prefix: &str,
+    output_path: &str,
+) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    let conn = Connection::open(path).unwrap();
     conn.execute_batch(
         "create table session (
             id text primary key,
@@ -53,19 +95,98 @@ pub(crate) fn write_native_opencode_fixture(temp: &TempDir, query: &str) -> Stri
             time_created, time_updated
         ) values (?1, 'project-1', null, 'native', '/workspace', 'native', '0.8.0',
             'default', 1782259200000, 1782259200000)",
-        ["opencode-cli-native"],
+        [session_id],
+    )
+    .unwrap();
+    let child_session_id = format!("{session_id}-child");
+    conn.execute(
+        "insert into session (
+            id, project_id, parent_id, slug, directory, title, version, permission,
+            time_created, time_updated
+        ) values (?1, 'project-1', ?2, 'native-child', '/workspace', 'native child', '0.8.0',
+            'default', 1782259202000, 1782259202000)",
+        params![child_session_id, session_id],
     )
     .unwrap();
     conn.execute(
         "insert into message values (?1, ?2, 1782259200000, 1782259200000, ?3)",
-        [
-            "opencode-cli-native-user",
-            "opencode-cli-native",
-            &format!(r#"{{"role":"user","time":{{"created":1782259200000}},"text":"{query}"}}"#),
+        params![
+            format!("{session_id}-user"),
+            session_id,
+            json!({
+                "role": "user",
+                "time": { "created": 1782259200000_i64 },
+                "text": query
+            })
+            .to_string(),
         ],
     )
     .unwrap();
-    path.to_str().unwrap().to_owned()
+    conn.execute(
+        "insert into message values (?1, ?2, 1782259201000, 1782259201000, ?3)",
+        params![
+            format!("{session_id}-assistant"),
+            session_id,
+            json!({
+                "role": "assistant",
+                "time": { "created": 1782259201000_i64 },
+                "providerID": provider_id,
+                "modelID": model_id
+            })
+            .to_string(),
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "insert into part values (?1, ?2, ?3, 1782259201001, 1782259201001, ?4)",
+        params![
+            format!("{session_id}-assistant-text"),
+            format!("{session_id}-assistant"),
+            session_id,
+            json!({
+                "type": "text",
+                "text": format!("{assistant_prefix} for {query}")
+            })
+            .to_string(),
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "insert into part values (?1, ?2, ?3, 1782259201002, 1782259201002, ?4)",
+        params![
+            format!("{session_id}-assistant-tool"),
+            format!("{session_id}-assistant"),
+            session_id,
+            json!({
+                "type": "tool",
+                "tool": "write_file",
+                "state": {
+                    "status": "completed",
+                    "metadata": {
+                        "outputPath": output_path,
+                        "exit": 0
+                    }
+                },
+                "input": { "path": "src/tool_arg_should_not_touch.txt" }
+            })
+            .to_string(),
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "insert into message values (?1, ?2, 1782259202000, 1782259202000, ?3)",
+        params![
+            format!("{session_id}-child-message"),
+            child_session_id,
+            json!({
+                "role": "assistant",
+                "time": { "created": 1782259202000_i64 },
+                "text": "MiMo child session answer"
+            })
+            .to_string(),
+        ],
+    )
+    .unwrap();
 }
 
 pub(crate) fn write_native_kilo_fixture(temp: &TempDir, query: &str) -> String {

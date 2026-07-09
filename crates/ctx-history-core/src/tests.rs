@@ -64,6 +64,10 @@ fn enum_string_roundtrips_and_defaults() {
         serde_json::from_str::<CaptureProvider>("\"lingma\"").unwrap(),
         CaptureProvider::Lingma
     );
+    assert_eq!(
+        serde_json::from_str::<CaptureProvider>("\"mimocode\"").unwrap(),
+        CaptureProvider::MiMoCode
+    );
 
     let sync: SyncMetadata = serde_json::from_value(json!({})).unwrap();
     assert_eq!(sync.visibility, Visibility::LocalOnly);

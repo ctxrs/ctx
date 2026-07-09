@@ -357,6 +357,7 @@ fn provider_check_constraints_accept_supported_providers() {
         ("pi", "pi_sessions_jsonl"),
         ("opencode", "opencode_sqlite"),
         ("kilo", "kilo_sqlite"),
+        ("mimocode", "mimocode_sqlite"),
         ("kiro_cli", "kiro_cli_sqlite"),
         ("crush", "crush_sqlite"),
         ("goose", "goose_sessions_sqlite"),
@@ -1421,6 +1422,17 @@ fn schema_v40_adds_junie_provider_checks() {
         "junie_session_events_jsonl_tree",
         "/tmp/junie/sessions",
         "/tmp/junie/sessions/session-260607-100000-acme/events.jsonl",
+    );
+}
+
+#[test]
+fn schema_v46_adds_mimocode_provider_checks() {
+    assert_provider_migration_accepts(
+        45,
+        "mimocode",
+        "mimocode_sqlite",
+        "/tmp/mimocode",
+        "/tmp/mimocode/mimocode.db",
     );
 }
 

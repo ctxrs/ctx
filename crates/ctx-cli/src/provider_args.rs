@@ -87,11 +87,7 @@ pub(crate) enum NativeProviderArg {
     RooCode,
     #[value(alias = "qoder-cn", alias = "qoder_cn")]
     Lingma,
-    #[value(
-        name = "mimocode",
-        alias = "mimo-code",
-        alias = "mimo_code"
-    )]
+    #[value(name = "mimocode", alias = "mimo-code", alias = "mimo_code")]
     MiMoCode,
     Qoder,
     Warp,
@@ -187,11 +183,7 @@ pub(crate) enum ProviderArg {
     RooCode,
     #[value(alias = "qoder-cn", alias = "qoder_cn")]
     Lingma,
-    #[value(
-        name = "mimocode",
-        alias = "mimo-code",
-        alias = "mimo_code"
-    )]
+    #[value(name = "mimocode", alias = "mimo-code", alias = "mimo_code")]
     MiMoCode,
     Qoder,
     Warp,

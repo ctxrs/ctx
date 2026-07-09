@@ -39,6 +39,9 @@ pub(crate) fn apply_hermetic_env(command: &mut Command, temp: &TempDir) {
     command.env_remove("ASTRBOT_ROOT");
     command.env_remove("SHELLEY_DB");
     command.env_remove("KILO_DB");
+    command.env_remove("MIMOCODE_HOME");
+    command.env_remove("MIMOCODE_DB");
+    command.env_remove("MIMOCODE_DISABLE_CHANNEL_DB");
     command.env_remove("FORGE_CONFIG");
     command.env_remove("VIBE_HOME");
     command.env_remove("CODEX_HOME");

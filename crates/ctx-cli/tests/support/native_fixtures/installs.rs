@@ -13,9 +13,9 @@ use super::json_tree::{
     write_pi_session_jsonl,
 };
 use super::sqlite::{
-    write_lingma_sqlite_fixture, write_native_astrbot_fixture, write_native_forgecode_fixture,
-    write_native_hermes_fixture, write_native_kilo_fixture, write_native_kiro_fixture,
-    write_native_shelley_fixture,
+    write_lingma_sqlite_fixture, write_mimocode_sqlite_fixture, write_native_astrbot_fixture,
+    write_native_forgecode_fixture, write_native_hermes_fixture, write_native_kilo_fixture,
+    write_native_kiro_fixture, write_native_shelley_fixture,
 };
 
 pub(crate) fn install_default_claude_fixture(temp: &TempDir, query: &str) {
@@ -65,6 +65,12 @@ pub(crate) fn install_default_kilo_fixture(temp: &TempDir, query: &str) {
     let target = temp.path().join(".local/share/kilo");
     fs::create_dir_all(&target).unwrap();
     fs::copy(source, target.join("kilo.db")).unwrap();
+}
+
+pub(crate) fn install_default_mimocode_fixture(temp: &TempDir, query: &str) {
+    let target = temp.path().join(".local/share/mimocode");
+    fs::create_dir_all(&target).unwrap();
+    write_mimocode_sqlite_fixture(&target.join("mimocode.db"), query, "mimocode-default");
 }
 
 pub(crate) fn install_default_kiro_fixture(temp: &TempDir, query: &str) {

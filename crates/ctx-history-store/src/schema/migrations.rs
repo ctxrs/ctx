@@ -75,6 +75,9 @@ pub(crate) fn run_migrations(conn: &Connection, user_version: i64) -> Result<()>
     if user_version < 45 {
         migrate_to_v45(conn)?;
     }
+    if user_version < 46 {
+        migrate_to_v46(conn)?;
+    }
     Ok(())
 }
 
@@ -639,6 +642,43 @@ fn migrate_to_v44(conn: &Connection, rebuild_search_projection_now: bool) -> Res
             rebuild_search_projection(conn)?;
         }
         conn.execute_batch("PRAGMA user_version = 44;")?;
+        Ok(())
+    })();
+
+    match migration {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;")?;
+            if foreign_keys_enabled != 0 {
+                conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+            }
+            Ok(())
+        }
+        Err(err) => {
+            if let Err(rollback_err) = conn.execute_batch("ROLLBACK;") {
+                return Err(StoreError::Sql(rollback_err));
+            }
+            if foreign_keys_enabled != 0 {
+                conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+            }
+            Err(err)
+        }
+    }
+}
+
+fn migrate_to_v46(conn: &Connection) -> Result<()> {
+    let foreign_keys_enabled: i64 = conn.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
+    conn.execute_batch("PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;")?;
+    let migration = (|| -> Result<()> {
+        conn.execute_batch(CREATE_TABLES_SQL)?;
+        if stable_sql_views_exist(conn)? {
+            drop_stable_sql_views(conn)?;
+        }
+        rebuild_capture_sources_provider_check(conn)?;
+        rebuild_catalog_sessions_provider_check(conn)?;
+        rebuild_source_import_files_provider_check(conn)?;
+        conn.execute_batch(INDEXES_SQL)?;
+        create_stable_sql_views(conn)?;
+        conn.execute_batch("PRAGMA user_version = 46;")?;
         Ok(())
     })();
 

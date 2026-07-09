@@ -89,6 +89,27 @@ fn native_parent_child_edges_import_for_claimed_provider_shapes() {
         },
     );
 
+    let mimocode = temp.path().join("mimocode-edge.db");
+    fs::copy(&kilo, &mimocode).unwrap();
+    assert_imports_parent_child_edge(
+        "MiMo Code",
+        CaptureProvider::MiMoCode,
+        "opencode-root",
+        "opencode-child",
+        |store| {
+            import_mimocode_sqlite(
+                &mimocode,
+                store,
+                MiMoCodeSqliteImportOptions {
+                    source_path: Some(mimocode.clone()),
+                    allow_partial_failures: true,
+                    ..MiMoCodeSqliteImportOptions::default()
+                },
+            )
+            .unwrap()
+        },
+    );
+
     let crush = write_crush_edge_db(&temp);
     assert_imports_parent_child_edge(
         "Crush",

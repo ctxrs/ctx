@@ -32,7 +32,8 @@ use crate::provider::providers::real_content::text_has_real_content;
 use crate::provider::sqlite::{sqlite_is_too_big, sqlite_row_ids_with_oversized_value};
 use crate::{
     CaptureError, ProviderAdapterContext, ProviderNormalizationResult, Result,
-    KILO_SQLITE_SOURCE_FORMAT, OPENCODE_SQLITE_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS,
+    KILO_SQLITE_SOURCE_FORMAT, MIMOCODE_SQLITE_SOURCE_FORMAT, OPENCODE_SQLITE_SOURCE_FORMAT,
+    PROVIDER_MAX_PREVIEW_CHARS,
 };
 
 pub(crate) struct OpenCodeSqliteDialect {
@@ -64,8 +65,6 @@ pub(crate) const KILO_SQLITE_DIALECT: OpenCodeSqliteDialect = OpenCodeSqliteDial
     session_message_time_created_field: "Kilo session_message time_created",
     event_time_created_field: "Kilo event time.created",
 };
-
-pub(crate) const MIMOCODE_SQLITE_SOURCE_FORMAT: &str = "mimocode_sqlite";
 
 pub(crate) const MIMOCODE_SQLITE_DIALECT: OpenCodeSqliteDialect = OpenCodeSqliteDialect {
     provider: CaptureProvider::MiMoCode,

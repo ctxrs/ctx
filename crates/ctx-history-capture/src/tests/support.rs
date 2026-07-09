@@ -38,8 +38,8 @@ pub(super) use crate::{
     import_deepagents_sqlite, import_factory_ai_droid_sessions, import_firebender_sqlite,
     import_forgecode_sqlite, import_gemini_cli_history, import_goose_sessions_sqlite,
     import_hermes_sqlite, import_junie_history, import_kilo_sqlite, import_kimi_code_cli_history,
-    import_kiro_sqlite, import_lingma_sqlite, import_mistral_vibe_history, import_mux_history,
-    import_nanoclaw_project, import_openclaw_history, import_opencode_sqlite,
+    import_kiro_sqlite, import_lingma_sqlite, import_mimocode_sqlite, import_mistral_vibe_history,
+    import_mux_history, import_nanoclaw_project, import_openclaw_history, import_opencode_sqlite,
     import_openhands_file_events, import_pi_session_jsonl, import_provider_fixture_jsonl,
     import_qoder_history, import_qwen_code_history, import_roo_task_json_history,
     import_rovodev_history, import_shelley_sqlite, import_spool, import_tabnine_cli_history,
@@ -55,7 +55,7 @@ pub(super) use crate::{
     ForgeCodeSqliteImportOptions, GeminiCliImportOptions, GooseSessionsSqliteImportOptions,
     HermesSqliteImportOptions, JunieImportOptions, KiloSqliteImportOptions,
     KimiCodeCliImportOptions, KiroSqliteImportOptions, LingmaSqliteImportOptions,
-    MistralVibeImportOptions, MuxImportOptions, NanoClawImportOptions,
+    MiMoCodeSqliteImportOptions, MistralVibeImportOptions, MuxImportOptions, NanoClawImportOptions,
     NormalizedProviderImportOptions, OpenClawImportOptions, OpenCodeSqliteImportOptions,
     OpenHandsImportOptions, PiSessionImportOptions, ProviderAdapterContext,
     ProviderFileTouchedEnvelope, ProviderFixtureImportOptions, ProviderImportSummary,
@@ -70,8 +70,8 @@ pub(super) use crate::{
     FORGECODE_SQLITE_SOURCE_FORMAT, GEMINI_CLI_SOURCE_FORMAT, GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT,
     JUNIE_SESSION_EVENTS_SOURCE_FORMAT, KILO_SQLITE_SOURCE_FORMAT, KIRO_SQLITE_SOURCE_FORMAT,
     LINGMA_SQLITE_SOURCE_FORMAT, MAX_OPENCLAW_SESSION_INDEX_BYTES, MAX_PROVIDER_JSONL_LINE_BYTES,
-    MAX_PROVIDER_SQLITE_VALUE_BYTES, OPENCODE_SQLITE_SOURCE_FORMAT, PROVIDER_MAX_TEXT_CHARS,
-    SHELLEY_SQLITE_SOURCE_FORMAT, ZED_THREADS_SQLITE_SOURCE_FORMAT,
+    MAX_PROVIDER_SQLITE_VALUE_BYTES, MIMOCODE_SQLITE_SOURCE_FORMAT, OPENCODE_SQLITE_SOURCE_FORMAT,
+    PROVIDER_MAX_TEXT_CHARS, SHELLEY_SQLITE_SOURCE_FORMAT, ZED_THREADS_SQLITE_SOURCE_FORMAT,
 };
 pub(super) use chrono::{DateTime, Utc};
 pub(super) use ctx_history_core::{

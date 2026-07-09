@@ -76,6 +76,7 @@ fn mcp_status_and_tools_list_are_read_only_without_initialized_store() {
     assert!(providers.iter().any(|provider| provider == "kimi_code_cli"));
     assert!(providers.iter().any(|provider| provider == "kiro-cli"));
     assert!(providers.iter().any(|provider| provider == "kiro_cli"));
+    assert!(providers.iter().any(|provider| provider == "mimocode"));
     assert!(providers.iter().any(|provider| provider == "lingma"));
     assert!(providers.iter().any(|provider| provider == "codebuddy"));
     assert!(providers.iter().any(|provider| provider == "auggie"));

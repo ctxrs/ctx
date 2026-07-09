@@ -296,6 +296,24 @@ fn native_sqlite_imports_do_not_mutate_provider_databases() {
         .unwrap()
     });
 
+    let mimocode = write_opencode_message_part_db(
+        &temp,
+        "mimocode-read-only.db",
+        "mimocode-read-only-root",
+        "mimocode read-only oracle",
+    );
+    assert_sqlite_clean_import_preserves_file("MiMo Code", &mimocode, |store| {
+        import_mimocode_sqlite(
+            &mimocode,
+            store,
+            MiMoCodeSqliteImportOptions {
+                allow_partial_failures: true,
+                ..MiMoCodeSqliteImportOptions::default()
+            },
+        )
+        .unwrap()
+    });
+
     let kilo = provider_history_fixture("kilo/kilo.db");
     assert_sqlite_clean_import_preserves_file("Kilo", &kilo, |store| {
         import_kilo_sqlite(
@@ -901,6 +919,56 @@ fn native_kilo_imports_message_part_text_and_metadata() {
         "kilo-part-root",
         "kilo message part oracle",
     );
+}
+
+#[test]
+fn native_mimocode_imports_message_part_text_and_metadata_idempotently() {
+    let temp = tempdir();
+    let fixture = write_opencode_message_part_db(
+        &temp,
+        "mimocode-message-part.db",
+        "mimocode-part-root",
+        "mimocode message part oracle",
+    );
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let first = import_mimocode_sqlite(
+        &fixture,
+        &mut store,
+        MiMoCodeSqliteImportOptions {
+            allow_partial_failures: true,
+            source_path: Some(fixture.clone()),
+            ..MiMoCodeSqliteImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(first.failed, 0, "{:?}", first.failures);
+    assert_eq!(first.imported_sessions, 1);
+    assert_eq!(first.imported_events, 2);
+    assert_message_part_import(
+        &store,
+        CaptureProvider::MiMoCode,
+        MIMOCODE_SQLITE_SOURCE_FORMAT,
+        "mimocode-part-root",
+        "mimocode message part oracle",
+    );
+
+    let second = import_mimocode_sqlite(
+        &fixture,
+        &mut store,
+        MiMoCodeSqliteImportOptions {
+            allow_partial_failures: true,
+            source_path: Some(fixture.clone()),
+            ..MiMoCodeSqliteImportOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(second.failed, 0, "{:?}", second.failures);
+    assert_eq!(second.imported_sessions, 0);
+    assert_eq!(second.imported_events, 0);
+    assert_eq!(second.skipped_sessions, 1);
+    assert_eq!(second.skipped_events, 2);
 }
 
 #[test]

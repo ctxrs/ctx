@@ -211,11 +211,14 @@
           "fidelity": "imported",
           "notes": [
             "Reads MiMo Code SQLite history using the OpenCode-family SQLite normalizer against a read-only connection.",
-            "Discovers the database at $XDG_DATA_HOME/mimocode/mimocode.db or ~/.local/share/mimocode/mimocode.db."
+            "Discovers the default database at $XDG_DATA_HOME/mimocode/mimocode.db or ~/.local/share/mimocode/mimocode.db, $MIMOCODE_HOME/data/mimocode.db, explicit $MIMOCODE_DB paths, and mimocode-*.db channel databases unless $MIMOCODE_DISABLE_CHANNEL_DB is set."
           ]
         }
       ],
       "history_locations": [
+        "$MIMOCODE_DB",
+        "$MIMOCODE_HOME/data/mimocode.db",
+        "$XDG_DATA_HOME/mimocode/mimocode-*.db",
         "$XDG_DATA_HOME/mimocode/mimocode.db",
         "~/.local/share/mimocode/mimocode.db"
       ],

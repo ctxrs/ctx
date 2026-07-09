@@ -19,7 +19,10 @@ use crate::provider::providers::{
     hermes::normalize_hermes_sqlite,
     kiro::normalize_kiro_sqlite,
     lingma::normalize_lingma_sqlite,
-    opencode::{normalize_opencode_sqlite, KILO_SQLITE_DIALECT, MIMOCODE_SQLITE_DIALECT, OPENCODE_SQLITE_DIALECT},
+    opencode::{
+        normalize_opencode_sqlite, KILO_SQLITE_DIALECT, MIMOCODE_SQLITE_DIALECT,
+        OPENCODE_SQLITE_DIALECT,
+    },
     shelley::normalize_shelley_sqlite,
     zed::normalize_zed_threads_sqlite,
 };

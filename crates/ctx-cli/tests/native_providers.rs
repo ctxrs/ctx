@@ -105,6 +105,166 @@ fn qwen_kimi_mistral_mux_and_qoder_default_sources_import_search_and_reimport() 
 }
 
 #[test]
+fn mimocode_default_env_and_channel_sources_import_search_and_reimport() {
+    let temp = tempdir();
+    let default_query = "mimocode-default-discovery-oracle";
+    let default_db = temp
+        .path()
+        .join(".local")
+        .join("share")
+        .join("mimocode")
+        .join("mimocode.db");
+    install_default_mimocode_fixture(&temp, default_query);
+
+    let sources = json_output(ctx(&temp).args(["sources", "--json", "--all"]));
+    let source = source_by_path(&sources, "mimocode", &default_db);
+    assert_eq!(source["status"], "available");
+    assert_eq!(source["source_format"], "mimocode_sqlite");
+    assert_eq!(source["import_support"], "native");
+    assert_eq!(source["native_import"], true);
+    assert_eq!(source["importable"], true);
+
+    let search = json_output(ctx(&temp).args([
+        "search",
+        default_query,
+        "--provider",
+        "mimo-code",
+        "--json",
+    ]));
+    let freshness_mode = search["freshness"]["mode"].as_str().unwrap();
+    assert!(
+        matches!(freshness_mode, "auto" | "background"),
+        "unexpected freshness mode in {search:#}"
+    );
+    assert_eq!(search["freshness"]["status"], "completed");
+    assert_eq!(search["freshness"]["totals"]["failed"], 0);
+    assert!(
+        search["freshness"]["totals"]["imported_sessions"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
+    assert!(
+        search["freshness"]["totals"]["imported_events"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
+    assert_search_provider_oracle(&search, "mimocode", default_query, 1, "message");
+
+    let second = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "mimo_code",
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(second["totals"]["failed"], 0);
+    assert_eq!(second["totals"]["imported_events"], 0);
+
+    let home_query = "mimocode-home-env-oracle";
+    let mimocode_home = temp.path().join("mimocode-home");
+    let home_db = mimocode_home.join("data").join("mimocode.db");
+    write_mimocode_sqlite_fixture(&home_db, home_query, "mimocode-home");
+    let home_sources = json_output(
+        ctx(&temp)
+            .env("MIMOCODE_HOME", &mimocode_home)
+            .args(["sources", "--json", "--all"]),
+    );
+    assert_eq!(
+        source_by_path(&home_sources, "mimocode", &home_db)["status"],
+        "available"
+    );
+    assert!(
+        !has_provider_source_path(&home_sources, "mimocode", &default_db),
+        "MIMOCODE_HOME should replace the default MiMo data root: {home_sources:#}"
+    );
+    let home_import = json_output(ctx(&temp).env("MIMOCODE_HOME", &mimocode_home).args([
+        "import",
+        "--provider",
+        "mimocode",
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(home_import["totals"]["failed"], 0);
+    assert!(home_import["totals"]["imported_events"].as_u64().unwrap() >= 1);
+    let home_search = json_output(ctx(&temp).args([
+        "search",
+        home_query,
+        "--provider",
+        "mimocode",
+        "--refresh",
+        "off",
+        "--json",
+    ]));
+    assert_search_provider_oracle(&home_search, "mimocode", home_query, 1, "message");
+
+    let custom_query = "mimocode-db-env-oracle";
+    let custom_db = temp.path().join("custom-mimocode.db");
+    write_mimocode_sqlite_fixture(&custom_db, custom_query, "mimocode-custom");
+    let custom_import = json_output(ctx(&temp).env("MIMOCODE_DB", &custom_db).args([
+        "import",
+        "--provider",
+        "mimocode",
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(
+        custom_import["sources"][0]["path"],
+        custom_db.display().to_string()
+    );
+    assert_eq!(custom_import["totals"]["failed"], 0);
+    assert!(custom_import["totals"]["imported_events"].as_u64().unwrap() >= 1);
+
+    let xdg_data = temp.path().join("xdg-data");
+    let channel_db = xdg_data.join("mimocode").join("mimocode-nightly.db");
+    write_mimocode_sqlite_fixture(&channel_db, "mimocode-channel-oracle", "mimocode-channel");
+    let channel_sources = json_output(
+        ctx(&temp)
+            .env("XDG_DATA_HOME", &xdg_data)
+            .args(["sources", "--json", "--all"]),
+    );
+    assert_eq!(
+        source_by_path(&channel_sources, "mimocode", &channel_db)["status"],
+        "available"
+    );
+    let disabled_channel_sources = json_output(
+        ctx(&temp)
+            .env("XDG_DATA_HOME", &xdg_data)
+            .env("MIMOCODE_DISABLE_CHANNEL_DB", "1")
+            .args(["sources", "--json", "--all"]),
+    );
+    assert!(
+        !has_provider_source_path(&disabled_channel_sources, "mimocode", &channel_db),
+        "MIMOCODE_DISABLE_CHANNEL_DB should suppress channel DB discovery"
+    );
+
+    let relative_db = xdg_data.join("mimocode").join("relative.db");
+    write_mimocode_sqlite_fixture(
+        &relative_db,
+        "mimocode-relative-db-oracle",
+        "mimocode-relative",
+    );
+    let relative_sources = json_output(
+        ctx(&temp)
+            .env("XDG_DATA_HOME", &xdg_data)
+            .env("MIMOCODE_DB", "relative.db")
+            .args(["sources", "--json", "--all"]),
+    );
+    assert_eq!(
+        source_by_path(&relative_sources, "mimocode", &relative_db)["status"],
+        "available"
+    );
+    assert!(
+        !has_provider_source_path(&relative_sources, "mimocode", &channel_db),
+        "MIMOCODE_DB should select one explicit MiMo database"
+    );
+}
+
+#[test]
 fn windsurf_default_discovery_is_native_and_search_refresh_imports() {
     let temp = tempdir();
     let query = "windsurf-native-default-discovery-oracle";
@@ -176,6 +336,12 @@ fn native_provider_cli_flow_imports_supported_provider_paths() {
             "opencode",
             "opencode_sqlite",
             write_native_opencode_fixture,
+        ),
+        (
+            "mimocode",
+            "mimocode",
+            "mimocode_sqlite",
+            write_native_mimocode_fixture,
         ),
         ("kilo", "kilo", "kilo_sqlite", write_native_kilo_fixture),
         (
@@ -359,6 +525,31 @@ fn native_provider_cli_flow_imports_supported_provider_paths() {
         ]));
         assert_search_provider_oracle(&search, stored_provider, &query, 1, "message");
     }
+}
+
+fn source_by_path<'a>(packet: &'a Value, provider: &str, path: &Path) -> &'a Value {
+    let expected_path = path.display().to_string();
+    packet["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| {
+            source["provider"] == provider
+                && source["path"]
+                    .as_str()
+                    .is_some_and(|path| path == expected_path)
+        })
+        .unwrap_or_else(|| panic!("missing {provider} source {expected_path} in {packet:#}"))
+}
+
+fn has_provider_source_path(packet: &Value, provider: &str, path: &Path) -> bool {
+    let expected_path = path.display().to_string();
+    packet["sources"].as_array().unwrap().iter().any(|source| {
+        source["provider"] == provider
+            && source["path"]
+                .as_str()
+                .is_some_and(|path| path == expected_path)
+    })
 }
 
 #[test]

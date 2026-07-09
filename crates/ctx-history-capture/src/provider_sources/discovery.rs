@@ -46,6 +46,9 @@ fn discover_provider_sources_for_spec(
     if spec.provider == CaptureProvider::Kilo {
         return discover_kilo_sources(home, spec);
     }
+    if spec.provider == CaptureProvider::MiMoCode {
+        return discover_mimocode_sources(home, spec);
+    }
     if spec.provider == CaptureProvider::ForgeCode {
         return discover_forgecode_sources(home, spec);
     }
@@ -123,17 +126,6 @@ fn discover_provider_sources_for_spec(
                     ProviderSourceKind::NativeHistory,
                 ));
             }
-        }
-        CaptureProvider::MiMoCode => {
-            let mimocode_data_dir = env_path("XDG_DATA_HOME")
-                .unwrap_or_else(|| home.join(".local").join("share"))
-                .join("mimocode");
-            sources.push(provider_source_from_parts(
-                spec,
-                mimocode_data_dir.join("mimocode.db"),
-                "mimocode_sqlite",
-                ProviderSourceKind::NativeHistory,
-            ));
         }
         CaptureProvider::Goose => {
             if let Some(path) = env_path("GOOSE_PATH_ROOT") {
@@ -473,6 +465,79 @@ fn kilo_channel_db_paths(data_dir: &Path) -> Vec<PathBuf> {
     }
     paths.sort();
     paths
+}
+
+fn discover_mimocode_sources(home: &Path, spec: &ProviderSourceSpec) -> Vec<ProviderSource> {
+    if let Some(raw) = env::var_os("MIMOCODE_DB").filter(|value| !value.is_empty()) {
+        if raw.to_string_lossy().trim() == ":memory:" {
+            return Vec::new();
+        }
+        return vec![mimocode_db_source(
+            spec,
+            resolve_mimocode_db_path(PathBuf::from(raw), home),
+        )];
+    }
+
+    let data_dir = mimocode_data_dir(home);
+    let mut sources = vec![mimocode_db_source(spec, data_dir.join("mimocode.db"))];
+
+    if !env_truthy("MIMOCODE_DISABLE_CHANNEL_DB") {
+        sources.extend(
+            mimocode_channel_db_paths(&data_dir)
+                .into_iter()
+                .map(|path| mimocode_db_source(spec, path)),
+        );
+    }
+
+    sources
+}
+
+fn resolve_mimocode_db_path(path: PathBuf, home: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path
+    } else {
+        mimocode_data_dir(home).join(path)
+    }
+}
+
+fn mimocode_data_dir(home: &Path) -> PathBuf {
+    if let Some(path) = env_path_with_home("MIMOCODE_HOME", home) {
+        path.join("data")
+    } else {
+        env_path("XDG_DATA_HOME")
+            .unwrap_or_else(|| home.join(".local").join("share"))
+            .join("mimocode")
+    }
+}
+
+fn mimocode_channel_db_paths(data_dir: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let Ok(entries) = fs::read_dir(data_dir) else {
+        return paths;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !entry.file_type().is_ok_and(|file_type| file_type.is_file()) {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if name.starts_with("mimocode-") && name.ends_with(".db") {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    paths
+}
+
+fn mimocode_db_source(spec: &ProviderSourceSpec, path: PathBuf) -> ProviderSource {
+    provider_source_from_parts(
+        spec,
+        path,
+        "mimocode_sqlite",
+        ProviderSourceKind::NativeHistory,
+    )
 }
 
 fn env_truthy(name: &str) -> bool {
