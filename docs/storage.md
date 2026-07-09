@@ -89,7 +89,7 @@ analytics marker described under network behavior.
 | `ctx import` | provider transcript files and path metadata, the explicit custom history JSONL file passed with `--format ctx-history-jsonl-v1 --path`, or stdout from an explicit history-source plugin command | data root, SQLite index, and optional daemon lock/status/job files when daemon autostart runs |
 | `ctx show` | SQLite index | selected `--out` path for `show session` when provided |
 | `ctx locate` | SQLite index and raw source path metadata | none |
-| `ctx search` | native provider transcript files, path metadata, enabled auto history-source plugin stdout, SQLite index, and existing semantic sidecar/status metadata | SQLite index for newly discovered native provider or plugin history |
+| `ctx search` | native provider transcript files, path metadata, enabled auto history-source plugin stdout, SQLite index, and existing semantic sidecar/status metadata | SQLite index for newly discovered native provider or plugin history, and optional daemon lock/status/query endpoint files when semantic-enabled background refresh autostarts daemon maintenance |
 | `ctx sql` | existing SQLite index only | none |
 | `ctx docs` | embedded documentation in the binary | selected topic `--out` path for `ctx docs show --out` or selected `--out` directory for `ctx docs man --out` |
 | `ctx upgrade` | signed release metadata and installed binary/sidecar metadata | installed binary for manual upgrade, install sidecar, `upgrade-state.json`, `upgrade.lock`, and `logs/upgrade.log` |
@@ -106,22 +106,23 @@ the ctx-owned background daemon maintenance profile when `[daemon].enabled` is t
 `ctx setup --no-daemon` or `ctx import --no-daemon` for a one-run opt-out.
 `ctx setup --catalog-only`, `ctx setup --json`, and `ctx import --json` do not
 autostart daemon maintenance.
-`ctx search --refresh off` does not refresh providers, run plugins, start
-semantic workers, schedule semantic indexing, or write the main store or
-semantic sidecar. Default `--backend hybrid --refresh off` uses semantic
-evidence only when sidecar coverage is complete and dirty work is drained, and
-otherwise falls back to lexical. Explicit semantic searches may initialize an
-already-cached local embedding model to embed the query and read partial
-existing sidecar coverage, but they do not download a model or write semantic
-catch-up work during search.
+`ctx search --refresh off` does not refresh providers, run plugins, autostart
+daemon maintenance, start semantic workers, schedule semantic indexing, or write
+the main store or semantic sidecar. Default `--backend hybrid --refresh off`
+uses semantic evidence only when sidecar coverage is complete and dirty work is
+drained, and otherwise falls back to lexical. Explicit semantic searches may ask
+the daemon query service to embed the query from an already-cached local model
+and read partial existing sidecar coverage, but they do not download a model or
+write semantic catch-up work during search.
 Explicit imports may best-effort mark recent semantic-eligible items dirty in
 the semantic sidecar when the sidecar already exists; this does not create the
 sidecar, initialize the model, or embed text.
 Explicit semantic search also refuses to initialize or download the embedding
 model when the required local cache is missing; hybrid falls back to lexical in
 that case. Default `--refresh background` lets daemon maintenance own enabled
-auto history-source plugin refresh when possible; use `--refresh wait` or
-`ctx import` for exhaustive foreground plugin catch-up.
+auto history-source plugin refresh when possible, and may autostart the
+configured daemon query service for semantic/hybrid retrieval; use
+`--refresh wait` or `ctx import` for exhaustive foreground plugin catch-up.
 
 When `ctx daemon run` or setup/import autostart runs the ctx-owned background
 coordinator, it stores private lock/status files under `daemon/` in the ctx data

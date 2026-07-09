@@ -27,15 +27,17 @@ fn lock_daemon_runtime_embedder(
         .map_err(|_| anyhow!("semantic embedder lock is poisoned"))
 }
 
-#[cfg(unix)]
 struct DaemonQueryService {
-    path: PathBuf,
+    data_root: PathBuf,
 }
 
-#[cfg(unix)]
 impl Drop for DaemonQueryService {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        remove_daemon_query_endpoint(&self.data_root);
+        #[cfg(unix)]
+        {
+            let _ = fs::remove_file(daemon_query_socket_path(&self.data_root));
+        }
     }
 }
 
@@ -52,29 +54,57 @@ fn start_daemon_query_service(
         UnixListener::bind(&path).with_context(|| format!("bind daemon query socket {}", path.display()))?;
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
         .with_context(|| format!("set daemon query socket permissions {}", path.display()))?;
+    let endpoint = DaemonQueryEndpoint::Unix {
+        path,
+        token: Uuid::new_v4().simple().to_string(),
+    };
+    let socket_path = match &endpoint {
+        DaemonQueryEndpoint::Unix { path, .. } => path.clone(),
+    };
+    if let Err(error) = write_daemon_query_endpoint(data_root, &endpoint) {
+        let _ = fs::remove_file(socket_path);
+        return Err(error);
+    }
     let thread_data_root = data_root.to_path_buf();
-    std::thread::Builder::new()
+    let thread_token = endpoint.token().to_owned();
+    let spawn_result = std::thread::Builder::new()
         .name("ctx-daemon-query".to_owned())
         .spawn(move || {
             for stream in listener.incoming() {
                 match stream {
-                    Ok(stream) => handle_daemon_query_stream(&thread_data_root, &embedder, stream),
+                    Ok(stream) => {
+                        handle_daemon_query_stream(&thread_data_root, &embedder, &thread_token, stream)
+                    }
                     Err(_) => break,
                 }
             }
-        })
-        .context("start daemon query service thread")?;
-    Ok(DaemonQueryService { path })
+        });
+    if let Err(error) = spawn_result {
+        remove_daemon_query_endpoint(data_root);
+        let _ = fs::remove_file(socket_path);
+        return Err(error).context("start daemon query service thread");
+    }
+    Ok(DaemonQueryService {
+        data_root: data_root.to_path_buf(),
+    })
+}
+
+#[cfg(not(unix))]
+fn start_daemon_query_service(
+    _data_root: &Path,
+    _embedder: Arc<Mutex<Option<SemanticEmbedder>>>,
+) -> Result<DaemonQueryService> {
+    Err(anyhow!("daemon query service is not supported on this platform"))
 }
 
 #[cfg(unix)]
-fn handle_daemon_query_stream(
+fn handle_daemon_query_stream<S: Read + Write>(
     data_root: &Path,
     embedder: &Arc<Mutex<Option<SemanticEmbedder>>>,
-    stream: UnixStream,
+    token: &str,
+    mut stream: S,
 ) {
-    let mut stream = stream;
-    let result = handle_daemon_query_stream_inner(data_root, embedder, &mut stream);
+    let result = handle_daemon_query_stream_inner(data_root, embedder, token, &mut stream);
     if let Err(error) = result {
         let _ = writeln!(
             stream,
@@ -89,17 +119,17 @@ fn handle_daemon_query_stream(
 }
 
 #[cfg(unix)]
-fn handle_daemon_query_stream_inner(
+fn handle_daemon_query_stream_inner<S: Read + Write>(
     data_root: &Path,
     embedder: &Arc<Mutex<Option<SemanticEmbedder>>>,
-    stream: &mut UnixStream,
+    token: &str,
+    stream: &mut S,
 ) -> Result<()> {
-    let mut body = String::new();
-    stream
-        .take(256 * 1024)
-        .read_to_string(&mut body)
-        .context("read daemon query request")?;
+    let body = read_daemon_query_request(stream, 256 * 1024)?;
     let request: Value = serde_json::from_str(&body).context("parse daemon query request")?;
+    if request.get("token").and_then(Value::as_str) != Some(token) {
+        return Err(anyhow!("daemon query authentication failed"));
+    }
     let op = request.get("op").and_then(Value::as_str).unwrap_or("");
     if op == "ping" {
         writeln!(
@@ -327,17 +357,15 @@ fn run_daemon(args: DaemonRunArgs, data_root: PathBuf, config: &AppConfig) -> Re
             "daemon autostart metadata flags are internal; run `ctx daemon run` without --start-mode or --trigger-command"
         ));
     }
-    if config.semantic_search_enabled() && !semantic_query_service_supported() {
-        return Err(anyhow!(
-            "local semantic search is not supported on this platform yet. Set [search] semantic = false"
-        ));
+    let semantic_enabled = config.semantic_search_enabled() && semantic_query_service_supported();
+    if semantic_enabled {
+        lower_semantic_worker_priority();
     }
-    lower_semantic_worker_priority();
     let report = match run_daemon_inner(
         args.clone(),
         &data_root,
         config.daemon.enabled,
-        config.semantic_search_enabled(),
+        semantic_enabled,
     ) {
         Ok(report) => report,
         Err(error) => {
@@ -396,7 +424,6 @@ fn run_daemon_inner(
     write_daemon_lifecycle_status(data_root, &args, "running", started_at_ms, None, None)?;
 
     let mut runtime = DaemonRuntime::default();
-    #[cfg(unix)]
     let _query_service = if semantic_enabled {
         Some(start_daemon_query_service(data_root, runtime.semantic_embedder.clone())?)
     } else {
@@ -1339,51 +1366,24 @@ fn maybe_autostart_daemon_inner(
 }
 
 pub(crate) fn semantic_query_service_supported() -> bool {
-    cfg!(unix)
+    cfg!(all(ctx_semantic_fastembed, unix))
 }
 
-#[cfg(unix)]
 pub(crate) fn daemon_query_service_available(data_root: &Path) -> bool {
-    let path = daemon_query_socket_path(data_root);
-    if !path.exists() {
-        return false;
-    }
-    let Ok(mut stream) = UnixStream::connect(path) else {
-        return false;
-    };
-    let _ = stream.set_read_timeout(Some(StdDuration::from_secs(1)));
-    let _ = stream.set_write_timeout(Some(StdDuration::from_secs(1)));
-    if writeln!(
-        stream,
-        "{}",
-        serde_json::to_string(&compact_json(json!({
+    let response = daemon_query_request(
+        data_root,
+        compact_json(json!({
             "schema_version": 1,
             "op": "ping",
-        })))
-        .unwrap_or_else(|_| "{\"schema_version\":1,\"op\":\"ping\"}".to_owned())
-    )
-    .is_err()
-    {
-        return false;
-    }
-    let _ = stream.shutdown(Shutdown::Write);
-    let mut body = String::new();
-    if stream
-        .take(1024)
-        .read_to_string(&mut body)
-        .is_err()
-    {
-        return false;
-    }
-    serde_json::from_str::<Value>(&body)
+        })),
+        StdDuration::from_secs(1),
+        1024,
+    );
+    response
         .ok()
+        .flatten()
         .and_then(|value| value.get("ok").and_then(Value::as_bool))
         == Some(true)
-}
-
-#[cfg(not(unix))]
-pub(crate) fn daemon_query_service_available(_data_root: &Path) -> bool {
-    false
 }
 
 pub(crate) fn wait_for_daemon_query_service(data_root: &Path, timeout: StdDuration) -> bool {

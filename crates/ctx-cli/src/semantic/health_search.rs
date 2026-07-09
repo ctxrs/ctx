@@ -267,37 +267,20 @@ fn semantic_hits_for_text_query(
     Ok((semantic_hit_search.hits, diagnostics))
 }
 
-#[cfg(unix)]
 fn daemon_query_embedding(data_root: &Path, semantic_text: &str) -> Result<Option<(Vec<f32>, u64)>> {
-    let path = daemon_query_socket_path(data_root);
-    if !path.exists() {
-        return Ok(None);
-    }
-    let mut stream =
-        UnixStream::connect(&path).with_context(|| format!("connect daemon query socket {}", path.display()))?;
-    stream
-        .set_read_timeout(Some(StdDuration::from_secs(30)))
-        .context("set daemon query read timeout")?;
-    stream
-        .set_write_timeout(Some(StdDuration::from_secs(30)))
-        .context("set daemon query write timeout")?;
-    writeln!(
-        stream,
-        "{}",
-        serde_json::to_string(&compact_json(json!({
+    let Some(response) = daemon_query_request(
+        data_root,
+        compact_json(json!({
             "schema_version": 1,
             "op": "embed_query",
             "model_key": SEMANTIC_MODEL_KEY,
             "text": semantic_text,
-        })))?
-    )?;
-    let _ = stream.shutdown(Shutdown::Write);
-    let mut body = String::new();
-    stream
-        .take(1024 * 1024)
-        .read_to_string(&mut body)
-        .context("read daemon query response")?;
-    let response: Value = serde_json::from_str(&body).context("parse daemon query response")?;
+        })),
+        StdDuration::from_secs(30),
+        1024 * 1024,
+    )? else {
+        return Ok(None);
+    };
     if response.get("ok").and_then(Value::as_bool) != Some(true) {
         let message = response
             .get("error")
@@ -333,14 +316,6 @@ fn daemon_query_embedding(data_root: &Path, semantic_text: &str) -> Result<Optio
         ));
     }
     Ok(Some((embedding, query_embed_ms)))
-}
-
-#[cfg(not(unix))]
-fn daemon_query_embedding(
-    _data_root: &Path,
-    _semantic_text: &str,
-) -> Result<Option<(Vec<f32>, u64)>> {
-    Ok(None)
 }
 
 #[cfg(ctx_semantic_fastembed)]
