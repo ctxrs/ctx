@@ -76,14 +76,10 @@ fn index_status_reports_stale_daemon_lock_as_recoverable() {
     );
 }
 
-#[cfg(any(
-    all(
-        target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64"),
-        target_env = "gnu"
-    ),
-    all(target_os = "macos", target_arch = "aarch64"),
-    all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    target_env = "gnu"
 ))]
 #[test]
 fn index_status_discovers_existing_semantic_model_cache_dirs() {

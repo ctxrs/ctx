@@ -131,11 +131,12 @@ semantic contribution and defaults to `0.35`. Public reports name the model as
 `sentence-transformers/all-MiniLM-L6-v2`; the required local FastEmbed cache is
 the Qdrant ONNX artifact directory `models--Qdrant--all-MiniLM-L6-v2-onnx`.
 The local embedding backend is compiled only for targets where the bundled ONNX
-Runtime backend is supported. Current Linux GNU builds and macOS arm64 builds
-can use semantic embeddings when the cache already exists. Current Windows GNU,
-FreeBSD, and macOS x64 public artifacts are lexical-safe builds: `hybrid` falls
-back to lexical, while explicit `semantic` reports a local unavailable/cache
-error instead of downloading or linking a model at runtime.
+Runtime backend is supported. Current Linux x64 GNU and Linux ARM64 GNU public
+builds can use semantic embeddings when the cache already exists. Current macOS,
+Windows GNU, and FreeBSD public artifacts are lexical-safe builds: daemon
+maintenance and lexical search remain available, `hybrid` falls back to lexical,
+and explicit `semantic` reports a local unavailable/cache error instead of
+downloading or linking a model at runtime.
 Semantic and hybrid searches read the coverage that is already present in the
 semantic sidecar; they do not perform foreground vector catch-up. They also
 require the local embedding model cache to already exist. If the cache is
@@ -178,9 +179,10 @@ discovery and may also be imported with an explicit `--path`.
 
 Use `--refresh off` for a search that does not import providers, execute
 plugins, schedule semantic indexing, or update either the main ctx SQLite store
-or semantic sidecar. Explicit semantic or hybrid requests may still initialize an already-cached local
-embedding model to embed the query and read existing sidecar coverage; they do
-not download a model or write semantic catch-up work during search.
+or semantic sidecar. Explicit semantic or hybrid requests may still ask the
+daemon query service to embed the query from an already-cached local model and
+read existing sidecar coverage; they do not download a model or write semantic
+catch-up work during search.
 
 ## Semantic Freshness
 
@@ -198,8 +200,10 @@ the normal ctx-owned background daemon profile and exits after it becomes idle;
 explicit `ctx daemon run` runs the same coordinator in the foreground.
 
 `ctx search` reads the sidecar coverage that already exists and reports semantic
-coverage and worker state in JSON. Search never starts the daemon, queues vector
-backfill, waits for full semantic coverage, or downloads an embedding model.
+coverage and worker state in JSON. With semantic enabled and default
+`--refresh background`, search may autostart the configured daemon so the
+daemon-owned query service can embed the query. Search does not queue vector
+backfill, wait for full semantic coverage, or download an embedding model.
 `hybrid` uses semantic evidence only after sidecar coverage is complete and the
 dirty queue is empty; otherwise it serves lexical results with a structured
 fallback reason. Explicit `semantic` can query partial sidecar coverage for
@@ -223,11 +227,10 @@ reports disabled with `enabled: false` and `network_allowed: false`.
 `ctx doctor` is the place for semantic and daemon diagnostics when local status
 needs troubleshooting.
 
-Search never starts the daemon or waits for full semantic coverage. Explicit
-semantic queries may read partial sidecar coverage. Default and explicit
-`hybrid` use semantic evidence only when sidecar coverage is complete and dirty
-work is drained, and otherwise serve lexical results with a structured fallback
-reason.
+Search never waits for full semantic coverage. Explicit semantic queries may
+read partial sidecar coverage. Default and explicit `hybrid` use semantic
+evidence only when sidecar coverage is complete and dirty work is drained, and
+otherwise serve lexical results with a structured fallback reason.
 
 ## History Reports
 

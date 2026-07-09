@@ -8,13 +8,14 @@ fn main() {
     let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
     let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
 
-    let supported = os == "linux" && arch == "x86_64" && target_env == "gnu";
+    let fastembed_supported =
+        os == "linux" && (arch == "x86_64" || arch == "aarch64") && target_env == "gnu";
 
-    if supported {
+    if fastembed_supported {
         println!("cargo:rustc-cfg=ctx_semantic_fastembed");
     }
 
-    if os == "linux" && arch == "x86_64" && target_env == "gnu" {
+    if fastembed_supported {
         println!("cargo:rustc-cfg=ctx_sqlite_vec");
     }
 }

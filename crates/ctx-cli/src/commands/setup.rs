@@ -33,12 +33,9 @@ pub(crate) fn run_setup(
     let store = Store::open(&db_path)?;
     let config_path = data_root.join(CONFIG_FILE);
     config::write_default_config(&data_root)?;
-    if config.semantic_search_enabled() && !semantic_query_service_supported() {
-        bail!(
-            "local semantic search is not supported on this platform yet. Set [search] semantic = false"
-        );
-    }
-    if config.semantic_search_enabled() && (!config.daemon.enabled || args.no_daemon) {
+    let semantic_enabled = config.semantic_search_enabled();
+    let semantic_supported = semantic_query_service_supported();
+    if semantic_enabled && semantic_supported && (!config.daemon.enabled || args.no_daemon) {
         bail!(
             "local semantic search requires the ctx daemon. Set [daemon] enabled = true, remove --no-daemon, or set [search] semantic = false"
         );
@@ -151,7 +148,7 @@ pub(crate) fn run_setup(
     let background_indexing_enabled = daemon_backgrounding_enabled
         && !args.catalog_only
         && !foreground_import
-        && (pending_inventory_units > 0 || config.semantic_search_enabled());
+        && (pending_inventory_units > 0 || (semantic_enabled && semantic_supported));
 
     if args.json {
         print_json(json!({
@@ -193,7 +190,8 @@ pub(crate) fn run_setup(
                 &inventory_totals,
                 inventory_units,
                 background_indexing_enabled,
-                config.semantic_search_enabled(),
+                semantic_enabled,
+                semantic_supported,
                 args.json
             ),
             "network_required": false,
@@ -247,7 +245,8 @@ pub(crate) fn run_setup(
                 print_background_indexing_guidance(
                     &inventory_totals,
                     inventory_units,
-                    config.semantic_search_enabled(),
+                    semantic_enabled,
+                    semantic_supported,
                 );
             }
             println!("Get started:");
@@ -406,15 +405,17 @@ fn setup_background_indexing_json(
     units: usize,
     enabled: bool,
     semantic_enabled: bool,
+    semantic_supported: bool,
     json_output: bool,
 ) -> Value {
     json!({
         "enabled": enabled,
         "semantic_enabled": semantic_enabled,
+        "semantic_supported": semantic_supported,
         "units": units,
         "source_bytes": inventory.source_bytes,
         "lexical_estimate_seconds": enabled.then(|| estimate_lexical_index_seconds(inventory)),
-        "semantic_estimate_seconds": (enabled && semantic_enabled).then(|| estimate_semantic_index_seconds(inventory)),
+        "semantic_estimate_seconds": (enabled && semantic_enabled && semantic_supported).then(|| estimate_semantic_index_seconds(inventory)),
         "daemon_autostart": setup_daemon_autostart_json(enabled, json_output),
         "status_command": "ctx index status",
         "watch_command": "ctx index watch",
@@ -448,6 +449,7 @@ fn print_background_indexing_guidance(
     inventory: &InventoryTotals,
     units: usize,
     semantic_enabled: bool,
+    semantic_supported: bool,
 ) {
     println!("ctx queued your local agent history for background indexing.");
     println!(
@@ -460,7 +462,7 @@ fn print_background_indexing_guidance(
         "Estimated lexical indexing: {}.",
         format_duration_estimate(estimate_lexical_index_seconds(inventory))
     );
-    if semantic_enabled {
+    if semantic_enabled && semantic_supported {
         println!(
             "Semantic search: enabled; the daemon will download the local embedding model if needed."
         );
@@ -468,6 +470,8 @@ fn print_background_indexing_guidance(
             "Estimated semantic indexing: {}.",
             format_duration_estimate(estimate_semantic_index_seconds(inventory))
         );
+    } else if semantic_enabled {
+        println!("Semantic search: unavailable on this platform; lexical indexing will continue.");
     } else {
         println!("Semantic search: disabled.");
     }

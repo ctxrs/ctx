@@ -26,6 +26,7 @@ fn daemon_status_path(data_root: &Path) -> PathBuf {
     daemon_root_path(data_root).join(DAEMON_STATUS_FILE)
 }
 
+#[cfg(unix)]
 fn daemon_query_socket_path(data_root: &Path) -> PathBuf {
     daemon_root_path(data_root).join(DAEMON_QUERY_SOCKET_FILE)
 }
@@ -147,7 +148,7 @@ fn pid_lock_file_is_stale(path: &Path) -> bool {
     let Some(pid) = pid_from_lock_json(&value) else {
         return true;
     };
-    !pid_is_running(pid)
+    matches!(process_state(pid), ProcessState::NotRunning)
 }
 
 fn read_pid_lock_file(path: &Path) -> Option<u32> {
@@ -173,21 +174,67 @@ fn lock_started_at_is_stale(value: &Value) -> bool {
     utc_now().timestamp_millis().saturating_sub(started_at_ms) > DAEMON_LOCK_STALE_AFTER_MS
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProcessState {
+    Running,
+    NotRunning,
+    Unknown,
+}
+
 #[cfg(unix)]
-fn pid_is_running(pid: u32) -> bool {
+fn process_state(pid: u32) -> ProcessState {
     if pid == 0 {
-        return false;
+        return ProcessState::NotRunning;
     }
     let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
     if result == 0 {
-        return true;
+        return ProcessState::Running;
     }
-    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(libc::ESRCH) => ProcessState::NotRunning,
+        Some(libc::EPERM) => ProcessState::Running,
+        _ => ProcessState::Unknown,
+    }
 }
 
-#[cfg(not(unix))]
-fn pid_is_running(pid: u32) -> bool {
-    pid != 0
+#[cfg(windows)]
+fn process_state(pid: u32) -> ProcessState {
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ACCESS_DENIED};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    if pid == 0 {
+        return ProcessState::NotRunning;
+    }
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if !handle.is_null() {
+        unsafe {
+            CloseHandle(handle);
+        }
+        return ProcessState::Running;
+    }
+    match unsafe { GetLastError() } {
+        windows_sys::Win32::Foundation::ERROR_INVALID_PARAMETER => ProcessState::NotRunning,
+        ERROR_ACCESS_DENIED => ProcessState::Running,
+        _ => ProcessState::Unknown,
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn process_state(_pid: u32) -> ProcessState {
+    ProcessState::Unknown
+}
+
+fn unknown_process_lock_reports_running(
+    lock_path: &Path,
+    state: Option<ProcessState>,
+    status: &str,
+) -> bool {
+    matches!(state, Some(ProcessState::Unknown))
+        && status == "running"
+        && lock_path.exists()
+        && !pid_lock_file_is_stale(lock_path)
 }
 
 #[cfg(unix)]
@@ -354,7 +401,14 @@ fn semantic_worker_report_with_count_mode(
     let status_path = semantic_worker_status_path(data_root);
     let lock_path = semantic_worker_lock_path(data_root);
     let lock_pid = read_pid_lock_file(&lock_path);
-    let running = lock_pid.is_some_and(pid_is_running);
+    let lock_state = lock_pid.map(process_state);
+    let status_file_status = current_status_value.and_then(|value| json_string(value, "status"));
+    let running = matches!(lock_state, Some(ProcessState::Running))
+        || unknown_process_lock_reports_running(
+            &lock_path,
+            lock_state,
+            status_file_status.as_deref().unwrap_or("unknown"),
+        );
     let pid = if running {
         lock_pid
     } else {
@@ -363,9 +417,7 @@ fn semantic_worker_report_with_count_mode(
     let queued_items_estimate = searchable_items
         .saturating_sub(embedded_items)
         .max(dirty_items);
-    let mut status = current_status_value
-        .and_then(|value| json_string(value, "status"))
-        .unwrap_or_else(|| {
+    let mut status = status_file_status.unwrap_or_else(|| {
             if !searchable_items_known || store.is_none() {
                 "unknown".to_owned()
             } else if searchable_items == 0 {
@@ -452,12 +504,14 @@ fn daemon_report_with_disabled_status(
     let lock_path = daemon_lock_path(data_root);
     let status_path = daemon_status_path(data_root);
     let lock_pid = read_pid_lock_file(&lock_path);
-    let running = lock_pid.is_some_and(pid_is_running);
-    let stale_lock = lock_path.exists() && daemon_lock_is_stale(&lock_path);
     let mut status = status_value
         .as_ref()
         .and_then(|value| json_string(value, "status"))
         .unwrap_or_else(|| "unknown".to_owned());
+    let lock_state = lock_pid.map(process_state);
+    let running = matches!(lock_state, Some(ProcessState::Running))
+        || unknown_process_lock_reports_running(&lock_path, lock_state, status.as_str());
+    let stale_lock = lock_path.exists() && daemon_lock_is_stale(&lock_path);
     let stale_running_status = !running && status == "running";
     if running {
         status = "running".to_owned();

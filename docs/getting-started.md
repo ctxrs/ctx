@@ -158,13 +158,15 @@ session or its subagent work is the history you want to search. Use
 `--refresh off` when you need a strictly read-only query over the existing ctx
 index.
 
-Semantic and hybrid search read existing local sidecar coverage. Search never
-starts the daemon, runs semantic catch-up, or downloads embedding models.
-Hybrid uses semantic evidence only after coverage is complete and dirty work is
-drained; until then it falls back to lexical search with a structured reason.
-Explicit semantic search can query partial coverage for diagnostics, but reports
-a local error when the model cache is missing or the semantic worker is actively
-indexing.
+Semantic and hybrid search read existing local sidecar coverage. With semantic
+enabled and default background refresh, search may start the configured daemon
+so the daemon-owned query service can embed the query; `--refresh off` skips
+that autostart. Search does not run semantic catch-up or download embedding
+models. Hybrid uses semantic evidence only after coverage is complete and dirty
+work is drained; until then it falls back to lexical search with a structured
+reason. Explicit semantic search can query partial coverage for diagnostics,
+but reports a local error when the model cache is missing or the semantic worker
+is actively indexing.
 
 ## 6. Use JSON For Scripts
 

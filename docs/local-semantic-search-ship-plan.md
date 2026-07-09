@@ -55,8 +55,10 @@ and private relevance evals justify flipping the default.
   setup should leave existing data intact, start daemon-owned indexing when
   possible, and let the daemon acquire the local embedding model and build
   missing semantic sidecars.
-- This branch supports the semantic query service on Unix. Non-Unix semantic
-  opt-in is blocked for v1 until there is an equivalent query-service transport.
+- This branch supports daemon query transport on Unix sockets. Local semantic
+  indexing remains gated by the embedded ONNX Runtime support matrix; current
+  public macOS, Windows, and FreeBSD artifacts stay daemon/lexical-safe without
+  semantic embeddings.
 
 ## Current Branch Addendum
 
@@ -78,10 +80,11 @@ and private relevance evals justify flipping the default.
   enters `acquiring_model`, downloads/initializes the model through fastembed,
   verifies the cache, and records `model_acquisition_failed` if acquisition
   fails.
-- On Unix, the daemon now exposes a private `0600` Unix socket query service for
-  query embeddings. CLI search no longer initializes or downloads the embedding
-  model in the foreground; semantic/hybrid search asks the daemon query service
-  for the query vector, then performs local vector scan/hydration/ranking.
+- On semantic-capable Unix builds, the daemon now exposes a private `0600` Unix
+  socket query service for query embeddings. CLI search no longer initializes or
+  downloads the embedding model in the foreground; semantic/hybrid search asks
+  the daemon query service for the query vector, then performs local vector
+  scan/hydration/ranking.
 - The query service is intentionally narrow for v1: it embeds query text only.
   Full vector search can move into the daemon later if command startup,
   sqlite-vec scan, or hydration becomes the dominant latency.
@@ -432,7 +435,7 @@ and private relevance evals justify flipping the default.
   recovery, semantic-first bootstrap scheduling, bounded incremental refresh,
   and cached read-only status.
 - Done in prerelease opt-in dogfood: semantic-enabled default search autostarts
-  the daemon query socket, foreground search no longer loads the model, and
+  the daemon query service, foreground search no longer loads the model, and
   strict `--refresh off` fails clearly when no daemon is available.
 - Original implementation checklist:
   - `ctx setup` foreground output distinguishes inventory complete, daemon

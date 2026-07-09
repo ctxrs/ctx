@@ -1,14 +1,17 @@
 use std::{
     collections::{HashMap, HashSet},
     env, fs,
-    io::{Read, Write},
-    net::Shutdown,
+    io::Write,
     path::{Path, PathBuf},
     process::{self, Command, Stdio},
     sync::{Arc, Mutex},
     time::{Duration as StdDuration, Instant},
 };
 
+#[cfg(unix)]
+use std::io::Read;
+#[cfg(unix)]
+use std::net::Shutdown;
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 #[cfg(unix)]
@@ -110,7 +113,9 @@ const DAEMON_DIR: &str = "daemon";
 const DAEMON_JOBS_DIR: &str = "jobs";
 const DAEMON_LOCK_FILE: &str = "daemon.lock";
 const DAEMON_STATUS_FILE: &str = "status.json";
+#[cfg(unix)]
 const DAEMON_QUERY_SOCKET_FILE: &str = "query.sock";
+const DAEMON_QUERY_ENDPOINT_FILE: &str = "query-endpoint.json";
 const DAEMON_HISTORY_REFRESH_JOB_FILE: &str = "history-refresh.json";
 const DAEMON_SEMANTIC_JOB_FILE: &str = "semantic-index.json";
 const DAEMON_CLOUD_SYNC_JOB_FILE: &str = "cloud-sync.json";
@@ -447,6 +452,32 @@ pub(crate) fn search_packet_with_backend(
         warn_if(
             emit_warnings,
             "warning: local semantic search is disabled; falling back to lexical search",
+        );
+        return Ok((lexical_search_packet()?, retrieval));
+    }
+
+    if !semantic_query_service_supported()
+        && matches!(
+            requested_backend,
+            SearchBackendArg::Semantic | SearchBackendArg::Hybrid
+        )
+    {
+        if requested_backend == SearchBackendArg::Semantic {
+            return Err(anyhow!(
+                "local semantic search is not supported on this platform yet"
+            ));
+        }
+        let mut retrieval = SemanticRetrievalReport::lexical(requested_backend, 0);
+        retrieval.effective_mode = SearchBackendArg::Lexical;
+        retrieval.semantic_weight = 0.0;
+        retrieval.semantic_status = "unavailable";
+        retrieval.set_semantic_fallback(
+            "unsupported_platform",
+            "local semantic search is not supported on this platform yet",
+        );
+        warn_if(
+            emit_warnings,
+            "warning: local semantic search is not supported on this platform; falling back to lexical search",
         );
         return Ok((lexical_search_packet()?, retrieval));
     }
