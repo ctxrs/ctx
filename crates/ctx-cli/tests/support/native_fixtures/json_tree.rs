@@ -712,7 +712,7 @@ pub(crate) fn write_native_factory_droid_fixture(temp: &TempDir, query: &str) ->
             "{}\n{}\n",
             json!({
                 "type": "session_start",
-                "sessionId": "droid-cli-native",
+                "id": "droid-cli-native",
                 "timestamp": "2026-06-24T12:00:00Z",
                 "cwd": "/workspace",
                 "model": "factory/droid"
@@ -721,8 +721,10 @@ pub(crate) fn write_native_factory_droid_fixture(temp: &TempDir, query: &str) ->
                 "type": "message",
                 "id": "droid-cli-native-user",
                 "timestamp": "2026-06-24T12:00:01Z",
-                "role": "user",
-                "content": [{"type": "text", "text": query}]
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": query}]
+                }
             })
         ),
     )

@@ -1695,18 +1695,18 @@ pub(super) fn write_droid_smoke_fixture(temp: &TempDir) -> PathBuf {
     fs::write(
             root.join("droid-root.jsonl"),
             concat!(
-                "{\"type\":\"session_start\",\"sessionId\":\"droid-root\",\"timestamp\":\"2026-06-24T12:00:00Z\",\"cwd\":\"/workspace\",\"model\":\"factory/droid\"}\n",
-                "{\"type\":\"message\",\"id\":\"droid-user\",\"timestamp\":\"2026-06-24T12:00:01Z\",\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"droid jsonl oracle prompt\"}]}\n",
-                "{\"type\":\"message\",\"id\":\"droid-tool\",\"timestamp\":\"2026-06-24T12:00:02Z\",\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"tool-1\",\"name\":\"droid_worker\"}]}\n",
-                "{\"type\":\"message\",\"id\":\"droid-tool-result\",\"timestamp\":\"2026-06-24T12:00:03Z\",\"role\":\"tool\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"tool-1\",\"content\":\"DROID_RAW_TOOL_OUTPUT_SHOULD_NOT_SEARCH\"}]}\n",
+                "{\"type\":\"session_start\",\"id\":\"droid-root\",\"timestamp\":\"2026-06-24T12:00:00Z\",\"cwd\":\"/workspace\",\"model\":\"factory/droid\"}\n",
+                "{\"type\":\"message\",\"id\":\"droid-user\",\"timestamp\":\"2026-06-24T12:00:01Z\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"droid jsonl oracle prompt\"}]}}\n",
+                "{\"type\":\"message\",\"id\":\"droid-tool\",\"timestamp\":\"2026-06-24T12:00:02Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"tool-1\",\"name\":\"droid_worker\"}]}}\n",
+                "{\"type\":\"message\",\"id\":\"droid-tool-result\",\"timestamp\":\"2026-06-24T12:00:03Z\",\"message\":{\"role\":\"tool\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"tool-1\",\"content\":\"DROID_RAW_TOOL_OUTPUT_SHOULD_NOT_SEARCH\"}]}}\n",
             ),
         )
         .unwrap();
     fs::write(
             root.join("droid-child.jsonl"),
             concat!(
-                "{\"type\":\"session_start\",\"sessionId\":\"droid-child\",\"timestamp\":\"2026-06-24T12:00:04Z\",\"cwd\":\"/workspace\",\"model\":\"factory/droid\",\"parent\":\"droid-root\",\"decompSessionType\":\"worker\"}\n",
-                "{\"type\":\"message\",\"id\":\"droid-child-user\",\"timestamp\":\"2026-06-24T12:00:05Z\",\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"droid child oracle prompt\"}]}\n",
+                "{\"type\":\"session_start\",\"id\":\"droid-child\",\"timestamp\":\"2026-06-24T12:00:04Z\",\"cwd\":\"/workspace\",\"model\":\"factory/droid\",\"parent\":\"droid-root\",\"decompSessionType\":\"worker\"}\n",
+                "{\"type\":\"message\",\"id\":\"droid-child-user\",\"timestamp\":\"2026-06-24T12:00:05Z\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"droid child oracle prompt\"}]}}\n",
             ),
         )
         .unwrap();
