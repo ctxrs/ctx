@@ -27,7 +27,7 @@ if command -v ruby >/dev/null 2>&1; then
     abort "public-smoke should run one hosted Linux job at a time" unless smoke["concurrency"] == 1 && smoke["concurrency_group"].to_s.include?("default-hosted")
     command = smoke["command"].to_s
     abort "public-smoke must run the Buildkite public CI script" unless command.include?("scripts/buildkite-public-ci.sh")
-    abort "public-smoke must run smoke mode" unless command.include?("--mode=smoke")
+    abort "public-smoke must pass an explicit hosted-safe target list" unless command.include?("scripts/buildkite-public-ci.sh -- test") && command.include?("//:cargo_check")
     required_keys = %w[
       public-cli-linux-x64
       public-cli-linux-aarch64
@@ -74,7 +74,8 @@ fi
 for required in \
   'key: "public-smoke"' \
   'queue: "default"' \
-  'bash scripts/buildkite-public-ci.sh --mode=smoke' \
+  'bash scripts/buildkite-public-ci.sh -- test' \
+  '//:cargo_check' \
   'target/ctx-artifacts/check/**' \
   'concurrency_group: "ctx/public-smoke/default-hosted"' \
   'CTX_RUST_TOOLCHAIN: "1.88.0"' \

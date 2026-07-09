@@ -11,7 +11,16 @@ steps:
   - label: ":bazel: public smoke gate"
     key: "public-smoke"
     command: |
-      bash scripts/buildkite-public-ci.sh --mode=smoke
+      bash scripts/buildkite-public-ci.sh -- test \
+        //:buildkite_pipeline_check \
+        //:cargo_check \
+        //:cargo_fmt_check \
+        //:docs_check \
+        //:installer_path_smoke \
+        //:loc_check \
+        //:package_audit_fast \
+        //:source_diff_check \
+        --config=ci
     agents:
       queue: "default"
     concurrency: 1
