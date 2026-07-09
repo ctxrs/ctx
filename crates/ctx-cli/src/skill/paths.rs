@@ -23,7 +23,7 @@ impl PathContext {
         let xdg_config_home =
             non_empty_env_path("XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config"));
         let mut env_overrides = BTreeMap::new();
-        for key in ["CODEX_HOME", "CLAUDE_CONFIG_DIR"] {
+        for key in ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "MIMOCODE_HOME"] {
             if let Some(path) = non_empty_env_path(key) {
                 env_overrides.insert(key.to_owned(), path);
             }
@@ -65,11 +65,21 @@ impl PathContext {
             .unwrap_or_else(|| self.home.join(fallback_child))
     }
 
+    pub(super) fn mimocode_config_dir(&self) -> PathBuf {
+        self.env_overrides
+            .get("MIMOCODE_HOME")
+            .map(|home| home.join("config"))
+            .unwrap_or_else(|| self.xdg_config_home.join("mimocode"))
+    }
+
     pub(super) fn agent_detected(&self, agent: SkillAgentArg) -> bool {
         if agent == SkillAgentArg::Codex
             && !self.env_overrides.contains_key("CODEX_HOME")
             && Path::new("/etc/codex").exists()
         {
+            return true;
+        }
+        if agent == SkillAgentArg::MiMoCode && self.env_overrides.contains_key("MIMOCODE_HOME") {
             return true;
         }
         agent.detect_dir(self).is_some_and(|path| path.exists())

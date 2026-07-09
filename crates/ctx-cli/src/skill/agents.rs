@@ -14,6 +14,8 @@ pub(super) enum SkillAgentArg {
     Cursor,
     #[value(name = "opencode", alias = "open-code")]
     OpenCode,
+    #[value(name = "mimocode", alias = "mimo-code", alias = "mimo_code")]
+    MiMoCode,
     Amp,
     #[value(name = "gemini-cli", alias = "gemini")]
     GeminiCli,
@@ -33,6 +35,7 @@ impl SkillAgentArg {
         Self::ClaudeCode,
         Self::Cursor,
         Self::OpenCode,
+        Self::MiMoCode,
         Self::Amp,
         Self::GeminiCli,
         Self::Antigravity,
@@ -49,6 +52,7 @@ impl SkillAgentArg {
             Self::ClaudeCode => "claude-code",
             Self::Cursor => "cursor",
             Self::OpenCode => "opencode",
+            Self::MiMoCode => "mimocode",
             Self::Amp => "amp",
             Self::GeminiCli => "gemini-cli",
             Self::Antigravity => "antigravity",
@@ -66,6 +70,7 @@ impl SkillAgentArg {
             Self::ClaudeCode => "Claude Code",
             Self::Cursor => "Cursor",
             Self::OpenCode => "OpenCode",
+            Self::MiMoCode => "MiMo Code",
             Self::Amp => "Amp",
             Self::GeminiCli => "Gemini CLI",
             Self::Antigravity => "Antigravity",
@@ -79,6 +84,7 @@ impl SkillAgentArg {
     pub(super) fn project_skills_dir(self) -> &'static str {
         match self {
             Self::ClaudeCode => ".claude/skills",
+            Self::MiMoCode => ".mimocode/skills",
             Self::Pi => ".pi/skills",
             Self::Goose => ".goose/skills",
             Self::Universal
@@ -104,6 +110,7 @@ impl SkillAgentArg {
                 .join("skills"),
             Self::Cursor => context.home.join(".cursor").join("skills"),
             Self::OpenCode => context.xdg_config_home.join("opencode").join("skills"),
+            Self::MiMoCode => context.mimocode_config_dir().join("skills"),
             Self::Amp => context.xdg_config_home.join("agents").join("skills"),
             Self::GeminiCli => context.home.join(".gemini").join("skills"),
             Self::Antigravity => context
@@ -133,6 +140,7 @@ impl SkillAgentArg {
             Self::ClaudeCode => Some(context.env_or_home_child("CLAUDE_CONFIG_DIR", ".claude")),
             Self::Cursor => Some(context.home.join(".cursor")),
             Self::OpenCode => Some(context.xdg_config_home.join("opencode")),
+            Self::MiMoCode => Some(context.mimocode_config_dir()),
             Self::Amp => Some(context.xdg_config_home.join("amp")),
             Self::GeminiCli => Some(context.home.join(".gemini")),
             Self::Antigravity => Some(context.home.join(".gemini").join("antigravity")),
@@ -151,6 +159,7 @@ pub(super) fn picker_agents() -> &'static [SkillAgentArg] {
         SkillAgentArg::Codex,
         SkillAgentArg::Cursor,
         SkillAgentArg::OpenCode,
+        SkillAgentArg::MiMoCode,
         SkillAgentArg::GeminiCli,
         SkillAgentArg::Antigravity,
         SkillAgentArg::AntigravityCli,
@@ -168,6 +177,7 @@ pub(super) fn agent_from_name(value: &str) -> Option<SkillAgentArg> {
         "claude" | "claude-code" | "claudecode" => Some(SkillAgentArg::ClaudeCode),
         "cursor" => Some(SkillAgentArg::Cursor),
         "opencode" | "open-code" => Some(SkillAgentArg::OpenCode),
+        "mimocode" | "mimo-code" | "mimo_code" => Some(SkillAgentArg::MiMoCode),
         "amp" => Some(SkillAgentArg::Amp),
         "gemini" | "gemini-cli" => Some(SkillAgentArg::GeminiCli),
         "antigravity" => Some(SkillAgentArg::Antigravity),

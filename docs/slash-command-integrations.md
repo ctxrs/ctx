@@ -21,6 +21,7 @@ entry points:
 | Agent | Global path | Project path | Format | Invocation | Detection |
 | --- | --- | --- | --- | --- | --- |
 | OpenCode | `$XDG_CONFIG_HOME/opencode/commands/ctx-history.md` | `.opencode/commands/ctx-history.md` | Markdown with YAML frontmatter | `/ctx-history <query>` | `$XDG_CONFIG_HOME/opencode` exists |
+| MiMo Code | `$XDG_CONFIG_HOME/mimocode/commands/ctx-history.md`, or `MIMOCODE_HOME/config/commands/ctx-history.md` | `.mimocode/commands/ctx-history.md` | Markdown with YAML frontmatter | `/ctx-history <query>` | `MIMOCODE_HOME` or `$XDG_CONFIG_HOME/mimocode` exists |
 | Gemini CLI | `~/.gemini/commands/ctx-history.toml` | `.gemini/commands/ctx-history.toml` | TOML custom command | `/ctx-history <query>` | `~/.gemini` exists |
 | Qwen Code | `~/.qwen/commands/ctx-history.md` | `.qwen/commands/ctx-history.md` | Markdown with YAML frontmatter and `{{args}}` | `/ctx-history <query>` | `~/.qwen` exists |
 | Windsurf | `~/.codeium/windsurf/global_workflows/ctx-history.md` | `.windsurf/workflows/ctx-history.md` | Markdown workflow | `/ctx-history` | `~/.codeium/windsurf` exists |
@@ -51,7 +52,7 @@ providers, interactive command reload or approval.
 
 ## Support Matrix
 
-Source links were checked on July 7, 2026.
+Source links were checked on July 9, 2026.
 
 | Harness | Support | Global/user path | Project path | Format | Invocation | Safe strategy and detection | Sources | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -59,6 +60,7 @@ Source links were checked on July 7, 2026.
 | Claude Code | Skill-only | `~/.claude/skills` | `.claude/skills` | `SKILL.md` | `/<skill-name>` | Covered by `ctx integrations install skills --agent claude-code` | [Claude skills](https://code.claude.com/docs/en/skills), [Claude slash commands](https://code.claude.com/docs/en/agent-sdk/slash-commands) | Claude says custom commands have merged into skills; legacy `.claude/commands` still works but is not preferred for ctx. |
 | Cursor | Skill-only | `~/.cursor/skills`, `~/.agents/skills` | `.cursor/skills`, `.agents/skills` | `SKILL.md` | `/<skill-name>` | Covered by `ctx integrations install skills --agent cursor`; no `.cursor/commands` writer until official layout docs are stable | [Cursor skills](https://cursor.com/docs/skills.md), [Cursor CLI slash commands](https://cursor.com/docs/cli/reference/slash-commands.md) | Cursor plugins can expose commands; the raw command-file surface is treated as migration input, not the ctx install target. |
 | OpenCode | Yes, separate | `$XDG_CONFIG_HOME/opencode/commands` | `.opencode/commands` | Markdown with YAML frontmatter, `$ARGUMENTS`, `$1` | `/ctx-history <query>` | Implemented with metadata hash and detection by config dir | [OpenCode commands](https://opencode.ai/docs/commands/) | Separate command file is clearly documented and safe to manage. |
+| MiMo Code | Yes, separate | `$XDG_CONFIG_HOME/mimocode/commands`, or `MIMOCODE_HOME/config/commands` | `.mimocode/commands` | Markdown with YAML frontmatter, `$ARGUMENTS` | `/ctx-history <query>` | Implemented with metadata hash and detection by MiMo config dir | [MiMo Code command loader](https://github.com/XiaomiMiMo/MiMo-Code/blob/main/packages/opencode/src/config/command.ts), [MiMo Code README](https://github.com/XiaomiMiMo/MiMo-Code) | MiMo supports both `command` and `commands`; ctx writes plural `commands`. |
 | Gemini CLI | Yes, separate | `~/.gemini/commands` | `.gemini/commands` | TOML command, `{{args}}` | `/ctx-history <query>` | Implemented with metadata hash and detection by `~/.gemini` | [Gemini custom commands](https://geminicli.com/docs/cli/custom-commands/), [Gemini commands reference](https://geminicli.com/docs/reference/commands/) | Gemini still documents TOML custom commands and `/commands reload`. |
 | Qwen Code | Yes, separate | `~/.qwen/commands` | `.qwen/commands` | Markdown with YAML frontmatter, `{{args}}` | `/ctx-history <query>` | Implemented with metadata hash and detection by `~/.qwen` | [Qwen commands](https://qwenlm.github.io/qwen-code-docs/en/users/features/commands/) | Qwen documents Markdown commands as recommended and TOML as deprecated. |
 | Windsurf | Yes, separate workflow | `~/.codeium/windsurf/global_workflows` | `.windsurf/workflows` | Markdown workflow | `/ctx-history` | Implemented with metadata hash and detection by Windsurf config dir | [Windsurf workflows](https://docs.devin.ai/desktop/cascade/workflows), [Windsurf skills](https://docs.devin.ai/desktop/cascade/skills) | Workflows are manual; skills are a separate progressive-disclosure mechanism. |

@@ -9,6 +9,7 @@ const GLOBAL_MCP_AGENTS: &[&str] = &[
     "claude-code",
     "cursor",
     "opencode",
+    "mimocode",
     "gemini-cli",
     "qwen-code",
     "goose",
@@ -26,6 +27,7 @@ const PROJECT_MCP_AGENTS: &[&str] = &[
     "claude-code",
     "cursor",
     "opencode",
+    "mimocode",
     "gemini-cli",
     "qwen-code",
     "kiro",
@@ -274,6 +276,41 @@ fn opencode_global_and_project_configs_are_connected_with_command_array_shape() 
 }
 
 #[test]
+fn mimocode_global_and_project_configs_are_connected_with_command_array_shape() {
+    let temp = tempdir();
+    let mimocode_home = temp.path().join("mimocode-home");
+    let project = temp.path().join("workspace");
+    fs::create_dir_all(&project).unwrap();
+
+    json_output(ctx(&temp).env("MIMOCODE_HOME", &mimocode_home).args([
+        "integrations",
+        "install",
+        "mcp",
+        "--agent",
+        "mimo-code",
+        "--json",
+    ]));
+    assert_eq!(
+        fake_mimocode_global(&mimocode_home.join("config")),
+        Some(OpenCodeServer::ctx_local())
+    );
+
+    json_output(ctx(&temp).current_dir(&project).args([
+        "integrations",
+        "install",
+        "mcp",
+        "--agent",
+        "mimocode",
+        "--project",
+        "--json",
+    ]));
+    assert_eq!(
+        fake_mimocode_project(&project),
+        Some(OpenCodeServer::ctx_local())
+    );
+}
+
+#[test]
 fn mcp_global_all_agents_json_covers_the_complete_supported_matrix() {
     let temp = tempdir();
     let xdg_config = temp.path().join("xdg-config");
@@ -312,6 +349,10 @@ fn mcp_global_all_agents_json_covers_the_complete_supported_matrix() {
     );
     assert_eq!(
         fake_opencode_global(&xdg_config),
+        Some(OpenCodeServer::ctx_local())
+    );
+    assert_eq!(
+        fake_mimocode_global(&xdg_config.join("mimocode")),
         Some(OpenCodeServer::ctx_local())
     );
     assert_eq!(
@@ -399,6 +440,10 @@ fn mcp_project_all_agents_json_covers_the_complete_supported_matrix() {
     );
     assert_eq!(
         fake_opencode_project(&project),
+        Some(OpenCodeServer::ctx_local())
+    );
+    assert_eq!(
+        fake_mimocode_project(&project),
         Some(OpenCodeServer::ctx_local())
     );
     assert_eq!(
@@ -866,6 +911,14 @@ fn fake_opencode_global(xdg_config: &Path) -> Option<OpenCodeServer> {
 
 fn fake_opencode_project(project: &Path) -> Option<OpenCodeServer> {
     json_opencode_server(&project.join("opencode.json"))
+}
+
+fn fake_mimocode_global(config_dir: &Path) -> Option<OpenCodeServer> {
+    json_opencode_server(&config_dir.join("mimocode.jsonc"))
+}
+
+fn fake_mimocode_project(project: &Path) -> Option<OpenCodeServer> {
+    json_opencode_server(&project.join(".mimocode").join("mimocode.jsonc"))
 }
 
 fn fake_cursor_global(home: &Path) -> Option<CommandServer> {

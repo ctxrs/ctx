@@ -19,3 +19,6 @@ __pycache__/
 /sdks/swift/.build/
 
 .fastembed_cache/
+
+# Local manager planning artifacts are not part of the public package.
+manager-exec-plan.md

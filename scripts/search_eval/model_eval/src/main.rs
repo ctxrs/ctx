@@ -1,6 +1,7 @@
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    env,
     fs,
     path::{Path, PathBuf},
     time::Instant,
@@ -31,8 +32,8 @@ const DEFAULT_QUERIES: &[&str] = &[
 
 #[derive(Debug, Parser)]
 struct Args {
-    #[arg(long, default_value = "/home/daddy/.ctx-semantic-dev")]
-    data_root: PathBuf,
+    #[arg(long)]
+    data_root: Option<PathBuf>,
     #[arg(long)]
     work_db: Option<PathBuf>,
     #[arg(long)]
@@ -144,14 +145,15 @@ struct QueryReport {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    let data_root = args.data_root.clone().unwrap_or_else(default_data_root);
     let work_db = args
         .work_db
         .clone()
-        .unwrap_or_else(|| args.data_root.join("work.sqlite"));
+        .unwrap_or_else(|| data_root.join("work.sqlite"));
     let cache_dir = args
         .cache_dir
         .clone()
-        .unwrap_or_else(|| args.data_root.join("model-eval-cache"));
+        .unwrap_or_else(|| data_root.join("model-eval-cache"));
     fs::create_dir_all(&cache_dir)
         .with_context(|| format!("create cache dir {}", cache_dir.display()))?;
 
@@ -184,6 +186,13 @@ fn main() -> Result<()> {
     }
     println!("{json}");
     Ok(())
+}
+
+fn default_data_root() -> PathBuf {
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".ctx-semantic-dev")
 }
 
 fn run_embedding_model(

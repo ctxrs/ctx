@@ -64,6 +64,8 @@ enum SlashCommandAgentArg {
     Cursor,
     #[value(name = "opencode", alias = "open-code")]
     OpenCode,
+    #[value(name = "mimocode", alias = "mimo-code", alias = "mimo_code")]
+    MiMoCode,
     #[value(name = "gemini-cli", alias = "gemini")]
     GeminiCli,
     #[value(name = "qwen-code", alias = "qwen")]
@@ -83,6 +85,7 @@ impl SlashCommandAgentArg {
         Self::ClaudeCode,
         Self::Cursor,
         Self::OpenCode,
+        Self::MiMoCode,
         Self::GeminiCli,
         Self::QwenCode,
         Self::Antigravity,
@@ -95,6 +98,7 @@ impl SlashCommandAgentArg {
 
     const WRITABLE: &'static [Self] = &[
         Self::OpenCode,
+        Self::MiMoCode,
         Self::GeminiCli,
         Self::QwenCode,
         Self::Windsurf,
@@ -106,6 +110,7 @@ impl SlashCommandAgentArg {
             Self::ClaudeCode => "claude-code",
             Self::Cursor => "cursor",
             Self::OpenCode => "opencode",
+            Self::MiMoCode => "mimocode",
             Self::GeminiCli => "gemini-cli",
             Self::QwenCode => "qwen-code",
             Self::Antigravity => "antigravity",
@@ -123,6 +128,7 @@ impl SlashCommandAgentArg {
             Self::ClaudeCode => "Claude Code",
             Self::Cursor => "Cursor",
             Self::OpenCode => "OpenCode",
+            Self::MiMoCode => "MiMo Code",
             Self::GeminiCli => "Gemini CLI",
             Self::QwenCode => "Qwen Code",
             Self::Antigravity => "Antigravity",
@@ -137,6 +143,9 @@ impl SlashCommandAgentArg {
     fn detected(self, context: &PathContext) -> bool {
         match self {
             Self::OpenCode => context.xdg_config_home.join("opencode").exists(),
+            Self::MiMoCode => {
+                context.mimocode_home.is_some() || context.mimocode_config_dir().exists()
+            }
             Self::GeminiCli => context.home.join(".gemini").exists(),
             Self::QwenCode => context.home.join(".qwen").exists(),
             Self::Windsurf => context.home.join(".codeium").join("windsurf").exists(),
@@ -160,6 +169,17 @@ impl SlashCommandAgentArg {
                     context.cwd.join(".opencode").join("commands")
                 } else {
                     context.xdg_config_home.join("opencode").join("commands")
+                },
+                filename: format!("{COMMAND_NAME}.md"),
+                body: opencode_command_body(),
+            }),
+            Self::MiMoCode => SlashCommandPlan::File(CommandFileTarget {
+                agent: self,
+                scope: scope(project),
+                base_dir: if project {
+                    context.cwd.join(".mimocode").join("commands")
+                } else {
+                    context.mimocode_config_dir().join("commands")
                 },
                 filename: format!("{COMMAND_NAME}.md"),
                 body: opencode_command_body(),
@@ -264,6 +284,7 @@ pub(crate) struct PathContext {
     home: PathBuf,
     xdg_config_home: PathBuf,
     cwd: PathBuf,
+    mimocode_home: Option<PathBuf>,
 }
 
 impl PathContext {
@@ -271,10 +292,12 @@ impl PathContext {
         let home = home_dir().context("resolve home directory")?;
         let xdg_config_home =
             non_empty_env_path("XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config"));
+        let mimocode_home = non_empty_env_path("MIMOCODE_HOME");
         Ok(Self {
             home,
             xdg_config_home,
             cwd: env::current_dir().context("resolve current directory")?,
+            mimocode_home,
         })
     }
 
@@ -284,6 +307,7 @@ impl PathContext {
             xdg_config_home: home.join(".config"),
             home,
             cwd,
+            mimocode_home: None,
         }
     }
 
@@ -291,6 +315,13 @@ impl PathContext {
     fn with_xdg_config_home(mut self, value: PathBuf) -> Self {
         self.xdg_config_home = value;
         self
+    }
+
+    fn mimocode_config_dir(&self) -> PathBuf {
+        self.mimocode_home
+            .as_ref()
+            .map(|home| home.join("config"))
+            .unwrap_or_else(|| self.xdg_config_home.join("mimocode"))
     }
 }
 
@@ -678,7 +709,7 @@ fn print_install_results(results: &[InstallResult]) {
     if results.is_empty() {
         println!("No separate slash-command targets detected");
         println!(
-            "Use --agent opencode, --agent gemini-cli, --agent qwen-code, or --agent windsurf to install explicitly."
+            "Use --agent opencode, --agent mimocode, --agent gemini-cli, --agent qwen-code, or --agent windsurf to install explicitly."
         );
         println!("For skill-based agents, run `ctx integrations install skills`.");
         return;
@@ -778,6 +809,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let xdg = temp.path().join("xdg");
         fs::create_dir_all(xdg.join("opencode")).unwrap();
+        fs::create_dir_all(xdg.join("mimocode")).unwrap();
         let context = PathContext::for_tests(temp.path().to_owned(), temp.path().to_owned())
             .with_xdg_config_home(xdg);
         let args = SlashCommandInstallArgs {
@@ -790,7 +822,10 @@ mod tests {
 
         assert_eq!(
             selected_agents(&args, &context),
-            vec![SlashCommandAgentArg::OpenCode]
+            vec![
+                SlashCommandAgentArg::OpenCode,
+                SlashCommandAgentArg::MiMoCode
+            ]
         );
     }
 

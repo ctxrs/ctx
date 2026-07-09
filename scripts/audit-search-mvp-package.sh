@@ -153,7 +153,7 @@ for package in metadata.get("packages", []):
   fi
 fi
 
-if grep_files 'ctx dashboard|ctx shim|ctx publish|ctx evidence|ctx pr([^[:alnum:]_]|$)|ctx link-pr|ctx context|ctx update|ctx uninstall|ctx watch|publish pr-comment|dashboard export|gh CLI|GhCli|upsert_github|wrapper scripts|write-shim-command|write_shim_command|capture_shim_command|shim_command_envelope|ShimCommandOptions|CommandRoot::Context|CommandRoot::Update|CommandRoot::Uninstall|CommandRoot::Watch|ContextArgs|UpdateArgs|UninstallArgs|WatchArgs|run_context|run_update|run_uninstall|run_watch|maybe_auto_update|check_or_apply_update|watch_strategy|polling_catch_up' \
+if grep_files 'ctx dashboard|ctx shim|ctx publish|ctx evidence|ctx pr([^[:alnum:]_]|$)|ctx link-pr|ctx context|ctx update|ctx uninstall|ctx watch|publish pr-comment|dashboard export|gh CLI|GhCli|upsert_github|wrapper scripts|write-shim-command|write_shim_command|capture_shim_command|shim_command_envelope|\bShimCommandOptions\b|CommandRoot::Context|CommandRoot::Update|CommandRoot::Uninstall|CommandRoot::Watch|\bContextArgs\b|\bUpdateArgs\b|\bUninstallArgs\b|\bWatchArgs\b|run_context|run_update|run_uninstall|run_watch|maybe_auto_update|check_or_apply_update|watch_strategy|polling_catch_up' \
   .bazelignore .bazelrc .bazelversion .buildkite .gitignore Cargo.toml BUILD.bazel MODULE.bazel scripts crates/ctx-cli/src crates/ctx-history-capture/src crates/ctx-history-search/src >/dev/null 2>&1; then
   fail 'default binary/release path contains dashboard, shim, PR publish, watch, or gh integration text'
 fi

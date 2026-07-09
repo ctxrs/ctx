@@ -121,7 +121,12 @@ impl McpPathContext {
         let xdg_config_home =
             non_empty_env_path("XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config"));
         let mut env_overrides = BTreeMap::new();
-        for key in ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "COPILOT_HOME"] {
+        for key in [
+            "CODEX_HOME",
+            "CLAUDE_CONFIG_DIR",
+            "COPILOT_HOME",
+            "MIMOCODE_HOME",
+        ] {
             if let Some(path) = non_empty_env_path(key) {
                 env_overrides.insert(key.to_owned(), path);
             }
@@ -163,6 +168,13 @@ impl McpPathContext {
             .unwrap_or_else(|| self.home.join(fallback_child))
     }
 
+    fn mimocode_config_dir(&self) -> PathBuf {
+        self.env_overrides
+            .get("MIMOCODE_HOME")
+            .map(|home| home.join("config"))
+            .unwrap_or_else(|| self.xdg_config_home.join("mimocode"))
+    }
+
     fn claude_user_config(&self) -> PathBuf {
         self.env_overrides
             .get("CLAUDE_CONFIG_DIR")
@@ -189,6 +201,8 @@ pub(crate) enum McpAgentArg {
     Cursor,
     #[value(name = "opencode", alias = "open-code")]
     OpenCode,
+    #[value(name = "mimocode", alias = "mimo-code", alias = "mimo_code")]
+    MiMoCode,
     #[value(name = "gemini-cli", alias = "gemini")]
     GeminiCli,
     #[value(name = "qwen-code", alias = "qwen")]
@@ -212,6 +226,7 @@ impl McpAgentArg {
         Self::ClaudeCode,
         Self::Cursor,
         Self::OpenCode,
+        Self::MiMoCode,
         Self::GeminiCli,
         Self::QwenCode,
         Self::Goose,
@@ -228,6 +243,7 @@ impl McpAgentArg {
         Self::ClaudeCode,
         Self::Cursor,
         Self::OpenCode,
+        Self::MiMoCode,
         Self::GeminiCli,
         Self::QwenCode,
         Self::Kiro,
@@ -243,6 +259,7 @@ impl McpAgentArg {
             Self::ClaudeCode => "claude-code",
             Self::Cursor => "cursor",
             Self::OpenCode => "opencode",
+            Self::MiMoCode => "mimocode",
             Self::GeminiCli => "gemini-cli",
             Self::QwenCode => "qwen-code",
             Self::Goose => "goose",
@@ -263,6 +280,7 @@ impl McpAgentArg {
             Self::ClaudeCode => "Claude Code",
             Self::Cursor => "Cursor",
             Self::OpenCode => "OpenCode",
+            Self::MiMoCode => "MiMo Code",
             Self::GeminiCli => "Gemini CLI",
             Self::QwenCode => "Qwen Code",
             Self::Goose => "Goose",
@@ -291,6 +309,10 @@ impl McpAgentArg {
             }
             Self::Cursor => context.home.join(".cursor").exists(),
             Self::OpenCode => context.xdg_config_home.join("opencode").exists(),
+            Self::MiMoCode => {
+                context.env_overrides.contains_key("MIMOCODE_HOME")
+                    || context.mimocode_config_dir().exists()
+            }
             Self::GeminiCli => context.home.join(".gemini").exists(),
             Self::QwenCode => context.home.join(".qwen").exists(),
             Self::Goose => context.xdg_config_home.join("goose").exists(),
@@ -344,10 +366,11 @@ impl McpAgentArg {
                     .xdg_config_home
                     .join("opencode")
                     .join("opencode.json"),
-                ConfigKind::Json {
-                    root: JsonRoot::Mcp,
-                    server: JsonServerShape::OpenCodeLocal,
-                },
+                ConfigKind::opencode_json(),
+            ),
+            Self::MiMoCode => (
+                context.mimocode_config_dir().join("mimocode.jsonc"),
+                ConfigKind::opencode_json(),
             ),
             Self::GeminiCli => (
                 context.home.join(".gemini").join("settings.json"),
@@ -448,10 +471,11 @@ impl McpAgentArg {
             )),
             Self::OpenCode => Some((
                 context.cwd.join("opencode.json"),
-                ConfigKind::Json {
-                    root: JsonRoot::Mcp,
-                    server: JsonServerShape::OpenCodeLocal,
-                },
+                ConfigKind::opencode_json(),
+            )),
+            Self::MiMoCode => Some((
+                context.cwd.join(".mimocode").join("mimocode.jsonc"),
+                ConfigKind::opencode_json(),
             )),
             Self::GeminiCli => Some((
                 context.cwd.join(".gemini").join("settings.json"),
@@ -528,6 +552,7 @@ fn project_detection_path(agent: McpAgentArg, context: &McpPathContext) -> PathB
         McpAgentArg::ClaudeCode => context.cwd.join(".mcp.json"),
         McpAgentArg::Cursor => context.cwd.join(".cursor"),
         McpAgentArg::OpenCode => context.cwd.join("opencode.json"),
+        McpAgentArg::MiMoCode => context.cwd.join(".mimocode"),
         McpAgentArg::GeminiCli => context.cwd.join(".gemini"),
         McpAgentArg::QwenCode => context.cwd.join(".qwen"),
         McpAgentArg::Kiro => context.cwd.join(".kiro"),
@@ -606,6 +631,15 @@ enum ConfigKind {
         root: JsonRoot,
         server: JsonServerShape,
     },
+}
+
+impl ConfigKind {
+    fn opencode_json() -> Self {
+        Self::Json {
+            root: JsonRoot::Mcp,
+            server: JsonServerShape::OpenCodeLocal,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1489,150 +1523,5 @@ fn print_status_results(results: &[McpStatusResult]) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn json_writer_adds_ctx_and_is_idempotent() {
-        let first = update_json(
-            r#"{"other":true}"#,
-            JsonRoot::McpServers,
-            JsonServerShape::StdioType,
-            false,
-        )
-        .unwrap();
-        let value: Value = serde_json::from_str(&first).unwrap();
-        assert_eq!(value["other"], true);
-        assert_eq!(value["mcpServers"]["ctx"]["command"], "ctx");
-        assert_eq!(value["mcpServers"]["ctx"]["args"], json!(["mcp", "serve"]));
-        assert_eq!(value["mcpServers"]["ctx"]["type"], "stdio");
-        assert_eq!(
-            status_json(&first, JsonRoot::McpServers).unwrap(),
-            McpConfigStatus::Current
-        );
-        let second = update_json(
-            &first,
-            JsonRoot::McpServers,
-            JsonServerShape::StdioType,
-            false,
-        )
-        .unwrap();
-        assert_eq!(first, second);
-    }
-
-    #[test]
-    fn json_writer_preserves_conflicting_ctx_unless_forced() {
-        let original = r#"{"mcpServers":{"ctx":{"command":"old","args":[]}}}"#;
-        assert_eq!(
-            status_json(original, JsonRoot::McpServers).unwrap(),
-            McpConfigStatus::Conflict
-        );
-        assert!(update_json(
-            original,
-            JsonRoot::McpServers,
-            JsonServerShape::Plain,
-            false
-        )
-        .is_err());
-        let forced =
-            update_json(original, JsonRoot::McpServers, JsonServerShape::Plain, true).unwrap();
-        let value: Value = serde_json::from_str(&forced).unwrap();
-        assert_eq!(value["mcpServers"]["ctx"]["command"], "ctx");
-    }
-
-    #[test]
-    fn json_writer_reports_invalid_shapes() {
-        assert!(update_json("[]", JsonRoot::McpServers, JsonServerShape::Plain, false).is_err());
-        assert!(update_json(
-            r#"{"mcpServers":[]}"#,
-            JsonRoot::McpServers,
-            JsonServerShape::Plain,
-            false,
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn codex_toml_writer_preserves_existing_settings() {
-        let first = update_codex_toml("model = \"gpt-5\"\n", false).unwrap();
-        assert!(first.contains("model = \"gpt-5\""));
-        assert!(first.contains("[mcp_servers.ctx]"));
-        assert_eq!(status_codex_toml(&first).unwrap(), McpConfigStatus::Current);
-        let second = update_codex_toml(&first, false).unwrap();
-        assert_eq!(first, second);
-    }
-
-    #[test]
-    fn opencode_writer_uses_command_array_shape() {
-        let body = update_json("", JsonRoot::Mcp, JsonServerShape::OpenCodeLocal, false).unwrap();
-        let value: Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(
-            value["mcp"]["ctx"]["command"],
-            json!(["ctx", "mcp", "serve"])
-        );
-        assert_eq!(value["mcp"]["ctx"]["type"], "local");
-        assert_eq!(
-            status_json(&body, JsonRoot::Mcp).unwrap(),
-            McpConfigStatus::Current
-        );
-    }
-
-    #[test]
-    fn goose_yaml_writer_adds_extension_and_is_idempotent() {
-        let first = update_goose_yaml("GOOSE_MODEL: test\n", false).unwrap();
-        let value: serde_yaml::Value = serde_yaml::from_str(&first).unwrap();
-        let ctx = yaml_mapping_get(yaml_mapping_get(&value, "extensions").unwrap(), "ctx").unwrap();
-        assert_eq!(yaml_mapping_get(ctx, "cmd").unwrap().as_str(), Some("ctx"));
-        assert_eq!(status_goose_yaml(&first).unwrap(), McpConfigStatus::Current);
-        let second = update_goose_yaml(&first, false).unwrap();
-        assert_eq!(first, second);
-    }
-
-    #[test]
-    fn continue_yaml_writer_adds_named_server_and_is_idempotent() {
-        let first =
-            update_continue_yaml("name: Local\nversion: 1.0.0\nschema: v1\n", false).unwrap();
-        let value: serde_yaml::Value = serde_yaml::from_str(&first).unwrap();
-        let servers = yaml_mapping_get(&value, "mcpServers")
-            .unwrap()
-            .as_sequence()
-            .unwrap();
-        let ctx = continue_server_by_name(servers).unwrap();
-        assert_eq!(
-            yaml_mapping_get(ctx, "command").unwrap().as_str(),
-            Some("ctx")
-        );
-        assert_eq!(
-            status_continue_yaml(&first).unwrap(),
-            McpConfigStatus::Current
-        );
-        let second = update_continue_yaml(&first, false).unwrap();
-        assert_eq!(first, second);
-    }
-
-    #[test]
-    fn detection_uses_home_xdg_and_env_paths() {
-        let temp = tempfile::tempdir().unwrap();
-        let home = temp.path().join("home");
-        let xdg = temp.path().join("xdg");
-        fs::create_dir_all(home.join(".cursor")).unwrap();
-        fs::create_dir_all(xdg.join("opencode")).unwrap();
-        let context = McpPathContext::for_tests(home, temp.path().join("repo"))
-            .with_xdg_config_home(xdg)
-            .with_env_override("CODEX_HOME", temp.path().join("codex-home"));
-        assert!(McpAgentArg::Codex.detected(&context));
-        assert!(McpAgentArg::Cursor.detected(&context));
-        assert!(McpAgentArg::OpenCode.detected(&context));
-        assert!(!McpAgentArg::QwenCode.detected(&context));
-    }
-
-    #[test]
-    fn project_target_reports_unsupported_for_global_only_agents() {
-        let temp = tempfile::tempdir().unwrap();
-        let context = McpPathContext::for_tests(temp.path().join("home"), temp.path().join("repo"));
-        let target = McpAgentArg::GitHubCopilot.target(true, &context);
-        assert!(target.path.is_none());
-        let status = status_target(&target);
-        assert_eq!(status.status, McpConfigStatus::Unsupported);
-    }
-}
+#[path = "mcp_tests.rs"]
+mod mcp_tests;

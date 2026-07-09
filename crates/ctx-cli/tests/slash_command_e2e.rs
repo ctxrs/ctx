@@ -9,6 +9,7 @@ const ALL_SLASH_COMMAND_AGENTS: &[&str] = &[
     "claude-code",
     "cursor",
     "opencode",
+    "mimocode",
     "gemini-cli",
     "qwen-code",
     "antigravity",
@@ -27,7 +28,13 @@ const SKILL_ONLY_SLASH_COMMAND_AGENTS: &[&str] = &[
     "pi",
 ];
 const MANUAL_ONLY_SLASH_COMMAND_AGENTS: &[&str] = &["goose", "continue"];
-const WRITABLE_SLASH_COMMAND_AGENTS: &[&str] = &["opencode", "gemini-cli", "qwen-code", "windsurf"];
+const WRITABLE_SLASH_COMMAND_AGENTS: &[&str] = &[
+    "opencode",
+    "mimocode",
+    "gemini-cli",
+    "qwen-code",
+    "windsurf",
+];
 
 // These tests are hermetic fake-harness E2E checks. They run the real ctx
 // installer binary with temp HOME/XDG/CTX_DATA_ROOT, then simulate the stable
@@ -42,6 +49,7 @@ fn slash_command_e2e_detected_global_harnesses_discover_and_invoke() {
     let xdg = temp.path().join("xdg-config");
 
     fs::create_dir_all(xdg.join("opencode")).unwrap();
+    fs::create_dir_all(xdg.join("mimocode")).unwrap();
     fs::create_dir_all(temp.path().join(".gemini")).unwrap();
     fs::create_dir_all(temp.path().join(".qwen")).unwrap();
     fs::create_dir_all(temp.path().join(".codeium").join("windsurf")).unwrap();
@@ -57,21 +65,30 @@ fn slash_command_e2e_detected_global_harnesses_discover_and_invoke() {
     assert_eq!(output["scope"], "global");
     assert_eq!(
         output_agents(&output),
-        vec!["opencode", "gemini-cli", "qwen-code", "windsurf"]
+        vec![
+            "opencode",
+            "mimocode",
+            "gemini-cli",
+            "qwen-code",
+            "windsurf"
+        ]
     );
 
     let opencode = OpenCodeHarness::global(&xdg);
+    let mimocode = MiMoCodeHarness::global(&xdg);
     let gemini = GeminiHarness::global(temp.path());
     let qwen = QwenHarness::global(temp.path());
     let windsurf = WindsurfHarness::global(temp.path());
 
     assert_result_path(&output, "opencode", &opencode.command_path(COMMAND_NAME));
+    assert_result_path(&output, "mimocode", &mimocode.command_path(COMMAND_NAME));
     assert_result_path(&output, "gemini-cli", &gemini.command_path(COMMAND_NAME));
     assert_result_path(&output, "qwen-code", &qwen.command_path(COMMAND_NAME));
     assert_result_path(&output, "windsurf", &windsurf.command_path(COMMAND_NAME));
     assert_result_paths_under(&output, &[temp.path(), &xdg]);
 
     assert_ctx_history_prompt(&opencode.invoke(COMMAND_NAME, QUERY), QUERY);
+    assert_ctx_history_prompt(&mimocode.invoke(COMMAND_NAME, QUERY), QUERY);
     assert_ctx_history_prompt(&gemini.invoke(COMMAND_NAME, QUERY), QUERY);
     assert_ctx_history_prompt(&qwen.invoke(COMMAND_NAME, QUERY), QUERY);
     windsurf.assert_workflow_ready(COMMAND_NAME);
@@ -91,6 +108,8 @@ fn slash_command_e2e_project_harnesses_discover_and_invoke() {
         "--agent",
         "opencode",
         "--agent",
+        "mimocode",
+        "--agent",
         "gemini-cli",
         "--agent",
         "qwen-code",
@@ -104,21 +123,30 @@ fn slash_command_e2e_project_harnesses_discover_and_invoke() {
     assert_eq!(output["scope"], "project");
     assert_eq!(
         output_agents(&output),
-        vec!["opencode", "gemini-cli", "qwen-code", "windsurf"]
+        vec![
+            "opencode",
+            "mimocode",
+            "gemini-cli",
+            "qwen-code",
+            "windsurf"
+        ]
     );
 
     let opencode = OpenCodeHarness::project(&project);
+    let mimocode = MiMoCodeHarness::project(&project);
     let gemini = GeminiHarness::project(&project);
     let qwen = QwenHarness::project(&project);
     let windsurf = WindsurfHarness::project(&project);
 
     assert_result_path(&output, "opencode", &opencode.command_path(COMMAND_NAME));
+    assert_result_path(&output, "mimocode", &mimocode.command_path(COMMAND_NAME));
     assert_result_path(&output, "gemini-cli", &gemini.command_path(COMMAND_NAME));
     assert_result_path(&output, "qwen-code", &qwen.command_path(COMMAND_NAME));
     assert_result_path(&output, "windsurf", &windsurf.command_path(COMMAND_NAME));
     assert_result_paths_under(&output, &[&project]);
 
     assert_ctx_history_prompt(&opencode.invoke(COMMAND_NAME, QUERY), QUERY);
+    assert_ctx_history_prompt(&mimocode.invoke(COMMAND_NAME, QUERY), QUERY);
     assert_ctx_history_prompt(&gemini.invoke(COMMAND_NAME, QUERY), QUERY);
     assert_ctx_history_prompt(&qwen.invoke(COMMAND_NAME, QUERY), QUERY);
     windsurf.assert_workflow_ready(COMMAND_NAME);
@@ -243,11 +271,13 @@ fn slash_command_e2e_project_all_agents_json_covers_the_complete_accepted_matrix
     }
 
     let opencode = OpenCodeHarness::project(&project);
+    let mimocode = MiMoCodeHarness::project(&project);
     let gemini = GeminiHarness::project(&project);
     let qwen = QwenHarness::project(&project);
     let windsurf = WindsurfHarness::project(&project);
 
     assert_ctx_history_prompt(&opencode.invoke(COMMAND_NAME, QUERY), QUERY);
+    assert_ctx_history_prompt(&mimocode.invoke(COMMAND_NAME, QUERY), QUERY);
     assert_ctx_history_prompt(&gemini.invoke(COMMAND_NAME, QUERY), QUERY);
     assert_ctx_history_prompt(&qwen.invoke(COMMAND_NAME, QUERY), QUERY);
     windsurf.assert_workflow_ready(COMMAND_NAME);
@@ -280,6 +310,42 @@ impl OpenCodeHarness {
         assert!(
             markdown.body.contains("$ARGUMENTS"),
             "OpenCode needs $ARGUMENTS so multi-word ctx queries survive"
+        );
+        markdown.body.replace("$ARGUMENTS", args)
+    }
+
+    fn command_path(&self, command_name: &str) -> PathBuf {
+        command_path(&self.command_dir, command_name, "md")
+    }
+}
+
+struct MiMoCodeHarness {
+    command_dir: PathBuf,
+}
+
+impl MiMoCodeHarness {
+    fn global(xdg_config_home: &Path) -> Self {
+        Self {
+            command_dir: xdg_config_home.join("mimocode").join("commands"),
+        }
+    }
+
+    fn project(project: &Path) -> Self {
+        Self {
+            command_dir: project.join(".mimocode").join("commands"),
+        }
+    }
+
+    fn invoke(&self, command_name: &str, args: &str) -> String {
+        assert_ctx_metadata(&self.command_dir, &format!("{command_name}.md"));
+        let markdown = parse_frontmatter_markdown(&self.command_path(command_name));
+        assert_eq!(markdown.description, "Search local agent history with ctx");
+        assert!(markdown
+            .frontmatter
+            .contains("argument-hint: [question or topic]"));
+        assert!(
+            markdown.body.contains("$ARGUMENTS"),
+            "MiMo Code needs $ARGUMENTS so multi-word ctx queries survive"
         );
         markdown.body.replace("$ARGUMENTS", args)
     }

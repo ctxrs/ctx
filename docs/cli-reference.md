@@ -91,7 +91,7 @@ separate from provider history indexing.
 
 ```bash
 ctx integrations install skills
-ctx integrations install skills --agent codex --agent claude-code
+ctx integrations install skills --agent codex --agent claude-code --agent mimocode
 ctx integrations install skills --all-agents
 ctx integrations install skills --project
 ctx integrations install skills --force
@@ -107,9 +107,9 @@ them. In non-interactive runs, it installs to the universal folder and also
 writes detected agent-specific folders, such as Claude Code, only when ctx sees
 evidence that the agent is installed. `--agent` targets native global skill
 folders for supported agents such as Claude Code, Codex, Cursor, OpenCode,
-Gemini CLI, Antigravity, GitHub Copilot, Pi, and Goose. `--all-agents` writes
-all supported target folders. `--project` switches from global paths to the
-current project's skill folders.
+MiMo Code, Gemini CLI, Antigravity, GitHub Copilot, Pi, and Goose.
+`--all-agents` writes all supported target folders. `--project` switches from
+global paths to the current project's skill folders.
 
 `integrations status skills` reports whether the bundled skill is `current`,
 `stale`, `modified`, or `missing`. `integrations install skills` refreshes
@@ -122,6 +122,7 @@ bundled ctx skill and does not fetch arbitrary remote skills.
 ```bash
 ctx integrations install mcp
 ctx integrations install mcp --agent codex
+ctx integrations install mcp --agent mimocode
 ctx integrations install mcp --provider cursor --project
 ctx integrations install mcp --all-agents --json
 ctx integrations install mcp --agent cursor --force
@@ -129,6 +130,7 @@ ctx integrations status mcp
 ctx integrations status mcp --agent codex --json
 ctx integrations install slash-commands
 ctx integrations install slash-commands --agent opencode
+ctx integrations install slash-commands --agent mimocode
 ctx integrations install slash-commands --agent gemini-cli --project
 ctx integrations install slash-commands --agent qwen-code
 ctx integrations install slash-commands --agent windsurf
@@ -155,9 +157,10 @@ reported and left untouched. `integrations status mcp` reports `current`,
 
 `integrations install slash-commands` installs a `/ctx-history` entry point only
 for providers where ctx has a documented, file-based command surface it can
-manage safely: OpenCode, Gemini CLI, Qwen Code, and Windsurf. With no explicit
-agent flag, it writes detected file-based targets only. `--project` installs
-into the current repository's command folder instead of the user/global folder.
+manage safely: OpenCode, MiMo Code, Gemini CLI, Qwen Code, and Windsurf. With no
+explicit agent flag, it writes detected file-based targets only. `--project`
+installs into the current repository's command folder instead of the user/global
+folder.
 
 The installer writes `.ctx-slash-commands.json` metadata beside generated
 command files. Re-running the command is idempotent, stale ctx-owned files are

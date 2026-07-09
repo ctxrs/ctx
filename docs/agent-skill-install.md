@@ -35,7 +35,7 @@ universal `.agents/skills` location:
 
 ```bash
 ctx integrations install skills --agent codex
-ctx integrations install skills --agent claude-code --agent cursor
+ctx integrations install skills --agent claude-code --agent cursor --agent mimocode
 ctx integrations install skills --all-agents
 ```
 
@@ -154,6 +154,7 @@ documented command-file location:
 
 ```bash
 ctx integrations install slash-commands --agent opencode
+ctx integrations install slash-commands --agent mimocode
 ctx integrations install slash-commands --agent gemini-cli
 ctx integrations install slash-commands --agent qwen-code
 ctx integrations install slash-commands --agent windsurf

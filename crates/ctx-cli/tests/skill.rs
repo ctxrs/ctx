@@ -419,12 +419,14 @@ fn skill_install_agent_paths_respect_env_xdg_and_project_scope() {
     let xdg = temp.path().join("xdg-config");
     let codex_home = temp.path().join("custom-codex");
     let claude_home = temp.path().join("custom-claude");
+    let mimocode_home = temp.path().join("custom-mimocode");
 
     let global = json_output(
         ctx(&temp)
             .env("XDG_CONFIG_HOME", &xdg)
             .env("CODEX_HOME", &codex_home)
             .env("CLAUDE_CONFIG_DIR", &claude_home)
+            .env("MIMOCODE_HOME", &mimocode_home)
             .args([
                 "integrations",
                 "install",
@@ -435,11 +437,19 @@ fn skill_install_agent_paths_respect_env_xdg_and_project_scope() {
                 "claude-code",
                 "--agent",
                 "opencode",
+                "--agent",
+                "mimocode",
                 "--json",
             ]),
     );
-    assert_eq!(global["results"].as_array().unwrap().len(), 3);
+    assert_eq!(global["results"].as_array().unwrap().len(), 4);
     assert!(codex_home
+        .join("skills")
+        .join("ctx-agent-history-search")
+        .join("SKILL.md")
+        .exists());
+    assert!(mimocode_home
+        .join("config")
         .join("skills")
         .join("ctx-agent-history-search")
         .join("SKILL.md")
@@ -468,6 +478,8 @@ fn skill_install_agent_paths_respect_env_xdg_and_project_scope() {
         "codex",
         "--agent",
         "claude-code",
+        "--agent",
+        "mimocode",
         "--json",
     ]);
     let project_output = json_output(&mut command);
@@ -480,6 +492,12 @@ fn skill_install_agent_paths_respect_env_xdg_and_project_scope() {
         .exists());
     assert!(project
         .join(".claude")
+        .join("skills")
+        .join("ctx-agent-history-search")
+        .join("SKILL.md")
+        .exists());
+    assert!(project
+        .join(".mimocode")
         .join("skills")
         .join("ctx-agent-history-search")
         .join("SKILL.md")

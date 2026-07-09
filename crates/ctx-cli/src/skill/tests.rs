@@ -34,12 +34,14 @@ fn agent_global_paths_preserve_env_and_xdg_rules() {
     let context = PathContext::for_tests(PathBuf::from("/home/tester"), PathBuf::from("/repo"))
         .with_xdg_config_home(PathBuf::from("/xdg"))
         .with_env_override("CODEX_HOME", PathBuf::from("/codex-home"))
-        .with_env_override("CLAUDE_CONFIG_DIR", PathBuf::from("/claude-home"));
+        .with_env_override("CLAUDE_CONFIG_DIR", PathBuf::from("/claude-home"))
+        .with_env_override("MIMOCODE_HOME", PathBuf::from("/mimocode-home"));
     let targets = resolve_targets(
         &[
             SkillAgentArg::Codex,
             SkillAgentArg::ClaudeCode,
             SkillAgentArg::OpenCode,
+            SkillAgentArg::MiMoCode,
             SkillAgentArg::Amp,
         ],
         false,
@@ -64,6 +66,10 @@ fn agent_global_paths_preserve_env_and_xdg_rules() {
         PathBuf::from("/xdg/opencode/skills/ctx-agent-history-search")
     );
     assert_eq!(
+        paths["mimocode"],
+        PathBuf::from("/mimocode-home/config/skills/ctx-agent-history-search")
+    );
+    assert_eq!(
         paths["amp"],
         PathBuf::from("/xdg/agents/skills/ctx-agent-history-search")
     );
@@ -73,7 +79,11 @@ fn agent_global_paths_preserve_env_and_xdg_rules() {
 fn project_paths_are_agent_specific_and_relative_to_cwd() {
     let context = PathContext::for_tests(PathBuf::from("/home/tester"), PathBuf::from("/repo"));
     let targets = resolve_targets(
-        &[SkillAgentArg::ClaudeCode, SkillAgentArg::Codex],
+        &[
+            SkillAgentArg::ClaudeCode,
+            SkillAgentArg::Codex,
+            SkillAgentArg::MiMoCode,
+        ],
         false,
         true,
         &context,
@@ -91,19 +101,29 @@ fn project_paths_are_agent_specific_and_relative_to_cwd() {
         paths["codex"],
         PathBuf::from("/repo/.agents/skills/ctx-agent-history-search")
     );
+    assert_eq!(
+        paths["mimocode"],
+        PathBuf::from("/repo/.mimocode/skills/ctx-agent-history-search")
+    );
 }
 
 #[test]
 fn default_selection_includes_universal_and_detected_agent_specific_dirs() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
+    let xdg = temp.path().join("xdg");
     fs::create_dir_all(home.join(".claude")).unwrap();
     fs::create_dir_all(home.join(".codex")).unwrap();
-    let context = PathContext::for_tests(home, temp.path().join("repo"));
+    fs::create_dir_all(xdg.join("mimocode")).unwrap();
+    let context = PathContext::for_tests(home, temp.path().join("repo")).with_xdg_config_home(xdg);
 
     assert_eq!(
         detected_agents(&context),
-        vec![SkillAgentArg::ClaudeCode, SkillAgentArg::Codex]
+        vec![
+            SkillAgentArg::ClaudeCode,
+            SkillAgentArg::Codex,
+            SkillAgentArg::MiMoCode
+        ]
     );
 
     let selection = install_agent_selection(
@@ -120,7 +140,11 @@ fn default_selection_includes_universal_and_detected_agent_specific_dirs() {
     assert_eq!(selection.source, SkillSelectionSource::Detected);
     assert_eq!(
         selection.agents,
-        vec![SkillAgentArg::Universal, SkillAgentArg::ClaudeCode]
+        vec![
+            SkillAgentArg::Universal,
+            SkillAgentArg::ClaudeCode,
+            SkillAgentArg::MiMoCode
+        ]
     );
 }
 
@@ -152,6 +176,10 @@ fn picker_selection_accepts_numbers_names_and_all() {
     assert_eq!(
         parse_picker_selection("cursor universal", options).unwrap(),
         vec![SkillAgentArg::Cursor, SkillAgentArg::Universal]
+    );
+    assert_eq!(
+        parse_picker_selection("mimo-code", options).unwrap(),
+        vec![SkillAgentArg::MiMoCode]
     );
     assert_eq!(parse_picker_selection("all", options).unwrap(), options);
     assert!(parse_picker_selection("99", options).is_err());
