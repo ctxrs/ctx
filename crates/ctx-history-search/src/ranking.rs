@@ -194,12 +194,11 @@ pub(crate) fn hydrate_record_context(
     let runs = store.runs_for_record(record_id)?;
     let events = store.events_for_record(record_id)?;
     let artifacts = store.artifacts_for_record(record_id)?;
-    let files_touched =
-        if let Some(file) = file_filter.map(str::trim).filter(|value| !value.is_empty()) {
-            store.files_touched_for_record_matching(record_id, file)?
-        } else {
-            store.files_touched_for_record(record_id)?
-        };
+    let files_touched = if let Some(file) = file_filter {
+        store.files_touched_for_record_matching(record_id, file)?
+    } else {
+        store.files_touched_for_record(record_id)?
+    };
     let vcs_changes = store.vcs_changes_for_record(record_id)?;
     let summaries = store.summaries_for_record(record_id)?;
     let mut source_ids = BTreeSet::new();
@@ -275,11 +274,7 @@ fn analyze_record(
     let mut citations = Vec::new();
 
     if terms.is_empty() {
-        if filters
-            .file
-            .as_ref()
-            .is_some_and(|file| !file.trim().is_empty())
-        {
+        if filters.file.is_some() {
             let mut primary_hit = None;
             for section in search_sections(record, context, filters)
                 .into_iter()

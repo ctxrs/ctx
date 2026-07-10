@@ -1169,6 +1169,58 @@ fn search_normalizes_whitespace_only_filters() {
 }
 
 #[test]
+fn search_trims_whitespace_padded_workspace_and_file_filters() {
+    let temp = tempdir();
+    let fixture = provider_history_fixture("codex-rich-sessions");
+    json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "codex",
+        "--path",
+        &fixture,
+        "--json",
+    ]));
+
+    let with_workspace = json_output(ctx(&temp).args([
+        "search",
+        "diagnostic",
+        "--workspace",
+        " ctx-rich-fixture ",
+        "--json",
+    ]));
+    assert_eq!(
+        with_workspace["filters"]["workspace"], "ctx-rich-fixture",
+        "workspace filter value should be trimmed; got filters: {}",
+        with_workspace["filters"],
+    );
+    assert!(
+        !with_workspace["results"].as_array().unwrap().is_empty(),
+        "workspace-filtered search should match using the trimmed value"
+    );
+
+    let with_file = json_output(ctx(&temp).args(["search", "--file", " src/main.rs ", "--json"]));
+    assert_eq!(
+        with_file["filters"]["file"], "src/main.rs",
+        "file filter value should be trimmed; got filters: {}",
+        with_file["filters"],
+    );
+
+    let results = with_file["results"].as_array().unwrap();
+    assert!(
+        !results.is_empty(),
+        "file-filtered search should return results with trimmed path"
+    );
+    assert!(
+        results[0]["why_matched"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason == "file_touched"),
+        "result should match by file_touched"
+    );
+}
+
+#[test]
 fn pi_cli_imports_directory_tree_path() {
     let temp = tempdir();
     let path = temp.path().join("pi-sessions-dir");
