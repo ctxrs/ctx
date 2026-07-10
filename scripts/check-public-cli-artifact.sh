@@ -5,9 +5,9 @@ usage() {
   cat >&2 <<'USAGE'
 Usage: scripts/check-public-cli-artifact.sh PLATFORM [ARTIFACT_DIR]
 
-Checks one locally staged public ctx CLI artifact. This validates only local
-public release outputs: artifact presence, SHA-256 sidecar consistency, and
-version sidecar contents.
+Checks one locally staged public ctx CLI artifact, including a present or
+required ONNX Runtime sidecar. Runtime archives must have the exact loader
+layout and native architecture/ABI expected for PLATFORM.
 USAGE
 }
 
@@ -46,9 +46,86 @@ esac
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_root}"
 
+runtime_asset_name_for_platform() {
+  case "$1" in
+    linux-x64) printf 'ctx-onnxruntime-linux-x64.tar.zst\n' ;;
+    linux-aarch64) printf 'ctx-onnxruntime-linux-aarch64.tar.zst\n' ;;
+    macos-arm64) printf 'ctx-onnxruntime-macos-arm64.tar.zst\n' ;;
+    macos-x64) printf 'ctx-onnxruntime-macos-x64.tar.zst\n' ;;
+    windows-x64) printf 'ctx-onnxruntime-windows-x64.zip\n' ;;
+    freebsd-x64) printf 'ctx-onnxruntime-freebsd-x64.tar.zst\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+sha256_file() {
+  local path="$1"
+
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "${path}" | awk '{ print $1 }'
+    return
+  fi
+
+  shasum -a 256 "${path}" | awk '{ print $1 }'
+}
+
+check_sha256_sidecar() {
+  local artifact_path="$1"
+  local sha_path="${artifact_path}.sha256"
+  local expected_sha actual_sha actual_sha_lower expected_sha_lower
+
+  if [[ ! -s "${sha_path}" ]]; then
+    printf 'public artifact SHA-256 sidecar missing or empty: %s\n' "${sha_path}" >&2
+    exit 1
+  fi
+
+  expected_sha="$(tr -d '[:space:]' < "${sha_path}")"
+  if [[ ! "${expected_sha}" =~ ^[0-9a-fA-F]{64}$ ]]; then
+    printf 'public artifact SHA-256 sidecar is not a digest: %s\n' "${sha_path}" >&2
+    exit 1
+  fi
+
+  actual_sha="$(sha256_file "${artifact_path}")"
+  actual_sha_lower="$(printf '%s' "${actual_sha}" | tr 'A-F' 'a-f')"
+  expected_sha_lower="$(printf '%s' "${expected_sha}" | tr 'A-F' 'a-f')"
+  if [[ "${actual_sha_lower}" != "${expected_sha_lower}" ]]; then
+    printf 'public artifact checksum mismatch for %s: expected %s got %s\n' \
+      "${artifact_path}" "${expected_sha}" "${actual_sha}" >&2
+    exit 1
+  fi
+
+  printf '%s\n' "${actual_sha}"
+}
+
+check_optional_runtime_asset() {
+  local required="${CTX_ONNXRUNTIME_ASSET_REQUIRED:-0}"
+  local asset_name runtime_path actual_sha
+
+  case "${required}" in
+    0|1) ;;
+    *)
+      printf 'CTX_ONNXRUNTIME_ASSET_REQUIRED must be 0 or 1\n' >&2
+      exit 2
+      ;;
+  esac
+
+  asset_name="$(runtime_asset_name_for_platform "${platform}")"
+  runtime_path="${artifact_dir%/}/${asset_name}"
+  if [[ ! -f "${runtime_path}" ]]; then
+    if [[ "${required}" == "1" ]]; then
+      printf 'required ONNX Runtime sidecar missing: %s\n' "${runtime_path}" >&2
+      exit 1
+    fi
+    return
+  fi
+
+  actual_sha="$(check_sha256_sidecar "${runtime_path}")"
+  bash scripts/build-onnxruntime-sidecar.sh --validate "${platform}" "${runtime_path}"
+  printf 'public ONNX Runtime sidecar ok: %s sha256=%s\n' "${asset_name}" "${actual_sha}"
+}
+
 version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next(pkg["version"] for pkg in data["packages"] if pkg["name"] == "ctx"))')"
 artifact="${artifact_dir%/}/${binary_name}"
-sha_file="${artifact}.sha256"
 version_file="${artifact}.version"
 
 if [[ ! -f "${artifact}" ]]; then
@@ -56,30 +133,7 @@ if [[ ! -f "${artifact}" ]]; then
   exit 1
 fi
 
-if [[ ! -s "${sha_file}" ]]; then
-  printf 'public CLI artifact SHA-256 sidecar missing or empty: %s\n' "${sha_file}" >&2
-  exit 1
-fi
-
-expected_sha="$(tr -d '[:space:]' < "${sha_file}")"
-if [[ ! "${expected_sha}" =~ ^[0-9a-fA-F]{64}$ ]]; then
-  printf 'public CLI artifact SHA-256 sidecar is not a digest: %s\n' "${sha_file}" >&2
-  exit 1
-fi
-
-if command -v sha256sum >/dev/null 2>&1; then
-  actual_sha="$(sha256sum "${artifact}" | awk '{ print $1 }')"
-else
-  actual_sha="$(shasum -a 256 "${artifact}" | awk '{ print $1 }')"
-fi
-
-actual_sha_lower="$(printf '%s' "${actual_sha}" | tr 'A-F' 'a-f')"
-expected_sha_lower="$(printf '%s' "${expected_sha}" | tr 'A-F' 'a-f')"
-if [[ "${actual_sha_lower}" != "${expected_sha_lower}" ]]; then
-  printf 'public CLI artifact checksum mismatch for %s: expected %s got %s\n' \
-    "${artifact}" "${expected_sha}" "${actual_sha}" >&2
-  exit 1
-fi
+actual_sha="$(check_sha256_sidecar "${artifact}")"
 
 if [[ ! -s "${version_file}" ]]; then
   printf 'public CLI artifact version sidecar missing or empty: %s\n' "${version_file}" >&2
@@ -137,5 +191,6 @@ case "${actual_version}" in
 esac
 
 bash scripts/check-release-binary-compat.sh "${platform}" "${artifact}"
+check_optional_runtime_asset
 
 printf 'public CLI artifact ok: %s sha256=%s\n' "${platform}" "${actual_sha}"

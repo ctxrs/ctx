@@ -127,22 +127,25 @@ uses local FastEmbed embeddings over v2 semantic documents: a transient metadata
 header plus chunked event semantic text. The header is embedded and hashed but
 not stored as plaintext in the sidecar. `--backend hybrid` blends lexical and
 semantic evidence with reciprocal-rank fusion; `--semantic-weight` controls the
-semantic contribution and defaults to `0.35`. Public reports name the model as
-`sentence-transformers/all-MiniLM-L6-v2`; the required local FastEmbed cache is
-the Qdrant ONNX artifact directory `models--Qdrant--all-MiniLM-L6-v2-onnx`.
-The local embedding backend is compiled only for targets where the bundled ONNX
-Runtime backend is supported. Current Linux x64 GNU and Linux ARM64 GNU public
-builds can use semantic embeddings when the cache already exists. Current macOS,
-Windows GNU, and FreeBSD public artifacts are lexical-safe builds: daemon
-maintenance and lexical search remain available, `hybrid` falls back to lexical,
-and explicit `semantic` reports a local unavailable/cache error instead of
-downloading or linking a model at runtime.
+semantic contribution and defaults to `0.35`. The production embedding model is
+`intfloat/multilingual-e5-small`, which produces 384-dimensional vectors. Its E5
+input contract prefixes semantic queries with `query: ` and indexed document
+chunks with `passage: `; ctx adds each prefix exactly once. The required local
+FastEmbed cache is the Hugging Face artifact directory
+`models--intfloat--multilingual-e5-small`. The model and prefix contract are part
+of the semantic sidecar model key, so pre-migration `all-MiniLM-L6-v2` vectors
+are not reused as E5 coverage.
+The local embedding backend requires a validated local ONNX Runtime backend for
+the installed platform. Builds without one stay lexical-safe: daemon
+maintenance and lexical search remain available, `hybrid` falls back to
+lexical, and explicit `semantic` reports a local unavailable/runtime/cache
+error instead of linking an unsupported backend.
 Semantic and hybrid searches read the coverage that is already present in the
-semantic sidecar; they do not perform foreground vector catch-up. They also
-require the local embedding model cache to already exist. If the cache is
-missing, hybrid falls back to lexical and explicit semantic search fails with an
-explicit local error instead of initializing or downloading a model during
-search. Explicit `semantic` also fails when filters or repeatable `--term`
+semantic sidecar; they do not perform foreground vector catch-up. If the local
+embedding model is not available to the daemon query service, hybrid falls back
+to lexical and explicit semantic search fails with an explicit local error
+instead of initializing or downloading a model during search. Explicit
+`semantic` also fails when filters or repeatable `--term`
 semantics cannot be honored by vector lookup, or when the installed local vector
 backend cannot safely scan the full sidecar. `hybrid` falls back to lexical in
 those cases and when semantic coverage is incomplete or dirty. Results still return

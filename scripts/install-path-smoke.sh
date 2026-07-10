@@ -125,6 +125,147 @@ metadata="${tmp_dir}/metadata.env"
   printf 'CTX_RELEASE_SHA256_linux_aarch64=%s\n' "${checksum_aarch64}"
 } > "${metadata}"
 
+runtime_stub="${tmp_dir}/ctx-onnxruntime-linux-x64.tar.gz"
+python3 - "${runtime_stub}" "${tmp_dir}" <<'PY'
+import io
+import os
+import tarfile
+import sys
+
+valid_path, root = sys.argv[1:]
+files = {
+    "LICENSE": b"smoke license\n",
+    "ThirdPartyNotices.txt": b"smoke notices\n",
+    "VERSION_NUMBER": b"1.27.0\n",
+    "GIT_COMMIT_ID": b"0123456789abcdef0123456789abcdef01234567\n",
+    "lib/libonnxruntime.so": b"smoke runtime bytes\n",
+}
+
+
+def add_entry(bundle, name, data=None, kind="file"):
+    info = tarfile.TarInfo(name)
+    info.mtime = 0
+    info.uid = info.gid = 0
+    info.uname = info.gname = "root"
+    if kind == "dir":
+        info.type = tarfile.DIRTYPE
+        info.mode = 0o755
+        bundle.addfile(info)
+    elif kind == "symlink":
+        info.type = tarfile.SYMTYPE
+        info.mode = 0o777
+        info.linkname = "/tmp/attacker"
+        bundle.addfile(info)
+    else:
+        info.mode = 0o755 if name.startswith("lib/") else 0o644
+        info.size = len(data)
+        bundle.addfile(info, io.BytesIO(data))
+
+
+def write_archive(path, mutation=None):
+    with tarfile.open(path, "w:gz", format=tarfile.PAX_FORMAT) as bundle:
+        add_entry(bundle, "lib/", kind="dir")
+        for name, data in files.items():
+            if mutation == "symlink" and name == "lib/libonnxruntime.so":
+                add_entry(bundle, name, kind="symlink")
+            else:
+                add_entry(bundle, name, data)
+        if mutation == "extra":
+            add_entry(bundle, "unexpected", b"extra")
+        elif mutation == "traversal":
+            add_entry(bundle, "../escape", b"escape")
+        elif mutation == "duplicate":
+            add_entry(bundle, "LICENSE", b"duplicate")
+
+
+write_archive(valid_path)
+for mutation in ("extra", "traversal", "duplicate", "symlink"):
+    write_archive(os.path.join(root, f"runtime-{mutation}.tar.gz"), mutation)
+PY
+runtime_checksum="$(sha256_file "${runtime_stub}")"
+metadata_runtime_missing_version="${tmp_dir}/metadata-runtime-missing-version.env"
+cp "${metadata}" "${metadata_runtime_missing_version}"
+{
+  printf 'CTX_RELEASE_ONNXRUNTIME_ARTIFACT_linux_x64=ctx-onnxruntime-linux-x64.tar.gz\n'
+  printf 'CTX_RELEASE_ONNXRUNTIME_SHA256_linux_x64=%s\n' "${runtime_checksum}"
+} >> "${metadata_runtime_missing_version}"
+if bash "${repo_root}/scripts/dev-install-from-metadata.sh" \
+  --metadata "${metadata_runtime_missing_version}" --platform linux-x64 --dry-run --no-setup \
+  > "${tmp_dir}/runtime-missing-version.out" 2>&1; then
+  printf 'runtime metadata without a version unexpectedly passed\n' >&2
+  exit 1
+fi
+grep -F 'metadata missing CTX_RELEASE_ONNXRUNTIME_VERSION' "${tmp_dir}/runtime-missing-version.out" >/dev/null
+
+metadata_runtime_wrong_version="${tmp_dir}/metadata-runtime-wrong-version.env"
+cp "${metadata_runtime_missing_version}" "${metadata_runtime_wrong_version}"
+printf 'CTX_RELEASE_ONNXRUNTIME_VERSION=1.26.0\n' >> "${metadata_runtime_wrong_version}"
+if bash "${repo_root}/scripts/dev-install-from-metadata.sh" \
+  --metadata "${metadata_runtime_wrong_version}" --platform linux-x64 --dry-run --no-setup \
+  > "${tmp_dir}/runtime-wrong-version.out" 2>&1; then
+  printf 'unsupported runtime metadata version unexpectedly passed\n' >&2
+  exit 1
+fi
+grep -F 'unsupported ONNX Runtime version 1.26.0; expected 1.27.0' "${tmp_dir}/runtime-wrong-version.out" >/dev/null
+
+metadata_runtime="${tmp_dir}/metadata-runtime.env"
+cp "${metadata_runtime_missing_version}" "${metadata_runtime}"
+printf 'CTX_RELEASE_ONNXRUNTIME_VERSION=1.27.0\n' >> "${metadata_runtime}"
+CURL_CA_BUNDLE="${tmp_dir}/cert.pem" HOME="${tmp_dir}/home-runtime-dry-run" \
+  bash "${repo_root}/scripts/dev-install-from-metadata.sh" \
+  --metadata "${metadata_runtime}" --platform linux-x64 --dry-run --no-setup \
+  > "${tmp_dir}/runtime-dry-run.out"
+grep -F 'onnxruntime: ' "${tmp_dir}/runtime-dry-run.out" | grep -F '/onnxruntime/1.27.0/linux-x64' >/dev/null
+
+runtime_home="${tmp_dir}/home-runtime-install"
+runtime_bin="${tmp_dir}/runtime-install-bin"
+runtime_dir="${tmp_dir}/runtime-install-root"
+mkdir -p "${runtime_home}"
+CURL_CA_BUNDLE="${tmp_dir}/cert.pem" HOME="${runtime_home}" PATH="/usr/bin:/bin" \
+  bash "${repo_root}/scripts/dev-install-from-metadata.sh" \
+    --metadata "${metadata_runtime}" --platform linux-x64 \
+    --bin-dir "${runtime_bin}" --runtime-dir "${runtime_dir}" \
+    --no-setup --no-skill --no-man --no-modify-path \
+    > "${tmp_dir}/runtime-install.out"
+runtime_install_path="${runtime_dir}/onnxruntime/1.27.0/linux-x64"
+test -f "${runtime_install_path}/lib/libonnxruntime.so"
+grep -Fx '1.27.0' "${runtime_install_path}/VERSION_NUMBER" >/dev/null
+grep -F '"manager": "ctx-explicit-metadata-installer"' "${runtime_bin}/ctx.install.json" >/dev/null
+grep -F '"metadata_trust": "explicit-unsigned"' "${runtime_install_path}/ctx-runtime-install.json" >/dev/null
+
+expect_runtime_rejected() {
+  local mutation="$1"
+  local archive="runtime-${mutation}.tar.gz"
+  local bad_metadata="${tmp_dir}/metadata-runtime-${mutation}.env"
+  local bad_checksum
+
+  bad_checksum="$(sha256_file "${tmp_dir}/${archive}")"
+  cp "${metadata}" "${bad_metadata}"
+  {
+    printf 'CTX_RELEASE_ONNXRUNTIME_VERSION=1.27.0\n'
+    printf 'CTX_RELEASE_ONNXRUNTIME_ARTIFACT_linux_x64=%s\n' "${archive}"
+    printf 'CTX_RELEASE_ONNXRUNTIME_SHA256_linux_x64=%s\n' "${bad_checksum}"
+  } >> "${bad_metadata}"
+  if CURL_CA_BUNDLE="${tmp_dir}/cert.pem" HOME="${tmp_dir}/home-bad-${mutation}" PATH="/usr/bin:/bin" \
+    bash "${repo_root}/scripts/dev-install-from-metadata.sh" \
+      --metadata "${bad_metadata}" --platform linux-x64 \
+      --bin-dir "${tmp_dir}/bad-bin-${mutation}" --runtime-dir "${tmp_dir}/bad-runtime-${mutation}" \
+      --no-setup --no-skill --no-man --no-modify-path \
+      > "${tmp_dir}/runtime-${mutation}.out" 2>&1; then
+    printf 'unsafe runtime archive unexpectedly installed: %s\n' "${mutation}" >&2
+    exit 1
+  fi
+}
+
+expect_runtime_rejected extra
+expect_runtime_rejected traversal
+expect_runtime_rejected duplicate
+expect_runtime_rejected symlink
+if grep -F -q 'zstd' "${repo_root}/scripts/dev-install-from-metadata.sh"; then
+  printf 'Unix explicit-metadata installer must not require zstd\n' >&2
+  exit 1
+fi
+
 base_env=(CURL_CA_BUNDLE="${tmp_dir}/cert.pem" CTX_INSTALL_NO_MAN=1)
 installer=(bash "${repo_root}/scripts/dev-install-from-metadata.sh" --metadata "${metadata}" --platform linux-x64)
 

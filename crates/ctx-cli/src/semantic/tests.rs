@@ -193,9 +193,33 @@ mod tests {
             "test-snapshot\n",
         )?;
         for file in SEMANTIC_REQUIRED_MODEL_FILES {
-            fs::write(snapshot.join(file), b"test")?;
+            let path = snapshot.join(file);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(path, b"test")?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn e5_embedding_text_uses_query_and_passage_prefixes_once() {
+        assert_eq!(
+            semantic_e5_query_text("find a daemon failure"),
+            "query: find a daemon failure"
+        );
+        assert_eq!(
+            semantic_e5_query_text("  query: find a daemon failure"),
+            "query: find a daemon failure"
+        );
+        assert_eq!(
+            semantic_e5_passage_text("daemon failed to restart"),
+            "passage: daemon failed to restart"
+        );
+        assert_eq!(
+            semantic_e5_passage_text("  passage: daemon failed to restart"),
+            "passage: daemon failed to restart"
+        );
     }
 
     #[cfg(ctx_semantic_fastembed)]
@@ -851,6 +875,56 @@ mod tests {
     }
 
     #[test]
+    fn opening_vector_store_removes_old_model_rows_and_resets_cursors() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let vector_path = temp.path().join("vectors.sqlite");
+        let old_model_key = "fastembed:all-MiniLM-L6-v2:old";
+        {
+            let store = SemanticVectorStore::open(&vector_path)?;
+            store.conn.execute(
+                r#"
+                INSERT INTO embedding_models
+                    (model_key, backend, model_id, dimensions, distance, normalized, created_at_ms)
+                VALUES (?1, 'fastembed', 'sentence-transformers/all-MiniLM-L6-v2', 384, 'cosine', 1, 1)
+                "#,
+                [old_model_key],
+            )?;
+            store.conn.execute(
+                r#"
+                INSERT INTO event_embedding_chunks
+                    (event_id, model_key, event_seq, chunk_index, chunk_count,
+                     source_text_sha256, chunk_text_sha256, start_char, end_char,
+                     dimensions, embedding_f32, embedded_at_ms)
+                VALUES (?1, ?2, 1, 0, 1, 'source', 'chunk', 0, 5, 384, ?3, 1)
+                "#,
+                params![
+                    Uuid::new_v4().to_string(),
+                    old_model_key,
+                    serialize_f32_blob(&test_embedding(1.0, 0.0))
+                ],
+            )?;
+            store.set_backfill_cursor(Some((123, 456)))?;
+        }
+
+        let store = SemanticVectorStore::open(&vector_path)?;
+        let old_rows = store.conn.query_row(
+            "SELECT COUNT(*) FROM event_embedding_chunks WHERE model_key = ?1",
+            [old_model_key],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let old_models = store.conn.query_row(
+            "SELECT COUNT(*) FROM embedding_models WHERE model_key = ?1",
+            [old_model_key],
+            |row| row.get::<_, i64>(0),
+        )?;
+
+        assert_eq!(old_rows, 0);
+        assert_eq!(old_models, 0);
+        assert_eq!(store.backfill_cursor()?, None);
+        Ok(())
+    }
+
+    #[test]
     fn prune_ineligible_events_is_bounded_and_advances_cursor() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let docs = write_searchable_store(temp.path(), SEMANTIC_PRUNE_EVENTS_PER_PASS + 1)?;
@@ -1194,7 +1268,66 @@ mod unsupported_platform_tests {
 mod query_service_transport_tests {
     use super::*;
 
+    #[test]
+    fn daemon_query_activity_prevents_idle_shutdown_during_a_request() {
+        let activity = Arc::new(DaemonQueryActivity::new());
+        let request = activity.begin_request().expect("request accepted");
+        let (active, generation) = activity.snapshot();
+
+        assert_eq!(active, 1);
+        assert!(!activity.try_stop_accepting_if_idle(generation));
+
+        drop(request);
+        let (active, completed_generation) = activity.snapshot();
+        assert_eq!(active, 0);
+        assert_ne!(completed_generation, generation);
+        assert!(activity.try_stop_accepting_if_idle(completed_generation));
+        assert!(activity.begin_request().is_none());
+    }
+
+    #[test]
+    fn observing_query_activity_resets_an_expired_idle_window() {
+        let activity = Arc::new(DaemonQueryActivity::new());
+        let request = activity.begin_request().expect("request accepted");
+        let mut idle_since = Some(Instant::now() - StdDuration::from_secs(5));
+        let mut observed_generation = 0;
+
+        observe_daemon_query_activity(
+            Some(activity.as_ref()),
+            &mut idle_since,
+            &mut observed_generation,
+        );
+
+        assert!(idle_since.is_none());
+        assert!(!daemon_can_begin_idle_shutdown(
+            Some(activity.as_ref()),
+            observed_generation
+        ));
+        drop(request);
+        observe_daemon_query_activity(
+            Some(activity.as_ref()),
+            &mut idle_since,
+            &mut observed_generation,
+        );
+        assert!(idle_since.is_none());
+    }
+
     #[cfg(unix)]
+    #[test]
+    fn daemon_query_socket_uses_short_private_fallback_for_long_data_root() -> Result<()> {
+        let data_root = PathBuf::from("/tmp").join("x".repeat(160));
+        let (listener, path, runtime_dir) = bind_daemon_query_listener(&data_root)?;
+        assert!(path.as_os_str().as_bytes().len() <= DAEMON_QUERY_SOCKET_PATH_SAFE_BYTES);
+        assert_ne!(path, daemon_query_socket_path(&data_root));
+        let runtime_dir = runtime_dir.expect("long path should use a private runtime dir");
+        assert_eq!(path.parent(), Some(runtime_dir.as_path()));
+
+        drop(listener);
+        fs::remove_file(&path)?;
+        fs::remove_dir(&runtime_dir)?;
+        Ok(())
+    }
+
     #[test]
     fn daemon_query_request_reader_stops_at_newline() -> Result<()> {
         let mut cursor = std::io::Cursor::new(b"{\"op\":\"ping\"}\nignored".to_vec());
@@ -1205,7 +1338,6 @@ mod query_service_transport_tests {
         Ok(())
     }
 
-    #[cfg(unix)]
     #[test]
     fn daemon_query_request_reader_rejects_oversized_request() {
         let mut cursor = std::io::Cursor::new(b"abcdef".to_vec());
@@ -1237,6 +1369,49 @@ mod query_service_transport_tests {
         Ok(())
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn daemon_query_endpoint_roundtrips_windows_named_pipe_metadata() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let pipe_name = daemon_query_pipe_name();
+        assert!(windows_named_pipe_name_is_local(&pipe_name));
+        let endpoint = DaemonQueryEndpoint::WindowsNamedPipe {
+            pipe_name: pipe_name.clone(),
+            token: "0123456789abcdef0123456789abcdef".to_owned(),
+        };
+
+        write_daemon_query_endpoint(temp.path(), &endpoint)?;
+        let loaded = read_daemon_query_endpoint(temp.path())?.expect("endpoint");
+
+        match loaded {
+            DaemonQueryEndpoint::WindowsNamedPipe {
+                pipe_name: loaded_pipe_name,
+                token,
+            } => {
+                assert_eq!(loaded_pipe_name, pipe_name);
+                assert_eq!(token, "0123456789abcdef0123456789abcdef");
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn daemon_query_endpoint_rejects_nonlocal_windows_pipe_name() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        create_private_dir_all(&daemon_root_path(temp.path()))?;
+        let endpoint = compact_json(json!({
+            "schema_version": 1,
+            "transport": "windows_named_pipe",
+            "pipe_name": r"\\server\pipe\ctx-daemon-query-0123456789abcdef0123456789abcdef",
+            "token": "0123456789abcdef0123456789abcdef",
+        }));
+        write_private_json_file(&daemon_query_endpoint_path(temp.path()), &endpoint)?;
+
+        assert!(read_daemon_query_endpoint(temp.path())?.is_none());
+        Ok(())
+    }
+
     #[test]
     fn daemon_query_endpoint_rejects_short_tokens() -> Result<()> {
         let temp = tempfile::tempdir()?;
@@ -1253,6 +1428,11 @@ mod query_service_transport_tests {
                     .to_string_lossy()
                     .into_owned(),
             );
+        }
+        #[cfg(windows)]
+        {
+            endpoint["transport"] = Value::String("windows_named_pipe".to_owned());
+            endpoint["pipe_name"] = Value::String(daemon_query_pipe_name());
         }
         write_private_json_file(&daemon_query_endpoint_path(temp.path()), &endpoint)?;
 
@@ -1279,7 +1459,11 @@ mod fastembed_policy_tests {
             "test-snapshot\n",
         )?;
         for file in SEMANTIC_REQUIRED_MODEL_FILES {
-            fs::write(snapshot.join(file), b"test")?;
+            let path = snapshot.join(file);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(path, b"test")?;
         }
         Ok(())
     }

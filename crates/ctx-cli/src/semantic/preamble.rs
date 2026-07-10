@@ -13,7 +13,10 @@ use std::io::Read;
 #[cfg(unix)]
 use std::net::Shutdown;
 #[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::{
+    ffi::OsStrExt,
+    fs::{OpenOptionsExt, PermissionsExt},
+};
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 #[cfg(ctx_sqlite_vec)]
@@ -37,7 +40,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use ctx_history_core::{database_path, utc_now};
+use ctx_history_core::{database_path, default_data_root, utc_now};
 use ctx_history_store::{EventEmbeddingDocument, Store};
 
 use crate::commands::{
@@ -56,17 +59,20 @@ use crate::{
 };
 
 const SEMANTIC_BACKEND: &str = "fastembed";
-const SEMANTIC_MODEL_KEY: &str = "fastembed:all-MiniLM-L6-v2:semantic-lite-turn-1200-200-v2";
-const SEMANTIC_MODEL_ID: &str = "sentence-transformers/all-MiniLM-L6-v2";
-const SEMANTIC_HF_MODEL_CACHE_DIR: &str = "models--Qdrant--all-MiniLM-L6-v2-onnx";
+const SEMANTIC_MODEL_KEY: &str =
+    "fastembed:intfloat-multilingual-e5-small:e5-query-passage:semantic-lite-turn-1200-200-v3";
+const SEMANTIC_MODEL_ID: &str = "intfloat/multilingual-e5-small";
+const SEMANTIC_HF_MODEL_CACHE_DIR: &str = "models--intfloat--multilingual-e5-small";
 const SEMANTIC_REQUIRED_MODEL_FILES: &[&str] = &[
-    "model.onnx",
+    "onnx/model.onnx",
     "tokenizer.json",
     "config.json",
     "special_tokens_map.json",
     "tokenizer_config.json",
 ];
 const SEMANTIC_DIMENSIONS: usize = 384;
+const SEMANTIC_PASSAGE_PREFIX: &str = "passage: ";
+const SEMANTIC_QUERY_PREFIX: &str = "query: ";
 const SEMANTIC_SEARCH_CANDIDATES: usize = 200;
 const SEMANTIC_SOFT_FILTER_SEARCH_CANDIDATES: usize = 1_000;
 const SEMANTIC_CHUNK_TARGET_CHARS: usize = 1_200;

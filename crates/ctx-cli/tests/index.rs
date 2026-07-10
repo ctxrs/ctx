@@ -3,19 +3,21 @@ mod support;
 use support::*;
 
 fn write_fake_semantic_model_cache(cache_root: &Path) {
-    let model_root = cache_root.join("models--Qdrant--all-MiniLM-L6-v2-onnx");
+    let model_root = cache_root.join("models--intfloat--multilingual-e5-small");
     let snapshot = model_root.join("snapshots").join("test-snapshot");
     fs::create_dir_all(model_root.join("refs")).unwrap();
     fs::create_dir_all(&snapshot).unwrap();
     fs::write(model_root.join("refs").join("main"), "test-snapshot\n").unwrap();
     for file in [
-        "model.onnx",
+        "onnx/model.onnx",
         "tokenizer.json",
         "config.json",
         "special_tokens_map.json",
         "tokenizer_config.json",
     ] {
-        fs::write(snapshot.join(file), "x").unwrap();
+        let path = snapshot.join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "x").unwrap();
     }
 }
 

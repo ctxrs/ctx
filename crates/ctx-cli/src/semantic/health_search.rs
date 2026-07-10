@@ -365,6 +365,7 @@ impl SemanticEmbedPolicy {
 
 #[cfg(ctx_semantic_fastembed)]
 fn new_semantic_embedder(cache_dir: &Path) -> Result<SemanticEmbedder> {
+    let _runtime = ensure_semantic_onnxruntime_loaded(cache_dir)?;
     let snapshot = semantic_model_cache_snapshot_dir(cache_dir).ok_or_else(|| {
         anyhow!(
             "semantic model cache is incomplete at {}",
@@ -372,7 +373,7 @@ fn new_semantic_embedder(cache_dir: &Path) -> Result<SemanticEmbedder> {
         )
     })?;
     let policy = semantic_embed_policy();
-    let model_info = TextEmbedding::get_model_info(&EmbeddingModel::AllMiniLML6V2)?;
+    let model_info = TextEmbedding::get_model_info(&EmbeddingModel::MultilingualE5Small)?;
     let tokenizer_files = TokenizerFiles {
         tokenizer_file: fs::read(snapshot.join("tokenizer.json"))
             .with_context(|| format!("read semantic tokenizer.json from {}", snapshot.display()))?,
@@ -406,11 +407,11 @@ fn new_semantic_embedder(cache_dir: &Path) -> Result<SemanticEmbedder> {
         tokenizer_files,
     )
     .with_pooling(
-        TextEmbedding::get_default_pooling_method(&EmbeddingModel::AllMiniLML6V2)
+        TextEmbedding::get_default_pooling_method(&EmbeddingModel::MultilingualE5Small)
             .unwrap_or(Pooling::Mean),
     )
     .with_quantization(TextEmbedding::get_quantization_mode(
-        &EmbeddingModel::AllMiniLML6V2,
+        &EmbeddingModel::MultilingualE5Small,
     ));
     user_model.output_key = model_info.output_key.clone();
     let options = InitOptionsUserDefined::new().with_intra_threads(policy.threads);
@@ -425,9 +426,10 @@ fn new_semantic_embedder(cache_dir: &Path) -> Result<SemanticEmbedder> {
 
 #[cfg(ctx_semantic_fastembed)]
 fn acquire_semantic_embedder(cache_dir: &Path) -> Result<SemanticEmbedder> {
+    let _runtime = ensure_semantic_onnxruntime_loaded(cache_dir)?;
     let _cache_env = FastembedCacheEnvGuard::new(cache_dir);
     let policy = semantic_embed_policy();
-    let options = InitOptions::new(EmbeddingModel::AllMiniLML6V2)
+    let options = InitOptions::new(EmbeddingModel::MultilingualE5Small)
         .with_cache_dir(cache_dir.to_path_buf())
         .with_show_download_progress(false)
         .with_intra_threads(policy.threads);

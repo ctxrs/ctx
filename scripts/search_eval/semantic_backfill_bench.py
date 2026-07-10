@@ -29,6 +29,14 @@ EMBEDDING_MODE_CHUNKED = "chunked"
 SOURCE_MODE_EVENT_SEARCH_PREVIEW = "event_search_preview"
 SOURCE_MODE_SEMANTIC_PAYLOAD = "semantic_payload"
 SOURCE_TEXT_MAX_CHARS = 64 * 1024
+DEFAULT_MODEL = "intfloat/multilingual-e5-small"
+DEFAULT_MODEL_KEY = (
+    "fastembed:intfloat-multilingual-e5-small:"
+    "e5-query-passage:semantic-lite-turn-1200-200-v3"
+)
+DEFAULT_DIMENSIONS = 384
+E5_QUERY_PREFIX = "query: "
+E5_PASSAGE_PREFIX = "passage: "
 
 
 @dataclass(frozen=True)
@@ -53,6 +61,19 @@ class TextChunk:
 
 def sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def semantic_prefixed_text(prefix: str, text: str) -> str:
+    text = text.lstrip()
+    return text if text.startswith(prefix) else f"{prefix}{text}"
+
+
+def semantic_query_text(text: str) -> str:
+    return semantic_prefixed_text(E5_QUERY_PREFIX, text)
+
+
+def semantic_passage_text(text: str) -> str:
+    return semantic_prefixed_text(E5_PASSAGE_PREFIX, text)
 
 
 def vector_blob(value) -> bytes:
@@ -589,12 +610,12 @@ def main():
     parser.add_argument("--work-db", required=True)
     parser.add_argument("--sidecar", required=True)
     parser.add_argument("--metrics", required=True)
-    parser.add_argument("--model", default="sentence-transformers/all-MiniLM-L6-v2")
+    parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument(
         "--model-key",
-        default="fastembed:all-MiniLM-L6-v2:semantic-payload-chunk-1200-200-v2",
+        default=DEFAULT_MODEL_KEY,
     )
-    parser.add_argument("--dimensions", type=int, default=384)
+    parser.add_argument("--dimensions", type=int, default=DEFAULT_DIMENSIONS)
     parser.add_argument("--cache-dir", default="/tmp/fastembed_cache")
     parser.add_argument("--fetch-batch", type=int, default=2048)
     parser.add_argument("--embed-batch", type=int, default=256)
@@ -741,10 +762,10 @@ def main():
                     args.chunk_overlap_chars,
                 )
             ]
-            texts = [chunk.text for chunk in text_units]
+            texts = [semantic_passage_text(chunk.text) for chunk in text_units]
         else:
             text_units = batch
-            texts = [doc.text for doc in batch]
+            texts = [semantic_passage_text(doc.text) for doc in batch]
 
         embed_started = time.perf_counter()
         embeddings = list(model.embed(texts, batch_size=args.embed_batch))

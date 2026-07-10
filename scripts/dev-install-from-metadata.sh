@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+expected_onnxruntime_version="1.27.0"
+
 usage() {
   cat <<'USAGE'
-usage: scripts/dev-install-from-metadata.sh --metadata PATH_OR_URL [--platform PLATFORM] [--bin-dir DIR] [--no-modify-path] [--no-setup] [--no-skill] [--skill-agent AGENT] [--all-skill-agents] [--no-man]
+usage: scripts/dev-install-from-metadata.sh --metadata PATH_OR_URL [--artifact-dir DIR] [--platform PLATFORM] [--bin-dir DIR] [--runtime-dir DIR] [--no-runtime] [--no-modify-path] [--no-setup] [--no-skill] [--skill-agent AGENT] [--all-skill-agents] [--no-man]
 
 Development/CI installer for explicit ctx release metadata.
 
@@ -20,11 +22,17 @@ detached metadata signatures before trusting artifact URLs or checksums.
 
 Options:
   --metadata PATH_OR_URL  Required. Local metadata file or HTTPS URL.
+  --artifact-dir DIR      Read checksum-pinned artifacts from this local
+                         directory instead of downloading them. Development
+                         and native release smoke use only.
   --platform PLATFORM    linux-x64, linux-aarch64, macos-arm64, macos-x64,
                          or freebsd-x64.
                          Defaults to the current host when it can be detected.
   --bin-dir DIR          Install directory. Defaults to
                          ${CTX_BIN_DIR:-$HOME/.local/bin}.
+  --runtime-dir DIR      ONNX Runtime sidecar install directory. Defaults to
+                         ${CTX_RUNTIME_DIR:-$HOME/.ctx/runtime}.
+  --no-runtime           Do not install optional ONNX Runtime sidecar metadata.
   --no-modify-path       Do not update shell startup files when the install
                          directory is not on PATH.
   --no-setup             Install only; do not install the skill or run ctx setup
@@ -99,6 +107,22 @@ download_file() {
   fi
 
   fail "curl or wget is required for HTTPS downloads"
+}
+
+fetch_artifact() {
+  local url="$1"
+  local name="$2"
+  local dest="$3"
+  local source
+
+  if [[ -z "${artifact_dir}" ]]; then
+    download_file "${url}" "${dest}"
+    return
+  fi
+  source="${artifact_dir%/}/${name}"
+  [[ -f "${source}" && ! -L "${source}" ]] || \
+    fail "local artifact is missing or not a regular non-symlink file: ${source}"
+  cp "${source}" "${dest}"
 }
 
 read_metadata_source() {
@@ -183,6 +207,10 @@ json_escape() {
 
 shell_double_quote_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/`/\\`/g; s/\$/\\$/g'
+}
+
+runtime_manifest_escape() {
+  json_escape "$1"
 }
 
 path_contains_dir() {
@@ -381,7 +409,8 @@ write_install_marker() {
   cat > "${marker_path}.$$" <<EOF
 {
   "schema_version": 1,
-  "manager": "ctx-hosted-installer",
+  "manager": "ctx-explicit-metadata-installer",
+  "metadata_trust": "explicit-unsigned",
   "install_path": "$(json_escape "${install_path}")",
   "platform": "$(json_escape "${platform}")",
   "channel": "$(json_escape "${channel}")",
@@ -397,14 +426,142 @@ EOF
   mv "${marker_path}.$$" "${marker_path}"
 }
 
+extract_runtime_asset() {
+  local archive="$1"
+  local dest="$2"
+  local name="$3"
+  local runtime_platform="$4"
+  local runtime_version="$5"
+
+  [[ "${name}" == *.tar.gz ]] || fail "unsupported ONNX Runtime archive format for ${runtime_platform}: ${name}"
+  command -v python3 >/dev/null 2>&1 || fail "python3 is required to safely install ONNX Runtime"
+  mkdir -p "${dest}"
+  python3 -I - "${archive}" "${dest}" "${runtime_platform}" "${runtime_version}" <<'PY'
+import os
+import posixpath
+import shutil
+import sys
+import tarfile
+
+archive, destination, platform, version = sys.argv[1:]
+library = "libonnxruntime.dylib" if platform.startswith("macos-") else "libonnxruntime.so"
+expected_files = {
+    "LICENSE",
+    "ThirdPartyNotices.txt",
+    "VERSION_NUMBER",
+    "GIT_COMMIT_ID",
+    f"lib/{library}",
+}
+expected_entries = expected_files | {"lib"}
+members = {}
+total_size = 0
+with tarfile.open(archive, "r:gz") as bundle:
+    for member in bundle.getmembers():
+        raw = member.name
+        canonical = posixpath.normpath(raw.rstrip("/"))
+        expected_raw = canonical
+        if (
+            not raw
+            or "\\" in raw
+            or raw.startswith("/")
+            or canonical in ("", ".", "..")
+            or canonical.startswith("../")
+            or raw != expected_raw
+        ):
+            raise SystemExit(f"unsafe or non-canonical runtime archive path: {raw!r}")
+        if canonical in members:
+            raise SystemExit(f"duplicate runtime archive entry: {canonical}")
+        if canonical not in expected_entries:
+            raise SystemExit(f"unexpected runtime archive entry: {canonical}")
+        if member.mode & 0o7000:
+            raise SystemExit(f"unsafe permission bits on runtime archive entry: {canonical}")
+        if canonical == "lib":
+            if not member.isdir():
+                raise SystemExit("runtime lib entry is not a directory")
+        elif not member.isfile():
+            raise SystemExit(f"runtime archive entry is not a regular file: {canonical}")
+        total_size += member.size
+        if total_size > 1024 * 1024 * 1024:
+            raise SystemExit("runtime archive expands beyond the 1 GiB safety limit")
+        members[canonical] = member
+    if set(members) != expected_entries:
+        missing = sorted(expected_entries - set(members))
+        raise SystemExit("runtime archive entries do not exactly match the expected layout; missing: " + ", ".join(missing))
+
+    version_file = bundle.extractfile(members["VERSION_NUMBER"])
+    if version_file is None or version_file.read() != (version + "\n").encode():
+        raise SystemExit(f"runtime VERSION_NUMBER is not exactly {version}")
+
+    os.makedirs(os.path.join(destination, "lib"), mode=0o755, exist_ok=True)
+    for entry_name in sorted(expected_files):
+        source = bundle.extractfile(members[entry_name])
+        if source is None:
+            raise SystemExit(f"could not read runtime archive entry: {entry_name}")
+        target = os.path.join(destination, *entry_name.split("/"))
+        with source, open(target, "wb") as output:
+            shutil.copyfileobj(source, output)
+        os.chmod(target, 0o755 if entry_name.startswith("lib/") else 0o644)
+PY
+}
+
+install_runtime_asset() {
+  local artifact_name="$1"
+  local checksum_value="$2"
+  local runtime_version="$3"
+  local artifact_url runtime_download actual_runtime_checksum runtime_parent runtime_path tmp_runtime_path manifest_path installed_at
+
+  validate_safe_value "ONNX Runtime artifact name" "${artifact_name}"
+  [[ "${checksum_value}" =~ ^[0-9a-fA-F]{64}$ ]] || fail "checksum for ONNX Runtime ${platform} is not a SHA-256 hex digest"
+  [[ "${checksum_value}" != "0000000000000000000000000000000000000000000000000000000000000000" ]] || fail "checksum for ONNX Runtime ${platform} is a placeholder"
+  test -n "${runtime_dir}" || fail "--runtime-dir cannot be empty when ONNX Runtime metadata is present"
+
+  artifact_url="${base_url%/}/${artifact_name}"
+  runtime_download="${tmp_dir}/${artifact_name}"
+  fetch_artifact "${artifact_url}" "${artifact_name}" "${runtime_download}"
+  actual_runtime_checksum="$(sha256_file "${runtime_download}")"
+  if [[ "$(lowercase "${actual_runtime_checksum}")" != "$(lowercase "${checksum_value}")" ]]; then
+    fail "checksum mismatch for ${artifact_name}: expected ${checksum_value}, got ${actual_runtime_checksum}"
+  fi
+
+  runtime_parent="${runtime_dir%/}/onnxruntime/${runtime_version}"
+  runtime_path="${runtime_parent}/${platform}"
+  tmp_runtime_path="${runtime_path}.tmp.$$"
+  rm -rf "${tmp_runtime_path}"
+  mkdir -p "${runtime_parent}"
+  extract_runtime_asset "${runtime_download}" "${tmp_runtime_path}" "${artifact_name}" "${platform}" "${runtime_version}"
+  rm -rf "${runtime_path}"
+  mv "${tmp_runtime_path}" "${runtime_path}"
+
+  manifest_path="${runtime_path}/ctx-runtime-install.json"
+  installed_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  cat > "${manifest_path}.tmp" <<EOF
+{
+  "schema_version": 1,
+  "manager": "ctx-explicit-metadata-installer",
+  "metadata_trust": "explicit-unsigned",
+  "runtime": "onnxruntime",
+  "platform": "$(runtime_manifest_escape "${platform}")",
+  "version": "$(runtime_manifest_escape "${runtime_version}")",
+  "sha256": "$(runtime_manifest_escape "${actual_runtime_checksum}")",
+  "artifact_url": "$(runtime_manifest_escape "${artifact_url}")",
+  "installed_at": "$(runtime_manifest_escape "${installed_at}")"
+}
+EOF
+  mv "${manifest_path}.tmp" "${manifest_path}"
+  printf 'Installed ONNX Runtime sidecar: %s\n' "${runtime_path}"
+}
+
 metadata_source=""
+artifact_dir=""
 platform=""
 bin_dir="${CTX_BIN_DIR:-${HOME:-}/.local/bin}"
+runtime_dir="${CTX_RUNTIME_DIR:-${HOME:-}/.ctx/runtime}"
 man_dir="${CTX_MAN_DIR:-${HOME:-}/.local/share/man/man1}"
 dry_run=0
 modify_path=1
 run_setup=1
 run_skill=1
+install_runtime=1
 no_skill_requested=0
 explicit_skill_request=0
 all_skill_agents=0
@@ -417,6 +574,10 @@ while (($# > 0)); do
       shift
       metadata_source="${1:-}"
       ;;
+    --artifact-dir)
+      shift
+      artifact_dir="${1:-}"
+      ;;
     --platform)
       shift
       platform="${1:-}"
@@ -424,6 +585,13 @@ while (($# > 0)); do
     --bin-dir)
       shift
       bin_dir="${1:-}"
+      ;;
+    --runtime-dir)
+      shift
+      runtime_dir="${1:-}"
+      ;;
+    --no-runtime)
+      install_runtime=0
       ;;
     --no-modify-path)
       modify_path=0
@@ -469,6 +637,10 @@ done
 test -n "${metadata_source}" || fail "--metadata is required"
 test -n "${bin_dir}" || fail "--bin-dir cannot be empty"
 test -n "${man_dir}" || fail "--man-dir cannot be empty"
+if [[ -n "${artifact_dir}" ]]; then
+  [[ -d "${artifact_dir}" ]] || fail "--artifact-dir is not a directory: ${artifact_dir}"
+  artifact_dir="$(cd "${artifact_dir}" && pwd -P)"
+fi
 
 if [[ -z "${platform}" ]]; then
   platform="$(detect_platform)" || fail "cannot detect this host platform; pass --platform"
@@ -493,18 +665,28 @@ base_url="$(metadata_value "${metadata_file}" CTX_RELEASE_BASE_URL)" || fail "me
 platform_key="${platform//-/_}"
 artifact="$(metadata_value "${metadata_file}" "CTX_RELEASE_ARTIFACT_${platform_key}")" || fail "metadata missing artifact for ${platform}"
 checksum="$(metadata_value "${metadata_file}" "CTX_RELEASE_SHA256_${platform_key}")" || fail "metadata missing checksum for ${platform}"
+runtime_artifact="$(metadata_value_optional "${metadata_file}" "CTX_RELEASE_ONNXRUNTIME_ARTIFACT_${platform_key}")"
+runtime_checksum="$(metadata_value_optional "${metadata_file}" "CTX_RELEASE_ONNXRUNTIME_SHA256_${platform_key}")"
+runtime_version="$(metadata_value_optional "${metadata_file}" CTX_RELEASE_ONNXRUNTIME_VERSION)"
 channel="$(metadata_value_optional "${metadata_file}" CTX_RELEASE_CHANNEL)"
 source_commit="$(metadata_value_optional "${metadata_file}" CTX_RELEASE_SOURCE_COMMIT)"
 published_at="$(metadata_value_optional "${metadata_file}" CTX_RELEASE_PUBLISHED_AT)"
 if [[ -z "${channel}" ]]; then
   channel="stable"
 fi
-
 [[ "${schema_version}" == "1" ]] || fail "unsupported metadata schema: ${schema_version}"
 [[ "${base_url}" == https://* ]] || fail "metadata base URL must be HTTPS"
 [[ "${checksum}" =~ ^[0-9a-fA-F]{64}$ ]] || fail "checksum for ${platform} is not a SHA-256 hex digest"
 [[ "${checksum}" != "0000000000000000000000000000000000000000000000000000000000000000" ]] || fail "checksum for ${platform} is a placeholder"
 validate_safe_value "artifact name" "${artifact}"
+if [[ -n "${runtime_artifact}" || -n "${runtime_checksum}" ]]; then
+  [[ -n "${runtime_artifact}" ]] || fail "metadata missing ONNX Runtime artifact for ${platform}"
+  [[ -n "${runtime_checksum}" ]] || fail "metadata missing ONNX Runtime checksum for ${platform}"
+  [[ -n "${runtime_version}" ]] || fail "metadata missing CTX_RELEASE_ONNXRUNTIME_VERSION"
+  [[ "${runtime_version}" == "${expected_onnxruntime_version}" ]] || \
+    fail "unsupported ONNX Runtime version ${runtime_version}; expected ${expected_onnxruntime_version}"
+  validate_safe_value "ONNX Runtime artifact name" "${runtime_artifact}"
+fi
 
 artifact_url="${base_url%/}/${artifact}"
 download_path="${tmp_dir}/${artifact}"
@@ -526,6 +708,10 @@ fi
 
 if [[ "${CTX_INSTALL_NO_SETUP:-0}" == "1" ]]; then
   run_setup=0
+fi
+
+if [[ "${CTX_INSTALL_NO_RUNTIME:-0}" == "1" ]]; then
+  install_runtime=0
 fi
 
 if [[ "${CTX_INSTALL_ALL_SKILL_AGENTS:-0}" == "1" ]]; then
@@ -569,6 +755,13 @@ else
   printf 'Installing ctx %s (%s)\n' "${version}" "${platform}"
 fi
 printf '  binary: %s\n' "${install_path}"
+if ((install_runtime)) && [[ -n "${runtime_artifact}" ]]; then
+  printf '  onnxruntime: %s\n' "${runtime_dir%/}/onnxruntime/${runtime_version}/${platform}"
+elif [[ -n "${runtime_artifact}" ]]; then
+  printf '  onnxruntime: skipped\n'
+else
+  printf '  onnxruntime: not present in metadata\n'
+fi
 if ((run_skill)); then
   if ((all_skill_agents)); then
     printf '  skill: all supported agents\n'
@@ -591,7 +784,7 @@ if ((dry_run)); then
   exit 0
 fi
 
-download_file "${artifact_url}" "${download_path}"
+fetch_artifact "${artifact_url}" "${artifact}" "${download_path}"
 actual_checksum="$(sha256_file "${download_path}")"
 if [[ "$(lowercase "${actual_checksum}")" != "$(lowercase "${checksum}")" ]]; then
   fail "checksum mismatch for ${artifact}: expected ${checksum}, got ${actual_checksum}"
@@ -601,6 +794,10 @@ mkdir -p "${bin_dir}"
 install -m 0755 "${download_path}" "${install_path}"
 
 write_install_marker "${install_path}.install.json" "${metadata_source}" "${source_commit}" "${published_at}"
+
+if ((install_runtime)) && [[ -n "${runtime_artifact}" ]]; then
+  install_runtime_asset "${runtime_artifact}" "${runtime_checksum}" "${runtime_version}"
+fi
 
 if ((install_man)); then
   mkdir -p "${man_dir}"

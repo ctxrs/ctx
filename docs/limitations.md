@@ -44,11 +44,14 @@ shipped.
   not a claim of semantic understanding.
 - Empty or punctuation-only search is invalid. Broad valid queries can still
   return metadata-driven matches.
-- Semantic embeddings depend on a compatible local ONNX Runtime backend.
-  Linux x64 GNU and Linux ARM64 GNU public builds can use the local FastEmbed
-  backend when the model cache already exists. Current macOS, Windows GNU, and
-  FreeBSD public artifacts remain lexical-safe and report semantic unavailable
-  rather than linking an unsupported backend.
+- Semantic embeddings depend on a compatible local ONNX Runtime backend and
+  the opt-in ctx daemon query service. Release/platform combinations without a
+  validated local runtime remain lexical-safe: `hybrid` falls back to lexical
+  and explicit `semantic` reports a local unavailable/runtime error instead of
+  linking an unsupported backend.
+- The ctx macOS CLI targets macOS 13, but ONNX Runtime 1.27 follows its upstream
+  macOS 14 minimum. On macOS 13, daemon-backed lexical search remains available
+  while semantic search is unavailable.
 
 ## Retrieval Semantics
 

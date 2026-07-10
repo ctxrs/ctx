@@ -356,11 +356,29 @@ fn semantic_embedded_document_text(doc: &EventEmbeddingDocument, body: &str) -> 
 
 fn semantic_embedded_chunk_text(doc: &EventEmbeddingDocument, body: &str) -> String {
     let header = semantic_document_header(doc);
-    if header.is_empty() {
+    let text = if header.is_empty() {
         body.to_owned()
     } else {
         format!("{header}\n\n{body}")
+    };
+    semantic_e5_passage_text(&text)
+}
+
+fn semantic_e5_prefixed_text(prefix: &str, text: &str) -> String {
+    let text = text.trim_start();
+    if text.starts_with(prefix) {
+        text.to_owned()
+    } else {
+        format!("{prefix}{text}")
     }
+}
+
+fn semantic_e5_passage_text(text: &str) -> String {
+    semantic_e5_prefixed_text(SEMANTIC_PASSAGE_PREFIX, text)
+}
+
+fn semantic_e5_query_text(text: &str) -> String {
+    semantic_e5_prefixed_text(SEMANTIC_QUERY_PREFIX, text)
 }
 
 fn semantic_document_header(doc: &EventEmbeddingDocument) -> String {
