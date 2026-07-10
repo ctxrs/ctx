@@ -2,6 +2,7 @@ include!("semantic/preamble.rs");
 include!("semantic/vector_store_schema.rs");
 include!("semantic/vector_store_state.rs");
 include!("semantic/vector_store_search.rs");
+include!("semantic/ort_runtime.rs");
 include!("semantic/paths_status.rs");
 include!("semantic/query_service_transport.rs");
 include!("semantic/daemon.rs");

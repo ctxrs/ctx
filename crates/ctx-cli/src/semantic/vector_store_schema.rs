@@ -189,6 +189,36 @@ impl SemanticVectorStore {
                 [],
             )?;
         }
+        let stale_vec0_rows = if sqlite_table_exists(&self.conn, "event_embedding_vec0_meta")?
+            && sqlite_column_exists(&self.conn, "event_embedding_vec0_meta", "model_key")?
+        {
+            self.conn.query_row(
+                "SELECT COUNT(*) FROM event_embedding_vec0_meta WHERE model_key != ?1",
+                [SEMANTIC_MODEL_KEY],
+                |row| row.get::<_, i64>(0),
+            )?
+        } else {
+            0
+        };
+        if stale_vec0_rows > 0 {
+            self.drop_sqlite_vec0_schema()?;
+        }
+        let mut stale_model_rows = 0_usize;
+        for table in [
+            "event_embedding_chunks",
+            "semantic_index_stats",
+            "semantic_dirty_events",
+            "embedding_models",
+        ] {
+            stale_model_rows = stale_model_rows.saturating_add(self.conn.execute(
+                &format!("DELETE FROM {table} WHERE model_key != ?1"),
+                [SEMANTIC_MODEL_KEY],
+            )?);
+        }
+        if stale_model_rows > 0 || stale_vec0_rows > 0 {
+            self.conn
+                .execute("DELETE FROM semantic_maintenance_state", [])?;
+        }
         let deleted_legacy_embeddings = self.conn.execute("DELETE FROM event_embeddings", [])?;
         let scrubbed_chunk_text = self.conn.execute(
             "UPDATE event_embedding_chunks SET chunk_text = '' WHERE chunk_text != ''",

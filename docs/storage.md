@@ -11,6 +11,10 @@ Default root:
 ~/.ctx/
   work.sqlite
   config.toml
+  runtime/
+    onnxruntime/
+      <runtime-version>/
+        <platform>/
   upgrade-state.json
   upgrade.lock
   logs/
@@ -30,6 +34,12 @@ binary, for example:
 
 The sidecar is outside the ctx data root because it describes ownership of the
 installed executable, not indexed provider history.
+
+When release metadata includes ctx-managed ONNX Runtime assets, the official
+installer and development installer place those native runtime files under
+`${CTX_RUNTIME_DIR:-$HOME/.ctx/runtime}/onnxruntime/<runtime-version>/<platform>`.
+They are product runtime assets, not provider-history storage, and may be shared
+by multiple ctx data roots on the same machine.
 
 ## What SQLite Stores
 
@@ -100,8 +110,9 @@ analytics marker described under network behavior.
 
 Setup, import, and default search do not require source repository writes, model
 APIs, API keys, or remote accounts. Without semantic opt-in they do not download
-models; with semantic enabled, daemon maintenance may acquire the local embedding
-model. Non-JSON setup and native provider imports may opportunistically start
+models or runtime assets; with semantic enabled, installer/runtime acquisition
+and daemon maintenance may acquire the local ONNX Runtime asset and embedding
+model when the installed build supports that path. Non-JSON setup and native provider imports may opportunistically start
 the ctx-owned background daemon maintenance profile when `[daemon].enabled` is true; use
 `ctx setup --no-daemon` or `ctx import --no-daemon` for a one-run opt-out.
 `ctx setup --catalog-only`, `ctx setup --json`, and `ctx import --json` do not
@@ -130,8 +141,8 @@ root. Setup/import autostart uses the normal background daemon profile and exits
 after it becomes idle; explicit `ctx daemon run` runs the same coordinator in
 the foreground. The current coordinator status surface is local-only: bounded
 native provider-history refresh updates the local SQLite index, semantic
-indexing is bounded by the local model cache, and cloud sync reports `disabled`
-with `enabled: false` and `network_allowed: false`.
+indexing is bounded by the local runtime/model availability, and cloud sync
+reports `disabled` with `enabled: false` and `network_allowed: false`.
 A looping daemon may keep the
 local embedding model resident between passes and uses the sidecar dirty queue
 to prioritize recent/stale events. With semantic enabled and default background

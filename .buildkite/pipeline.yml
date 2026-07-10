@@ -130,3 +130,255 @@ steps:
       - "target/public-cli-artifacts/ctx-macos-x64"
       - "target/public-cli-artifacts/ctx-macos-x64.sha256"
       - "target/public-cli-artifacts/ctx-macos-x64.version"
+
+  - label: ":package: ONNX Runtime official repacks"
+    key: "public-onnxruntime-official"
+    if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1"
+    command: |
+      scripts/build-onnxruntime-sidecar.sh linux-x64 target/public-cli-artifacts
+      scripts/stage-github-release-assets.sh --transcode-runtime linux-x64 target/public-cli-artifacts
+      scripts/build-onnxruntime-sidecar.sh linux-aarch64 target/public-cli-artifacts
+      scripts/stage-github-release-assets.sh --transcode-runtime linux-aarch64 target/public-cli-artifacts
+      scripts/build-onnxruntime-sidecar.sh macos-arm64 target/public-cli-artifacts
+      scripts/stage-github-release-assets.sh --transcode-runtime macos-arm64 target/public-cli-artifacts
+      scripts/build-onnxruntime-sidecar.sh windows-x64 target/public-cli-artifacts
+    agents:
+      queue: "release-linux-managed"
+      ctx-runner-class: "release-linux-control"
+      os: "linux"
+      arch: "x86_64"
+    timeout_in_minutes: 60
+    artifact_paths:
+      - "target/public-cli-artifacts/ctx-onnxruntime-linux-x64.tar.gz"
+      - "target/public-cli-artifacts/ctx-onnxruntime-linux-x64.tar.gz.sha256"
+      - "target/public-cli-artifacts/ctx-onnxruntime-linux-aarch64.tar.gz"
+      - "target/public-cli-artifacts/ctx-onnxruntime-linux-aarch64.tar.gz.sha256"
+      - "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.tar.gz"
+      - "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.tar.gz.sha256"
+      - "target/public-cli-artifacts/ctx-onnxruntime-windows-x64.zip"
+      - "target/public-cli-artifacts/ctx-onnxruntime-windows-x64.zip.sha256"
+
+  - label: ":package: ONNX Runtime macos-x64"
+    key: "public-onnxruntime-macos-x64"
+    if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1"
+    command: |
+      scripts/build-onnxruntime-sidecar.sh macos-x64 target/public-cli-artifacts
+      scripts/stage-github-release-assets.sh --transcode-runtime macos-x64 target/public-cli-artifacts
+    agents:
+      queue: "release-macos-managed"
+      ctx-runner-class: "release-macos-control"
+      os: "macos"
+      arch: "x86_64"
+    timeout_in_minutes: 120
+    artifact_paths:
+      - "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.tar.gz"
+      - "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.tar.gz.sha256"
+
+  - label: ":package: ONNX Runtime freebsd-x64"
+    key: "public-onnxruntime-freebsd-x64"
+    if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1"
+    command: |
+      scripts/build-onnxruntime-sidecar.sh freebsd-x64 target/public-cli-artifacts
+      scripts/stage-github-release-assets.sh --transcode-runtime freebsd-x64 target/public-cli-artifacts
+    agents:
+      queue: "release-freebsd-managed"
+      ctx-runner-class: "release-freebsd-control"
+      os: "freebsd"
+      arch: "x86_64"
+    timeout_in_minutes: 90
+    artifact_paths:
+      - "target/public-cli-artifacts/ctx-onnxruntime-freebsd-x64.tar.gz"
+      - "target/public-cli-artifacts/ctx-onnxruntime-freebsd-x64.tar.gz.sha256"
+
+  - label: ":package: public CLI release assets"
+    key: "public-cli-release-assets"
+    if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && build.env("CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX") == "1"
+    depends_on:
+      - "public-cli-linux-x64"
+      - "public-cli-linux-aarch64"
+      - "public-cli-windows-x64"
+      - "public-cli-freebsd-x64"
+      - "public-cli-macos-arm64"
+      - "public-cli-macos-x64"
+      - "public-onnxruntime-official"
+      - "public-onnxruntime-macos-x64"
+      - "public-onnxruntime-freebsd-x64"
+      - "native-semantic-linux-x64"
+      - "native-semantic-linux-aarch64"
+      - "native-semantic-macos-arm64"
+      - "native-semantic-macos-x64"
+      - "native-semantic-windows-x64"
+      - "native-semantic-freebsd-x64"
+    command: |
+      rm -rf target/public-cli-artifacts target/github-release-assets
+      mkdir -p target/public-cli-artifacts
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx" . --step public-cli-linux-x64
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx.sha256" . --step public-cli-linux-x64
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx.version" . --step public-cli-linux-x64
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-linux-aarch64" . --step public-cli-linux-aarch64
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-linux-aarch64.sha256" . --step public-cli-linux-aarch64
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-linux-aarch64.version" . --step public-cli-linux-aarch64
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx.exe" . --step public-cli-windows-x64
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx.exe.sha256" . --step public-cli-windows-x64
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx.exe.version" . --step public-cli-windows-x64
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-freebsd-x64" . --step public-cli-freebsd-x64
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-freebsd-x64.sha256" . --step public-cli-freebsd-x64
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-freebsd-x64.version" . --step public-cli-freebsd-x64
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-macos-arm64" . --step public-cli-macos-arm64
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-macos-arm64.sha256" . --step public-cli-macos-arm64
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-macos-arm64.version" . --step public-cli-macos-arm64
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-macos-x64" . --step public-cli-macos-x64
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-macos-x64.sha256" . --step public-cli-macos-x64
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-macos-x64.version" . --step public-cli-macos-x64
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-onnxruntime-linux-x64.tar.gz" . --step public-onnxruntime-official
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-onnxruntime-linux-x64.tar.gz.sha256" . --step public-onnxruntime-official
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-onnxruntime-linux-aarch64.tar.gz" . --step public-onnxruntime-official
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-onnxruntime-linux-aarch64.tar.gz.sha256" . --step public-onnxruntime-official
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.tar.gz" . --step public-onnxruntime-official
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.tar.gz.sha256" . --step public-onnxruntime-official
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-onnxruntime-windows-x64.zip" . --step public-onnxruntime-official
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-onnxruntime-windows-x64.zip.sha256" . --step public-onnxruntime-official
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.tar.gz" . --step public-onnxruntime-macos-x64
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.tar.gz.sha256" . --step public-onnxruntime-macos-x64
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-onnxruntime-freebsd-x64.tar.gz" . --step public-onnxruntime-freebsd-x64
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-onnxruntime-freebsd-x64.tar.gz.sha256" . --step public-onnxruntime-freebsd-x64
+      scripts/check-public-cli-artifact.sh linux-x64 target/public-cli-artifacts
+      scripts/check-public-cli-artifact.sh linux-aarch64 target/public-cli-artifacts
+      scripts/check-public-cli-artifact.sh windows-x64 target/public-cli-artifacts
+      scripts/check-public-cli-artifact.sh freebsd-x64 target/public-cli-artifacts
+      scripts/check-public-cli-artifact.sh macos-arm64 target/public-cli-artifacts
+      scripts/check-public-cli-artifact.sh macos-x64 target/public-cli-artifacts
+      CTX_ONNXRUNTIME_ASSET_REQUIRED=1 scripts/stage-github-release-assets.sh target/public-cli-artifacts target/github-release-assets
+    agents:
+      queue: "release-linux-managed"
+      ctx-runner-class: "release-linux-control"
+      os: "linux"
+      arch: "x86_64"
+    timeout_in_minutes: 60
+    artifact_paths:
+      - "target/github-release-assets/**"
+
+  - label: ":test_tube: daemon+semantic linux-x64"
+    key: "native-semantic-linux-x64"
+    if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && build.env("CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX") == "1"
+    depends_on:
+      - "public-cli-linux-x64"
+      - "public-onnxruntime-official"
+    command: |
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx" . --step public-cli-linux-x64
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-onnxruntime-linux-x64.tar.gz" . --step public-onnxruntime-official
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-onnxruntime-linux-x64.tar.gz.sha256" . --step public-onnxruntime-official
+      chmod +x target/public-cli-artifacts/ctx
+      scripts/smoke-daemon-semantic-release.sh --ctx target/public-cli-artifacts/ctx --runtime-archive target/public-cli-artifacts/ctx-onnxruntime-linux-x64.tar.gz --runtime-platform linux-x64 --data-root target/ctx-semantic-smoke/linux-x64 --keep-root
+    agents:
+      queue: "release-linux-managed"
+      ctx-runner-class: "release-linux-control"
+      os: "linux"
+      arch: "x86_64"
+    timeout_in_minutes: 30
+    artifact_paths:
+      - "target/ctx-semantic-smoke/**"
+
+  - label: ":test_tube: daemon+semantic linux-aarch64"
+    key: "native-semantic-linux-aarch64"
+    if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && build.env("CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX") == "1"
+    depends_on:
+      - "public-cli-linux-aarch64"
+      - "public-onnxruntime-official"
+    command: |
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-linux-aarch64" . --step public-cli-linux-aarch64
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-onnxruntime-linux-aarch64.tar.gz" . --step public-onnxruntime-official
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-onnxruntime-linux-aarch64.tar.gz.sha256" . --step public-onnxruntime-official
+      chmod +x target/public-cli-artifacts/ctx-linux-aarch64
+      scripts/smoke-daemon-semantic-release.sh --ctx target/public-cli-artifacts/ctx-linux-aarch64 --runtime-archive target/public-cli-artifacts/ctx-onnxruntime-linux-aarch64.tar.gz --runtime-platform linux-aarch64 --data-root target/ctx-semantic-smoke/linux-aarch64 --keep-root
+    agents:
+      queue: "release-linux-managed"
+      ctx-runner-class: "release-linux-control"
+      os: "linux"
+      arch: "arm64"
+    timeout_in_minutes: 30
+    artifact_paths:
+      - "target/ctx-semantic-smoke/**"
+
+  - label: ":test_tube: daemon+semantic macos-arm64"
+    key: "native-semantic-macos-arm64"
+    if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && build.env("CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX") == "1"
+    depends_on:
+      - "public-cli-macos-arm64"
+      - "public-onnxruntime-official"
+    command: |
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-macos-arm64" . --step public-cli-macos-arm64
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.tar.gz" . --step public-onnxruntime-official
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.tar.gz.sha256" . --step public-onnxruntime-official
+      chmod +x target/public-cli-artifacts/ctx-macos-arm64
+      scripts/smoke-daemon-semantic-release.sh --ctx target/public-cli-artifacts/ctx-macos-arm64 --runtime-archive target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.tar.gz --runtime-platform macos-arm64 --data-root target/ctx-semantic-smoke/macos-arm64 --keep-root
+    agents:
+      queue: "release-macos-managed"
+      ctx-runner-class: "release-macos-control"
+      os: "macos"
+      arch: "arm64"
+    timeout_in_minutes: 30
+    artifact_paths:
+      - "target/ctx-semantic-smoke/**"
+
+  - label: ":test_tube: daemon+semantic macos-x64"
+    key: "native-semantic-macos-x64"
+    if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && build.env("CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX") == "1"
+    depends_on:
+      - "public-cli-macos-x64"
+      - "public-onnxruntime-macos-x64"
+    command: |
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-macos-x64" . --step public-cli-macos-x64
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.tar.gz" . --step public-onnxruntime-macos-x64
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.tar.gz.sha256" . --step public-onnxruntime-macos-x64
+      chmod +x target/public-cli-artifacts/ctx-macos-x64
+      scripts/smoke-daemon-semantic-release.sh --ctx target/public-cli-artifacts/ctx-macos-x64 --runtime-archive target/public-cli-artifacts/ctx-onnxruntime-macos-x64.tar.gz --runtime-platform macos-x64 --data-root target/ctx-semantic-smoke/macos-x64 --keep-root
+    agents:
+      queue: "release-macos-managed"
+      ctx-runner-class: "release-macos-control"
+      os: "macos"
+      arch: "x86_64"
+    timeout_in_minutes: 30
+    artifact_paths:
+      - "target/ctx-semantic-smoke/**"
+
+  - label: ":test_tube: daemon+semantic windows-x64"
+    key: "native-semantic-windows-x64"
+    if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && build.env("CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX") == "1"
+    depends_on:
+      - "public-cli-windows-x64"
+      - "public-onnxruntime-official"
+    command: |
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx.exe" . --step public-cli-windows-x64
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-onnxruntime-windows-x64.zip" . --step public-onnxruntime-official
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-onnxruntime-windows-x64.zip.sha256" . --step public-onnxruntime-official
+      powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-daemon-semantic-release.ps1 -Ctx target/public-cli-artifacts/ctx.exe -RuntimeArchive target/public-cli-artifacts/ctx-onnxruntime-windows-x64.zip -RuntimePlatform windows-x64 -DataRoot target/ctx-semantic-smoke/windows-x64 -KeepRoot
+    agents:
+      queue: "release-windows-managed"
+      ctx-runner-class: "release-windows-control"
+      os: "windows"
+      arch: "x86_64"
+    timeout_in_minutes: 30
+    artifact_paths:
+      - "target/ctx-semantic-smoke/**"
+
+  - label: ":test_tube: daemon+semantic freebsd-x64"
+    key: "native-semantic-freebsd-x64"
+    if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && build.env("CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX") == "1"
+    depends_on:
+      - "public-cli-freebsd-x64"
+      - "public-onnxruntime-freebsd-x64"
+    command: |
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-freebsd-x64" . --step public-cli-freebsd-x64
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-onnxruntime-freebsd-x64.tar.gz" . --step public-onnxruntime-freebsd-x64
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-onnxruntime-freebsd-x64.tar.gz.sha256" . --step public-onnxruntime-freebsd-x64
+      chmod +x target/public-cli-artifacts/ctx-freebsd-x64
+      bash scripts/smoke-daemon-semantic-release.sh --ctx target/public-cli-artifacts/ctx-freebsd-x64 --runtime-archive target/public-cli-artifacts/ctx-onnxruntime-freebsd-x64.tar.gz --runtime-platform freebsd-x64 --data-root target/ctx-semantic-smoke/freebsd-x64 --keep-root
+    agents:
+      queue: "release-freebsd-managed"
+      ctx-runner-class: "release-freebsd-control"
+      os: "freebsd"
+      arch: "x86_64"
+    timeout_in_minutes: 30
+    artifact_paths:
+      - "target/ctx-semantic-smoke/**"

@@ -1,8 +1,7 @@
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
-    env,
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     time::Instant,
 };
@@ -29,6 +28,9 @@ const DEFAULT_QUERIES: &[&str] = &[
     "semantic payload chunking 1200 200",
     "feature branch dogfood real corpus performance testing",
 ];
+const E5_QUERY_PREFIX: &str = "query: ";
+const E5_PASSAGE_PREFIX: &str = "passage: ";
+const E5_DIMENSIONS: usize = 384;
 
 #[derive(Debug, Parser)]
 struct Args {
@@ -38,7 +40,7 @@ struct Args {
     work_db: Option<PathBuf>,
     #[arg(long)]
     cache_dir: Option<PathBuf>,
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, default_value = "e5-small")]
     model: ModelArg,
     #[arg(long, default_value_t = 2)]
     threads: usize,
@@ -58,8 +60,9 @@ struct Args {
     include_snippets: bool,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum ModelArg {
+    E5Small,
     MiniLm,
     BgeSmall,
     SnowflakeXs,
@@ -70,6 +73,7 @@ enum ModelArg {
 impl ModelArg {
     fn as_str(self) -> &'static str {
         match self {
+            Self::E5Small => "intfloat/multilingual-e5-small",
             Self::MiniLm => "minilm",
             Self::BgeSmall => "bge-small",
             Self::SnowflakeXs => "snowflake-xs",
@@ -80,12 +84,36 @@ impl ModelArg {
 
     fn embedding_model(self) -> Option<EmbeddingModel> {
         match self {
+            Self::E5Small => Some(EmbeddingModel::MultilingualE5Small),
             Self::MiniLm => Some(EmbeddingModel::AllMiniLML6V2),
             Self::BgeSmall => Some(EmbeddingModel::BGESmallENV15),
             Self::SnowflakeXs => Some(EmbeddingModel::SnowflakeArcticEmbedXS),
             Self::JinaBaseEn => Some(EmbeddingModel::JinaEmbeddingsV2BaseEN),
             Self::BgeReranker => None,
         }
+    }
+
+    fn document_text(self, text: &str) -> String {
+        match self {
+            Self::E5Small => prefixed_text(E5_PASSAGE_PREFIX, text),
+            _ => text.to_owned(),
+        }
+    }
+
+    fn query_text(self, text: &str) -> String {
+        match self {
+            Self::E5Small => prefixed_text(E5_QUERY_PREFIX, text),
+            _ => text.to_owned(),
+        }
+    }
+}
+
+fn prefixed_text(prefix: &str, text: &str) -> String {
+    let text = text.trim_start();
+    if text.starts_with(prefix) {
+        text.to_owned()
+    } else {
+        format!("{prefix}{text}")
     }
 }
 
@@ -217,7 +245,10 @@ fn run_embedding_model(
     .with_context(|| format!("initialize {}", args.model.as_str()))?;
     let model_init_ms = model_started.elapsed().as_millis();
 
-    let doc_texts = docs.iter().map(|doc| doc.text.clone()).collect::<Vec<_>>();
+    let doc_texts = docs
+        .iter()
+        .map(|doc| args.model.document_text(&doc.text))
+        .collect::<Vec<_>>();
     let embed_started = Instant::now();
     eprintln!("embedding {} docs with {}", docs.len(), args.model.as_str());
     let mut doc_embeddings = model
@@ -228,6 +259,14 @@ fn run_embedding_model(
     }
     let embed_docs_ms = embed_started.elapsed().as_millis();
     let dimensions = doc_embeddings.first().map(Vec::len);
+    if args.model == ModelArg::E5Small && dimensions != Some(E5_DIMENSIONS) {
+        return Err(anyhow!(
+            "{} returned {:?} dimensions, expected {}",
+            args.model.as_str(),
+            dimensions,
+            E5_DIMENSIONS
+        ));
+    }
 
     let doc_index = docs
         .iter()
@@ -252,7 +291,7 @@ fn run_embedding_model(
     for (query_index, refs) in query_refs.iter().enumerate() {
         let query_embed_started = Instant::now();
         let mut query_embedding = model
-            .embed(vec![refs.query.clone()], Some(1))
+            .embed(vec![args.model.query_text(&refs.query)], Some(1))
             .with_context(|| format!("embed query with {}", args.model.as_str()))?
             .pop()
             .ok_or_else(|| anyhow!("empty query embedding"))?;
@@ -347,7 +386,12 @@ fn run_reranker(
             .map(|index| docs[*index].text.clone())
             .collect::<Vec<_>>();
         let reranked = reranker
-            .rerank(refs.query.clone(), candidate_docs, false, Some(args.batch_size))
+            .rerank(
+                refs.query.clone(),
+                candidate_docs,
+                false,
+                Some(args.batch_size),
+            )
             .with_context(|| format!("rerank query {}", refs.query))?;
         let top = reranked
             .iter()
@@ -362,7 +406,11 @@ fn run_reranker(
             refs,
             &top,
             docs,
-            &lexical_refs[query_index].iter().copied().take(10).collect::<Vec<_>>(),
+            &lexical_refs[query_index]
+                .iter()
+                .copied()
+                .take(10)
+                .collect::<Vec<_>>(),
             args.include_snippets,
             None,
         ));
@@ -628,8 +676,8 @@ fn candidate_docs(
 
 fn query_tokens(value: &str) -> Vec<String> {
     let stop = [
-        "the", "and", "for", "with", "from", "that", "this", "what", "does", "into", "our",
-        "all", "are", "was", "were", "how", "why",
+        "the", "and", "for", "with", "from", "that", "this", "what", "does", "into", "our", "all",
+        "are", "was", "were", "how", "why",
     ];
     let stop = stop.into_iter().collect::<HashSet<_>>();
     let mut tokens = value
@@ -760,4 +808,40 @@ fn process_peak_rss_kb() -> Option<u64> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn production_e5_model_is_the_eval_default() {
+        let args = Args::try_parse_from(["ctx-model-eval"]).unwrap();
+
+        assert_eq!(args.model, ModelArg::E5Small);
+        assert_eq!(E5_DIMENSIONS, 384);
+    }
+
+    #[test]
+    fn e5_inputs_use_query_and_passage_prefixes_once() {
+        assert_eq!(ModelArg::E5Small.query_text("find it"), "query: find it");
+        assert_eq!(
+            ModelArg::E5Small.query_text("  query: find it"),
+            "query: find it"
+        );
+        assert_eq!(
+            ModelArg::E5Small.document_text("found it"),
+            "passage: found it"
+        );
+        assert_eq!(
+            ModelArg::E5Small.document_text("  passage: found it"),
+            "passage: found it"
+        );
+    }
+
+    #[test]
+    fn comparison_models_keep_unprefixed_inputs() {
+        assert_eq!(ModelArg::MiniLm.query_text("find it"), "find it");
+        assert_eq!(ModelArg::BgeSmall.document_text("found it"), "found it");
+    }
 }

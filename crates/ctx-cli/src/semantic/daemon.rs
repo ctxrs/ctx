@@ -29,16 +29,194 @@ fn lock_daemon_runtime_embedder(
 
 struct DaemonQueryService {
     data_root: PathBuf,
+    activity: Arc<DaemonQueryActivity>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    #[cfg(unix)]
+    socket_path: PathBuf,
+    #[cfg(unix)]
+    socket_runtime_dir: Option<PathBuf>,
+    #[cfg(windows)]
+    pipe_name: String,
 }
 
 impl Drop for DaemonQueryService {
     fn drop(&mut self) {
         remove_daemon_query_endpoint(&self.data_root);
+        self.activity.stop();
+        #[cfg(windows)]
+        wake_windows_daemon_query_pipe(&self.pipe_name);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
         #[cfg(unix)]
         {
-            let _ = fs::remove_file(daemon_query_socket_path(&self.data_root));
+            let _ = fs::remove_file(&self.socket_path);
+            if let Some(dir) = self.socket_runtime_dir.as_ref() {
+                let _ = fs::remove_dir(dir);
+            }
         }
     }
+}
+
+#[derive(Default)]
+struct DaemonQueryActivity {
+    state: Mutex<DaemonQueryActivityState>,
+}
+
+#[derive(Default)]
+struct DaemonQueryActivityState {
+    accepting: bool,
+    stopping: bool,
+    active_requests: usize,
+    generation: u64,
+}
+
+struct DaemonQueryRequestGuard {
+    activity: Arc<DaemonQueryActivity>,
+}
+
+impl DaemonQueryActivity {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(DaemonQueryActivityState {
+                accepting: true,
+                ..DaemonQueryActivityState::default()
+            }),
+        }
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, DaemonQueryActivityState> {
+        self.state.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
+    fn begin_request(self: &Arc<Self>) -> Option<DaemonQueryRequestGuard> {
+        let mut state = self.state();
+        if !state.accepting || state.stopping {
+            return None;
+        }
+        state.active_requests = state.active_requests.saturating_add(1);
+        state.generation = state.generation.wrapping_add(1);
+        drop(state);
+        Some(DaemonQueryRequestGuard {
+            activity: self.clone(),
+        })
+    }
+
+    fn snapshot(&self) -> (usize, u64) {
+        let state = self.state();
+        (state.active_requests, state.generation)
+    }
+
+    fn try_stop_accepting_if_idle(&self, observed_generation: u64) -> bool {
+        let mut state = self.state();
+        if state.active_requests != 0 || state.generation != observed_generation {
+            return false;
+        }
+        state.accepting = false;
+        true
+    }
+
+    fn stop(&self) {
+        let mut state = self.state();
+        state.accepting = false;
+        state.stopping = true;
+    }
+
+    fn stopping(&self) -> bool {
+        self.state().stopping
+    }
+}
+
+impl Drop for DaemonQueryRequestGuard {
+    fn drop(&mut self) {
+        let mut state = self.activity.state();
+        state.active_requests = state.active_requests.saturating_sub(1);
+        state.generation = state.generation.wrapping_add(1);
+    }
+}
+
+fn observe_daemon_query_activity(
+    activity: Option<&DaemonQueryActivity>,
+    idle_since: &mut Option<Instant>,
+    observed_generation: &mut u64,
+) {
+    let Some(activity) = activity else {
+        return;
+    };
+    let (active_requests, generation) = activity.snapshot();
+    if active_requests != 0 || generation != *observed_generation {
+        *idle_since = None;
+        *observed_generation = generation;
+    }
+}
+
+fn daemon_can_begin_idle_shutdown(
+    activity: Option<&DaemonQueryActivity>,
+    observed_generation: u64,
+) -> bool {
+    activity.is_none_or(|activity| activity.try_stop_accepting_if_idle(observed_generation))
+}
+
+#[cfg(unix)]
+const DAEMON_QUERY_SOCKET_PATH_SAFE_BYTES: usize = 90;
+
+#[cfg(unix)]
+fn bind_daemon_query_listener(
+    data_root: &Path,
+) -> Result<(UnixListener, PathBuf, Option<PathBuf>)> {
+    let preferred = daemon_query_socket_path(data_root);
+    if preferred.as_os_str().as_bytes().len() <= DAEMON_QUERY_SOCKET_PATH_SAFE_BYTES {
+        let _ = fs::remove_file(&preferred);
+        let listener = UnixListener::bind(&preferred)
+            .with_context(|| format!("bind daemon query socket {}", preferred.display()))?;
+        return Ok((listener, preferred, None));
+    }
+
+    let mut roots = vec![PathBuf::from("/tmp")];
+    let env_tmp = env::temp_dir();
+    if env_tmp != roots[0] {
+        roots.push(env_tmp);
+    }
+    let mut failures = Vec::new();
+    for root in roots {
+        if !root.is_dir() {
+            continue;
+        }
+        for _ in 0..8 {
+            let runtime_dir = root.join(format!("ctx-q-{}", Uuid::new_v4().simple()));
+            match fs::create_dir(&runtime_dir) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    failures.push(format!("create {}: {error}", runtime_dir.display()));
+                    break;
+                }
+            }
+            if let Err(error) = fs::set_permissions(&runtime_dir, fs::Permissions::from_mode(0o700)) {
+                let _ = fs::remove_dir(&runtime_dir);
+                failures.push(format!("secure {}: {error}", runtime_dir.display()));
+                continue;
+            }
+            let path = runtime_dir.join("q.sock");
+            if path.as_os_str().as_bytes().len() > DAEMON_QUERY_SOCKET_PATH_SAFE_BYTES {
+                let _ = fs::remove_dir(&runtime_dir);
+                failures.push(format!("fallback socket path is still too long: {}", path.display()));
+                continue;
+            }
+            match UnixListener::bind(&path) {
+                Ok(listener) => return Ok((listener, path, Some(runtime_dir))),
+                Err(error) => {
+                    let _ = fs::remove_file(&path);
+                    let _ = fs::remove_dir(&runtime_dir);
+                    failures.push(format!("bind {}: {error}", path.display()));
+                }
+            }
+        }
+    }
+    Err(anyhow!(
+        "daemon query socket path is too long and no short private runtime directory was available: {}",
+        failures.join("; ")
+    ))
 }
 
 #[cfg(unix)]
@@ -48,10 +226,10 @@ fn start_daemon_query_service(
 ) -> Result<DaemonQueryService> {
     let root = daemon_root_path(data_root);
     create_private_dir_all(&root)?;
-    let path = daemon_query_socket_path(data_root);
-    let _ = fs::remove_file(&path);
-    let listener =
-        UnixListener::bind(&path).with_context(|| format!("bind daemon query socket {}", path.display()))?;
+    let (listener, path, socket_runtime_dir) = bind_daemon_query_listener(data_root)?;
+    listener
+        .set_nonblocking(true)
+        .context("make daemon query socket nonblocking")?;
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
         .with_context(|| format!("set daemon query socket permissions {}", path.display()))?;
     let endpoint = DaemonQueryEndpoint::Unix {
@@ -63,33 +241,282 @@ fn start_daemon_query_service(
     };
     if let Err(error) = write_daemon_query_endpoint(data_root, &endpoint) {
         let _ = fs::remove_file(socket_path);
+        if let Some(dir) = socket_runtime_dir.as_ref() {
+            let _ = fs::remove_dir(dir);
+        }
         return Err(error);
     }
     let thread_data_root = data_root.to_path_buf();
     let thread_token = endpoint.token().to_owned();
+    let activity = Arc::new(DaemonQueryActivity::new());
+    let thread_activity = activity.clone();
     let spawn_result = std::thread::Builder::new()
         .name("ctx-daemon-query".to_owned())
         .spawn(move || {
-            for stream in listener.incoming() {
-                match stream {
-                    Ok(stream) => {
-                        handle_daemon_query_stream(&thread_data_root, &embedder, &thread_token, stream)
+            while !thread_activity.stopping() {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let Some(_request) = thread_activity.begin_request() else {
+                            continue;
+                        };
+                        handle_daemon_query_stream(&thread_data_root, &embedder, &thread_token, stream);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(StdDuration::from_millis(25));
                     }
                     Err(_) => break,
                 }
             }
         });
-    if let Err(error) = spawn_result {
-        remove_daemon_query_endpoint(data_root);
-        let _ = fs::remove_file(socket_path);
-        return Err(error).context("start daemon query service thread");
-    }
+    let thread = match spawn_result {
+        Ok(thread) => thread,
+        Err(error) => {
+            remove_daemon_query_endpoint(data_root);
+            let _ = fs::remove_file(socket_path);
+            if let Some(dir) = socket_runtime_dir.as_ref() {
+                let _ = fs::remove_dir(dir);
+            }
+            return Err(error).context("start daemon query service thread");
+        }
+    };
     Ok(DaemonQueryService {
         data_root: data_root.to_path_buf(),
+        activity,
+        thread: Some(thread),
+        socket_path: match endpoint {
+            DaemonQueryEndpoint::Unix { path, .. } => path,
+        },
+        socket_runtime_dir,
     })
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn start_daemon_query_service(
+    data_root: &Path,
+    embedder: Arc<Mutex<Option<SemanticEmbedder>>>,
+) -> Result<DaemonQueryService> {
+    let root = daemon_root_path(data_root);
+    create_private_dir_all(&root)?;
+    let endpoint = DaemonQueryEndpoint::WindowsNamedPipe {
+        pipe_name: daemon_query_pipe_name(),
+        token: Uuid::new_v4().simple().to_string(),
+    };
+    let pipe_name = match &endpoint {
+        DaemonQueryEndpoint::WindowsNamedPipe { pipe_name, .. } => pipe_name.clone(),
+    };
+    let first_stream = create_windows_daemon_query_pipe(&pipe_name)?;
+    if let Err(error) = write_daemon_query_endpoint(data_root, &endpoint) {
+        drop(first_stream);
+        return Err(error);
+    }
+    let thread_data_root = data_root.to_path_buf();
+    let thread_token = endpoint.token().to_owned();
+    let activity = Arc::new(DaemonQueryActivity::new());
+    let thread_activity = activity.clone();
+    let thread_pipe_name = pipe_name.clone();
+    let spawn_result = std::thread::Builder::new()
+        .name("ctx-daemon-query".to_owned())
+        .spawn(move || {
+            let mut next_stream = Some(first_stream);
+            while !thread_activity.stopping() {
+                let stream = match next_stream.take() {
+                    Some(stream) => stream,
+                    None => match create_windows_daemon_query_pipe(&thread_pipe_name) {
+                        Ok(stream) => stream,
+                        Err(_) => break,
+                    },
+                };
+                if connect_windows_daemon_query_pipe(&stream).is_err() {
+                    break;
+                }
+                let Some(_request) = thread_activity.begin_request() else {
+                    break;
+                };
+                handle_daemon_query_stream(&thread_data_root, &embedder, &thread_token, stream);
+            }
+        });
+    let thread = match spawn_result {
+        Ok(thread) => thread,
+        Err(error) => {
+            remove_daemon_query_endpoint(data_root);
+            return Err(error).context("start daemon query service thread");
+        }
+    };
+    Ok(DaemonQueryService {
+        data_root: data_root.to_path_buf(),
+        activity,
+        thread: Some(thread),
+        pipe_name,
+    })
+}
+
+#[cfg(windows)]
+struct WindowsDaemonQueryPipe {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+#[cfg(windows)]
+unsafe impl Send for WindowsDaemonQueryPipe {}
+
+#[cfg(windows)]
+impl Drop for WindowsDaemonQueryPipe {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::Storage::FileSystem::FlushFileBuffers;
+        use windows_sys::Win32::System::Pipes::DisconnectNamedPipe;
+
+        unsafe {
+            let _ = FlushFileBuffers(self.handle);
+            let _ = DisconnectNamedPipe(self.handle);
+            let _ = CloseHandle(self.handle);
+        }
+    }
+}
+
+#[cfg(windows)]
+impl std::io::Read for WindowsDaemonQueryPipe {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        use windows_sys::Win32::Foundation::{GetLastError, ERROR_BROKEN_PIPE};
+        use windows_sys::Win32::Storage::FileSystem::ReadFile;
+
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let mut bytes_read = 0u32;
+        let read_len = u32::try_from(buf.len()).unwrap_or(u32::MAX);
+        let ok = unsafe {
+            ReadFile(
+                self.handle,
+                buf.as_mut_ptr(),
+                read_len,
+                &mut bytes_read,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            let error = unsafe { GetLastError() };
+            if error == ERROR_BROKEN_PIPE {
+                return Ok(0);
+            }
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(bytes_read as usize)
+    }
+}
+
+#[cfg(windows)]
+impl std::io::Write for WindowsDaemonQueryPipe {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        use windows_sys::Win32::Storage::FileSystem::WriteFile;
+
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let mut bytes_written = 0u32;
+        let write_len = u32::try_from(buf.len()).unwrap_or(u32::MAX);
+        let ok = unsafe {
+            WriteFile(
+                self.handle,
+                buf.as_ptr(),
+                write_len,
+                &mut bytes_written,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(bytes_written as usize)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        use windows_sys::Win32::Storage::FileSystem::FlushFileBuffers;
+
+        let ok = unsafe { FlushFileBuffers(self.handle) };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn create_windows_daemon_query_pipe(pipe_name: &str) -> Result<WindowsDaemonQueryPipe> {
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX,
+    };
+    use windows_sys::Win32::System::Pipes::{
+        CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
+        PIPE_WAIT,
+    };
+
+    if !windows_named_pipe_name_is_local(pipe_name) {
+        return Err(anyhow!("daemon query pipe name is not local"));
+    }
+    let pipe_name_w = windows_wide_null(pipe_name);
+    let handle = unsafe {
+        CreateNamedPipeW(
+            pipe_name_w.as_ptr(),
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+            1,
+            1024 * 1024,
+            256 * 1024,
+            0,
+            std::ptr::null(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("create daemon query named pipe {pipe_name}"));
+    }
+    Ok(WindowsDaemonQueryPipe { handle })
+}
+
+#[cfg(windows)]
+fn connect_windows_daemon_query_pipe(stream: &WindowsDaemonQueryPipe) -> Result<()> {
+    use windows_sys::Win32::Foundation::{GetLastError, ERROR_PIPE_CONNECTED};
+    use windows_sys::Win32::System::Pipes::ConnectNamedPipe;
+
+    let ok = unsafe { ConnectNamedPipe(stream.handle, std::ptr::null_mut()) };
+    if ok != 0 {
+        return Ok(());
+    }
+    let error = unsafe { GetLastError() };
+    if error == ERROR_PIPE_CONNECTED {
+        return Ok(());
+    }
+    Err(std::io::Error::last_os_error()).context("connect daemon query named pipe")
+}
+
+#[cfg(windows)]
+fn wake_windows_daemon_query_pipe(pipe_name: &str) {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_GENERIC_READ, FILE_GENERIC_WRITE, OPEN_EXISTING,
+    };
+
+    let pipe_name_w = windows_wide_null(pipe_name);
+    let handle = unsafe {
+        CreateFileW(
+            pipe_name_w.as_ptr(),
+            FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+            0,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            0,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle != INVALID_HANDLE_VALUE {
+        unsafe {
+            let _ = CloseHandle(handle);
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 fn start_daemon_query_service(
     _data_root: &Path,
     _embedder: Arc<Mutex<Option<SemanticEmbedder>>>,
@@ -97,8 +524,7 @@ fn start_daemon_query_service(
     Err(anyhow!("daemon query service is not supported on this platform"))
 }
 
-#[cfg(unix)]
-fn handle_daemon_query_stream<S: Read + Write>(
+fn handle_daemon_query_stream<S: std::io::Read + std::io::Write>(
     data_root: &Path,
     embedder: &Arc<Mutex<Option<SemanticEmbedder>>>,
     token: &str,
@@ -118,8 +544,7 @@ fn handle_daemon_query_stream<S: Read + Write>(
     }
 }
 
-#[cfg(unix)]
-fn handle_daemon_query_stream_inner<S: Read + Write>(
+fn handle_daemon_query_stream_inner<S: std::io::Read + std::io::Write>(
     data_root: &Path,
     embedder: &Arc<Mutex<Option<SemanticEmbedder>>>,
     token: &str,
@@ -171,7 +596,7 @@ fn handle_daemon_query_stream_inner<S: Read + Write>(
     let embedder = guard
         .as_mut()
         .ok_or_else(|| anyhow!("semantic embedder was not initialized"))?;
-    let mut embeddings = embed_texts(embedder, vec![text.to_owned()])?;
+    let mut embeddings = embed_texts(embedder, vec![semantic_e5_query_text(text)])?;
     let embedding = embeddings
         .pop()
         .ok_or_else(|| anyhow!("semantic query embedding was empty"))?;
@@ -424,15 +849,38 @@ fn run_daemon_inner(
     write_daemon_lifecycle_status(data_root, &args, "running", started_at_ms, None, None)?;
 
     let mut runtime = DaemonRuntime::default();
-    let _query_service = if semantic_enabled {
+    let query_service = if semantic_enabled {
         Some(start_daemon_query_service(data_root, runtime.semantic_embedder.clone())?)
     } else {
         None
     };
     let mut idle_since: Option<Instant> = None;
+    let mut observed_query_generation = 0;
     loop {
+        observe_daemon_query_activity(
+            query_service
+                .as_ref()
+                .map(|service| service.activity.as_ref()),
+            &mut idle_since,
+            &mut observed_query_generation,
+        );
         if idle_since.is_some_and(|idle| idle.elapsed() >= idle_exit) {
-            break;
+            if daemon_can_begin_idle_shutdown(
+                query_service
+                    .as_ref()
+                    .map(|service| service.activity.as_ref()),
+                observed_query_generation,
+            ) {
+                break;
+            }
+            observe_daemon_query_activity(
+                query_service
+                    .as_ref()
+                    .map(|service| service.activity.as_ref()),
+                &mut idle_since,
+                &mut observed_query_generation,
+            );
+            continue;
         }
         let iteration = run_daemon_once(&args, data_root, &mut runtime, None, semantic_enabled)?;
         write_daemon_lifecycle_status(data_root, &args, "running", started_at_ms, None, None)?;
@@ -443,6 +891,13 @@ fn run_daemon_inner(
         if run_once {
             break;
         }
+        observe_daemon_query_activity(
+            query_service
+                .as_ref()
+                .map(|service| service.activity.as_ref()),
+            &mut idle_since,
+            &mut observed_query_generation,
+        );
         if iteration.did_work {
             idle_since = None;
         } else if idle_since.is_none() {
@@ -1366,7 +1821,7 @@ fn maybe_autostart_daemon_inner(
 }
 
 pub(crate) fn semantic_query_service_supported() -> bool {
-    cfg!(all(ctx_semantic_fastembed, unix))
+    cfg!(ctx_semantic_fastembed)
 }
 
 pub(crate) fn daemon_query_service_available(data_root: &Path) -> bool {

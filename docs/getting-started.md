@@ -74,8 +74,11 @@ CTX_DATA_ROOT=/tmp/ctx-demo ctx status
 ```
 
 Setup does not write to source repositories, call model APIs, download embedding
-models, or require API keys. Daemon maintenance is local-only; cloud sync
-remains disabled and reports `network_allowed: false`. Official
+models, or require API keys while semantic search is disabled. If daemon and
+semantic search are explicitly enabled, daemon maintenance may acquire the local
+ONNX Runtime asset and embedding model needed for the installed platform.
+Daemon maintenance is local-only; cloud sync remains disabled and reports
+`network_allowed: false`. Official
 installer-managed binaries can run a signed background auto-upgrade check after
 later successful non-JSON commands other than `ctx status`; that updater does
 not collect provider history.

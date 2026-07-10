@@ -55,13 +55,25 @@ and private relevance evals justify flipping the default.
   setup should leave existing data intact, start daemon-owned indexing when
   possible, and let the daemon acquire the local embedding model and build
   missing semantic sidecars.
-- This branch supports daemon query transport on Unix sockets. Local semantic
-  indexing remains gated by the embedded ONNX Runtime support matrix; current
-  public macOS, Windows, and FreeBSD artifacts stay daemon/lexical-safe without
-  semantic embeddings.
+- Equal public-platform support uses one embedding model and one runtime family:
+  `intfloat/multilingual-e5-small` through ONNX Runtime. The model produces
+  384-dimensional vectors and requires `query: ` for query inputs and
+  `passage: ` for indexed document chunks. The portable
+  product shape is ctx-managed dynamic runtime assets, not Cargo build-time
+  `ort-sys` downloads. The CLI artifact names remain stable; runtime archives
+  are separate release sidecars acquired by installer metadata or daemon/runtime
+  acquisition.
+- Until a platform has both daemon query transport and a validated local ONNX
+  Runtime asset, that artifact must remain lexical-safe and report semantic
+  unavailable rather than pretending to support embeddings.
 
 ## Current Branch Addendum
 
+- Production semantic embeddings have migrated from
+  `sentence-transformers/all-MiniLM-L6-v2` to
+  `intfloat/multilingual-e5-small`. Query and passage role prefixes are applied
+  exactly once, and the new model key prevents pre-migration vectors from being
+  counted as E5 sidecar coverage.
 - Config now has `[daemon] enabled = true|false` and
   `[search] semantic = true|false`. Both are default unset/off for prerelease
   dogfood, and both have env overrides.
@@ -98,9 +110,34 @@ and private relevance evals justify flipping the default.
 - Daemon model acquisition shields fastembed's `HF_HOME` override while filling
   the ctx-selected cache root, preserving ctx cache precedence during download
   as well as during normal model loading.
+- Release plumbing now has a stable ONNX Runtime sidecar naming convention:
+  `ctx-onnxruntime-linux-x64.tar.gz`,
+  `ctx-onnxruntime-linux-aarch64.tar.gz`,
+  `ctx-onnxruntime-macos-arm64.tar.gz`,
+  `ctx-onnxruntime-macos-x64.tar.gz`,
+  `ctx-onnxruntime-windows-x64.zip`, and
+  `ctx-onnxruntime-freebsd-x64.tar.gz`. Runtime producer jobs may use validated
+  `.tar.zst` intermediates, but release metadata and end-user installers only
+  consume the checksum-verified `.tar.gz` transport and do not require zstd.
+- Release metadata can describe those sidecars with
+  `CTX_RELEASE_ONNXRUNTIME_ARTIFACT_<platform_key>`,
+  `CTX_RELEASE_ONNXRUNTIME_SHA256_<platform_key>`, and
+  `CTX_RELEASE_ONNXRUNTIME_VERSION`. The development installers place runtime
+  assets under
+  `${CTX_RUNTIME_DIR:-$HOME/.ctx/runtime}/onnxruntime/<version>/<platform>`.
+- The public Buildkite pipeline has an opt-in native smoke matrix gated by
+  `CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX=1`. Each smoke installs/runs the built
+  artifact on its native platform, enables `[daemon]` and `[search] semantic`
+  in an isolated data root, imports a tiny custom-history fixture, runs the
+  daemon, performs strict semantic search through the daemon query service, and
+  preserves the smoke data root as a Buildkite artifact on failure.
 
 ## Dogfood Baseline
 
+- Unless a subsection explicitly says otherwise, the numeric semantic dogfood
+  observations below predate the E5 migration and were collected with
+  `all-MiniLM-L6-v2`. They remain historical baselines, not E5 results, and must
+  be rerun before they are used as E5 ship evidence.
 - Fresh `ctx setup` identified 32,384 records / 13.1 GiB in 2.94s, but the
   daemon autostart path left a stale/non-running daemon before history indexing
   completed.
@@ -396,6 +433,14 @@ and private relevance evals justify flipping the default.
 - At least one dogfood machine completes daemon-owned initial lexical refresh
   and semantic backfill from an existing local corpus without manual env-var
   cache setup.
+- The native release smoke passes for every public artifact:
+  `linux-x64`, `linux-aarch64`, `macos-arm64`, `macos-x64`, `windows-x64`, and
+  `freebsd-x64`.
+- Runtime sidecar metadata is present, checksum-verified, and installed or
+  acquired before semantic setup/indexing needs ONNX Runtime.
+- The Windows artifact has a working daemon query-service transport, and Unix
+  artifacts keep private Unix-domain socket transport with local-only
+  permissions.
 - Setup/status/index watch messaging is understandable for disabled, acquiring
   model, indexing, ready, and failure states.
 - Incremental semantic freshness for a single new user turn is under 60s p95
@@ -594,6 +639,44 @@ and private relevance evals justify flipping the default.
     startup or per-command sqlite opening becomes the bottleneck;
   - add a refill loop for post-vector filters so candidate count can drop below
     the conservative 1,000 soft-filter window without under-filling results.
+
+### 8. Equal Platform Runtime And Release Plumbing
+
+- Target architecture: one embedding model and ONNX Runtime everywhere. Do not
+  introduce a second embedding model or a second semantic index format for
+  platform coverage.
+- Switch semantic runtime loading from Cargo build-time ORT downloads to a
+  ctx-managed dynamic runtime resolver. The resolver must initialize ONNX
+  Runtime before FastEmbed constructs the embedding session.
+- Package and checksum release sidecars for all public platforms:
+  - official upstream ORT CPU packages where available;
+  - ctx-owned reproducible CPU builds for platforms not covered by upstream
+    release assets;
+  - license and notice files preserved inside the sidecar archive.
+- Keep CLI artifact names stable. Runtime sidecars are additive assets named
+  `ctx-onnxruntime-<platform>.<archive>`.
+- Release metadata may omit runtime keys entirely, but when a runtime is
+  published it must include all three keys:
+  `CTX_RELEASE_ONNXRUNTIME_ARTIFACT_<platform_key>`,
+  `CTX_RELEASE_ONNXRUNTIME_SHA256_<platform_key>`, and
+  `CTX_RELEASE_ONNXRUNTIME_VERSION`.
+- Development installers already understand those metadata keys and install
+  sidecars under a versioned runtime root before setup runs.
+- Buildkite has a gated native smoke matrix. Keep it off by default for normal
+  hosted presubmit, but require it before claiming equal daemon+semantic support
+  for a release.
+- Native smoke command:
+  - Unix-like platforms:
+    `scripts/smoke-daemon-semantic-release.sh --ctx <artifact>`;
+  - Windows:
+    `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-daemon-semantic-release.ps1 -Ctx <artifact>`.
+- Fast-fail review criteria:
+  - no platform-specific CLI artifact renames;
+  - no semantic success claim without native smoke;
+  - no fallback to a different embedding model without a relevance/index
+    compatibility decision;
+  - no foreground search model downloads;
+  - no default config writes for daemon or semantic opt-in.
 
 ## Parallel Implementation And Review Plan
 
