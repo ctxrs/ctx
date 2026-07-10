@@ -76,6 +76,22 @@ pub struct SearchFilters {
     pub exclude_provider_session: Option<ProviderSessionFilter>,
 }
 
+impl SearchFilters {
+    fn normalized(&self) -> Self {
+        let mut normalized = self.clone();
+        normalized.repo = normalized_text_filter(self.repo.as_deref());
+        normalized.file = normalized_text_filter(self.file.as_deref());
+        normalized
+    }
+}
+
+fn normalized_text_filter(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProviderSessionFilter {
     pub provider: ctx_history_core::CaptureProvider,
@@ -88,7 +104,7 @@ pub(crate) fn normalized_options(options: &PacketOptions) -> PacketOptions {
     PacketOptions {
         limit: options.limit.clamp(1, MAX_RESULT_LIMIT),
         snippet_chars: options.snippet_chars.clamp(32, 2_000),
-        filters: options.filters.clone(),
+        filters: options.filters.normalized(),
         result_mode: options.result_mode,
     }
 }

@@ -37,12 +37,7 @@ pub(crate) fn event_hit_matches_filters(
             return false;
         }
     }
-    if let Some(repo) = filters
-        .repo
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
+    if let Some(repo) = filters.repo.as_deref() {
         let repo = repo.to_lowercase();
         let matches_repo = [
             hit.cwd.as_deref(),
@@ -143,12 +138,7 @@ pub(crate) fn file_filter_scope(
     store: &Store,
     filters: &SearchFilters,
 ) -> Result<Option<FileTouchScope>> {
-    let Some(file) = filters
-        .file
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
+    let Some(file) = filters.file.as_deref() else {
         return Ok(None);
     };
     Ok(Some(store.file_touch_scope(file)?))
@@ -364,18 +354,12 @@ pub(crate) fn source_identity_matches_history_source_filter(
 pub(crate) fn has_filters(filters: &SearchFilters) -> bool {
     filters.session.is_some()
         || filters.provider.is_some()
-        || filters
-            .repo
-            .as_ref()
-            .is_some_and(|value| !value.trim().is_empty())
+        || filters.repo.is_some()
         || filters.since.is_some()
         || filters.primary_only
         || !filters.include_subagents
         || filters.event_type.is_some()
-        || filters
-            .file
-            .as_ref()
-            .is_some_and(|value| !value.trim().is_empty())
+        || filters.file.is_some()
         || filters.exclude_provider_session.is_some()
         || has_history_source_filter(filters)
 }
@@ -481,12 +465,7 @@ pub(crate) fn record_matches_filters(
         }
     }
 
-    if let Some(repo) = filters
-        .repo
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
+    if let Some(repo) = filters.repo.as_deref() {
         let repo = repo.to_lowercase();
         let matches_record = record
             .workspace
@@ -516,12 +495,7 @@ pub(crate) fn record_matches_filters(
         }
     }
 
-    if let Some(file) = filters
-        .file
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
+    if let Some(file) = filters.file.as_deref() {
         if let Some(scope) = file_scope {
             if !record_context_matches_file_scope(scope, record, context) {
                 return false;

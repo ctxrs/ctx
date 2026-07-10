@@ -465,6 +465,43 @@ fn no_token_query_returns_empty_without_recent_activity() {
 }
 
 #[test]
+fn search_packet_normalizes_workspace_and_file_filters_for_library_callers() {
+    let (_temp, store) = test_store();
+    let packet = search_packet(
+        &store,
+        "normalization-no-result",
+        &PacketOptions {
+            filters: SearchFilters {
+                repo: Some(" workspace ".into()),
+                file: Some(" src/main.rs ".into()),
+                ..SearchFilters::default()
+            },
+            ..PacketOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(packet.filters.repo.as_deref(), Some("workspace"));
+    assert_eq!(packet.filters.file.as_deref(), Some("src/main.rs"));
+
+    let packet = search_packet(
+        &store,
+        "normalization-no-result",
+        &PacketOptions {
+            filters: SearchFilters {
+                repo: Some(" \t ".into()),
+                file: Some(" \n ".into()),
+                ..SearchFilters::default()
+            },
+            ..PacketOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(packet.filters, SearchFilters::default());
+}
+
+#[test]
 fn search_result_limit_is_capped() {
     let (_temp, store) = test_store();
     let query = "limit-cap-needle";
