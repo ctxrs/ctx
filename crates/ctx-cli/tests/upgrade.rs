@@ -86,6 +86,49 @@ fn upgrade_status_text_output_shows_error_details() {
 
 #[cfg(unix)]
 #[test]
+fn upgrade_status_reconciles_completed_scheduled_replacement() {
+    let temp = tempdir();
+    let release = fake_release(&temp, "9.9.9");
+    write_fake_ctx_binary(&release.target, "9.9.9");
+
+    let mut marker: Value =
+        serde_json::from_slice(&fs::read(install_marker_path(&release.target)).unwrap()).unwrap();
+    marker["version"] = Value::String("9.9.9".to_owned());
+    marker["sha256"] = Value::String(release.artifact_sha.clone());
+    fs::write(
+        install_marker_path(&release.target),
+        serde_json::to_vec_pretty(&marker).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("upgrade-state.json"),
+        serde_json::to_vec_pretty(&json!({
+            "status": "scheduled",
+            "current_version": env!("CARGO_PKG_VERSION"),
+            "latest_version": "9.9.9",
+            "update_available": true,
+            "channel": "stable",
+            "platform": test_platform_key().replace('_', "-"),
+            "install_path": release.target,
+            "managed": true
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let status = json_output(fake_release_env(
+        ctx(&temp).args(["upgrade", "status", "--json"]),
+        &release,
+    ));
+
+    assert_eq!(status["state"]["status"], "applied");
+    assert_eq!(status["state"]["applied"], true);
+    assert_eq!(status["state"]["reconciled_from"], "scheduled");
+    assert_eq!(status["install"]["version"], "9.9.9");
+}
+
+#[cfg(unix)]
+#[test]
 fn upgrade_status_reports_path_shadowing() {
     let temp = tempdir();
     let release = fake_release(&temp, "9.9.9");
