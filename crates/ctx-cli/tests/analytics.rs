@@ -80,6 +80,38 @@ fn analytics_sends_coarse_cli_metadata_when_enabled() {
 }
 
 #[test]
+fn eligible_json_command_analytics_reports_normal_auto_upgrade_status() {
+    let temp = tempdir();
+    let events_path = temp.path().join("analytics.jsonl");
+    let home = temp.path().join("home");
+    let state = temp.path().join("state");
+    let data_root = temp.path().join("data");
+    fs::create_dir_all(&home).unwrap();
+
+    ctx(&temp)
+        .args(["doctor", "--json"])
+        .env("CTX_DATA_ROOT", &data_root)
+        .env("HOME", &home)
+        .env("XDG_STATE_HOME", &state)
+        .env("LOCALAPPDATA", &state)
+        .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
+        .assert()
+        .success();
+
+    let event = read_analytics_events(&events_path).remove(0);
+    let properties = analytics_event_properties(&event);
+    assert_eq!(properties["action"], "doctor");
+    assert_eq!(properties["json_output"], true);
+    assert_eq!(properties["auto_upgrade_probe"], true);
+    assert_eq!(properties["auto_upgrade_due"], true);
+    assert_eq!(properties["auto_upgrade_spawned"], false);
+    assert_eq!(properties["auto_upgrade_spawn_status"], "marker_invalid");
+    assert_ne!(properties["auto_upgrade_spawn_status"], "json_output");
+    assert_analytics_properties_are_allowlisted(properties);
+}
+
+#[test]
 fn capability_snapshot_is_sent_once_after_successful_delivery() {
     let temp = tempdir();
     let events_path = temp.path().join("analytics.jsonl");

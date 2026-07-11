@@ -195,7 +195,6 @@ pub fn run(
 pub fn maybe_spawn_auto_upgrade(
     data_root: &Path,
     config: &AppConfig,
-    json_output: bool,
     analytics_properties: &mut AnalyticsProperties,
 ) {
     analytics::insert_bool(analytics_properties, "auto_upgrade_probe", true);
@@ -206,14 +205,6 @@ pub fn maybe_spawn_auto_upgrade(
         "upgrade_channel",
         upgrade_channel_bucket(&config.upgrade.channel),
     );
-    if json_output {
-        analytics::insert_str(
-            analytics_properties,
-            "auto_upgrade_spawn_status",
-            "json_output",
-        );
-        return;
-    }
     if !auto_mode_is_apply(config) {
         analytics::insert_str(
             analytics_properties,

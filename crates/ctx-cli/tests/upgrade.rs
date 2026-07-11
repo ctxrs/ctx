@@ -466,7 +466,7 @@ fn upgrade_rejects_unsafe_metadata_and_bad_artifacts() {
 
 #[cfg(unix)]
 #[test]
-fn json_commands_do_not_spawn_background_upgrade() {
+fn status_json_does_not_spawn_background_upgrade() {
     let temp = tempdir();
     let release = fake_release(&temp, "9.9.9");
 
@@ -482,6 +482,68 @@ fn json_commands_do_not_spawn_background_upgrade() {
     assert!(
         !temp.path().join("upgrade-state.json").exists(),
         "JSON status must not start a background upgrade"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn eligible_json_command_spawns_background_upgrade_without_polluting_output() {
+    let temp = tempdir();
+    let release = fake_release(&temp, "9.9.9");
+    let binary = copied_ctx_binary(&temp);
+    let before = fs::read(&binary).unwrap();
+    let current_sha = sha256_hex(&before);
+    fs::write(
+        install_marker_path(&binary),
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": 1,
+            "manager": "ctx-hosted-installer",
+            "install_attempt_id": "ia_test_doctor_json_background",
+            "install_path": binary.display().to_string(),
+            "platform": test_platform_key().replace('_', "-"),
+            "channel": "stable",
+            "version": env!("CARGO_PKG_VERSION"),
+            "sha256": current_sha,
+            "metadata_url": null,
+            "artifact_url": null,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let mut command = ctx_from_binary(&temp, &binary);
+    let output = command
+        .args(["doctor", "--json"])
+        .env("CTX_RELEASE_METADATA_URL", file_url(&release.metadata))
+        .env(
+            "CTX_RELEASE_METADATA_SIGNATURE_URL",
+            file_url(&release.signature),
+        )
+        .env(
+            "CTX_RELEASE_METADATA_PUBLIC_KEY_PEM",
+            TEST_RELEASE_PUBLIC_KEY_PEM,
+        )
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let doctor: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(doctor["schema_version"], 1);
+    assert_eq!(
+        output.stderr, b"",
+        "background upgrade must not write to JSON command stderr"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline {
+        if fs::read_to_string(&binary).unwrap_or_default() == "#!/bin/sh\nprintf 'ctx 9.9.9\\n'\n" {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!(
+        "eligible JSON command did not apply background upgrade; state: {:?}",
+        fs::read_to_string(temp.path().join("upgrade-state.json")).ok()
     );
 }
 

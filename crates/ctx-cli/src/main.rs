@@ -738,12 +738,7 @@ fn main() -> Result<()> {
         );
     }
     if result.is_ok() && allow_background_upgrade {
-        upgrade::maybe_spawn_auto_upgrade(
-            &data_root,
-            &config,
-            json_output,
-            &mut analytics_properties,
-        );
+        upgrade::maybe_spawn_auto_upgrade(&data_root, &config, &mut analytics_properties);
     }
     if sends_analytics {
         analytics::send_cli_event(
