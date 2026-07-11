@@ -320,8 +320,10 @@ First-party analytics are default-on and may create `install.json` plus a
 separate device identity file in OS user state, then send coarse product
 metadata. They do not send session text, prompts, transcripts, search queries,
 result snippets, source paths, repository or branch names, native session IDs,
-command text, command output, usernames, hostnames, raw IP addresses, or
-hardware-derived machine fingerprints.
+command text, command output, usernames, hostnames, raw IP addresses, exact
+CPU or GPU names, serial numbers, hardware IDs, live utilization, or benchmark
+results. Coarse capability ranges are bucketed before they are sent and are not
+used to derive a machine identity.
 
 Analytics may include:
 
@@ -331,6 +333,10 @@ Analytics may include:
 - JSON-output and option booleans such as whether a search used filters;
 - bucketed counts such as indexed sessions, import totals, result counts, and
   validation finding counts;
+- a versioned coarse execution-capability snapshot, including available
+  parallelism, host-visible memory range, CPU vector support, and whether the
+  platform is a candidate for Apple Neural Engine or NVIDIA CUDA acceleration,
+  without loading an accelerator runtime or collecting component names;
 - bucketed search query length and term count, but not query content;
 - provider identifiers such as `codex` or `claude` when selected as filters;
 - coarse Cloudflare-derived geography such as country, region, colo, ASN, and
@@ -341,6 +347,11 @@ root and represents that local index. The device identifier is a random UUID
 created only when analytics are enabled and an event is sent; it lives outside
 the ctx data root in OS user state, such as `$XDG_STATE_HOME/ctx/device.json` or
 `~/.local/state/ctx/device.json` on Linux.
+When a capability snapshot is eligible, ctx also creates a private versioned
+claim in that state directory and promotes it to a version marker after
+delivery. This avoids routinely sending the same snapshot again. If delivery
+fails or is interrupted, the claim remains in place so ctx does not risk
+replaying a snapshot whose delivery status is uncertain.
 
 `ctx sql` and MCP do not send first-party analytics events.
 

@@ -11,6 +11,7 @@ mod analytics;
 mod commands;
 mod config;
 mod docs;
+mod execution_capabilities;
 mod history_source_plugins;
 mod identity;
 mod install_marker;

@@ -56,6 +56,7 @@ fn analytics_sends_coarse_cli_metadata_when_enabled() {
         event["events"][0]["properties"]["auto_upgrade_spawned"],
         false
     );
+    assert_capability_snapshot_is_coarse(analytics_event_properties(&event));
     assert_analytics_properties_are_allowlisted(analytics_event_properties(&event));
     for forbidden in [
         "command",
@@ -76,6 +77,261 @@ fn analytics_sends_coarse_cli_metadata_when_enabled() {
             "analytics leaked forbidden property {forbidden}: {event:#}"
         );
     }
+}
+
+#[test]
+fn capability_snapshot_is_sent_once_after_successful_delivery() {
+    let temp = tempdir();
+    let events_path = temp.path().join("analytics.jsonl");
+    let home = temp.path().join("home");
+    let state = temp.path().join("state");
+    let data_root = temp.path().join("data");
+    fs::create_dir_all(&home).unwrap();
+
+    for _ in 0..2 {
+        ctx(&temp)
+            .arg("doctor")
+            .env("CTX_DATA_ROOT", &data_root)
+            .env("HOME", &home)
+            .env("XDG_STATE_HOME", &state)
+            .env("LOCALAPPDATA", &state)
+            .env_remove("CTX_ANALYTICS_OFF")
+            .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
+            .env("CTX_UPGRADE_OFF", "1")
+            .assert()
+            .success();
+    }
+
+    let events = read_analytics_events(&events_path);
+    assert_eq!(events.len(), 2, "one request should be made per invocation");
+    assert!(events
+        .iter()
+        .all(|event| event["events"].as_array().unwrap().len() == 1));
+    let first_properties = analytics_event_properties(&events[0]);
+    assert_capability_snapshot_is_coarse(first_properties);
+    assert_analytics_properties_are_allowlisted(first_properties);
+    let second_properties = analytics_event_properties(&events[1]);
+    for key in CAPABILITY_PROPERTY_KEYS {
+        assert!(
+            !second_properties.contains_key(key),
+            "capability property {key} was sent more than once: {events:#?}"
+        );
+    }
+    assert_analytics_properties_are_allowlisted(second_properties);
+
+    let marker_path = expected_capability_marker_path(&home, &state);
+    assert!(marker_path.exists());
+    assert!(!marker_path.starts_with(&data_root));
+    assert_eq!(
+        fs::read_to_string(&marker_path).unwrap(),
+        "schema_version=1\n"
+    );
+    assert!(!expected_capability_claim_path(&home, &state).exists());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mode = fs::metadata(marker_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+}
+
+#[test]
+fn capability_snapshot_failure_keeps_claim_and_suppresses_replay() {
+    let temp = tempdir();
+    let delivery_dir = temp.path().join("missing-delivery-dir");
+    let events_path = delivery_dir.join("analytics.jsonl");
+    let home = temp.path().join("home");
+    let state = temp.path().join("state");
+    let data_root = temp.path().join("data");
+    fs::create_dir_all(&home).unwrap();
+
+    ctx(&temp)
+        .arg("doctor")
+        .env("CTX_DATA_ROOT", &data_root)
+        .env("HOME", &home)
+        .env("XDG_STATE_HOME", &state)
+        .env("LOCALAPPDATA", &state)
+        .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
+        .env("CTX_UPGRADE_OFF", "1")
+        .assert()
+        .success();
+
+    let marker_path = expected_capability_marker_path(&home, &state);
+    let claim_path = expected_capability_claim_path(&home, &state);
+    assert!(!events_path.exists());
+    assert!(
+        !marker_path.exists(),
+        "failed delivery must not look successfully reported"
+    );
+    assert!(
+        claim_path.exists(),
+        "uncertain delivery must retain the claim"
+    );
+
+    fs::create_dir_all(&delivery_dir).unwrap();
+    ctx(&temp)
+        .arg("doctor")
+        .env("CTX_DATA_ROOT", &data_root)
+        .env("HOME", &home)
+        .env("XDG_STATE_HOME", &state)
+        .env("LOCALAPPDATA", &state)
+        .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
+        .env("CTX_UPGRADE_OFF", "1")
+        .assert()
+        .success();
+
+    let events = read_analytics_events(&events_path);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["events"].as_array().unwrap().len(), 1);
+    let properties = analytics_event_properties(&events[0]);
+    for key in CAPABILITY_PROPERTY_KEYS {
+        assert!(!properties.contains_key(key));
+    }
+    assert_analytics_properties_are_allowlisted(properties);
+    assert!(!marker_path.exists());
+    assert!(claim_path.exists());
+}
+
+#[test]
+fn concurrent_invocations_claim_at_most_one_capability_snapshot() {
+    let temp = tempdir();
+    let binary = copied_ctx_binary(&temp);
+    let events_path = temp.path().join("analytics.jsonl");
+    let home = temp.path().join("home");
+    let state = temp.path().join("state");
+    fs::create_dir_all(&home).unwrap();
+
+    let mut children = Vec::new();
+    for index in 0..8 {
+        children.push(
+            std::process::Command::new(&binary)
+                .arg("doctor")
+                .env("CTX_DATA_ROOT", temp.path().join(format!("data-{index}")))
+                .env("HOME", &home)
+                .env("XDG_STATE_HOME", &state)
+                .env("LOCALAPPDATA", &state)
+                .env_remove("CTX_ANALYTICS_OFF")
+                .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
+                .env("CTX_UPGRADE_OFF", "1")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+    }
+    for mut child in children {
+        assert!(child.wait().unwrap().success());
+    }
+
+    let body = fs::read_to_string(&events_path).unwrap();
+    assert_eq!(body.matches("capability_snapshot_schema").count(), 1);
+    assert!(expected_capability_marker_path(&home, &state).exists());
+    assert!(!expected_capability_claim_path(&home, &state).exists());
+}
+
+#[test]
+fn existing_claim_suppresses_replay_without_being_rewritten() {
+    let temp = tempdir();
+    let events_path = temp.path().join("analytics.jsonl");
+    let home = temp.path().join("home");
+    let state = temp.path().join("state");
+    let data_root = temp.path().join("data");
+    let claim_path = expected_capability_claim_path(&home, &state);
+    fs::create_dir_all(claim_path.parent().unwrap()).unwrap();
+    fs::write(&claim_path, "existing-claim\n").unwrap();
+
+    ctx(&temp)
+        .arg("doctor")
+        .env("CTX_DATA_ROOT", &data_root)
+        .env("HOME", &home)
+        .env("XDG_STATE_HOME", &state)
+        .env("LOCALAPPDATA", &state)
+        .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
+        .env("CTX_UPGRADE_OFF", "1")
+        .assert()
+        .success();
+
+    let event = read_analytics_events(&events_path).remove(0);
+    for key in CAPABILITY_PROPERTY_KEYS {
+        assert!(!analytics_event_properties(&event).contains_key(key));
+    }
+    assert_eq!(fs::read_to_string(claim_path).unwrap(), "existing-claim\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn capability_claim_symlink_is_never_followed_or_overwritten() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempdir();
+    let events_path = temp.path().join("analytics.jsonl");
+    let home = temp.path().join("home");
+    let state = temp.path().join("state");
+    let data_root = temp.path().join("data");
+    let sentinel = temp.path().join("sentinel.txt");
+    let claim_path = expected_capability_claim_path(&home, &state);
+    fs::create_dir_all(claim_path.parent().unwrap()).unwrap();
+    fs::write(&sentinel, "do-not-touch\n").unwrap();
+    symlink(&sentinel, &claim_path).unwrap();
+
+    ctx(&temp)
+        .arg("doctor")
+        .env("CTX_DATA_ROOT", &data_root)
+        .env("HOME", &home)
+        .env("XDG_STATE_HOME", &state)
+        .env("LOCALAPPDATA", &state)
+        .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
+        .env("CTX_UPGRADE_OFF", "1")
+        .assert()
+        .success();
+
+    assert_eq!(fs::read_to_string(&sentinel).unwrap(), "do-not-touch\n");
+    assert!(fs::symlink_metadata(claim_path)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+}
+
+#[cfg(unix)]
+#[test]
+fn analytics_device_identity_symlink_is_never_followed_or_overwritten() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempdir();
+    let events_path = temp.path().join("analytics.jsonl");
+    let home = temp.path().join("home");
+    let state = temp.path().join("state");
+    let data_root = temp.path().join("data");
+    let sentinel = temp.path().join("sentinel.json");
+    let device_path = expected_device_path(&home, &state);
+    fs::create_dir_all(device_path.parent().unwrap()).unwrap();
+    fs::write(&sentinel, "{}\n").unwrap();
+    symlink(&sentinel, &device_path).unwrap();
+
+    ctx(&temp)
+        .arg("doctor")
+        .env("CTX_DATA_ROOT", &data_root)
+        .env("HOME", &home)
+        .env("XDG_STATE_HOME", &state)
+        .env("LOCALAPPDATA", &state)
+        .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
+        .env("CTX_UPGRADE_OFF", "1")
+        .assert()
+        .success();
+
+    assert!(!events_path.exists());
+    assert_eq!(fs::read_to_string(&sentinel).unwrap(), "{}\n");
+    assert!(fs::symlink_metadata(device_path)
+        .unwrap()
+        .file_type()
+        .is_symlink());
 }
 
 #[test]
@@ -111,6 +367,11 @@ fn status_does_not_emit_analytics_or_create_identities_when_enabled() {
         !expected_device_path(&home, &state).exists(),
         "status must not create a device identity"
     );
+    assert!(
+        !expected_capability_marker_path(&home, &state).exists(),
+        "status must not create a capability marker"
+    );
+    assert_no_capability_state(&home, &state);
 }
 
 #[test]
@@ -146,6 +407,11 @@ fn daemon_status_does_not_emit_analytics_or_create_identities_when_enabled() {
         !expected_device_path(&home, &state).exists(),
         "daemon status must not create a device identity"
     );
+    assert!(
+        !expected_capability_marker_path(&home, &state).exists(),
+        "daemon status must not create a capability marker"
+    );
+    assert_no_capability_state(&home, &state);
 }
 
 #[test]
@@ -878,6 +1144,10 @@ fn setup_analytics_emits_start_and_completion_events() {
     assert!(started_properties
         .get("has_indexed_content_after_setup")
         .is_none());
+    assert_capability_snapshot_is_coarse(started_properties);
+    for key in CAPABILITY_PROPERTY_KEYS {
+        assert!(!completed_properties.contains_key(key));
+    }
     assert_eq!(completed_properties["setup_completed"], true);
     assert_eq!(completed_properties["setup_result"], "success");
     assert_eq!(
@@ -928,6 +1198,10 @@ fn setup_analytics_emits_failure_completion_event() {
     assert!(completed_properties
         .get("has_indexed_content_after_setup")
         .is_none());
+    assert_capability_snapshot_is_coarse(started_properties);
+    for key in CAPABILITY_PROPERTY_KEYS {
+        assert!(!completed_properties.contains_key(key));
+    }
     for event in &events {
         assert_analytics_properties_are_allowlisted(analytics_event_properties(event));
     }
@@ -965,6 +1239,11 @@ fn setup_analytics_opt_out_suppresses_start_completion_and_identities() {
         !expected_device_path(&home, &state).exists(),
         "setup analytics opt-out should not create a device identity"
     );
+    assert!(
+        !expected_capability_marker_path(&home, &state).exists(),
+        "setup analytics opt-out should not create a capability marker"
+    );
+    assert_no_capability_state(&home, &state);
 }
 
 #[test]
@@ -1001,6 +1280,11 @@ fn setup_analytics_dry_run_suppresses_start_completion_and_identities() {
         !expected_device_path(&home, &state).exists(),
         "setup analytics dry run should not create a device identity"
     );
+    assert!(
+        !expected_capability_marker_path(&home, &state).exists(),
+        "setup analytics dry run should not create a capability marker"
+    );
+    assert_no_capability_state(&home, &state);
 }
 
 #[test]
@@ -1035,6 +1319,11 @@ fn analytics_config_opt_out_suppresses_delivery() {
         !expected_device_path(temp.path(), &state).exists(),
         "disabled analytics should not create a device identity"
     );
+    assert!(
+        !expected_capability_marker_path(temp.path(), &state).exists(),
+        "disabled analytics should not create a capability marker"
+    );
+    assert_no_capability_state(temp.path(), &state);
 }
 
 #[test]
@@ -1061,18 +1350,25 @@ fn analytics_env_opt_out_wins_over_enable_flag() {
         !expected_device_path(temp.path(), &state).exists(),
         "hard opt-out should not create a device identity"
     );
+    assert!(
+        !expected_capability_marker_path(temp.path(), &state).exists(),
+        "hard opt-out should not create a capability marker"
+    );
+    assert_no_capability_state(temp.path(), &state);
 }
 
 #[test]
 fn analytics_refuses_device_identity_under_data_root() {
     let temp = tempdir();
     let data_root = temp.path().join("ctx-data");
+    let home = data_root.clone();
     let state = data_root.join("state");
     let events_path = temp.path().join("analytics.jsonl");
 
     ctx(&temp)
         .arg("doctor")
         .env("CTX_DATA_ROOT", &data_root)
+        .env("HOME", &home)
         .env("XDG_STATE_HOME", &state)
         .env("LOCALAPPDATA", &state)
         .env_remove("CTX_ANALYTICS_OFF")
@@ -1088,4 +1384,30 @@ fn analytics_refuses_device_identity_under_data_root() {
         !state.join("ctx").join("device.json").exists(),
         "device identity must not be created under CTX_DATA_ROOT"
     );
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+#[test]
+fn analytics_refuses_symlinked_state_directory_under_data_root() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempdir();
+    let data_root = temp.path().join("ctx-data");
+    let state_link = temp.path().join("state-link");
+    let events_path = temp.path().join("analytics.jsonl");
+    fs::create_dir_all(&data_root).unwrap();
+    symlink(&data_root, &state_link).unwrap();
+
+    ctx(&temp)
+        .arg("doctor")
+        .env("CTX_DATA_ROOT", &data_root)
+        .env("XDG_STATE_HOME", &state_link)
+        .env("LOCALAPPDATA", &state_link)
+        .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
+        .assert()
+        .success();
+
+    assert!(!events_path.exists());
+    assert!(!data_root.join("ctx").exists());
 }

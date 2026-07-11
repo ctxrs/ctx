@@ -68,7 +68,11 @@ pub fn device_id(data_root: &Path) -> Result<String> {
 }
 
 pub fn device_path(data_root: &Path) -> Result<PathBuf> {
-    let path = device_state_dir()?.join(DEVICE_FILE);
+    device_state_path(DEVICE_FILE, data_root)
+}
+
+pub(crate) fn device_state_path(file_name: &str, data_root: &Path) -> Result<PathBuf> {
+    let path = device_state_dir()?.join(file_name);
     ensure_device_path_outside_data_root(&path, data_root)?;
     Ok(path)
 }
@@ -76,13 +80,45 @@ pub fn device_path(data_root: &Path) -> Result<PathBuf> {
 pub(crate) fn ensure_device_path_outside_data_root(path: &Path, data_root: &Path) -> Result<()> {
     let normalized_path = normalize_for_prefix_check(path);
     let normalized_data_root = normalize_for_prefix_check(data_root);
-    if normalized_path.starts_with(&normalized_data_root) {
+    let resolved_path = resolve_for_prefix_check(&normalized_path)?;
+    let resolved_data_root = resolve_for_prefix_check(&normalized_data_root)?;
+    if normalized_path.starts_with(&normalized_data_root)
+        || resolved_path.starts_with(&resolved_data_root)
+    {
         bail!(
-            "refusing to store telemetry device identity under ctx data root: {}",
+            "refusing to store telemetry state under ctx data root: {}",
             path.display()
         );
     }
     Ok(())
+}
+
+fn resolve_for_prefix_check(path: &Path) -> Result<PathBuf> {
+    let mut existing = path.to_path_buf();
+    let mut missing = Vec::new();
+    loop {
+        match fs::symlink_metadata(&existing) {
+            Ok(_) => break,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                let name = existing
+                    .file_name()
+                    .context("resolve telemetry state path")?
+                    .to_os_string();
+                missing.push(name);
+                existing = existing
+                    .parent()
+                    .context("resolve telemetry state parent")?
+                    .to_path_buf();
+            }
+            Err(err) => return Err(err).with_context(|| format!("inspect {}", existing.display())),
+        }
+    }
+    let mut resolved =
+        fs::canonicalize(&existing).with_context(|| format!("resolve {}", existing.display()))?;
+    for name in missing.into_iter().rev() {
+        resolved.push(name);
+    }
+    Ok(resolved)
 }
 
 pub(crate) fn normalize_for_prefix_check(path: &Path) -> PathBuf {
@@ -152,20 +188,69 @@ pub(crate) fn home_dir() -> Option<PathBuf> {
 
 #[cfg(unix)]
 pub(crate) fn write_private_file(path: &Path, body: &[u8]) -> Result<()> {
-    use std::{fs::OpenOptions, io::Write, os::unix::fs::OpenOptionsExt};
+    use std::{
+        fs::OpenOptions,
+        io::Write,
+        os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    };
 
     let mut file = OpenOptions::new()
         .create(true)
         .truncate(true)
         .write(true)
         .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
         .open(path)?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
     file.write_all(body)?;
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(target_os = "windows")]
 pub(crate) fn write_private_file(path: &Path, body: &[u8]) -> Result<()> {
+    use std::{fs::OpenOptions, io::Write, os::windows::fs::OpenOptionsExt};
+
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    if file.metadata()?.file_type().is_symlink() {
+        bail!("refusing to write telemetry state through a symlink");
+    }
+    file.set_len(0)?;
+    file.write_all(body)?;
+    Ok(())
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
+pub(crate) fn write_private_file(path: &Path, body: &[u8]) -> Result<()> {
+    if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        bail!("refusing to write telemetry state through a symlink");
+    }
     fs::write(path, body)?;
     Ok(())
+}
+
+#[cfg(unix)]
+pub(crate) fn create_private_file(path: &Path, body: &[u8]) -> std::io::Result<()> {
+    use std::{fs::OpenOptions, io::Write, os::unix::fs::OpenOptionsExt};
+
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    file.write_all(body)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn create_private_file(path: &Path, body: &[u8]) -> std::io::Result<()> {
+    use std::{fs::OpenOptions, io::Write};
+
+    let mut file = OpenOptions::new().create_new(true).write(true).open(path)?;
+    file.write_all(body)
 }

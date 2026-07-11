@@ -5,7 +5,7 @@ use ctx_history_core::utc_now;
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
-use crate::{config::AppConfig, identity, install_marker, net};
+use crate::{config::AppConfig, execution_capabilities, identity, install_marker, net};
 
 pub type AnalyticsProperties = Map<String, Value>;
 
@@ -40,6 +40,10 @@ pub(crate) fn send_cli_event_inner(
     let duration_ms = event.duration.as_millis().min(i64::MAX as u128) as i64;
     let install_marker = install_marker::current_exe_install_marker();
     let mut properties = event.properties;
+    let capability_snapshot = execution_capabilities::pending(data_root).ok().flatten();
+    if let Some(snapshot) = capability_snapshot.as_ref() {
+        snapshot.insert_properties(&mut properties);
+    }
     properties.insert("action".to_owned(), Value::String(event.action.to_owned()));
     properties.insert("json_output".to_owned(), Value::Bool(event.json_output));
     properties.insert(
@@ -97,7 +101,11 @@ pub(crate) fn send_cli_event_inner(
         "events": [cli_event]
     });
     let body = serde_json::to_vec(&payload)?;
-    net::post_json(&config.analytics.endpoint, &body)
+    net::post_json(&config.analytics.endpoint, &body)?;
+    if let Some(snapshot) = capability_snapshot {
+        snapshot.mark_reported()?;
+    }
+    Ok(())
 }
 
 pub fn empty_properties() -> AnalyticsProperties {
