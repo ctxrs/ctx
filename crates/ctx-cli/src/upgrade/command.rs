@@ -648,7 +648,9 @@ fn render_status(data_root: &Path, json_output: bool) -> Result<()> {
     let path_diagnostics = current_exe
         .as_ref()
         .map(|path| path_diagnostics(path, current_version));
-    let marker = read_verified_install_marker_for_current_exe()
+    let marker_result = read_verified_install_marker_for_current_exe();
+    let state = reconcile_scheduled_state(state, marker_result.as_ref().ok());
+    let marker = marker_result
         .map(|marker| {
             json!({
                 "managed": true,
@@ -718,4 +720,36 @@ fn render_status(data_root: &Path, json_output: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn reconcile_scheduled_state(
+    mut state: Value,
+    marker: Option<&super::install::InstallMarker>,
+) -> Value {
+    if state.get("status").and_then(Value::as_str) != Some("scheduled") {
+        return state;
+    }
+    let Some(marker) = marker else {
+        return state;
+    };
+    let Some(latest_version) = state.get("latest_version").and_then(Value::as_str) else {
+        return state;
+    };
+    let Some(install_path) = state.get("install_path").and_then(Value::as_str) else {
+        return state;
+    };
+    if Path::new(install_path) != marker.install_path {
+        return state;
+    }
+    if marker.version == latest_version {
+        if let Some(object) = state.as_object_mut() {
+            object.insert("status".to_owned(), Value::String("applied".to_owned()));
+            object.insert("applied".to_owned(), Value::Bool(true));
+            object.insert(
+                "reconciled_from".to_owned(),
+                Value::String("scheduled".to_owned()),
+            );
+        }
+    }
+    state
 }
