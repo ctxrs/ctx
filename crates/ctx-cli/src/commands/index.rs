@@ -114,11 +114,12 @@ fn run_index_watch(args: IndexWatchArgs, data_root: &Path, quiet: bool) -> Resul
 }
 
 fn run_index_wait(args: IndexWaitArgs, data_root: &Path, quiet: bool) -> Result<()> {
-    let selection = IndexSelection::from_wait_args(&args);
+    let explicit_selection = IndexSelection::from_wait_args(&args);
     let interval = Duration::from_secs(args.interval_seconds);
     let started = Instant::now();
     loop {
         let status = index_status_snapshot(data_root)?;
+        let selection = explicit_selection.unwrap_or_else(|| IndexSelection::default_for(&status));
         if index_ready(&status, selection) {
             if args.json {
                 print_json(index_wait_json(status, selection, "ready"))?;
@@ -366,14 +367,23 @@ impl IndexSelection {
         }
     }
 
-    fn from_wait_args(args: &IndexWaitArgs) -> Self {
-        if args.all || (!args.lexical && !args.semantic) {
-            Self::all()
-        } else {
-            Self {
+    fn from_wait_args(args: &IndexWaitArgs) -> Option<Self> {
+        if args.all {
+            Some(Self::all())
+        } else if args.lexical || args.semantic {
+            Some(Self {
                 lexical: args.lexical,
                 semantic: args.semantic,
-            }
+            })
+        } else {
+            None
+        }
+    }
+
+    fn default_for(status: &Value) -> Self {
+        Self {
+            lexical: true,
+            semantic: bool_at(status, &["semantic", "enabled"]),
         }
     }
 }

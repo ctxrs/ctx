@@ -144,3 +144,111 @@ fn index_wait_lexical_reports_ready_after_import() {
     assert_eq!(wait["local_only"], true);
     assert_eq!(wait["read_only"], true);
 }
+
+#[test]
+fn index_wait_default_skips_semantic_when_disabled_after_import() {
+    let temp = tempdir();
+    let fixture = provider_history_fixture("codex-sessions");
+    json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "codex",
+        "--path",
+        &fixture,
+        "--json",
+    ]));
+
+    let wait = json_output(ctx(&temp).args([
+        "index",
+        "wait",
+        "--json",
+        "--timeout-seconds",
+        "1",
+        "--interval-seconds",
+        "1",
+    ]));
+    assert_eq!(wait["schema_version"], 1);
+    assert_eq!(wait["status"], "ready");
+    assert_eq!(wait["selection"]["lexical"], true);
+    assert_eq!(wait["selection"]["semantic"], false);
+    assert_eq!(wait["index"]["lexical"]["status"], "ready");
+    assert_eq!(wait["index"]["semantic"]["enabled"], false);
+    assert_eq!(wait["index"]["semantic"]["config_source"], "default");
+}
+
+#[test]
+fn index_wait_semantic_stays_strict_when_semantic_is_disabled() {
+    let temp = tempdir();
+    let fixture = provider_history_fixture("codex-sessions");
+    json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "codex",
+        "--path",
+        &fixture,
+        "--json",
+    ]));
+
+    let output = ctx(&temp)
+        .args([
+            "index",
+            "wait",
+            "--semantic",
+            "--json",
+            "--timeout-seconds",
+            "1",
+            "--interval-seconds",
+            "1",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stdout: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(stdout["schema_version"], 1);
+    assert_eq!(stdout["status"], "blocked");
+    assert_eq!(stdout["selection"]["lexical"], false);
+    assert_eq!(stdout["selection"]["semantic"], true);
+    assert_eq!(stdout["index"]["semantic"]["enabled"], false);
+    assert!(stderr.contains("semantic indexing is disabled"), "{stderr}");
+}
+
+#[test]
+fn index_wait_all_stays_strict_when_semantic_is_disabled() {
+    let temp = tempdir();
+    let fixture = provider_history_fixture("codex-sessions");
+    json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "codex",
+        "--path",
+        &fixture,
+        "--json",
+    ]));
+
+    let output = ctx(&temp)
+        .args([
+            "index",
+            "wait",
+            "--all",
+            "--json",
+            "--timeout-seconds",
+            "1",
+            "--interval-seconds",
+            "1",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stdout: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(stdout["schema_version"], 1);
+    assert_eq!(stdout["status"], "blocked");
+    assert_eq!(stdout["selection"]["lexical"], true);
+    assert_eq!(stdout["selection"]["semantic"], true);
+    assert_eq!(stdout["index"]["lexical"]["status"], "ready");
+    assert_eq!(stdout["index"]["semantic"]["enabled"], false);
+    assert!(stderr.contains("semantic indexing is disabled"), "{stderr}");
+}
