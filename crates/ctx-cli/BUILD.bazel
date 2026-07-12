@@ -1,4 +1,4 @@
-load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
+load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_deps", "crate_edition")
 load("@rules_rust//cargo:defs.bzl", "cargo_toml_env_vars")
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_test")
 load("//:rust_sources.bzl", "RUST_PROD_SRC_EXCLUDES")
@@ -33,6 +33,37 @@ CTX_CLI_COMPILE_DATA = [
     "//:ctx_embedded_docs",
 ]
 
+# Cargo build.rs enables these cfgs on platforms supported by the public
+# semantic runtime. Mirror that decision for platforms represented by the
+# native Bazel graph while preserving the fallback on unsupported targets.
+CTX_CLI_RUSTC_FLAGS = [
+    "--check-cfg=cfg(ctx_semantic_fastembed)",
+    "--check-cfg=cfg(ctx_sqlite_vec)",
+    "--check-cfg=cfg(test)",
+] + select({
+    "@rules_rust//rust/platform:aarch64-apple-darwin": [
+        "--cfg=ctx_semantic_fastembed",
+        "--cfg=ctx_sqlite_vec",
+    ],
+    "@rules_rust//rust/platform:aarch64-unknown-linux-gnu": [
+        "--cfg=ctx_semantic_fastembed",
+        "--cfg=ctx_sqlite_vec",
+    ],
+    "@rules_rust//rust/platform:x86_64-pc-windows-msvc": [
+        "--cfg=ctx_semantic_fastembed",
+        "--cfg=ctx_sqlite_vec",
+    ],
+    "@rules_rust//rust/platform:x86_64-unknown-linux-gnu": [
+        "--cfg=ctx_semantic_fastembed",
+        "--cfg=ctx_sqlite_vec",
+    ],
+    "@rules_rust//rust/platform:x86_64-unknown-nixos-gnu": [
+        "--cfg=ctx_semantic_fastembed",
+        "--cfg=ctx_sqlite_vec",
+    ],
+    "//conditions:default": [],
+})
+
 RUST_SRCS = glob(["src/**/*.rs"])
 
 PROD_SRCS = glob(
@@ -52,6 +83,7 @@ rust_binary(
     proc_macro_deps = all_crate_deps(proc_macro = True),
     rustc_env = COMMON_RUSTC_ENV,
     rustc_env_files = [":cargo_toml_env_vars"],
+    rustc_flags = CTX_CLI_RUSTC_FLAGS,
 )
 
 rust_test(
@@ -68,11 +100,12 @@ rust_test(
     deps = all_crate_deps(
         normal = True,
         normal_dev = True,
-    ) + CTX_CLI_DEPS,
+    ) + CTX_CLI_DEPS + crate_deps(["xz2"]),
     proc_macro_deps = all_crate_deps(
         proc_macro = True,
         proc_macro_dev = True,
     ),
     rustc_env = COMMON_RUSTC_ENV,
     rustc_env_files = [":cargo_toml_env_vars"],
+    rustc_flags = CTX_CLI_RUSTC_FLAGS,
 )
