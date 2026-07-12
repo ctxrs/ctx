@@ -381,7 +381,9 @@ visible through `ctx status`, `ctx index status`, and the search JSON
 during search, does not create the semantic sidecar from the query path, and
 does not start semantic indexing. Use `--refresh off` to search the existing
 index without refreshing or scheduling semantic work, or `--refresh wait` to run
-foreground text refresh and fail when it cannot complete. Explicit-only native sources such as
+foreground text refresh and fail when it cannot complete. Foreground refresh skips isolated
+malformed history records with a warning and commits valid records; source-level and system-level
+failures remain fatal. Explicit-only native sources such as
 NanoClaw, plus search-only sources without native import support, are searched
 from the existing index until they are explicitly imported through a supported
 path. Supported AstrBot `data_v4.db` locations participate in bounded native

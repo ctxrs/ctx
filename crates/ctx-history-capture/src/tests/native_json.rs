@@ -1216,6 +1216,7 @@ fn native_claude_projects_reports_malformed_jsonl() {
     assert_eq!(summary.imported_sessions, 1);
     assert_eq!(summary.imported_events, 1);
     assert!(summary.failures[0].error.contains("malformed JSONL"));
+    assert!(summary.failures[0].error.contains("claude-malformed.jsonl"));
 }
 
 #[test]

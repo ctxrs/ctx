@@ -167,9 +167,11 @@ lets daemon maintenance refresh lexical and semantic indexes. If daemon
 maintenance is disabled, `background` uses the bounded foreground text-refresh
 path for discovered native provider sources and enabled auto history-source
 plugins. `wait` runs that foreground text refresh and fails if it cannot
-complete; it does not wait for full semantic coverage. `off` skips foreground
-refresh, never runs plugin commands, and does not schedule or run semantic
-indexing. Explicit-only native sources such as
+complete; isolated malformed history records are skipped with a warning while
+valid records are committed. Source-level and system-level failures still fail
+the refresh. `wait` does not wait for full semantic coverage. `off` skips
+foreground refresh, never runs plugin commands, and does not schedule or run
+semantic indexing. Explicit-only native sources such as
 NanoClaw, plus search-only sources without native import support, are searched
 from the existing index until they are explicitly imported through a supported
 path. Supported AstrBot `data_v4.db` locations participate in bounded native

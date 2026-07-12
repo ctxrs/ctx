@@ -31,6 +31,89 @@ fn search_refreshes_discovered_codex_sessions_before_query() {
 }
 
 #[test]
+fn search_refresh_wait_skips_malformed_jsonl_rows() {
+    let temp = tempdir();
+    write_malformed_claude_session(&temp);
+
+    let output = ctx(&temp)
+        .args([
+            "search",
+            "partial refresh search marker",
+            "--provider",
+            "claude",
+            "--refresh",
+            "wait",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let search: Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    assert_search_provider_oracle(
+        &search,
+        "claude",
+        "partial refresh search marker",
+        1,
+        "message",
+    );
+    assert_eq!(search["freshness"]["status"], "completed");
+    assert!(
+        search["freshness"]["totals"]["failed"].as_u64().unwrap() >= 1,
+        "{search:#}"
+    );
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("partially refreshed claude"), "{stderr}");
+    assert!(stderr.contains("malformed JSONL"), "{stderr}");
+    assert!(stderr.contains("claude-session.jsonl"), "{stderr}");
+}
+
+#[test]
+fn search_refresh_wait_warns_when_progress_is_not_interactive() {
+    let temp = tempdir();
+    write_malformed_claude_session(&temp);
+
+    let output = ctx(&temp)
+        .args([
+            "search",
+            "partial refresh search marker",
+            "--provider",
+            "claude",
+            "--refresh",
+            "wait",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("partial refresh search marker"), "{stdout}");
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("partially refreshed claude"), "{stderr}");
+    assert!(stderr.contains("malformed JSONL"), "{stderr}");
+    assert!(stderr.contains("claude-session.jsonl"), "{stderr}");
+}
+
+fn write_malformed_claude_session(temp: &TempDir) {
+    let project = temp.path().join(".claude").join("projects").join("-repo");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        project.join("claude-session.jsonl"),
+        concat!(
+            r#"{"sessionId":"claude-session","timestamp":"2026-06-24T10:00:00Z","cwd":"/repo","version":"test","type":"user","message":{"role":"user","content":[{"type":"text","text":"partial refresh search marker"}]},"uuid":"claude-user"}"#,
+            "\n",
+            "{malformed-jsonl-row\n",
+            r#"{"sessionId":"claude-session","timestamp":"2026-06-24T10:00:01Z","cwd":"/repo","version":"test","type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"valid rows remain searchable"}]},"uuid":"claude-assistant"}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
 fn search_refresh_off_serves_existing_index_without_importing() {
     let temp = tempdir();
     let indexed_fixture = provider_history_fixture("codex-sessions");

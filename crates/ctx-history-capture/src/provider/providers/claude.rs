@@ -51,7 +51,7 @@ pub(crate) fn normalize_claude_projects_jsonl_file(
                 result.summary.failed += 1;
                 result.summary.failures.push(ProviderImportFailure {
                     line: line_number,
-                    error: format!("malformed JSONL: {err}"),
+                    error: format!("malformed JSONL in {}: {err}", path.display()),
                 });
                 continue;
             }

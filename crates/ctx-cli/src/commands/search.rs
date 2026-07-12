@@ -10,7 +10,9 @@ use anyhow::{anyhow, Context, Result};
 use clap::ValueEnum;
 use serde_json::{json, Value};
 
-use ctx_history_capture::{discover_provider_sources_for_provider, ProviderSourceStatus};
+use ctx_history_capture::{
+    discover_provider_sources_for_provider, ProviderImportSummary, ProviderSourceStatus,
+};
 use ctx_history_core::database_path;
 use ctx_history_store::Store;
 
@@ -536,6 +538,10 @@ pub(crate) fn refresh_sources_for_search(
     );
     let mut totals = ImportTotals::default();
     let mut first_refresh_failure = None::<String>;
+    // Provider histories are live, append-only data and may contain isolated
+    // malformed rows. Refresh all valid history while preserving hard errors
+    // for source-level and system-level failures.
+    let allow_partial_failures = true;
     if should_parallelize_import(&planned_sources) {
         let source_states = Arc::new(Mutex::new(
             planned_sources
@@ -563,7 +569,7 @@ pub(crate) fn refresh_sources_for_search(
                         &plan.source,
                         progress_callback,
                         false,
-                        false,
+                        allow_partial_failures,
                         &plan.preinventory,
                     )?;
                     Ok(ImportSourceOutcome {
@@ -592,6 +598,12 @@ pub(crate) fn refresh_sources_for_search(
         }
         outcomes.sort_by_key(|outcome| outcome.index);
         for outcome in outcomes {
+            warn_on_partial_refresh(
+                &progress,
+                json_output,
+                outcome.source.provider.as_str(),
+                &outcome.summary,
+            );
             totals.add(&outcome.summary, &outcome.stats);
         }
     } else {
@@ -610,11 +622,17 @@ pub(crate) fn refresh_sources_for_search(
                 &plan.source,
                 source_progress,
                 false,
-                false,
+                allow_partial_failures,
                 &plan.preinventory,
             );
             match import_result {
                 Ok(summary) => {
+                    warn_on_partial_refresh(
+                        &progress,
+                        json_output,
+                        plan.source.provider.as_str(),
+                        &summary,
+                    );
                     totals.add(&summary, &plan.stats);
                     progress.done(
                         "refreshing",
@@ -648,13 +666,22 @@ pub(crate) fn refresh_sources_for_search(
                 "refreshing",
                 format!("running history source plugin {}", plugin_source.label()),
             );
-            let import_result =
-                import_history_source_plugin(&mut store, &plugin_source, data_root, false, false)
-                    .with_context(|| {
-                        format!("refresh history source plugin {}", plugin_source.label())
-                    });
+            let import_result = import_history_source_plugin(
+                &mut store,
+                &plugin_source,
+                data_root,
+                false,
+                allow_partial_failures,
+            )
+            .with_context(|| format!("refresh history source plugin {}", plugin_source.label()));
             match import_result {
                 Ok((summary, stats)) => {
+                    warn_on_partial_refresh(
+                        &progress,
+                        json_output,
+                        &plugin_source.label(),
+                        &summary,
+                    );
                     totals.add(&summary, &stats);
                     progress.done(
                         "refreshing",
@@ -693,4 +720,34 @@ pub(crate) fn refresh_sources_for_search(
 
     Store::open(&db_path)?.checkpoint_wal_truncate_if_larger_than(WAL_TRUNCATE_MIN_BYTES)?;
     Ok(totals)
+}
+
+fn warn_on_partial_refresh(
+    progress: &ProgressReporter,
+    json_output: bool,
+    source: &str,
+    summary: &ProviderImportSummary,
+) {
+    if summary.failed == 0 {
+        return;
+    }
+    let first_failure = summary
+        .failures
+        .first()
+        .map(|failure| {
+            format!(
+                "; first failure at line {}: {}",
+                failure.line, failure.error
+            )
+        })
+        .unwrap_or_default();
+    let warning = format!(
+        "partially refreshed {source}: skipped {} invalid history record(s){first_failure}",
+        summary.failed
+    );
+    if progress.is_enabled() {
+        progress.warning(warning);
+    } else if !json_output {
+        eprintln!("warning: {warning}");
+    }
 }
