@@ -1621,10 +1621,7 @@ fn native_mux_fixture_imports_searches_reimports_and_subagents() {
         Value::String("mux-child-input-sentinel".into());
     fs::write(
         &child_chat,
-        child_lines
-            .into_iter()
-            .map(|line| jsonl_line(line))
-            .collect::<String>(),
+        child_lines.into_iter().map(jsonl_line).collect::<String>(),
     )
     .unwrap();
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();

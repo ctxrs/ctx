@@ -56,14 +56,11 @@ pub(crate) fn normalize_jsonl_tree(
 
     let mut merged = ProviderNormalizationResult::default();
     for path in paths {
-        match normalize_native_jsonl_session_file(&path, context, provider, source_format) {
-            Ok(mut result) => {
-                merged.summary.merge(result.summary);
-                merged.captures.append(&mut result.captures);
-                merged.files_touched.append(&mut result.files_touched);
-            }
-            Err(err) => return Err(err),
-        }
+        let mut result =
+            normalize_native_jsonl_session_file(&path, context, provider, source_format)?;
+        merged.summary.merge(result.summary);
+        merged.captures.append(&mut result.captures);
+        merged.files_touched.append(&mut result.files_touched);
     }
     Ok(merged)
 }
