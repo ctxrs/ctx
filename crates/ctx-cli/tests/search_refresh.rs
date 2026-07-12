@@ -485,6 +485,38 @@ sys.exit(23)
 }
 
 #[test]
+fn search_refresh_auto_all_malformed_native_history_fails_instead_of_serving_empty_index() {
+    let temp = tempdir();
+    ctx(&temp).args(["daemon", "disable"]).assert().success();
+    let sessions = temp
+        .path()
+        .join(".codex")
+        .join("sessions")
+        .join("2026/07/12");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(sessions.join("rollout-empty-session.jsonl"), "").unwrap();
+
+    let stderr = failure_stderr(ctx(&temp).args([
+        "search",
+        "anything",
+        "--provider",
+        "codex",
+        "--refresh",
+        "background",
+        "--json",
+    ]));
+
+    assert!(
+        stderr.contains("search refresh failed and no existing ctx index is available"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("background refresh imported no content and reported 1 failure(s)"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn search_refresh_auto_failure_serves_prior_index() {
     let temp = tempdir();
     ctx(&temp).args(["daemon", "disable"]).assert().success();

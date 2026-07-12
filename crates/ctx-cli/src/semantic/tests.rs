@@ -178,58 +178,123 @@ mod tests {
         }
     }
 
+    #[test]
+    fn deadline_partial_batch_keeps_only_fully_embedded_events() {
+        let first = Uuid::new_v4();
+        let split = Uuid::new_v4();
+        let last = Uuid::new_v4();
+        let pending = vec![
+            test_chunk_at(first, 1, "first", 0, 1),
+            test_chunk_at(split, 2, "split", 0, 3),
+            test_chunk_at(split, 2, "split", 1, 3),
+            test_chunk_at(split, 2, "split", 2, 3),
+            test_chunk_at(last, 3, "last", 0, 1),
+        ];
+
+        assert_eq!(semantic_complete_embedding_prefix(&pending, 0), 0);
+        assert_eq!(semantic_complete_embedding_prefix(&pending, 1), 1);
+        assert_eq!(semantic_complete_embedding_prefix(&pending, 2), 1);
+        assert_eq!(semantic_complete_embedding_prefix(&pending, 3), 1);
+        assert_eq!(semantic_complete_embedding_prefix(&pending, 4), 4);
+        assert_eq!(semantic_complete_embedding_prefix(&pending, 5), 5);
+        assert_eq!(semantic_complete_embedding_prefix(&pending, 99), 5);
+
+        let considered = vec![first, split, last];
+        assert_eq!(
+            semantic_contiguous_consumed_event_ids(&considered, &[first, last]),
+            vec![first]
+        );
+        assert_eq!(
+            semantic_contiguous_consumed_event_ids(&considered, &[first, split, last]),
+            considered
+        );
+
+        let cursors = vec![(first, (30, 3)), (split, (20, 2)), (last, (10, 1))];
+        assert_eq!(
+            semantic_contiguous_consumed_cursor(&cursors, &[first, last]),
+            Some((30, 3)),
+            "an unchanged event after an unfinished event cannot advance the cursor"
+        );
+        assert_eq!(
+            semantic_contiguous_consumed_cursor(&cursors, &[first, split, last]),
+            Some((10, 1))
+        );
+    }
+
     #[cfg(ctx_semantic_fastembed)]
     fn write_test_semantic_cache(root: &Path) -> Result<()> {
         let snapshot = root
             .join(SEMANTIC_HF_MODEL_CACHE_DIR)
             .join("snapshots")
-            .join("test-snapshot");
+            .join(SEMANTIC_MODEL_REVISION);
         fs::create_dir_all(&snapshot)?;
-        fs::create_dir_all(root.join(SEMANTIC_HF_MODEL_CACHE_DIR).join("refs"))?;
-        fs::write(
-            root.join(SEMANTIC_HF_MODEL_CACHE_DIR)
-                .join("refs")
-                .join("main"),
-            "test-snapshot\n",
-        )?;
         for file in SEMANTIC_REQUIRED_MODEL_FILES {
-            fs::write(snapshot.join(file), b"test")?;
+            let path = snapshot.join(file.path);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::File::create(path)?.set_len(file.size)?;
         }
         Ok(())
     }
 
+    #[test]
+    fn e5_embedding_text_uses_query_and_passage_prefixes_once() {
+        assert_eq!(
+            semantic_e5_query_text_value("find a daemon failure"),
+            "query: find a daemon failure"
+        );
+        assert_eq!(
+            semantic_e5_query_text_value("  query: find a daemon failure"),
+            "query: find a daemon failure"
+        );
+        assert_eq!(
+            semantic_e5_passage_text("daemon failed to restart"),
+            "passage: daemon failed to restart"
+        );
+        assert_eq!(
+            semantic_e5_passage_text("  passage: daemon failed to restart"),
+            "passage: daemon failed to restart"
+        );
+    }
+
     #[cfg(ctx_semantic_fastembed)]
     #[test]
-    fn semantic_adaptive_policy_uses_one_memory_budget_formula() {
-        let gib = 1024 * 1024 * 1024;
-        let large = SemanticMemorySnapshot {
-            total_bytes: Some(64 * gib),
-            available_bytes: Some(32 * gib),
-        };
-        let small = SemanticMemorySnapshot {
-            total_bytes: Some(8 * gib),
-            available_bytes: Some(4 * gib),
-        };
-        let constrained = SemanticMemorySnapshot {
-            total_bytes: Some(64 * gib),
-            available_bytes: Some(3 * gib),
-        };
+    fn fixed_shape_settings_are_strict() {
+        assert_eq!(semantic_fixed_shape_from_values(None, None).unwrap(), None);
+        assert_eq!(
+            semantic_fixed_shape_from_values(Some("16"), Some("512")).unwrap(),
+            Some((16, 512))
+        );
+        for values in [
+            (Some("16"), None),
+            (None, Some("512")),
+            (Some("0"), Some("512")),
+            (Some("wat"), Some("512")),
+            (Some("16"), Some("-1")),
+        ] {
+            assert!(semantic_fixed_shape_from_values(values.0, values.1).is_err());
+        }
+    }
 
-        assert_eq!(
-            semantic_adaptive_memory_budget_bytes(large),
-            SEMANTIC_MEMORY_BUDGET_MAX_BYTES
-        );
-        assert_eq!(semantic_adaptive_embed_policy(large).batch_size, 128);
-        assert_eq!(
-            semantic_adaptive_memory_budget_bytes(small),
-            1_717_986_918
-        );
-        assert_eq!(semantic_adaptive_embed_policy(small).batch_size, 16);
-        assert_eq!(
-            semantic_adaptive_memory_budget_bytes(constrained),
-            1_610_612_736
-        );
-        assert_eq!(semantic_adaptive_embed_policy(constrained).batch_size, 16);
+    #[cfg(ctx_semantic_fastembed)]
+    #[test]
+    fn fixed_batch_padding_preserves_complete_batches() -> Result<()> {
+        let make = |count| {
+            (0..count)
+                .map(|index| format!("passage: {index}"))
+                .collect::<Vec<_>>()
+        };
+        assert!(pad_texts_to_exact_batch(make(0), 4)?.is_empty());
+        assert_eq!(pad_texts_to_exact_batch(make(4), 4)?.len(), 4);
+        let padded = pad_texts_to_exact_batch(make(5), 4)?;
+        assert_eq!(padded.len(), 8);
+        assert_eq!(&padded[..5], make(5));
+        assert!(padded[5..]
+            .iter()
+            .all(|text| text == SEMANTIC_PASSAGE_PREFIX));
+        assert!(pad_texts_to_exact_batch(make(1), 0).is_err());
+        Ok(())
     }
 
     #[test]
@@ -240,7 +305,7 @@ mod tests {
             &json!({
                 "schema_version": 1,
                 "status": "budget_exhausted",
-                "model_key": SEMANTIC_MODEL_KEY,
+                "model_key": semantic_model_key(),
                 "pid": 1234,
                 "searchable_items": 10,
                 "embedded_items": 2,
@@ -311,7 +376,7 @@ mod tests {
             &json!({
                 "schema_version": 1,
                 "status": "completed",
-                "model_key": SEMANTIC_MODEL_KEY,
+                "model_key": semantic_model_key(),
                 "searchable_items": 11,
                 "embedded_items": 10,
                 "embedded_chunks": 20,
@@ -328,7 +393,7 @@ mod tests {
             &json!({
                 "schema_version": 1,
                 "status": "ready",
-                "model_key": SEMANTIC_MODEL_KEY,
+                "model_key": semantic_model_key(),
                 "searchable_items": 10,
                 "embedded_items": 10,
                 "embedded_chunks": 20,
@@ -339,6 +404,66 @@ mod tests {
             temp.path(),
             stats
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn ready_index_requests_daemon_model_load_with_or_without_cache() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let mut report = SemanticWorkerReport::unavailable(temp.path(), "test");
+        report.status = "ready".to_owned();
+        report.searchable_items = 10;
+        report.searchable_items_known = true;
+        report.embedded_items = 10;
+        report.queued_items_estimate = 0;
+        report.model_cache_available = false;
+        report.embedding_runtime = Some(json!({
+            "backend": "cpu",
+            "compute_class": "cpu",
+        }));
+
+        assert!(semantic_daemon_model_load_needed(&report, false));
+        assert!(!semantic_daemon_model_load_needed(&report, true));
+        report.model_cache_available = true;
+        assert!(semantic_daemon_model_load_needed(&report, false));
+        let status = daemon_semantic_job_report(temp.path(), &report, true);
+        assert_eq!(status["embedding_runtime"]["backend"], "cpu");
+        assert_eq!(status["embedding_runtime"]["compute_class"], "cpu");
+        Ok(())
+    }
+
+    #[test]
+    fn daemon_status_reports_retryable_memory_deferral() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_semantic_enabled_config(temp.path())?;
+        let mut report = SemanticWorkerReport::unavailable(temp.path(), "test");
+        report.status = "model_load_deferred".to_owned();
+        report.searchable_items = 10;
+        report.searchable_items_known = true;
+        report.queued_items_estimate = 10;
+        write_daemon_job_status(
+            &daemon_semantic_job_path(temp.path()),
+            &compact_json(json!({
+                "schema_version": 1,
+                "model_key": semantic_model_key(),
+                "status": "skipped",
+                "reason": "memory_pressure",
+                "retryable": true,
+                "available_memory_bytes": 1_610_612_736_u64,
+                "required_available_memory_bytes": 2_147_483_648_u64,
+            })),
+        )?;
+
+        let value = daemon_semantic_job_report(temp.path(), &report, true);
+        assert_eq!(value["status"], "skipped");
+        assert_eq!(value["reason"], "memory_pressure");
+        assert_eq!(value["worker_status"], "model_load_deferred");
+        assert_eq!(value["retryable"], true);
+        assert_eq!(value["available_memory_bytes"], 1_610_612_736_u64);
+        assert_eq!(
+            value["required_available_memory_bytes"],
+            2_147_483_648_u64
+        );
         Ok(())
     }
 
@@ -421,8 +546,9 @@ mod tests {
     }
 
     #[test]
-    fn semantic_only_search_fails_fast_while_worker_is_running() -> Result<()> {
+    fn semantic_only_search_does_not_reject_a_running_worker() -> Result<()> {
         let temp = tempfile::tempdir()?;
+        write_test_semantic_cache(&temp.path().join("semantic-model-cache"))?;
         let docs = write_searchable_store(temp.path(), 1)?;
         let doc = docs.first().expect("searchable fixture doc");
         let source_text = semantic_source_text(&doc.text);
@@ -449,8 +575,174 @@ mod tests {
             RefreshArg::Off,
             false,
         )
-        .expect_err("semantic-only search should fail while worker is running");
-        assert!(format!("{err:#}").contains("semantic worker is currently indexing"));
+        .expect_err("fixture has no daemon query service");
+        let message = format!("{err:#}");
+        assert!(message.contains("daemon semantic query service is not available"));
+        assert!(!message.contains("semantic worker is currently indexing"));
+        Ok(())
+    }
+
+    #[test]
+    fn advisory_pid_lock_does_not_expire_or_trust_a_reused_pid() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let lock = DaemonLock::acquire(temp.path())?.expect("daemon lock");
+        let path = daemon_lock_path(temp.path());
+        assert!(pid_lock_file_reports_running(
+            &path,
+            Some(ProcessState::Running),
+            "running"
+        ));
+        assert!(!daemon_lock_is_stale(&path));
+        assert_eq!(
+            observe_pid_advisory_lock(&path),
+            Some(PidAdvisoryLockObservation {
+                held: true,
+                released: false,
+            })
+        );
+        assert!(DaemonLock::acquire(temp.path())?.is_none());
+
+        drop(lock);
+        assert!(!pid_lock_file_reports_running(
+            &path,
+            Some(ProcessState::Running),
+            "running"
+        ));
+        assert!(daemon_lock_is_stale(&path));
+        assert_eq!(
+            observe_pid_advisory_lock(&path),
+            Some(PidAdvisoryLockObservation {
+                held: false,
+                released: true,
+            })
+        );
+        let replacement = DaemonLock::acquire(temp.path())?
+            .expect("released advisory lock should be reusable despite live payload pid");
+        assert!(pid_lock_file_reports_running(
+            &path,
+            Some(ProcessState::Running),
+            "running"
+        ));
+        drop(replacement);
+
+        fs::write(&path, b"{")?;
+        assert!(!daemon_lock_is_stale(&path));
+        Ok(())
+    }
+
+    #[test]
+    fn advisory_pid_lock_allows_only_one_concurrent_reclaimer() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        drop(DaemonLock::acquire(temp.path())?.expect("seed lock"));
+        let root = temp.path().to_path_buf();
+        let contenders = 8;
+        let start = Arc::new(std::sync::Barrier::new(contenders + 1));
+        let finish = Arc::new(std::sync::Barrier::new(contenders + 1));
+        let (send, receive) = std::sync::mpsc::channel();
+        let mut threads = Vec::new();
+        for _ in 0..contenders {
+            let root = root.clone();
+            let start = Arc::clone(&start);
+            let finish = Arc::clone(&finish);
+            let send = send.clone();
+            threads.push(std::thread::spawn(move || -> Result<()> {
+                start.wait();
+                let lock = DaemonLock::acquire(&root)?;
+                send.send(lock.is_some())?;
+                finish.wait();
+                drop(lock);
+                Ok(())
+            }));
+        }
+        drop(send);
+        start.wait();
+        let acquired = (0..contenders)
+            .map(|_| receive.recv())
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|acquired| *acquired)
+            .count();
+        finish.wait();
+        for thread in threads {
+            thread.join().expect("lock contender panicked")?;
+        }
+        assert_eq!(acquired, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn advisory_pid_lock_waits_out_a_status_probe() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        drop(DaemonLock::acquire(temp.path())?.expect("seed lock"));
+        let path = daemon_lock_path(temp.path());
+        let probe = private_open_existing_lock_file(&pid_lock_guard_path(&path))?;
+        fs2::FileExt::lock_shared(&probe)?;
+        let root = temp.path().to_path_buf();
+        let contender = std::thread::spawn(move || DaemonLock::acquire(&root));
+        std::thread::sleep(StdDuration::from_millis(5));
+        fs2::FileExt::unlock(&probe)?;
+        let lock = contender
+            .join()
+            .expect("lock contender panicked")?
+            .expect("status probe should not make acquisition give up");
+        drop(lock);
+        Ok(())
+    }
+
+    #[test]
+    fn advisory_guard_survives_metadata_path_replacement() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = daemon_lock_path(temp.path());
+        let lock = DaemonLock::acquire(temp.path())?.expect("daemon lock");
+        fs::remove_file(&path)?;
+        fs::write(&path, serde_json::to_vec(&pid_lock_payload(json!({})))?)?;
+        assert!(DaemonLock::acquire(temp.path())?.is_none());
+        drop(lock);
+        assert!(DaemonLock::acquire(temp.path())?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn advisory_publication_does_not_overwrite_a_late_legacy_owner() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = daemon_lock_path(temp.path());
+        create_private_dir_all(path.parent().expect("lock parent"))?;
+        fs::write(
+            &path,
+            serde_json::to_vec(&json!({
+                "pid": process::id(),
+                "started_at_ms": utc_now().timestamp_millis(),
+            }))?,
+        )?;
+        assert!(!publish_pid_lock_metadata(
+            &path,
+            &pid_lock_payload(json!({}))
+        )?);
+        assert!(!pid_lock_uses_advisory_protocol(
+            &read_pid_lock_json(&path).expect("legacy metadata")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn advisory_lock_reclaims_dead_legacy_metadata_for_upgrade_handoff() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = daemon_lock_path(temp.path());
+        create_private_dir_all(path.parent().expect("lock parent"))?;
+        fs::write(
+            &path,
+            serde_json::to_vec(&json!({
+                "pid": u32::MAX,
+                "started_at_ms": 0,
+            }))?,
+        )?;
+        assert!(daemon_lock_is_stale(&path));
+        let lock = DaemonLock::acquire(temp.path())?
+            .expect("dead legacy owner should be reclaimed during upgrade");
+        assert!(pid_lock_uses_advisory_protocol(
+            &read_pid_lock_json(&path).expect("advisory metadata")
+        ));
+        drop(lock);
         Ok(())
     }
 
@@ -833,7 +1125,7 @@ mod tests {
                 (model_key, embedded_items, embedded_chunks, updated_at_ms)
             VALUES (?1, 1, ?2, 1)
             "#,
-            params![SEMANTIC_MODEL_KEY, (chunk_limit + 1) as i64],
+            params![semantic_model_key(), (chunk_limit + 1) as i64],
         )?;
 
         assert!(!semantic_full_corpus_vector_scan_ready(&store)?);
@@ -844,9 +1136,59 @@ mod tests {
             SET embedded_chunks = ?2
             WHERE model_key = ?1
             "#,
-            params![SEMANTIC_MODEL_KEY, chunk_limit as i64],
+            params![semantic_model_key(), chunk_limit as i64],
         )?;
         assert!(semantic_full_corpus_vector_scan_ready(&store)?);
+        Ok(())
+    }
+
+    #[test]
+    fn opening_vector_store_preserves_other_embedding_spaces_and_current_cursor() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let vector_path = temp.path().join("vectors.sqlite");
+        let old_model_key = "fastembed:all-MiniLM-L6-v2:old";
+        {
+            let store = SemanticVectorStore::open(&vector_path)?;
+            store.conn.execute(
+                r#"
+                INSERT INTO embedding_models
+                    (model_key, backend, model_id, dimensions, distance, normalized, created_at_ms)
+                VALUES (?1, 'fastembed', 'sentence-transformers/all-MiniLM-L6-v2', 384, 'cosine', 1, 1)
+                "#,
+                [old_model_key],
+            )?;
+            store.conn.execute(
+                r#"
+                INSERT INTO event_embedding_chunks
+                    (event_id, model_key, event_seq, chunk_index, chunk_count,
+                     source_text_sha256, chunk_text_sha256, start_char, end_char,
+                     dimensions, embedding_f32, embedded_at_ms)
+                VALUES (?1, ?2, 1, 0, 1, 'source', 'chunk', 0, 5, 384, ?3, 1)
+                "#,
+                params![
+                    Uuid::new_v4().to_string(),
+                    old_model_key,
+                    serialize_f32_blob(&test_embedding(1.0, 0.0))
+                ],
+            )?;
+            store.set_backfill_cursor(Some((123, 456)))?;
+        }
+
+        let store = SemanticVectorStore::open(&vector_path)?;
+        let old_rows = store.conn.query_row(
+            "SELECT COUNT(*) FROM event_embedding_chunks WHERE model_key = ?1",
+            [old_model_key],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let old_models = store.conn.query_row(
+            "SELECT COUNT(*) FROM embedding_models WHERE model_key = ?1",
+            [old_model_key],
+            |row| row.get::<_, i64>(0),
+        )?;
+
+        assert_eq!(old_rows, 1);
+        assert_eq!(old_models, 1);
+        assert_eq!(store.backfill_cursor()?, Some((123, 456)));
         Ok(())
     }
 
@@ -995,12 +1337,12 @@ mod tests {
 
         let canonical_rowid = store.conn.query_row(
             "SELECT rowid FROM event_embedding_chunks WHERE event_id = ?1 AND model_key = ?2",
-            params![close_event.to_string(), SEMANTIC_MODEL_KEY],
+            params![close_event.to_string(), semantic_model_key()],
             |row| row.get::<_, i64>(0),
         )?;
         store.conn.execute(
 	            "UPDATE event_embedding_vec0_meta SET rowid = rowid + 1000 WHERE event_id = ?1 AND model_key = ?2",
-	            params![close_event.to_string(), SEMANTIC_MODEL_KEY],
+	            params![close_event.to_string(), semantic_model_key()],
 	        )?;
 
         assert!(!store.sqlite_vec0_ready()?);
@@ -1009,7 +1351,7 @@ mod tests {
 
         let repaired_rowid = store.conn.query_row(
             "SELECT rowid FROM event_embedding_vec0_meta WHERE event_id = ?1 AND model_key = ?2",
-            params![close_event.to_string(), SEMANTIC_MODEL_KEY],
+            params![close_event.to_string(), semantic_model_key()],
             |row| row.get::<_, i64>(0),
         )?;
         assert_eq!(repaired_rowid, canonical_rowid);
@@ -1033,7 +1375,7 @@ mod tests {
 
         let close_rowid = store.conn.query_row(
             "SELECT rowid FROM event_embedding_chunks WHERE event_id = ?1 AND model_key = ?2",
-            params![close_event.to_string(), SEMANTIC_MODEL_KEY],
+            params![close_event.to_string(), semantic_model_key()],
             |row| row.get::<_, i64>(0),
         )?;
         store.conn.execute(
@@ -1107,42 +1449,594 @@ mod tests {
 
 }
 
+#[cfg(all(test, not(ctx_semantic_fastembed)))]
+mod unsupported_platform_tests {
+    use super::*;
+    use ctx_history_core::{
+        new_id, Event, EventRole, EventType, Fidelity, SyncMetadata, SyncState, Visibility,
+    };
+
+    fn test_sync_metadata() -> SyncMetadata {
+        SyncMetadata {
+            visibility: Visibility::LocalOnly,
+            fidelity: Fidelity::Imported,
+            sync_state: SyncState::LocalOnly,
+            sync_version: 0,
+            deleted_at: None,
+            metadata: json!({}),
+        }
+    }
+
+    fn insert_test_event(store: &Store, text: &str) -> Result<()> {
+        store.upsert_event(&Event {
+            id: new_id(),
+            seq: 1,
+            history_record_id: None,
+            session_id: None,
+            run_id: None,
+            event_type: EventType::Message,
+            role: Some(EventRole::User),
+            occurred_at: utc_now(),
+            capture_source_id: None,
+            payload: json!({ "text": text }),
+            payload_blob_id: None,
+            dedupe_key: None,
+            sync: test_sync_metadata(),
+        })?;
+        Ok(())
+    }
+
+    #[test]
+    fn hybrid_search_falls_back_to_lexical_on_unsupported_platform() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        fs::create_dir_all(temp.path())?;
+        let store = Store::open(database_path(temp.path().to_path_buf()))?;
+        insert_test_event(&store, "semantic unsupported platform lexical fallback fixture")?;
+
+        let (packet, retrieval) = search_packet_with_backend(
+            &store,
+            temp.path(),
+            "semantic unsupported platform lexical fallback fixture",
+            &[],
+            &ctx_history_search::PacketOptions::default(),
+            SearchBackendArg::Hybrid,
+            true,
+            0.35,
+            RefreshArg::Off,
+            false,
+        )?;
+
+        assert_eq!(retrieval.effective_mode(), SearchBackendArg::Lexical);
+        assert_eq!(retrieval.to_json()["semantic_status"], "unavailable");
+        assert_eq!(retrieval.to_json()["semantic_fallback_code"], "unsupported_platform");
+        assert_eq!(
+            packet.query,
+            "semantic unsupported platform lexical fallback fixture"
+        );
+
+        let error = search_packet_with_backend(
+            &store,
+            temp.path(),
+            "semantic unsupported platform lexical fallback fixture",
+            &[],
+            &ctx_history_search::PacketOptions::default(),
+            SearchBackendArg::Semantic,
+            true,
+            1.0,
+            RefreshArg::Off,
+            false,
+        )
+        .expect_err("explicit semantic search should fail on unsupported platforms");
+        assert!(format!("{error:#}").contains("local semantic search is not supported"));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod query_service_transport_tests {
+    use super::*;
+
+    #[cfg(any(unix, windows))]
+    const TEST_QUERY_REQUEST_READ_TIMEOUT: StdDuration = StdDuration::from_millis(100);
+
+    #[cfg(any(unix, windows))]
+    fn start_test_query_service(data_root: &Path) -> Result<DaemonQueryService> {
+        start_daemon_query_service_with_request_timeout(
+            data_root,
+            Arc::new(Mutex::new(None)),
+            TEST_QUERY_REQUEST_READ_TIMEOUT,
+        )
+    }
+
+    #[cfg(any(unix, windows))]
+    fn wait_for_active_query(service: &DaemonQueryService) -> Result<()> {
+        let started = Instant::now();
+        while started.elapsed() < StdDuration::from_secs(2) {
+            if service.activity.snapshot().0 == 1 {
+                return Ok(());
+            }
+            std::thread::sleep(StdDuration::from_millis(5));
+        }
+        Err(anyhow!(
+            "daemon query service did not accept the test client"
+        ))
+    }
+
+    #[cfg(unix)]
+    fn connect_stalled_query_client(data_root: &Path) -> Result<UnixStream> {
+        let endpoint = read_daemon_query_endpoint(data_root)?.expect("query endpoint");
+        let DaemonQueryEndpoint::Unix { path, .. } = endpoint;
+        UnixStream::connect(&path)
+            .with_context(|| format!("connect test query socket {}", path.display()))
+    }
+
+    #[cfg(unix)]
+    fn connect_valid_nonreading_query_client(data_root: &Path) -> Result<UnixStream> {
+        let endpoint = read_daemon_query_endpoint(data_root)?.expect("query endpoint");
+        let DaemonQueryEndpoint::Unix { path, token } = endpoint;
+        let mut stream = UnixStream::connect(&path)
+            .with_context(|| format!("connect test query socket {}", path.display()))?;
+        writeln!(
+            stream,
+            "{}",
+            serde_json::to_string(&compact_json(json!({
+                "schema_version": 1,
+                "op": "ping",
+                "token": token,
+            })))?
+        )?;
+        Ok(stream)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configured_unix_query_stream_drains_response_larger_than_socket_buffer() -> Result<()> {
+        use std::io::{Read, Write};
+
+        let (mut server, mut client) = UnixStream::pair()?;
+        server.set_nonblocking(true)?;
+        configure_daemon_query_stream_unix(&server, StdDuration::from_secs(2))?;
+        let response = vec![b'x'; 1024 * 1024];
+        let expected = response.len();
+        let writer = std::thread::spawn(move || -> std::io::Result<()> {
+            server.write_all(&response)?;
+            server.shutdown(Shutdown::Write)
+        });
+        std::thread::sleep(StdDuration::from_millis(25));
+        let mut received = Vec::new();
+        client.read_to_end(&mut received)?;
+        writer.join().expect("query response writer panicked")?;
+        assert_eq!(received.len(), expected);
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn connect_stalled_query_client(data_root: &Path) -> Result<WindowsQueryHandle> {
+        let endpoint = read_daemon_query_endpoint(data_root)?.expect("query endpoint");
+        let DaemonQueryEndpoint::WindowsNamedPipe { pipe_name, .. } = endpoint;
+        let deadline = WindowsIoDeadline::new(StdDuration::from_secs(2));
+        open_windows_daemon_query_pipe(&windows_wide_null(&pipe_name), &deadline)
+    }
+
+    #[cfg(windows)]
+    fn connect_valid_nonreading_query_client(data_root: &Path) -> Result<WindowsQueryHandle> {
+        let endpoint = read_daemon_query_endpoint(data_root)?.expect("query endpoint");
+        let DaemonQueryEndpoint::WindowsNamedPipe { pipe_name, token } = endpoint;
+        let deadline = WindowsIoDeadline::new(StdDuration::from_secs(2));
+        let pipe = open_windows_daemon_query_pipe(&windows_wide_null(&pipe_name), &deadline)?;
+        let request = format!(
+            "{}\n",
+            serde_json::to_string(&compact_json(json!({
+                "schema_version": 1,
+                "op": "ping",
+                "token": token,
+            })))?
+        );
+        write_all_windows_daemon_query_pipe(&pipe, request.as_bytes(), &deadline)?;
+        Ok(pipe)
+    }
+
+    #[test]
+    fn daemon_query_activity_prevents_idle_shutdown_during_a_request() {
+        let activity = Arc::new(DaemonQueryActivity::new());
+        let request = activity.begin_request().expect("request accepted");
+        let (active, generation) = activity.snapshot();
+
+        assert_eq!(active, 1);
+        assert!(!activity.try_stop_accepting_if_idle(generation));
+
+        drop(request);
+        let (active, completed_generation) = activity.snapshot();
+        assert_eq!(active, 0);
+        assert_ne!(completed_generation, generation);
+        assert!(activity.try_stop_accepting_if_idle(completed_generation));
+        assert!(activity.begin_request().is_none());
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn stalled_query_client_is_discarded_and_next_query_is_served() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let service = start_test_query_service(temp.path())?;
+        let stalled_client = connect_stalled_query_client(temp.path())?;
+        wait_for_active_query(&service)?;
+
+        let started = Instant::now();
+        let response = daemon_query_request(
+            temp.path(),
+            compact_json(json!({
+                "schema_version": 1,
+                "op": "ping",
+            })),
+            StdDuration::from_secs(2),
+            64 * 1024,
+        )?
+        .expect("query response");
+
+        assert_eq!(response.get("ok").and_then(Value::as_bool), Some(true));
+        assert!(started.elapsed() < StdDuration::from_secs(1));
+        drop(stalled_client);
+        drop(service);
+        Ok(())
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn query_service_ping_stays_healthy_while_embedder_is_busy() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let embedder = Arc::new(Mutex::new(None));
+        let service = start_daemon_query_service_with_request_timeout(
+            temp.path(),
+            embedder.clone(),
+            TEST_QUERY_REQUEST_READ_TIMEOUT,
+        )?;
+        let _embedder_guard = embedder.lock().expect("test embedder lock");
+
+        let started = Instant::now();
+        let response = daemon_query_request(
+            temp.path(),
+            compact_json(json!({
+                "schema_version": 1,
+                "op": "ping",
+            })),
+            StdDuration::from_secs(1),
+            64 * 1024,
+        )?
+        .expect("query response");
+
+        assert_eq!(response.get("ok").and_then(Value::as_bool), Some(true));
+        assert_eq!(response.get("busy").and_then(Value::as_bool), Some(true));
+        assert!(response["embedding_runtime"].is_null());
+        assert!(started.elapsed() < StdDuration::from_millis(500));
+        drop(service);
+        Ok(())
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn query_service_shutdown_is_bounded_with_stalled_client() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let service = start_test_query_service(temp.path())?;
+        let stalled_client = connect_stalled_query_client(temp.path())?;
+        wait_for_active_query(&service)?;
+
+        let started = Instant::now();
+        drop(service);
+
+        assert!(started.elapsed() < StdDuration::from_secs(1));
+        drop(stalled_client);
+        Ok(())
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn valid_nonreading_client_does_not_block_later_queries_or_shutdown() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let service = start_test_query_service(temp.path())?;
+        let nonreader = connect_valid_nonreading_query_client(temp.path())?;
+        std::thread::sleep(StdDuration::from_millis(25));
+
+        let response = daemon_query_request(
+            temp.path(),
+            compact_json(json!({
+                "schema_version": 1,
+                "op": "ping",
+            })),
+            StdDuration::from_secs(2),
+            64 * 1024,
+        )?
+        .expect("query response");
+        assert_eq!(response.get("ok").and_then(Value::as_bool), Some(true));
+
+        let started = Instant::now();
+        drop(service);
+        assert!(started.elapsed() < StdDuration::from_secs(1));
+        drop(nonreader);
+        Ok(())
+    }
+
+    #[test]
+    fn observing_query_activity_resets_an_expired_idle_window() {
+        let activity = Arc::new(DaemonQueryActivity::new());
+        let request = activity.begin_request().expect("request accepted");
+        let mut idle_since = Some(Instant::now() - StdDuration::from_secs(5));
+        let mut observed_generation = 0;
+
+        observe_daemon_query_activity(
+            Some(activity.as_ref()),
+            &mut idle_since,
+            &mut observed_generation,
+        );
+
+        assert!(idle_since.is_none());
+        assert!(!daemon_can_begin_idle_shutdown(
+            Some(activity.as_ref()),
+            observed_generation
+        ));
+        drop(request);
+        observe_daemon_query_activity(
+            Some(activity.as_ref()),
+            &mut idle_since,
+            &mut observed_generation,
+        );
+        assert!(idle_since.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_query_socket_uses_short_private_fallback_for_long_data_root() -> Result<()> {
+        let data_root = PathBuf::from("/tmp").join("x".repeat(160));
+        let (listener, path, runtime_dir) = bind_daemon_query_listener(&data_root)?;
+        assert!(path.as_os_str().as_bytes().len() <= DAEMON_QUERY_SOCKET_PATH_SAFE_BYTES);
+        assert_ne!(path, daemon_query_socket_path(&data_root));
+        let runtime_dir = runtime_dir.expect("long path should use a private runtime dir");
+        assert_eq!(path.parent(), Some(runtime_dir.as_path()));
+
+        drop(listener);
+        fs::remove_file(&path)?;
+        fs::remove_dir(&runtime_dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn daemon_query_request_reader_stops_at_newline() -> Result<()> {
+        let mut cursor = std::io::Cursor::new(b"{\"op\":\"ping\"}\nignored".to_vec());
+
+        let body = read_daemon_query_request(&mut cursor, 256)?;
+
+        assert_eq!(body, "{\"op\":\"ping\"}");
+        Ok(())
+    }
+
+    #[test]
+    fn daemon_query_request_reader_rejects_oversized_request() {
+        let mut cursor = std::io::Cursor::new(b"abcdef".to_vec());
+
+        let error = read_daemon_query_request(&mut cursor, 3)
+            .expect_err("oversized request should fail");
+
+        assert!(format!("{error:#}").contains("daemon query request is too large"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_query_endpoint_roundtrips_unix_metadata() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let endpoint = DaemonQueryEndpoint::Unix {
+            path: daemon_query_socket_path(temp.path()),
+            token: "0123456789abcdef0123456789abcdef".to_owned(),
+        };
+
+        write_daemon_query_endpoint(temp.path(), &endpoint)?;
+        let loaded = read_daemon_query_endpoint(temp.path())?.expect("endpoint");
+
+        match loaded {
+            DaemonQueryEndpoint::Unix { path, token } => {
+                assert_eq!(path, daemon_query_socket_path(temp.path()));
+                assert_eq!(token, "0123456789abcdef0123456789abcdef");
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn daemon_query_endpoint_roundtrips_windows_named_pipe_metadata() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let pipe_name = daemon_query_pipe_name();
+        assert!(windows_named_pipe_name_is_local(&pipe_name));
+        let endpoint = DaemonQueryEndpoint::WindowsNamedPipe {
+            pipe_name: pipe_name.clone(),
+            token: "0123456789abcdef0123456789abcdef".to_owned(),
+        };
+
+        write_daemon_query_endpoint(temp.path(), &endpoint)?;
+        let loaded = read_daemon_query_endpoint(temp.path())?.expect("endpoint");
+
+        match loaded {
+            DaemonQueryEndpoint::WindowsNamedPipe {
+                pipe_name: loaded_pipe_name,
+                token,
+            } => {
+                assert_eq!(loaded_pipe_name, pipe_name);
+                assert_eq!(token, "0123456789abcdef0123456789abcdef");
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn daemon_query_endpoint_rejects_nonlocal_windows_pipe_name() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        create_private_dir_all(&daemon_root_path(temp.path()))?;
+        let endpoint = compact_json(json!({
+            "schema_version": 1,
+            "transport": "windows_named_pipe",
+            "pipe_name": r"\\server\pipe\ctx-daemon-query-0123456789abcdef0123456789abcdef",
+            "token": "0123456789abcdef0123456789abcdef",
+        }));
+        write_private_json_file(&daemon_query_endpoint_path(temp.path()), &endpoint)?;
+
+        assert!(read_daemon_query_endpoint(temp.path())?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn daemon_query_endpoint_rejects_short_tokens() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        create_private_dir_all(&daemon_root_path(temp.path()))?;
+        let mut endpoint = compact_json(json!({
+                "schema_version": 1,
+                "transport": "unix",
+                "token": "short",
+        }));
+        #[cfg(unix)]
+        {
+            endpoint["path"] = Value::String(
+                daemon_query_socket_path(temp.path())
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+        #[cfg(windows)]
+        {
+            endpoint["transport"] = Value::String("windows_named_pipe".to_owned());
+            endpoint["pipe_name"] = Value::String(daemon_query_pipe_name());
+        }
+        write_private_json_file(&daemon_query_endpoint_path(temp.path()), &endpoint)?;
+
+        assert!(read_daemon_query_endpoint(temp.path())?.is_none());
+        Ok(())
+    }
+}
+
 #[cfg(all(test, ctx_semantic_fastembed))]
 mod fastembed_policy_tests {
     use super::*;
+
+    #[test]
+    fn cpu_model_file_verification_binds_size_and_sha256() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("model.bin");
+        fs::write(&path, b"test")?;
+        let expected = SemanticModelFile::new(
+            "model.bin",
+            4,
+            "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+        );
+        verify_semantic_cpu_file(&path, expected)?;
+
+        let size_error = verify_semantic_cpu_file(
+            &path,
+            SemanticModelFile::new("model.bin", 5, expected.sha256),
+        )
+        .unwrap_err();
+        assert!(
+            size_error
+                .downcast_ref::<SemanticCpuModelIntegrityError>()
+                .is_some()
+        );
+        let hash_error = verify_semantic_cpu_file(
+            &path,
+            SemanticModelFile::new(
+                "model.bin",
+                4,
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            ),
+        )
+        .unwrap_err();
+        assert!(semantic_model_acquisition_integrity_error(&hash_error));
+        Ok(())
+    }
+
+    #[test]
+    fn cpu_model_publication_restores_old_root_and_preserves_siblings() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let managed = temp.path().join(SEMANTIC_MANAGED_MODEL_CACHE_DIR);
+        let model_root = managed.join(SEMANTIC_HF_MODEL_CACHE_DIR);
+        let shared = temp.path().join("shared-hf-cache");
+        let partial_download = managed.join("download-cache/partial");
+        fs::create_dir_all(&model_root)?;
+        fs::create_dir_all(&shared)?;
+        fs::create_dir_all(partial_download.parent().expect("partial parent"))?;
+        fs::write(model_root.join("old"), b"old")?;
+        fs::write(shared.join("keep"), b"shared")?;
+        fs::write(&partial_download, b"partial")?;
+
+        let missing_staging = managed.join("missing-staging");
+        assert!(publish_semantic_cpu_model_root(&missing_staging, &model_root).is_err());
+        assert_eq!(fs::read(model_root.join("old"))?, b"old");
+        assert_eq!(fs::read(shared.join("keep"))?, b"shared");
+        assert_eq!(fs::read(&partial_download)?, b"partial");
+
+        let staging = managed.join("staging");
+        fs::create_dir_all(&staging)?;
+        fs::write(staging.join("new"), b"new")?;
+        publish_semantic_cpu_model_root(&staging, &model_root)?;
+        assert_eq!(fs::read(model_root.join("new"))?, b"new");
+        assert!(!model_root.join("old").exists());
+        assert_eq!(fs::read(shared.join("keep"))?, b"shared");
+        assert_eq!(fs::read(&partial_download)?, b"partial");
+        Ok(())
+    }
+
+    #[test]
+    fn cpu_model_acquisition_lock_serializes_publishers() -> Result<()> {
+        use fs2::FileExt;
+
+        let temp = tempfile::tempdir()?;
+        let managed = temp.path().join(SEMANTIC_MANAGED_MODEL_CACHE_DIR);
+        let first = lock_semantic_model_acquisition(&managed)?;
+        let second_path = managed.join("acquisition.lock");
+        let second = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&second_path)?;
+        assert!(second.try_lock_exclusive().is_err());
+        drop(first);
+        second.lock_exclusive()?;
+        FileExt::unlock(&second)?;
+        Ok(())
+    }
+
+    #[test]
+    fn cpu_model_load_defers_before_cache_or_runtime_access() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let policy = semantic_embed_policy_from_env_and_resources(
+            SemanticComputeClass::Cpu,
+            SemanticSystemResources {
+                total_memory_bytes: Some(8 * 1024 * 1024 * 1024),
+                available_memory_bytes: Some(1024),
+                available_parallelism: 8,
+            },
+        );
+        let error = match acquire_cpu_backend(
+            temp.path(),
+            policy,
+            BackendPreference::Cpu,
+            false,
+        ) {
+            Ok(_) => panic!("low-memory acquisition should defer"),
+            Err(error) => error,
+        };
+        assert!(error.downcast_ref::<SemanticModelLoadDeferred>().is_some());
+    }
 
     fn write_test_semantic_cache(root: &Path) -> Result<()> {
         let snapshot = root
             .join(SEMANTIC_HF_MODEL_CACHE_DIR)
             .join("snapshots")
-            .join("test-snapshot");
+            .join(SEMANTIC_MODEL_REVISION);
         fs::create_dir_all(&snapshot)?;
-        fs::create_dir_all(root.join(SEMANTIC_HF_MODEL_CACHE_DIR).join("refs"))?;
-        fs::write(
-            root.join(SEMANTIC_HF_MODEL_CACHE_DIR)
-                .join("refs")
-                .join("main"),
-            "test-snapshot\n",
-        )?;
         for file in SEMANTIC_REQUIRED_MODEL_FILES {
-            fs::write(snapshot.join(file), b"test")?;
+            let path = snapshot.join(file.path);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::File::create(path)?.set_len(file.size)?;
         }
         Ok(())
-    }
-
-    #[test]
-    fn adaptive_policy_formula_runs_without_sqlite_vec() {
-        let gib = 1024 * 1024 * 1024;
-        let snapshot = SemanticMemorySnapshot {
-            total_bytes: Some(64 * gib),
-            available_bytes: Some(32 * gib),
-        };
-
-        let policy = semantic_adaptive_embed_policy(snapshot);
-
-        assert_eq!(policy.memory_budget_bytes, SEMANTIC_MEMORY_BUDGET_MAX_BYTES);
-        assert_eq!(policy.batch_size, SEMANTIC_EMBED_BATCH_ADAPTIVE_MAX);
-        assert_eq!(policy.source, "adaptive");
     }
 
     #[test]

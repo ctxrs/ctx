@@ -9,7 +9,7 @@ use anyhow::{anyhow, Context, Result};
 use ctx_history_core::utc_now;
 use serde_json::{json, Value};
 
-use super::UpgradePlan;
+use super::{env_flag, UpgradePlan};
 
 pub(super) const STATE_FILE: &str = "upgrade-state.json";
 const LOCK_FILE: &str = "upgrade.lock";
@@ -21,6 +21,9 @@ pub(super) fn write_state_checked(
     plan: &UpgradePlan,
     status: &str,
 ) -> Result<()> {
+    if cfg!(debug_assertions) && env_flag("CTX_UPGRADE_FAIL_STATE_WRITE_FOR_TESTS") {
+        return Err(anyhow!("injected upgrade state write failure"));
+    }
     let body = json!({
         "schema_version": 1,
         "status": status,
@@ -82,6 +85,7 @@ pub(super) fn atomic_write_json(path: &Path, value: &Value) -> Result<()> {
 
 pub(super) struct UpgradeLock {
     path: PathBuf,
+    remove_on_drop: bool,
 }
 
 impl UpgradeLock {
@@ -96,7 +100,11 @@ impl UpgradeLock {
             {
                 Ok(mut file) => {
                     writeln!(file, "{} {}", std::process::id(), now_unix_s())?;
-                    return Ok(Self { path });
+                    file.sync_all()?;
+                    return Ok(Self {
+                        path,
+                        remove_on_drop: true,
+                    });
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                     if stale_upgrade_lock_reason(&path).is_some() {
@@ -132,6 +140,23 @@ impl UpgradeLock {
             "ctx upgrade lock could not be acquired at {}",
             path.display()
         ))
+    }
+
+    pub(super) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    #[cfg(windows)]
+    pub(super) fn transfer_to(&mut self, pid: u32) -> Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&self.path)
+            .with_context(|| format!("open ctx upgrade lock {}", self.path.display()))?;
+        writeln!(file, "{} {}", pid, now_unix_s())?;
+        file.sync_all()?;
+        self.remove_on_drop = false;
+        Ok(())
     }
 }
 
@@ -203,7 +228,39 @@ fn process_state(pid: u32) -> ProcessState {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn process_state(pid: u32) -> ProcessState {
+    use windows_sys::Win32::{
+        Foundation::{
+            CloseHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, STILL_ACTIVE,
+        },
+        System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+    };
+
+    if pid == 0 {
+        return ProcessState::NotRunning;
+    }
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return match unsafe { GetLastError() } {
+            ERROR_INVALID_PARAMETER => ProcessState::NotRunning,
+            ERROR_ACCESS_DENIED => ProcessState::Running,
+            _ => ProcessState::Unknown,
+        };
+    }
+    let mut exit_code = 0_u32;
+    let queried = unsafe { GetExitCodeProcess(handle, &mut exit_code) };
+    unsafe { CloseHandle(handle) };
+    if queried == 0 {
+        ProcessState::Unknown
+    } else if exit_code == STILL_ACTIVE as u32 {
+        ProcessState::Running
+    } else {
+        ProcessState::NotRunning
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 fn process_state(_pid: u32) -> ProcessState {
     ProcessState::Unknown
 }
@@ -234,7 +291,9 @@ fn last_errno() -> Option<i32> {
 
 impl Drop for UpgradeLock {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        if self.remove_on_drop {
+            let _ = fs::remove_file(&self.path);
+        }
     }
 }
 

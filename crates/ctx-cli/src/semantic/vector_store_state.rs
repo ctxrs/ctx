@@ -1,4 +1,8 @@
 impl SemanticVectorStore {
+    fn maintenance_state_key(key: &str) -> String {
+        format!("{}:{key}", semantic_model_key())
+    }
+
     fn cached_stats(&self) -> Result<Option<SemanticSidecarStats>> {
         if !sqlite_table_exists(&self.conn, "semantic_index_stats")? {
             return Ok(None);
@@ -11,7 +15,7 @@ impl SemanticVectorStore {
                 FROM semantic_index_stats
                 WHERE model_key = ?1
                 "#,
-                params![SEMANTIC_MODEL_KEY],
+                params![semantic_model_key()],
                 |row| {
                     let embedded_items = row.get::<_, i64>(0)?.max(0) as usize;
                     let embedded_chunks = row.get::<_, i64>(1)?.max(0) as usize;
@@ -33,7 +37,7 @@ impl SemanticVectorStore {
             .conn
             .query_row(
                 "SELECT COUNT(*) FROM event_embedding_chunks WHERE model_key = ?1",
-                params![SEMANTIC_MODEL_KEY],
+                params![semantic_model_key()],
                 |row| row.get::<_, i64>(0),
             )
             .optional()?
@@ -42,7 +46,7 @@ impl SemanticVectorStore {
             .conn
             .query_row(
                 "SELECT COUNT(DISTINCT event_id) FROM event_embedding_chunks WHERE model_key = ?1",
-                params![SEMANTIC_MODEL_KEY],
+                params![semantic_model_key()],
                 |row| row.get::<_, i64>(0),
             )
             .optional()?
@@ -73,7 +77,7 @@ impl SemanticVectorStore {
                 updated_at_ms = excluded.updated_at_ms
             "#,
             params![
-                SEMANTIC_MODEL_KEY,
+                semantic_model_key(),
                 stats.embedded_items as i64,
                 stats.embedded_chunks as i64,
                 utc_now().timestamp_millis()
@@ -86,6 +90,7 @@ impl SemanticVectorStore {
         if !sqlite_table_exists(&self.conn, "semantic_maintenance_state")? {
             return Ok(None);
         }
+        let key = Self::maintenance_state_key(key);
         let value = self
             .conn
             .query_row(
@@ -98,6 +103,7 @@ impl SemanticVectorStore {
     }
 
     fn set_maintenance_state_i64(&self, key: &str, value: i64) -> Result<()> {
+        let key = Self::maintenance_state_key(key);
         self.conn.execute(
             r#"
             INSERT INTO semantic_maintenance_state (key, value, updated_at_ms)
@@ -116,6 +122,7 @@ impl SemanticVectorStore {
             return Ok(());
         }
         for key in keys {
+            let key = Self::maintenance_state_key(key);
             self.conn
                 .execute("DELETE FROM semantic_maintenance_state WHERE key = ?1", [key])?;
         }
@@ -155,7 +162,7 @@ impl SemanticVectorStore {
             .conn
             .query_row(
                 "SELECT COUNT(*) FROM semantic_dirty_events WHERE model_key = ?1",
-                params![SEMANTIC_MODEL_KEY],
+                params![semantic_model_key()],
                 |row| row.get::<_, i64>(0),
             )
             .optional()?
@@ -190,7 +197,7 @@ impl SemanticVectorStore {
             for doc in docs {
                 changed = changed.saturating_add(stmt.execute(params![
                     doc.event_id.to_string(),
-                    SEMANTIC_MODEL_KEY,
+                    semantic_model_key(),
                     queued_at_ms,
                     doc.seq as i64,
                     reason
@@ -214,7 +221,7 @@ impl SemanticVectorStore {
             LIMIT ?2
             "#,
         )?;
-        let mut rows = stmt.query(params![SEMANTIC_MODEL_KEY, limit as i64])?;
+        let mut rows = stmt.query(params![semantic_model_key(), limit as i64])?;
         let mut event_ids = Vec::new();
         while let Some(row) = rows.next()? {
             let event_id_text = row.get::<_, String>(0)?;
@@ -237,7 +244,7 @@ impl SemanticVectorStore {
             )?;
             for event_id in event_ids {
                 deleted = deleted.saturating_add(
-                    stmt.execute(params![SEMANTIC_MODEL_KEY, event_id.to_string()])?,
+                    stmt.execute(params![semantic_model_key(), event_id.to_string()])?,
                 );
             }
         }
@@ -291,7 +298,7 @@ impl SemanticVectorStore {
             GROUP BY event_id, source_text_sha256
             "#
         );
-        let mut query_params = vec![SqlValue::from(SEMANTIC_MODEL_KEY.to_owned())];
+        let mut query_params = vec![SqlValue::from(semantic_model_key().to_owned())];
         query_params.extend(
             event_ids
                 .iter()
@@ -338,8 +345,8 @@ impl SemanticVectorStore {
                 for (doc, _) in items {
                     if deleted_events.insert(doc.event_id) {
                         let event_id = doc.event_id.to_string();
-                        delete_vec_stmt.execute(params![SEMANTIC_MODEL_KEY, &event_id])?;
-                        delete_meta_stmt.execute(params![SEMANTIC_MODEL_KEY, &event_id])?;
+                        delete_vec_stmt.execute(params![semantic_model_key(), &event_id])?;
+                        delete_meta_stmt.execute(params![semantic_model_key(), &event_id])?;
                     }
                 }
             }
@@ -349,7 +356,7 @@ impl SemanticVectorStore {
             let mut deleted_events = std::collections::HashSet::new();
             for (doc, _) in items {
                 if deleted_events.insert(doc.event_id) {
-                    delete_stmt.execute(params![doc.event_id.to_string(), SEMANTIC_MODEL_KEY])?;
+                    delete_stmt.execute(params![doc.event_id.to_string(), semantic_model_key()])?;
                 }
             }
             drop(delete_stmt);
@@ -390,7 +397,7 @@ impl SemanticVectorStore {
                 let blob = serialize_f32_blob(embedding);
                 stmt.execute(params![
                     &event_id,
-                    SEMANTIC_MODEL_KEY,
+                    semantic_model_key(),
                     &history_record_id,
                     &session_id,
                     doc.seq as i64,
@@ -412,7 +419,7 @@ impl SemanticVectorStore {
                     meta_stmt.execute(params![
                         rowid,
                         &event_id,
-                        SEMANTIC_MODEL_KEY,
+                        semantic_model_key(),
                         &history_record_id,
                         &session_id,
                         doc.seq as i64,
@@ -510,7 +517,7 @@ impl SemanticVectorStore {
             "#,
         )?;
         let mut rows = stmt.query(params![
-            SEMANTIC_MODEL_KEY,
+            semantic_model_key(),
             before_event_seq,
             SEMANTIC_PRUNE_EVENTS_PER_PASS as i64
         ])?;
@@ -553,8 +560,8 @@ impl SemanticVectorStore {
                 )?;
                 for event_id in event_ids {
                     let event_id = event_id.to_string();
-                    delete_vec_stmt.execute(params![SEMANTIC_MODEL_KEY, &event_id])?;
-                    delete_meta_stmt.execute(params![SEMANTIC_MODEL_KEY, &event_id])?;
+                    delete_vec_stmt.execute(params![semantic_model_key(), &event_id])?;
+                    delete_meta_stmt.execute(params![semantic_model_key(), &event_id])?;
                 }
             }
             let mut stmt = tx.prepare(
@@ -562,7 +569,7 @@ impl SemanticVectorStore {
             )?;
             for event_id in event_ids {
                 deleted = deleted.saturating_add(
-                    stmt.execute(params![SEMANTIC_MODEL_KEY, event_id.to_string()])?,
+                    stmt.execute(params![semantic_model_key(), event_id.to_string()])?,
                 );
             }
         }

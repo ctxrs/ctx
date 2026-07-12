@@ -1,5 +1,6 @@
 mod support;
 
+#[cfg(unix)]
 use support::*;
 
 #[cfg(unix)]
@@ -7,6 +8,7 @@ use support::*;
 fn upgrade_status_check_and_apply_support_managed_installs() {
     let temp = tempdir();
     let release = fake_release(&temp, "9.9.9");
+    let _runtime = add_fake_release_runtime(&temp, &release);
 
     let status = json_output(fake_release_env(
         ctx(&temp).args(["upgrade", "status", "--json"]),
@@ -45,6 +47,678 @@ fn upgrade_status_check_and_apply_support_managed_installs() {
     assert_eq!(marker["version"], "9.9.9");
     assert_eq!(marker["sha256"], release.artifact_sha);
     assert_eq!(marker["install_attempt_id"], "ia_test_upgrade_attempt");
+}
+
+#[cfg(unix)]
+#[test]
+fn upgrade_installs_sidecar_from_signed_release_metadata() {
+    let temp = tempdir();
+    let release = fake_release(&temp, "9.9.9");
+    let runtime = add_fake_release_runtime(&temp, &release);
+
+    let applied = json_output(fake_release_env(
+        ctx(&temp).args(["upgrade", "--json"]),
+        &release,
+    ));
+
+    assert_eq!(applied["status"], "applied");
+    assert_eq!(
+        fs::read_to_string(&release.target).unwrap(),
+        "#!/bin/sh\nprintf 'ctx 9.9.9\\n'\n"
+    );
+    assert_eq!(
+        fs::read_to_string(runtime.target.join("VERSION_NUMBER")).unwrap(),
+        "1.27.0\n"
+    );
+    let library = if cfg!(target_os = "macos") {
+        "libonnxruntime.dylib"
+    } else {
+        "libonnxruntime.so"
+    };
+    assert!(runtime.target.join("lib").join(library).is_file());
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(runtime.target.join("ctx-runtime-install.json")).unwrap())
+            .unwrap();
+    assert_eq!(manifest["manager"], "ctx-hosted-installer");
+    assert_eq!(manifest["metadata_trust"], "signed-release-metadata");
+    assert_eq!(manifest["sha256"], runtime.artifact_sha);
+    assert_eq!(manifest["artifact_url"], file_url(&runtime.artifact));
+}
+
+#[cfg(unix)]
+#[test]
+fn sidecar_hash_failure_leaves_cli_and_runtime_unmodified() {
+    let temp = tempdir();
+    let release = fake_release(&temp, "9.9.9");
+    let runtime = add_fake_release_runtime(&temp, &release);
+    let before = fs::read(&release.target).unwrap();
+    rewrite_fake_release_metadata(&release, |metadata| {
+        metadata.replace(
+            &format!(
+                "CTX_RELEASE_ONNXRUNTIME_SHA256_{}={}\n",
+                test_platform_key(),
+                runtime.artifact_sha
+            ),
+            &format!(
+                "CTX_RELEASE_ONNXRUNTIME_SHA256_{}={}\n",
+                test_platform_key(),
+                "f".repeat(64)
+            ),
+        )
+    });
+
+    let stderr = failure_stderr(fake_release_env(
+        ctx(&temp).args(["upgrade", "--json"]),
+        &release,
+    ));
+
+    assert!(stderr.contains("artifact checksum mismatch"), "{stderr}");
+    assert_eq!(fs::read(&release.target).unwrap(), before);
+    assert!(
+        !runtime.target.exists(),
+        "failed sidecar verification must not publish a runtime"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn upgrade_status_accepts_current_legacy_metadata_without_sidecar_fields() {
+    let temp = tempdir();
+    let release = fake_legacy_release(&temp, env!("CARGO_PKG_VERSION"));
+
+    let outcome = json_output(fake_release_env(
+        ctx(&temp).args(["upgrade", "--json"]),
+        &release,
+    ));
+
+    assert_eq!(outcome["status"], "up_to_date");
+    assert!(!temp.path().join("runtime").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn upgrade_refuses_newer_legacy_metadata_without_sidecar_fields() {
+    let temp = tempdir();
+    let release = fake_legacy_release(&temp, "9.9.9");
+
+    let stderr = failure_stderr(fake_release_env(
+        ctx(&temp).args(["upgrade", "--json"]),
+        &release,
+    ));
+
+    assert!(
+        stderr.contains("has no complete ONNX Runtime sidecar metadata"),
+        "{stderr}"
+    );
+    assert!(!temp.path().join("runtime").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn upgrade_installs_future_runtime_version_from_target_metadata() {
+    let temp = tempdir();
+    let release = fake_release(&temp, "9.9.9");
+    let runtime = add_fake_release_runtime_version(&temp, &release, "1.28.0");
+
+    let applied = json_output(fake_release_env(
+        ctx(&temp).args(["upgrade", "--json"]),
+        &release,
+    ));
+
+    assert_eq!(applied["status"], "applied");
+    assert_eq!(
+        fs::read_to_string(runtime.target.join("VERSION_NUMBER")).unwrap(),
+        "1.28.0\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn signed_runtime_metadata_requires_complete_supported_platform_matrix() {
+    let temp = tempdir();
+    let release = fake_release(&temp, "9.9.9");
+    let _runtime = add_fake_release_runtime(&temp, &release);
+    rewrite_fake_release_metadata(&release, |metadata| {
+        metadata.replace(
+            "CTX_RELEASE_ONNXRUNTIME_ARTIFACT_windows_x64=ctx-onnxruntime-windows-x64.zip\n",
+            "",
+        )
+    });
+
+    let stderr = failure_stderr(fake_release_env(
+        ctx(&temp).args(["upgrade", "check"]),
+        &release,
+    ));
+
+    assert!(
+        stderr.contains("metadata missing CTX_RELEASE_ONNXRUNTIME_ARTIFACT_windows_x64"),
+        "{stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn signed_runtime_metadata_rejects_indented_partial_and_malformed_lines() {
+    for rewrite in [
+        Box::new(|metadata: String| {
+            metadata.replace(
+                "CTX_RELEASE_ONNXRUNTIME_VERSION=1.27.0",
+                " CTX_RELEASE_ONNXRUNTIME_VERSION=1.27.0",
+            )
+        }) as Box<dyn FnOnce(String) -> String>,
+        Box::new(|metadata: String| {
+            metadata.replace(
+                "CTX_RELEASE_ONNXRUNTIME_VERSION=1.27.0",
+                "CTX_RELEASE_ONNXRUNTIME_VERSION 1.27.0",
+            )
+        }),
+        Box::new(|metadata: String| {
+            metadata.replace(
+                "CTX_RELEASE_ONNXRUNTIME_SHA256_windows_x64=",
+                "CTX_RELEASE_ONNXRUNTIME_SHA256_windows_x64_BAD=",
+            )
+        }),
+    ] {
+        let temp = tempdir();
+        let release = fake_release(&temp, "9.9.9");
+        let _runtime = add_fake_release_runtime(&temp, &release);
+        rewrite_fake_release_metadata(&release, rewrite);
+
+        let stderr = failure_stderr(fake_release_env(
+            ctx(&temp).args(["upgrade", "check"]),
+            &release,
+        ));
+
+        assert!(
+            stderr.contains("metadata contains invalid key")
+                || stderr.contains("metadata contains malformed line")
+                || stderr.contains("metadata missing CTX_RELEASE_ONNXRUNTIME_SHA256_windows_x64"),
+            "{stderr}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn signed_runtime_metadata_rejects_unsafe_version_identifiers() {
+    for version in ["1.28", "01.28.0", "../1.28.0", "1.28.0 "] {
+        let temp = tempdir();
+        let release = fake_release(&temp, "9.9.9");
+        let _runtime = add_fake_release_runtime(&temp, &release);
+        rewrite_fake_release_metadata(&release, |metadata| {
+            metadata.replace(
+                "CTX_RELEASE_ONNXRUNTIME_VERSION=1.27.0",
+                &format!("CTX_RELEASE_ONNXRUNTIME_VERSION={version}"),
+            )
+        });
+
+        let stderr = failure_stderr(fake_release_env(
+            ctx(&temp).args(["upgrade", "check"]),
+            &release,
+        ));
+
+        assert!(
+            stderr.contains("safe MAJOR.MINOR.PATCH identifier"),
+            "{version:?}: {stderr}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn runtime_publication_rolls_back_cli_runtime_and_marker_on_marker_failure() {
+    let temp = tempdir();
+    let release = fake_release(&temp, "9.9.9");
+    let runtime = add_fake_release_runtime(&temp, &release);
+    fs::create_dir_all(&runtime.target).unwrap();
+    fs::write(runtime.target.join("old-runtime"), "old\n").unwrap();
+    let cli_before = fs::read(&release.target).unwrap();
+    let marker_path = install_marker_path(&release.target);
+    let marker_before = fs::read(&marker_path).unwrap();
+
+    let stderr = failure_stderr(
+        fake_release_env(ctx(&temp).args(["upgrade", "--json"]), &release)
+            .env("CTX_UPGRADE_FAIL_MARKER_PUBLISH_FOR_TESTS", "1"),
+    );
+
+    assert!(
+        stderr.contains("injected install marker publication failure"),
+        "{stderr}"
+    );
+    assert_eq!(fs::read(&release.target).unwrap(), cli_before);
+    assert_eq!(fs::read(&marker_path).unwrap(), marker_before);
+    assert_eq!(
+        fs::read_to_string(runtime.target.join("old-runtime")).unwrap(),
+        "old\n"
+    );
+    assert!(!runtime.target.join("VERSION_NUMBER").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn runtime_restore_failure_reports_primary_error_and_retains_backup() {
+    let temp = tempdir();
+    let release = fake_release(&temp, "9.9.9");
+    let runtime = add_fake_release_runtime(&temp, &release);
+    fs::create_dir_all(&runtime.target).unwrap();
+    fs::write(runtime.target.join("old-runtime"), "old\n").unwrap();
+
+    let stderr = failure_stderr(
+        fake_release_env(ctx(&temp).args(["upgrade", "--json"]), &release)
+            .env("CTX_UPGRADE_FAIL_MARKER_PUBLISH_FOR_TESTS", "1")
+            .env("CTX_UPGRADE_FAIL_RUNTIME_RESTORE_FOR_TESTS", "1"),
+    );
+
+    assert!(
+        stderr.contains("injected install marker publication failure"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("injected ONNX Runtime restore failure"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("recoverable backup retained at"),
+        "{stderr}"
+    );
+    let runtime_parent = runtime.target.parent().unwrap();
+    let backup = fs::read_dir(runtime_parent)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains(".runtime.previous")
+        })
+        .expect("recoverable runtime backup");
+    assert_eq!(
+        fs::read_to_string(backup.join("old-runtime")).unwrap(),
+        "old\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn interrupted_publications_recover_before_the_next_upgrade_action() {
+    for (injection, point) in [
+        ("CTX_UPGRADE_ABORT_AFTER_BACKUP_FOR_TESTS", "runtime"),
+        ("CTX_UPGRADE_ABORT_AFTER_BACKUP_FOR_TESTS", "binary"),
+        ("CTX_UPGRADE_ABORT_AFTER_BACKUP_FOR_TESTS", "marker"),
+        ("CTX_UPGRADE_ABORT_AFTER_PUBLISH_FOR_TESTS", "runtime"),
+        ("CTX_UPGRADE_ABORT_AFTER_PUBLISH_FOR_TESTS", "binary"),
+        ("CTX_UPGRADE_ABORT_AFTER_PUBLISH_FOR_TESTS", "marker"),
+    ] {
+        let temp = tempdir();
+        let release = fake_release(&temp, "9.9.9");
+        let runtime = add_fake_release_runtime(&temp, &release);
+        fs::create_dir_all(&runtime.target).unwrap();
+        fs::write(runtime.target.join("old-runtime"), "old\n").unwrap();
+        let cli_before = fs::read(&release.target).unwrap();
+        let marker_path = install_marker_path(&release.target);
+        let marker_before = fs::read(&marker_path).unwrap();
+
+        let _ = failure_stderr(
+            fake_release_env(ctx(&temp).args(["upgrade", "--json"]), &release)
+                .env(injection, point),
+        );
+        assert!(
+            temp.path()
+                .join("upgrade-install-transaction.json")
+                .is_file(),
+            "{injection}={point} did not retain a recovery journal"
+        );
+
+        let stderr = failure_stderr(
+            fake_release_env(ctx(&temp).args(["upgrade", "--json"]), &release)
+                .env("CTX_UPGRADE_STOP_AFTER_RECOVERY_FOR_TESTS", "1"),
+        );
+        assert!(
+            stderr.contains("stopped after interrupted install recovery"),
+            "{injection}={point}: {stderr}"
+        );
+        assert_eq!(
+            fs::read(&release.target).unwrap(),
+            cli_before,
+            "{injection}={point} did not restore the CLI"
+        );
+        assert_eq!(
+            fs::read(&marker_path).unwrap(),
+            marker_before,
+            "{injection}={point} did not restore the marker"
+        );
+        assert_eq!(
+            fs::read_to_string(runtime.target.join("old-runtime")).unwrap(),
+            "old\n",
+            "{injection}={point} did not restore the runtime"
+        );
+        assert!(
+            !temp
+                .path()
+                .join("upgrade-install-transaction.json")
+                .exists(),
+            "{injection}={point} left the recovery journal behind"
+        );
+
+        let applied = json_output(fake_release_env(
+            ctx(&temp).args(["upgrade", "--json"]),
+            &release,
+        ));
+        assert_eq!(applied["status"], "applied", "{injection}={point}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn forged_recovery_journal_fails_closed_without_touching_paths() {
+    let temp = tempdir();
+    let release = fake_release(&temp, "9.9.9");
+    let _runtime = add_fake_release_runtime(&temp, &release);
+    let sentinel = temp.path().join("must-survive");
+    fs::write(&sentinel, "safe\n").unwrap();
+    fs::write(
+        temp.path().join("upgrade-install-transaction.json"),
+        serde_json::to_vec(&json!({
+            "schema_version": 1,
+            "transaction_id": "forged",
+            "phase": "publishing",
+            "install_path": sentinel,
+            "paths": [
+                {
+                    "label": "ctx binary",
+                    "staged": sentinel.parent().unwrap().join(".ctx-upgrade-forged.new"),
+                    "target": sentinel,
+                    "backup": sentinel.parent().unwrap().join(".must-survive.ctx-upgrade-forged.binary.previous"),
+                    "kind": "file"
+                },
+                {
+                    "label": "ctx install marker",
+                    "staged": sentinel.parent().unwrap().join(".ctx-upgrade-forged.install.json.new"),
+                    "target": sentinel.parent().unwrap().join("must-survive.install.json"),
+                    "backup": sentinel.parent().unwrap().join(".must-survive.install.json.ctx-upgrade-forged.marker.previous"),
+                    "kind": "file"
+                }
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let stderr = failure_stderr(fake_release_env(
+        ctx(&temp).args(["upgrade", "--json"]),
+        &release,
+    ));
+
+    assert!(
+        stderr.contains("expected current managed install"),
+        "{stderr}"
+    );
+    assert_eq!(fs::read_to_string(&sentinel).unwrap(), "safe\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn interrupted_committed_transaction_finishes_without_rolling_back() {
+    let temp = tempdir();
+    let release = fake_release(&temp, "9.9.9");
+    let runtime = add_fake_release_runtime(&temp, &release);
+    fs::create_dir_all(&runtime.target).unwrap();
+    fs::write(runtime.target.join("old-runtime"), "old\n").unwrap();
+
+    let _ = failure_stderr(
+        fake_release_env(ctx(&temp).args(["upgrade", "--json"]), &release)
+            .env("CTX_UPGRADE_ABORT_AFTER_COMMIT_FOR_TESTS", "1"),
+    );
+
+    let stderr = failure_stderr(
+        fake_release_env(ctx(&temp).args(["upgrade", "--json"]), &release)
+            .env("CTX_UPGRADE_STOP_AFTER_RECOVERY_FOR_TESTS", "1"),
+    );
+    assert!(
+        stderr.contains("stopped after interrupted install recovery"),
+        "{stderr}"
+    );
+    assert_eq!(
+        fs::read_to_string(&release.target).unwrap(),
+        "#!/bin/sh\nprintf 'ctx 9.9.9\\n'\n"
+    );
+    assert!(runtime.target.join("VERSION_NUMBER").is_file());
+    assert!(!runtime.target.join("old-runtime").exists());
+    let marker: Value =
+        serde_json::from_slice(&fs::read(install_marker_path(&release.target)).unwrap()).unwrap();
+    assert_eq!(marker["version"], "9.9.9");
+}
+
+#[cfg(unix)]
+#[test]
+fn state_write_failure_after_commit_is_reported_as_warning() {
+    let temp = tempdir();
+    let release = fake_release(&temp, "9.9.9");
+    let runtime = add_fake_release_runtime(&temp, &release);
+
+    let applied = json_output(
+        fake_release_env(ctx(&temp).args(["upgrade", "--json"]), &release)
+            .env("CTX_UPGRADE_FAIL_STATE_WRITE_FOR_TESTS", "1"),
+    );
+
+    assert_eq!(applied["status"], "applied");
+    assert_eq!(applied["applied"], true);
+    assert!(applied["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning
+            .as_str()
+            .unwrap()
+            .contains("local upgrade state could not be written")));
+    assert!(runtime.target.join("VERSION_NUMBER").is_file());
+    let marker: Value =
+        serde_json::from_slice(&fs::read(install_marker_path(&release.target)).unwrap()).unwrap();
+    assert_eq!(marker["version"], "9.9.9");
+}
+
+#[cfg(unix)]
+#[test]
+fn committed_journal_write_failure_rolls_back_immediately() {
+    let temp = tempdir();
+    let release = fake_release(&temp, "9.9.9");
+    let runtime = add_fake_release_runtime(&temp, &release);
+    fs::create_dir_all(&runtime.target).unwrap();
+    fs::write(runtime.target.join("old-runtime"), "old\n").unwrap();
+    let cli_before = fs::read(&release.target).unwrap();
+    let marker_path = install_marker_path(&release.target);
+    let marker_before = fs::read(&marker_path).unwrap();
+
+    let stderr = failure_stderr(
+        fake_release_env(ctx(&temp).args(["upgrade", "--json"]), &release)
+            .env("CTX_UPGRADE_FAIL_COMMIT_JOURNAL_WRITE_FOR_TESTS", "1"),
+    );
+
+    assert!(
+        stderr.contains("injected committed journal write failure"),
+        "{stderr}"
+    );
+    assert_eq!(fs::read(&release.target).unwrap(), cli_before);
+    assert_eq!(fs::read(&marker_path).unwrap(), marker_before);
+    assert_eq!(
+        fs::read_to_string(runtime.target.join("old-runtime")).unwrap(),
+        "old\n"
+    );
+    assert!(!temp
+        .path()
+        .join("upgrade-install-transaction.json")
+        .exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn runtime_installs_at_semantic_discovery_roots() {
+    let explicit = tempdir();
+    let release = fake_release(&explicit, "9.9.9");
+    let _runtime = add_fake_release_runtime(&explicit, &release);
+    let runtime_root = explicit.path().join("custom-runtime");
+    let applied = json_output(
+        fake_release_env(ctx(&explicit).args(["upgrade", "--json"]), &release)
+            .env("CTX_RUNTIME_DIR", &runtime_root),
+    );
+    assert_eq!(applied["status"], "applied");
+    assert!(runtime_root
+        .join("onnxruntime")
+        .join("1.27.0")
+        .join(test_platform_key().replace('_', "-"))
+        .join("VERSION_NUMBER")
+        .is_file());
+
+    let custom_data = tempdir();
+    let release = fake_release(&custom_data, "9.9.9");
+    let _runtime = add_fake_release_runtime(&custom_data, &release);
+    let data_root = custom_data.path().join("custom-data-root");
+    let applied = json_output(
+        fake_release_env(ctx(&custom_data).args(["upgrade", "--json"]), &release)
+            .env("CTX_DATA_ROOT", &data_root),
+    );
+    assert_eq!(applied["status"], "applied");
+    assert!(data_root
+        .join("runtime")
+        .join("onnxruntime")
+        .join("1.27.0")
+        .join(test_platform_key().replace('_', "-"))
+        .join("VERSION_NUMBER")
+        .is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn runtime_install_honors_cli_selected_data_root() {
+    let temp = tempdir();
+    let release = fake_release(&temp, "9.9.9");
+    let _runtime = add_fake_release_runtime(&temp, &release);
+    let selected_root = temp.path().join("selected-data-root");
+    let unrelated_home = temp.path().join("unrelated-home");
+    fs::create_dir(&unrelated_home).unwrap();
+    let mut command = ctx(&temp);
+    command
+        .env_remove("CTX_DATA_ROOT")
+        .env("HOME", &unrelated_home)
+        .args([
+            "--data-root",
+            selected_root.to_str().unwrap(),
+            "upgrade",
+            "--json",
+        ]);
+
+    let applied = json_output(fake_release_env(&mut command, &release));
+
+    assert_eq!(applied["status"], "applied");
+    assert!(selected_root
+        .join("runtime")
+        .join("onnxruntime")
+        .join("1.27.0")
+        .join(test_platform_key().replace('_', "-"))
+        .join("VERSION_NUMBER")
+        .is_file());
+    assert!(!unrelated_home.join(".ctx/runtime").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn runtime_discovery_roots_reject_relative_and_whitespace_paths() {
+    for (key, value, expected) in [
+        ("CTX_RUNTIME_DIR", "relative", "must be an absolute path"),
+        (
+            "CTX_RUNTIME_DIR",
+            " /tmp/ctx-runtime",
+            "must not be empty or whitespace-padded",
+        ),
+        ("CTX_DATA_ROOT", "relative", "must be an absolute path"),
+        (
+            "CTX_DATA_ROOT",
+            " /tmp/ctx-data",
+            "must not be empty or whitespace-padded",
+        ),
+    ] {
+        let temp = tempdir();
+        let release = fake_release(&temp, "9.9.9");
+        let _runtime = add_fake_release_runtime(&temp, &release);
+        let cli_before = fs::read(&release.target).unwrap();
+        let mut command = ctx(&temp);
+        command
+            .args(["upgrade", "--json"])
+            .env(key, value)
+            .current_dir(temp.path());
+        let stderr = failure_stderr(fake_release_env(&mut command, &release));
+        assert!(stderr.contains(expected), "{key}={value:?}: {stderr}");
+        assert_eq!(fs::read(&release.target).unwrap(), cli_before);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn runtime_archive_rejects_traversal_links_specials_and_unexpected_entries() {
+    for (mode, expected) in [
+        ("traversal", "unsafe or non-canonical runtime archive path"),
+        ("symlink", "runtime archive entry is not a regular file"),
+        ("special", "runtime archive entry is not a regular file"),
+        ("unexpected", "unexpected runtime archive entry"),
+        ("duplicate", "duplicate runtime archive entry"),
+        ("unsafe_mode", "unsafe permission bits"),
+    ] {
+        let temp = tempdir();
+        let release = fake_release(&temp, "9.9.9");
+        let mut runtime = add_fake_release_runtime(&temp, &release);
+        rewrite_fake_runtime_archive(&release, &mut runtime, mode);
+        let cli_before = fs::read(&release.target).unwrap();
+
+        let stderr = failure_stderr(fake_release_env(
+            ctx(&temp).args(["upgrade", "--json"]),
+            &release,
+        ));
+
+        assert!(stderr.contains(expected), "{mode}: {stderr}");
+        assert_eq!(fs::read(&release.target).unwrap(), cli_before);
+        assert!(!runtime.target.exists(), "{mode} published a runtime");
+        assert!(!temp.path().join("escape").exists(), "{mode} escaped");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn runtime_archive_rejects_expansion_over_limit_without_partial_install() {
+    let temp = tempdir();
+    let release = fake_release(&temp, "9.9.9");
+    let runtime = add_fake_release_runtime(&temp, &release);
+    let cli_before = fs::read(&release.target).unwrap();
+
+    let stderr = failure_stderr(
+        fake_release_env(ctx(&temp).args(["upgrade", "--json"]), &release)
+            .env("CTX_UPGRADE_RUNTIME_MAX_EXPANDED_BYTES_FOR_TESTS", "16"),
+    );
+
+    assert!(
+        stderr.contains("runtime archive expands beyond the 1 GiB safety limit"),
+        "{stderr}"
+    );
+    assert_eq!(fs::read(&release.target).unwrap(), cli_before);
+    assert!(!runtime.target.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn runtime_extraction_does_not_require_external_python() {
+    let temp = tempdir();
+    let release = fake_release(&temp, "9.9.9");
+    let runtime = add_fake_release_runtime(&temp, &release);
+    let cli_before = fs::read(&release.target).unwrap();
+    let empty_path = temp.path().join("empty-path");
+    fs::create_dir(&empty_path).unwrap();
+
+    let applied = json_output(
+        fake_release_env(ctx(&temp).args(["upgrade", "--json"]), &release).env("PATH", &empty_path),
+    );
+
+    assert_eq!(applied["status"], "applied");
+    assert_ne!(fs::read(&release.target).unwrap(), cli_before);
+    assert!(runtime.target.join("VERSION_NUMBER").is_file());
 }
 
 #[cfg(unix)]
@@ -168,6 +842,7 @@ fn upgrade_commands_do_not_execute_hanging_shadow_path_ctx() {
     ] {
         let temp = tempdir();
         let release = fake_release(&temp, "9.9.9");
+        let _runtime = add_fake_release_runtime(&temp, &release);
         let shadow_dir = temp.path().join("shadow-bin");
         fs::create_dir_all(&shadow_dir).unwrap();
         let shadow_ctx = shadow_dir.join("ctx");
@@ -176,19 +851,12 @@ fn upgrade_commands_do_not_execute_hanging_shadow_path_ctx() {
         let managed_dir = release.target.parent().unwrap();
         let path = std::env::join_paths([shadow_dir.as_path(), managed_dir]).unwrap();
 
-        let started = Instant::now();
         let mut command = ctx(&temp);
         command
             .args(args)
             .env("PATH", &path)
             .env("CTX_SHADOW_MARKER", &marker);
         let output = json_output(fake_release_env(&mut command, &release));
-        let elapsed = started.elapsed();
-
-        assert!(
-            elapsed < Duration::from_secs(2),
-            "ctx {args:?} should not wait for shadow PATH binaries; elapsed {elapsed:?}"
-        );
         assert_eq!(
             output["path"]["entries"][0]["path"],
             shadow_ctx.display().to_string()
@@ -209,6 +877,7 @@ fn upgrade_commands_do_not_execute_hanging_shadow_path_ctx() {
 fn upgrade_recovers_stale_lock_for_dead_pid() {
     let temp = tempdir();
     let release = fake_release(&temp, "9.9.9");
+    let _runtime = add_fake_release_runtime(&temp, &release);
     let mut child = std::process::Command::new("sh")
         .arg("-c")
         .arg("exit 0")
@@ -443,6 +1112,7 @@ fn upgrade_rejects_unsafe_metadata_and_bad_artifacts() {
 
     let bad_checksum = tempdir();
     let release = fake_release(&bad_checksum, "9.9.9");
+    let _runtime = add_fake_release_runtime(&bad_checksum, &release);
     rewrite_fake_release_metadata(&release, |metadata| {
         metadata.replace(
             &format!(

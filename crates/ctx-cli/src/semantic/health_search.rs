@@ -10,14 +10,14 @@ fn semantic_env_flag(name: &str) -> bool {
 pub(crate) fn semantic_health_findings(data_root: &Path) -> Vec<String> {
     let mut findings = Vec::new();
     let semantic_lock = semantic_worker_lock_path(data_root);
-    if semantic_lock.exists() && semantic_worker_lock_is_stale(&semantic_lock) {
+    if semantic_lock.exists() && pid_lock_file_is_orphaned(&semantic_lock) {
         findings.push(format!(
             "semantic worker lock is stale: {}",
             semantic_lock.display()
         ));
     }
     let daemon_lock = daemon_lock_path(data_root);
-    if daemon_lock.exists() && daemon_lock_is_stale(&daemon_lock) {
+    if daemon_lock.exists() && pid_lock_file_is_orphaned(&daemon_lock) {
         findings.push(format!("daemon lock is stale: {}", daemon_lock.display()));
     }
     if let Some(status) = read_semantic_worker_status(data_root) {
@@ -92,6 +92,59 @@ fn private_create_new_file(path: &Path) -> std::io::Result<fs::File> {
     #[cfg(unix)]
     options.mode(0o600);
     options.open(path)
+}
+
+#[cfg(unix)]
+fn private_create_new_lock_file(path: &Path) -> std::io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn private_create_new_lock_file(path: &Path) -> std::io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(path)
+}
+
+#[cfg(unix)]
+fn private_open_existing_lock_file(path: &Path) -> std::io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(windows)]
+fn private_open_existing_lock_file(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "ctx process lock is not a regular file",
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn private_open_existing_lock_file(path: &Path) -> std::io::Result<fs::File> {
+    fs::OpenOptions::new().read(true).write(true).open(path)
 }
 
 #[cfg(unix)]
@@ -267,37 +320,20 @@ fn semantic_hits_for_text_query(
     Ok((semantic_hit_search.hits, diagnostics))
 }
 
-#[cfg(unix)]
 fn daemon_query_embedding(data_root: &Path, semantic_text: &str) -> Result<Option<(Vec<f32>, u64)>> {
-    let path = daemon_query_socket_path(data_root);
-    if !path.exists() {
-        return Ok(None);
-    }
-    let mut stream =
-        UnixStream::connect(&path).with_context(|| format!("connect daemon query socket {}", path.display()))?;
-    stream
-        .set_read_timeout(Some(StdDuration::from_secs(30)))
-        .context("set daemon query read timeout")?;
-    stream
-        .set_write_timeout(Some(StdDuration::from_secs(30)))
-        .context("set daemon query write timeout")?;
-    writeln!(
-        stream,
-        "{}",
-        serde_json::to_string(&compact_json(json!({
+    let Some(response) = daemon_query_request(
+        data_root,
+        compact_json(json!({
             "schema_version": 1,
             "op": "embed_query",
-            "model_key": SEMANTIC_MODEL_KEY,
+            "model_key": semantic_model_key(),
             "text": semantic_text,
-        })))?
-    )?;
-    let _ = stream.shutdown(Shutdown::Write);
-    let mut body = String::new();
-    stream
-        .take(1024 * 1024)
-        .read_to_string(&mut body)
-        .context("read daemon query response")?;
-    let response: Value = serde_json::from_str(&body).context("parse daemon query response")?;
+        })),
+        StdDuration::from_secs(30),
+        1024 * 1024,
+    )? else {
+        return Ok(None);
+    };
     if response.get("ok").and_then(Value::as_bool) != Some(true) {
         let message = response
             .get("error")
@@ -306,7 +342,7 @@ fn daemon_query_embedding(data_root: &Path, semantic_text: &str) -> Result<Optio
         return Err(anyhow!("{message}"));
     }
     let model_key = response.get("model_key").and_then(Value::as_str).unwrap_or("");
-    if model_key != SEMANTIC_MODEL_KEY {
+    if model_key != semantic_model_key() {
         return Err(anyhow!("daemon query response model key mismatch"));
     }
     let query_embed_ms = response
@@ -335,34 +371,6 @@ fn daemon_query_embedding(data_root: &Path, semantic_text: &str) -> Result<Optio
     Ok(Some((embedding, query_embed_ms)))
 }
 
-#[cfg(not(unix))]
-fn daemon_query_embedding(
-    _data_root: &Path,
-    _semantic_text: &str,
-) -> Result<Option<(Vec<f32>, u64)>> {
-    Ok(None)
-}
-
-#[cfg(ctx_semantic_fastembed)]
-struct SemanticEmbedder {
-    model: TextEmbedding,
-    batch_size: usize,
-    policy: SemanticEmbedPolicy,
-}
-
-#[cfg(ctx_semantic_fastembed)]
-static FASTEMBED_ACQUIRE_ENV_LOCK: Mutex<()> = Mutex::new(());
-
-#[cfg(not(ctx_semantic_fastembed))]
-struct SemanticEmbedder;
-
-#[cfg(ctx_semantic_fastembed)]
-#[derive(Debug, Clone, Copy)]
-struct SemanticMemorySnapshot {
-    total_bytes: Option<u64>,
-    available_bytes: Option<u64>,
-}
-
 #[cfg(ctx_semantic_fastembed)]
 #[derive(Debug, Clone)]
 struct SemanticEmbedPolicy {
@@ -371,6 +379,8 @@ struct SemanticEmbedPolicy {
     memory_budget_bytes: u64,
     total_memory_bytes: Option<u64>,
     available_memory_bytes: Option<u64>,
+    active_percent: u8,
+    compute_class: SemanticComputeClass,
     source: &'static str,
 }
 
@@ -384,139 +394,26 @@ impl SemanticEmbedPolicy {
             "memory_budget_bytes": self.memory_budget_bytes,
             "total_memory_bytes": self.total_memory_bytes,
             "available_memory_bytes": self.available_memory_bytes,
+            "active_percent": self.active_percent,
+            "compute_class": match self.compute_class {
+                SemanticComputeClass::Cpu => "cpu",
+                SemanticComputeClass::Accelerator => "accelerator",
+            },
         }))
     }
 }
 
 #[cfg(ctx_semantic_fastembed)]
-fn new_semantic_embedder(cache_dir: &Path) -> Result<SemanticEmbedder> {
-    let snapshot = semantic_model_cache_snapshot_dir(cache_dir).ok_or_else(|| {
-        anyhow!(
-            "semantic model cache is incomplete at {}",
-            cache_dir.display()
-        )
-    })?;
-    let policy = semantic_embed_policy();
-    let model_info = TextEmbedding::get_model_info(&EmbeddingModel::AllMiniLML6V2)?;
-    let tokenizer_files = TokenizerFiles {
-        tokenizer_file: fs::read(snapshot.join("tokenizer.json"))
-            .with_context(|| format!("read semantic tokenizer.json from {}", snapshot.display()))?,
-        config_file: fs::read(snapshot.join("config.json"))
-            .with_context(|| format!("read semantic config.json from {}", snapshot.display()))?,
-        special_tokens_map_file: fs::read(snapshot.join("special_tokens_map.json")).with_context(
-            || {
-                format!(
-                    "read semantic special_tokens_map.json from {}",
-                    snapshot.display()
-                )
-            },
-        )?,
-        tokenizer_config_file: fs::read(snapshot.join("tokenizer_config.json")).with_context(
-            || {
-                format!(
-                    "read semantic tokenizer_config.json from {}",
-                    snapshot.display()
-                )
-            },
-        )?,
-    };
-    let mut user_model = UserDefinedEmbeddingModel::new(
-        fs::read(snapshot.join(&model_info.model_file)).with_context(|| {
-            format!(
-                "read semantic model file {} from {}",
-                model_info.model_file,
-                snapshot.display()
-            )
-        })?,
-        tokenizer_files,
-    )
-    .with_pooling(
-        TextEmbedding::get_default_pooling_method(&EmbeddingModel::AllMiniLML6V2)
-            .unwrap_or(Pooling::Mean),
-    )
-    .with_quantization(TextEmbedding::get_quantization_mode(
-        &EmbeddingModel::AllMiniLML6V2,
-    ));
-    user_model.output_key = model_info.output_key.clone();
-    let options = InitOptionsUserDefined::new().with_intra_threads(policy.threads);
-    let model = TextEmbedding::try_new_from_user_defined(user_model, options)
-        .with_context(|| format!("initialize semantic embedding model {SEMANTIC_MODEL_ID}"))?;
-    Ok(SemanticEmbedder {
-        model,
-        batch_size: policy.batch_size,
-        policy,
-    })
-}
-
-#[cfg(ctx_semantic_fastembed)]
-fn acquire_semantic_embedder(cache_dir: &Path) -> Result<SemanticEmbedder> {
-    let _cache_env = FastembedCacheEnvGuard::new(cache_dir);
-    let policy = semantic_embed_policy();
-    let options = InitOptions::new(EmbeddingModel::AllMiniLML6V2)
-        .with_cache_dir(cache_dir.to_path_buf())
-        .with_show_download_progress(false)
-        .with_intra_threads(policy.threads);
-    let model = TextEmbedding::try_new(options)
-        .with_context(|| format!("download and initialize semantic model {SEMANTIC_MODEL_ID}"))?;
-    if !semantic_model_cache_available(cache_dir) {
-        return Err(anyhow!(
-            "semantic model download completed but cache verification failed at {}",
-            cache_dir.display()
-        ));
-    }
-    Ok(SemanticEmbedder {
-        model,
-        batch_size: policy.batch_size,
-        policy,
-    })
-}
-
-#[cfg(ctx_semantic_fastembed)]
-struct FastembedCacheEnvGuard {
-    _lock: std::sync::MutexGuard<'static, ()>,
-    hf_home: Option<std::ffi::OsString>,
-}
-
-#[cfg(ctx_semantic_fastembed)]
-impl FastembedCacheEnvGuard {
-    fn new(cache_dir: &Path) -> Self {
-        let lock = FASTEMBED_ACQUIRE_ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
-        let hf_home = env::var_os("HF_HOME");
-        env::set_var("HF_HOME", cache_dir);
-        Self {
-            _lock: lock,
-            hf_home,
-        }
-    }
-}
-
-#[cfg(ctx_semantic_fastembed)]
-impl Drop for FastembedCacheEnvGuard {
-    fn drop(&mut self) {
-        match &self.hf_home {
-            Some(value) => env::set_var("HF_HOME", value),
-            None => env::remove_var("HF_HOME"),
-        }
-    }
-}
-
-#[cfg(not(ctx_semantic_fastembed))]
-fn new_semantic_embedder(_cache_dir: &Path) -> Result<SemanticEmbedder> {
-    Err(anyhow!(
-        "semantic embedding model {SEMANTIC_MODEL_ID} is not supported on this platform"
-    ))
-}
-
-#[cfg(not(ctx_semantic_fastembed))]
-fn acquire_semantic_embedder(_cache_dir: &Path) -> Result<SemanticEmbedder> {
-    Err(anyhow!(
-        "semantic embedding model {SEMANTIC_MODEL_ID} is not supported on this platform"
-    ))
-}
-
-#[cfg(ctx_semantic_fastembed)]
 fn semantic_embed_policy() -> SemanticEmbedPolicy {
-    semantic_embed_policy_from_env_and_memory(SemanticMemorySnapshot::current())
+    semantic_embed_policy_for(SemanticComputeClass::Cpu)
+}
+
+#[cfg(ctx_semantic_fastembed)]
+fn semantic_embed_policy_for(compute_class: SemanticComputeClass) -> SemanticEmbedPolicy {
+    semantic_embed_policy_from_env_and_resources(
+        compute_class,
+        SemanticSystemResources::current(),
+    )
 }
 
 #[cfg(ctx_semantic_fastembed)]
@@ -545,11 +442,34 @@ fn semantic_embedder_policy_status_json(_embedder: &Option<SemanticEmbedder>) ->
 }
 
 #[cfg(ctx_semantic_fastembed)]
-fn semantic_embed_policy_from_env_and_memory(
-    snapshot: SemanticMemorySnapshot,
+fn semantic_embedder_runtime_status_json(embedder: &Option<SemanticEmbedder>) -> Option<Value> {
+    embedder
+        .as_ref()
+        .map(|embedder| embedder.runtime_info().to_json())
+}
+
+#[cfg(not(ctx_semantic_fastembed))]
+fn semantic_embedder_runtime_status_json(_embedder: &Option<SemanticEmbedder>) -> Option<Value> {
+    None
+}
+
+#[cfg(ctx_semantic_fastembed)]
+fn semantic_embed_policy_from_env_and_resources(
+    compute_class: SemanticComputeClass,
+    resources: SemanticSystemResources,
 ) -> SemanticEmbedPolicy {
-    let mut policy = semantic_adaptive_embed_policy(snapshot);
-    let mut source = "adaptive";
+    let quiet = semantic_quiet_policy(resources, compute_class);
+    let mut policy = SemanticEmbedPolicy {
+        threads: quiet.threads,
+        batch_size: quiet.batch_size,
+        memory_budget_bytes: quiet.memory_budget_bytes,
+        total_memory_bytes: resources.total_memory_bytes,
+        available_memory_bytes: resources.available_memory_bytes,
+        active_percent: quiet.active_percent,
+        compute_class,
+        source: "dynamic_quiet",
+    };
+    let mut source = "dynamic_quiet";
     if let Some(threads) = env_usize("CTX_SEMANTIC_THREADS") {
         policy.threads = threads.min(SEMANTIC_EMBED_THREADS_MAX);
         source = "env_override";
@@ -560,97 +480,6 @@ fn semantic_embed_policy_from_env_and_memory(
     }
     policy.source = source;
     policy
-}
-
-#[cfg(ctx_semantic_fastembed)]
-fn semantic_adaptive_embed_policy(snapshot: SemanticMemorySnapshot) -> SemanticEmbedPolicy {
-    let memory_budget_bytes = semantic_adaptive_memory_budget_bytes(snapshot);
-    let parallelism = std::thread::available_parallelism()
-        .ok()
-        .map(|threads| threads.get())
-        .unwrap_or(SEMANTIC_EMBED_THREADS_FALLBACK);
-    let budget_gib_ceiling = usize::try_from(
-        memory_budget_bytes.saturating_add((1024 * 1024 * 1024) - 1) / (1024 * 1024 * 1024),
-    )
-    .unwrap_or(SEMANTIC_EMBED_THREADS_MAX);
-    let threads = budget_gib_ceiling
-        .clamp(SEMANTIC_EMBED_THREADS_FALLBACK, SEMANTIC_EMBED_THREADS_MAX)
-        .min(parallelism.max(1));
-    let raw_batch =
-        usize::try_from(memory_budget_bytes / SEMANTIC_EMBED_BATCH_TARGET_BYTES)
-            .unwrap_or(SEMANTIC_EMBED_BATCH_ADAPTIVE_MAX);
-    let batch_size = (raw_batch / 16 * 16).clamp(
-        SEMANTIC_EMBED_BATCH_FALLBACK,
-        SEMANTIC_EMBED_BATCH_ADAPTIVE_MAX,
-    );
-    SemanticEmbedPolicy {
-        threads,
-        batch_size,
-        memory_budget_bytes,
-        total_memory_bytes: snapshot.total_bytes,
-        available_memory_bytes: snapshot.available_bytes,
-        source: "adaptive",
-    }
-}
-
-#[cfg(ctx_semantic_fastembed)]
-fn semantic_adaptive_memory_budget_bytes(snapshot: SemanticMemorySnapshot) -> u64 {
-    let by_total = snapshot.total_bytes.map(|bytes| bytes / 5);
-    let by_available = snapshot.available_bytes.map(|bytes| bytes / 2);
-    let budget = by_total
-        .into_iter()
-        .chain(by_available)
-        .min()
-        .unwrap_or(SEMANTIC_MEMORY_BUDGET_FALLBACK_BYTES);
-    budget.clamp(
-        SEMANTIC_MEMORY_BUDGET_MIN_BYTES,
-        SEMANTIC_MEMORY_BUDGET_MAX_BYTES,
-    )
-}
-
-#[cfg(ctx_semantic_fastembed)]
-impl SemanticMemorySnapshot {
-    fn current() -> Self {
-        semantic_memory_snapshot()
-    }
-}
-
-#[cfg(all(ctx_semantic_fastembed, target_os = "linux"))]
-fn semantic_memory_snapshot() -> SemanticMemorySnapshot {
-    let Ok(text) = fs::read_to_string("/proc/meminfo") else {
-        return SemanticMemorySnapshot {
-            total_bytes: None,
-            available_bytes: None,
-        };
-    };
-    let mut total_bytes = None;
-    let mut available_bytes = None;
-    for line in text.lines() {
-        if let Some(bytes) = meminfo_kib_line_bytes(line, "MemTotal:") {
-            total_bytes = Some(bytes);
-        } else if let Some(bytes) = meminfo_kib_line_bytes(line, "MemAvailable:") {
-            available_bytes = Some(bytes);
-        }
-    }
-    SemanticMemorySnapshot {
-        total_bytes,
-        available_bytes,
-    }
-}
-
-#[cfg(all(ctx_semantic_fastembed, not(target_os = "linux")))]
-fn semantic_memory_snapshot() -> SemanticMemorySnapshot {
-    SemanticMemorySnapshot {
-        total_bytes: None,
-        available_bytes: None,
-    }
-}
-
-#[cfg(all(ctx_semantic_fastembed, target_os = "linux"))]
-fn meminfo_kib_line_bytes(line: &str, key: &str) -> Option<u64> {
-    let rest = line.strip_prefix(key)?;
-    let kib = rest.split_whitespace().next()?.parse::<u64>().ok()?;
-    kib.checked_mul(1024)
 }
 
 fn semantic_worker_cache_dir(data_root: &Path) -> PathBuf {
@@ -743,6 +572,53 @@ fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
 
 fn semantic_model_cache_available(cache_dir: &Path) -> bool {
     semantic_model_cache_snapshot_dir(cache_dir).is_some()
+        || semantic_coreml_model_cache_available(cache_dir)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn semantic_coreml_model_cache_available(cache_dir: &Path) -> bool {
+    coreml_bundle_cache_available(cache_dir)
+}
+
+#[cfg(not(any(target_os = "macos", test)))]
+fn semantic_coreml_model_cache_available(_cache_dir: &Path) -> bool {
+    false
+}
+
+fn semantic_model_acquisition_status_json(cache_dir: &Path) -> Value {
+    let cpu_available = semantic_model_cache_snapshot_dir(cache_dir).is_some();
+    #[cfg(any(target_os = "macos", test))]
+    let coreml = coreml_acquisition_status_json(cache_dir);
+    #[cfg(not(any(target_os = "macos", test)))]
+    let coreml = json!({
+        "cache_status": "unsupported",
+        "descriptor_provisioned": false,
+        "network_scope": "daemon_only",
+    });
+    compact_json(json!({
+        "network_scope": "daemon_only",
+        "cpu": {
+            "cache_status": if cpu_available { "present" } else { "missing" },
+            "verification": "sha256_on_load",
+            "source_revision": SEMANTIC_MODEL_REVISION,
+        },
+        "coreml": coreml,
+    }))
+}
+
+fn semantic_model_acquisition_integrity_error(error: &anyhow::Error) -> bool {
+    if error
+        .downcast_ref::<SemanticCpuModelIntegrityError>()
+        .is_some()
+    {
+        return true;
+    }
+    #[cfg(any(target_os = "macos", test))]
+    {
+        model_acquisition_integrity_error(error)
+    }
+    #[cfg(not(any(target_os = "macos", test)))]
+    false
 }
 
 fn semantic_model_cache_snapshot_dir(cache_dir: &Path) -> Option<PathBuf> {
@@ -762,6 +638,12 @@ fn semantic_model_cache_snapshot_dir(cache_dir: &Path) -> Option<PathBuf> {
 
 fn semantic_model_cache_roots(cache_dir: &Path) -> Vec<PathBuf> {
     let mut roots = Vec::new();
+    push_unique_path(
+        &mut roots,
+        cache_dir
+            .join(SEMANTIC_MANAGED_MODEL_CACHE_DIR)
+            .join(SEMANTIC_HF_MODEL_CACHE_DIR),
+    );
     if cache_dir
         .file_name()
         .and_then(|name| name.to_str())
@@ -778,23 +660,13 @@ fn semantic_model_cache_roots(cache_dir: &Path) -> Vec<PathBuf> {
 }
 
 fn semantic_model_snapshot_from_root(model_root: &Path) -> Option<PathBuf> {
-    let snapshot_ref = fs::read_to_string(model_root.join("refs").join("main")).ok()?;
-    let snapshot_ref = snapshot_ref.trim();
-    if snapshot_ref.is_empty()
-        || snapshot_ref.contains('/')
-        || snapshot_ref.contains('\\')
-        || snapshot_ref == "."
-        || snapshot_ref == ".."
-    {
-        return None;
-    }
-    let snapshot = model_root.join("snapshots").join(snapshot_ref);
+    let snapshot = model_root.join("snapshots").join(SEMANTIC_MODEL_REVISION);
     if !snapshot.is_dir() {
         return None;
     }
     if SEMANTIC_REQUIRED_MODEL_FILES.iter().all(|file| {
-        fs::metadata(snapshot.join(file))
-            .map(|metadata| metadata.is_file() && metadata.len() > 0)
+        fs::metadata(snapshot.join(file.path))
+            .map(|metadata| metadata.is_file() && metadata.len() == file.size)
             .unwrap_or(false)
     }) {
         Some(snapshot)

@@ -37,10 +37,28 @@ ctx-history-search = { path = "../ctx-history-search" }
 ctx-history-store = { path = "../ctx-history-store" }
 
 [target.'cfg(unix)'.dependencies]
+flate2 = "1"
 libc.workspace = true
+tar.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+coreml-native = "=0.2.0"
+tokenizers = "0.22.2"
+xz2.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Threading"] }
+
+[target.'cfg(any(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64"), target_env = "gnu"), all(target_os = "macos", any(target_arch = "x86_64", target_arch = "aarch64")), all(target_os = "windows", target_arch = "x86_64"), all(target_os = "freebsd", target_arch = "x86_64")))'.dependencies]
+fastembed = { version = "5.17.2", default-features = false, features = ["hf-hub-rustls-tls", "ort-load-dynamic"] }
+fs2 = "0.4.3"
+hf-hub = { version = "0.5.0", default-features = false, features = ["ureq", "rustls-tls"] }
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["load-dynamic", "ndarray", "std", "api-24"] }
+sqlite-vec = "=0.1.9"
 [dev-dependencies]
 assert_cmd.workspace = true
 predicates.workspace = true
 proptest.workspace = true
+tar.workspace = true
 tempfile.workspace = true
+xz2.workspace = true

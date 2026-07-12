@@ -19,7 +19,7 @@ use crate::search::analyzer::{
 };
 use crate::{Result, Store};
 
-const SEMANTIC_SEARCHABLE_ITEMS_STAT_KEY: &str = "semantic_searchable_lite_turn_items_v2";
+const SEMANTIC_SEARCHABLE_ITEMS_STAT_KEY: &str = "semantic_searchable_lite_turn_items_v3";
 const SEMANTIC_TURN_TEXT_MAX_CHARS: usize = 64 * 1024;
 const SEMANTIC_LITE_TURN_RANK_BUCKET: &str = "lite_turn";
 
@@ -888,14 +888,14 @@ fn semantic_searchable_item_count_exact(conn: &Connection) -> Result<usize> {
     }
     let sql = format!(
         r#"
-        {}
         SELECT COUNT(*)
-        FROM semantic_lite_turn_docs
+        FROM events AS anchor
+        JOIN event_search_lookup AS anchor_search
+          ON anchor_search.event_id = anchor.id
+         AND length(trim(anchor_search.preview_text)) > 0
+        WHERE {}
         "#,
-        semantic_lite_turn_cte_sql(&format!(
-            "WHERE {}",
-            semantic_lite_turn_anchor_eligible_predicate()
-        ))
+        semantic_lite_turn_anchor_eligible_predicate()
     );
     let count = conn.query_row(&sql, [], |row| row.get::<_, i64>(0))?;
     Ok(count.max(0) as usize)

@@ -128,9 +128,14 @@ pub(crate) fn assert_provider_citations(result: &Value, provider: &str) {
     assert!(!citations.is_empty(), "missing citations in {result:#}");
     for citation in citations {
         assert!(
-            citation["ctx_event_id"].is_string() || citation["ctx_session_id"].is_string(),
-            "citation needs a ctx-owned event or session id in {citation:#}"
+            citation["item_id"].is_string(),
+            "citation needs a ctx-owned item id in {citation:#}"
         );
+        match citation["target_type"].as_str() {
+            Some("event") => assert!(citation["ctx_event_id"].is_string()),
+            Some("session") => assert!(citation["ctx_session_id"].is_string()),
+            _ => {}
+        }
         assert_eq!(citation["provider"], provider, "citation provider failed");
         assert_eq!(
             citation["source_exists"], true,

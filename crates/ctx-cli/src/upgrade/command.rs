@@ -13,7 +13,7 @@ use crate::{analytics, analytics::AnalyticsProperties, config::AppConfig, net};
 
 use super::install::{
     apply_artifact, current_install_path, install_marker_for_plan,
-    read_verified_install_marker_for_current_exe, write_install_marker_after_upgrade, ApplyResult,
+    read_verified_install_marker_for_current_exe, recover_interrupted_install, ApplyResult,
 };
 use super::metadata::{
     metadata_signature_url, metadata_url, parse_release_metadata, validate_artifact_url,
@@ -29,6 +29,7 @@ use super::{env_flag, platform_key, version_gt, UpgradePlan};
 const RELEASE_METADATA_MAX_BYTES: usize = 1024 * 1024;
 const RELEASE_METADATA_SIGNATURE_MAX_BYTES: usize = 64 * 1024;
 const RELEASE_ARTIFACT_MAX_BYTES: usize = 128 * 1024 * 1024;
+const RELEASE_ONNXRUNTIME_ARTIFACT_MAX_BYTES: usize = 1024 * 1024 * 1024;
 
 #[derive(Debug, Args)]
 pub struct UpgradeArgs {
@@ -450,7 +451,8 @@ fn apply_upgrade(
     background: bool,
 ) -> Result<UpgradeOutcome> {
     fs::create_dir_all(data_root)?;
-    let _lock = match UpgradeLock::acquire(data_root) {
+    #[allow(unused_mut)]
+    let mut upgrade_lock = match UpgradeLock::acquire(data_root) {
         Ok(lock) => lock,
         Err(error) if background => {
             append_upgrade_log(data_root, &format!("background upgrade skipped: {error}"));
@@ -467,6 +469,12 @@ fn apply_upgrade(
         }
         Err(error) => return Err(error),
     };
+    if recover_interrupted_install(data_root)? {
+        append_upgrade_log(data_root, "recovered interrupted install transaction");
+        if cfg!(debug_assertions) && env_flag("CTX_UPGRADE_STOP_AFTER_RECOVERY_FOR_TESTS") {
+            return Err(anyhow!("stopped after interrupted install recovery"));
+        }
+    }
     let plan = build_upgrade_plan(config, channel_override, true)?;
     if !plan.update_available {
         write_state_checked(data_root, &plan, "up_to_date")?;
@@ -484,6 +492,12 @@ fn apply_upgrade(
     if !plan.metadata.self_upgrade_allowed {
         return Err(anyhow!(
             "release {} does not allow self-upgrade",
+            plan.latest_version
+        ));
+    }
+    if plan.metadata.onnxruntime.is_none() {
+        return Err(anyhow!(
+            "release {} is newer than this ctx build but has no complete ONNX Runtime sidecar metadata; refusing a downgrade-compatible legacy update",
             plan.latest_version
         ));
     }
@@ -512,10 +526,34 @@ fn apply_upgrade(
     let bytes = net::get_bytes_limited(&plan.artifact_url, RELEASE_ARTIFACT_MAX_BYTES)
         .with_context(|| format!("download {}", plan.artifact_url))?;
     verify_artifact_sha(&bytes, &plan.artifact_sha256)?;
-    let apply_result = apply_artifact(&plan, &bytes)?;
-    let warnings = plan.warnings.clone();
-    if apply_result == ApplyResult::Scheduled {
-        write_state_checked(data_root, &plan, "scheduled")?;
+    let runtime_bytes = match (
+        plan.metadata.onnxruntime.as_ref(),
+        plan.onnxruntime_artifact_url(),
+    ) {
+        (Some(runtime), Some(runtime_url)) => {
+            let bytes =
+                net::get_bytes_limited(&runtime_url, RELEASE_ONNXRUNTIME_ARTIFACT_MAX_BYTES)
+                    .with_context(|| format!("download {runtime_url}"))?;
+            verify_artifact_sha(&bytes, &runtime.sha256)?;
+            Some(bytes)
+        }
+        (None, None) => None,
+        _ => return Err(anyhow!("incomplete ONNX Runtime upgrade plan")),
+    };
+    let apply_result = apply_artifact(
+        &plan,
+        &bytes,
+        runtime_bytes.as_deref(),
+        data_root,
+        upgrade_lock.path(),
+    )?;
+    let mut warnings = plan.warnings.clone();
+    if let ApplyResult::Scheduled { helper_pid } = apply_result {
+        #[cfg(windows)]
+        upgrade_lock.transfer_to(helper_pid)?;
+        #[cfg(not(windows))]
+        let _ = helper_pid;
+        record_post_apply_state(data_root, &plan, "scheduled", &mut warnings);
         return Ok(UpgradeOutcome {
             command: "upgrade",
             status: "scheduled",
@@ -531,8 +569,7 @@ fn apply_upgrade(
             warnings,
         });
     }
-    write_install_marker_after_upgrade(&plan)?;
-    write_state_checked(data_root, &plan, "applied")?;
+    record_post_apply_state(data_root, &plan, "applied", &mut warnings);
     Ok(UpgradeOutcome {
         command: "upgrade",
         status: "applied",
@@ -547,6 +584,19 @@ fn apply_upgrade(
         dry_run: false,
         warnings,
     })
+}
+
+fn record_post_apply_state(
+    data_root: &Path,
+    plan: &UpgradePlan,
+    status: &str,
+    warnings: &mut Vec<String>,
+) {
+    if let Err(error) = write_state_checked(data_root, plan, status) {
+        warnings.push(format!(
+            "upgrade {status}, but local upgrade state could not be written: {error:#}"
+        ));
+    }
 }
 
 fn write_background_skip_state(data_root: &Path, status: &str) -> Result<()> {
@@ -597,6 +647,9 @@ fn build_upgrade_plan(
         metadata.artifact
     );
     validate_artifact_url(&metadata.base_url, &metadata.artifact)?;
+    if let Some(runtime) = &metadata.onnxruntime {
+        validate_artifact_url(&metadata.base_url, &runtime.artifact)?;
+    }
     let update_available = version_gt(&metadata.version, &current_version);
     Ok(UpgradePlan {
         current_version,

@@ -18,6 +18,25 @@ import semantic_worker_bench as worker_bench
 
 
 class SemanticBackfillBenchTest(unittest.TestCase):
+    def test_e5_defaults_and_role_prefixes_match_production(self):
+        self.assertEqual(bench.DEFAULT_MODEL, "intfloat/multilingual-e5-small")
+        self.assertEqual(
+            bench.DEFAULT_MODEL_KEY,
+            "fastembed:intfloat-multilingual-e5-small:"
+            "e5-query-passage:semantic-lite-turn-1200-200-v3",
+        )
+        self.assertEqual(bench.DEFAULT_DIMENSIONS, 384)
+        self.assertEqual(bench.semantic_query_text("find it"), "query: find it")
+        self.assertEqual(
+            bench.semantic_query_text("  query: find it"), "query: find it"
+        )
+        self.assertEqual(
+            bench.semantic_passage_text("found it"), "passage: found it"
+        )
+        self.assertEqual(
+            bench.semantic_passage_text("  passage: found it"), "passage: found it"
+        )
+
     def test_chunk_document_uses_deterministic_char_ranges(self):
         doc = bench.SourceDocument(
             event_id="event-1",
@@ -80,7 +99,7 @@ class SemanticBackfillBenchTest(unittest.TestCase):
             chunk_metrics = temp_path / "chunk-metrics.json"
             self.create_work_db(work_db)
 
-            self.run_main(
+            event_embedding_texts = self.run_main(
                 [
                     "--work-db",
                     str(work_db),
@@ -100,9 +119,15 @@ class SemanticBackfillBenchTest(unittest.TestCase):
             )
             event_data = json.loads(event_metrics.read_text(encoding="utf-8"))
             self.assertEqual(event_data["embedding_mode"], "event")
+            self.assertEqual(event_data["model"], "intfloat/multilingual-e5-small")
             self.assertEqual(
                 event_data["model_key"],
-                "fastembed:all-MiniLM-L6-v2:semantic-payload-chunk-1200-200-v2",
+                "fastembed:intfloat-multilingual-e5-small:"
+                "e5-query-passage:semantic-lite-turn-1200-200-v3",
+            )
+            self.assertEqual(
+                event_embedding_texts,
+                ["passage: abcdefghijklmnop", "passage: 12345"],
             )
             self.assertEqual(event_data["source_mode"], "event_search_preview")
             self.assertEqual(event_data["events"], 2)
@@ -118,7 +143,7 @@ class SemanticBackfillBenchTest(unittest.TestCase):
                 ).fetchall()
             self.assertEqual(event_rows, [("event_search_preview", 2)])
 
-            self.run_main(
+            chunk_embedding_texts = self.run_main(
                 [
                     "--work-db",
                     str(work_db),
@@ -146,6 +171,14 @@ class SemanticBackfillBenchTest(unittest.TestCase):
             self.assertEqual(chunk_data["events"], 2)
             self.assertEqual(chunk_data["chunks"], 3)
             self.assertEqual(chunk_data["chunk_multiplier"], 1.5)
+            self.assertEqual(
+                chunk_embedding_texts,
+                [
+                    "passage: abcdefghij",
+                    "passage: ijklmnop",
+                    "passage: 12345",
+                ],
+            )
             with sqlite3.connect(chunk_sidecar) as conn:
                 rows = conn.execute(
                     """
@@ -264,11 +297,14 @@ class SemanticBackfillBenchTest(unittest.TestCase):
 
     @staticmethod
     def run_main(argv):
+        embedded_texts = []
+
         class FakeEmbedding:
             def __init__(self, **kwargs):
                 self.kwargs = kwargs
 
             def embed(self, texts, batch_size):
+                embedded_texts.extend(texts)
                 for text in texts:
                     yield [float(len(text)), float(batch_size), 1.0, 0.0]
 
@@ -276,6 +312,7 @@ class SemanticBackfillBenchTest(unittest.TestCase):
             with mock.patch.object(sys, "argv", ["semantic_backfill_bench.py", *argv]):
                 with mock.patch("sys.stdout", new=io.StringIO()):
                     bench.main()
+        return embedded_texts
 
 
 class SemanticWorkerBenchTest(unittest.TestCase):

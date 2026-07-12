@@ -3,6 +3,7 @@ use std::{
     fs::OpenOptions,
     io::{Read, Write},
     path::PathBuf,
+    time::{Duration, Instant},
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -42,6 +43,81 @@ pub fn get_bytes_limited(endpoint: &str, max_bytes: usize) -> Result<Vec<u8>> {
         max_bytes,
         &format!("GET {endpoint}"),
     )
+}
+
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+pub(crate) fn get_to_writer_limited(
+    endpoint: &str,
+    max_bytes: u64,
+    timeout: Duration,
+    writer: &mut impl Write,
+) -> Result<u64> {
+    let started = Instant::now();
+    if let Some(path) = file_url_path(endpoint)? {
+        let file = fs::File::open(&path).with_context(|| format!("read {}", path.display()))?;
+        return copy_limited(
+            file,
+            writer,
+            max_bytes,
+            timeout,
+            started,
+            "read local artifact",
+        );
+    }
+    require_https_or_localhost(endpoint)?;
+    let response = ureq::get(endpoint)
+        .timeout(timeout)
+        .call()
+        .map_err(|err| anyhow!("GET artifact: {err}"))?;
+    if response
+        .header("content-length")
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|length| length > max_bytes)
+    {
+        return Err(anyhow!("GET artifact exceeds max bytes ({max_bytes})"));
+    }
+    copy_limited(
+        response.into_reader(),
+        writer,
+        max_bytes,
+        timeout,
+        started,
+        "GET artifact",
+    )
+}
+
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn copy_limited(
+    mut reader: impl Read,
+    writer: &mut impl Write,
+    max_bytes: u64,
+    timeout: Duration,
+    started: Instant,
+    label: &str,
+) -> Result<u64> {
+    let mut total = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        if started.elapsed() > timeout {
+            return Err(anyhow!("{label} exceeded time limit"));
+        }
+        let count = reader
+            .read(&mut buffer)
+            .with_context(|| format!("{label}: read response"))?;
+        if count == 0 {
+            break;
+        }
+        total = total
+            .checked_add(count as u64)
+            .ok_or_else(|| anyhow!("{label} size overflow"))?;
+        if total > max_bytes {
+            return Err(anyhow!("{label} exceeds max bytes ({max_bytes})"));
+        }
+        writer
+            .write_all(&buffer[..count])
+            .with_context(|| format!("{label}: write destination"))?;
+    }
+    Ok(total)
 }
 
 pub(crate) fn read_limited(
@@ -134,5 +210,21 @@ mod tests {
         fs::write(&path, b"12345").unwrap();
         let err = get_bytes_limited(&format!("file://{}", path.display()), 4).unwrap_err();
         assert!(err.to_string().contains("exceeds max bytes (4)"));
+    }
+
+    #[test]
+    fn streaming_get_enforces_compressed_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("artifact.bin");
+        fs::write(&path, b"12345").unwrap();
+        let mut output = Vec::new();
+        let error = get_to_writer_limited(
+            &format!("file://{}", path.display()),
+            4,
+            Duration::from_secs(1),
+            &mut output,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("exceeds max bytes"));
     }
 }

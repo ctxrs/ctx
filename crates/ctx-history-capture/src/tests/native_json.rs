@@ -926,6 +926,12 @@ fn antigravity_native_history_imports_transcripts_and_preserves_previews() {
 fn native_windsurf_fixture_imports_searches_reimports_and_file_touches() {
     let temp = tempdir();
     let fixture = provider_history_fixture("windsurf/transcripts");
+    let transcript = fixture.join("windsurf-hook-trajectory-1.jsonl");
+    let transcript_text = fs::read_to_string(&transcript).unwrap().replace(
+        "windsurf unknown typed payload oracle",
+        "windsurf-unknown-payload-sentinel",
+    );
+    fs::write(&transcript, transcript_text).unwrap();
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
 
     let source = provider_source_for_path(CaptureProvider::Windsurf, fixture.clone());
@@ -958,7 +964,7 @@ fn native_windsurf_fixture_imports_searches_reimports_and_file_touches() {
         .iter()
         .any(|hit| hit.provider == Some(CaptureProvider::Windsurf)));
     assert!(store
-        .search_event_hits("windsurf unknown typed payload oracle", 10)
+        .search_event_hits("windsurf-unknown-payload-sentinel", 10)
         .unwrap()
         .is_empty());
 
@@ -1078,6 +1084,17 @@ fn native_qoder_fixture_imports_documented_transcript_jsonl() {
 fn native_cursor_fixture_imports_searches_reports_malformed_and_reimports() {
     let temp = tempdir();
     let fixture = provider_history_fixture("cursor/2026.06.24");
+    let transcript = fixture.join(
+        "projects/sanitized-workspace/agent-transcripts/cursor-native-session-1/cursor-native-session-1.jsonl",
+    );
+    let transcript_text = fs::read_to_string(&transcript)
+        .unwrap()
+        .replace("cursor native fixture proof", "cursor-tool-input-sentinel")
+        .replace(
+            "wrote cursor-native-cli-oracle.txt",
+            "cursor-tool-output-sentinel",
+        );
+    fs::write(&transcript, transcript_text).unwrap();
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
 
     let source = provider_source_for_path(CaptureProvider::Cursor, fixture.clone());
@@ -1131,8 +1148,8 @@ fn native_cursor_fixture_imports_searches_reports_malformed_and_reimports() {
         "This valid line should import",
         CaptureProvider::Cursor,
     );
-    assert_search_misses(&store, "wrote cursor-native-cli-oracle.txt");
-    assert_search_misses(&store, "cursor native fixture proof");
+    assert_search_misses(&store, "cursor-tool-output-sentinel");
+    assert_search_misses(&store, "cursor-tool-input-sentinel");
 
     let archive = store.export_archive().unwrap();
     assert!(archive

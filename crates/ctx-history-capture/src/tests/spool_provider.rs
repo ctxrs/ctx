@@ -667,12 +667,12 @@ fn pi_session_import_keeps_metadata_entries_when_real_messages_exist() {
                 "{\"type\":\"message\",\"id\":\"real-user-entry\",\"timestamp\":\"2026-06-24T12:00:00.500Z\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"mixed real prompt\"}]}}\n",
                 "{\"type\":\"compaction\",\"id\":\"compact-entry\",\"timestamp\":\"2026-06-24T12:00:01Z\",\"summary\":\"compacted plan oracle\"}\n",
                 "{\"type\":\"branch_summary\",\"id\":\"branch-entry\",\"timestamp\":\"2026-06-24T12:00:02Z\",\"summary\":\"branch summary oracle\"}\n",
-                "{\"type\":\"custom_message\",\"id\":\"custom-message-entry\",\"timestamp\":\"2026-06-24T12:00:03Z\",\"content\":[{\"type\":\"text\",\"text\":\"custom message oracle\"}]}\n",
-                "{\"type\":\"session_info\",\"id\":\"session-info-entry\",\"timestamp\":\"2026-06-24T12:00:04Z\",\"name\":\"session info oracle\"}\n",
+                "{\"type\":\"custom_message\",\"id\":\"custom-message-entry\",\"timestamp\":\"2026-06-24T12:00:03Z\",\"content\":[{\"type\":\"text\",\"text\":\"pi-custom-message-sentinel\"}]}\n",
+                "{\"type\":\"session_info\",\"id\":\"session-info-entry\",\"timestamp\":\"2026-06-24T12:00:04Z\",\"name\":\"pi-session-info-sentinel\"}\n",
                 "{\"type\":\"model_change\",\"id\":\"model-entry\",\"timestamp\":\"2026-06-24T12:00:05Z\",\"provider\":\"google\",\"modelId\":\"gemini-2.5-flash\"}\n",
                 "{\"type\":\"thinking_level_change\",\"id\":\"thinking-entry\",\"timestamp\":\"2026-06-24T12:00:06Z\",\"thinkingLevel\":\"high\"}\n",
-                "{\"type\":\"label\",\"id\":\"label-entry\",\"timestamp\":\"2026-06-24T12:00:07Z\",\"label\":\"label oracle\"}\n",
-                "{\"type\":\"custom\",\"id\":\"custom-entry\",\"timestamp\":\"2026-06-24T12:00:08Z\",\"customType\":\"custom type oracle\"}\n",
+                "{\"type\":\"label\",\"id\":\"label-entry\",\"timestamp\":\"2026-06-24T12:00:07Z\",\"label\":\"pi-label-sentinel\"}\n",
+                "{\"type\":\"custom\",\"id\":\"custom-entry\",\"timestamp\":\"2026-06-24T12:00:08Z\",\"customType\":\"pi-custom-type-sentinel\"}\n",
             ),
         )
         .unwrap();
@@ -708,18 +708,18 @@ fn pi_session_import_keeps_metadata_entries_when_real_messages_exist() {
     );
     let payloads = serde_json::to_string(&events).unwrap();
     for expected in [
-        "session info oracle",
+        "pi-session-info-sentinel",
         "gemini-2.5-flash",
         "high",
-        "label oracle",
-        "custom type oracle",
+        "pi-label-sentinel",
+        "pi-custom-type-sentinel",
     ] {
         assert!(
             payloads.contains(expected),
             "missing metadata {expected:?} in payloads {payloads}"
         );
     }
-    assert!(!payloads.contains("custom message oracle"));
+    assert!(!payloads.contains("pi-custom-message-sentinel"));
     for expected in [
         "mixed real prompt",
         "compacted plan oracle",
@@ -735,12 +735,12 @@ fn pi_session_import_keeps_metadata_entries_when_real_messages_exist() {
         );
     }
     for omitted in [
-        "custom message oracle",
-        "session info oracle",
+        "pi-custom-message-sentinel",
+        "pi-session-info-sentinel",
         "gemini-2.5-flash",
         "high",
-        "label oracle",
-        "custom type oracle",
+        "pi-label-sentinel",
+        "pi-custom-type-sentinel",
     ] {
         assert!(
             !store

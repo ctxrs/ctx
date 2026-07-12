@@ -670,8 +670,12 @@ if [[ "${platform}" != linux-* ]]; then
   if [[ "$(tr -d '\r' < "${staged}.version" | tail -n 1)" == "ctx ${version}" ]]; then
     local_runtime_status=passed
   fi
+  IFS=$'\t' read -r \
+    host_system host_arch host_native_arch process_translated _native_arch_probe \
+    < <(scripts/public-cli-host-runtime-evidence.sh)
   local_runtime_authority="$(scripts/public-cli-runtime-authority.sh \
-    "${platform}" "$(uname -s)" "$(uname -m)" "${local_runtime_status}")"
+    "${platform}" "${host_system}" "${host_arch}" "${local_runtime_status}" \
+    "${host_native_arch}" "${process_translated}")"
   python3 scripts/write-public-cli-build-info.py \
     --output "${staged}.build-info.json" \
     --artifact "${staged}" \

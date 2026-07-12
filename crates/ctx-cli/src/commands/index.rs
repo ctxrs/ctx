@@ -16,7 +16,7 @@ use crate::progress::format_count;
 use crate::semantic::{
     daemon_report, semantic_worker_report_cached, semantic_worker_report_configured_json,
 };
-use crate::store_util::open_existing_store_snapshot_read_only;
+use crate::store_util::open_existing_store_read_only;
 
 #[derive(Debug, Args)]
 pub(crate) struct IndexArgs {
@@ -169,7 +169,7 @@ fn index_status_snapshot(data_root: &Path) -> Result<Value> {
         semantic,
         daemon,
     ) = if initialized {
-        let store = open_existing_store_snapshot_read_only(&db_path, "ctx index status")?;
+        let store = open_existing_store_read_only(&db_path, "ctx index status")?;
         let indexed_counts = store.indexed_history_counts()?;
         let catalog_counts = store.catalog_session_counts()?;
         let source_import_file_counts = store.source_import_file_counts()?;

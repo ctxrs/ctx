@@ -23,7 +23,7 @@ if command -v ruby >/dev/null 2>&1; then
     data = YAML.load_file(ARGV.fetch(0))
     abort "pipeline must have steps" unless data.is_a?(Hash) && data["steps"].is_a?(Array)
     steps = data["steps"]
-    abort "pipeline should include public smoke and gated artifact matrix" unless steps.length == 8
+    abort "pipeline should include public smoke and gated artifact/native smoke matrices" unless steps.length == 11
     smoke = steps.fetch(0)
     abort "pipeline step must be a mapping" unless smoke.is_a?(Hash)
     abort "pipeline public smoke step must be keyed" unless smoke.key?("key")
@@ -41,11 +41,15 @@ if command -v ruby >/dev/null 2>&1; then
       public-cli-freebsd-x64
       public-cli-macos-arm64
       public-cli-macos-x64
+      public-cli-macos-x64-native-smoke
+      public-cli-windows-x64-native-smoke
+      public-cli-freebsd-x64-native-smoke
     ]
     actual_keys = steps.filter_map { |step| step["key"] if step.is_a?(Hash) }
     required_keys.each { |key| abort "missing gated artifact step #{key}" unless actual_keys.include?(key) }
+    artifact_keys = required_keys.first(6)
     steps.drop(2).each do |step|
-      next unless step.is_a?(Hash)
+      next unless step.is_a?(Hash) && artifact_keys.include?(step["key"])
       abort "artifact step #{step["key"]} must be gated" unless step["if"].to_s.include?("CTX_PUBLIC_CLI_ARTIFACT_MATRIX")
       artifact_paths = Array(step["artifact_paths"]).map(&:to_s)
       abort "artifact step #{step["key"]} must upload build-info evidence" unless artifact_paths.any? { |path| path.end_with?(".build-info.json") }
@@ -53,10 +57,69 @@ if command -v ruby >/dev/null 2>&1; then
     %w[public-cli-macos-arm64 public-cli-macos-x64].each do |key|
       step = steps.find { |candidate| candidate.is_a?(Hash) && candidate["key"] == key }
       abort "missing macOS artifact step #{key}" unless step
-      abort "#{key} must cross-build on release-linux-managed" unless step.dig("agents", "queue") == "release-linux-managed"
-      abort "#{key} must run on linux" unless step.dig("agents", "os") == "linux"
-      abort "#{key} must run on x86_64" unless step.dig("agents", "arch") == "x86_64"
-      abort "#{key} must not serialize on the Mac GUI queue" if step.key?("concurrency_group")
+      abort "#{key} must build on the native mac-shared queue" unless step.dig("agents", "queue") == "mac-shared"
+      abort "#{key} must run on Darwin" unless step.dig("agents", "os") == "darwin"
+      abort "#{key} must run on Apple Silicon" unless step.dig("agents", "arch") == "arm64"
+      abort "#{key} must serialize native Mac construction" unless step["concurrency"] == 1 && step["concurrency_group"] == "ctx-public-cli-macos-native"
+      command = step["command"].to_s
+      abort "#{key} must gate native smoke explicitly" unless command.include?("CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX")
+      abort "#{key} must force the CoreML smoke" unless command.include?("--coreml")
+      abort "#{key} must preserve native smoke evidence" unless command.include?("--keep-root")
+      proof = "target/public-cli-native-smoke/#{key.delete_prefix("public-cli-")}/**/packaged-runtime-proof.txt"
+      abort "#{key} must upload native smoke proof" unless Array(step["artifact_paths"]).include?(proof)
+      diagnostics = "target/public-cli-native-smoke/#{key.delete_prefix("public-cli-")}/**/daemon-smoke.log"
+      abort "#{key} must upload native smoke failure diagnostics" unless Array(step["artifact_paths"]).include?(diagnostics)
+    end
+    macos_arm64 = steps.find { |candidate| candidate.is_a?(Hash) && candidate["key"] == "public-cli-macos-arm64" }
+    abort "macos-arm64 smoke must require authoritative evidence" unless macos_arm64["command"].to_s.include?("runtime_authority=authoritative")
+    macos_x64 = steps.find { |candidate| candidate.is_a?(Hash) && candidate["key"] == "public-cli-macos-x64" }
+    abort "macos-x64 Rosetta smoke must remain explicitly non-authoritative" unless macos_x64["command"].to_s.include?("runtime_authority=non_authoritative")
+    inline_proofs = {
+      "public-cli-linux-x64" => "ctx-linux-x64.native-runtime-proof.txt",
+      "public-cli-linux-aarch64" => "ctx-linux-aarch64.native-runtime-proof.txt",
+      "public-cli-macos-arm64" => "ctx-macos-arm64.native-runtime-proof.txt",
+    }
+    inline_proofs.each do |key, proof_name|
+      step = steps.find { |candidate| candidate.is_a?(Hash) && candidate["key"] == key }
+      command = step["command"].to_s
+      abort "#{key} must gate packaged ONNX smoke" unless command.include?("CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX") && command.include?("--runtime-archive")
+      abort "#{key} must require authoritative proof" unless command.include?("runtime_authority=authoritative")
+      proof_path = "target/public-cli-artifacts/#{proof_name}"
+      abort "#{key} must publish #{proof_name}" unless Array(step["artifact_paths"]).include?(proof_path)
+    end
+    native_steps = {
+      "public-cli-macos-x64-native-smoke" => ["ctx-mac-gui-shared-x64", "ctx-macos-x64.native-runtime-proof.txt"],
+      "public-cli-windows-x64-native-smoke" => ["windows-x64", "ctx-windows-x64.native-runtime-proof.txt"],
+      "public-cli-freebsd-x64-native-smoke" => ["freebsd-x64", "ctx-freebsd-x64.native-runtime-proof.txt"],
+    }
+    native_steps.each do |key, values|
+      queue, proof_name = values
+      step = steps.find { |candidate| candidate.is_a?(Hash) && candidate["key"] == key }
+      abort "missing native semantic smoke step #{key}" unless step
+      condition = step["if"].to_s
+      abort "#{key} must require both artifact and native smoke gates" unless condition.include?("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") && condition.include?("CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX")
+      abort "#{key} must use #{queue}" unless step.dig("agents", "queue") == queue
+      command = step["command"].to_s
+      abort "#{key} must consume or build an ONNX runtime archive" unless command.include?("onnxruntime")
+      abort "#{key} must publish proof directly" unless command.include?("ProofOutput") || command.include?("--proof-output")
+      abort "#{key} must require authoritative execution" unless command.include?("runtime_authority=authoritative") || command.include?("RequireAuthoritative")
+      proof_path = "target/public-cli-artifacts/#{proof_name}"
+      abort "#{key} must publish #{proof_name}" unless Array(step["artifact_paths"]).include?(proof_path)
+    end
+    runtime_builds = {
+      "public-cli-linux-x64" => "linux-x64",
+      "public-cli-linux-aarch64" => "linux-aarch64",
+      "public-cli-windows-x64" => "windows-x64",
+      "public-cli-macos-arm64" => "macos-arm64",
+    }
+    runtime_builds.each do |key, platform|
+      step = steps.find { |candidate| candidate.is_a?(Hash) && candidate["key"] == key }
+      abort "missing runtime-producing artifact step #{key}" unless step
+      command = step["command"].to_s
+      abort "#{key} must build its ONNX Runtime sidecar" unless command.include?("scripts/build-onnxruntime-sidecar.sh #{platform}")
+      archive = platform == "windows-x64" ? "ctx-onnxruntime-windows-x64.zip" : "ctx-onnxruntime-#{platform}.tar.gz"
+      abort "#{key} must upload #{archive}" unless Array(step["artifact_paths"]).include?("target/public-cli-artifacts/#{archive}")
+      abort "#{key} must upload #{archive}.sha256" unless Array(step["artifact_paths"]).include?("target/public-cli-artifacts/#{archive}.sha256")
     end
     linux_aarch64 = steps.find { |candidate| candidate.is_a?(Hash) && candidate["key"] == "public-cli-linux-aarch64" }
     abort "missing linux-aarch64 artifact step" unless linux_aarch64
@@ -73,8 +136,8 @@ else
       END { print count + 0 }
     ' "${pipeline}"
   )"
-  if [[ "${top_level_steps}" != "8" ]]; then
-    printf 'pipeline should include public smoke and gated artifact matrix\n' >&2
+  if [[ "${top_level_steps}" != "11" ]]; then
+    printf 'pipeline should include public smoke and gated artifact/native smoke matrices\n' >&2
     exit 1
   fi
 fi
@@ -183,17 +246,18 @@ fi
 
 for mac_step in public-cli-macos-arm64 public-cli-macos-x64; do
   for required in \
-    'queue: "release-linux-managed"' \
-    'ctx-runner-class: "release-linux-control"' \
-    'os: "linux"' \
-    'arch: "x86_64"'; do
+    'queue: "mac-shared"' \
+    'os: "darwin"' \
+    'arch: "arm64"' \
+    'concurrency: 1' \
+    'concurrency_group: "ctx-public-cli-macos-native"'; do
     if ! awk '
         index($0, "key: \"" step "\"") { in_step = 1 }
         in_step && /^  - label:/ && index($0, step) == 0 { in_step = 0 }
         in_step && index($0, needle) { found = 1 }
         END { exit found ? 0 : 1 }
       ' step="${mac_step}" needle="${required}" "${pipeline}"; then
-      printf '%s artifact step missing required Linux runner snippet: %s\n' "${mac_step}" "${required}" >&2
+      printf '%s artifact step missing required native Mac runner snippet: %s\n' "${mac_step}" "${required}" >&2
       exit 1
     fi
   done

@@ -494,6 +494,19 @@ fn native_sqlite_successful_tool_outputs_are_metadata_only_and_not_searchable() 
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
 
     let goose = provider_history_fixture("goose/v14/sessions.db");
+    Connection::open(&goose)
+        .unwrap()
+        .execute(
+            "UPDATE messages SET content_json = ?1 WHERE id = 3",
+            [json!([{
+                "type": "toolResponse",
+                "toolResult": {
+                    "content": [{"type": "text", "text": "goose-output-sentinel"}]
+                }
+            }])
+            .to_string()],
+        )
+        .unwrap();
     let goose_summary = import_goose_sessions_sqlite(
         &goose,
         &mut store,
@@ -510,7 +523,7 @@ fn native_sqlite_successful_tool_outputs_are_metadata_only_and_not_searchable() 
         CaptureProvider::Goose,
         "goose-root",
         EventType::ToolOutput,
-        "goose tool output oracle",
+        "goose-output-sentinel",
     );
     assert_search_hit_cites_source(
         &store,
@@ -520,6 +533,24 @@ fn native_sqlite_successful_tool_outputs_are_metadata_only_and_not_searchable() 
     );
 
     let forgecode = provider_history_fixture("forgecode/v1/forge.db");
+    let forge_connection = Connection::open(&forgecode).unwrap();
+    let context: String = forge_connection
+        .query_row(
+            "SELECT context FROM conversations WHERE conversation_id = 'forge-root'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut context: Value = serde_json::from_str(&context).unwrap();
+    context["messages"][2]["message"]["tool"]["output"]["values"][0]["text"] =
+        Value::String("forge-output-sentinel".into());
+    forge_connection
+        .execute(
+            "UPDATE conversations SET context = ?1 WHERE conversation_id = 'forge-root'",
+            [serde_json::to_string(&context).unwrap()],
+        )
+        .unwrap();
+    drop(forge_connection);
     let forge_summary = import_forgecode_sqlite(
         &forgecode,
         &mut store,
@@ -536,9 +567,8 @@ fn native_sqlite_successful_tool_outputs_are_metadata_only_and_not_searchable() 
         CaptureProvider::ForgeCode,
         "forge-root",
         EventType::ToolOutput,
-        "wrote src/forge_oracle.rs",
+        "forge-output-sentinel",
     );
-    assert!(store.search_event_hits("wrote", 10).unwrap().is_empty());
     assert_search_hit_cites_source(
         &store,
         CaptureProvider::ForgeCode,

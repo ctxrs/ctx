@@ -28,6 +28,18 @@ struct UpgradePlan {
     pub(super) metadata: metadata::ReleaseMetadata,
 }
 
+impl UpgradePlan {
+    fn onnxruntime_artifact_url(&self) -> Option<String> {
+        self.metadata.onnxruntime.as_ref().map(|runtime| {
+            format!(
+                "{}/{}",
+                self.metadata.base_url.trim_end_matches('/'),
+                runtime.artifact
+            )
+        })
+    }
+}
+
 fn platform_key() -> Result<&'static str> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("linux", "x86_64") => Ok("linux-x64"),

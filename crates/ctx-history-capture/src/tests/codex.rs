@@ -1267,7 +1267,7 @@ fn codex_session_tail_rejects_malformed_append_atomically() {
                 "payload": {
                     "type": "message",
                     "role": "assistant",
-                    "content": [{"type": "output_text", "text": "tail valid should rollback"}]
+                    "content": [{"type": "output_text", "text": "codex-tail-rollback-sentinel"}]
                 }
             })),
             jsonl_line(json!({
@@ -1311,7 +1311,7 @@ fn codex_session_tail_rejects_malformed_append_atomically() {
         1
     );
     assert!(store
-        .search_event_hits("tail valid should rollback", 10)
+        .search_event_hits("codex-tail-rollback-sentinel", 10)
         .unwrap()
         .is_empty());
 }

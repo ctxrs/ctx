@@ -19,6 +19,22 @@ t4JAElZCs8SGTlV70MSlnyZb5/rkKx9kMvb7YjuYbY6vnN5Pp3P7gMhOKehP+62U
 /a+X6TNV/k5fAgMBAAE=
 -----END RSA PUBLIC KEY-----"#;
 const RELEASE_BASE_PREFIX: &str = "https://cli.ctx.rs/storage/v1/object/public/releases/artifacts/";
+const ONNXRUNTIME_METADATA_PREFIX: &str = "CTX_RELEASE_ONNXRUNTIME_";
+const SUPPORTED_PLATFORM_KEYS: [&str; 6] = [
+    "linux_x64",
+    "linux_aarch64",
+    "macos_arm64",
+    "macos_x64",
+    "windows_x64",
+    "freebsd_x64",
+];
+
+#[derive(Debug, Clone)]
+pub(super) struct OnnxRuntimeMetadata {
+    pub(super) version: String,
+    pub(super) artifact: String,
+    pub(super) sha256: String,
+}
 
 #[derive(Debug, Clone)]
 pub(super) struct ReleaseMetadata {
@@ -31,6 +47,7 @@ pub(super) struct ReleaseMetadata {
     pub(super) self_upgrade_allowed: bool,
     pub(super) auto_upgrade_allowed: bool,
     pub(super) store_schema_version: Option<String>,
+    pub(super) onnxruntime: Option<OnnxRuntimeMetadata>,
 }
 
 pub(super) fn metadata_url(config: &AppConfig, channel: &str) -> String {
@@ -81,6 +98,35 @@ pub(super) fn parse_release_metadata(
     let sha256 = value(&format!("CTX_RELEASE_SHA256_{platform_key}"))
         .ok_or_else(|| anyhow!("metadata missing checksum for {platform}"))?;
     validate_sha256(&sha256)?;
+    let onnxruntime = if metadata
+        .keys()
+        .any(|key| key.starts_with(ONNXRUNTIME_METADATA_PREFIX))
+    {
+        let version = value("CTX_RELEASE_ONNXRUNTIME_VERSION")
+            .ok_or_else(|| anyhow!("metadata missing CTX_RELEASE_ONNXRUNTIME_VERSION"))?;
+        validate_onnxruntime_version(&version)?;
+        for key in SUPPORTED_PLATFORM_KEYS {
+            let artifact_key = format!("CTX_RELEASE_ONNXRUNTIME_ARTIFACT_{key}");
+            let checksum_key = format!("CTX_RELEASE_ONNXRUNTIME_SHA256_{key}");
+            let artifact =
+                value(&artifact_key).ok_or_else(|| anyhow!("metadata missing {artifact_key}"))?;
+            let checksum =
+                value(&checksum_key).ok_or_else(|| anyhow!("metadata missing {checksum_key}"))?;
+            validate_artifact_name(&artifact)?;
+            validate_sha256(&checksum)?;
+        }
+        let artifact = value(&format!("CTX_RELEASE_ONNXRUNTIME_ARTIFACT_{platform_key}"))
+            .ok_or_else(|| anyhow!("metadata missing ONNX Runtime artifact for {platform}"))?;
+        let sha256 = value(&format!("CTX_RELEASE_ONNXRUNTIME_SHA256_{platform_key}"))
+            .ok_or_else(|| anyhow!("metadata missing ONNX Runtime checksum for {platform}"))?;
+        Some(OnnxRuntimeMetadata {
+            version,
+            artifact,
+            sha256,
+        })
+    } else {
+        None
+    };
     Ok(ReleaseMetadata {
         version,
         base_url,
@@ -91,23 +137,28 @@ pub(super) fn parse_release_metadata(
         self_upgrade_allowed: metadata_bool(&metadata, "CTX_RELEASE_SELF_UPGRADE_ALLOWED", false)?,
         auto_upgrade_allowed: metadata_bool(&metadata, "CTX_RELEASE_AUTO_UPGRADE_ALLOWED", false)?,
         store_schema_version: value("CTX_RELEASE_STORE_SCHEMA_VERSION"),
+        onnxruntime,
     })
 }
 
 fn parse_metadata_map(text: &str) -> Result<BTreeMap<String, String>> {
     let mut metadata = BTreeMap::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.starts_with('#') || line.is_empty() {
+    for raw_line in text.lines() {
+        let line = raw_line.trim_end_matches('\r');
+        if line.trim_start().starts_with('#') || line.trim().is_empty() {
             continue;
         }
         let Some((key, value)) = line.split_once('=') else {
-            continue;
+            return Err(anyhow!("metadata contains malformed line: {line:?}"));
         };
-        if metadata
-            .insert(key.to_owned(), value.trim_end_matches('\r').to_owned())
-            .is_some()
+        if key.is_empty()
+            || !key
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
         {
+            return Err(anyhow!("metadata contains invalid key: {key:?}"));
+        }
+        if metadata.insert(key.to_owned(), value.to_owned()).is_some() {
             return Err(anyhow!("metadata contains duplicate key {key}"));
         }
     }
@@ -171,8 +222,36 @@ pub(super) fn validate_artifact_url(base_url: &str, artifact: &str) -> Result<()
             "metadata base URL must be under {RELEASE_BASE_PREFIX}"
         ));
     }
-    if artifact.contains('/') || artifact.contains('\\') || artifact.contains("..") {
+    validate_artifact_name(artifact)
+}
+
+fn validate_artifact_name(artifact: &str) -> Result<()> {
+    if artifact.is_empty()
+        || artifact.contains('/')
+        || artifact.contains('\\')
+        || artifact.contains("..")
+        || artifact.contains('\n')
+        || artifact.contains('\r')
+    {
         return Err(anyhow!("unsafe artifact name: {artifact}"));
+    }
+    Ok(())
+}
+
+fn validate_onnxruntime_version(version: &str) -> Result<()> {
+    if version.len() > 32
+        || version.trim() != version
+        || version.split('.').count() != 3
+        || version.split('.').any(|part| {
+            part.is_empty()
+                || !part.bytes().all(|byte| byte.is_ascii_digit())
+                || (part.len() > 1 && part.starts_with('0'))
+                || part.parse::<u32>().is_err()
+        })
+    {
+        return Err(anyhow!(
+            "ONNX Runtime version must be a safe MAJOR.MINOR.PATCH identifier"
+        ));
     }
     Ok(())
 }

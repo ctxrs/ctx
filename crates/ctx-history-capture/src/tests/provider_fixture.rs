@@ -79,7 +79,7 @@ fn batched_provider_import_stops_on_pinned_wal_and_resumes_idempotently() {
         &source_path,
         occurred_at,
     );
-    first.event.as_mut().unwrap().payload = json!({"text": "first batch oracle"});
+    first.event.as_mut().unwrap().payload = json!({"text": "batched-import-sentinel-first"});
     let mut second = provider_collision_capture(
         CaptureProvider::Hermes,
         "batched-provider-second",
@@ -87,7 +87,7 @@ fn batched_provider_import_stops_on_pinned_wal_and_resumes_idempotently() {
         &source_path,
         occurred_at + chrono::Duration::seconds(1),
     );
-    second.event.as_mut().unwrap().payload = json!({"text": "second batch oracle"});
+    second.event.as_mut().unwrap().payload = json!({"text": "batched-import-sentinel-second"});
     let normalization = ProviderNormalizationResult {
         summary: ProviderImportSummary::default(),
         captures: vec![(1, first), (2, second)],
@@ -121,13 +121,13 @@ fn batched_provider_import_stops_on_pinned_wal_and_resumes_idempotently() {
     assert_eq!(store.list_sessions().unwrap().len(), 1);
     assert_eq!(
         store
-            .search_event_hits("first batch oracle", 10)
+            .search_event_hits("batched-import-sentinel-first", 10)
             .unwrap()
             .len(),
         1
     );
     assert!(store
-        .search_event_hits("second batch oracle", 10)
+        .search_event_hits("batched-import-sentinel-second", 10)
         .unwrap()
         .is_empty());
 
@@ -143,7 +143,7 @@ fn batched_provider_import_stops_on_pinned_wal_and_resumes_idempotently() {
     assert_eq!(store.list_sessions().unwrap().len(), 2);
     assert_eq!(
         store
-            .search_event_hits("second batch oracle", 10)
+            .search_event_hits("batched-import-sentinel-second", 10)
             .unwrap()
             .len(),
         1
@@ -155,7 +155,10 @@ fn batched_provider_import_stops_on_pinned_wal_and_resumes_idempotently() {
     assert_eq!(replayed.imported_events, 0);
     assert_eq!(replayed.skipped_events, 2);
     assert_eq!(
-        store.search_event_hits("batch oracle", 10).unwrap().len(),
+        store
+            .search_event_hits("batched-import-sentinel", 10)
+            .unwrap()
+            .len(),
         2
     );
 }
@@ -179,7 +182,7 @@ fn batched_provider_import_rotates_on_serialized_byte_budget() {
         occurred_at,
     );
     first.event.as_mut().unwrap().payload =
-        json!({"text": format!("first byte-budget oracle {}", "a".repeat(4_500_000))});
+        json!({"text": format!("byte-budget-sentinel-first {}", "a".repeat(4_500_000))});
     let mut second = provider_collision_capture(
         CaptureProvider::Hermes,
         "byte-batched-second",
@@ -188,7 +191,7 @@ fn batched_provider_import_rotates_on_serialized_byte_budget() {
         occurred_at + chrono::Duration::seconds(1),
     );
     second.event.as_mut().unwrap().payload =
-        json!({"text": format!("second byte-budget oracle {}", "b".repeat(4_500_000))});
+        json!({"text": format!("byte-budget-sentinel-second {}", "b".repeat(4_500_000))});
 
     let reader = Connection::open(&db_path).unwrap();
     reader.execute_batch("BEGIN").unwrap();
@@ -220,13 +223,13 @@ fn batched_provider_import_rotates_on_serialized_byte_budget() {
     assert_eq!(store.list_sessions().unwrap().len(), 1);
     assert_eq!(
         store
-            .search_event_hits("first byte-budget oracle", 10)
+            .search_event_hits("byte-budget-sentinel-first", 10)
             .unwrap()
             .len(),
         1
     );
     assert!(store
-        .search_event_hits("second byte-budget oracle", 10)
+        .search_event_hits("byte-budget-sentinel-second", 10)
         .unwrap()
         .is_empty());
     store.optimize_search_index().unwrap();

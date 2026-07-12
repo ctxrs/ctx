@@ -11,6 +11,10 @@ Default root:
 ~/.ctx/
   work.sqlite
   config.toml
+  runtime/
+    onnxruntime/
+      <runtime-version>/
+        <platform>/
   upgrade-state.json
   upgrade.lock
   logs/
@@ -30,6 +34,12 @@ binary, for example:
 
 The sidecar is outside the ctx data root because it describes ownership of the
 installed executable, not indexed provider history.
+
+When release metadata includes ctx-managed ONNX Runtime assets, the official
+installer and development installer place those native runtime files under
+`${CTX_RUNTIME_DIR:-$HOME/.ctx/runtime}/onnxruntime/<runtime-version>/<platform>`.
+They are product runtime assets, not provider-history storage, and may be shared
+by multiple ctx data roots on the same machine.
 
 ## What SQLite Stores
 
@@ -89,7 +99,7 @@ analytics marker described under network behavior.
 | `ctx import` | provider transcript files and path metadata, the explicit custom history JSONL file passed with `--format ctx-history-jsonl-v1 --path`, or stdout from an explicit history-source plugin command | data root, SQLite index, and optional daemon lock/status/job files when daemon autostart runs |
 | `ctx show` | SQLite index | selected `--out` path for `show session` when provided |
 | `ctx locate` | SQLite index and raw source path metadata | none |
-| `ctx search` | native provider transcript files, path metadata, enabled auto history-source plugin stdout, SQLite index, and existing semantic sidecar/status metadata | SQLite index for newly discovered native provider or plugin history |
+| `ctx search` | native provider transcript files, path metadata, enabled auto history-source plugin stdout, SQLite index, and existing semantic sidecar/status metadata | SQLite index for newly discovered native provider or plugin history, and optional daemon lock/status/query endpoint files when semantic-enabled background refresh autostarts daemon maintenance |
 | `ctx sql` | existing SQLite index only | none |
 | `ctx docs` | embedded documentation in the binary | selected topic `--out` path for `ctx docs show --out` or selected `--out` directory for `ctx docs man --out` |
 | `ctx upgrade` | signed release metadata and installed binary/sidecar metadata | installed binary for manual upgrade, install sidecar, `upgrade-state.json`, `upgrade.lock`, and `logs/upgrade.log` |
@@ -100,28 +110,30 @@ analytics marker described under network behavior.
 
 Setup, import, and default search do not require source repository writes, model
 APIs, API keys, or remote accounts. Without semantic opt-in they do not download
-models; with semantic enabled, daemon maintenance may acquire the local embedding
-model. Non-JSON setup and native provider imports may opportunistically start
+models or runtime assets; with semantic enabled, installer/runtime acquisition
+and daemon maintenance may acquire the local ONNX Runtime asset and embedding
+model when the installed build supports that path. Non-JSON setup and native provider imports may opportunistically start
 the ctx-owned background daemon maintenance profile when `[daemon].enabled` is true; use
 `ctx setup --no-daemon` or `ctx import --no-daemon` for a one-run opt-out.
 `ctx setup --catalog-only`, `ctx setup --json`, and `ctx import --json` do not
 autostart daemon maintenance.
-`ctx search --refresh off` does not refresh providers, run plugins, start
-semantic workers, schedule semantic indexing, or write the main store or
-semantic sidecar. Default `--backend hybrid --refresh off` uses semantic
-evidence only when sidecar coverage is complete and dirty work is drained, and
-otherwise falls back to lexical. Explicit semantic searches may initialize an
-already-cached local embedding model to embed the query and read partial
-existing sidecar coverage, but they do not download a model or write semantic
-catch-up work during search.
+`ctx search --refresh off` does not refresh providers, run plugins, autostart
+daemon maintenance, start semantic workers, schedule semantic indexing, or write
+the main store or semantic sidecar. Default `--backend hybrid --refresh off`
+uses semantic evidence only when sidecar coverage is complete and dirty work is
+drained, and otherwise falls back to lexical. Explicit semantic searches may ask
+the daemon query service to embed the query from an already-cached local model
+and read partial existing sidecar coverage, but they do not download a model or
+write semantic catch-up work during search.
 Explicit imports may best-effort mark recent semantic-eligible items dirty in
 the semantic sidecar when the sidecar already exists; this does not create the
 sidecar, initialize the model, or embed text.
 Explicit semantic search also refuses to initialize or download the embedding
 model when the required local cache is missing; hybrid falls back to lexical in
 that case. Default `--refresh background` lets daemon maintenance own enabled
-auto history-source plugin refresh when possible; use `--refresh wait` or
-`ctx import` for exhaustive foreground plugin catch-up.
+auto history-source plugin refresh when possible, and may autostart the
+configured daemon query service for semantic/hybrid retrieval; use
+`--refresh wait` or `ctx import` for exhaustive foreground plugin catch-up.
 
 When `ctx daemon run` or setup/import autostart runs the ctx-owned background
 coordinator, it stores private lock/status files under `daemon/` in the ctx data
@@ -129,8 +141,8 @@ root. Setup/import autostart uses the normal background daemon profile and exits
 after it becomes idle; explicit `ctx daemon run` runs the same coordinator in
 the foreground. The current coordinator status surface is local-only: bounded
 native provider-history refresh updates the local SQLite index, semantic
-indexing is bounded by the local model cache, and cloud sync reports `disabled`
-with `enabled: false` and `network_allowed: false`.
+indexing is bounded by the local runtime/model availability, and cloud sync
+reports `disabled` with `enabled: false` and `network_allowed: false`.
 A looping daemon may keep the
 local embedding model resident between passes and uses the sidecar dirty queue
 to prioritize recent/stale events. With semantic enabled and default background

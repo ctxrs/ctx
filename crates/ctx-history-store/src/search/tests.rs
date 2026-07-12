@@ -917,7 +917,7 @@ fn semantic_embedding_documents_use_user_assistant_lite_turns() {
     store
         .conn
         .execute(
-            "DELETE FROM search_projection_stats WHERE key = 'semantic_searchable_lite_turn_items_v2'",
+            "DELETE FROM search_projection_stats WHERE key = 'semantic_searchable_lite_turn_items_v3'",
             [],
         )
         .unwrap();

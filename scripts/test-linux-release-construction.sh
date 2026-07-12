@@ -114,13 +114,148 @@ if python3 scripts/write-public-cli-build-info.py \
   exit 1
 fi
 
-test "$(scripts/public-cli-runtime-authority.sh macos-x64 Darwin arm64 passed)" = non_authoritative
-test "$(scripts/public-cli-runtime-authority.sh macos-x64 Darwin x86_64 passed)" = authoritative
+test "$(scripts/public-cli-runtime-authority.sh macos-x64 Darwin arm64 passed arm64 0)" = non_authoritative
+test "$(scripts/public-cli-runtime-authority.sh macos-x64 Darwin x86_64 passed x86_64 0)" = authoritative
+test "$(scripts/public-cli-runtime-authority.sh macos-x64 Darwin x86_64 passed arm64 1)" = non_authoritative
+test "$(scripts/public-cli-runtime-authority.sh macos-x64 Darwin x86_64 passed unknown unknown)" = non_authoritative
+test "$(scripts/public-cli-runtime-authority.sh linux-x64 Linux x86_64 passed x86_64 0)" = authoritative
+test "$(scripts/public-cli-runtime-authority.sh linux-x64 Darwin arm64 passed arm64 0)" = non_authoritative
 test "$(scripts/public-cli-runtime-authority.sh windows-x64 Windows_NT AMD64 not_run)" = not_run
 if scripts/public-cli-runtime-authority.sh macos-x64 Darwin arm64 invalid >/dev/null 2>&1; then
   echo "invalid runtime status unexpectedly produced authority" >&2
   exit 1
 fi
+
+cat > "${tmp_dir}/native-sysctl" <<'EOF'
+#!/usr/bin/env bash
+case "${2:-}" in
+  sysctl.proc_translated) exit 1 ;;
+  hw.optional.arm64) printf '0\n' ;;
+  *) exit 2 ;;
+esac
+EOF
+cat > "${tmp_dir}/rosetta-sysctl" <<'EOF'
+#!/usr/bin/env bash
+case "${2:-}" in
+  sysctl.proc_translated|hw.optional.arm64) printf '1\n' ;;
+  *) exit 2 ;;
+esac
+EOF
+cat > "${tmp_dir}/inconsistent-sysctl" <<'EOF'
+#!/usr/bin/env bash
+case "${2:-}" in
+  sysctl.proc_translated) printf '0\n' ;;
+  hw.optional.arm64) printf '1\n' ;;
+  *) exit 2 ;;
+esac
+EOF
+chmod +x \
+  "${tmp_dir}/native-sysctl" \
+  "${tmp_dir}/rosetta-sysctl" \
+  "${tmp_dir}/inconsistent-sysctl"
+test "$(scripts/public-cli-host-runtime-evidence.sh \
+  --host-system Darwin --host-arch x86_64 --sysctl "${tmp_dir}/native-sysctl")" = \
+  $'Darwin\tx86_64\tx86_64\t0\tsysctl'
+test "$(scripts/public-cli-host-runtime-evidence.sh \
+  --host-system Darwin --host-arch x86_64 --sysctl "${tmp_dir}/rosetta-sysctl")" = \
+  $'Darwin\tx86_64\tarm64\t1\tsysctl'
+test "$(scripts/public-cli-host-runtime-evidence.sh \
+  --host-system Darwin --host-arch x86_64 --sysctl "${tmp_dir}/missing-sysctl")" = \
+  $'Darwin\tx86_64\tunknown\tunknown\tsysctl'
+test "$(scripts/public-cli-host-runtime-evidence.sh \
+  --host-system Darwin --host-arch x86_64 --sysctl "${tmp_dir}/inconsistent-sysctl")" = \
+  $'Darwin\tx86_64\tunknown\tunknown\tsysctl'
+
+partial_runtime_matrix="${tmp_dir}/partial-runtime-matrix"
+mkdir -p "${partial_runtime_matrix}"
+touch \
+  "${partial_runtime_matrix}/ctx-onnxruntime-linux-x64.tar.gz" \
+  "${partial_runtime_matrix}/ctx-onnxruntime-linux-aarch64.tar.gz" \
+  "${partial_runtime_matrix}/ctx-onnxruntime-macos-arm64.tar.gz" \
+  "${partial_runtime_matrix}/ctx-onnxruntime-windows-x64.zip"
+if scripts/stage-github-release-assets.sh \
+  "${partial_runtime_matrix}" "${tmp_dir}/partial-release" \
+  >"${tmp_dir}/partial-runtime.out" 2>"${tmp_dir}/partial-runtime.err"; then
+  echo "release staging accepted an incomplete runtime matrix" >&2
+  exit 1
+fi
+grep -Fq \
+  'required ONNX Runtime sidecar missing:' \
+  "${tmp_dir}/partial-runtime.err"
+grep -Fq \
+  'ctx-onnxruntime-macos-x64.tar.gz' \
+  "${tmp_dir}/partial-runtime.err"
+
+complete_runtime_matrix="${tmp_dir}/complete-runtime-matrix"
+mkdir -p "${complete_runtime_matrix}"
+touch \
+  "${complete_runtime_matrix}/ctx-onnxruntime-linux-x64.tar.gz" \
+  "${complete_runtime_matrix}/ctx-onnxruntime-linux-aarch64.tar.gz" \
+  "${complete_runtime_matrix}/ctx-onnxruntime-macos-arm64.tar.gz" \
+  "${complete_runtime_matrix}/ctx-onnxruntime-macos-x64.tar.gz" \
+  "${complete_runtime_matrix}/ctx-onnxruntime-windows-x64.zip" \
+  "${complete_runtime_matrix}/ctx-onnxruntime-freebsd-x64.tar.gz"
+if scripts/stage-github-release-assets.sh \
+  "${complete_runtime_matrix}" "${tmp_dir}/unproven-release" \
+  >"${tmp_dir}/unproven-runtime.out" 2>"${tmp_dir}/unproven-runtime.err"; then
+  echo "release staging accepted runtimes without native exact-binary proof" >&2
+  exit 1
+fi
+grep -Fq \
+  'required authoritative runtime proof missing:' \
+  "${tmp_dir}/unproven-runtime.err"
+grep -Fq \
+  'ctx-linux-x64.native-runtime-proof.txt' \
+  "${tmp_dir}/unproven-runtime.err"
+
+mismatched_runtime_matrix="${tmp_dir}/mismatched-runtime-matrix"
+cp -R "${complete_runtime_matrix}" "${mismatched_runtime_matrix}"
+for binary in ctx; do
+  printf 'synthetic %s\n' "${binary}" > "${mismatched_runtime_matrix}/${binary}"
+  sha256sum "${mismatched_runtime_matrix}/${binary}" | awk '{ print $1 }' \
+    > "${mismatched_runtime_matrix}/${binary}.sha256"
+done
+linux_binary_sha="$(cat "${mismatched_runtime_matrix}/ctx.sha256")"
+linux_runtime_sha="$(sha256sum \
+  "${mismatched_runtime_matrix}/ctx-onnxruntime-linux-x64.tar.gz" | awk '{ print $1 }')"
+printf '%s\n' "${linux_runtime_sha}" > \
+  "${mismatched_runtime_matrix}/ctx-onnxruntime-linux-x64.tar.gz.sha256"
+cat > "${mismatched_runtime_matrix}/ctx-linux-x64.native-runtime-proof.txt" <<EOF
+runtime=onnxruntime
+platform=linux-x64
+host_system=Linux
+host_arch=x86_64
+host_native_arch=x86_64
+process_translated=0
+native_arch_probe=uname
+runtime_authority=authoritative
+artifact_sha256=${linux_binary_sha}
+runtime_archive_sha256=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+semantic_search=passed
+EOF
+if scripts/stage-github-release-assets.sh \
+  "${mismatched_runtime_matrix}" "${tmp_dir}/mismatched-release" \
+  >"${tmp_dir}/mismatched-runtime.out" 2>"${tmp_dir}/mismatched-runtime.err"; then
+  echo "release staging accepted proof for a different runtime sidecar" >&2
+  exit 1
+fi
+grep -Fq \
+  'runtime proof does not match the exact runtime sidecar:' \
+  "${tmp_dir}/mismatched-runtime.err"
+
+duplicate_proof_matrix="${tmp_dir}/duplicate-proof-matrix"
+cp -R "${mismatched_runtime_matrix}" "${duplicate_proof_matrix}"
+printf 'platform=linux-x64\n' >> \
+  "${duplicate_proof_matrix}/ctx-linux-x64.native-runtime-proof.txt"
+if scripts/stage-github-release-assets.sh \
+  "${duplicate_proof_matrix}" "${tmp_dir}/duplicate-proof-release" \
+  >"${tmp_dir}/duplicate-proof.out" 2>"${tmp_dir}/duplicate-proof.err"; then
+  echo "release staging accepted a proof with duplicate fields" >&2
+  exit 1
+fi
+grep -Fq \
+  'runtime proof contains duplicate field platform:' \
+  "${tmp_dir}/duplicate-proof.err"
 
 multiline_cross_output='cross 0.2.5
 rustup 1.28.2
@@ -167,6 +302,9 @@ grep -F 'LINUX_X64_QEMU_CPU_PROFILE="qemu64"' scripts/build-public-cli-artifact.
 grep -F 'CTX_TEST_ONLY_ALLOW_EMULATED_LINUX_BUILD' scripts/build-public-cli-artifact.sh >/dev/null
 grep -F 'flock -n' scripts/build-public-cli-artifact.sh >/dev/null
 grep -F 'local_runtime_authority' scripts/write-public-cli-build-info.py >/dev/null
+grep -F 'required ONNX Runtime sidecar missing' scripts/stage-github-release-assets.sh >/dev/null
+grep -F 'ctx-onnxruntime-freebsd-x64.tar.gz' scripts/check-github-release-assets.sh >/dev/null
+grep -F 'ctx-onnxruntime-macos-x64.tar.gz' scripts/check-github-release-assets.sh >/dev/null
 grep -F -- '--expected-builder-base "${LINUX_RELEASE_UBUNTU_DIGEST}"' scripts/build-public-cli-artifact.sh >/dev/null
 grep -F -- '--actual-builder-base "${actual_base_digest}"' scripts/build-public-cli-artifact.sh >/dev/null
 grep -F -- '--runtime-image-id "${runtime_image_id}"' scripts/build-public-cli-artifact.sh >/dev/null

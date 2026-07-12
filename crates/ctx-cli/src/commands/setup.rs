@@ -1,5 +1,5 @@
 use std::{
-    fs,
+    env, fs,
     path::{Path, PathBuf},
 };
 
@@ -33,12 +33,9 @@ pub(crate) fn run_setup(
     let store = Store::open(&db_path)?;
     let config_path = data_root.join(CONFIG_FILE);
     config::write_default_config(&data_root)?;
-    if config.semantic_search_enabled() && !semantic_query_service_supported() {
-        bail!(
-            "local semantic search is not supported on this platform yet. Set [search] semantic = false"
-        );
-    }
-    if config.semantic_search_enabled() && (!config.daemon.enabled || args.no_daemon) {
+    let semantic_enabled = config.semantic_search_enabled();
+    let semantic_supported = semantic_query_service_supported();
+    if semantic_enabled && semantic_supported && (!config.daemon.enabled || args.no_daemon) {
         bail!(
             "local semantic search requires the ctx daemon. Set [daemon] enabled = true, remove --no-daemon, or set [search] semantic = false"
         );
@@ -151,7 +148,7 @@ pub(crate) fn run_setup(
     let background_indexing_enabled = daemon_backgrounding_enabled
         && !args.catalog_only
         && !foreground_import
-        && (pending_inventory_units > 0 || config.semantic_search_enabled());
+        && (pending_inventory_units > 0 || (semantic_enabled && semantic_supported));
 
     if args.json {
         print_json(json!({
@@ -193,7 +190,8 @@ pub(crate) fn run_setup(
                 &inventory_totals,
                 inventory_units,
                 background_indexing_enabled,
-                config.semantic_search_enabled(),
+                semantic_enabled,
+                semantic_supported,
                 args.json
             ),
             "network_required": false,
@@ -247,7 +245,8 @@ pub(crate) fn run_setup(
                 print_background_indexing_guidance(
                     &inventory_totals,
                     inventory_units,
-                    config.semantic_search_enabled(),
+                    semantic_enabled,
+                    semantic_supported,
                 );
             }
             println!("Get started:");
@@ -406,15 +405,20 @@ fn setup_background_indexing_json(
     units: usize,
     enabled: bool,
     semantic_enabled: bool,
+    semantic_supported: bool,
     json_output: bool,
 ) -> Value {
+    let semantic_estimate = semantic_index_estimate(inventory);
     json!({
         "enabled": enabled,
         "semantic_enabled": semantic_enabled,
+        "semantic_supported": semantic_supported,
         "units": units,
         "source_bytes": inventory.source_bytes,
         "lexical_estimate_seconds": enabled.then(|| estimate_lexical_index_seconds(inventory)),
-        "semantic_estimate_seconds": (enabled && semantic_enabled).then(|| estimate_semantic_index_seconds(inventory)),
+        "semantic_estimate_seconds": (enabled && semantic_enabled && semantic_supported).then_some(semantic_estimate.expected_seconds),
+        "semantic_estimate_backend": (enabled && semantic_enabled && semantic_supported).then_some(semantic_estimate.backend),
+        "semantic_cpu_fallback_estimate_seconds": (enabled && semantic_enabled && semantic_supported).then_some(semantic_estimate.cpu_fallback_seconds).flatten(),
         "daemon_autostart": setup_daemon_autostart_json(enabled, json_output),
         "status_command": "ctx index status",
         "watch_command": "ctx index watch",
@@ -448,6 +452,7 @@ fn print_background_indexing_guidance(
     inventory: &InventoryTotals,
     units: usize,
     semantic_enabled: bool,
+    semantic_supported: bool,
 ) {
     println!("ctx queued your local agent history for background indexing.");
     println!(
@@ -460,14 +465,26 @@ fn print_background_indexing_guidance(
         "Estimated lexical indexing: {}.",
         format_duration_estimate(estimate_lexical_index_seconds(inventory))
     );
-    if semantic_enabled {
+    if semantic_enabled && semantic_supported {
+        let estimate = semantic_index_estimate(inventory);
         println!(
             "Semantic search: enabled; the daemon will download the local embedding model if needed."
         );
-        println!(
-            "Estimated semantic indexing: {}.",
-            format_duration_estimate(estimate_semantic_index_seconds(inventory))
-        );
+        if let Some(cpu_fallback_seconds) = estimate.cpu_fallback_seconds {
+            println!(
+                "Estimated semantic indexing: {} with CoreML; CPU fallback can take about {}.",
+                format_duration_estimate(estimate.expected_seconds),
+                format_duration_estimate(cpu_fallback_seconds)
+            );
+        } else {
+            println!(
+                "Estimated semantic indexing: {} with {}.",
+                format_duration_estimate(estimate.expected_seconds),
+                estimate.backend
+            );
+        }
+    } else if semantic_enabled {
+        println!("Semantic search: unavailable on this platform; lexical indexing will continue.");
     } else {
         println!("Semantic search: disabled.");
     }
@@ -485,8 +502,56 @@ fn estimate_lexical_index_seconds(inventory: &InventoryTotals) -> u64 {
     estimate_seconds_for_bytes(inventory.source_bytes, 16 * 1024 * 1024)
 }
 
-fn estimate_semantic_index_seconds(inventory: &InventoryTotals) -> u64 {
-    estimate_seconds_for_bytes(inventory.source_bytes, 5 * 1024 * 1024)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SemanticIndexEstimate {
+    expected_seconds: u64,
+    backend: &'static str,
+    cpu_fallback_seconds: Option<u64>,
+}
+
+fn semantic_index_estimate(inventory: &InventoryTotals) -> SemanticIndexEstimate {
+    let preference = env::var("CTX_INTERNAL_SEMANTIC_BACKEND").ok();
+    semantic_index_estimate_for(
+        inventory,
+        preference.as_deref(),
+        cfg!(all(target_os = "macos", target_arch = "aarch64")),
+    )
+}
+
+fn semantic_index_estimate_for(
+    inventory: &InventoryTotals,
+    preference: Option<&str>,
+    apple_silicon: bool,
+) -> SemanticIndexEstimate {
+    const COREML_BYTES_PER_SECOND: u64 = 5 * 1024 * 1024 / 4;
+    const CPU_BYTES_PER_SECOND: u64 = 256 * 1024;
+
+    // These are measured end-to-end planning rates under the quiet daemon
+    // policy, not startup benchmarks. Unknown internal overrides use the
+    // conservative CPU estimate; backend acquisition will report their error.
+    let preference = preference.map(str::trim).filter(|value| !value.is_empty());
+    let coreml_expected =
+        apple_silicon && matches!(preference, None | Some("auto") | Some("coreml"));
+    if coreml_expected {
+        SemanticIndexEstimate {
+            expected_seconds: estimate_seconds_for_bytes(
+                inventory.source_bytes,
+                COREML_BYTES_PER_SECOND,
+            ),
+            backend: "CoreML",
+            cpu_fallback_seconds: matches!(preference, None | Some("auto"))
+                .then(|| estimate_seconds_for_bytes(inventory.source_bytes, CPU_BYTES_PER_SECOND)),
+        }
+    } else {
+        SemanticIndexEstimate {
+            expected_seconds: estimate_seconds_for_bytes(
+                inventory.source_bytes,
+                CPU_BYTES_PER_SECOND,
+            ),
+            backend: "CPU",
+            cpu_fallback_seconds: None,
+        }
+    }
 }
 
 fn estimate_seconds_for_bytes(bytes: u64, bytes_per_second: u64) -> u64 {
@@ -509,8 +574,9 @@ fn format_duration_estimate(seconds: u64) -> String {
             plural(minutes as usize, "minute", "minutes")
         )
     } else {
-        let hours = seconds / 3_600;
-        let minutes = (seconds % 3_600).div_ceil(60);
+        let rounded_minutes = seconds.div_ceil(60);
+        let hours = rounded_minutes / 60;
+        let minutes = rounded_minutes % 60;
         if minutes == 0 {
             format!("{} {}", hours, plural(hours as usize, "hour", "hours"))
         } else {
@@ -564,4 +630,35 @@ pub(crate) fn insert_db_size_bucket(
 
 pub(crate) fn setup_has_failed_sources(report: Option<&ImportReport>) -> bool {
     report.is_some_and(|report| report.totals.failed_sources > 0)
+}
+
+#[cfg(test)]
+mod setup_estimate_tests {
+    use super::*;
+
+    #[test]
+    fn semantic_estimate_uses_quiet_backend_throughput() {
+        let inventory = InventoryTotals {
+            source_bytes: 15 * 1024 * 1024 * 1024,
+            ..InventoryTotals::default()
+        };
+        let coreml = semantic_index_estimate_for(&inventory, None, true);
+        assert_eq!(coreml.expected_seconds, 12_288);
+        assert_eq!(coreml.backend, "CoreML");
+        assert_eq!(coreml.cpu_fallback_seconds, Some(61_440));
+
+        let forced_cpu = semantic_index_estimate_for(&inventory, Some("cpu"), true);
+        assert_eq!(forced_cpu.expected_seconds, 61_440);
+        assert_eq!(forced_cpu.backend, "CPU");
+        assert_eq!(forced_cpu.cpu_fallback_seconds, None);
+
+        let conservative = semantic_index_estimate_for(&inventory, None, false);
+        assert_eq!(conservative.expected_seconds, 61_440);
+        assert_eq!(conservative.backend, "CPU");
+    }
+
+    #[test]
+    fn duration_estimate_carries_rounded_minutes_into_hours() {
+        assert_eq!(format_duration_estimate(7_199), "2 hours");
+    }
 }

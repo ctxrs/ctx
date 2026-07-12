@@ -1,16 +1,20 @@
 use std::{
     collections::{HashMap, HashSet},
-    env, fs,
-    io::{Read, Write},
-    net::Shutdown,
+    env, fmt, fs,
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::{self, Command, Stdio},
     sync::{Arc, Mutex},
-    time::{Duration as StdDuration, Instant},
+    time::{Duration as StdDuration, Instant, SystemTime},
 };
 
 #[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::net::Shutdown;
+#[cfg(unix)]
+use std::os::unix::{
+    ffi::OsStrExt,
+    fs::{OpenOptionsExt, PermissionsExt},
+};
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 #[cfg(ctx_sqlite_vec)]
@@ -22,11 +26,6 @@ use std::sync::{
 };
 
 use anyhow::{anyhow, Context, Result};
-#[cfg(ctx_semantic_fastembed)]
-use fastembed::{
-    EmbeddingModel, InitOptions, InitOptionsUserDefined, Pooling, TextEmbedding, TokenizerFiles,
-    UserDefinedEmbeddingModel,
-};
 use rusqlite::{
     params, params_from_iter, types::Value as SqlValue, Connection, OpenFlags, OptionalExtension,
 };
@@ -34,7 +33,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use ctx_history_core::{database_path, utc_now};
+use ctx_history_core::{database_path, default_data_root, utc_now};
 use ctx_history_store::{EventEmbeddingDocument, Store};
 
 use crate::commands::{
@@ -46,24 +45,105 @@ use crate::commands::{
 };
 use crate::config::{self, AppConfig, CONFIG_FILE};
 use crate::output::{compact_json, print_json};
-use crate::store_util::open_existing_store_snapshot_read_only;
+use crate::store_util::open_existing_store_read_only;
 use crate::{
     DaemonArgs, DaemonCommand, DaemonRunArgs, DaemonStartModeArg, DaemonTriggerCommandArg,
     JsonArgs, SearchBackendArg,
 };
 
-const SEMANTIC_BACKEND: &str = "fastembed";
-const SEMANTIC_MODEL_KEY: &str = "fastembed:all-MiniLM-L6-v2:semantic-lite-turn-1200-200-v2";
-const SEMANTIC_MODEL_ID: &str = "sentence-transformers/all-MiniLM-L6-v2";
-const SEMANTIC_HF_MODEL_CACHE_DIR: &str = "models--Qdrant--all-MiniLM-L6-v2-onnx";
-const SEMANTIC_REQUIRED_MODEL_FILES: &[&str] = &[
-    "model.onnx",
-    "tokenizer.json",
-    "config.json",
-    "special_tokens_map.json",
-    "tokenizer_config.json",
+const SEMANTIC_BACKEND: &str = "multilingual-e5";
+const SEMANTIC_MODEL_KEY: &str = "e5-small-v1:mean-pool:l2:query-passage";
+const SEMANTIC_MODEL_ID: &str = "intfloat/multilingual-e5-small";
+const SEMANTIC_MODEL_REVISION: &str = "614241f622f53c4eeff9890bdc4f31cfecc418b3";
+const SEMANTIC_HF_MODEL_CACHE_DIR: &str = "models--intfloat--multilingual-e5-small";
+const SEMANTIC_MANAGED_MODEL_CACHE_DIR: &str = "ctx-semantic-models";
+const SEMANTIC_REQUIRED_MODEL_FILES: &[SemanticModelFile] = &[
+    SemanticModelFile::new(
+        "onnx/model.onnx",
+        470_268_510,
+        "ca456c06b3a9505ddfd9131408916dd79290368331e7d76bb621f1cba6bc8665",
+    ),
+    SemanticModelFile::new(
+        "tokenizer.json",
+        17_082_730,
+        "0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39",
+    ),
+    SemanticModelFile::new(
+        "config.json",
+        655,
+        "69137736cab8b8903a07fe8afaafdda25aac55415a12a55d1bffa9f581abf959",
+    ),
+    SemanticModelFile::new(
+        "special_tokens_map.json",
+        167,
+        "d05497f1da52c5e09554c0cd874037a083e1dc1b9cfd48034d1c717f1afc07a7",
+    ),
+    SemanticModelFile::new(
+        "tokenizer_config.json",
+        443,
+        "a1d6bc8734a6f635dc158508bef000f8e2e5a759c7d92f984b2c86e5ff53425b",
+    ),
 ];
 const SEMANTIC_DIMENSIONS: usize = 384;
+const SEMANTIC_PASSAGE_PREFIX: &str = "passage: ";
+const SEMANTIC_QUERY_PREFIX: &str = "query: ";
+
+#[derive(Clone, Copy, Debug)]
+struct SemanticModelFile {
+    path: &'static str,
+    size: u64,
+    sha256: &'static str,
+}
+
+impl SemanticModelFile {
+    const fn new(path: &'static str, size: u64, sha256: &'static str) -> Self {
+        Self { path, size, sha256 }
+    }
+}
+
+#[derive(Debug)]
+struct SemanticCpuModelIntegrityError(String);
+
+impl fmt::Display for SemanticCpuModelIntegrityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for SemanticCpuModelIntegrityError {}
+
+#[derive(Debug)]
+struct SemanticCpuModelCacheMissing(String);
+
+impl fmt::Display for SemanticCpuModelCacheMissing {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for SemanticCpuModelCacheMissing {}
+
+#[derive(Debug)]
+struct SemanticModelLoadDeferred {
+    available_memory_bytes: u64,
+    required_available_memory_bytes: u64,
+}
+
+impl fmt::Display for SemanticModelLoadDeferred {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "semantic CPU model load deferred: {} bytes available, {} required",
+            self.available_memory_bytes, self.required_available_memory_bytes
+        )
+    }
+}
+
+impl std::error::Error for SemanticModelLoadDeferred {}
+
+fn semantic_model_key() -> &'static str {
+    SEMANTIC_MODEL_KEY
+}
 const SEMANTIC_SEARCH_CANDIDATES: usize = 200;
 const SEMANTIC_SOFT_FILTER_SEARCH_CANDIDATES: usize = 1_000;
 const SEMANTIC_CHUNK_TARGET_CHARS: usize = 1_200;
@@ -76,30 +156,16 @@ const SEMANTIC_VECTOR_BACKEND_RUST: &str = "rust_blob_scan";
 const SEMANTIC_VECTOR_BACKEND_SQLITE_VEC: &str = "sqlite_vec0";
 const SEMANTIC_SQLITE_VEC0_MAX_K: usize = 4_096;
 #[cfg(ctx_semantic_fastembed)]
-const SEMANTIC_EMBED_THREADS_FALLBACK: usize = 2;
-#[cfg(ctx_semantic_fastembed)]
 const SEMANTIC_EMBED_THREADS_MAX: usize = 8;
 #[cfg(ctx_semantic_fastembed)]
-const SEMANTIC_EMBED_BATCH_FALLBACK: usize = 16;
-#[cfg(ctx_semantic_fastembed)]
 const SEMANTIC_EMBED_BATCH_MAX: usize = 512;
-#[cfg(ctx_semantic_fastembed)]
-const SEMANTIC_EMBED_BATCH_ADAPTIVE_MAX: usize = 128;
-#[cfg(ctx_semantic_fastembed)]
-const SEMANTIC_MEMORY_BUDGET_MIN_BYTES: u64 = 1024 * 1024 * 1024;
-#[cfg(ctx_semantic_fastembed)]
-const SEMANTIC_MEMORY_BUDGET_MAX_BYTES: u64 = 10 * 1024 * 1024 * 1024;
-#[cfg(ctx_semantic_fastembed)]
-const SEMANTIC_MEMORY_BUDGET_FALLBACK_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-#[cfg(ctx_semantic_fastembed)]
-const SEMANTIC_EMBED_BATCH_TARGET_BYTES: u64 = 80 * 1024 * 1024;
 const SEMANTIC_DIRTY_QUEUE_RECENT_LIMIT: usize = 512;
 const SEMANTIC_WORKER_LOCK_FILE: &str = "semantic-worker.lock";
 const SEMANTIC_WORKER_STATUS_FILE: &str = "semantic-worker.json";
 const SEMANTIC_WORKER_BATCH_DEFAULT: usize = 5_000;
-pub(crate) const SEMANTIC_WORKER_BATCH_MAX: usize = 5_000;
+pub(crate) const SEMANTIC_WORKER_BATCH_MAX: usize = 1_000_000;
 const SEMANTIC_WORKER_MAX_SECONDS_DEFAULT: u64 = 60;
-pub(crate) const SEMANTIC_WORKER_MAX_SECONDS_CAP: u64 = 3_600;
+pub(crate) const SEMANTIC_WORKER_MAX_SECONDS_CAP: u64 = 86_400;
 const SEMANTIC_MODEL_INIT_MIN_REMAINING_SECS: u64 = 15;
 const SEMANTIC_VECTOR_BUSY_TIMEOUT_MS: u64 = 30_000;
 const SEMANTIC_PRUNE_EVENTS_PER_PASS: usize = 256;
@@ -110,7 +176,9 @@ const DAEMON_DIR: &str = "daemon";
 const DAEMON_JOBS_DIR: &str = "jobs";
 const DAEMON_LOCK_FILE: &str = "daemon.lock";
 const DAEMON_STATUS_FILE: &str = "status.json";
+#[cfg(unix)]
 const DAEMON_QUERY_SOCKET_FILE: &str = "query.sock";
+const DAEMON_QUERY_ENDPOINT_FILE: &str = "query-endpoint.json";
 const DAEMON_HISTORY_REFRESH_JOB_FILE: &str = "history-refresh.json";
 const DAEMON_SEMANTIC_JOB_FILE: &str = "semantic-index.json";
 const DAEMON_CLOUD_SYNC_JOB_FILE: &str = "cloud-sync.json";
@@ -123,6 +191,10 @@ const DAEMON_BACKGROUND_CHILD_ENV: &str = "CTX_DAEMON_BACKGROUND_CHILD";
 const DAEMON_AUTOSTART_OFF_ENV: &str = "CTX_DAEMON_AUTOSTART_OFF";
 const DAEMON_SEMANTIC_BOOTSTRAP_PASSES_BEFORE_REFRESH: usize = 1;
 const DAEMON_LOCK_STALE_AFTER_MS: i64 = 25 * 60 * 60 * 1_000;
+const PID_LOCK_INCOMPLETE_GRACE: StdDuration = StdDuration::from_secs(30);
+const PID_LOCK_PROTOCOL: &str = "advisory-v1";
+const PID_LOCK_ACQUIRE_ATTEMPTS: usize = 20;
+const PID_LOCK_ACQUIRE_RETRY: StdDuration = StdDuration::from_millis(2);
 const DAEMON_SEMANTIC_RESERVE_GRACE_SECS: u64 = 10;
 const DAEMON_MIN_REMAINING_FOR_JOB_SECS: u64 = 2;
 
@@ -150,7 +222,9 @@ pub(crate) struct SemanticWorkerReport {
     dirty_items: usize,
     queued_items_estimate: usize,
     model_cache_available: bool,
+    model_acquisition: Value,
     embed_policy: Option<Value>,
+    embedding_runtime: Option<Value>,
     vector_path: PathBuf,
     lock_path: PathBuf,
     status_path: PathBuf,
@@ -177,7 +251,11 @@ impl SemanticWorkerReport {
             model_cache_available: semantic_model_cache_available(&semantic_worker_cache_dir(
                 data_root,
             )),
+            model_acquisition: semantic_model_acquisition_status_json(
+                &semantic_worker_cache_dir(data_root),
+            ),
             embed_policy: Some(semantic_embed_policy_status_json()),
+            embedding_runtime: None,
             vector_path: semantic_vector_path(data_root),
             lock_path: semantic_worker_lock_path(data_root),
             status_path: semantic_worker_status_path(data_root),
@@ -195,7 +273,7 @@ impl SemanticWorkerReport {
     pub(crate) fn to_json(&self) -> Value {
         compact_json(json!({
             "status": self.status,
-            "model_key": SEMANTIC_MODEL_KEY,
+            "model_key": semantic_model_key(),
             "running": self.running,
             "pid": self.pid,
             "started_at_ms": self.started_at_ms,
@@ -214,7 +292,9 @@ impl SemanticWorkerReport {
                 "coverage_ratio": self.coverage_ratio(),
             },
             "model_cache_available": self.model_cache_available,
+            "model_acquisition": self.model_acquisition.clone(),
             "embed_policy": self.embed_policy.clone(),
+            "embedding_runtime": self.embedding_runtime.clone(),
             "vector_path": self.vector_path.display().to_string(),
             "lock_path": self.lock_path.display().to_string(),
             "status_path": self.status_path.display().to_string(),
@@ -451,6 +531,32 @@ pub(crate) fn search_packet_with_backend(
         return Ok((lexical_search_packet()?, retrieval));
     }
 
+    if !semantic_query_service_supported()
+        && matches!(
+            requested_backend,
+            SearchBackendArg::Semantic | SearchBackendArg::Hybrid
+        )
+    {
+        if requested_backend == SearchBackendArg::Semantic {
+            return Err(anyhow!(
+                "local semantic search is not supported on this platform yet"
+            ));
+        }
+        let mut retrieval = SemanticRetrievalReport::lexical(requested_backend, 0);
+        retrieval.effective_mode = SearchBackendArg::Lexical;
+        retrieval.semantic_weight = 0.0;
+        retrieval.semantic_status = "unavailable";
+        retrieval.set_semantic_fallback(
+            "unsupported_platform",
+            "local semantic search is not supported on this platform yet",
+        );
+        warn_if(
+            emit_warnings,
+            "warning: local semantic search is not supported on this platform; falling back to lexical search",
+        );
+        return Ok((lexical_search_packet()?, retrieval));
+    }
+
     let semantic_cache_dir = semantic_worker_cache_dir(data_root);
     let vector_path = semantic_vector_path(data_root);
 
@@ -601,12 +707,6 @@ fn semantic_or_hybrid_search_packet(
                     "warning: semantic index is empty; falling back to lexical search",
                 );
                 return lexical_search_packet();
-            }
-
-            if effective_backend == SearchBackendArg::Semantic && worker_report.running {
-                return Err(anyhow!(
-                    "semantic worker is currently indexing; semantic-only search will not initialize a query embedding model while background indexing is active; retry when indexing is idle or use --backend hybrid"
-                ));
             }
 
             if effective_backend == SearchBackendArg::Hybrid

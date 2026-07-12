@@ -45,6 +45,12 @@ expected_assets=(
   ctx-linux-x64
   ctx-macos-arm64
   ctx-macos-x64
+  ctx-onnxruntime-freebsd-x64.tar.gz
+  ctx-onnxruntime-linux-aarch64.tar.gz
+  ctx-onnxruntime-linux-x64.tar.gz
+  ctx-onnxruntime-macos-arm64.tar.gz
+  ctx-onnxruntime-macos-x64.tar.gz
+  ctx-onnxruntime-windows-x64.zip
   ctx-windows-x64.exe
   SHA256SUMS
 )

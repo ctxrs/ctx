@@ -63,6 +63,40 @@ fn setup_does_not_write_default_config_and_preserves_existing_config() {
 }
 
 #[test]
+fn status_reads_committed_wal_content_from_an_active_store() {
+    let temp = tempdir();
+    write_codex_setup_session(&temp);
+    ctx(&temp)
+        .args(["setup", "--wait", "--progress", "none"])
+        .assert()
+        .success();
+
+    let db_path = temp.path().join("work.sqlite");
+    let writer = Connection::open(&db_path).unwrap();
+    writer
+        .execute_batch("PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;")
+        .unwrap();
+    writer
+        .execute(
+            r#"
+            INSERT INTO sessions
+            (id, provider, external_session_id, agent_type, is_primary, status, fidelity,
+             started_at_ms, created_at_ms, updated_at_ms)
+            VALUES
+            ('00000000-0000-0000-0000-000000000001', 'codex', 'wal-only-session',
+             'primary', 1, 'imported', 'imported', 1, 1, 1)
+            "#,
+            [],
+        )
+        .unwrap();
+    assert!(temp.path().join("work.sqlite-wal").exists());
+
+    let status = json_output(ctx(&temp).args(["status", "--json"]));
+    assert_eq!(status["indexed_sessions"], 2, "{status:#}");
+    drop(writer);
+}
+
+#[test]
 fn malformed_present_config_fails_before_setup_and_analytics_side_effects() {
     let temp = tempdir();
     let state = temp.path().join("state");
@@ -512,6 +546,12 @@ fn setup_partial_import_isolates_empty_codex_session_file() {
         "codex",
         "--json",
     ]));
+    assert_eq!(search["freshness"]["status"], "completed", "{search:#}");
+    assert_eq!(search["freshness"]["totals"]["failed"], 1, "{search:#}");
+    assert_eq!(
+        search["freshness"]["totals"]["failed_sources"], 0,
+        "{search:#}"
+    );
     assert_search_provider_oracle(&search, "codex", "setup should import", 1, "message");
 }
 

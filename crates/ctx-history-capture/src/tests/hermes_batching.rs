@@ -18,7 +18,7 @@ fn native_hermes_partial_import_crosses_batches_and_replays_idempotently() {
     assert_eq!(first.imported_events, 130);
     assert_eq!(
         store
-            .search_event_hits("hermes batched message 129", 10)
+            .search_event_hits("hermes-batched-message-129", 10)
             .unwrap()
             .len(),
         1
@@ -31,7 +31,7 @@ fn native_hermes_partial_import_crosses_batches_and_replays_idempotently() {
     assert_eq!(replay.skipped_events, 130);
     assert_eq!(
         store
-            .search_event_hits("hermes batched message 129", 10)
+            .search_event_hits("hermes-batched-message-129", 10)
             .unwrap()
             .len(),
         1
@@ -59,7 +59,7 @@ fn native_hermes_nonpartial_import_preserves_atomic_search_projection() {
     assert_eq!(summary.imported_events, 70);
     assert_eq!(
         store
-            .search_event_hits("hermes batched message 69", 10)
+            .search_event_hits("hermes-batched-message-69", 10)
             .unwrap()
             .len(),
         1
@@ -108,7 +108,7 @@ fn write_hermes_batched_db(temp: &TempDir, messages: usize) -> PathBuf {
                  VALUES ('hermes-batched', ?1, ?2, ?3)",
                 rusqlite::params![
                     role,
-                    format!("hermes batched message {index}"),
+                    format!("hermes-batched-message-{index}"),
                     1782259201.0 + index as f64,
                 ],
             )

@@ -173,6 +173,7 @@ pub(crate) fn run_search(
     let semantic_enabled = config.semantic_search_enabled();
     if args.refresh == RefreshArg::Background
         && semantic_enabled
+        && semantic::semantic_query_service_supported()
         && matches!(
             requested_backend,
             SearchBackendArg::Semantic | SearchBackendArg::Hybrid
@@ -370,26 +371,28 @@ pub(crate) fn resolve_search_backend(
     config: &config::AppConfig,
 ) -> Result<SearchBackendArg> {
     let semantic_enabled = config.semantic_search_enabled();
-    if semantic_enabled
-        && !semantic::semantic_query_service_supported()
-        && !matches!(backend, Some(SearchBackendArg::Lexical))
-    {
-        return Err(anyhow!(
-            "local semantic search is not supported on this platform yet. Set [search] semantic = false or use --backend lexical"
-        ));
-    }
-    if semantic_enabled
-        && !config.daemon.enabled
-        && !matches!(backend, Some(SearchBackendArg::Lexical))
-    {
-        return Err(anyhow!(
-            "local semantic search requires the ctx daemon. Set [daemon] enabled = true, set [search] semantic = false, or use --backend lexical"
-        ));
-    }
     match backend {
         Some(SearchBackendArg::Semantic) if !semantic_enabled => Err(anyhow!(
             "semantic search is disabled. Set [search] semantic = true in ctx config to enable the local semantic preview"
         )),
+        Some(SearchBackendArg::Semantic) if !semantic::semantic_query_service_supported() => Err(
+            anyhow!(
+                "local semantic search is not supported on this platform yet. Set [search] semantic = false or use --backend lexical"
+            ),
+        ),
+        Some(SearchBackendArg::Semantic) if !config.daemon.enabled => Err(anyhow!(
+            "local semantic search requires the ctx daemon. Set [daemon] enabled = true, set [search] semantic = false, or use --backend lexical"
+        )),
+        value
+            if semantic_enabled
+                && semantic::semantic_query_service_supported()
+                && !config.daemon.enabled
+                && !matches!(value, Some(SearchBackendArg::Lexical)) =>
+        {
+            Err(anyhow!(
+                "local semantic search requires the ctx daemon. Set [daemon] enabled = true, set [search] semantic = false, or use --backend lexical"
+            ))
+        }
         Some(value) => Ok(value),
         None if semantic_enabled => Ok(SearchBackendArg::Hybrid),
         None => Ok(SearchBackendArg::Lexical),
@@ -517,6 +520,7 @@ pub(crate) fn refresh_sources_for_search(
     config::write_default_config(data_root)?;
     let db_path = database_path(data_root.to_path_buf());
     let store = Store::open(&db_path)?;
+    let had_indexed_content = store.indexed_history_item_count()? > 0;
     let inventory = inventory_import_sources(&store, sources, false)?;
     let planned_sources = inventory.sources;
     let planned_total_bytes = inventory.totals.source_bytes;
@@ -708,12 +712,24 @@ pub(crate) fn refresh_sources_for_search(
         }
     }
 
+    let all_sources_failed = totals.imported_sources == 0 && totals.failed_sources > 0;
+    let all_partial_items_failed_without_prior_index = !had_indexed_content
+        && totals.imported_sessions == 0
+        && totals.imported_events == 0
+        && totals.failed > 0;
     if refresh == RefreshArg::Background
-        && totals.imported_sources == 0
-        && totals.failed_sources > 0
+        && (all_sources_failed || all_partial_items_failed_without_prior_index)
     {
         let detail = first_refresh_failure
             .map(|error| format!("; first failure: {error}"))
+            .or_else(|| {
+                (totals.failed > 0).then(|| {
+                    format!(
+                        "; background refresh imported no content and reported {} failure(s)",
+                        totals.failed
+                    )
+                })
+            })
             .unwrap_or_default();
         return Err(anyhow!("all search refresh sources failed{detail}"));
     }

@@ -346,7 +346,7 @@ fn native_nanoclaw_rejects_database_path_traversal() {
     inbound
         .execute(
             "INSERT INTO messages_in VALUES ('escaped-message', ?1)",
-            [json!({"text": "nanoclaw traversal content must not import"}).to_string()],
+            [json!({"text": "nanoclaw-traversal-sentinel"}).to_string()],
         )
         .unwrap();
     drop(inbound);
@@ -367,7 +367,7 @@ fn native_nanoclaw_rejects_database_path_traversal() {
         .error
         .contains("identifiers are not safe path segments"));
     assert!(store
-        .search_event_hits("nanoclaw traversal content must not import", 10)
+        .search_event_hits("nanoclaw-traversal-sentinel", 10)
         .unwrap()
         .is_empty());
 }

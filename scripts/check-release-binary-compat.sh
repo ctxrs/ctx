@@ -216,9 +216,20 @@ check_macos() {
   minimum="$(macho_min_version)"
   [[ -n "${minimum}" ]] || fail "missing macOS minimum version load command"
   version_le "${minimum}" 13.0 || fail "minimum macOS ${minimum} is newer than 13.0"
-  assert_exact_lines "Mach-O dylibs" "$(macho_dylibs)" "/usr/lib/libSystem.B.dylib
-/usr/lib/libcharset.1.dylib
-/usr/lib/libiconv.2.dylib"
+  # Core ML support is compiled into both macOS artifacts. Keep the complete
+  # reviewed system-library set exact so an accidental third-party dylib or
+  # new framework dependency still fails release construction.
+  assert_exact_lines "Mach-O dylibs" "$(macho_dylibs)" "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation
+/System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics
+/System/Library/Frameworks/CoreML.framework/Versions/A/CoreML
+/System/Library/Frameworks/CoreVideo.framework/Versions/A/CoreVideo
+/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation
+/System/Library/Frameworks/ImageIO.framework/Versions/A/ImageIO
+/System/Library/Frameworks/Metal.framework/Versions/A/Metal
+/usr/lib/libSystem.B.dylib
+/usr/lib/libc++.1.dylib
+/usr/lib/libiconv.2.dylib
+/usr/lib/libobjc.A.dylib"
 }
 
 pe_imports() {

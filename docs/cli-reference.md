@@ -418,8 +418,8 @@ do not dominate historical retrieval. Use `--include-current-session` to opt
 back in. Use `--refresh off` for a strictly read-only query over the existing
 ctx index. Explicit semantic or hybrid requests may read an existing semantic
 sidecar under `--refresh off`, but the command does not update the sidecar or
-download models. They may initialize an already-cached local model to embed the
-query.
+download models. They may ask the daemon query service to embed the query from
+an already-cached local model.
 
 Results are local hits over indexed history. Event hits include `ctx_event_id`;
 hits with known session context include `ctx_session_id`; provider metadata

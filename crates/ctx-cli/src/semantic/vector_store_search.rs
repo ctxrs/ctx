@@ -46,7 +46,7 @@ impl SemanticVectorStore {
             "#
         .to_owned();
         let mut query_params = vec![
-            SqlValue::from(SEMANTIC_MODEL_KEY.to_owned()),
+            SqlValue::from(semantic_model_key().to_owned()),
             SqlValue::from(SEMANTIC_DIMENSIONS as i64),
         ];
         if let Some(event_ids) = event_ids {
@@ -161,7 +161,7 @@ impl SemanticVectorStore {
 	                ORDER BY v.distance
 	                "#,
             )?;
-            let mut rows = stmt.query(params![&query_blob, k as i64, SEMANTIC_MODEL_KEY])?;
+            let mut rows = stmt.query(params![&query_blob, k as i64, semantic_model_key()])?;
             while let Some(row) = rows.next()? {
                 rows_returned = rows_returned.saturating_add(1);
                 let event_id = Uuid::parse_str(&row.get::<_, String>(0)?)

@@ -1610,6 +1610,23 @@ fn native_mistral_vibe_fixture_imports_searches_and_reimports() {
 fn native_mux_fixture_imports_searches_reimports_and_subagents() {
     let temp = tempdir();
     let fixture = provider_history_fixture("mux/v0.27.0/sessions");
+    let child_chat =
+        fixture.join("mux-parent-session/subagent-transcripts/mux-child-session/chat.jsonl");
+    let mut child_lines = fs::read_to_string(&child_chat)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    child_lines[1]["parts"][1]["input"]["content"] =
+        Value::String("mux-child-input-sentinel".into());
+    fs::write(
+        &child_chat,
+        child_lines
+            .into_iter()
+            .map(|line| jsonl_line(line))
+            .collect::<String>(),
+    )
+    .unwrap();
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
 
     let source = provider_source_for_path(CaptureProvider::Mux, fixture.clone());
@@ -1668,7 +1685,7 @@ fn native_mux_fixture_imports_searches_reimports_and_subagents() {
         "mux partial response still searchable",
         CaptureProvider::Mux,
     );
-    assert_search_misses(&store, "child proof");
+    assert_search_misses(&store, "mux-child-input-sentinel");
     assert!(store
         .export_archive()
         .unwrap()

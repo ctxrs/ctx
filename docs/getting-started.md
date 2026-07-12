@@ -74,8 +74,11 @@ CTX_DATA_ROOT=/tmp/ctx-demo ctx status
 ```
 
 Setup does not write to source repositories, call model APIs, download embedding
-models, or require API keys. Daemon maintenance is local-only; cloud sync
-remains disabled and reports `network_allowed: false`. Official
+models, or require API keys while semantic search is disabled. If daemon and
+semantic search are explicitly enabled, daemon maintenance may acquire the local
+ONNX Runtime asset and embedding model needed for the installed platform.
+Daemon maintenance is local-only; cloud sync remains disabled and reports
+`network_allowed: false`. Official
 installer-managed binaries can run a signed background auto-upgrade check after
 later successful non-JSON commands other than `ctx status`; that updater does
 not collect provider history.
@@ -162,13 +165,15 @@ session or its subagent work is the history you want to search. Use
 `--refresh off` when you need a strictly read-only query over the existing ctx
 index.
 
-Semantic and hybrid search read existing local sidecar coverage. Search never
-starts the daemon, runs semantic catch-up, or downloads embedding models.
-Hybrid uses semantic evidence only after coverage is complete and dirty work is
-drained; until then it falls back to lexical search with a structured reason.
-Explicit semantic search can query partial coverage for diagnostics, but reports
-a local error when the model cache is missing or the semantic worker is actively
-indexing.
+Semantic and hybrid search read existing local sidecar coverage. With semantic
+enabled and default background refresh, search may start the configured daemon
+so the daemon-owned query service can embed the query; `--refresh off` skips
+that autostart. Search does not run semantic catch-up or download embedding
+models. Hybrid uses semantic evidence only after coverage is complete and dirty
+work is drained; until then it falls back to lexical search with a structured
+reason. Explicit semantic search can query partial coverage for diagnostics,
+but reports a local error when the model cache is missing or the semantic worker
+is actively indexing.
 
 ## 6. Use JSON For Scripts
 

@@ -641,9 +641,9 @@ Reads local storage and returns findings:
 - `findings`.
 
 Doctor checks the main SQLite store plus read-only semantic sidecar health. It
-does not initialize embedding models or write sidecar data. Search may
-initialize an already-cached local embedding model only for explicit
-semantic/hybrid query embedding; it does not download models or write sidecar
+does not initialize embedding models or write sidecar data. Semantic or hybrid
+search may ask the daemon query service to embed the query from an
+already-cached local model; search does not download models or write sidecar
 data from the search path.
 
 ## Provider Smoke

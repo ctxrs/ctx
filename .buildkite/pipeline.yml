@@ -43,6 +43,21 @@ steps:
     if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1"
     command: |
       scripts/build-public-cli-artifact.sh linux-x64
+      scripts/build-onnxruntime-sidecar.sh linux-x64
+      scripts/stage-github-release-assets.sh --transcode-runtime linux-x64
+      if [[ "${CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX:-0}" == "1" ]]; then
+        smoke_root="target/public-cli-native-smoke/linux-x64"
+        mkdir -p "${smoke_root}"
+        scripts/smoke-daemon-semantic-release.sh \
+          --runtime-archive target/public-cli-artifacts/ctx-onnxruntime-linux-x64.tar.gz \
+          --runtime-platform linux-x64 \
+          --ctx target/public-cli-artifacts/ctx \
+          --data-root "${smoke_root}" \
+          --proof-output target/public-cli-artifacts/ctx-linux-x64.native-runtime-proof.txt \
+          --keep-root >"${smoke_root}/smoke.log" 2>&1
+        grep -Fxq 'runtime_authority=authoritative' \
+          target/public-cli-artifacts/ctx-linux-x64.native-runtime-proof.txt
+      fi
     agents:
       queue: "release-linux-managed"
       ctx-runner-class: "release-linux-control"
@@ -54,12 +69,34 @@ steps:
       - "target/public-cli-artifacts/ctx.sha256"
       - "target/public-cli-artifacts/ctx.version"
       - "target/public-cli-artifacts/ctx.build-info.json"
+      - "target/public-cli-artifacts/ctx-onnxruntime-linux-x64.tar.gz"
+      - "target/public-cli-artifacts/ctx-onnxruntime-linux-x64.tar.gz.sha256"
+      - "target/public-cli-artifacts/ctx-linux-x64.native-runtime-proof.txt"
+      - "target/public-cli-native-smoke/linux-x64/smoke.log"
+      - "target/public-cli-native-smoke/linux-x64/**/daemon-smoke.log"
+      - "target/public-cli-native-smoke/linux-x64/**/daemon-status.*"
+      - "target/public-cli-native-smoke/linux-x64/**/semantic-search.*"
 
   - label: ":package: public CLI linux-aarch64"
     key: "public-cli-linux-aarch64"
     if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1"
     command: |
       scripts/build-public-cli-artifact.sh linux-aarch64
+      scripts/build-onnxruntime-sidecar.sh linux-aarch64
+      scripts/stage-github-release-assets.sh --transcode-runtime linux-aarch64
+      if [[ "${CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX:-0}" == "1" ]]; then
+        smoke_root="target/public-cli-native-smoke/linux-aarch64"
+        mkdir -p "${smoke_root}"
+        scripts/smoke-daemon-semantic-release.sh \
+          --runtime-archive target/public-cli-artifacts/ctx-onnxruntime-linux-aarch64.tar.gz \
+          --runtime-platform linux-aarch64 \
+          --ctx target/public-cli-artifacts/ctx-linux-aarch64 \
+          --data-root "${smoke_root}" \
+          --proof-output target/public-cli-artifacts/ctx-linux-aarch64.native-runtime-proof.txt \
+          --keep-root >"${smoke_root}/smoke.log" 2>&1
+        grep -Fxq 'runtime_authority=authoritative' \
+          target/public-cli-artifacts/ctx-linux-aarch64.native-runtime-proof.txt
+      fi
     agents:
       queue: "release-linux-managed"
       ctx-runner-class: "release-linux-control"
@@ -71,12 +108,20 @@ steps:
       - "target/public-cli-artifacts/ctx-linux-aarch64.sha256"
       - "target/public-cli-artifacts/ctx-linux-aarch64.version"
       - "target/public-cli-artifacts/ctx-linux-aarch64.build-info.json"
+      - "target/public-cli-artifacts/ctx-onnxruntime-linux-aarch64.tar.gz"
+      - "target/public-cli-artifacts/ctx-onnxruntime-linux-aarch64.tar.gz.sha256"
+      - "target/public-cli-artifacts/ctx-linux-aarch64.native-runtime-proof.txt"
+      - "target/public-cli-native-smoke/linux-aarch64/smoke.log"
+      - "target/public-cli-native-smoke/linux-aarch64/**/daemon-smoke.log"
+      - "target/public-cli-native-smoke/linux-aarch64/**/daemon-status.*"
+      - "target/public-cli-native-smoke/linux-aarch64/**/semantic-search.*"
 
   - label: ":package: public CLI windows-x64"
     key: "public-cli-windows-x64"
     if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1"
     command: |
       scripts/build-public-cli-artifact.sh windows-x64
+      scripts/build-onnxruntime-sidecar.sh windows-x64
     agents:
       queue: "release-linux-managed"
       ctx-runner-class: "release-linux-control"
@@ -88,6 +133,8 @@ steps:
       - "target/public-cli-artifacts/ctx.exe.sha256"
       - "target/public-cli-artifacts/ctx.exe.version"
       - "target/public-cli-artifacts/ctx.exe.build-info.json"
+      - "target/public-cli-artifacts/ctx-onnxruntime-windows-x64.zip"
+      - "target/public-cli-artifacts/ctx-onnxruntime-windows-x64.zip.sha256"
 
   - label: ":package: public CLI freebsd-x64"
     key: "public-cli-freebsd-x64"
@@ -111,31 +158,202 @@ steps:
     if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1"
     command: |
       scripts/build-public-cli-artifact.sh macos-arm64
+      scripts/build-onnxruntime-sidecar.sh macos-arm64
+      scripts/stage-github-release-assets.sh --transcode-runtime macos-arm64
+      if [[ "${CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX:-0}" == "1" ]]; then
+        smoke_root="target/public-cli-native-smoke/macos-arm64/coreml"
+        mkdir -p "${smoke_root}"
+        if ! scripts/smoke-daemon-semantic-release.sh \
+          --coreml \
+          --runtime-platform macos-arm64 \
+          --ctx target/public-cli-artifacts/ctx-macos-arm64 \
+          --data-root "${smoke_root}" \
+          --proof-output target/public-cli-artifacts/ctx-macos-arm64.coreml-runtime-proof.txt \
+          --keep-root >"${smoke_root}/smoke.log" 2>&1; then
+          cat "${smoke_root}/smoke.log"
+          exit 1
+        fi
+        cat "${smoke_root}/smoke.log"
+        proof="$(find "${smoke_root}" -name packaged-runtime-proof.txt -type f -print -quit)"
+        [[ -n "${proof}" ]]
+        grep -Fxq 'runtime_authority=authoritative' "${proof}"
+
+        onnx_smoke_root="target/public-cli-native-smoke/macos-arm64/onnxruntime"
+        mkdir -p "${onnx_smoke_root}"
+        if ! scripts/smoke-daemon-semantic-release.sh \
+          --runtime-archive target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.tar.gz \
+          --runtime-platform macos-arm64 \
+          --ctx target/public-cli-artifacts/ctx-macos-arm64 \
+          --data-root "${onnx_smoke_root}" \
+          --proof-output target/public-cli-artifacts/ctx-macos-arm64.native-runtime-proof.txt \
+          --keep-root >"${onnx_smoke_root}/smoke.log" 2>&1; then
+          cat "${onnx_smoke_root}/smoke.log"
+          exit 1
+        fi
+        cat "${onnx_smoke_root}/smoke.log"
+        grep -Fxq 'runtime_authority=authoritative' \
+          target/public-cli-artifacts/ctx-macos-arm64.native-runtime-proof.txt
+      fi
     agents:
-      queue: "release-linux-managed"
-      ctx-runner-class: "release-linux-control"
-      os: "linux"
-      arch: "x86_64"
+      queue: "mac-shared"
+      os: "darwin"
+      arch: "arm64"
+    concurrency: 1
+    concurrency_group: "ctx-public-cli-macos-native"
     timeout_in_minutes: 60
     artifact_paths:
       - "target/public-cli-artifacts/ctx-macos-arm64"
       - "target/public-cli-artifacts/ctx-macos-arm64.sha256"
       - "target/public-cli-artifacts/ctx-macos-arm64.version"
       - "target/public-cli-artifacts/ctx-macos-arm64.build-info.json"
+      - "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.tar.gz"
+      - "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.tar.gz.sha256"
+      - "target/public-cli-artifacts/ctx-macos-arm64.native-runtime-proof.txt"
+      - "target/public-cli-artifacts/ctx-macos-arm64.coreml-runtime-proof.txt"
+      - "target/public-cli-native-smoke/macos-arm64/**/smoke.log"
+      - "target/public-cli-native-smoke/macos-arm64/**/packaged-runtime-proof.txt"
+      - "target/public-cli-native-smoke/macos-arm64/**/daemon-smoke.log"
+      - "target/public-cli-native-smoke/macos-arm64/**/daemon-status.*"
+      - "target/public-cli-native-smoke/macos-arm64/**/semantic-search.*"
 
   - label: ":package: public CLI macos-x64"
     key: "public-cli-macos-x64"
     if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1"
     command: |
       scripts/build-public-cli-artifact.sh macos-x64
+      if [[ "${CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX:-0}" == "1" ]]; then
+        smoke_root="target/public-cli-native-smoke/macos-x64"
+        mkdir -p "${smoke_root}"
+        if ! scripts/smoke-daemon-semantic-release.sh \
+          --coreml \
+          --runtime-platform macos-x64 \
+          --ctx target/public-cli-artifacts/ctx-macos-x64 \
+          --data-root "${smoke_root}" \
+          --keep-root >"${smoke_root}/smoke.log" 2>&1; then
+          cat "${smoke_root}/smoke.log"
+          exit 1
+        fi
+        cat "${smoke_root}/smoke.log"
+        proof="$(find "${smoke_root}" -name packaged-runtime-proof.txt -type f -print -quit)"
+        [[ -n "${proof}" ]]
+        grep -Fxq 'runtime_authority=non_authoritative' "${proof}"
+      fi
     agents:
-      queue: "release-linux-managed"
-      ctx-runner-class: "release-linux-control"
-      os: "linux"
-      arch: "x86_64"
+      queue: "mac-shared"
+      os: "darwin"
+      arch: "arm64"
+    concurrency: 1
+    concurrency_group: "ctx-public-cli-macos-native"
     timeout_in_minutes: 60
     artifact_paths:
       - "target/public-cli-artifacts/ctx-macos-x64"
       - "target/public-cli-artifacts/ctx-macos-x64.sha256"
       - "target/public-cli-artifacts/ctx-macos-x64.version"
       - "target/public-cli-artifacts/ctx-macos-x64.build-info.json"
+      - "target/public-cli-native-smoke/macos-x64/smoke.log"
+      - "target/public-cli-native-smoke/macos-x64/**/packaged-runtime-proof.txt"
+      - "target/public-cli-native-smoke/macos-x64/**/daemon-smoke.log"
+      - "target/public-cli-native-smoke/macos-x64/**/daemon-status.*"
+      - "target/public-cli-native-smoke/macos-x64/**/semantic-search.*"
+
+  - label: ":test_tube: public CLI macos-x64 native semantic"
+    key: "public-cli-macos-x64-native-smoke"
+    depends_on: "public-cli-macos-x64"
+    if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && build.env("CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX") == "1"
+    command: |
+      buildkite-agent artifact download \
+        "target/public-cli-artifacts/ctx-macos-x64*" . \
+        --step public-cli-macos-x64
+      scripts/build-onnxruntime-sidecar.sh macos-x64
+      scripts/stage-github-release-assets.sh --transcode-runtime macos-x64
+      smoke_root="target/public-cli-native-smoke/macos-x64-native"
+      mkdir -p "${smoke_root}"
+      if ! scripts/smoke-daemon-semantic-release.sh \
+        --runtime-archive target/public-cli-artifacts/ctx-onnxruntime-macos-x64.tar.gz \
+        --runtime-platform macos-x64 \
+        --ctx target/public-cli-artifacts/ctx-macos-x64 \
+        --data-root "${smoke_root}" \
+        --proof-output target/public-cli-artifacts/ctx-macos-x64.native-runtime-proof.txt \
+        --keep-root >"${smoke_root}/smoke.log" 2>&1; then
+        cat "${smoke_root}/smoke.log"
+        exit 1
+      fi
+      cat "${smoke_root}/smoke.log"
+      grep -Fxq 'runtime_authority=authoritative' \
+        target/public-cli-artifacts/ctx-macos-x64.native-runtime-proof.txt
+    agents:
+      queue: "ctx-mac-gui-shared-x64"
+      os: "darwin"
+      arch: "x86_64"
+    concurrency: 1
+    concurrency_group: "ctx-public-cli-macos-intel-native"
+    timeout_in_minutes: 180
+    artifact_paths:
+      - "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.tar.gz"
+      - "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.tar.gz.sha256"
+      - "target/public-cli-artifacts/ctx-macos-x64.native-runtime-proof.txt"
+      - "target/public-cli-native-smoke/macos-x64-native/smoke.log"
+      - "target/public-cli-native-smoke/macos-x64-native/**/daemon-smoke.log"
+      - "target/public-cli-native-smoke/macos-x64-native/**/daemon-status.*"
+      - "target/public-cli-native-smoke/macos-x64-native/**/semantic-search.*"
+
+  - label: ":test_tube: public CLI windows-x64 native semantic"
+    key: "public-cli-windows-x64-native-smoke"
+    depends_on: "public-cli-windows-x64"
+    if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && build.env("CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX") == "1"
+    command: |
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx.exe*" . --step public-cli-windows-x64
+      buildkite-agent artifact download "target/public-cli-artifacts/ctx-onnxruntime-windows-x64.zip*" . --step public-cli-windows-x64
+      powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-daemon-semantic-release.ps1 -Ctx target/public-cli-artifacts/ctx.exe -RuntimeArchive target/public-cli-artifacts/ctx-onnxruntime-windows-x64.zip -RuntimePlatform windows-x64 -DataRoot target/public-cli-native-smoke/windows-x64 -ProofOutput target/public-cli-artifacts/ctx-windows-x64.native-runtime-proof.txt -RequireAuthoritative -KeepRoot
+    agents:
+      queue: "windows-x64"
+      os: "windows"
+      arch: "x86_64"
+    concurrency: 1
+    concurrency_group: "ctx-public-cli-windows-native"
+    timeout_in_minutes: 90
+    artifact_paths:
+      - "target/public-cli-artifacts/ctx-windows-x64.native-runtime-proof.txt"
+      - "target/public-cli-native-smoke/windows-x64/**/packaged-runtime-proof.txt"
+      - "target/public-cli-native-smoke/windows-x64/**/daemon-smoke.log"
+
+  - label: ":test_tube: public CLI freebsd-x64 native semantic"
+    key: "public-cli-freebsd-x64-native-smoke"
+    depends_on: "public-cli-freebsd-x64"
+    if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && build.env("CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX") == "1"
+    command: |
+      buildkite-agent artifact download \
+        "target/public-cli-artifacts/ctx-freebsd-x64*" . \
+        --step public-cli-freebsd-x64
+      scripts/build-onnxruntime-sidecar.sh freebsd-x64
+      scripts/stage-github-release-assets.sh --transcode-runtime freebsd-x64
+      smoke_root="target/public-cli-native-smoke/freebsd-x64"
+      mkdir -p "${smoke_root}"
+      if ! scripts/smoke-daemon-semantic-release.sh \
+        --runtime-archive target/public-cli-artifacts/ctx-onnxruntime-freebsd-x64.tar.gz \
+        --runtime-platform freebsd-x64 \
+        --ctx target/public-cli-artifacts/ctx-freebsd-x64 \
+        --data-root "${smoke_root}" \
+        --proof-output target/public-cli-artifacts/ctx-freebsd-x64.native-runtime-proof.txt \
+        --keep-root >"${smoke_root}/smoke.log" 2>&1; then
+        cat "${smoke_root}/smoke.log"
+        exit 1
+      fi
+      cat "${smoke_root}/smoke.log"
+      grep -Fxq 'runtime_authority=authoritative' \
+        target/public-cli-artifacts/ctx-freebsd-x64.native-runtime-proof.txt
+    agents:
+      queue: "freebsd-x64"
+      os: "freebsd"
+      arch: "x86_64"
+    concurrency: 1
+    concurrency_group: "ctx-public-cli-freebsd-native"
+    timeout_in_minutes: 240
+    artifact_paths:
+      - "target/public-cli-artifacts/ctx-onnxruntime-freebsd-x64.tar.gz"
+      - "target/public-cli-artifacts/ctx-onnxruntime-freebsd-x64.tar.gz.sha256"
+      - "target/public-cli-artifacts/ctx-freebsd-x64.native-runtime-proof.txt"
+      - "target/public-cli-native-smoke/freebsd-x64/smoke.log"
+      - "target/public-cli-native-smoke/freebsd-x64/**/daemon-smoke.log"
+      - "target/public-cli-native-smoke/freebsd-x64/**/daemon-status.*"
+      - "target/public-cli-native-smoke/freebsd-x64/**/semantic-search.*"

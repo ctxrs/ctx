@@ -143,6 +143,7 @@ case "${mode}" in
     ;;
   native_candidate_smoke_tests)
     run bash scripts/tests/run-native-candidate-smoke-test.sh
+    run bash scripts/tests/smoke-daemon-semantic-release-test.sh
     if command -v pwsh >/dev/null 2>&1; then
       run pwsh -NoLogo -NoProfile -File scripts/tests/run-native-candidate-smoke-test.ps1
     fi

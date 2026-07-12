@@ -32,7 +32,13 @@ Stable releases publish prebuilt binaries on GitHub Releases:
 | Windows x64 | `ctx-windows-x64.exe` |
 | FreeBSD x64 | `ctx-freebsd-x64` |
 
-Each release also publishes `SHA256SUMS` for the binary assets.
+Each release also publishes `SHA256SUMS` for the binary assets. Releases that
+ship ctx-managed dynamic ONNX Runtime assets for the local semantic preview may
+also include sidecar archives named `ctx-onnxruntime-<platform>.tar.gz` on
+Unix-like platforms and `ctx-onnxruntime-windows-x64.zip` on Windows. The
+official installer reads signed release metadata and installs those runtime
+assets automatically when present; direct unmanaged installs should follow the
+release notes for any required runtime sidecar placement.
 
 The hosted installer and managed-upgrade path verify signed ctx release
 metadata. The macOS and Windows binaries are not currently Developer ID

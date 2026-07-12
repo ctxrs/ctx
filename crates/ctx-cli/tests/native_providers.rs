@@ -599,9 +599,9 @@ fn native_provider_cli_policy_excludes_success_tool_outputs_from_search_and_payl
     }
 
     for (provider, sentinel) in [
-        ("qoder", "native qoder fixture result"),
-        ("openhands", "Edited openhands-cli-native-oracle.txt"),
-        ("continue", "Continue tool output marker"),
+        ("qoder", "qoder-success-tool-output-sentinel"),
+        ("openhands", "openhands-success-tool-output-sentinel"),
+        ("continue", "continue-success-tool-output-sentinel"),
     ] {
         let search = json_output(ctx(&temp).args([
             "search",
@@ -622,21 +622,21 @@ fn native_provider_cli_policy_excludes_success_tool_outputs_from_search_and_payl
     assert_eq!(
         sqlite_count(
             &conn,
-            "SELECT COUNT(*) FROM events WHERE payload_json LIKE '%native qoder fixture result%'",
+            "SELECT COUNT(*) FROM events WHERE payload_json LIKE '%qoder-success-tool-output-sentinel%'",
         ),
         0
     );
     assert_eq!(
         sqlite_count(
             &conn,
-            "SELECT COUNT(*) FROM events WHERE payload_json LIKE '%Edited openhands-cli-native-oracle.txt%'",
+            "SELECT COUNT(*) FROM events WHERE payload_json LIKE '%openhands-success-tool-output-sentinel%'",
         ),
         0
     );
     assert_eq!(
         sqlite_count(
             &conn,
-            "SELECT COUNT(*) FROM events WHERE payload_json LIKE '%Continue tool output marker%'",
+            "SELECT COUNT(*) FROM events WHERE payload_json LIKE '%continue-success-tool-output-sentinel%'",
         ),
         0
     );

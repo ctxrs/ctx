@@ -3,19 +3,21 @@ mod support;
 use support::*;
 
 fn write_fake_semantic_model_cache(cache_root: &Path) {
-    let model_root = cache_root.join("models--Qdrant--all-MiniLM-L6-v2-onnx");
-    let snapshot = model_root.join("snapshots").join("test-snapshot");
-    fs::create_dir_all(model_root.join("refs")).unwrap();
+    let model_root = cache_root.join("models--intfloat--multilingual-e5-small");
+    let snapshot = model_root
+        .join("snapshots")
+        .join("614241f622f53c4eeff9890bdc4f31cfecc418b3");
     fs::create_dir_all(&snapshot).unwrap();
-    fs::write(model_root.join("refs").join("main"), "test-snapshot\n").unwrap();
-    for file in [
-        "model.onnx",
-        "tokenizer.json",
-        "config.json",
-        "special_tokens_map.json",
-        "tokenizer_config.json",
+    for (file, size) in [
+        ("onnx/model.onnx", 470_268_510),
+        ("tokenizer.json", 17_082_730),
+        ("config.json", 655),
+        ("special_tokens_map.json", 167),
+        ("tokenizer_config.json", 443),
     ] {
-        fs::write(snapshot.join(file), "x").unwrap();
+        let path = snapshot.join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::File::create(path).unwrap().set_len(size).unwrap();
     }
 }
 
@@ -76,8 +78,13 @@ fn index_status_reports_stale_daemon_lock_as_recoverable() {
     );
 }
 
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    target_env = "gnu"
+))]
 #[test]
-fn index_status_ignores_semantic_model_caches_when_backend_is_unsupported() {
+fn index_status_recognizes_semantic_model_caches_on_supported_linux() {
     let temp = tempdir();
     let workspace = temp.path().join("workspace");
     fs::create_dir_all(&workspace).unwrap();
@@ -87,8 +94,11 @@ fn index_status_ignores_semantic_model_caches_when_backend_is_unsupported() {
     current_dir_command.current_dir(&workspace);
     remove_semantic_cache_env(&mut current_dir_command);
     let status = json_output(current_dir_command.args(["index", "status", "--json"]));
-    assert_eq!(status["semantic"]["model_cache_available"], false);
-    assert_eq!(status["semantic"]["embed_policy"]["source"], "unsupported");
+    assert_eq!(status["semantic"]["model_cache_available"], true);
+    assert_eq!(
+        status["semantic"]["embed_policy"]["source"],
+        "dynamic_quiet"
+    );
 
     let temp = tempdir();
     let hf_home = temp.path().join("hf-home");
@@ -97,8 +107,11 @@ fn index_status_ignores_semantic_model_caches_when_backend_is_unsupported() {
     remove_semantic_cache_env(&mut hf_home_command);
     hf_home_command.env("HF_HOME", &hf_home);
     let status = json_output(hf_home_command.args(["index", "status", "--json"]));
-    assert_eq!(status["semantic"]["model_cache_available"], false);
-    assert_eq!(status["semantic"]["embed_policy"]["source"], "unsupported");
+    assert_eq!(status["semantic"]["model_cache_available"], true);
+    assert_eq!(
+        status["semantic"]["embed_policy"]["source"],
+        "dynamic_quiet"
+    );
 }
 
 #[test]

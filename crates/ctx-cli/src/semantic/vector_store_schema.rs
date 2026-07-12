@@ -189,6 +189,20 @@ impl SemanticVectorStore {
                 [],
             )?;
         }
+        let foreign_vec0_rows = if sqlite_table_exists(&self.conn, "event_embedding_vec0_meta")?
+            && sqlite_column_exists(&self.conn, "event_embedding_vec0_meta", "model_key")?
+        {
+            self.conn.query_row(
+                "SELECT COUNT(*) FROM event_embedding_vec0_meta WHERE model_key != ?1",
+                [semantic_model_key()],
+                |row| row.get::<_, i64>(0),
+            )?
+        } else {
+            0
+        };
+        if foreign_vec0_rows > 0 {
+            self.drop_sqlite_vec0_schema()?;
+        }
         let deleted_legacy_embeddings = self.conn.execute("DELETE FROM event_embeddings", [])?;
         let scrubbed_chunk_text = self.conn.execute(
             "UPDATE event_embedding_chunks SET chunk_text = '' WHERE chunk_text != ''",
@@ -201,7 +215,7 @@ impl SemanticVectorStore {
             VALUES (?1, ?2, ?3, ?4, 'cosine', 1, ?5)
             "#,
             params![
-                SEMANTIC_MODEL_KEY,
+                semantic_model_key(),
                 SEMANTIC_BACKEND,
                 SEMANTIC_MODEL_ID,
                 SEMANTIC_DIMENSIONS as i64,
@@ -340,7 +354,7 @@ impl SemanticVectorStore {
 	                     OR m.end_char != c.end_char
 	                  )
 	                "#,
-                params![SEMANTIC_MODEL_KEY, SEMANTIC_DIMENSIONS as i64],
+                params![semantic_model_key(), SEMANTIC_DIMENSIONS as i64],
                 |row| row.get::<_, i64>(0),
             )
             .optional()?
@@ -359,7 +373,7 @@ impl SemanticVectorStore {
 	                WHERE m.model_key = ?1
 	                  AND c.rowid IS NULL
 	                "#,
-                params![SEMANTIC_MODEL_KEY, SEMANTIC_DIMENSIONS as i64],
+                params![semantic_model_key(), SEMANTIC_DIMENSIONS as i64],
                 |row| row.get::<_, i64>(0),
             )
             .optional()?
@@ -380,7 +394,7 @@ impl SemanticVectorStore {
 	                     OR v.embedding != c.embedding_f32
 	                  )
 	                "#,
-                params![SEMANTIC_MODEL_KEY, SEMANTIC_DIMENSIONS as i64],
+                params![semantic_model_key(), SEMANTIC_DIMENSIONS as i64],
                 |row| row.get::<_, i64>(0),
             )
             .optional()?
@@ -412,7 +426,7 @@ impl SemanticVectorStore {
             .conn
             .query_row(
                 "SELECT COUNT(*) FROM event_embedding_chunks WHERE model_key = ?1 AND dimensions = ?2",
-                params![SEMANTIC_MODEL_KEY, SEMANTIC_DIMENSIONS as i64],
+                params![semantic_model_key(), SEMANTIC_DIMENSIONS as i64],
                 |row| row.get::<_, i64>(0),
             )
             .optional()?
@@ -422,7 +436,7 @@ impl SemanticVectorStore {
             .conn
             .query_row(
                 "SELECT COUNT(*) FROM event_embedding_vec0_meta WHERE model_key = ?1",
-                params![SEMANTIC_MODEL_KEY],
+                params![semantic_model_key()],
                 |row| row.get::<_, i64>(0),
             )
             .optional()?
@@ -498,7 +512,7 @@ impl SemanticVectorStore {
             )?;
             let mut vec_stmt =
                 tx.prepare("INSERT INTO event_embedding_vec0(rowid, embedding) VALUES (?1, ?2)")?;
-            let mut rows = rows.query(params![SEMANTIC_MODEL_KEY, SEMANTIC_DIMENSIONS as i64])?;
+            let mut rows = rows.query(params![semantic_model_key(), SEMANTIC_DIMENSIONS as i64])?;
             while let Some(row) = rows.next()? {
                 let rowid: i64 = row.get(0)?;
                 let event_id: String = row.get(1)?;
@@ -513,7 +527,7 @@ impl SemanticVectorStore {
                 meta_stmt.execute(params![
                     rowid,
                     event_id,
-                    SEMANTIC_MODEL_KEY,
+                    semantic_model_key(),
                     history_record_id,
                     session_id,
                     event_seq,

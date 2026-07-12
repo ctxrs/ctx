@@ -567,11 +567,11 @@ pub(crate) fn write_native_qoder_fixture(temp: &TempDir, query: &str) -> String 
                     "content": [{
                         "type": "tool_result",
                         "tool_use_id": "call-qoder-cli-read",
-                        "content": "native qoder fixture result",
+                        "content": "qoder-success-tool-output-sentinel",
                         "is_error": false
                     }]
                 },
-                "toolUseResult": "native qoder fixture result"
+                "toolUseResult": "qoder-success-tool-output-sentinel"
             })
         ),
     )
@@ -646,7 +646,7 @@ pub(crate) fn write_native_openhands_fixture(temp: &TempDir, query: &str) -> Str
             "observation": {
                 "kind": "FileEditorObservation",
                 "command": "str_replace",
-                "output": "Edited openhands-cli-native-oracle.txt",
+                "output": "openhands-success-tool-output-sentinel",
                 "path": "openhands-cli-native-oracle.txt",
                 "prev_exist": true,
                 "old_content": "old",
@@ -1087,7 +1087,7 @@ pub(crate) fn write_native_continue_fixture(temp: &TempDir, query: &str) -> Stri
                                 {
                                     "name": "Result",
                                     "description": "",
-                                    "content": "Continue tool output marker"
+                                    "content": "continue-success-tool-output-sentinel"
                                 }
                             ]
                         }

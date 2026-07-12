@@ -1,8 +1,7 @@
 # Daemon-Owned Indexing and Semantic Search Spec
 
 This spec records the product and architecture decision for local semantic
-search after the July 2026 dogfood experiments on a real power-user ctx
-history store.
+search.
 
 ## Decision
 
@@ -54,19 +53,6 @@ existing structured metadata:
 
 No LLM is used to create semantic documents. No inferred "important findings"
 or summarization is allowed in the local indexing path.
-
-The July 2026 real-corpus experiment measured:
-
-| Strategy | Unit docs | Vector chunks | Avg chars/chunk |
-| --- | ---: | ---: | ---: |
-| `message_only` | 439,971 | 487,501 | 571 |
-| `full_turn` | 94,101 | 141,198 | 1,436 |
-| `lite_turn` | 94,101 | 123,390 | 1,326 |
-| `lite_turn + rollups` | 105,439 | 139,587 | 1,344 |
-
-`lite_turn + rollups` uses about 71% fewer vectors than message-level indexing,
-keeps vector count close to plain lite turns, and performed best on file/error
-queries in targeted real-data samples.
 
 ## Setup UX
 

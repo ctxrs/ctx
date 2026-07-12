@@ -26,6 +26,7 @@ fn daemon_status_path(data_root: &Path) -> PathBuf {
     daemon_root_path(data_root).join(DAEMON_STATUS_FILE)
 }
 
+#[cfg(unix)]
 fn daemon_query_socket_path(data_root: &Path) -> PathBuf {
     daemon_root_path(data_root).join(DAEMON_QUERY_SOCKET_FILE)
 }
@@ -43,7 +44,7 @@ fn daemon_cloud_sync_job_path(data_root: &Path) -> PathBuf {
 }
 
 struct DaemonLock {
-    path: PathBuf,
+    _inner: PidFileLock,
 }
 
 impl DaemonLock {
@@ -51,86 +52,133 @@ impl DaemonLock {
         create_private_dir_all(data_root)?;
         let root = daemon_root_path(data_root);
         create_private_dir_all(&root)?;
-        let path = daemon_lock_path(data_root);
-        for attempt in 0..2 {
-            match private_create_new_file(&path) {
-                Ok(mut file) => {
-                    let payload = json!({
-                        "pid": process::id(),
-                        "started_at_ms": utc_now().timestamp_millis(),
-                        "binary": env::current_exe().ok(),
-                        "data_root": data_root,
-                    });
-                    writeln!(file, "{}", serde_json::to_string(&payload)?)?;
-                    return Ok(Some(Self { path }));
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if attempt == 0 && daemon_lock_is_stale(&path) {
-                        let _ = fs::remove_file(&path);
-                        continue;
-                    }
-                    return Ok(None);
-                }
-                Err(err) => {
-                    return Err(err)
-                        .with_context(|| format!("create ctx daemon lock {}", path.display()));
-                }
-            }
-        }
-        Ok(None)
-    }
-}
-
-impl Drop for DaemonLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        let payload = pid_lock_payload(json!({
+            "binary": env::current_exe().ok(),
+            "data_root": data_root,
+        }));
+        Ok(PidFileLock::acquire(&daemon_lock_path(data_root), payload)?
+            .map(|inner| Self { _inner: inner }))
     }
 }
 
 struct SemanticWorkerLock {
-    path: PathBuf,
+    _inner: PidFileLock,
 }
 
 impl SemanticWorkerLock {
     fn acquire(data_root: &Path) -> Result<Option<Self>> {
         create_private_dir_all(data_root)?;
-        let path = semantic_worker_lock_path(data_root);
-        for attempt in 0..2 {
-            match private_create_new_file(&path) {
-                Ok(mut file) => {
-                    let payload = json!({
-                        "pid": process::id(),
-                        "started_at_ms": utc_now().timestamp_millis(),
-                    });
-                    writeln!(file, "{}", serde_json::to_string(&payload)?)?;
-                    return Ok(Some(Self { path }));
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if attempt == 0 && semantic_worker_lock_is_stale(&path) {
-                        let _ = fs::remove_file(&path);
-                        continue;
-                    }
-                    return Ok(None);
-                }
-                Err(err) => {
-                    return Err(err).with_context(|| {
-                        format!("create semantic worker lock {}", path.display())
-                    });
-                }
-            }
+        Ok(PidFileLock::acquire(
+            &semantic_worker_lock_path(data_root),
+            pid_lock_payload(json!({})),
+        )?
+        .map(|inner| Self { _inner: inner }))
+    }
+}
+
+struct PidFileLock {
+    guard: fs::File,
+    path: PathBuf,
+    payload: Value,
+}
+
+impl PidFileLock {
+    fn acquire(path: &Path, payload: Value) -> Result<Option<Self>> {
+        let guard_path = pid_lock_guard_path(path);
+        let (guard, _) = open_or_create_pid_lock_file(&guard_path)
+            .with_context(|| format!("open ctx process guard {}", guard_path.display()))?;
+        secure_private_file_permissions(&guard_path)?;
+        if !try_lock_pid_file(&guard)
+            .with_context(|| format!("lock ctx process guard {}", guard_path.display()))?
+        {
+            return Ok(None);
         }
-        Ok(None)
+
+        let previous = read_pid_lock_json(path);
+        // A legacy process may already be committed to unlinking this path and
+        // cannot see the guard file. A live or incomplete legacy owner wins;
+        // stale legacy metadata is reclaimable for supported upgrade handoff.
+        if path.exists()
+            && !previous.as_ref().is_some_and(pid_lock_uses_advisory_protocol)
+            && !legacy_pid_lock_value_is_stale(path, previous.as_ref())
+        {
+            let _ = fs2::FileExt::unlock(&guard);
+            return Ok(None);
+        }
+        if !publish_pid_lock_metadata(path, &payload)? {
+            let _ = fs2::FileExt::unlock(&guard);
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            guard,
+            path: path.to_path_buf(),
+            payload,
+        }))
     }
 }
 
-impl Drop for SemanticWorkerLock {
+impl Drop for PidFileLock {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        if pid_lock_path_has_owner(&self.path, &self.payload) {
+            if let Some(object) = self.payload.as_object_mut() {
+                object.insert("released".to_owned(), Value::Bool(true));
+            }
+            let _ = publish_pid_lock_metadata(&self.path, &self.payload);
+        }
+        let _ = fs2::FileExt::unlock(&self.guard);
     }
 }
 
-fn semantic_worker_lock_is_stale(path: &Path) -> bool {
-    pid_lock_file_is_stale(path)
+fn pid_lock_guard_path(path: &Path) -> PathBuf {
+    path.with_extension("guard")
+}
+
+fn open_or_create_pid_lock_file(path: &Path) -> std::io::Result<(fs::File, bool)> {
+    match private_create_new_lock_file(path) {
+        Ok(file) => Ok((file, true)),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            private_open_existing_lock_file(path).map(|file| (file, false))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn publish_pid_lock_metadata(path: &Path, payload: &Value) -> Result<bool> {
+    for attempt in 0..3 {
+        let (mut file, created) = open_or_create_pid_lock_file(path)
+            .with_context(|| format!("open ctx process lock metadata {}", path.display()))?;
+        secure_private_file_permissions(path)?;
+        let previous = (!created).then(|| read_pid_lock_json(path)).flatten();
+        if !created
+            && !previous.as_ref().is_some_and(pid_lock_uses_advisory_protocol)
+            && !legacy_pid_lock_value_is_stale(path, previous.as_ref())
+        {
+            return Ok(false);
+        }
+        write_pid_lock_json(&mut file, payload)
+            .with_context(|| format!("publish ctx process lock metadata {}", path.display()))?;
+        if pid_lock_path_has_owner(path, payload) {
+            return Ok(true);
+        }
+        if attempt < 2 {
+            std::thread::sleep(PID_LOCK_ACQUIRE_RETRY);
+        }
+    }
+    Ok(false)
+}
+
+fn pid_lock_payload(extra: Value) -> Value {
+    let mut payload = json!({
+        "lock_protocol": PID_LOCK_PROTOCOL,
+        "owner_id": Uuid::now_v7().to_string(),
+        "pid": process::id(),
+        "released": false,
+        "started_at_ms": utc_now().timestamp_millis(),
+    });
+    if let (Some(payload), Some(extra)) = (payload.as_object_mut(), extra.as_object()) {
+        payload.extend(extra.clone());
+    }
+    payload
 }
 
 fn daemon_lock_is_stale(path: &Path) -> bool {
@@ -138,16 +186,114 @@ fn daemon_lock_is_stale(path: &Path) -> bool {
 }
 
 fn pid_lock_file_is_stale(path: &Path) -> bool {
-    let Some(value) = read_pid_lock_json(path) else {
-        return path.exists();
-    };
-    if lock_started_at_is_stale(&value) {
-        return true;
+    if let Some(observation) = observe_pid_advisory_lock(path) {
+        return !observation.held;
     }
-    let Some(pid) = pid_from_lock_json(&value) else {
-        return true;
+    let value = read_pid_lock_json(path);
+    legacy_pid_lock_value_is_stale(path, value.as_ref())
+}
+
+fn pid_lock_file_is_orphaned(path: &Path) -> bool {
+    if let Some(observation) = observe_pid_advisory_lock(path) {
+        return !observation.held && !observation.released;
+    }
+    let value = read_pid_lock_json(path);
+    legacy_pid_lock_value_is_stale(path, value.as_ref())
+}
+
+fn legacy_pid_lock_value_is_stale(path: &Path, value: Option<&Value>) -> bool {
+    let Some(value) = value else {
+        return incomplete_pid_lock_is_stale(path);
     };
-    !pid_is_running(pid)
+    let Some(pid) = pid_from_lock_json(value) else {
+        return incomplete_pid_lock_is_stale(path);
+    };
+    match process_state(pid) {
+        ProcessState::Running => false,
+        ProcessState::NotRunning => true,
+        ProcessState::Unknown => lock_started_at_is_stale(value),
+    }
+}
+
+fn incomplete_pid_lock_is_stale(path: &Path) -> bool {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+        .is_some_and(|age| age > PID_LOCK_INCOMPLETE_GRACE)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PidAdvisoryLockObservation {
+    held: bool,
+    released: bool,
+}
+
+fn observe_pid_advisory_lock(path: &Path) -> Option<PidAdvisoryLockObservation> {
+    let guard = private_open_existing_lock_file(&pid_lock_guard_path(path)).ok()?;
+    match fs2::FileExt::try_lock_shared(&guard) {
+        Ok(()) => {
+            let observation = read_pid_lock_json(path)
+                .filter(pid_lock_uses_advisory_protocol)
+                .map(|value| PidAdvisoryLockObservation {
+                    held: false,
+                    released: value
+                        .get("released")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                });
+            let _ = fs2::FileExt::unlock(&guard);
+            observation
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            Some(PidAdvisoryLockObservation {
+                held: true,
+                released: false,
+            })
+        }
+        Err(_) => None,
+    }
+}
+
+fn try_lock_pid_file(file: &fs::File) -> std::io::Result<bool> {
+    for attempt in 0..PID_LOCK_ACQUIRE_ATTEMPTS {
+        match fs2::FileExt::try_lock_exclusive(file) {
+            Ok(()) => return Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if attempt + 1 < PID_LOCK_ACQUIRE_ATTEMPTS {
+                    std::thread::sleep(PID_LOCK_ACQUIRE_RETRY);
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(false)
+}
+
+fn pid_lock_path_has_owner(path: &Path, payload: &Value) -> bool {
+    let owner_id = payload.get("owner_id").and_then(Value::as_str);
+    owner_id.is_some()
+        && read_pid_lock_json(path)
+            .as_ref()
+            .and_then(|value| value.get("owner_id"))
+            .and_then(Value::as_str)
+            == owner_id
+}
+
+fn pid_lock_uses_advisory_protocol(value: &Value) -> bool {
+    value.get("lock_protocol").and_then(Value::as_str) == Some(PID_LOCK_PROTOCOL)
+}
+
+fn pid_lock_file_reports_running(
+    path: &Path,
+    lock_state: Option<ProcessState>,
+    status: &str,
+) -> bool {
+    if let Some(observation) = observe_pid_advisory_lock(path) {
+        return observation.held;
+    }
+    matches!(lock_state, Some(ProcessState::Running))
+        || unknown_process_lock_reports_running(path, lock_state, status)
 }
 
 fn read_pid_lock_file(path: &Path) -> Option<u32> {
@@ -157,6 +303,15 @@ fn read_pid_lock_file(path: &Path) -> Option<u32> {
 fn read_pid_lock_json(path: &Path) -> Option<Value> {
     let text = fs::read_to_string(path).ok()?;
     serde_json::from_str(&text).ok()
+}
+
+fn write_pid_lock_json(file: &mut fs::File, value: &Value) -> Result<()> {
+    file.set_len(0)?;
+    file.seek(SeekFrom::Start(0))?;
+    serde_json::to_writer(&mut *file, value)?;
+    file.write_all(b"\n")?;
+    file.flush()?;
+    Ok(())
 }
 
 fn pid_from_lock_json(value: &Value) -> Option<u32> {
@@ -173,21 +328,70 @@ fn lock_started_at_is_stale(value: &Value) -> bool {
     utc_now().timestamp_millis().saturating_sub(started_at_ms) > DAEMON_LOCK_STALE_AFTER_MS
 }
 
-#[cfg(unix)]
-fn pid_is_running(pid: u32) -> bool {
-    if pid == 0 {
-        return false;
-    }
-    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
-    if result == 0 {
-        return true;
-    }
-    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProcessState {
+    Running,
+    NotRunning,
+    Unknown,
 }
 
-#[cfg(not(unix))]
-fn pid_is_running(pid: u32) -> bool {
-    pid != 0
+#[cfg(unix)]
+fn process_state(pid: u32) -> ProcessState {
+    if pid == 0 {
+        return ProcessState::NotRunning;
+    }
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return ProcessState::NotRunning;
+    };
+    let result = unsafe { libc::kill(pid, 0) };
+    if result == 0 {
+        return ProcessState::Running;
+    }
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(libc::ESRCH) => ProcessState::NotRunning,
+        Some(libc::EPERM) => ProcessState::Running,
+        _ => ProcessState::Unknown,
+    }
+}
+
+#[cfg(windows)]
+fn process_state(pid: u32) -> ProcessState {
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ACCESS_DENIED};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    if pid == 0 {
+        return ProcessState::NotRunning;
+    }
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if !handle.is_null() {
+        unsafe {
+            CloseHandle(handle);
+        }
+        return ProcessState::Running;
+    }
+    match unsafe { GetLastError() } {
+        windows_sys::Win32::Foundation::ERROR_INVALID_PARAMETER => ProcessState::NotRunning,
+        ERROR_ACCESS_DENIED => ProcessState::Running,
+        _ => ProcessState::Unknown,
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn process_state(_pid: u32) -> ProcessState {
+    ProcessState::Unknown
+}
+
+fn unknown_process_lock_reports_running(
+    lock_path: &Path,
+    state: Option<ProcessState>,
+    status: &str,
+) -> bool {
+    matches!(state, Some(ProcessState::Unknown))
+        && status == "running"
+        && lock_path.exists()
+        && !pid_lock_file_is_stale(lock_path)
 }
 
 #[cfg(unix)]
@@ -252,7 +456,7 @@ fn read_daemon_job_status(path: &Path) -> Option<Value> {
 fn semantic_status_file_model_matches(status_value: Option<&Value>) -> bool {
     status_value
         .and_then(|value| json_string(value, "model_key"))
-        .is_some_and(|model_key| model_key == SEMANTIC_MODEL_KEY)
+        .is_some_and(|model_key| model_key == semantic_model_key())
 }
 
 fn semantic_status_file_searchable_items(status_value: Option<&Value>) -> Option<usize> {
@@ -354,7 +558,13 @@ fn semantic_worker_report_with_count_mode(
     let status_path = semantic_worker_status_path(data_root);
     let lock_path = semantic_worker_lock_path(data_root);
     let lock_pid = read_pid_lock_file(&lock_path);
-    let running = lock_pid.is_some_and(pid_is_running);
+    let lock_state = lock_pid.map(process_state);
+    let status_file_status = current_status_value.and_then(|value| json_string(value, "status"));
+    let running = pid_lock_file_reports_running(
+        &lock_path,
+        lock_state,
+        status_file_status.as_deref().unwrap_or("unknown"),
+    );
     let pid = if running {
         lock_pid
     } else {
@@ -363,9 +573,7 @@ fn semantic_worker_report_with_count_mode(
     let queued_items_estimate = searchable_items
         .saturating_sub(embedded_items)
         .max(dirty_items);
-    let mut status = current_status_value
-        .and_then(|value| json_string(value, "status"))
-        .unwrap_or_else(|| {
+    let mut status = status_file_status.unwrap_or_else(|| {
             if !searchable_items_known || store.is_none() {
                 "unknown".to_owned()
             } else if searchable_items == 0 {
@@ -390,7 +598,9 @@ fn semantic_worker_report_with_count_mode(
         };
         let preserve_status = (status == "budget_exhausted" && queued_items_estimate > 0)
             || status == "acquiring_model"
+            || status == "model_load_deferred"
             || status == "model_acquisition_failed"
+            || status == "model_integrity_failed"
             || (status == "failed"
                 && sidecar_error.is_none()
                 && embedded_items == 0
@@ -400,7 +610,7 @@ fn semantic_worker_report_with_count_mode(
     if running {
         status = "running".to_owned();
     } else if lock_path.exists()
-        && semantic_worker_lock_is_stale(&lock_path)
+        && pid_lock_file_is_orphaned(&lock_path)
         && queued_items_estimate > 0
     {
         status = "stale_lock".to_owned();
@@ -424,9 +634,16 @@ fn semantic_worker_report_with_count_mode(
         dirty_items,
         queued_items_estimate,
         model_cache_available,
+        model_acquisition: current_status_value
+            .and_then(|value| value.get("model_acquisition").cloned())
+            .unwrap_or_else(|| {
+                semantic_model_acquisition_status_json(&semantic_worker_cache_dir(data_root))
+            }),
         embed_policy: current_status_value
             .and_then(|value| value.get("embed_policy").cloned())
             .or_else(|| Some(semantic_embed_policy_status_json())),
+        embedding_runtime: current_status_value
+            .and_then(|value| value.get("embedding_runtime").cloned()),
         vector_path,
         lock_path,
         status_path,
@@ -452,12 +669,13 @@ fn daemon_report_with_disabled_status(
     let lock_path = daemon_lock_path(data_root);
     let status_path = daemon_status_path(data_root);
     let lock_pid = read_pid_lock_file(&lock_path);
-    let running = lock_pid.is_some_and(pid_is_running);
-    let stale_lock = lock_path.exists() && daemon_lock_is_stale(&lock_path);
     let mut status = status_value
         .as_ref()
         .and_then(|value| json_string(value, "status"))
         .unwrap_or_else(|| "unknown".to_owned());
+    let lock_state = lock_pid.map(process_state);
+    let running = pid_lock_file_reports_running(&lock_path, lock_state, status.as_str());
+    let stale_lock = lock_path.exists() && pid_lock_file_is_orphaned(&lock_path);
     let stale_running_status = !running && status == "running";
     if running {
         status = "running".to_owned();
@@ -596,7 +814,10 @@ fn daemon_semantic_job_report(
         "unavailable"
     } else if semantic_report.status == "acquiring_model" {
         "acquiring_model"
-    } else if semantic_report.status == "model_acquisition_failed" {
+    } else if matches!(
+        semantic_report.status.as_str(),
+        "model_load_deferred" | "model_acquisition_failed" | "model_integrity_failed"
+    ) {
         "skipped"
     } else if !semantic_report.searchable_items_known {
         "unknown"
@@ -627,8 +848,12 @@ fn daemon_semantic_job_report(
         Some("sidecar_unavailable".to_owned())
     } else if semantic_report.status == "acquiring_model" {
         Some("acquiring_model".to_owned())
+    } else if semantic_report.status == "model_load_deferred" {
+        Some("memory_pressure".to_owned())
     } else if semantic_report.status == "model_acquisition_failed" {
         Some("model_acquisition_failed".to_owned())
+    } else if semantic_report.status == "model_integrity_failed" {
+        Some("model_integrity_failed".to_owned())
     } else if !semantic_report.searchable_items_known {
         Some("searchable_items_unknown".to_owned())
     } else if semantic_report.searchable_items == 0 {
@@ -656,12 +881,29 @@ fn daemon_semantic_job_report(
             .as_ref()
             .and_then(|value| json_string(value, "last_error"))
             .or_else(|| semantic_report.last_error.clone()),
+        "retryable": status_value
+            .as_ref()
+            .and_then(|value| value.get("retryable").and_then(Value::as_bool)),
+        "available_memory_bytes": status_value
+            .as_ref()
+            .and_then(|value| value.get("available_memory_bytes").and_then(Value::as_u64)),
+        "required_available_memory_bytes": status_value
+            .as_ref()
+            .and_then(|value| value.get("required_available_memory_bytes").and_then(Value::as_u64)),
         "indexed_chunks": status_value.as_ref().and_then(|value| json_usize(value, "indexed_chunks")),
         "model_cache_available": semantic_report.model_cache_available,
+        "model_acquisition": status_value
+            .as_ref()
+            .and_then(|value| value.get("model_acquisition").cloned())
+            .unwrap_or_else(|| semantic_report.model_acquisition.clone()),
         "embed_policy": status_value
             .as_ref()
             .and_then(|value| value.get("embed_policy").cloned())
             .or_else(|| semantic_report.embed_policy.clone()),
+        "embedding_runtime": status_value
+            .as_ref()
+            .and_then(|value| value.get("embedding_runtime").cloned())
+            .or_else(|| semantic_report.embedding_runtime.clone()),
         "worker_status": semantic_report.status,
         "coverage": {
             "searchable_items": semantic_report.searchable_items,

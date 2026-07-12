@@ -107,13 +107,37 @@ Load command 0
     minos 13.0
 Load command 1
       cmd LC_LOAD_DYLIB
-     name /usr/lib/libSystem.B.dylib (offset 24)
+     name /System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (offset 24)
 Load command 2
       cmd LC_LOAD_DYLIB
-     name /usr/lib/libiconv.2.dylib (offset 24)
+     name /System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics (offset 24)
 Load command 3
       cmd LC_LOAD_DYLIB
-     name /usr/lib/libcharset.1.dylib (offset 24)
+     name /System/Library/Frameworks/CoreML.framework/Versions/A/CoreML (offset 24)
+Load command 4
+      cmd LC_LOAD_DYLIB
+     name /System/Library/Frameworks/CoreVideo.framework/Versions/A/CoreVideo (offset 24)
+Load command 5
+      cmd LC_LOAD_DYLIB
+     name /System/Library/Frameworks/Foundation.framework/Versions/C/Foundation (offset 24)
+Load command 6
+      cmd LC_LOAD_DYLIB
+     name /System/Library/Frameworks/ImageIO.framework/Versions/A/ImageIO (offset 24)
+Load command 7
+      cmd LC_LOAD_DYLIB
+     name /System/Library/Frameworks/Metal.framework/Versions/A/Metal (offset 24)
+Load command 8
+      cmd LC_LOAD_DYLIB
+     name /usr/lib/libSystem.B.dylib (offset 24)
+Load command 9
+      cmd LC_LOAD_DYLIB
+     name /usr/lib/libc++.1.dylib (offset 24)
+Load command 10
+      cmd LC_LOAD_DYLIB
+     name /usr/lib/libiconv.2.dylib (offset 24)
+Load command 11
+      cmd LC_LOAD_DYLIB
+     name /usr/lib/libobjc.A.dylib (offset 24)
 EOF
 
 windows="${tmp}/windows.txt"
@@ -213,7 +237,7 @@ mutate_and_fail linux_avx linux-x64 "${linux_x64}" 's/GNU_PROPERTY_X86_ISA_1_NEE
 mutate_and_fail arm_glibcxx linux-aarch64 "${linux_arm64}" 's/Name: GLIBC_2.35/Name: GLIBC_2.35\nName: GLIBCXX_3.4.30/'
 
 bad_mac_dylib="${tmp}/bad-mac-dylib.txt"
-sed 's#/usr/lib/libcharset.1.dylib#/opt/local/libcharset.dylib#' "${mac_objdump}" > "${bad_mac_dylib}"
+sed 's#/System/Library/Frameworks/CoreML.framework/Versions/A/CoreML#/opt/local/libCoreML.dylib#' "${mac_objdump}" > "${bad_mac_dylib}"
 expect_fail mac_dylib run_check macos-arm64 "${mac_arm_readobj}" "${bad_mac_dylib}"
 bad_mac_version="${tmp}/bad-mac-version.txt"
 sed 's/minos 13.0/minos 14.0/' "${mac_objdump}" > "${bad_mac_version}"

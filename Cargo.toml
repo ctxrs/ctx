@@ -38,6 +38,19 @@ serde_json = "1.0"
 sha2 = "0.10"
 tempfile = "3.10"
 thiserror = "1.0"
+tar = "0.4"
 url = "2.5"
 uuid = { version = "1.10", features = ["serde", "v4", "v7"] }
+xz2 = "0.1"
 zstd = "0.13"
+
+[patch.crates-io]
+# `ort` 2.0.0-rc.12 does not select the default load-dynamic library name on
+# FreeBSD. This fork is exactly rc.12 plus that one-line target cfg fix. Drop
+# the patch once a crates.io release includes the fix.
+ort = { git = "https://github.com/ctxrs/ort.git", rev = "7cc21d66952354c3ecc6d1b88c2f27b700850807" }
+
+# `sqlite-vec` 0.1.9 redeclares stdint types on Unix, which conflicts with the
+# FreeBSD headers. This fork is the stable crate plus the upstream three-typedef
+# removal from asg017/sqlite-vec#219. Drop it once a stable release includes it.
+sqlite-vec = { git = "https://github.com/ctxrs/sqlite-vec.git", rev = "c1762b6065bccdedf1f68a904096d46f91d3a486" }
