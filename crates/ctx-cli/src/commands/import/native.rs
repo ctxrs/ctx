@@ -72,6 +72,19 @@ pub(crate) fn import_one_source_inner(
     let record = import_record_for_source(source);
     let record_id = record.id;
     store.upsert_record(&record)?;
+    // Non-manifest SQLite/tree sources still have a persisted root inventory.
+    // Do not normalize an unchanged, already-indexed source just because a
+    // background search discovered it again; those adapters may read the
+    // entire provider database before deduplication can occur.
+    if !full_rescan
+        && !source_uses_import_file_manifest(source)
+        && preinventory.source_root_file().is_some()
+        && store
+            .list_pending_source_import_files(source.provider, &source.path.display().to_string())?
+            .is_empty()
+    {
+        return Ok(ProviderImportSummary::default());
+    }
     let summary = if !full_rescan && source_uses_import_file_manifest(source) {
         import_manifested_source(
             store,
@@ -855,4 +868,60 @@ pub(crate) fn merge_provider_import_summary(
     summary.imported_edges += other.imported_edges;
     summary.skipped_edges += other.skipped_edges;
     summary.failures.extend(other.failures);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider_sources::explicit_path_source;
+    use ctx_history_store::{SourceImportFile, SourceImportFileIndexUpdate};
+    use serde_json::json;
+
+    #[test]
+    fn unchanged_root_source_skips_provider_normalization() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_path = temp.path().join("state.db");
+        let source = explicit_path_source(CaptureProvider::Hermes, source_path.clone());
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let source_root = source_path.display().to_string();
+        let file = SourceImportFile {
+            provider: source.provider,
+            source_format: source.source_format.to_owned(),
+            source_root: source_root.clone(),
+            source_path: source_root.clone(),
+            file_size_bytes: 0,
+            file_modified_at_ms: 0,
+            observed_at_ms: 0,
+            metadata: json!({}),
+        };
+        store
+            .upsert_source_import_files(std::slice::from_ref(&file))
+            .unwrap();
+        store
+            .mark_source_import_file_indexed(
+                source.provider,
+                SourceImportFileIndexUpdate {
+                    source_root: &source_root,
+                    source_path: &source_root,
+                    file_size_bytes: file.file_size_bytes,
+                    file_modified_at_ms: file.file_modified_at_ms,
+                    indexed_at_ms: 1,
+                },
+            )
+            .unwrap();
+
+        let summary = import_one_source_inner(
+            &mut store,
+            &source,
+            None,
+            false,
+            false,
+            true,
+            &SourcePreinventory::SourceRoot(file),
+        )
+        .unwrap();
+
+        assert_eq!(summary.imported_events, 0);
+        assert_eq!(summary.failed, 0);
+    }
 }
