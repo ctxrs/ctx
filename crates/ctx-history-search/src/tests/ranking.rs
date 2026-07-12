@@ -1,7 +1,7 @@
 use super::{
     fixed_time, search_packet, search_packet_terms, sync_metadata, test_store, timestamps,
-    Confidence, FileChangeKind, FileTouched, HistoryRecord, PacketOptions, SearchFilters,
-    Serialize, Uuid,
+    Confidence, Event, EventRole, EventType, FileChangeKind, FileTouched, HistoryRecord,
+    PacketOptions, SearchFilters, Serialize, Uuid,
 };
 
 fn deterministic_tie_record(id: &str) -> HistoryRecord {
@@ -22,6 +22,74 @@ fn packet_without_generated_at<T: Serialize>(packet: &T) -> serde_json::Value {
     let mut value = serde_json::to_value(packet).unwrap();
     value.as_object_mut().unwrap().remove("generated_at");
     value
+}
+
+#[test]
+fn candidate_ranking_prefers_messages_and_summaries_and_honors_event_type_filter() {
+    let (_temp, store) = test_store();
+    let needle = "candidate-event-type-ranking-needle";
+    let event_types = [
+        EventType::ToolCall,
+        EventType::CommandStarted,
+        EventType::Message,
+        EventType::Summary,
+    ];
+    for (index, event_type) in event_types.into_iter().enumerate() {
+        let mut record = HistoryRecord::new(
+            format!("Mixed event record {index}"),
+            "agent history record",
+            Vec::new(),
+            "agent_history",
+            None,
+        );
+        record.id =
+            Uuid::parse_str(&format!("018f45d0-0000-7000-8000-00000008{index:04x}")).unwrap();
+        store.insert_record(&record).unwrap();
+        store
+            .upsert_event(&Event {
+                id: Uuid::parse_str(&format!("018f45d0-0000-7000-8000-00000009{index:04x}"))
+                    .unwrap(),
+                seq: index as u64,
+                history_record_id: Some(record.id),
+                session_id: None,
+                run_id: None,
+                event_type,
+                role: Some(EventRole::Assistant),
+                occurred_at: fixed_time(),
+                capture_source_id: None,
+                payload: serde_json::json!({"text": needle}),
+                payload_blob_id: None,
+                dedupe_key: None,
+                sync: sync_metadata(),
+            })
+            .unwrap();
+    }
+
+    let packet = search_packet(&store, needle, &PacketOptions::default()).unwrap();
+    assert_eq!(packet.results.len(), event_types.len());
+    assert!(matches!(
+        packet.results[0].why_matched.as_slice(),
+        [reason] if reason == "message" || reason == "summary"
+    ));
+    assert!(matches!(
+        packet.results[1].why_matched.as_slice(),
+        [reason] if reason == "message" || reason == "summary"
+    ));
+
+    let filtered = search_packet(
+        &store,
+        needle,
+        &PacketOptions {
+            filters: SearchFilters {
+                event_type: Some(EventType::ToolCall),
+                ..SearchFilters::default()
+            },
+            ..PacketOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(filtered.results.len(), 1);
+    assert_eq!(filtered.results[0].why_matched, vec!["tool_call"]);
 }
 
 #[test]

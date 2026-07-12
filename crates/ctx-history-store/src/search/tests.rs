@@ -115,6 +115,92 @@ fn with_occurred_at(mut event: Event, offset_minutes: i64) -> Event {
 }
 
 #[test]
+fn preferred_event_search_ranks_conversation_above_equal_tool_events() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let needle = "conversation-ranking-needle";
+    let events = [
+        policy_event(
+            1,
+            EventType::ToolCall,
+            Some(EventRole::Assistant),
+            serde_json::json!({"text": needle}),
+        ),
+        policy_event(
+            2,
+            EventType::CommandStarted,
+            Some(EventRole::Assistant),
+            serde_json::json!({"command": needle}),
+        ),
+        policy_event(
+            3,
+            EventType::Message,
+            Some(EventRole::Assistant),
+            serde_json::json!({"text": needle}),
+        ),
+        policy_event(
+            4,
+            EventType::Summary,
+            Some(EventRole::Assistant),
+            serde_json::json!({"summary": needle}),
+        ),
+    ];
+    for event in &events {
+        store.upsert_event(event).unwrap();
+    }
+
+    let hits = store
+        .search_event_hits_page_prefer_conversation(needle, 10, 0)
+        .unwrap();
+    assert_eq!(hits.len(), events.len());
+    assert!(matches!(
+        hits[0].event_type,
+        EventType::Message | EventType::Summary
+    ));
+    assert!(matches!(
+        hits[1].event_type,
+        EventType::Message | EventType::Summary
+    ));
+    assert!(matches!(
+        hits[2].event_type,
+        EventType::ToolCall | EventType::CommandStarted
+    ));
+    assert!(matches!(
+        hits[3].event_type,
+        EventType::ToolCall | EventType::CommandStarted
+    ));
+}
+
+#[test]
+fn preferred_event_search_keeps_materially_stronger_tool_evidence_first() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let needle = "exact-tool-evidence-needle";
+    let message = policy_event(
+        1,
+        EventType::Message,
+        Some(EventRole::Assistant),
+        serde_json::json!({
+            "text": format!("{needle} {}", "unrelated context ".repeat(100))
+        }),
+    );
+    let tool = policy_event(
+        2,
+        EventType::ToolCall,
+        Some(EventRole::Assistant),
+        serde_json::json!({"text": format!("{needle} {needle} {needle}")}),
+    );
+    store.upsert_event(&message).unwrap();
+    store.upsert_event(&tool).unwrap();
+
+    let hits = store
+        .search_event_hits_page_prefer_conversation(needle, 10, 0)
+        .unwrap();
+    assert_eq!(hits.len(), 2);
+    assert_eq!(hits[0].event_id, tool.id);
+}
+
+#[test]
 fn indexed_history_item_count_uses_sessions_and_events() {
     let temp = tempdir();
     let store = Store::open(temp.path().join("work.sqlite")).unwrap();

@@ -107,6 +107,25 @@ impl Store {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<EventSearchHit>> {
+        self.search_event_hits_page_with_ranking(query, limit, offset, false)
+    }
+
+    pub fn search_event_hits_page_prefer_conversation(
+        &self,
+        query: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<EventSearchHit>> {
+        self.search_event_hits_page_with_ranking(query, limit, offset, true)
+    }
+
+    fn search_event_hits_page_with_ranking(
+        &self,
+        query: &str,
+        limit: usize,
+        offset: usize,
+        prefer_conversation: bool,
+    ) -> Result<Vec<EventSearchHit>> {
         if !table_exists(&self.conn, "event_search")? {
             return Ok(Vec::new());
         }
@@ -139,8 +158,8 @@ impl Store {
                     "#,
                     event_search_hit_sql(
                         "ranked JOIN event_search ON event_search.event_id = ranked.event_id",
-                        "ranked.score",
-                        "ORDER BY ranked.score, e.occurred_at_ms DESC, e.seq DESC, event_search.event_id",
+                        &event_search_score("ranked.score", prefer_conversation),
+                        "ORDER BY search_score, e.occurred_at_ms DESC, e.seq DESC, event_search.event_id",
                     )
                 );
                 let mut stmt = self.conn.prepare(&sql)?;
@@ -160,7 +179,7 @@ impl Store {
                     "{} LIMIT ?2 OFFSET ?3",
                     event_search_hit_sql(
                         "event_search",
-                        "bm25(event_search)",
+                        &event_search_score("bm25(event_search)", prefer_conversation),
                         "WHERE event_search MATCH ?1 ORDER BY search_score, e.occurred_at_ms DESC, e.seq DESC, event_search.event_id",
                     )
                 );
@@ -176,7 +195,10 @@ impl Store {
                     "{} LIMIT ?2 OFFSET ?3",
                     event_search_hit_sql(
                         "event_search_scriptgram JOIN event_search ON event_search.event_id = event_search_scriptgram.event_id",
-                        "bm25(event_search_scriptgram) + 0.35",
+                        &event_search_score(
+                            "bm25(event_search_scriptgram) + 0.35",
+                            prefer_conversation,
+                        ),
                         "WHERE event_search_scriptgram MATCH ?1 ORDER BY search_score, e.occurred_at_ms DESC, e.seq DESC, event_search.event_id",
                     )
                 );
@@ -508,6 +530,16 @@ impl Store {
                 [],
             )?;
         Ok(())
+    }
+}
+
+fn event_search_score(score_sql: &str, prefer_conversation: bool) -> String {
+    if prefer_conversation {
+        format!(
+            "CASE WHEN e.event_type IN ('message', 'summary') THEN ({score_sql}) - (ABS({score_sql}) * 0.15) ELSE ({score_sql}) END"
+        )
+    } else {
+        score_sql.to_owned()
     }
 }
 

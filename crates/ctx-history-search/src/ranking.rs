@@ -390,9 +390,10 @@ pub(crate) fn search_sections(
     filters: &SearchFilters,
 ) -> Vec<SearchSection> {
     let mut sections = Vec::new();
+    let event_type_search = filters.event_type.is_some();
     let record_hit = record_context_display_hit(context, filters, record.updated_at);
     let include_record_bookkeeping_text = !is_agent_history_bookkeeping_record(record);
-    if include_record_bookkeeping_text {
+    if include_record_bookkeeping_text && !event_type_search {
         sections.push(SearchSection {
             reason: "title",
             weight: 8.0,
@@ -406,7 +407,8 @@ pub(crate) fn search_sections(
             hit: record_hit.clone(),
         });
     }
-    let include_record_text = include_record_bookkeeping_text
+    let include_record_text = !event_type_search
+        && include_record_bookkeeping_text
         && record_text_matches_agent_scope(context, filters)
         && !context_has_excluded_provider_session(context, filters);
     if include_record_text {
@@ -440,6 +442,9 @@ pub(crate) fn search_sections(
         }
     }
     for session in &context.sessions {
+        if event_type_search {
+            continue;
+        }
         if !session_matches_agent_scope(session, filters)
             || !source_id_matches_history_source_filter(session.capture_source_id, context, filters)
         {
@@ -468,6 +473,9 @@ pub(crate) fn search_sections(
     }
 
     for run in &context.runs {
+        if event_type_search {
+            continue;
+        }
         if !item_matches_agent_scope(run.session_id, run.source_id, context, filters) {
             continue;
         }
@@ -496,6 +504,12 @@ pub(crate) fn search_sections(
     }
 
     for event in &context.events {
+        if filters
+            .event_type
+            .is_some_and(|event_type| event.event_type != event_type)
+        {
+            continue;
+        }
         if !item_matches_agent_scope(event.session_id, event.capture_source_id, context, filters) {
             continue;
         }
@@ -509,6 +523,8 @@ pub(crate) fn search_sections(
                 ctx_history_core::EventType::CommandStarted
                 | ctx_history_core::EventType::CommandOutput
                 | ctx_history_core::EventType::CommandFinished => "command_event",
+                ctx_history_core::EventType::Summary => "summary",
+                ctx_history_core::EventType::Notice => "notice",
                 _ => "event",
             },
             weight: event_weight(event),
@@ -524,6 +540,9 @@ pub(crate) fn search_sections(
     }
 
     for artifact in &context.artifacts {
+        if event_type_search {
+            continue;
+        }
         if !item_matches_agent_scope(None, artifact.source_id, context, filters) {
             continue;
         }
@@ -548,6 +567,9 @@ pub(crate) fn search_sections(
     }
 
     for file in &context.files_touched {
+        if event_type_search {
+            continue;
+        }
         let session_id = file.event_id.and_then(|id| {
             context
                 .events
@@ -574,6 +596,9 @@ pub(crate) fn search_sections(
     }
 
     for change in &context.vcs_changes {
+        if event_type_search {
+            continue;
+        }
         if !item_matches_agent_scope(None, change.source_id, context, filters) {
             continue;
         }
@@ -604,6 +629,9 @@ pub(crate) fn search_sections(
     }
 
     for summary in &context.summaries {
+        if event_type_search {
+            continue;
+        }
         if !item_matches_agent_scope(None, summary.source_id, context, filters) {
             continue;
         }

@@ -93,7 +93,12 @@ pub fn semantic_event_search_packet(
     if hybrid {
         let page_size = FILTERED_SEARCH_PAGE_SIZE.max(target_results.saturating_mul(8).max(50));
         let mut lexical_rank = 0_usize;
-        for hit in store.search_event_hits_page(query, page_size, 0)? {
+        let lexical_hits = if options.filters.event_type.is_some() {
+            store.search_event_hits_page(query, page_size, 0)?
+        } else {
+            store.search_event_hits_page_prefer_conversation(query, page_size, 0)?
+        };
+        for hit in lexical_hits {
             if !event_hit_matches_filters(&hit, &options.filters, file_scope) {
                 continue;
             }
@@ -362,7 +367,11 @@ fn fast_event_search_packet(
 
     loop {
         pages_scanned = pages_scanned.saturating_add(1);
-        let hits = store.search_event_hits_page(query, page_size, offset)?;
+        let hits = if options.filters.event_type.is_some() {
+            store.search_event_hits_page(query, page_size, offset)?
+        } else {
+            store.search_event_hits_page_prefer_conversation(query, page_size, offset)?
+        };
         let page_len = hits.len();
 
         for hit in hits {

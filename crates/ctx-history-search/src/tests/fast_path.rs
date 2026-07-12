@@ -7,6 +7,141 @@ use super::{
 };
 
 #[test]
+fn fast_search_prefers_messages_and_summaries_in_event_and_session_modes() {
+    let (_temp, store) = test_store();
+    let record = HistoryRecord::new(
+        "Large mixed event history",
+        "single imported agent-history record",
+        Vec::new(),
+        "agent_history",
+        Some("/workspace/ctx".into()),
+    );
+    store.insert_record(&record).unwrap();
+    let needle = "fast-event-type-ranking-needle";
+    let event_types = [
+        EventType::ToolCall,
+        EventType::CommandStarted,
+        EventType::ToolOutput,
+        EventType::Message,
+        EventType::Summary,
+    ];
+    let mut matching_event_ids = Vec::new();
+    let mut matching_sessions = Vec::new();
+
+    for (index, event_type) in event_types.into_iter().enumerate() {
+        let session_id =
+            Uuid::parse_str(&format!("018f45d0-0000-7000-8000-00000005{index:04x}")).unwrap();
+        matching_sessions.push(session_id);
+        store
+            .upsert_session(&Session {
+                id: session_id,
+                history_record_id: Some(record.id),
+                parent_session_id: None,
+                root_session_id: None,
+                capture_source_id: None,
+                provider: CaptureProvider::Codex,
+                external_session_id: Some(format!("mixed-event-session-{index}")),
+                external_agent_id: None,
+                agent_type: AgentType::Primary,
+                role_hint: Some("primary".into()),
+                is_primary: true,
+                status: SessionStatus::Imported,
+                transcript_blob_id: None,
+                started_at: fixed_time(),
+                ended_at: None,
+                timestamps: timestamps(),
+                sync: sync_metadata(),
+            })
+            .unwrap();
+        let event_id =
+            Uuid::parse_str(&format!("018f45d0-0000-7000-8000-00000006{index:04x}")).unwrap();
+        matching_event_ids.push(event_id);
+        let payload = if event_type == EventType::ToolOutput {
+            serde_json::json!({"text": needle, "exit_code": 1})
+        } else {
+            serde_json::json!({"text": needle})
+        };
+        store
+            .upsert_event(&Event {
+                id: event_id,
+                seq: 10 + index as u64,
+                history_record_id: Some(record.id),
+                session_id: Some(session_id),
+                run_id: None,
+                event_type,
+                role: Some(EventRole::Assistant),
+                occurred_at: fixed_time(),
+                capture_source_id: None,
+                payload,
+                payload_blob_id: None,
+                dedupe_key: None,
+                sync: sync_metadata(),
+            })
+            .unwrap();
+    }
+    for index in 0..(LARGE_EVENT_CORPUS_THRESHOLD as usize - matching_event_ids.len()) {
+        store
+            .upsert_event(&Event {
+                id: Uuid::parse_str(&format!("018f45d0-0000-7000-8000-00000007{index:04x}"))
+                    .unwrap(),
+                seq: 1_000 + index as u64,
+                history_record_id: Some(record.id),
+                session_id: Some(matching_sessions[0]),
+                run_id: None,
+                event_type: EventType::Message,
+                role: Some(EventRole::Assistant),
+                occurred_at: fixed_time(),
+                capture_source_id: None,
+                payload: serde_json::json!({"text": format!("unrelated event {index}")}),
+                payload_blob_id: None,
+                dedupe_key: None,
+                sync: sync_metadata(),
+            })
+            .unwrap();
+    }
+
+    for result_mode in [SearchResultMode::Events, SearchResultMode::Sessions] {
+        let packet = search_packet(
+            &store,
+            needle,
+            &PacketOptions {
+                limit: matching_event_ids.len(),
+                result_mode,
+                ..PacketOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(packet.results.len(), matching_event_ids.len());
+        assert!(matches!(
+            packet.results[0].why_matched.as_slice(),
+            [reason] if reason == "message" || reason == "summary"
+        ));
+        assert!(matches!(
+            packet.results[1].why_matched.as_slice(),
+            [reason] if reason == "message" || reason == "summary"
+        ));
+    }
+
+    let tool_only = search_packet(
+        &store,
+        needle,
+        &PacketOptions {
+            limit: 5,
+            result_mode: SearchResultMode::Events,
+            filters: SearchFilters {
+                event_type: Some(EventType::ToolOutput),
+                ..SearchFilters::default()
+            },
+            ..PacketOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(tool_only.results.len(), 1);
+    assert_eq!(tool_only.results[0].event_id, Some(matching_event_ids[2]));
+    assert_eq!(tool_only.results[0].why_matched, vec!["tool_output"]);
+}
+
+#[test]
 fn large_agent_history_search_returns_event_hits() {
     let (_temp, store) = test_store();
     let record = HistoryRecord::new(

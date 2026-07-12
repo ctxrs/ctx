@@ -22,7 +22,7 @@ pub(crate) fn joined<const N: usize>(parts: [&str; N]) -> String {
 
 pub(crate) fn event_weight(event: &Event) -> f32 {
     match event.event_type {
-        ctx_history_core::EventType::Message => 4.0,
+        ctx_history_core::EventType::Message | ctx_history_core::EventType::Summary => 4.0,
         ctx_history_core::EventType::ToolCall | ctx_history_core::EventType::ToolOutput => 3.5,
         ctx_history_core::EventType::CommandStarted
         | ctx_history_core::EventType::CommandOutput
