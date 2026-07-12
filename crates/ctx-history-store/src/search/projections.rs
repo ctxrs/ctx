@@ -141,6 +141,15 @@ impl Store {
             return Ok(Vec::new());
         }
 
+        if scriptgram_clauses.is_empty() {
+            return self.search_event_hits_page_lexical(
+                match_clauses,
+                limit,
+                offset,
+                prefer_conversation,
+            );
+        }
+
         let mut selects = Vec::new();
         let mut values = Vec::<Value>::new();
         for (term_index, clause) in match_clauses.into_iter().enumerate() {
@@ -189,6 +198,62 @@ impl Store {
                 "ranked JOIN event_search ON event_search.event_id = ranked.event_id",
                 &event_search_score("ranked.score", prefer_conversation),
                 "ORDER BY ranked.matched_terms DESC, search_score, e.occurred_at_ms DESC, e.seq DESC, event_search.event_id",
+            )
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(values), event_search_hit_from_row)?;
+        collect_rows(rows)
+    }
+
+    fn search_event_hits_page_lexical(
+        &self,
+        match_clauses: Vec<String>,
+        limit: usize,
+        offset: usize,
+        prefer_conversation: bool,
+    ) -> Result<Vec<EventSearchHit>> {
+        let mut values = Vec::<Value>::new();
+        let selects = match_clauses
+            .into_iter()
+            .enumerate()
+            .map(|(term_index, clause)| {
+                values.push(Value::Text(clause));
+                format!(
+                    r#"SELECT event_search.event_id,
+                              event_search.history_record_id,
+                              event_search.session_id,
+                              event_search.role,
+                              event_search.preview_text,
+                              {term_index},
+                              bm25(event_search)
+                       FROM event_search
+                       WHERE event_search MATCH ?{}"#,
+                    values.len()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" UNION ALL ");
+        values.push(Value::Integer(limit.max(1) as i64));
+        let limit_parameter = values.len();
+        values.push(Value::Integer(offset as i64));
+        let offset_parameter = values.len();
+        let sql = format!(
+            r#"
+            WITH matches(event_id, history_record_id, session_id, role, preview_text, term_index, score) AS MATERIALIZED (
+                {selects}
+            ),
+            ranked(event_id, history_record_id, session_id, role, preview_text, matched_terms, score) AS (
+                SELECT event_id, history_record_id, session_id, role, preview_text, COUNT(*), SUM(score)
+                FROM matches
+                GROUP BY event_id, history_record_id, session_id, role, preview_text
+            )
+            {}
+            LIMIT ?{limit_parameter} OFFSET ?{offset_parameter}
+            "#,
+            event_search_hit_sql(
+                "ranked AS event_search",
+                &event_search_score("event_search.score", prefer_conversation),
+                "ORDER BY event_search.matched_terms DESC, search_score, e.occurred_at_ms DESC, e.seq DESC, event_search.event_id",
             )
         );
         let mut stmt = self.conn.prepare(&sql)?;
