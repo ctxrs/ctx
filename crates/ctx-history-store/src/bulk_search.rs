@@ -30,7 +30,11 @@ const BULK_MODE_MERGE_STARTED_KEY_PREFIX: &str = "event_search_bulk_mode_v1:merg
 const FTS_AUTOMERGE_DEFAULT: i64 = 4;
 const FTS_CRISISMERGE_DEFAULT: i64 = 16;
 const FTS_BULK_CRISISMERGE: i64 = 1_000_000;
-const FTS_MERGE_PAGE_BUDGET: i64 = 1024;
+// FTS5's merge page budget is not a hard upper bound on WAL pages: merging a
+// large segment can rewrite substantially more data inside one statement.
+// Keep each step deliberately small so checkpoints remain safe on large real
+// indexes, not only on compact synthetic fixtures.
+const FTS_MERGE_PAGE_BUDGET: i64 = 16;
 const BULK_LOCK_SUFFIX: &str = ".event-search-bulk.lock.sqlite";
 
 /// Owns the cross-process lock for one event-search bulk operation.
