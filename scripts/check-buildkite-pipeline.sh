@@ -349,6 +349,11 @@ if grep -Fq 'scripts/run-macos-release-signing.sh --preflight' "${pipeline}"; th
   printf 'macOS release lanes must not fetch signing values before construction\n' >&2
   exit 1
 fi
+if grep -Fq -- '-certsout "${signer_cert}"' "${macos_attestation_script}" \
+  || ! grep -Fq -- '-signer "${signer_cert}"' "${macos_attestation_script}"; then
+  printf 'macOS CMS verification must validate the actual signer, not embedded certificate decoys\n' >&2
+  exit 1
+fi
 if grep -Fq 'infisical run' "${pipeline}"; then
   printf 'macOS release builds must not run under broad Infisical injection\n' >&2
   exit 1

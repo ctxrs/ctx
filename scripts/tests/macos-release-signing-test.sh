@@ -64,13 +64,13 @@ case "${1:-}" in
     input=""
     output=""
     content=""
-    certsout=""
+    signer_output=""
     while [[ $# -gt 0 ]]; do
       case "$1" in
         -in) input="$2"; shift 2 ;;
         -out) output="$2"; shift 2 ;;
         -content) content="$2"; shift 2 ;;
-        -certsout) certsout="$2"; shift 2 ;;
+        -signer) signer_output="$2"; shift 2 ;;
         *) shift ;;
       esac
     done
@@ -84,7 +84,10 @@ case "${1:-}" in
           && " ${original_args} " == *' -no-CAstore '* ]]
         [[ ! -e "${TMPDIR}/fake-host-trust-only-certificate" ]]
         [[ "$(cat "${input}")" == "$(sha256sum "${content}" | awk '{print $1}')" ]] || exit 1
-        printf '%s\n' 'fake signer certificate' >"${certsout}"
+        printf '%s\n' \
+          '-----BEGIN CERTIFICATE-----' \
+          'fake signer certificate' \
+          '-----END CERTIFICATE-----' >"${signer_output}"
         ;;
       *) exit 2 ;;
     esac
@@ -694,6 +697,160 @@ with open(evidence_path, "w", encoding="utf-8") as output:
 PY
 expect_failure 'signed macOS attestation does not bind' "${test_root}/unsigned-nested.log" \
   "${check_script}" macos-x64 runtime "${runtime_archive}" "${runtime_evidence}"
+
+if /usr/bin/python3 -c 'import cryptography' >/dev/null 2>&1 \
+  && /usr/bin/openssl version | grep -Fq 'OpenSSL 3'; then
+  decoy_root="${test_root}/real-signer-decoy"
+  mkdir -p "${decoy_root}/scripts"
+  cp "${attestation_check}" "${decoy_root}/scripts/verify-macos-release-attestation.sh"
+  cp "${evidence_tool}" "${decoy_root}/scripts/macos-release-signing-evidence.py"
+  /usr/bin/python3 - "${decoy_root}" <<'PY'
+import datetime
+import sys
+import warnings
+from pathlib import Path
+
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+
+root = Path(sys.argv[1])
+now = datetime.datetime.now(datetime.timezone.utc)
+warnings.filterwarnings("ignore", message="Attribute's length must be")
+
+
+def key():
+    return rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+
+def write_key(path, value):
+    path.write_bytes(
+        value.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.NoEncryption(),
+        )
+    )
+
+
+ca_key = key()
+ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "ctx test signer CA")])
+ca_cert = (
+    x509.CertificateBuilder()
+    .subject_name(ca_name)
+    .issuer_name(ca_name)
+    .public_key(ca_key.public_key())
+    .serial_number(x509.random_serial_number())
+    .not_valid_before(now - datetime.timedelta(days=1))
+    .not_valid_after(now + datetime.timedelta(days=1))
+    .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+    .sign(ca_key, hashes.SHA256())
+)
+
+
+def leaf(name, common_name, team):
+    value_key = key()
+    subject = x509.Name(
+        [
+            x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, team),
+            x509.NameAttribute(NameOID.COMMON_NAME, common_name, _validate=False),
+        ]
+    )
+    value_cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(ca_name)
+        .public_key(value_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(
+            x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CODE_SIGNING]), critical=False
+        )
+        .sign(ca_key, hashes.SHA256())
+    )
+    write_key(root / f"{name}.key", value_key)
+    (root / f"{name}.pem").write_bytes(value_cert.public_bytes(serialization.Encoding.PEM))
+
+
+write_key(root / "ca.key", ca_key)
+(root / "scripts" / "apple-developer-id-g2-ca.pem").write_bytes(
+    ca_cert.public_bytes(serialization.Encoding.PEM)
+)
+leaf("wrong", "Developer ID Application: Wrong Signer (WRONGTEAM)", "WRONGTEAM")
+leaf(
+    "decoy",
+    "Developer ID Application: Profound Health Institute LLC (SJSNARH4TG)",
+    "SJSNARH4TG",
+)
+PY
+  decoy_ca_fingerprint="$(/usr/bin/openssl x509 \
+    -in "${decoy_root}/scripts/apple-developer-id-g2-ca.pem" \
+    -noout -fingerprint -sha256 | sed 's/^.*Fingerprint=//')"
+  /usr/bin/python3 - \
+    "${decoy_root}/scripts/verify-macos-release-attestation.sh" \
+    "${decoy_ca_fingerprint}" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+source = path.read_text(encoding="utf-8")
+source = re.sub(
+    r'^EXPECTED_CA_SHA256="[^"]+"$',
+    f'EXPECTED_CA_SHA256="{sys.argv[2]}"',
+    source,
+    count=1,
+    flags=re.MULTILINE,
+)
+path.write_text(source, encoding="utf-8")
+PY
+  chmod +x "${decoy_root}/scripts/verify-macos-release-attestation.sh"
+  /usr/bin/git -C "${decoy_root}" init -q
+  /usr/bin/git -C "${decoy_root}" config user.email test@ctx.rs
+  /usr/bin/git -C "${decoy_root}" config user.name ctx-test
+  /usr/bin/git -C "${decoy_root}" add scripts
+  /usr/bin/git -C "${decoy_root}" commit -qm init
+  decoy_commit="$(/usr/bin/git -C "${decoy_root}" rev-parse HEAD)"
+
+  decoy_cli="${decoy_root}/ctx-macos-arm64"
+  decoy_cli_statement="${decoy_root}/ctx-macos-arm64.attestation.json"
+  decoy_cli_cms="${decoy_root}/ctx-macos-arm64.attestation.cms"
+  printf '%s\n' 'real decoy CMS executable' >"${decoy_cli}"
+  /usr/bin/python3 "${decoy_root}/scripts/macos-release-signing-evidence.py" \
+    create-attestation --output "${decoy_cli_statement}" --platform macos-arm64 \
+    --kind cli --artifact "${decoy_cli}" --source-commit "${decoy_commit}"
+  /usr/bin/openssl cms -sign -binary -in "${decoy_cli_statement}" \
+    -signer "${decoy_root}/wrong.pem" -inkey "${decoy_root}/wrong.key" \
+    -certfile "${decoy_root}/decoy.pem" -outform DER -out "${decoy_cli_cms}" \
+    -md sha256 -noattr >/dev/null 2>&1
+  expect_failure 'actual signer does not have the pinned ctx Apple authority' \
+    "${test_root}/real-decoy-cli.log" env PATH=/usr/bin:/bin \
+    "${decoy_root}/scripts/verify-macos-release-attestation.sh" \
+      macos-arm64 cli "${decoy_cli}" "${decoy_cli_statement}" "${decoy_cli_cms}"
+
+  decoy_archive="${decoy_root}/ctx-onnxruntime-macos-arm64.tar.gz"
+  decoy_nested="${decoy_root}/libonnxruntime.dylib"
+  decoy_archive_statement="${decoy_root}/ctx-onnxruntime-macos-arm64.release-attestation.json"
+  decoy_archive_cms="${decoy_root}/ctx-onnxruntime-macos-arm64.release-attestation.cms"
+  printf '%s\n' 'real decoy CMS archive' >"${decoy_archive}"
+  printf '%s\n' 'real decoy CMS dylib' >"${decoy_nested}"
+  /usr/bin/python3 "${decoy_root}/scripts/macos-release-signing-evidence.py" \
+    create-runtime-archive-attestation --output "${decoy_archive_statement}" \
+    --platform macos-arm64 --archive "${decoy_archive}" \
+    --nested-artifact "${decoy_nested}" --source-commit "${decoy_commit}"
+  /usr/bin/openssl cms -sign -binary -in "${decoy_archive_statement}" \
+    -signer "${decoy_root}/wrong.pem" -inkey "${decoy_root}/wrong.key" \
+    -certfile "${decoy_root}/decoy.pem" -outform DER -out "${decoy_archive_cms}" \
+    -md sha256 -noattr >/dev/null 2>&1
+  expect_failure 'actual signer does not have the pinned ctx Apple authority' \
+    "${test_root}/real-decoy-archive.log" env PATH=/usr/bin:/bin \
+    "${decoy_root}/scripts/verify-macos-release-attestation.sh" \
+      --runtime-archive macos-arm64 "${decoy_archive}" "${decoy_nested}" \
+      "${decoy_archive_statement}" "${decoy_archive_cms}"
+fi
 
 if [[ -x /usr/bin/openssl ]] && /usr/bin/openssl cms -help >/dev/null 2>&1; then
   forged_root="${test_root}/self-signed-forgery"

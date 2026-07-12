@@ -77,20 +77,26 @@ if ! openssl cms -verify \
   -no-CApath \
   -no-CAstore \
   -CAfile "${ca_file}" \
-  -certsout "${signer_cert}" \
+  -signer "${signer_cert}" \
   -out /dev/null >/dev/null 2>&1; then
   die "macOS release attestation CMS signature verification failed"
 fi
+signer_count="$(grep -c '^-----BEGIN CERTIFICATE-----$' "${signer_cert}" || true)"
+[[ "${signer_count}" == "1" ]] || \
+  die "macOS release attestation must have exactly one actual signer"
 subject="$(openssl x509 \
   -in "${signer_cert}" -noout -subject -nameopt RFC2253 2>/dev/null || true)"
 subject=",${subject#subject=},"
 [[ "${subject}" == *",CN=${EXPECTED_AUTHORITY},"* ]] || \
-  die "macOS attestation signer does not have the pinned ctx Apple authority"
+  die "macOS attestation actual signer does not have the pinned ctx Apple authority"
 [[ "${subject}" == *",OU=${EXPECTED_TEAM_ID},"* ]] || \
-  die "macOS attestation signer does not have the pinned ctx Apple Team ID"
+  die "macOS attestation actual signer does not have the pinned ctx Apple Team ID"
 eku="$(openssl x509 -in "${signer_cert}" -noout -ext extendedKeyUsage 2>/dev/null || true)"
 grep -Eq '(^|[ ,])(Code Signing|1\.3\.6\.1\.5\.5\.7\.3\.3)(,|$)' <<<"${eku}" || \
-  die "macOS attestation signer certificate lacks the Code Signing EKU"
+  die "macOS attestation actual signer certificate lacks the Code Signing EKU"
+openssl verify -purpose any -partial_chain -no-CApath -no-CAstore \
+  -CAfile "${ca_file}" "${signer_cert}" >/dev/null 2>&1 || \
+  die "macOS attestation actual signer does not chain exclusively to the pinned Apple G2 CA"
 
 source_commit="$(git -C "${root_dir}" rev-parse --verify HEAD)"
 if [[ "${mode}" == "runtime_archive" ]]; then
