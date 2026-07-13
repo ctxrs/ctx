@@ -35,6 +35,7 @@ pub struct CatalogSourceIndexUpdate<'a> {
     pub file_size_bytes: u64,
     pub file_modified_at_ms: i64,
     pub import_revision: u32,
+    pub inventory_generation: u64,
     pub file_sha256: Option<&'a str>,
     pub event_count: Option<u64>,
     pub indexed_at_ms: i64,
@@ -69,6 +70,8 @@ pub struct SourceImportFileIndexUpdate<'a> {
     pub file_size_bytes: u64,
     pub file_modified_at_ms: i64,
     pub import_revision: u32,
+    pub inventory_generation: u64,
+    pub metadata: &'a Value,
     pub indexed_at_ms: i64,
 }
 
@@ -132,6 +135,43 @@ impl CatalogIndexedStatus {
 }
 
 impl Store {
+    pub fn allocate_catalog_inventory_generation(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+    ) -> Result<u64> {
+        self.allocate_import_inventory_generation(provider, source_root, "catalog_sessions")
+    }
+
+    pub fn allocate_source_import_inventory_generation(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+    ) -> Result<u64> {
+        self.allocate_import_inventory_generation(provider, source_root, "source_import_files")
+    }
+
+    fn allocate_import_inventory_generation(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        inventory_family: &str,
+    ) -> Result<u64> {
+        let generation = self.conn.query_row(
+            r#"
+            INSERT INTO import_inventory_generations
+                (provider, source_root, inventory_family, current_generation)
+            VALUES (?1, ?2, ?3, 1)
+            ON CONFLICT(provider, source_root, inventory_family) DO UPDATE SET
+                current_generation = current_generation + 1
+            RETURNING current_generation
+            "#,
+            params![provider.as_str(), source_root, inventory_family],
+            |row| nonnegative_i64_to_u64(row.get(0)?),
+        )?;
+        Ok(generation)
+    }
+
     pub fn mark_catalog_source_stale(
         &self,
         provider: CaptureProvider,
@@ -149,7 +189,11 @@ impl Store {
         Ok(changed)
     }
 
-    pub fn upsert_catalog_sessions(&self, sessions: &[CatalogSession]) -> Result<()> {
+    pub fn upsert_catalog_sessions(
+        &self,
+        inventory_generation: u64,
+        sessions: &[CatalogSession],
+    ) -> Result<usize> {
         let mut stmt = self.conn.prepare(
                 r#"
                 INSERT INTO catalog_sessions
@@ -159,7 +203,15 @@ impl Store {
                     external_agent_id, cwd, session_started_at_ms, file_size_bytes,
                     file_modified_at_ms, import_revision, cataloged_at_ms, is_stale, metadata_json
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, 0, ?16)
+                SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, 0, ?16
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM import_inventory_generations AS inventory
+                    WHERE inventory.provider = ?2
+                      AND inventory.source_root = ?4
+                      AND inventory.inventory_family = 'catalog_sessions'
+                      AND inventory.current_generation = ?17
+                )
                 ON CONFLICT(source_path) DO UPDATE SET
                     provider = excluded.provider,
                     source_format = excluded.source_format,
@@ -357,25 +409,36 @@ impl Store {
                         ELSE NULL
                     END,
                     metadata_json = excluded.metadata_json
-                WHERE catalog_sessions.provider IS NOT excluded.provider
-                   OR catalog_sessions.source_format IS NOT excluded.source_format
-                   OR catalog_sessions.source_root IS NOT excluded.source_root
-                   OR catalog_sessions.external_session_id IS NOT excluded.external_session_id
-                   OR catalog_sessions.parent_external_session_id IS NOT excluded.parent_external_session_id
-                   OR catalog_sessions.agent_type IS NOT excluded.agent_type
-                   OR catalog_sessions.role_hint IS NOT excluded.role_hint
-                   OR catalog_sessions.external_agent_id IS NOT excluded.external_agent_id
-                   OR catalog_sessions.cwd IS NOT excluded.cwd
-                   OR catalog_sessions.session_started_at_ms IS NOT excluded.session_started_at_ms
-                   OR catalog_sessions.file_size_bytes != excluded.file_size_bytes
-                   OR catalog_sessions.file_modified_at_ms != excluded.file_modified_at_ms
-                   OR catalog_sessions.import_revision != excluded.import_revision
-                   OR catalog_sessions.is_stale != 0
-                   OR catalog_sessions.metadata_json IS NOT excluded.metadata_json
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM import_inventory_generations AS inventory
+                    WHERE inventory.provider = excluded.provider
+                      AND inventory.source_root = excluded.source_root
+                      AND inventory.inventory_family = 'catalog_sessions'
+                      AND inventory.current_generation = ?17
+                )
+                  AND (
+                       catalog_sessions.provider IS NOT excluded.provider
+                    OR catalog_sessions.source_format IS NOT excluded.source_format
+                    OR catalog_sessions.source_root IS NOT excluded.source_root
+                    OR catalog_sessions.external_session_id IS NOT excluded.external_session_id
+                    OR catalog_sessions.parent_external_session_id IS NOT excluded.parent_external_session_id
+                    OR catalog_sessions.agent_type IS NOT excluded.agent_type
+                    OR catalog_sessions.role_hint IS NOT excluded.role_hint
+                    OR catalog_sessions.external_agent_id IS NOT excluded.external_agent_id
+                    OR catalog_sessions.cwd IS NOT excluded.cwd
+                    OR catalog_sessions.session_started_at_ms IS NOT excluded.session_started_at_ms
+                    OR catalog_sessions.file_size_bytes != excluded.file_size_bytes
+                    OR catalog_sessions.file_modified_at_ms != excluded.file_modified_at_ms
+                    OR catalog_sessions.import_revision != excluded.import_revision
+                    OR catalog_sessions.is_stale != 0
+                    OR catalog_sessions.metadata_json IS NOT excluded.metadata_json
+                  )
                 "#,
             )?;
+        let mut changed = 0;
         for session in sessions {
-            stmt.execute(params![
+            changed += stmt.execute(params![
                 session.source_path.as_str(),
                 session.provider.as_str(),
                 session.source_format.as_str(),
@@ -392,9 +455,10 @@ impl Store {
                 i64::from(session.import_revision),
                 session.cataloged_at_ms,
                 serde_json::to_string(&session.metadata)?,
+                capped_i64(inventory_generation),
             ])?;
         }
-        Ok(())
+        Ok(changed)
     }
 
     pub fn list_catalog_sessions_for_source(
@@ -442,6 +506,7 @@ impl Store {
         source_root: &str,
         current_paths: &[String],
         cataloged_at_ms: i64,
+        inventory_generation: u64,
     ) -> Result<usize> {
         self.conn.execute(
                 "CREATE TEMP TABLE IF NOT EXISTS temp_catalog_current_paths(source_path TEXT PRIMARY KEY)",
@@ -463,13 +528,27 @@ impl Store {
                 SET is_stale = 1, cataloged_at_ms = ?3
                 WHERE provider = ?1
                   AND source_root = ?2
+                  AND is_stale = 0
+                  AND EXISTS (
+                      SELECT 1
+                      FROM import_inventory_generations AS inventory
+                      WHERE inventory.provider = ?1
+                        AND inventory.source_root = ?2
+                        AND inventory.inventory_family = 'catalog_sessions'
+                        AND inventory.current_generation = ?4
+                  )
                   AND NOT EXISTS (
                       SELECT 1
                       FROM temp_catalog_current_paths current
                       WHERE current.source_path = catalog_sessions.source_path
                   )
                 "#,
-            params![provider.as_str(), source_root, cataloged_at_ms],
+            params![
+                provider.as_str(),
+                source_root,
+                cataloged_at_ms,
+                capped_i64(inventory_generation)
+            ],
         )?;
         self.conn
             .execute("DELETE FROM temp_catalog_current_paths", [])?;
@@ -564,6 +643,14 @@ impl Store {
                   AND file_size_bytes = ?5
                   AND file_modified_at_ms = ?6
                   AND import_revision = ?12
+                  AND EXISTS (
+                      SELECT 1
+                      FROM import_inventory_generations AS inventory
+                      WHERE inventory.provider = ?1
+                        AND inventory.source_root = ?2
+                        AND inventory.inventory_family = 'catalog_sessions'
+                        AND inventory.current_generation = ?13
+                  )
                 "#,
             params![
                 provider.as_str(),
@@ -578,6 +665,7 @@ impl Store {
                 error,
                 status.preserves_native_resume_checkpoint(),
                 i64::from(update.import_revision),
+                capped_i64(update.inventory_generation),
             ],
         )?;
         Ok(changed)
@@ -626,9 +714,13 @@ impl Store {
             .map_err(StoreError::from)
     }
 
-    pub fn upsert_source_import_files(&self, files: &[SourceImportFile]) -> Result<()> {
+    pub fn upsert_source_import_files(
+        &self,
+        inventory_generation: u64,
+        files: &[SourceImportFile],
+    ) -> Result<usize> {
         if files.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
         let mut stmt = self.conn.prepare(
             r#"
@@ -636,7 +728,16 @@ impl Store {
                     provider, source_format, source_root, source_path,
                     file_size_bytes, file_modified_at_ms, import_revision, observed_at_ms, is_stale,
                     metadata_json
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9)
+                )
+                SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM import_inventory_generations AS inventory
+                    WHERE inventory.provider = ?1
+                      AND inventory.source_root = ?3
+                      AND inventory.inventory_family = 'source_import_files'
+                      AND inventory.current_generation = ?10
+                )
                 ON CONFLICT(provider, source_root, source_path) DO UPDATE SET
                     source_format = excluded.source_format,
                     file_size_bytes = excluded.file_size_bytes,
@@ -705,16 +806,27 @@ impl Store {
                         ELSE NULL
                     END,
                     metadata_json = excluded.metadata_json
-                WHERE source_import_files.source_format IS NOT excluded.source_format
-                   OR source_import_files.file_size_bytes != excluded.file_size_bytes
-                   OR source_import_files.file_modified_at_ms != excluded.file_modified_at_ms
-                   OR source_import_files.import_revision != excluded.import_revision
-                   OR source_import_files.is_stale != 0
-                   OR source_import_files.metadata_json IS NOT excluded.metadata_json
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM import_inventory_generations AS inventory
+                    WHERE inventory.provider = excluded.provider
+                      AND inventory.source_root = excluded.source_root
+                      AND inventory.inventory_family = 'source_import_files'
+                      AND inventory.current_generation = ?10
+                )
+                  AND (
+                       source_import_files.source_format IS NOT excluded.source_format
+                    OR source_import_files.file_size_bytes != excluded.file_size_bytes
+                    OR source_import_files.file_modified_at_ms != excluded.file_modified_at_ms
+                    OR source_import_files.import_revision != excluded.import_revision
+                    OR source_import_files.is_stale != 0
+                    OR source_import_files.metadata_json IS NOT excluded.metadata_json
+                  )
                 "#,
         )?;
+        let mut changed = 0;
         for file in files {
-            stmt.execute(params![
+            changed += stmt.execute(params![
                 file.provider.as_str(),
                 file.source_format.as_str(),
                 file.source_root.as_str(),
@@ -724,9 +836,10 @@ impl Store {
                 i64::from(file.import_revision),
                 file.observed_at_ms,
                 serde_json::to_string(&file.metadata)?,
+                capped_i64(inventory_generation),
             ])?;
         }
-        Ok(())
+        Ok(changed)
     }
 
     pub fn mark_source_import_missing_paths_stale(
@@ -735,6 +848,7 @@ impl Store {
         source_root: &str,
         current_paths: &[String],
         observed_at_ms: i64,
+        inventory_generation: u64,
     ) -> Result<usize> {
         self.conn.execute_batch(
                 "CREATE TEMP TABLE IF NOT EXISTS temp_source_import_current_paths (source_path TEXT PRIMARY KEY)",
@@ -756,13 +870,26 @@ impl Store {
                 WHERE provider = ?1
                   AND source_root = ?2
                   AND is_stale = 0
+                  AND EXISTS (
+                      SELECT 1
+                      FROM import_inventory_generations AS inventory
+                      WHERE inventory.provider = ?1
+                        AND inventory.source_root = ?2
+                        AND inventory.inventory_family = 'source_import_files'
+                        AND inventory.current_generation = ?4
+                  )
                   AND NOT EXISTS (
                       SELECT 1
                       FROM temp_source_import_current_paths AS current
                       WHERE current.source_path = source_import_files.source_path
                   )
                 "#,
-            params![provider.as_str(), source_root, observed_at_ms],
+            params![
+                provider.as_str(),
+                source_root,
+                observed_at_ms,
+                capped_i64(inventory_generation)
+            ],
         )?;
         self.conn
             .execute("DELETE FROM temp_source_import_current_paths", [])?;
@@ -824,6 +951,15 @@ impl Store {
                   AND file_size_bytes = ?5
                   AND file_modified_at_ms = ?6
                   AND import_revision = ?9
+                  AND metadata_json IS ?11
+                  AND EXISTS (
+                      SELECT 1
+                      FROM import_inventory_generations AS inventory
+                      WHERE inventory.provider = ?1
+                        AND inventory.source_root = ?2
+                        AND inventory.inventory_family = 'source_import_files'
+                        AND inventory.current_generation = ?10
+                  )
                 "#,
             params![
                 provider.as_str(),
@@ -835,6 +971,8 @@ impl Store {
                 status.as_str(),
                 error,
                 i64::from(update.import_revision),
+                capped_i64(update.inventory_generation),
+                serde_json::to_string(update.metadata)?,
             ],
         )?;
         Ok(changed)
@@ -1038,7 +1176,7 @@ fn catalog_pending_import_condition_sql(alias: &str) -> String {
             OR {alias}.indexed_import_revision IS NULL
             OR {alias}.indexed_import_revision != {alias}.import_revision
             OR (
-              {alias}.indexed_status = 'indexed'
+              {alias}.indexed_status IN ('indexed', 'completed_with_rejections')
               AND NOT EXISTS (
                 SELECT 1
                 FROM sessions AS session
@@ -1050,6 +1188,7 @@ fn catalog_pending_import_condition_sql(alias: &str) -> String {
                   AND (
                       session.capture_source_id IS NULL
                       OR source.source_root = {alias}.source_root
+                      OR source.raw_source_path = {alias}.source_path
                   )
                 LIMIT 1
               )
@@ -1095,6 +1234,7 @@ fn catalog_indexed_count_sql() -> String {
           AND (
               session.capture_source_id IS NULL
               OR source.source_root = catalog.source_root
+              OR source.raw_source_path = catalog.source_path
           )
         LIMIT 1
       )

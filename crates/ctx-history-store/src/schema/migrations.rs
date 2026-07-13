@@ -82,6 +82,9 @@ pub(crate) fn run_migrations(conn: &Connection, user_version: i64) -> Result<()>
     if user_version < 47 {
         migrate_to_v47(conn)?;
     }
+    if user_version < 48 {
+        migrate_to_v48(conn)?;
+    }
     Ok(())
 }
 
@@ -749,6 +752,42 @@ fn migrate_to_v47(conn: &Connection) -> Result<()> {
             }
             if foreign_keys_enabled != 0 {
                 conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+            }
+            Err(err)
+        }
+    }
+}
+
+fn migrate_to_v48(conn: &Connection) -> Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE;")?;
+    let migration = (|| -> Result<()> {
+        conn.execute_batch(CREATE_TABLES_SQL)?;
+        conn.execute_batch(
+            r#"
+            INSERT OR IGNORE INTO import_inventory_generations
+                (provider, source_root, inventory_family, current_generation)
+            SELECT DISTINCT provider, source_root, 'catalog_sessions', 1
+            FROM catalog_sessions;
+
+            INSERT OR IGNORE INTO import_inventory_generations
+                (provider, source_root, inventory_family, current_generation)
+            SELECT DISTINCT provider, source_root, 'source_import_files', 1
+            FROM source_import_files;
+
+            PRAGMA user_version = 48;
+            "#,
+        )?;
+        Ok(())
+    })();
+
+    match migration {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;")?;
+            Ok(())
+        }
+        Err(err) => {
+            if let Err(rollback_err) = conn.execute_batch("ROLLBACK;") {
+                return Err(StoreError::Sql(rollback_err));
             }
             Err(err)
         }

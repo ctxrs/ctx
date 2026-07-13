@@ -1446,7 +1446,7 @@ fn schema_v46_adds_mimocode_provider_checks() {
 }
 
 #[test]
-fn real_schema_v45_fixture_migrates_import_state_through_v47() {
+fn real_schema_v45_fixture_migrates_import_state_through_v48() {
     let temp = tempdir();
     let path = temp.path().join("work.sqlite");
     {
@@ -1485,7 +1485,7 @@ fn real_schema_v45_fixture_migrates_import_state_through_v47() {
         .conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 47);
+    assert_eq!(version, 48);
     let indexed: (String, i64, Option<i64>, Option<i64>) = store
         .conn
         .query_row(
@@ -1509,15 +1509,48 @@ fn real_schema_v45_fixture_migrates_import_state_through_v47() {
         )
         .unwrap();
     assert_eq!(indexed_revision, None);
+    let generations: Vec<(String, String, String, i64)> = store
+        .conn
+        .prepare(
+            "SELECT provider, source_root, inventory_family, current_generation FROM import_inventory_generations ORDER BY inventory_family, provider, source_root",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        generations,
+        vec![
+            (
+                "codex".to_owned(),
+                "/missing/v45".to_owned(),
+                "catalog_sessions".to_owned(),
+                1,
+            ),
+            (
+                "claude".to_owned(),
+                "/missing/v45-claude".to_owned(),
+                "source_import_files".to_owned(),
+                1,
+            ),
+        ]
+    );
 }
 
 #[test]
-fn schema_v47_grandfathers_indexed_rows_and_retries_v46_failures_without_source_reads() {
+fn schema_v48_grandfathers_indexed_rows_and_retries_v46_failures_without_source_reads() {
     let temp = tempdir();
     let path = temp.path().join("work.sqlite");
     {
         let conn = Connection::open(&path).unwrap();
         let v46_sql = CREATE_TABLES_SQL
+            .replace(
+                "CREATE TABLE IF NOT EXISTS import_inventory_generations (\n    provider TEXT NOT NULL,\n    source_root TEXT NOT NULL,\n    inventory_family TEXT NOT NULL CHECK (inventory_family IN ('catalog_sessions', 'source_import_files')),\n    current_generation INTEGER NOT NULL CHECK (current_generation > 0),\n    PRIMARY KEY (provider, source_root, inventory_family)\n);\n\n",
+                "",
+            )
             .replace(
                 "    import_revision INTEGER NOT NULL DEFAULT 1 CHECK (import_revision > 0),\n",
                 "",
@@ -1569,7 +1602,7 @@ fn schema_v47_grandfathers_indexed_rows_and_retries_v46_failures_without_source_
         .conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 47);
+    assert_eq!(version, 48);
 
     let catalog_rows = store
         .conn
@@ -1652,6 +1685,15 @@ fn schema_v47_grandfathers_indexed_rows_and_retries_v46_failures_without_source_
             .len(),
         1
     );
+    let generation_count: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM import_inventory_generations WHERE current_generation = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(generation_count, 3);
 }
 
 fn assert_provider_migration_accepts(

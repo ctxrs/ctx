@@ -38,6 +38,8 @@ pub struct ProviderImportSummary {
     pub skipped_edges: usize,
     #[serde(skip)]
     pub(crate) accepted_content_records: usize,
+    #[serde(skip)]
+    retained_existing_content: bool,
     pub failures: Vec<ProviderImportFailure>,
 }
 
@@ -61,7 +63,14 @@ pub struct CatalogSummary {
 
 impl ProviderImportSummary {
     pub fn has_accepted_content(&self) -> bool {
-        self.accepted_content_records > 0 || self.imported_events > 0 || self.imported_edges > 0
+        self.accepted_content_records > 0
+            || self.imported_events > 0
+            || self.imported_edges > 0
+            || self.retained_existing_content
+    }
+
+    pub fn mark_retained_existing_content(&mut self) {
+        self.retained_existing_content = true;
     }
 
     pub fn merge_from(&mut self, other: ProviderImportSummary) {
@@ -75,11 +84,37 @@ impl ProviderImportSummary {
         self.imported_edges += other.imported_edges;
         self.skipped_edges += other.skipped_edges;
         self.accepted_content_records += other.accepted_content_records;
+        self.retained_existing_content |= other.retained_existing_content;
         self.failures.extend(other.failures);
     }
 
     pub(crate) fn merge(&mut self, other: ProviderImportSummary) {
         self.merge_from(other);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProviderImportSummary;
+
+    #[test]
+    fn retained_existing_content_changes_outcome_without_synthesizing_counts() {
+        let mut summary = ProviderImportSummary {
+            failed: 1,
+            ..ProviderImportSummary::default()
+        };
+        summary.mark_retained_existing_content();
+
+        assert!(summary.has_accepted_content());
+        assert_eq!(summary.accepted_content_records, 0);
+        assert_eq!(summary.imported_sessions, 0);
+        assert_eq!(summary.imported_events, 0);
+        assert_eq!(summary.imported_edges, 0);
+
+        let mut merged = ProviderImportSummary::default();
+        merged.merge_from(summary);
+        assert!(merged.has_accepted_content());
+        assert_eq!(merged.accepted_content_records, 0);
     }
 }
 

@@ -14,9 +14,16 @@ pub(crate) fn import_incremental_codex_session_tree(
     record_id: Uuid,
     progress: Option<CodexSessionImportProgressCallback>,
     preinventory_catalog: Option<&CatalogSummary>,
+    preinventory_generation: Option<u64>,
     force_selection: bool,
 ) -> Result<ProviderImportSummary> {
     let source_root = source.path.display().to_string();
+    let inventory_generation = match preinventory_generation {
+        Some(generation) => generation,
+        None => {
+            store.allocate_catalog_inventory_generation(CaptureProvider::Codex, &source_root)?
+        }
+    };
     let mut summary = ProviderImportSummary::default();
     if let Some(catalog) = preinventory_catalog {
         summary.failed += catalog.failed_sessions;
@@ -27,6 +34,7 @@ pub(crate) fn import_incremental_codex_session_tree(
             store,
             CodexSessionCatalogOptions {
                 source_root: Some(source.path.clone()),
+                observation_generation: Some(inventory_generation),
                 ..CodexSessionCatalogOptions::default()
             },
         )
@@ -76,6 +84,7 @@ pub(crate) fn import_incremental_codex_session_tree(
                         std::slice::from_ref(session),
                         &error,
                         catalog_import_error_status(&err),
+                        inventory_generation,
                     )?;
                     return Err(err);
                 }
@@ -104,6 +113,7 @@ pub(crate) fn import_incremental_codex_session_tree(
                         std::slice::from_ref(session),
                         &err.to_string(),
                         catalog_import_error_status(&err),
+                        inventory_generation,
                     )?;
                     return Err(err);
                 }
@@ -129,6 +139,7 @@ pub(crate) fn import_incremental_codex_session_tree(
                 utc_now().timestamp_millis(),
                 status,
                 error.as_deref(),
+                inventory_generation,
             )?;
             summary.merge_from(tail_summary);
         } else {
@@ -160,6 +171,7 @@ pub(crate) fn import_incremental_codex_session_tree(
                         std::slice::from_ref(session),
                         &error,
                         catalog_import_error_status(&err),
+                        inventory_generation,
                     )?;
                     if failure_scope == ImportFailureScope::System {
                         return Err(err);
@@ -171,7 +183,12 @@ pub(crate) fn import_incremental_codex_session_tree(
                     continue;
                 }
             };
-            mark_catalog_sessions_result(store, std::slice::from_ref(session), &file_summary)?;
+            mark_catalog_sessions_result(
+                store,
+                std::slice::from_ref(session),
+                &file_summary,
+                inventory_generation,
+            )?;
             summary.merge_from(file_summary);
         }
     }
@@ -196,6 +213,7 @@ pub(crate) fn mark_catalog_sessions_result(
     store: &Store,
     sessions: &[CatalogSession],
     summary: &ProviderImportSummary,
+    inventory_generation: u64,
 ) -> Result<()> {
     let indexed_at_ms = utc_now().timestamp_millis();
     let event_count = if sessions.len() == 1 {
@@ -217,6 +235,7 @@ pub(crate) fn mark_catalog_sessions_result(
             indexed_at_ms,
             status,
             error.as_deref(),
+            inventory_generation,
         )?;
     }
     Ok(())
@@ -229,6 +248,7 @@ pub(crate) fn mark_catalog_session_result(
     indexed_at_ms: i64,
     status: CatalogIndexedStatus,
     error: Option<&str>,
+    inventory_generation: u64,
 ) -> Result<()> {
     let file_sha256 = if status == CatalogIndexedStatus::Indexed {
         let hash = sha256_file_prefix_hex(Path::new(&session.source_path), session.file_size_bytes)
@@ -242,6 +262,7 @@ pub(crate) fn mark_catalog_session_result(
                     std::slice::from_ref(session),
                     &durable_error,
                     catalog_import_error_status(&err),
+                    inventory_generation,
                 )?;
                 return Err(err);
             }
@@ -257,6 +278,7 @@ pub(crate) fn mark_catalog_session_result(
             file_size_bytes: session.file_size_bytes,
             file_modified_at_ms: session.file_modified_at_ms,
             import_revision: session.import_revision,
+            inventory_generation,
             file_sha256: file_sha256.as_deref(),
             event_count,
             indexed_at_ms,
@@ -304,6 +326,7 @@ pub(crate) fn mark_catalog_sessions_error(
     sessions: &[CatalogSession],
     error: &str,
     status: CatalogIndexedStatus,
+    inventory_generation: u64,
 ) -> Result<()> {
     let indexed_at_ms = utc_now().timestamp_millis();
     for session in sessions {
@@ -315,6 +338,7 @@ pub(crate) fn mark_catalog_sessions_error(
                 file_size_bytes: session.file_size_bytes,
                 file_modified_at_ms: session.file_modified_at_ms,
                 import_revision: session.import_revision,
+                inventory_generation,
                 file_sha256: None,
                 event_count: None,
                 indexed_at_ms,
