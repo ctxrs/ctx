@@ -8,6 +8,26 @@ use crate::model::RecordContext;
 use crate::query::{query_terms, SearchFilters};
 use crate::ranking::search_sections;
 
+pub fn wrap_delimited(snippet: &str, nonce: &str) -> String {
+    let escaped = xml_escape(snippet);
+    format!("[[RECALLED_DATA nonce={nonce}]]{escaped}[[/RECALLED_DATA nonce={nonce}]]")
+}
+
+fn xml_escape(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '&' => out.push_str("\u{26}amp\u{3b}"), // 5 bytes: ampersand a m p semicolon
+            '<' => out.push_str("\u{26}lt\u{3b}"),  // 4 bytes: ampersand l t semicolon
+            '>' => out.push_str("\u{26}gt\u{3b}"),  // 4 bytes: ampersand g t semicolon
+            '"' => out.push_str("\u{26}quot\u{3b}"), // 6 bytes: ampersand q u o t semicolon
+            '\'' => out.push_str("\u{26}apos\u{3b}"), // 6 bytes: ampersand a p o s semicolon
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 pub fn display_snippet(input: &str, max_chars: usize) -> String {
     local_snippet(input, max_chars)
 }

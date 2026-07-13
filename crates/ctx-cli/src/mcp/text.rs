@@ -1,4 +1,7 @@
 use serde_json::Value;
+use uuid::Uuid;
+
+use ctx_history_search::wrap_delimited;
 
 const MCP_TEXT_MAX_SEARCH_RESULTS: usize = 5;
 const MCP_TEXT_MAX_SOURCES: usize = 12;
@@ -136,6 +139,7 @@ fn render_sources_text(value: &Value) -> String {
 }
 
 fn render_search_text(value: &Value) -> String {
+    let snippet_nonce = Uuid::new_v4().to_string();
     let results = value
         .get("results")
         .and_then(Value::as_array)
@@ -181,10 +185,9 @@ fn render_search_text(value: &Value) -> String {
         push_indented_key_value(&mut out, "timestamp", result.get("timestamp"));
         if let Some(snippet) = value_field(result, "snippet").filter(|snippet| !snippet.is_empty())
         {
-            out.push_str(&format!(
-                "   snippet: {}\n",
-                clip_inline(&snippet, MCP_TEXT_MAX_SNIPPET_CHARS)
-            ));
+            let clipped = clip_inline(&snippet, MCP_TEXT_MAX_SNIPPET_CHARS);
+            let wrapped = wrap_delimited(&clipped, &snippet_nonce);
+            out.push_str(&format!("   snippet: {wrapped}\n"));
         }
         if let Some(commands) = result
             .get("suggested_next_commands")

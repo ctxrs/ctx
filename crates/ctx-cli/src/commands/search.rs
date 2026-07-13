@@ -350,11 +350,12 @@ pub(crate) fn run_search(
             }
         }
         let suggested_next_query = (!uses_composed_terms).then_some(query.as_str());
+        let snippet_nonce = uuid::Uuid::new_v4().to_string();
         for (index, result) in packet.results.iter().enumerate() {
             if args.verbose {
-                print_search_result_verbose(result, suggested_next_query);
+                print_search_result_verbose(result, suggested_next_query, &snippet_nonce);
             } else {
-                print_search_result_compact(index + 1, result);
+                print_search_result_compact(index + 1, result, &snippet_nonce);
             }
         }
     }

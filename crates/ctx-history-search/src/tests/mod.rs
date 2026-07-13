@@ -21,8 +21,9 @@ use crate::query::{
 };
 use crate::source::empty_hit;
 use crate::{
-    display_snippet, event_preview_text, search_packet, search_packet_terms, PacketOptions,
-    ProviderSessionFilter, SearchFilters, SearchResultMode, SearchResultScope, MAX_RESULT_LIMIT,
+    display_snippet, event_preview_text, search_packet, search_packet_terms, wrap_delimited,
+    PacketOptions, ProviderSessionFilter, SearchFilters, SearchResultMode, SearchResultScope,
+    MAX_RESULT_LIMIT,
 };
 use ctx_history_store::EventSearchHit;
 

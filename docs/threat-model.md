@@ -40,4 +40,20 @@ files are read as import sources, not modified.
 - preserve citations and source availability flags;
 - keep setup local and side-effect-limited;
 - document that searchable text is copied into SQLite;
-- treat JSON output as private until reviewed.
+- treat JSON output as private until reviewed;
+- wrap recalled snippets in `[[RECALLED_DATA nonce=X]]...
+  [[/RECALLED_DATA nonce=X]]` delimiters with a per-response random
+  nonce. Consumers (agents, MCP clients) MUST validate that opening and
+  closing nonce values match before trusting content as 'recalled data' —
+  checking only for the presence of the `[[RECALLED_DATA` tag is NOT
+  sufficient, since escaped snippet content may itself contain literal
+  text resembling this pattern. The nonce match is the only thing that
+  distinguishes a real boundary from injected text mimicking one.
+- this delimiter wrapping applies only to human/agent-facing text
+  rendering (CLI text output and MCP text responses). It does NOT apply
+  to the `--json` output path (`SearchDto::packet`) or any SDK consumer
+  reading the raw `snippet` field from JSON — that path intentionally
+  returns unwrapped, unescaped text to remain machine-parseable (e.g.
+  for `jq` pipelines). Any agent or integration that treats JSON-sourced
+  snippet content as trusted input should apply its own sanitization,
+  since it bypasses this mitigation entirely.

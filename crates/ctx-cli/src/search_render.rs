@@ -2,6 +2,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use ctx_history_core::{ContextCitation, ContextCitationType, HistoryRecord};
+use ctx_history_search::wrap_delimited;
 use ctx_history_store::Store;
 
 use crate::commands::search::SearchRefreshReport;
@@ -203,15 +204,22 @@ pub(crate) fn result_type_for_id(store: &Store, item_id: Uuid) -> String {
 pub(crate) fn print_search_result_compact(
     index: usize,
     result: &ctx_history_search::SearchPacketResult,
+    snippet_nonce: &str,
 ) {
     println!("{index}. {}", result.title);
     let summary = search_result_summary(result);
     if !summary.is_empty() {
         println!("   {}", summary.join(" | "));
     }
-    let snippet = result.snippet.trim();
-    if !snippet.is_empty() {
-        println!("   {snippet}");
+    let clipped = result
+        .snippet
+        .trim()
+        .chars()
+        .take(ctx_history_search::DEFAULT_SNIPPET_CHARS)
+        .collect::<String>();
+    if !clipped.is_empty() {
+        let wrapped = wrap_delimited(&clipped, snippet_nonce);
+        println!("   {wrapped}");
     }
     if result.result_scope == ctx_history_search::SearchResultScope::Session
         && result.more_matches_in_session > 0
@@ -229,6 +237,7 @@ pub(crate) fn print_search_result_compact(
 pub(crate) fn print_search_result_verbose(
     result: &ctx_history_search::SearchPacketResult,
     suggested_next_query: Option<&str>,
+    snippet_nonce: &str,
 ) {
     println!("{}", result.title);
     if let Some(event_id) = result.event_id {
@@ -252,7 +261,15 @@ pub(crate) fn print_search_result_verbose(
     if let Some(source_format) = &result.source_format {
         println!("  source_format: {source_format}");
     }
-    println!("  {}", result.snippet);
+    let clipped = result
+        .snippet
+        .chars()
+        .take(ctx_history_search::DEFAULT_SNIPPET_CHARS)
+        .collect::<String>();
+    if !clipped.is_empty() {
+        let wrapped = wrap_delimited(&clipped, snippet_nonce);
+        println!("  {wrapped}");
+    }
     println!("  rank: {:.2}", result.rank);
     if result.result_scope == ctx_history_search::SearchResultScope::Session {
         println!("  session_importance: {:.2}", result.session_importance);

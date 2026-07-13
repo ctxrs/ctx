@@ -17,7 +17,7 @@ pub use query::{
     DEFAULT_RESULT_LIMIT, DEFAULT_SNIPPET_CHARS, MAX_RESULT_LIMIT,
 };
 pub use search::{search_packet, search_packet_terms, semantic_event_search_packet};
-pub use snippets::{display_snippet, event_preview_text};
+pub use snippets::{display_snippet, event_preview_text, wrap_delimited};
 
 #[cfg(test)]
 mod tests;
