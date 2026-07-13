@@ -75,6 +75,7 @@ pub struct ProviderSource {
     pub path: PathBuf,
     pub exists: bool,
     pub source_format: &'static str,
+    pub import_revision: u32,
     pub source_kind: ProviderSourceKind,
     pub import_support: ProviderImportSupport,
     pub catalog_support: ProviderCatalogSupport,

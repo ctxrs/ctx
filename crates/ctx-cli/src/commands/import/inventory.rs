@@ -205,6 +205,7 @@ fn source_root_import_file(source: &SourceInfo, stats: SourceStats) -> Result<So
         source_path: source.path.display().to_string(),
         file_size_bytes: stats.bytes,
         file_modified_at_ms: system_time_ms(metadata.modified().unwrap_or(UNIX_EPOCH)),
+        import_revision: source.import_revision,
         observed_at_ms: system_time_ms(SystemTime::now()),
         metadata: json!({
             "inventory_unit": "source_root",

@@ -86,15 +86,6 @@ pub(crate) fn import_incremental_codex_session_tree(
                     return Err(err);
                 }
             };
-            if tail_summary.failed > 0 {
-                mark_catalog_sessions_failed(
-                    store,
-                    std::slice::from_ref(session),
-                    "tail import failed for one or more appended events",
-                )?;
-                summary.merge_from(tail_summary);
-                continue;
-            }
             let tail_event_count = tail_summary
                 .imported_events
                 .saturating_add(tail_summary.skipped_events)
@@ -102,11 +93,20 @@ pub(crate) fn import_incremental_codex_session_tree(
             let event_count = state
                 .and_then(|state| state.last_imported_event_count)
                 .map(|event_count| event_count.saturating_add(tail_event_count));
-            mark_catalog_session_indexed(
+            let status = if tail_summary.failed == 0 {
+                CatalogIndexedStatus::Indexed
+            } else {
+                CatalogIndexedStatus::CompletedWithRejections
+            };
+            let error =
+                (tail_summary.failed > 0).then(|| catalog_session_import_failure(&tail_summary));
+            mark_catalog_session_result(
                 store,
                 session,
                 event_count,
                 utc_now().timestamp_millis(),
+                status,
+                error.as_deref(),
             )?;
             summary.merge_from(tail_summary);
         } else {
@@ -144,15 +144,7 @@ pub(crate) fn import_incremental_codex_session_tree(
                     continue;
                 }
             };
-            if file_summary.failed > 0 {
-                mark_catalog_sessions_failed(
-                    store,
-                    std::slice::from_ref(session),
-                    &catalog_session_import_failure(&file_summary),
-                )?;
-            } else {
-                mark_catalog_sessions_indexed(store, std::slice::from_ref(session), &file_summary)?;
-            }
+            mark_catalog_sessions_result(store, std::slice::from_ref(session), &file_summary)?;
             summary.merge_from(file_summary);
         }
     }
@@ -173,7 +165,7 @@ fn catalog_session_import_failure(summary: &ProviderImportSummary) -> String {
         .unwrap_or_else(|| "session import failed".to_owned())
 }
 
-pub(crate) fn mark_catalog_sessions_indexed(
+pub(crate) fn mark_catalog_sessions_result(
     store: &Store,
     sessions: &[CatalogSession],
     summary: &ProviderImportSummary,
@@ -188,32 +180,50 @@ pub(crate) fn mark_catalog_sessions_indexed(
     } else {
         None
     };
+    let status = provider_summary_import_status(summary);
+    let error = (summary.failed > 0).then(|| catalog_session_import_failure(summary));
     for session in sessions {
-        mark_catalog_session_indexed(store, session, event_count, indexed_at_ms)?;
+        mark_catalog_session_result(
+            store,
+            session,
+            event_count,
+            indexed_at_ms,
+            status,
+            error.as_deref(),
+        )?;
     }
     Ok(())
 }
 
-pub(crate) fn mark_catalog_session_indexed(
+pub(crate) fn mark_catalog_session_result(
     store: &Store,
     session: &CatalogSession,
     event_count: Option<u64>,
     indexed_at_ms: i64,
+    status: CatalogIndexedStatus,
+    error: Option<&str>,
 ) -> Result<()> {
-    let file_sha256 =
-        sha256_file_prefix_hex(Path::new(&session.source_path), session.file_size_bytes)
-            .with_context(|| format!("hash checkpoint prefix for {}", session.source_path))?;
-    store.mark_catalog_source_indexed(
+    let file_sha256 = if status == CatalogIndexedStatus::Indexed {
+        Some(
+            sha256_file_prefix_hex(Path::new(&session.source_path), session.file_size_bytes)
+                .with_context(|| format!("hash checkpoint prefix for {}", session.source_path))?,
+        )
+    } else {
+        None
+    };
+    store.record_catalog_source_import_result(
         session.provider,
         CatalogSourceIndexUpdate {
             source_root: &session.source_root,
             source_path: &session.source_path,
             file_size_bytes: session.file_size_bytes,
             file_modified_at_ms: session.file_modified_at_ms,
-            file_sha256: Some(&file_sha256),
+            file_sha256: file_sha256.as_deref(),
             event_count,
             indexed_at_ms,
         },
+        status,
+        error,
     )?;
     Ok(())
 }

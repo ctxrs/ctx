@@ -263,6 +263,7 @@ pub(crate) fn annotate_history_source_plugin_output(
                     "provider_key": source.provider_key,
                     "source_id": source.source_id,
                     "source_format": source.source_format,
+                    "import_revision": source.import_revision,
                 }),
             );
             source_record.metadata = Value::Object(metadata);

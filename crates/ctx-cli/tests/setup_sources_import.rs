@@ -554,8 +554,12 @@ fn setup_import_isolates_empty_codex_session_file() {
     let status = json_output(ctx(&temp).args(["status", "--json"]));
     assert_eq!(status["cataloged_sessions"], 2, "{status:#}");
     assert_eq!(status["indexed_catalog_sessions"], 1, "{status:#}");
-    assert_eq!(status["failed_catalog_sessions"], 1, "{status:#}");
-    assert_eq!(status["pending_catalog_sessions"], 1, "{status:#}");
+    assert_eq!(status["failed_catalog_sessions"], 0, "{status:#}");
+    assert_eq!(status["pending_catalog_sessions"], 0, "{status:#}");
+    assert_eq!(
+        status["terminal_rejected_catalog_sessions"], 1,
+        "{status:#}"
+    );
     assert!(status["indexed_items"].as_u64().unwrap() > 0);
 
     let search = json_output(ctx(&temp).args([
@@ -567,7 +571,7 @@ fn setup_import_isolates_empty_codex_session_file() {
     ]));
     assert_eq!(search["freshness"]["status"], "completed", "{search:#}");
     assert_eq!(
-        search["freshness"]["totals"]["rejected_records"], 1,
+        search["freshness"]["totals"]["rejected_records"], 0,
         "{search:#}"
     );
     assert_eq!(

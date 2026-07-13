@@ -49,8 +49,8 @@ use ctx_history_core::{
     database_path, utc_now, CaptureProvider, CtxHistoryJsonlRecord, HistoryRecord,
 };
 use ctx_history_store::{
-    CatalogSession, CatalogSourceIndexUpdate, SourceImportFile, SourceImportFileIndexUpdate, Store,
-    StoreError,
+    CatalogIndexedStatus, CatalogSession, CatalogSourceIndexUpdate, SourceImportFile,
+    SourceImportFileIndexUpdate, Store, StoreError,
 };
 
 use crate::analytics::AnalyticsProperties;
@@ -210,6 +210,18 @@ impl ImportTotals {
 
 pub(crate) fn provider_summary_has_imported_content(summary: &ProviderImportSummary) -> bool {
     summary.has_accepted_content()
+}
+
+pub(crate) fn provider_summary_import_status(
+    summary: &ProviderImportSummary,
+) -> CatalogIndexedStatus {
+    if summary.failed == 0 {
+        CatalogIndexedStatus::Indexed
+    } else if provider_summary_has_imported_content(summary) {
+        CatalogIndexedStatus::CompletedWithRejections
+    } else {
+        CatalogIndexedStatus::Rejected
+    }
 }
 
 pub(crate) fn history_record_exists(store: &Store, record_id: Uuid) -> Result<bool> {

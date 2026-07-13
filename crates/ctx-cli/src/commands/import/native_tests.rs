@@ -49,6 +49,7 @@ fn persist_indexed_root(
     let file = SourceImportFile {
         provider: source.provider,
         source_format: source.source_format.to_owned(),
+        import_revision: source.import_revision,
         source_root: source_root.clone(),
         source_path: source_root.clone(),
         file_size_bytes,
@@ -161,6 +162,7 @@ fn changed_root_source_does_not_skip_provider_normalization() {
     let changed = SourceImportFile {
         provider: source.provider,
         source_format: source.source_format.to_owned(),
+        import_revision: source.import_revision,
         source_root: source_path.display().to_string(),
         source_path: source_path.display().to_string(),
         file_size_bytes: 21,
@@ -204,4 +206,80 @@ fn full_rescan_does_not_skip_unchanged_root_source() {
     );
 
     assert!(result.is_err(), "full rescan must reach the Hermes adapter");
+}
+
+#[test]
+fn pre_summary_source_error_is_terminal_for_the_observed_revision() {
+    let temp = tempfile::tempdir().unwrap();
+    let source_path = temp.path().join("transcript.jsonl");
+    let source = explicit_path_source(CaptureProvider::Hermes, source_path.clone());
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let file = SourceImportFile {
+        provider: source.provider,
+        source_format: source.source_format.to_owned(),
+        import_revision: source.import_revision,
+        source_root: source_path.display().to_string(),
+        source_path: source_path.display().to_string(),
+        file_size_bytes: 17,
+        file_modified_at_ms: 23,
+        observed_at_ms: 29,
+        metadata: json!({}),
+    };
+    store
+        .upsert_source_import_files(std::slice::from_ref(&file))
+        .unwrap();
+    let error = anyhow::Error::new(CaptureError::InvalidProviderTranscriptPath {
+        path: source_path,
+        reason: "expected a provider transcript file",
+    });
+
+    assert!(rejected_source_summary(&error).is_none());
+    let status = import_error_status(&error);
+    assert_eq!(status, CatalogIndexedStatus::Rejected);
+    mark_source_import_file_result(&store, &file, status, Some(&error.to_string())).unwrap();
+
+    assert!(store
+        .list_pending_source_import_files(source.provider, &file.source_root)
+        .unwrap()
+        .is_empty());
+    assert_eq!(store.source_import_file_counts().unwrap().rejected, 1);
+}
+
+#[test]
+fn system_error_remains_retryable_for_the_observed_revision() {
+    let temp = tempfile::tempdir().unwrap();
+    let source_path = temp.path().join("transcript.jsonl");
+    let source = explicit_path_source(CaptureProvider::Hermes, source_path.clone());
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let file = SourceImportFile {
+        provider: source.provider,
+        source_format: source.source_format.to_owned(),
+        import_revision: source.import_revision,
+        source_root: source_path.display().to_string(),
+        source_path: source_path.display().to_string(),
+        file_size_bytes: 17,
+        file_modified_at_ms: 23,
+        observed_at_ms: 29,
+        metadata: json!({}),
+    };
+    store
+        .upsert_source_import_files(std::slice::from_ref(&file))
+        .unwrap();
+    let error = anyhow::Error::new(CaptureError::SystemIo {
+        operation: "read provider transcript",
+        source: std::io::Error::other("transient test failure"),
+    });
+
+    let status = import_error_status(&error);
+    assert_eq!(status, CatalogIndexedStatus::Failed);
+    mark_source_import_file_result(&store, &file, status, Some(&error.to_string())).unwrap();
+
+    assert_eq!(
+        store
+            .list_pending_source_import_files(source.provider, &file.source_root)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(store.source_import_file_counts().unwrap().failed, 1);
 }

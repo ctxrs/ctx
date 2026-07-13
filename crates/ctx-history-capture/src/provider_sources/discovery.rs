@@ -10,6 +10,7 @@ use serde_json::Value;
 use super::{
     probes::{default_location_import_probe, BoundedProbe},
     reasons::{empty_source_reason, probe_io_error_reason, unknown_source_reason},
+    revisions::provider_import_revision,
     specs::{provider_source_spec, PROVIDER_SPECS, TRAE_STATE_VSCDB_SOURCE_FORMAT},
     types::{
         ProviderCatalogSupport, ProviderDefaultLocation, ProviderImportSupport, ProviderSource,
@@ -913,6 +914,7 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         exists,
         path,
         source_format,
+        import_revision: provider_import_revision(provider, source_format),
         source_kind,
         import_support: explicit_import_support,
         catalog_support: spec.catalog_support,
@@ -968,6 +970,7 @@ fn provider_source_from_location(
         path,
         exists,
         source_format: location.source_format,
+        import_revision: provider_import_revision(spec.provider, location.source_format),
         source_kind: location.source_kind,
         import_support: spec.import_support,
         catalog_support: spec.catalog_support,
