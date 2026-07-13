@@ -81,7 +81,7 @@ pub struct EventEmbeddingDocument {
 
 impl Store {
     pub fn refresh_search_index(&self) -> Result<()> {
-        self.rebuild_search_projection()
+        self.with_write_transaction(|| self.rebuild_search_projection())
     }
 
     pub fn optimize_search_index(&self) -> Result<()> {
@@ -357,7 +357,9 @@ impl Store {
     }
 
     pub fn refresh_event_embedding_document_count_cache(&self) -> Result<()> {
-        refresh_semantic_searchable_item_stats(&self.conn).map(|_| ())
+        self.with_write_transaction(|| {
+            refresh_semantic_searchable_item_stats(&self.conn).map(|_| ())
+        })
     }
 
     pub fn recent_event_embedding_documents(

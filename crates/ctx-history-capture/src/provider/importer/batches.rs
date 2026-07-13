@@ -315,6 +315,7 @@ impl Write for ByteCounter {
 }
 
 pub(crate) struct ProviderImportTransaction {
+    enabled: bool,
     active: bool,
     batch_size: Option<NonZeroUsize>,
     units: usize,
@@ -324,24 +325,14 @@ pub(crate) struct ProviderImportTransaction {
 
 impl ProviderImportTransaction {
     fn begin(store: &Store, has_work: bool, batch_size: Option<NonZeroUsize>) -> Result<Self> {
-        let slice = if has_work {
-            store.begin_immediate_batch()?;
-            match store.begin_indexing_slice() {
-                Ok(slice) => Some(slice),
-                Err(error) => {
-                    let _ = store.rollback_batch();
-                    return Err(error.into());
-                }
-            }
-        } else {
-            None
-        };
+        let _ = store;
         Ok(Self {
-            active: has_work,
+            enabled: has_work,
+            active: false,
             batch_size,
             units: 0,
             bytes: 0,
-            slice,
+            slice: None,
         })
     }
 
@@ -350,6 +341,9 @@ impl ProviderImportTransaction {
     }
 
     pub(crate) fn prepare_unit(&mut self, store: &Store, unit_bytes: usize) -> Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
         let measured_rotation = self
             .slice
             .as_ref()
@@ -362,14 +356,21 @@ impl ProviderImportTransaction {
                 || (self.batch_size.is_some()
                     && self.bytes.saturating_add(unit_bytes) > IMPORT_TRANSACTION_BATCH_BYTES))
         {
-            self.rotate(store)
+            self.finish_active(store)
         } else {
             Ok(())
         };
         if result.is_err() {
             self.rollback(store);
+            return result;
         }
-        result
+        if !self.active {
+            if let Err(error) = self.start(store) {
+                self.rollback(store);
+                return Err(error);
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn record_unit(&mut self, store: &Store, unit_bytes: usize) -> Result<()> {
@@ -392,22 +393,28 @@ impl ProviderImportTransaction {
         if below_unit_limit && below_byte_limit && !measured_rotation {
             return Ok(());
         }
-        let result = self.rotate(store);
+        let result = self.finish_active(store);
         if result.is_err() {
             self.rollback(store);
         }
         result
     }
 
-    fn rotate(&mut self, store: &Store) -> Result<()> {
+    fn start(&mut self, store: &Store) -> Result<()> {
+        store.begin_immediate_batch()?;
+        self.active = true;
+        self.slice = Some(store.begin_indexing_slice()?);
+        self.units = 0;
+        self.bytes = 0;
+        Ok(())
+    }
+
+    fn finish_active(&mut self, store: &Store) -> Result<()> {
         store.commit_batch()?;
         self.active = false;
         if let Some(slice) = self.slice.take() {
             store.finish_indexing_slice(slice)?;
         }
-        store.begin_immediate_batch()?;
-        self.active = true;
-        self.slice = Some(store.begin_indexing_slice()?);
         self.units = 0;
         self.bytes = 0;
         Ok(())
@@ -431,6 +438,7 @@ impl ProviderImportTransaction {
         };
         if result.is_ok() {
             self.active = false;
+            self.enabled = false;
         } else {
             self.rollback(store);
         }

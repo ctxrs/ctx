@@ -32,6 +32,8 @@ mod ids;
 
 #[cfg(test)]
 pub(crate) use batches::import_normalized_provider_captures_in_batches;
+#[cfg(test)]
+pub(crate) use batches::IMPORT_TRANSACTION_BATCH_UNITS;
 pub(crate) use batches::{resolve_pending_provider_edges_batched, ProviderImportTransaction};
 pub(crate) use commands::{
     provider_command_run_from_event, validate_provider_event_for_import, ProviderCommandRunInput,

@@ -30,6 +30,10 @@ pub struct LocalWorkspaceIdentity {
 
 impl Store {
     pub fn get_or_create_local_device(&self) -> Result<LocalDeviceIdentity> {
+        self.with_write_transaction(|| self.get_or_create_local_device_inner())
+    }
+
+    fn get_or_create_local_device_inner(&self) -> Result<LocalDeviceIdentity> {
         if let Some(device) = self.local_device()? {
             return Ok(device);
         }
@@ -61,8 +65,23 @@ impl Store {
         repo_fingerprint: &str,
         vcs_workspace_id: Option<Uuid>,
     ) -> Result<LocalWorkspaceIdentity> {
+        self.with_write_transaction(|| {
+            self.register_local_workspace_inner(
+                root_path.as_ref(),
+                repo_fingerprint,
+                vcs_workspace_id,
+            )
+        })
+    }
+
+    fn register_local_workspace_inner(
+        &self,
+        root_path: &Path,
+        repo_fingerprint: &str,
+        vcs_workspace_id: Option<Uuid>,
+    ) -> Result<LocalWorkspaceIdentity> {
         let device = self.get_or_create_local_device()?;
-        let root = root_path.as_ref();
+        let root = root_path;
         let root_path_hash = sha256_hex(root.display().to_string().as_bytes());
         let display_root = root.display().to_string();
         let now = utc_now();

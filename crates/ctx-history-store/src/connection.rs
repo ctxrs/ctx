@@ -59,7 +59,9 @@ impl Store {
             conn,
             busy_timeout: BUSY_TIMEOUT,
             event_search_bulk_depth: Default::default(),
+            event_search_transaction_lock: Default::default(),
             indexing_admission: None,
+            indexing_writer_lease: Default::default(),
         })
     }
 
@@ -90,6 +92,10 @@ impl Store {
         busy_timeout: Duration,
         indexing_admission: Option<IndexingAdmission>,
     ) -> Result<Self> {
+        let _open_lease = indexing_admission
+            .as_ref()
+            .map(IndexingAdmission::lease)
+            .transpose()?;
         let path = path.to_path_buf();
         let mut migrated_legacy_layout = false;
         if let Some(parent) = path.parent() {
@@ -116,7 +122,9 @@ impl Store {
             conn,
             busy_timeout,
             event_search_bulk_depth: Default::default(),
+            event_search_transaction_lock: Default::default(),
             indexing_admission,
+            indexing_writer_lease: Default::default(),
         };
         store.migrate()?;
         if migrated_legacy_layout {
@@ -131,42 +139,123 @@ impl Store {
     }
 
     pub fn begin_immediate_batch(&self) -> Result<()> {
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
-        Ok(())
-    }
-
-    pub fn commit_batch(&self) -> Result<()> {
-        self.conn.execute_batch("COMMIT")?;
-        Ok(())
-    }
-
-    pub fn rollback_batch(&self) -> Result<()> {
-        self.conn.execute_batch("ROLLBACK")?;
-        Ok(())
-    }
-
-    pub fn checkpoint_wal_passive(&self) -> Result<()> {
-        let _ = self.checkpoint_wal("PASSIVE")?;
-        Ok(())
-    }
-
-    pub fn checkpoint_wal_truncate(&self) -> Result<()> {
-        let _ = self.checkpoint_wal("TRUNCATE")?;
-        Ok(())
-    }
-
-    pub fn checkpoint_wal_truncate_required(&self) -> Result<()> {
-        let outcome = self.checkpoint_wal("TRUNCATE")?;
-        if outcome.busy {
-            return Err(StoreError::WalCheckpointBusy {
-                log_frames: outcome.log_frames,
-                checkpointed_frames: outcome.checkpointed_frames,
-            });
+        let event_search_lock = self.event_search_bulk_mode_active();
+        if !self.begin_immediate_batch_inner(false, event_search_lock, event_search_lock)? {
+            unreachable!("blocking transaction admission returned without a lease");
         }
         Ok(())
     }
 
+    pub fn commit_batch(&self) -> Result<()> {
+        match self.conn.execute_batch("COMMIT") {
+            Ok(()) => {
+                let lock_result = self.release_event_search_transaction_lock(true);
+                self.release_indexing_writer_lease();
+                lock_result
+            }
+            Err(error) => {
+                // SQLite can leave a transaction active after a deferred
+                // constraint fails at COMMIT. Resolve both transactions while
+                // admission is still held, then expose the original failure.
+                let _ = self.conn.execute_batch("ROLLBACK");
+                let _ = self.release_event_search_transaction_lock(false);
+                self.release_indexing_writer_lease();
+                Err(error.into())
+            }
+        }
+    }
+
+    pub fn rollback_batch(&self) -> Result<()> {
+        let rollback_result = self
+            .conn
+            .execute_batch("ROLLBACK")
+            .map_err(StoreError::from);
+        let lock_result = self.release_event_search_transaction_lock(false);
+        self.release_indexing_writer_lease();
+        rollback_result.and(lock_result)
+    }
+
+    pub(crate) fn with_write_transaction<T>(
+        &self,
+        operation: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        if !self.conn.is_autocommit() {
+            return operation();
+        }
+        self.begin_immediate_batch()?;
+        let value = match operation() {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = self.rollback_batch();
+                return Err(error);
+            }
+        };
+        self.commit_batch()?;
+        Ok(value)
+    }
+
+    pub(crate) fn begin_event_search_batch(&self, nonblocking: bool) -> Result<bool> {
+        self.begin_immediate_batch_inner(nonblocking, true, false)
+    }
+
+    fn begin_immediate_batch_inner(
+        &self,
+        nonblocking: bool,
+        event_search_lock: bool,
+        prepare_bulk_mode: bool,
+    ) -> Result<bool> {
+        if !self.acquire_indexing_writer_lease(nonblocking)? {
+            return Ok(false);
+        }
+        if event_search_lock && !self.acquire_event_search_transaction_lock(nonblocking)? {
+            self.release_indexing_writer_lease();
+            return Ok(false);
+        }
+        if let Err(error) = self.conn.execute_batch("BEGIN IMMEDIATE") {
+            let _ = self.release_event_search_transaction_lock(false);
+            self.release_indexing_writer_lease();
+            return Err(error.into());
+        }
+        if prepare_bulk_mode {
+            if let Err(error) = self.prepare_active_event_search_bulk_transaction() {
+                let _ = self.rollback_batch();
+                return Err(error);
+            }
+        }
+        Ok(true)
+    }
+
+    pub fn checkpoint_wal_passive(&self) -> Result<()> {
+        self.with_indexing_writer_lease(|| self.checkpoint_wal("PASSIVE").map(|_| ()))
+    }
+
+    pub fn checkpoint_wal_truncate(&self) -> Result<()> {
+        self.with_indexing_writer_lease(|| self.checkpoint_wal("TRUNCATE").map(|_| ()))
+    }
+
+    pub fn checkpoint_wal_truncate_required(&self) -> Result<()> {
+        self.with_indexing_writer_lease(|| {
+            let outcome = self.checkpoint_wal("TRUNCATE")?;
+            if outcome.busy {
+                return Err(StoreError::WalCheckpointBusy {
+                    log_frames: outcome.log_frames,
+                    checkpointed_frames: outcome.checkpointed_frames,
+                });
+            }
+            Ok(())
+        })
+    }
+
     pub fn checkpoint_wal_for_pressure(&self) -> Result<WalCheckpointStatus> {
+        self.with_indexing_writer_lease(|| self.checkpoint_wal_for_pressure_unleased())
+    }
+
+    pub(crate) fn try_checkpoint_wal_for_pressure(&self) -> Result<bool> {
+        self.try_with_indexing_writer_lease(|| self.checkpoint_wal_for_pressure_unleased())
+            .map(|outcome| outcome.is_some())
+    }
+
+    fn checkpoint_wal_for_pressure_unleased(&self) -> Result<WalCheckpointStatus> {
         let before_bytes = self.wal_bytes()?.unwrap_or(0);
         if before_bytes < WAL_PASSIVE_MIN_BYTES {
             return Ok(WalCheckpointStatus {

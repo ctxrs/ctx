@@ -5,16 +5,16 @@ use ctx_history_core::{
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
-use rusqlite::{params, OptionalExtension, Transaction};
+use rusqlite::{params, OptionalExtension};
 use uuid::Uuid;
 
-use super::validate_archive_artifact_record_blobs;
+use super::{validate_archive_artifact_record_blobs, ArchiveWriteTransaction};
 use crate::connection::{optional_timestamp_ms, optional_uuid_string, parse_uuid, timestamp_ms};
 use crate::object_store::BlobWriteGuard;
 use crate::{Result, StoreError};
 
 pub(super) fn upsert_capture_source_tx(
-    tx: &Transaction<'_>,
+    tx: &ArchiveWriteTransaction<'_>,
     source_id: Uuid,
     source: &CaptureSourceDescriptor,
     occurred_at: DateTime<Utc>,
@@ -65,7 +65,7 @@ pub(super) fn upsert_capture_source_tx(
 }
 
 pub(super) fn import_rich_archive_entities_tx(
-    tx: &Transaction<'_>,
+    tx: &ArchiveWriteTransaction<'_>,
     blob_dir: &Path,
     archive: &SessionHistoryArchive,
     _blob_guard: &mut BlobWriteGuard,
@@ -109,7 +109,10 @@ pub(super) fn import_rich_archive_entities_tx(
     Ok(())
 }
 
-fn upsert_imported_capture_source_tx(tx: &Transaction<'_>, source: &CaptureSource) -> Result<()> {
+fn upsert_imported_capture_source_tx(
+    tx: &ArchiveWriteTransaction<'_>,
+    source: &CaptureSource,
+) -> Result<()> {
     tx.execute(
         r#"
         INSERT INTO capture_sources
@@ -158,7 +161,7 @@ fn upsert_imported_capture_source_tx(tx: &Transaction<'_>, source: &CaptureSourc
     Ok(())
 }
 
-fn upsert_session_tx(tx: &Transaction<'_>, session: &Session) -> Result<()> {
+fn upsert_session_tx(tx: &ArchiveWriteTransaction<'_>, session: &Session) -> Result<()> {
     tx.execute(
         r#"
         INSERT INTO sessions
@@ -216,7 +219,7 @@ fn upsert_session_tx(tx: &Transaction<'_>, session: &Session) -> Result<()> {
     Ok(())
 }
 
-fn upsert_run_tx(tx: &Transaction<'_>, run: &Run) -> Result<()> {
+fn upsert_run_tx(tx: &ArchiveWriteTransaction<'_>, run: &Run) -> Result<()> {
     tx.execute(
         r#"
         INSERT INTO runs
@@ -270,7 +273,7 @@ fn upsert_run_tx(tx: &Transaction<'_>, run: &Run) -> Result<()> {
     Ok(())
 }
 
-fn upsert_event_tx(tx: &Transaction<'_>, event: &Event) -> Result<Uuid> {
+fn upsert_event_tx(tx: &ArchiveWriteTransaction<'_>, event: &Event) -> Result<Uuid> {
     let event_id = if let Some(dedupe_key) = &event.dedupe_key {
         if let Some(existing) = tx
             .query_row(
@@ -336,7 +339,7 @@ fn upsert_event_tx(tx: &Transaction<'_>, event: &Event) -> Result<Uuid> {
     Ok(event_id)
 }
 
-fn upsert_artifact_tx(tx: &Transaction<'_>, artifact: &Artifact) -> Result<Uuid> {
+fn upsert_artifact_tx(tx: &ArchiveWriteTransaction<'_>, artifact: &Artifact) -> Result<Uuid> {
     tx.execute(
         r#"
         INSERT INTO artifacts
@@ -383,7 +386,10 @@ fn upsert_artifact_tx(tx: &Transaction<'_>, artifact: &Artifact) -> Result<Uuid>
     .map_err(StoreError::from)
 }
 
-fn upsert_vcs_workspace_tx(tx: &Transaction<'_>, workspace: &VcsWorkspace) -> Result<Uuid> {
+fn upsert_vcs_workspace_tx(
+    tx: &ArchiveWriteTransaction<'_>,
+    workspace: &VcsWorkspace,
+) -> Result<Uuid> {
     tx.execute(
         r#"
         INSERT INTO vcs_workspaces
@@ -434,7 +440,7 @@ fn upsert_vcs_workspace_tx(tx: &Transaction<'_>, workspace: &VcsWorkspace) -> Re
     .map_err(StoreError::from)
 }
 
-fn upsert_vcs_change_tx(tx: &Transaction<'_>, change: &VcsChange) -> Result<Uuid> {
+fn upsert_vcs_change_tx(tx: &ArchiveWriteTransaction<'_>, change: &VcsChange) -> Result<Uuid> {
     tx.execute(
         r#"
         INSERT INTO vcs_changes
@@ -489,7 +495,7 @@ fn upsert_vcs_change_tx(tx: &Transaction<'_>, change: &VcsChange) -> Result<Uuid
 }
 
 pub(super) fn upsert_record_tx(
-    tx: &Transaction<'_>,
+    tx: &ArchiveWriteTransaction<'_>,
     record: &HistoryRecord,
     source_id: Option<Uuid>,
 ) -> Result<()> {
@@ -538,7 +544,7 @@ pub(super) fn upsert_record_tx(
     Ok(())
 }
 
-fn upsert_summary_tx(tx: &Transaction<'_>, summary: &Summary) -> Result<()> {
+fn upsert_summary_tx(tx: &ArchiveWriteTransaction<'_>, summary: &Summary) -> Result<()> {
     tx.execute(
         r#"
         INSERT INTO summaries
@@ -582,7 +588,7 @@ fn upsert_summary_tx(tx: &Transaction<'_>, summary: &Summary) -> Result<()> {
     Ok(())
 }
 
-fn upsert_file_touched_tx(tx: &Transaction<'_>, file: &FileTouched) -> Result<()> {
+fn upsert_file_touched_tx(tx: &ArchiveWriteTransaction<'_>, file: &FileTouched) -> Result<()> {
     tx.execute(
         r#"
         INSERT INTO files_touched
@@ -632,7 +638,10 @@ fn upsert_file_touched_tx(tx: &Transaction<'_>, file: &FileTouched) -> Result<()
     Ok(())
 }
 
-fn upsert_history_record_link_tx(tx: &Transaction<'_>, link: &HistoryRecordLink) -> Result<Uuid> {
+fn upsert_history_record_link_tx(
+    tx: &ArchiveWriteTransaction<'_>,
+    link: &HistoryRecordLink,
+) -> Result<Uuid> {
     tx.execute(
         r#"
         INSERT INTO history_record_links

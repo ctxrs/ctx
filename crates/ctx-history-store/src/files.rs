@@ -32,6 +32,10 @@ impl FileTouchScope {
 
 impl Store {
     pub fn upsert_file_touched(&self, file: &FileTouched) -> Result<()> {
+        self.with_write_transaction(|| self.upsert_file_touched_inner(file))
+    }
+
+    fn upsert_file_touched_inner(&self, file: &FileTouched) -> Result<()> {
         self.conn.execute(
                 r#"
                 INSERT INTO files_touched

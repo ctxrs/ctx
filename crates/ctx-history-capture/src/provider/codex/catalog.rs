@@ -21,6 +21,9 @@ use crate::{
 };
 
 use crate::provider::codex::session::{apply_codex_session_import_bounds, contains_bytes};
+use crate::provider::importer::ProviderImportTransaction;
+#[cfg(test)]
+use crate::provider::importer::IMPORT_TRANSACTION_BATCH_UNITS;
 
 pub fn catalog_codex_session_tree(
     root: impl AsRef<Path>,
@@ -52,11 +55,17 @@ pub fn catalog_codex_session_tree(
         .into_iter()
         .map(|session| (session.source_path.clone(), session))
         .collect::<BTreeMap<_, _>>();
+    let stale_paths = store
+        .list_stale_catalog_source_paths(CaptureProvider::Codex, &source_root)?
+        .into_iter()
+        .collect::<BTreeSet<_>>();
     let mut current_paths = Vec::with_capacity(paths.len());
     let mut cached_sessions = Vec::new();
     let mut paths_to_parse = Vec::new();
     let mut metadata_failures = Vec::new();
     for path in paths {
+        let source_path = path.display().to_string();
+        current_paths.push(source_path.clone());
         let metadata = match fs::metadata(&path) {
             Ok(metadata) => metadata,
             Err(err) => {
@@ -67,8 +76,6 @@ pub fn catalog_codex_session_tree(
         };
         summary.source_files += 1;
         summary.source_bytes = summary.source_bytes.saturating_add(metadata.len());
-        let source_path = path.display().to_string();
-        current_paths.push(source_path.clone());
         if let Some(session) = cached_catalog_session_if_unchanged(
             existing.get(&source_path),
             &metadata,
@@ -86,18 +93,22 @@ pub fn catalog_codex_session_tree(
             .cloned()
             .map(|error| ProviderImportFailure { line: 0, error }),
     );
-    let stale_session_count =
-        store.catalog_source_stale_session_count(CaptureProvider::Codex, &source_root)?;
     let current_path_set = current_paths.iter().cloned().collect::<BTreeSet<_>>();
-    let has_missing_existing_paths = existing
+    let missing_paths = existing
         .keys()
-        .any(|source_path| !current_path_set.contains(source_path));
+        .filter(|source_path| {
+            !stale_paths.contains(*source_path) && !current_path_set.contains(*source_path)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let has_reappeared_stale_paths = current_path_set
+        .iter()
+        .any(|source_path| stale_paths.contains(source_path));
     if paths_to_parse.is_empty()
         && metadata_failures.is_empty()
         && cached_sessions.len() == current_paths.len()
-        && existing.len() == current_paths.len()
-        && !has_missing_existing_paths
-        && stale_session_count == 0
+        && missing_paths.is_empty()
+        && !has_reappeared_stale_paths
     {
         summary.cataloged_sessions = cached_sessions.len();
         return Ok(summary);
@@ -114,35 +125,16 @@ pub fn catalog_codex_session_tree(
     let parsed_session_count = sessions.len();
     let cached_session_count = cached_sessions.len();
     let mut sessions_to_persist = sessions;
-    if stale_session_count > 0 {
-        sessions_to_persist.extend(cached_sessions);
-    }
+    sessions_to_persist.extend(
+        cached_sessions
+            .iter()
+            .filter(|session| stale_paths.contains(&session.source_path))
+            .cloned(),
+    );
     summary.cataloged_sessions = parsed_session_count.saturating_add(cached_session_count);
 
-    store.begin_immediate_batch()?;
-    let persist = (|| -> Result<()> {
-        if !sessions_to_persist.is_empty() {
-            store.upsert_catalog_sessions(&sessions_to_persist)?;
-        }
-        if stale_session_count > 0 || has_missing_existing_paths {
-            store.mark_catalog_source_missing_paths_stale(
-                CaptureProvider::Codex,
-                &source_root,
-                &current_paths,
-                cataloged_at_ms,
-            )?;
-        }
-        Ok(())
-    })();
-    match persist {
-        Ok(()) => {
-            store.commit_batch()?;
-        }
-        Err(err) => {
-            let _ = store.rollback_batch();
-            return Err(err);
-        }
-    }
+    persist_catalog_sessions_in_slices(store, &sessions_to_persist)?;
+    finalize_catalog_missing_paths(store, &source_root, &missing_paths, cataloged_at_ms)?;
     Ok(summary)
 }
 
@@ -163,10 +155,67 @@ pub fn catalog_codex_session_files(
         catalog_codex_session_paths(paths, &source_root, cataloged_at_ms, options.parallelism)?;
     let mut summary = scan_summary;
     summary.cataloged_sessions = sessions.len();
-    if !sessions.is_empty() {
-        store.upsert_catalog_sessions(&sessions)?;
-    }
+    persist_catalog_sessions_in_slices(store, &sessions)?;
     Ok(summary)
+}
+
+fn persist_catalog_sessions_in_slices(store: &Store, sessions: &[CatalogSession]) -> Result<()> {
+    let mut transaction = ProviderImportTransaction::begin_bounded(store, !sessions.is_empty())?;
+    for (_index, session) in sessions.iter().enumerate() {
+        let unit_bytes = catalog_session_estimated_len(session);
+        transaction.prepare_unit(store, unit_bytes)?;
+        if let Err(error) = store.upsert_catalog_sessions(std::slice::from_ref(session)) {
+            transaction.rollback(store);
+            return Err(error.into());
+        }
+        transaction.record_unit(store, unit_bytes)?;
+        #[cfg(test)]
+        if std::env::var_os("CTX_TEST_CODEX_CATALOG_CRASH_AFTER_FIRST_SLICE").is_some()
+            && _index + 1 == IMPORT_TRANSACTION_BATCH_UNITS
+        {
+            std::process::exit(87);
+        }
+    }
+    transaction.commit(store)
+}
+
+fn finalize_catalog_missing_paths(
+    store: &Store,
+    source_root: &str,
+    missing_paths: &[String],
+    cataloged_at_ms: i64,
+) -> Result<()> {
+    let mut transaction =
+        ProviderImportTransaction::begin_bounded(store, !missing_paths.is_empty())?;
+    for path in missing_paths {
+        transaction.prepare_unit(store, path.len())?;
+        if let Err(error) = store.mark_catalog_source_paths_stale(
+            CaptureProvider::Codex,
+            source_root,
+            std::slice::from_ref(path),
+            cataloged_at_ms,
+        ) {
+            transaction.rollback(store);
+            return Err(error.into());
+        }
+        transaction.record_unit(store, path.len())?;
+    }
+    transaction.commit(store)
+}
+
+fn catalog_session_estimated_len(session: &CatalogSession) -> usize {
+    let optional_len = |value: &Option<String>| value.as_ref().map_or(0, String::len);
+    session
+        .source_format
+        .len()
+        .saturating_add(session.source_root.len())
+        .saturating_add(session.source_path.len())
+        .saturating_add(optional_len(&session.external_session_id))
+        .saturating_add(optional_len(&session.parent_external_session_id))
+        .saturating_add(optional_len(&session.role_hint))
+        .saturating_add(optional_len(&session.external_agent_id))
+        .saturating_add(optional_len(&session.cwd))
+        .saturating_add(session.metadata.to_string().len())
 }
 
 pub(crate) fn cached_catalog_session_if_unchanged(

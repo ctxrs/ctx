@@ -44,22 +44,19 @@ const FTS_BULK_CRISISMERGE: i64 = 1_000_000;
 const FTS_MERGE_PAGE_BUDGET: i64 = 16;
 const BULK_LOCK_SUFFIX: &str = ".event-search-bulk.lock.sqlite";
 
-/// Owns the cross-process lock for one event-search bulk operation.
+/// Tracks one local event-search bulk scope.
 ///
-/// SQLite releases the sidecar database's writer lock if the process exits,
-/// including after an unclean exit. The guard intentionally cannot be cloned.
+/// Cross-process FTS ownership is acquired only with the global writer lease
+/// for each relational transaction. No sidecar lock survives a slice handoff.
 pub struct EventSearchBulkGuard {
-    lock_conn: Option<Connection>,
     store_path: PathBuf,
     depth: Arc<AtomicUsize>,
     depth_counted: bool,
+    outer: bool,
 }
 
 impl Drop for EventSearchBulkGuard {
     fn drop(&mut self) {
-        if let Some(lock_conn) = &self.lock_conn {
-            let _ = lock_conn.execute_batch("ROLLBACK");
-        }
         if self.depth_counted {
             self.depth.fetch_sub(1, Ordering::SeqCst);
         }
@@ -67,63 +64,37 @@ impl Drop for EventSearchBulkGuard {
 }
 
 impl Store {
-    /// Acquire the bulk-import lock and persist merge suppression.
+    /// Enter bulk mode and persist merge suppression in one admitted slice.
     pub fn begin_event_search_bulk_mode(&self) -> Result<EventSearchBulkGuard> {
-        if self.event_search_bulk_depth.fetch_add(1, Ordering::SeqCst) > 0 {
+        let outer = self.event_search_bulk_depth.fetch_add(1, Ordering::SeqCst) == 0;
+        if !outer {
             return Ok(EventSearchBulkGuard {
-                lock_conn: None,
                 store_path: self.path.clone(),
                 depth: Arc::clone(&self.event_search_bulk_depth),
                 depth_counted: true,
+                outer: false,
             });
         }
-        let acquired = match self.acquire_event_search_bulk_lock(self.busy_timeout) {
-            Ok(acquired) => acquired,
-            Err(error) => {
-                self.event_search_bulk_depth.fetch_sub(1, Ordering::SeqCst);
-                return Err(error);
-            }
-        };
-        let mut guard = match acquired {
-            Some(guard) => guard,
-            None => {
-                self.event_search_bulk_depth.fetch_sub(1, Ordering::SeqCst);
-                return Err(StoreError::BulkSearchImportBusy);
-            }
-        };
-        guard.depth_counted = true;
-        self.begin_immediate_batch()?;
-        let result = (|| {
-            ensure_search_projection_stats_table(self)?;
-            if !bulk_mode_pending(self)? {
-                for table in EVENT_SEARCH_FTS_TABLES {
-                    if !table_exists(&self.conn, table)? {
-                        continue;
-                    }
-                    save_bulk_mode_config(
-                        self,
-                        &format!("{BULK_MODE_AUTOMERGE_KEY_PREFIX}{table}"),
-                        fts_config_value(self, table, "automerge", FTS_AUTOMERGE_DEFAULT)?,
-                    )?;
-                    save_bulk_mode_config(
-                        self,
-                        &format!("{BULK_MODE_CRISISMERGE_KEY_PREFIX}{table}"),
-                        fts_config_value(self, table, "crisismerge", FTS_CRISISMERGE_DEFAULT)?,
-                    )?;
-                }
-                save_bulk_mode_config(self, BULK_MODE_MARKER_KEY, 1)?;
-            }
-            suppress_event_search_merges(self)
-        })();
-        if let Err(err) = result {
-            let _ = self.rollback_batch();
-            return Err(err);
+        if let Err(error) = self.begin_event_search_batch(false) {
+            self.event_search_bulk_depth.fetch_sub(1, Ordering::SeqCst);
+            return Err(error);
         }
-        if let Err(err) = self.commit_batch() {
+        if let Err(error) = self.prepare_active_event_search_bulk_transaction() {
             let _ = self.rollback_batch();
-            return Err(err);
+            self.event_search_bulk_depth.fetch_sub(1, Ordering::SeqCst);
+            return Err(error);
         }
-        Ok(guard)
+        if let Err(error) = self.commit_batch() {
+            let _ = self.rollback_batch();
+            self.event_search_bulk_depth.fetch_sub(1, Ordering::SeqCst);
+            return Err(error);
+        }
+        Ok(EventSearchBulkGuard {
+            store_path: self.path.clone(),
+            depth: Arc::clone(&self.event_search_bulk_depth),
+            depth_counted: true,
+            outer: true,
+        })
     }
 
     /// Run one bounded positive-merge slice for pending bulk segments.
@@ -137,7 +108,7 @@ impl Store {
         if guard.store_path != self.path {
             return Err(StoreError::InvalidBulkSearchGuard);
         }
-        if guard.lock_conn.is_none() {
+        if !guard.outer {
             return Ok(());
         }
         if guard.depth_counted && guard.depth.load(Ordering::SeqCst) != 1 {
@@ -146,7 +117,7 @@ impl Store {
         if !bulk_mode_pending(self)? {
             return Ok(());
         }
-        let _ = self.finish_event_search_bulk_mode_step()?;
+        let _ = self.finish_event_search_bulk_mode_step(false)?;
         Ok(())
     }
 
@@ -158,23 +129,13 @@ impl Store {
         if !bulk_mode_pending(self)? {
             return Ok(false);
         }
-        let Some(guard) = self.acquire_event_search_bulk_lock(self.busy_timeout)? else {
-            return Ok(true);
-        };
-        if bulk_mode_pending(self)? {
-            self.finish_event_search_bulk_mode(&guard)?;
-        }
+        let _ = self.finish_event_search_bulk_mode_step(true)?;
         bulk_mode_pending(self)
     }
 
     pub(crate) fn merge_all_fts_tables_bounded(&self) -> Result<()> {
-        // Serialize unconditionally. Reading the marker before acquiring the
-        // lock would let a new bulk import start in the handoff window.
-        let guard = self
-            .acquire_event_search_bulk_lock(self.busy_timeout)?
-            .ok_or(StoreError::BulkSearchImportBusy)?;
-        if bulk_mode_pending(self)? {
-            self.finish_event_search_bulk_mode(&guard)?;
+        while bulk_mode_pending(self)? {
+            let _ = self.finish_event_search_bulk_mode_step(false)?;
         }
         for table in ALL_FTS_TABLES {
             self.merge_fts_table_bounded(table, true)?;
@@ -205,7 +166,9 @@ impl Store {
     }
 
     fn merge_fts_table_step(&self, table: &'static str, page_budget: i64) -> Result<bool> {
-        self.begin_immediate_batch()?;
+        if !self.begin_event_search_batch(false)? {
+            unreachable!("blocking FTS maintenance returned without a lease");
+        }
         let result = merge_fts_table_in_transaction(self, table, page_budget);
         let changed = match result {
             Ok(changed) => changed,
@@ -218,44 +181,17 @@ impl Store {
             let _ = self.rollback_batch();
             return Err(err);
         }
-        self.checkpoint_wal_for_pressure()?;
+        self.checkpoint_event_search_slice(false)?;
         Ok(changed)
     }
 
-    /// Perform one bounded merge on both tables from the same writer snapshot.
-    /// A quiescent pass is checkpointed before a second locked pass may restore
-    /// settings, so a failed large-WAL checkpoint always leaves recovery marked.
-    fn finish_event_search_bulk_mode_step(&self) -> Result<bool> {
-        self.begin_immediate_batch()?;
-        let result = (|| {
-            if !bulk_mode_pending(self)? {
-                return Ok(true);
-            }
-            Ok(!merge_event_search_tables_in_transaction(self)?)
-        })();
-        let quiescent = match result {
-            Ok(quiescent) => quiescent,
-            Err(err) => {
-                let _ = self.rollback_batch();
-                return Err(err);
-            }
-        };
-        if let Err(err) = self.commit_batch() {
-            let _ = self.rollback_batch();
-            return Err(err);
+    /// Perform one bounded merge transaction on both tables from the same
+    /// writer snapshot. A quiescent transaction restores settings and clears
+    /// the marker while the canonical writer/FTS locks are still held.
+    fn finish_event_search_bulk_mode_step(&self, nonblocking: bool) -> Result<Option<bool>> {
+        if !self.begin_event_search_batch(nonblocking)? {
+            return Ok(None);
         }
-        self.checkpoint_wal_for_pressure()?;
-        if !quiescent {
-            return Ok(false);
-        }
-        self.restore_event_search_bulk_mode_if_quiescent()
-    }
-
-    /// Recheck both tables and restore settings while holding one writer lock.
-    /// If the final config-only checkpoint is pinned, the preceding potentially
-    /// large merge WAL has already been truncated successfully.
-    fn restore_event_search_bulk_mode_if_quiescent(&self) -> Result<bool> {
-        self.begin_immediate_batch()?;
         let result = (|| {
             if !bulk_mode_pending(self)? {
                 return Ok(true);
@@ -278,33 +214,80 @@ impl Store {
             let _ = self.rollback_batch();
             return Err(err);
         }
-        self.checkpoint_wal_for_pressure()?;
-        Ok(finished)
+        self.checkpoint_event_search_slice(nonblocking)?;
+        Ok(Some(finished))
     }
 
-    fn acquire_event_search_bulk_lock(
-        &self,
-        busy_timeout: Duration,
-    ) -> Result<Option<EventSearchBulkGuard>> {
+    fn checkpoint_event_search_slice(&self, nonblocking: bool) -> Result<()> {
+        if nonblocking {
+            let _ = self.try_checkpoint_wal_for_pressure()?;
+        } else {
+            self.checkpoint_wal_for_pressure()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn event_search_bulk_mode_active(&self) -> bool {
+        self.event_search_bulk_depth.load(Ordering::SeqCst) > 0
+    }
+
+    pub(crate) fn prepare_active_event_search_bulk_transaction(&self) -> Result<()> {
+        ensure_search_projection_stats_table(self)?;
+        if !bulk_mode_pending(self)? {
+            for table in EVENT_SEARCH_FTS_TABLES {
+                if !table_exists(&self.conn, table)? {
+                    continue;
+                }
+                save_bulk_mode_config(
+                    self,
+                    &format!("{BULK_MODE_AUTOMERGE_KEY_PREFIX}{table}"),
+                    fts_config_value(self, table, "automerge", FTS_AUTOMERGE_DEFAULT)?,
+                )?;
+                save_bulk_mode_config(
+                    self,
+                    &format!("{BULK_MODE_CRISISMERGE_KEY_PREFIX}{table}"),
+                    fts_config_value(self, table, "crisismerge", FTS_CRISISMERGE_DEFAULT)?,
+                )?;
+            }
+            save_bulk_mode_config(self, BULK_MODE_MARKER_KEY, 1)?;
+        }
+        suppress_event_search_merges(self)
+    }
+
+    pub(crate) fn acquire_event_search_transaction_lock(&self, nonblocking: bool) -> Result<bool> {
+        if self.event_search_transaction_lock.borrow().is_some() {
+            return Ok(true);
+        }
         let lock_path = event_search_bulk_lock_path(&self.path);
         let lock_conn = Connection::open(&lock_path)?;
         restrict_private_file(&lock_path)?;
-        lock_conn.busy_timeout(busy_timeout)?;
+        lock_conn.busy_timeout(if nonblocking {
+            Duration::ZERO
+        } else {
+            self.busy_timeout
+        })?;
         let result = lock_conn.execute_batch(
             "PRAGMA journal_mode=DELETE;\
              CREATE TABLE IF NOT EXISTS bulk_search_lock (id INTEGER PRIMARY KEY);\
              BEGIN IMMEDIATE",
         );
         match result {
-            Ok(()) => Ok(Some(EventSearchBulkGuard {
-                lock_conn: Some(lock_conn),
-                store_path: self.path.clone(),
-                depth: Arc::clone(&self.event_search_bulk_depth),
-                depth_counted: false,
-            })),
-            Err(err) if sqlite_is_busy(&err) => Ok(None),
+            Ok(()) => {
+                *self.event_search_transaction_lock.borrow_mut() = Some(lock_conn);
+                Ok(true)
+            }
+            Err(err) if sqlite_is_busy(&err) => Ok(false),
             Err(err) => Err(err.into()),
         }
+    }
+
+    pub(crate) fn release_event_search_transaction_lock(&self, commit: bool) -> Result<()> {
+        let Some(lock_conn) = self.event_search_transaction_lock.borrow_mut().take() else {
+            return Ok(());
+        };
+        let statement = if commit { "COMMIT" } else { "ROLLBACK" };
+        lock_conn.execute_batch(statement)?;
+        Ok(())
     }
 }
 

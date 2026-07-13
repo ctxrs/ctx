@@ -11,6 +11,10 @@ use crate::{Result, Store, StoreError};
 
 impl Store {
     pub fn upsert_artifact(&self, artifact: &Artifact) -> Result<Uuid> {
+        self.with_write_transaction(|| self.upsert_artifact_inner(artifact))
+    }
+
+    fn upsert_artifact_inner(&self, artifact: &Artifact) -> Result<Uuid> {
         self.conn.execute(
                 r#"
                 INSERT INTO artifacts

@@ -13,6 +13,10 @@ use crate::{Result, Store, StoreError};
 
 impl Store {
     pub fn upsert_capture_source(&self, source: &CaptureSource) -> Result<()> {
+        self.with_write_transaction(|| self.upsert_capture_source_inner(source))
+    }
+
+    fn upsert_capture_source_inner(&self, source: &CaptureSource) -> Result<()> {
         self.conn.execute(
             r#"
                 INSERT INTO capture_sources

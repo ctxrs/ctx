@@ -347,7 +347,7 @@ pub(crate) fn run_import(
     let json = args.json;
     let progress = args.progress;
     let db_path = database_path(data_root.clone());
-    let admission = IndexingAdmission::acquire(&db_path, IndexingWorkClass::Foreground)?;
+    let admission = IndexingAdmission::acquire(&db_path, bulk_import_work_class())?;
     let report = match run_import_internal(
         &args,
         data_root,
@@ -381,6 +381,10 @@ pub(crate) fn run_import(
         return Err(anyhow!("all import sources failed{detail}"));
     }
     Ok(())
+}
+
+fn bulk_import_work_class() -> IndexingWorkClass {
+    IndexingWorkClass::Background
 }
 
 pub(crate) fn insert_import_report_analytics(
@@ -808,4 +812,14 @@ pub(crate) fn large_import_notice(
         plural(planned_total_files, "file", "files"),
         format_bytes(planned_total_bytes)
     ))
+}
+
+#[cfg(test)]
+mod work_class_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_bulk_import_is_quiet_and_preemptible() {
+        assert_eq!(bulk_import_work_class(), IndexingWorkClass::Background);
+    }
 }

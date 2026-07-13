@@ -1,5 +1,5 @@
 use ctx_history_core::{CaptureProvider, Event, EventRole, EventType};
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
 use crate::connection::{
@@ -39,6 +39,10 @@ impl Store {
     }
 
     pub fn upsert_event(&self, event: &Event) -> Result<Uuid> {
+        self.with_write_transaction(|| self.upsert_event_inner(event))
+    }
+
+    fn upsert_event_inner(&self, event: &Event) -> Result<Uuid> {
         let event_id = if let Some(dedupe_key) = &event.dedupe_key {
             reject_provider_event_hash_conflict(&self.conn, dedupe_key)?;
             if let Some(existing_id) = self
@@ -117,6 +121,10 @@ impl Store {
     }
 
     pub fn insert_event_if_absent(&self, event: &Event) -> Result<bool> {
+        self.with_write_transaction(|| self.insert_event_if_absent_inner(event))
+    }
+
+    fn insert_event_if_absent_inner(&self, event: &Event) -> Result<bool> {
         let changed = self
                 .conn
                 .prepare_cached(
@@ -349,24 +357,6 @@ pub(crate) fn reject_provider_event_hash_conflict(
     let prefix = provider_event_dedupe_key_prefix(&parsed);
     let upper_bound = provider_event_dedupe_key_upper_bound(&prefix);
     let mut stmt = conn.prepare(
-        "SELECT dedupe_key FROM events
-         WHERE dedupe_key >= ?1 AND dedupe_key < ?2
-         ORDER BY dedupe_key",
-    )?;
-    let rows = stmt.query_map(params![prefix, upper_bound], |row| row.get::<_, String>(0))?;
-    reject_provider_event_hash_conflict_from_rows(dedupe_key, rows)
-}
-
-pub(crate) fn reject_provider_event_hash_conflict_tx(
-    tx: &Transaction<'_>,
-    dedupe_key: &str,
-) -> Result<()> {
-    let Some(parsed) = parse_provider_event_dedupe_key(dedupe_key) else {
-        return Ok(());
-    };
-    let prefix = provider_event_dedupe_key_prefix(&parsed);
-    let upper_bound = provider_event_dedupe_key_upper_bound(&prefix);
-    let mut stmt = tx.prepare(
         "SELECT dedupe_key FROM events
          WHERE dedupe_key >= ?1 AND dedupe_key < ?2
          ORDER BY dedupe_key",

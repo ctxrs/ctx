@@ -1,4 +1,5 @@
 use super::*;
+use crate::commands::import::catalog::source_uses_incremental_event_search;
 use crate::commands::import::manifest::{
     collect_source_import_files, persist_source_import_files, source_uses_import_file_manifest,
 };

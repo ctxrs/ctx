@@ -46,6 +46,7 @@ pub use work_control::{
 };
 
 use std::{
+    cell::RefCell,
     path::PathBuf,
     sync::{atomic::AtomicUsize, Arc},
     time::Duration,
@@ -61,7 +62,9 @@ pub struct Store {
     conn: Connection,
     busy_timeout: Duration,
     event_search_bulk_depth: Arc<AtomicUsize>,
+    event_search_transaction_lock: RefCell<Option<Connection>>,
     indexing_admission: Option<IndexingAdmission>,
+    indexing_writer_lease: RefCell<Option<work_control::IndexingWriterLease>>,
 }
 
 #[cfg(test)]

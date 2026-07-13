@@ -30,7 +30,22 @@ and also when measured WAL growth reaches 8 MiB or a transaction reaches its
 snapshots; a busy checkpoint ends the current slice and is retried later rather
 than failing already-committed import work. Event-search merge suppression may
 span a whole source, including manifested per-file imports, but recovery and
-finalization advance one admitted positive-merge slice at a time.
+finalization advance one admitted positive-merge slice at a time. The global
+writer lease is scoped to relational transactions and checkpoints; source
+discovery, file parsing before persistence, and vector/model preparation remain
+outside it.
+
+Setup and explicit bulk import both use the quiet background work class even
+when they display foreground progress. They yield at every bounded slice;
+foreground admission is reserved for short user-blocking freshness work such
+as `search --refresh wait`.
+
+Codex catalog and provider-manifest inventory persist only changed or new rows
+in these same bounded slices. After discovery, they compute the exact active
+paths that are now missing and update only those keys in bounded slices. A
+crash during changed-row persistence therefore cannot stale unseen rows, and a
+one-path deletion does not require rewriting or staging the full inventory.
+Quiet Codex catalog work uses one parser.
 
 Routine setup, import, and refresh must not issue a negative FTS merge or
 optimize the corpus-wide search index. Full merge is explicit maintenance only.

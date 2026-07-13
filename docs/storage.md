@@ -141,10 +141,14 @@ Heavy writable indexing uses one internal cross-process writer lane per ctx
 store. The lane and its foreground-priority gate are private lock sidecars next
 to `work.sqlite`; the operating system releases them when a process exits, so
 an interrupted writer does not require stale-PID cleanup. There is no command,
-flag, or configuration setting for this policy.
+flag, or configuration setting for this policy. Discovery, transcript parsing,
+model preparation, and vector-only work do not own the lane. A scoped lease
+covers each relational transaction or checkpoint and is released at every
+slice boundary.
 
-Interactive `search --refresh wait` work is foreground. Setup, daemon refresh,
-and semantic catch-up are quiet background work. Background work hands off
+Interactive `search --refresh wait` work is foreground. Setup, explicit bulk
+import, daemon refresh, and semantic catch-up are quiet background work even
+when the command displays progress in the foreground. Background work hands off
 between bounded slices and limits itself to a 25 percent active duty cycle even
 when memory and disk emergency signals remain healthy. Missing resource signals
 cause conservative handoffs.
@@ -157,12 +161,21 @@ attempt, releases admission at the slice boundary, and retries in later work.
 Committed batches are not reported as failed because a reader delayed WAL
 truncation.
 
+First-run Codex catalog rows and provider file manifests use the same bounded
+write slices. They upsert only changed or new rows, then update the exact active
+keys found missing by the completed discovery pass in separate bounded slices.
+A crash during changed-row persistence leaves unseen rows live; one deletion
+costs one stale-row update rather than a full-inventory rewrite or temporary
+table build. Quiet Codex catalog parsing uses one worker.
+
 Routine setup, import, and refresh do not optimize the corpus-wide FTS index.
 Bulk-mode FTS recovery runs one positive-merge slice only after write admission
-has been acquired; ordinary store open performs no hidden recovery. A crash-safe
-marker remains until later admitted opens or scheduled work finish the bounded
-maintenance. `ctx status` reports only coarse admission, pressure, WAL-band,
-and pending-maintenance state.
+has been acquired. The FTS sidecar lock is nested inside that transaction's
+writer lease and is released before the lease at handoff. Ordinary unadmitted
+store open performs no hidden recovery; an admitted open makes at most one
+nonblocking recovery attempt. A crash-safe marker remains until later admitted
+opens or scheduled work finish the bounded maintenance. `ctx status` reports
+only coarse admission, pressure, WAL-band, and pending-maintenance state.
 
 When `ctx daemon run` or setup/import autostart runs the ctx-owned background
 coordinator, it stores private lock/status files under `daemon/` in the ctx data

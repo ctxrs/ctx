@@ -12,6 +12,10 @@ use crate::{Result, Store, StoreError};
 
 impl Store {
     pub fn upsert_sync_cursor(&self, cursor: &SyncCursor) -> Result<Uuid> {
+        self.with_write_transaction(|| self.upsert_sync_cursor_inner(cursor))
+    }
+
+    fn upsert_sync_cursor_inner(&self, cursor: &SyncCursor) -> Result<Uuid> {
         if let Some(existing) =
             self.get_sync_cursor(cursor.team_id.as_deref(), &cursor.device_id, &cursor.stream)?
         {

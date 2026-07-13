@@ -2,7 +2,6 @@ use std::{
     fs::{self, File, OpenOptions},
     io,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard},
     thread,
     time::{Duration, Instant},
 };
@@ -23,6 +22,8 @@ pub const INDEXING_TRANSACTION_MAX: Duration = Duration::from_millis(250);
 
 const WRITER_LOCK_SUFFIX: &str = ".indexing-writer.lock";
 const FOREGROUND_LOCK_SUFFIX: &str = ".indexing-foreground.lock";
+// Keep retry wakeups well inside the 250 ms transaction handoff boundary.
+const BACKGROUND_ADMISSION_MAX_BACKOFF: Duration = Duration::from_millis(25);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IndexingWorkClass {
@@ -59,7 +60,6 @@ impl IndexingPressure {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct IndexingResourceSnapshot {
     pub available_memory_bytes: Option<u64>,
-    pub process_rss_bytes: Option<u64>,
     pub available_disk_bytes: Option<u64>,
     pub wal_bytes: Option<u64>,
 }
@@ -72,17 +72,18 @@ impl IndexingResourceSnapshot {
             .and_then(|parent| fs2::available_space(parent).ok());
         Self {
             available_memory_bytes,
-            process_rss_bytes: process_rss_bytes(),
             available_disk_bytes,
             wal_bytes,
         }
     }
 
     pub fn pressure(self) -> IndexingPressure {
-        let memory = match (self.available_memory_bytes, self.process_rss_bytes) {
-            (Some(available), Some(rss)) if available < rss => IndexingPressure::Constrained,
-            (Some(_), Some(_)) => IndexingPressure::Normal,
-            _ => IndexingPressure::Unknown,
+        let memory = match self.available_memory_bytes {
+            Some(available) if available < WAL_TRUNCATE_MIN_BYTES.saturating_mul(2) => {
+                IndexingPressure::Constrained
+            }
+            Some(_) => IndexingPressure::Normal,
+            None => IndexingPressure::Unknown,
         };
         let disk = match self.available_disk_bytes {
             Some(available) if available < WAL_TRUNCATE_MIN_BYTES.saturating_mul(2) => {
@@ -124,7 +125,8 @@ pub struct IndexingSlice {
 
 #[derive(Clone)]
 pub struct IndexingAdmission {
-    inner: Arc<Mutex<IndexingAdmissionState>>,
+    store_path: PathBuf,
+    class: IndexingWorkClass,
 }
 
 impl std::fmt::Debug for IndexingAdmission {
@@ -136,22 +138,13 @@ impl std::fmt::Debug for IndexingAdmission {
     }
 }
 
-struct IndexingAdmissionState {
-    class: IndexingWorkClass,
+pub(crate) struct IndexingWriterLease {
     writer: File,
-    foreground: File,
-    writer_locked: bool,
-    foreground_locked: bool,
 }
 
-impl Drop for IndexingAdmissionState {
+impl Drop for IndexingWriterLease {
     fn drop(&mut self) {
-        if self.writer_locked {
-            let _ = FileExt::unlock(&self.writer);
-        }
-        if self.foreground_locked {
-            let _ = FileExt::unlock(&self.foreground);
-        }
+        let _ = FileExt::unlock(&self.writer);
     }
 }
 
@@ -181,27 +174,13 @@ impl IndexingAdmission {
         if let Some(parent) = store_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let writer = open_lock_file(&lock_path(store_path, WRITER_LOCK_SUFFIX))?;
-        let foreground = open_lock_file(&lock_path(store_path, FOREGROUND_LOCK_SUFFIX))?;
-        let mut state = IndexingAdmissionState {
+        let admission = Self {
+            store_path: store_path.to_path_buf(),
             class,
-            writer,
-            foreground,
-            writer_locked: false,
-            foreground_locked: false,
         };
-        match class {
-            IndexingWorkClass::Foreground => {
-                FileExt::lock_exclusive(&state.foreground)?;
-                state.foreground_locked = true;
-                FileExt::lock_exclusive(&state.writer)?;
-                state.writer_locked = true;
-            }
-            IndexingWorkClass::Background => acquire_background_lane(&mut state)?,
-        }
-        Ok(Self {
-            inner: Arc::new(Mutex::new(state)),
-        })
+        open_lock_file(&admission.writer_lock_path())?;
+        open_lock_file(&admission.foreground_lock_path())?;
+        Ok(admission)
     }
 
     pub fn status(store_path: &Path) -> Result<IndexingAdmissionStatus> {
@@ -223,17 +202,19 @@ impl IndexingAdmission {
     }
 
     pub fn work_class(&self) -> IndexingWorkClass {
-        self.state().class
+        self.class
     }
 
     pub fn foreground_pending(&self) -> bool {
-        let state = self.state();
-        if state.class == IndexingWorkClass::Foreground {
+        if self.class == IndexingWorkClass::Foreground {
             return false;
         }
-        match FileExt::try_lock_shared(&state.foreground) {
+        let Ok(foreground) = open_lock_file(&self.foreground_lock_path()) else {
+            return true;
+        };
+        match FileExt::try_lock_shared(&foreground) {
             Ok(()) => {
-                let _ = FileExt::unlock(&state.foreground);
+                let _ = FileExt::unlock(&foreground);
                 false
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => true,
@@ -241,34 +222,136 @@ impl IndexingAdmission {
         }
     }
 
-    fn yield_background(&self, active: Duration, max_rest: Option<Duration>) -> Result<()> {
-        let mut state = self.state();
-        if state.class != IndexingWorkClass::Background {
-            return Ok(());
+    pub(crate) fn lease(&self) -> Result<IndexingWriterLease> {
+        match self.class {
+            IndexingWorkClass::Foreground => self.acquire_foreground_lease(),
+            IndexingWorkClass::Background => {
+                let mut backoff = Duration::from_millis(1);
+                loop {
+                    if let Some(lease) = self.try_background_lease()? {
+                        return Ok(lease);
+                    }
+                    thread::sleep(backoff);
+                    backoff = backoff
+                        .saturating_mul(2)
+                        .min(BACKGROUND_ADMISSION_MAX_BACKOFF);
+                }
+            }
         }
-        if state.writer_locked {
-            FileExt::unlock(&state.writer)?;
-            state.writer_locked = false;
-        }
-        drop(state);
+    }
 
+    pub(crate) fn try_lease(&self) -> Result<Option<IndexingWriterLease>> {
+        match self.class {
+            IndexingWorkClass::Foreground => self.try_foreground_lease(),
+            IndexingWorkClass::Background => self.try_background_lease(),
+        }
+    }
+
+    fn acquire_foreground_lease(&self) -> Result<IndexingWriterLease> {
+        let foreground = open_lock_file(&self.foreground_lock_path())?;
+        let writer = open_lock_file(&self.writer_lock_path())?;
+        FileExt::lock_exclusive(&foreground)?;
+        if let Err(error) = FileExt::lock_exclusive(&writer) {
+            let _ = FileExt::unlock(&foreground);
+            return Err(error.into());
+        }
+        FileExt::unlock(&foreground)?;
+        Ok(IndexingWriterLease { writer })
+    }
+
+    fn try_foreground_lease(&self) -> Result<Option<IndexingWriterLease>> {
+        let foreground = open_lock_file(&self.foreground_lock_path())?;
+        let writer = open_lock_file(&self.writer_lock_path())?;
+        if !try_lock_exclusive(&foreground)? {
+            return Ok(None);
+        }
+        let writer_locked = try_lock_exclusive(&writer)?;
+        FileExt::unlock(&foreground)?;
+        Ok(writer_locked.then_some(IndexingWriterLease { writer }))
+    }
+
+    fn try_background_lease(&self) -> Result<Option<IndexingWriterLease>> {
+        let foreground = open_lock_file(&self.foreground_lock_path())?;
+        let writer = open_lock_file(&self.writer_lock_path())?;
+        if !try_lock_shared(&foreground)? {
+            return Ok(None);
+        }
+        let writer_locked = try_lock_exclusive(&writer)?;
+        FileExt::unlock(&foreground)?;
+        Ok(writer_locked.then_some(IndexingWriterLease { writer }))
+    }
+
+    fn writer_lock_path(&self) -> PathBuf {
+        lock_path(&self.store_path, WRITER_LOCK_SUFFIX)
+    }
+
+    fn foreground_lock_path(&self) -> PathBuf {
+        lock_path(&self.store_path, FOREGROUND_LOCK_SUFFIX)
+    }
+
+    fn rest_background(&self, active: Duration, max_rest: Option<Duration>) {
+        if self.class != IndexingWorkClass::Background {
+            return;
+        }
         let rest = background_rest_with_limit(active, max_rest);
         if !rest.is_zero() {
             thread::sleep(rest);
         }
-
-        let mut state = self.state();
-        acquire_background_lane(&mut state)
-    }
-
-    fn state(&self) -> MutexGuard<'_, IndexingAdmissionState> {
-        self.inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
 impl Store {
+    pub(crate) fn acquire_indexing_writer_lease(&self, nonblocking: bool) -> Result<bool> {
+        if self.indexing_writer_lease.borrow().is_some() {
+            return Ok(true);
+        }
+        let Some(admission) = &self.indexing_admission else {
+            return Ok(true);
+        };
+        let lease = if nonblocking {
+            admission.try_lease()?
+        } else {
+            Some(admission.lease()?)
+        };
+        let Some(lease) = lease else {
+            return Ok(false);
+        };
+        *self.indexing_writer_lease.borrow_mut() = Some(lease);
+        Ok(true)
+    }
+
+    pub(crate) fn release_indexing_writer_lease(&self) {
+        self.indexing_writer_lease.borrow_mut().take();
+    }
+
+    pub(crate) fn with_indexing_writer_lease<T>(
+        &self,
+        operation: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let already_held = self.indexing_writer_lease.borrow().is_some();
+        self.acquire_indexing_writer_lease(false)?;
+        let result = operation();
+        if !already_held {
+            self.release_indexing_writer_lease();
+        }
+        result
+    }
+
+    pub(crate) fn try_with_indexing_writer_lease<T>(
+        &self,
+        operation: impl FnOnce() -> Result<T>,
+    ) -> Result<Option<T>> {
+        let already_held = self.indexing_writer_lease.borrow().is_some();
+        if !self.acquire_indexing_writer_lease(true)? {
+            return Ok(None);
+        }
+        let result = operation();
+        if !already_held {
+            self.release_indexing_writer_lease();
+        }
+        result.map(Some)
+    }
+
     pub fn begin_indexing_slice(&self) -> Result<IndexingSlice> {
         Ok(IndexingSlice {
             started: Instant::now(),
@@ -303,16 +386,16 @@ impl Store {
     }
 
     pub fn finish_indexing_slice(&self, slice: IndexingSlice) -> Result<()> {
-        self.checkpoint_wal_for_pressure()?;
+        self.with_indexing_writer_lease(|| self.checkpoint_wal_for_pressure().map(|_| ()))?;
         if let Some(admission) = &self.indexing_admission {
-            admission.yield_background(slice.started.elapsed(), None)?;
+            admission.rest_background(slice.started.elapsed(), None);
         }
         Ok(())
     }
 
     pub fn yield_indexing_admission(&self, active: Duration) -> Result<()> {
         if let Some(admission) = &self.indexing_admission {
-            admission.yield_background(active, None)?;
+            admission.rest_background(active, None);
         }
         Ok(())
     }
@@ -323,7 +406,7 @@ impl Store {
         remaining: Option<Duration>,
     ) -> Result<()> {
         if let Some(admission) = &self.indexing_admission {
-            admission.yield_background(active, remaining)?;
+            admission.rest_background(active, remaining);
         }
         Ok(())
     }
@@ -333,21 +416,6 @@ impl Store {
             .as_ref()
             .map(IndexingAdmission::work_class)
     }
-}
-
-fn acquire_background_lane(state: &mut IndexingAdmissionState) -> Result<()> {
-    FileExt::lock_shared(&state.foreground)?;
-    if let Err(error) = FileExt::lock_exclusive(&state.writer) {
-        let _ = FileExt::unlock(&state.foreground);
-        return Err(error.into());
-    }
-    state.writer_locked = true;
-    if let Err(error) = FileExt::unlock(&state.foreground) {
-        let _ = FileExt::unlock(&state.writer);
-        state.writer_locked = false;
-        return Err(error.into());
-    }
-    Ok(())
 }
 
 fn background_rest(active: Duration) -> Duration {
@@ -401,89 +469,20 @@ fn lock_is_held(file: &File) -> Result<bool> {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn process_rss_bytes() -> Option<u64> {
-    let resident_pages = fs::read_to_string("/proc/self/statm")
-        .ok()?
-        .split_whitespace()
-        .nth(1)?
-        .parse::<u64>()
-        .ok()?;
-    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-    (page_size > 0).then(|| resident_pages.saturating_mul(page_size as u64))
+fn try_lock_exclusive(file: &File) -> Result<bool> {
+    match FileExt::try_lock_exclusive(file) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(false),
+        Err(error) => Err(StoreError::Io(error)),
+    }
 }
 
-#[cfg(any(target_os = "macos", target_os = "freebsd"))]
-fn process_rss_bytes() -> Option<u64> {
-    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
-    if unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) } != 0 {
-        return None;
+fn try_lock_shared(file: &File) -> Result<bool> {
+    match FileExt::try_lock_shared(file) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(false),
+        Err(error) => Err(StoreError::Io(error)),
     }
-    let rss = unsafe { usage.assume_init() }.ru_maxrss;
-    let rss = u64::try_from(rss).ok()?;
-    #[cfg(target_os = "macos")]
-    return Some(rss);
-    #[cfg(target_os = "freebsd")]
-    return Some(rss.saturating_mul(1024));
-}
-
-#[cfg(target_os = "windows")]
-fn process_rss_bytes() -> Option<u64> {
-    #[repr(C)]
-    struct ProcessMemoryCounters {
-        cb: u32,
-        page_fault_count: u32,
-        peak_working_set_size: usize,
-        working_set_size: usize,
-        quota_peak_paged_pool_usage: usize,
-        quota_paged_pool_usage: usize,
-        quota_peak_non_paged_pool_usage: usize,
-        quota_non_paged_pool_usage: usize,
-        pagefile_usage: usize,
-        peak_pagefile_usage: usize,
-    }
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn GetCurrentProcess() -> *mut std::ffi::c_void;
-    }
-    #[link(name = "psapi")]
-    extern "system" {
-        fn GetProcessMemoryInfo(
-            process: *mut std::ffi::c_void,
-            counters: *mut ProcessMemoryCounters,
-            size: u32,
-        ) -> i32;
-    }
-    let mut counters = ProcessMemoryCounters {
-        cb: std::mem::size_of::<ProcessMemoryCounters>() as u32,
-        page_fault_count: 0,
-        peak_working_set_size: 0,
-        working_set_size: 0,
-        quota_peak_paged_pool_usage: 0,
-        quota_paged_pool_usage: 0,
-        quota_peak_non_paged_pool_usage: 0,
-        quota_non_paged_pool_usage: 0,
-        pagefile_usage: 0,
-        peak_pagefile_usage: 0,
-    };
-    let result = unsafe {
-        GetProcessMemoryInfo(
-            GetCurrentProcess(),
-            &mut counters,
-            std::mem::size_of::<ProcessMemoryCounters>() as u32,
-        )
-    };
-    (result != 0).then(|| counters.working_set_size as u64)
-}
-
-#[cfg(not(any(
-    target_os = "linux",
-    target_os = "macos",
-    target_os = "freebsd",
-    target_os = "windows"
-)))]
-fn process_rss_bytes() -> Option<u64> {
-    None
 }
 
 #[cfg(target_os = "linux")]
@@ -620,9 +619,109 @@ fn meminfo_kib(line: &str, key: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc;
+    use std::{env, io::Write, process::Command, sync::mpsc};
 
     use super::*;
+
+    const PRIORITY_DB_ENV: &str = "CTX_TEST_PRIORITY_DB";
+    const PRIORITY_ROLE_ENV: &str = "CTX_TEST_PRIORITY_ROLE";
+    const PRIORITY_READY_ENV: &str = "CTX_TEST_PRIORITY_READY";
+    const PRIORITY_RELEASE_ENV: &str = "CTX_TEST_PRIORITY_RELEASE";
+    const PRIORITY_ORDER_ENV: &str = "CTX_TEST_PRIORITY_ORDER";
+
+    #[test]
+    fn admission_priority_child_helper() {
+        let Some(db_path) = env::var_os(PRIORITY_DB_ENV).map(PathBuf::from) else {
+            return;
+        };
+        let role = env::var(PRIORITY_ROLE_ENV).unwrap();
+        let class = if role == "foreground" {
+            IndexingWorkClass::Foreground
+        } else {
+            IndexingWorkClass::Background
+        };
+        let admission = IndexingAdmission::acquire(&db_path, class).unwrap();
+        let _lease = admission.lease().unwrap();
+        if role == "active" {
+            let ready = PathBuf::from(env::var_os(PRIORITY_READY_ENV).unwrap());
+            let release = PathBuf::from(env::var_os(PRIORITY_RELEASE_ENV).unwrap());
+            fs::write(ready, b"ready").unwrap();
+            while !release.exists() {
+                thread::sleep(Duration::from_millis(2));
+            }
+            return;
+        }
+        let order = PathBuf::from(env::var_os(PRIORITY_ORDER_ENV).unwrap());
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(order)
+            .unwrap();
+        writeln!(file, "{role}").unwrap();
+    }
+
+    #[test]
+    fn foreground_wins_multiprocess_handoff_over_queued_background() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("work.sqlite");
+        let ready = temp.path().join("ready");
+        let release = temp.path().join("release");
+        let order = temp.path().join("order");
+        let test_exe = env::current_exe().unwrap();
+        let child_args = [
+            "--exact",
+            "work_control::tests::admission_priority_child_helper",
+            "--nocapture",
+            "--test-threads=1",
+        ];
+        let mut active = Command::new(&test_exe)
+            .args(child_args)
+            .env(PRIORITY_DB_ENV, &db_path)
+            .env(PRIORITY_ROLE_ENV, "active")
+            .env(PRIORITY_READY_ENV, &ready)
+            .env(PRIORITY_RELEASE_ENV, &release)
+            .spawn()
+            .unwrap();
+        wait_for_path(&ready);
+
+        let mut queued = Command::new(&test_exe)
+            .args(child_args)
+            .env(PRIORITY_DB_ENV, &db_path)
+            .env(PRIORITY_ROLE_ENV, "background")
+            .env(PRIORITY_ORDER_ENV, &order)
+            .spawn()
+            .unwrap();
+        thread::sleep(Duration::from_millis(25));
+        let mut foreground = Command::new(&test_exe)
+            .args(child_args)
+            .env(PRIORITY_DB_ENV, &db_path)
+            .env(PRIORITY_ROLE_ENV, "foreground")
+            .env(PRIORITY_ORDER_ENV, &order)
+            .spawn()
+            .unwrap();
+
+        let observer = IndexingAdmission::acquire(&db_path, IndexingWorkClass::Background).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !observer.foreground_pending() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(observer.foreground_pending());
+        fs::write(&release, b"release").unwrap();
+
+        assert!(active.wait().unwrap().success());
+        assert!(foreground.wait().unwrap().success());
+        assert!(queued.wait().unwrap().success());
+        let order = fs::read_to_string(order).unwrap();
+        assert_eq!(order.lines().next(), Some("foreground"), "{order:?}");
+    }
+
+    fn wait_for_path(path: &Path) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !path.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert!(path.exists(), "timed out waiting for {}", path.display());
+    }
 
     #[test]
     fn resource_policy_is_conservative_for_missing_and_pressure_signals() {
@@ -633,7 +732,6 @@ mod tests {
         assert_eq!(
             IndexingResourceSnapshot {
                 available_memory_bytes: Some(99),
-                process_rss_bytes: Some(100),
                 available_disk_bytes: Some(WAL_TRUNCATE_MIN_BYTES * 4),
                 wal_bytes: Some(0),
             }
@@ -642,8 +740,7 @@ mod tests {
         );
         assert_eq!(
             IndexingResourceSnapshot {
-                available_memory_bytes: Some(200),
-                process_rss_bytes: Some(100),
+                available_memory_bytes: Some(WAL_TRUNCATE_MIN_BYTES * 4),
                 available_disk_bytes: Some(WAL_TRUNCATE_MIN_BYTES * 4),
                 wal_bytes: Some(WAL_PASSIVE_MIN_BYTES),
             }
@@ -674,13 +771,25 @@ mod tests {
         let db_path = temp.path().join("work.sqlite");
         let background =
             IndexingAdmission::acquire(&db_path, IndexingWorkClass::Background).unwrap();
+        let active_background = background.lease().unwrap();
+
+        let queued_background = background.clone();
+        let (background_acquired_tx, background_acquired_rx) = mpsc::channel();
+        let (release_background_tx, release_background_rx) = mpsc::channel();
+        let background_thread = thread::spawn(move || {
+            let _lease = queued_background.lease().unwrap();
+            background_acquired_tx.send(()).unwrap();
+            release_background_rx.recv().unwrap();
+        });
+
         let (foreground_acquired_tx, foreground_acquired_rx) = mpsc::channel();
         let (release_foreground_tx, release_foreground_rx) = mpsc::channel();
         let foreground_path = db_path.clone();
         let foreground = thread::spawn(move || {
-            let _admission =
+            let admission =
                 IndexingAdmission::acquire(&foreground_path, IndexingWorkClass::Foreground)
                     .unwrap();
+            let _lease = admission.lease().unwrap();
             foreground_acquired_tx.send(()).unwrap();
             release_foreground_rx.recv().unwrap();
         });
@@ -690,24 +799,48 @@ mod tests {
             thread::sleep(Duration::from_millis(1));
         }
         assert!(background.foreground_pending());
-
-        let yielding_background = background.clone();
-        let (background_reacquired_tx, background_reacquired_rx) = mpsc::channel();
-        let background_handoff = thread::spawn(move || {
-            yielding_background
-                .yield_background(Duration::from_millis(1), None)
-                .unwrap();
-            background_reacquired_tx.send(()).unwrap();
-        });
+        drop(active_background);
 
         foreground_acquired_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("foreground should acquire at the background slice boundary");
-        assert!(background_reacquired_rx.try_recv().is_err());
+        assert!(background_acquired_rx.try_recv().is_err());
         release_foreground_tx.send(()).unwrap();
         foreground.join().unwrap();
-        background_handoff.join().unwrap();
-        background_reacquired_rx.recv().unwrap();
+        background_acquired_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("queued background should resume after foreground");
+        release_background_tx.send(()).unwrap();
+        background_thread.join().unwrap();
+    }
+
+    #[test]
+    fn slow_inventory_preparation_without_a_lease_does_not_delay_foreground() {
+        assert_slow_preparation_does_not_delay_foreground();
+    }
+
+    #[test]
+    fn slow_vector_preparation_without_a_lease_does_not_delay_foreground() {
+        assert_slow_preparation_does_not_delay_foreground();
+    }
+
+    fn assert_slow_preparation_does_not_delay_foreground() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("work.sqlite");
+        let background =
+            IndexingAdmission::acquire(&db_path, IndexingWorkClass::Background).unwrap();
+        let preparation = thread::spawn(move || {
+            let _descriptor = background;
+            thread::sleep(Duration::from_millis(250));
+        });
+
+        let foreground =
+            IndexingAdmission::acquire(&db_path, IndexingWorkClass::Foreground).unwrap();
+        let started = Instant::now();
+        let lease = foreground.lease().unwrap();
+        assert!(started.elapsed() < Duration::from_millis(100));
+        drop(lease);
+        preparation.join().unwrap();
     }
 
     #[cfg(target_os = "linux")]

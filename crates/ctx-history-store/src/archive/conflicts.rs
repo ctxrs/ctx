@@ -4,12 +4,12 @@ use ctx_history_core::{
 };
 use std::collections::HashMap;
 
-use rusqlite::{params, OptionalExtension, Transaction};
+use rusqlite::{params, OptionalExtension};
 use uuid::Uuid;
 
 use crate::artifacts::{artifact_from_row, artifact_select_sql};
 use crate::events::{event_from_row, event_select_sql};
-use crate::events::{parse_provider_event_dedupe_key, reject_provider_event_hash_conflict_tx};
+use crate::events::{parse_provider_event_dedupe_key, reject_provider_event_hash_conflict};
 use crate::files::{file_touched_from_row, file_touched_select_sql};
 use crate::records::{history_record_link_from_row, history_record_link_select_sql};
 use crate::runs::{run_from_row, run_select_sql};
@@ -21,8 +21,10 @@ use crate::vcs::{
 };
 use crate::{Result, StoreError};
 
+use super::ArchiveWriteTransaction;
+
 pub(super) fn reject_import_conflicts(
-    tx: &Transaction<'_>,
+    tx: &ArchiveWriteTransaction<'_>,
     archive: &SessionHistoryArchive,
 ) -> Result<()> {
     for record in &archive.records {
@@ -38,7 +40,7 @@ pub(super) fn reject_import_conflicts(
 }
 
 pub(super) fn reject_capture_source_import_conflict(
-    tx: &Transaction<'_>,
+    tx: &ArchiveWriteTransaction<'_>,
     source_id: Uuid,
 ) -> Result<()> {
     if row_exists(tx, "capture_sources", source_id)? {
@@ -51,7 +53,7 @@ pub(super) fn reject_capture_source_import_conflict(
 }
 
 pub(super) fn reject_import_invariant_conflicts(
-    tx: &Transaction<'_>,
+    tx: &ArchiveWriteTransaction<'_>,
     archive: &SessionHistoryArchive,
 ) -> Result<()> {
     if archive.schema_version < 2 && archive.version < 2 {
@@ -60,13 +62,13 @@ pub(super) fn reject_import_invariant_conflicts(
 
     for event in &archive.events {
         if let Some(dedupe_key) = &event.dedupe_key {
-            reject_provider_event_hash_conflict_tx(tx, dedupe_key)?;
+            reject_provider_event_hash_conflict(tx, dedupe_key)?;
         }
     }
     Ok(())
 }
 
-fn row_exists(tx: &Transaction<'_>, table: &str, id: Uuid) -> Result<bool> {
+fn row_exists(tx: &ArchiveWriteTransaction<'_>, table: &str, id: Uuid) -> Result<bool> {
     let sql = format!("SELECT 1 FROM {table} WHERE id = ?1");
     Ok(tx
         .query_row(&sql, params![id.to_string()], |_| Ok(()))
@@ -75,7 +77,7 @@ fn row_exists(tx: &Transaction<'_>, table: &str, id: Uuid) -> Result<bool> {
 }
 
 fn reject_rich_import_conflicts(
-    tx: &Transaction<'_>,
+    tx: &ArchiveWriteTransaction<'_>,
     archive: &SessionHistoryArchive,
 ) -> Result<()> {
     if archive.schema_version < 2 && archive.version < 2 {
@@ -157,7 +159,7 @@ fn reject_rich_import_conflicts(
             event.id,
         )?;
         if let Some(dedupe_key) = &event.dedupe_key {
-            reject_provider_event_hash_conflict_tx(tx, dedupe_key)?;
+            reject_provider_event_hash_conflict(tx, dedupe_key)?;
             reject_entity_conflict(
                 existing_event_by_dedupe_key(tx, dedupe_key)?,
                 event,
@@ -274,7 +276,10 @@ fn reject_entity_conflict<T: PartialEq>(
     Ok(())
 }
 
-fn existing_capture_source_by_id(tx: &Transaction<'_>, id: Uuid) -> Result<Option<CaptureSource>> {
+fn existing_capture_source_by_id(
+    tx: &ArchiveWriteTransaction<'_>,
+    id: Uuid,
+) -> Result<Option<CaptureSource>> {
     tx.query_row(
         "SELECT id, kind, provider, machine_id, process_id, cwd, raw_source_path, source_format, source_root, source_identity, external_session_id, started_at_ms, ended_at_ms, fidelity, visibility, sync_state, sync_version, metadata_json FROM capture_sources WHERE id = ?1",
         params![id.to_string()],
@@ -284,7 +289,7 @@ fn existing_capture_source_by_id(tx: &Transaction<'_>, id: Uuid) -> Result<Optio
     .map_err(StoreError::from)
 }
 
-fn existing_session_by_id(tx: &Transaction<'_>, id: Uuid) -> Result<Option<Session>> {
+fn existing_session_by_id(tx: &ArchiveWriteTransaction<'_>, id: Uuid) -> Result<Option<Session>> {
     tx.query_row(
         session_select_sql("WHERE id = ?1").as_str(),
         params![id.to_string()],
@@ -295,7 +300,7 @@ fn existing_session_by_id(tx: &Transaction<'_>, id: Uuid) -> Result<Option<Sessi
 }
 
 fn existing_session_by_external_session(
-    tx: &Transaction<'_>,
+    tx: &ArchiveWriteTransaction<'_>,
     provider: CaptureProvider,
     external_session_id: &str,
 ) -> Result<Vec<Session>> {
@@ -313,7 +318,7 @@ fn existing_session_by_external_session(
 }
 
 fn existing_source_scoped_session_by_external_session(
-    tx: &Transaction<'_>,
+    tx: &ArchiveWriteTransaction<'_>,
     archive_sources: &HashMap<Uuid, &CaptureSource>,
     session: &Session,
 ) -> Result<Option<Session>> {
@@ -331,7 +336,7 @@ fn existing_source_scoped_session_by_external_session(
 }
 
 fn session_source(
-    tx: &Transaction<'_>,
+    tx: &ArchiveWriteTransaction<'_>,
     archive_sources: &HashMap<Uuid, &CaptureSource>,
     source_id: Option<Uuid>,
 ) -> Result<Option<CaptureSource>> {
@@ -345,7 +350,7 @@ fn session_source(
 }
 
 fn sessions_share_external_source(
-    tx: &Transaction<'_>,
+    tx: &ArchiveWriteTransaction<'_>,
     incoming_source: Option<&CaptureSource>,
     incoming: &Session,
     existing: &Session,
@@ -400,7 +405,7 @@ fn capture_sources_share_identity(left: &CaptureSource, right: &CaptureSource) -
     }
 }
 
-fn existing_run_by_id(tx: &Transaction<'_>, id: Uuid) -> Result<Option<Run>> {
+fn existing_run_by_id(tx: &ArchiveWriteTransaction<'_>, id: Uuid) -> Result<Option<Run>> {
     tx.query_row(
         run_select_sql("WHERE id = ?1").as_str(),
         params![id.to_string()],
@@ -410,7 +415,7 @@ fn existing_run_by_id(tx: &Transaction<'_>, id: Uuid) -> Result<Option<Run>> {
     .map_err(StoreError::from)
 }
 
-fn existing_event_by_id(tx: &Transaction<'_>, id: Uuid) -> Result<Option<Event>> {
+fn existing_event_by_id(tx: &ArchiveWriteTransaction<'_>, id: Uuid) -> Result<Option<Event>> {
     tx.query_row(
         event_select_sql("WHERE id = ?1").as_str(),
         params![id.to_string()],
@@ -420,7 +425,10 @@ fn existing_event_by_id(tx: &Transaction<'_>, id: Uuid) -> Result<Option<Event>>
     .map_err(StoreError::from)
 }
 
-fn existing_event_by_dedupe_key(tx: &Transaction<'_>, dedupe_key: &str) -> Result<Option<Event>> {
+fn existing_event_by_dedupe_key(
+    tx: &ArchiveWriteTransaction<'_>,
+    dedupe_key: &str,
+) -> Result<Option<Event>> {
     tx.query_row(
         event_select_sql("WHERE dedupe_key = ?1").as_str(),
         params![dedupe_key],
@@ -430,7 +438,7 @@ fn existing_event_by_dedupe_key(tx: &Transaction<'_>, dedupe_key: &str) -> Resul
     .map_err(StoreError::from)
 }
 
-fn existing_event_by_seq(tx: &Transaction<'_>, seq: u64) -> Result<Option<Event>> {
+fn existing_event_by_seq(tx: &ArchiveWriteTransaction<'_>, seq: u64) -> Result<Option<Event>> {
     tx.query_row(
         event_select_sql("WHERE seq = ?1").as_str(),
         params![seq as i64],
@@ -440,7 +448,7 @@ fn existing_event_by_seq(tx: &Transaction<'_>, seq: u64) -> Result<Option<Event>
     .map_err(StoreError::from)
 }
 
-fn existing_artifact_by_id(tx: &Transaction<'_>, id: Uuid) -> Result<Option<Artifact>> {
+fn existing_artifact_by_id(tx: &ArchiveWriteTransaction<'_>, id: Uuid) -> Result<Option<Artifact>> {
     tx.query_row(
         artifact_select_sql("WHERE id = ?1").as_str(),
         params![id.to_string()],
@@ -451,7 +459,7 @@ fn existing_artifact_by_id(tx: &Transaction<'_>, id: Uuid) -> Result<Option<Arti
 }
 
 fn existing_artifact_by_hash_kind(
-    tx: &Transaction<'_>,
+    tx: &ArchiveWriteTransaction<'_>,
     blob_hash: &str,
     kind: ArtifactKind,
 ) -> Result<Option<Artifact>> {
@@ -465,13 +473,16 @@ fn existing_artifact_by_hash_kind(
 }
 
 fn existing_artifact_by_identity(
-    tx: &Transaction<'_>,
+    tx: &ArchiveWriteTransaction<'_>,
     artifact: &Artifact,
 ) -> Result<Option<Artifact>> {
     existing_artifact_by_hash_kind(tx, &artifact.blob_hash, artifact.kind)
 }
 
-fn existing_vcs_workspace_by_id(tx: &Transaction<'_>, id: Uuid) -> Result<Option<VcsWorkspace>> {
+fn existing_vcs_workspace_by_id(
+    tx: &ArchiveWriteTransaction<'_>,
+    id: Uuid,
+) -> Result<Option<VcsWorkspace>> {
     tx.query_row(
         vcs_workspace_select_sql("WHERE id = ?1").as_str(),
         params![id.to_string()],
@@ -482,7 +493,7 @@ fn existing_vcs_workspace_by_id(tx: &Transaction<'_>, id: Uuid) -> Result<Option
 }
 
 fn existing_vcs_workspace_by_identity(
-    tx: &Transaction<'_>,
+    tx: &ArchiveWriteTransaction<'_>,
     workspace: &VcsWorkspace,
 ) -> Result<Option<VcsWorkspace>> {
     tx.query_row(
@@ -494,7 +505,10 @@ fn existing_vcs_workspace_by_identity(
     .map_err(StoreError::from)
 }
 
-fn existing_vcs_change_by_id(tx: &Transaction<'_>, id: Uuid) -> Result<Option<VcsChange>> {
+fn existing_vcs_change_by_id(
+    tx: &ArchiveWriteTransaction<'_>,
+    id: Uuid,
+) -> Result<Option<VcsChange>> {
     tx.query_row(
         vcs_change_select_sql("WHERE id = ?1").as_str(),
         params![id.to_string()],
@@ -505,7 +519,7 @@ fn existing_vcs_change_by_id(tx: &Transaction<'_>, id: Uuid) -> Result<Option<Vc
 }
 
 fn existing_vcs_change_by_identity(
-    tx: &Transaction<'_>,
+    tx: &ArchiveWriteTransaction<'_>,
     change: &VcsChange,
 ) -> Result<Option<VcsChange>> {
     tx.query_row(
@@ -522,7 +536,7 @@ fn existing_vcs_change_by_identity(
     .map_err(StoreError::from)
 }
 
-fn existing_summary_by_id(tx: &Transaction<'_>, id: Uuid) -> Result<Option<Summary>> {
+fn existing_summary_by_id(tx: &ArchiveWriteTransaction<'_>, id: Uuid) -> Result<Option<Summary>> {
     tx.query_row(
         summary_select_sql("WHERE id = ?1").as_str(),
         params![id.to_string()],
@@ -532,7 +546,10 @@ fn existing_summary_by_id(tx: &Transaction<'_>, id: Uuid) -> Result<Option<Summa
     .map_err(StoreError::from)
 }
 
-fn existing_file_touched_by_id(tx: &Transaction<'_>, id: Uuid) -> Result<Option<FileTouched>> {
+fn existing_file_touched_by_id(
+    tx: &ArchiveWriteTransaction<'_>,
+    id: Uuid,
+) -> Result<Option<FileTouched>> {
     tx.query_row(
         file_touched_select_sql("WHERE id = ?1").as_str(),
         params![id.to_string()],
@@ -543,7 +560,7 @@ fn existing_file_touched_by_id(tx: &Transaction<'_>, id: Uuid) -> Result<Option<
 }
 
 fn existing_history_record_link_by_id(
-    tx: &Transaction<'_>,
+    tx: &ArchiveWriteTransaction<'_>,
     id: Uuid,
 ) -> Result<Option<HistoryRecordLink>> {
     tx.query_row(
@@ -556,7 +573,7 @@ fn existing_history_record_link_by_id(
 }
 
 fn existing_history_record_link_by_identity(
-    tx: &Transaction<'_>,
+    tx: &ArchiveWriteTransaction<'_>,
     link: &HistoryRecordLink,
 ) -> Result<Option<HistoryRecordLink>> {
     tx.query_row(

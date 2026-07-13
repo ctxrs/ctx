@@ -1,14 +1,22 @@
 use std::{
-    env,
+    env, fs,
     process::Command,
+    thread,
     time::{Duration, Instant},
 };
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::{IndexingAdmission, IndexingWorkClass, Store, StoreError};
+use crate::{CatalogSession, IndexingAdmission, IndexingWorkClass, Store, StoreError};
+use ctx_history_core::{AgentType, CaptureProvider};
 
 const ADMISSION_CRASH_DB_ENV: &str = "CTX_TEST_ADMISSION_CRASH_DB";
+const FTS_ROTATION_DB_ENV: &str = "CTX_TEST_FTS_ROTATION_DB";
+const FTS_ROTATION_READY_ENV: &str = "CTX_TEST_FTS_ROTATION_READY";
+const CATALOG_RESULT_DB_ENV: &str = "CTX_TEST_CATALOG_RESULT_DB";
+const CATALOG_RESULT_READY_ENV: &str = "CTX_TEST_CATALOG_RESULT_READY";
+const CATALOG_RESULT_GO_ENV: &str = "CTX_TEST_CATALOG_RESULT_GO";
+const CATALOG_RESULT_DONE_ENV: &str = "CTX_TEST_CATALOG_RESULT_DONE";
 
 fn tempdir() -> tempfile::TempDir {
     tempfile::Builder::new()
@@ -138,6 +146,153 @@ fn pressure_checkpoint_returns_bounded_with_pinned_reader_and_preserves_snapshot
 }
 
 #[test]
+fn failed_main_commit_rolls_back_sidecar_before_releasing_admission() {
+    let temp = tempdir();
+    let db_path = temp.path().join("work.sqlite");
+    let admission = IndexingAdmission::acquire(&db_path, IndexingWorkClass::Background).unwrap();
+    let store = Store::open_admitted(&db_path, &admission).unwrap();
+    store.begin_immediate_batch().unwrap();
+    store
+        .conn
+        .execute_batch(
+            "CREATE TABLE commit_parent(id INTEGER PRIMARY KEY);\
+             CREATE TABLE commit_child(\
+                 parent_id INTEGER REFERENCES commit_parent(id)\
+                 DEFERRABLE INITIALLY DEFERRED\
+             );",
+        )
+        .unwrap();
+    store.commit_batch().unwrap();
+
+    let guard = store.begin_event_search_bulk_mode().unwrap();
+    store.begin_immediate_batch().unwrap();
+    store
+        .conn
+        .execute("INSERT INTO commit_child(parent_id) VALUES (7)", [])
+        .unwrap();
+    assert!(store.commit_batch().is_err());
+    assert!(store.conn.is_autocommit());
+    assert!(store.event_search_transaction_lock.borrow().is_none());
+    assert!(store.indexing_writer_lease.borrow().is_none());
+
+    let foreground_admission =
+        IndexingAdmission::acquire(&db_path, IndexingWorkClass::Foreground).unwrap();
+    let foreground = Store::open_admitted_with_busy_timeout(
+        &db_path,
+        Duration::from_millis(100),
+        &foreground_admission,
+    )
+    .unwrap();
+    assert_eq!(
+        foreground
+            .conn
+            .query_row("SELECT COUNT(*) FROM commit_child", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    store.finish_event_search_bulk_mode(&guard).unwrap();
+}
+
+#[test]
+fn catalog_result_contention_child_helper() {
+    let Some(db_path) = env::var_os(CATALOG_RESULT_DB_ENV) else {
+        return;
+    };
+    let db_path = std::path::PathBuf::from(db_path);
+    let ready = std::path::PathBuf::from(env::var_os(CATALOG_RESULT_READY_ENV).unwrap());
+    let go = std::path::PathBuf::from(env::var_os(CATALOG_RESULT_GO_ENV).unwrap());
+    let done = std::path::PathBuf::from(env::var_os(CATALOG_RESULT_DONE_ENV).unwrap());
+    let admission = IndexingAdmission::acquire(&db_path, IndexingWorkClass::Background).unwrap();
+    let store = Store::open_admitted(&db_path, &admission).unwrap();
+    fs::write(&ready, b"ready").unwrap();
+    while !go.exists() {
+        thread::sleep(Duration::from_millis(2));
+    }
+    store
+        .mark_catalog_source_failed(
+            CaptureProvider::Codex,
+            "catalog-root",
+            "catalog-path",
+            "expected test failure",
+            2,
+        )
+        .unwrap();
+    fs::write(done, b"done").unwrap();
+}
+
+#[test]
+fn standalone_catalog_result_write_waits_for_scoped_writer_lane() {
+    let temp = tempdir();
+    let db_path = temp.path().join("work.sqlite");
+    let ready = temp.path().join("ready");
+    let go = temp.path().join("go");
+    let done = temp.path().join("done");
+    let admission = IndexingAdmission::acquire(&db_path, IndexingWorkClass::Background).unwrap();
+    let store = Store::open_admitted(&db_path, &admission).unwrap();
+    store
+        .upsert_catalog_sessions(&[CatalogSession {
+            provider: CaptureProvider::Codex,
+            source_format: "codex_session_jsonl_tree".to_owned(),
+            source_root: "catalog-root".to_owned(),
+            source_path: "catalog-path".to_owned(),
+            external_session_id: Some("catalog-session".to_owned()),
+            parent_external_session_id: None,
+            agent_type: AgentType::Primary,
+            role_hint: None,
+            external_agent_id: None,
+            cwd: None,
+            session_started_at_ms: Some(1),
+            file_size_bytes: 1,
+            file_modified_at_ms: 1,
+            cataloged_at_ms: 1,
+            metadata: serde_json::json!({}),
+        }])
+        .unwrap();
+
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "connection_tests::catalog_result_contention_child_helper",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CATALOG_RESULT_DB_ENV, &db_path)
+        .env(CATALOG_RESULT_READY_ENV, &ready)
+        .env(CATALOG_RESULT_GO_ENV, &go)
+        .env(CATALOG_RESULT_DONE_ENV, &done)
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !ready.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert!(ready.exists());
+
+    let held_writer = admission.lease().unwrap();
+    fs::write(&go, b"go").unwrap();
+    thread::sleep(Duration::from_millis(100));
+    assert!(
+        !done.exists(),
+        "standalone catalog result write bypassed global writer admission"
+    );
+    drop(held_writer);
+    assert!(child.wait().unwrap().success());
+    assert!(done.exists());
+    assert_eq!(
+        store
+            .conn
+            .query_row(
+                "SELECT indexed_status FROM catalog_sessions WHERE source_path = 'catalog-path'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "failed"
+    );
+}
+
+#[test]
 fn bulk_search_mode_recovers_on_reopen_and_restores_saved_config() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");
@@ -175,7 +330,12 @@ fn admitted_crash_child_helper() {
     let admission = IndexingAdmission::acquire(&db_path, IndexingWorkClass::Background).unwrap();
     let store = Store::open_admitted(&db_path, &admission).unwrap();
     let _guard = store.begin_event_search_bulk_mode().unwrap();
-    insert_bulk_search_events(&store, "admission-crash", 128, 64);
+    for index in 0..20 {
+        store.begin_immediate_batch().unwrap();
+        insert_bulk_search_events(&store, &format!("admission-crash-{index}"), 1, 2_048);
+        store.commit_batch().unwrap();
+    }
+    assert!(event_search_segment_count(&store) >= 20);
     assert_eq!(bulk_mode_marker(&store), Some(1));
 
     // Exit without destructors so the parent exercises OS lock cleanup and
@@ -228,7 +388,115 @@ fn admitted_reopen_recovers_crashed_owner_one_slice_at_a_time() {
                 |row| row.get::<_, i64>(0),
             )
             .unwrap(),
-        128
+        20
+    );
+    assert_eq!(reopened.validate().unwrap(), Vec::<String>::new());
+}
+
+#[test]
+fn fts_rotation_child_helper() {
+    let Some(db_path) = env::var_os(FTS_ROTATION_DB_ENV) else {
+        return;
+    };
+    let ready = std::path::PathBuf::from(env::var_os(FTS_ROTATION_READY_ENV).unwrap());
+    let db_path = std::path::PathBuf::from(db_path);
+    let admission = IndexingAdmission::acquire(&db_path, IndexingWorkClass::Background).unwrap();
+    let store = Store::open_admitted(&db_path, &admission).unwrap();
+    let guard = store.begin_event_search_bulk_mode().unwrap();
+    for index in 0..12 {
+        store.begin_immediate_batch().unwrap();
+        store
+            .conn
+            .execute(
+                r#"
+                INSERT INTO event_search
+                (event_id, history_record_id, session_id, role, preview_text, rank_bucket)
+                VALUES (?1, NULL, NULL, 'user', ?2, 'message')
+                "#,
+                params![
+                    format!("rotation-{index}"),
+                    format!("rotation token {index}")
+                ],
+            )
+            .unwrap();
+        store.commit_batch().unwrap();
+        if index == 0 {
+            fs::write(&ready, b"ready").unwrap();
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    store.finish_event_search_bulk_mode(&guard).unwrap();
+}
+
+#[test]
+fn multiprocess_fts_rotation_hands_off_to_foreground_and_recovers() {
+    let temp = tempdir();
+    let db_path = temp.path().join("work.sqlite");
+    let ready = temp.path().join("ready");
+    let initial = Store::open(&db_path).unwrap();
+    initial
+        .conn
+        .execute("CREATE TABLE foreground_probe(value INTEGER)", [])
+        .unwrap();
+    drop(initial);
+
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "connection_tests::fts_rotation_child_helper",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(FTS_ROTATION_DB_ENV, &db_path)
+        .env(FTS_ROTATION_READY_ENV, &ready)
+        .spawn()
+        .unwrap();
+    let ready_deadline = Instant::now() + Duration::from_secs(2);
+    while !ready.exists() && Instant::now() < ready_deadline {
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert!(ready.exists());
+
+    let started = Instant::now();
+    let admission = IndexingAdmission::acquire(&db_path, IndexingWorkClass::Foreground).unwrap();
+    let foreground = Store::open_admitted(&db_path, &admission).unwrap();
+    foreground.begin_immediate_batch().unwrap();
+    foreground
+        .conn
+        .execute("INSERT INTO foreground_probe VALUES (1)", [])
+        .unwrap();
+    foreground.commit_batch().unwrap();
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(child.wait().unwrap().success());
+    drop(foreground);
+
+    let mut reopened = Store::open_admitted(&db_path, &admission).unwrap();
+    for _ in 0..256 {
+        if bulk_mode_marker(&reopened).is_none() {
+            break;
+        }
+        drop(reopened);
+        reopened = Store::open_admitted(&db_path, &admission).unwrap();
+    }
+    assert_eq!(bulk_mode_marker(&reopened), None);
+    assert_eq!(
+        reopened
+            .conn
+            .query_row("SELECT COUNT(*) FROM foreground_probe", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        reopened
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM event_search WHERE event_search MATCH 'rotation'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        12
     );
     assert_eq!(reopened.validate().unwrap(), Vec::<String>::new());
 }
@@ -251,21 +519,22 @@ fn bulk_search_recovery_without_marker_preserves_custom_config() {
 }
 
 #[test]
-fn overlapping_bulk_search_mode_is_rejected_until_guard_releases() {
+fn overlapping_bulk_search_scopes_release_ownership_between_transactions() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");
     let first = Store::open(&db_path).unwrap();
     let guard = first.begin_event_search_bulk_mode().unwrap();
     let second = Store::open_with_busy_timeout(&db_path, Duration::from_millis(10)).unwrap();
 
-    let error = second.begin_event_search_bulk_mode().err().unwrap();
-    assert!(matches!(error, StoreError::BulkSearchImportBusy));
+    let second_guard = second.begin_event_search_bulk_mode().unwrap();
     assert_eq!(bulk_mode_marker(&second), Some(1));
     for table in ["event_search", "event_search_scriptgram"] {
         assert_eq!(fts_config(&second, table, "automerge", 4), 0);
         assert_eq!(fts_config(&second, table, "crisismerge", 16), 1_000_000);
     }
 
+    second.finish_event_search_bulk_mode(&second_guard).unwrap();
+    drop(second_guard);
     first.finish_event_search_bulk_mode(&guard).unwrap();
     drop(guard);
     let next_guard = second.begin_event_search_bulk_mode().unwrap();
@@ -285,10 +554,8 @@ fn nested_bulk_search_mode_finishes_only_at_outer_scope() {
     assert_eq!(bulk_mode_marker(&first), Some(1));
     let error = first.finish_event_search_bulk_mode(&outer).unwrap_err();
     assert!(matches!(error, StoreError::InvalidBulkSearchGuard));
-    assert!(matches!(
-        second.begin_event_search_bulk_mode().err().unwrap(),
-        StoreError::BulkSearchImportBusy
-    ));
+    let overlapping = second.begin_event_search_bulk_mode().unwrap();
+    drop(overlapping);
 
     drop(nested);
     first.finish_event_search_bulk_mode(&outer).unwrap();
@@ -304,7 +571,7 @@ fn nested_bulk_search_mode_finishes_only_at_outer_scope() {
 }
 
 #[test]
-fn optimize_serializes_with_bulk_guard_even_without_visible_marker() {
+fn optimize_and_bulk_import_reacquire_fts_ownership_in_canonical_order() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");
     let first = Store::open(&db_path).unwrap();
@@ -322,11 +589,21 @@ fn optimize_serializes_with_bulk_guard_even_without_visible_marker() {
     }
     let second = Store::open_with_busy_timeout(&db_path, Duration::from_millis(10)).unwrap();
 
-    let error = second.optimize_search_index().unwrap_err();
-    assert!(matches!(error, StoreError::BulkSearchImportBusy));
-
-    drop(guard);
     second.optimize_search_index().unwrap();
+
+    first.begin_immediate_batch().unwrap();
+    first
+        .conn
+        .execute(
+            "INSERT INTO event_search (event_id, role, preview_text, rank_bucket) VALUES ('reacquired', 'user', 'reacquired', 'message')",
+            [],
+        )
+        .unwrap();
+    first.commit_batch().unwrap();
+    assert_eq!(bulk_mode_marker(&first), Some(1));
+
+    first.finish_event_search_bulk_mode(&guard).unwrap();
+    drop(guard);
 }
 
 #[test]
@@ -375,6 +652,12 @@ fn bulk_search_mode_crosses_crisis_threshold_without_automatic_merge() {
     );
 
     store.finish_event_search_bulk_mode(&guard).unwrap();
+    assert_eq!(
+        bulk_mode_marker(&store),
+        Some(1),
+        "one finish call must perform only one bounded maintenance slice"
+    );
+    while store.run_event_search_maintenance_slice().unwrap() {}
     assert_eq!(bulk_mode_marker(&store), None);
     let compacted_segments = store
         .conn
