@@ -11,7 +11,7 @@ use ctx_history_capture::{
     ProviderSourceStatus,
 };
 use ctx_history_core::CaptureProvider;
-use ctx_history_store::{SourceImportFile, Store};
+use ctx_history_store::{IndexingWorkClass, SourceImportFile, Store};
 
 use crate::commands::import::catalog::{source_import_stats, source_stats, system_time_ms};
 use crate::commands::import::manifest::{
@@ -107,6 +107,8 @@ fn inventory_import_source(
             store,
             CodexSessionCatalogOptions {
                 source_root: Some(source.path.clone()),
+                parallelism: (store.indexing_work_class() == Some(IndexingWorkClass::Background))
+                    .then_some(1),
                 ..CodexSessionCatalogOptions::default()
             },
         )

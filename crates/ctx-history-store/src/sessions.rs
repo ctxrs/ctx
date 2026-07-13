@@ -13,6 +13,10 @@ use crate::{Result, Store, StoreError};
 
 impl Store {
     pub fn upsert_session(&self, session: &Session) -> Result<()> {
+        self.with_write_transaction(|| self.upsert_session_inner(session))
+    }
+
+    fn upsert_session_inner(&self, session: &Session) -> Result<()> {
         self.conn.execute(
                 r#"
                 INSERT INTO sessions
@@ -168,6 +172,10 @@ impl Store {
     }
 
     pub fn assign_session_to_record(&self, session_id: Uuid, record_id: Uuid) -> Result<()> {
+        self.with_write_transaction(|| self.assign_session_to_record_inner(session_id, record_id))
+    }
+
+    fn assign_session_to_record_inner(&self, session_id: Uuid, record_id: Uuid) -> Result<()> {
         self.conn.execute(
             "UPDATE sessions SET history_record_id = ?1 WHERE id = ?2",
             params![record_id.to_string(), session_id.to_string()],
@@ -192,6 +200,10 @@ impl Store {
     }
 
     pub fn upsert_session_edge(&self, edge: &SessionEdge) -> Result<()> {
+        self.with_write_transaction(|| self.upsert_session_edge_inner(edge))
+    }
+
+    fn upsert_session_edge_inner(&self, edge: &SessionEdge) -> Result<()> {
         self.conn.execute(
                 r#"
                 INSERT INTO session_edges

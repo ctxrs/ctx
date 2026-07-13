@@ -778,6 +778,40 @@ fn clean_multisource_setup_bounds_wal_without_full_fts_optimize() {
     );
 }
 
+#[test]
+fn three_noop_setup_refreshes_leave_main_wal_and_fts_lock_database_unchanged() {
+    let temp = tempdir();
+    write_large_codex_setup_sessions(&temp, 2, 2, 256);
+    install_default_hermes_fixture(&temp, "noop setup refresh");
+    ctx(&temp)
+        .args(["setup", "--wait", "--json", "--progress", "none"])
+        .assert()
+        .success();
+
+    let db_path = temp.path().join("work.sqlite");
+    let wal_path = sqlite_sidecar_path(&db_path, "-wal");
+    let fts_lock_path = sqlite_sidecar_path(&db_path, ".event-search-bulk.lock.sqlite");
+    let before = (
+        fs::read(&db_path).unwrap(),
+        fs::read(&wal_path).ok(),
+        fs::read(&fts_lock_path).ok(),
+    );
+
+    for _ in 0..3 {
+        let refresh =
+            json_output(ctx(&temp).args(["setup", "--wait", "--json", "--progress", "none"]));
+        assert_eq!(refresh["import"]["totals"]["imported_sessions"], 0);
+        assert_eq!(refresh["import"]["totals"]["imported_events"], 0);
+    }
+
+    let after = (
+        fs::read(&db_path).unwrap(),
+        fs::read(&wal_path).ok(),
+        fs::read(&fts_lock_path).ok(),
+    );
+    assert_eq!(after, before);
+}
+
 fn write_large_codex_setup_sessions(
     temp: &TempDir,
     sessions: usize,

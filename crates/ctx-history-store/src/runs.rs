@@ -12,6 +12,10 @@ use crate::{Result, Store, StoreError};
 
 impl Store {
     pub fn upsert_run(&self, run: &Run) -> Result<()> {
+        self.with_write_transaction(|| self.upsert_run_inner(run))
+    }
+
+    fn upsert_run_inner(&self, run: &Run) -> Result<()> {
         self.conn.execute(
                 r#"
                 INSERT INTO runs
@@ -66,6 +70,10 @@ impl Store {
     }
 
     pub fn insert_run_if_absent(&self, run: &Run) -> Result<bool> {
+        self.with_write_transaction(|| self.insert_run_if_absent_inner(run))
+    }
+
+    fn insert_run_if_absent_inner(&self, run: &Run) -> Result<bool> {
         let changed = self
                 .conn
                 .prepare_cached(

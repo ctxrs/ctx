@@ -11,6 +11,10 @@ use crate::{Result, Store};
 
 impl Store {
     pub fn upsert_summary(&self, summary: &Summary) -> Result<()> {
+        self.with_write_transaction(|| self.upsert_summary_inner(summary))
+    }
+
+    fn upsert_summary_inner(&self, summary: &Summary) -> Result<()> {
         self.conn.execute(
                 r#"
                 INSERT INTO summaries

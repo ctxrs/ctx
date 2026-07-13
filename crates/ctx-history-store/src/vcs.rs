@@ -11,6 +11,10 @@ use crate::{Result, Store, StoreError};
 
 impl Store {
     pub fn upsert_vcs_workspace(&self, workspace: &VcsWorkspace) -> Result<Uuid> {
+        self.with_write_transaction(|| self.upsert_vcs_workspace_inner(workspace))
+    }
+
+    fn upsert_vcs_workspace_inner(&self, workspace: &VcsWorkspace) -> Result<Uuid> {
         self.conn.execute(
                 r#"
                 INSERT INTO vcs_workspaces
@@ -71,6 +75,10 @@ impl Store {
     }
 
     pub fn upsert_vcs_change(&self, change: &VcsChange) -> Result<Uuid> {
+        self.with_write_transaction(|| self.upsert_vcs_change_inner(change))
+    }
+
+    fn upsert_vcs_change_inner(&self, change: &VcsChange) -> Result<Uuid> {
         self.conn.execute(
                 r#"
                 INSERT INTO vcs_changes

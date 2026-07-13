@@ -1,7 +1,12 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
 use crate::commands::import::catalog::system_time_ms;
+
+// Keep inventory writes inside the same established bounds as provider import
+// transactions. Actual WAL growth and transaction time can rotate earlier.
+const INVENTORY_BATCH_UNITS: usize = 64;
+const INVENTORY_BATCH_BYTES: usize = 8 * 1024 * 1024;
 
 pub(crate) fn persist_source_import_files(
     store: &Store,
@@ -9,30 +14,183 @@ pub(crate) fn persist_source_import_files(
     files: &[SourceImportFile],
 ) -> Result<()> {
     let source_root = source.path.display().to_string();
-    let current_paths = files
+    let existing = store.list_source_import_files_for_source(source.provider, &source_root)?;
+    if source_import_inventory_matches(&existing, files) {
+        return Ok(());
+    }
+    let existing_by_path = existing
         .iter()
+        .map(|file| (file.source_path.as_str(), file))
+        .collect::<BTreeMap<_, _>>();
+    let changed_files = files
+        .iter()
+        .filter(|file| {
+            existing_by_path
+                .get(file.source_path.as_str())
+                .is_none_or(|existing| !source_import_file_matches_row(existing, file))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let current_path_set = files
+        .iter()
+        .map(|file| file.source_path.as_str())
+        .collect::<BTreeSet<_>>();
+    let missing_paths = existing
+        .iter()
+        .filter(|file| !current_path_set.contains(file.source_path.as_str()))
         .map(|file| file.source_path.clone())
         .collect::<Vec<_>>();
-    let observed_at_ms = utc_now().timestamp_millis();
-    store.begin_immediate_batch()?;
-    let persist = (|| -> Result<()> {
-        store.upsert_source_import_files(files)?;
-        store.mark_source_import_missing_paths_stale(
-            source.provider,
-            &source_root,
-            &current_paths,
-            observed_at_ms,
-        )?;
-        Ok(())
-    })();
-    match persist {
-        Ok(()) => store.commit_batch()?,
-        Err(err) => {
-            let _ = store.rollback_batch();
-            return Err(err);
-        }
+    let mut offset = 0;
+    while offset < changed_files.len() {
+        offset += persist_source_import_file_slice(store, &changed_files[offset..])?;
+    }
+
+    finalize_source_import_missing_paths(
+        store,
+        source,
+        &source_root,
+        &missing_paths,
+        utc_now().timestamp_millis(),
+    )?;
+    Ok(())
+}
+
+fn source_import_inventory_matches(
+    existing: &[SourceImportFile],
+    current: &[SourceImportFile],
+) -> bool {
+    if existing.len() != current.len() {
+        return false;
+    }
+    let existing = existing
+        .iter()
+        .map(|file| (file.source_path.as_str(), file))
+        .collect::<BTreeMap<_, _>>();
+    current.iter().all(|file| {
+        existing
+            .get(file.source_path.as_str())
+            .is_some_and(|row| source_import_file_matches_row(row, file))
+    })
+}
+
+fn source_import_file_matches_row(existing: &SourceImportFile, current: &SourceImportFile) -> bool {
+    existing.provider == current.provider
+        && existing.source_format == current.source_format
+        && existing.source_root == current.source_root
+        && existing.file_size_bytes == current.file_size_bytes
+        && existing.file_modified_at_ms == current.file_modified_at_ms
+        && existing.metadata == current.metadata
+}
+
+fn finalize_source_import_missing_paths(
+    store: &Store,
+    source: &SourceInfo,
+    source_root: &str,
+    missing_paths: &[String],
+    observed_at_ms: i64,
+) -> Result<()> {
+    let mut offset = 0;
+    while offset < missing_paths.len() {
+        offset += run_inventory_slice(store, |store, slice| {
+            let mut units = 0;
+            let mut bytes = 0_usize;
+            for path in &missing_paths[offset..] {
+                let unit_bytes = path.len();
+                if units > 0 && bytes.saturating_add(unit_bytes) > INVENTORY_BATCH_BYTES {
+                    break;
+                }
+                store.mark_source_import_paths_stale(
+                    source.provider,
+                    source_root,
+                    std::slice::from_ref(path),
+                    observed_at_ms,
+                )?;
+                units += 1;
+                bytes = bytes.saturating_add(unit_bytes);
+                if units >= INVENTORY_BATCH_UNITS
+                    || bytes >= INVENTORY_BATCH_BYTES
+                    || store.indexing_slice_should_rotate(slice)?
+                {
+                    break;
+                }
+            }
+            Ok(units)
+        })?;
     }
     Ok(())
+}
+
+fn run_inventory_slice<T>(
+    store: &Store,
+    operation: impl FnOnce(&Store, &ctx_history_store::IndexingSlice) -> Result<T>,
+) -> Result<T> {
+    store.begin_immediate_batch()?;
+    let slice = match store.begin_indexing_slice() {
+        Ok(slice) => slice,
+        Err(error) => {
+            let _ = store.rollback_batch();
+            return Err(error.into());
+        }
+    };
+    let value = match operation(store, &slice) {
+        Ok(value) => value,
+        Err(error) => {
+            let _ = store.rollback_batch();
+            return Err(error);
+        }
+    };
+    store.commit_batch()?;
+    store.finish_indexing_slice(slice)?;
+    Ok(value)
+}
+
+fn persist_source_import_file_slice(store: &Store, files: &[SourceImportFile]) -> Result<usize> {
+    store.begin_immediate_batch()?;
+    let slice = match store.begin_indexing_slice() {
+        Ok(slice) => slice,
+        Err(error) => {
+            let _ = store.rollback_batch();
+            return Err(error.into());
+        }
+    };
+    let mut units = 0;
+    let mut bytes = 0_usize;
+    for file in files {
+        let unit_bytes = source_import_file_estimated_len(file);
+        if units > 0 && bytes.saturating_add(unit_bytes) > INVENTORY_BATCH_BYTES {
+            break;
+        }
+        if let Err(error) = store.upsert_source_import_files(std::slice::from_ref(file)) {
+            let _ = store.rollback_batch();
+            return Err(error.into());
+        }
+        units += 1;
+        bytes = bytes.saturating_add(unit_bytes);
+        let measured_rotation = match store.indexing_slice_should_rotate(&slice) {
+            Ok(rotate) => rotate,
+            Err(error) => {
+                let _ = store.rollback_batch();
+                return Err(error.into());
+            }
+        };
+        if units >= INVENTORY_BATCH_UNITS || bytes >= INVENTORY_BATCH_BYTES || measured_rotation {
+            break;
+        }
+    }
+    if let Err(error) = store.commit_batch() {
+        let _ = store.rollback_batch();
+        return Err(error.into());
+    }
+    store.finish_indexing_slice(slice)?;
+    Ok(units)
+}
+
+fn source_import_file_estimated_len(file: &SourceImportFile) -> usize {
+    file.source_format
+        .len()
+        .saturating_add(file.source_root.len())
+        .saturating_add(file.source_path.len())
+        .saturating_add(file.metadata.to_string().len())
 }
 
 pub(crate) fn source_uses_import_file_manifest(source: &SourceInfo) -> bool {
@@ -289,5 +447,120 @@ pub(crate) fn source_import_file_matches(source: &SourceInfo, path: &Path) -> bo
         | CaptureProvider::Gh
         | CaptureProvider::Custom
         | CaptureProvider::Unknown => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider_sources::explicit_path_source;
+    use ctx_history_store::{IndexingAdmission, IndexingWorkClass, WAL_TRUNCATE_MIN_BYTES};
+
+    #[test]
+    fn manifest_noop_and_one_change_do_not_rewrite_unchanged_rows() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("claude-projects");
+        fs::create_dir_all(&root).unwrap();
+        let source = explicit_path_source(CaptureProvider::Claude, root.clone());
+        let db_path = temp.path().join("work.sqlite");
+        let admission =
+            IndexingAdmission::acquire(&db_path, IndexingWorkClass::Background).unwrap();
+        let store = Store::open_admitted(&db_path, &admission).unwrap();
+        let baseline = manifest_files(&source, 130, 1);
+        persist_source_import_files(&store, &source, &baseline).unwrap();
+        let baseline_db = fs::read(&db_path).unwrap();
+
+        let mut noop = baseline.clone();
+        for file in &mut noop {
+            file.observed_at_ms = 2;
+        }
+        persist_source_import_files(&store, &source, &noop).unwrap();
+        assert_eq!(
+            fs::read(&db_path).unwrap(),
+            baseline_db,
+            "a changed observation time alone rewrote the main database"
+        );
+
+        let mut one_change = noop;
+        one_change[17].file_size_bytes += 1;
+        one_change[17].file_modified_at_ms = 3;
+        one_change[17].observed_at_ms = 3;
+        persist_source_import_files(&store, &source, &one_change).unwrap();
+        let persisted = store
+            .list_source_import_files_for_source(source.provider, &root.display().to_string())
+            .unwrap();
+        assert_eq!(
+            persisted
+                .iter()
+                .filter(|file| file.observed_at_ms == 3)
+                .count(),
+            1,
+            "one changed manifest path must rewrite only its row"
+        );
+        assert_eq!(
+            persisted
+                .iter()
+                .find(|file| file.source_path.ends_with("session-18.jsonl"))
+                .unwrap()
+                .observed_at_ms,
+            1,
+            "an unchanged manifest row was restamped"
+        );
+    }
+
+    #[test]
+    fn manifest_changed_rows_are_chunked_before_missing_paths_are_staled() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("claude-projects");
+        fs::create_dir_all(&root).unwrap();
+        let source = explicit_path_source(CaptureProvider::Claude, root.clone());
+        let db_path = temp.path().join("work.sqlite");
+        let admission =
+            IndexingAdmission::acquire(&db_path, IndexingWorkClass::Background).unwrap();
+        let store = Store::open_admitted(&db_path, &admission).unwrap();
+        let baseline = manifest_files(&source, 130, 1);
+        persist_source_import_files(&store, &source, &baseline).unwrap();
+        assert_eq!(store.source_import_file_counts().unwrap().stale, 0);
+        assert!(store.wal_size_bytes().unwrap() <= WAL_TRUNCATE_MIN_BYTES);
+
+        let changed = manifest_files(&source, 129, 2);
+        store.begin_immediate_batch().unwrap();
+        store.upsert_source_import_files(&changed[..64]).unwrap();
+        store.commit_batch().unwrap();
+        assert_eq!(
+            store.source_import_file_counts().unwrap().stale,
+            0,
+            "an interrupted data slice must not stale unseen manifest rows"
+        );
+
+        persist_source_import_files(&store, &source, &changed).unwrap();
+        let counts = store.source_import_file_counts().unwrap();
+        assert_eq!(counts.total, 129);
+        assert_eq!(counts.stale, 1);
+        assert!(store.wal_size_bytes().unwrap() <= WAL_TRUNCATE_MIN_BYTES);
+    }
+
+    fn manifest_files(
+        source: &SourceInfo,
+        count: usize,
+        file_modified_at_ms: i64,
+    ) -> Vec<SourceImportFile> {
+        let source_root = source.path.display().to_string();
+        (0..count)
+            .map(|index| SourceImportFile {
+                provider: source.provider,
+                source_format: source.source_format.to_owned(),
+                source_root: source_root.clone(),
+                source_path: source
+                    .path
+                    .join(format!("session-{index}.jsonl"))
+                    .display()
+                    .to_string(),
+                file_size_bytes: 128,
+                file_modified_at_ms,
+                observed_at_ms: file_modified_at_ms,
+                metadata: json!({}),
+            })
+            .collect()
     }
 }

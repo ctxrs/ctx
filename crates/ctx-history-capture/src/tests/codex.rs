@@ -115,7 +115,13 @@ fn codex_session_catalog_large_noop_uses_metadata_cache() {
     let root = temp.path().join("sessions");
     let session_count = 1_024;
     synthetic_codex_session_tree(&root, session_count);
-    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let db_path = temp.path().join("work.sqlite");
+    let admission = ctx_history_store::IndexingAdmission::acquire(
+        &db_path,
+        ctx_history_store::IndexingWorkClass::Background,
+    )
+    .unwrap();
+    let store = Store::open_admitted(&db_path, &admission).unwrap();
 
     let first = catalog_codex_session_tree(
         &root,
@@ -123,6 +129,7 @@ fn codex_session_catalog_large_noop_uses_metadata_cache() {
         CodexSessionCatalogOptions {
             source_root: Some(root.clone()),
             cataloged_at: "2026-06-26T12:00:00Z".parse().unwrap(),
+            parallelism: Some(1),
             ..CodexSessionCatalogOptions::default()
         },
     )
@@ -132,6 +139,17 @@ fn codex_session_catalog_large_noop_uses_metadata_cache() {
     assert_eq!(first.cached_sessions, 0);
     assert_eq!(first.parsed_sessions, session_count);
     assert_eq!(first.failed_sessions, 0);
+    assert!(
+        store.wal_size_bytes().unwrap() <= ctx_history_store::WAL_TRUNCATE_MIN_BYTES,
+        "first-run catalog WAL exceeded the pressure ceiling"
+    );
+    let first_db_bytes = fs::read(&db_path).unwrap();
+    let first_catalog = store
+        .list_catalog_sessions_for_source(CaptureProvider::Codex, &root.display().to_string())
+        .unwrap();
+    assert!(first_catalog
+        .iter()
+        .all(|session| session.cataloged_at_ms == 1_782_475_200_000));
 
     let second = catalog_codex_session_tree(
         &root,
@@ -139,6 +157,7 @@ fn codex_session_catalog_large_noop_uses_metadata_cache() {
         CodexSessionCatalogOptions {
             source_root: Some(root.clone()),
             cataloged_at: "2026-06-26T12:01:00Z".parse().unwrap(),
+            parallelism: Some(1),
             ..CodexSessionCatalogOptions::default()
         },
     )
@@ -148,6 +167,11 @@ fn codex_session_catalog_large_noop_uses_metadata_cache() {
     assert_eq!(second.cached_sessions, session_count);
     assert_eq!(second.parsed_sessions, 0);
     assert_eq!(second.failed_sessions, 0);
+    assert_eq!(
+        fs::read(&db_path).unwrap(),
+        first_db_bytes,
+        "a catalog no-op rewrote the main database"
+    );
 
     write_synthetic_codex_session(&root, 17, "changed-size-for-incremental-refresh");
     let third = catalog_codex_session_tree(
@@ -156,6 +180,7 @@ fn codex_session_catalog_large_noop_uses_metadata_cache() {
         CodexSessionCatalogOptions {
             source_root: Some(root.clone()),
             cataloged_at: "2026-06-26T12:02:00Z".parse().unwrap(),
+            parallelism: Some(1),
             ..CodexSessionCatalogOptions::default()
         },
     )
@@ -165,6 +190,125 @@ fn codex_session_catalog_large_noop_uses_metadata_cache() {
     assert_eq!(third.cached_sessions, session_count - 1);
     assert_eq!(third.parsed_sessions, 1);
     assert_eq!(third.failed_sessions, 0);
+    let third_catalog = store
+        .list_catalog_sessions_for_source(CaptureProvider::Codex, &root.display().to_string())
+        .unwrap();
+    assert_eq!(
+        third_catalog
+            .iter()
+            .filter(|session| session.cataloged_at_ms == 1_782_475_320_000)
+            .count(),
+        1,
+        "one changed path must rewrite only its catalog row"
+    );
+    assert_eq!(
+        third_catalog
+            .iter()
+            .find(|session| session
+                .source_path
+                .ends_with("synthetic-session-000018.jsonl"))
+            .unwrap()
+            .cataloged_at_ms,
+        1_782_475_200_000,
+        "an unchanged cached row was restamped"
+    );
+}
+
+#[test]
+fn codex_catalog_crash_child_helper() {
+    let Some(db_path) = std::env::var_os("CTX_TEST_CODEX_CATALOG_DB") else {
+        return;
+    };
+    let root = PathBuf::from(std::env::var_os("CTX_TEST_CODEX_CATALOG_ROOT").unwrap());
+    let db_path = PathBuf::from(db_path);
+    let admission = ctx_history_store::IndexingAdmission::acquire(
+        &db_path,
+        ctx_history_store::IndexingWorkClass::Background,
+    )
+    .unwrap();
+    let store = Store::open_admitted(&db_path, &admission).unwrap();
+    let _ = catalog_codex_session_tree(
+        &root,
+        &store,
+        CodexSessionCatalogOptions {
+            source_root: Some(root.clone()),
+            parallelism: Some(1),
+            ..CodexSessionCatalogOptions::default()
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn codex_catalog_crash_before_finalization_resumes_without_false_stale_rows() {
+    let temp = tempdir();
+    let root = temp.path().join("sessions");
+    let db_path = temp.path().join("work.sqlite");
+    let session_count = 130;
+    synthetic_codex_session_tree(&root, session_count);
+    let store = Store::open(&db_path).unwrap();
+    catalog_codex_session_tree(
+        &root,
+        &store,
+        CodexSessionCatalogOptions {
+            source_root: Some(root.clone()),
+            parallelism: Some(1),
+            ..CodexSessionCatalogOptions::default()
+        },
+    )
+    .unwrap();
+    for index in 0..session_count {
+        write_synthetic_codex_session(&root, index, "changed-before-crash");
+    }
+    fs::remove_file(
+        root.join("2026/06/26/00")
+            .join("synthetic-session-000129.jsonl"),
+    )
+    .unwrap();
+    drop(store);
+
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "tests::codex::codex_catalog_crash_child_helper",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("CTX_TEST_CODEX_CATALOG_DB", &db_path)
+        .env("CTX_TEST_CODEX_CATALOG_ROOT", &root)
+        .env("CTX_TEST_CODEX_CATALOG_CRASH_AFTER_FIRST_SLICE", "1")
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(87));
+
+    let store = Store::open(&db_path).unwrap();
+    let source_root = root.display().to_string();
+    assert_eq!(
+        store
+            .catalog_source_stale_session_count(CaptureProvider::Codex, &source_root)
+            .unwrap(),
+        0,
+        "interrupted changed-row slices must not stale unseen rows"
+    );
+    catalog_codex_session_tree(
+        &root,
+        &store,
+        CodexSessionCatalogOptions {
+            source_root: Some(root.clone()),
+            parallelism: Some(1),
+            ..CodexSessionCatalogOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        store
+            .catalog_source_stale_session_count(CaptureProvider::Codex, &source_root)
+            .unwrap(),
+        1
+    );
+    let counts = store.catalog_session_counts().unwrap();
+    assert_eq!(counts.total, session_count - 1);
+    assert_eq!(counts.stale, 1);
 }
 
 #[test]

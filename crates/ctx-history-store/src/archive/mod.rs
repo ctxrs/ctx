@@ -21,6 +21,18 @@ use crate::object_store::{
 };
 use crate::{Result, Store, StoreError};
 
+struct ArchiveWriteTransaction<'a> {
+    conn: &'a rusqlite::Connection,
+}
+
+impl std::ops::Deref for ArchiveWriteTransaction<'_> {
+    type Target = rusqlite::Connection;
+
+    fn deref(&self) -> &Self::Target {
+        self.conn
+    }
+}
+
 impl Store {
     pub fn export_archive(&self) -> Result<SessionHistoryArchive> {
         Ok(SessionHistoryArchive {
@@ -48,19 +60,20 @@ impl Store {
         validate_archive_version(archive)?;
         reject_archive_event_internal_conflicts(archive)?;
         let blob_dir = self.object_dir.clone();
-        let tx = self.conn.transaction()?;
-        reject_import_invariant_conflicts(&tx, archive)?;
-        if !overwrite {
-            reject_import_conflicts(&tx, archive)?;
-        }
         let mut blob_guard = BlobWriteGuard::default();
-        for record in &archive.records {
-            upsert_record_tx(&tx, record, None)?;
-        }
-        import_rich_archive_entities_tx(&tx, &blob_dir, archive, &mut blob_guard)?;
-        tx.commit()?;
+        self.with_write_transaction(|| {
+            let tx = ArchiveWriteTransaction { conn: &self.conn };
+            reject_import_invariant_conflicts(&tx, archive)?;
+            if !overwrite {
+                reject_import_conflicts(&tx, archive)?;
+            }
+            for record in &archive.records {
+                upsert_record_tx(&tx, record, None)?;
+            }
+            import_rich_archive_entities_tx(&tx, &blob_dir, archive, &mut blob_guard)
+        })?;
         blob_guard.commit();
-        self.rebuild_search_projection()?;
+        self.refresh_search_index()?;
         Ok(())
     }
 
@@ -76,21 +89,22 @@ impl Store {
         validate_archive_version(archive)?;
         reject_archive_event_internal_conflicts(archive)?;
         let blob_dir = self.object_dir.clone();
-        let tx = self.conn.transaction()?;
-        reject_import_invariant_conflicts(&tx, archive)?;
-        if !overwrite {
-            reject_capture_source_import_conflict(&tx, source_id)?;
-            reject_import_conflicts(&tx, archive)?;
-        }
         let mut blob_guard = BlobWriteGuard::default();
-        upsert_capture_source_tx(&tx, source_id, source, occurred_at, fidelity)?;
-        for record in &archive.records {
-            upsert_record_tx(&tx, record, Some(source_id))?;
-        }
-        import_rich_archive_entities_tx(&tx, &blob_dir, archive, &mut blob_guard)?;
-        tx.commit()?;
+        self.with_write_transaction(|| {
+            let tx = ArchiveWriteTransaction { conn: &self.conn };
+            reject_import_invariant_conflicts(&tx, archive)?;
+            if !overwrite {
+                reject_capture_source_import_conflict(&tx, source_id)?;
+                reject_import_conflicts(&tx, archive)?;
+            }
+            upsert_capture_source_tx(&tx, source_id, source, occurred_at, fidelity)?;
+            for record in &archive.records {
+                upsert_record_tx(&tx, record, Some(source_id))?;
+            }
+            import_rich_archive_entities_tx(&tx, &blob_dir, archive, &mut blob_guard)
+        })?;
         blob_guard.commit();
-        self.rebuild_search_projection()?;
+        self.refresh_search_index()?;
         Ok(())
     }
 }

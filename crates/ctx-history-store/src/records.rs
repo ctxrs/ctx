@@ -19,6 +19,10 @@ use crate::{Result, Store, StoreError};
 
 impl Store {
     pub fn upsert_history_record_link(&self, link: &HistoryRecordLink) -> Result<Uuid> {
+        self.with_write_transaction(|| self.upsert_history_record_link_inner(link))
+    }
+
+    fn upsert_history_record_link_inner(&self, link: &HistoryRecordLink) -> Result<Uuid> {
         self.conn.execute(
                 r#"
                 INSERT INTO history_record_links
@@ -76,6 +80,10 @@ impl Store {
     }
 
     pub fn insert_record(&self, record: &HistoryRecord) -> Result<()> {
+        self.with_write_transaction(|| self.insert_record_inner(record))
+    }
+
+    fn insert_record_inner(&self, record: &HistoryRecord) -> Result<()> {
         let created_at_ms = timestamp_ms(record.created_at);
         let updated_at_ms = timestamp_ms(record.updated_at);
         self.conn.execute(
@@ -107,12 +115,20 @@ impl Store {
     }
 
     pub fn upsert_record(&self, record: &HistoryRecord) -> Result<()> {
+        self.with_write_transaction(|| self.upsert_record_without_transaction(record))
+    }
+
+    fn upsert_record_without_transaction(&self, record: &HistoryRecord) -> Result<()> {
         self.upsert_record_row(record)?;
         upsert_record_search_projection(&self.conn, record)?;
         Ok(())
     }
 
     pub fn delete_orphan_record(&self, record_id: Uuid) -> Result<bool> {
+        self.with_write_transaction(|| self.delete_orphan_record_inner(record_id))
+    }
+
+    fn delete_orphan_record_inner(&self, record_id: Uuid) -> Result<bool> {
         let record_id = record_id.to_string();
         let deleted = self.conn.execute(
             r#"
@@ -142,21 +158,12 @@ impl Store {
         if records.is_empty() {
             return Ok(());
         }
-        self.begin_immediate_batch()?;
-        for record in records {
-            if let Err(err) = self.upsert_record_row(record) {
-                let _ = self.rollback_batch();
-                return Err(err);
+        self.with_write_transaction(|| {
+            for record in records {
+                self.upsert_record_without_transaction(record)?;
             }
-        }
-        if let Err(err) = self.commit_batch() {
-            let _ = self.rollback_batch();
-            return Err(err);
-        }
-        for record in records {
-            upsert_record_search_projection(&self.conn, record)?;
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     fn upsert_record_row(&self, record: &HistoryRecord) -> Result<()> {

@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use ctx_history_core::{AgentType, CaptureProvider};
 use rusqlite::{params, OptionalExtension};
 use serde_json::Value;
@@ -121,19 +123,25 @@ impl Store {
         source_root: &str,
         cataloged_at_ms: i64,
     ) -> Result<usize> {
-        let changed = self.conn.execute(
-            r#"
+        self.with_write_transaction(|| {
+            let changed = self.conn.execute(
+                r#"
                 UPDATE catalog_sessions
                 SET is_stale = 1, cataloged_at_ms = ?3
                 WHERE provider = ?1 AND source_root = ?2
                 "#,
-            params![provider.as_str(), source_root, cataloged_at_ms],
-        )?;
-        Ok(changed)
+                params![provider.as_str(), source_root, cataloged_at_ms],
+            )?;
+            Ok(changed)
+        })
     }
 
     pub fn upsert_catalog_sessions(&self, sessions: &[CatalogSession]) -> Result<()> {
-        let mut stmt = self.conn.prepare(
+        if sessions.is_empty() {
+            return Ok(());
+        }
+        self.with_write_transaction(|| {
+            let mut stmt = self.conn.prepare(
                 r#"
                 INSERT INTO catalog_sessions
                 (
@@ -271,26 +279,27 @@ impl Store {
                    OR catalog_sessions.metadata_json IS NOT excluded.metadata_json
                 "#,
             )?;
-        for session in sessions {
-            stmt.execute(params![
-                session.source_path.as_str(),
-                session.provider.as_str(),
-                session.source_format.as_str(),
-                session.source_root.as_str(),
-                session.external_session_id.as_deref(),
-                session.parent_external_session_id.as_deref(),
-                session.agent_type.as_str(),
-                session.role_hint.as_deref(),
-                session.external_agent_id.as_deref(),
-                session.cwd.as_deref(),
-                session.session_started_at_ms,
-                capped_i64(session.file_size_bytes),
-                session.file_modified_at_ms,
-                session.cataloged_at_ms,
-                serde_json::to_string(&session.metadata)?,
-            ])?;
-        }
-        Ok(())
+            for session in sessions {
+                stmt.execute(params![
+                    session.source_path.as_str(),
+                    session.provider.as_str(),
+                    session.source_format.as_str(),
+                    session.source_root.as_str(),
+                    session.external_session_id.as_deref(),
+                    session.parent_external_session_id.as_deref(),
+                    session.agent_type.as_str(),
+                    session.role_hint.as_deref(),
+                    session.external_agent_id.as_deref(),
+                    session.cwd.as_deref(),
+                    session.session_started_at_ms,
+                    capped_i64(session.file_size_bytes),
+                    session.file_modified_at_ms,
+                    session.cataloged_at_ms,
+                    serde_json::to_string(&session.metadata)?,
+                ])?;
+            }
+            Ok(())
+        })
     }
 
     pub fn list_catalog_sessions_for_source(
@@ -339,37 +348,69 @@ impl Store {
         current_paths: &[String],
         cataloged_at_ms: i64,
     ) -> Result<usize> {
-        self.conn.execute(
-                "CREATE TEMP TABLE IF NOT EXISTS temp_catalog_current_paths(source_path TEXT PRIMARY KEY)",
-                [],
-            )?;
-        self.conn
-            .execute("DELETE FROM temp_catalog_current_paths", [])?;
-        {
+        let current_paths = current_paths
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        let missing_paths = {
             let mut stmt = self.conn.prepare(
-                "INSERT OR IGNORE INTO temp_catalog_current_paths(source_path) VALUES (?1)",
+                "SELECT source_path FROM catalog_sessions WHERE provider = ?1 AND source_root = ?2 AND is_stale = 0",
             )?;
-            for path in current_paths {
-                stmt.execute(params![path.as_str()])?;
-            }
+            let rows = stmt.query_map(params![provider.as_str(), source_root], |row| row.get(0))?;
+            collect_rows(rows)?
         }
-        let changed = self.conn.execute(
-            r#"
+        .into_iter()
+        .filter(|path: &String| !current_paths.contains(path.as_str()))
+        .collect::<Vec<_>>();
+        self.mark_catalog_source_paths_stale(provider, source_root, &missing_paths, cataloged_at_ms)
+    }
+
+    #[doc(hidden)]
+    pub fn list_stale_catalog_source_paths(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+    ) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT source_path FROM catalog_sessions WHERE provider = ?1 AND source_root = ?2 AND is_stale != 0",
+        )?;
+        let rows = stmt.query_map(params![provider.as_str(), source_root], |row| row.get(0))?;
+        collect_rows(rows)
+    }
+
+    #[doc(hidden)]
+    pub fn mark_catalog_source_paths_stale(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        source_paths: &[String],
+        cataloged_at_ms: i64,
+    ) -> Result<usize> {
+        if source_paths.is_empty() {
+            return Ok(0);
+        }
+        self.with_write_transaction(|| {
+            let mut stmt = self.conn.prepare(
+                r#"
                 UPDATE catalog_sessions
-                SET is_stale = 1, cataloged_at_ms = ?3
+                SET is_stale = 1, cataloged_at_ms = ?4
                 WHERE provider = ?1
                   AND source_root = ?2
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM temp_catalog_current_paths current
-                      WHERE current.source_path = catalog_sessions.source_path
-                  )
+                  AND source_path = ?3
+                  AND is_stale = 0
                 "#,
-            params![provider.as_str(), source_root, cataloged_at_ms],
-        )?;
-        self.conn
-            .execute("DELETE FROM temp_catalog_current_paths", [])?;
-        Ok(changed)
+            )?;
+            let mut changed = 0_usize;
+            for source_path in source_paths {
+                changed = changed.saturating_add(stmt.execute(params![
+                    provider.as_str(),
+                    source_root,
+                    source_path,
+                    cataloged_at_ms,
+                ])?);
+            }
+            Ok(changed)
+        })
     }
 
     pub fn list_pending_catalog_sessions(
@@ -401,8 +442,9 @@ impl Store {
         provider: CaptureProvider,
         update: CatalogSourceIndexUpdate<'_>,
     ) -> Result<usize> {
-        let changed = self.conn.execute(
-            r#"
+        self.with_write_transaction(|| {
+            let changed = self.conn.execute(
+                r#"
                 UPDATE catalog_sessions
                 SET indexed_at_ms = ?4,
                     indexed_file_size_bytes = ?5,
@@ -420,19 +462,20 @@ impl Store {
                   AND source_path = ?3
                   AND is_stale = 0
                 "#,
-            params![
-                provider.as_str(),
-                update.source_root,
-                update.source_path,
-                update.indexed_at_ms,
-                capped_i64(update.file_size_bytes),
-                update.file_modified_at_ms,
-                update.event_count.map(capped_i64),
-                CatalogIndexedStatus::Indexed.as_str(),
-                update.file_sha256,
-            ],
-        )?;
-        Ok(changed)
+                params![
+                    provider.as_str(),
+                    update.source_root,
+                    update.source_path,
+                    update.indexed_at_ms,
+                    capped_i64(update.file_size_bytes),
+                    update.file_modified_at_ms,
+                    update.event_count.map(capped_i64),
+                    CatalogIndexedStatus::Indexed.as_str(),
+                    update.file_sha256,
+                ],
+            )?;
+            Ok(changed)
+        })
     }
 
     pub fn mark_catalog_source_failed(
@@ -443,8 +486,9 @@ impl Store {
         error: &str,
         indexed_at_ms: i64,
     ) -> Result<usize> {
-        let changed = self.conn.execute(
-            r#"
+        self.with_write_transaction(|| {
+            let changed = self.conn.execute(
+                r#"
                 UPDATE catalog_sessions
                 SET indexed_at_ms = ?4,
                     indexed_file_size_bytes = NULL,
@@ -457,16 +501,17 @@ impl Store {
                   AND source_path = ?3
                   AND is_stale = 0
                 "#,
-            params![
-                provider.as_str(),
-                source_root,
-                source_path,
-                indexed_at_ms,
-                error,
-                CatalogIndexedStatus::Failed.as_str(),
-            ],
-        )?;
-        Ok(changed)
+                params![
+                    provider.as_str(),
+                    source_root,
+                    source_path,
+                    indexed_at_ms,
+                    error,
+                    CatalogIndexedStatus::Failed.as_str(),
+                ],
+            )?;
+            Ok(changed)
+        })
     }
 
     pub fn catalog_source_index_state(
@@ -516,8 +561,9 @@ impl Store {
         if files.is_empty() {
             return Ok(());
         }
-        let mut stmt = self.conn.prepare(
-            r#"
+        self.with_write_transaction(|| {
+            let mut stmt = self.conn.prepare(
+                r#"
                 INSERT INTO source_import_files (
                     provider, source_format, source_root, source_path,
                     file_size_bytes, file_modified_at_ms, observed_at_ms, is_stale,
@@ -581,20 +627,21 @@ impl Store {
                    OR source_import_files.is_stale != 0
                    OR source_import_files.metadata_json IS NOT excluded.metadata_json
                 "#,
-        )?;
-        for file in files {
-            stmt.execute(params![
-                file.provider.as_str(),
-                file.source_format.as_str(),
-                file.source_root.as_str(),
-                file.source_path.as_str(),
-                capped_i64(file.file_size_bytes),
-                file.file_modified_at_ms,
-                file.observed_at_ms,
-                serde_json::to_string(&file.metadata)?,
-            ])?;
-        }
-        Ok(())
+            )?;
+            for file in files {
+                stmt.execute(params![
+                    file.provider.as_str(),
+                    file.source_format.as_str(),
+                    file.source_root.as_str(),
+                    file.source_path.as_str(),
+                    capped_i64(file.file_size_bytes),
+                    file.file_modified_at_ms,
+                    file.observed_at_ms,
+                    serde_json::to_string(&file.metadata)?,
+                ])?;
+            }
+            Ok(())
+        })
     }
 
     pub fn mark_source_import_missing_paths_stale(
@@ -604,37 +651,72 @@ impl Store {
         current_paths: &[String],
         observed_at_ms: i64,
     ) -> Result<usize> {
-        self.conn.execute_batch(
-                "CREATE TEMP TABLE IF NOT EXISTS temp_source_import_current_paths (source_path TEXT PRIMARY KEY)",
-            )?;
-        self.conn
-            .execute("DELETE FROM temp_source_import_current_paths", [])?;
-        {
-            let mut stmt = self.conn.prepare(
-                "INSERT OR IGNORE INTO temp_source_import_current_paths (source_path) VALUES (?1)",
-            )?;
-            for source_path in current_paths {
-                stmt.execute(params![source_path])?;
-            }
+        let current_paths = current_paths
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        let missing_paths = self
+            .list_source_import_files_for_source(provider, source_root)?
+            .into_iter()
+            .filter(|file| !current_paths.contains(file.source_path.as_str()))
+            .map(|file| file.source_path)
+            .collect::<Vec<_>>();
+        self.mark_source_import_paths_stale(provider, source_root, &missing_paths, observed_at_ms)
+    }
+
+    #[doc(hidden)]
+    pub fn list_source_import_files_for_source(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+    ) -> Result<Vec<SourceImportFile>> {
+        let mut stmt = self.conn.prepare(
+            format!(
+                "{} WHERE provider = ?1 AND source_root = ?2 AND is_stale = 0 ORDER BY source_path",
+                source_import_file_select_sql("")
+            )
+            .as_str(),
+        )?;
+        let rows = stmt.query_map(
+            params![provider.as_str(), source_root],
+            source_import_file_from_row,
+        )?;
+        collect_rows(rows)
+    }
+
+    #[doc(hidden)]
+    pub fn mark_source_import_paths_stale(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        source_paths: &[String],
+        observed_at_ms: i64,
+    ) -> Result<usize> {
+        if source_paths.is_empty() {
+            return Ok(0);
         }
-        let changed = self.conn.execute(
-            r#"
+        self.with_write_transaction(|| {
+            let mut stmt = self.conn.prepare(
+                r#"
                 UPDATE source_import_files
-                SET is_stale = 1, observed_at_ms = ?3
+                SET is_stale = 1, observed_at_ms = ?4
                 WHERE provider = ?1
                   AND source_root = ?2
+                  AND source_path = ?3
                   AND is_stale = 0
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM temp_source_import_current_paths AS current
-                      WHERE current.source_path = source_import_files.source_path
-                  )
                 "#,
-            params![provider.as_str(), source_root, observed_at_ms],
-        )?;
-        self.conn
-            .execute("DELETE FROM temp_source_import_current_paths", [])?;
-        Ok(changed)
+            )?;
+            let mut changed = 0_usize;
+            for source_path in source_paths {
+                changed = changed.saturating_add(stmt.execute(params![
+                    provider.as_str(),
+                    source_root,
+                    source_path,
+                    observed_at_ms,
+                ])?);
+            }
+            Ok(changed)
+        })
     }
 
     pub fn list_pending_source_import_files(
@@ -666,8 +748,9 @@ impl Store {
         provider: CaptureProvider,
         update: SourceImportFileIndexUpdate<'_>,
     ) -> Result<usize> {
-        let changed = self.conn.execute(
-            r#"
+        self.with_write_transaction(|| {
+            let changed = self.conn.execute(
+                r#"
                 UPDATE source_import_files
                 SET indexed_at_ms = ?4,
                     indexed_file_size_bytes = ?5,
@@ -679,17 +762,18 @@ impl Store {
                   AND source_path = ?3
                   AND is_stale = 0
                 "#,
-            params![
-                provider.as_str(),
-                update.source_root,
-                update.source_path,
-                update.indexed_at_ms,
-                capped_i64(update.file_size_bytes),
-                update.file_modified_at_ms,
-                CatalogIndexedStatus::Indexed.as_str(),
-            ],
-        )?;
-        Ok(changed)
+                params![
+                    provider.as_str(),
+                    update.source_root,
+                    update.source_path,
+                    update.indexed_at_ms,
+                    capped_i64(update.file_size_bytes),
+                    update.file_modified_at_ms,
+                    CatalogIndexedStatus::Indexed.as_str(),
+                ],
+            )?;
+            Ok(changed)
+        })
     }
 
     pub fn mark_source_import_file_failed(
@@ -700,8 +784,9 @@ impl Store {
         error: &str,
         indexed_at_ms: i64,
     ) -> Result<usize> {
-        let changed = self.conn.execute(
-            r#"
+        self.with_write_transaction(|| {
+            let changed = self.conn.execute(
+                r#"
                 UPDATE source_import_files
                 SET indexed_at_ms = ?4,
                     indexed_file_size_bytes = NULL,
@@ -713,16 +798,17 @@ impl Store {
                   AND source_path = ?3
                   AND is_stale = 0
                 "#,
-            params![
-                provider.as_str(),
-                source_root,
-                source_path,
-                indexed_at_ms,
-                error,
-                CatalogIndexedStatus::Failed.as_str(),
-            ],
-        )?;
-        Ok(changed)
+                params![
+                    provider.as_str(),
+                    source_root,
+                    source_path,
+                    indexed_at_ms,
+                    error,
+                    CatalogIndexedStatus::Failed.as_str(),
+                ],
+            )?;
+            Ok(changed)
+        })
     }
 
     pub fn catalog_session_count(&self) -> Result<usize> {
