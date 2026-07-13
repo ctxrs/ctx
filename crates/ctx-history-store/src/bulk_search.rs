@@ -156,27 +156,23 @@ impl Store {
             self.finish_event_search_bulk_mode(&guard)?;
         }
         for table in ALL_FTS_TABLES {
-            self.merge_fts_table_bounded(table, true)?;
+            self.merge_fts_table_bounded(table)?;
         }
         Ok(())
     }
 
-    fn merge_fts_table_bounded(
-        &self,
-        table: &'static str,
-        mut start_full_merge: bool,
-    ) -> Result<()> {
+    /// Compact one FTS table using only positive merge budgets.
+    ///
+    /// A negative FTS5 merge budget starts a full merge. Even a small absolute
+    /// budget can then rewrite a large existing segment in one transaction,
+    /// before this layer gets a chance to checkpoint the WAL. Normal imports
+    /// must therefore make progress through positive bounded steps only.
+    fn merge_fts_table_bounded(&self, table: &'static str) -> Result<()> {
         if !table_exists(&self.conn, table)? {
             return Ok(());
         }
         loop {
-            let page_budget = if start_full_merge {
-                -FTS_MERGE_PAGE_BUDGET
-            } else {
-                FTS_MERGE_PAGE_BUDGET
-            };
-            let changed = self.merge_fts_table_step(table, page_budget)?;
-            start_full_merge = false;
+            let changed = self.merge_fts_table_step(table, FTS_MERGE_PAGE_BUDGET)?;
             if !changed {
                 return Ok(());
             }

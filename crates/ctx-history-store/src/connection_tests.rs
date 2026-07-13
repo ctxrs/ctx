@@ -273,6 +273,32 @@ fn bulk_search_finish_preserves_preexisting_optimized_segment() {
 }
 
 #[test]
+fn optimize_search_index_compacts_deferred_segments_in_bounded_steps() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let guard = store.begin_event_search_bulk_mode().unwrap();
+    insert_bulk_search_events(&store, "optimize", 40, 512);
+    drop(guard);
+
+    assert_eq!(event_search_segment_count(&store), 40);
+
+    store.optimize_search_index().unwrap();
+
+    assert_eq!(event_search_segment_count(&store), 1);
+    assert_eq!(
+        store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM event_search WHERE event_search MATCH 'optimize'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        40
+    );
+}
+
+#[test]
 fn bulk_search_recovery_resumes_legacy_in_progress_full_merge() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");
