@@ -306,56 +306,10 @@ pub(crate) fn mark_catalog_sessions_failed(
 }
 
 pub(crate) fn source_uses_incremental_event_search(source: &SourceInfo) -> bool {
-    matches!(
-        source.provider,
-        CaptureProvider::Codex
-            | CaptureProvider::Claude
-            | CaptureProvider::Pi
-            | CaptureProvider::Cursor
-            | CaptureProvider::OpenCode
-            | CaptureProvider::Kilo
-            | CaptureProvider::KiroCli
-            | CaptureProvider::Crush
-            | CaptureProvider::Goose
-            | CaptureProvider::Warp
-            | CaptureProvider::Antigravity
-            | CaptureProvider::Gemini
-            | CaptureProvider::Tabnine
-            | CaptureProvider::Windsurf
-            | CaptureProvider::Qoder
-            | CaptureProvider::CopilotCli
-            | CaptureProvider::FactoryAiDroid
-            | CaptureProvider::Continue
-            | CaptureProvider::QwenCode
-            | CaptureProvider::KimiCodeCli
-            | CaptureProvider::Auggie
-            | CaptureProvider::Junie
-            | CaptureProvider::Firebender
-            | CaptureProvider::ForgeCode
-            | CaptureProvider::DeepAgents
-            | CaptureProvider::Hermes
-            | CaptureProvider::OpenClaw
-            | CaptureProvider::MistralVibe
-            | CaptureProvider::Mux
-            | CaptureProvider::RovoDev
-            | CaptureProvider::Cline
-            | CaptureProvider::RooCode
-            | CaptureProvider::CodeBuddy
-            | CaptureProvider::Trae
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::provider_sources::explicit_path_source;
-
-    #[test]
-    fn openclaw_uses_incremental_event_search() {
-        let source = explicit_path_source(CaptureProvider::OpenClaw, PathBuf::from("openclaw"));
-
-        assert!(source_uses_incremental_event_search(&source));
-    }
+    // Every importable provider persists events through Store APIs that update
+    // the event-search projection transactionally. Unsupported sources have no
+    // importer and therefore cannot make that guarantee.
+    source.import_support.is_importable()
 }
 
 pub(crate) fn source_stats(path: &Path) -> Result<SourceStats> {
@@ -583,4 +537,36 @@ pub(crate) fn import_record_for_history_source_plugin(
     );
     record.id = stable_capture_uuid(&key, "record");
     record
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider_sources::explicit_path_source;
+    use ctx_history_capture::provider_source_specs;
+
+    #[test]
+    fn every_importable_provider_uses_incremental_event_search() {
+        for spec in provider_source_specs() {
+            let source = explicit_path_source(
+                spec.provider,
+                PathBuf::from(format!("{}-history", spec.provider.as_str())),
+            );
+
+            assert_eq!(source.import_support, spec.import_support);
+            assert!(
+                source_uses_incremental_event_search(&source),
+                "{} import must maintain event search incrementally",
+                spec.provider
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_source_does_not_claim_incremental_event_search() {
+        let source = explicit_path_source(CaptureProvider::Shell, PathBuf::from("shell-history"));
+
+        assert!(!source.import_support.is_importable());
+        assert!(!source_uses_incremental_event_search(&source));
+    }
 }

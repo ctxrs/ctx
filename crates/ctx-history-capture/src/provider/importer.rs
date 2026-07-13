@@ -30,6 +30,8 @@ mod cursors;
 mod identity;
 mod ids;
 
+#[cfg(test)]
+pub(crate) use batches::import_normalized_provider_captures_in_batches;
 pub(crate) use commands::{provider_command_run_from_event, ProviderCommandRunInput};
 #[cfg(test)]
 pub(crate) use cursors::provider_source_cursor_stream;
@@ -102,15 +104,7 @@ pub fn import_normalized_provider_captures(
     normalization: ProviderNormalizationResult,
     options: NormalizedProviderImportOptions,
 ) -> Result<ProviderImportSummary> {
-    // Partial imports commit and checkpoint in bounded batches. Suppress FTS
-    // automatic merges for the same path so a merge cannot undo that bound.
-    let suppress_search_merges = options.allow_partial_failures;
-    batches::import_normalized_provider_captures(
-        store,
-        normalization,
-        options,
-        suppress_search_merges,
-    )
+    batches::import_normalized_provider_captures(store, normalization, options, false)
 }
 
 pub(crate) fn import_normalized_provider_captures_with_bulk_search(
@@ -119,21 +113,6 @@ pub(crate) fn import_normalized_provider_captures_with_bulk_search(
     options: NormalizedProviderImportOptions,
 ) -> Result<ProviderImportSummary> {
     batches::import_normalized_provider_captures(store, normalization, options, true)
-}
-
-#[cfg(test)]
-pub(crate) fn import_normalized_provider_captures_in_batches(
-    store: &mut Store,
-    normalization: ProviderNormalizationResult,
-    options: NormalizedProviderImportOptions,
-    transaction_batch_size: usize,
-) -> Result<ProviderImportSummary> {
-    batches::import_normalized_provider_captures_in_batches(
-        store,
-        normalization,
-        options,
-        transaction_batch_size,
-    )
 }
 
 pub(crate) fn import_provider_capture_lines(

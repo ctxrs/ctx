@@ -11,9 +11,10 @@ pub(super) fn import_normalized_provider_captures(
     store: &mut Store,
     normalization: ProviderNormalizationResult,
     options: NormalizedProviderImportOptions,
-    suppress_search_merges: bool,
+    force_bulk_search_mode: bool,
 ) -> Result<ProviderImportSummary> {
     let transaction_batch_size = partial_transaction_batch_size(options.allow_partial_failures);
+    let suppress_search_merges = force_bulk_search_mode || options.allow_partial_failures;
     let ProviderNormalizationResult {
         summary,
         captures,
@@ -31,7 +32,7 @@ pub(super) fn import_normalized_provider_captures(
 }
 
 #[cfg(test)]
-pub(super) fn import_normalized_provider_captures_in_batches(
+pub(crate) fn import_normalized_provider_captures_in_batches(
     store: &mut Store,
     normalization: ProviderNormalizationResult,
     options: NormalizedProviderImportOptions,
