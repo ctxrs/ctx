@@ -404,6 +404,7 @@ run_linux_container_build() {
     -e CTX_PUBLIC_CLI_ARTIFACT_DIR=/artifacts \
     -e CTX_PUBLIC_CLI_PREPARED_DIR=/prepared \
     -e CARGO_TARGET_DIR=/release-target \
+    -e "CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-2}" \
     -e HOME=/tmp/home \
     -v "${root_dir}:/work:ro" \
     -v "${root_dir}/${prepared_dir}:/prepared:ro" \

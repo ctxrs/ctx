@@ -294,6 +294,7 @@ grep -F 'RUSTUP_VERSION="1.28.2"' scripts/docker/linux-release.Dockerfile >/dev/
 grep -F 'RUST_TOOLCHAIN_VERSION="1.88.0"' scripts/build-public-cli-artifact.sh >/dev/null
 grep -F 'rustup target add --toolchain "${RUST_TOOLCHAIN_VERSION}"' scripts/build-public-cli-artifact.sh >/dev/null
 grep -F 'cargo "+${RUST_TOOLCHAIN_VERSION}"' scripts/build-public-cli-artifact.sh >/dev/null
+grep -F -- '-e "CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-2}"' scripts/build-public-cli-artifact.sh >/dev/null
 grep -F 'public release construction requires a clean checkout' scripts/build-public-cli-artifact.sh >/dev/null
 grep -F 'source commit changed during public release construction' scripts/build-public-cli-artifact.sh >/dev/null
 grep -F 'linux-*' scripts/build-public-cli-artifact.sh >/dev/null
