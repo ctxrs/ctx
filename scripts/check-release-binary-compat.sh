@@ -278,10 +278,10 @@ check_windows() {
 api-ms-win-core-synch-l1-2-0.dll
 bcrypt.dll
 bcryptprimitives.dll
+combase.dll
 kernel32.dll
 msvcrt.dll
 ntdll.dll
-ole32.dll
 shell32.dll
 userenv.dll
 ws2_32.dll"

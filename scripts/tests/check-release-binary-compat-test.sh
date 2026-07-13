@@ -165,6 +165,9 @@ Import {
   Name: bcryptprimitives.dll
 }
 Import {
+  Name: combase.dll
+}
+Import {
   Name: KERNEL32.dll
 }
 Import {
@@ -172,9 +175,6 @@ Import {
 }
 Import {
   Name: ntdll.dll
-}
-Import {
-  Name: ole32.dll
 }
 Import {
   Name: shell32.dll
