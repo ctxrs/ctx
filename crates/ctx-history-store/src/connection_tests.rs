@@ -215,7 +215,7 @@ fn bulk_search_mode_crosses_crisis_threshold_without_automatic_merge() {
 
     store.finish_event_search_bulk_mode(&guard).unwrap();
     assert_eq!(bulk_mode_marker(&store), None);
-    let compacted_segments = store
+    let deferred_segments = store
         .conn
         .query_row(
             "SELECT COUNT(DISTINCT segid) FROM event_search_idx",
@@ -223,7 +223,7 @@ fn bulk_search_mode_crosses_crisis_threshold_without_automatic_merge() {
             |row| row.get::<_, i64>(0),
         )
         .unwrap();
-    assert_eq!(compacted_segments, 1);
+    assert!(deferred_segments >= 20);
     assert_eq!(
         store
             .conn
@@ -238,7 +238,7 @@ fn bulk_search_mode_crosses_crisis_threshold_without_automatic_merge() {
 }
 
 #[test]
-fn bulk_search_finish_preserves_preexisting_optimized_segment() {
+fn bulk_search_finish_preserves_deferred_segments_for_later_maintenance() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");
     let store = Store::open(&db_path).unwrap();
@@ -247,18 +247,14 @@ fn bulk_search_finish_preserves_preexisting_optimized_segment() {
     insert_bulk_search_events(&store, "historic", 80, 512);
     store.finish_event_search_bulk_mode(&first_guard).unwrap();
     drop(first_guard);
-    assert_eq!(event_search_segment_count(&store), 1);
+    assert_eq!(event_search_segment_count(&store), 80);
 
     let second_guard = store.begin_event_search_bulk_mode().unwrap();
     insert_bulk_search_events(&store, "new", 20, 128);
-    assert_eq!(event_search_segment_count(&store), 21);
+    assert_eq!(event_search_segment_count(&store), 100);
     store.finish_event_search_bulk_mode(&second_guard).unwrap();
 
-    assert_eq!(
-        event_search_segment_count(&store),
-        2,
-        "finishing one provider import must not re-optimize the historical index"
-    );
+    assert_eq!(event_search_segment_count(&store), 100);
     assert_eq!(
         store
             .conn
@@ -434,7 +430,7 @@ fn interrupted_bounded_merge_resumes_after_reopen() {
             |row| row.get::<_, i64>(0),
         )
         .unwrap();
-    assert_eq!(segments, 1);
+    assert_eq!(segments, 20);
     assert_eq!(
         reopened
             .conn

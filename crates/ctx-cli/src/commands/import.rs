@@ -673,11 +673,6 @@ pub(crate) fn run_import_internal(
         }
     }
 
-    if totals.imported_sessions > 0 || totals.imported_events > 0 || totals.imported_edges > 0 {
-        progress.message("finalizing", "Optimizing search index...");
-        Store::open(&db_path)?.optimize_search_index()?;
-    }
-
     progress.message("finalizing", "Checkpointing search database...");
     Store::open(&db_path)?.checkpoint_wal_truncate_if_larger_than(WAL_TRUNCATE_MIN_BYTES)?;
 
