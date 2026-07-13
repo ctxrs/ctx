@@ -1,4 +1,5 @@
 mod discovery;
+mod import_units;
 mod probes;
 mod reasons;
 mod specs;
@@ -9,8 +10,10 @@ pub use discovery::{
 };
 pub use specs::{provider_source_spec, provider_source_specs};
 pub use types::{
-    ProviderCatalogSupport, ProviderDefaultLocation, ProviderImportSupport, ProviderSource,
-    ProviderSourceKind, ProviderSourceSpec, ProviderSourceStatus,
+    ProviderCatalogSupport, ProviderDefaultLocation, ProviderImportDependency,
+    ProviderImportSupport, ProviderImportUnitGrouping, ProviderImportUnitOwner,
+    ProviderImportUnitSpec, ProviderSource, ProviderSourceKind, ProviderSourceSpec,
+    ProviderSourceStatus,
 };
 
 #[cfg(test)]

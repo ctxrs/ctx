@@ -836,6 +836,60 @@ fn source_root_inventory_change_token_marks_same_stat_source_pending() {
 }
 
 #[test]
+fn logical_import_unit_change_token_marks_same_owner_stat_pending() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let observed_at_ms = timestamp_ms(fixed_time());
+    let root = "/home/user/.local/share/opencode/opencode.db";
+    let mut file = SourceImportFile {
+        provider: CaptureProvider::OpenCode,
+        source_format: "opencode_sqlite".into(),
+        source_root: root.into(),
+        source_path: root.into(),
+        file_size_bytes: 42,
+        file_modified_at_ms: observed_at_ms,
+        observed_at_ms,
+        metadata: serde_json::json!({
+            "inventory_unit": "logical_import_unit",
+            "change_token_v1": "before",
+            "dependencies": ["opencode.db-wal"],
+        }),
+    };
+    store
+        .upsert_source_import_files(std::slice::from_ref(&file))
+        .unwrap();
+    store
+        .mark_source_import_file_indexed(
+            CaptureProvider::OpenCode,
+            SourceImportFileIndexUpdate {
+                source_root: root,
+                source_path: root,
+                file_size_bytes: file.file_size_bytes,
+                file_modified_at_ms: file.file_modified_at_ms,
+                indexed_at_ms: observed_at_ms + 1,
+            },
+        )
+        .unwrap();
+    assert!(store
+        .list_pending_source_import_files(CaptureProvider::OpenCode, root)
+        .unwrap()
+        .is_empty());
+
+    file.metadata["change_token_v1"] = serde_json::json!("after");
+    file.observed_at_ms += 1;
+    store
+        .upsert_source_import_files(std::slice::from_ref(&file))
+        .unwrap();
+
+    assert_eq!(
+        store
+            .list_pending_source_import_files(CaptureProvider::OpenCode, root)
+            .unwrap(),
+        vec![file]
+    );
+}
+
+#[test]
 fn source_import_format_change_marks_same_stat_source_pending() {
     let temp = tempdir();
     let store = Store::open(temp.path().join("work.sqlite")).unwrap();
