@@ -441,6 +441,12 @@ pub(crate) enum ImportFailureScope {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ImportRetryability {
+    Retryable,
+    Terminal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ImportFailureType {
     RecordRejection,
     UnsupportedSchema,
@@ -495,6 +501,69 @@ pub(crate) fn import_error_scope(error: &anyhow::Error) -> ImportFailureScope {
     } else {
         ImportFailureScope::Source
     }
+}
+
+pub(crate) fn import_error_retryability(error: &anyhow::Error) -> ImportRetryability {
+    let typed_sqlite_retryability = error.chain().find_map(|cause| {
+        cause
+            .downcast_ref::<rusqlite::Error>()
+            .map(is_transient_sqlite_error)
+            .or_else(|| {
+                cause.downcast_ref::<CaptureError>().and_then(|capture| {
+                    let CaptureError::Sqlite(error) = capture else {
+                        return None;
+                    };
+                    Some(is_transient_sqlite_error(error))
+                })
+            })
+    });
+    let opaque_sqlite_busy = typed_sqlite_retryability.is_none()
+        && error
+            .chain()
+            .any(|cause| is_sqlite_busy_text(&cause.to_string()));
+    if typed_sqlite_retryability == Some(true)
+        || opaque_sqlite_busy
+        || error.chain().any(|cause| {
+            cause
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| is_transient_io_kind(error.kind()))
+                || matches!(
+                    cause.downcast_ref::<CaptureError>(),
+                    Some(CaptureError::Io(error)) if is_transient_io_kind(error.kind())
+                )
+        })
+        || import_error_scope(error) == ImportFailureScope::System
+    {
+        ImportRetryability::Retryable
+    } else {
+        ImportRetryability::Terminal
+    }
+}
+
+fn is_transient_sqlite_error(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(inner, _)
+            if matches!(
+                inner.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            )
+    )
+}
+
+fn is_transient_io_kind(kind: std::io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        std::io::ErrorKind::Interrupted
+            | std::io::ErrorKind::WouldBlock
+            | std::io::ErrorKind::TimedOut
+            | std::io::ErrorKind::PermissionDenied
+            | std::io::ErrorKind::UnexpectedEof
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::NotConnected
+            | std::io::ErrorKind::BrokenPipe
+    )
 }
 
 pub(crate) fn import_failure_type(error: &anyhow::Error) -> ImportFailureType {
@@ -618,10 +687,44 @@ mod tests {
 
         assert_eq!(import_error_scope(&error), ImportFailureScope::Source);
         assert_eq!(
+            import_error_retryability(&error),
+            ImportRetryability::Retryable
+        );
+        assert_eq!(
             import_failure_type(&error),
             ImportFailureType::SourceDatabase
         );
         assert!(!error_summary(&error).contains("ctx index is busy"));
+    }
+
+    #[test]
+    fn typed_sqlite_locked_is_retryable_but_typed_non_locking_errors_are_terminal() {
+        let locked = anyhow::Error::new(CaptureError::Sqlite(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_LOCKED),
+            None,
+        )));
+        assert_eq!(
+            import_error_retryability(&locked),
+            ImportRetryability::Retryable
+        );
+
+        let non_locking = anyhow::Error::new(CaptureError::Sqlite(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+            Some("database is locked but the typed code is corrupt".to_owned()),
+        )));
+        assert_eq!(
+            import_error_retryability(&non_locking),
+            ImportRetryability::Terminal
+        );
+    }
+
+    #[test]
+    fn opaque_sqlite_lock_text_remains_retryable() {
+        let error = anyhow!("plugin adapter failed: database table is locked");
+        assert_eq!(
+            import_error_retryability(&error),
+            ImportRetryability::Retryable
+        );
     }
 
     #[test]
@@ -670,6 +773,53 @@ mod tests {
         assert_eq!(
             import_failure_type(&sqlite),
             ImportFailureType::SourceDatabase
+        );
+    }
+
+    #[test]
+    fn durable_retryability_separates_transient_io_from_invalid_source_paths() {
+        let transient = anyhow::Error::new(CaptureError::Io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "provider read timed out",
+        )));
+        assert_eq!(import_error_scope(&transient), ImportFailureScope::Source);
+        assert_eq!(
+            import_error_retryability(&transient),
+            ImportRetryability::Retryable
+        );
+
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::UnexpectedEof,
+        ] {
+            let repairable = anyhow::Error::new(CaptureError::Io(std::io::Error::new(
+                kind,
+                "repairable source read",
+            )));
+            assert_eq!(import_error_scope(&repairable), ImportFailureScope::Source);
+            assert_eq!(
+                import_error_retryability(&repairable),
+                ImportRetryability::Retryable
+            );
+        }
+
+        let missing = anyhow::Error::new(CaptureError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "source disappeared",
+        )));
+        assert_eq!(
+            import_error_retryability(&missing),
+            ImportRetryability::Terminal
+        );
+
+        let invalid = anyhow::Error::new(CaptureError::InvalidProviderTranscriptPath {
+            path: PathBuf::from("/tmp/not-a-transcript"),
+            reason: "expected a transcript file",
+        });
+        assert_eq!(import_error_scope(&invalid), ImportFailureScope::Source);
+        assert_eq!(
+            import_error_retryability(&invalid),
+            ImportRetryability::Terminal
         );
     }
 
