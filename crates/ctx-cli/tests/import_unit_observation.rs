@@ -282,6 +282,36 @@ fn manifested_trae_observes_wal_only_commits_read_only() {
     drop(writer);
 }
 
+#[cfg(unix)]
+#[test]
+fn non_utf8_manifest_owners_are_rejected_without_lossy_aliases() {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+    let temp = tempdir();
+    let root = temp.path().join("non-utf8-claude-projects");
+    fs::create_dir(&root).unwrap();
+    let owner_a = root.join(OsString::from_vec(b"session-\x80.jsonl".to_vec()));
+    let owner_b = root.join(OsString::from_vec(b"session-\x81.jsonl".to_vec()));
+    assert_ne!(owner_a, owner_b);
+    assert_eq!(owner_a.display().to_string(), owner_b.display().to_string());
+    fs::write(&owner_a, b"{}\n").unwrap();
+    fs::write(&owner_b, b"{}\n").unwrap();
+
+    let mut command = ctx(&temp);
+    command
+        .args(["import", "--provider", "claude", "--path"])
+        .arg(&root)
+        .args(["--json", "--progress", "none"]);
+    let stderr = failure_stderr(&mut command);
+    assert!(
+        stderr.contains("import unit owner cannot be persisted because it is not valid UTF-8"),
+        "{stderr}"
+    );
+
+    let status = json_output(ctx(&temp).args(["status", "--json"]));
+    assert_eq!(status["source_import_files"], 0, "{status:#}");
+}
+
 fn import_path(temp: &TempDir, provider: &str, path: &Path) -> Value {
     json_output(ctx(temp).args([
         "import",

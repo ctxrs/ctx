@@ -1,5 +1,6 @@
 use super::*;
 use crate::commands::import::manifest::collect_source_import_paths;
+use ctx_history_capture::{observe_sqlite_source_generation, SqliteObservedFile};
 use sha2::{Digest, Sha256};
 
 pub(crate) fn system_time_ms(time: SystemTime) -> i64 {
@@ -281,6 +282,17 @@ pub(crate) fn source_stats(path: &Path) -> Result<SourceStats> {
     let mut stats = SourceStats::default();
     let mut change_entries = Vec::new();
     if metadata.file_type().is_file() {
+        if is_sqlite_main_path(path) {
+            let generation = observe_sqlite_source_generation(path)
+                .with_context(|| format!("observe SQLite import source {}", path.display()))?;
+            stats.files = 1;
+            stats.bytes = generation.main().len();
+            change_entries.extend(generation.files().into_iter().map(|file| {
+                SourceChangeEntry::from_sqlite_observed(path.parent().unwrap_or(path), file)
+            }));
+            stats.change_token = Some(source_change_token(change_entries));
+            return Ok(stats);
+        }
         add_source_stat(
             &mut stats,
             &mut change_entries,
@@ -290,37 +302,6 @@ pub(crate) fn source_stats(path: &Path) -> Result<SourceStats> {
             true,
             true,
         );
-        // WAL and rollback-journal files can hold committed changes that have
-        // not reached the main database. A -shm file is nondurable coordination
-        // state, contains no transaction data, and may change during read-only use.
-        for suffix in ["-wal", "-journal"] {
-            let mut sidecar = path.as_os_str().to_os_string();
-            sidecar.push(suffix);
-            let sidecar = PathBuf::from(sidecar);
-            match fs::symlink_metadata(&sidecar) {
-                Ok(metadata) if metadata.file_type().is_file() => add_source_stat(
-                    &mut stats,
-                    &mut change_entries,
-                    path.parent().unwrap_or(path),
-                    &sidecar,
-                    &metadata,
-                    false,
-                    true,
-                ),
-                Ok(_) => {
-                    return Err(anyhow!(
-                        "import source sidecar is not a regular file: {}",
-                        sidecar.display()
-                    ))
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(error).with_context(|| {
-                        format!("stat import source sidecar {}", sidecar.display())
-                    })
-                }
-            }
-        }
         stats.change_token = Some(source_change_token(change_entries));
         return Ok(stats);
     }
@@ -342,12 +323,35 @@ pub(crate) fn source_stats(path: &Path) -> Result<SourceStats> {
             if file_type.is_dir() {
                 stack.push(entry_path);
             } else if file_type.is_file() {
-                let metadata = entry
-                    .metadata()
-                    .with_context(|| format!("stat import source file {}", entry_path.display()))?;
-                let include_in_token = !entry_path
-                    .file_name()
-                    .is_some_and(|name| name.as_encoded_bytes().ends_with(b"-shm"));
+                let metadata = match entry.metadata() {
+                    Ok(metadata) => metadata,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => {
+                        return Err(error).with_context(|| {
+                            format!("stat import source file {}", entry_path.display())
+                        })
+                    }
+                };
+                if is_sqlite_main_path(&entry_path) {
+                    stats.files += 1;
+                    stats.bytes = stats.bytes.saturating_add(metadata.len());
+                    match observe_sqlite_source_generation(&entry_path) {
+                        Ok(generation) => change_entries.extend(
+                            generation
+                                .files()
+                                .into_iter()
+                                .map(|file| SourceChangeEntry::from_sqlite_observed(path, file)),
+                        ),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                        Err(error) => {
+                            return Err(error).with_context(|| {
+                                format!("observe SQLite import source {}", entry_path.display())
+                            })
+                        }
+                    }
+                    continue;
+                }
+                let include_in_token = !is_sqlite_sidecar_path(&entry_path);
                 add_source_stat(
                     &mut stats,
                     &mut change_entries,
@@ -369,6 +373,7 @@ pub(crate) struct SourceChangeEntry {
     len: u64,
     modified_secs: u64,
     modified_nanos: u32,
+    sentinel: Vec<u8>,
 }
 
 impl SourceChangeEntry {
@@ -383,8 +388,42 @@ impl SourceChangeEntry {
             len: metadata.len(),
             modified_secs: modified.as_secs(),
             modified_nanos: modified.subsec_nanos(),
+            sentinel: Vec::new(),
         }
     }
+
+    pub(crate) fn from_sqlite_observed(base: &Path, file: &SqliteObservedFile) -> Self {
+        Self {
+            path: file
+                .path()
+                .strip_prefix(base)
+                .unwrap_or(file.path())
+                .to_path_buf(),
+            len: file.len(),
+            modified_secs: file.modified_secs(),
+            modified_nanos: file.modified_nanos(),
+            sentinel: file.sentinel().to_vec(),
+        }
+    }
+}
+
+fn is_sqlite_main_path(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|extension| extension.to_str()),
+        Some("db" | "sqlite" | "sqlite3" | "vscdb")
+    )
+}
+
+fn is_sqlite_sidecar_path(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| {
+        [
+            b"-wal".as_slice(),
+            b"-journal".as_slice(),
+            b"-shm".as_slice(),
+        ]
+        .iter()
+        .any(|suffix| name.as_encoded_bytes().ends_with(suffix))
+    })
 }
 
 fn add_source_stat(
@@ -416,6 +455,10 @@ pub(crate) fn source_change_token(mut entries: Vec<SourceChangeEntry>) -> [u8; 3
         hasher.update(entry.len.to_le_bytes());
         hasher.update(entry.modified_secs.to_le_bytes());
         hasher.update(entry.modified_nanos.to_le_bytes());
+        if !entry.sentinel.is_empty() {
+            hasher.update((entry.sentinel.len() as u64).to_le_bytes());
+            hasher.update(entry.sentinel);
+        }
     }
     hasher.finalize().into()
 }
@@ -568,6 +611,59 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sqlite_source_stats_detect_same_stat_wal_generation_and_disappearance() {
+        use std::fs::FileTimes;
+
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("state.db");
+        fs::write(&db, b"main").unwrap();
+        let wal = sqlite_sidecar(&db, "-wal");
+        fs::write(&wal, synthetic_wal(1)).unwrap();
+        let original_metadata = fs::metadata(&wal).unwrap();
+        let original_modified = original_metadata.modified().unwrap();
+        let first = source_stats(&db).unwrap().change_token.unwrap();
+
+        fs::write(&wal, synthetic_wal(2)).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&wal)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(original_modified))
+            .unwrap();
+        let replacement_metadata = fs::metadata(&wal).unwrap();
+        assert_eq!(replacement_metadata.len(), original_metadata.len());
+        assert_eq!(replacement_metadata.modified().unwrap(), original_modified);
+        let replaced = source_stats(&db).unwrap().change_token.unwrap();
+        assert_ne!(replaced, first);
+
+        fs::remove_file(&wal).unwrap();
+        let disappeared = source_stats(&db).unwrap().change_token.unwrap();
+        assert_ne!(disappeared, replaced);
+    }
+
+    #[test]
+    fn ordinary_source_change_tokens_keep_the_stat_only_encoding() {
+        let path = PathBuf::from("session.jsonl");
+        let entry = SourceChangeEntry {
+            path: path.clone(),
+            len: 42,
+            modified_secs: 123,
+            modified_nanos: 456,
+            sentinel: Vec::new(),
+        };
+        let mut expected = Sha256::new();
+        let path = path.as_os_str().as_encoded_bytes();
+        expected.update((path.len() as u64).to_le_bytes());
+        expected.update(path);
+        expected.update(42_u64.to_le_bytes());
+        expected.update(123_u64.to_le_bytes());
+        expected.update(456_u32.to_le_bytes());
+        let expected: [u8; 32] = expected.finalize().into();
+
+        assert_eq!(source_change_token(vec![entry]), expected);
+    }
+
     #[cfg(unix)]
     #[test]
     fn source_change_tokens_distinguish_lossy_non_utf8_path_labels() {
@@ -583,6 +679,7 @@ mod tests {
             len: 42,
             modified_secs: 123,
             modified_nanos: 456,
+            sentinel: Vec::new(),
         };
         assert_ne!(
             source_change_token(vec![entry(path_a)]),
@@ -594,5 +691,17 @@ mod tests {
         let mut sidecar = path.as_os_str().to_owned();
         sidecar.push(suffix);
         PathBuf::from(sidecar)
+    }
+
+    fn synthetic_wal(generation: u8) -> Vec<u8> {
+        let page_size = 512_u32;
+        let mut bytes = vec![0_u8; 32 + 24 + page_size as usize];
+        bytes[0..4].copy_from_slice(&0x377f_0682_u32.to_be_bytes());
+        bytes[8..12].copy_from_slice(&page_size.to_be_bytes());
+        bytes[16..24].fill(generation);
+        bytes[32..36].copy_from_slice(&1_u32.to_be_bytes());
+        bytes[36..40].copy_from_slice(&1_u32.to_be_bytes());
+        bytes[40..48].fill(generation);
+        bytes
     }
 }

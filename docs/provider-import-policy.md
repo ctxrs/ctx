@@ -34,16 +34,32 @@ Inventory tracks the logical unit an adapter reads, not merely the file passed
 to it. A per-file unit has one canonical owner and includes every companion that
 can affect normalization in its change token. For example, a session JSONL file
 may own adjacent metadata, and a SQLite database owns its `-wal` and rollback
-`-journal` when present. SQLite `-shm` files are excluded because they are
-nondurable coordination state, contain no transaction data, and can change
-during read-only access. A companion-only change therefore selects the owner
-once, while an unchanged unit remains a no-op.
+`-journal` when present. SQLite tokens combine file identity/stat data with
+bounded main-header, WAL-generation/committed-frame, and journal sentinels;
+they do not hash an entire database or transcript. SQLite `-shm` files are
+excluded because they are rebuildable, nondurable coordination state, contain
+no transaction data, and can change during read-only access. A companion-only
+change therefore selects the owner once, while an unchanged unit remains a
+no-op.
+
+SQLite discovery predicates first inspect the immutable main database. Only a
+predicate miss with a durable WAL or hot rollback journal uses a bounded,
+generation-checked copy in ctx-owned temporary storage. Provider `-shm` files
+are never copied; SQLite may rebuild temporary coordination state there before
+the connection becomes query-only. Observation retries a bounded number of
+times when checkpointing or concurrent writes replace a sidecar, and never
+modifies provider-owned files.
 
 Providers whose adapters normalize a whole document or root may remain
 whole-source replacement units. Native one-shot discovery still scans the
 declared source in O(files) as the correctness fallback; import-unit inventory
 does not imply filesystem-event O(delta) discovery. Observation and import must
 remain read-only with respect to provider-owned files.
+
+Persisted source-root and canonical-owner identities must be valid UTF-8 while
+display-only dependency labels may be lossy. Inventory rejects an unpersistable
+identity instead of aliasing distinct native paths through replacement
+characters in the existing text schema.
 
 ## Default Import Shape
 

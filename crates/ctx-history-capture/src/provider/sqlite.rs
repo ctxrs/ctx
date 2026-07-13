@@ -1,8 +1,9 @@
 use std::{
     collections::BTreeSet,
-    fs,
+    fs::{File, OpenOptions},
+    io,
     ops::Deref,
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 use rusqlite::{Connection, OpenFlags};
@@ -12,6 +13,9 @@ use url::Url;
 
 use crate::common::io::ensure_regular_provider_transcript_file;
 use crate::compute_payload_hash;
+use crate::provider::sqlite_observation::{
+    observe_sqlite_source_generation, SQLITE_GENERATION_MAX_ATTEMPTS,
+};
 
 use crate::{CaptureError, Result, MAX_PROVIDER_SQLITE_VALUE_BYTES};
 
@@ -131,82 +135,199 @@ impl Deref for ReadOnlySqliteConnection {
 
 pub(crate) fn open_sqlite_readonly_source(path: &Path) -> Result<ReadOnlySqliteConnection> {
     ensure_regular_provider_transcript_file(path)?;
-    let sidecars = sqlite_existing_regular_sidecar_paths(path)?;
-    if sidecars.is_empty() {
-        let uri = sqlite_immutable_uri(path)?;
-        let conn = Connection::open_with_flags(
-            uri.as_str(),
-            OpenFlags::SQLITE_OPEN_READ_ONLY
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX
-                | OpenFlags::SQLITE_OPEN_URI,
-        )?;
-        return Ok(ReadOnlySqliteConnection {
-            conn,
-            _snapshot_dir: None,
-        });
+    let generation = observe_sqlite_source_generation(path)?;
+    if !generation.requires_snapshot() {
+        return open_sqlite_immutable_main(path);
+    }
+    open_stable_sqlite_snapshot(path)
+}
+
+pub(crate) fn probe_sqlite_readonly_source(
+    path: &Path,
+    predicate: impl Fn(&Connection) -> rusqlite::Result<bool>,
+) -> Result<bool> {
+    ensure_regular_provider_transcript_file(path)?;
+    let immutable = open_sqlite_immutable_main(path)?;
+    let main_result = predicate(&immutable);
+    if matches!(main_result, Ok(true)) {
+        return Ok(true);
     }
 
-    // Read-only SQLite connections can still update live WAL shared-memory files.
-    // Copy the DB plus sidecars first so imports see committed WAL content without
-    // mutating provider-owned history.
-    let snapshot_dir = tempfile::Builder::new()
-        .prefix("ctx-provider-sqlite-")
-        .tempdir()?;
-    let snapshot_path = snapshot_dir.path().join(path.file_name().ok_or_else(|| {
-        CaptureError::InvalidProviderTranscriptPath {
-            path: path.to_path_buf(),
-            reason: "provider SQLite path has no file name",
-        }
-    })?);
-    fs::copy(path, &snapshot_path)?;
-    for sidecar in sidecars {
-        let sidecar_name =
-            sidecar
-                .file_name()
-                .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
-                    path: sidecar.clone(),
-                    reason: "provider SQLite sidecar path has no file name",
-                })?;
-        fs::copy(&sidecar, snapshot_dir.path().join(sidecar_name))?;
+    let generation = observe_sqlite_source_generation(path)?;
+    if !generation.requires_snapshot() {
+        return main_result.map_err(CaptureError::from);
     }
+    let snapshot = open_stable_sqlite_snapshot(path)?;
+    predicate(&snapshot).map_err(CaptureError::from)
+}
+
+fn open_sqlite_immutable_main(path: &Path) -> Result<ReadOnlySqliteConnection> {
+    let uri = sqlite_immutable_uri(path)?;
     let conn = Connection::open_with_flags(
-        &snapshot_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        uri.as_str(),
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_URI,
     )?;
+    conn.pragma_update(None, "query_only", true)?;
     Ok(ReadOnlySqliteConnection {
         conn,
-        _snapshot_dir: Some(snapshot_dir),
+        _snapshot_dir: None,
     })
 }
 
-fn sqlite_existing_regular_sidecar_paths(path: &Path) -> Result<Vec<PathBuf>> {
-    let mut sidecars = Vec::new();
-    for sidecar in sqlite_sidecar_paths(path) {
-        match sidecar.symlink_metadata() {
-            Ok(metadata) if metadata.file_type().is_file() => sidecars.push(sidecar),
-            Ok(_) => {
-                return Err(CaptureError::InvalidProviderTranscriptPath {
-                    path: sidecar,
-                    reason: "provider SQLite sidecar is not a regular file",
-                });
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(CaptureError::Io(error)),
+fn open_stable_sqlite_snapshot(path: &Path) -> Result<ReadOnlySqliteConnection> {
+    for attempt in 1..=SQLITE_GENERATION_MAX_ATTEMPTS {
+        let before = observe_sqlite_source_generation(path)?;
+        if !before.requires_snapshot() {
+            return open_sqlite_immutable_main(path);
         }
+
+        let snapshot_dir = tempfile::Builder::new()
+            .prefix("ctx-provider-sqlite-")
+            .tempdir()?;
+        record_snapshot_attempt();
+        let mut raced = false;
+        for source in before.snapshot_files() {
+            let file_name = source.path().file_name().ok_or_else(|| {
+                CaptureError::InvalidProviderTranscriptPath {
+                    path: source.path().to_path_buf(),
+                    reason: "provider SQLite path has no file name",
+                }
+            })?;
+            match copy_sqlite_snapshot_file(source.path(), &snapshot_dir.path().join(file_name)) {
+                Ok(_) => record_snapshot_copy(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    raced = true;
+                    break;
+                }
+                Err(error) => return Err(CaptureError::Io(error)),
+            }
+        }
+        if raced {
+            continue;
+        }
+        run_snapshot_test_hook(path, attempt);
+        let after = match observe_sqlite_source_generation(path) {
+            Ok(after) => after,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Err(error) => return Err(CaptureError::Io(error)),
+        };
+        if before != after {
+            continue;
+        }
+
+        let snapshot_path = snapshot_dir.path().join(path.file_name().ok_or_else(|| {
+            CaptureError::InvalidProviderTranscriptPath {
+                path: path.to_path_buf(),
+                reason: "provider SQLite path has no file name",
+            }
+        })?);
+        // Recovery, WAL-index creation, and any journal cleanup happen only in
+        // this ctx-owned directory. The connection is query-only before adapters use it.
+        let conn = Connection::open_with_flags(
+            &snapshot_path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        let _: i64 = conn.query_row("PRAGMA schema_version", [], |row| row.get(0))?;
+        conn.pragma_update(None, "query_only", true)?;
+        return Ok(ReadOnlySqliteConnection {
+            conn,
+            _snapshot_dir: Some(snapshot_dir),
+        });
     }
-    Ok(sidecars)
+    Err(CaptureError::Io(std::io::Error::new(
+        std::io::ErrorKind::WouldBlock,
+        format!(
+            "SQLite source generation did not stabilize after {SQLITE_GENERATION_MAX_ATTEMPTS} copy attempts: {}",
+            path.display()
+        ),
+    )))
 }
 
-fn sqlite_sidecar_paths(path: &Path) -> Vec<PathBuf> {
-    ["-wal", "-shm", "-journal"]
-        .into_iter()
-        .map(|suffix| {
-            let mut sidecar = path.as_os_str().to_os_string();
-            sidecar.push(suffix);
-            PathBuf::from(sidecar)
-        })
-        .collect()
+fn copy_sqlite_snapshot_file(source: &Path, destination: &Path) -> io::Result<()> {
+    let mut source = File::open(source)?;
+    let mut destination = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)?;
+    io::copy(&mut source, &mut destination)?;
+    Ok(())
 }
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SqliteSnapshotTestMetrics {
+    pub(crate) attempts: usize,
+    pub(crate) copied_files: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    static SNAPSHOT_TEST_METRICS: std::cell::Cell<SqliteSnapshotTestMetrics> =
+        std::cell::Cell::new(SqliteSnapshotTestMetrics { attempts: 0, copied_files: 0 });
+    static SNAPSHOT_TEST_HOOK: std::cell::RefCell<Option<Box<dyn FnMut(&Path, usize)>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+pub(crate) fn take_sqlite_snapshot_test_metrics() -> SqliteSnapshotTestMetrics {
+    SNAPSHOT_TEST_METRICS.with(|metrics| metrics.replace(SqliteSnapshotTestMetrics::default()))
+}
+
+#[cfg(test)]
+pub(crate) struct SqliteSnapshotTestHookGuard;
+
+#[cfg(test)]
+impl Drop for SqliteSnapshotTestHookGuard {
+    fn drop(&mut self) {
+        SNAPSHOT_TEST_HOOK.with(|hook| *hook.borrow_mut() = None);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_sqlite_snapshot_test_hook(
+    hook: impl FnMut(&Path, usize) + 'static,
+) -> SqliteSnapshotTestHookGuard {
+    SNAPSHOT_TEST_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    SqliteSnapshotTestHookGuard
+}
+
+#[cfg(test)]
+fn record_snapshot_attempt() {
+    SNAPSHOT_TEST_METRICS.with(|metrics| {
+        let mut value = metrics.get();
+        value.attempts += 1;
+        metrics.set(value);
+    });
+}
+
+#[cfg(not(test))]
+fn record_snapshot_attempt() {}
+
+#[cfg(test)]
+fn record_snapshot_copy() {
+    SNAPSHOT_TEST_METRICS.with(|metrics| {
+        let mut value = metrics.get();
+        value.copied_files += 1;
+        metrics.set(value);
+    });
+}
+
+#[cfg(not(test))]
+fn record_snapshot_copy() {}
+
+#[cfg(test)]
+fn run_snapshot_test_hook(path: &Path, attempt: usize) {
+    SNAPSHOT_TEST_HOOK.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(path, attempt);
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn run_snapshot_test_hook(_path: &Path, _attempt: usize) {}
 
 fn sqlite_immutable_uri(path: &Path) -> Result<String> {
     let absolute_path =
@@ -266,9 +387,15 @@ pub(crate) fn opencode_schema_fingerprint(conn: &Connection) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::{fs, path::Path};
+
     use rusqlite::{params, types::Value as SqlValue, Connection};
 
-    use super::{optional_text_column_expr, optional_timestamp_millis_expr, BTreeSet};
+    use super::{
+        install_sqlite_snapshot_test_hook, open_sqlite_readonly_source, optional_text_column_expr,
+        optional_timestamp_millis_expr, take_sqlite_snapshot_test_metrics, BTreeSet,
+        SqliteSnapshotTestMetrics,
+    };
 
     #[test]
     fn optional_sqlite_casts_normalize_native_text_and_timestamp_shapes() {
@@ -358,5 +485,52 @@ mod tests {
             optional_text_column_expr(&missing, "value", "fallback"),
             "fallback"
         );
+    }
+
+    #[test]
+    fn disappearing_wal_retries_as_a_new_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("source.db");
+        drop(Connection::open(&db).unwrap());
+        let wal = sidecar(&db, "-wal");
+        fs::write(&wal, synthetic_wal()).unwrap();
+        let removed_wal = wal.clone();
+        let _hook = install_sqlite_snapshot_test_hook(move |_, attempt| {
+            if attempt == 1 {
+                fs::remove_file(&removed_wal).unwrap();
+            }
+        });
+
+        take_sqlite_snapshot_test_metrics();
+        let connection = open_sqlite_readonly_source(&db).unwrap();
+        assert_eq!(
+            connection
+                .query_row("PRAGMA query_only", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            take_sqlite_snapshot_test_metrics(),
+            SqliteSnapshotTestMetrics {
+                attempts: 1,
+                copied_files: 2,
+            }
+        );
+    }
+
+    fn synthetic_wal() -> Vec<u8> {
+        let page_size = 512_u32;
+        let mut bytes = vec![0_u8; 32 + 24 + page_size as usize];
+        bytes[0..4].copy_from_slice(&0x377f_0682_u32.to_be_bytes());
+        bytes[8..12].copy_from_slice(&page_size.to_be_bytes());
+        bytes[32..36].copy_from_slice(&1_u32.to_be_bytes());
+        bytes[36..40].copy_from_slice(&1_u32.to_be_bytes());
+        bytes
+    }
+
+    fn sidecar(path: &Path, suffix: &str) -> std::path::PathBuf {
+        let mut sidecar = path.as_os_str().to_owned();
+        sidecar.push(suffix);
+        sidecar.into()
     }
 }
