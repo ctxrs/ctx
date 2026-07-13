@@ -334,6 +334,7 @@ pub(crate) fn source_uses_incremental_event_search(source: &SourceInfo) -> bool 
             | CaptureProvider::ForgeCode
             | CaptureProvider::DeepAgents
             | CaptureProvider::Hermes
+            | CaptureProvider::OpenClaw
             | CaptureProvider::MistralVibe
             | CaptureProvider::Mux
             | CaptureProvider::RovoDev
@@ -342,6 +343,19 @@ pub(crate) fn source_uses_incremental_event_search(source: &SourceInfo) -> bool 
             | CaptureProvider::CodeBuddy
             | CaptureProvider::Trae
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider_sources::explicit_path_source;
+
+    #[test]
+    fn openclaw_uses_incremental_event_search() {
+        let source = explicit_path_source(CaptureProvider::OpenClaw, PathBuf::from("openclaw"));
+
+        assert!(source_uses_incremental_event_search(&source));
+    }
 }
 
 pub(crate) fn source_stats(path: &Path) -> Result<SourceStats> {
