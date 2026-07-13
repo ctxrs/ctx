@@ -79,7 +79,7 @@ pub(super) fn import_provider_capture_lines(
         captures,
         files_touched,
         None,
-        false,
+        true,
     )
 }
 

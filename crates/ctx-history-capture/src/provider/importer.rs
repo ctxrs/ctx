@@ -102,7 +102,11 @@ pub fn import_normalized_provider_captures(
     normalization: ProviderNormalizationResult,
     options: NormalizedProviderImportOptions,
 ) -> Result<ProviderImportSummary> {
-    batches::import_normalized_provider_captures(store, normalization, options, false)
+    // Every normalized provider import writes into the shared event FTS tables.
+    // Keep FTS automatic/crisis merges suppressed until the importer can finish
+    // them in bounded, checkpointed steps. This applies equally to atomic and
+    // partial imports, so no provider needs its own WAL safety policy.
+    batches::import_normalized_provider_captures(store, normalization, options, true)
 }
 
 pub(crate) fn import_normalized_provider_captures_with_bulk_search(
