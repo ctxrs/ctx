@@ -24,14 +24,17 @@ outcome is selected again until the source changes or that provider/source-forma
 revision is bumped. Session/source metadata alone does not make an import
 successful. Source failures discovered before ctx can record a stable
 observation are discovered again. Once an exact observation exists,
-source-scoped adapter errors are terminal for that fingerprint and revision;
-ctx-owned and system-scoped failures remain retryable.
+deterministic source-scoped adapter errors are terminal for that fingerprint
+and revision. Transient provider SQLite locks, transient or permission-denied
+I/O, and ctx-owned or system-scoped failures remain retryable.
 
 Observation completion is separate from native resume checkpoints. A completed
 observation with rejections may preserve an earlier safe checkpoint, but it must
 not advance that checkpoint past a rejected record. A later changed observation
 can therefore replay from the safe point while stable event IDs keep the import
 idempotent.
+Forced `--resume` imports still inventory and persist the final observation;
+forcing selection does not bypass fingerprint or parser-revision accounting.
 
 Every native provider/source-format parser has a positive import revision in the
 shared provider registry. Inventory completion requires both the current source

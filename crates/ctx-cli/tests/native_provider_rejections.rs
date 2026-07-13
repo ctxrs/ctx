@@ -217,6 +217,90 @@ fn unchanged_codex_catalog_mixed_observation_is_not_selected_again() {
 }
 
 #[test]
+fn codex_append_after_mixed_tail_preserves_the_earlier_safe_checkpoint() {
+    let temp = tempdir();
+    let sessions = temp.path().join("codex-sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let session = sessions.join("mixed-append.jsonl");
+    let meta = r#"{"timestamp":"2026-07-13T12:00:00.000Z","type":"session_meta","payload":{"id":"mixed-append","timestamp":"2026-07-13T12:00:00.000Z","cwd":"/repo","originator":"codex-cli","source":"cli"}}"#;
+    let user = r#"{"timestamp":"2026-07-13T12:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"mixed append checkpoint oracle"}]}}"#;
+    let initial = format!("{meta}\n{user}\n");
+    fs::write(&session, &initial).unwrap();
+    let args = [
+        "import",
+        "--provider",
+        "codex",
+        "--path",
+        sessions.to_str().unwrap(),
+        "--json",
+        "--progress",
+        "none",
+    ];
+    let first = json_output(ctx(&temp).args(args));
+    assert_eq!(first["outcome"], "success", "{first:#}");
+
+    let rejected = r#"{"timestamp":"2026-07-13T12:00:02.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":["#;
+    let mixed = format!("{initial}{rejected}\n");
+    fs::write(&session, &mixed).unwrap();
+    let first_mixed = json_output(ctx(&temp).args(args));
+    assert_eq!(
+        first_mixed["outcome"], "completed_with_rejections",
+        "{first_mixed:#}"
+    );
+    let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
+    let checkpoint_after_rejection: (i64, i64) = conn
+        .query_row(
+            "SELECT last_imported_file_size_bytes, indexed_file_size_bytes FROM catalog_sessions WHERE source_path = ?1",
+            [session.to_str().unwrap()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(checkpoint_after_rejection.0, initial.len() as i64);
+    assert_eq!(checkpoint_after_rejection.1, mixed.len() as i64);
+    drop(conn);
+
+    let accepted = r#"{"timestamp":"2026-07-13T12:00:03.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"mixed append accepted after rejection"}]}}"#;
+    let appended = format!("{mixed}{accepted}\n");
+    fs::write(&session, &appended).unwrap();
+    let appended_result = json_output(ctx(&temp).args(args));
+    assert_eq!(
+        appended_result["outcome"], "completed_with_rejections",
+        "{appended_result:#}"
+    );
+    let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
+    let checkpoint_after_append: (i64, i64) = conn
+        .query_row(
+            "SELECT last_imported_file_size_bytes, indexed_file_size_bytes FROM catalog_sessions WHERE source_path = ?1",
+            [session.to_str().unwrap()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(checkpoint_after_append.0, initial.len() as i64);
+    assert_eq!(checkpoint_after_append.1, appended.len() as i64);
+    drop(conn);
+
+    let unchanged = json_output(ctx(&temp).args(args));
+    assert_eq!(unchanged["outcome"], "success", "{unchanged:#}");
+    assert_eq!(unchanged["totals"]["imported_events"], 0, "{unchanged:#}");
+    let search = json_output(ctx(&temp).args([
+        "search",
+        "mixed append accepted after rejection",
+        "--provider",
+        "codex",
+        "--refresh",
+        "off",
+        "--json",
+    ]));
+    assert_search_provider_oracle(
+        &search,
+        "codex",
+        "mixed append accepted after rejection",
+        1,
+        "message",
+    );
+}
+
+#[test]
 fn legacy_pr75_generic_catalog_failure_gets_one_tolerant_recovery_attempt() {
     let temp = tempdir();
     let sessions = temp.path().join("codex-sessions");
@@ -252,12 +336,15 @@ fn legacy_pr75_generic_catalog_failure_gets_one_tolerant_recovery_attempt() {
     .unwrap();
     drop(conn);
 
-    let recovered = json_output(ctx(&temp).args(args));
+    let recovered = json_output(ctx(&temp).args(args).arg("--resume"));
     assert_eq!(recovered["outcome"], "success", "{recovered:#}");
     assert_eq!(recovered["totals"]["rejected_records"], 0, "{recovered:#}");
     let status = json_output(ctx(&temp).args(["status", "--json"]));
     assert_eq!(status["failed_catalog_sessions"], 0, "{status:#}");
     assert_eq!(status["pending_catalog_sessions"], 0, "{status:#}");
+    let unchanged = json_output(ctx(&temp).args(args));
+    assert_eq!(unchanged["outcome"], "success", "{unchanged:#}");
+    assert_eq!(unchanged["totals"]["imported_events"], 0, "{unchanged:#}");
     let search = json_output(ctx(&temp).args([
         "search",
         "legacy pr75 recovery oracle",
@@ -330,8 +417,21 @@ fn terminal_codex_catalog_rejection_converges_then_retries_after_correction() {
         "--json",
         "--progress",
         "none",
+        "--resume",
     ]));
     assert_eq!(imported["outcome"], "success", "{imported:#}");
+    let completed = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "codex",
+        "--path",
+        sessions.to_str().unwrap(),
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(completed["outcome"], "success", "{completed:#}");
+    assert_eq!(completed["totals"]["imported_events"], 0, "{completed:#}");
     let search = json_output(ctx(&temp).args([
         "search",
         "catalog rejected corrected later",

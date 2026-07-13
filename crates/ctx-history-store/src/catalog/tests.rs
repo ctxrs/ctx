@@ -367,6 +367,7 @@ fn catalog_sessions_count_indexed_and_stale_rows() {
                 source_path: "/home/user/.codex/sessions/2026/06/24/rollout.jsonl",
                 file_size_bytes: 42,
                 file_modified_at_ms: cataloged_at_ms,
+                import_revision: 1,
                 file_sha256: None,
                 event_count: Some(3),
                 indexed_at_ms: cataloged_at_ms + 10,
@@ -420,6 +421,7 @@ fn catalog_import_planning_requires_current_index_state_and_matching_session() {
                 source_path: "/home/user/.codex/sessions/2026/06/24/rollout.jsonl",
                 file_size_bytes: 42,
                 file_modified_at_ms: cataloged_at_ms,
+                import_revision: 1,
                 file_sha256: None,
                 event_count: Some(3),
                 indexed_at_ms: cataloged_at_ms + 10,
@@ -475,6 +477,7 @@ fn catalog_import_planning_scopes_matching_sessions_by_source_root() {
                     source_path,
                     file_size_bytes: 42,
                     file_modified_at_ms: cataloged_at_ms,
+                    import_revision: 1,
                     file_sha256: None,
                     event_count: Some(3),
                     indexed_at_ms: cataloged_at_ms + 10,
@@ -526,12 +529,20 @@ fn catalog_import_mark_failed_records_error_and_remains_pending() {
         .unwrap();
 
     let changed = store
-        .mark_catalog_source_failed(
+        .record_catalog_source_import_result(
             CaptureProvider::Codex,
-            "/home/user/.codex/sessions",
-            "/home/user/.codex/sessions/2026/06/24/rollout.jsonl",
-            "bad json",
-            cataloged_at_ms + 10,
+            CatalogSourceIndexUpdate {
+                source_root: "/home/user/.codex/sessions",
+                source_path: "/home/user/.codex/sessions/2026/06/24/rollout.jsonl",
+                file_size_bytes: 42,
+                file_modified_at_ms: cataloged_at_ms,
+                import_revision: 1,
+                file_sha256: None,
+                event_count: None,
+                indexed_at_ms: cataloged_at_ms + 10,
+            },
+            CatalogIndexedStatus::Failed,
+            Some("bad json"),
         )
         .unwrap();
     assert_eq!(changed, 1);
@@ -576,6 +587,7 @@ fn catalog_upsert_clears_completion_metadata_but_preserves_append_checkpoint() {
                 source_path,
                 file_size_bytes: 42,
                 file_modified_at_ms: cataloged_at_ms,
+                import_revision: 1,
                 file_sha256: None,
                 event_count: Some(3),
                 indexed_at_ms: cataloged_at_ms + 10,
@@ -676,6 +688,7 @@ fn completed_with_rejections_converges_without_advancing_safe_resume_checkpoint(
                 source_path,
                 file_size_bytes: 42,
                 file_modified_at_ms: observed_at_ms,
+                import_revision: 1,
                 file_sha256: Some("safe-prefix"),
                 event_count: Some(3),
                 indexed_at_ms: observed_at_ms + 10,
@@ -694,6 +707,7 @@ fn completed_with_rejections_converges_without_advancing_safe_resume_checkpoint(
                 source_path,
                 file_size_bytes: 64,
                 file_modified_at_ms: observed_at_ms + 1,
+                import_revision: 1,
                 file_sha256: None,
                 event_count: Some(4),
                 indexed_at_ms: observed_at_ms + 20,
@@ -738,6 +752,162 @@ fn completed_with_rejections_converges_without_advancing_safe_resume_checkpoint(
             1,
         )
     );
+
+    let mut appended_again = catalog_session(source_path, "mixed-tail", observed_at_ms + 2);
+    appended_again.file_size_bytes = 80;
+    store.upsert_catalog_sessions(&[appended_again]).unwrap();
+    let carried = store
+        .catalog_source_index_state(
+            CaptureProvider::Codex,
+            "/home/user/.codex/sessions",
+            source_path,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(carried.last_imported_file_size_bytes, Some(42));
+    assert_eq!(
+        carried.last_imported_file_sha256.as_deref(),
+        Some("safe-prefix")
+    );
+    assert_eq!(carried.last_imported_event_count, Some(3));
+    assert_eq!(
+        store
+            .list_pending_catalog_sessions(CaptureProvider::Codex, "/home/user/.codex/sessions")
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn stale_revision_results_cannot_complete_newer_inventory() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let observed_at_ms = timestamp_ms(fixed_time());
+    let source_root = "/home/user/.codex/sessions";
+    let source_path = "/home/user/.codex/sessions/revised.jsonl";
+    let mut session = catalog_session(source_path, "revised", observed_at_ms);
+    store.upsert_catalog_sessions(&[session.clone()]).unwrap();
+    session.import_revision = 2;
+    session.cataloged_at_ms += 1;
+    store.upsert_catalog_sessions(&[session.clone()]).unwrap();
+
+    let stale_catalog = store
+        .record_catalog_source_import_result(
+            CaptureProvider::Codex,
+            CatalogSourceIndexUpdate {
+                source_root,
+                source_path,
+                file_size_bytes: session.file_size_bytes,
+                file_modified_at_ms: session.file_modified_at_ms,
+                import_revision: 1,
+                file_sha256: None,
+                event_count: Some(1),
+                indexed_at_ms: observed_at_ms + 2,
+            },
+            CatalogIndexedStatus::Indexed,
+            None,
+        )
+        .unwrap();
+    assert_eq!(stale_catalog, 0);
+    assert_eq!(
+        store
+            .list_pending_catalog_sessions(CaptureProvider::Codex, source_root)
+            .unwrap(),
+        vec![session]
+    );
+
+    let file_root = "/home/user/.claude/projects";
+    let mut file = source_import_file(
+        CaptureProvider::Claude,
+        "claude_projects_jsonl_tree",
+        file_root,
+        "/home/user/.claude/projects/revised.jsonl",
+        observed_at_ms,
+    );
+    store
+        .upsert_source_import_files(std::slice::from_ref(&file))
+        .unwrap();
+    file.import_revision = 2;
+    file.observed_at_ms += 1;
+    store
+        .upsert_source_import_files(std::slice::from_ref(&file))
+        .unwrap();
+
+    let stale_file = store
+        .record_source_import_file_result(
+            CaptureProvider::Claude,
+            SourceImportFileIndexUpdate {
+                source_root: file_root,
+                source_path: &file.source_path,
+                file_size_bytes: file.file_size_bytes,
+                file_modified_at_ms: file.file_modified_at_ms,
+                import_revision: 1,
+                indexed_at_ms: observed_at_ms + 2,
+            },
+            CatalogIndexedStatus::Rejected,
+            Some("stale parser result"),
+        )
+        .unwrap();
+    assert_eq!(stale_file, 0);
+    assert_eq!(
+        store
+            .list_pending_source_import_files(CaptureProvider::Claude, file_root)
+            .unwrap(),
+        vec![file]
+    );
+}
+
+#[test]
+fn catalog_append_discards_checkpoint_past_prior_observation() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let observed_at_ms = timestamp_ms(fixed_time());
+    let source_path = "/home/user/.codex/sessions/invalid-checkpoint.jsonl";
+    store
+        .upsert_catalog_sessions(&[catalog_session(
+            source_path,
+            "invalid-checkpoint",
+            observed_at_ms,
+        )])
+        .unwrap();
+    store
+        .mark_catalog_source_indexed(
+            CaptureProvider::Codex,
+            CatalogSourceIndexUpdate {
+                source_root: "/home/user/.codex/sessions",
+                source_path,
+                file_size_bytes: 42,
+                file_modified_at_ms: observed_at_ms,
+                import_revision: 1,
+                file_sha256: Some("invalid-prefix"),
+                event_count: Some(3),
+                indexed_at_ms: observed_at_ms + 1,
+            },
+        )
+        .unwrap();
+    store
+        .conn
+        .execute(
+            "UPDATE catalog_sessions SET last_imported_file_size_bytes = 43 WHERE source_path = ?1",
+            [source_path],
+        )
+        .unwrap();
+
+    let mut appended = catalog_session(source_path, "invalid-checkpoint", observed_at_ms + 2);
+    appended.file_size_bytes = 64;
+    store.upsert_catalog_sessions(&[appended]).unwrap();
+
+    let state = store
+        .catalog_source_index_state(
+            CaptureProvider::Codex,
+            "/home/user/.codex/sessions",
+            source_path,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.last_imported_file_size_bytes, None);
+    assert_eq!(state.last_imported_file_sha256, None);
 }
 
 #[test]
@@ -757,6 +927,7 @@ fn terminal_rejected_catalog_observation_needs_no_materialized_session() {
                 source_path,
                 file_size_bytes: 42,
                 file_modified_at_ms: observed_at_ms,
+                import_revision: 1,
                 file_sha256: None,
                 event_count: Some(0),
                 indexed_at_ms: observed_at_ms + 10,
@@ -812,6 +983,7 @@ fn source_outcomes_converge_and_revision_invalidation_is_provider_scoped() {
                     source_path: &file.source_path,
                     file_size_bytes: file.file_size_bytes,
                     file_modified_at_ms: file.file_modified_at_ms,
+                    import_revision: file.import_revision,
                     indexed_at_ms: observed_at_ms + 10,
                 },
                 status,
@@ -887,6 +1059,7 @@ fn catalog_upsert_invalidates_checkpoint_for_shrink_and_same_size_change() {
                     source_path,
                     file_size_bytes: 42,
                     file_modified_at_ms: cataloged_at_ms,
+                    import_revision: 1,
                     file_sha256: None,
                     event_count: Some(3),
                     indexed_at_ms: cataloged_at_ms + 10,
@@ -934,6 +1107,7 @@ fn catalog_index_checkpoint_event_count_can_be_unknown() {
                 source_path,
                 file_size_bytes: 42,
                 file_modified_at_ms: cataloged_at_ms,
+                import_revision: 1,
                 file_sha256: Some("abc123"),
                 event_count: None,
                 indexed_at_ms: cataloged_at_ms + 10,
@@ -983,6 +1157,7 @@ fn source_import_manifest_upsert_ignores_observed_at_for_unchanged_files() {
                 source_path: "/home/user/.claude/projects/session.jsonl",
                 file_size_bytes: 42,
                 file_modified_at_ms: observed_at_ms,
+                import_revision: 1,
                 indexed_at_ms: observed_at_ms + 10,
             },
         )
@@ -1039,6 +1214,7 @@ fn source_root_inventory_change_token_marks_same_stat_source_pending() {
                 source_path: root,
                 file_size_bytes: file.file_size_bytes,
                 file_modified_at_ms: file.file_modified_at_ms,
+                import_revision: file.import_revision,
                 indexed_at_ms: observed_at_ms + 1,
             },
         )
@@ -1090,6 +1266,7 @@ fn source_import_format_change_marks_same_stat_source_pending() {
                 source_path: root,
                 file_size_bytes: file.file_size_bytes,
                 file_modified_at_ms: file.file_modified_at_ms,
+                import_revision: file.import_revision,
                 indexed_at_ms: observed_at_ms + 1,
             },
         )
@@ -1139,17 +1316,24 @@ fn source_import_file_counts_track_pending_indexed_failed_and_stale() {
                 source_path: &files[0].source_path,
                 file_size_bytes: 42,
                 file_modified_at_ms: observed_at_ms,
+                import_revision: 1,
                 indexed_at_ms: observed_at_ms + 10,
             },
         )
         .unwrap();
     store
-        .mark_source_import_file_failed(
+        .record_source_import_file_result(
             CaptureProvider::Claude,
-            root,
-            &files[2].source_path,
-            "bad json",
-            observed_at_ms + 20,
+            SourceImportFileIndexUpdate {
+                source_root: root,
+                source_path: &files[2].source_path,
+                file_size_bytes: files[2].file_size_bytes,
+                file_modified_at_ms: files[2].file_modified_at_ms,
+                import_revision: files[2].import_revision,
+                indexed_at_ms: observed_at_ms + 20,
+            },
+            CatalogIndexedStatus::Failed,
+            Some("bad json"),
         )
         .unwrap();
     store
