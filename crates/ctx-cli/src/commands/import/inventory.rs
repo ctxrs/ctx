@@ -13,6 +13,7 @@ use ctx_history_capture::{
 use ctx_history_core::CaptureProvider;
 use ctx_history_store::{SourceImportFile, Store};
 
+use crate::commands::import::catalog::codex_catalog_root_identity;
 use crate::commands::import::catalog::{source_import_stats, source_stats, system_time_ms};
 use crate::commands::import::manifest::{
     collect_source_import_files, persist_source_import_files, persisted_import_identity,
@@ -105,6 +106,9 @@ fn inventory_import_source(
     source: SourceInfo,
     full_rescan: bool,
 ) -> Result<(PlannedImportSource, Option<(CatalogSummary, Value)>)> {
+    if source.provider == CaptureProvider::Codex {
+        codex_catalog_root_identity(&source.path)?;
+    }
     if !full_rescan && is_incremental_codex_session_tree(&source) {
         let summary = catalog_codex_session_tree(
             &source.path,

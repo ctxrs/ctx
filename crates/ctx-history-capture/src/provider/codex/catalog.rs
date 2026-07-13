@@ -28,15 +28,13 @@ pub fn catalog_codex_session_tree(
     options: CodexSessionCatalogOptions,
 ) -> Result<CatalogSummary> {
     let root = root.as_ref();
-    let source_root = options
-        .source_root
-        .as_deref()
-        .unwrap_or(root)
-        .display()
-        .to_string();
+    codex_catalog_root_identity(root)?;
+    let source_root_path = options.source_root.as_deref().unwrap_or(root);
+    let source_root = codex_catalog_root_identity(source_root_path)?.to_owned();
     let cataloged_at_ms = options.cataloged_at.timestamp_millis();
     let mut paths = Vec::new();
     collect_jsonl_paths(root, &mut paths)?;
+    validate_codex_catalog_session_paths(&paths)?;
     let skipped_by_bounds = apply_codex_session_import_bounds(
         &mut paths,
         options.max_session_files,
@@ -67,7 +65,7 @@ pub fn catalog_codex_session_tree(
         };
         summary.source_files += 1;
         summary.source_bytes = summary.source_bytes.saturating_add(metadata.len());
-        let source_path = path.display().to_string();
+        let source_path = codex_catalog_session_identity(&path)?.to_owned();
         current_paths.push(source_path.clone());
         if let Some(session) = cached_catalog_session_if_unchanged(
             existing.get(&source_path),
@@ -152,12 +150,13 @@ pub fn catalog_codex_session_files(
     store: &Store,
     options: CodexSessionCatalogOptions,
 ) -> Result<CatalogSummary> {
-    let source_root = options
+    codex_catalog_root_identity(source_root.as_ref())?;
+    let source_root_path = options
         .source_root
         .as_deref()
-        .unwrap_or(source_root.as_ref())
-        .display()
-        .to_string();
+        .unwrap_or(source_root.as_ref());
+    let source_root = codex_catalog_root_identity(source_root_path)?.to_owned();
+    validate_codex_catalog_session_paths(&paths)?;
     let cataloged_at_ms = options.cataloged_at.timestamp_millis();
     let (scan_summary, sessions) =
         catalog_codex_session_paths(paths, &source_root, cataloged_at_ms, options.parallelism)?;
@@ -200,6 +199,7 @@ pub(crate) fn catalog_codex_session_paths(
     cataloged_at_ms: i64,
     requested_parallelism: Option<usize>,
 ) -> Result<(CatalogSummary, Vec<CatalogSession>)> {
+    validate_codex_catalog_session_paths(&paths)?;
     let parallelism = catalog_parallelism(paths.len(), requested_parallelism);
     let batches = if parallelism <= 1 {
         vec![catalog_codex_session_chunk(
@@ -301,6 +301,7 @@ pub(crate) fn catalog_codex_session_file(
     metadata: &fs::Metadata,
     cataloged_at_ms: i64,
 ) -> Result<CatalogSession> {
+    let source_path = codex_catalog_session_identity(path)?;
     let session_meta = read_codex_session_meta(path)?;
     let payload = session_meta.as_ref().and_then(|value| value.get("payload"));
     let source = payload
@@ -341,7 +342,7 @@ pub(crate) fn catalog_codex_session_file(
         provider: CaptureProvider::Codex,
         source_format: CODEX_SESSION_SOURCE_FORMAT.to_owned(),
         source_root: source_root.to_owned(),
-        source_path: path.display().to_string(),
+        source_path: source_path.to_owned(),
         external_session_id,
         parent_external_session_id,
         agent_type,
@@ -369,6 +370,29 @@ pub(crate) fn catalog_codex_session_file(
             "catalog_scope": "session_meta",
         }),
     })
+}
+
+fn codex_catalog_root_identity(path: &Path) -> Result<&str> {
+    path.to_str()
+        .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "Codex catalog source root is not valid UTF-8",
+        })
+}
+
+fn codex_catalog_session_identity(path: &Path) -> Result<&str> {
+    path.to_str()
+        .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "Codex catalog session path is not valid UTF-8",
+        })
+}
+
+fn validate_codex_catalog_session_paths(paths: &[PathBuf]) -> Result<()> {
+    for path in paths {
+        codex_catalog_session_identity(path)?;
+    }
+    Ok(())
 }
 pub(crate) fn read_codex_session_meta(path: &Path) -> Result<Option<Value>> {
     let file = File::open(path)?;

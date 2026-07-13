@@ -312,6 +312,50 @@ fn non_utf8_manifest_owners_are_rejected_without_lossy_aliases() {
     assert_eq!(status["source_import_files"], 0, "{status:#}");
 }
 
+#[cfg(unix)]
+#[test]
+fn non_utf8_codex_catalog_roots_and_sessions_are_rejected_before_persistence() {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+    for (invalid_root, resume) in [(true, false), (true, true), (false, false)] {
+        let temp = tempdir();
+        let root = if invalid_root {
+            temp.path()
+                .join(OsString::from_vec(b"codex-sessions-\x80".to_vec()))
+        } else {
+            temp.path().join("codex-sessions")
+        };
+        fs::create_dir(&root).unwrap();
+        let session = if invalid_root {
+            root.join("session.jsonl")
+        } else {
+            root.join(OsString::from_vec(b"session-\x80.jsonl".to_vec()))
+        };
+        fs::write(&session, b"{}\n").unwrap();
+
+        let mut command = ctx(&temp);
+        command
+            .args(["import", "--provider", "codex", "--path"])
+            .arg(&root)
+            .args(["--json", "--progress", "none"]);
+        if resume {
+            command.arg("--resume");
+        }
+        let stderr = failure_stderr(&mut command);
+        let expected = if invalid_root {
+            "Codex catalog source root is not valid UTF-8"
+        } else {
+            "Codex catalog session path is not valid UTF-8"
+        };
+        assert!(stderr.contains(expected), "{stderr}");
+        assert!(!stderr.contains('\u{fffd}'), "{stderr}");
+
+        let status = json_output(ctx(&temp).args(["status", "--json"]));
+        assert_eq!(status["cataloged_sessions"], 0, "{status:#}");
+        assert_eq!(status["indexed_items"], 0, "{status:#}");
+    }
+}
+
 fn import_path(temp: &TempDir, provider: &str, path: &Path) -> Value {
     json_output(ctx(temp).args([
         "import",

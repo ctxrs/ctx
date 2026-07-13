@@ -100,6 +100,9 @@ fn import_one_source_inner_batched(
     full_rescan: bool,
     preinventory: &SourcePreinventory,
 ) -> Result<ProviderImportSummary> {
+    if source.provider == CaptureProvider::Codex {
+        super::catalog::codex_catalog_root_identity(&source.path)?;
+    }
     let record = import_record_for_source(source);
     let record_id = record.id;
     let record_existed = history_record_exists(store, record_id)?;
