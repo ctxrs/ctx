@@ -17,7 +17,7 @@ pub(crate) fn import_incremental_codex_session_tree(
     progress: Option<CodexSessionImportProgressCallback>,
     preinventory_catalog: Option<&CatalogSummary>,
 ) -> Result<ProviderImportSummary> {
-    let source_root = source.path.display().to_string();
+    let source_root = codex_catalog_root_identity(&source.path)?.to_owned();
     let mut summary = ProviderImportSummary::default();
     if let Some(catalog) = preinventory_catalog {
         summary.failed += catalog.failed_sessions;
@@ -158,6 +158,11 @@ pub(crate) fn import_incremental_codex_session_tree(
         }
     }
     Ok(summary)
+}
+
+pub(crate) fn codex_catalog_root_identity(path: &Path) -> Result<&str> {
+    path.to_str()
+        .ok_or_else(|| anyhow!("Codex catalog source root is not valid UTF-8"))
 }
 
 fn catalog_session_import_failure(summary: &ProviderImportSummary) -> String {
@@ -617,14 +622,18 @@ mod tests {
 
         let temp = tempfile::tempdir().unwrap();
         let db = temp.path().join("state.db");
-        fs::write(&db, b"main").unwrap();
+        let first_fixture = real_wal_generation(temp.path(), "first", "omega");
+        let second_fixture = real_wal_generation(temp.path(), "second", "sigma");
+        assert_eq!(first_fixture.0, second_fixture.0);
+        assert_eq!(first_fixture.1.len(), second_fixture.1.len());
+        fs::write(&db, first_fixture.0).unwrap();
         let wal = sqlite_sidecar(&db, "-wal");
-        fs::write(&wal, synthetic_wal(1)).unwrap();
+        fs::write(&wal, first_fixture.1).unwrap();
         let original_metadata = fs::metadata(&wal).unwrap();
         let original_modified = original_metadata.modified().unwrap();
         let first = source_stats(&db).unwrap().change_token.unwrap();
 
-        fs::write(&wal, synthetic_wal(2)).unwrap();
+        fs::write(&wal, second_fixture.1).unwrap();
         fs::File::options()
             .write(true)
             .open(&wal)
@@ -693,15 +702,26 @@ mod tests {
         PathBuf::from(sidecar)
     }
 
-    fn synthetic_wal(generation: u8) -> Vec<u8> {
-        let page_size = 512_u32;
-        let mut bytes = vec![0_u8; 32 + 24 + page_size as usize];
-        bytes[0..4].copy_from_slice(&0x377f_0682_u32.to_be_bytes());
-        bytes[8..12].copy_from_slice(&page_size.to_be_bytes());
-        bytes[16..24].fill(generation);
-        bytes[32..36].copy_from_slice(&1_u32.to_be_bytes());
-        bytes[36..40].copy_from_slice(&1_u32.to_be_bytes());
-        bytes[40..48].fill(generation);
-        bytes
+    fn real_wal_generation(root: &Path, name: &str, value: &str) -> (Vec<u8>, Vec<u8>) {
+        let path = root.join(format!("{name}.db"));
+        let writer = rusqlite::Connection::open(&path).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA page_size = 512;
+                 VACUUM;
+                 CREATE TABLE entries (id INTEGER PRIMARY KEY, value TEXT);
+                 INSERT INTO entries VALUES (1, 'alpha');
+                 PRAGMA journal_mode = WAL;
+                 PRAGMA wal_autocheckpoint = 0;
+                 PRAGMA wal_checkpoint(TRUNCATE);",
+            )
+            .unwrap();
+        writer
+            .execute("UPDATE entries SET value = ?1 WHERE id = 1", [value])
+            .unwrap();
+        (
+            fs::read(&path).unwrap(),
+            fs::read(sqlite_sidecar(&path, "-wal")).unwrap(),
+        )
     }
 }
