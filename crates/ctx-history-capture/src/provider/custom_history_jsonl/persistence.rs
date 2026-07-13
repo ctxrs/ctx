@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::provider::importer::{
     provider_edge_uuid, provider_scoped_source_uuid, provider_session_exists_cached,
-    provider_session_uuid, provider_sync_metadata, timestamps,
+    provider_session_uuid, provider_sync_metadata, timestamps, ProviderImportTransaction,
 };
 use crate::{stable_capture_uuid, ProviderImportSummary, Result};
 
@@ -22,100 +22,116 @@ pub(crate) fn import_custom_history_edges(
     store: &mut Store,
     edges: &[(usize, CustomHistoryJsonlV1EdgeImport)],
     history_record_id: Option<Uuid>,
-    allow_partial_failures: bool,
     summary: &mut ProviderImportSummary,
 ) -> Result<()> {
     if edges.is_empty() {
         return Ok(());
     }
 
-    store.begin_immediate_batch()?;
+    let mut transaction = ProviderImportTransaction::begin_bounded(store, true)?;
     for (line_number, edge) in edges {
-        let edge_id = if edge.edge_type == SessionEdgeType::ParentChild {
-            provider_edge_uuid(
-                CaptureProvider::Custom,
-                &edge.to_provider_session_id,
-                "parent_child",
-            )
-        } else {
-            let key = custom_history_key(json!({
-                "schema": CTX_HISTORY_JSONL_V1_SCHEMA_VERSION,
-                "kind": "session_edge",
-                "provider_key": edge.provider_key,
-                "source_id": edge.source_id,
-                "from_provider_session_id": edge.from_provider_session_id,
-                "to_provider_session_id": edge.to_provider_session_id,
-                "edge_type": edge.edge_type.as_str(),
-                "edge_id": edge.edge_id,
-            }));
-            stable_capture_uuid(&key, "session-edge")
-        };
-        let from_session_id =
-            provider_session_uuid(CaptureProvider::Custom, &edge.from_provider_session_id);
-        let to_session_id =
-            provider_session_uuid(CaptureProvider::Custom, &edge.to_provider_session_id);
-        let source_id = provider_scoped_source_uuid(
-            CaptureProvider::Custom,
-            &edge.to_provider_session_id,
-            &edge.source_format,
-            edge.raw_source_path.as_deref(),
-        );
-        let mut exists_cache = BTreeMap::<Uuid, bool>::new();
-        if !provider_session_exists_cached(store, from_session_id, &mut exists_cache)?
-            || !provider_session_exists_cached(store, to_session_id, &mut exists_cache)?
-        {
-            push_provider_import_failure(
-                summary,
-                *line_number,
-                "edge endpoint session was not imported".to_owned(),
-            );
-            if !allow_partial_failures {
-                let _ = store.rollback_batch();
-                return Ok(());
-            }
-            continue;
-        }
-        let was_present = store.session_edge_exists(edge_id)?;
-        let session_edge = SessionEdge {
-            id: edge_id,
-            from_session_id,
-            to_session_id,
-            edge_type: edge.edge_type,
-            confidence: edge.confidence,
-            source_id: Some(source_id),
-            timestamps: timestamps(edge.occurred_at),
-            sync: provider_sync_metadata(
-                edge.fidelity,
-                json!({
+        let edge_bytes = custom_edge_estimated_bytes(edge);
+        transaction.prepare_unit(store, edge_bytes)?;
+        let persist = (|| -> Result<()> {
+            let edge_id = if edge.edge_type == SessionEdgeType::ParentChild {
+                provider_edge_uuid(
+                    CaptureProvider::Custom,
+                    &edge.to_provider_session_id,
+                    "parent_child",
+                )
+            } else {
+                let key = custom_history_key(json!({
+                    "schema": CTX_HISTORY_JSONL_V1_SCHEMA_VERSION,
+                    "kind": "session_edge",
                     "provider_key": edge.provider_key,
                     "source_id": edge.source_id,
-                    "history_record_id": history_record_id,
-                    "metadata": edge.metadata,
-                }),
-            ),
-        };
-        store.upsert_session_edge(&session_edge)?;
-        if edge.edge_type == SessionEdgeType::ParentChild {
-            let mut child = store.get_session(to_session_id)?;
-            child.parent_session_id = Some(from_session_id);
-            if child.root_session_id.is_none() {
-                child.root_session_id = Some(from_session_id);
+                    "from_provider_session_id": edge.from_provider_session_id,
+                    "to_provider_session_id": edge.to_provider_session_id,
+                    "edge_type": edge.edge_type.as_str(),
+                    "edge_id": edge.edge_id,
+                }));
+                stable_capture_uuid(&key, "session-edge")
+            };
+            let from_session_id =
+                provider_session_uuid(CaptureProvider::Custom, &edge.from_provider_session_id);
+            let to_session_id =
+                provider_session_uuid(CaptureProvider::Custom, &edge.to_provider_session_id);
+            let source_id = provider_scoped_source_uuid(
+                CaptureProvider::Custom,
+                &edge.to_provider_session_id,
+                &edge.source_format,
+                edge.raw_source_path.as_deref(),
+            );
+            let mut exists_cache = BTreeMap::<Uuid, bool>::new();
+            if !provider_session_exists_cached(store, from_session_id, &mut exists_cache)?
+                || !provider_session_exists_cached(store, to_session_id, &mut exists_cache)?
+            {
+                push_provider_import_failure(
+                    summary,
+                    *line_number,
+                    "edge endpoint session was not imported".to_owned(),
+                );
+                return Ok(());
             }
-            store.upsert_session(&child)?;
+            let was_present = store.session_edge_exists(edge_id)?;
+            let session_edge = SessionEdge {
+                id: edge_id,
+                from_session_id,
+                to_session_id,
+                edge_type: edge.edge_type,
+                confidence: edge.confidence,
+                source_id: Some(source_id),
+                timestamps: timestamps(edge.occurred_at),
+                sync: provider_sync_metadata(
+                    edge.fidelity,
+                    json!({
+                        "provider_key": edge.provider_key,
+                        "source_id": edge.source_id,
+                        "history_record_id": history_record_id,
+                        "metadata": edge.metadata,
+                    }),
+                ),
+            };
+            store.upsert_session_edge(&session_edge)?;
+            if edge.edge_type == SessionEdgeType::ParentChild {
+                let mut child = store.get_session(to_session_id)?;
+                child.parent_session_id = Some(from_session_id);
+                if child.root_session_id.is_none() {
+                    child.root_session_id = Some(from_session_id);
+                }
+                store.upsert_session(&child)?;
+            }
+            if was_present {
+                summary.skipped_edges += 1;
+                summary.skipped += 1;
+            } else {
+                summary.imported_edges += 1;
+                summary.imported += 1;
+            }
+            summary.accepted_content_records += 1;
+            Ok(())
+        })();
+        if let Err(error) = persist {
+            transaction.rollback(store);
+            return Err(error);
         }
-        if was_present {
-            summary.skipped_edges += 1;
-            summary.skipped += 1;
-        } else {
-            summary.imported_edges += 1;
-            summary.imported += 1;
-        }
+        transaction.record_unit(store, edge_bytes)?;
     }
-    if let Err(err) = store.commit_batch() {
-        let _ = store.rollback_batch();
-        return Err(err.into());
-    }
+    transaction.commit(store)?;
     Ok(())
+}
+
+fn custom_edge_estimated_bytes(edge: &CustomHistoryJsonlV1EdgeImport) -> usize {
+    edge.provider_key
+        .len()
+        .saturating_add(edge.source_id.len())
+        .saturating_add(edge.source_format.len())
+        .saturating_add(edge.raw_source_path.as_deref().map_or(0, str::len))
+        .saturating_add(edge.from_provider_session_id.len())
+        .saturating_add(edge.to_provider_session_id.len())
+        .saturating_add(edge.edge_id.as_deref().map_or(0, str::len))
+        .saturating_add(edge.metadata.to_string().len())
+        .saturating_add(256)
 }
 
 pub(crate) fn import_custom_history_source_cursors(

@@ -108,16 +108,16 @@ ctx import --provider cursor
 ctx import --provider zed
 ctx import --provider codex --path ~/.codex/sessions
 ctx import --resume --json
-ctx import --provider pi --path ./pi-session.jsonl --partial
+ctx import --provider pi --path ./pi-session.jsonl
 ```
 
 Setup already imports discovered sources. Use `ctx import` to repair, re-run,
 resume, or target a specific provider/path. Current importers rescan sources
 idempotently and skip or replace unchanged indexed rows. The `--resume` flag is
 reported as `idempotent_rescan`; it does not yet mean every provider has a
-native cursor-resume API. Imports are source-atomic by default; use `--partial`
-only when you want valid rows from a malformed source to commit while row
-failures are reported.
+native cursor-resume API. Imports keep valid records when isolated records are
+malformed and report those rejections explicitly. Unreadable or incompatible
+sources still fail without preventing `--all` from importing other sources.
 
 When daemon maintenance is enabled, `ctx import` can start the same ctx-owned
 background daemon profile after the foreground import finishes.

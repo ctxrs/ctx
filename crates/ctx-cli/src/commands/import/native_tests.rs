@@ -6,6 +6,30 @@ use ctx_history_core::{
 use ctx_history_store::{SourceImportFile, SourceImportFileIndexUpdate};
 use serde_json::json;
 
+#[test]
+fn codex_preinventory_failures_survive_when_catalog_has_no_pending_sessions() {
+    let temp = tempfile::tempdir().unwrap();
+    let source_path = temp.path().join("sessions");
+    fs::create_dir_all(&source_path).unwrap();
+    let source = explicit_path_source(CaptureProvider::Codex, source_path);
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let catalog = CatalogSummary {
+        failed_sessions: 1,
+        failures: vec![ProviderImportFailure {
+            line: 0,
+            error: "catalog-only rejection".to_owned(),
+        }],
+        ..CatalogSummary::default()
+    };
+
+    let summary =
+        import_incremental_codex_session_tree(&mut store, &source, new_id(), None, Some(&catalog))
+            .unwrap();
+
+    assert_eq!(summary.failed, 1);
+    assert_eq!(summary.failures, catalog.failures);
+}
+
 fn persist_indexed_root(
     store: &Store,
     source: &SourceInfo,
@@ -53,7 +77,6 @@ fn unchanged_root_source_skips_provider_normalization() {
         &mut store,
         &source,
         None,
-        true,
         &SourcePreinventory::SourceRoot(file),
     )
     .unwrap();
@@ -104,7 +127,6 @@ fn unchanged_root_source_still_repairs_event_search_backfill() {
         &mut store,
         &source,
         None,
-        true,
         &SourcePreinventory::SourceRoot(file),
     )
     .unwrap();
@@ -145,7 +167,6 @@ fn changed_root_source_does_not_skip_provider_normalization() {
         &mut store,
         &source,
         None,
-        true,
         &SourcePreinventory::SourceRoot(changed),
     );
 
@@ -169,7 +190,6 @@ fn full_rescan_does_not_skip_unchanged_root_source() {
         &source,
         None,
         false,
-        true,
         true,
         &SourcePreinventory::SourceRoot(file),
     );

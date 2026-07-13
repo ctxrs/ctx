@@ -18,13 +18,15 @@ use crate::commands::import::manifest::{
     collect_source_import_files, persist_source_import_files, source_uses_import_file_manifest,
 };
 use crate::commands::import::{
-    CatalogTotals, InventoryTotals, PlannedImportSource, SourcePreinventory, SourceStats,
+    error_summary, import_error_scope, import_failure_type, CatalogTotals, ImportFailureScope,
+    ImportSourceFailure, InventoryTotals, PlannedImportSource, SourcePreinventory, SourceStats,
 };
 use crate::provider_sources::SourceInfo;
 
 #[derive(Debug, Default)]
 pub(crate) struct ImportInventory {
     pub(crate) sources: Vec<PlannedImportSource>,
+    pub(crate) failures: Vec<ImportSourceFailure>,
     pub(crate) totals: InventoryTotals,
     pub(crate) catalog: CatalogTotals,
     pub(crate) catalog_sources: Vec<Value>,
@@ -36,9 +38,26 @@ pub(crate) fn inventory_import_sources(
     full_rescan: bool,
 ) -> Result<ImportInventory> {
     let mut inventory = ImportInventory::default();
-    for source in sources {
-        let (plan, cataloged) = inventory_import_source(store, source, full_rescan)?;
+    for (index, source) in sources.into_iter().enumerate() {
         inventory.totals.sources += 1;
+        let failure_source = source.clone();
+        let (plan, cataloged) = match inventory_import_source(store, source, full_rescan) {
+            Ok(inventoried) => inventoried,
+            Err(error) if import_error_scope(&error) == ImportFailureScope::Source => {
+                inventory.failures.push(ImportSourceFailure {
+                    index,
+                    source: failure_source,
+                    stats: SourceStats::default(),
+                    error: error_summary(&error),
+                    failure_scope: ImportFailureScope::Source,
+                    failure_type: import_failure_type(&error),
+                    rejected_summary: None,
+                    system_error: None,
+                });
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         inventory.totals.source_files += plan.stats.files;
         inventory.totals.source_bytes = inventory
             .totals
@@ -51,7 +70,7 @@ pub(crate) fn inventory_import_sources(
             SourcePreinventory::SourceRoot(_) => {
                 inventory.totals.source_import_files += 1;
             }
-            SourcePreinventory::None | SourcePreinventory::CodexSessionCatalog => {}
+            SourcePreinventory::None | SourcePreinventory::CodexSessionCatalog(_) => {}
         }
         if let Some((summary, source_json)) = cataloged {
             inventory.catalog.add(&summary);
@@ -91,7 +110,6 @@ fn inventory_import_source(
             store,
             CodexSessionCatalogOptions {
                 source_root: Some(source.path.clone()),
-                allow_partial_failures: true,
                 ..CodexSessionCatalogOptions::default()
             },
         )
@@ -104,7 +122,7 @@ fn inventory_import_source(
         let plan = PlannedImportSource {
             source,
             stats,
-            preinventory: SourcePreinventory::CodexSessionCatalog,
+            preinventory: SourcePreinventory::CodexSessionCatalog(summary.clone()),
         };
         let source_json = json!({
             "provider": plan.source.provider.as_str(),

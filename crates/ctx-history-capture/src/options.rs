@@ -38,7 +38,6 @@ pub struct ProviderFixtureImportOptions {
     pub imported_at: DateTime<Utc>,
     pub history_record_id: Option<Uuid>,
     pub expected_provider: Option<CaptureProvider>,
-    pub allow_partial_failures: bool,
     pub source_format: String,
     pub fidelity: Fidelity,
 }
@@ -51,7 +50,6 @@ impl Default for ProviderFixtureImportOptions {
             imported_at: utc_now(),
             history_record_id: None,
             expected_provider: None,
-            allow_partial_failures: false,
             source_format: "normalized_provider_fixture_jsonl".to_owned(),
             fidelity: Fidelity::Imported,
         }
@@ -67,7 +65,6 @@ macro_rules! import_options {
                 pub source_path: Option<PathBuf>,
                 pub imported_at: DateTime<Utc>,
                 pub history_record_id: Option<Uuid>,
-                pub allow_partial_failures: bool,
             }
 
             impl Default for $name {
@@ -77,7 +74,6 @@ macro_rules! import_options {
                         source_path: None,
                         imported_at: utc_now(),
                         history_record_id: None,
-                        allow_partial_failures: false,
                     }
                 }
             }
@@ -137,7 +133,6 @@ pub struct CodexSessionImportOptions {
     pub source_path: Option<PathBuf>,
     pub imported_at: DateTime<Utc>,
     pub history_record_id: Option<Uuid>,
-    pub allow_partial_failures: bool,
     pub max_session_files: Option<usize>,
     pub max_total_bytes: Option<u64>,
     pub fast_event_inserts: bool,
@@ -151,7 +146,6 @@ impl Default for CodexSessionImportOptions {
             source_path: None,
             imported_at: utc_now(),
             history_record_id: None,
-            allow_partial_failures: false,
             max_session_files: None,
             max_total_bytes: None,
             fast_event_inserts: true,
@@ -167,7 +161,6 @@ impl std::fmt::Debug for CodexSessionImportOptions {
             .field("source_path", &self.source_path)
             .field("imported_at", &self.imported_at)
             .field("history_record_id", &self.history_record_id)
-            .field("allow_partial_failures", &self.allow_partial_failures)
             .field("max_session_files", &self.max_session_files)
             .field("max_total_bytes", &self.max_total_bytes)
             .field("fast_event_inserts", &self.fast_event_inserts)
@@ -198,7 +191,6 @@ pub struct CodexSessionImportProgress {
 pub struct CodexSessionCatalogOptions {
     pub source_root: Option<PathBuf>,
     pub cataloged_at: DateTime<Utc>,
-    pub allow_partial_failures: bool,
     pub max_session_files: Option<usize>,
     pub max_total_bytes: Option<u64>,
     pub parallelism: Option<usize>,
@@ -209,7 +201,6 @@ impl Default for CodexSessionCatalogOptions {
         Self {
             source_root: None,
             cataloged_at: utc_now(),
-            allow_partial_failures: true,
             max_session_files: None,
             max_total_bytes: None,
             parallelism: None,

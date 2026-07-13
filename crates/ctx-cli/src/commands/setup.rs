@@ -11,8 +11,10 @@ use ctx_history_store::Store;
 
 use crate::analytics::AnalyticsProperties;
 use crate::commands::import::{
-    import_totals_json, inventory_available_sources, run_import_internal, CatalogTotals,
-    ImportInventory, ImportReport, ImportRunOptions, InventoryTotals,
+    import_report_analytics_outcome, import_report_failure_type, import_totals_json,
+    insert_import_error_analytics, insert_import_report_analytics, inventory_available_sources,
+    run_import_internal, CatalogTotals, ImportInventory, ImportReport, ImportRunOptions,
+    InventoryTotals,
 };
 use crate::config::CONFIG_FILE;
 use crate::output::print_json;
@@ -72,12 +74,11 @@ pub(crate) fn run_setup(
             format: None,
             all: true,
             resume: false,
-            partial: true,
             no_daemon: args.no_daemon,
             json: args.json,
             progress: progress_arg,
         };
-        Some(run_import_internal(
+        let report = run_import_internal(
             &import_args,
             data_root.clone(),
             analytics_properties,
@@ -89,8 +90,21 @@ pub(crate) fn run_setup(
                 include_history_source_plugins: false,
                 operation: "setup",
             },
-        )?)
+        );
+        match report {
+            Ok(report) => Some(report),
+            Err(error) => {
+                insert_import_error_analytics(analytics_properties, &error);
+                return Err(error);
+            }
+        }
     };
+    if let Some(report) = import_report.as_ref() {
+        insert_import_report_analytics(analytics_properties, report);
+    }
+    let all_import_sources_failed = import_report
+        .as_ref()
+        .is_some_and(|report| import_report_analytics_outcome(&report.totals).0 == "failure");
     let inventory_totals = setup_inventory_totals(import_report.as_ref(), inventory_only.as_ref());
     let catalog = setup_catalog_totals(import_report.as_ref(), inventory_only.as_ref());
     let catalog_sources = setup_catalog_sources(import_report.as_ref(), inventory_only.as_ref());
@@ -274,6 +288,9 @@ pub(crate) fn run_setup(
             }
         }
     }
+    if all_import_sources_failed {
+        bail!("all setup import sources failed");
+    }
     Ok(())
 }
 
@@ -289,6 +306,9 @@ pub(crate) fn setup_import_json(report: Option<&ImportReport>, catalog_only: boo
     match report {
         Some(report) => json!({
             "ran": true,
+            "outcome": import_report_analytics_outcome(&report.totals).0,
+            "failure_scope": import_report_analytics_outcome(&report.totals).1,
+            "failure_type": import_report_failure_type(&report.totals),
             "resume": report.resume,
             "resume_mode": report.resume_mode(),
             "totals": import_totals_json(&report.totals),

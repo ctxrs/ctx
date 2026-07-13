@@ -16,7 +16,6 @@ fn native_crush_fixture_imports_searches_and_reimports() {
             imported_at: DateTime::parse_from_rfc3339("2026-06-24T12:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
-            allow_partial_failures: true,
             ..CrushSqliteImportOptions::default()
         },
     )
@@ -51,7 +50,6 @@ fn native_crush_fixture_imports_searches_and_reimports() {
         &fixture,
         &mut store,
         CrushSqliteImportOptions {
-            allow_partial_failures: true,
             ..CrushSqliteImportOptions::default()
         },
     )
@@ -81,7 +79,6 @@ fn native_parent_child_edges_import_for_claimed_provider_shapes() {
                 store,
                 KiloSqliteImportOptions {
                     source_path: Some(kilo.clone()),
-                    allow_partial_failures: true,
                     ..KiloSqliteImportOptions::default()
                 },
             )
@@ -102,7 +99,6 @@ fn native_parent_child_edges_import_for_claimed_provider_shapes() {
                 store,
                 MiMoCodeSqliteImportOptions {
                     source_path: Some(mimocode.clone()),
-                    allow_partial_failures: true,
                     ..MiMoCodeSqliteImportOptions::default()
                 },
             )
@@ -122,7 +118,6 @@ fn native_parent_child_edges_import_for_claimed_provider_shapes() {
                 store,
                 CrushSqliteImportOptions {
                     source_path: Some(crush.clone()),
-                    allow_partial_failures: true,
                     ..CrushSqliteImportOptions::default()
                 },
             )
@@ -142,7 +137,6 @@ fn native_parent_child_edges_import_for_claimed_provider_shapes() {
                 store,
                 HermesSqliteImportOptions {
                     source_path: Some(hermes.clone()),
-                    allow_partial_failures: true,
                     ..HermesSqliteImportOptions::default()
                 },
             )
@@ -162,7 +156,6 @@ fn native_parent_child_edges_import_for_claimed_provider_shapes() {
                 store,
                 WarpSqliteImportOptions {
                     source_path: Some(warp.clone()),
-                    allow_partial_failures: true,
                     ..WarpSqliteImportOptions::default()
                 },
             )
@@ -182,7 +175,6 @@ fn native_parent_child_edges_import_for_claimed_provider_shapes() {
                 store,
                 MistralVibeImportOptions {
                     source_path: Some(mistral.clone()),
-                    allow_partial_failures: true,
                     ..MistralVibeImportOptions::default()
                 },
             )
@@ -202,7 +194,6 @@ fn native_parent_child_edges_import_for_claimed_provider_shapes() {
                 store,
                 RovoDevImportOptions {
                     source_path: Some(rovodev.clone()),
-                    allow_partial_failures: true,
                     ..RovoDevImportOptions::default()
                 },
             )
@@ -229,7 +220,6 @@ fn native_tool_outputs_are_metadata_only_for_sqlite_provider_shapes() {
                 store,
                 CrushSqliteImportOptions {
                     source_path: Some(crush.clone()),
-                    allow_partial_failures: true,
                     ..CrushSqliteImportOptions::default()
                 },
             )
@@ -251,7 +241,6 @@ fn native_tool_outputs_are_metadata_only_for_sqlite_provider_shapes() {
                 store,
                 HermesSqliteImportOptions {
                     source_path: Some(hermes.clone()),
-                    allow_partial_failures: true,
                     ..HermesSqliteImportOptions::default()
                 },
             )
@@ -700,7 +689,6 @@ fn native_goose_fixture_imports_searches_and_reimports() {
             imported_at: DateTime::parse_from_rfc3339("2026-06-24T12:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
-            allow_partial_failures: true,
             ..GooseSessionsSqliteImportOptions::default()
         },
     )
@@ -738,7 +726,6 @@ fn native_goose_fixture_imports_searches_and_reimports() {
         &fixture,
         &mut store,
         GooseSessionsSqliteImportOptions {
-            allow_partial_failures: true,
             ..GooseSessionsSqliteImportOptions::default()
         },
     )
@@ -769,7 +756,6 @@ fn native_kiro_fixture_imports_searches_and_reimports() {
             imported_at: DateTime::parse_from_rfc3339("2026-06-25T20:12:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
-            allow_partial_failures: true,
             ..KiroSqliteImportOptions::default()
         },
     )
@@ -817,7 +803,6 @@ fn native_kiro_fixture_imports_searches_and_reimports() {
         &fixture,
         &mut store,
         KiroSqliteImportOptions {
-            allow_partial_failures: true,
             ..KiroSqliteImportOptions::default()
         },
     )
@@ -847,7 +832,6 @@ fn native_astrbot_fixture_imports_searches_and_reimports() {
             imported_at: DateTime::parse_from_rfc3339("2026-07-06T12:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
-            allow_partial_failures: true,
             ..AstrBotSqliteImportOptions::default()
         },
     )
@@ -894,7 +878,6 @@ fn native_astrbot_fixture_imports_searches_and_reimports() {
         &fixture,
         &mut store,
         AstrBotSqliteImportOptions {
-            allow_partial_failures: true,
             ..AstrBotSqliteImportOptions::default()
         },
     )
@@ -925,7 +908,6 @@ fn native_junie_fixture_imports_searches_reimports_and_file_touches() {
             imported_at: DateTime::parse_from_rfc3339("2026-07-06T12:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
-            allow_partial_failures: true,
             ..JunieImportOptions::default()
         },
     )
@@ -993,7 +975,6 @@ fn native_junie_fixture_imports_searches_reimports_and_file_touches() {
         &fixture,
         &mut store,
         JunieImportOptions {
-            allow_partial_failures: true,
             ..JunieImportOptions::default()
         },
     )
@@ -1027,7 +1008,6 @@ fn native_junie_index_rejects_traversal_session_ids() {
         &sessions,
         &mut store,
         JunieImportOptions {
-            allow_partial_failures: true,
             ..JunieImportOptions::default()
         },
     )
@@ -1064,7 +1044,6 @@ fn native_zed_fixture_imports_searches_and_reimports() {
             imported_at: DateTime::parse_from_rfc3339("2026-07-04T12:10:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
-            allow_partial_failures: true,
             ..ZedThreadsSqliteImportOptions::default()
         },
     )
@@ -1149,7 +1128,6 @@ fn native_zed_fixture_imports_searches_and_reimports() {
         &fixture,
         &mut store,
         ZedThreadsSqliteImportOptions {
-            allow_partial_failures: true,
             ..ZedThreadsSqliteImportOptions::default()
         },
     )
@@ -1174,7 +1152,6 @@ fn native_zed_tool_call_input_is_metadata_only_and_not_searchable() {
         &mut store,
         ZedThreadsSqliteImportOptions {
             source_path: Some(fixture.clone()),
-            allow_partial_failures: true,
             ..ZedThreadsSqliteImportOptions::default()
         },
     )
@@ -1352,7 +1329,6 @@ fn native_forgecode_fixture_imports_searches_reimports_and_file_metrics() {
             imported_at: DateTime::parse_from_rfc3339("2026-06-24T12:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
-            allow_partial_failures: true,
             ..ForgeCodeSqliteImportOptions::default()
         },
     )
@@ -1390,7 +1366,6 @@ fn native_forgecode_fixture_imports_searches_reimports_and_file_metrics() {
         &mut store,
         ForgeCodeSqliteImportOptions {
             source_path: Some(fixture.clone()),
-            allow_partial_failures: true,
             ..ForgeCodeSqliteImportOptions::default()
         },
     )
@@ -1437,7 +1412,6 @@ fn native_deepagents_fixture_imports_searches_and_reimports() {
             imported_at: DateTime::parse_from_rfc3339("2026-07-04T19:30:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
-            allow_partial_failures: true,
             ..DeepAgentsSqliteImportOptions::default()
         },
     )
@@ -1493,7 +1467,6 @@ fn native_deepagents_fixture_imports_searches_and_reimports() {
         &mut store,
         DeepAgentsSqliteImportOptions {
             source_path: Some(fixture.clone()),
-            allow_partial_failures: true,
             ..DeepAgentsSqliteImportOptions::default()
         },
     )
@@ -1524,7 +1497,6 @@ fn native_deepagents_reports_malformed_writes_and_corrupt_db() {
         &mut store,
         DeepAgentsSqliteImportOptions {
             source_path: Some(malformed.clone()),
-            allow_partial_failures: true,
             ..DeepAgentsSqliteImportOptions::default()
         },
     )
@@ -1564,7 +1536,6 @@ fn native_mistral_vibe_fixture_imports_searches_and_reimports() {
             imported_at: DateTime::parse_from_rfc3339("2026-07-04T19:05:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
-            allow_partial_failures: true,
             ..MistralVibeImportOptions::default()
         },
     )
@@ -1594,7 +1565,6 @@ fn native_mistral_vibe_fixture_imports_searches_and_reimports() {
         &mut store,
         MistralVibeImportOptions {
             source_path: Some(fixture.clone()),
-            allow_partial_failures: true,
             ..MistralVibeImportOptions::default()
         },
     )
@@ -1639,7 +1609,6 @@ fn native_mux_fixture_imports_searches_reimports_and_subagents() {
             imported_at: DateTime::parse_from_rfc3339("2026-07-04T19:20:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
-            allow_partial_failures: true,
             ..MuxImportOptions::default()
         },
     )
@@ -1695,7 +1664,6 @@ fn native_mux_fixture_imports_searches_reimports_and_subagents() {
         &mut store,
         MuxImportOptions {
             source_path: Some(fixture.clone()),
-            allow_partial_failures: true,
             ..MuxImportOptions::default()
         },
     )
@@ -1731,7 +1699,6 @@ fn native_mux_skips_oversized_chat_record() {
         &mut store,
         MuxImportOptions {
             source_path: Some(fixture.clone()),
-            allow_partial_failures: true,
             imported_at: "2026-07-04T19:30:00Z".parse().unwrap(),
             ..MuxImportOptions::default()
         },
@@ -1751,7 +1718,7 @@ fn native_mux_skips_oversized_chat_record() {
 }
 
 #[test]
-fn native_mux_reports_malformed_jsonl_partially() {
+fn native_mux_reports_malformed_jsonl_and_keeps_valid_rows() {
     let temp = tempdir();
     let fixture = provider_history_fixture("mux/malformed/sessions");
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
@@ -1760,7 +1727,6 @@ fn native_mux_reports_malformed_jsonl_partially() {
         &fixture,
         &mut store,
         MuxImportOptions {
-            allow_partial_failures: true,
             ..MuxImportOptions::default()
         },
     )
@@ -1803,7 +1769,6 @@ fn native_rovodev_fixture_imports_searches_reimports_and_file_touches() {
             imported_at: DateTime::parse_from_rfc3339("2026-07-04T15:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
-            allow_partial_failures: true,
             ..RovoDevImportOptions::default()
         },
     )
@@ -1844,7 +1809,6 @@ fn native_rovodev_fixture_imports_searches_reimports_and_file_touches() {
         &mut store,
         RovoDevImportOptions {
             source_path: Some(fixture.clone()),
-            allow_partial_failures: true,
             ..RovoDevImportOptions::default()
         },
     )
@@ -1897,7 +1861,6 @@ fn native_jsonl_tree_imports_gemini_droid_and_copilot_smokes() {
         &gemini,
         &mut store,
         GeminiCliImportOptions {
-            allow_partial_failures: true,
             ..GeminiCliImportOptions::default()
         },
     )
@@ -1930,7 +1893,6 @@ fn native_jsonl_tree_imports_gemini_droid_and_copilot_smokes() {
         &gemini,
         &mut store,
         GeminiCliImportOptions {
-            allow_partial_failures: true,
             ..GeminiCliImportOptions::default()
         },
     )
@@ -1948,7 +1910,6 @@ fn native_jsonl_tree_imports_gemini_droid_and_copilot_smokes() {
         &tabnine,
         &mut store,
         TabnineCliImportOptions {
-            allow_partial_failures: true,
             ..TabnineCliImportOptions::default()
         },
     )
@@ -1998,7 +1959,6 @@ fn native_jsonl_tree_imports_gemini_droid_and_copilot_smokes() {
         &droid,
         &mut store,
         FactoryAiDroidImportOptions {
-            allow_partial_failures: true,
             ..FactoryAiDroidImportOptions::default()
         },
     )
@@ -2033,7 +1993,6 @@ fn native_jsonl_tree_imports_gemini_droid_and_copilot_smokes() {
         &droid,
         &mut store,
         FactoryAiDroidImportOptions {
-            allow_partial_failures: true,
             ..FactoryAiDroidImportOptions::default()
         },
     )
@@ -2051,7 +2010,6 @@ fn native_jsonl_tree_imports_gemini_droid_and_copilot_smokes() {
         &copilot,
         &mut store,
         CopilotCliImportOptions {
-            allow_partial_failures: true,
             ..CopilotCliImportOptions::default()
         },
     )
@@ -2086,7 +2044,6 @@ fn native_jsonl_tree_imports_gemini_droid_and_copilot_smokes() {
         &copilot,
         &mut store,
         CopilotCliImportOptions {
-            allow_partial_failures: true,
             ..CopilotCliImportOptions::default()
         },
     )
@@ -2158,7 +2115,6 @@ fn native_jsonl_tree_imports_qwen_and_kimi_smokes_are_idempotent() {
         &qwen,
         &mut store,
         QwenCodeImportOptions {
-            allow_partial_failures: true,
             ..QwenCodeImportOptions::default()
         },
     )
@@ -2194,7 +2150,6 @@ fn native_jsonl_tree_imports_qwen_and_kimi_smokes_are_idempotent() {
         &qwen,
         &mut store,
         QwenCodeImportOptions {
-            allow_partial_failures: true,
             ..QwenCodeImportOptions::default()
         },
     )
@@ -2208,7 +2163,6 @@ fn native_jsonl_tree_imports_qwen_and_kimi_smokes_are_idempotent() {
         &kimi,
         &mut store,
         KimiCodeCliImportOptions {
-            allow_partial_failures: true,
             ..KimiCodeCliImportOptions::default()
         },
     )
@@ -2260,7 +2214,6 @@ fn native_jsonl_tree_imports_qwen_and_kimi_smokes_are_idempotent() {
         &kimi,
         &mut store,
         KimiCodeCliImportOptions {
-            allow_partial_failures: true,
             ..KimiCodeCliImportOptions::default()
         },
     )
@@ -2299,7 +2252,6 @@ fn native_kimi_skips_oversized_index_and_wire_records() {
         &kimi,
         &mut store,
         KimiCodeCliImportOptions {
-            allow_partial_failures: true,
             imported_at: "2026-07-04T15:30:00Z".parse().unwrap(),
             ..KimiCodeCliImportOptions::default()
         },
@@ -2340,7 +2292,6 @@ fn native_jsonl_tree_skips_headerless_native_files() {
         temp.path().join("gemini/.gemini"),
         &mut store,
         GeminiCliImportOptions {
-            allow_partial_failures: true,
             ..GeminiCliImportOptions::default()
         },
     )
@@ -2365,7 +2316,6 @@ fn native_jsonl_tree_rejects_empty_native_files() {
         temp.path().join("gemini/.gemini"),
         &mut store,
         GeminiCliImportOptions {
-            allow_partial_failures: true,
             ..GeminiCliImportOptions::default()
         },
     )
@@ -2391,7 +2341,6 @@ fn native_jsonl_tree_tolerates_unimportable_siblings_for_shared_providers() {
         &gemini,
         &mut store,
         GeminiCliImportOptions {
-            allow_partial_failures: true,
             ..GeminiCliImportOptions::default()
         },
     )
@@ -2407,7 +2356,6 @@ fn native_jsonl_tree_tolerates_unimportable_siblings_for_shared_providers() {
         &droid,
         &mut store,
         FactoryAiDroidImportOptions {
-            allow_partial_failures: true,
             ..FactoryAiDroidImportOptions::default()
         },
     )
@@ -2423,7 +2371,6 @@ fn native_jsonl_tree_tolerates_unimportable_siblings_for_shared_providers() {
         &copilot,
         &mut store,
         CopilotCliImportOptions {
-            allow_partial_failures: true,
             ..CopilotCliImportOptions::default()
         },
     )

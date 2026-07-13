@@ -1,5 +1,0 @@
-{"record_type":"manifest","schema_version":"ctx-history-jsonl-v1","metadata":{"fixture":"malformed-partial"}}
-{"record_type":"source","source_id":"partial-source","provider_key":"partial-agent","source_format":"partial-jsonl","cursor":{"after":{"stream":"partial-agent:partial-source","cursor":"1","observed_at":"2026-06-23T13:00:00Z"}}}
-{"record_type":"session","source_id":"partial-source","session_id":"partial-session","cwd":"/workspace/demo","started_at":"2026-06-23T13:00:00Z","agent_type":"primary","role_hint":"developer","is_primary":true,"status":"active"}
-{"record_type":"event","source_id":"partial-source","session_id":"partial-session","event_index":0,"event_type":"message","role":"user","occurred_at":"2026-06-23T13:00:01Z","payload":{"text":"Valid event before malformed record."},"preview":"Valid event before malformed record."}
-{"record_type":"event","source_id":"partial-source","session_id":"partial-session","event_index":"not-a-u64","event_type":"message","role":"assistant","occurred_at":"2026-06-23T13:00:02Z","payload":{"text":"This record is valid JSONL but semantically invalid."},"preview":"This record is valid JSONL but semantically invalid."}

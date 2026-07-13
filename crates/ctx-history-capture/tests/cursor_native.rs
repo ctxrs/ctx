@@ -74,7 +74,6 @@ fn imports_cursor_agent_transcript_jsonl_tree() {
         CursorNativeImportOptions {
             source_path: Some(fixture.clone()),
             imported_at: "2026-06-24T13:00:00Z".parse().unwrap(),
-            allow_partial_failures: true,
             ..CursorNativeImportOptions::default()
         },
     )
@@ -113,7 +112,7 @@ fn imports_cursor_agent_transcript_jsonl_tree() {
 }
 
 #[test]
-fn reports_malformed_cursor_agent_transcript_when_partial_disallowed() {
+fn imports_valid_cursor_rows_and_reports_malformed_rows() {
     let temp = tempdir();
     let fixture = temp
         .path()
@@ -134,12 +133,12 @@ fn reports_malformed_cursor_agent_transcript_when_partial_disallowed() {
             .unwrap();
 
     assert_eq!(summary.failed, 1);
-    assert_eq!(summary.imported_events, 0);
+    assert_eq!(summary.imported_events, 1);
     assert!(summary.failures[0].error.contains("malformed JSONL"));
 }
 
 #[test]
-fn reports_all_malformed_cursor_agent_transcript_when_partial_disallowed() {
+fn reports_all_malformed_cursor_agent_transcript() {
     let temp = tempdir();
     let fixture = temp
         .path()
@@ -162,7 +161,7 @@ fn reports_all_malformed_cursor_agent_transcript_when_partial_disallowed() {
 }
 
 #[test]
-fn reports_empty_cursor_agent_transcript_when_partial_disallowed() {
+fn reports_empty_cursor_agent_transcript() {
     let temp = tempdir();
     let fixture = temp
         .path()
@@ -183,7 +182,7 @@ fn reports_empty_cursor_agent_transcript_when_partial_disallowed() {
 }
 
 #[test]
-fn reports_aborted_stub_cursor_agent_transcript_when_partial_disallowed() {
+fn reports_aborted_stub_cursor_agent_transcript() {
     let temp = tempdir();
     let fixture = temp
         .path()

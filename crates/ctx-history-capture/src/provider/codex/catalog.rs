@@ -16,7 +16,8 @@ use crate::common::io::{
 };
 use crate::common::time::{parse_rfc3339_utc, system_time_ms};
 use crate::{
-    CaptureError, CatalogSummary, CodexSessionCatalogOptions, Result, CODEX_SESSION_SOURCE_FORMAT,
+    CaptureError, CatalogSummary, CodexSessionCatalogOptions, ProviderImportFailure, Result,
+    CODEX_SESSION_SOURCE_FORMAT,
 };
 
 use crate::provider::codex::session::{apply_codex_session_import_bounds, contains_bytes};
@@ -79,12 +80,12 @@ pub fn catalog_codex_session_tree(
             paths_to_parse.push(path);
         }
     }
-    if !options.allow_partial_failures && !metadata_failures.is_empty() {
-        return Err(CaptureError::InvalidPayload(format!(
-            "catalog failed: {}",
-            metadata_failures.remove(0)
-        )));
-    }
+    summary.failures.extend(
+        metadata_failures
+            .iter()
+            .cloned()
+            .map(|error| ProviderImportFailure { line: 0, error }),
+    );
     let stale_session_count =
         store.catalog_source_stale_session_count(CaptureProvider::Codex, &source_root)?;
     let current_path_set = current_paths.iter().cloned().collect::<BTreeSet<_>>();
@@ -105,10 +106,10 @@ pub fn catalog_codex_session_tree(
         paths_to_parse,
         &source_root,
         cataloged_at_ms,
-        options.allow_partial_failures,
         options.parallelism,
     )?;
     summary.failed_sessions += scan_summary.failed_sessions;
+    summary.failures.extend(scan_summary.failures);
     summary.parsed_sessions += scan_summary.parsed_sessions;
     let parsed_session_count = sessions.len();
     let cached_session_count = cached_sessions.len();
@@ -158,13 +159,8 @@ pub fn catalog_codex_session_files(
         .display()
         .to_string();
     let cataloged_at_ms = options.cataloged_at.timestamp_millis();
-    let (scan_summary, sessions) = catalog_codex_session_paths(
-        paths,
-        &source_root,
-        cataloged_at_ms,
-        options.allow_partial_failures,
-        options.parallelism,
-    )?;
+    let (scan_summary, sessions) =
+        catalog_codex_session_paths(paths, &source_root, cataloged_at_ms, options.parallelism)?;
     let mut summary = scan_summary;
     summary.cataloged_sessions = sessions.len();
     if !sessions.is_empty() {
@@ -202,7 +198,6 @@ pub(crate) fn catalog_codex_session_paths(
     paths: Vec<PathBuf>,
     source_root: &str,
     cataloged_at_ms: i64,
-    allow_partial_failures: bool,
     requested_parallelism: Option<usize>,
 ) -> Result<(CatalogSummary, Vec<CatalogSession>)> {
     let parallelism = catalog_parallelism(paths.len(), requested_parallelism);
@@ -214,7 +209,7 @@ pub(crate) fn catalog_codex_session_paths(
         )]
     } else {
         let chunk_size = paths.len().div_ceil(parallelism).max(1);
-        thread::scope(|scope| {
+        thread::scope(|scope| -> Result<Vec<CatalogWorkerBatch>> {
             let mut handles = Vec::new();
             for chunk in paths.chunks(chunk_size) {
                 let chunk = chunk.to_vec();
@@ -225,22 +220,18 @@ pub(crate) fn catalog_codex_session_paths(
             }
             let mut batches = Vec::with_capacity(handles.len());
             for handle in handles {
-                batches.push(handle.join().unwrap_or_else(|_| {
-                    let mut batch = CatalogWorkerBatch::default();
-                    batch
-                        .failures
-                        .push("catalog worker thread panicked".to_owned());
-                    batch.summary.failed_sessions += 1;
-                    batch
-                }));
+                batches.push(
+                    handle
+                        .join()
+                        .map_err(|_| CaptureError::WorkerPanicked("Codex catalog"))?,
+                );
             }
-            batches
-        })
+            Ok(batches)
+        })?
     };
 
     let mut summary = CatalogSummary::default();
     let mut sessions = Vec::new();
-    let mut failures = Vec::new();
     for mut batch in batches {
         summary.source_files += batch.summary.source_files;
         summary.source_bytes = summary
@@ -249,13 +240,12 @@ pub(crate) fn catalog_codex_session_paths(
         summary.parsed_sessions += batch.summary.parsed_sessions;
         summary.failed_sessions += batch.summary.failed_sessions;
         sessions.append(&mut batch.sessions);
-        failures.append(&mut batch.failures);
-    }
-    if !allow_partial_failures && !failures.is_empty() {
-        return Err(CaptureError::InvalidPayload(format!(
-            "catalog failed: {}",
-            failures.remove(0)
-        )));
+        summary.failures.extend(
+            batch
+                .failures
+                .drain(..)
+                .map(|error| ProviderImportFailure { line: 0, error }),
+        );
     }
     Ok((summary, sessions))
 }

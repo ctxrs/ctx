@@ -73,12 +73,18 @@ fn qwen_kimi_mistral_mux_and_qoder_default_sources_import_search_and_reimport() 
             "--progress",
             "none",
         ]));
-        assert_eq!(first["totals"]["failed"], 0);
+        assert_eq!(first["totals"]["rejected_records"], 0);
         assert_eq!(first["totals"]["imported_sources"], 1);
         assert!(
             first["totals"]["imported_events"].as_u64().unwrap() >= minimum_events,
             "{first:#}"
         );
+        if stored_provider == "mux" {
+            assert_eq!(
+                first["totals"]["imported_sessions"], 2,
+                "manifested Mux files must reuse one source-scoped parent session: {first:#}"
+            );
+        }
 
         let search = json_output(ctx(&temp).args([
             "search",
@@ -99,7 +105,7 @@ fn qwen_kimi_mistral_mux_and_qoder_default_sources_import_search_and_reimport() 
             "--progress",
             "none",
         ]));
-        assert_eq!(second["totals"]["failed"], 0);
+        assert_eq!(second["totals"]["rejected_records"], 0);
         assert_eq!(second["totals"]["imported_events"], 0);
     }
 }
@@ -137,7 +143,7 @@ fn mimocode_default_env_and_channel_sources_import_search_and_reimport() {
         "unexpected freshness mode in {search:#}"
     );
     assert_eq!(search["freshness"]["status"], "completed");
-    assert_eq!(search["freshness"]["totals"]["failed"], 0);
+    assert_eq!(search["freshness"]["totals"]["rejected_records"], 0);
     assert!(
         search["freshness"]["totals"]["imported_sessions"]
             .as_u64()
@@ -160,7 +166,7 @@ fn mimocode_default_env_and_channel_sources_import_search_and_reimport() {
         "--progress",
         "none",
     ]));
-    assert_eq!(second["totals"]["failed"], 0);
+    assert_eq!(second["totals"]["rejected_records"], 0);
     assert_eq!(second["totals"]["imported_events"], 0);
 
     let home_query = "mimocode-home-env-oracle";
@@ -188,7 +194,7 @@ fn mimocode_default_env_and_channel_sources_import_search_and_reimport() {
         "--progress",
         "none",
     ]));
-    assert_eq!(home_import["totals"]["failed"], 0);
+    assert_eq!(home_import["totals"]["rejected_records"], 0);
     assert!(home_import["totals"]["imported_events"].as_u64().unwrap() >= 1);
     let home_search = json_output(ctx(&temp).args([
         "search",
@@ -216,7 +222,7 @@ fn mimocode_default_env_and_channel_sources_import_search_and_reimport() {
         custom_import["sources"][0]["path"],
         custom_db.display().to_string()
     );
-    assert_eq!(custom_import["totals"]["failed"], 0);
+    assert_eq!(custom_import["totals"]["rejected_records"], 0);
     assert!(custom_import["totals"]["imported_events"].as_u64().unwrap() >= 1);
 
     let xdg_data = temp.path().join("xdg-data");
@@ -302,7 +308,7 @@ fn windsurf_default_discovery_is_native_and_search_refresh_imports() {
     assert_eq!(search["freshness"]["mode"], "wait");
     assert_eq!(search["freshness"]["status"], "completed");
     assert_eq!(search["freshness"]["source_count"], 1);
-    assert_eq!(search["freshness"]["totals"]["failed"], 0);
+    assert_eq!(search["freshness"]["totals"]["rejected_records"], 0);
     assert_eq!(search["freshness"]["totals"]["imported_sessions"], 1);
     assert_eq!(search["freshness"]["totals"]["imported_events"], 3);
     assert_search_provider_oracle(&search, "windsurf", query, 1, "message");
@@ -315,7 +321,7 @@ fn windsurf_default_discovery_is_native_and_search_refresh_imports() {
         "--progress",
         "none",
     ]));
-    assert_eq!(second["totals"]["failed"], 0);
+    assert_eq!(second["totals"]["rejected_records"], 0);
     assert_eq!(second["totals"]["imported_events"], 0);
 }
 
@@ -514,10 +520,10 @@ fn native_provider_cli_flow_imports_supported_provider_paths() {
             &path,
             "--json",
         ]));
-        assert_eq!(first["schema_version"], 1);
+        assert_eq!(first["schema_version"], 2);
         assert_eq!(first["sources"][0]["provider"], stored_provider);
         assert_eq!(first["sources"][0]["source_format"], expected_format);
-        assert_eq!(first["totals"]["failed"], 0);
+        assert_eq!(first["totals"]["rejected_records"], 0);
         assert!(first["totals"]["imported_sessions"].as_u64().unwrap() >= 1);
         assert!(first["totals"]["imported_events"].as_u64().unwrap() >= 1);
 
@@ -584,7 +590,7 @@ fn native_provider_cli_policy_excludes_success_tool_outputs_from_search_and_payl
             "--progress",
             "none",
         ]));
-        assert_eq!(imported["totals"]["failed"], 0, "{imported:#}");
+        assert_eq!(imported["totals"]["rejected_records"], 0, "{imported:#}");
 
         let search = json_output(ctx(&temp).args([
             "search",
@@ -675,10 +681,10 @@ fn trae_cli_imports_explicit_workspace_storage_with_default_discovery() {
         "--progress",
         "none",
     ]));
-    assert_eq!(imported["schema_version"], 1);
+    assert_eq!(imported["schema_version"], 2);
     assert_eq!(imported["sources"][0]["provider"], "trae");
     assert_eq!(imported["sources"][0]["source_format"], "trae_state_vscdb");
-    assert_eq!(imported["totals"]["failed"], 0);
+    assert_eq!(imported["totals"]["rejected_records"], 0);
     assert_eq!(imported["totals"]["imported_sessions"], 1);
     assert_eq!(imported["totals"]["imported_events"], 2);
 
@@ -711,7 +717,7 @@ fn trae_cli_imports_explicit_workspace_storage_with_default_discovery() {
         "--progress",
         "none",
     ]));
-    assert_eq!(second["totals"]["failed"], 0);
+    assert_eq!(second["totals"]["rejected_records"], 0);
     assert_eq!(second["totals"]["imported_sessions"], 0);
     assert_eq!(second["totals"]["imported_events"], 0);
 }
@@ -756,7 +762,7 @@ fn trae_cn_native_default_discovery_search_refresh_imports_input_history() {
     assert_eq!(search["freshness"]["mode"], "wait");
     assert_eq!(search["freshness"]["status"], "completed");
     assert_eq!(search["freshness"]["source_count"], 1);
-    assert_eq!(search["freshness"]["totals"]["failed"], 0);
+    assert_eq!(search["freshness"]["totals"]["rejected_records"], 0);
     assert_eq!(search["freshness"]["totals"]["imported_sessions"], 1);
     assert_eq!(search["freshness"]["totals"]["imported_events"], 2);
     assert_search_provider_oracle_with_scope(
@@ -805,7 +811,7 @@ fn trae_native_default_discovery_search_refresh_imports_standard_workspace_stora
     assert_eq!(search["freshness"]["mode"], "wait");
     assert_eq!(search["freshness"]["status"], "completed");
     assert_eq!(search["freshness"]["source_count"], 1);
-    assert_eq!(search["freshness"]["totals"]["failed"], 0);
+    assert_eq!(search["freshness"]["totals"]["rejected_records"], 0);
     assert_eq!(search["freshness"]["totals"]["imported_sessions"], 1);
     assert_eq!(search["freshness"]["totals"]["imported_events"], 2);
     assert_search_provider_oracle_with_scope(
@@ -836,7 +842,7 @@ fn trae_cn_native_default_discovery_is_included_in_import_all() {
                 && source["source_format"] == "trae_state_vscdb"
                 && source["import_support"] == "native"
         }));
-    assert_eq!(imported["totals"]["failed"], 0);
+    assert_eq!(imported["totals"]["rejected_records"], 0);
     assert_eq!(imported["totals"]["imported_sessions"], 1);
     assert_eq!(imported["totals"]["imported_events"], 2);
 
@@ -877,7 +883,7 @@ fn astrbot_native_default_discovery_is_included_in_import_all() {
                 && source["source_format"] == "astrbot_data_v4_sqlite"
                 && source["import_support"] == "native"
         }));
-    assert_eq!(imported["totals"]["failed"], 0);
+    assert_eq!(imported["totals"]["rejected_records"], 0);
     assert_eq!(imported["totals"]["imported_sessions"], 1);
     assert_eq!(imported["totals"]["imported_events"], 3);
 
@@ -907,10 +913,10 @@ fn warp_cli_imports_explicit_sqlite() {
         "--progress",
         "none",
     ]));
-    assert_eq!(imported["schema_version"], 1);
+    assert_eq!(imported["schema_version"], 2);
     assert_eq!(imported["sources"][0]["provider"], "warp");
     assert_eq!(imported["sources"][0]["source_format"], "warp_sqlite");
-    assert_eq!(imported["totals"]["failed"], 0);
+    assert_eq!(imported["totals"]["rejected_records"], 0);
     assert_eq!(imported["totals"]["imported_sessions"], 1);
     assert_eq!(imported["totals"]["imported_events"], 4);
 
@@ -935,7 +941,7 @@ fn warp_cli_imports_explicit_sqlite() {
         "--progress",
         "none",
     ]));
-    assert_eq!(second["totals"]["failed"], 0);
+    assert_eq!(second["totals"]["rejected_records"], 0);
     assert_eq!(second["totals"]["imported_sessions"], 0);
     assert_eq!(second["totals"]["imported_events"], 0);
 }
@@ -970,7 +976,7 @@ fn warp_native_default_discovery_auto_imports_for_search() {
     assert_eq!(search["freshness"]["mode"], "wait");
     assert_eq!(search["freshness"]["status"], "completed");
     assert_eq!(search["freshness"]["source_count"], 1);
-    assert_eq!(search["freshness"]["totals"]["failed"], 0);
+    assert_eq!(search["freshness"]["totals"]["rejected_records"], 0);
     assert_eq!(search["freshness"]["totals"]["imported_sessions"], 1);
     assert_eq!(search["freshness"]["totals"]["imported_events"], 4);
     assert_search_provider_oracle(&search, "warp", "Warp sqlite oracle answer", 1, "message");
@@ -990,7 +996,7 @@ fn warp_native_default_discovery_is_included_in_import_all() {
         .any(|source| {
             source["provider"] == "warp" && source["source_format"] == "warp_sqlite"
         }));
-    assert_eq!(imported["totals"]["failed"], 0);
+    assert_eq!(imported["totals"]["rejected_records"], 0);
     assert_eq!(imported["totals"]["imported_sessions"], 1);
     assert_eq!(imported["totals"]["imported_events"], 4);
 
@@ -1026,7 +1032,7 @@ fn lingma_cli_default_source_imports_home_local_db() {
     let imported = json_output(ctx(&temp).args(["import", "--provider", "lingma", "--json"]));
     assert_eq!(imported["sources"][0]["provider"], "lingma");
     assert_eq!(imported["sources"][0]["source_format"], "lingma_sqlite");
-    assert_eq!(imported["totals"]["failed"], 0);
+    assert_eq!(imported["totals"]["rejected_records"], 0);
     assert_eq!(imported["totals"]["imported_sessions"], 1);
     assert_eq!(imported["totals"]["imported_events"], 2);
 
@@ -1038,7 +1044,7 @@ fn lingma_cli_default_source_imports_home_local_db() {
     assert_search_provider_oracle(&alias_search, "lingma", query, 1, "message");
 
     let second = json_output(ctx(&temp).args(["import", "--provider", "lingma", "--json"]));
-    assert_eq!(second["totals"]["failed"], 0);
+    assert_eq!(second["totals"]["rejected_records"], 0);
     assert_eq!(second["totals"]["imported_events"], 0);
 }
 
@@ -1057,13 +1063,13 @@ fn tabnine_cli_imports_explicit_agent_home_searches_and_reimports() {
         "--progress",
         "none",
     ]));
-    assert_eq!(imported["schema_version"], 1);
+    assert_eq!(imported["schema_version"], 2);
     assert_eq!(imported["sources"][0]["provider"], "tabnine");
     assert_eq!(
         imported["sources"][0]["source_format"],
         "tabnine_cli_chat_recording_jsonl"
     );
-    assert_eq!(imported["totals"]["failed"], 0);
+    assert_eq!(imported["totals"]["rejected_records"], 0);
     assert_eq!(imported["totals"]["imported_sessions"], 2);
     assert_eq!(imported["totals"]["imported_events"], 7);
 
@@ -1094,7 +1100,7 @@ fn tabnine_cli_imports_explicit_agent_home_searches_and_reimports() {
         "--progress",
         "none",
     ]));
-    assert_eq!(second["totals"]["failed"], 0);
+    assert_eq!(second["totals"]["rejected_records"], 0);
     assert_eq!(second["totals"]["imported_sessions"], 0);
     assert_eq!(second["totals"]["imported_events"], 0);
 }
@@ -1135,7 +1141,7 @@ fn deepagents_cli_sources_import_search_and_reimport_with_aliases() {
         imported["sources"][0]["source_format"],
         "deepagents_sessions_sqlite"
     );
-    assert_eq!(imported["totals"]["failed"], 0);
+    assert_eq!(imported["totals"]["rejected_records"], 0);
     assert_eq!(imported["totals"]["imported_sessions"], 1);
     assert_eq!(imported["totals"]["imported_events"], 3);
 
@@ -1164,7 +1170,7 @@ fn deepagents_cli_sources_import_search_and_reimport_with_aliases() {
         default_db.to_str().unwrap(),
         "--json",
     ]));
-    assert_eq!(second["totals"]["failed"], 0);
+    assert_eq!(second["totals"]["rejected_records"], 0);
     assert_eq!(second["totals"]["imported_events"], 0);
     let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
     assert_eq!(
@@ -1238,10 +1244,10 @@ fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
             "--progress",
             "none",
         ]));
-        assert_eq!(imported["schema_version"], 1);
+        assert_eq!(imported["schema_version"], 2);
         assert_eq!(imported["sources"][0]["provider"], stored_provider);
         assert_eq!(imported["sources"][0]["source_format"], source_format);
-        assert_eq!(imported["totals"]["failed"], 0);
+        assert_eq!(imported["totals"]["rejected_records"], 0);
         assert_eq!(imported["totals"]["imported_sessions"], sessions);
         assert_eq!(imported["totals"]["imported_events"], events);
 
@@ -1275,7 +1281,7 @@ fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
             "--progress",
             "none",
         ]));
-        assert_eq!(second["totals"]["failed"], 0);
+        assert_eq!(second["totals"]["rejected_records"], 0);
         assert_eq!(second["totals"]["imported_sessions"], 0);
         assert_eq!(second["totals"]["imported_events"], 0);
     }
@@ -1328,7 +1334,7 @@ fn personal_agent_provider_imports_are_idempotent_and_incremental() {
             &path,
             "--json",
         ]));
-        assert_eq!(first["totals"]["failed"], 0);
+        assert_eq!(first["totals"]["rejected_records"], 0);
         assert!(first["totals"]["imported_events"].as_u64().unwrap() >= 1);
 
         let second = json_output(ctx(&temp).args([
@@ -1339,7 +1345,7 @@ fn personal_agent_provider_imports_are_idempotent_and_incremental() {
             &path,
             "--json",
         ]));
-        assert_eq!(second["totals"]["failed"], 0);
+        assert_eq!(second["totals"]["rejected_records"], 0);
         assert_eq!(second["totals"]["imported_events"], 0);
 
         append_event(&path, &incremental_query);
@@ -1351,7 +1357,7 @@ fn personal_agent_provider_imports_are_idempotent_and_incremental() {
             &path,
             "--json",
         ]));
-        assert_eq!(third["totals"]["failed"], 0);
+        assert_eq!(third["totals"]["rejected_records"], 0);
         assert!(third["totals"]["imported_events"].as_u64().unwrap() >= 1);
 
         let search = json_output(ctx(&temp).args([
@@ -1397,7 +1403,7 @@ fn openclaw_import_accepts_explicit_session_jsonl_file() {
         path.to_str().unwrap(),
         "--json",
     ]));
-    assert_eq!(imported["totals"]["failed"], 0);
+    assert_eq!(imported["totals"]["rejected_records"], 0);
     assert_eq!(imported["totals"]["imported_sources"], 1);
 
     let search =
@@ -1429,7 +1435,7 @@ fn nanoclaw_import_tolerates_partial_auxiliary_tables() {
         &path,
         "--json",
     ]));
-    assert_eq!(imported["totals"]["failed"], 0);
+    assert_eq!(imported["totals"]["rejected_records"], 0);
     assert_eq!(imported["totals"]["imported_sources"], 1);
 
     let search =
@@ -1542,7 +1548,7 @@ fn task_json_cli_imports_cline_and_roo_and_searches() {
 
     let imported =
         json_output(ctx(&temp).args(["import", "--provider", "cline", "--path", &cline, "--json"]));
-    assert_eq!(imported["schema_version"], 1);
+    assert_eq!(imported["schema_version"], 2);
     assert_eq!(imported["sources"][0]["provider"], "cline");
     assert_eq!(
         imported["sources"][0]["source_format"],
@@ -1550,7 +1556,7 @@ fn task_json_cli_imports_cline_and_roo_and_searches() {
     );
     assert_eq!(imported["totals"]["imported_sessions"], 1);
     assert_eq!(imported["totals"]["imported_events"], 4);
-    assert_eq!(imported["totals"]["failed"], 0);
+    assert_eq!(imported["totals"]["rejected_records"], 0);
 
     let second =
         json_output(ctx(&temp).args(["import", "--provider", "cline", "--path", &cline, "--json"]));
@@ -1571,7 +1577,7 @@ fn task_json_cli_imports_cline_and_roo_and_searches() {
         &roo,
         "--json",
     ]));
-    assert_eq!(imported["schema_version"], 1);
+    assert_eq!(imported["schema_version"], 2);
     assert_eq!(imported["sources"][0]["provider"], "roo_code");
     assert_eq!(
         imported["sources"][0]["source_format"],
@@ -1579,7 +1585,7 @@ fn task_json_cli_imports_cline_and_roo_and_searches() {
     );
     assert_eq!(imported["totals"]["imported_sessions"], 2);
     assert_eq!(imported["totals"]["imported_events"], 6);
-    assert_eq!(imported["totals"]["failed"], 0);
+    assert_eq!(imported["totals"]["rejected_records"], 0);
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -1608,10 +1614,9 @@ fn antigravity_cli_imports_native_transcript_tree() {
         "antigravity",
         "--path",
         &fixture,
-        "--partial",
         "--json",
     ]));
-    assert_eq!(imported["schema_version"], 1);
+    assert_eq!(imported["schema_version"], 2);
     assert_eq!(imported["sources"][0]["provider"], "antigravity");
     assert_eq!(
         imported["sources"][0]["source_format"],
@@ -1619,7 +1624,7 @@ fn antigravity_cli_imports_native_transcript_tree() {
     );
     assert_eq!(imported["totals"]["imported_sessions"], 3);
     assert_eq!(imported["totals"]["imported_events"], 9);
-    assert_eq!(imported["totals"]["failed"], 2);
+    assert_eq!(imported["totals"]["rejected_records"], 2);
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -1658,44 +1663,15 @@ fn antigravity_cli_inventory_prefers_full_transcript_over_live_partial() {
         "antigravity",
         "--path",
         brain.to_str().unwrap(),
-        "--partial",
         "--json",
     ]));
     assert_eq!(imported["totals"]["source_files"], 1, "{imported:#}");
-    assert_eq!(imported["totals"]["failed"], 0, "{imported:#}");
+    assert_eq!(imported["totals"]["rejected_records"], 0, "{imported:#}");
     assert_eq!(imported["totals"]["imported_sessions"], 1, "{imported:#}");
 }
 
 #[test]
-fn antigravity_cli_malformed_default_import_is_atomic() {
-    let temp = tempdir();
-    let fixture = provider_history_fixture("antigravity/v1/brain");
-
-    let stderr = failure_stderr(ctx(&temp).args([
-        "import",
-        "--provider",
-        "antigravity",
-        "--path",
-        &fixture,
-        "--json",
-    ]));
-    assert!(stderr.contains("failed with 1 failure"), "{stderr}");
-    assert_import_store_empty_after_atomic_failure(&temp);
-
-    let search = json_output(ctx(&temp).args([
-        "search",
-        "write_to_file",
-        "--provider",
-        "antigravity",
-        "--refresh",
-        "off",
-        "--json",
-    ]));
-    assert!(search["results"].as_array().unwrap().is_empty());
-}
-
-#[test]
-fn codex_cli_reports_malformed_partial_import_progress() {
+fn codex_cli_reports_rejected_records_and_imports_valid_content() {
     let temp = tempdir();
     let fixture = provider_history_fixture("codex-malformed-session.jsonl");
 
@@ -1705,61 +1681,35 @@ fn codex_cli_reports_malformed_partial_import_progress() {
         "codex",
         "--path",
         &fixture,
-        "--partial",
         "--json",
     ]));
-    assert_eq!(imported["schema_version"], 1);
+    assert_eq!(imported["schema_version"], 2);
     assert_eq!(imported["totals"]["imported_sessions"], 1);
     assert_eq!(imported["totals"]["imported_events"], 2);
-    assert_eq!(imported["totals"]["failed"], 1);
-    assert_eq!(imported["sources"][0]["failed"], 1);
+    assert_eq!(imported["totals"]["rejected_records"], 1);
+    assert_eq!(imported["sources"][0]["rejected_records"], 1);
 
     let search = json_output(ctx(&temp).args(["search", "after malformed", "--json"]));
     assert!(!search["results"].as_array().unwrap().is_empty());
 }
 
 #[test]
-fn codex_cli_malformed_default_import_is_atomic() {
+fn pi_cli_reports_malformed_and_schema_rejections() {
     let temp = tempdir();
-    let fixture = provider_history_fixture("codex-malformed-session.jsonl");
+    let fixture = provider_history_fixture("pi-malformed-mixed.jsonl");
 
-    let stderr = failure_stderr(ctx(&temp).args([
-        "import",
-        "--provider",
-        "codex",
-        "--path",
-        &fixture,
-        "--json",
-    ]));
-    assert!(stderr.contains("failed with 1 failure"), "{stderr}");
-    assert_import_store_empty_after_atomic_failure(&temp);
-
-    let search =
-        json_output(ctx(&temp).args(["search", "after malformed", "--refresh", "off", "--json"]));
-    assert!(search["results"].as_array().unwrap().is_empty());
-}
-
-#[test]
-fn pi_cli_reports_malformed_partial_and_schema_failures() {
-    let temp = tempdir();
-    let fixture = provider_history_fixture("pi-malformed-partial.jsonl");
-
-    let imported = json_output(ctx(&temp).args([
-        "import",
-        "--provider",
-        "pi",
-        "--path",
-        &fixture,
-        "--partial",
-        "--json",
-    ]));
-    assert_eq!(imported["schema_version"], 1);
+    let imported =
+        json_output(ctx(&temp).args(["import", "--provider", "pi", "--path", &fixture, "--json"]));
+    assert_eq!(imported["schema_version"], 2);
     assert_eq!(imported["totals"]["imported_sessions"], 1);
     assert_eq!(imported["totals"]["imported_events"], 2);
-    assert_eq!(imported["totals"]["failed"], 2);
-    assert_eq!(imported["sources"][0]["failed"], 2);
+    assert_eq!(imported["totals"]["rejected_records"], 2);
+    assert_eq!(imported["sources"][0]["rejected_records"], 2);
     assert_eq!(
-        imported["sources"][0]["failures"].as_array().unwrap().len(),
+        imported["sources"][0]["rejections"]
+            .as_array()
+            .unwrap()
+            .len(),
         2
     );
 
@@ -1769,35 +1719,7 @@ fn pi_cli_reports_malformed_partial_and_schema_failures() {
 }
 
 #[test]
-fn pi_cli_malformed_default_import_is_atomic() {
-    let temp = tempdir();
-    let fixture = provider_history_fixture("pi-malformed-partial.jsonl");
-
-    let stderr = failure_stderr(ctx(&temp).args([
-        "import",
-        "--provider",
-        "pi",
-        "--path",
-        &fixture,
-        "--json",
-    ]));
-    assert!(stderr.contains("failed with 2 failure"), "{stderr}");
-    assert_import_store_empty_after_atomic_failure(&temp);
-
-    let search = json_output(ctx(&temp).args([
-        "search",
-        "after malformed line",
-        "--provider",
-        "pi",
-        "--refresh",
-        "off",
-        "--json",
-    ]));
-    assert!(search["results"].as_array().unwrap().is_empty());
-}
-
-#[test]
-fn import_all_continues_after_atomic_source_failure_without_bad_rows() {
+fn import_all_isolates_rejected_records_and_imports_other_sources() {
     let temp = tempdir();
     let codex_dir = temp.path().join(".codex/sessions/2026/07/03");
     fs::create_dir_all(&codex_dir).unwrap();
@@ -1811,17 +1733,19 @@ fn import_all_continues_after_atomic_source_failure_without_bad_rows() {
 
     let imported =
         json_output(ctx(&temp).args(["import", "--all", "--json", "--progress", "none"]));
-    assert_eq!(imported["totals"]["failed_sources"], 1, "{imported:#}");
+    assert_eq!(imported["totals"]["failed_sources"], 0, "{imported:#}");
     assert!(imported["sources"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|source| { source["provider"] == "codex" && source["status"] == "failed" }));
+        .any(|source| {
+            source["provider"] == "codex" && source["status"] == "completed_with_rejections"
+        }));
     assert!(imported["sources"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|source| { source["provider"] == "pi" && source["status"] == "imported" }));
+        .any(|source| { source["provider"] == "pi" && source["status"] == "success" }));
 
     let pi_search = json_output(ctx(&temp).args([
         "search",
@@ -1842,54 +1766,5 @@ fn import_all_continues_after_atomic_source_failure_without_bad_rows() {
         "off",
         "--json",
     ]));
-    assert!(codex_search["results"].as_array().unwrap().is_empty());
-    assert_no_history_record_for_provider(&temp, "codex");
-}
-
-fn assert_import_store_empty_after_atomic_failure(temp: &TempDir) {
-    let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
-    for table in [
-        "history_records",
-        "sessions",
-        "events",
-        "ctx_history_search",
-        "event_search",
-    ] {
-        let count: i64 = conn
-            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert_eq!(
-            count, 0,
-            "{table} should be empty after atomic import failure"
-        );
-    }
-}
-
-fn assert_no_history_record_for_provider(temp: &TempDir, provider: &str) {
-    let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
-    let title = format!("{provider} agent history");
-    let record_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM history_records WHERE title = ?1",
-            params![&title],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(
-        record_count, 0,
-        "{provider} source record should not persist"
-    );
-    let search_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM ctx_history_search WHERE title = ?1",
-            params![&title],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(
-        search_count, 0,
-        "{provider} source search row should not persist"
-    );
+    assert!(!codex_search["results"].as_array().unwrap().is_empty());
 }

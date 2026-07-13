@@ -200,17 +200,17 @@ Re-import or update the index:
 ```bash
 ctx import --all
 ctx import --resume
-ctx import --partial
 ctx import --provider codex --path ~/.codex/sessions
 ctx import --format ctx-history-jsonl-v1 --path ./history.jsonl
 ctx import --history-source example-agent/default
 ```
 
 Current adapters are safe to re-run. They rescan sources idempotently and keep
-source paths or cursors when available. Imports are source-atomic by default:
-malformed rows fail that source without committing its valid rows. Use
-`--partial` to opt into committing valid rows from a malformed source while row
-failures are reported. Native provider cursor progress is scoped by provider,
+source paths or cursors when available. Imports always commit valid records and
+report rejected records. Sources with no usable imported content fail, as do
+unreadable or incompatible sources; ctx-owned storage or index failures abort
+the command. Native
+provider cursor progress is scoped by provider,
 source format, and an opaque source identity derived from the configured root or
 source path, so two roots for the same provider do not overwrite each other's
 progress.

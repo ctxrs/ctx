@@ -113,6 +113,29 @@ impl Store {
                 .map_err(StoreError::from)
     }
 
+    pub fn session_by_capture_source_and_external_session(
+        &self,
+        source_id: Uuid,
+        provider: CaptureProvider,
+        external_session_id: &str,
+    ) -> Result<Option<Session>> {
+        self.conn
+            .query_row(
+                session_select_sql(
+                    "WHERE capture_source_id = ?1 AND provider = ?2 AND external_session_id = ?3 ORDER BY created_at_ms, id LIMIT 1",
+                )
+                .as_str(),
+                params![
+                    source_id.to_string(),
+                    provider.as_str(),
+                    external_session_id
+                ],
+                session_from_row,
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
     pub fn sessions_by_external_session_limited(
         &self,
         provider: CaptureProvider,

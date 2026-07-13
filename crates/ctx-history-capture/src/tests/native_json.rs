@@ -69,7 +69,6 @@ fn native_file_tree_imports_do_not_mutate_provider_sources() {
                 store,
                 CodexSessionImportOptions {
                     source_path: Some(codex_sessions.clone()),
-                    allow_partial_failures: true,
                     ..CodexSessionImportOptions::default()
                 },
             )
@@ -97,7 +96,6 @@ fn native_file_tree_imports_do_not_mutate_provider_sources() {
             store,
             PiSessionImportOptions {
                 source_path: Some(pi.clone()),
-                allow_partial_failures: true,
                 ..PiSessionImportOptions::default()
             },
         )
@@ -111,7 +109,6 @@ fn native_file_tree_imports_do_not_mutate_provider_sources() {
             store,
             ClaudeProjectsImportOptions {
                 source_path: Some(claude.clone()),
-                allow_partial_failures: true,
                 ..ClaudeProjectsImportOptions::default()
             },
         )
@@ -125,7 +122,6 @@ fn native_file_tree_imports_do_not_mutate_provider_sources() {
             store,
             QoderImportOptions {
                 source_path: Some(qoder.clone()),
-                allow_partial_failures: true,
                 ..QoderImportOptions::default()
             },
         )
@@ -139,7 +135,6 @@ fn native_file_tree_imports_do_not_mutate_provider_sources() {
             store,
             CodeBuddyImportOptions {
                 source_path: Some(codebuddy.clone()),
-                allow_partial_failures: true,
                 ..CodeBuddyImportOptions::default()
             },
         )
@@ -168,7 +163,6 @@ fn native_file_tree_imports_do_not_mutate_provider_sources() {
             store,
             ContinueCliImportOptions {
                 source_path: Some(continue_root.clone()),
-                allow_partial_failures: true,
                 ..ContinueCliImportOptions::default()
             },
         )
@@ -201,7 +195,6 @@ fn native_file_tree_imports_do_not_mutate_provider_sources() {
             store,
             OpenClawImportOptions {
                 source_path: Some(openclaw_root.clone()),
-                allow_partial_failures: true,
                 ..OpenClawImportOptions::default()
             },
         )
@@ -215,7 +208,6 @@ fn native_file_tree_imports_do_not_mutate_provider_sources() {
             store,
             TraeImportOptions {
                 source_path: Some(trae.clone()),
-                allow_partial_failures: true,
                 ..TraeImportOptions::default()
             },
         )
@@ -229,7 +221,6 @@ fn native_file_tree_imports_do_not_mutate_provider_sources() {
             store,
             AntigravityCliImportOptions {
                 source_path: Some(antigravity.clone()),
-                allow_partial_failures: true,
                 ..AntigravityCliImportOptions::default()
             },
         )
@@ -243,7 +234,6 @@ fn native_file_tree_imports_do_not_mutate_provider_sources() {
             store,
             GeminiCliImportOptions {
                 source_path: Some(gemini.clone()),
-                allow_partial_failures: true,
                 ..GeminiCliImportOptions::default()
             },
         )
@@ -257,7 +247,6 @@ fn native_file_tree_imports_do_not_mutate_provider_sources() {
             store,
             TabnineCliImportOptions {
                 source_path: Some(tabnine.clone()),
-                allow_partial_failures: true,
                 ..TabnineCliImportOptions::default()
             },
         )
@@ -271,7 +260,6 @@ fn native_file_tree_imports_do_not_mutate_provider_sources() {
             store,
             CursorNativeImportOptions {
                 source_path: Some(cursor.clone()),
-                allow_partial_failures: true,
                 ..CursorNativeImportOptions::default()
             },
         )
@@ -285,7 +273,6 @@ fn native_file_tree_imports_do_not_mutate_provider_sources() {
             store,
             WindsurfCascadeHookImportOptions {
                 source_path: Some(windsurf.clone()),
-                allow_partial_failures: true,
                 ..WindsurfCascadeHookImportOptions::default()
             },
         )
@@ -299,7 +286,6 @@ fn native_file_tree_imports_do_not_mutate_provider_sources() {
             store,
             FactoryAiDroidImportOptions {
                 source_path: Some(droid.clone()),
-                allow_partial_failures: true,
                 ..FactoryAiDroidImportOptions::default()
             },
         )
@@ -313,7 +299,6 @@ fn native_file_tree_imports_do_not_mutate_provider_sources() {
             store,
             CopilotCliImportOptions {
                 source_path: Some(copilot.clone()),
-                allow_partial_failures: true,
                 ..CopilotCliImportOptions::default()
             },
         )
@@ -327,7 +312,6 @@ fn native_file_tree_imports_do_not_mutate_provider_sources() {
             store,
             QwenCodeImportOptions {
                 source_path: Some(qwen.clone()),
-                allow_partial_failures: true,
                 ..QwenCodeImportOptions::default()
             },
         )
@@ -341,7 +325,6 @@ fn native_file_tree_imports_do_not_mutate_provider_sources() {
             store,
             KimiCodeCliImportOptions {
                 source_path: Some(kimi.clone()),
-                allow_partial_failures: true,
                 ..KimiCodeCliImportOptions::default()
             },
         )
@@ -355,7 +338,6 @@ fn native_file_tree_imports_do_not_mutate_provider_sources() {
             store,
             AuggieImportOptions {
                 source_path: Some(auggie.clone()),
-                allow_partial_failures: true,
                 ..AuggieImportOptions::default()
             },
         )
@@ -369,7 +351,6 @@ fn native_file_tree_imports_do_not_mutate_provider_sources() {
             store,
             JunieImportOptions {
                 source_path: Some(junie.clone()),
-                allow_partial_failures: true,
                 ..JunieImportOptions::default()
             },
         )
@@ -383,7 +364,6 @@ fn native_file_tree_imports_do_not_mutate_provider_sources() {
             store,
             NanoClawImportOptions {
                 source_path: Some(nanoclaw.clone()),
-                allow_partial_failures: true,
                 ..NanoClawImportOptions::default()
             },
         )
@@ -397,7 +377,6 @@ fn native_file_tree_imports_do_not_mutate_provider_sources() {
             store,
             MistralVibeImportOptions {
                 source_path: Some(mistral.clone()),
-                allow_partial_failures: true,
                 ..MistralVibeImportOptions::default()
             },
         )
@@ -411,7 +390,6 @@ fn native_file_tree_imports_do_not_mutate_provider_sources() {
             store,
             MuxImportOptions {
                 source_path: Some(mux.clone()),
-                allow_partial_failures: true,
                 ..MuxImportOptions::default()
             },
         )
@@ -425,7 +403,6 @@ fn native_file_tree_imports_do_not_mutate_provider_sources() {
             store,
             RovoDevImportOptions {
                 source_path: Some(rovodev.clone()),
-                allow_partial_failures: true,
                 ..RovoDevImportOptions::default()
             },
         )
@@ -439,7 +416,6 @@ fn native_file_tree_imports_do_not_mutate_provider_sources() {
             store,
             ClineTaskJsonImportOptions {
                 source_path: Some(cline.clone()),
-                allow_partial_failures: true,
                 ..ClineTaskJsonImportOptions::default()
             },
         )
@@ -453,7 +429,6 @@ fn native_file_tree_imports_do_not_mutate_provider_sources() {
             store,
             RooTaskJsonImportOptions {
                 source_path: Some(roo.clone()),
-                allow_partial_failures: true,
                 ..RooTaskJsonImportOptions::default()
             },
         )
@@ -574,7 +549,6 @@ fn continue_cli_tool_call_redacts_raw_outputs_and_reimports_file_touches() {
         ContinueCliImportOptions {
             source_path: Some(root.clone()),
             imported_at: "2026-07-04T16:05:00Z".parse().unwrap(),
-            allow_partial_failures: true,
             ..ContinueCliImportOptions::default()
         },
     )
@@ -624,7 +598,6 @@ fn continue_cli_tool_call_redacts_raw_outputs_and_reimports_file_touches() {
         ContinueCliImportOptions {
             source_path: Some(root.clone()),
             imported_at: "2026-07-04T16:06:00Z".parse().unwrap(),
-            allow_partial_failures: true,
             ..ContinueCliImportOptions::default()
         },
     )
@@ -653,7 +626,6 @@ fn native_pi_fixture_imports_event_types_searches_and_reimports() {
         PiSessionImportOptions {
             source_path: Some(fixture.clone()),
             imported_at: "2026-06-23T16:10:00Z".parse().unwrap(),
-            allow_partial_failures: true,
             ..PiSessionImportOptions::default()
         },
     )
@@ -694,7 +666,6 @@ fn native_pi_fixture_imports_event_types_searches_and_reimports() {
         PiSessionImportOptions {
             source_path: Some(fixture.clone()),
             imported_at: "2026-06-23T16:15:00Z".parse().unwrap(),
-            allow_partial_failures: true,
             ..PiSessionImportOptions::default()
         },
     )
@@ -707,9 +678,9 @@ fn native_pi_fixture_imports_event_types_searches_and_reimports() {
 }
 
 #[test]
-fn native_pi_malformed_file_is_atomic_without_partial_failures() {
+fn native_pi_malformed_file_imports_valid_records_and_reports_rejections() {
     let temp = tempdir();
-    let fixture = provider_history_fixture("pi-malformed-partial.jsonl");
+    let fixture = provider_history_fixture("pi-malformed-mixed.jsonl");
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
 
     let summary = import_pi_session_jsonl(
@@ -724,13 +695,19 @@ fn native_pi_malformed_file_is_atomic_without_partial_failures() {
     .unwrap();
 
     assert_eq!(summary.failed, 2, "{:?}", summary.failures);
-    assert_eq!(summary.imported_sessions, 0);
-    assert_eq!(summary.imported_events, 0);
-    assert!(store.list_sessions().unwrap().is_empty());
-    assert!(store
-        .search_event_hits("after malformed line", 10)
-        .unwrap()
-        .is_empty());
+    assert_eq!(summary.imported_sessions, 1);
+    assert_eq!(summary.imported_events, 2);
+    let sessions = store.list_sessions().unwrap();
+    assert_eq!(
+        sessions.len(),
+        1,
+        "unexpected Pi sessions: {:?}",
+        sessions
+            .iter()
+            .map(|session| (&session.id, &session.external_session_id))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(store.search_event_hits("after", 10).unwrap().len(), 1);
 }
 
 #[test]
@@ -748,7 +725,6 @@ fn native_claude_projects_imports_jsonl_tree() {
             imported_at: DateTime::parse_from_rfc3339("2026-06-24T12:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
-            allow_partial_failures: true,
             ..ClaudeProjectsImportOptions::default()
         },
     )
@@ -789,7 +765,6 @@ fn native_claude_empty_project_jsonl_rejects_no_real_message() {
         temp.path().join("claude/projects"),
         &mut store,
         ClaudeProjectsImportOptions {
-            allow_partial_failures: true,
             ..ClaudeProjectsImportOptions::default()
         },
     )
@@ -871,7 +846,6 @@ fn antigravity_native_history_imports_transcripts_and_preserves_previews() {
         &mut store,
         AntigravityCliImportOptions {
             source_path: Some(fixture.clone()),
-            allow_partial_failures: true,
             imported_at: "2026-06-24T14:00:00Z".parse().unwrap(),
             ..AntigravityCliImportOptions::default()
         },
@@ -948,7 +922,6 @@ fn native_windsurf_fixture_imports_searches_reimports_and_file_touches() {
         &mut store,
         WindsurfCascadeHookImportOptions {
             source_path: Some(fixture.clone()),
-            allow_partial_failures: true,
             imported_at: "2026-06-24T14:00:00Z".parse().unwrap(),
             ..WindsurfCascadeHookImportOptions::default()
         },
@@ -992,7 +965,6 @@ fn native_windsurf_fixture_imports_searches_reimports_and_file_touches() {
         &mut store,
         WindsurfCascadeHookImportOptions {
             source_path: Some(fixture.clone()),
-            allow_partial_failures: true,
             imported_at: "2026-06-24T14:05:00Z".parse().unwrap(),
             ..WindsurfCascadeHookImportOptions::default()
         },
@@ -1021,7 +993,6 @@ fn native_qoder_fixture_imports_documented_transcript_jsonl() {
         &mut store,
         QoderImportOptions {
             source_path: Some(fixture.clone()),
-            allow_partial_failures: true,
             imported_at: "2026-07-01T12:00:00Z".parse().unwrap(),
             ..QoderImportOptions::default()
         },
@@ -1067,7 +1038,6 @@ fn native_qoder_fixture_imports_documented_transcript_jsonl() {
         &mut store,
         QoderImportOptions {
             source_path: Some(fixture.clone()),
-            allow_partial_failures: true,
             imported_at: "2026-07-01T12:05:00Z".parse().unwrap(),
             ..QoderImportOptions::default()
         },
@@ -1107,7 +1077,6 @@ fn native_cursor_fixture_imports_searches_reports_malformed_and_reimports() {
         &mut store,
         CursorNativeImportOptions {
             source_path: Some(fixture.clone()),
-            allow_partial_failures: true,
             imported_at: "2026-06-24T12:20:00Z".parse().unwrap(),
             ..CursorNativeImportOptions::default()
         },
@@ -1131,12 +1100,12 @@ fn native_cursor_fixture_imports_searches_reports_malformed_and_reimports() {
     assert_event_with_role(&events, EventType::ToolOutput, EventRole::User);
     assert_events_have_provider_citations(&events);
 
-    let partial_id =
+    let malformed_id =
         stored_provider_session_id(&store, CaptureProvider::Cursor, "cursor-malformed-session");
-    let partial_events = store.events_for_session(partial_id).unwrap();
-    assert_eq!(partial_events.len(), 1);
-    assert_event_type_count(&partial_events, EventType::Message, 1);
-    assert_events_have_provider_citations(&partial_events);
+    let malformed_events = store.events_for_session(malformed_id).unwrap();
+    assert_eq!(malformed_events.len(), 1);
+    assert_event_type_count(&malformed_events, EventType::Message, 1);
+    assert_events_have_provider_citations(&malformed_events);
 
     assert_search_hits_provider(
         &store,
@@ -1162,7 +1131,6 @@ fn native_cursor_fixture_imports_searches_reports_malformed_and_reimports() {
         &mut store,
         CursorNativeImportOptions {
             source_path: Some(fixture.clone()),
-            allow_partial_failures: true,
             imported_at: "2026-06-24T12:25:00Z".parse().unwrap(),
             ..CursorNativeImportOptions::default()
         },
@@ -1176,7 +1144,7 @@ fn native_cursor_fixture_imports_searches_reports_malformed_and_reimports() {
 }
 
 #[test]
-fn native_windsurf_reports_malformed_jsonl_partially() {
+fn native_windsurf_reports_malformed_jsonl_and_keeps_valid_rows() {
     let temp = tempdir();
     let fixture = provider_history_fixture("windsurf/malformed/transcripts");
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
@@ -1185,7 +1153,6 @@ fn native_windsurf_reports_malformed_jsonl_partially() {
         &fixture,
         &mut store,
         WindsurfCascadeHookImportOptions {
-            allow_partial_failures: true,
             imported_at: "2026-06-24T14:00:00Z".parse().unwrap(),
             ..WindsurfCascadeHookImportOptions::default()
         },
@@ -1223,7 +1190,6 @@ fn native_claude_projects_reports_malformed_jsonl() {
         &fixture,
         &mut store,
         ClaudeProjectsImportOptions {
-            allow_partial_failures: true,
             ..ClaudeProjectsImportOptions::default()
         },
     )
@@ -1247,7 +1213,6 @@ fn native_task_json_imports_cline_and_roo_task_directories() {
         &mut store,
         ClineTaskJsonImportOptions {
             source_path: Some(cline.clone()),
-            allow_partial_failures: true,
             imported_at: "2026-06-30T12:10:00Z".parse().unwrap(),
             ..ClineTaskJsonImportOptions::default()
         },
@@ -1285,7 +1250,6 @@ fn native_task_json_imports_cline_and_roo_task_directories() {
         &mut store,
         ClineTaskJsonImportOptions {
             source_path: Some(cline.clone()),
-            allow_partial_failures: true,
             imported_at: "2026-06-30T12:10:00Z".parse().unwrap(),
             ..ClineTaskJsonImportOptions::default()
         },
@@ -1302,7 +1266,6 @@ fn native_task_json_imports_cline_and_roo_task_directories() {
         &mut store,
         RooTaskJsonImportOptions {
             source_path: Some(roo.clone()),
-            allow_partial_failures: true,
             imported_at: "2026-06-30T12:10:00Z".parse().unwrap(),
             ..RooTaskJsonImportOptions::default()
         },
@@ -1343,7 +1306,6 @@ fn native_task_json_imports_cline_and_roo_task_directories() {
         &mut store,
         RooTaskJsonImportOptions {
             source_path: Some(roo.clone()),
-            allow_partial_failures: true,
             imported_at: "2026-06-30T12:15:00Z".parse().unwrap(),
             ..RooTaskJsonImportOptions::default()
         },
@@ -1355,7 +1317,7 @@ fn native_task_json_imports_cline_and_roo_task_directories() {
     assert_eq!(roo_second.skipped_events, 6);
 }
 #[test]
-fn native_task_json_malformed_file_is_atomic_without_partial_failures() {
+fn native_task_json_all_invalid_file_reports_rejection() {
     let temp = tempdir();
     let task = temp.path().join("cline-data/tasks/cline-bad");
     fs::create_dir_all(&task).unwrap();
@@ -1409,7 +1371,6 @@ fn native_task_json_metadata_only_task_rejects_no_real_message() {
         temp.path().join("cline-data"),
         &mut store,
         ClineTaskJsonImportOptions {
-            allow_partial_failures: true,
             ..ClineTaskJsonImportOptions::default()
         },
     )
@@ -1446,7 +1407,6 @@ fn native_roo_non_array_message_history_rejects_no_real_message() {
         temp.path().join("roo-storage"),
         &mut store,
         RooTaskJsonImportOptions {
-            allow_partial_failures: true,
             ..RooTaskJsonImportOptions::default()
         },
     )
@@ -1480,7 +1440,6 @@ fn native_codebuddy_fixture_imports_searches_and_reimports() {
             imported_at: DateTime::parse_from_rfc3339("2026-07-04T16:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
-            allow_partial_failures: true,
             ..CodeBuddyImportOptions::default()
         },
     )
@@ -1531,7 +1490,6 @@ fn native_codebuddy_fixture_imports_searches_and_reimports() {
         &fixture,
         &mut store,
         CodeBuddyImportOptions {
-            allow_partial_failures: true,
             ..CodeBuddyImportOptions::default()
         },
     )
@@ -1559,7 +1517,6 @@ fn native_codebuddy_empty_messages_rejects_no_real_message() {
         temp.path().join("codebuddy/project"),
         &mut store,
         CodeBuddyImportOptions {
-            allow_partial_failures: true,
             ..CodeBuddyImportOptions::default()
         },
     )
@@ -1593,7 +1550,6 @@ fn native_codebuddy_non_array_messages_rejects_orphan_message_file() {
         temp.path().join("codebuddy/project"),
         &mut store,
         CodeBuddyImportOptions {
-            allow_partial_failures: true,
             ..CodeBuddyImportOptions::default()
         },
     )
@@ -1640,7 +1596,6 @@ fn native_codebuddy_symlinked_messages_dir_is_not_imported() {
         &project,
         &mut store,
         CodeBuddyImportOptions {
-            allow_partial_failures: true,
             ..CodeBuddyImportOptions::default()
         },
     )
@@ -1683,7 +1638,6 @@ fn native_codebuddy_symlinked_message_file_is_not_imported() {
         &project,
         &mut store,
         CodeBuddyImportOptions {
-            allow_partial_failures: true,
             ..CodeBuddyImportOptions::default()
         },
     )
@@ -1773,7 +1727,6 @@ fn native_openhands_file_events_redact_outputs_cite_source_and_leave_tree_readon
         OpenHandsImportOptions {
             source_path: Some(root.clone()),
             imported_at: "2026-07-04T17:05:00Z".parse().unwrap(),
-            allow_partial_failures: true,
             ..OpenHandsImportOptions::default()
         },
     )
@@ -1843,7 +1796,6 @@ fn native_openhands_file_events_redact_outputs_cite_source_and_leave_tree_readon
         OpenHandsImportOptions {
             source_path: Some(root.clone()),
             imported_at: "2026-07-04T17:06:00Z".parse().unwrap(),
-            allow_partial_failures: true,
             ..OpenHandsImportOptions::default()
         },
     )
@@ -1867,7 +1819,6 @@ fn native_openclaw_empty_session_jsonl_rejects_no_real_message() {
         temp.path().join("openclaw"),
         &mut store,
         OpenClawImportOptions {
-            allow_partial_failures: true,
             ..OpenClawImportOptions::default()
         },
     )
@@ -1902,7 +1853,6 @@ fn native_openclaw_contentless_message_does_not_fabricate_search_text() {
         temp.path().join("openclaw"),
         &mut store,
         OpenClawImportOptions {
-            allow_partial_failures: true,
             ..OpenClawImportOptions::default()
         },
     )
@@ -1965,7 +1915,6 @@ fn native_openclaw_tool_output_is_metadata_only_and_not_searchable() {
         temp.path().join("openclaw"),
         &mut store,
         OpenClawImportOptions {
-            allow_partial_failures: true,
             ..OpenClawImportOptions::default()
         },
     )
@@ -2006,7 +1955,6 @@ fn native_trae_fixture_imports_searches_and_reimports() {
             imported_at: DateTime::parse_from_rfc3339("2026-07-04T21:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
-            allow_partial_failures: true,
             ..TraeImportOptions::default()
         },
     )
@@ -2049,7 +1997,6 @@ fn native_trae_fixture_imports_searches_and_reimports() {
         &fixture,
         &mut store,
         TraeImportOptions {
-            allow_partial_failures: true,
             ..TraeImportOptions::default()
         },
     )
@@ -2108,7 +2055,6 @@ fn native_trae_chatstore_entries_schema_drift_imports() {
         temp.path().join("User/workspaceStorage"),
         &mut store,
         TraeImportOptions {
-            allow_partial_failures: true,
             ..TraeImportOptions::default()
         },
     )
@@ -2169,7 +2115,6 @@ fn native_trae_cn_input_history_key_imports_user_messages() {
         temp.path().join("Trae CN/User/workspaceStorage"),
         &mut store,
         TraeImportOptions {
-            allow_partial_failures: true,
             ..TraeImportOptions::default()
         },
     )
@@ -2217,7 +2162,6 @@ fn native_auggie_fixture_imports_searches_and_reimports() {
             imported_at: DateTime::parse_from_rfc3339("2026-07-04T20:30:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
-            allow_partial_failures: true,
             ..AuggieImportOptions::default()
         },
     )
@@ -2259,7 +2203,6 @@ fn native_auggie_fixture_imports_searches_and_reimports() {
         &fixture,
         &mut store,
         AuggieImportOptions {
-            allow_partial_failures: true,
             ..AuggieImportOptions::default()
         },
     )
@@ -2321,7 +2264,6 @@ fn native_auggie_tool_only_nodes_reject_no_real_message() {
         &mut store,
         AuggieImportOptions {
             source_path: Some(root.clone()),
-            allow_partial_failures: true,
             imported_at: "2026-07-04T20:05:00Z".parse().unwrap(),
             ..AuggieImportOptions::default()
         },
@@ -2387,7 +2329,6 @@ fn native_auggie_mixed_tool_nodes_do_not_store_raw_tool_output() {
         &mut store,
         AuggieImportOptions {
             source_path: Some(root.clone()),
-            allow_partial_failures: true,
             imported_at: "2026-07-04T20:15:00Z".parse().unwrap(),
             ..AuggieImportOptions::default()
         },
@@ -2435,7 +2376,6 @@ fn native_rovodev_non_array_message_history_rejects_no_real_message() {
         &mut store,
         RovoDevImportOptions {
             source_path: Some(temp.path().join("rovodev/sessions")),
-            allow_partial_failures: true,
             imported_at: "2026-07-04T20:10:00Z".parse().unwrap(),
             ..RovoDevImportOptions::default()
         },
@@ -2516,7 +2456,6 @@ fn native_firebender_fixture_imports_project_root_db_and_reimports() {
             imported_at: DateTime::parse_from_rfc3339("2026-07-04T20:10:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
-            allow_partial_failures: true,
             ..FirebenderSqliteImportOptions::default()
         },
     )
@@ -2570,7 +2509,6 @@ fn native_firebender_fixture_imports_project_root_db_and_reimports() {
         &mut store,
         FirebenderSqliteImportOptions {
             source_path: Some(fixture.clone()),
-            allow_partial_failures: true,
             ..FirebenderSqliteImportOptions::default()
         },
     )
@@ -2618,7 +2556,6 @@ fn native_lingma_fixture_imports_searches_and_reimports() {
             imported_at: DateTime::parse_from_rfc3339("2026-07-04T16:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
-            allow_partial_failures: true,
             ..LingmaSqliteImportOptions::default()
         },
     )
@@ -2664,7 +2601,6 @@ fn native_lingma_fixture_imports_searches_and_reimports() {
         &fixture,
         &mut store,
         LingmaSqliteImportOptions {
-            allow_partial_failures: true,
             ..LingmaSqliteImportOptions::default()
         },
     )
@@ -2736,7 +2672,6 @@ fn native_factory_ai_droid_supports_new_session_format() {
         &mut store,
         FactoryAiDroidImportOptions {
             source_path: Some(root.clone()),
-            allow_partial_failures: true,
             ..FactoryAiDroidImportOptions::default()
         },
     )
@@ -2787,7 +2722,6 @@ fn native_factory_ai_droid_supports_legacy_session_format() {
         &mut store,
         FactoryAiDroidImportOptions {
             source_path: Some(root.clone()),
-            allow_partial_failures: true,
             ..FactoryAiDroidImportOptions::default()
         },
     )

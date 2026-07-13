@@ -15,6 +15,7 @@ use std::os::unix::{fs::OpenOptionsExt, io::AsRawFd};
 use std::sync::mpsc;
 
 use anyhow::{anyhow, Context, Result};
+use ctx_history_capture::CaptureError;
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -237,7 +238,7 @@ pub fn run_history_source_plugin(
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(err) => {
-            cleanup_cursor_file(cursor_file.as_ref());
+            cleanup_cursor_file(cursor_file.as_ref())?;
             return Err(err).with_context(|| {
                 format!(
                     "spawn history source plugin {} command {}",
@@ -247,14 +248,16 @@ pub fn run_history_source_plugin(
             });
         }
     };
-    let stdout = child
-        .stdout
-        .take()
-        .context("history source plugin stdout was not piped")?;
-    let stderr = child
-        .stderr
-        .take()
-        .context("history source plugin stderr was not piped")?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        anyhow::Error::new(CaptureError::SystemInvariant(
+            "history source plugin stdout was not piped",
+        ))
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        anyhow::Error::new(CaptureError::SystemInvariant(
+            "history source plugin stderr was not piped",
+        ))
+    })?;
     let run_result = collect_child_output_with_timeout(
         &mut child,
         stdout,
@@ -262,7 +265,7 @@ pub fn run_history_source_plugin(
         source.timeout,
         &source.label(),
     );
-    cleanup_cursor_file(cursor_file.as_ref());
+    cleanup_cursor_file(cursor_file.as_ref())?;
     let (status, stdout, stderr) = run_result?;
     let stderr = String::from_utf8_lossy(&stderr).trim().to_owned();
     if !status.success() {
@@ -326,7 +329,10 @@ pub(crate) fn collect_child_output_with_timeout(
             })?;
         }
         if status.is_none() {
-            status = child.try_wait()?;
+            status = child.try_wait().map_err(|source| CaptureError::SystemIo {
+                operation: "poll history source plugin process",
+                source,
+            })?;
         }
         if let Some(status) = status {
             if !stdout_open && !stderr_open {
@@ -381,7 +387,10 @@ pub(crate) fn collect_child_output_with_timeout(
 
     let started = Instant::now();
     let status = loop {
-        if let Some(status) = child.try_wait()? {
+        if let Some(status) = child.try_wait().map_err(|source| CaptureError::SystemIo {
+            operation: "poll history source plugin process",
+            source,
+        })? {
             break status;
         }
         if started.elapsed() >= timeout {
@@ -424,18 +433,22 @@ pub(crate) fn collect_child_output_with_timeout(
                 ));
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return Err(anyhow!(
-                    "history source plugin {source_label} output reader stopped before pipes were drained"
-                ));
+                return Err(anyhow::Error::new(CaptureError::SystemInvariant(
+                    "history source plugin output reader stopped before pipes were drained",
+                )));
             }
         }
     }
 
     if stdout_handle.join().is_err() {
-        return Err(anyhow!("history source plugin stdout reader panicked"));
+        return Err(anyhow::Error::new(CaptureError::WorkerPanicked(
+            "history source plugin stdout reader",
+        )));
     }
     if stderr_handle.join().is_err() {
-        return Err(anyhow!("history source plugin stderr reader panicked"));
+        return Err(anyhow::Error::new(CaptureError::WorkerPanicked(
+            "history source plugin stderr reader",
+        )));
     }
     let stdout = stdout.expect("stdout reader result");
     let stderr = stderr.expect("stderr reader result");
@@ -446,11 +459,19 @@ pub(crate) fn collect_child_output_with_timeout(
 pub(crate) fn set_nonblocking(fd: std::os::fd::RawFd) -> Result<()> {
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     if flags < 0 {
-        return Err(std::io::Error::last_os_error()).context("read plugin pipe flags");
+        return Err(CaptureError::SystemIo {
+            operation: "read history source plugin pipe flags",
+            source: std::io::Error::last_os_error(),
+        }
+        .into());
     }
     let result = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
     if result < 0 {
-        return Err(std::io::Error::last_os_error()).context("set plugin pipe nonblocking");
+        return Err(CaptureError::SystemIo {
+            operation: "set history source plugin pipe nonblocking",
+            source: std::io::Error::last_os_error(),
+        }
+        .into());
     }
     Ok(())
 }
@@ -482,8 +503,11 @@ pub(crate) fn read_available_with_limit<R: Read>(
             Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
             Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(err) => {
-                return Err(err)
-                    .with_context(|| format!("read history source plugin {source_label} {name}"))
+                return Err(anyhow::Error::new(CaptureError::SystemIo {
+                    operation: "read history source plugin output pipe",
+                    source: err,
+                }))
+                .with_context(|| format!("read history source plugin {source_label} {name}"))
             }
         }
     }
@@ -499,7 +523,12 @@ pub(crate) fn read_pipe_with_limit<R: Read>(
     let mut bytes = Vec::new();
     let mut buffer = [0u8; 8192];
     loop {
-        let count = reader.read(&mut buffer)?;
+        let count = reader
+            .read(&mut buffer)
+            .map_err(|source| CaptureError::SystemIo {
+                operation: "read history source plugin output pipe",
+                source,
+            })?;
         if count == 0 {
             return Ok(bytes);
         }
@@ -529,23 +558,43 @@ pub(crate) fn write_private_temp_file(prefix: &str, contents: &str) -> Result<Pa
         options.mode(0o600);
         match options.open(&path) {
             Ok(mut file) => {
-                file.write_all(contents.as_bytes())?;
+                file.write_all(contents.as_bytes())
+                    .map_err(|source| CaptureError::SystemIo {
+                        operation: "write history source plugin cursor file",
+                        source,
+                    })?;
                 return Ok(path);
             }
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(err) => {
-                return Err(err)
-                    .with_context(|| format!("create private temp file {}", path.display()));
+                return Err(anyhow::Error::new(CaptureError::SystemIo {
+                    operation: "create history source plugin cursor file",
+                    source: err,
+                }))
+                .with_context(|| format!("create private temp file {}", path.display()));
             }
         }
     }
-    Err(anyhow!("failed to allocate unique private temp file"))
+    Err(anyhow::Error::new(CaptureError::SystemInvariant(
+        "failed to allocate unique history source plugin cursor file",
+    )))
 }
 
-pub(crate) fn cleanup_cursor_file(path: Option<&PathBuf>) {
+pub(crate) fn cleanup_cursor_file(path: Option<&PathBuf>) -> Result<()> {
     if let Some(path) = path {
-        let _ = fs::remove_file(path);
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(CaptureError::SystemIo {
+                    operation: "remove history source plugin cursor file",
+                    source,
+                }
+                .into())
+            }
+        }
     }
+    Ok(())
 }
 
 pub(crate) fn read_plugin_manifest(path: &Path) -> Result<Vec<HistorySourcePluginSource>> {

@@ -143,6 +143,37 @@ fn overlapping_bulk_search_mode_is_rejected_until_guard_releases() {
 }
 
 #[test]
+fn nested_bulk_search_mode_finishes_only_at_outer_scope() {
+    let temp = tempdir();
+    let db_path = temp.path().join("work.sqlite");
+    let first = Store::open(&db_path).unwrap();
+    let outer = first.begin_event_search_bulk_mode().unwrap();
+    let nested = first.begin_event_search_bulk_mode().unwrap();
+    let second = Store::open_with_busy_timeout(&db_path, Duration::from_millis(10)).unwrap();
+
+    first.finish_event_search_bulk_mode(&nested).unwrap();
+    assert_eq!(bulk_mode_marker(&first), Some(1));
+    let error = first.finish_event_search_bulk_mode(&outer).unwrap_err();
+    assert!(matches!(error, StoreError::InvalidBulkSearchGuard));
+    assert!(matches!(
+        second.begin_event_search_bulk_mode().err().unwrap(),
+        StoreError::BulkSearchImportBusy
+    ));
+
+    drop(nested);
+    first.finish_event_search_bulk_mode(&outer).unwrap();
+    assert_eq!(bulk_mode_marker(&first), None);
+    for table in ["event_search", "event_search_scriptgram"] {
+        assert_eq!(fts_config(&first, table, "automerge", 4), 4);
+        assert_eq!(fts_config(&first, table, "crisismerge", 16), 16);
+    }
+    drop(outer);
+
+    let fresh = second.begin_event_search_bulk_mode().unwrap();
+    second.finish_event_search_bulk_mode(&fresh).unwrap();
+}
+
+#[test]
 fn optimize_serializes_with_bulk_guard_even_without_visible_marker() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");

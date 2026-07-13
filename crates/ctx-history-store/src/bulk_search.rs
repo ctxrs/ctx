@@ -7,7 +7,15 @@
 //! Bounded merge steps run before the saved settings and marker are cleared.
 
 use ctx_history_core::utc_now;
-use std::{ffi::OsString, path::PathBuf, time::Duration};
+use std::{
+    ffi::OsString,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use rusqlite::{params, Connection, ErrorCode, OptionalExtension};
 
@@ -41,22 +49,49 @@ const BULK_LOCK_SUFFIX: &str = ".event-search-bulk.lock.sqlite";
 /// SQLite releases the sidecar database's writer lock if the process exits,
 /// including after an unclean exit. The guard intentionally cannot be cloned.
 pub struct EventSearchBulkGuard {
-    lock_conn: Connection,
+    lock_conn: Option<Connection>,
     store_path: PathBuf,
+    depth: Arc<AtomicUsize>,
+    depth_counted: bool,
 }
 
 impl Drop for EventSearchBulkGuard {
     fn drop(&mut self) {
-        let _ = self.lock_conn.execute_batch("ROLLBACK");
+        if let Some(lock_conn) = &self.lock_conn {
+            let _ = lock_conn.execute_batch("ROLLBACK");
+        }
+        if self.depth_counted {
+            self.depth.fetch_sub(1, Ordering::SeqCst);
+        }
     }
 }
 
 impl Store {
     /// Acquire the bulk-import lock and persist merge suppression.
     pub fn begin_event_search_bulk_mode(&self) -> Result<EventSearchBulkGuard> {
-        let guard = self
-            .acquire_event_search_bulk_lock(self.busy_timeout)?
-            .ok_or(StoreError::BulkSearchImportBusy)?;
+        if self.event_search_bulk_depth.fetch_add(1, Ordering::SeqCst) > 0 {
+            return Ok(EventSearchBulkGuard {
+                lock_conn: None,
+                store_path: self.path.clone(),
+                depth: Arc::clone(&self.event_search_bulk_depth),
+                depth_counted: true,
+            });
+        }
+        let acquired = match self.acquire_event_search_bulk_lock(self.busy_timeout) {
+            Ok(acquired) => acquired,
+            Err(error) => {
+                self.event_search_bulk_depth.fetch_sub(1, Ordering::SeqCst);
+                return Err(error);
+            }
+        };
+        let mut guard = match acquired {
+            Some(guard) => guard,
+            None => {
+                self.event_search_bulk_depth.fetch_sub(1, Ordering::SeqCst);
+                return Err(StoreError::BulkSearchImportBusy);
+            }
+        };
+        guard.depth_counted = true;
         self.begin_immediate_batch()?;
         let result = (|| {
             ensure_search_projection_stats_table(self)?;
@@ -100,6 +135,12 @@ impl Store {
     /// provider import in an already-populated multi-source index.
     pub fn finish_event_search_bulk_mode(&self, guard: &EventSearchBulkGuard) -> Result<()> {
         if guard.store_path != self.path {
+            return Err(StoreError::InvalidBulkSearchGuard);
+        }
+        if guard.lock_conn.is_none() {
+            return Ok(());
+        }
+        if guard.depth_counted && guard.depth.load(Ordering::SeqCst) != 1 {
             return Err(StoreError::InvalidBulkSearchGuard);
         }
         if !bulk_mode_pending(self)? {
@@ -276,8 +317,10 @@ impl Store {
         );
         match result {
             Ok(()) => Ok(Some(EventSearchBulkGuard {
-                lock_conn,
+                lock_conn: Some(lock_conn),
                 store_path: self.path.clone(),
+                depth: Arc::clone(&self.event_search_bulk_depth),
+                depth_counted: false,
             })),
             Err(err) if sqlite_is_busy(&err) => Ok(None),
             Err(err) => Err(err.into()),

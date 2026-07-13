@@ -38,7 +38,7 @@ fn search_refresh_wait_skips_malformed_jsonl_rows() {
     let output = ctx(&temp)
         .args([
             "search",
-            "partial refresh search marker",
+            "rejected refresh search marker",
             "--provider",
             "claude",
             "--refresh",
@@ -54,18 +54,21 @@ fn search_refresh_wait_skips_malformed_jsonl_rows() {
     assert_search_provider_oracle(
         &search,
         "claude",
-        "partial refresh search marker",
+        "rejected refresh search marker",
         1,
         "message",
     );
     assert_eq!(search["freshness"]["status"], "completed");
     assert!(
-        search["freshness"]["totals"]["failed"].as_u64().unwrap() >= 1,
+        search["freshness"]["totals"]["rejected_records"]
+            .as_u64()
+            .unwrap()
+            >= 1,
         "{search:#}"
     );
 
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("partially refreshed claude"), "{stderr}");
+    assert!(stderr.contains("refreshed claude with"), "{stderr}");
     assert!(stderr.contains("malformed JSONL"), "{stderr}");
     assert!(stderr.contains("claude-session.jsonl"), "{stderr}");
 }
@@ -78,7 +81,7 @@ fn search_refresh_wait_warns_when_progress_is_not_interactive() {
     let output = ctx(&temp)
         .args([
             "search",
-            "partial refresh search marker",
+            "rejected refresh search marker",
             "--provider",
             "claude",
             "--refresh",
@@ -89,10 +92,13 @@ fn search_refresh_wait_warns_when_progress_is_not_interactive() {
         .get_output()
         .clone();
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("partial refresh search marker"), "{stdout}");
+    assert!(
+        stdout.contains("rejected refresh search marker"),
+        "{stdout}"
+    );
 
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("partially refreshed claude"), "{stderr}");
+    assert!(stderr.contains("refreshed claude with"), "{stderr}");
     assert!(stderr.contains("malformed JSONL"), "{stderr}");
     assert!(stderr.contains("claude-session.jsonl"), "{stderr}");
 }
@@ -103,7 +109,7 @@ fn write_malformed_claude_session(temp: &TempDir) {
     fs::write(
         project.join("claude-session.jsonl"),
         concat!(
-            r#"{"sessionId":"claude-session","timestamp":"2026-06-24T10:00:00Z","cwd":"/repo","version":"test","type":"user","message":{"role":"user","content":[{"type":"text","text":"partial refresh search marker"}]},"uuid":"claude-user"}"#,
+            r#"{"sessionId":"claude-session","timestamp":"2026-06-24T10:00:00Z","cwd":"/repo","version":"test","type":"user","message":{"role":"user","content":[{"type":"text","text":"rejected refresh search marker"}]},"uuid":"claude-user"}"#,
             "\n",
             "{malformed-jsonl-row\n",
             r#"{"sessionId":"claude-session","timestamp":"2026-06-24T10:00:01Z","cwd":"/repo","version":"test","type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"valid rows remain searchable"}]},"uuid":"claude-assistant"}"#,
@@ -511,7 +517,11 @@ fn search_refresh_auto_all_malformed_native_history_fails_instead_of_serving_emp
         "{stderr}"
     );
     assert!(
-        stderr.contains("background refresh imported no content and reported 1 failure(s)"),
+        stderr.contains("all search refresh sources failed; first failure: import codex source"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("codex session JSONL contained no real message content"),
         "{stderr}"
     );
 }

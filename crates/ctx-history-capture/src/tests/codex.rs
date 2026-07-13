@@ -94,6 +94,22 @@ fn codex_session_tree_imports_messages_and_subagent_edges() {
 }
 
 #[test]
+fn codex_parallel_join_panic_is_a_typed_system_failure() {
+    let error = std::thread::scope(|scope| {
+        let handle = scope.spawn(|| -> crate::Result<()> {
+            panic!("intentional Codex normalization worker panic")
+        });
+        join_codex_import_worker(handle)
+    })
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        CaptureError::WorkerPanicked("Codex import")
+    ));
+}
+
+#[test]
 fn codex_session_catalog_large_noop_uses_metadata_cache() {
     let temp = tempdir();
     let root = temp.path().join("sessions");
@@ -107,7 +123,6 @@ fn codex_session_catalog_large_noop_uses_metadata_cache() {
         CodexSessionCatalogOptions {
             source_root: Some(root.clone()),
             cataloged_at: "2026-06-26T12:00:00Z".parse().unwrap(),
-            allow_partial_failures: false,
             ..CodexSessionCatalogOptions::default()
         },
     )
@@ -124,7 +139,6 @@ fn codex_session_catalog_large_noop_uses_metadata_cache() {
         CodexSessionCatalogOptions {
             source_root: Some(root.clone()),
             cataloged_at: "2026-06-26T12:01:00Z".parse().unwrap(),
-            allow_partial_failures: false,
             ..CodexSessionCatalogOptions::default()
         },
     )
@@ -142,7 +156,6 @@ fn codex_session_catalog_large_noop_uses_metadata_cache() {
         CodexSessionCatalogOptions {
             source_root: Some(root.clone()),
             cataloged_at: "2026-06-26T12:02:00Z".parse().unwrap(),
-            allow_partial_failures: false,
             ..CodexSessionCatalogOptions::default()
         },
     )
@@ -168,7 +181,6 @@ fn codex_session_catalog_skips_oversized_metadata_probe_line() {
         CodexSessionCatalogOptions {
             source_root: Some(temp.path().join("sessions")),
             cataloged_at: "2026-07-03T12:00:00Z".parse().unwrap(),
-            allow_partial_failures: false,
             ..CodexSessionCatalogOptions::default()
         },
     )
@@ -194,7 +206,6 @@ fn codex_session_catalog_marks_deleted_paths_stale_when_additions_outnumber_dele
         CodexSessionCatalogOptions {
             source_root: Some(root.clone()),
             cataloged_at: "2026-06-26T12:00:00Z".parse().unwrap(),
-            allow_partial_failures: false,
             ..CodexSessionCatalogOptions::default()
         },
     )
@@ -215,7 +226,6 @@ fn codex_session_catalog_marks_deleted_paths_stale_when_additions_outnumber_dele
         CodexSessionCatalogOptions {
             source_root: Some(root.clone()),
             cataloged_at: "2026-06-26T12:01:00Z".parse().unwrap(),
-            allow_partial_failures: false,
             ..CodexSessionCatalogOptions::default()
         },
     )
@@ -1217,7 +1227,7 @@ fn codex_session_jsonl_fast_rejects_malformed_event_timestamp_atomically() {
 }
 
 #[test]
-fn codex_session_tail_rejects_malformed_append_atomically() {
+fn codex_session_tail_keeps_valid_append_when_another_row_is_rejected() {
     let temp = tempdir();
     let path = temp.path().join("tail-bad-timestamp-codex.jsonl");
     let initial = [
@@ -1302,18 +1312,16 @@ fn codex_session_tail_rejects_malformed_append_atomically() {
         &path,
         "codex-tail-bad-timestamp",
     );
-    assert_eq!(store.events_for_session(session_id).unwrap().len(), 1);
+    assert_eq!(summary.imported_events, 1, "{:?}", summary.failures);
+    assert_eq!(store.events_for_session(session_id).unwrap().len(), 2);
+    assert_eq!(store.search_event_hits("initial", 10).unwrap().len(), 1);
     assert_eq!(
         store
-            .search_event_hits("initial tail event", 10)
+            .search_event_hits("codex-tail-rollback-sentinel", 10)
             .unwrap()
             .len(),
         1
     );
-    assert!(store
-        .search_event_hits("codex-tail-rollback-sentinel", 10)
-        .unwrap()
-        .is_empty());
 }
 
 #[test]
@@ -1354,6 +1362,211 @@ fn codex_session_tail_skips_oversized_required_header_without_failure() {
     assert_eq!(summary.imported_sessions, 0);
     assert_eq!(summary.imported_events, 0);
     assert!(store.list_sessions().unwrap().is_empty());
+}
+
+#[test]
+fn codex_fast_session_stream_uses_shared_bounded_batches() {
+    let temp = tempdir();
+    let path = temp.path().join("codex-fast-bounded.jsonl");
+    let mut lines = vec![jsonl_line(json!({
+        "timestamp": "2026-07-13T12:00:00Z",
+        "type": "session_meta",
+        "payload": {
+            "id": "codex-fast-bounded",
+            "timestamp": "2026-07-13T12:00:00Z",
+            "cwd": "/repo",
+            "originator": "codex-cli"
+        }
+    }))];
+    lines.extend((0..64).map(|index| {
+        jsonl_line(json!({
+            "timestamp": format!("2026-07-13T12:00:{:02}Z", index % 60),
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": if index % 2 == 0 { "user" } else { "assistant" },
+                "content": [{
+                    "type": if index % 2 == 0 { "input_text" } else { "output_text" },
+                    "text": format!("codex fast bounded event {index}")
+                }]
+            }
+        }))
+    }));
+    fs::write(&path, lines.concat()).unwrap();
+
+    let db_path = temp.path().join("work.sqlite");
+    let mut store =
+        Store::open_with_busy_timeout(&db_path, std::time::Duration::from_millis(10)).unwrap();
+    let reader = Connection::open(&db_path).unwrap();
+    reader.execute_batch("BEGIN").unwrap();
+    assert_eq!(
+        reader
+            .query_row("SELECT COUNT(*) FROM events", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+
+    let error = import_codex_session_jsonl(&path, &mut store, CodexSessionImportOptions::default())
+        .unwrap_err();
+    assert!(error.to_string().contains("ctx index is busy"), "{error}");
+    reader.execute_batch("ROLLBACK").unwrap();
+
+    let conn = Connection::open(&db_path).unwrap();
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM events", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        64
+    );
+}
+
+#[test]
+fn codex_parallel_normalized_stream_uses_shared_bounded_batches() {
+    let temp = tempdir();
+    let sessions_root = temp.path().join("codex-parallel-bounded");
+    fs::create_dir_all(&sessions_root).unwrap();
+    let mut paths = Vec::new();
+    for session_index in 0..13 {
+        let path = sessions_root.join(format!("session-{session_index}.jsonl"));
+        let mut lines = vec![jsonl_line(json!({
+            "timestamp": "2026-07-13T12:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": format!("codex-parallel-bounded-{session_index}"),
+                "timestamp": "2026-07-13T12:00:00Z",
+                "cwd": "/repo",
+                "originator": "codex-cli"
+            }
+        }))];
+        lines.extend((0..4).map(|event_index| {
+            jsonl_line(json!({
+                "timestamp": format!("2026-07-13T12:00:0{}Z", event_index + 1),
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": if event_index % 2 == 0 { "user" } else { "assistant" },
+                    "content": [{
+                        "type": if event_index % 2 == 0 { "input_text" } else { "output_text" },
+                        "text": format!(
+                            "codex parallel bounded {session_index} event {event_index}"
+                        )
+                    }]
+                }
+            }))
+        }));
+        fs::write(&path, lines.concat()).unwrap();
+        paths.push(path);
+    }
+
+    let db_path = temp.path().join("work.sqlite");
+    let mut store =
+        Store::open_with_busy_timeout(&db_path, std::time::Duration::from_millis(10)).unwrap();
+    let reader = Connection::open(&db_path).unwrap();
+    reader.execute_batch("BEGIN").unwrap();
+    assert_eq!(
+        reader
+            .query_row("SELECT COUNT(*) FROM events", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+
+    let error = import_codex_session_paths(paths, &mut store, CodexSessionImportOptions::default())
+        .unwrap_err();
+    assert!(error.to_string().contains("ctx index is busy"), "{error}");
+    reader.execute_batch("ROLLBACK").unwrap();
+
+    let conn = Connection::open(&db_path).unwrap();
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM events", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        51
+    );
+}
+
+#[test]
+fn codex_tail_stream_uses_shared_bounded_batches() {
+    let temp = tempdir();
+    let path = temp.path().join("codex-tail-bounded.jsonl");
+    let initial = [
+        jsonl_line(json!({
+            "timestamp": "2026-07-13T12:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "codex-tail-bounded",
+                "timestamp": "2026-07-13T12:00:00Z",
+                "cwd": "/repo",
+                "originator": "codex-cli"
+            }
+        })),
+        jsonl_line(json!({
+            "timestamp": "2026-07-13T12:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "codex tail initial"}]
+            }
+        })),
+    ]
+    .concat();
+    fs::write(&path, &initial).unwrap();
+    let tail_start = initial.len() as u64;
+
+    let db_path = temp.path().join("work.sqlite");
+    let mut store =
+        Store::open_with_busy_timeout(&db_path, std::time::Duration::from_millis(10)).unwrap();
+    import_codex_session_jsonl(&path, &mut store, CodexSessionImportOptions::default()).unwrap();
+
+    let mut complete = initial;
+    complete.push_str(
+        &(0..64)
+            .map(|index| {
+                jsonl_line(json!({
+                    "timestamp": format!("2026-07-13T12:01:{:02}Z", index % 60),
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{
+                            "type": "output_text",
+                            "text": format!("codex tail bounded event {index}")
+                        }]
+                    }
+                }))
+            })
+            .collect::<String>(),
+    );
+    fs::write(&path, complete).unwrap();
+
+    let reader = Connection::open(&db_path).unwrap();
+    reader.execute_batch("BEGIN").unwrap();
+    assert_eq!(
+        reader
+            .query_row("SELECT COUNT(*) FROM events", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    let error = import_codex_session_jsonl_tail(
+        &path,
+        tail_start,
+        &mut store,
+        CodexSessionImportOptions::default(),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("ctx index is busy"), "{error}");
+    reader.execute_batch("ROLLBACK").unwrap();
+
+    let conn = Connection::open(&db_path).unwrap();
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM events", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        65
+    );
 }
 
 #[test]

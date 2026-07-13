@@ -24,7 +24,6 @@ pub(crate) fn import_one_source(
     source: &SourceInfo,
     progress: Option<CodexSessionImportProgressCallback>,
     full_rescan: bool,
-    allow_partial_failures: bool,
     preinventory: &SourcePreinventory,
 ) -> Result<ProviderImportSummary> {
     let event_search_needs_backfill = store.event_search_projection_needs_backfill()?;
@@ -36,7 +35,6 @@ pub(crate) fn import_one_source(
         progress,
         refresh_search_after_import,
         full_rescan,
-        allow_partial_failures,
         preinventory,
     )
 }
@@ -46,25 +44,15 @@ pub(crate) fn import_one_source_without_search_refresh(
     source: &SourceInfo,
     progress: Option<CodexSessionImportProgressCallback>,
     full_rescan: bool,
-    allow_partial_failures: bool,
     preinventory: &SourcePreinventory,
 ) -> Result<ProviderImportSummary> {
-    import_one_source_inner(
-        store,
-        source,
-        progress,
-        false,
-        full_rescan,
-        allow_partial_failures,
-        preinventory,
-    )
+    import_one_source_inner(store, source, progress, false, full_rescan, preinventory)
 }
 
 pub(crate) fn import_one_source_for_search_refresh(
     store: &mut Store,
     source: &SourceInfo,
     progress: Option<CodexSessionImportProgressCallback>,
-    allow_partial_failures: bool,
     preinventory: &SourcePreinventory,
 ) -> Result<ProviderImportSummary> {
     if !source_uses_import_file_manifest(source)
@@ -79,14 +67,7 @@ pub(crate) fn import_one_source_for_search_refresh(
         }
         return Ok(ProviderImportSummary::default());
     }
-    import_one_source_without_search_refresh(
-        store,
-        source,
-        progress,
-        false,
-        allow_partial_failures,
-        preinventory,
-    )
+    import_one_source_without_search_refresh(store, source, progress, false, preinventory)
 }
 
 pub(crate) fn import_one_source_inner(
@@ -95,11 +76,33 @@ pub(crate) fn import_one_source_inner(
     progress: Option<CodexSessionImportProgressCallback>,
     refresh_search_after_import: bool,
     full_rescan: bool,
-    allow_partial_failures: bool,
+    preinventory: &SourcePreinventory,
+) -> Result<ProviderImportSummary> {
+    let bulk_guard = store.begin_event_search_bulk_mode()?;
+    let import_result =
+        import_one_source_inner_batched(store, source, progress, full_rescan, preinventory);
+    let finish_result = store.finish_event_search_bulk_mode(&bulk_guard);
+    let summary = match (import_result, finish_result) {
+        (Ok(summary), Ok(())) => Ok(summary),
+        (_, Err(error)) => Err(error.into()),
+        (Err(error), Ok(())) => Err(error),
+    }?;
+    if refresh_search_after_import {
+        store.refresh_search_index()?;
+    }
+    Ok(summary)
+}
+
+fn import_one_source_inner_batched(
+    store: &mut Store,
+    source: &SourceInfo,
+    progress: Option<CodexSessionImportProgressCallback>,
+    full_rescan: bool,
     preinventory: &SourcePreinventory,
 ) -> Result<ProviderImportSummary> {
     let record = import_record_for_source(source);
     let record_id = record.id;
+    let record_existed = history_record_exists(store, record_id)?;
     store.upsert_record(&record)?;
     let summary = if !full_rescan && source_uses_import_file_manifest(source) {
         import_manifested_source(
@@ -107,7 +110,6 @@ pub(crate) fn import_one_source_inner(
             source,
             record_id,
             progress,
-            allow_partial_failures,
             preinventory.source_import_files(),
         )
     } else {
@@ -121,7 +123,6 @@ pub(crate) fn import_one_source_inner(
                             CodexSessionImportOptions {
                                 source_path: Some(source.path.clone()),
                                 history_record_id: Some(record_id),
-                                allow_partial_failures,
                                 progress: progress.clone(),
                                 ..CodexSessionImportOptions::default()
                             },
@@ -133,8 +134,7 @@ pub(crate) fn import_one_source_inner(
                             source,
                             record_id,
                             progress.clone(),
-                            allow_partial_failures,
-                            !preinventory.codex_session_tree_cataloged(),
+                            preinventory.codex_session_catalog(),
                         )
                     }
                 } else if source
@@ -149,7 +149,6 @@ pub(crate) fn import_one_source_inner(
                         CodexHistoryImportOptions {
                             source_path: Some(source.path.clone()),
                             history_record_id: Some(record_id),
-                            allow_partial_failures,
                             ..CodexHistoryImportOptions::default()
                         },
                     )
@@ -161,7 +160,6 @@ pub(crate) fn import_one_source_inner(
                         CodexSessionImportOptions {
                             source_path: Some(source.path.clone()),
                             history_record_id: Some(record_id),
-                            allow_partial_failures,
                             progress,
                             ..CodexSessionImportOptions::default()
                         },
@@ -175,7 +173,6 @@ pub(crate) fn import_one_source_inner(
                 PiSessionImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..PiSessionImportOptions::default()
                 },
             )
@@ -186,7 +183,6 @@ pub(crate) fn import_one_source_inner(
                 ClaudeProjectsImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..ClaudeProjectsImportOptions::default()
                 },
             )
@@ -197,7 +193,6 @@ pub(crate) fn import_one_source_inner(
                 ClineTaskJsonImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..ClineTaskJsonImportOptions::default()
                 },
             )
@@ -208,7 +203,6 @@ pub(crate) fn import_one_source_inner(
                 RooTaskJsonImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..RooTaskJsonImportOptions::default()
                 },
             )
@@ -219,7 +213,6 @@ pub(crate) fn import_one_source_inner(
                 CodeBuddyImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..CodeBuddyImportOptions::default()
                 },
             )
@@ -230,7 +223,6 @@ pub(crate) fn import_one_source_inner(
                 TraeImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..TraeImportOptions::default()
                 },
             )
@@ -241,7 +233,6 @@ pub(crate) fn import_one_source_inner(
                 OpenCodeSqliteImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..OpenCodeSqliteImportOptions::default()
                 },
             )
@@ -252,7 +243,6 @@ pub(crate) fn import_one_source_inner(
                 KiloSqliteImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..KiloSqliteImportOptions::default()
                 },
             )
@@ -263,7 +253,6 @@ pub(crate) fn import_one_source_inner(
                 MiMoCodeSqliteImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..MiMoCodeSqliteImportOptions::default()
                 },
             )
@@ -274,7 +263,6 @@ pub(crate) fn import_one_source_inner(
                 KiroSqliteImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..KiroSqliteImportOptions::default()
                 },
             )
@@ -285,7 +273,6 @@ pub(crate) fn import_one_source_inner(
                 ForgeCodeSqliteImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..ForgeCodeSqliteImportOptions::default()
                 },
             )
@@ -296,7 +283,6 @@ pub(crate) fn import_one_source_inner(
                 DeepAgentsSqliteImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..DeepAgentsSqliteImportOptions::default()
                 },
             )
@@ -307,7 +293,6 @@ pub(crate) fn import_one_source_inner(
                 CrushSqliteImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..CrushSqliteImportOptions::default()
                 },
             )
@@ -318,7 +303,6 @@ pub(crate) fn import_one_source_inner(
                 GooseSessionsSqliteImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..GooseSessionsSqliteImportOptions::default()
                 },
             )
@@ -329,7 +313,6 @@ pub(crate) fn import_one_source_inner(
                 OpenClawImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..OpenClawImportOptions::default()
                 },
             )
@@ -340,7 +323,6 @@ pub(crate) fn import_one_source_inner(
                 HermesSqliteImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..HermesSqliteImportOptions::default()
                 },
             )
@@ -351,7 +333,6 @@ pub(crate) fn import_one_source_inner(
                 NanoClawImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..NanoClawImportOptions::default()
                 },
             )
@@ -362,7 +343,6 @@ pub(crate) fn import_one_source_inner(
                 AstrBotSqliteImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..AstrBotSqliteImportOptions::default()
                 },
             )
@@ -373,7 +353,6 @@ pub(crate) fn import_one_source_inner(
                 ShelleySqliteImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..ShelleySqliteImportOptions::default()
                 },
             )
@@ -384,7 +363,6 @@ pub(crate) fn import_one_source_inner(
                 ContinueCliImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..ContinueCliImportOptions::default()
                 },
             )
@@ -395,7 +373,6 @@ pub(crate) fn import_one_source_inner(
                 OpenHandsImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..OpenHandsImportOptions::default()
                 },
             )
@@ -406,7 +383,6 @@ pub(crate) fn import_one_source_inner(
                 LingmaSqliteImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..LingmaSqliteImportOptions::default()
                 },
             )
@@ -417,7 +393,6 @@ pub(crate) fn import_one_source_inner(
                 QoderImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..QoderImportOptions::default()
                 },
             )
@@ -428,7 +403,6 @@ pub(crate) fn import_one_source_inner(
                 WarpSqliteImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..WarpSqliteImportOptions::default()
                 },
             )
@@ -439,7 +413,6 @@ pub(crate) fn import_one_source_inner(
                 GeminiCliImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..GeminiCliImportOptions::default()
                 },
             )
@@ -450,7 +423,6 @@ pub(crate) fn import_one_source_inner(
                 TabnineCliImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..TabnineCliImportOptions::default()
                 },
             )
@@ -461,7 +433,6 @@ pub(crate) fn import_one_source_inner(
                 CursorNativeImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..CursorNativeImportOptions::default()
                 },
             )
@@ -472,7 +443,6 @@ pub(crate) fn import_one_source_inner(
                 WindsurfCascadeHookImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..WindsurfCascadeHookImportOptions::default()
                 },
             )
@@ -483,7 +453,6 @@ pub(crate) fn import_one_source_inner(
                 ZedThreadsSqliteImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..ZedThreadsSqliteImportOptions::default()
                 },
             )
@@ -494,7 +463,6 @@ pub(crate) fn import_one_source_inner(
                 CopilotCliImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..CopilotCliImportOptions::default()
                 },
             )
@@ -505,7 +473,6 @@ pub(crate) fn import_one_source_inner(
                 FactoryAiDroidImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..FactoryAiDroidImportOptions::default()
                 },
             )
@@ -516,7 +483,6 @@ pub(crate) fn import_one_source_inner(
                 QwenCodeImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..QwenCodeImportOptions::default()
                 },
             )
@@ -527,7 +493,6 @@ pub(crate) fn import_one_source_inner(
                 KimiCodeCliImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..KimiCodeCliImportOptions::default()
                 },
             )
@@ -538,7 +503,6 @@ pub(crate) fn import_one_source_inner(
                 AuggieImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..AuggieImportOptions::default()
                 },
             )
@@ -549,7 +513,6 @@ pub(crate) fn import_one_source_inner(
                 JunieImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..JunieImportOptions::default()
                 },
             )
@@ -560,7 +523,6 @@ pub(crate) fn import_one_source_inner(
                 FirebenderSqliteImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..FirebenderSqliteImportOptions::default()
                 },
             )
@@ -571,7 +533,6 @@ pub(crate) fn import_one_source_inner(
                 RovoDevImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..RovoDevImportOptions::default()
                 },
             )
@@ -582,7 +543,6 @@ pub(crate) fn import_one_source_inner(
                 MistralVibeImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..MistralVibeImportOptions::default()
                 },
             )
@@ -593,7 +553,6 @@ pub(crate) fn import_one_source_inner(
                 MuxImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..MuxImportOptions::default()
                 },
             )
@@ -604,7 +563,6 @@ pub(crate) fn import_one_source_inner(
                 AntigravityCliImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     ..AntigravityCliImportOptions::default()
                 },
             )
@@ -617,14 +575,29 @@ pub(crate) fn import_one_source_inner(
     };
     let summary = match summary {
         Ok(summary) => {
-            if !allow_partial_failures && summary.failed > 0 {
+            // A manifested-source retry can contain only rejected files even though earlier
+            // files under the same stable history record are already indexed. Preserve that
+            // as a completed source with rejections; an orphan record is still cleaned up and
+            // remains an all-rejected source failure.
+            let retained_existing_content = if summary.failed > 0
+                && !provider_summary_has_imported_content(&summary)
+                && record_existed
+            {
+                !store.delete_orphan_record(record_id)? && history_record_exists(store, record_id)?
+            } else {
+                false
+            };
+            if summary.failed > 0
+                && !provider_summary_has_imported_content(&summary)
+                && !retained_existing_content
+            {
                 mark_source_root_inventory_failed(
                     store,
                     source,
                     preinventory,
                     &format!("provider import reported {} failure(s)", summary.failed),
                 )?;
-                let _ = store.delete_orphan_record(record_id);
+                cleanup_rejected_history_record(store, record_id, record_existed)?;
                 return Err(provider_import_summary_failure(source, &summary));
             }
             mark_source_root_inventory_indexed(store, preinventory)?;
@@ -632,15 +605,19 @@ pub(crate) fn import_one_source_inner(
         }
         Err(err) => {
             mark_source_root_inventory_failed(store, source, preinventory, &err.to_string())?;
-            if !allow_partial_failures {
-                let _ = store.delete_orphan_record(record_id);
+            let deleted = store.delete_orphan_record(record_id)?;
+            if import_error_scope(&err) == ImportFailureScope::Source
+                && !deleted
+                && !record_existed
+                && history_record_exists(store, record_id)?
+            {
+                return Err(anyhow::Error::new(CaptureError::SystemInvariant(
+                    "failed source import left content attached to its history record",
+                )));
             }
             return Err(err);
         }
     };
-    if refresh_search_after_import {
-        store.refresh_search_index()?;
-    }
     Ok(summary)
 }
 
@@ -717,21 +694,22 @@ pub(crate) fn provider_import_summary_failure(
         .first()
         .map(|failure| format!("line {}: {}", failure.line, failure.error))
         .unwrap_or_else(|| "unknown provider import failure".to_owned());
-    anyhow!(
-        "import {} source {} failed with {} failure(s); first failure: {detail}",
-        source.provider.as_str(),
-        source.path.display(),
-        summary.failed
+    rejected_source_error(
+        format!(
+            "import {} source {} failed with {} failure(s); first failure: {detail}",
+            source.provider.as_str(),
+            source.path.display(),
+            summary.failed
+        ),
+        summary,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn import_manifested_source(
     store: &mut Store,
     source: &SourceInfo,
     record_id: Uuid,
     progress: Option<CodexSessionImportProgressCallback>,
-    allow_partial_failures: bool,
     preinventoried_files: Option<&[SourceImportFile]>,
 ) -> Result<ProviderImportSummary> {
     let source_root = source.path.display().to_string();
@@ -758,44 +736,6 @@ pub(crate) fn import_manifested_source(
         return Ok(ProviderImportSummary::default());
     }
 
-    if !allow_partial_failures {
-        let imported = import_one_source_inner(
-            store,
-            source,
-            progress,
-            false,
-            true,
-            false,
-            &SourcePreinventory::None,
-        );
-        match imported {
-            Ok(summary) => {
-                for pending_file in pending {
-                    mark_source_import_file_indexed(
-                        store,
-                        source.provider,
-                        &source_root,
-                        &pending_file,
-                    )?;
-                }
-                return Ok(summary);
-            }
-            Err(err) => {
-                let error = err.to_string();
-                for pending_file in pending {
-                    mark_source_import_file_failed(
-                        store,
-                        source.provider,
-                        &source_root,
-                        &pending_file.source_path,
-                        &error,
-                    )?;
-                }
-                return Err(err);
-            }
-        }
-    }
-
     let mut summary = ProviderImportSummary::default();
     for pending_file in pending {
         let path = PathBuf::from(&pending_file.source_path);
@@ -807,14 +747,11 @@ pub(crate) fn import_manifested_source(
             progress.clone(),
             false,
             true,
-            allow_partial_failures,
             &SourcePreinventory::None,
         );
         match imported {
             Ok(file_summary) => {
-                if source_import_file_has_no_imported_content(&file_summary)
-                    && file_summary.failed > 0
-                {
+                if file_summary.failed > 0 {
                     mark_source_import_file_failed(
                         store,
                         source.provider,
@@ -830,9 +767,10 @@ pub(crate) fn import_manifested_source(
                         &pending_file,
                     )?;
                 }
-                merge_provider_import_summary(&mut summary, file_summary);
+                summary.merge_from(file_summary);
             }
             Err(err) => {
+                let failure_scope = import_error_scope(&err);
                 let error = error_summary(&err);
                 mark_source_import_file_failed(
                     store,
@@ -841,7 +779,7 @@ pub(crate) fn import_manifested_source(
                     &pending_file.source_path,
                     &error,
                 )?;
-                if import_error_is_systemic(&error) {
+                if failure_scope == ImportFailureScope::System {
                     return Err(err);
                 }
                 summary.failed += 1;
@@ -851,13 +789,8 @@ pub(crate) fn import_manifested_source(
             }
         }
     }
-
     let _ = record_id;
     Ok(summary)
-}
-
-fn source_import_file_has_no_imported_content(summary: &ProviderImportSummary) -> bool {
-    summary.imported_sessions == 0 && summary.imported_events == 0 && summary.imported_edges == 0
 }
 
 fn source_import_file_failure(summary: &ProviderImportSummary) -> String {
@@ -868,22 +801,6 @@ fn source_import_file_failure(summary: &ProviderImportSummary) -> String {
         0 => failure.error.clone(),
         line => format!("line {line}: {}", failure.error),
     }
-}
-
-pub(crate) fn merge_provider_import_summary(
-    summary: &mut ProviderImportSummary,
-    other: ProviderImportSummary,
-) {
-    summary.imported += other.imported;
-    summary.skipped += other.skipped;
-    summary.failed += other.failed;
-    summary.imported_sessions += other.imported_sessions;
-    summary.skipped_sessions += other.skipped_sessions;
-    summary.imported_events += other.imported_events;
-    summary.skipped_events += other.skipped_events;
-    summary.imported_edges += other.imported_edges;
-    summary.skipped_edges += other.skipped_edges;
-    summary.failures.extend(other.failures);
 }
 
 #[cfg(test)]

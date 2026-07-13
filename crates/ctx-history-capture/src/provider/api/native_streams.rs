@@ -37,7 +37,6 @@ pub fn import_antigravity_cli_history(
             source_root: None,
             imported_at: options.imported_at,
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
         },
         AntigravityCliJsonlAdapter,
     )
@@ -57,7 +56,6 @@ pub fn import_gemini_cli_history(
             source_root: None,
             imported_at: options.imported_at,
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
         },
         GeminiCliJsonlAdapter,
     )
@@ -77,7 +75,6 @@ pub fn import_tabnine_cli_history(
             source_root: None,
             imported_at: options.imported_at,
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
         },
         TabnineCliJsonlAdapter,
     )
@@ -97,7 +94,6 @@ pub fn import_cursor_native_history(
             source_root: None,
             imported_at: options.imported_at,
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
         },
         CursorAgentTranscriptJsonlAdapter,
     )
@@ -117,7 +113,6 @@ pub fn import_windsurf_cascade_hook_transcripts(
             source_root: None,
             imported_at: options.imported_at,
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
         },
         WindsurfCascadeHookTranscriptJsonlAdapter,
     )
@@ -147,7 +142,6 @@ pub fn import_warp_sqlite(
         normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: false,
@@ -169,7 +163,6 @@ pub fn import_qoder_history(
             source_root: None,
             imported_at: options.imported_at,
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
         },
         QoderJsonlAdapter,
     )
@@ -199,7 +192,6 @@ pub fn import_zed_threads_sqlite(
         normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
@@ -231,7 +223,6 @@ pub fn import_lingma_sqlite(
         normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
@@ -253,7 +244,6 @@ pub fn import_factory_ai_droid_sessions(
             source_root: None,
             imported_at: options.imported_at,
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
         },
         FactoryAiDroidJsonlAdapter,
     )
@@ -273,7 +263,6 @@ pub fn import_copilot_cli_session_events(
             source_root: None,
             imported_at: options.imported_at,
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
         },
         CopilotCliSessionEventsAdapter,
     )
@@ -293,7 +282,6 @@ pub fn import_qwen_code_history(
             source_root: None,
             imported_at: options.imported_at,
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
         },
         QwenCodeJsonlAdapter,
     )
@@ -313,7 +301,6 @@ pub fn import_kimi_code_cli_history(
             source_root: None,
             imported_at: options.imported_at,
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
         },
         KimiCodeCliWireJsonlAdapter,
     )
@@ -343,7 +330,6 @@ pub fn import_rovodev_history(
         normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
@@ -365,7 +351,6 @@ pub fn import_mistral_vibe_history(
             source_root: None,
             imported_at: options.imported_at,
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
         },
         MistralVibeJsonlAdapter,
     )
@@ -385,7 +370,6 @@ pub fn import_mux_history(
             source_root: None,
             imported_at: options.imported_at,
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
         },
         MuxJsonlAdapter,
     )

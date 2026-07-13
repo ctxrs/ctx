@@ -25,6 +25,16 @@ pub enum CaptureError {
     InvalidProviderTranscriptPath { path: PathBuf, reason: &'static str },
     #[error("spool writer is already closed")]
     WriterClosed,
+    #[error("{0} worker thread panicked")]
+    WorkerPanicked(&'static str),
+    #[error("system I/O error during {operation}: {source}")]
+    SystemIo {
+        operation: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("system invariant failed: {0}")]
+    SystemInvariant(&'static str),
     #[error("line {line} in {path:?} is not a valid capture envelope: {source}")]
     InvalidJsonLine {
         path: PathBuf,

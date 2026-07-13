@@ -248,7 +248,6 @@ ctx import --history-source example-agent/default
 ctx import --history-source-manifest ./ctx-history-plugin.json
 ctx import --history-source example-agent/default --reset-cursor
 ctx import --resume
-ctx import --partial
 ctx import --no-daemon
 ctx import --json
 ctx import --progress json --json
@@ -262,10 +261,11 @@ creates the data root if needed, reads provider transcript files, and writes
 indexed source metadata, sessions, events, searchable text, citations, and
 import totals to SQLite. It does not write `config.toml` for implicit defaults.
 
-Imports are source-atomic by default. If a source contains malformed rows, ctx
-reports that source as failed and does not commit the valid rows from that same
-source. Use `--partial` only when you explicitly want ctx to commit valid rows
-and report malformed or skipped rows in the import summary.
+Imports always commit valid records and report rejected records. An unreadable
+or structurally incompatible input fails that source, while ctx-owned storage
+or index failures abort the command. A source with only rejected records is a
+failure; a source with valid content and rejections completes with an explicit
+`completed_with_rejections` outcome.
 
 When `[daemon].enabled` is true, `import` may opportunistically start a short
 one-pass ctx-owned maintenance profile after the foreground import finishes.

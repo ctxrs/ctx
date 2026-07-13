@@ -68,7 +68,6 @@ pub fn import_provider_fixture_jsonl(
         normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
@@ -95,32 +94,25 @@ pub fn import_custom_history_jsonl_v1(
             imported_at: options.imported_at,
         },
     )?;
-    if normalization.provider.summary.failed > 0 && !options.allow_partial_failures {
-        return Ok(normalization.provider.summary);
-    }
-
     let mut summary = import_normalized_provider_captures(
         store,
         normalization.provider,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
         },
     )?;
-    if summary.failed > 0 && !options.allow_partial_failures {
-        return Ok(summary);
-    }
     import_custom_history_edges(
         store,
         &normalization.edges,
         options.history_record_id,
-        options.allow_partial_failures,
         &mut summary,
     )?;
-    import_custom_history_source_cursors(store, &normalization.source_cursors)?;
+    if summary.failed == 0 {
+        import_custom_history_source_cursors(store, &normalization.source_cursors)?;
+    }
     Ok(summary)
 }
 
@@ -138,32 +130,25 @@ pub fn import_custom_history_jsonl_v1_reader(
             imported_at: options.imported_at,
         },
     )?;
-    if normalization.provider.summary.failed > 0 && !options.allow_partial_failures {
-        return Ok(normalization.provider.summary);
-    }
-
     let mut summary = import_normalized_provider_captures(
         store,
         normalization.provider,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
         },
     )?;
-    if summary.failed > 0 && !options.allow_partial_failures {
-        return Ok(summary);
-    }
     import_custom_history_edges(
         store,
         &normalization.edges,
         options.history_record_id,
-        options.allow_partial_failures,
         &mut summary,
     )?;
-    import_custom_history_source_cursors(store, &normalization.source_cursors)?;
+    if summary.failed == 0 {
+        import_custom_history_source_cursors(store, &normalization.source_cursors)?;
+    }
     Ok(summary)
 }
 

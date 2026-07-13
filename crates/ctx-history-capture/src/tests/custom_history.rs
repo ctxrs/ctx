@@ -247,9 +247,9 @@ fn custom_history_jsonl_reader_persists_source_only_cursor() {
 }
 
 #[test]
-fn custom_history_jsonl_malformed_import_is_atomic_by_default() {
+fn custom_history_jsonl_imports_valid_records_reports_rejections_and_remains_retryable() {
     let temp = tempdir();
-    let fixture = custom_history_fixture("malformed-partial.jsonl");
+    let fixture = custom_history_fixture("malformed-mixed.jsonl");
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
 
     let summary = import_custom_history_jsonl_v1(
@@ -263,10 +263,10 @@ fn custom_history_jsonl_malformed_import_is_atomic_by_default() {
     )
     .unwrap();
 
-    assert_eq!(summary.imported_sessions, 0);
-    assert_eq!(summary.imported_events, 0);
+    assert_eq!(summary.imported_sessions, 1);
+    assert_eq!(summary.imported_events, 1);
     assert_eq!(summary.failed, 1);
-    assert_eq!(store.capture_source_count().unwrap(), 0);
+    assert_eq!(store.capture_source_count().unwrap(), 1);
     let conn = rusqlite::Connection::open(temp.path().join("work.sqlite")).unwrap();
     let sessions: i64 = conn
         .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
@@ -274,8 +274,231 @@ fn custom_history_jsonl_malformed_import_is_atomic_by_default() {
     let events: i64 = conn
         .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(sessions, 0);
-    assert_eq!(events, 0);
+    assert_eq!(sessions, 1);
+    assert_eq!(events, 1);
+    let cursors: i64 = conn
+        .query_row("SELECT COUNT(*) FROM sync_cursors", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        cursors, 0,
+        "a rejected record must keep the source retryable"
+    );
+
+    drop(conn);
+    let retry = import_custom_history_jsonl_v1(
+        &fixture,
+        &mut store,
+        CustomHistoryJsonlV1ImportOptions {
+            source_path: Some(fixture.clone()),
+            imported_at: "2026-06-23T13:11:00Z".parse().unwrap(),
+            ..CustomHistoryJsonlV1ImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(retry.imported_sessions, 0);
+    assert_eq!(retry.imported_events, 0);
+    assert_eq!(retry.skipped_sessions, 1);
+    assert_eq!(retry.skipped_events, 1);
+    assert_eq!(retry.failed, 1);
+    assert!(retry.accepted_content_records > 0);
+    let conn = rusqlite::Connection::open(temp.path().join("work.sqlite")).unwrap();
+    let cursors: i64 = conn
+        .query_row("SELECT COUNT(*) FROM sync_cursors", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        cursors, 0,
+        "retry must not advance past the rejected record"
+    );
+}
+
+#[test]
+fn custom_history_semantic_event_rejection_keeps_independent_valid_event() {
+    let temp = tempdir();
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let input = concat!(
+        r#"{"record_type":"manifest","schema_version":"ctx-history-jsonl-v1"}"#,
+        "\n",
+        r#"{"record_type":"source","source_id":"src","provider_key":"semantic-agent","source_format":"semantic-v1","cursor":{"after":{"stream":"semantic:src","cursor":"2","observed_at":"2026-07-13T12:00:02Z"}}}"#,
+        "\n",
+        r#"{"record_type":"session","source_id":"src","session_id":"valid","started_at":"2026-07-13T12:00:00Z"}"#,
+        "\n",
+        r#"{"record_type":"event","source_id":"src","session_id":"valid","event_index":0,"event_type":"message","role":"user","occurred_at":"2026-07-13T12:00:00Z","payload":{"text":"accepted semantic event"}}"#,
+        "\n",
+        r#"{"record_type":"event","source_id":"src","session_id":"missing","event_index":1,"event_type":"message","role":"assistant","occurred_at":"2026-07-13T12:00:01Z","payload":{"text":"rejected semantic event"}}"#,
+        "\n",
+    );
+
+    let summary = import_custom_history_jsonl_v1_reader(
+        std::io::Cursor::new(input),
+        &mut store,
+        CustomHistoryJsonlV1ImportOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(summary.imported_sessions, 1, "{:?}", summary.failures);
+    assert_eq!(summary.imported_events, 1, "{:?}", summary.failures);
+    assert_eq!(summary.failed, 1, "{:?}", summary.failures);
+    assert!(summary.failures[0]
+        .error
+        .contains("event references unknown session `missing`"));
+    assert_eq!(
+        store
+            .events_for_session(store.list_sessions().unwrap()[0].id)
+            .unwrap()
+            .len(),
+        1
+    );
+    let conn = rusqlite::Connection::open(temp.path().join("work.sqlite")).unwrap();
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM sync_cursors", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn custom_history_semantic_rejection_isolated_across_sources() {
+    let temp = tempdir();
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let input = concat!(
+        r#"{"record_type":"manifest","schema_version":"ctx-history-jsonl-v1"}"#,
+        "\n",
+        r#"{"record_type":"source","source_id":"bad","provider_key":"semantic-agent","source_format":"semantic-v1"}"#,
+        "\n",
+        r#"{"record_type":"session","source_id":"bad","session_id":"unused","started_at":"2026-07-13T12:00:00Z"}"#,
+        "\n",
+        r#"{"record_type":"event","source_id":"bad","session_id":"missing","event_index":0,"event_type":"message","role":"user","occurred_at":"2026-07-13T12:00:00Z","payload":{"text":"bad source event"}}"#,
+        "\n",
+        r#"{"record_type":"source","source_id":"good","provider_key":"semantic-agent","source_format":"semantic-v1"}"#,
+        "\n",
+        r#"{"record_type":"session","source_id":"good","session_id":"kept","started_at":"2026-07-13T12:00:01Z"}"#,
+        "\n",
+        r#"{"record_type":"event","source_id":"good","session_id":"kept","event_index":0,"event_type":"message","role":"user","occurred_at":"2026-07-13T12:00:01Z","payload":{"text":"good source event"}}"#,
+        "\n",
+    );
+
+    let summary = import_custom_history_jsonl_v1_reader(
+        std::io::Cursor::new(input),
+        &mut store,
+        CustomHistoryJsonlV1ImportOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(summary.imported_sessions, 1, "{:?}", summary.failures);
+    assert_eq!(summary.imported_events, 1, "{:?}", summary.failures);
+    assert_eq!(summary.failed, 1, "{:?}", summary.failures);
+    let conn = rusqlite::Connection::open(temp.path().join("work.sqlite")).unwrap();
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM sessions", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        1,
+        "unused scaffolding from the rejected source must not persist"
+    );
+}
+
+#[test]
+fn custom_history_only_invalid_content_persists_no_scaffolding() {
+    let temp = tempdir();
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let input = concat!(
+        r#"{"record_type":"manifest","schema_version":"ctx-history-jsonl-v1"}"#,
+        "\n",
+        r#"{"record_type":"source","source_id":"src","provider_key":"semantic-agent","source_format":"semantic-v1"}"#,
+        "\n",
+        r#"{"record_type":"session","source_id":"src","session_id":"unused","started_at":"2026-07-13T12:00:00Z"}"#,
+        "\n",
+        r#"{"record_type":"event","source_id":"src","session_id":"missing","event_index":0,"event_type":"message","role":"user","occurred_at":"2026-07-13T12:00:00Z","payload":{"text":"invalid only event"}}"#,
+        "\n",
+    );
+
+    let summary = import_custom_history_jsonl_v1_reader(
+        std::io::Cursor::new(input),
+        &mut store,
+        CustomHistoryJsonlV1ImportOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(summary.imported_sessions, 0, "{:?}", summary.failures);
+    assert_eq!(summary.imported_events, 0, "{:?}", summary.failures);
+    assert_eq!(summary.accepted_content_records, 0);
+    assert_eq!(summary.failed, 1, "{:?}", summary.failures);
+    let conn = rusqlite::Connection::open(temp.path().join("work.sqlite")).unwrap();
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM sessions", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM events", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn custom_history_edges_cross_shared_transaction_batch_boundary() {
+    let temp = tempdir();
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let mut records = vec![
+        json!({"record_type": "manifest", "schema_version": "ctx-history-jsonl-v1"}),
+        json!({
+            "record_type": "source",
+            "source_id": "src",
+            "provider_key": "edge-agent",
+            "source_format": "edge-v1"
+        }),
+    ];
+    for index in 0..70 {
+        records.push(json!({
+            "record_type": "session",
+            "source_id": "src",
+            "session_id": format!("session-{index}"),
+            "started_at": "2026-07-13T12:00:00Z"
+        }));
+        records.push(json!({
+            "record_type": "event",
+            "source_id": "src",
+            "session_id": format!("session-{index}"),
+            "event_index": 0,
+            "event_type": "message",
+            "role": "user",
+            "occurred_at": "2026-07-13T12:00:00Z",
+            "payload": {"text": format!("edge batch event {index}")}
+        }));
+    }
+    for index in 1..70 {
+        records.push(json!({
+            "record_type": "edge",
+            "source_id": "src",
+            "from_session_id": "session-0",
+            "to_session_id": format!("session-{index}"),
+            "edge_type": "spawned",
+            "edge_id": format!("edge-{index}"),
+            "confidence": "explicit"
+        }));
+    }
+    let input = records
+        .into_iter()
+        .map(|record| serde_json::to_string(&record).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let summary = import_custom_history_jsonl_v1_reader(
+        std::io::Cursor::new(input),
+        &mut store,
+        CustomHistoryJsonlV1ImportOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+    assert_eq!(summary.imported_events, 70);
+    assert_eq!(summary.imported_edges, 69);
+    store.checkpoint_wal_truncate_required().unwrap();
 }
 
 #[test]
@@ -653,46 +876,22 @@ fn custom_history_jsonl_dedupes_explicit_parent_child_edge_from_session_parent()
 }
 
 #[test]
-fn provider_fixture_replay_rejects_malformed_lines_without_partial_import_by_default() {
+fn provider_fixture_replay_imports_valid_rows_and_reports_malformed_rows() {
     let temp = tempdir();
-    let fixture = provider_fixture("malformed-partial.jsonl");
+    let fixture = provider_fixture("malformed-mixed.jsonl");
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
-
     let summary =
         import_provider_fixture_jsonl(&fixture, &mut store, fixed_import_options(fixture.clone()))
             .unwrap();
 
-    assert_eq!(summary.imported_sessions, 0);
-    assert_eq!(summary.imported_events, 0);
-    assert_eq!(summary.failed, 1);
-    let session_id = provider_fixture_session_id(
-        CaptureProvider::Codex,
-        "malformed-partial-session",
-        &fixture,
-    );
-    assert!(store.events_for_session(session_id).unwrap().is_empty());
-}
-
-#[test]
-fn provider_fixture_replay_allows_explicit_partial_import() {
-    let temp = tempdir();
-    let fixture = provider_fixture("malformed-partial.jsonl");
-    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
-    let mut options = fixed_import_options(fixture.clone());
-    options.allow_partial_failures = true;
-
-    let summary = import_provider_fixture_jsonl(&fixture, &mut store, options).unwrap();
-
     assert_eq!(summary.imported_sessions, 1);
     assert_eq!(summary.imported_events, 2);
     assert_eq!(summary.failed, 1);
+    assert!(summary.accepted_content_records > 0);
     assert_eq!(summary.failures.len(), 1);
     assert_eq!(summary.failures[0].line, 3);
-    let session_id = provider_fixture_session_id(
-        CaptureProvider::Codex,
-        "malformed-partial-session",
-        &fixture,
-    );
+    let session_id =
+        provider_fixture_session_id(CaptureProvider::Codex, "malformed-mixed-session", &fixture);
     let events = store.events_for_session(session_id).unwrap();
     assert_eq!(events.len(), 2);
     assert!(events[0]
@@ -703,6 +902,16 @@ fn provider_fixture_replay_allows_explicit_partial_import() {
         .payload
         .to_string()
         .contains("Valid event after malformed line."));
+    let source_path = fixture.display().to_string();
+    let cursor_stream = provider_source_cursor_stream(
+        CaptureProvider::Codex,
+        "normalized_provider_fixture_jsonl",
+        Some(&source_path),
+    );
+    assert!(store
+        .get_sync_cursor(None, "test-machine", &cursor_stream)
+        .unwrap()
+        .is_none());
 }
 
 #[test]

@@ -1,8 +1,8 @@
 pub(super) use crate::provider::adapter::ProviderCaptureAdapter;
 pub(super) use crate::provider::codex::events::codex_tool_output_event;
 pub(super) use crate::provider::codex::session::{
-    codex_session_file_conversation_scan, should_parse_codex_session_line,
-    should_skip_codex_tool_output_line,
+    codex_session_file_conversation_scan, join_codex_import_worker,
+    should_parse_codex_session_line, should_skip_codex_tool_output_line,
 };
 pub(super) use crate::provider::custom_history_jsonl::{
     custom_history_internal_session_id, custom_history_jsonl_v1_cursor_stream,
@@ -10,12 +10,13 @@ pub(super) use crate::provider::custom_history_jsonl::{
 pub(super) use crate::provider::file_touches::provider_file_touches_from_raw_value;
 pub(super) use crate::provider::importer::{
     import_normalized_provider_captures, import_normalized_provider_captures_in_batches,
-    provider_command_run_from_event, provider_cursor_stream, provider_event_import_identity,
-    provider_event_seq, provider_event_uuid, provider_file_touch_uuid, provider_scoped_source_uuid,
-    provider_session_uuid, provider_source_cursor_stream, provider_source_edge_uuid,
+    import_provider_capture_line, provider_command_run_from_event, provider_cursor_stream,
+    provider_event_import_identity, provider_event_seq, provider_event_uuid,
+    provider_file_touch_uuid, provider_scoped_source_uuid, provider_session_uuid,
+    provider_source_cursor_stream, provider_source_edge_uuid,
     provider_source_event_import_identity, provider_source_event_seq, provider_source_event_uuid,
     provider_source_root_identity, provider_source_session_uuid, provider_source_uuid,
-    provider_sync_metadata, timestamps, ProviderCommandRunInput,
+    provider_sync_metadata, timestamps, ProviderCommandRunInput, ProviderImportCaches,
 };
 pub(super) use crate::provider::native::ShelleyMessageRow;
 pub(super) use crate::provider::providers::{
@@ -388,7 +389,6 @@ pub(super) fn incremental_codex_catch_up(
         CodexSessionCatalogOptions {
             source_root: Some(root.to_path_buf()),
             cataloged_at: observed_at,
-            allow_partial_failures: false,
             ..CodexSessionCatalogOptions::default()
         },
     )
@@ -415,7 +415,6 @@ pub(super) fn incremental_codex_catch_up(
         CodexSessionImportOptions {
             source_path: Some(root.to_path_buf()),
             imported_at: observed_at,
-            allow_partial_failures: false,
             ..CodexSessionImportOptions::default()
         },
     )
@@ -543,7 +542,6 @@ pub(super) fn fixed_import_options(path: PathBuf) -> ProviderFixtureImportOption
             .with_timezone(&Utc),
         history_record_id: None,
         expected_provider: None,
-        allow_partial_failures: false,
         ..ProviderFixtureImportOptions::default()
     }
 }

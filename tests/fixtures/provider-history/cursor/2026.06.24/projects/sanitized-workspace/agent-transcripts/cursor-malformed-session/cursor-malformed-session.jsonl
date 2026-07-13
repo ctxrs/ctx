@@ -1,2 +1,2 @@
 {"timestamp":"2026-06-24T12:10:00Z","role":"user","message":{"role":"user","content":[{"type":"text","text":"This valid line should import."}]}}
-{"timestamp":"2026-06-24T12:10:01Z","role":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"This partial line is intentionally malformed"}]}
+{"timestamp":"2026-06-24T12:10:01Z","role":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"This line is intentionally malformed"}]}

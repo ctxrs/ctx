@@ -54,8 +54,6 @@ pub(crate) const MISTRAL_VIBE_SOURCE_FORMAT: &str = "mistral_vibe_session_jsonl"
 pub(crate) const MUX_SOURCE_FORMAT: &str = "mux_session_jsonl";
 pub(crate) const PROVIDER_MAX_TEXT_CHARS: usize = 16_000;
 pub(crate) const PROVIDER_MAX_PREVIEW_CHARS: usize = 4_000;
-pub(crate) const CODEX_FAST_IMPORT_TRANSACTION_FILES: usize = 512;
-pub(crate) const CODEX_FAST_IMPORT_PASSIVE_CHECKPOINT_MIN_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 mod error;
 pub use error::{CaptureError, Result};

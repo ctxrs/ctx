@@ -55,6 +55,7 @@ impl Store {
             object_dir,
             conn,
             busy_timeout: BUSY_TIMEOUT,
+            event_search_bulk_depth: Default::default(),
         })
     }
 
@@ -84,6 +85,7 @@ impl Store {
             object_dir,
             conn,
             busy_timeout,
+            event_search_bulk_depth: Default::default(),
         };
         store.migrate()?;
         store.recover_event_search_bulk_mode()?;

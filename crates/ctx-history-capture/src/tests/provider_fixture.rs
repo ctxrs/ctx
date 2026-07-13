@@ -1,7 +1,7 @@
 use super::support::*;
 
 #[test]
-fn batched_provider_import_rejects_nonpartial_unwrapped_and_zero_sized_modes() {
+fn batched_provider_import_rejects_unwrapped_and_zero_sized_modes() {
     let temp = tempdir();
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
     let occurred_at = DateTime::parse_from_rfc3339("2026-07-11T11:00:00Z")
@@ -20,22 +20,10 @@ fn batched_provider_import_rejects_nonpartial_unwrapped_and_zero_sized_modes() {
         files_touched: Vec::new(),
     };
 
-    let nonpartial = import_normalized_provider_captures_in_batches(
-        &mut store,
-        normalization.clone(),
-        NormalizedProviderImportOptions::default(),
-        1,
-    )
-    .unwrap_err();
-    assert!(nonpartial
-        .to_string()
-        .contains("requires allow_partial_failures"));
-
     let unwrapped = import_normalized_provider_captures_in_batches(
         &mut store,
         normalization.clone(),
         NormalizedProviderImportOptions {
-            allow_partial_failures: true,
             wrap_transaction: false,
             ..NormalizedProviderImportOptions::default()
         },
@@ -50,7 +38,6 @@ fn batched_provider_import_rejects_nonpartial_unwrapped_and_zero_sized_modes() {
         &mut store,
         normalization,
         NormalizedProviderImportOptions {
-            allow_partial_failures: true,
             ..NormalizedProviderImportOptions::default()
         },
         0,
@@ -59,6 +46,96 @@ fn batched_provider_import_rejects_nonpartial_unwrapped_and_zero_sized_modes() {
     assert!(zero
         .to_string()
         .contains("batch size must be greater than zero"));
+}
+
+#[test]
+fn normalized_provider_preflight_rejects_invalid_event_without_losing_valid_content() {
+    let temp = tempdir();
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let occurred_at = DateTime::parse_from_rfc3339("2026-07-13T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let source_path = temp.path().join("preflight.jsonl");
+    let source_path = source_path.display().to_string();
+    let accepted = provider_collision_capture(
+        CaptureProvider::Hermes,
+        "accepted-session",
+        "hermes_state_sqlite",
+        &source_path,
+        occurred_at,
+    );
+    let mut rejected = provider_collision_capture(
+        CaptureProvider::Hermes,
+        "accepted-session",
+        "hermes_state_sqlite",
+        &source_path,
+        occurred_at + chrono::Duration::seconds(1),
+    );
+    let rejected_event = rejected.event.as_mut().unwrap();
+    rejected_event.event_type = EventType::CommandOutput;
+    rejected_event.role = Some(EventRole::Tool);
+    rejected_event.payload = json!({
+        "command": "cargo test",
+        "duration_ms": -1,
+    });
+
+    let summary = import_normalized_provider_captures(
+        &mut store,
+        ProviderNormalizationResult {
+            summary: ProviderImportSummary::default(),
+            captures: vec![(1, accepted), (2, rejected)],
+            files_touched: Vec::new(),
+        },
+        NormalizedProviderImportOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(summary.imported_events, 1, "{:?}", summary.failures);
+    assert_eq!(summary.failed, 1, "{:?}", summary.failures);
+    assert!(summary.failures[0]
+        .error
+        .contains("duration_ms must be nonnegative"));
+    let sessions = store.list_sessions().unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(
+        sessions[0].external_session_id.as_deref(),
+        Some("accepted-session")
+    );
+}
+
+#[test]
+fn provider_line_preflight_rejects_before_persisting_scaffolding() {
+    let temp = tempdir();
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let occurred_at = DateTime::parse_from_rfc3339("2026-07-13T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let mut capture = provider_collision_capture(
+        CaptureProvider::Hermes,
+        "rejected-session",
+        "hermes_state_sqlite",
+        "/tmp/rejected-session.db",
+        occurred_at,
+    );
+    let event = capture.event.as_mut().unwrap();
+    event.event_type = EventType::CommandOutput;
+    event.role = Some(EventRole::Tool);
+    event.payload = json!({"command": "cargo test", "duration_ms": -1});
+
+    let error = import_provider_capture_line(
+        &mut store,
+        &capture,
+        &NormalizedProviderImportOptions::default(),
+        1,
+        &mut ProviderImportCaches::default(),
+    )
+    .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("duration_ms must be nonnegative"));
+    assert!(store.list_capture_sources().unwrap().is_empty());
+    assert!(store.list_sessions().unwrap().is_empty());
 }
 
 #[test]
@@ -94,7 +171,6 @@ fn batched_provider_import_stops_on_pinned_wal_and_resumes_idempotently() {
         files_touched: Vec::new(),
     };
     let options = NormalizedProviderImportOptions {
-        allow_partial_failures: true,
         fast_event_inserts: true,
         ..NormalizedProviderImportOptions::default()
     };
@@ -164,7 +240,7 @@ fn batched_provider_import_stops_on_pinned_wal_and_resumes_idempotently() {
 }
 
 #[test]
-fn partial_provider_import_uses_shared_bounded_batches() {
+fn provider_import_uses_shared_bounded_batches() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");
     let mut store =
@@ -206,7 +282,6 @@ fn partial_provider_import_uses_shared_bounded_batches() {
             files_touched: Vec::new(),
         },
         NormalizedProviderImportOptions {
-            allow_partial_failures: true,
             fast_event_inserts: true,
             ..NormalizedProviderImportOptions::default()
         },
@@ -226,7 +301,7 @@ fn partial_provider_import_uses_shared_bounded_batches() {
 }
 
 #[test]
-fn partial_provider_import_uses_shared_bulk_search_guard() {
+fn provider_import_uses_shared_bulk_search_guard() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");
     let mut store =
@@ -236,7 +311,9 @@ fn partial_provider_import_uses_shared_bulk_search_guard() {
         .with_timezone(&Utc);
     let source_path = temp.path().join("shared-bulk-provider.jsonl");
     let source_path = source_path.display().to_string();
-    let guard = store.begin_event_search_bulk_mode().unwrap();
+    let other_store =
+        Store::open_with_busy_timeout(&db_path, std::time::Duration::from_millis(10)).unwrap();
+    let guard = other_store.begin_event_search_bulk_mode().unwrap();
 
     let error = import_normalized_provider_captures(
         &mut store,
@@ -255,7 +332,6 @@ fn partial_provider_import_uses_shared_bulk_search_guard() {
             files_touched: Vec::new(),
         },
         NormalizedProviderImportOptions {
-            allow_partial_failures: true,
             ..NormalizedProviderImportOptions::default()
         },
     )
@@ -264,7 +340,7 @@ fn partial_provider_import_uses_shared_bulk_search_guard() {
     assert!(error
         .to_string()
         .contains("another bulk search import is active"));
-    store.finish_event_search_bulk_mode(&guard).unwrap();
+    other_store.finish_event_search_bulk_mode(&guard).unwrap();
 }
 
 #[test]
@@ -314,7 +390,6 @@ fn batched_provider_import_rotates_on_serialized_byte_budget() {
             files_touched: Vec::new(),
         },
         NormalizedProviderImportOptions {
-            allow_partial_failures: true,
             fast_event_inserts: true,
             ..NormalizedProviderImportOptions::default()
         },
@@ -393,7 +468,6 @@ fn batched_provider_import_chunks_edges_and_file_touches() {
             files_touched,
         },
         NormalizedProviderImportOptions {
-            allow_partial_failures: true,
             fast_event_inserts: true,
             ..NormalizedProviderImportOptions::default()
         },
@@ -407,7 +481,7 @@ fn batched_provider_import_chunks_edges_and_file_touches() {
 }
 
 #[test]
-fn nonpartial_provider_import_remains_source_atomic() {
+fn provider_import_propagates_store_conflicts_and_rolls_back_active_batch() {
     let temp = tempdir();
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
     let occurred_at = DateTime::parse_from_rfc3339("2026-07-11T14:00:00Z")
@@ -425,7 +499,7 @@ fn nonpartial_provider_import_remains_source_atomic() {
     let mut conflicting = first.clone();
     conflicting.event.as_mut().unwrap().payload = json!({"text": "conflicting payload"});
 
-    let summary = import_normalized_provider_captures(
+    let error = import_normalized_provider_captures(
         &mut store,
         ProviderNormalizationResult {
             summary: ProviderImportSummary::default(),
@@ -437,9 +511,9 @@ fn nonpartial_provider_import_remains_source_atomic() {
             ..NormalizedProviderImportOptions::default()
         },
     )
-    .unwrap();
+    .unwrap_err();
 
-    assert_eq!(summary.failed, 1, "{:?}", summary.failures);
+    assert!(matches!(error, CaptureError::Store(_)), "{error:?}");
     assert!(store.list_sessions().unwrap().is_empty());
     assert!(store
         .search_event_hits("same provider event payload", 10)

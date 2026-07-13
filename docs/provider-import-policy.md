@@ -8,6 +8,26 @@ If an existing adapter conflicts with this policy, prefer fixing the adapter and
 its fixtures over adding a new user-facing mode. The local CLI should have one
 good default.
 
+## Import Failure Policy
+
+Every import keeps independently valid content and reports rejected records.
+There is no user-selectable failure mode. Parse, validation, and reference
+errors reject the narrowest safe record plus records that depend on it. An
+unreadable root, incompatible manifest/schema, or provider-database failure
+fails that source while independent sources continue. Ctx-owned store, index,
+worker, lock, and operational-I/O failures abort the run.
+
+A source with rejections and accepted content completes with
+`completed_with_rejections`. A source with rejections but no accepted event,
+file-touch, or edge content fails. Session/source metadata alone does not make
+an import successful. Source and provider cursor checkpoints advance only when
+the source run has zero rejections, so corrected records remain eligible for a
+later idempotent scan.
+
+Content transactions use the shared 64-unit/8 MiB bounds with required WAL
+checkpoints. Event-search merge suppression may span a whole source, including
+manifested per-file imports, but its final compaction remains bounded.
+
 ## Default Import Shape
 
 Native imports should store:
@@ -147,7 +167,7 @@ SQLite encoded/blob-store adapters should test corrupt encoded payloads,
 oversized blobs, decoded-message extraction, metadata-only rows, tool-only
 payloads, and sensitive-token non-copying.
 
-File event-log adapters should test event ordering, partial/corrupt files,
+File event-log adapters should test event ordering, truncated/corrupt files,
 metadata-only runs, raw diff/output non-indexing, and citations back to source
 files.
 

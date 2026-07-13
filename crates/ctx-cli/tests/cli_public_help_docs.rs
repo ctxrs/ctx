@@ -227,7 +227,6 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
                 "--path <PATH>",
                 "--format <FORMAT>",
                 "--resume",
-                "--partial",
                 "--json",
             ],
         ),
