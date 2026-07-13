@@ -102,6 +102,7 @@ expect_usage_failure() {
 
 "${smoke}" --help > "${tmp}/help.out" 2>&1
 grep -Fq -- '--coreml --runtime-platform macos-arm64|macos-x64' "${tmp}/help.out"
+grep -Fq -- '--non-authoritative-runtime-proof' "${tmp}/help.out"
 
 expect_usage_failure coreml_linux \
   '--coreml requires --runtime-platform macos-arm64 or macos-x64' \
@@ -113,6 +114,9 @@ expect_usage_failure coreml_archive \
 expect_usage_failure archive_required \
   '--runtime-archive is required unless --coreml is selected' \
   --runtime-platform macos-arm64 --ctx "${fake_ctx}"
+expect_usage_failure preview_proof_linux \
+  '--non-authoritative-runtime-proof is restricted to macos-x64' \
+  --runtime-platform linux-x64 --non-authoritative-runtime-proof --ctx "${fake_ctx}"
 
 cpu_ctx="${tmp}/ctx-macos-cpu-fallback"
 sed 's/"backend":"coreml"/"backend":"cpu"/g' "${fake_ctx}" > "${cpu_ctx}"

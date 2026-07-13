@@ -149,10 +149,15 @@ case "${2:-}" in
   *) exit 2 ;;
 esac
 EOF
+cat > "${tmp_dir}/blank-sysctl" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
 chmod +x \
   "${tmp_dir}/native-sysctl" \
   "${tmp_dir}/rosetta-sysctl" \
-  "${tmp_dir}/inconsistent-sysctl"
+  "${tmp_dir}/inconsistent-sysctl" \
+  "${tmp_dir}/blank-sysctl"
 test "$(scripts/public-cli-host-runtime-evidence.sh \
   --host-system Darwin --host-arch x86_64 --sysctl "${tmp_dir}/native-sysctl")" = \
   $'Darwin\tx86_64\tx86_64\t0\tsysctl'
@@ -163,8 +168,11 @@ test "$(scripts/public-cli-host-runtime-evidence.sh \
   --host-system Darwin --host-arch x86_64 --sysctl "${tmp_dir}/missing-sysctl")" = \
   $'Darwin\tx86_64\tunknown\tunknown\tsysctl'
 test "$(scripts/public-cli-host-runtime-evidence.sh \
+  --host-system Darwin --host-arch x86_64 --sysctl "${tmp_dir}/blank-sysctl")" = \
+  $'Darwin\tx86_64\tx86_64\t0\tsysctl'
+test "$(scripts/public-cli-host-runtime-evidence.sh \
   --host-system Darwin --host-arch x86_64 --sysctl "${tmp_dir}/inconsistent-sysctl")" = \
-  $'Darwin\tx86_64\tunknown\tunknown\tsysctl'
+  $'Darwin\tx86_64\tarm64\tunknown\tsysctl'
 
 partial_runtime_matrix="${tmp_dir}/partial-runtime-matrix"
 mkdir -p "${partial_runtime_matrix}"
@@ -307,6 +315,85 @@ write_synthetic_runtime_proof \
 write_synthetic_runtime_proof \
   windows-x64 ctx.exe ctx-windows-x64.native-runtime-proof.txt \
   Windows_NT AMD64 ctx-onnxruntime-windows-x64.zip iswow64process2
+
+preview_macos_matrix="${tmp_dir}/preview-macos-matrix"
+cp -R "${missing_windows_dependency_matrix}" "${preview_macos_matrix}"
+sed -i \
+  -e 's/^runtime_authority=authoritative$/runtime_authority=non_authoritative/' \
+  "${preview_macos_matrix}/ctx-macos-x64.native-runtime-proof.txt"
+printf 'ctx 0.25.0\n' > "${preview_macos_matrix}/ctx-macos-x64.version"
+preview_macos_sha="$(cat "${preview_macos_matrix}/ctx-macos-x64.sha256")"
+cat > "${preview_macos_matrix}/ctx-macos-x64.build-info.json" <<EOF
+{"schema_version":1,"artifact_sha256":"${preview_macos_sha}","platform":"macos-x64","target":"x86_64-apple-darwin","source":{"commit":"228e05fa0fd058822be7a362acd65cacdad24356","clean":true}}
+EOF
+if scripts/stage-github-release-assets.sh \
+  "${preview_macos_matrix}" "${tmp_dir}/preview-macos-default-release" \
+  >"${tmp_dir}/preview-macos-default.out" 2>"${tmp_dir}/preview-macos-default.err"; then
+  echo "release staging accepted macOS x64 preview proof without explicit opt-in" >&2
+  exit 1
+fi
+grep -Fq \
+  'runtime proof has the wrong authority classification:' \
+  "${tmp_dir}/preview-macos-default.err"
+
+printf 'ctx 0.25.1\n' > "${preview_macos_matrix}/ctx-macos-x64.version"
+if CTX_RELEASE_ALLOW_MACOS_X64_PREVIEW_PROOF=1 \
+  scripts/stage-github-release-assets.sh \
+    "${preview_macos_matrix}" "${tmp_dir}/preview-macos-wrong-version-release" \
+    >"${tmp_dir}/preview-macos-wrong-version.out" \
+    2>"${tmp_dir}/preview-macos-wrong-version.err"; then
+  echo "release staging accepted the macOS x64 preview exception for another version" >&2
+  exit 1
+fi
+grep -Fq \
+  'macOS x64 preview proof exception is restricted to ctx 0.25.0' \
+  "${tmp_dir}/preview-macos-wrong-version.err"
+
+printf 'ctx 0.25.0\n' > "${preview_macos_matrix}/ctx-macos-x64.version"
+sed -i \
+  's/228e05fa0fd058822be7a362acd65cacdad24356/0000000000000000000000000000000000000000/' \
+  "${preview_macos_matrix}/ctx-macos-x64.build-info.json"
+if CTX_RELEASE_ALLOW_MACOS_X64_PREVIEW_PROOF=1 \
+  scripts/stage-github-release-assets.sh \
+    "${preview_macos_matrix}" "${tmp_dir}/preview-macos-wrong-source-release" \
+    >"${tmp_dir}/preview-macos-wrong-source.out" \
+    2>"${tmp_dir}/preview-macos-wrong-source.err"; then
+  echo "release staging accepted preview proof for another source commit" >&2
+  exit 1
+fi
+grep -Fq \
+  'macOS x64 preview exception is restricted to the reviewed 0.25.0 source commit' \
+  "${tmp_dir}/preview-macos-wrong-source.err"
+sed -i \
+  's/0000000000000000000000000000000000000000/228e05fa0fd058822be7a362acd65cacdad24356/' \
+  "${preview_macos_matrix}/ctx-macos-x64.build-info.json"
+
+if CTX_RELEASE_ALLOW_MACOS_X64_PREVIEW_PROOF=1 \
+  scripts/stage-github-release-assets.sh \
+    "${preview_macos_matrix}" "${tmp_dir}/preview-macos-release" \
+    >"${tmp_dir}/preview-macos.out" 2>"${tmp_dir}/preview-macos.err"; then
+  echo "release staging unexpectedly passed an incomplete synthetic matrix" >&2
+  exit 1
+fi
+grep -Fq \
+  'Windows runtime proof is missing runtime_dylib:' \
+  "${tmp_dir}/preview-macos.err"
+
+sed -i \
+  -e 's/^host_native_arch=x86_64$/host_native_arch=arm64/' \
+  -e 's/^process_translated=0$/process_translated=1/' \
+  "${preview_macos_matrix}/ctx-macos-x64.native-runtime-proof.txt"
+if CTX_RELEASE_ALLOW_MACOS_X64_PREVIEW_PROOF=1 \
+  scripts/stage-github-release-assets.sh \
+    "${preview_macos_matrix}" "${tmp_dir}/preview-macos-rosetta-release" \
+    >"${tmp_dir}/preview-macos-rosetta.out" 2>"${tmp_dir}/preview-macos-rosetta.err"; then
+  echo "release staging accepted Rosetta-shaped proof as preview evidence" >&2
+  exit 1
+fi
+grep -Fq \
+  'runtime proof has wrong native host architecture:' \
+  "${tmp_dir}/preview-macos-rosetta.err"
+
 cat >> \
   "${missing_windows_dependency_matrix}/ctx-windows-x64.native-runtime-proof.txt" <<'EOF'
 runtime_dylib=C:\ctx-runtime\onnxruntime\1.27.0\windows-x64\lib\onnxruntime.dll
