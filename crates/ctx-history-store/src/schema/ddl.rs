@@ -76,6 +76,10 @@ pub(crate) const HISTORY_RECORD_COLUMNS: &[ColumnSpec] = &[
 
 pub(crate) const CATALOG_SESSION_IMPORT_STATE_COLUMNS: &[ColumnSpec] = &[
     ColumnSpec {
+        name: "import_revision",
+        definition: "import_revision INTEGER NOT NULL DEFAULT 1 CHECK (import_revision > 0)",
+    },
+    ColumnSpec {
         name: "indexed_at_ms",
         definition: "indexed_at_ms INTEGER",
     },
@@ -89,7 +93,7 @@ pub(crate) const CATALOG_SESSION_IMPORT_STATE_COLUMNS: &[ColumnSpec] = &[
     },
     ColumnSpec {
         name: "indexed_status",
-        definition: "indexed_status TEXT NOT NULL DEFAULT 'pending' CHECK (indexed_status IN ('pending', 'indexed', 'failed'))",
+        definition: "indexed_status TEXT NOT NULL DEFAULT 'pending' CHECK (indexed_status IN ('pending', 'indexed', 'completed_with_rejections', 'rejected', 'failed'))",
     },
     ColumnSpec {
         name: "indexed_error",
@@ -98,6 +102,10 @@ pub(crate) const CATALOG_SESSION_IMPORT_STATE_COLUMNS: &[ColumnSpec] = &[
     ColumnSpec {
         name: "indexed_event_count",
         definition: "indexed_event_count INTEGER",
+    },
+    ColumnSpec {
+        name: "indexed_import_revision",
+        definition: "indexed_import_revision INTEGER CHECK (indexed_import_revision > 0)",
     },
     ColumnSpec {
         name: "last_imported_at_ms",
@@ -118,6 +126,17 @@ pub(crate) const CATALOG_SESSION_IMPORT_STATE_COLUMNS: &[ColumnSpec] = &[
     ColumnSpec {
         name: "last_imported_event_count",
         definition: "last_imported_event_count INTEGER",
+    },
+];
+
+pub(crate) const SOURCE_IMPORT_FILE_STATE_COLUMNS: &[ColumnSpec] = &[
+    ColumnSpec {
+        name: "import_revision",
+        definition: "import_revision INTEGER NOT NULL DEFAULT 1 CHECK (import_revision > 0)",
+    },
+    ColumnSpec {
+        name: "indexed_import_revision",
+        definition: "indexed_import_revision INTEGER CHECK (indexed_import_revision > 0)",
     },
 ];
 
@@ -176,14 +195,16 @@ CREATE TABLE IF NOT EXISTS catalog_sessions (
     session_started_at_ms INTEGER,
     file_size_bytes INTEGER NOT NULL,
     file_modified_at_ms INTEGER NOT NULL,
+    import_revision INTEGER NOT NULL DEFAULT 1 CHECK (import_revision > 0),
     cataloged_at_ms INTEGER NOT NULL,
     is_stale INTEGER NOT NULL DEFAULT 0,
     indexed_at_ms INTEGER,
     indexed_file_size_bytes INTEGER,
     indexed_file_modified_at_ms INTEGER,
-    indexed_status TEXT NOT NULL DEFAULT 'pending' CHECK (indexed_status IN ('pending', 'indexed', 'failed')),
+    indexed_status TEXT NOT NULL DEFAULT 'pending' CHECK (indexed_status IN ('pending', 'indexed', 'completed_with_rejections', 'rejected', 'failed')),
     indexed_error TEXT,
     indexed_event_count INTEGER,
+    indexed_import_revision INTEGER CHECK (indexed_import_revision > 0),
     last_imported_at_ms INTEGER,
     last_imported_file_size_bytes INTEGER,
     last_imported_file_modified_at_ms INTEGER,
@@ -201,13 +222,15 @@ CREATE TABLE IF NOT EXISTS source_import_files (
     source_path TEXT NOT NULL,
     file_size_bytes INTEGER NOT NULL,
     file_modified_at_ms INTEGER NOT NULL,
+    import_revision INTEGER NOT NULL DEFAULT 1 CHECK (import_revision > 0),
     observed_at_ms INTEGER NOT NULL,
     is_stale INTEGER NOT NULL DEFAULT 0,
     indexed_at_ms INTEGER,
     indexed_file_size_bytes INTEGER,
     indexed_file_modified_at_ms INTEGER,
-    indexed_status TEXT NOT NULL DEFAULT 'pending' CHECK (indexed_status IN ('pending', 'indexed', 'failed')),
+    indexed_status TEXT NOT NULL DEFAULT 'pending' CHECK (indexed_status IN ('pending', 'indexed', 'completed_with_rejections', 'rejected', 'failed')),
     indexed_error TEXT,
+    indexed_import_revision INTEGER CHECK (indexed_import_revision > 0),
     metadata_json TEXT NOT NULL DEFAULT '{}',
     PRIMARY KEY (provider, source_root, source_path)
 );

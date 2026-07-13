@@ -83,6 +83,7 @@ fn catalog_session(source_path: &str, external_session_id: &str, mtime_ms: i64) 
         session_started_at_ms: Some(mtime_ms),
         file_size_bytes: 42,
         file_modified_at_ms: mtime_ms,
+        import_revision: 1,
         cataloged_at_ms: mtime_ms,
         metadata: serde_json::json!({"catalog_scope": "session_meta"}),
     }
@@ -97,6 +98,26 @@ fn catalog_session_for_root(
     CatalogSession {
         source_root: source_root.into(),
         ..catalog_session(source_path, external_session_id, mtime_ms)
+    }
+}
+
+fn source_import_file(
+    provider: CaptureProvider,
+    source_format: &str,
+    source_root: &str,
+    source_path: &str,
+    observed_at_ms: i64,
+) -> SourceImportFile {
+    SourceImportFile {
+        provider,
+        source_format: source_format.into(),
+        source_root: source_root.into(),
+        source_path: source_path.into(),
+        file_size_bytes: 42,
+        file_modified_at_ms: observed_at_ms,
+        import_revision: 1,
+        observed_at_ms,
+        metadata: serde_json::json!({}),
     }
 }
 
@@ -637,6 +658,210 @@ fn catalog_upsert_clears_completion_metadata_but_preserves_append_checkpoint() {
 }
 
 #[test]
+fn completed_with_rejections_converges_without_advancing_safe_resume_checkpoint() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let observed_at_ms = timestamp_ms(fixed_time());
+    let source_path = "/home/user/.codex/sessions/2026/06/24/mixed-tail.jsonl";
+    let initial = catalog_session(source_path, "mixed-tail", observed_at_ms);
+    store.upsert_catalog_sessions(&[initial]).unwrap();
+    store
+        .upsert_session(&imported_session("mixed-tail"))
+        .unwrap();
+    store
+        .mark_catalog_source_indexed(
+            CaptureProvider::Codex,
+            CatalogSourceIndexUpdate {
+                source_root: "/home/user/.codex/sessions",
+                source_path,
+                file_size_bytes: 42,
+                file_modified_at_ms: observed_at_ms,
+                file_sha256: Some("safe-prefix"),
+                event_count: Some(3),
+                indexed_at_ms: observed_at_ms + 10,
+            },
+        )
+        .unwrap();
+
+    let mut appended = catalog_session(source_path, "mixed-tail", observed_at_ms + 1);
+    appended.file_size_bytes = 64;
+    store.upsert_catalog_sessions(&[appended]).unwrap();
+    store
+        .record_catalog_source_import_result(
+            CaptureProvider::Codex,
+            CatalogSourceIndexUpdate {
+                source_root: "/home/user/.codex/sessions",
+                source_path,
+                file_size_bytes: 64,
+                file_modified_at_ms: observed_at_ms + 1,
+                file_sha256: None,
+                event_count: Some(4),
+                indexed_at_ms: observed_at_ms + 20,
+            },
+            CatalogIndexedStatus::CompletedWithRejections,
+            Some("line 4: malformed record"),
+        )
+        .unwrap();
+
+    assert!(store
+        .list_pending_catalog_sessions(CaptureProvider::Codex, "/home/user/.codex/sessions")
+        .unwrap()
+        .is_empty());
+    let state = store
+        .catalog_source_index_state(
+            CaptureProvider::Codex,
+            "/home/user/.codex/sessions",
+            source_path,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.last_imported_file_size_bytes, Some(42));
+    assert_eq!(
+        state.last_imported_file_sha256.as_deref(),
+        Some("safe-prefix")
+    );
+    assert_eq!(state.last_imported_event_count, Some(3));
+    let observation: (String, i64, i64, i64) = store
+        .conn
+        .query_row(
+            "SELECT indexed_status, indexed_file_size_bytes, indexed_file_modified_at_ms, indexed_import_revision FROM catalog_sessions WHERE source_path = ?1",
+            [source_path],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        observation,
+        (
+            "completed_with_rejections".to_owned(),
+            64,
+            observed_at_ms + 1,
+            1,
+        )
+    );
+}
+
+#[test]
+fn terminal_rejected_catalog_observation_needs_no_materialized_session() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let observed_at_ms = timestamp_ms(fixed_time());
+    let source_path = "/home/user/.codex/sessions/2026/06/24/all-invalid.jsonl";
+    store
+        .upsert_catalog_sessions(&[catalog_session(source_path, "all-invalid", observed_at_ms)])
+        .unwrap();
+    store
+        .record_catalog_source_import_result(
+            CaptureProvider::Codex,
+            CatalogSourceIndexUpdate {
+                source_root: "/home/user/.codex/sessions",
+                source_path,
+                file_size_bytes: 42,
+                file_modified_at_ms: observed_at_ms,
+                file_sha256: None,
+                event_count: Some(0),
+                indexed_at_ms: observed_at_ms + 10,
+            },
+            CatalogIndexedStatus::Rejected,
+            Some("all content records were rejected"),
+        )
+        .unwrap();
+
+    assert!(store
+        .list_pending_catalog_sessions(CaptureProvider::Codex, "/home/user/.codex/sessions")
+        .unwrap()
+        .is_empty());
+    let counts = store.catalog_session_counts().unwrap();
+    assert_eq!(counts.rejected, 1);
+    assert_eq!(counts.pending, 0);
+    assert_eq!(counts.indexed, 0);
+}
+
+#[test]
+fn source_outcomes_converge_and_revision_invalidation_is_provider_scoped() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let observed_at_ms = timestamp_ms(fixed_time());
+    let claude_root = "/home/user/.claude/projects";
+    let antigravity_root = "/home/user/.gemini/antigravity/brain";
+    let claude = source_import_file(
+        CaptureProvider::Claude,
+        "claude_projects_jsonl_tree",
+        claude_root,
+        "/home/user/.claude/projects/mixed.jsonl",
+        observed_at_ms,
+    );
+    let antigravity = source_import_file(
+        CaptureProvider::Antigravity,
+        "antigravity_cli_transcript_jsonl_tree",
+        antigravity_root,
+        "/home/user/.gemini/antigravity/brain/rejected.jsonl",
+        observed_at_ms,
+    );
+    store
+        .upsert_source_import_files(&[claude.clone(), antigravity.clone()])
+        .unwrap();
+    for (file, status) in [
+        (&claude, CatalogIndexedStatus::CompletedWithRejections),
+        (&antigravity, CatalogIndexedStatus::Rejected),
+    ] {
+        store
+            .record_source_import_file_result(
+                file.provider,
+                SourceImportFileIndexUpdate {
+                    source_root: &file.source_root,
+                    source_path: &file.source_path,
+                    file_size_bytes: file.file_size_bytes,
+                    file_modified_at_ms: file.file_modified_at_ms,
+                    indexed_at_ms: observed_at_ms + 10,
+                },
+                status,
+                Some("deterministic rejection"),
+            )
+            .unwrap();
+    }
+
+    assert!(store
+        .list_pending_source_import_files(CaptureProvider::Claude, claude_root)
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .list_pending_source_import_files(CaptureProvider::Antigravity, antigravity_root)
+        .unwrap()
+        .is_empty());
+
+    let mut revised_claude = claude.clone();
+    revised_claude.import_revision = 2;
+    revised_claude.observed_at_ms += 20;
+    store
+        .upsert_source_import_files(&[revised_claude.clone()])
+        .unwrap();
+    assert_eq!(
+        store
+            .list_pending_source_import_files(CaptureProvider::Claude, claude_root)
+            .unwrap(),
+        vec![revised_claude]
+    );
+    assert!(store
+        .list_pending_source_import_files(CaptureProvider::Antigravity, antigravity_root)
+        .unwrap()
+        .is_empty());
+
+    let mut corrected_antigravity = antigravity;
+    corrected_antigravity.file_size_bytes += 1;
+    corrected_antigravity.file_modified_at_ms += 1;
+    corrected_antigravity.observed_at_ms += 20;
+    store
+        .upsert_source_import_files(&[corrected_antigravity.clone()])
+        .unwrap();
+    assert_eq!(
+        store
+            .list_pending_source_import_files(CaptureProvider::Antigravity, antigravity_root)
+            .unwrap(),
+        vec![corrected_antigravity]
+    );
+}
+
+#[test]
 fn catalog_upsert_invalidates_checkpoint_for_shrink_and_same_size_change() {
     let temp = tempdir();
     let store = Store::open(temp.path().join("work.sqlite")).unwrap();
@@ -743,6 +968,7 @@ fn source_import_manifest_upsert_ignores_observed_at_for_unchanged_files() {
         source_path: "/home/user/.claude/projects/session.jsonl".into(),
         file_size_bytes: 42,
         file_modified_at_ms: observed_at_ms,
+        import_revision: 1,
         observed_at_ms,
         metadata: serde_json::json!({}),
     };
@@ -794,6 +1020,7 @@ fn source_root_inventory_change_token_marks_same_stat_source_pending() {
         source_path: root.into(),
         file_size_bytes: 42,
         file_modified_at_ms: observed_at_ms,
+        import_revision: 1,
         observed_at_ms,
         metadata: serde_json::json!({
             "inventory_unit": "source_root",
@@ -848,6 +1075,7 @@ fn source_import_format_change_marks_same_stat_source_pending() {
         source_path: root.into(),
         file_size_bytes: 42,
         file_modified_at_ms: observed_at_ms,
+        import_revision: 1,
         observed_at_ms,
         metadata: serde_json::json!({}),
     };
@@ -896,6 +1124,7 @@ fn source_import_file_counts_track_pending_indexed_failed_and_stale() {
             source_path: format!("{root}/{name}"),
             file_size_bytes: 42,
             file_modified_at_ms: observed_at_ms,
+            import_revision: 1,
             observed_at_ms,
             metadata: serde_json::json!({}),
         })

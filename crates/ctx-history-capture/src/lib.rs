@@ -138,7 +138,9 @@ pub use provider::codex::{
     import_codex_session_jsonl, import_codex_session_jsonl_tail, import_codex_session_paths,
     import_codex_session_tree,
 };
-pub use provider::custom_history_jsonl::custom_history_jsonl_v1_cursor_stream;
+pub use provider::custom_history_jsonl::{
+    custom_history_jsonl_v1_cursor_stream, custom_history_jsonl_v1_cursor_stream_with_revision,
+};
 pub use provider::importer::import_normalized_provider_captures;
 
 mod spool;

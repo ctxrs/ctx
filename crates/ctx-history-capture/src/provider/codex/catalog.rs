@@ -16,8 +16,8 @@ use crate::common::io::{
 };
 use crate::common::time::{parse_rfc3339_utc, system_time_ms};
 use crate::{
-    CaptureError, CatalogSummary, CodexSessionCatalogOptions, ProviderImportFailure, Result,
-    CODEX_SESSION_SOURCE_FORMAT,
+    provider_sources::provider_import_revision, CaptureError, CatalogSummary,
+    CodexSessionCatalogOptions, ProviderImportFailure, Result, CODEX_SESSION_SOURCE_FORMAT,
 };
 
 use crate::provider::codex::session::{apply_codex_session_import_bounds, contains_bytes};
@@ -359,6 +359,10 @@ pub(crate) fn catalog_codex_session_file(
         session_started_at_ms,
         file_size_bytes: metadata.len(),
         file_modified_at_ms: system_time_ms(metadata.modified().unwrap_or(UNIX_EPOCH)),
+        import_revision: provider_import_revision(
+            CaptureProvider::Codex,
+            CODEX_SESSION_SOURCE_FORMAT,
+        ),
         cataloged_at_ms,
         metadata: json!({
             "originator": payload.and_then(|payload| payload.get("originator")).and_then(Value::as_str),

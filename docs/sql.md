@@ -90,7 +90,8 @@ are implementation details and can change between versions.
 | `cwd` | Captured working directory, when known. |
 | `session_started_at_ms` | Provider session start time in Unix epoch milliseconds. |
 | `file_size_bytes`, `file_modified_at_ms`, `cataloged_at_ms` | Catalog metadata. |
-| `indexed_status`, `indexed_at_ms`, `indexed_error`, `indexed_event_count` | Import/index status. |
+| `import_revision`, `indexed_import_revision` | Current parser revision and the revision that produced the recorded outcome. |
+| `indexed_status`, `indexed_at_ms`, `indexed_error`, `indexed_event_count` | Import outcome and diagnostic metadata. Outcomes are `pending`, `indexed`, `completed_with_rejections`, `rejected`, or retryable `failed`. |
 
 ## File Path Queries
 
