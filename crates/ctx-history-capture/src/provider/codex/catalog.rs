@@ -34,6 +34,14 @@ pub fn catalog_codex_session_tree(
         .unwrap_or(root)
         .display()
         .to_string();
+    let observation_generation = match options.observation_generation {
+        Some(generation) => generation,
+        None => {
+            store.allocate_catalog_inventory_generation(CaptureProvider::Codex, &source_root)?
+        }
+    };
+    let import_revision =
+        provider_import_revision(CaptureProvider::Codex, CODEX_SESSION_SOURCE_FORMAT);
     let cataloged_at_ms = options.cataloged_at.timestamp_millis();
     let mut paths = Vec::new();
     collect_jsonl_paths(root, &mut paths)?;
@@ -73,6 +81,7 @@ pub fn catalog_codex_session_tree(
             existing.get(&source_path),
             &metadata,
             cataloged_at_ms,
+            import_revision,
         ) {
             summary.cached_sessions += 1;
             cached_sessions.push(session);
@@ -122,7 +131,7 @@ pub fn catalog_codex_session_tree(
     store.begin_immediate_batch()?;
     let persist = (|| -> Result<()> {
         if !sessions_to_persist.is_empty() {
-            store.upsert_catalog_sessions(&sessions_to_persist)?;
+            store.upsert_catalog_sessions(observation_generation, &sessions_to_persist)?;
         }
         if stale_session_count > 0 || has_missing_existing_paths {
             store.mark_catalog_source_missing_paths_stale(
@@ -130,6 +139,7 @@ pub fn catalog_codex_session_tree(
                 &source_root,
                 &current_paths,
                 cataloged_at_ms,
+                observation_generation,
             )?;
         }
         Ok(())
@@ -158,13 +168,19 @@ pub fn catalog_codex_session_files(
         .unwrap_or(source_root.as_ref())
         .display()
         .to_string();
+    let observation_generation = match options.observation_generation {
+        Some(generation) => generation,
+        None => {
+            store.allocate_catalog_inventory_generation(CaptureProvider::Codex, &source_root)?
+        }
+    };
     let cataloged_at_ms = options.cataloged_at.timestamp_millis();
     let (scan_summary, sessions) =
         catalog_codex_session_paths(paths, &source_root, cataloged_at_ms, options.parallelism)?;
     let mut summary = scan_summary;
     summary.cataloged_sessions = sessions.len();
     if !sessions.is_empty() {
-        store.upsert_catalog_sessions(&sessions)?;
+        store.upsert_catalog_sessions(observation_generation, &sessions)?;
     }
     Ok(summary)
 }
@@ -173,11 +189,13 @@ pub(crate) fn cached_catalog_session_if_unchanged(
     session: Option<&CatalogSession>,
     metadata: &fs::Metadata,
     cataloged_at_ms: i64,
+    import_revision: u32,
 ) -> Option<CatalogSession> {
     let session = session?;
     let modified_at_ms = system_time_ms(metadata.modified().unwrap_or(UNIX_EPOCH));
     if session.provider == CaptureProvider::Codex
         && session.source_format == CODEX_SESSION_SOURCE_FORMAT
+        && session.import_revision == import_revision
         && session.file_size_bytes == metadata.len()
         && session.file_modified_at_ms == modified_at_ms
     {

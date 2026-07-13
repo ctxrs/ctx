@@ -63,13 +63,13 @@ pub(crate) fn inventory_import_sources(
             .source_bytes
             .saturating_add(plan.stats.bytes);
         match &plan.preinventory {
-            SourcePreinventory::SourceImportFiles(files) => {
+            SourcePreinventory::SourceImportFiles { files, .. } => {
                 inventory.totals.source_import_files += files.len();
             }
-            SourcePreinventory::SourceRoot(_) => {
+            SourcePreinventory::SourceRoot { .. } => {
                 inventory.totals.source_import_files += 1;
             }
-            SourcePreinventory::None | SourcePreinventory::CodexSessionCatalog(_) => {}
+            SourcePreinventory::None | SourcePreinventory::CodexSessionCatalog { .. } => {}
         }
         if let Some((summary, source_json)) = cataloged {
             inventory.catalog.add(&summary);
@@ -103,11 +103,15 @@ fn inventory_import_source(
     source: SourceInfo,
 ) -> Result<(PlannedImportSource, Option<(CatalogSummary, Value)>)> {
     if is_incremental_codex_session_tree(&source) {
+        let source_root = source.path.display().to_string();
+        let inventory_generation =
+            store.allocate_catalog_inventory_generation(CaptureProvider::Codex, &source_root)?;
         let summary = catalog_codex_session_tree(
             &source.path,
             store,
             CodexSessionCatalogOptions {
                 source_root: Some(source.path.clone()),
+                observation_generation: Some(inventory_generation),
                 ..CodexSessionCatalogOptions::default()
             },
         )
@@ -120,7 +124,10 @@ fn inventory_import_source(
         let plan = PlannedImportSource {
             source,
             stats,
-            preinventory: SourcePreinventory::CodexSessionCatalog(summary.clone()),
+            preinventory: SourcePreinventory::CodexSessionCatalog {
+                summary: summary.clone(),
+                inventory_generation,
+            },
         };
         let source_json = json!({
             "provider": plan.source.provider.as_str(),
@@ -138,29 +145,46 @@ fn inventory_import_source(
     }
 
     if source_uses_import_file_manifest(&source) {
+        let source_root = source.path.display().to_string();
+        let inventory_generation =
+            store.allocate_source_import_inventory_generation(source.provider, &source_root)?;
         let files = collect_source_import_files(&source)
             .with_context(|| format!("inventory import files from {}", source.path.display()))?;
-        persist_source_import_files(store, &source, &files)?;
+        persist_source_import_files(store, &source, inventory_generation, &files)?;
         let stats = source_stats_from_import_files(&files);
         return Ok((
             PlannedImportSource {
                 source,
                 stats,
-                preinventory: SourcePreinventory::SourceImportFiles(files),
+                preinventory: SourcePreinventory::SourceImportFiles {
+                    files,
+                    inventory_generation,
+                },
             },
             None,
         ));
     }
 
+    let source_root = source.path.display().to_string();
+    let inventory_generation =
+        store.allocate_source_import_inventory_generation(source.provider, &source_root)?;
     let stats = source_stats(&source.path)
         .with_context(|| format!("inventory import source {}", source.path.display()))?;
     let root_file = source_root_import_file(&source, stats)?;
-    persist_source_import_files(store, &source, std::slice::from_ref(&root_file))?;
+    persist_source_import_files(
+        store,
+        &source,
+        inventory_generation,
+        std::slice::from_ref(&root_file),
+    )?;
     Ok((
         PlannedImportSource {
             source,
             stats,
-            preinventory: SourcePreinventory::SourceRoot(root_file),
+            preinventory: SourcePreinventory::SourceRoot {
+                file: root_file,
+                inventory_generation,
+            },
         },
         None,
     ))

@@ -1,4 +1,5 @@
 pub(super) use crate::provider::adapter::ProviderCaptureAdapter;
+pub(super) use crate::provider::codex::catalog::cached_catalog_session_if_unchanged;
 pub(super) use crate::provider::codex::events::codex_tool_output_event;
 pub(super) use crate::provider::codex::session::{
     codex_session_file_conversation_scan, join_codex_import_worker,
@@ -394,11 +395,15 @@ pub(super) fn incremental_codex_catch_up(
     observed_at: DateTime<Utc>,
 ) -> IncrementalCatchUpSummary {
     let source_root = root.display().to_string();
+    let inventory_generation = store
+        .allocate_catalog_inventory_generation(CaptureProvider::Codex, &source_root)
+        .unwrap();
     let catalog = catalog_codex_session_tree(
         root,
         store,
         CodexSessionCatalogOptions {
             source_root: Some(root.to_path_buf()),
+            observation_generation: Some(inventory_generation),
             cataloged_at: observed_at,
             ..CodexSessionCatalogOptions::default()
         },
@@ -441,6 +446,7 @@ pub(super) fn incremental_codex_catch_up(
                     file_size_bytes: session.file_size_bytes,
                     file_modified_at_ms: session.file_modified_at_ms,
                     import_revision: session.import_revision,
+                    inventory_generation,
                     file_sha256: None,
                     event_count: Some(1),
                     indexed_at_ms,

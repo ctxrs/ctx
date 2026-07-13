@@ -517,6 +517,69 @@ fn corrected_manifested_file_retries_rejected_row_idempotently() {
 }
 
 #[test]
+fn manifested_retry_retaining_existing_content_reports_completed_with_rejections() {
+    let temp = tempdir();
+    let project = temp.path().join("claude-retained-project");
+    fs::create_dir_all(&project).unwrap();
+    let session = project.join("retained.jsonl");
+    let valid = r#"{"sessionId":"retained","timestamp":"2026-07-13T12:00:00Z","cwd":"/repo","version":"test","type":"user","message":{"role":"user","content":[{"type":"text","text":"retained manifested content oracle"}]},"uuid":"retained-1"}"#;
+    fs::write(&session, format!("{valid}\n")).unwrap();
+    let args = [
+        "import",
+        "--provider",
+        "claude",
+        "--path",
+        project.to_str().unwrap(),
+        "--json",
+        "--progress",
+        "none",
+    ];
+
+    let first = json_output(ctx(&temp).args(args));
+    assert_eq!(first["outcome"], "success", "{first:#}");
+    assert_eq!(first["totals"]["imported_events"], 1, "{first:#}");
+
+    fs::write(&session, "{\"type\":\n").unwrap();
+    let retained = json_output(ctx(&temp).args(args));
+    assert_eq!(
+        retained["outcome"], "completed_with_rejections",
+        "{retained:#}"
+    );
+    assert_eq!(
+        retained["sources"][0]["status"], "completed_with_rejections",
+        "{retained:#}"
+    );
+    assert_eq!(retained["sources"][0]["failure_scope"], "record");
+    assert_eq!(retained["totals"]["failed_sources"], 0);
+    assert_eq!(retained["totals"]["sources_completed_with_rejections"], 1);
+    assert_eq!(retained["totals"]["rejected_records"], 1);
+    assert_eq!(retained["totals"]["imported_sessions"], 0);
+    assert_eq!(retained["totals"]["imported_events"], 0);
+    assert_eq!(retained["totals"]["imported_edges"], 0);
+
+    let search = json_output(ctx(&temp).args([
+        "search",
+        "retained manifested content oracle",
+        "--provider",
+        "claude",
+        "--refresh",
+        "off",
+        "--json",
+    ]));
+    assert_search_provider_oracle(
+        &search,
+        "claude",
+        "retained manifested content oracle",
+        1,
+        "message",
+    );
+
+    let unchanged = json_output(ctx(&temp).args(args));
+    assert_eq!(unchanged["outcome"], "success", "{unchanged:#}");
+    assert_eq!(unchanged["totals"]["rejected_records"], 0, "{unchanged:#}");
+}
+
+#[test]
 fn unchanged_root_source_completed_with_rejections_is_not_retried() {
     let temp = tempdir();
     let root = PathBuf::from(write_native_openclaw_fixture(

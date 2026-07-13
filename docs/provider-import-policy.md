@@ -42,6 +42,13 @@ fingerprint and current import revision. Bump only the affected registry entry
 when parser or normalization semantics require reprocessing; unrelated providers
 remain complete.
 
+Inventory allocates a durable monotonic generation per provider, source root,
+and catalog family before discovery. Upserts, missing-path finalization, and
+completion apply only while that generation is current, so a late older scan
+cannot replace or complete a newer observation. The generation is a concurrency
+fence, not per-row seen state: unchanged catalog and source rows are not rewritten
+just because another inventory completed.
+
 Content transactions use the shared 64-unit/8 MiB bounds with required WAL
 checkpoints. Event-search merge suppression may span a whole source, including
 manifested per-file imports, but its final compaction remains bounded.
