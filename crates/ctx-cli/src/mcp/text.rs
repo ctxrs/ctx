@@ -40,6 +40,21 @@ fn render_status_text(value: &Value) -> String {
     );
     push_key_value(
         &mut out,
+        "failed_inventory_units",
+        value.get("failed_inventory_units"),
+    );
+    push_key_value(
+        &mut out,
+        "completed_with_rejections_inventory_units",
+        value.get("completed_with_rejections_inventory_units"),
+    );
+    push_key_value(
+        &mut out,
+        "terminal_rejected_inventory_units",
+        value.get("terminal_rejected_inventory_units"),
+    );
+    push_key_value(
+        &mut out,
         "cataloged_sessions",
         value.get("cataloged_sessions"),
     );
@@ -60,6 +75,16 @@ fn render_status_text(value: &Value) -> String {
     );
     push_key_value(
         &mut out,
+        "completed_with_rejections_catalog_sessions",
+        value.get("completed_with_rejections_catalog_sessions"),
+    );
+    push_key_value(
+        &mut out,
+        "terminal_rejected_catalog_sessions",
+        value.get("terminal_rejected_catalog_sessions"),
+    );
+    push_key_value(
+        &mut out,
         "source_import_files",
         value.get("source_import_files"),
     );
@@ -67,6 +92,21 @@ fn render_status_text(value: &Value) -> String {
         &mut out,
         "pending_source_import_files",
         value.get("pending_source_import_files"),
+    );
+    push_key_value(
+        &mut out,
+        "failed_source_import_files",
+        value.get("failed_source_import_files"),
+    );
+    push_key_value(
+        &mut out,
+        "completed_with_rejections_source_import_files",
+        value.get("completed_with_rejections_source_import_files"),
+    );
+    push_key_value(
+        &mut out,
+        "terminal_rejected_source_import_files",
+        value.get("terminal_rejected_source_import_files"),
     );
     push_key_value(&mut out, "read_only", value.get("read_only"));
     push_key_value(&mut out, "local_only", value.get("local_only"));

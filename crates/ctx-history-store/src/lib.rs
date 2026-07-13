@@ -46,7 +46,7 @@ use std::{
 
 use rusqlite::Connection;
 
-pub(crate) const SCHEMA_VERSION: i64 = 46;
+pub(crate) const SCHEMA_VERSION: i64 = 47;
 
 pub struct Store {
     path: PathBuf,

@@ -55,6 +55,7 @@ pub struct HistorySourcePluginSource {
     pub provider_key: String,
     pub source_id: String,
     pub source_format: String,
+    pub import_revision: u32,
     pub command: Vec<String>,
     pub working_dir: Option<PathBuf>,
     pub env: BTreeMap<String, String>,
@@ -69,10 +70,11 @@ impl HistorySourcePluginSource {
     }
 
     pub fn cursor_stream(&self) -> String {
-        ctx_history_capture::custom_history_jsonl_v1_cursor_stream(
+        ctx_history_capture::custom_history_jsonl_v1_cursor_stream_with_revision(
             &self.provider_key,
             &self.source_id,
             &self.source_format,
+            self.import_revision,
         )
     }
 
@@ -138,6 +140,8 @@ struct HistorySourcePluginSourceManifest {
     #[serde(default)]
     source_id: Option<String>,
     source_format: String,
+    #[serde(default = "default_plugin_import_revision")]
+    import_revision: u32,
     command: Vec<String>,
     #[serde(default)]
     working_dir: Option<PathBuf>,
@@ -149,6 +153,10 @@ struct HistorySourcePluginSourceManifest {
     refresh: HistorySourcePluginRefresh,
     #[serde(default)]
     timeout_seconds: Option<u64>,
+}
+
+fn default_plugin_import_revision() -> u32 {
+    1
 }
 
 pub fn discover_history_source_plugins(
@@ -213,6 +221,10 @@ pub fn run_history_source_plugin(
     command.env("CTX_HISTORY_SOURCE_ID", &source.source_id);
     command.env("CTX_HISTORY_PROVIDER_KEY", &source.provider_key);
     command.env("CTX_HISTORY_SOURCE_FORMAT", &source.source_format);
+    command.env(
+        "CTX_HISTORY_IMPORT_REVISION",
+        source.import_revision.to_string(),
+    );
     command.env("CTX_HISTORY_CURSOR_STREAM", options.cursor_stream);
     command.env("CTX_HISTORY_MACHINE_ID", options.machine_id);
     command.env(
@@ -627,6 +639,13 @@ pub(crate) fn read_plugin_manifest(path: &Path) -> Result<Vec<HistorySourcePlugi
                 source.id
             )
         })?;
+        if source.import_revision == 0 {
+            return Err(anyhow!(
+                "history source plugin manifest {} source {} has invalid import_revision 0; expected a positive integer",
+                path.display(),
+                source.id
+            ));
+        }
         if source.command.is_empty() || source.command.iter().any(|part| part.trim().is_empty()) {
             return Err(anyhow!(
                 "history source plugin manifest {} source {} has empty command",
@@ -645,6 +664,7 @@ pub(crate) fn read_plugin_manifest(path: &Path) -> Result<Vec<HistorySourcePlugi
             provider_key,
             source_id,
             source_format: source.source_format,
+            import_revision: source.import_revision,
             command: source.command,
             working_dir: source.working_dir,
             env: source.env,

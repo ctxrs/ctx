@@ -65,6 +65,12 @@ pub(crate) fn run_status(args: JsonArgs, data_root: PathBuf, quiet: bool) -> Res
     let failed_inventory_units = catalog_counts
         .failed
         .saturating_add(source_import_file_counts.failed);
+    let completed_with_rejections_inventory_units = catalog_counts
+        .completed_with_rejections
+        .saturating_add(source_import_file_counts.completed_with_rejections);
+    let terminal_rejected_inventory_units = catalog_counts
+        .rejected
+        .saturating_add(source_import_file_counts.rejected);
     let stale_inventory_units = catalog_counts
         .stale
         .saturating_add(source_import_file_counts.stale);
@@ -83,16 +89,22 @@ pub(crate) fn run_status(args: JsonArgs, data_root: PathBuf, quiet: bool) -> Res
             "inventory_units": inventory_units,
             "pending_inventory_units": pending_inventory_units,
             "failed_inventory_units": failed_inventory_units,
+            "completed_with_rejections_inventory_units": completed_with_rejections_inventory_units,
+            "terminal_rejected_inventory_units": terminal_rejected_inventory_units,
             "stale_inventory_units": stale_inventory_units,
             "cataloged_sessions": catalog_counts.total,
             "indexed_catalog_sessions": catalog_counts.indexed,
             "pending_catalog_sessions": catalog_counts.pending,
             "failed_catalog_sessions": catalog_counts.failed,
+            "completed_with_rejections_catalog_sessions": catalog_counts.completed_with_rejections,
+            "terminal_rejected_catalog_sessions": catalog_counts.rejected,
             "stale_catalog_sessions": catalog_counts.stale,
             "source_import_files": source_import_file_counts.total,
             "indexed_source_import_files": source_import_file_counts.indexed,
             "pending_source_import_files": source_import_file_counts.pending,
             "failed_source_import_files": source_import_file_counts.failed,
+            "completed_with_rejections_source_import_files": source_import_file_counts.completed_with_rejections,
+            "terminal_rejected_source_import_files": source_import_file_counts.rejected,
             "stale_source_import_files": source_import_file_counts.stale,
             "semantic": semantic,
             "daemon": daemon,
@@ -109,11 +121,23 @@ pub(crate) fn run_status(args: JsonArgs, data_root: PathBuf, quiet: bool) -> Res
         println!("inventory_units: {inventory_units}");
         println!("pending_inventory_units: {pending_inventory_units}");
         println!("failed_inventory_units: {failed_inventory_units}");
+        println!(
+            "completed_with_rejections_inventory_units: {completed_with_rejections_inventory_units}"
+        );
+        println!("terminal_rejected_inventory_units: {terminal_rejected_inventory_units}");
         println!("stale_inventory_units: {stale_inventory_units}");
         println!("cataloged_sessions: {}", catalog_counts.total);
         println!("indexed_catalog_sessions: {}", catalog_counts.indexed);
         println!("pending_catalog_sessions: {}", catalog_counts.pending);
         println!("failed_catalog_sessions: {}", catalog_counts.failed);
+        println!(
+            "completed_with_rejections_catalog_sessions: {}",
+            catalog_counts.completed_with_rejections
+        );
+        println!(
+            "terminal_rejected_catalog_sessions: {}",
+            catalog_counts.rejected
+        );
         println!("stale_catalog_sessions: {}", catalog_counts.stale);
         println!("source_import_files: {}", source_import_file_counts.total);
         println!(
@@ -127,6 +151,14 @@ pub(crate) fn run_status(args: JsonArgs, data_root: PathBuf, quiet: bool) -> Res
         println!(
             "failed_source_import_files: {}",
             source_import_file_counts.failed
+        );
+        println!(
+            "completed_with_rejections_source_import_files: {}",
+            source_import_file_counts.completed_with_rejections
+        );
+        println!(
+            "terminal_rejected_source_import_files: {}",
+            source_import_file_counts.rejected
         );
         println!(
             "stale_source_import_files: {}",

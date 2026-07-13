@@ -386,11 +386,15 @@ fn tool_status(data_root: &Path) -> Result<Value> {
         indexed_catalog_sessions,
         pending_catalog_sessions,
         failed_catalog_sessions,
+        completed_with_rejections_catalog_sessions,
+        terminal_rejected_catalog_sessions,
         stale_catalog_sessions,
         source_import_files,
         indexed_source_import_files,
         pending_source_import_files,
         failed_source_import_files,
+        completed_with_rejections_source_import_files,
+        terminal_rejected_source_import_files,
         stale_source_import_files,
         semantic,
         daemon,
@@ -411,11 +415,15 @@ fn tool_status(data_root: &Path) -> Result<Value> {
             catalog_counts.indexed,
             catalog_counts.pending,
             catalog_counts.failed,
+            catalog_counts.completed_with_rejections,
+            catalog_counts.rejected,
             catalog_counts.stale,
             source_import_file_counts.total,
             source_import_file_counts.indexed,
             source_import_file_counts.pending,
             source_import_file_counts.failed,
+            source_import_file_counts.completed_with_rejections,
+            source_import_file_counts.rejected,
             source_import_file_counts.stale,
             semantic,
             daemon,
@@ -438,6 +446,10 @@ fn tool_status(data_root: &Path) -> Result<Value> {
             0,
             0,
             0,
+            0,
+            0,
+            0,
+            0,
             semantic_worker_report_configured_json(&config, &semantic_report),
             daemon,
         )
@@ -446,6 +458,10 @@ fn tool_status(data_root: &Path) -> Result<Value> {
     let pending_inventory_units =
         pending_catalog_sessions.saturating_add(pending_source_import_files);
     let failed_inventory_units = failed_catalog_sessions.saturating_add(failed_source_import_files);
+    let completed_with_rejections_inventory_units = completed_with_rejections_catalog_sessions
+        .saturating_add(completed_with_rejections_source_import_files);
+    let terminal_rejected_inventory_units =
+        terminal_rejected_catalog_sessions.saturating_add(terminal_rejected_source_import_files);
     let stale_inventory_units = stale_catalog_sessions.saturating_add(stale_source_import_files);
 
     Ok(json!({
@@ -461,16 +477,22 @@ fn tool_status(data_root: &Path) -> Result<Value> {
         "inventory_units": inventory_units,
         "pending_inventory_units": pending_inventory_units,
         "failed_inventory_units": failed_inventory_units,
+        "completed_with_rejections_inventory_units": completed_with_rejections_inventory_units,
+        "terminal_rejected_inventory_units": terminal_rejected_inventory_units,
         "stale_inventory_units": stale_inventory_units,
         "cataloged_sessions": cataloged_sessions,
         "indexed_catalog_sessions": indexed_catalog_sessions,
         "pending_catalog_sessions": pending_catalog_sessions,
         "failed_catalog_sessions": failed_catalog_sessions,
+        "completed_with_rejections_catalog_sessions": completed_with_rejections_catalog_sessions,
+        "terminal_rejected_catalog_sessions": terminal_rejected_catalog_sessions,
         "stale_catalog_sessions": stale_catalog_sessions,
         "source_import_files": source_import_files,
         "indexed_source_import_files": indexed_source_import_files,
         "pending_source_import_files": pending_source_import_files,
         "failed_source_import_files": failed_source_import_files,
+        "completed_with_rejections_source_import_files": completed_with_rejections_source_import_files,
+        "terminal_rejected_source_import_files": terminal_rejected_source_import_files,
         "stale_source_import_files": stale_source_import_files,
         "semantic": semantic,
         "daemon": daemon,

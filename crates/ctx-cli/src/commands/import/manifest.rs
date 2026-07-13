@@ -67,6 +67,7 @@ pub(crate) fn collect_source_import_files(source: &SourceInfo) -> Result<Vec<Sou
             source_path: path.display().to_string(),
             file_size_bytes: metadata.len(),
             file_modified_at_ms: system_time_ms(metadata.modified().unwrap_or(UNIX_EPOCH)),
+            import_revision: source.import_revision,
             observed_at_ms,
             metadata: json!({}),
         });

@@ -329,21 +329,33 @@ pub(crate) fn inventory_totals_json(
     let units = catalog_counts
         .total
         .saturating_add(source_import_file_counts.total);
+    let completed_with_rejections_units = catalog_counts
+        .completed_with_rejections
+        .saturating_add(source_import_file_counts.completed_with_rejections);
+    let terminal_rejected_units = catalog_counts
+        .rejected
+        .saturating_add(source_import_file_counts.rejected);
     json!({
         "sources": inventory.sources,
         "units": units,
+        "completed_with_rejections_units": completed_with_rejections_units,
+        "terminal_rejected_units": terminal_rejected_units,
         "source_files": inventory.source_files,
         "source_bytes": inventory.source_bytes,
         "source_import_files": inventory.source_import_files,
         "indexed_source_import_files": source_import_file_counts.indexed,
         "pending_source_import_files": source_import_file_counts.pending,
         "failed_source_import_files": source_import_file_counts.failed,
+        "completed_with_rejections_source_import_files": source_import_file_counts.completed_with_rejections,
+        "terminal_rejected_source_import_files": source_import_file_counts.rejected,
         "stale_source_import_files": source_import_file_counts.stale,
         "codex_catalog_sources": inventory.codex_catalog_sources,
         "codex_catalog_sessions": inventory.codex_catalog_sessions,
         "indexed_catalog_sessions": catalog_counts.indexed,
         "pending_catalog_sessions": catalog_counts.pending,
         "failed_catalog_sessions": catalog_counts.failed,
+        "completed_with_rejections_catalog_sessions": catalog_counts.completed_with_rejections,
+        "terminal_rejected_catalog_sessions": catalog_counts.rejected,
         "stale_catalog_sessions": catalog_counts.stale,
     })
 }

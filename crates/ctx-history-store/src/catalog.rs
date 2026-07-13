@@ -3,7 +3,8 @@ use rusqlite::{params, OptionalExtension};
 use serde_json::Value;
 
 use crate::connection::{
-    capped_i64, collect_rows, nonnegative_i64_to_u64, parse_json, parse_text_enum,
+    capped_i64, collect_rows, nonnegative_i64_to_u32, nonnegative_i64_to_u64, parse_json,
+    parse_text_enum,
 };
 use crate::{Result, Store, StoreError};
 
@@ -22,6 +23,7 @@ pub struct CatalogSession {
     pub session_started_at_ms: Option<i64>,
     pub file_size_bytes: u64,
     pub file_modified_at_ms: i64,
+    pub import_revision: u32,
     pub cataloged_at_ms: i64,
     pub metadata: Value,
 }
@@ -54,6 +56,7 @@ pub struct SourceImportFile {
     pub source_path: String,
     pub file_size_bytes: u64,
     pub file_modified_at_ms: i64,
+    pub import_revision: u32,
     pub observed_at_ms: i64,
     pub metadata: Value,
 }
@@ -74,6 +77,8 @@ pub struct CatalogCounts {
     pub stale: usize,
     pub pending: usize,
     pub failed: usize,
+    pub completed_with_rejections: usize,
+    pub rejected: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -83,6 +88,8 @@ pub struct SourceImportFileCounts {
     pub stale: usize,
     pub pending: usize,
     pub failed: usize,
+    pub completed_with_rejections: usize,
+    pub rejected: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -101,6 +108,8 @@ impl IndexedHistoryCounts {
 pub enum CatalogIndexedStatus {
     Pending,
     Indexed,
+    CompletedWithRejections,
+    Rejected,
     Failed,
 }
 
@@ -109,8 +118,14 @@ impl CatalogIndexedStatus {
         match self {
             Self::Pending => "pending",
             Self::Indexed => "indexed",
+            Self::CompletedWithRejections => "completed_with_rejections",
+            Self::Rejected => "rejected",
             Self::Failed => "failed",
         }
+    }
+
+    fn preserves_native_resume_checkpoint(self) -> bool {
+        self == Self::Indexed
     }
 }
 
@@ -140,9 +155,9 @@ impl Store {
                     source_path, provider, source_format, source_root,
                     external_session_id, parent_external_session_id, agent_type, role_hint,
                     external_agent_id, cwd, session_started_at_ms, file_size_bytes,
-                    file_modified_at_ms, cataloged_at_ms, is_stale, metadata_json
+                    file_modified_at_ms, import_revision, cataloged_at_ms, is_stale, metadata_json
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 0, ?15)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, 0, ?16)
                 ON CONFLICT(source_path) DO UPDATE SET
                     provider = excluded.provider,
                     source_format = excluded.source_format,
@@ -156,50 +171,93 @@ impl Store {
                     session_started_at_ms = excluded.session_started_at_ms,
                     file_size_bytes = excluded.file_size_bytes,
                     file_modified_at_ms = excluded.file_modified_at_ms,
+                    import_revision = excluded.import_revision,
                     cataloged_at_ms = excluded.cataloged_at_ms,
                     is_stale = 0,
                     indexed_at_ms = CASE
-                        WHEN catalog_sessions.file_size_bytes = excluded.file_size_bytes
+                        WHEN catalog_sessions.provider IS excluded.provider
+                         AND catalog_sessions.source_format IS excluded.source_format
+                         AND catalog_sessions.source_root IS excluded.source_root
+                         AND catalog_sessions.import_revision = excluded.import_revision
+                         AND catalog_sessions.file_size_bytes = excluded.file_size_bytes
                          AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
                         THEN catalog_sessions.indexed_at_ms
                         ELSE NULL
                     END,
                     indexed_file_size_bytes = CASE
-                        WHEN catalog_sessions.file_size_bytes = excluded.file_size_bytes
+                        WHEN catalog_sessions.provider IS excluded.provider
+                         AND catalog_sessions.source_format IS excluded.source_format
+                         AND catalog_sessions.source_root IS excluded.source_root
+                         AND catalog_sessions.import_revision = excluded.import_revision
+                         AND catalog_sessions.file_size_bytes = excluded.file_size_bytes
                          AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
                         THEN catalog_sessions.indexed_file_size_bytes
                         ELSE NULL
                     END,
                     indexed_file_modified_at_ms = CASE
-                        WHEN catalog_sessions.file_size_bytes = excluded.file_size_bytes
+                        WHEN catalog_sessions.provider IS excluded.provider
+                         AND catalog_sessions.source_format IS excluded.source_format
+                         AND catalog_sessions.source_root IS excluded.source_root
+                         AND catalog_sessions.import_revision = excluded.import_revision
+                         AND catalog_sessions.file_size_bytes = excluded.file_size_bytes
                          AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
                         THEN catalog_sessions.indexed_file_modified_at_ms
                         ELSE NULL
                     END,
                     indexed_status = CASE
-                        WHEN catalog_sessions.file_size_bytes = excluded.file_size_bytes
+                        WHEN catalog_sessions.provider IS excluded.provider
+                         AND catalog_sessions.source_format IS excluded.source_format
+                         AND catalog_sessions.source_root IS excluded.source_root
+                         AND catalog_sessions.import_revision = excluded.import_revision
+                         AND catalog_sessions.file_size_bytes = excluded.file_size_bytes
                          AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
                         THEN catalog_sessions.indexed_status
                         ELSE 'pending'
                     END,
                     indexed_error = CASE
-                        WHEN catalog_sessions.file_size_bytes = excluded.file_size_bytes
+                        WHEN catalog_sessions.provider IS excluded.provider
+                         AND catalog_sessions.source_format IS excluded.source_format
+                         AND catalog_sessions.source_root IS excluded.source_root
+                         AND catalog_sessions.import_revision = excluded.import_revision
+                         AND catalog_sessions.file_size_bytes = excluded.file_size_bytes
                          AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
                         THEN catalog_sessions.indexed_error
                         ELSE NULL
                     END,
                     indexed_event_count = CASE
-                        WHEN catalog_sessions.file_size_bytes = excluded.file_size_bytes
+                        WHEN catalog_sessions.provider IS excluded.provider
+                         AND catalog_sessions.source_format IS excluded.source_format
+                         AND catalog_sessions.source_root IS excluded.source_root
+                         AND catalog_sessions.import_revision = excluded.import_revision
+                         AND catalog_sessions.file_size_bytes = excluded.file_size_bytes
                          AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
                         THEN catalog_sessions.indexed_event_count
                         ELSE NULL
                     END,
+                    indexed_import_revision = CASE
+                        WHEN catalog_sessions.provider IS excluded.provider
+                         AND catalog_sessions.source_format IS excluded.source_format
+                         AND catalog_sessions.source_root IS excluded.source_root
+                         AND catalog_sessions.import_revision = excluded.import_revision
+                         AND catalog_sessions.file_size_bytes = excluded.file_size_bytes
+                         AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
+                        THEN catalog_sessions.indexed_import_revision
+                        ELSE NULL
+                    END,
                     last_imported_at_ms = CASE
-                        WHEN catalog_sessions.file_size_bytes = excluded.file_size_bytes
+                        WHEN catalog_sessions.provider IS excluded.provider
+                         AND catalog_sessions.source_format IS excluded.source_format
+                         AND catalog_sessions.source_root IS excluded.source_root
+                         AND catalog_sessions.import_revision = excluded.import_revision
+                         AND catalog_sessions.file_size_bytes = excluded.file_size_bytes
                          AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
                         THEN catalog_sessions.last_imported_at_ms
                         WHEN excluded.file_size_bytes > catalog_sessions.file_size_bytes
+                         AND catalog_sessions.provider IS excluded.provider
+                         AND catalog_sessions.source_format IS excluded.source_format
+                         AND catalog_sessions.source_root IS excluded.source_root
                          AND catalog_sessions.indexed_status = 'indexed'
+                         AND catalog_sessions.import_revision = excluded.import_revision
                          AND catalog_sessions.indexed_file_size_bytes = catalog_sessions.file_size_bytes
                          AND catalog_sessions.indexed_file_modified_at_ms = catalog_sessions.file_modified_at_ms
                          AND catalog_sessions.last_imported_file_size_bytes = catalog_sessions.file_size_bytes
@@ -207,11 +265,19 @@ impl Store {
                         ELSE NULL
                     END,
                     last_imported_file_size_bytes = CASE
-                        WHEN catalog_sessions.file_size_bytes = excluded.file_size_bytes
+                        WHEN catalog_sessions.provider IS excluded.provider
+                         AND catalog_sessions.source_format IS excluded.source_format
+                         AND catalog_sessions.source_root IS excluded.source_root
+                         AND catalog_sessions.import_revision = excluded.import_revision
+                         AND catalog_sessions.file_size_bytes = excluded.file_size_bytes
                          AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
                         THEN catalog_sessions.last_imported_file_size_bytes
                         WHEN excluded.file_size_bytes > catalog_sessions.file_size_bytes
+                         AND catalog_sessions.provider IS excluded.provider
+                         AND catalog_sessions.source_format IS excluded.source_format
+                         AND catalog_sessions.source_root IS excluded.source_root
                          AND catalog_sessions.indexed_status = 'indexed'
+                         AND catalog_sessions.import_revision = excluded.import_revision
                          AND catalog_sessions.indexed_file_size_bytes = catalog_sessions.file_size_bytes
                          AND catalog_sessions.indexed_file_modified_at_ms = catalog_sessions.file_modified_at_ms
                          AND catalog_sessions.last_imported_file_size_bytes = catalog_sessions.file_size_bytes
@@ -219,11 +285,19 @@ impl Store {
                         ELSE NULL
                     END,
                     last_imported_file_modified_at_ms = CASE
-                        WHEN catalog_sessions.file_size_bytes = excluded.file_size_bytes
+                        WHEN catalog_sessions.provider IS excluded.provider
+                         AND catalog_sessions.source_format IS excluded.source_format
+                         AND catalog_sessions.source_root IS excluded.source_root
+                         AND catalog_sessions.import_revision = excluded.import_revision
+                         AND catalog_sessions.file_size_bytes = excluded.file_size_bytes
                          AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
                         THEN catalog_sessions.last_imported_file_modified_at_ms
                         WHEN excluded.file_size_bytes > catalog_sessions.file_size_bytes
+                         AND catalog_sessions.provider IS excluded.provider
+                         AND catalog_sessions.source_format IS excluded.source_format
+                         AND catalog_sessions.source_root IS excluded.source_root
                          AND catalog_sessions.indexed_status = 'indexed'
+                         AND catalog_sessions.import_revision = excluded.import_revision
                          AND catalog_sessions.indexed_file_size_bytes = catalog_sessions.file_size_bytes
                          AND catalog_sessions.indexed_file_modified_at_ms = catalog_sessions.file_modified_at_ms
                          AND catalog_sessions.last_imported_file_size_bytes = catalog_sessions.file_size_bytes
@@ -231,11 +305,19 @@ impl Store {
                         ELSE NULL
                     END,
                     last_imported_file_sha256 = CASE
-                        WHEN catalog_sessions.file_size_bytes = excluded.file_size_bytes
+                        WHEN catalog_sessions.provider IS excluded.provider
+                         AND catalog_sessions.source_format IS excluded.source_format
+                         AND catalog_sessions.source_root IS excluded.source_root
+                         AND catalog_sessions.import_revision = excluded.import_revision
+                         AND catalog_sessions.file_size_bytes = excluded.file_size_bytes
                          AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
                         THEN catalog_sessions.last_imported_file_sha256
                         WHEN excluded.file_size_bytes > catalog_sessions.file_size_bytes
+                         AND catalog_sessions.provider IS excluded.provider
+                         AND catalog_sessions.source_format IS excluded.source_format
+                         AND catalog_sessions.source_root IS excluded.source_root
                          AND catalog_sessions.indexed_status = 'indexed'
+                         AND catalog_sessions.import_revision = excluded.import_revision
                          AND catalog_sessions.indexed_file_size_bytes = catalog_sessions.file_size_bytes
                          AND catalog_sessions.indexed_file_modified_at_ms = catalog_sessions.file_modified_at_ms
                          AND catalog_sessions.last_imported_file_size_bytes = catalog_sessions.file_size_bytes
@@ -243,11 +325,19 @@ impl Store {
                         ELSE NULL
                     END,
                     last_imported_event_count = CASE
-                        WHEN catalog_sessions.file_size_bytes = excluded.file_size_bytes
+                        WHEN catalog_sessions.provider IS excluded.provider
+                         AND catalog_sessions.source_format IS excluded.source_format
+                         AND catalog_sessions.source_root IS excluded.source_root
+                         AND catalog_sessions.import_revision = excluded.import_revision
+                         AND catalog_sessions.file_size_bytes = excluded.file_size_bytes
                          AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
                         THEN catalog_sessions.last_imported_event_count
                         WHEN excluded.file_size_bytes > catalog_sessions.file_size_bytes
+                         AND catalog_sessions.provider IS excluded.provider
+                         AND catalog_sessions.source_format IS excluded.source_format
+                         AND catalog_sessions.source_root IS excluded.source_root
                          AND catalog_sessions.indexed_status = 'indexed'
+                         AND catalog_sessions.import_revision = excluded.import_revision
                          AND catalog_sessions.indexed_file_size_bytes = catalog_sessions.file_size_bytes
                          AND catalog_sessions.indexed_file_modified_at_ms = catalog_sessions.file_modified_at_ms
                          AND catalog_sessions.last_imported_file_size_bytes = catalog_sessions.file_size_bytes
@@ -267,6 +357,7 @@ impl Store {
                    OR catalog_sessions.session_started_at_ms IS NOT excluded.session_started_at_ms
                    OR catalog_sessions.file_size_bytes != excluded.file_size_bytes
                    OR catalog_sessions.file_modified_at_ms != excluded.file_modified_at_ms
+                   OR catalog_sessions.import_revision != excluded.import_revision
                    OR catalog_sessions.is_stale != 0
                    OR catalog_sessions.metadata_json IS NOT excluded.metadata_json
                 "#,
@@ -286,6 +377,7 @@ impl Store {
                 session.session_started_at_ms,
                 capped_i64(session.file_size_bytes),
                 session.file_modified_at_ms,
+                i64::from(session.import_revision),
                 session.cataloged_at_ms,
                 serde_json::to_string(&session.metadata)?,
             ])?;
@@ -401,6 +493,21 @@ impl Store {
         provider: CaptureProvider,
         update: CatalogSourceIndexUpdate<'_>,
     ) -> Result<usize> {
+        self.record_catalog_source_import_result(
+            provider,
+            update,
+            CatalogIndexedStatus::Indexed,
+            None,
+        )
+    }
+
+    pub fn record_catalog_source_import_result(
+        &self,
+        provider: CaptureProvider,
+        update: CatalogSourceIndexUpdate<'_>,
+        status: CatalogIndexedStatus,
+        error: Option<&str>,
+    ) -> Result<usize> {
         let changed = self.conn.execute(
             r#"
                 UPDATE catalog_sessions
@@ -408,17 +515,20 @@ impl Store {
                     indexed_file_size_bytes = ?5,
                     indexed_file_modified_at_ms = ?6,
                     indexed_status = ?8,
-                    indexed_error = NULL,
+                    indexed_error = ?10,
                     indexed_event_count = ?7,
-                    last_imported_at_ms = ?4,
-                    last_imported_file_size_bytes = ?5,
-                    last_imported_file_modified_at_ms = ?6,
-                    last_imported_file_sha256 = ?9,
-                    last_imported_event_count = ?7
+                    indexed_import_revision = import_revision,
+                    last_imported_at_ms = CASE WHEN ?11 THEN ?4 ELSE last_imported_at_ms END,
+                    last_imported_file_size_bytes = CASE WHEN ?11 THEN ?5 ELSE last_imported_file_size_bytes END,
+                    last_imported_file_modified_at_ms = CASE WHEN ?11 THEN ?6 ELSE last_imported_file_modified_at_ms END,
+                    last_imported_file_sha256 = CASE WHEN ?11 THEN ?9 ELSE last_imported_file_sha256 END,
+                    last_imported_event_count = CASE WHEN ?11 THEN ?7 ELSE last_imported_event_count END
                 WHERE provider = ?1
                   AND source_root = ?2
                   AND source_path = ?3
                   AND is_stale = 0
+                  AND file_size_bytes = ?5
+                  AND file_modified_at_ms = ?6
                 "#,
             params![
                 provider.as_str(),
@@ -428,8 +538,10 @@ impl Store {
                 capped_i64(update.file_size_bytes),
                 update.file_modified_at_ms,
                 update.event_count.map(capped_i64),
-                CatalogIndexedStatus::Indexed.as_str(),
+                status.as_str(),
                 update.file_sha256,
+                error,
+                status.preserves_native_resume_checkpoint(),
             ],
         )?;
         Ok(changed)
@@ -447,11 +559,12 @@ impl Store {
             r#"
                 UPDATE catalog_sessions
                 SET indexed_at_ms = ?4,
-                    indexed_file_size_bytes = NULL,
-                    indexed_file_modified_at_ms = NULL,
+                    indexed_file_size_bytes = file_size_bytes,
+                    indexed_file_modified_at_ms = file_modified_at_ms,
                     indexed_status = ?6,
                     indexed_error = ?5,
-                    indexed_event_count = NULL
+                    indexed_event_count = NULL,
+                    indexed_import_revision = import_revision
                 WHERE provider = ?1
                   AND source_root = ?2
                   AND source_path = ?3
@@ -520,19 +633,21 @@ impl Store {
             r#"
                 INSERT INTO source_import_files (
                     provider, source_format, source_root, source_path,
-                    file_size_bytes, file_modified_at_ms, observed_at_ms, is_stale,
+                    file_size_bytes, file_modified_at_ms, import_revision, observed_at_ms, is_stale,
                     metadata_json
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8)
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9)
                 ON CONFLICT(provider, source_root, source_path) DO UPDATE SET
                     source_format = excluded.source_format,
                     file_size_bytes = excluded.file_size_bytes,
                     file_modified_at_ms = excluded.file_modified_at_ms,
+                    import_revision = excluded.import_revision,
                     observed_at_ms = excluded.observed_at_ms,
                     is_stale = 0,
                     indexed_at_ms = CASE
                         WHEN source_import_files.source_format IS excluded.source_format
                          AND source_import_files.file_size_bytes = excluded.file_size_bytes
                          AND source_import_files.file_modified_at_ms = excluded.file_modified_at_ms
+                         AND source_import_files.import_revision = excluded.import_revision
                          AND (json_extract(excluded.metadata_json, '$.inventory_unit') IS NOT 'source_root'
                               OR source_import_files.metadata_json IS excluded.metadata_json)
                         THEN source_import_files.indexed_at_ms
@@ -542,6 +657,7 @@ impl Store {
                         WHEN source_import_files.source_format IS excluded.source_format
                          AND source_import_files.file_size_bytes = excluded.file_size_bytes
                          AND source_import_files.file_modified_at_ms = excluded.file_modified_at_ms
+                         AND source_import_files.import_revision = excluded.import_revision
                          AND (json_extract(excluded.metadata_json, '$.inventory_unit') IS NOT 'source_root'
                               OR source_import_files.metadata_json IS excluded.metadata_json)
                         THEN source_import_files.indexed_file_size_bytes
@@ -551,6 +667,7 @@ impl Store {
                         WHEN source_import_files.source_format IS excluded.source_format
                          AND source_import_files.file_size_bytes = excluded.file_size_bytes
                          AND source_import_files.file_modified_at_ms = excluded.file_modified_at_ms
+                         AND source_import_files.import_revision = excluded.import_revision
                          AND (json_extract(excluded.metadata_json, '$.inventory_unit') IS NOT 'source_root'
                               OR source_import_files.metadata_json IS excluded.metadata_json)
                         THEN source_import_files.indexed_file_modified_at_ms
@@ -560,6 +677,7 @@ impl Store {
                         WHEN source_import_files.source_format IS excluded.source_format
                          AND source_import_files.file_size_bytes = excluded.file_size_bytes
                          AND source_import_files.file_modified_at_ms = excluded.file_modified_at_ms
+                         AND source_import_files.import_revision = excluded.import_revision
                          AND (json_extract(excluded.metadata_json, '$.inventory_unit') IS NOT 'source_root'
                               OR source_import_files.metadata_json IS excluded.metadata_json)
                         THEN source_import_files.indexed_status
@@ -569,15 +687,27 @@ impl Store {
                         WHEN source_import_files.source_format IS excluded.source_format
                          AND source_import_files.file_size_bytes = excluded.file_size_bytes
                          AND source_import_files.file_modified_at_ms = excluded.file_modified_at_ms
+                         AND source_import_files.import_revision = excluded.import_revision
                          AND (json_extract(excluded.metadata_json, '$.inventory_unit') IS NOT 'source_root'
                               OR source_import_files.metadata_json IS excluded.metadata_json)
                         THEN source_import_files.indexed_error
+                        ELSE NULL
+                    END,
+                    indexed_import_revision = CASE
+                        WHEN source_import_files.source_format IS excluded.source_format
+                         AND source_import_files.file_size_bytes = excluded.file_size_bytes
+                         AND source_import_files.file_modified_at_ms = excluded.file_modified_at_ms
+                         AND source_import_files.import_revision = excluded.import_revision
+                         AND (json_extract(excluded.metadata_json, '$.inventory_unit') IS NOT 'source_root'
+                              OR source_import_files.metadata_json IS excluded.metadata_json)
+                        THEN source_import_files.indexed_import_revision
                         ELSE NULL
                     END,
                     metadata_json = excluded.metadata_json
                 WHERE source_import_files.source_format IS NOT excluded.source_format
                    OR source_import_files.file_size_bytes != excluded.file_size_bytes
                    OR source_import_files.file_modified_at_ms != excluded.file_modified_at_ms
+                   OR source_import_files.import_revision != excluded.import_revision
                    OR source_import_files.is_stale != 0
                    OR source_import_files.metadata_json IS NOT excluded.metadata_json
                 "#,
@@ -590,6 +720,7 @@ impl Store {
                 file.source_path.as_str(),
                 capped_i64(file.file_size_bytes),
                 file.file_modified_at_ms,
+                i64::from(file.import_revision),
                 file.observed_at_ms,
                 serde_json::to_string(&file.metadata)?,
             ])?;
@@ -666,6 +797,16 @@ impl Store {
         provider: CaptureProvider,
         update: SourceImportFileIndexUpdate<'_>,
     ) -> Result<usize> {
+        self.record_source_import_file_result(provider, update, CatalogIndexedStatus::Indexed, None)
+    }
+
+    pub fn record_source_import_file_result(
+        &self,
+        provider: CaptureProvider,
+        update: SourceImportFileIndexUpdate<'_>,
+        status: CatalogIndexedStatus,
+        error: Option<&str>,
+    ) -> Result<usize> {
         let changed = self.conn.execute(
             r#"
                 UPDATE source_import_files
@@ -673,11 +814,14 @@ impl Store {
                     indexed_file_size_bytes = ?5,
                     indexed_file_modified_at_ms = ?6,
                     indexed_status = ?7,
-                    indexed_error = NULL
+                    indexed_error = ?8,
+                    indexed_import_revision = import_revision
                 WHERE provider = ?1
                   AND source_root = ?2
                   AND source_path = ?3
                   AND is_stale = 0
+                  AND file_size_bytes = ?5
+                  AND file_modified_at_ms = ?6
                 "#,
             params![
                 provider.as_str(),
@@ -686,7 +830,8 @@ impl Store {
                 update.indexed_at_ms,
                 capped_i64(update.file_size_bytes),
                 update.file_modified_at_ms,
-                CatalogIndexedStatus::Indexed.as_str(),
+                status.as_str(),
+                error,
             ],
         )?;
         Ok(changed)
@@ -704,10 +849,11 @@ impl Store {
             r#"
                 UPDATE source_import_files
                 SET indexed_at_ms = ?4,
-                    indexed_file_size_bytes = NULL,
-                    indexed_file_modified_at_ms = NULL,
+                    indexed_file_size_bytes = file_size_bytes,
+                    indexed_file_modified_at_ms = file_modified_at_ms,
                     indexed_status = ?6,
-                    indexed_error = ?5
+                    indexed_error = ?5,
+                    indexed_import_revision = import_revision
                 WHERE provider = ?1
                   AND source_root = ?2
                   AND source_path = ?3
@@ -766,12 +912,24 @@ impl Store {
                 [],
                 |row| row.get::<_, i64>(0),
             )? as usize;
+        let completed_with_rejections = self.conn.query_row(
+            "SELECT COUNT(*) FROM catalog_sessions WHERE is_stale = 0 AND indexed_status = 'completed_with_rejections'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )? as usize;
+        let rejected = self.conn.query_row(
+            "SELECT COUNT(*) FROM catalog_sessions WHERE is_stale = 0 AND indexed_status = 'rejected'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )? as usize;
         Ok(CatalogCounts {
             total,
             indexed,
             stale,
             pending,
             failed,
+            completed_with_rejections,
+            rejected,
         })
     }
 
@@ -786,9 +944,10 @@ impl Store {
             SELECT COUNT(*)
             FROM source_import_files
             WHERE is_stale = 0
-              AND indexed_status = 'indexed'
+              AND indexed_status IN ('indexed', 'completed_with_rejections')
               AND indexed_file_size_bytes = file_size_bytes
               AND indexed_file_modified_at_ms = file_modified_at_ms
+              AND indexed_import_revision = import_revision
             "#,
             [],
             |row| row.get::<_, i64>(0),
@@ -811,6 +970,16 @@ impl Store {
             "SELECT COUNT(*) FROM source_import_files WHERE is_stale = 0 AND indexed_status = 'failed'",
             [],
             |row| row.get::<_, i64>(0),
+            )? as usize;
+        let completed_with_rejections = self.conn.query_row(
+            "SELECT COUNT(*) FROM source_import_files WHERE is_stale = 0 AND indexed_status = 'completed_with_rejections'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )? as usize;
+        let rejected = self.conn.query_row(
+            "SELECT COUNT(*) FROM source_import_files WHERE is_stale = 0 AND indexed_status = 'rejected'",
+            [],
+            |row| row.get::<_, i64>(0),
         )? as usize;
         Ok(SourceImportFileCounts {
             total,
@@ -818,6 +987,8 @@ impl Store {
             stale,
             pending,
             failed,
+            completed_with_rejections,
+            rejected,
         })
     }
 
@@ -841,13 +1012,13 @@ impl Store {
 
 fn catalog_session_select_sql(tail: &str) -> String {
     format!(
-        "SELECT source_path, provider, source_format, source_root, external_session_id, parent_external_session_id, agent_type, role_hint, external_agent_id, cwd, session_started_at_ms, file_size_bytes, file_modified_at_ms, cataloged_at_ms, metadata_json FROM catalog_sessions {tail}"
+        "SELECT source_path, provider, source_format, source_root, external_session_id, parent_external_session_id, agent_type, role_hint, external_agent_id, cwd, session_started_at_ms, file_size_bytes, file_modified_at_ms, import_revision, cataloged_at_ms, metadata_json FROM catalog_sessions {tail}"
     )
 }
 
 fn source_import_file_select_sql(tail: &str) -> String {
     format!(
-        "SELECT provider, source_format, source_root, source_path, file_size_bytes, file_modified_at_ms, observed_at_ms, metadata_json FROM source_import_files {tail}"
+        "SELECT provider, source_format, source_root, source_path, file_size_bytes, file_modified_at_ms, import_revision, observed_at_ms, metadata_json FROM source_import_files {tail}"
     )
 }
 
@@ -859,8 +1030,9 @@ fn source_import_file_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sour
         source_path: row.get(3)?,
         file_size_bytes: nonnegative_i64_to_u64(row.get(4)?)?,
         file_modified_at_ms: row.get(5)?,
-        observed_at_ms: row.get(6)?,
-        metadata: parse_json(row.get::<_, String>(7)?)?,
+        import_revision: nonnegative_i64_to_u32(row.get(6)?)?,
+        observed_at_ms: row.get(7)?,
+        metadata: parse_json(row.get::<_, String>(8)?)?,
     })
 }
 
@@ -879,8 +1051,9 @@ fn catalog_session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Catalog
         session_started_at_ms: row.get(10)?,
         file_size_bytes: nonnegative_i64_to_u64(row.get(11)?)?,
         file_modified_at_ms: row.get(12)?,
-        cataloged_at_ms: row.get(13)?,
-        metadata: parse_json(row.get::<_, String>(14)?)?,
+        import_revision: nonnegative_i64_to_u32(row.get(13)?)?,
+        cataloged_at_ms: row.get(14)?,
+        metadata: parse_json(row.get::<_, String>(15)?)?,
     })
 }
 
@@ -888,12 +1061,16 @@ fn catalog_pending_import_condition_sql(alias: &str) -> String {
     format!(
         r#"
         (
-            {alias}.indexed_status != 'indexed'
+            {alias}.indexed_status IN ('pending', 'failed')
             OR {alias}.indexed_file_size_bytes IS NULL
             OR {alias}.indexed_file_modified_at_ms IS NULL
             OR {alias}.indexed_file_size_bytes != {alias}.file_size_bytes
             OR {alias}.indexed_file_modified_at_ms != {alias}.file_modified_at_ms
-            OR NOT EXISTS (
+            OR {alias}.indexed_import_revision IS NULL
+            OR {alias}.indexed_import_revision != {alias}.import_revision
+            OR (
+              {alias}.indexed_status IN ('indexed', 'completed_with_rejections')
+              AND NOT EXISTS (
                 SELECT 1
                 FROM sessions AS session
                 LEFT JOIN capture_sources AS source
@@ -906,6 +1083,7 @@ fn catalog_pending_import_condition_sql(alias: &str) -> String {
                       OR source.source_root = {alias}.source_root
                   )
                 LIMIT 1
+              )
             )
         )
         "#
@@ -916,11 +1094,13 @@ fn source_import_file_pending_condition_sql(alias: &str) -> String {
     format!(
         r#"
         (
-            {alias}.indexed_status != 'indexed'
+            {alias}.indexed_status IN ('pending', 'failed')
             OR {alias}.indexed_file_size_bytes IS NULL
             OR {alias}.indexed_file_modified_at_ms IS NULL
             OR {alias}.indexed_file_size_bytes != {alias}.file_size_bytes
             OR {alias}.indexed_file_modified_at_ms != {alias}.file_modified_at_ms
+            OR {alias}.indexed_import_revision IS NULL
+            OR {alias}.indexed_import_revision != {alias}.import_revision
         )
         "#
     )
@@ -931,9 +1111,10 @@ fn catalog_indexed_count_sql() -> String {
     SELECT COUNT(*)
     FROM catalog_sessions AS catalog
     WHERE catalog.is_stale = 0
-      AND catalog.indexed_status = 'indexed'
+      AND catalog.indexed_status IN ('indexed', 'completed_with_rejections')
       AND catalog.indexed_file_size_bytes = catalog.file_size_bytes
       AND catalog.indexed_file_modified_at_ms = catalog.file_modified_at_ms
+      AND catalog.indexed_import_revision = catalog.import_revision
       AND EXISTS (
         SELECT 1
         FROM sessions AS session
