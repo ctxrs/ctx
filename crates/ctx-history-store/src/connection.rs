@@ -2,7 +2,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     str::FromStr,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use chrono::{DateTime, Utc};
@@ -13,7 +13,10 @@ use crate::object_store::{
     migrate_legacy_history_layout, restrict_private_dir, restrict_private_file, OBJECTS_DIR,
     SPOOL_DIR,
 };
-use crate::{Result, Store, StoreError, SCHEMA_VERSION};
+use crate::{
+    IndexingAdmission, Result, Store, StoreError, WalCheckpointStatus, SCHEMA_VERSION,
+    WAL_PASSIVE_MIN_BYTES, WAL_RESTART_MIN_BYTES, WAL_TRUNCATE_MIN_BYTES,
+};
 
 pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_millis(30_000);
 
@@ -56,11 +59,38 @@ impl Store {
             conn,
             busy_timeout: BUSY_TIMEOUT,
             event_search_bulk_depth: Default::default(),
+            indexing_admission: None,
         })
     }
 
     pub fn open_with_busy_timeout(path: impl AsRef<Path>, busy_timeout: Duration) -> Result<Self> {
-        let path = path.as_ref().to_path_buf();
+        Self::open_inner(path.as_ref(), busy_timeout, None)
+    }
+
+    pub fn open_admitted(path: impl AsRef<Path>, admission: &IndexingAdmission) -> Result<Self> {
+        Self::open_admitted_with_busy_timeout(path, BUSY_TIMEOUT, admission)
+    }
+
+    pub fn open_admitted_with_busy_timeout(
+        path: impl AsRef<Path>,
+        busy_timeout: Duration,
+        admission: &IndexingAdmission,
+    ) -> Result<Self> {
+        let store = Self::open_inner(path.as_ref(), busy_timeout, Some(admission.clone()))?;
+        if store.event_search_maintenance_pending()? {
+            let started = Instant::now();
+            store.run_event_search_maintenance_slice()?;
+            store.yield_indexing_admission(started.elapsed())?;
+        }
+        Ok(store)
+    }
+
+    fn open_inner(
+        path: &Path,
+        busy_timeout: Duration,
+        indexing_admission: Option<IndexingAdmission>,
+    ) -> Result<Self> {
+        let path = path.to_path_buf();
         let mut migrated_legacy_layout = false;
         if let Some(parent) = path.parent() {
             migrated_legacy_layout = migrate_legacy_history_layout(parent)?;
@@ -86,9 +116,9 @@ impl Store {
             conn,
             busy_timeout,
             event_search_bulk_depth: Default::default(),
+            indexing_admission,
         };
         store.migrate()?;
-        store.recover_event_search_bulk_mode()?;
         if migrated_legacy_layout {
             store.normalize_legacy_blob_paths()?;
         }
@@ -136,6 +166,41 @@ impl Store {
         Ok(())
     }
 
+    pub fn checkpoint_wal_for_pressure(&self) -> Result<WalCheckpointStatus> {
+        let before_bytes = self.wal_bytes()?.unwrap_or(0);
+        if before_bytes < WAL_PASSIVE_MIN_BYTES {
+            return Ok(WalCheckpointStatus {
+                wal_bytes: before_bytes,
+                ..WalCheckpointStatus::default()
+            });
+        }
+
+        let passive = self.checkpoint_wal("PASSIVE")?;
+        let after_bytes = self.wal_bytes()?.unwrap_or(0);
+        let mut status = WalCheckpointStatus {
+            attempted: true,
+            busy: passive.busy,
+            log_frames: passive.log_frames,
+            checkpointed_frames: passive.checkpointed_frames,
+            wal_bytes: after_bytes,
+        };
+        if after_bytes < WAL_RESTART_MIN_BYTES || status.pinned() {
+            return Ok(status);
+        }
+
+        let mode = if after_bytes >= WAL_TRUNCATE_MIN_BYTES {
+            "TRUNCATE"
+        } else {
+            "RESTART"
+        };
+        let outcome = self.checkpoint_wal(mode)?;
+        status.busy = outcome.busy;
+        status.log_frames = outcome.log_frames;
+        status.checkpointed_frames = outcome.checkpointed_frames;
+        status.wal_bytes = self.wal_bytes()?.unwrap_or(0);
+        Ok(status)
+    }
+
     pub fn checkpoint_wal_passive_if_larger_than(&self, min_bytes: u64) -> Result<bool> {
         let Some(wal_bytes) = self.wal_bytes()? else {
             return Ok(false);
@@ -164,7 +229,11 @@ impl Store {
         PathBuf::from(path)
     }
 
-    fn wal_bytes(&self) -> Result<Option<u64>> {
+    pub fn wal_size_bytes(&self) -> Result<u64> {
+        Ok(self.wal_bytes()?.unwrap_or(0))
+    }
+
+    pub(crate) fn wal_bytes(&self) -> Result<Option<u64>> {
         match fs::metadata(self.wal_path()) {
             Ok(metadata) => Ok(Some(metadata.len())),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -175,6 +244,7 @@ impl Store {
     fn checkpoint_wal(&self, mode: &'static str) -> Result<WalCheckpointOutcome> {
         let sql = match mode {
             "PASSIVE" => "PRAGMA wal_checkpoint(PASSIVE)",
+            "RESTART" => "PRAGMA wal_checkpoint(RESTART)",
             "TRUNCATE" => "PRAGMA wal_checkpoint(TRUNCATE)",
             _ => unreachable!("unsupported WAL checkpoint mode"),
         };

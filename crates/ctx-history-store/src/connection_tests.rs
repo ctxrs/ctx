@@ -1,8 +1,14 @@
-use std::time::Duration;
+use std::{
+    env,
+    process::Command,
+    time::{Duration, Instant},
+};
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::{Store, StoreError};
+use crate::{IndexingAdmission, IndexingWorkClass, Store, StoreError};
+
+const ADMISSION_CRASH_DB_ENV: &str = "CTX_TEST_ADMISSION_CRASH_DB";
 
 fn tempdir() -> tempfile::TempDir {
     tempfile::Builder::new()
@@ -75,6 +81,63 @@ fn strict_truncating_checkpoint_reports_pinned_reader() {
 }
 
 #[test]
+fn pressure_checkpoint_returns_bounded_with_pinned_reader_and_preserves_snapshot() {
+    let temp = tempdir();
+    let db_path = temp.path().join("work.sqlite");
+    let store = Store::open_with_busy_timeout(&db_path, Duration::from_millis(10)).unwrap();
+    store
+        .conn
+        .execute_batch(
+            "CREATE TABLE pressure_probe(value BLOB);\
+             INSERT INTO pressure_probe VALUES (zeroblob(1));\
+             PRAGMA wal_checkpoint(TRUNCATE);",
+        )
+        .unwrap();
+
+    let reader = Connection::open(&db_path).unwrap();
+    reader.execute_batch("BEGIN").unwrap();
+    assert_eq!(
+        reader
+            .query_row("SELECT COUNT(*) FROM pressure_probe", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+
+    store
+        .conn
+        .execute(
+            "INSERT INTO pressure_probe VALUES (zeroblob(?1))",
+            params![9 * 1024 * 1024_i64],
+        )
+        .unwrap();
+    let started = Instant::now();
+    let status = store.checkpoint_wal_for_pressure().unwrap();
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(status.attempted);
+    assert!(status.pinned(), "{status:?}");
+    assert_eq!(
+        reader
+            .query_row("SELECT COUNT(*) FROM pressure_probe", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1,
+        "checkpoint must preserve the pinned snapshot"
+    );
+
+    reader.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(
+        store
+            .conn
+            .query_row("SELECT COUNT(*) FROM pressure_probe", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    assert_eq!(store.validate().unwrap(), Vec::<String>::new());
+}
+
+#[test]
 fn bulk_search_mode_recovers_on_reopen_and_restores_saved_config() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");
@@ -94,11 +157,80 @@ fn bulk_search_mode_recovers_on_reopen_and_restores_saved_config() {
     drop(guard);
 
     let reopened = Store::open(&db_path).unwrap();
+    assert_eq!(bulk_mode_marker(&reopened), Some(1));
+    while reopened.run_event_search_maintenance_slice().unwrap() {}
     assert_eq!(bulk_mode_marker(&reopened), None);
     for table in ["event_search", "event_search_scriptgram"] {
         assert_eq!(fts_config(&reopened, table, "automerge", 4), 8);
         assert_eq!(fts_config(&reopened, table, "crisismerge", 16), 32);
     }
+}
+
+#[test]
+fn admitted_crash_child_helper() {
+    let Some(db_path) = env::var_os(ADMISSION_CRASH_DB_ENV) else {
+        return;
+    };
+    let db_path = std::path::PathBuf::from(db_path);
+    let admission = IndexingAdmission::acquire(&db_path, IndexingWorkClass::Background).unwrap();
+    let store = Store::open_admitted(&db_path, &admission).unwrap();
+    let _guard = store.begin_event_search_bulk_mode().unwrap();
+    insert_bulk_search_events(&store, "admission-crash", 128, 64);
+    assert_eq!(bulk_mode_marker(&store), Some(1));
+
+    // Exit without destructors so the parent exercises OS lock cleanup and
+    // persisted FTS recovery state rather than an orderly guard drop.
+    std::process::exit(86);
+}
+
+#[test]
+fn admitted_reopen_recovers_crashed_owner_one_slice_at_a_time() {
+    let temp = tempdir();
+    let db_path = temp.path().join("work.sqlite");
+    let child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "connection_tests::admitted_crash_child_helper",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(ADMISSION_CRASH_DB_ENV, &db_path)
+        .status()
+        .unwrap();
+    assert_eq!(child.code(), Some(86));
+
+    let plain = Store::open(&db_path).unwrap();
+    assert_eq!(bulk_mode_marker(&plain), Some(1));
+    drop(plain);
+
+    let admission = IndexingAdmission::acquire(&db_path, IndexingWorkClass::Foreground).unwrap();
+    let mut reopened = Store::open_admitted(&db_path, &admission).unwrap();
+    assert_eq!(
+        bulk_mode_marker(&reopened),
+        Some(1),
+        "one admitted open must not drain all pending FTS maintenance"
+    );
+    for _ in 0..256 {
+        if bulk_mode_marker(&reopened).is_none() {
+            break;
+        }
+        drop(reopened);
+        reopened = Store::open_admitted(&db_path, &admission).unwrap();
+    }
+
+    assert_eq!(bulk_mode_marker(&reopened), None);
+    assert_eq!(
+        reopened
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM event_search WHERE event_search MATCH 'admission'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        128
+    );
+    assert_eq!(reopened.validate().unwrap(), Vec::<String>::new());
 }
 
 #[test]
@@ -110,8 +242,6 @@ fn bulk_search_recovery_without_marker_preserves_custom_config() {
         set_fts_config(&store, table, "automerge", 8);
         set_fts_config(&store, table, "crisismerge", 32);
     }
-
-    store.recover_event_search_bulk_mode().unwrap();
 
     assert_eq!(bulk_mode_marker(&store), None);
     for table in ["event_search", "event_search_scriptgram"] {
@@ -331,6 +461,8 @@ fn bulk_search_recovery_resumes_legacy_in_progress_full_merge() {
     drop(guard);
 
     let reopened = Store::open(&db_path).unwrap();
+    assert_eq!(bulk_mode_marker(&reopened), Some(1));
+    while reopened.run_event_search_maintenance_slice().unwrap() {}
     assert_eq!(bulk_mode_marker(&reopened), None);
     assert_eq!(
         reopened
@@ -421,8 +553,7 @@ fn interrupted_bounded_merge_resumes_after_reopen() {
         .unwrap();
     assert_eq!(visible, 20);
 
-    let error = store.finish_event_search_bulk_mode(&guard).unwrap_err();
-    assert!(matches!(error, StoreError::WalCheckpointBusy { .. }));
+    store.finish_event_search_bulk_mode(&guard).unwrap();
     assert_eq!(bulk_mode_marker(&store), Some(1));
     reader.execute_batch("ROLLBACK").unwrap();
     drop(reader);
@@ -430,6 +561,8 @@ fn interrupted_bounded_merge_resumes_after_reopen() {
     drop(guard);
 
     let reopened = Store::open(&db_path).unwrap();
+    assert_eq!(bulk_mode_marker(&reopened), Some(1));
+    while reopened.run_event_search_maintenance_slice().unwrap() {}
     assert_eq!(bulk_mode_marker(&reopened), None);
     let segments = reopened
         .conn

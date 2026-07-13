@@ -48,11 +48,12 @@ fn shared_semantic_embedder_runtime_status_json(
 
 #[cfg(ctx_semantic_fastembed)]
 fn embed_documents_with_shared_runtime(
+    store: &Store,
     shared: &Arc<Mutex<Option<SemanticEmbedder>>>,
     cache_dir: &Path,
     texts: Vec<String>,
     deadline: Option<Instant>,
-) -> Result<(Vec<Vec<f32>>, SemanticQuietPolicy)> {
+) -> Result<Vec<Vec<f32>>> {
     let mut guard = lock_shared_semantic_embedder(shared)?;
     let started = Instant::now();
     let first = guard
@@ -76,15 +77,11 @@ fn embed_documents_with_shared_runtime(
             retry
         }
     };
-    let quiet_policy = guard
-        .as_ref()
-        .ok_or_else(|| anyhow!("semantic embedder was not initialized"))?
-        .quiet_policy();
     drop(guard);
     let active = started.elapsed();
     let remaining = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
-    throttle_semantic_batch(active, quiet_policy, remaining);
-    Ok((embeddings, quiet_policy))
+    store.yield_indexing_admission_with_budget(active, remaining)?;
+    Ok(embeddings)
 }
 
 #[cfg(ctx_semantic_fastembed)]
@@ -1285,7 +1282,10 @@ fn semantic_bootstrap_should_run_first(
     {
         return Ok(false);
     }
-    let store = Store::open(&db_path).context("open ctx store for daemon semantic bootstrap")?;
+    let admission = IndexingAdmission::acquire(&db_path, IndexingWorkClass::Background)
+        .context("acquire indexing admission for daemon semantic bootstrap")?;
+    let store = Store::open_admitted(&db_path, &admission)
+        .context("open admitted ctx store for daemon semantic bootstrap")?;
     refresh_semantic_document_count_cache(&store)?;
     let report = semantic_worker_report(data_root, Some(&store))?;
     Ok(report.searchable_items > 0
@@ -1464,6 +1464,21 @@ fn search_refresh_source_fingerprint(sources: &[crate::provider_sources::SourceI
     semantic_text_hash(&items.join("\n"))
 }
 
+fn prepare_daemon_semantic_report(data_root: &Path, db_path: &Path) -> Result<SemanticWorkerReport> {
+    let admission = IndexingAdmission::acquire(db_path, IndexingWorkClass::Background)
+        .context("acquire indexing admission for daemon semantic job")?;
+    let store = Store::open_admitted(db_path, &admission)
+        .context("open admitted ctx store for daemon semantic job")?;
+    refresh_semantic_document_count_cache(&store)?;
+    let mut report = semantic_worker_report(data_root, Some(&store))?;
+    if semantic_report_should_queue_recent_work(&report)
+        && queue_recent_semantic_work(data_root, &store, "daemon_recent").unwrap_or(0) > 0
+    {
+        report = semantic_worker_report(data_root, Some(&store))?;
+    }
+    Ok(report)
+}
+
 fn run_daemon_semantic_job(
     args: &DaemonRunArgs,
     data_root: &Path,
@@ -1502,14 +1517,7 @@ fn run_daemon_semantic_job(
         ));
     }
 
-    let store = Store::open(&db_path).context("open ctx store for daemon semantic job")?;
-    refresh_semantic_document_count_cache(&store)?;
-    let mut before = semantic_worker_report(data_root, Some(&store))?;
-    if semantic_report_should_queue_recent_work(&before)
-        && queue_recent_semantic_work(data_root, &store, "daemon_recent").unwrap_or(0) > 0
-    {
-        before = semantic_worker_report(data_root, Some(&store))?;
-    }
+    let mut before = prepare_daemon_semantic_report(data_root, &db_path)?;
     if before.searchable_items == 0 {
         return Ok(daemon_semantic_job_json(
             "empty",
@@ -1551,14 +1559,14 @@ fn run_daemon_semantic_job(
                     embedding_runtime,
                     embed_policy,
                 );
-                before = semantic_worker_report(data_root, Some(&store))?;
+                before = prepare_daemon_semantic_report(data_root, &db_path)?;
             }
             Err(error) if error.downcast_ref::<SemanticModelLoadDeferred>().is_some() => {
                 let deferred = error
                     .downcast_ref::<SemanticModelLoadDeferred>()
                     .expect("matched semantic model load deferral");
                 let _ = write_semantic_model_load_deferred_status(data_root, deferred);
-                let report = semantic_worker_report(data_root, Some(&store))?;
+                let report = semantic_worker_report_for_daemon(data_root);
                 return Ok(daemon_semantic_model_load_deferred_job(
                     last_run_at_ms,
                     &report,
@@ -1599,8 +1607,6 @@ fn run_daemon_semantic_job(
             None,
         ));
     }
-    drop(store);
-
     let worker_max_seconds = daemon_semantic_worker_seconds_budget(args, deadline);
     if worker_max_seconds == 0 {
         let report = semantic_worker_report_for_daemon(data_root);
@@ -1948,7 +1954,11 @@ fn run_semantic_worker_inner_with_embedder(
             "semantic model is not available in the local cache; background indexing will not initialize or download {SEMANTIC_MODEL_ID}"
         ));
     }
-    let store = Store::open(&db_path).context("open ctx store for semantic worker")?;
+    let admission = IndexingAdmission::acquire(&db_path, IndexingWorkClass::Background)
+        .context("acquire indexing admission for semantic worker")?;
+    let prepare_started = Instant::now();
+    let store = Store::open_admitted(&db_path, &admission)
+        .context("open admitted ctx store for semantic worker")?;
     refresh_semantic_document_count_cache(&store)?;
     let vector_path = semantic_vector_path(data_root);
     let mut vector_store = SemanticVectorStore::open(&vector_path)?;
@@ -1989,6 +1999,7 @@ fn run_semantic_worker_inner_with_embedder(
             "last_error": null,
         }),
     )?;
+    store.yield_indexing_admission(prepare_started.elapsed())?;
     let max_chunks = semantic_worker_chunk_budget(&args);
     let max_seconds = semantic_worker_seconds_budget(&args);
     let started = Instant::now();

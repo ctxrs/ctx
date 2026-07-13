@@ -26,6 +26,7 @@ clap = { version = "4.5", features = ["derive", "env"] }
 clap_mangen = "0.2"
 directories = "5.0"
 ed25519-dalek = "2.1"
+fs2 = "0.4.3"
 libc = "0.2"
 predicates = "3.1"
 proptest = "1"

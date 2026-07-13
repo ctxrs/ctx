@@ -18,6 +18,7 @@ mod sources;
 mod summaries;
 mod sync;
 mod vcs;
+mod work_control;
 
 pub use archive::validate_archive_version;
 pub use bulk_search::EventSearchBulkGuard;
@@ -37,6 +38,12 @@ pub use raw_sql::{
     RAW_SQL_MAX_SQL_BYTES_CAP, RAW_SQL_MAX_TIMEOUT, RAW_SQL_MAX_VALUE_BYTES_CAP,
 };
 pub use search::projections::{EventEmbeddingDocument, EventSearchHit};
+pub use work_control::{
+    system_memory, IndexingAdmission, IndexingAdmissionStatus, IndexingPressure,
+    IndexingResourceSnapshot, IndexingSlice, IndexingWorkClass, WalCheckpointStatus,
+    INDEXING_TRANSACTION_MAX, INDEXING_WAL_DELTA_BYTES, WAL_PASSIVE_MIN_BYTES,
+    WAL_RESTART_MIN_BYTES, WAL_TRUNCATE_MIN_BYTES,
+};
 
 use std::{
     path::PathBuf,
@@ -54,6 +61,7 @@ pub struct Store {
     conn: Connection,
     busy_timeout: Duration,
     event_search_bulk_depth: Arc<AtomicUsize>,
+    indexing_admission: Option<IndexingAdmission>,
 }
 
 #[cfg(test)]

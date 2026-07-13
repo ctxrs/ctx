@@ -929,6 +929,25 @@ fn search_refresh_hermes_root_inventory_skips_unchanged_and_detects_wal_only_app
     ]));
     assert_eq!(unchanged["freshness"]["totals"]["imported_events"], 0);
 
+    let ctx_db = temp.path().join("work.sqlite");
+    let ctx_wal = temp.path().join("work.sqlite-wal");
+    let db_before = fs::read(&ctx_db).unwrap();
+    let wal_before = fs::read(&ctx_wal).ok();
+    for _ in 0..3 {
+        let noop = json_output(ctx(&temp).args([
+            "search",
+            initial,
+            "--provider",
+            "hermes",
+            "--refresh",
+            "wait",
+            "--json",
+        ]));
+        assert_eq!(noop["freshness"]["totals"]["imported_events"], 0);
+        assert_eq!(fs::read(&ctx_db).unwrap(), db_before);
+        assert_eq!(fs::read(&ctx_wal).ok(), wal_before);
+    }
+
     let main_before = fs::metadata(&source).unwrap();
     writer
         .execute(

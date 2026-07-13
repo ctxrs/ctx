@@ -535,6 +535,8 @@ version = "0.25.0"
 dependencies = [
  "chrono",
  "ctx-history-core",
+ "fs2",
+ "libc",
  "rusqlite",
  "serde_json",
  "sha2",

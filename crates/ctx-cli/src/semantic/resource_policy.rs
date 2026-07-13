@@ -111,43 +111,8 @@ fn semantic_quiet_policy(
                 _ => 128,
             },
             memory_budget_bytes,
-            active_percent: 50,
+            active_percent: 25,
         },
-    }
-}
-
-fn semantic_batch_rest(active: StdDuration, active_percent: u8) -> StdDuration {
-    if active.is_zero() || !(1..100).contains(&active_percent) {
-        return StdDuration::ZERO;
-    }
-    let active_nanos = active.as_nanos();
-    let total_nanos = active_nanos
-        .saturating_mul(100)
-        .checked_div(u128::from(active_percent))
-        .unwrap_or(active_nanos);
-    let rest_nanos = total_nanos.saturating_sub(active_nanos);
-    StdDuration::from_nanos(rest_nanos.min(u128::from(u64::MAX)) as u64)
-}
-
-fn semantic_limited_batch_rest(
-    active: StdDuration,
-    active_percent: u8,
-    remaining: Option<StdDuration>,
-) -> StdDuration {
-    let rest = semantic_batch_rest(active, active_percent);
-    remaining
-        .map(|remaining| rest.min(remaining))
-        .unwrap_or(rest)
-}
-
-fn throttle_semantic_batch(
-    active: StdDuration,
-    policy: SemanticQuietPolicy,
-    remaining: Option<StdDuration>,
-) {
-    let rest = semantic_limited_batch_rest(active, policy.active_percent, remaining);
-    if !rest.is_zero() {
-        std::thread::sleep(rest);
     }
 }
 
@@ -454,39 +419,7 @@ mod semantic_resource_policy_tests {
         assert_eq!(policy.threads, 1);
         assert_eq!(policy.batch_size, 64);
         assert_eq!(policy.memory_budget_bytes, 1_717_986_918);
-        assert_eq!(policy.active_percent, 50);
-    }
-
-    #[test]
-    fn batch_rest_enforces_target_fraction() {
-        assert_eq!(
-            semantic_batch_rest(StdDuration::from_millis(100), 25),
-            StdDuration::from_millis(300)
-        );
-        assert_eq!(
-            semantic_batch_rest(StdDuration::from_secs(3), 25),
-            StdDuration::from_secs(9)
-        );
-        assert_eq!(
-            semantic_batch_rest(StdDuration::ZERO, 25),
-            StdDuration::ZERO
-        );
-        assert_eq!(
-            semantic_limited_batch_rest(
-                StdDuration::from_secs(3),
-                25,
-                Some(StdDuration::from_secs(2)),
-            ),
-            StdDuration::from_secs(2),
-        );
-        assert_eq!(
-            semantic_limited_batch_rest(
-                StdDuration::from_secs(3),
-                25,
-                Some(StdDuration::ZERO),
-            ),
-            StdDuration::ZERO,
-        );
+        assert_eq!(policy.active_percent, 25);
     }
 
     #[test]

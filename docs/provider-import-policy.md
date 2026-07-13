@@ -24,9 +24,18 @@ an import successful. Source and provider cursor checkpoints advance only when
 the source run has zero rejections, so corrected records remain eligible for a
 later idempotent scan.
 
-Content transactions use the shared 64-unit/8 MiB bounds with required WAL
-checkpoints. Event-search merge suppression may span a whole source, including
-manifested per-file imports, but its final compaction remains bounded.
+Content transactions rotate at the shared 64-unit/8 MiB estimated-input bounds
+and also when measured WAL growth reaches 8 MiB or a transaction reaches its
+250 ms handoff boundary. Checkpoints are thresholded and preserve pinned reader
+snapshots; a busy checkpoint ends the current slice and is retried later rather
+than failing already-committed import work. Event-search merge suppression may
+span a whole source, including manifested per-file imports, but recovery and
+finalization advance one admitted positive-merge slice at a time.
+
+Routine setup, import, and refresh must not issue a negative FTS merge or
+optimize the corpus-wide search index. Full merge is explicit maintenance only.
+No-op refresh must return before source/history-record upserts and FTS
+projection writes.
 
 ## Default Import Shape
 

@@ -36,7 +36,9 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use ctx_history_core::{database_path, default_data_root, utc_now};
-use ctx_history_store::{EventEmbeddingDocument, Store};
+use ctx_history_store::{
+    EventEmbeddingDocument, IndexingAdmission, IndexingWorkClass, Store,
+};
 
 use crate::commands::{
     import::{error_summary, import_totals_json, ImportTotals},
