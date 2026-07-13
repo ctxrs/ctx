@@ -13,6 +13,15 @@ ONNXRUNTIME_NOTICES_URL="https://raw.githubusercontent.com/microsoft/onnxruntime
 ONNXRUNTIME_NOTICES_SHA256="0e07b95f3a8d6230037707c5c4a2b554d12c4cb67369669ac255635528ffcee2"
 ONNXRUNTIME_MAX_GLIBC="2.39"
 ONNXRUNTIME_DEPS_SHA256="e411468ead299e3386b2e5e9d773e50e1939b5fc0baca599666ca5757eeb3f71"
+WINDOWS_VC_RUNTIME_VERSION="14.44.35211.0"
+WINDOWS_VC_REDIST_URL="https://download.visualstudio.microsoft.com/download/pr/7ebf5fdb-36dc-4145-b0a0-90d3d5990a61/CC0FF0EB1DC3F5188AE6300FAEF32BF5BEEBA4BDD6E8E445A9184072096B713B/VC_redist.x64.exe"
+WINDOWS_VC_REDIST_SHA256="cc0ff0eb1dc3f5188ae6300faef32bf5beeba4bdd6e8e445a9184072096b713b"
+WINDOWS_VC_MINIMUM_CAB_SHA256="640aa6c516c72444523b8fbe034db46ff4e118ed02705340e3ccb62d426ff040"
+WINDOWS_VC_LICENSE_SHA256="8099dc3cf9502c335da829e5c755948a12e3e6de490eb492a99deb673d883d8b"
+WINDOWS_MSVC_RUNTIME_SHA256="0f885b509a685d2bbfa652fed26b5fb31d88fbdab0a978c641d1c7b8aa460aa9"
+WINDOWS_MSVC_RUNTIME_1_SHA256="bfad5aef4c63a669e3c140655cdfdf395b6c979b400a447bd5dcb65ed8826c3d"
+WINDOWS_VCRUNTIME_SHA256="d5e4d9a3e835fa679450145d6a7d94e36573a509317111904d9b3712c30d9066"
+WINDOWS_VCRUNTIME_1_SHA256="1f2d41c4aa5db0bc33ebf7b66d72943a817d7ce6cbe880502a9403823633093f"
 FREEBSD_PORTS_COMMIT="7c1f125705820cd2b776056f2c492ed605f3b5e3"
 FREEBSD_PORTS_PATCH_BASE_URL="https://cgit.freebsd.org/ports/plain/misc/onnxruntime/files"
 FREEBSD_SPIN_PAUSE_PATCH="patch-onnxruntime_core_common_spin__pause.cc"
@@ -54,6 +63,10 @@ Native FreeBSD build requirements:
   FreeBSD 14 x64 userland, CMake >= 3.28, Python 3, clang/clang++, GNU patch
   (gpatch), make, and network access to the checksum-declared source inputs.
   The OS/compiler/CMake versions are recorded, not supplied by environment.
+
+Windows sidecar build requirement:
+  cabextract, used to extract checksum-pinned app-local VC runtime files from
+  Microsoft's checksum-pinned redistributable bundle.
 USAGE
 }
 
@@ -382,6 +395,36 @@ stage_official_release() {
   download_verified "${ONNXRUNTIME_RELEASE_BASE_URL}/${upstream_asset}" \
     "${upstream_sha256}" "${archive}"
   extract_official_asset "${archive}" "${destination}"
+}
+
+stage_windows_vc_runtime() {
+  local destination="$1"
+  local cache_dir="$2"
+  local redist="${cache_dir}/vc-redist-x64-${WINDOWS_VC_RUNTIME_VERSION}.exe"
+  local outer="${work_dir}/vc-redist-outer"
+  local minimum="${work_dir}/vc-redist-minimum"
+
+  require_command cabextract
+  download_verified "${WINDOWS_VC_REDIST_URL}" "${WINDOWS_VC_REDIST_SHA256}" "${redist}"
+  rm -rf "${outer}" "${minimum}"
+  mkdir -p "${outer}" "${minimum}"
+  cabextract -q -d "${outer}" "${redist}"
+  verify_sha256 "${outer}/a12" "${WINDOWS_VC_MINIMUM_CAB_SHA256}"
+  verify_sha256 "${outer}/u4" "${WINDOWS_VC_LICENSE_SHA256}"
+  cabextract -q -d "${minimum}" "${outer}/a12"
+
+  verify_sha256 "${minimum}/msvcp140.dll_amd64" "${WINDOWS_MSVC_RUNTIME_SHA256}"
+  verify_sha256 "${minimum}/msvcp140_1.dll_amd64" "${WINDOWS_MSVC_RUNTIME_1_SHA256}"
+  verify_sha256 "${minimum}/vcruntime140.dll_amd64" "${WINDOWS_VCRUNTIME_SHA256}"
+  verify_sha256 "${minimum}/vcruntime140_1.dll_amd64" "${WINDOWS_VCRUNTIME_1_SHA256}"
+  cp "${minimum}/msvcp140.dll_amd64" "${destination}/lib/msvcp140.dll"
+  cp "${minimum}/msvcp140_1.dll_amd64" "${destination}/lib/msvcp140_1.dll"
+  cp "${minimum}/vcruntime140.dll_amd64" "${destination}/lib/vcruntime140.dll"
+  cp "${minimum}/vcruntime140_1.dll_amd64" "${destination}/lib/vcruntime140_1.dll"
+  cp "${outer}/u4" "${destination}/MICROSOFT_VC_RUNTIME_LICENSE.rtf"
+  chmod 755 "${destination}/lib/msvcp140.dll" "${destination}/lib/msvcp140_1.dll" \
+    "${destination}/lib/vcruntime140.dll" "${destination}/lib/vcruntime140_1.dll"
+  chmod 644 "${destination}/MICROSOFT_VC_RUNTIME_LICENSE.rtf"
 }
 
 stage_macos_x64_source_build() {
@@ -777,7 +820,16 @@ def info(name, mode):
 
 with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as bundle:
     bundle.writestr(info("lib/", 0o40755), b"")
-    for name in ("LICENSE", "ThirdPartyNotices.txt", "VERSION_NUMBER", "GIT_COMMIT_ID", f"lib/{library}"):
+    files = ["LICENSE", "ThirdPartyNotices.txt", "VERSION_NUMBER", "GIT_COMMIT_ID", f"lib/{library}"]
+    if library == "onnxruntime.dll":
+        files.extend([
+            "MICROSOFT_VC_RUNTIME_LICENSE.rtf",
+            "lib/msvcp140.dll",
+            "lib/msvcp140_1.dll",
+            "lib/vcruntime140.dll",
+            "lib/vcruntime140_1.dll",
+        ])
+    for name in files:
         path = os.path.join(source, *name.split("/"))
         mode = 0o100755 if name.startswith("lib/") else 0o100644
         with open(path, "rb") as handle:
@@ -815,6 +867,14 @@ expected_files = {
     "GIT_COMMIT_ID",
     f"lib/{library}",
 }
+if library == "onnxruntime.dll":
+    expected_files.update({
+        "MICROSOFT_VC_RUNTIME_LICENSE.rtf",
+        "lib/msvcp140.dll",
+        "lib/msvcp140_1.dll",
+        "lib/vcruntime140.dll",
+        "lib/vcruntime140_1.dll",
+    })
 expected_entries = expected_files | {"lib"}
 
 
@@ -1115,6 +1175,14 @@ validate_archive() {
 
   verify_sha256 "${validation_dir}/LICENSE" "${ONNXRUNTIME_LICENSE_SHA256}"
   verify_sha256 "${validation_dir}/ThirdPartyNotices.txt" "${ONNXRUNTIME_NOTICES_SHA256}"
+  if [[ "${platform}" == "windows-x64" ]]; then
+    verify_sha256 "${validation_dir}/MICROSOFT_VC_RUNTIME_LICENSE.rtf" \
+      "${WINDOWS_VC_LICENSE_SHA256}"
+    verify_sha256 "${validation_dir}/lib/msvcp140.dll" "${WINDOWS_MSVC_RUNTIME_SHA256}"
+    verify_sha256 "${validation_dir}/lib/msvcp140_1.dll" "${WINDOWS_MSVC_RUNTIME_1_SHA256}"
+    verify_sha256 "${validation_dir}/lib/vcruntime140.dll" "${WINDOWS_VCRUNTIME_SHA256}"
+    verify_sha256 "${validation_dir}/lib/vcruntime140_1.dll" "${WINDOWS_VCRUNTIME_1_SHA256}"
+  fi
   [[ "$(cat "${validation_dir}/VERSION_NUMBER")" == "${ONNXRUNTIME_VERSION}" ]] || \
     die "sidecar VERSION_NUMBER is not exactly ${ONNXRUNTIME_VERSION}"
   [[ "$(wc -c < "${validation_dir}/VERSION_NUMBER" | tr -d '[:space:]')" == "7" ]] || \
@@ -1183,6 +1251,9 @@ case "${platform}" in
     stage_freebsd_source_build "${stage_dir}" "${cache_dir}"
     ;;
 esac
+if [[ "${platform}" == "windows-x64" ]]; then
+  stage_windows_vc_runtime "${stage_dir}" "${cache_dir}"
+fi
 
 macos_signing_mode="${CTX_MACOS_RELEASE_SIGNING:-optional}"
 if [[ "${platform}" == macos-* && "${CTX_PUBLIC_CLI_ARTIFACT_MATRIX:-0}" == "1" ]]; then

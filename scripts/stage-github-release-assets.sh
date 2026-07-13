@@ -380,6 +380,35 @@ validate_authoritative_runtime_proof() {
       exit 1
     }
   fi
+  if [[ "${platform}" == "windows-x64" ]]; then
+    local runtime_dylib windows_runtime_lib dependency dependency_path normalized_path expected_path
+    runtime_dylib="$(sed -n 's/^runtime_dylib=//p' "${proof_path}")"
+    [[ -n "${runtime_dylib}" ]] || {
+      printf 'Windows runtime proof is missing runtime_dylib: %s\n' "${proof_path}" >&2
+      exit 1
+    }
+    normalized_path="${runtime_dylib//\\//}"
+    [[ "${normalized_path,,}" == */lib/onnxruntime.dll ]] || {
+      printf 'Windows runtime proof has an invalid runtime_dylib: %s\n' "${proof_path}" >&2
+      exit 1
+    }
+    windows_runtime_lib="${normalized_path%/*}"
+    for dependency in msvcp140 msvcp140_1 vcruntime140 vcruntime140_1; do
+      dependency_path="$(sed -n "s/^runtime_dependency_${dependency}=//p" "${proof_path}")"
+      [[ -n "${dependency_path}" ]] || {
+        printf 'Windows runtime proof is missing runtime_dependency_%s: %s\n' \
+          "${dependency}" "${proof_path}" >&2
+        exit 1
+      }
+      normalized_path="${dependency_path//\\//}"
+      expected_path="${windows_runtime_lib}/${dependency}.dll"
+      [[ "${normalized_path,,}" == "${expected_path,,}" ]] || {
+        printf 'Windows runtime proof has an invalid runtime_dependency_%s path: %s\n' \
+          "${dependency}" "${proof_path}" >&2
+        exit 1
+      }
+    done
+  fi
   grep -Fxq 'semantic_search=passed' "${proof_path}" || {
     printf 'runtime proof does not record semantic search success: %s\n' "${proof_path}" >&2
     exit 1

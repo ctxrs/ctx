@@ -16,6 +16,33 @@ function Fail([string]$Message) {
     throw "native candidate smoke: $Message"
 }
 
+function ConvertTo-NativeArgument([string]$Value) {
+    if ($Value.Length -gt 0 -and $Value -notmatch '[\s"]') {
+        return $Value
+    }
+
+    $quoted = New-Object System.Text.StringBuilder
+    [void]$quoted.Append('"')
+    $backslashes = 0
+    foreach ($character in $Value.ToCharArray()) {
+        if ($character -eq '\') {
+            $backslashes++
+            continue
+        }
+        if ($character -eq '"') {
+            [void]$quoted.Append(('\' * (($backslashes * 2) + 1)))
+            [void]$quoted.Append('"')
+        } else {
+            [void]$quoted.Append(('\' * $backslashes))
+            [void]$quoted.Append($character)
+        }
+        $backslashes = 0
+    }
+    [void]$quoted.Append(('\' * ($backslashes * 2)))
+    [void]$quoted.Append('"')
+    return $quoted.ToString()
+}
+
 $Binary = [System.IO.Path]::GetFullPath($Binary)
 $Fixture = [System.IO.Path]::GetFullPath($Fixture)
 $ResultPath = [System.IO.Path]::GetFullPath($ResultPath)
@@ -117,17 +144,22 @@ function Invoke-CtxRaw([string[]]$Arguments) {
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
     $start.CreateNoWindow = $true
-    if ([System.IO.Path]::GetExtension($Binary) -ieq ".cmd") {
+    $isCommandScript = [System.IO.Path]::GetExtension($Binary) -ieq ".cmd"
+    if ($isCommandScript) {
         $start.FileName = $env:ComSpec
-        [void]$start.ArgumentList.Add("/d")
-        [void]$start.ArgumentList.Add("/s")
-        [void]$start.ArgumentList.Add("/c")
-        [void]$start.ArgumentList.Add($Binary)
     } else {
         $start.FileName = $Binary
     }
-    foreach ($argument in $Arguments) {
-        [void]$start.ArgumentList.Add($argument)
+
+    if ($null -ne $start.PSObject.Properties["ArgumentList"] -and -not $isCommandScript) {
+        foreach ($argument in $Arguments) {
+            [void]$start.ArgumentList.Add($argument)
+        }
+    } elseif ($isCommandScript) {
+        $command = (@($Binary) + $Arguments | ForEach-Object { ConvertTo-NativeArgument $_ }) -join " "
+        $start.Arguments = "/d /s /c `"$command`""
+    } else {
+        $start.Arguments = ($Arguments | ForEach-Object { ConvertTo-NativeArgument $_ }) -join " "
     }
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $start
@@ -135,7 +167,15 @@ function Invoke-CtxRaw([string[]]$Arguments) {
     $stdout = $process.StandardOutput.ReadToEndAsync()
     $stderr = $process.StandardError.ReadToEndAsync()
     if (-not $process.WaitForExit($timeoutSeconds * 1000)) {
-        $process.Kill($true)
+        try {
+            $process.Kill($true)
+        } catch [System.Management.Automation.MethodException] {
+            $taskkill = Join-Path $env:SystemRoot "System32\taskkill.exe"
+            & $taskkill /PID $process.Id /T /F 2>&1 | Out-Null
+            if (-not $process.HasExited) {
+                $process.Kill()
+            }
+        }
         $process.WaitForExit()
         Fail ("ctx command exceeded {0} seconds: {1}" -f $timeoutSeconds, ($Arguments -join " "))
     }

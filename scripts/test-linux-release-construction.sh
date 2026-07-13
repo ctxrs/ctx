@@ -258,6 +258,70 @@ grep -Fq \
   'runtime proof contains duplicate field platform:' \
   "${tmp_dir}/duplicate-proof.err"
 
+missing_windows_dependency_matrix="${tmp_dir}/missing-windows-dependency-matrix"
+cp -R "${complete_runtime_matrix}" "${missing_windows_dependency_matrix}"
+write_synthetic_runtime_proof() {
+  local platform="$1"
+  local binary="$2"
+  local proof="$3"
+  local host_system="$4"
+  local host_arch="$5"
+  local runtime_asset="$6"
+  local native_arch_probe="$7"
+  local binary_sha runtime_sha
+
+  printf 'synthetic %s\n' "${platform}" > "${missing_windows_dependency_matrix}/${binary}"
+  binary_sha="$(sha256sum "${missing_windows_dependency_matrix}/${binary}" | awk '{ print $1 }')"
+  printf '%s\n' "${binary_sha}" > "${missing_windows_dependency_matrix}/${binary}.sha256"
+  runtime_sha="$(sha256sum \
+    "${missing_windows_dependency_matrix}/${runtime_asset}" | awk '{ print $1 }')"
+  printf '%s\n' "${runtime_sha}" > \
+    "${missing_windows_dependency_matrix}/${runtime_asset}.sha256"
+  cat > "${missing_windows_dependency_matrix}/${proof}" <<EOF
+runtime=onnxruntime
+embedding_backend=cpu
+platform=${platform}
+host_system=${host_system}
+host_arch=${host_arch}
+host_native_arch=${host_arch}
+process_translated=0
+native_arch_probe=${native_arch_probe}
+runtime_authority=authoritative
+artifact_sha256=${binary_sha}
+runtime_archive_sha256=${runtime_sha}
+semantic_search=passed
+EOF
+}
+write_synthetic_runtime_proof \
+  linux-x64 ctx ctx-linux-x64.native-runtime-proof.txt \
+  Linux x86_64 ctx-onnxruntime-linux-x64.tar.gz uname
+write_synthetic_runtime_proof \
+  linux-aarch64 ctx-linux-aarch64 ctx-linux-aarch64.native-runtime-proof.txt \
+  Linux aarch64 ctx-onnxruntime-linux-aarch64.tar.gz uname
+write_synthetic_runtime_proof \
+  macos-arm64 ctx-macos-arm64 ctx-macos-arm64.native-runtime-proof.txt \
+  Darwin arm64 ctx-onnxruntime-macos-arm64.tar.gz sysctl
+write_synthetic_runtime_proof \
+  macos-x64 ctx-macos-x64 ctx-macos-x64.native-runtime-proof.txt \
+  Darwin x86_64 ctx-onnxruntime-macos-x64.tar.gz sysctl
+write_synthetic_runtime_proof \
+  windows-x64 ctx.exe ctx-windows-x64.native-runtime-proof.txt \
+  Windows_NT AMD64 ctx-onnxruntime-windows-x64.zip iswow64process2
+cat >> \
+  "${missing_windows_dependency_matrix}/ctx-windows-x64.native-runtime-proof.txt" <<'EOF'
+runtime_dylib=C:\ctx-runtime\onnxruntime\1.27.0\windows-x64\lib\onnxruntime.dll
+EOF
+if scripts/stage-github-release-assets.sh \
+  "${missing_windows_dependency_matrix}" "${tmp_dir}/missing-windows-dependency-release" \
+  >"${tmp_dir}/missing-windows-dependency.out" \
+  2>"${tmp_dir}/missing-windows-dependency.err"; then
+  echo "release staging accepted Windows proof without app-local VC runtime evidence" >&2
+  exit 1
+fi
+grep -Fq \
+  'Windows runtime proof is missing runtime_dependency_msvcp140:' \
+  "${tmp_dir}/missing-windows-dependency.err"
+
 multiline_cross_output='cross 0.2.5
 rustup 1.28.2
 cargo 1.88.0'
@@ -329,5 +393,19 @@ grep -F 'timeout --signal=KILL 120s' scripts/build-public-cli-artifact.sh >/dev/
 grep -F 'x86_64-unknown-freebsd:0.2.5@sha256:' Cross.toml >/dev/null
 grep -F '[System.IO.File]::WriteAllText(' scripts/smoke-daemon-semantic-release.ps1 >/dev/null
 grep -F '($runtimeProofLines -join "`n") + "`n"' scripts/smoke-daemon-semantic-release.ps1 >/dev/null
+grep -F 'param([string[]]$CommandArgs)' scripts/smoke-daemon-semantic-release.ps1 >/dev/null
+grep -F '@CommandArgs' scripts/smoke-daemon-semantic-release.ps1 >/dev/null
+grep -F 'scripts/test-windows-semantic-smoke-contract.ps1' .buildkite/pipeline.yml >/dev/null
+grep -F 'scripts/test-windows-runtime-upgrade-extractor.ps1' .buildkite/pipeline.yml >/dev/null
+grep -F 'scripts/tests/run-native-candidate-smoke-test.ps1' .buildkite/pipeline.yml >/dev/null
+grep -F '//crates/ctx-cli:unit_tests' .buildkite/pipeline.yml >/dev/null
+grep -F 'apt-get is required to provision cabextract' .buildkite/pipeline.yml >/dev/null
+grep -F 'sudo is required to provision cabextract' .buildkite/pipeline.yml >/dev/null
+test -f scripts/test-windows-semantic-smoke-contract.ps1
+test -f scripts/test-windows-runtime-upgrade-extractor.ps1
+if grep -Fq 'param([string[]]$Args)' scripts/smoke-daemon-semantic-release.ps1; then
+  echo 'Windows semantic smoke reused the reserved PowerShell $Args variable' >&2
+  exit 1
+fi
 
 printf 'Linux release construction self-test passed\n'

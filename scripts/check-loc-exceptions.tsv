@@ -19,5 +19,5 @@ crates/ctx-cli/src/semantic/embedding_backend.rs	1361	source	unified ONNX and Co
 crates/ctx-cli/src/semantic/model_acquisition.rs	1424	source	model download, cache validation, and atomic installation remain together while distribution paths settle	2026-10-01
 crates/ctx-cli/src/semantic/model_bundle.rs	1445	source	model bundle manifests, validation, cache markers, and atomic publication remain together while the bundle format settles	2026-10-01
 crates/ctx-cli/src/semantic/tests.rs	2058	test	semantic readiness, indexing, and query tests share fixtures while the prerelease module boundaries settle	2026-10-01
-crates/ctx-cli/src/upgrade/install.rs	1706	source	managed upgrade installation includes transactional CLI and runtime sidecar handling; split after the runtime install boundary settles	2026-10-01
-scripts/build-onnxruntime-sidecar.sh	1227	source	pinned cross-platform ONNX Runtime construction, signing hooks, packaging, and validation remain one release helper while platform lanes settle	2026-10-01
+crates/ctx-cli/src/upgrade/install.rs	1717	source	managed upgrade installation includes transactional CLI and runtime sidecar handling; split after the runtime install boundary settles	2026-10-01
+scripts/build-onnxruntime-sidecar.sh	1298	source	pinned cross-platform ONNX Runtime construction, signing hooks, packaging, and validation remain one release helper while platform lanes settle	2026-10-01

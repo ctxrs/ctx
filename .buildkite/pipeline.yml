@@ -12,6 +12,7 @@ steps:
     key: "public-smoke"
     command: |
       bash scripts/buildkite-public-ci.sh -- test \
+        //crates/ctx-cli:unit_tests \
         //:buildkite_pipeline_check \
         //:cargo_check \
         //:cargo_fmt_check \
@@ -120,6 +121,22 @@ steps:
     key: "public-cli-windows-x64"
     if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1"
     command: |
+      if ! command -v cabextract >/dev/null 2>&1; then
+        command -v apt-get >/dev/null 2>&1 || {
+          echo "apt-get is required to provision cabextract on the managed release worker" >&2
+          exit 127
+        }
+        privilege=()
+        if [ "$(id -u)" -ne 0 ]; then
+          command -v sudo >/dev/null 2>&1 || {
+            echo "sudo is required to provision cabextract as a non-root worker" >&2
+            exit 127
+          }
+          privilege=(sudo)
+        fi
+        "${privilege[@]}" apt-get -o DPkg::Lock::Timeout=300 update
+        "${privilege[@]}" env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y --no-install-recommends cabextract
+      fi
       scripts/build-public-cli-artifact.sh windows-x64
       scripts/build-onnxruntime-sidecar.sh windows-x64
     agents:
@@ -352,6 +369,9 @@ steps:
     command: |
       buildkite-agent artifact download "target/public-cli-artifacts/ctx.exe*" . --step public-cli-windows-x64
       buildkite-agent artifact download "target/public-cli-artifacts/ctx-onnxruntime-windows-x64.zip*" . --step public-cli-windows-x64
+      powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows-semantic-smoke-contract.ps1
+      powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows-runtime-upgrade-extractor.ps1 -RuntimeArchive target/public-cli-artifacts/ctx-onnxruntime-windows-x64.zip
+      powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/tests/run-native-candidate-smoke-test.ps1
       powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/run-native-candidate-smoke.ps1 -Binary target/public-cli-artifacts/ctx.exe -Fixture tests/fixtures/custom-history-jsonl/basic.jsonl -ExpectedVersionFile target/public-cli-artifacts/ctx.exe.expected-version -ResultPath target/public-cli-native-smoke/windows-x64/candidate-smoke.json
       powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-daemon-semantic-release.ps1 -Ctx target/public-cli-artifacts/ctx.exe -RuntimeArchive target/public-cli-artifacts/ctx-onnxruntime-windows-x64.zip -RuntimePlatform windows-x64 -DataRoot target/public-cli-native-smoke/windows-x64 -ProofOutput target/public-cli-artifacts/ctx-windows-x64.native-runtime-proof.txt -RequireAuthoritative -KeepRoot
     agents:

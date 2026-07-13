@@ -87,6 +87,15 @@ fn load_semantic_onnxruntime(
         if !candidate.try_even_if_missing && !candidate.path.exists() {
             continue;
         }
+        #[cfg(target_os = "windows")]
+        if let Err(error) = preload_windows_onnxruntime(&candidate.path) {
+            failures.push(format!(
+                "{} {}: {error}",
+                candidate.source,
+                candidate.path.display()
+            ));
+            continue;
+        }
         match ort::init_from(&candidate.path) {
             Ok(builder) => {
                 let _ = builder.commit();
@@ -111,6 +120,27 @@ fn load_semantic_onnxruntime(
         )
     };
     Err(anyhow!(detail))
+}
+
+#[cfg(all(ctx_semantic_fastembed, target_os = "windows"))]
+fn preload_windows_onnxruntime(path: &Path) -> Result<()> {
+    use libloading::os::windows::{
+        Library as WindowsLibrary, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS,
+        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR,
+    };
+
+    static PRELOADED: std::sync::OnceLock<Mutex<Vec<(PathBuf, libloading::Library)>>> =
+        std::sync::OnceLock::new();
+    let libraries = PRELOADED.get_or_init(|| Mutex::new(Vec::new()));
+    let mut libraries = libraries.lock().unwrap_or_else(|error| error.into_inner());
+    if libraries.iter().any(|(loaded_path, _)| loaded_path == path) {
+        return Ok(());
+    }
+    let flags = LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS;
+    let library = unsafe { WindowsLibrary::load_with_flags(path, flags) }
+        .with_context(|| format!("load packaged ONNX Runtime {}", path.display()))?;
+    libraries.push((path.to_path_buf(), library.into()));
+    Ok(())
 }
 
 #[cfg(ctx_semantic_fastembed)]
@@ -491,5 +521,58 @@ mod ort_runtime_tests {
 
         assert!(semantic_onnxruntime_candidates(Path::new("model-cache"), &env).is_empty());
         assert!(semantic_onnxruntime_load_candidates(Path::new("model-cache"), &env).is_empty());
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn onnxruntime_invalid_shared_library_fails_without_deadlock() {
+        const CHILD_ENV: &str = "CTX_TEST_INVALID_ONNXRUNTIME_CHILD";
+        const TEST_NAME: &str =
+            "semantic::ort_runtime_tests::onnxruntime_invalid_shared_library_fails_without_deadlock";
+        let library = [
+            "/lib/x86_64-linux-gnu/libm.so.6",
+            "/usr/lib/x86_64-linux-gnu/libm.so.6",
+            "/lib64/libm.so.6",
+            "/usr/lib64/libm.so.6",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|path| path.is_file())
+        .expect("a loadable system library is required for the ORT loader regression test");
+
+        if env::var_os(CHILD_ENV).is_some() {
+            let error = load_semantic_onnxruntime(
+                &test_absolute_path("model-cache"),
+                &SemanticOnnxRuntimeEnv {
+                    ctx_dylib: Some(library),
+                    ..SemanticOnnxRuntimeEnv::default()
+                },
+            )
+            .expect_err("a non-ORT shared library must be rejected");
+            assert!(
+                format!("{error:#}").contains("OrtGetApiBase"),
+                "unexpected ORT loader error: {error:#}"
+            );
+            return;
+        }
+
+        let mut child = std::process::Command::new(env::current_exe().expect("current test binary"))
+            .args(["--exact", TEST_NAME, "--nocapture"])
+            .env(CHILD_ENV, "1")
+            .spawn()
+            .expect("spawn isolated ORT loader regression test");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Some(status) = child.try_wait().expect("poll ORT loader regression test") {
+                assert!(status.success(), "isolated ORT loader regression test failed");
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("ORT loader deadlocked while rejecting a non-ORT shared library");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
     }
 }

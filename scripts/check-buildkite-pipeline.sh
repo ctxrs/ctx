@@ -54,6 +54,7 @@ if command -v ruby >/dev/null 2>&1; then
     command = smoke["command"].to_s
     abort "public-smoke must run the Buildkite public CI script" unless command.include?("scripts/buildkite-public-ci.sh")
     abort "public-smoke must pass an explicit hosted-safe target list" unless command.include?("scripts/buildkite-public-ci.sh -- test") && command.include?("//:cargo_check")
+    abort "public-smoke must run ctx CLI unit regressions" unless command.include?("//crates/ctx-cli:unit_tests")
     required_keys = %w[
       public-cli-linux-x64
       public-cli-linux-aarch64
@@ -165,6 +166,9 @@ if command -v ruby >/dev/null 2>&1; then
     native_runtime_smoke = native_command.index("--runtime-archive target/public-cli-artifacts/ctx-onnxruntime-macos-x64.tar.gz")
     abort "macos-x64 native runtime smoke must follow signed final packaging" unless native_runtime_build && native_transcode && native_runtime_smoke && native_runtime_build < native_transcode && native_transcode < native_runtime_smoke
     abort "macos-x64 native lane must upload default smoke evidence" unless native_paths.include?("target/public-cli-native-smoke/macos-x64-native/candidate-smoke.json")
+    windows_native = steps.find { |candidate| candidate.is_a?(Hash) && candidate["key"] == "public-cli-windows-x64-native-smoke" }
+    windows_native_command = windows_native["command"].to_s
+    abort "windows-x64 native lane must run the PowerShell 5 candidate contract" unless windows_native_command.include?("scripts/tests/run-native-candidate-smoke-test.ps1")
     runtime_builds = {
       "public-cli-linux-x64" => "linux-x64",
       "public-cli-linux-aarch64" => "linux-aarch64",
@@ -205,6 +209,7 @@ for required in \
   'key: "public-smoke"' \
   'queue: "default"' \
   'bash scripts/buildkite-public-ci.sh -- test' \
+  '//crates/ctx-cli:unit_tests' \
   '//:cargo_check' \
   '//:linux_release_construction_tests' \
   '//:macos_release_signing_tests' \
