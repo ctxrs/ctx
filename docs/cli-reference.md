@@ -42,8 +42,9 @@ ctx daemon enable
 
 - `setup` creates the data root, opens or creates `work.sqlite`, discovers known
   provider history locations, inventories local history sources, imports
-  discovered native provider sources, optimizes the local search index, and
-  prints next steps. It does not write `config.toml` for implicit defaults and
+  discovered native provider sources, advances bounded search maintenance, and
+  prints next steps. Routine setup does not run a corpus-wide search optimize.
+  It does not write `config.toml` for implicit defaults and
   does not execute history-source plugin commands. When `[daemon].enabled` is
   true, setup may opportunistically start the ctx-owned background daemon after
   foreground setup work completes. Use `setup --no-daemon` for a one-run opt-out.
@@ -55,7 +56,8 @@ ctx daemon enable
   prints errors on failure.
 - `status` reports the ctx root, database path, config path, indexed item
   count, indexed source count, inventory counters, legacy Codex catalog
-  counters, semantic coverage, daemon enabled/coordinator state,
+  counters, coarse indexing admission/pressure state, pending FTS maintenance,
+  semantic coverage, daemon enabled/coordinator state,
   initialization state, local-only marker, and read-only marker. It does not
   initialize, migrate, or repair the store.
 - `status --quiet` performs the same local checks but prints nothing on

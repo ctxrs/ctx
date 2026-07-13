@@ -698,7 +698,7 @@ fn setup_inventories_whole_source_sqlite_providers() {
 }
 
 #[test]
-fn clean_multisource_setup_with_hermes_bounds_wal_through_final_optimization() {
+fn clean_multisource_setup_bounds_wal_without_full_fts_optimize() {
     let temp = tempdir();
     write_large_codex_setup_sessions(&temp, 40, 4, 4 * 1024);
     write_large_hermes_setup_db(&temp, 130, 8 * 1024);
@@ -744,26 +744,15 @@ fn clean_multisource_setup_with_hermes_bounds_wal_through_final_optimization() {
         "clean multi-source setup grew WAL to {} bytes",
         peak_wal_bytes.load(Ordering::Acquire)
     );
-    assert!(
-        fs::metadata(temp.path().join("work.sqlite-wal"))
-            .map(|metadata| metadata.len())
-            .unwrap_or(0)
-            <= 4 * 1024 * 1024,
-        "setup left a large final WAL"
-    );
-
     let conn = Connection::open(&db_path).unwrap();
     assert_eq!(
         conn.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
             .unwrap(),
         "ok"
     );
-    assert_eq!(
-        sqlite_count(
-            &conn,
-            "SELECT COUNT(*) FROM search_projection_stats WHERE key LIKE 'event_search_bulk_mode_v1%'"
-        ),
-        0
+    assert!(
+        sqlite_count(&conn, "SELECT COUNT(DISTINCT segid) FROM event_search_idx") > 1,
+        "routine setup must not collapse the shared FTS index with a negative full merge"
     );
     assert!(
         sqlite_count(

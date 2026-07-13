@@ -7,7 +7,7 @@ use anyhow::{bail, Result};
 use serde_json::{json, Value};
 
 use ctx_history_core::database_path;
-use ctx_history_store::Store;
+use ctx_history_store::{IndexingAdmission, IndexingWorkClass, Store};
 
 use crate::analytics::AnalyticsProperties;
 use crate::commands::import::{
@@ -32,7 +32,8 @@ pub(crate) fn run_setup(
 ) -> Result<()> {
     fs::create_dir_all(&data_root)?;
     let db_path = database_path(data_root.clone());
-    let store = Store::open(&db_path)?;
+    let admission = IndexingAdmission::acquire(&db_path, IndexingWorkClass::Background)?;
+    let store = Store::open_admitted(&db_path, &admission)?;
     let config_path = data_root.join(CONFIG_FILE);
     config::write_default_config(&data_root)?;
     let semantic_enabled = config.semantic_search_enabled();
@@ -82,6 +83,7 @@ pub(crate) fn run_setup(
             &import_args,
             data_root.clone(),
             analytics_properties,
+            &admission,
             ImportRunOptions {
                 progress: progress_arg,
                 json: args.json,
@@ -108,7 +110,7 @@ pub(crate) fn run_setup(
     let inventory_totals = setup_inventory_totals(import_report.as_ref(), inventory_only.as_ref());
     let catalog = setup_catalog_totals(import_report.as_ref(), inventory_only.as_ref());
     let catalog_sources = setup_catalog_sources(import_report.as_ref(), inventory_only.as_ref());
-    let setup_store = Store::open(&db_path)?;
+    let setup_store = Store::open_admitted(&db_path, &admission)?;
     let catalog_counts = setup_store.catalog_session_counts()?;
     let source_import_file_counts = setup_store.source_import_file_counts()?;
     let inventory_units = catalog_counts

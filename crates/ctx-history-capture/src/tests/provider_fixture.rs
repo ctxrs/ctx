@@ -139,7 +139,7 @@ fn provider_line_preflight_rejects_before_persisting_scaffolding() {
 }
 
 #[test]
-fn batched_provider_import_stops_on_pinned_wal_and_resumes_idempotently() {
+fn batched_provider_import_preserves_pinned_reader_and_replays_idempotently() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");
     let mut store =
@@ -184,17 +184,25 @@ fn batched_provider_import_stops_on_pinned_wal_and_resumes_idempotently() {
         .unwrap();
     assert_eq!(initial_events, 0);
 
-    let error = import_normalized_provider_captures_in_batches(
+    let imported = import_normalized_provider_captures_in_batches(
         &mut store,
         normalization.clone(),
         options.clone(),
         1,
     )
-    .unwrap_err();
-    assert!(error.to_string().contains("ctx index is busy"), "{error}");
+    .unwrap();
+    assert_eq!(imported.imported_events, 2);
+    assert_eq!(
+        reader
+            .query_row("SELECT COUNT(*) FROM events", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0,
+        "batch rotation must preserve the pinned reader snapshot"
+    );
     reader.execute_batch("ROLLBACK").unwrap();
 
-    assert_eq!(store.list_sessions().unwrap().len(), 1);
+    assert_eq!(store.list_sessions().unwrap().len(), 2);
     assert_eq!(
         store
             .search_event_hits("batched-import-sentinel-first", 10)
@@ -202,21 +210,6 @@ fn batched_provider_import_stops_on_pinned_wal_and_resumes_idempotently() {
             .len(),
         1
     );
-    assert!(store
-        .search_event_hits("batched-import-sentinel-second", 10)
-        .unwrap()
-        .is_empty());
-
-    let resumed = import_normalized_provider_captures_in_batches(
-        &mut store,
-        normalization.clone(),
-        options.clone(),
-        1,
-    )
-    .unwrap();
-    assert_eq!(resumed.failed, 0, "{:?}", resumed.failures);
-    assert_eq!(resumed.imported_events, 1);
-    assert_eq!(store.list_sessions().unwrap().len(), 2);
     assert_eq!(
         store
             .search_event_hits("batched-import-sentinel-second", 10)

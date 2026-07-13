@@ -38,21 +38,18 @@ pub(crate) fn inventory_import_sources(
     full_rescan: bool,
 ) -> Result<ImportInventory> {
     let mut inventory = ImportInventory::default();
-    for (index, source) in sources.into_iter().enumerate() {
+    for source in sources {
         inventory.totals.sources += 1;
         let failure_source = source.clone();
         let (plan, cataloged) = match inventory_import_source(store, source, full_rescan) {
             Ok(inventoried) => inventoried,
             Err(error) if import_error_scope(&error) == ImportFailureScope::Source => {
                 inventory.failures.push(ImportSourceFailure {
-                    index,
                     source: failure_source,
                     stats: SourceStats::default(),
                     error: error_summary(&error),
-                    failure_scope: ImportFailureScope::Source,
                     failure_type: import_failure_type(&error),
                     rejected_summary: None,
-                    system_error: None,
                 });
                 continue;
             }

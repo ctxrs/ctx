@@ -5,6 +5,7 @@ pub(crate) fn run_explicit_format_import(
     format: ImportFormatArg,
     db_path: PathBuf,
     mut store: Store,
+    admission: &IndexingAdmission,
     analytics_properties: &mut AnalyticsProperties,
     options: ImportRunOptions,
 ) -> Result<ImportReport> {
@@ -105,11 +106,9 @@ pub(crate) fn run_explicit_format_import(
         totals.add(&summary, &stats);
     }
     if totals.imported_sessions > 0 || totals.imported_events > 0 || totals.imported_edges > 0 {
-        progress.message("finalizing", "optimizing search index");
-        Store::open(&db_path)?.optimize_search_index()?;
+        progress.message("finalizing", "checkpointing search database");
+        Store::open_admitted(&db_path, admission)?.checkpoint_wal_for_pressure()?;
     }
-    progress.message("finalizing", "checkpointing search database");
-    Store::open(&db_path)?.checkpoint_wal_truncate_if_larger_than(WAL_TRUNCATE_MIN_BYTES)?;
     if options.print_human {
         progress.finish_line();
     }

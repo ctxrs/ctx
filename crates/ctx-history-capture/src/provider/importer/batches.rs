@@ -319,18 +319,29 @@ pub(crate) struct ProviderImportTransaction {
     batch_size: Option<NonZeroUsize>,
     units: usize,
     bytes: usize,
+    slice: Option<ctx_history_store::IndexingSlice>,
 }
 
 impl ProviderImportTransaction {
     fn begin(store: &Store, has_work: bool, batch_size: Option<NonZeroUsize>) -> Result<Self> {
-        if has_work {
+        let slice = if has_work {
             store.begin_immediate_batch()?;
-        }
+            match store.begin_indexing_slice() {
+                Ok(slice) => Some(slice),
+                Err(error) => {
+                    let _ = store.rollback_batch();
+                    return Err(error.into());
+                }
+            }
+        } else {
+            None
+        };
         Ok(Self {
             active: has_work,
             batch_size,
             units: 0,
             bytes: 0,
+            slice,
         })
     }
 
@@ -339,10 +350,17 @@ impl ProviderImportTransaction {
     }
 
     pub(crate) fn prepare_unit(&mut self, store: &Store, unit_bytes: usize) -> Result<()> {
+        let measured_rotation = self
+            .slice
+            .as_ref()
+            .map(|slice| store.indexing_slice_should_rotate(slice))
+            .transpose()?
+            .unwrap_or(false);
         let result = if self.active
-            && self.batch_size.is_some()
             && self.units > 0
-            && self.bytes.saturating_add(unit_bytes) > IMPORT_TRANSACTION_BATCH_BYTES
+            && (measured_rotation
+                || (self.batch_size.is_some()
+                    && self.bytes.saturating_add(unit_bytes) > IMPORT_TRANSACTION_BATCH_BYTES))
         {
             self.rotate(store)
         } else {
@@ -365,7 +383,13 @@ impl ProviderImportTransaction {
             .is_none_or(|batch_size| self.units < batch_size.get());
         let below_byte_limit =
             self.batch_size.is_none() || self.bytes < IMPORT_TRANSACTION_BATCH_BYTES;
-        if below_unit_limit && below_byte_limit {
+        let measured_rotation = self
+            .slice
+            .as_ref()
+            .map(|slice| store.indexing_slice_should_rotate(slice))
+            .transpose()?
+            .unwrap_or(false);
+        if below_unit_limit && below_byte_limit && !measured_rotation {
             return Ok(());
         }
         let result = self.rotate(store);
@@ -378,9 +402,12 @@ impl ProviderImportTransaction {
     fn rotate(&mut self, store: &Store) -> Result<()> {
         store.commit_batch()?;
         self.active = false;
-        store.checkpoint_wal_truncate_required()?;
+        if let Some(slice) = self.slice.take() {
+            store.finish_indexing_slice(slice)?;
+        }
         store.begin_immediate_batch()?;
         self.active = true;
+        self.slice = Some(store.begin_indexing_slice()?);
         self.units = 0;
         self.bytes = 0;
         Ok(())
@@ -388,7 +415,17 @@ impl ProviderImportTransaction {
 
     pub(crate) fn commit(&mut self, store: &Store) -> Result<()> {
         let result = if self.active {
-            store.commit_batch().map_err(CaptureError::from)
+            store
+                .commit_batch()
+                .map_err(CaptureError::from)
+                .and_then(|()| {
+                    self.slice
+                        .take()
+                        .map(|slice| store.finish_indexing_slice(slice))
+                        .transpose()
+                        .map_err(CaptureError::from)
+                        .map(|_| ())
+                })
         } else {
             Ok(())
         };
@@ -405,5 +442,6 @@ impl ProviderImportTransaction {
             let _ = store.rollback_batch();
             self.active = false;
         }
+        self.slice = None;
     }
 }

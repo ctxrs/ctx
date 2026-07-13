@@ -61,7 +61,6 @@ use search_filters::{
 use search_render::SearchDto;
 use transcript::{event_window, event_window_json, session_transcript_json, TranscriptMode};
 
-const WAL_TRUNCATE_MIN_BYTES: u64 = 64 * 1024 * 1024;
 const LARGE_IMPORT_SOURCE_FILES_WARNING: usize = 10_000;
 const LARGE_IMPORT_SOURCE_BYTES_WARNING: u64 = 1024 * 1024 * 1024;
 const MAX_SEARCH_LIMIT: usize = 200;

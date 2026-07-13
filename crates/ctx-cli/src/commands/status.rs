@@ -1,9 +1,14 @@
-use std::path::PathBuf;
+use std::{
+    ffi::OsString,
+    fs, io,
+    path::{Path, PathBuf},
+};
 
 use anyhow::Result;
 use serde_json::json;
 
 use ctx_history_core::database_path;
+use ctx_history_store::{IndexingAdmission, IndexingResourceSnapshot};
 
 use crate::config::{self, CONFIG_FILE};
 use crate::output::print_json;
@@ -25,6 +30,7 @@ pub(crate) fn run_status(args: JsonArgs, data_root: PathBuf, quiet: bool) -> Res
         sources,
         catalog_counts,
         source_import_file_counts,
+        fts_maintenance_pending,
         semantic,
         daemon,
     ) = if initialized {
@@ -39,6 +45,7 @@ pub(crate) fn run_status(args: JsonArgs, data_root: PathBuf, quiet: bool) -> Res
             store.capture_source_count()?,
             store.catalog_session_counts()?,
             store.source_import_file_counts()?,
+            store.event_search_maintenance_pending()?,
             semantic_worker_report_configured_json(&config, &semantic_report),
             daemon,
         )
@@ -52,6 +59,7 @@ pub(crate) fn run_status(args: JsonArgs, data_root: PathBuf, quiet: bool) -> Res
             0,
             Default::default(),
             Default::default(),
+            false,
             semantic_worker_report_configured_json(&config, &semantic_report),
             daemon,
         )
@@ -68,6 +76,18 @@ pub(crate) fn run_status(args: JsonArgs, data_root: PathBuf, quiet: bool) -> Res
     let stale_inventory_units = catalog_counts
         .stale
         .saturating_add(source_import_file_counts.stale);
+    let admission = IndexingAdmission::status(&db_path).ok();
+    let resource_snapshot = IndexingResourceSnapshot::current(
+        &db_path,
+        initialized.then(|| wal_size_bytes(&db_path)).flatten(),
+    );
+    let indexing = json!({
+        "writer_active": admission.map(|status| status.writer_active),
+        "foreground_pending": admission.map(|status| status.foreground_pending),
+        "pressure": resource_snapshot.pressure().as_str(),
+        "wal_band": resource_snapshot.wal_band(),
+        "fts_maintenance_pending": fts_maintenance_pending,
+    });
 
     if args.json {
         print_json(json!({
@@ -94,6 +114,7 @@ pub(crate) fn run_status(args: JsonArgs, data_root: PathBuf, quiet: bool) -> Res
             "pending_source_import_files": source_import_file_counts.pending,
             "failed_source_import_files": source_import_file_counts.failed,
             "stale_source_import_files": source_import_file_counts.stale,
+            "indexing": indexing,
             "semantic": semantic,
             "daemon": daemon,
             "local_only": true,
@@ -132,6 +153,24 @@ pub(crate) fn run_status(args: JsonArgs, data_root: PathBuf, quiet: bool) -> Res
             "stale_source_import_files: {}",
             source_import_file_counts.stale
         );
+        println!(
+            "indexing_writer_active: {}",
+            admission
+                .map(|status| status.writer_active.to_string())
+                .unwrap_or_else(|| "unknown".to_owned())
+        );
+        println!(
+            "indexing_foreground_pending: {}",
+            admission
+                .map(|status| status.foreground_pending.to_string())
+                .unwrap_or_else(|| "unknown".to_owned())
+        );
+        println!(
+            "indexing_pressure: {}",
+            resource_snapshot.pressure().as_str()
+        );
+        println!("indexing_wal_band: {}", resource_snapshot.wal_band());
+        println!("fts_maintenance_pending: {fts_maintenance_pending}");
         println!(
             "semantic_status: {}",
             semantic
@@ -175,4 +214,14 @@ pub(crate) fn run_status(args: JsonArgs, data_root: PathBuf, quiet: bool) -> Res
         println!("read_only: true");
     }
     Ok(())
+}
+
+fn wal_size_bytes(db_path: &Path) -> Option<u64> {
+    let mut path = OsString::from(db_path.as_os_str());
+    path.push("-wal");
+    match fs::metadata(PathBuf::from(path)) {
+        Ok(metadata) => Some(metadata.len()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Some(0),
+        Err(_) => None,
+    }
 }

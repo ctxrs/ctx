@@ -1,8 +1,6 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
-    thread,
     time::{Duration as StdDuration, Instant},
 };
 
@@ -11,18 +9,16 @@ use clap::ValueEnum;
 use serde_json::{json, Value};
 
 use ctx_history_capture::{
-    discover_provider_sources_for_provider, CaptureError, ProviderImportSummary,
-    ProviderSourceStatus,
+    discover_provider_sources_for_provider, ProviderImportSummary, ProviderSourceStatus,
 };
 use ctx_history_core::database_path;
-use ctx_history_store::Store;
+use ctx_history_store::{IndexingAdmission, IndexingWorkClass, Store};
 
 use crate::analytics::AnalyticsProperties;
 use crate::commands::import::{
     error_summary, import_error_scope, import_history_source_plugin,
     import_one_source_for_search_refresh, import_totals_json, inventory_import_sources,
-    one_line_error, rejected_source_summary, should_parallelize_import, ImportFailureScope,
-    ImportSourceOutcome, ImportTotals, SourceStats,
+    one_line_error, rejected_source_summary, ImportFailureScope, ImportTotals, SourceStats,
 };
 use crate::commands::setup::{
     indexed_history_item_count, insert_db_size_bucket, insert_store_analytics_counts,
@@ -31,7 +27,7 @@ use crate::history_source_plugins::{
     discover_history_source_plugins, HistorySourcePluginRefresh, HistorySourcePluginSource,
 };
 use crate::output::{compact_json, print_json};
-use crate::progress::{ProgressArg, ProgressReporter, SourceProgressSnapshot};
+use crate::progress::{ProgressArg, ProgressReporter};
 use crate::provider_args::ProviderArg;
 use crate::provider_sources::{discovered_sources, home_dir, SourceInfo};
 use crate::search_filters::{
@@ -43,7 +39,7 @@ use crate::search_render::{print_search_result_compact, print_search_result_verb
 use crate::semantic::search_packet_with_backend;
 use crate::store_util::open_existing_store_read_only;
 use crate::transcript::shell_quote_arg;
-use crate::{analytics, config, semantic, SearchArgs, SearchBackendArg, WAL_TRUNCATE_MIN_BYTES};
+use crate::{analytics, config, semantic, SearchArgs, SearchBackendArg};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum RefreshArg {
@@ -198,7 +194,8 @@ pub(crate) fn run_search(
     {
         open_existing_store_read_only(&db_path, "ctx search")?
     } else {
-        Store::open(&db_path)?
+        let admission = IndexingAdmission::acquire(&db_path, IndexingWorkClass::Foreground)?;
+        Store::open_admitted(&db_path, &admission)?
     };
     analytics::insert_bool(
         analytics_properties,
@@ -521,7 +518,12 @@ pub(crate) fn refresh_sources_for_search(
     fs::create_dir_all(data_root)?;
     config::write_default_config(data_root)?;
     let db_path = database_path(data_root.to_path_buf());
-    let store = Store::open(&db_path)?;
+    let work_class = match refresh {
+        RefreshArg::Background => IndexingWorkClass::Background,
+        RefreshArg::Wait | RefreshArg::Off => IndexingWorkClass::Foreground,
+    };
+    let admission = IndexingAdmission::acquire(&db_path, work_class)?;
+    let store = Store::open_admitted(&db_path, &admission)?;
     let had_indexed_content = store.indexed_history_item_count()? > 0;
     let inventory = inventory_import_sources(&store, sources, false)?;
     let planned_sources = inventory.sources;
@@ -554,127 +556,59 @@ pub(crate) fn refresh_sources_for_search(
             one_line_error(&failure.error)
         ));
     }
-    if should_parallelize_import(&planned_sources) {
-        let source_states = Arc::new(Mutex::new(
-            planned_sources
-                .iter()
-                .map(|plan| SourceProgressSnapshot {
-                    completed_bytes: 0,
-                    total_bytes: plan.stats.bytes,
-                })
-                .collect::<Vec<_>>(),
-        ));
-        let handles = planned_sources
-            .into_iter()
-            .enumerate()
-            .map(|(index, plan)| {
-                let db_path = db_path.clone();
-                let progress_callback = progress.parallel_codex_import_callback(
-                    &plan.source,
-                    index,
-                    Arc::clone(&source_states),
+    let mut store = Store::open_admitted(&db_path, &admission)?;
+    let mut completed_source_bytes = 0u64;
+    for plan in planned_sources {
+        progress.message(
+            "refreshing",
+            format!("importing {}", plan.source.provider.as_str()),
+        );
+        let source_progress = progress.codex_import_callback(&plan.source, completed_source_bytes);
+        completed_source_bytes = completed_source_bytes.saturating_add(plan.stats.bytes);
+        let import_result = import_one_source_for_search_refresh(
+            &mut store,
+            &plan.source,
+            source_progress,
+            &plan.preinventory,
+        );
+        match import_result {
+            Ok(summary) => {
+                warn_on_rejected_records(
+                    &progress,
+                    json_output,
+                    plan.source.provider.as_str(),
+                    &summary,
                 );
-                thread::spawn(move || -> Result<ImportSourceOutcome> {
-                    let mut store = Store::open(&db_path)?;
-                    let summary = import_one_source_for_search_refresh(
-                        &mut store,
-                        &plan.source,
-                        progress_callback,
-                        &plan.preinventory,
-                    )?;
-                    Ok(ImportSourceOutcome {
-                        index,
-                        source: plan.source,
-                        stats: plan.stats,
-                        summary,
-                    })
-                })
-            })
-            .collect::<Vec<_>>();
-
-        let mut outcomes = Vec::with_capacity(handles.len());
-        for handle in handles {
-            let result = handle
-                .join()
-                .map_err(|_| CaptureError::WorkerPanicked("provider import"))?;
-            match result {
-                Ok(outcome) => outcomes.push(outcome),
-                Err(err)
-                    if refresh == RefreshArg::Background
-                        && import_error_scope(&err) == ImportFailureScope::Source =>
-                {
-                    first_refresh_failure.get_or_insert_with(|| error_summary(&err));
-                    add_refresh_source_failure(&mut totals, &SourceStats::default(), &err);
-                }
-                Err(err) => return Err(err),
+                totals.add(&summary, &plan.stats);
+                progress.done(
+                    "refreshing",
+                    format!("refreshed {}", plan.source.provider.as_str()),
+                    completed_source_bytes,
+                );
             }
-        }
-        outcomes.sort_by_key(|outcome| outcome.index);
-        for outcome in outcomes {
-            warn_on_rejected_records(
-                &progress,
-                json_output,
-                outcome.source.provider.as_str(),
-                &outcome.summary,
-            );
-            totals.add(&outcome.summary, &outcome.stats);
-        }
-    } else {
-        let mut store = Store::open(&db_path)?;
-        let mut completed_source_bytes = 0u64;
-        for plan in planned_sources {
-            progress.message(
-                "refreshing",
-                format!("importing {}", plan.source.provider.as_str()),
-            );
-            let source_progress =
-                progress.codex_import_callback(&plan.source, completed_source_bytes);
-            completed_source_bytes = completed_source_bytes.saturating_add(plan.stats.bytes);
-            let import_result = import_one_source_for_search_refresh(
-                &mut store,
-                &plan.source,
-                source_progress,
-                &plan.preinventory,
-            );
-            match import_result {
-                Ok(summary) => {
-                    warn_on_rejected_records(
-                        &progress,
-                        json_output,
+            Err(err)
+                if refresh == RefreshArg::Background
+                    && import_error_scope(&err) == ImportFailureScope::Source =>
+            {
+                let error = error_summary(&err);
+                first_refresh_failure.get_or_insert_with(|| error.clone());
+                add_refresh_source_failure(&mut totals, &plan.stats, &err);
+                progress.done(
+                    "refreshing",
+                    format!(
+                        "skipped {}: {}",
                         plan.source.provider.as_str(),
-                        &summary,
-                    );
-                    totals.add(&summary, &plan.stats);
-                    progress.done(
-                        "refreshing",
-                        format!("refreshed {}", plan.source.provider.as_str()),
-                        completed_source_bytes,
-                    );
-                }
-                Err(err)
-                    if refresh == RefreshArg::Background
-                        && import_error_scope(&err) == ImportFailureScope::Source =>
-                {
-                    let error = error_summary(&err);
-                    first_refresh_failure.get_or_insert_with(|| error.clone());
-                    add_refresh_source_failure(&mut totals, &plan.stats, &err);
-                    progress.done(
-                        "refreshing",
-                        format!(
-                            "skipped {}: {}",
-                            plan.source.provider.as_str(),
-                            one_line_error(&error)
-                        ),
-                        completed_source_bytes,
-                    );
-                }
-                Err(err) => return Err(err),
+                        one_line_error(&error)
+                    ),
+                    completed_source_bytes,
+                );
             }
+            Err(err) => return Err(err),
         }
     }
 
     if !plugin_sources.is_empty() {
-        let mut store = Store::open(&db_path)?;
+        let mut store = Store::open_admitted(&db_path, &admission)?;
         for plugin_source in plugin_sources {
             progress.message(
                 "refreshing",
@@ -743,7 +677,9 @@ pub(crate) fn refresh_sources_for_search(
         return Err(anyhow!("all search refresh sources failed{detail}"));
     }
 
-    Store::open(&db_path)?.checkpoint_wal_truncate_if_larger_than(WAL_TRUNCATE_MIN_BYTES)?;
+    if totals.imported_sessions > 0 || totals.imported_events > 0 || totals.imported_edges > 0 {
+        Store::open_admitted(&db_path, &admission)?.checkpoint_wal_for_pressure()?;
+    }
     Ok(totals)
 }
 

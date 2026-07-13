@@ -81,10 +81,17 @@ Reads local storage state and returns:
 - `pending_source_import_files`;
 - `failed_source_import_files`;
 - `stale_source_import_files`;
+- `indexing`;
 - `semantic`;
 - `daemon`;
 - `local_only: true`;
 - `read_only: true`.
+
+`indexing` is content-free operational state. It includes nullable
+`writer_active` and `foreground_pending` lock observations, `pressure`
+(`normal`, `constrained`, or `unknown`), `wal_band` (`normal`, `checkpoint`,
+`restart`, `truncate`, or `unknown`), and `fts_maintenance_pending`. These are
+coarse diagnostics, not a tuning or progress API.
 
 `semantic` reports semantic sidecar and background-worker state. Fields listed
 as nullable may be omitted when unavailable:

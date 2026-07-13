@@ -126,7 +126,7 @@ impl Store {
         Ok(guard)
     }
 
-    /// Compact pending bulk segments in bounded steps, then restore saved settings.
+    /// Run one bounded positive-merge slice for pending bulk segments.
     ///
     /// Bulk finalization deliberately uses positive FTS5 merge commands. Starting
     /// a full merge with a negative command would assign every pre-existing
@@ -146,45 +146,25 @@ impl Store {
         if !bulk_mode_pending(self)? {
             return Ok(());
         }
-        loop {
-            if self.finish_event_search_bulk_mode_step()? {
-                return Ok(());
-            }
-        }
+        let _ = self.finish_event_search_bulk_mode_step()?;
+        Ok(())
     }
 
-    pub(crate) fn recover_event_search_bulk_mode(&self) -> Result<()> {
-        // Check and reassert under one writer lock. A guarded importer may
-        // restore settings and clear the marker while another connection is
-        // waiting for this transaction, so an earlier check would be stale.
-        self.begin_immediate_batch()?;
-        let result = (|| {
-            let pending = bulk_mode_pending(self)?;
-            if pending {
-                suppress_event_search_merges(self)?;
-            }
-            Ok(pending)
-        })();
-        let pending = match result {
-            Ok(pending) => pending,
-            Err(err) => {
-                let _ = self.rollback_batch();
-                return Err(err);
-            }
+    pub fn event_search_maintenance_pending(&self) -> Result<bool> {
+        bulk_mode_pending(self)
+    }
+
+    pub fn run_event_search_maintenance_slice(&self) -> Result<bool> {
+        if !bulk_mode_pending(self)? {
+            return Ok(false);
+        }
+        let Some(guard) = self.acquire_event_search_bulk_lock(self.busy_timeout)? else {
+            return Ok(true);
         };
-        if let Err(err) = self.commit_batch() {
-            let _ = self.rollback_batch();
-            return Err(err);
-        }
-        if !pending {
-            return Ok(());
-        }
-        // A live importer owns this lock. A stale marker has no owner, so the
-        // next writable open adopts and completes its bounded recovery.
-        if let Some(guard) = self.acquire_event_search_bulk_lock(Duration::ZERO)? {
+        if bulk_mode_pending(self)? {
             self.finish_event_search_bulk_mode(&guard)?;
         }
-        Ok(())
+        bulk_mode_pending(self)
     }
 
     pub(crate) fn merge_all_fts_tables_bounded(&self) -> Result<()> {
@@ -238,7 +218,7 @@ impl Store {
             let _ = self.rollback_batch();
             return Err(err);
         }
-        self.checkpoint_wal_truncate_required()?;
+        self.checkpoint_wal_for_pressure()?;
         Ok(changed)
     }
 
@@ -264,7 +244,7 @@ impl Store {
             let _ = self.rollback_batch();
             return Err(err);
         }
-        self.checkpoint_wal_truncate_required()?;
+        self.checkpoint_wal_for_pressure()?;
         if !quiescent {
             return Ok(false);
         }
@@ -298,7 +278,7 @@ impl Store {
             let _ = self.rollback_batch();
             return Err(err);
         }
-        self.checkpoint_wal_truncate_required()?;
+        self.checkpoint_wal_for_pressure()?;
         Ok(finished)
     }
 

@@ -55,13 +55,7 @@ pub(crate) fn import_one_source_for_search_refresh(
     progress: Option<CodexSessionImportProgressCallback>,
     preinventory: &SourcePreinventory,
 ) -> Result<ProviderImportSummary> {
-    if !source_uses_import_file_manifest(source)
-        && preinventory.source_root_file().is_some()
-        && store
-            .list_pending_source_import_files(source.provider, &source.path.display().to_string())?
-            .is_empty()
-    {
-        store.upsert_record(&import_record_for_source(source))?;
+    if !source_preinventory_has_pending_work(store, source, preinventory)? {
         if store.event_search_projection_needs_backfill()? {
             store.refresh_search_index()?;
         }
@@ -78,6 +72,12 @@ pub(crate) fn import_one_source_inner(
     full_rescan: bool,
     preinventory: &SourcePreinventory,
 ) -> Result<ProviderImportSummary> {
+    if !full_rescan
+        && !refresh_search_after_import
+        && !source_preinventory_has_pending_work(store, source, preinventory)?
+    {
+        return Ok(ProviderImportSummary::default());
+    }
     let bulk_guard = store.begin_event_search_bulk_mode()?;
     let import_result =
         import_one_source_inner_batched(store, source, progress, full_rescan, preinventory);
@@ -91,6 +91,23 @@ pub(crate) fn import_one_source_inner(
         store.refresh_search_index()?;
     }
     Ok(summary)
+}
+
+fn source_preinventory_has_pending_work(
+    store: &Store,
+    source: &SourceInfo,
+    preinventory: &SourcePreinventory,
+) -> Result<bool> {
+    let source_root = source.path.display().to_string();
+    match preinventory {
+        SourcePreinventory::CodexSessionCatalog(_) => Ok(!store
+            .list_pending_catalog_sessions(source.provider, &source_root)?
+            .is_empty()),
+        SourcePreinventory::SourceImportFiles(_) | SourcePreinventory::SourceRoot(_) => Ok(!store
+            .list_pending_source_import_files(source.provider, &source_root)?
+            .is_empty()),
+        SourcePreinventory::None => Ok(true),
+    }
 }
 
 fn import_one_source_inner_batched(

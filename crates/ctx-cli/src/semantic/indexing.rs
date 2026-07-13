@@ -30,6 +30,7 @@ fn backfill_semantic_embeddings(
             .collect::<Vec<_>>();
         scanned = scanned.saturating_add(docs.len());
         let outcome = index_semantic_documents(
+            store,
             vector_store,
             embedder,
             model_init_ms,
@@ -63,6 +64,7 @@ fn backfill_semantic_embeddings(
                 extend_existing_hashes_for_docs(vector_store, &mut existing_hashes, &docs)?;
                 scanned = scanned.saturating_add(docs.len());
                 let outcome = index_semantic_documents(
+                    store,
                     vector_store,
                     embedder,
                     model_init_ms,
@@ -108,6 +110,7 @@ fn backfill_semantic_embeddings(
         extend_existing_hashes_for_docs(vector_store, &mut existing_hashes, &docs)?;
         scanned = scanned.saturating_add(docs.len());
         let outcome = index_semantic_documents(
+            store,
             vector_store,
             embedder,
             model_init_ms,
@@ -178,6 +181,7 @@ fn extend_existing_hashes_for_docs(
 
 #[allow(clippy::too_many_arguments)]
 fn index_semantic_documents(
+    store: &Store,
     vector_store: &mut SemanticVectorStore,
     embedder: &Arc<Mutex<Option<SemanticEmbedder>>>,
     model_init_ms: &mut Option<u64>,
@@ -260,8 +264,13 @@ fn index_semantic_documents(
         if semantic_deadline_reached(deadline) {
             break;
         }
-        let (batch_embeddings, _) =
-            embed_documents_with_shared_runtime(embedder, cache_dir, batch.to_vec(), deadline)?;
+        let batch_embeddings = embed_documents_with_shared_runtime(
+            store,
+            embedder,
+            cache_dir,
+            batch.to_vec(),
+            deadline,
+        )?;
         embeddings.extend(batch_embeddings);
     }
     let complete_prefix = semantic_complete_embedding_prefix(&pending, embeddings.len());
