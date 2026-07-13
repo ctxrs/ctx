@@ -489,6 +489,7 @@ pub(crate) fn run_import_internal(
                             progress_callback,
                             full_rescan,
                             allow_partial_failures,
+                            None,
                             &plan.preinventory,
                         )
                         .with_context(|| {
@@ -626,6 +627,7 @@ pub(crate) fn run_import_internal(
                 source_progress,
                 args.resume,
                 args.partial,
+                args.runtime_user.as_deref(),
                 &plan.preinventory,
             ) {
                 Ok(summary) => {

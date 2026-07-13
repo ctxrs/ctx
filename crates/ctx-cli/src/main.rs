@@ -213,6 +213,12 @@ struct ImportArgs {
         help = "Allow valid rows in a source to commit when malformed rows are encountered"
     )]
     partial: bool,
+    #[arg(
+        long,
+        value_name = "UNIX_USER",
+        help = "Unix user whose environment produced this runtime history"
+    )]
+    runtime_user: Option<String>,
     #[arg(long, help = "Do not start daemon maintenance after import")]
     no_daemon: bool,
     #[arg(long)]

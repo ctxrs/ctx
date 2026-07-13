@@ -42,7 +42,7 @@ use std::{path::PathBuf, time::Duration};
 
 use rusqlite::Connection;
 
-pub(crate) const SCHEMA_VERSION: i64 = 47;
+pub(crate) const SCHEMA_VERSION: i64 = 48;
 
 pub struct Store {
     path: PathBuf,

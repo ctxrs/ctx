@@ -161,6 +161,16 @@ CREATE TABLE IF NOT EXISTS capture_sources (
     metadata_json TEXT NOT NULL DEFAULT '{}'
 );
 
+-- An event is canonicalized by its dedupe key, but may be observed through
+-- multiple provider sessions and capture sources (for example, the same
+-- runtime history imported from two Unix user environments).
+CREATE TABLE IF NOT EXISTS event_observations (
+    event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    capture_source_id TEXT NOT NULL REFERENCES capture_sources(id) ON DELETE CASCADE,
+    PRIMARY KEY (event_id, session_id, capture_source_id)
+);
+
 CREATE TABLE IF NOT EXISTS catalog_sessions (
     source_path TEXT PRIMARY KEY NOT NULL,
 

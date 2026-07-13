@@ -101,7 +101,16 @@ pub(crate) fn provider_event_import_identity(
     event_hash: &str,
     legacy_provider_event_index: Option<u64>,
     allow_legacy_provider_identity: bool,
+    prefer_provider_identity: bool,
 ) -> Result<ProviderEventImportIdentity> {
+    if prefer_provider_identity {
+        return Ok(provider_legacy_event_import_identity(
+            provider,
+            provider_session_id,
+            provider_event_index,
+            event_hash,
+        ));
+    }
     let source_identity = provider_source_event_import_identity_with_seq(
         source_id,
         provider_event_index,

@@ -45,6 +45,8 @@ CREATE INDEX IF NOT EXISTS idx_events_session_run_role_occurred_seq ON events(se
 CREATE INDEX IF NOT EXISTS idx_events_capture_source_id ON events(capture_source_id);
 CREATE INDEX IF NOT EXISTS idx_events_payload_blob_id ON events(payload_blob_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_events_dedupe_key ON events(dedupe_key) WHERE dedupe_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_event_observations_session_id ON event_observations(session_id);
+CREATE INDEX IF NOT EXISTS idx_event_observations_capture_source_id ON event_observations(capture_source_id);
 
 CREATE INDEX IF NOT EXISTS idx_vcs_workspaces_kind_repo_fingerprint ON vcs_workspaces(kind, repo_fingerprint);
 CREATE INDEX IF NOT EXISTS idx_vcs_workspaces_source_id ON vcs_workspaces(source_id);

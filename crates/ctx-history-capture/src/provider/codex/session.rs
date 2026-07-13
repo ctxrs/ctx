@@ -434,6 +434,7 @@ pub fn import_codex_session_jsonl(
         normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
+            runtime_user: options.runtime_user.clone(),
             allow_partial_failures: options.allow_partial_failures,
             persist_cursors: false,
             wrap_transaction: true,
@@ -467,6 +468,7 @@ pub fn import_codex_session_jsonl_tail(
     };
     let import_options = NormalizedProviderImportOptions {
         history_record_id: options.history_record_id,
+        runtime_user: options.runtime_user.clone(),
         allow_partial_failures: options.allow_partial_failures,
         persist_cursors: false,
         wrap_transaction: false,
@@ -529,8 +531,9 @@ pub fn import_codex_session_jsonl_tail(
 
         store.begin_immediate_batch()?;
         began_transaction = true;
-        let header_capture =
+        let mut header_capture =
             codex_session_capture(&header, None, line_number, header.timestamp, &context);
+        header_capture.source.runtime_user = options.runtime_user.clone();
         summary.merge(import_provider_capture_line(
             store,
             &header_capture,
@@ -638,10 +641,12 @@ pub fn import_codex_session_jsonl_tail(
                         context.imported_at,
                         raw_source_path.as_deref(),
                         source_root.as_deref(),
+                        options.runtime_user.as_deref(),
                     )?);
                 }
             }
-            for (_, file) in line_capture.files_touched {
+            for (_, mut file) in line_capture.files_touched {
+                file.runtime_user = options.runtime_user.clone();
                 import_provider_file_touched_line(store, &file, &import_options)?;
             }
             report_codex_import_progress(
@@ -828,6 +833,7 @@ pub(crate) fn import_codex_session_paths_parallel_normalized(
             store,
             NormalizedProviderImportOptions {
                 history_record_id: options.history_record_id,
+                runtime_user: options.runtime_user.clone(),
                 allow_partial_failures: options.allow_partial_failures,
                 persist_cursors: false,
                 wrap_transaction: false,

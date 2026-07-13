@@ -25,6 +25,7 @@ pub(crate) fn import_one_source(
     progress: Option<CodexSessionImportProgressCallback>,
     full_rescan: bool,
     allow_partial_failures: bool,
+    runtime_user: Option<&str>,
     preinventory: &SourcePreinventory,
 ) -> Result<ProviderImportSummary> {
     let event_search_needs_backfill = store.event_search_projection_needs_backfill()?;
@@ -37,6 +38,7 @@ pub(crate) fn import_one_source(
         refresh_search_after_import,
         full_rescan,
         allow_partial_failures,
+        runtime_user,
         preinventory,
     )
 }
@@ -47,6 +49,7 @@ pub(crate) fn import_one_source_without_search_refresh(
     progress: Option<CodexSessionImportProgressCallback>,
     full_rescan: bool,
     allow_partial_failures: bool,
+    runtime_user: Option<&str>,
     preinventory: &SourcePreinventory,
 ) -> Result<ProviderImportSummary> {
     import_one_source_inner(
@@ -56,6 +59,7 @@ pub(crate) fn import_one_source_without_search_refresh(
         false,
         full_rescan,
         allow_partial_failures,
+        runtime_user,
         preinventory,
     )
 }
@@ -65,6 +69,7 @@ pub(crate) fn import_one_source_for_search_refresh(
     source: &SourceInfo,
     progress: Option<CodexSessionImportProgressCallback>,
     allow_partial_failures: bool,
+    runtime_user: Option<&str>,
     preinventory: &SourcePreinventory,
 ) -> Result<ProviderImportSummary> {
     if !source_uses_import_file_manifest(source)
@@ -85,6 +90,7 @@ pub(crate) fn import_one_source_for_search_refresh(
         progress,
         false,
         allow_partial_failures,
+        runtime_user,
         preinventory,
     )
 }
@@ -96,8 +102,10 @@ pub(crate) fn import_one_source_inner(
     refresh_search_after_import: bool,
     full_rescan: bool,
     allow_partial_failures: bool,
+    runtime_user: Option<&str>,
     preinventory: &SourcePreinventory,
 ) -> Result<ProviderImportSummary> {
+    let full_rescan = full_rescan || runtime_user.is_some();
     let record = import_record_for_source(source);
     let record_id = record.id;
     store.upsert_record(&record)?;
@@ -122,6 +130,7 @@ pub(crate) fn import_one_source_inner(
                                 source_path: Some(source.path.clone()),
                                 history_record_id: Some(record_id),
                                 allow_partial_failures,
+                                runtime_user: runtime_user.map(str::to_owned),
                                 progress: progress.clone(),
                                 ..CodexSessionImportOptions::default()
                             },
@@ -150,6 +159,7 @@ pub(crate) fn import_one_source_inner(
                             source_path: Some(source.path.clone()),
                             history_record_id: Some(record_id),
                             allow_partial_failures,
+                            runtime_user: runtime_user.map(str::to_owned),
                             ..CodexHistoryImportOptions::default()
                         },
                     )
@@ -162,6 +172,7 @@ pub(crate) fn import_one_source_inner(
                             source_path: Some(source.path.clone()),
                             history_record_id: Some(record_id),
                             allow_partial_failures,
+                            runtime_user: runtime_user.map(str::to_owned),
                             progress,
                             ..CodexSessionImportOptions::default()
                         },
@@ -176,6 +187,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..PiSessionImportOptions::default()
                 },
             )
@@ -187,6 +199,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..ClaudeProjectsImportOptions::default()
                 },
             )
@@ -198,6 +211,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..ClineTaskJsonImportOptions::default()
                 },
             )
@@ -209,6 +223,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..RooTaskJsonImportOptions::default()
                 },
             )
@@ -220,6 +235,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..CodeBuddyImportOptions::default()
                 },
             )
@@ -231,6 +247,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..TraeImportOptions::default()
                 },
             )
@@ -242,6 +259,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..OpenCodeSqliteImportOptions::default()
                 },
             )
@@ -253,6 +271,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..KiloSqliteImportOptions::default()
                 },
             )
@@ -264,6 +283,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..MiMoCodeSqliteImportOptions::default()
                 },
             )
@@ -275,6 +295,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..KiroSqliteImportOptions::default()
                 },
             )
@@ -286,6 +307,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..ForgeCodeSqliteImportOptions::default()
                 },
             )
@@ -297,6 +319,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..DeepAgentsSqliteImportOptions::default()
                 },
             )
@@ -308,6 +331,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..CrushSqliteImportOptions::default()
                 },
             )
@@ -319,6 +343,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..GooseSessionsSqliteImportOptions::default()
                 },
             )
@@ -330,6 +355,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..OpenClawImportOptions::default()
                 },
             )
@@ -341,6 +367,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..HermesSqliteImportOptions::default()
                 },
             )
@@ -352,6 +379,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..NanoClawImportOptions::default()
                 },
             )
@@ -363,6 +391,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..AstrBotSqliteImportOptions::default()
                 },
             )
@@ -374,6 +403,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..ShelleySqliteImportOptions::default()
                 },
             )
@@ -385,6 +415,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..ContinueCliImportOptions::default()
                 },
             )
@@ -396,6 +427,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..OpenHandsImportOptions::default()
                 },
             )
@@ -407,6 +439,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..LingmaSqliteImportOptions::default()
                 },
             )
@@ -418,6 +451,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..QoderImportOptions::default()
                 },
             )
@@ -429,6 +463,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..WarpSqliteImportOptions::default()
                 },
             )
@@ -440,6 +475,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..GeminiCliImportOptions::default()
                 },
             )
@@ -451,6 +487,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..TabnineCliImportOptions::default()
                 },
             )
@@ -462,6 +499,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..CursorNativeImportOptions::default()
                 },
             )
@@ -473,6 +511,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..WindsurfCascadeHookImportOptions::default()
                 },
             )
@@ -484,6 +523,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..ZedThreadsSqliteImportOptions::default()
                 },
             )
@@ -495,6 +535,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..CopilotCliImportOptions::default()
                 },
             )
@@ -506,6 +547,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..FactoryAiDroidImportOptions::default()
                 },
             )
@@ -517,6 +559,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..QwenCodeImportOptions::default()
                 },
             )
@@ -528,6 +571,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..KimiCodeCliImportOptions::default()
                 },
             )
@@ -539,6 +583,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..AuggieImportOptions::default()
                 },
             )
@@ -550,6 +595,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..JunieImportOptions::default()
                 },
             )
@@ -561,6 +607,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..FirebenderSqliteImportOptions::default()
                 },
             )
@@ -572,6 +619,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..RovoDevImportOptions::default()
                 },
             )
@@ -583,6 +631,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..MistralVibeImportOptions::default()
                 },
             )
@@ -594,6 +643,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..MuxImportOptions::default()
                 },
             )
@@ -605,6 +655,7 @@ pub(crate) fn import_one_source_inner(
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
                     allow_partial_failures,
+                    runtime_user: runtime_user.map(str::to_owned),
                     ..AntigravityCliImportOptions::default()
                 },
             )
@@ -766,6 +817,7 @@ pub(crate) fn import_manifested_source(
             false,
             true,
             false,
+            None,
             &SourcePreinventory::None,
         );
         match imported {
@@ -808,6 +860,7 @@ pub(crate) fn import_manifested_source(
             false,
             true,
             allow_partial_failures,
+            None,
             &SourcePreinventory::None,
         );
         match imported {

@@ -34,6 +34,7 @@ impl Default for FixtureOptions {
 #[derive(Debug, Clone)]
 pub struct ProviderFixtureImportOptions {
     pub machine_id: String,
+    pub runtime_user: Option<String>,
     pub source_path: Option<PathBuf>,
     pub imported_at: DateTime<Utc>,
     pub history_record_id: Option<Uuid>,
@@ -47,6 +48,7 @@ impl Default for ProviderFixtureImportOptions {
     fn default() -> Self {
         Self {
             machine_id: default_machine_id(),
+            runtime_user: None,
             source_path: None,
             imported_at: utc_now(),
             history_record_id: None,
@@ -64,6 +66,7 @@ macro_rules! import_options {
             #[derive(Debug, Clone)]
             pub struct $name {
                 pub machine_id: String,
+                pub runtime_user: Option<String>,
                 pub source_path: Option<PathBuf>,
                 pub imported_at: DateTime<Utc>,
                 pub history_record_id: Option<Uuid>,
@@ -74,6 +77,7 @@ macro_rules! import_options {
                 fn default() -> Self {
                     Self {
                         machine_id: default_machine_id(),
+                        runtime_user: None,
                         source_path: None,
                         imported_at: utc_now(),
                         history_record_id: None,
@@ -134,6 +138,7 @@ pub type TabnineCliImportOptions = GeminiCliImportOptions;
 #[derive(Clone)]
 pub struct CodexSessionImportOptions {
     pub machine_id: String,
+    pub runtime_user: Option<String>,
     pub source_path: Option<PathBuf>,
     pub imported_at: DateTime<Utc>,
     pub history_record_id: Option<Uuid>,
@@ -148,6 +153,7 @@ impl Default for CodexSessionImportOptions {
     fn default() -> Self {
         Self {
             machine_id: default_machine_id(),
+            runtime_user: None,
             source_path: None,
             imported_at: utc_now(),
             history_record_id: None,
@@ -164,6 +170,7 @@ impl std::fmt::Debug for CodexSessionImportOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CodexSessionImportOptions")
             .field("machine_id", &self.machine_id)
+            .field("runtime_user", &self.runtime_user)
             .field("source_path", &self.source_path)
             .field("imported_at", &self.imported_at)
             .field("history_record_id", &self.history_record_id)

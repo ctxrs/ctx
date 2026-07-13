@@ -25,7 +25,8 @@ use crate::common::io::{
 };
 use crate::provider::importer::{
     import_provider_capture_line, import_provider_file_touched_line, provider_scoped_source_uuid,
-    provider_sync_metadata, resolve_pending_provider_edges, ProviderImportCaches,
+    provider_source_identity_for_runtime_user, provider_sync_metadata,
+    resolve_pending_provider_edges, ProviderImportCaches,
 };
 use crate::{
     CodexSessionImportOptions, CodexSessionImportProgress, NormalizedProviderImportOptions,
@@ -234,6 +235,7 @@ pub(crate) fn import_codex_session_path_fast(
     };
     let import_options = NormalizedProviderImportOptions {
         history_record_id: options.history_record_id,
+        runtime_user: options.runtime_user.clone(),
         allow_partial_failures: options.allow_partial_failures,
         persist_cursors: false,
         wrap_transaction: false,
@@ -298,13 +300,14 @@ pub(crate) fn import_codex_session_path_fast(
         if entry_type == "session_meta" {
             match codex_session_header(value) {
                 Ok(parsed) => {
-                    let capture = codex_session_capture(
+                    let mut capture = codex_session_capture(
                         &parsed,
                         None,
                         line_number,
                         parsed.timestamp,
                         &context,
                     );
+                    capture.source.runtime_user = options.runtime_user.clone();
                     let line_summary = import_provider_capture_line(
                         store,
                         &capture,
@@ -384,11 +387,13 @@ pub(crate) fn import_codex_session_path_fast(
                     context.imported_at,
                     raw_source_path.as_deref(),
                     source_root.as_deref(),
+                    options.runtime_user.as_deref(),
                 )?;
                 summary.merge(line_summary);
             }
         }
-        for (_, file) in line_capture.files_touched {
+        for (_, mut file) in line_capture.files_touched {
+            file.runtime_user = options.runtime_user.clone();
             import_provider_file_touched_line(store, &file, &import_options)?;
         }
     }
@@ -409,6 +414,7 @@ pub(crate) fn import_codex_provider_event_fast(
     imported_at: DateTime<Utc>,
     raw_source_path: Option<&str>,
     source_root: Option<&str>,
+    runtime_user: Option<&str>,
 ) -> Result<ProviderImportSummary> {
     let mut summary = ProviderImportSummary::default();
     let provider = CaptureProvider::Codex;
@@ -417,16 +423,19 @@ pub(crate) fn import_codex_provider_event_fast(
         &header.id,
         CODEX_SESSION_SOURCE_FORMAT,
         raw_source_path,
-        None,
+        runtime_user,
     );
     let source_root = provider_source_root(source_root, raw_source_path);
-    let source_identity = provider_source_identity(
-        provider,
-        CODEX_SESSION_SOURCE_FORMAT,
-        source_root.as_deref(),
-        raw_source_path,
-        None,
-        &Value::Null,
+    let source_identity = provider_source_identity_for_runtime_user(
+        provider_source_identity(
+            provider,
+            CODEX_SESSION_SOURCE_FORMAT,
+            source_root.as_deref(),
+            raw_source_path,
+            None,
+            &Value::Null,
+        ),
+        runtime_user,
     );
     let session_id = provider_import_session_uuid(
         store,
@@ -451,6 +460,7 @@ pub(crate) fn import_codex_provider_event_fast(
         &event_hash,
         None,
         session_id == provider_session_uuid(provider, &header.id),
+        runtime_user.is_some(),
     )?;
     let command_run = provider_command_run_from_event(ProviderCommandRunInput {
         provider,

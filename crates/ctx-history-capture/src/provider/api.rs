@@ -68,6 +68,7 @@ pub fn import_provider_fixture_jsonl(
         normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
+            runtime_user: options.runtime_user.clone(),
             allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
@@ -104,6 +105,7 @@ pub fn import_custom_history_jsonl_v1(
         normalization.provider,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
+            runtime_user: options.runtime_user.clone(),
             allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
@@ -147,6 +149,7 @@ pub fn import_custom_history_jsonl_v1_reader(
         normalization.provider,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
+            runtime_user: options.runtime_user.clone(),
             allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,

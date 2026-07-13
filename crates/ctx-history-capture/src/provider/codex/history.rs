@@ -238,6 +238,7 @@ pub fn import_codex_history_jsonl(
         normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
+            runtime_user: options.runtime_user.clone(),
             allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,

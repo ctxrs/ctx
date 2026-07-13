@@ -12,6 +12,8 @@ pub(super) fn import_normalized_provider_captures(
     options: NormalizedProviderImportOptions,
     suppress_search_merges: bool,
 ) -> Result<ProviderImportSummary> {
+    let mut normalization = normalization;
+    apply_runtime_user_if_missing(&mut normalization, options.runtime_user.as_deref());
     let ProviderNormalizationResult {
         summary,
         captures,
@@ -49,6 +51,8 @@ pub(super) fn import_normalized_provider_captures_in_batches(
             "provider import batch size must be greater than zero".to_owned(),
         )
     })?;
+    let mut normalization = normalization;
+    apply_runtime_user_if_missing(&mut normalization, options.runtime_user.as_deref());
     let ProviderNormalizationResult {
         summary,
         captures,
@@ -63,6 +67,25 @@ pub(super) fn import_normalized_provider_captures_in_batches(
         Some(transaction_batch_size),
         true,
     )
+}
+
+fn apply_runtime_user_if_missing(
+    normalization: &mut ProviderNormalizationResult,
+    runtime_user: Option<&str>,
+) {
+    let Some(runtime_user) = runtime_user else {
+        return;
+    };
+    for (_, capture) in &mut normalization.captures {
+        if capture.source.runtime_user.is_none() {
+            capture.source.runtime_user = Some(runtime_user.to_owned());
+        }
+    }
+    for (_, file) in &mut normalization.files_touched {
+        if file.runtime_user.is_none() {
+            file.runtime_user = Some(runtime_user.to_owned());
+        }
+    }
 }
 
 pub(super) fn import_provider_capture_lines(

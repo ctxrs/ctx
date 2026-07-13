@@ -58,6 +58,71 @@ fn antigravity_cli_partial_import_skips_malformed_file_among_valid_files() {
     assert_import_store_empty_after_atomic_failure(&strict_temp);
 }
 
+#[test]
+fn native_import_passes_runtime_user_to_capture_source() {
+    let temp = tempdir();
+    let brain = write_antigravity_valid_and_malformed_file_tree(&temp);
+    fs::remove_dir_all(brain.join("agy-bad")).unwrap();
+
+    ctx(&temp)
+        .args([
+            "import",
+            "--provider",
+            "antigravity",
+            "--path",
+            brain.to_str().unwrap(),
+            "--runtime-user",
+            "root",
+            "--no-daemon",
+            "--progress",
+            "none",
+        ])
+        .assert()
+        .success();
+
+    let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
+    let runtime_user: Option<String> = conn
+        .query_row("SELECT runtime_user FROM capture_sources", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(runtime_user.as_deref(), Some("root"));
+}
+
+#[test]
+fn explicit_codex_session_import_preserves_runtime_user_provenance() {
+    let temp = tempdir();
+    let sessions = PathBuf::from(provider_history_fixture("codex-sessions"));
+    let session = sessions.join("2026/06/23/root.jsonl");
+
+    ctx(&temp)
+        .args([
+            "import",
+            "--provider",
+            "codex",
+            "--path",
+            session.to_str().unwrap(),
+            "--runtime-user",
+            "root",
+            "--no-daemon",
+            "--progress",
+            "none",
+        ])
+        .assert()
+        .success();
+
+    let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
+    let (runtime_user, source_identity): (Option<String>, String) = conn
+        .query_row(
+            "SELECT runtime_user, source_identity FROM capture_sources WHERE runtime_user = 'root'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(runtime_user.as_deref(), Some("root"));
+    assert!(source_identity.contains("root"), "{source_identity}");
+}
+
 fn write_antigravity_valid_and_malformed_file_tree(temp: &TempDir) -> PathBuf {
     let source_fixture = PathBuf::from(provider_history_fixture("antigravity/v1/brain"));
     let brain = temp.path().join("brain");

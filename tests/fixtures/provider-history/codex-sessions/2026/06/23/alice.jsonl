@@ -1,0 +1,8 @@
+{"timestamp":"2026-06-23T15:00:00.000Z","type":"session_meta","payload":{"id":"codex-session-root","timestamp":"2026-06-23T15:00:00.000Z","cwd":"/repo/app","originator":"codex-cli","cli_version":"0.200.0","source":"cli","model_provider":"openai"}}
+{"timestamp":"2026-06-23T15:00:01.000Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"Follow repo instructions before editing."}]}}
+{"timestamp":"2026-06-23T15:00:02.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Fix the onboarding bug and make sure local history search stays useful."}]}}
+{"timestamp":"2026-06-23T15:00:03.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"I am checking the setup flow and provider import path."}],"phase":"commentary"}}
+{"timestamp":"2026-06-23T15:00:04.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"cargo test -p ctx --test cli codex_session_import\",\"workdir\":\"/repo/app\",\"yield_time_ms\":1000}","call_id":"call-root-test"}}
+{"timestamp":"2026-06-23T15:00:05.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-root-test","output":"Chunk ID: abc\nProcess exited with code 0\nOutput:\nall onboarding tests passed\n"}}
+{"timestamp":"2026-06-23T15:00:06.000Z","type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"The setup bug was in provider history discovery."}]}}
+{"timestamp":"2026-06-23T15:00:07.000Z","type":"event_msg","payload":{"type":"task_complete","last_agent_message":"Implemented the onboarding fix."}}

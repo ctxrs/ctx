@@ -573,6 +573,7 @@ pub(crate) fn refresh_sources_for_search(
                         &plan.source,
                         progress_callback,
                         allow_partial_failures,
+                        None,
                         &plan.preinventory,
                     )?;
                     Ok(ImportSourceOutcome {
@@ -625,6 +626,7 @@ pub(crate) fn refresh_sources_for_search(
                 &plan.source,
                 source_progress,
                 allow_partial_failures,
+                None,
                 &plan.preinventory,
             );
             match import_result {

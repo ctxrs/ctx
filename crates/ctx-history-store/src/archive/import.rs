@@ -292,7 +292,9 @@ fn upsert_event_tx(tx: &Transaction<'_>, event: &Event) -> Result<Uuid> {
         event.id
     };
 
-    tx.execute(
+    let inserted = event_id == event.id;
+    if inserted {
+        tx.execute(
         r#"
         INSERT INTO events
         (id, seq, history_record_id, session_id, run_id, event_type, role, occurred_at_ms, capture_source_id, payload_json, payload_blob_id, dedupe_key, visibility, fidelity, sync_state, sync_version, deleted_at_ms, metadata_json)
@@ -337,6 +339,14 @@ fn upsert_event_tx(tx: &Transaction<'_>, event: &Event) -> Result<Uuid> {
             serde_json::to_string(&event.sync.metadata)?,
         ],
     )?;
+    }
+    if let (Some(session_id), Some(capture_source_id)) = (event.session_id, event.capture_source_id)
+    {
+        tx.execute(
+            "INSERT OR IGNORE INTO event_observations (event_id, session_id, capture_source_id) VALUES (?1, ?2, ?3)",
+            params![event_id.to_string(), session_id.to_string(), capture_source_id.to_string()],
+        )?;
+    }
     Ok(event_id)
 }
 

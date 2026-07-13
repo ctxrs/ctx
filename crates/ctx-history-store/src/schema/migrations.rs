@@ -81,6 +81,9 @@ pub(crate) fn run_migrations(conn: &Connection, user_version: i64) -> Result<()>
     if user_version < 47 {
         migrate_to_v47(conn)?;
     }
+    if user_version < 48 {
+        migrate_to_v48(conn)?;
+    }
     Ok(())
 }
 
@@ -718,6 +721,38 @@ fn migrate_to_v47(conn: &Connection) -> Result<()> {
         )?;
         create_stable_sql_views(conn)?;
         conn.execute_batch("PRAGMA user_version = 47;")?;
+        Ok(())
+    })();
+    match migration {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;")?;
+            Ok(())
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(error)
+        }
+    }
+}
+
+fn migrate_to_v48(conn: &Connection) -> Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE;")?;
+    let migration = (|| -> Result<()> {
+        // No backfill: legacy events retain their existing canonical source.
+        // New imports record every observed session/source pair going forward.
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS event_observations (
+                event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                capture_source_id TEXT NOT NULL REFERENCES capture_sources(id) ON DELETE CASCADE,
+                PRIMARY KEY (event_id, session_id, capture_source_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_event_observations_session_id ON event_observations(session_id);
+            CREATE INDEX IF NOT EXISTS idx_event_observations_capture_source_id ON event_observations(capture_source_id);
+            PRAGMA user_version = 48;
+            "#,
+        )?;
         Ok(())
     })();
     match migration {

@@ -96,6 +96,8 @@ impl Default for ProviderAdapterContext {
 #[derive(Debug, Clone)]
 pub struct NormalizedProviderImportOptions {
     pub history_record_id: Option<Uuid>,
+    /// Supplied by the import caller. Existing portable source metadata wins.
+    pub runtime_user: Option<String>,
     pub allow_partial_failures: bool,
     pub persist_cursors: bool,
     pub wrap_transaction: bool,
@@ -106,6 +108,7 @@ impl Default for NormalizedProviderImportOptions {
     fn default() -> Self {
         Self {
             history_record_id: None,
+            runtime_user: None,
             allow_partial_failures: false,
             persist_cursors: true,
             wrap_transaction: true,

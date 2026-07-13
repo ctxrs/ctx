@@ -62,6 +62,99 @@ fn batched_provider_import_rejects_nonpartial_unwrapped_and_zero_sized_modes() {
 }
 
 #[test]
+fn runtime_users_scope_file_touches_and_retain_canonical_event_observations() {
+    let temp = tempdir();
+    let db_path = temp.path().join("work.sqlite");
+    let mut store = Store::open(&db_path).unwrap();
+    let occurred_at = DateTime::parse_from_rfc3339("2026-07-13T10:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let source_path = "/srv/shared/.codex/sessions/session.jsonl";
+    let capture = provider_collision_capture(
+        CaptureProvider::Codex,
+        "shared-session",
+        "codex_session_jsonl",
+        source_path,
+        occurred_at,
+    );
+    let file_touch = provider_collision_file_touch(
+        CaptureProvider::Codex,
+        "shared-session",
+        "codex_session_jsonl",
+        source_path,
+        occurred_at,
+    );
+
+    for runtime_user in ["alice", "bob"] {
+        let summary = import_normalized_provider_captures(
+            &mut store,
+            ProviderNormalizationResult {
+                summary: ProviderImportSummary::default(),
+                captures: vec![(1, capture.clone())],
+                files_touched: vec![(1, file_touch.clone())],
+            },
+            NormalizedProviderImportOptions {
+                runtime_user: Some(runtime_user.to_owned()),
+                ..NormalizedProviderImportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(summary.failed, 0);
+    }
+
+    // The same import is idempotent: it adds neither a source nor a duplicate
+    // observation, while the two runtime users retain separate sources/sessions.
+    import_normalized_provider_captures(
+        &mut store,
+        ProviderNormalizationResult {
+            summary: ProviderImportSummary::default(),
+            captures: vec![(1, capture)],
+            files_touched: vec![(1, file_touch)],
+        },
+        NormalizedProviderImportOptions {
+            runtime_user: Some("alice".to_owned()),
+            ..NormalizedProviderImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(store.list_capture_sources().unwrap().len(), 2);
+    assert_eq!(store.list_sessions().unwrap().len(), 2);
+    let reader = Connection::open(&db_path).unwrap();
+    assert_eq!(
+        reader
+            .query_row("SELECT COUNT(*) FROM files_touched", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        reader
+            .query_row(
+                "SELECT COUNT(DISTINCT source_id) FROM files_touched",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        reader
+            .query_row("SELECT COUNT(*) FROM events", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        reader
+            .query_row("SELECT COUNT(*) FROM event_observations", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+}
+
+#[test]
 fn batched_provider_import_stops_on_pinned_wal_and_resumes_idempotently() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");

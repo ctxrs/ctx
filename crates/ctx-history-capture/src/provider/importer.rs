@@ -44,7 +44,8 @@ pub(crate) use identity::{
 pub(crate) use ids::{
     provider_edge_uuid, provider_scoped_source_identity_key, provider_scoped_source_uuid,
     provider_session_uuid, provider_source_edge_uuid, provider_source_identity,
-    provider_source_root, provider_source_session_uuid, provider_sync_metadata, timestamps,
+    provider_source_identity_for_runtime_user, provider_source_root, provider_source_session_uuid,
+    provider_sync_metadata, timestamps,
 };
 
 #[cfg(test)]
@@ -64,6 +65,7 @@ pub(crate) struct NativeJsonlTreeImport<'a> {
     pub(crate) source_root: Option<PathBuf>,
     pub(crate) imported_at: DateTime<Utc>,
     pub(crate) history_record_id: Option<Uuid>,
+    pub(crate) runtime_user: Option<String>,
     pub(crate) allow_partial_failures: bool,
 }
 
@@ -89,6 +91,7 @@ pub(crate) fn import_native_jsonl_tree<A: ProviderCaptureAdapter>(
         normalization,
         NormalizedProviderImportOptions {
             history_record_id: request.history_record_id,
+            runtime_user: request.runtime_user,
             allow_partial_failures: request.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
@@ -306,13 +309,16 @@ pub(crate) fn import_provider_file_touched_line(
     );
     let source_root =
         provider_source_root(file.source_root.as_deref(), file.raw_source_path.as_deref());
-    let source_identity = provider_source_identity(
-        file.provider,
-        &file.source_format,
-        file.source_root.as_deref(),
-        file.raw_source_path.as_deref(),
-        None,
-        &file.metadata,
+    let source_identity = provider_source_identity_for_runtime_user(
+        provider_source_identity(
+            file.provider,
+            &file.source_format,
+            file.source_root.as_deref(),
+            file.raw_source_path.as_deref(),
+            None,
+            &file.metadata,
+        ),
+        file.runtime_user.as_deref(),
     );
     let session_id = provider_import_session_uuid(
         store,
@@ -529,13 +535,19 @@ pub(crate) fn import_provider_capture_line(
         source.source_root.as_deref(),
         source.raw_source_path.as_deref(),
     );
-    let source_identity = provider_source_identity(
-        provider,
-        &source.source_format,
-        source.source_root.as_deref(),
-        source.raw_source_path.as_deref(),
-        source.idempotency_key.as_deref(),
-        &source.metadata,
+    // Keep legacy source and session IDs unchanged when runtime_user is
+    // absent. An explicit user scopes the source/session identity, without
+    // changing the provider event dedupe identity.
+    let source_identity = provider_source_identity_for_runtime_user(
+        provider_source_identity(
+            provider,
+            &source.source_format,
+            source.source_root.as_deref(),
+            source.raw_source_path.as_deref(),
+            source.idempotency_key.as_deref(),
+            &source.metadata,
+        ),
+        source.runtime_user.as_deref(),
     );
     let session_id = provider_import_session_uuid(
         store,
@@ -775,6 +787,7 @@ pub(crate) fn import_provider_capture_line(
                 &event_hash,
                 legacy_provider_event_index,
                 session_id == provider_session_uuid(provider, &session.provider_session_id),
+                source.runtime_user.is_some(),
             )?,
         };
         let command_run = provider_command_run_from_event(ProviderCommandRunInput {

@@ -452,6 +452,7 @@ fn pi_session_identity_resolver_reuses_legacy_line_indexed_events() {
         event_hash,
         Some(legacy_index),
         true,
+        false,
     )
     .unwrap();
 

@@ -15,6 +15,21 @@ use crate::sync::sync_metadata_from_row;
 use crate::{Result, Store, StoreError};
 
 impl Store {
+    pub(crate) fn record_event_observation(
+        &self,
+        event_id: Uuid,
+        session_id: Option<Uuid>,
+        capture_source_id: Option<Uuid>,
+    ) -> Result<()> {
+        let (Some(session_id), Some(capture_source_id)) = (session_id, capture_source_id) else {
+            return Ok(());
+        };
+        self.conn.execute(
+            "INSERT OR IGNORE INTO event_observations (event_id, session_id, capture_source_id) VALUES (?1, ?2, ?3)",
+            params![event_id.to_string(), session_id.to_string(), capture_source_id.to_string()],
+        )?;
+        Ok(())
+    }
     pub fn provider_event_dedupe_key(
         provider: CaptureProvider,
         external_session_id: &str,
@@ -50,6 +65,11 @@ impl Store {
                 )
                 .optional()?
             {
+                self.record_event_observation(
+                    existing_id,
+                    event.session_id,
+                    event.capture_source_id,
+                )?;
                 return Ok(existing_id);
             }
             event.id
@@ -104,6 +124,7 @@ impl Store {
                     serde_json::to_string(&event.sync.metadata)?,
                 ],
             )?;
+        self.record_event_observation(event_id, event.session_id, event.capture_source_id)?;
         upsert_event_search_projection_for_event(&self.conn, event_id, event)?;
         adjust_semantic_searchable_item_stats(
             &self.conn,
@@ -158,6 +179,12 @@ impl Store {
                 0,
                 semantic_searchable_document_count_for_event(event),
             )?;
+        }
+        if let Some(dedupe_key) = &event.dedupe_key {
+            let event_id = self.event_id_by_dedupe_key(dedupe_key)?;
+            self.record_event_observation(event_id, event.session_id, event.capture_source_id)?;
+        } else {
+            self.record_event_observation(event.id, event.session_id, event.capture_source_id)?;
         }
         Ok(changed > 0)
     }

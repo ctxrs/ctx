@@ -677,6 +677,35 @@ fn schema_v46_adds_nullable_capture_runtime_user() {
     );
 }
 
+#[test]
+fn schema_v47_adds_event_observations_without_backfill() {
+    let temp = tempdir();
+    let path = temp.path().join("work.sqlite");
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(CREATE_TABLES_SQL).unwrap();
+        conn.execute_batch("PRAGMA user_version = 47;").unwrap();
+    }
+
+    let store = Store::open(&path).unwrap();
+    assert!(table_exists(&store.conn, "event_observations").unwrap());
+    assert_eq!(
+        store
+            .conn
+            .query_row("SELECT COUNT(*) FROM event_observations", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        store
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        SCHEMA_VERSION
+    );
+}
+
 fn provider_archive_session(id: &str, source_id: Uuid, external_session_id: &str) -> Session {
     Session {
         id: Uuid::parse_str(id).unwrap(),

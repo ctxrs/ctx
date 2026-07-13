@@ -101,6 +101,23 @@ pub(crate) fn provider_source_identity(
     })
 }
 
+/// Scope a source identity to an explicit runtime user.
+///
+/// `None` deliberately preserves the legacy identity byte-for-byte so existing
+/// imports retain their stable source and session IDs.
+pub(crate) fn provider_source_identity_for_runtime_user(
+    source_identity: Option<String>,
+    runtime_user: Option<&str>,
+) -> Option<String> {
+    source_identity.map(|identity| match runtime_user {
+        Some(runtime_user) => {
+            serde_json::to_string(&("provider-session-source-v2", identity, runtime_user))
+                .expect("provider session source identity should serialize")
+        }
+        None => identity,
+    })
+}
+
 pub(crate) fn provider_source_identity_component(
     source_root: Option<&str>,
     raw_source_path: Option<&str>,

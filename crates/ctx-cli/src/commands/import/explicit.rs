@@ -73,6 +73,7 @@ pub(crate) fn run_explicit_format_import(
             CustomHistoryJsonlV1ImportOptions {
                 source_path: Some(path.clone()),
                 history_record_id: Some(record_id),
+                runtime_user: args.runtime_user.clone(),
                 allow_partial_failures: args.partial,
                 ..CustomHistoryJsonlV1ImportOptions::default()
             },
