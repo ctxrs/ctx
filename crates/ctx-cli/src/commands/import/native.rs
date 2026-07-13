@@ -116,39 +116,29 @@ fn import_one_source_inner_batched(
     let record_id = record.id;
     let record_existed = history_record_exists(store, record_id)?;
     store.upsert_record(&record)?;
-    let summary = if !full_rescan && source_uses_import_file_manifest(source) {
+    let summary = if source_uses_import_file_manifest(source)
+        && (source.path.is_dir() || preinventory.source_import_files().is_some())
+    {
         import_manifested_source(
             store,
             source,
             record_id,
             progress,
             preinventory.source_import_files(),
+            full_rescan,
         )
     } else {
         match source.provider {
             CaptureProvider::Codex => {
                 if source.path.is_dir() {
-                    if full_rescan {
-                        import_codex_session_tree(
-                            &source.path,
-                            store,
-                            CodexSessionImportOptions {
-                                source_path: Some(source.path.clone()),
-                                history_record_id: Some(record_id),
-                                progress: progress.clone(),
-                                ..CodexSessionImportOptions::default()
-                            },
-                        )
-                        .map_err(anyhow::Error::from)
-                    } else {
-                        import_incremental_codex_session_tree(
-                            store,
-                            source,
-                            record_id,
-                            progress.clone(),
-                            preinventory.codex_session_catalog(),
-                        )
-                    }
+                    import_incremental_codex_session_tree(
+                        store,
+                        source,
+                        record_id,
+                        progress.clone(),
+                        preinventory.codex_session_catalog(),
+                        full_rescan,
+                    )
                 } else if source
                     .path
                     .file_name()
@@ -670,6 +660,7 @@ fn mark_source_import_file_result(
             source_path: &file.source_path,
             file_size_bytes: file.file_size_bytes,
             file_modified_at_ms: file.file_modified_at_ms,
+            import_revision: file.import_revision,
             indexed_at_ms: utc_now().timestamp_millis(),
         },
         status,
@@ -704,6 +695,7 @@ pub(crate) fn import_manifested_source(
     record_id: Uuid,
     progress: Option<CodexSessionImportProgressCallback>,
     preinventoried_files: Option<&[SourceImportFile]>,
+    force_selection: bool,
 ) -> Result<ProviderImportSummary> {
     let source_root = source.path.display().to_string();
     let collected_files;
@@ -724,13 +716,17 @@ pub(crate) fn import_manifested_source(
             source.path.display()
         ));
     }
-    let pending = store.list_pending_source_import_files(source.provider, &source_root)?;
-    if pending.is_empty() {
+    let selected_files = if force_selection {
+        files.to_vec()
+    } else {
+        store.list_pending_source_import_files(source.provider, &source_root)?
+    };
+    if selected_files.is_empty() {
         return Ok(ProviderImportSummary::default());
     }
 
     let mut summary = ProviderImportSummary::default();
-    for pending_file in pending {
+    for pending_file in selected_files {
         let path = PathBuf::from(&pending_file.source_path);
         let mut pending_source = explicit_path_source(source.provider, path);
         pending_source.source_format = source.source_format;
@@ -770,9 +766,9 @@ pub(crate) fn import_manifested_source(
 }
 
 fn import_error_status(error: &anyhow::Error) -> CatalogIndexedStatus {
-    match import_error_scope(error) {
-        ImportFailureScope::Source => CatalogIndexedStatus::Rejected,
-        ImportFailureScope::System => CatalogIndexedStatus::Failed,
+    match import_error_retryability(error) {
+        ImportRetryability::Retryable => CatalogIndexedStatus::Failed,
+        ImportRetryability::Terminal => CatalogIndexedStatus::Rejected,
     }
 }
 

@@ -1446,6 +1446,72 @@ fn schema_v46_adds_mimocode_provider_checks() {
 }
 
 #[test]
+fn real_schema_v45_fixture_migrates_import_state_through_v47() {
+    let temp = tempdir();
+    let path = temp.path().join("work.sqlite");
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(include_str!("fixtures/schema_v45.sql"))
+            .unwrap();
+        conn.execute_batch(
+            r#"
+            INSERT INTO catalog_sessions
+            (source_path, provider, source_format, source_root, external_session_id,
+             agent_type, file_size_bytes, file_modified_at_ms, cataloged_at_ms,
+             indexed_at_ms, indexed_file_size_bytes, indexed_file_modified_at_ms,
+             indexed_status, last_imported_at_ms, last_imported_file_size_bytes,
+             last_imported_file_modified_at_ms, last_imported_event_count)
+            VALUES
+            ('/missing/v45-indexed.jsonl', 'codex', 'codex_session_jsonl', '/missing/v45',
+             'v45-indexed', 'primary', 21, 31, 41, 51, 21, 31, 'indexed', 51, 21, 31, 2);
+
+            INSERT INTO source_import_files
+            (provider, source_format, source_root, source_path, file_size_bytes,
+             file_modified_at_ms, observed_at_ms, indexed_at_ms, indexed_status,
+             indexed_error)
+            VALUES
+            ('claude', 'claude_projects_jsonl_tree', '/missing/v45-claude',
+             '/missing/v45-claude/failed.jsonl', 22, 32, 42, 52, 'failed',
+             'legacy transient failure');
+
+            PRAGMA user_version = 45;
+            "#,
+        )
+        .unwrap();
+    }
+
+    let store = Store::open(&path).unwrap();
+    let version: i64 = store
+        .conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 47);
+    let indexed: (String, i64, Option<i64>, Option<i64>) = store
+        .conn
+        .query_row(
+            "SELECT indexed_status, import_revision, indexed_import_revision, last_imported_file_size_bytes FROM catalog_sessions WHERE source_path = '/missing/v45-indexed.jsonl'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(indexed, ("indexed".to_owned(), 1, Some(1), Some(21)));
+    let pending = store
+        .list_pending_source_import_files(CaptureProvider::Claude, "/missing/v45-claude")
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].import_revision, 1);
+    let indexed_revision: Option<i64> = store
+        .conn
+        .query_row(
+            "SELECT indexed_import_revision FROM source_import_files WHERE source_path = '/missing/v45-claude/failed.jsonl'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(indexed_revision, None);
+}
+
+#[test]
 fn schema_v47_grandfathers_indexed_rows_and_retries_v46_failures_without_source_reads() {
     let temp = tempdir();
     let path = temp.path().join("work.sqlite");

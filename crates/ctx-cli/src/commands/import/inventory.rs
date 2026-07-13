@@ -13,7 +13,7 @@ use ctx_history_capture::{
 use ctx_history_core::CaptureProvider;
 use ctx_history_store::{SourceImportFile, Store};
 
-use crate::commands::import::catalog::{source_import_stats, source_stats, system_time_ms};
+use crate::commands::import::catalog::{source_stats, system_time_ms};
 use crate::commands::import::manifest::{
     collect_source_import_files, persist_source_import_files, source_uses_import_file_manifest,
 };
@@ -35,13 +35,12 @@ pub(crate) struct ImportInventory {
 pub(crate) fn inventory_import_sources(
     store: &Store,
     sources: Vec<SourceInfo>,
-    full_rescan: bool,
 ) -> Result<ImportInventory> {
     let mut inventory = ImportInventory::default();
     for (index, source) in sources.into_iter().enumerate() {
         inventory.totals.sources += 1;
         let failure_source = source.clone();
-        let (plan, cataloged) = match inventory_import_source(store, source, full_rescan) {
+        let (plan, cataloged) = match inventory_import_source(store, source) {
             Ok(inventoried) => inventoried,
             Err(error) if import_error_scope(&error) == ImportFailureScope::Source => {
                 inventory.failures.push(ImportSourceFailure {
@@ -96,15 +95,14 @@ pub(crate) fn inventory_available_sources(
         })
         .cloned()
         .collect::<Vec<_>>();
-    inventory_import_sources(store, available, false)
+    inventory_import_sources(store, available)
 }
 
 fn inventory_import_source(
     store: &Store,
     source: SourceInfo,
-    full_rescan: bool,
 ) -> Result<(PlannedImportSource, Option<(CatalogSummary, Value)>)> {
-    if !full_rescan && is_incremental_codex_session_tree(&source) {
+    if is_incremental_codex_session_tree(&source) {
         let summary = catalog_codex_session_tree(
             &source.path,
             store,
@@ -139,7 +137,7 @@ fn inventory_import_source(
         return Ok((plan, Some((summary, source_json))));
     }
 
-    if !full_rescan && source_uses_import_file_manifest(&source) {
+    if source_uses_import_file_manifest(&source) {
         let files = collect_source_import_files(&source)
             .with_context(|| format!("inventory import files from {}", source.path.display()))?;
         persist_source_import_files(store, &source, &files)?;
@@ -154,28 +152,15 @@ fn inventory_import_source(
         ));
     }
 
-    if !full_rescan {
-        let stats = source_stats(&source.path)
-            .with_context(|| format!("inventory import source {}", source.path.display()))?;
-        let root_file = source_root_import_file(&source, stats)?;
-        persist_source_import_files(store, &source, std::slice::from_ref(&root_file))?;
-        return Ok((
-            PlannedImportSource {
-                source,
-                stats,
-                preinventory: SourcePreinventory::SourceRoot(root_file),
-            },
-            None,
-        ));
-    }
-
-    let stats = source_import_stats(&source)
+    let stats = source_stats(&source.path)
         .with_context(|| format!("inventory import source {}", source.path.display()))?;
+    let root_file = source_root_import_file(&source, stats)?;
+    persist_source_import_files(store, &source, std::slice::from_ref(&root_file))?;
     Ok((
         PlannedImportSource {
             source,
             stats,
-            preinventory: SourcePreinventory::None,
+            preinventory: SourcePreinventory::SourceRoot(root_file),
         },
         None,
     ))

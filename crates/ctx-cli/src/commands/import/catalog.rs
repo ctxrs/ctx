@@ -1,5 +1,4 @@
 use super::*;
-use crate::commands::import::manifest::collect_source_import_paths;
 use sha2::{Digest, Sha256};
 
 pub(crate) fn system_time_ms(time: SystemTime) -> i64 {
@@ -15,6 +14,7 @@ pub(crate) fn import_incremental_codex_session_tree(
     record_id: Uuid,
     progress: Option<CodexSessionImportProgressCallback>,
     preinventory_catalog: Option<&CatalogSummary>,
+    force_selection: bool,
 ) -> Result<ProviderImportSummary> {
     let source_root = source.path.display().to_string();
     let mut summary = ProviderImportSummary::default();
@@ -35,13 +35,21 @@ pub(crate) fn import_incremental_codex_session_tree(
         summary.failures.extend(catalog.failures);
     }
 
-    let pending = store.list_pending_catalog_sessions(CaptureProvider::Codex, &source_root)?;
-    if pending.is_empty() {
+    let selected_sessions = if force_selection {
+        store.list_active_catalog_sessions_for_source(CaptureProvider::Codex, &source_root)?
+    } else {
+        store.list_pending_catalog_sessions(CaptureProvider::Codex, &source_root)?
+    };
+    if selected_sessions.is_empty() {
         return Ok(summary);
     }
 
     let mut full_import_sessions = Vec::new();
-    for session in &pending {
+    for session in &selected_sessions {
+        if force_selection {
+            full_import_sessions.push(session.clone());
+            continue;
+        }
         let state = store.catalog_source_index_state(
             CaptureProvider::Codex,
             &source_root,
@@ -55,11 +63,24 @@ pub(crate) fn import_incremental_codex_session_tree(
             let checkpoint_hash = state
                 .as_ref()
                 .and_then(|state| state.last_imported_file_sha256.as_deref());
-            if !catalog_import_checkpoint_matches(
+            let checkpoint_matches = match catalog_import_checkpoint_matches(
                 Path::new(&session.source_path),
                 start_offset,
                 checkpoint_hash,
-            )? {
+            ) {
+                Ok(matches) => matches,
+                Err(err) => {
+                    let error = error_summary(&err);
+                    mark_catalog_sessions_error(
+                        store,
+                        std::slice::from_ref(session),
+                        &error,
+                        catalog_import_error_status(&err),
+                    )?;
+                    return Err(err);
+                }
+            };
+            if !checkpoint_matches {
                 full_import_sessions.push(session.clone());
                 continue;
             }
@@ -78,10 +99,11 @@ pub(crate) fn import_incremental_codex_session_tree(
             {
                 Ok(summary) => summary,
                 Err(err) => {
-                    mark_catalog_sessions_failed(
+                    mark_catalog_sessions_error(
                         store,
                         std::slice::from_ref(session),
                         &err.to_string(),
+                        catalog_import_error_status(&err),
                     )?;
                     return Err(err);
                 }
@@ -133,7 +155,12 @@ pub(crate) fn import_incremental_codex_session_tree(
                 Err(err) => {
                     let failure_scope = import_error_scope(&err);
                     let error = error_summary(&err);
-                    mark_catalog_sessions_failed(store, std::slice::from_ref(session), &error)?;
+                    mark_catalog_sessions_error(
+                        store,
+                        std::slice::from_ref(session),
+                        &error,
+                        catalog_import_error_status(&err),
+                    )?;
                     if failure_scope == ImportFailureScope::System {
                         return Err(err);
                     }
@@ -204,10 +231,21 @@ pub(crate) fn mark_catalog_session_result(
     error: Option<&str>,
 ) -> Result<()> {
     let file_sha256 = if status == CatalogIndexedStatus::Indexed {
-        Some(
-            sha256_file_prefix_hex(Path::new(&session.source_path), session.file_size_bytes)
-                .with_context(|| format!("hash checkpoint prefix for {}", session.source_path))?,
-        )
+        let hash = sha256_file_prefix_hex(Path::new(&session.source_path), session.file_size_bytes)
+            .with_context(|| format!("hash checkpoint prefix for {}", session.source_path));
+        match hash {
+            Ok(hash) => Some(hash),
+            Err(err) => {
+                let durable_error = error_summary(&err);
+                mark_catalog_sessions_error(
+                    store,
+                    std::slice::from_ref(session),
+                    &durable_error,
+                    catalog_import_error_status(&err),
+                )?;
+                return Err(err);
+            }
+        }
     } else {
         None
     };
@@ -218,6 +256,7 @@ pub(crate) fn mark_catalog_session_result(
             source_path: &session.source_path,
             file_size_bytes: session.file_size_bytes,
             file_modified_at_ms: session.file_modified_at_ms,
+            import_revision: session.import_revision,
             file_sha256: file_sha256.as_deref(),
             event_count,
             indexed_at_ms,
@@ -260,22 +299,38 @@ pub(crate) fn sha256_file_prefix_hex(path: &Path, byte_count: u64) -> Result<Str
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-pub(crate) fn mark_catalog_sessions_failed(
+pub(crate) fn mark_catalog_sessions_error(
     store: &Store,
     sessions: &[CatalogSession],
     error: &str,
+    status: CatalogIndexedStatus,
 ) -> Result<()> {
     let indexed_at_ms = utc_now().timestamp_millis();
     for session in sessions {
-        store.mark_catalog_source_failed(
+        store.record_catalog_source_import_result(
             session.provider,
-            &session.source_root,
-            &session.source_path,
-            error,
-            indexed_at_ms,
+            CatalogSourceIndexUpdate {
+                source_root: &session.source_root,
+                source_path: &session.source_path,
+                file_size_bytes: session.file_size_bytes,
+                file_modified_at_ms: session.file_modified_at_ms,
+                import_revision: session.import_revision,
+                file_sha256: None,
+                event_count: None,
+                indexed_at_ms,
+            },
+            status,
+            Some(error),
         )?;
     }
     Ok(())
+}
+
+fn catalog_import_error_status(error: &anyhow::Error) -> CatalogIndexedStatus {
+    match import_error_retryability(error) {
+        ImportRetryability::Retryable => CatalogIndexedStatus::Failed,
+        ImportRetryability::Terminal => CatalogIndexedStatus::Rejected,
+    }
 }
 
 pub(crate) fn source_uses_incremental_event_search(source: &SourceInfo) -> bool {
@@ -423,17 +478,6 @@ fn source_change_token(mut entries: Vec<SourceChangeEntry>) -> [u8; 32] {
         hasher.update(entry.modified_nanos.to_le_bytes());
     }
     hasher.finalize().into()
-}
-
-pub(crate) fn source_import_stats(source: &SourceInfo) -> Result<SourceStats> {
-    let mut stats = SourceStats::default();
-    for path in collect_source_import_paths(source)? {
-        let metadata = fs::metadata(&path)
-            .with_context(|| format!("stat import source file {}", path.display()))?;
-        stats.files += 1;
-        stats.bytes = stats.bytes.saturating_add(metadata.len());
-    }
-    Ok(stats)
 }
 
 pub(crate) fn import_record_for_source(source: &SourceInfo) -> HistoryRecord {
