@@ -38,7 +38,11 @@ pub use raw_sql::{
 };
 pub use search::projections::{EventEmbeddingDocument, EventSearchHit};
 
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::{atomic::AtomicUsize, Arc},
+    time::Duration,
+};
 
 use rusqlite::Connection;
 
@@ -49,6 +53,7 @@ pub struct Store {
     object_dir: PathBuf,
     conn: Connection,
     busy_timeout: Duration,
+    event_search_bulk_depth: Arc<AtomicUsize>,
 }
 
 #[cfg(test)]

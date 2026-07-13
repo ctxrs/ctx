@@ -19,13 +19,14 @@ use crate::common::io::{
 use crate::provider::importer::{
     import_normalized_provider_captures, import_provider_capture_line,
     import_provider_capture_lines, import_provider_file_touched_line,
-    resolve_pending_provider_edges, ProviderImportCaches,
+    resolve_pending_provider_edges_batched, validate_provider_event_for_import,
+    ProviderImportCaches, ProviderImportTransaction,
 };
 use crate::provider::native::provider_output_event_is_failure;
 use crate::{
     CaptureError, CodexSessionImportOptions, NormalizedProviderImportOptions,
     ProviderAdapterContext, ProviderCaptureAdapter, ProviderImportFailure, ProviderImportSummary,
-    ProviderNormalizationResult, Result, CODEX_FAST_IMPORT_PASSIVE_CHECKPOINT_MIN_BYTES,
+    ProviderNormalizationResult, Result,
 };
 
 use crate::provider::codex::events::{
@@ -434,7 +435,6 @@ pub fn import_codex_session_jsonl(
         normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
             persist_cursors: false,
             wrap_transaction: true,
             fast_event_inserts: options.fast_event_inserts,
@@ -457,6 +457,24 @@ pub fn import_codex_session_jsonl_tail(
         return Ok(ProviderImportSummary::default());
     }
 
+    let bulk_guard = store.begin_event_search_bulk_mode()?;
+    let import_result =
+        import_codex_session_jsonl_tail_bounded(path, start_offset, total_bytes, store, &options);
+    let finish_result = store.finish_event_search_bulk_mode(&bulk_guard);
+    match (import_result, finish_result) {
+        (Ok(summary), Ok(())) => Ok(summary),
+        (_, Err(err)) => Err(err.into()),
+        (Err(err), Ok(())) => Err(err),
+    }
+}
+
+fn import_codex_session_jsonl_tail_bounded(
+    path: &Path,
+    start_offset: u64,
+    total_bytes: u64,
+    store: &mut Store,
+    options: &CodexSessionImportOptions,
+) -> Result<ProviderImportSummary> {
     let mut summary = ProviderImportSummary::default();
     let mut caches = ProviderImportCaches::default();
     let context = ProviderAdapterContext {
@@ -467,7 +485,6 @@ pub fn import_codex_session_jsonl_tail(
     };
     let import_options = NormalizedProviderImportOptions {
         history_record_id: options.history_record_id,
-        allow_partial_failures: options.allow_partial_failures,
         persist_cursors: false,
         wrap_transaction: false,
         fast_event_inserts: true,
@@ -478,7 +495,7 @@ pub fn import_codex_session_jsonl_tail(
         .map(|path| path.display().to_string());
 
     report_codex_import_progress(
-        &options,
+        options,
         1,
         total_bytes - start_offset,
         0,
@@ -487,7 +504,7 @@ pub fn import_codex_session_jsonl_tail(
         false,
     );
 
-    let mut began_transaction = false;
+    let mut transaction = None;
     let import = (|| -> Result<ProviderImportSummary> {
         let file = File::open(path)?;
         let mut reader = BufReader::new(file);
@@ -527,17 +544,9 @@ pub fn import_codex_session_jsonl_tail(
             }
         }
 
-        store.begin_immediate_batch()?;
-        began_transaction = true;
-        let header_capture =
-            codex_session_capture(&header, None, line_number, header.timestamp, &context);
-        summary.merge(import_provider_capture_line(
-            store,
-            &header_capture,
-            &import_options,
-            line_number,
-            &mut caches,
-        )?);
+        transaction = Some(ProviderImportTransaction::begin_bounded(store, true)?);
+        let transaction = transaction.as_mut().expect("transaction was initialized");
+        let mut header_persisted = false;
 
         let mut call_contexts: BTreeMap<String, CodexToolCallContext> = BTreeMap::new();
         let mut completed_bytes = 0u64;
@@ -554,7 +563,7 @@ pub fn import_codex_session_jsonl_tail(
                     summary.skipped += 1;
                     summary.skipped_events += 1;
                     report_codex_import_progress(
-                        &options,
+                        options,
                         1,
                         total_bytes - start_offset,
                         0,
@@ -585,9 +594,6 @@ pub fn import_codex_session_jsonl_tail(
                         line: line_number,
                         error: err.to_string(),
                     });
-                    if !options.allow_partial_failures {
-                        return Ok(summary);
-                    }
                     continue;
                 }
             };
@@ -606,9 +612,6 @@ pub fn import_codex_session_jsonl_tail(
                         line: line_number,
                         error: err.to_string(),
                     });
-                    if !options.allow_partial_failures {
-                        return Ok(summary);
-                    }
                     continue;
                 }
             };
@@ -623,29 +626,63 @@ pub fn import_codex_session_jsonl_tail(
                     source_root: context.source_root_display().as_deref(),
                 },
             );
-            if let Some(event) = line_capture.event.take() {
-                if event.event_type == EventType::Notice {
+            let event = match line_capture.event.take() {
+                Some(event) if event.event_type == EventType::Notice => {
                     summary.skipped += 1;
                     summary.skipped_events += 1;
-                } else {
-                    let source_root = context.source_root_display();
-                    summary.merge(import_codex_provider_event_fast(
-                        store,
-                        &header,
-                        &event,
-                        options.history_record_id,
-                        line_number,
-                        context.imported_at,
-                        raw_source_path.as_deref(),
-                        source_root.as_deref(),
-                    )?);
+                    None
                 }
+                Some(event) => {
+                    if let Err(err) = validate_provider_event_for_import(&event) {
+                        summary.failed += 1;
+                        summary.failures.push(ProviderImportFailure {
+                            line: line_number,
+                            error: err.to_string(),
+                        });
+                        continue;
+                    }
+                    Some(event)
+                }
+                None => None,
+            };
+            let has_content = event.is_some() || !line_capture.files_touched.is_empty();
+            if has_content {
+                transaction.prepare_unit(store, line.len())?;
+            }
+            if !header_persisted && has_content {
+                let header_capture =
+                    codex_session_capture(&header, None, line_number, header.timestamp, &context);
+                summary.merge(import_provider_capture_line(
+                    store,
+                    &header_capture,
+                    &import_options,
+                    line_number,
+                    &mut caches,
+                )?);
+                header_persisted = true;
+            }
+            if let Some(event) = event {
+                let source_root = context.source_root_display();
+                summary.merge(import_codex_provider_event_fast(
+                    store,
+                    &header,
+                    &event,
+                    options.history_record_id,
+                    line_number,
+                    context.imported_at,
+                    raw_source_path.as_deref(),
+                    source_root.as_deref(),
+                )?);
             }
             for (_, file) in line_capture.files_touched {
                 import_provider_file_touched_line(store, &file, &import_options)?;
+                summary.accepted_content_records += 1;
+            }
+            if has_content {
+                transaction.record_unit(store, line.len())?;
             }
             report_codex_import_progress(
-                &options,
+                options,
                 1,
                 total_bytes - start_offset,
                 0,
@@ -655,32 +692,15 @@ pub fn import_codex_session_jsonl_tail(
             );
         }
 
-        resolve_pending_provider_edges(store, &mut summary, &mut caches)?;
+        resolve_pending_provider_edges_batched(store, &mut summary, &mut caches, transaction)?;
+        transaction.commit(store)?;
         Ok(summary)
     })();
 
     match import {
         Ok(summary) => {
-            if summary.failed > 0 && !options.allow_partial_failures {
-                if began_transaction {
-                    let _ = store.rollback_batch();
-                }
-                report_codex_import_progress(
-                    &options,
-                    1,
-                    total_bytes - start_offset,
-                    1,
-                    total_bytes - start_offset,
-                    &summary,
-                    true,
-                );
-                return Ok(summary);
-            }
-            if began_transaction {
-                store.commit_batch()?;
-            }
             report_codex_import_progress(
-                &options,
+                options,
                 1,
                 total_bytes - start_offset,
                 1,
@@ -691,8 +711,8 @@ pub fn import_codex_session_jsonl_tail(
             Ok(summary)
         }
         Err(err) => {
-            if began_transaction {
-                let _ = store.rollback_batch();
+            if let Some(transaction) = transaction.as_mut() {
+                transaction.rollback(store);
             }
             Err(err)
         }
@@ -756,20 +776,36 @@ pub(crate) fn import_codex_session_paths_parallel_normalized(
     options: CodexSessionImportOptions,
     skipped_by_bounds: usize,
 ) -> Result<ProviderImportSummary> {
+    let bulk_guard = store.begin_event_search_bulk_mode()?;
+    let import_result = import_codex_session_paths_parallel_normalized_bounded(
+        paths,
+        store,
+        &options,
+        skipped_by_bounds,
+    );
+    let finish_result = store.finish_event_search_bulk_mode(&bulk_guard);
+    match (import_result, finish_result) {
+        (Ok(summary), Ok(())) => Ok(summary),
+        (_, Err(err)) => Err(err.into()),
+        (Err(err), Ok(())) => Err(err),
+    }
+}
+
+fn import_codex_session_paths_parallel_normalized_bounded(
+    paths: Vec<PathBuf>,
+    store: &mut Store,
+    options: &CodexSessionImportOptions,
+    skipped_by_bounds: usize,
+) -> Result<ProviderImportSummary> {
     let mut merged = ProviderImportSummary::default();
     merged.skipped_sessions += skipped_by_bounds;
     merged.skipped += skipped_by_bounds;
-    let mut in_transaction = false;
-    if !paths.is_empty() {
-        store.begin_immediate_batch()?;
-        in_transaction = true;
-    }
     let total_files = paths.len();
     let total_bytes = codex_session_paths_total_bytes(&paths);
     let mut completed_files = 0usize;
     let mut completed_bytes = 0u64;
     report_codex_import_progress(
-        &options,
+        options,
         total_files,
         total_bytes,
         completed_files,
@@ -781,16 +817,7 @@ pub(crate) fn import_codex_session_paths_parallel_normalized(
     let parallelism = import_parallelism(paths.len());
     let chunk_size = parallelism.saturating_mul(8).max(16);
     for chunk in paths.chunks(chunk_size) {
-        let normalized = match normalize_codex_session_paths_parallel(chunk, &options, parallelism)
-        {
-            Ok(normalized) => normalized,
-            Err(err) => {
-                if in_transaction {
-                    let _ = store.rollback_batch();
-                }
-                return Err(err);
-            }
-        };
+        let normalized = normalize_codex_session_paths_parallel(chunk, options, parallelism)?;
         let mut chunk_summary = ProviderImportSummary::default();
         let mut chunk_captures = Vec::new();
         let mut chunk_files_touched = Vec::new();
@@ -814,7 +841,7 @@ pub(crate) fn import_codex_session_paths_parallel_normalized(
             completed_files += chunk.len();
             completed_bytes = completed_bytes.saturating_add(chunk_bytes);
             report_codex_import_progress(
-                &options,
+                options,
                 total_files,
                 total_bytes,
                 completed_files,
@@ -824,47 +851,23 @@ pub(crate) fn import_codex_session_paths_parallel_normalized(
             );
             continue;
         }
-        let summary = match import_provider_capture_lines(
+        let summary = import_provider_capture_lines(
             store,
             NormalizedProviderImportOptions {
                 history_record_id: options.history_record_id,
-                allow_partial_failures: options.allow_partial_failures,
                 persist_cursors: false,
-                wrap_transaction: false,
+                wrap_transaction: true,
                 fast_event_inserts: options.fast_event_inserts,
             },
             chunk_summary,
             chunk_captures,
             chunk_files_touched,
-        ) {
-            Ok(summary) => summary,
-            Err(err) => {
-                if in_transaction {
-                    let _ = store.rollback_batch();
-                }
-                return Err(err);
-            }
-        };
+        )?;
         merged.merge(summary);
-        if merged.failed > 0 && !options.allow_partial_failures {
-            if in_transaction {
-                let _ = store.rollback_batch();
-            }
-            report_codex_import_progress(
-                &options,
-                total_files,
-                total_bytes,
-                completed_files,
-                completed_bytes,
-                &merged,
-                true,
-            );
-            return Ok(merged);
-        }
         completed_files += chunk.len();
         completed_bytes = completed_bytes.saturating_add(chunk_bytes);
         report_codex_import_progress(
-            &options,
+            options,
             total_files,
             total_bytes,
             completed_files,
@@ -873,12 +876,8 @@ pub(crate) fn import_codex_session_paths_parallel_normalized(
             false,
         );
     }
-    if in_transaction {
-        store.commit_batch()?;
-    }
-    store.checkpoint_wal_passive_if_larger_than(CODEX_FAST_IMPORT_PASSIVE_CHECKPOINT_MIN_BYTES)?;
     report_codex_import_progress(
-        &options,
+        options,
         total_files,
         total_bytes,
         completed_files,
@@ -936,9 +935,7 @@ pub(crate) fn normalize_codex_session_paths_parallel(
         }
         let mut batches = Vec::with_capacity(handles.len());
         for handle in handles {
-            batches.push(handle.join().map_err(|_| {
-                CaptureError::InvalidPayload("Codex import worker panicked".into())
-            })??);
+            batches.push(join_codex_import_worker(handle)?);
         }
         Result::<Vec<_>>::Ok(batches)
     })?;
@@ -950,6 +947,15 @@ pub(crate) fn normalize_codex_session_paths_parallel(
     normalized.sort_by_key(|(index, _, _)| *index);
     Ok(normalized)
 }
+
+pub(crate) fn join_codex_import_worker<T>(
+    handle: thread::ScopedJoinHandle<'_, Result<T>>,
+) -> Result<T> {
+    handle
+        .join()
+        .map_err(|_| CaptureError::WorkerPanicked("Codex import"))?
+}
+
 pub(crate) fn normalize_codex_session_path(
     path: &Path,
     options: &CodexSessionImportOptions,

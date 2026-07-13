@@ -208,11 +208,6 @@ struct ImportArgs {
     all: bool,
     #[arg(long)]
     resume: bool,
-    #[arg(
-        long,
-        help = "Allow valid rows in a source to commit when malformed rows are encountered"
-    )]
-    partial: bool,
     #[arg(long, help = "Do not start daemon maintenance after import")]
     no_daemon: bool,
     #[arg(long)]

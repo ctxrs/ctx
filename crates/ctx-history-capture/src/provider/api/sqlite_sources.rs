@@ -44,7 +44,6 @@ pub fn import_firebender_sqlite(
         normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
@@ -77,7 +76,6 @@ pub fn import_opencode_sqlite(
         normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
@@ -110,7 +108,6 @@ pub fn import_kilo_sqlite(
         normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
@@ -143,7 +140,6 @@ pub fn import_forgecode_sqlite(
         normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
@@ -176,7 +172,6 @@ pub fn import_deepagents_sqlite(
         normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
@@ -208,7 +203,6 @@ pub fn import_nanoclaw_project(
         normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
@@ -241,7 +235,6 @@ pub fn import_kiro_sqlite(
         normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
@@ -273,7 +266,6 @@ pub fn import_astrbot_sqlite(
         normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
@@ -305,7 +297,6 @@ pub fn import_shelley_sqlite(
         normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
@@ -337,7 +328,6 @@ pub fn import_continue_cli_sessions(
         normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
@@ -369,7 +359,6 @@ pub fn import_openhands_file_events(
         normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
@@ -401,7 +390,6 @@ pub fn import_mimocode_sqlite(
         normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,

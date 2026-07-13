@@ -1195,6 +1195,48 @@ fn setup_analytics_emits_start_and_completion_events() {
 }
 
 #[test]
+fn foreground_setup_analytics_includes_import_outcome() {
+    let temp = tempdir();
+    let data_root = temp.path().join("ctx-data");
+    let home = temp.path().join("home");
+    let state = temp.path().join("state");
+    let events_path = temp.path().join("analytics.jsonl");
+    let sessions = home.join(".codex").join("sessions").join("2026/07/13");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(
+        sessions.join("rollout-setup-analytics.jsonl"),
+        concat!(
+            r#"{"timestamp":"2026-07-13T12:00:00.000Z","type":"session_meta","payload":{"id":"setup-analytics","timestamp":"2026-07-13T12:00:00.000Z","cwd":"/repo","originator":"codex-cli","cli_version":"0.200.0","source":"cli","model_provider":"openai"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-07-13T12:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"setup analytics import oracle"}]}}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+
+    ctx(&temp)
+        .args(["setup", "--wait", "--progress", "none"])
+        .env("CTX_DATA_ROOT", &data_root)
+        .env("HOME", &home)
+        .env("XDG_STATE_HOME", &state)
+        .env("LOCALAPPDATA", &state)
+        .env_remove("CTX_ANALYTICS_OFF")
+        .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
+        .env("CTX_UPGRADE_OFF", "1")
+        .assert()
+        .success();
+
+    let events = read_analytics_events(&events_path);
+    assert_eq!(events.len(), 2);
+    let completed = analytics_event_properties(&events[1]);
+    assert_eq!(completed["action"], "setup");
+    assert_eq!(completed["import_outcome"], "success");
+    assert_eq!(completed["import_failure_scope"], "none");
+    assert_eq!(completed["import_failure_type"], "none");
+    assert_analytics_properties_are_allowlisted(completed);
+}
+
+#[test]
 fn setup_analytics_emits_failure_completion_event() {
     let temp = tempdir();
     let data_root = temp.path().join("ctx-data");

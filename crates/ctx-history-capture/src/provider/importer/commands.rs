@@ -44,27 +44,8 @@ pub(crate) fn provider_command_run_from_event(
         .map(str::to_owned);
     let call_id = payload.get("call_id").and_then(Value::as_str);
     let key = call_id.unwrap_or(event_hash);
-    let duration_ms = provider_command_duration_ms(payload)?;
+    let started_at = provider_event_started_at(event, payload)?;
     let ended_at = Some(event.occurred_at);
-    let started_at = match duration_ms {
-        Some(duration) => {
-            let duration_value = duration;
-            let duration = chrono::Duration::try_milliseconds(duration_value).ok_or_else(|| {
-                CaptureError::InvalidPayload(format!(
-                    "duration_ms is not representable as milliseconds: {duration_value}"
-                ))
-            })?;
-            event
-                .occurred_at
-                .checked_sub_signed(duration)
-                .ok_or_else(|| {
-                    CaptureError::InvalidPayload(format!(
-                        "duration_ms moves command start before representable time: {duration_value}"
-                    ))
-                })?
-        }
-        None => event.occurred_at,
-    };
     Ok(Some(Run {
         id: run_source_id
             .map(|source_id| provider_source_run_uuid(source_id, key))
@@ -96,6 +77,38 @@ pub(crate) fn provider_command_run_from_event(
             }),
         ),
     }))
+}
+
+pub(crate) fn validate_provider_event_for_import(event: &ProviderEventEnvelope) -> Result<()> {
+    provider_event_started_at(event, &event.payload).map(|_| ())
+}
+
+fn provider_event_started_at(
+    event: &ProviderEventEnvelope,
+    payload: &Value,
+) -> Result<chrono::DateTime<chrono::Utc>> {
+    if event.event_type != EventType::CommandOutput {
+        return Ok(event.occurred_at);
+    }
+    Ok(match provider_command_duration_ms(payload)? {
+        Some(duration) => {
+            let duration_value = duration;
+            let duration = chrono::Duration::try_milliseconds(duration_value).ok_or_else(|| {
+                CaptureError::InvalidPayload(format!(
+                    "duration_ms is not representable as milliseconds: {duration_value}"
+                ))
+            })?;
+            event
+                .occurred_at
+                .checked_sub_signed(duration)
+                .ok_or_else(|| {
+                    CaptureError::InvalidPayload(format!(
+                        "duration_ms moves command start before representable time: {duration_value}"
+                    ))
+                })?
+        }
+        None => event.occurred_at,
+    })
 }
 
 pub(crate) fn provider_command_duration_ms(payload: &Value) -> Result<Option<i64>> {

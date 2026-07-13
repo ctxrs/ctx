@@ -75,7 +75,6 @@ fn native_astrbot_real_schema_casts_ids_metadata_and_datetime_millis() {
         AstrBotSqliteImportOptions {
             source_path: Some(fixture.clone()),
             imported_at,
-            allow_partial_failures: true,
             ..AstrBotSqliteImportOptions::default()
         },
     )
@@ -189,7 +188,6 @@ fn native_codebuddy_cli_jsonl_imports_searches_and_reimports() {
             imported_at: DateTime::parse_from_rfc3339("2026-07-04T16:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
-            allow_partial_failures: true,
             ..CodeBuddyImportOptions::default()
         },
     )
@@ -263,7 +261,6 @@ fn native_codebuddy_cli_jsonl_imports_searches_and_reimports() {
         &source,
         &mut store,
         CodeBuddyImportOptions {
-            allow_partial_failures: true,
             ..CodeBuddyImportOptions::default()
         },
     )
@@ -297,7 +294,6 @@ fn native_codebuddy_rejects_message_id_path_traversal() {
         &project,
         &mut store,
         CodeBuddyImportOptions {
-            allow_partial_failures: true,
             ..CodeBuddyImportOptions::default()
         },
     )
@@ -356,7 +352,6 @@ fn native_nanoclaw_rejects_database_path_traversal() {
         &root,
         &mut store,
         NanoClawImportOptions {
-            allow_partial_failures: true,
             ..NanoClawImportOptions::default()
         },
     )
@@ -480,7 +475,6 @@ fn native_junie_current_cli_failure_sessions_import_and_search() {
             imported_at: DateTime::parse_from_rfc3339("2026-07-10T03:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
-            allow_partial_failures: true,
             ..JunieImportOptions::default()
         },
     )
@@ -504,7 +498,6 @@ fn native_junie_current_cli_failure_sessions_import_and_search() {
         &sessions,
         &mut store,
         JunieImportOptions {
-            allow_partial_failures: true,
             ..JunieImportOptions::default()
         },
     )

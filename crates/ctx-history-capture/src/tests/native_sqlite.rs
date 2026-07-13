@@ -16,7 +16,6 @@ fn native_opencode_imports_read_only_sqlite() {
             imported_at: DateTime::parse_from_rfc3339("2026-06-24T12:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
-            allow_partial_failures: true,
             ..OpenCodeSqliteImportOptions::default()
         },
     )
@@ -56,7 +55,6 @@ fn native_kilo_imports_opencode_derived_sqlite_fixture_idempotently() {
             imported_at: DateTime::parse_from_rfc3339("2026-07-04T12:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
-            allow_partial_failures: true,
             ..KiloSqliteImportOptions::default()
         },
     )
@@ -89,7 +87,6 @@ fn native_kilo_imports_opencode_derived_sqlite_fixture_idempotently() {
         &mut store,
         KiloSqliteImportOptions {
             source_path: Some(fixture.clone()),
-            allow_partial_failures: true,
             ..KiloSqliteImportOptions::default()
         },
     )
@@ -115,7 +112,6 @@ fn native_warp_imports_sqlite_fixture_idempotently() {
             imported_at: DateTime::parse_from_rfc3339("2026-07-05T12:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
-            allow_partial_failures: true,
             ..WarpSqliteImportOptions::default()
         },
     )
@@ -155,7 +151,6 @@ fn native_warp_imports_sqlite_fixture_idempotently() {
         &mut store,
         WarpSqliteImportOptions {
             source_path: Some(fixture.clone()),
-            allow_partial_failures: true,
             ..WarpSqliteImportOptions::default()
         },
     )
@@ -195,7 +190,6 @@ fn native_warp_import_reads_committed_wal_content() {
         &mut store,
         WarpSqliteImportOptions {
             source_path: Some(live_db.clone()),
-            allow_partial_failures: true,
             ..WarpSqliteImportOptions::default()
         },
     )
@@ -266,7 +260,6 @@ fn native_hermes_rejects_out_of_range_message_timestamp() {
         &fixture,
         &mut store,
         HermesSqliteImportOptions {
-            allow_partial_failures: true,
             ..HermesSqliteImportOptions::default()
         },
     )
@@ -289,7 +282,6 @@ fn native_sqlite_imports_do_not_mutate_provider_databases() {
             &opencode,
             store,
             OpenCodeSqliteImportOptions {
-                allow_partial_failures: true,
                 ..OpenCodeSqliteImportOptions::default()
             },
         )
@@ -307,7 +299,6 @@ fn native_sqlite_imports_do_not_mutate_provider_databases() {
             &mimocode,
             store,
             MiMoCodeSqliteImportOptions {
-                allow_partial_failures: true,
                 ..MiMoCodeSqliteImportOptions::default()
             },
         )
@@ -320,7 +311,6 @@ fn native_sqlite_imports_do_not_mutate_provider_databases() {
             &kilo,
             store,
             KiloSqliteImportOptions {
-                allow_partial_failures: true,
                 ..KiloSqliteImportOptions::default()
             },
         )
@@ -333,7 +323,6 @@ fn native_sqlite_imports_do_not_mutate_provider_databases() {
             &kiro,
             store,
             KiroSqliteImportOptions {
-                allow_partial_failures: true,
                 ..KiroSqliteImportOptions::default()
             },
         )
@@ -346,7 +335,6 @@ fn native_sqlite_imports_do_not_mutate_provider_databases() {
             &crush,
             store,
             CrushSqliteImportOptions {
-                allow_partial_failures: true,
                 ..CrushSqliteImportOptions::default()
             },
         )
@@ -359,7 +347,6 @@ fn native_sqlite_imports_do_not_mutate_provider_databases() {
             &goose,
             store,
             GooseSessionsSqliteImportOptions {
-                allow_partial_failures: true,
                 ..GooseSessionsSqliteImportOptions::default()
             },
         )
@@ -372,7 +359,6 @@ fn native_sqlite_imports_do_not_mutate_provider_databases() {
             &lingma,
             store,
             LingmaSqliteImportOptions {
-                allow_partial_failures: true,
                 ..LingmaSqliteImportOptions::default()
             },
         )
@@ -385,7 +371,6 @@ fn native_sqlite_imports_do_not_mutate_provider_databases() {
             &warp,
             store,
             WarpSqliteImportOptions {
-                allow_partial_failures: true,
                 ..WarpSqliteImportOptions::default()
             },
         )
@@ -398,7 +383,6 @@ fn native_sqlite_imports_do_not_mutate_provider_databases() {
             &zed,
             store,
             ZedThreadsSqliteImportOptions {
-                allow_partial_failures: true,
                 ..ZedThreadsSqliteImportOptions::default()
             },
         )
@@ -411,7 +395,6 @@ fn native_sqlite_imports_do_not_mutate_provider_databases() {
             &hermes,
             store,
             HermesSqliteImportOptions {
-                allow_partial_failures: true,
                 ..HermesSqliteImportOptions::default()
             },
         )
@@ -424,7 +407,6 @@ fn native_sqlite_imports_do_not_mutate_provider_databases() {
             &astrbot,
             store,
             AstrBotSqliteImportOptions {
-                allow_partial_failures: true,
                 ..AstrBotSqliteImportOptions::default()
             },
         )
@@ -437,7 +419,6 @@ fn native_sqlite_imports_do_not_mutate_provider_databases() {
             &shelley,
             store,
             ShelleySqliteImportOptions {
-                allow_partial_failures: true,
                 ..ShelleySqliteImportOptions::default()
             },
         )
@@ -454,7 +435,6 @@ fn native_sqlite_imports_do_not_mutate_provider_databases() {
             &firebender_root,
             store,
             FirebenderSqliteImportOptions {
-                allow_partial_failures: true,
                 ..FirebenderSqliteImportOptions::default()
             },
         )
@@ -467,7 +447,6 @@ fn native_sqlite_imports_do_not_mutate_provider_databases() {
             &forgecode,
             store,
             ForgeCodeSqliteImportOptions {
-                allow_partial_failures: true,
                 ..ForgeCodeSqliteImportOptions::default()
             },
         )
@@ -480,7 +459,6 @@ fn native_sqlite_imports_do_not_mutate_provider_databases() {
             &deepagents,
             store,
             DeepAgentsSqliteImportOptions {
-                allow_partial_failures: true,
                 ..DeepAgentsSqliteImportOptions::default()
             },
         )
@@ -512,7 +490,6 @@ fn native_sqlite_successful_tool_outputs_are_metadata_only_and_not_searchable() 
         &mut store,
         GooseSessionsSqliteImportOptions {
             source_path: Some(goose.clone()),
-            allow_partial_failures: true,
             ..GooseSessionsSqliteImportOptions::default()
         },
     )
@@ -556,7 +533,6 @@ fn native_sqlite_successful_tool_outputs_are_metadata_only_and_not_searchable() 
         &mut store,
         ForgeCodeSqliteImportOptions {
             source_path: Some(forgecode.clone()),
-            allow_partial_failures: true,
             ..ForgeCodeSqliteImportOptions::default()
         },
     )
@@ -676,7 +652,6 @@ fn native_opencode_synthesizes_session_message_seq_when_missing() {
         &fixture,
         &mut store,
         OpenCodeSqliteImportOptions {
-            allow_partial_failures: true,
             ..OpenCodeSqliteImportOptions::default()
         },
     )
@@ -718,7 +693,6 @@ fn native_opencode_rejects_negative_session_message_seq() {
         &fixture,
         &mut store,
         OpenCodeSqliteImportOptions {
-            allow_partial_failures: true,
             ..OpenCodeSqliteImportOptions::default()
         },
     )
@@ -761,7 +735,6 @@ fn native_opencode_rejects_out_of_range_message_timestamp() {
         &fixture,
         &mut store,
         OpenCodeSqliteImportOptions {
-            allow_partial_failures: true,
             ..OpenCodeSqliteImportOptions::default()
         },
     )
@@ -900,7 +873,6 @@ fn native_opencode_imports_message_part_text_and_metadata() {
         &fixture,
         &mut store,
         OpenCodeSqliteImportOptions {
-            allow_partial_failures: true,
             ..OpenCodeSqliteImportOptions::default()
         },
     )
@@ -933,7 +905,6 @@ fn native_kilo_imports_message_part_text_and_metadata() {
         &fixture,
         &mut store,
         KiloSqliteImportOptions {
-            allow_partial_failures: true,
             ..KiloSqliteImportOptions::default()
         },
     )
@@ -966,7 +937,6 @@ fn native_mimocode_imports_message_part_text_and_metadata_idempotently() {
         &fixture,
         &mut store,
         MiMoCodeSqliteImportOptions {
-            allow_partial_failures: true,
             source_path: Some(fixture.clone()),
             ..MiMoCodeSqliteImportOptions::default()
         },
@@ -988,7 +958,6 @@ fn native_mimocode_imports_message_part_text_and_metadata_idempotently() {
         &fixture,
         &mut store,
         MiMoCodeSqliteImportOptions {
-            allow_partial_failures: true,
             source_path: Some(fixture.clone()),
             ..MiMoCodeSqliteImportOptions::default()
         },
@@ -1129,7 +1098,6 @@ fn native_opencode_reports_malformed_and_corrupt_db() {
         &malformed,
         &mut store,
         OpenCodeSqliteImportOptions {
-            allow_partial_failures: true,
             ..OpenCodeSqliteImportOptions::default()
         },
     )
@@ -1152,7 +1120,6 @@ fn native_opencode_rejects_empty_current_schema_without_model_column() {
         &fixture,
         &mut store,
         OpenCodeSqliteImportOptions {
-            allow_partial_failures: true,
             ..OpenCodeSqliteImportOptions::default()
         },
     )
@@ -1177,7 +1144,6 @@ fn native_opencode_imports_legacy_message_table_when_session_message_is_absent()
         &fixture,
         &mut store,
         OpenCodeSqliteImportOptions {
-            allow_partial_failures: true,
             ..OpenCodeSqliteImportOptions::default()
         },
     )
@@ -1207,7 +1173,6 @@ fn native_opencode_falls_back_when_session_message_is_metadata_only() {
         &fixture,
         &mut store,
         OpenCodeSqliteImportOptions {
-            allow_partial_failures: true,
             ..OpenCodeSqliteImportOptions::default()
         },
     )
@@ -1244,7 +1209,6 @@ fn native_opencode_rejects_malformed_authoritative_rows_without_legacy_fallback(
         &fixture,
         &mut store,
         OpenCodeSqliteImportOptions {
-            allow_partial_failures: true,
             ..OpenCodeSqliteImportOptions::default()
         },
     )
@@ -1267,7 +1231,6 @@ fn native_opencode_rejects_malformed_metadata_authoritative_rows_without_legacy_
         &fixture,
         &mut store,
         OpenCodeSqliteImportOptions {
-            allow_partial_failures: true,
             ..OpenCodeSqliteImportOptions::default()
         },
     )
@@ -1292,7 +1255,6 @@ fn native_opencode_rejects_tool_only_sqlite_rows() {
         &fixture,
         &mut store,
         OpenCodeSqliteImportOptions {
-            allow_partial_failures: true,
             ..OpenCodeSqliteImportOptions::default()
         },
     )
@@ -1317,7 +1279,6 @@ fn native_opencode_falls_back_when_session_entry_is_metadata_only() {
         &fixture,
         &mut store,
         OpenCodeSqliteImportOptions {
-            allow_partial_failures: true,
             ..OpenCodeSqliteImportOptions::default()
         },
     )
@@ -1354,7 +1315,6 @@ fn native_kilo_rejects_metadata_only_sqlite_rows() {
         &fixture,
         &mut store,
         KiloSqliteImportOptions {
-            allow_partial_failures: true,
             ..KiloSqliteImportOptions::default()
         },
     )
@@ -1379,7 +1339,6 @@ fn native_kilo_rejects_tool_only_sqlite_rows() {
         &fixture,
         &mut store,
         KiloSqliteImportOptions {
-            allow_partial_failures: true,
             ..KiloSqliteImportOptions::default()
         },
     )
@@ -1444,7 +1403,6 @@ fn openclaw_import_ignores_oversized_session_index_sidecar() {
         &root,
         &mut store,
         OpenClawImportOptions {
-            allow_partial_failures: true,
             ..OpenClawImportOptions::default()
         },
     )
@@ -1480,7 +1438,6 @@ fn native_shelley_imports_sessions_messages_metadata_and_citations() {
             imported_at: DateTime::parse_from_rfc3339("2026-06-24T12:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
-            allow_partial_failures: true,
             ..ShelleySqliteImportOptions::default()
         },
     )
@@ -1574,7 +1531,6 @@ fn native_shelley_reimport_is_idempotent() {
         &fixture,
         &mut store,
         ShelleySqliteImportOptions {
-            allow_partial_failures: true,
             ..ShelleySqliteImportOptions::default()
         },
     )
@@ -1585,7 +1541,6 @@ fn native_shelley_reimport_is_idempotent() {
         &fixture,
         &mut store,
         ShelleySqliteImportOptions {
-            allow_partial_failures: true,
             ..ShelleySqliteImportOptions::default()
         },
     )
@@ -1609,7 +1564,6 @@ fn native_shelley_handles_duplicate_sequences_and_nonchat_rows() {
         &fixture,
         &mut store,
         ShelleySqliteImportOptions {
-            allow_partial_failures: true,
             ..ShelleySqliteImportOptions::default()
         },
     )

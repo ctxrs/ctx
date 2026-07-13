@@ -9,8 +9,7 @@ use crate::provider::adapter::{
     ProviderCaptureAdapter, RooTaskJsonAdapter,
 };
 use crate::provider::importer::{
-    import_native_jsonl_tree, import_normalized_provider_captures,
-    import_normalized_provider_captures_with_bulk_search, NativeJsonlTreeImport,
+    import_native_jsonl_tree, import_normalized_provider_captures, NativeJsonlTreeImport,
 };
 use crate::provider::providers::trae::normalize_trae_history;
 use crate::{
@@ -46,7 +45,6 @@ pub fn import_pi_session_jsonl(
         normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
@@ -79,7 +77,6 @@ pub fn import_claude_projects_jsonl_tree(
         normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
@@ -112,7 +109,6 @@ pub fn import_cline_task_json_history(
         normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
@@ -145,7 +141,6 @@ pub fn import_roo_task_json_history(
         normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
@@ -178,7 +173,6 @@ pub fn import_codebuddy_history(
         normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
@@ -211,7 +205,6 @@ pub fn import_trae_history(
         normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
@@ -244,7 +237,6 @@ pub fn import_crush_sqlite(
         normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
@@ -277,7 +269,6 @@ pub fn import_goose_sessions_sqlite(
         normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
@@ -299,7 +290,6 @@ pub fn import_openclaw_history(
             source_root: None,
             imported_at: options.imported_at,
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
         },
         OpenClawJsonlAdapter,
     )
@@ -326,16 +316,11 @@ pub fn import_hermes_sqlite(
     )?;
     let import_options = NormalizedProviderImportOptions {
         history_record_id: options.history_record_id,
-        allow_partial_failures: options.allow_partial_failures,
         persist_cursors: true,
         wrap_transaction: true,
         fast_event_inserts: true,
     };
-    if options.allow_partial_failures {
-        import_normalized_provider_captures(store, normalization, import_options)
-    } else {
-        import_normalized_provider_captures_with_bulk_search(store, normalization, import_options)
-    }
+    import_normalized_provider_captures(store, normalization, import_options)
 }
 
 pub fn import_auggie_history(
@@ -363,7 +348,6 @@ pub fn import_auggie_history(
         normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
@@ -395,7 +379,6 @@ pub fn import_junie_history(
         normalization,
         NormalizedProviderImportOptions {
             history_record_id: options.history_record_id,
-            allow_partial_failures: options.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,

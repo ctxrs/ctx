@@ -92,9 +92,8 @@ pub(crate) fn normalize_custom_history_jsonl_v1_reader(
             Err(err) => push_provider_import_failure(&mut summary, line_number, err.to_string()),
         }
     }
-    let parse_failures = summary.failed;
-
     let mut manifest_line = None;
+    let mut manifest_is_structurally_invalid = false;
     let mut sources = BTreeMap::<String, (usize, CtxHistoryJsonlSourceRecord)>::new();
     let mut sessions = BTreeMap::<(String, String), (usize, CtxHistoryJsonlSessionRecord)>::new();
     let mut events = Vec::<(usize, CtxHistoryJsonlEventRecord)>::new();
@@ -116,6 +115,7 @@ pub(crate) fn normalize_custom_history_jsonl_v1_reader(
                             manifest.schema_version
                         ),
                     );
+                    manifest_is_structurally_invalid = true;
                 }
                 if manifest_line.replace(line_number).is_some() {
                     push_provider_import_failure(
@@ -123,22 +123,25 @@ pub(crate) fn normalize_custom_history_jsonl_v1_reader(
                         line_number,
                         "duplicate manifest record".to_owned(),
                     );
+                    manifest_is_structurally_invalid = true;
                 }
             }
             CtxHistoryJsonlRecord::Source(source) => {
+                let failures_before = summary.failed;
                 validate_custom_source_record(&mut summary, line_number, &source);
-                if sources
-                    .insert(source.source_id.clone(), (line_number, source))
-                    .is_some()
-                {
+                if sources.contains_key(&source.source_id) {
                     push_provider_import_failure(
                         &mut summary,
                         line_number,
                         "duplicate source_id".to_owned(),
                     );
                 }
+                if summary.failed == failures_before {
+                    sources.insert(source.source_id.clone(), (line_number, source));
+                }
             }
             CtxHistoryJsonlRecord::Session(session) => {
+                let failures_before = summary.failed;
                 validate_custom_history_identifier(
                     &mut summary,
                     line_number,
@@ -152,15 +155,19 @@ pub(crate) fn normalize_custom_history_jsonl_v1_reader(
                     &session.session_id,
                 );
                 let key = (session.source_id.clone(), session.session_id.clone());
-                if sessions.insert(key, (line_number, session)).is_some() {
+                if sessions.contains_key(&key) {
                     push_provider_import_failure(
                         &mut summary,
                         line_number,
                         "duplicate session record".to_owned(),
                     );
                 }
+                if summary.failed == failures_before {
+                    sessions.insert(key, (line_number, session));
+                }
             }
             CtxHistoryJsonlRecord::Event(event) => {
+                let failures_before = summary.failed;
                 validate_custom_history_identifier(
                     &mut summary,
                     line_number,
@@ -178,16 +185,20 @@ pub(crate) fn normalize_custom_history_jsonl_v1_reader(
                     event.session_id.clone(),
                     event.event_index,
                 );
-                if !event_keys.insert(key) {
+                if event_keys.contains(&key) {
                     push_provider_import_failure(
                         &mut summary,
                         line_number,
                         "duplicate event_index for session".to_owned(),
                     );
                 }
-                events.push((line_number, event));
+                if summary.failed == failures_before {
+                    event_keys.insert(key);
+                    events.push((line_number, event));
+                }
             }
             CtxHistoryJsonlRecord::FileTouch(file_touch) => {
+                let failures_before = summary.failed;
                 validate_custom_history_identifier(
                     &mut summary,
                     line_number,
@@ -212,16 +223,20 @@ pub(crate) fn normalize_custom_history_jsonl_v1_reader(
                     file_touch.session_id.clone(),
                     file_touch.touch_index,
                 );
-                if !touch_keys.insert(key) {
+                if touch_keys.contains(&key) {
                     push_provider_import_failure(
                         &mut summary,
                         line_number,
                         "duplicate touch_index for session".to_owned(),
                     );
                 }
-                file_touches.push((line_number, file_touch));
+                if summary.failed == failures_before {
+                    touch_keys.insert(key);
+                    file_touches.push((line_number, file_touch));
+                }
             }
             CtxHistoryJsonlRecord::Edge(edge) => {
+                let failures_before = summary.failed;
                 validate_custom_history_identifier(
                     &mut summary,
                     line_number,
@@ -254,31 +269,43 @@ pub(crate) fn normalize_custom_history_jsonl_v1_reader(
                     edge.to_session_id.clone(),
                     edge_key,
                 );
-                if !edge_keys.insert(key) {
+                if edge_keys.contains(&key) {
                     push_provider_import_failure(
                         &mut summary,
                         line_number,
                         "duplicate edge record".to_owned(),
                     );
                 }
-                edges.push((line_number, edge));
+                if summary.failed == failures_before {
+                    edge_keys.insert(key);
+                    edges.push((line_number, edge));
+                }
             }
         }
     }
 
-    let reference_index = CustomHistoryReferenceIndex {
-        manifest_line,
-        sources: &sources,
-        sessions: &sessions,
-        events: &events,
-        event_keys: &event_keys,
-        file_touches: &file_touches,
-        edges: &edges,
-    };
-    validate_custom_history_references(&mut summary, reference_index);
-    if summary.failed > parse_failures {
+    if manifest_line.is_none() {
+        push_provider_import_failure(
+            &mut summary,
+            0,
+            "missing manifest record for ctx-history-jsonl-v1".to_owned(),
+        );
+        manifest_is_structurally_invalid = true;
+    }
+    if manifest_is_structurally_invalid {
         return Ok(custom_history_failed_normalization(summary));
     }
+
+    reject_invalid_custom_history_references(
+        &mut summary,
+        &sources,
+        &mut sessions,
+        &mut events,
+        &mut event_keys,
+        &mut file_touches,
+        &mut edges,
+    );
+    retain_custom_history_content_sessions(&mut sessions, &events, &file_touches, &edges);
 
     let mut result = ProviderNormalizationResult {
         summary,
@@ -428,69 +455,40 @@ pub(crate) fn validate_custom_history_identifier(
     }
 }
 
-pub(crate) struct CustomHistoryReferenceIndex<'a> {
-    pub(crate) manifest_line: Option<usize>,
-    pub(crate) sources: &'a BTreeMap<String, (usize, CtxHistoryJsonlSourceRecord)>,
-    pub(crate) sessions: &'a BTreeMap<(String, String), (usize, CtxHistoryJsonlSessionRecord)>,
-    pub(crate) events: &'a [(usize, CtxHistoryJsonlEventRecord)],
-    pub(crate) event_keys: &'a BTreeSet<(String, String, u64)>,
-    pub(crate) file_touches: &'a [(usize, CtxHistoryJsonlFileTouchRecord)],
-    pub(crate) edges: &'a [(usize, CtxHistoryJsonlEdgeRecord)],
-}
-
-pub(crate) fn validate_custom_history_references(
+pub(crate) fn reject_invalid_custom_history_references(
     summary: &mut ProviderImportSummary,
-    references: CustomHistoryReferenceIndex<'_>,
+    sources: &BTreeMap<String, (usize, CtxHistoryJsonlSourceRecord)>,
+    sessions: &mut BTreeMap<(String, String), (usize, CtxHistoryJsonlSessionRecord)>,
+    events: &mut Vec<(usize, CtxHistoryJsonlEventRecord)>,
+    event_keys: &mut BTreeSet<(String, String, u64)>,
+    file_touches: &mut Vec<(usize, CtxHistoryJsonlFileTouchRecord)>,
+    edges: &mut Vec<(usize, CtxHistoryJsonlEdgeRecord)>,
 ) {
-    if references.manifest_line.is_none() {
-        push_provider_import_failure(
-            summary,
-            0,
-            "missing manifest record for ctx-history-jsonl-v1".to_owned(),
-        );
-    }
-
-    for (line_number, session) in references.sessions.values() {
-        if !references.sources.contains_key(&session.source_id) {
-            push_provider_import_failure(
-                summary,
-                *line_number,
-                format!(
-                    "session references unknown source_id `{}`",
-                    session.source_id
-                ),
-            );
+    loop {
+        let invalid = sessions
+            .iter()
+            .filter_map(|(key, (line_number, session))| {
+                custom_history_session_reference_error(sources, sessions, session)
+                    .map(|error| (key.clone(), *line_number, error))
+            })
+            .collect::<Vec<_>>();
+        if invalid.is_empty() {
+            break;
         }
-        if let Some(parent) = &session.parent_session_id {
-            let key = (session.source_id.clone(), parent.clone());
-            if !references.sessions.contains_key(&key) {
-                push_provider_import_failure(
-                    summary,
-                    *line_number,
-                    format!("session references unknown parent_session_id `{parent}`"),
-                );
-            }
-        }
-        if let Some(root) = &session.root_session_id {
-            let key = (session.source_id.clone(), root.clone());
-            if root != &session.session_id && !references.sessions.contains_key(&key) {
-                push_provider_import_failure(
-                    summary,
-                    *line_number,
-                    format!("session references unknown root_session_id `{root}`"),
-                );
-            }
+        for (key, line_number, error) in invalid {
+            sessions.remove(&key);
+            push_provider_import_failure(summary, line_number, error);
         }
     }
 
-    for (line_number, event) in references.events {
-        if !references
-            .sessions
-            .contains_key(&(event.source_id.clone(), event.session_id.clone()))
-        {
+    let mut valid_events = Vec::with_capacity(events.len());
+    for (line_number, event) in events.drain(..) {
+        if sessions.contains_key(&(event.source_id.clone(), event.session_id.clone())) {
+            valid_events.push((line_number, event));
+        } else {
             push_provider_import_failure(
                 summary,
-                *line_number,
+                line_number,
                 format!(
                     "event references unknown session `{}` in source `{}`",
                     event.session_id, event.source_id
@@ -498,78 +496,159 @@ pub(crate) fn validate_custom_history_references(
             );
         }
     }
+    *events = valid_events;
+    *event_keys = events
+        .iter()
+        .map(|(_, event)| {
+            (
+                event.source_id.clone(),
+                event.session_id.clone(),
+                event.event_index,
+            )
+        })
+        .collect();
 
-    for (line_number, file_touch) in references.file_touches {
-        if !references
-            .sessions
-            .contains_key(&(file_touch.source_id.clone(), file_touch.session_id.clone()))
-        {
-            push_provider_import_failure(
-                summary,
-                *line_number,
-                format!(
-                    "file_touch references unknown session `{}` in source `{}`",
-                    file_touch.session_id, file_touch.source_id
-                ),
-            );
-        }
-        if let Some(event_index) = file_touch.event_index {
+    let mut valid_file_touches = Vec::with_capacity(file_touches.len());
+    for (line_number, file_touch) in file_touches.drain(..) {
+        let session_key = (file_touch.source_id.clone(), file_touch.session_id.clone());
+        let error = if !sessions.contains_key(&session_key) {
+            Some(format!(
+                "file_touch references unknown session `{}` in source `{}`",
+                file_touch.session_id, file_touch.source_id
+            ))
+        } else if let Some(event_index) = file_touch.event_index {
             let key = (
                 file_touch.source_id.clone(),
                 file_touch.session_id.clone(),
                 event_index,
             );
-            if !references.event_keys.contains(&key) {
-                push_provider_import_failure(
-                    summary,
-                    *line_number,
-                    format!("file_touch references unknown event_index `{event_index}`"),
-                );
-            }
+            (!event_keys.contains(&key))
+                .then(|| format!("file_touch references unknown event_index `{event_index}`"))
+        } else {
+            None
+        };
+        if let Some(error) = error {
+            push_provider_import_failure(summary, line_number, error);
+        } else {
+            valid_file_touches.push((line_number, file_touch));
         }
     }
+    *file_touches = valid_file_touches;
 
-    for (line_number, edge) in references.edges {
+    let mut valid_edges = Vec::with_capacity(edges.len());
+    for (line_number, edge) in edges.drain(..) {
         let from_key = (edge.source_id.clone(), edge.from_session_id.clone());
         let to_key = (edge.source_id.clone(), edge.to_session_id.clone());
-        if !references.sessions.contains_key(&from_key) {
-            push_provider_import_failure(
-                summary,
-                *line_number,
-                format!(
-                    "edge references unknown from_session_id `{}`",
-                    edge.from_session_id
-                ),
-            );
-        }
-        if !references.sessions.contains_key(&to_key) {
-            push_provider_import_failure(
-                summary,
-                *line_number,
-                format!(
-                    "edge references unknown to_session_id `{}`",
-                    edge.to_session_id
-                ),
-            );
-        }
-        if edge.edge_type == SessionEdgeType::ParentChild {
-            let Some((_, child)) = references.sessions.get(&to_key) else {
-                continue;
-            };
-            if let Some(parent) = &child.parent_session_id {
-                if parent != &edge.from_session_id {
-                    push_provider_import_failure(
-                        summary,
-                        *line_number,
+        let error = if !sessions.contains_key(&from_key) {
+            Some(format!(
+                "edge references unknown from_session_id `{}`",
+                edge.from_session_id
+            ))
+        } else if !sessions.contains_key(&to_key) {
+            Some(format!(
+                "edge references unknown to_session_id `{}`",
+                edge.to_session_id
+            ))
+        } else if edge.edge_type == SessionEdgeType::ParentChild {
+            sessions.get(&to_key).and_then(|(_, child)| {
+                child.parent_session_id.as_ref().and_then(|parent| {
+                    (parent != &edge.from_session_id).then(|| {
                         format!(
                             "parent_child edge from_session_id `{}` conflicts with session parent_session_id `{parent}`",
                             edge.from_session_id
-                        ),
-                    );
-                }
-            }
+                        )
+                    })
+                })
+            })
+        } else {
+            None
+        };
+        if let Some(error) = error {
+            push_provider_import_failure(summary, line_number, error);
+        } else {
+            valid_edges.push((line_number, edge));
         }
     }
+    *edges = valid_edges;
+}
+
+fn custom_history_session_reference_error(
+    sources: &BTreeMap<String, (usize, CtxHistoryJsonlSourceRecord)>,
+    sessions: &BTreeMap<(String, String), (usize, CtxHistoryJsonlSessionRecord)>,
+    session: &CtxHistoryJsonlSessionRecord,
+) -> Option<String> {
+    if !sources.contains_key(&session.source_id) {
+        return Some(format!(
+            "session references unknown source_id `{}`",
+            session.source_id
+        ));
+    }
+    if let Some(parent) = &session.parent_session_id {
+        let key = (session.source_id.clone(), parent.clone());
+        if !sessions.contains_key(&key) {
+            return Some(format!(
+                "session references unknown parent_session_id `{parent}`"
+            ));
+        }
+    }
+    if let Some(root) = &session.root_session_id {
+        let key = (session.source_id.clone(), root.clone());
+        if root != &session.session_id && !sessions.contains_key(&key) {
+            return Some(format!(
+                "session references unknown root_session_id `{root}`"
+            ));
+        }
+    }
+    None
+}
+
+fn retain_custom_history_content_sessions(
+    sessions: &mut BTreeMap<(String, String), (usize, CtxHistoryJsonlSessionRecord)>,
+    events: &[(usize, CtxHistoryJsonlEventRecord)],
+    file_touches: &[(usize, CtxHistoryJsonlFileTouchRecord)],
+    edges: &[(usize, CtxHistoryJsonlEdgeRecord)],
+) {
+    let mut required = events
+        .iter()
+        .map(|(_, event)| (event.source_id.clone(), event.session_id.clone()))
+        .chain(
+            file_touches
+                .iter()
+                .map(|(_, touch)| (touch.source_id.clone(), touch.session_id.clone())),
+        )
+        .chain(edges.iter().flat_map(|(_, edge)| {
+            [
+                (edge.source_id.clone(), edge.from_session_id.clone()),
+                (edge.source_id.clone(), edge.to_session_id.clone()),
+            ]
+        }))
+        .collect::<BTreeSet<_>>();
+
+    loop {
+        let dependencies = required
+            .iter()
+            .filter_map(|key| sessions.get(key).map(|(_, session)| session))
+            .flat_map(|session| {
+                [
+                    session
+                        .parent_session_id
+                        .as_ref()
+                        .map(|id| (session.source_id.clone(), id.clone())),
+                    session
+                        .root_session_id
+                        .as_ref()
+                        .map(|id| (session.source_id.clone(), id.clone())),
+                ]
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        let before = required.len();
+        required.extend(dependencies);
+        if required.len() == before {
+            break;
+        }
+    }
+    sessions.retain(|key, _| required.contains(key));
 }
 
 pub(crate) fn custom_history_session_capture(

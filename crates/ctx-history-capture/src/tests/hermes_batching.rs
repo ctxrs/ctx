@@ -9,14 +9,13 @@ use std::{
 };
 
 #[test]
-fn native_hermes_partial_import_crosses_batches_and_replays_idempotently() {
+fn native_hermes_import_crosses_batches_and_replays_idempotently() {
     let temp = tempdir();
     let fixture = write_hermes_batched_db(&temp, 130);
     let db_path = temp.path().join("work.sqlite");
     let mut store = Store::open(&db_path).unwrap();
     let options = HermesSqliteImportOptions {
         source_path: Some(fixture.clone()),
-        allow_partial_failures: true,
         ..HermesSqliteImportOptions::default()
     };
 
@@ -47,7 +46,7 @@ fn native_hermes_partial_import_crosses_batches_and_replays_idempotently() {
 }
 
 #[test]
-fn native_hermes_nonpartial_import_preserves_atomic_search_projection() {
+fn native_hermes_import_preserves_search_projection() {
     let temp = tempdir();
     let fixture = write_hermes_batched_db(&temp, 70);
     let db_path = temp.path().join("work.sqlite");
@@ -76,7 +75,7 @@ fn native_hermes_nonpartial_import_preserves_atomic_search_projection() {
 }
 
 #[test]
-fn native_hermes_partial_import_preserves_preexisting_search_segment_and_bounds_peak_wal() {
+fn native_hermes_import_preserves_preexisting_search_segment_and_bounds_peak_wal() {
     let temp = tempdir();
     let historic = write_hermes_batched_db_named(&temp, "historic", 256, 8 * 1024);
     let current = write_hermes_batched_db_named(&temp, "current", 130, 8 * 1024);
@@ -88,7 +87,6 @@ fn native_hermes_partial_import_preserves_preexisting_search_segment_and_bounds_
         &mut store,
         HermesSqliteImportOptions {
             source_path: Some(historic.clone()),
-            allow_partial_failures: true,
             ..HermesSqliteImportOptions::default()
         },
     )
@@ -125,7 +123,6 @@ fn native_hermes_partial_import_preserves_preexisting_search_segment_and_bounds_
     sampler_ready.wait();
     let current_options = HermesSqliteImportOptions {
         source_path: Some(current.clone()),
-        allow_partial_failures: true,
         ..HermesSqliteImportOptions::default()
     };
     let current_summary = import_hermes_sqlite(&current, &mut store, current_options.clone());

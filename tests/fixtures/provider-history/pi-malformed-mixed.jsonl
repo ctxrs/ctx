@@ -1,5 +1,5 @@
 {"type":"message","id":"pi-orphan-before-session","parentId":null,"timestamp":"2026-06-23T17:00:00.000Z","message":{"role":"user","content":"This orphan message should fail before a Pi session header."}}
-{"type":"session","version":3,"id":"pi-malformed-partial-1","timestamp":"2026-06-23T17:00:01.000Z","cwd":"/workspace/example"}
+{"type":"session","version":3,"id":"pi-malformed-mixed-1","timestamp":"2026-06-23T17:00:01.000Z","cwd":"/workspace/example"}
 {"type":"message","id":"pi-edge-user","parentId":null,"timestamp":"2026-06-23T17:00:02.000Z","message":{"role":"user","content":"Pi edge fixture before malformed line."}}
 {"type":"message","id":"pi-edge-bad","parentId":"pi-edge-user","timestamp":"2026-06-23T17:00:03.000Z","message":{"role":"assistant","content":[
 {"type":"message","id":"pi-edge-assistant","parentId":"pi-edge-user","timestamp":"2026-06-23T17:00:04.000Z","message":{"role":"assistant","content":"Pi edge fixture after malformed line.","provider":"inflection","model":"pi-2"}}

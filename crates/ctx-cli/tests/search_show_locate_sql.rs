@@ -248,7 +248,7 @@ fn fresh_home_search_mvp_flow() {
         &fixture,
         "--json",
     ]));
-    assert_eq!(import["schema_version"], 1);
+    assert_eq!(import["schema_version"], 2);
     assert!(import["totals"]["imported_sessions"].as_u64().unwrap() > 0);
     assert!(import["totals"]["source_files"].as_u64().unwrap() > 0);
     assert!(import["totals"]["source_bytes"].as_u64().unwrap() > 0);
@@ -728,7 +728,7 @@ fn codex_cli_resume_is_idempotent_rescan_and_filters_subagents() {
         &fixture,
         "--json",
     ]));
-    assert_eq!(first["schema_version"], 1);
+    assert_eq!(first["schema_version"], 2);
     assert_eq!(first["resume"], false);
     assert_eq!(first["resume_mode"], "normal_scan");
     assert_eq!(first["totals"]["imported_sessions"], 2);
@@ -799,7 +799,7 @@ fn codex_cli_resume_is_idempotent_rescan_and_filters_subagents() {
         "--resume",
         "--json",
     ]));
-    assert_eq!(second["schema_version"], 1);
+    assert_eq!(second["schema_version"], 2);
     assert_eq!(second["resume"], true);
     assert_eq!(second["resume_mode"], "idempotent_rescan");
     assert_eq!(second["totals"]["imported_sessions"], 0);
@@ -837,7 +837,7 @@ fn codex_cli_default_import_uses_catalog_state_for_incremental_catch_up() {
     assert_eq!(first["resume_mode"], "normal_scan");
     assert_eq!(first["totals"]["imported_sessions"], 2);
     assert_eq!(first["totals"]["imported_events"], 7);
-    assert_eq!(first["totals"]["failed"], 0);
+    assert_eq!(first["totals"]["rejected_records"], 0);
 
     let status = json_output(ctx(&temp).args(["status", "--json"]));
     assert_eq!(status["cataloged_sessions"], 2);
@@ -859,7 +859,7 @@ fn codex_cli_default_import_uses_catalog_state_for_incremental_catch_up() {
     assert_eq!(second["totals"]["imported_events"], 0);
     assert_eq!(second["totals"]["imported_edges"], 0);
     assert_eq!(second["totals"]["skipped"], 0);
-    assert_eq!(second["totals"]["failed"], 0);
+    assert_eq!(second["totals"]["rejected_records"], 0);
 }
 
 #[test]
@@ -971,7 +971,7 @@ fn pi_cli_import_search_flow() {
 
     let imported =
         json_output(ctx(&temp).args(["import", "--provider", "pi", "--path", &fixture, "--json"]));
-    assert_eq!(imported["schema_version"], 1);
+    assert_eq!(imported["schema_version"], 2);
     assert_eq!(imported["sources"][0]["provider"], "pi");
     assert_eq!(imported["sources"][0]["source_format"], "pi_session_jsonl");
     assert_eq!(imported["totals"]["imported_sessions"], 1);
@@ -1268,7 +1268,11 @@ fn pi_cli_imports_directory_tree_path() {
         "pi",
         "--json",
     ]));
-    assert_search_provider_oracle(&search, "pi", "pi directory beta oracle", 1, "message");
+    assert_search_provider_oracle(&search, "pi", "pi directory beta oracle", 2, "message");
+    assert!(search["results"][0]["snippet"]
+        .as_str()
+        .unwrap()
+        .contains("pi directory beta oracle"));
 }
 
 #[test]
@@ -1363,9 +1367,10 @@ fn import_rejects_nonexistent_explicit_format_path() {
         .assert()
         .failure()
         .stderr(
-            predicate::str::contains("import path does not exist")
+            predicate::str::contains("all import sources failed")
                 .and(predicate::str::contains(path)),
-        );
+        )
+        .stdout(predicate::str::contains("outcome: failure"));
 }
 
 #[test]
@@ -1437,7 +1442,8 @@ fn import_reports_unreadable_directory_with_path_context() {
     ]));
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
 
-    assert!(stderr.contains("read import source directory"), "{stderr}");
+    assert!(stderr.contains("inventory import files"), "{stderr}");
+    assert!(stderr.contains("Permission denied"), "{stderr}");
     assert!(stderr.contains(path.to_str().unwrap()), "{stderr}");
 }
 

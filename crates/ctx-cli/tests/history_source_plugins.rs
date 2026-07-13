@@ -365,6 +365,102 @@ for record in records:
 }
 
 #[test]
+fn all_invalid_history_source_plugin_does_not_advance_cursor_and_retries() {
+    let temp = tempdir();
+    let state = temp.path().join("plugin-state");
+    fs::write(&state, "invalid").unwrap();
+    let script = format!(
+        r#"#!/usr/bin/env python3
+import json
+import pathlib
+state = pathlib.Path({state:?}).read_text().strip()
+records = [
+  {{"record_type":"manifest","schema_version":"ctx-history-jsonl-v1"}},
+  {{"record_type":"source","source_id":"default","provider_key":"retryplugin","source_format":"retryplugin-history-v1","cursor":{{"after":{{"stream":"retryplugin:default","cursor":"invalid-advance" if state == "invalid" else "valid-advance","observed_at":"2026-07-13T12:00:00Z"}}}}}},
+  {{"record_type":"session","source_id":"default","session_id":"run","started_at":"2026-07-13T12:00:00Z"}},
+  {{"record_type":"event","source_id":"default","session_id":"run","event_index":"bad" if state == "invalid" else 0,"event_type":"message","role":"user","occurred_at":"2026-07-13T12:00:01Z","payload":{{"text":"plugin retry oracle"}}}},
+]
+for record in records:
+    print(json.dumps(record))
+"#,
+        state = state.display().to_string(),
+    );
+    let plugin = write_raw_history_source_plugin(&temp, "retryplugin", &script);
+
+    let failed = ctx(&temp)
+        .env("CTX_HISTORY_PLUGIN_PATH", &plugin.manifest_dir)
+        .args([
+            "import",
+            "--history-source",
+            "retryplugin/default",
+            "--json",
+            "--progress",
+            "none",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let report: Value = serde_json::from_slice(&failed.stdout).unwrap();
+    assert_eq!(report["outcome"], "failure", "{report:#}");
+    let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
+    assert_eq!(sqlite_count(&conn, "SELECT COUNT(*) FROM sync_cursors"), 0);
+    assert_eq!(
+        sqlite_count(&conn, "SELECT COUNT(*) FROM history_records"),
+        0
+    );
+    assert_eq!(sqlite_count(&conn, "SELECT COUNT(*) FROM sessions"), 0);
+    assert_eq!(sqlite_count(&conn, "SELECT COUNT(*) FROM events"), 0);
+    drop(conn);
+
+    fs::write(&state, "valid").unwrap();
+    let retry = json_output(
+        ctx(&temp)
+            .env("CTX_HISTORY_PLUGIN_PATH", &plugin.manifest_dir)
+            .args([
+                "import",
+                "--history-source",
+                "retryplugin/default",
+                "--json",
+                "--progress",
+                "none",
+            ]),
+    );
+    assert_eq!(retry["outcome"], "success", "{retry:#}");
+    assert_eq!(retry["totals"]["imported_events"], 1, "{retry:#}");
+
+    fs::write(&state, "invalid").unwrap();
+    let corrupt_retry = ctx(&temp)
+        .env("CTX_HISTORY_PLUGIN_PATH", &plugin.manifest_dir)
+        .args([
+            "import",
+            "--history-source",
+            "retryplugin/default",
+            "--json",
+            "--progress",
+            "none",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let report: Value = serde_json::from_slice(&corrupt_retry.stdout).unwrap();
+    assert_eq!(report["outcome"], "failure", "{report:#}");
+    assert_eq!(report["failure_scope"], "source", "{report:#}");
+    let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
+    assert_eq!(
+        sqlite_count(&conn, "SELECT COUNT(*) FROM history_records"),
+        1
+    );
+    assert_eq!(sqlite_count(&conn, "SELECT COUNT(*) FROM sessions"), 1);
+    assert_eq!(sqlite_count(&conn, "SELECT COUNT(*) FROM events"), 1);
+    let cursor: String = conn
+        .query_row("SELECT cursor FROM sync_cursors", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(cursor, "valid-advance");
+}
+
+#[test]
 fn large_history_source_plugin_cursor_uses_cursor_file_without_inline_env() {
     let temp = tempdir();
     let log = temp.path().join("large-cursor.log");

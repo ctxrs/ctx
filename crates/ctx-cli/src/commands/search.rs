@@ -11,15 +11,17 @@ use clap::ValueEnum;
 use serde_json::{json, Value};
 
 use ctx_history_capture::{
-    discover_provider_sources_for_provider, ProviderImportSummary, ProviderSourceStatus,
+    discover_provider_sources_for_provider, CaptureError, ProviderImportSummary,
+    ProviderSourceStatus,
 };
 use ctx_history_core::database_path;
 use ctx_history_store::Store;
 
 use crate::analytics::AnalyticsProperties;
 use crate::commands::import::{
-    error_summary, import_history_source_plugin, import_one_source_for_search_refresh,
-    import_totals_json, inventory_import_sources, one_line_error, should_parallelize_import,
+    error_summary, import_error_scope, import_history_source_plugin,
+    import_one_source_for_search_refresh, import_totals_json, inventory_import_sources,
+    one_line_error, rejected_source_summary, should_parallelize_import, ImportFailureScope,
     ImportSourceOutcome, ImportTotals, SourceStats,
 };
 use crate::commands::setup::{
@@ -523,9 +525,10 @@ pub(crate) fn refresh_sources_for_search(
     let had_indexed_content = store.indexed_history_item_count()? > 0;
     let inventory = inventory_import_sources(&store, sources, false)?;
     let planned_sources = inventory.sources;
+    let inventory_failures = inventory.failures;
     let planned_total_bytes = inventory.totals.source_bytes;
     drop(store);
-    if planned_sources.is_empty() && plugin_sources.is_empty() {
+    if planned_sources.is_empty() && inventory_failures.is_empty() && plugin_sources.is_empty() {
         return Ok(ImportTotals::default());
     }
 
@@ -542,10 +545,15 @@ pub(crate) fn refresh_sources_for_search(
     );
     let mut totals = ImportTotals::default();
     let mut first_refresh_failure = None::<String>;
-    // Provider histories are live, append-only data and may contain isolated
-    // malformed rows. Refresh all valid history while preserving hard errors
-    // for source-level and system-level failures.
-    let allow_partial_failures = true;
+    for failure in inventory_failures {
+        first_refresh_failure.get_or_insert_with(|| failure.error.clone());
+        totals.add_source_failure(&failure.stats);
+        progress.warning(format!(
+            "skipped {} during inventory: {}",
+            failure.source.provider.as_str(),
+            one_line_error(&failure.error)
+        ));
+    }
     if should_parallelize_import(&planned_sources) {
         let source_states = Arc::new(Mutex::new(
             planned_sources
@@ -572,7 +580,6 @@ pub(crate) fn refresh_sources_for_search(
                         &mut store,
                         &plan.source,
                         progress_callback,
-                        allow_partial_failures,
                         &plan.preinventory,
                     )?;
                     Ok(ImportSourceOutcome {
@@ -589,19 +596,22 @@ pub(crate) fn refresh_sources_for_search(
         for handle in handles {
             let result = handle
                 .join()
-                .map_err(|_| anyhow!("provider import worker panicked"))?;
+                .map_err(|_| CaptureError::WorkerPanicked("provider import"))?;
             match result {
                 Ok(outcome) => outcomes.push(outcome),
-                Err(err) if refresh == RefreshArg::Background => {
+                Err(err)
+                    if refresh == RefreshArg::Background
+                        && import_error_scope(&err) == ImportFailureScope::Source =>
+                {
                     first_refresh_failure.get_or_insert_with(|| error_summary(&err));
-                    totals.add_source_failure(&SourceStats::default());
+                    add_refresh_source_failure(&mut totals, &SourceStats::default(), &err);
                 }
                 Err(err) => return Err(err),
             }
         }
         outcomes.sort_by_key(|outcome| outcome.index);
         for outcome in outcomes {
-            warn_on_partial_refresh(
+            warn_on_rejected_records(
                 &progress,
                 json_output,
                 outcome.source.provider.as_str(),
@@ -624,12 +634,11 @@ pub(crate) fn refresh_sources_for_search(
                 &mut store,
                 &plan.source,
                 source_progress,
-                allow_partial_failures,
                 &plan.preinventory,
             );
             match import_result {
                 Ok(summary) => {
-                    warn_on_partial_refresh(
+                    warn_on_rejected_records(
                         &progress,
                         json_output,
                         plan.source.provider.as_str(),
@@ -642,10 +651,13 @@ pub(crate) fn refresh_sources_for_search(
                         completed_source_bytes,
                     );
                 }
-                Err(err) if refresh == RefreshArg::Background => {
+                Err(err)
+                    if refresh == RefreshArg::Background
+                        && import_error_scope(&err) == ImportFailureScope::Source =>
+                {
                     let error = error_summary(&err);
                     first_refresh_failure.get_or_insert_with(|| error.clone());
-                    totals.add_source_failure(&plan.stats);
+                    add_refresh_source_failure(&mut totals, &plan.stats, &err);
                     progress.done(
                         "refreshing",
                         format!(
@@ -668,17 +680,14 @@ pub(crate) fn refresh_sources_for_search(
                 "refreshing",
                 format!("running history source plugin {}", plugin_source.label()),
             );
-            let import_result = import_history_source_plugin(
-                &mut store,
-                &plugin_source,
-                data_root,
-                false,
-                allow_partial_failures,
-            )
-            .with_context(|| format!("refresh history source plugin {}", plugin_source.label()));
+            let import_result =
+                import_history_source_plugin(&mut store, &plugin_source, data_root, false)
+                    .with_context(|| {
+                        format!("refresh history source plugin {}", plugin_source.label())
+                    });
             match import_result {
                 Ok((summary, stats)) => {
-                    warn_on_partial_refresh(
+                    warn_on_rejected_records(
                         &progress,
                         json_output,
                         &plugin_source.label(),
@@ -691,10 +700,13 @@ pub(crate) fn refresh_sources_for_search(
                         0,
                     );
                 }
-                Err(err) if refresh == RefreshArg::Background => {
+                Err(err)
+                    if refresh == RefreshArg::Background
+                        && import_error_scope(&err) == ImportFailureScope::Source =>
+                {
                     let error = error_summary(&err);
                     first_refresh_failure.get_or_insert_with(|| error.clone());
-                    totals.add_source_failure(&SourceStats::default());
+                    add_refresh_source_failure(&mut totals, &SourceStats::default(), &err);
                     progress.done(
                         "refreshing",
                         format!(
@@ -711,12 +723,11 @@ pub(crate) fn refresh_sources_for_search(
     }
 
     let all_sources_failed = totals.imported_sources == 0 && totals.failed_sources > 0;
-    let all_partial_items_failed_without_prior_index = !had_indexed_content
+    let all_rejected_without_prior_index = !had_indexed_content
         && totals.imported_sessions == 0
         && totals.imported_events == 0
         && totals.failed > 0;
-    if refresh == RefreshArg::Background
-        && (all_sources_failed || all_partial_items_failed_without_prior_index)
+    if refresh == RefreshArg::Background && (all_sources_failed || all_rejected_without_prior_index)
     {
         let detail = first_refresh_failure
             .map(|error| format!("; first failure: {error}"))
@@ -736,7 +747,19 @@ pub(crate) fn refresh_sources_for_search(
     Ok(totals)
 }
 
-fn warn_on_partial_refresh(
+fn add_refresh_source_failure(
+    totals: &mut ImportTotals,
+    stats: &SourceStats,
+    error: &anyhow::Error,
+) {
+    if let Some(summary) = rejected_source_summary(error) {
+        totals.add_rejected_source(&summary, stats);
+    } else {
+        totals.add_source_failure(stats);
+    }
+}
+
+fn warn_on_rejected_records(
     progress: &ProgressReporter,
     json_output: bool,
     source: &str,
@@ -756,7 +779,7 @@ fn warn_on_partial_refresh(
         })
         .unwrap_or_default();
     let warning = format!(
-        "partially refreshed {source}: skipped {} invalid history record(s){first_failure}",
+        "refreshed {source} with {} rejected history record(s){first_failure}",
         summary.failed
     );
     if progress.is_enabled() {

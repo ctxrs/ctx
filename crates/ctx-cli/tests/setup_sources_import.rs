@@ -514,7 +514,7 @@ fn setup_backgrounds_discovered_codex_sessions_when_daemon_is_enabled_and_wait_i
 }
 
 #[test]
-fn setup_partial_import_isolates_empty_codex_session_file() {
+fn setup_import_isolates_empty_codex_session_file() {
     let temp = tempdir();
     write_codex_setup_session(&temp);
     let sessions = temp
@@ -528,13 +528,25 @@ fn setup_partial_import_isolates_empty_codex_session_file() {
     assert_eq!(setup["inventory"]["sources"], 1, "{setup:#}");
     assert_eq!(setup["inventory"]["units"], 2, "{setup:#}");
     assert_eq!(setup["catalog"]["cataloged_sessions"], 2, "{setup:#}");
+    assert_eq!(
+        setup["import"]["outcome"], "completed_with_rejections",
+        "{setup:#}"
+    );
+    assert_eq!(setup["import"]["failure_scope"], "record", "{setup:#}");
+    assert_eq!(
+        setup["import"]["failure_type"], "record_rejection",
+        "{setup:#}"
+    );
     assert_eq!(setup["import"]["totals"]["failed_sources"], 0, "{setup:#}");
     assert_eq!(
         setup["import"]["totals"]["imported_sessions"], 1,
         "{setup:#}"
     );
-    assert_eq!(setup["import"]["totals"]["failed"], 1, "{setup:#}");
-    assert!(setup["import"]["sources"][0]["failures"][0]["error"]
+    assert_eq!(
+        setup["import"]["totals"]["rejected_records"], 1,
+        "{setup:#}"
+    );
+    assert!(setup["import"]["sources"][0]["rejections"][0]["error"]
         .as_str()
         .unwrap()
         .contains("rollout-empty-codex-session.jsonl"));
@@ -554,12 +566,45 @@ fn setup_partial_import_isolates_empty_codex_session_file() {
         "--json",
     ]));
     assert_eq!(search["freshness"]["status"], "completed", "{search:#}");
-    assert_eq!(search["freshness"]["totals"]["failed"], 1, "{search:#}");
+    assert_eq!(
+        search["freshness"]["totals"]["rejected_records"], 1,
+        "{search:#}"
+    );
     assert_eq!(
         search["freshness"]["totals"]["failed_sources"], 0,
         "{search:#}"
     );
     assert_search_provider_oracle(&search, "codex", "setup should import", 1, "message");
+}
+
+#[test]
+fn setup_all_failed_foreground_import_prints_json_and_exits_nonzero() {
+    let temp = tempdir();
+    let sessions = temp
+        .path()
+        .join(".codex")
+        .join("sessions")
+        .join("2026/06/24");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(sessions.join("rollout-empty-only.jsonl"), "").unwrap();
+
+    let output = ctx(&temp)
+        .args(["setup", "--wait", "--json", "--progress", "none"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let setup: Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    assert_eq!(setup["schema_version"], 1, "{setup:#}");
+    assert_eq!(setup["import"]["ran"], true, "{setup:#}");
+    assert_eq!(setup["import"]["outcome"], "failure", "{setup:#}");
+    assert_eq!(setup["import"]["failure_scope"], "source", "{setup:#}");
+    assert_eq!(
+        setup["import"]["totals"]["imported_sources"], 0,
+        "{setup:#}"
+    );
+    assert_eq!(setup["import"]["totals"]["failed_sources"], 1, "{setup:#}");
 }
 
 #[test]
@@ -614,6 +659,9 @@ fn setup_inventories_and_imports_claude_sources_by_default() {
     assert_eq!(setup["inventory"]["indexed_source_import_files"], 1);
     assert_eq!(setup["inventory"]["pending_source_import_files"], 0);
     assert_eq!(setup["catalog"]["cataloged_sessions"], 0);
+    assert_eq!(setup["import"]["outcome"], "success");
+    assert_eq!(setup["import"]["failure_scope"], "none");
+    assert_eq!(setup["import"]["failure_type"], "none");
     assert_eq!(setup["import"]["totals"]["imported_sources"], 1);
     assert_eq!(setup["import"]["totals"]["imported_sessions"], 1);
     assert_eq!(setup["import"]["totals"]["failed_sources"], 0);
@@ -931,7 +979,7 @@ fn import_progress_json_goes_to_stderr_without_polluting_stdout() {
         .clone();
 
     let stdout: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(stdout["schema_version"], 1);
+    assert_eq!(stdout["schema_version"], 2);
     assert!(stdout["totals"]["imported_sessions"].as_u64().unwrap() > 0);
 
     let stderr = String::from_utf8(output.stderr).unwrap();
@@ -991,47 +1039,9 @@ fn import_custom_history_jsonl_format_is_searchable_and_idempotent() {
 }
 
 #[test]
-fn import_custom_history_jsonl_format_rejects_malformed_atomically() {
+fn import_custom_history_jsonl_format_imports_valid_rows_and_reports_rejections() {
     let temp = tempdir();
-    let fixture = custom_history_fixture("malformed-partial.jsonl");
-
-    let stderr = failure_stderr(ctx(&temp).args([
-        "import",
-        "--format",
-        "ctx-history-jsonl-v1",
-        "--path",
-        &fixture,
-        "--progress",
-        "none",
-    ]));
-    assert!(
-        stderr.contains("ctx-history-jsonl-v1 import failed"),
-        "{stderr}"
-    );
-
-    let status = json_output(ctx(&temp).args(["status", "--json"]));
-    assert_eq!(status["indexed_items"], 0);
-    let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
-    assert_eq!(
-        sqlite_count(&conn, "SELECT COUNT(*) FROM history_records"),
-        0
-    );
-    assert_eq!(
-        sqlite_count(&conn, "SELECT COUNT(*) FROM ctx_history_search"),
-        0
-    );
-    assert_eq!(
-        sqlite_count(&conn, "SELECT COUNT(*) FROM capture_sources"),
-        0
-    );
-    assert_eq!(sqlite_count(&conn, "SELECT COUNT(*) FROM sessions"), 0);
-    assert_eq!(sqlite_count(&conn, "SELECT COUNT(*) FROM events"), 0);
-}
-
-#[test]
-fn import_custom_history_jsonl_format_partial_commits_valid_rows() {
-    let temp = tempdir();
-    let fixture = custom_history_fixture("malformed-partial.jsonl");
+    let fixture = custom_history_fixture("malformed-mixed.jsonl");
 
     let import = json_output(ctx(&temp).args([
         "import",
@@ -1039,15 +1049,14 @@ fn import_custom_history_jsonl_format_partial_commits_valid_rows() {
         "ctx-history-jsonl-v1",
         "--path",
         &fixture,
-        "--partial",
         "--json",
         "--progress",
         "none",
     ]));
     assert_eq!(import["totals"]["imported_sessions"], 1);
     assert_eq!(import["totals"]["imported_events"], 1);
-    assert_eq!(import["totals"]["failed"], 1);
-    assert_eq!(import["sources"][0]["failed"], 1);
+    assert_eq!(import["totals"]["rejected_records"], 1);
+    assert_eq!(import["sources"][0]["rejected_records"], 1);
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -1060,8 +1069,62 @@ fn import_custom_history_jsonl_format_partial_commits_valid_rows() {
     ]));
     assert!(
         !search["results"].as_array().unwrap().is_empty(),
-        "partial custom import was not searchable: {search:#}"
+        "custom import with rejections was not searchable: {search:#}"
     );
+}
+
+#[test]
+fn all_invalid_custom_import_cleans_up_and_retries_after_source_is_fixed() {
+    let temp = tempdir();
+    let fixture = temp.path().join("custom-retry.jsonl");
+    let records = |event_index: &str| {
+        r#"{"record_type":"manifest","schema_version":"ctx-history-jsonl-v1"}
+{"record_type":"source","source_id":"retry-source","provider_key":"retry-agent","source_format":"retry-jsonl","cursor":{"after":{"stream":"retry-agent:retry-source","cursor":"1","observed_at":"2026-07-13T12:00:00Z"}}}
+{"record_type":"session","source_id":"retry-source","session_id":"retry-session","started_at":"2026-07-13T12:00:00Z"}
+{"record_type":"event","source_id":"retry-source","session_id":"retry-session","event_index":EVENT_INDEX,"event_type":"message","role":"user","occurred_at":"2026-07-13T12:00:01Z","payload":{"text":"retry oracle"}}
+"#
+        .replace("EVENT_INDEX", event_index)
+    };
+    fs::write(&fixture, records(r#""invalid""#)).unwrap();
+
+    let failed = ctx(&temp)
+        .args([
+            "import",
+            "--format",
+            "ctx-history-jsonl-v1",
+            "--path",
+            fixture.to_str().unwrap(),
+            "--json",
+            "--progress",
+            "none",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let report: Value = serde_json::from_slice(&failed.stdout).unwrap();
+    assert_eq!(report["outcome"], "failure", "{report:#}");
+    let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
+    assert_eq!(
+        sqlite_count(&conn, "SELECT COUNT(*) FROM history_records"),
+        0
+    );
+    assert_eq!(sqlite_count(&conn, "SELECT COUNT(*) FROM sync_cursors"), 0);
+    drop(conn);
+
+    fs::write(&fixture, records("0")).unwrap();
+    let retry = json_output(ctx(&temp).args([
+        "import",
+        "--format",
+        "ctx-history-jsonl-v1",
+        "--path",
+        fixture.to_str().unwrap(),
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(retry["outcome"], "success", "{retry:#}");
+    assert_eq!(retry["totals"]["imported_events"], 1, "{retry:#}");
 }
 
 #[test]
@@ -1151,7 +1214,7 @@ fn import_all_discovers_and_imports_providers_together() {
         .clone();
 
     let stdout: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(stdout["schema_version"], 1);
+    assert_eq!(stdout["schema_version"], 2);
     assert!(stdout["totals"]["imported_sessions"].as_u64().unwrap() >= 3);
     let sources = stdout["sources"].as_array().unwrap();
     assert_eq!(sources.len(), 2);
@@ -1428,7 +1491,7 @@ fn explicit_native_sources_are_listed_but_not_auto_imported() {
         project.to_str().unwrap(),
         "--json",
     ]));
-    assert_eq!(imported["totals"]["failed"], 0);
+    assert_eq!(imported["totals"]["rejected_records"], 0);
     assert_eq!(imported["totals"]["imported_sources"], 1);
 
     let search_after_import =
@@ -1454,17 +1517,17 @@ fn import_all_reports_source_failure_without_losing_successes() {
         .get_output()
         .clone();
     let stdout: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(stdout["schema_version"], 1);
+    assert_eq!(stdout["schema_version"], 2);
     assert_eq!(stdout["totals"]["imported_sources"], 1);
     assert_eq!(stdout["totals"]["failed_sources"], 1);
     assert!(stdout["totals"]["imported_sessions"].as_u64().unwrap() > 0);
     let sources = stdout["sources"].as_array().unwrap();
     assert!(sources
         .iter()
-        .any(|source| source["provider"] == "codex" && source["status"] == "imported"));
+        .any(|source| source["provider"] == "codex" && source["status"] == "success"));
     assert!(sources
         .iter()
-        .any(|source| source["provider"] == "opencode" && source["status"] == "failed"));
+        .any(|source| source["provider"] == "opencode" && source["status"] == "failure"));
     let opencode_failure = sources
         .iter()
         .find(|source| source["provider"] == "opencode")

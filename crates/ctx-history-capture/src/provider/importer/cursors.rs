@@ -101,10 +101,7 @@ fn provider_source_cursor_stream_for_component(
     )
 }
 
-pub(crate) fn persist_provider_cursor(
-    store: &mut Store,
-    capture: &ProviderCaptureEnvelope,
-) -> Result<()> {
+pub(crate) fn provider_sync_cursor(capture: &ProviderCaptureEnvelope) -> Option<SyncCursor> {
     let checkpoint = capture
         .source
         .cursor
@@ -130,11 +127,9 @@ pub(crate) fn persist_provider_cursor(
                     })
             })
         });
-    let Some(checkpoint) = checkpoint else {
-        return Ok(());
-    };
+    let checkpoint = checkpoint?;
 
-    store.upsert_sync_cursor(&SyncCursor {
+    Some(SyncCursor {
         id: stable_capture_uuid(
             &format!(
                 "provider-cursor:{}:{}:{}",
@@ -150,6 +145,10 @@ pub(crate) fn persist_provider_cursor(
         cursor: checkpoint.cursor,
         last_synced_at: Some(checkpoint.observed_at),
         timestamps: timestamps(checkpoint.observed_at),
-    })?;
+    })
+}
+
+pub(crate) fn persist_provider_sync_cursor(store: &mut Store, cursor: &SyncCursor) -> Result<()> {
+    store.upsert_sync_cursor(cursor)?;
     Ok(())
 }

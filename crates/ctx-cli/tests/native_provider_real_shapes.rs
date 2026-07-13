@@ -16,13 +16,13 @@ fn codebuddy_cli_jsonl_imports_and_searches_through_public_cli() {
         &path,
         "--json",
     ]));
-    assert_eq!(imported["schema_version"], 1);
+    assert_eq!(imported["schema_version"], 2);
     assert_eq!(imported["sources"][0]["provider"], "codebuddy");
     assert_eq!(
         imported["sources"][0]["source_format"],
         "codebuddy_history_json"
     );
-    assert_eq!(imported["totals"]["failed"], 0);
+    assert_eq!(imported["totals"]["rejected_records"], 0);
     assert_eq!(imported["totals"]["imported_sessions"], 1);
     assert_eq!(imported["totals"]["imported_events"], 2);
 
@@ -85,7 +85,7 @@ fn nanoclaw_import_preserves_text_timestamp_millis_and_integer_trigger() {
         &path,
         "--json",
     ]));
-    assert_eq!(imported["totals"]["failed"], 0);
+    assert_eq!(imported["totals"]["rejected_records"], 0);
     assert_eq!(imported["totals"]["imported_events"], 2);
 
     let store = Connection::open(temp.path().join("work.sqlite")).unwrap();

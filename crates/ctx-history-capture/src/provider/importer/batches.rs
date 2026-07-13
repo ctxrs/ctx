@@ -1,20 +1,22 @@
-use std::{collections::BTreeSet, io::Write, num::NonZeroUsize};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::Write,
+    num::NonZeroUsize,
+};
 
 use serde::Serialize;
 
 use super::*;
 
-const PROVIDER_IMPORT_TRANSACTION_BATCH_BYTES: usize = 8 * 1024 * 1024;
-const PARTIAL_PROVIDER_IMPORT_TRANSACTION_BATCH_UNITS: usize = 64;
+pub(crate) const IMPORT_TRANSACTION_BATCH_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const IMPORT_TRANSACTION_BATCH_UNITS: usize = 64;
 
 pub(super) fn import_normalized_provider_captures(
     store: &mut Store,
     normalization: ProviderNormalizationResult,
     options: NormalizedProviderImportOptions,
-    force_bulk_search_mode: bool,
 ) -> Result<ProviderImportSummary> {
-    let transaction_batch_size = partial_transaction_batch_size(options.allow_partial_failures);
-    let suppress_search_merges = force_bulk_search_mode || options.allow_partial_failures;
+    let transaction_batch_size = provider_transaction_batch_size();
     let ProviderNormalizationResult {
         summary,
         captures,
@@ -27,7 +29,7 @@ pub(super) fn import_normalized_provider_captures(
         captures,
         files_touched,
         transaction_batch_size,
-        suppress_search_merges,
+        true,
     )
 }
 
@@ -38,11 +40,6 @@ pub(crate) fn import_normalized_provider_captures_in_batches(
     options: NormalizedProviderImportOptions,
     transaction_batch_size: usize,
 ) -> Result<ProviderImportSummary> {
-    if !options.allow_partial_failures {
-        return Err(CaptureError::InvalidPayload(
-            "batched provider import requires allow_partial_failures".to_owned(),
-        ));
-    }
     if !options.wrap_transaction {
         return Err(CaptureError::InvalidPayload(
             "batched provider import requires transaction wrapping".to_owned(),
@@ -82,15 +79,13 @@ pub(super) fn import_provider_capture_lines(
         summary,
         captures,
         files_touched,
-        None,
-        false,
+        provider_transaction_batch_size(),
+        true,
     )
 }
 
-fn partial_transaction_batch_size(allow_partial_failures: bool) -> Option<NonZeroUsize> {
-    allow_partial_failures
-        .then(|| NonZeroUsize::new(PARTIAL_PROVIDER_IMPORT_TRANSACTION_BATCH_UNITS))
-        .flatten()
+fn provider_transaction_batch_size() -> Option<NonZeroUsize> {
+    NonZeroUsize::new(IMPORT_TRANSACTION_BATCH_UNITS)
 }
 
 fn import_provider_capture_lines_with_batch_size(
@@ -144,10 +139,6 @@ fn import_provider_capture_lines_with_batch_size(
         }
     }
     let has_captures = !captures.is_empty() || !files_touched.is_empty();
-    if summary.failed > 0 && !options.allow_partial_failures {
-        return Ok(summary);
-    }
-
     let bulk_search_mode = suppress_search_merges && has_captures && options.wrap_transaction;
     let bulk_search_guard = bulk_search_mode
         .then(|| store.begin_event_search_bulk_mode())
@@ -170,8 +161,8 @@ fn import_provider_capture_lines_with_batch_size(
     };
     match (import_result, finish_result) {
         (Ok(summary), Ok(())) => Ok(summary),
-        (Err(err), _) => Err(err),
-        (Ok(_), Err(err)) => Err(err),
+        (_, Err(err)) => Err(err),
+        (Err(err), Ok(())) => Err(err),
     }
 }
 
@@ -186,6 +177,15 @@ fn persist_provider_capture_lines(
     transaction_batch_size: Option<NonZeroUsize>,
     mut caches: ProviderImportCaches,
 ) -> Result<ProviderImportSummary> {
+    let pending_cursors = if options.persist_cursors && summary.failed == 0 {
+        captures
+            .iter()
+            .filter_map(|(_, capture)| provider_sync_cursor(capture))
+            .map(|cursor| (cursor.id, cursor))
+            .collect::<BTreeMap<_, _>>()
+    } else {
+        BTreeMap::new()
+    };
     let mut transaction = ProviderImportTransaction::begin(
         store,
         has_captures && options.wrap_transaction,
@@ -193,9 +193,13 @@ fn persist_provider_capture_lines(
     )?;
     for (line_number, capture) in captures {
         let unit_bytes = serialized_len_or_rollback(&mut transaction, store, &capture)?;
-        prepare_or_rollback(&mut transaction, store, unit_bytes)?;
+        transaction.prepare_unit(store, unit_bytes)?;
         match import_provider_capture_line(store, &capture, options, line_number, &mut caches) {
             Ok(line_summary) => summary.merge(line_summary),
+            Err(err @ CaptureError::Store(_)) => {
+                transaction.rollback(store);
+                return Err(err);
+            }
             Err(err) => {
                 summary.failed += 1;
                 summary.failures.push(ProviderImportFailure {
@@ -204,65 +208,43 @@ fn persist_provider_capture_lines(
                 });
             }
         }
-        record_or_rollback(&mut transaction, store, unit_bytes)?;
+        transaction.record_unit(store, unit_bytes)?;
     }
-    let pending = std::mem::take(&mut caches.pending_edges);
-    for (edge_id, edge) in pending {
-        let unit_bytes = pending_edge_estimated_len(&edge);
-        prepare_or_rollback(&mut transaction, store, unit_bytes)?;
-        if let Err(err) =
-            resolve_pending_provider_edge(store, &mut summary, &mut caches, edge_id, edge)
-        {
-            transaction.rollback(store);
-            return Err(err);
-        }
-        record_or_rollback(&mut transaction, store, unit_bytes)?;
-    }
+    resolve_pending_provider_edges_batched(store, &mut summary, &mut caches, &mut transaction)?;
     for (line_number, file) in files_touched {
         let unit_bytes = serialized_len_or_rollback(&mut transaction, store, &file)?;
-        prepare_or_rollback(&mut transaction, store, unit_bytes)?;
-        if let Err(err) = import_provider_file_touched_line(store, &file, options) {
-            summary.failed += 1;
-            summary.failures.push(ProviderImportFailure {
-                line: line_number,
-                error: err.to_string(),
-            });
+        transaction.prepare_unit(store, unit_bytes)?;
+        match import_provider_file_touched_line(store, &file, options) {
+            Ok(()) => summary.accepted_content_records += 1,
+            Err(err) => match err {
+                err @ CaptureError::Store(_) => {
+                    transaction.rollback(store);
+                    return Err(err);
+                }
+                err => {
+                    summary.failed += 1;
+                    summary.failures.push(ProviderImportFailure {
+                        line: line_number,
+                        error: err.to_string(),
+                    });
+                }
+            },
         }
-        record_or_rollback(&mut transaction, store, unit_bytes)?;
+        transaction.record_unit(store, unit_bytes)?;
     }
-    if summary.failed > 0 && !options.allow_partial_failures {
-        transaction.rollback(store);
-        return Ok(summary);
+    if summary.failed == 0 {
+        for cursor in pending_cursors.into_values() {
+            let unit_bytes = serialized_len_or_rollback(&mut transaction, store, &cursor)?;
+            transaction.prepare_unit(store, unit_bytes)?;
+            if let Err(err) = persist_provider_sync_cursor(store, &cursor) {
+                transaction.rollback(store);
+                return Err(err);
+            }
+            transaction.record_unit(store, unit_bytes)?;
+        }
     }
-    if let Err(err) = transaction.commit(store) {
-        transaction.rollback(store);
-        return Err(err);
-    }
+    transaction.commit(store)?;
     Ok(summary)
-}
-
-fn prepare_or_rollback(
-    transaction: &mut ProviderImportTransaction,
-    store: &Store,
-    unit_bytes: usize,
-) -> Result<()> {
-    if let Err(err) = transaction.prepare_unit(store, unit_bytes) {
-        transaction.rollback(store);
-        return Err(err);
-    }
-    Ok(())
-}
-
-fn record_or_rollback(
-    transaction: &mut ProviderImportTransaction,
-    store: &Store,
-    unit_bytes: usize,
-) -> Result<()> {
-    if let Err(err) = transaction.record_unit(store, unit_bytes) {
-        transaction.rollback(store);
-        return Err(err);
-    }
-    Ok(())
 }
 
 fn serialized_len(value: &impl Serialize) -> Result<usize> {
@@ -297,6 +279,25 @@ fn pending_edge_estimated_len(edge: &PendingProviderEdge) -> usize {
         .saturating_add(256)
 }
 
+pub(crate) fn resolve_pending_provider_edges_batched(
+    store: &mut Store,
+    summary: &mut ProviderImportSummary,
+    caches: &mut ProviderImportCaches,
+    transaction: &mut ProviderImportTransaction,
+) -> Result<()> {
+    let pending = std::mem::take(&mut caches.pending_edges);
+    for (edge_id, edge) in pending {
+        let unit_bytes = pending_edge_estimated_len(&edge);
+        transaction.prepare_unit(store, unit_bytes)?;
+        if let Err(err) = resolve_pending_provider_edge(store, summary, caches, edge_id, edge) {
+            transaction.rollback(store);
+            return Err(err);
+        }
+        transaction.record_unit(store, unit_bytes)?;
+    }
+    Ok(())
+}
+
 #[derive(Default)]
 struct ByteCounter {
     bytes: usize,
@@ -313,7 +314,7 @@ impl Write for ByteCounter {
     }
 }
 
-struct ProviderImportTransaction {
+pub(crate) struct ProviderImportTransaction {
     active: bool,
     batch_size: Option<NonZeroUsize>,
     units: usize,
@@ -333,18 +334,27 @@ impl ProviderImportTransaction {
         })
     }
 
-    fn prepare_unit(&mut self, store: &Store, unit_bytes: usize) -> Result<()> {
-        if self.active
-            && self.batch_size.is_some()
-            && self.units > 0
-            && self.bytes.saturating_add(unit_bytes) > PROVIDER_IMPORT_TRANSACTION_BATCH_BYTES
-        {
-            self.rotate(store)?;
-        }
-        Ok(())
+    pub(crate) fn begin_bounded(store: &Store, has_work: bool) -> Result<Self> {
+        Self::begin(store, has_work, provider_transaction_batch_size())
     }
 
-    fn record_unit(&mut self, store: &Store, unit_bytes: usize) -> Result<()> {
+    pub(crate) fn prepare_unit(&mut self, store: &Store, unit_bytes: usize) -> Result<()> {
+        let result = if self.active
+            && self.batch_size.is_some()
+            && self.units > 0
+            && self.bytes.saturating_add(unit_bytes) > IMPORT_TRANSACTION_BATCH_BYTES
+        {
+            self.rotate(store)
+        } else {
+            Ok(())
+        };
+        if result.is_err() {
+            self.rollback(store);
+        }
+        result
+    }
+
+    pub(crate) fn record_unit(&mut self, store: &Store, unit_bytes: usize) -> Result<()> {
         if !self.active {
             return Ok(());
         }
@@ -354,11 +364,15 @@ impl ProviderImportTransaction {
             .batch_size
             .is_none_or(|batch_size| self.units < batch_size.get());
         let below_byte_limit =
-            self.batch_size.is_none() || self.bytes < PROVIDER_IMPORT_TRANSACTION_BATCH_BYTES;
+            self.batch_size.is_none() || self.bytes < IMPORT_TRANSACTION_BATCH_BYTES;
         if below_unit_limit && below_byte_limit {
             return Ok(());
         }
-        self.rotate(store)
+        let result = self.rotate(store);
+        if result.is_err() {
+            self.rollback(store);
+        }
+        result
     }
 
     fn rotate(&mut self, store: &Store) -> Result<()> {
@@ -372,15 +386,21 @@ impl ProviderImportTransaction {
         Ok(())
     }
 
-    fn commit(&mut self, store: &Store) -> Result<()> {
-        if self.active {
-            store.commit_batch()?;
+    pub(crate) fn commit(&mut self, store: &Store) -> Result<()> {
+        let result = if self.active {
+            store.commit_batch().map_err(CaptureError::from)
+        } else {
+            Ok(())
+        };
+        if result.is_ok() {
             self.active = false;
+        } else {
+            self.rollback(store);
         }
-        Ok(())
+        result
     }
 
-    fn rollback(&mut self, store: &Store) {
+    pub(crate) fn rollback(&mut self, store: &Store) {
         if self.active {
             let _ = store.rollback_batch();
             self.active = false;

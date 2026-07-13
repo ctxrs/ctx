@@ -36,6 +36,8 @@ pub struct ProviderImportSummary {
     pub skipped_events: usize,
     pub imported_edges: usize,
     pub skipped_edges: usize,
+    #[serde(skip)]
+    pub(crate) accepted_content_records: usize,
     pub failures: Vec<ProviderImportFailure>,
 }
 
@@ -54,10 +56,15 @@ pub struct CatalogSummary {
     pub parsed_sessions: usize,
     pub skipped_sessions: usize,
     pub failed_sessions: usize,
+    pub failures: Vec<ProviderImportFailure>,
 }
 
 impl ProviderImportSummary {
-    pub(crate) fn merge(&mut self, other: ProviderImportSummary) {
+    pub fn has_accepted_content(&self) -> bool {
+        self.accepted_content_records > 0 || self.imported_events > 0 || self.imported_edges > 0
+    }
+
+    pub fn merge_from(&mut self, other: ProviderImportSummary) {
         self.imported += other.imported;
         self.skipped += other.skipped;
         self.failed += other.failed;
@@ -67,7 +74,12 @@ impl ProviderImportSummary {
         self.skipped_events += other.skipped_events;
         self.imported_edges += other.imported_edges;
         self.skipped_edges += other.skipped_edges;
+        self.accepted_content_records += other.accepted_content_records;
         self.failures.extend(other.failures);
+    }
+
+    pub(crate) fn merge(&mut self, other: ProviderImportSummary) {
+        self.merge_from(other);
     }
 }
 

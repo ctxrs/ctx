@@ -32,11 +32,15 @@ mod ids;
 
 #[cfg(test)]
 pub(crate) use batches::import_normalized_provider_captures_in_batches;
-pub(crate) use commands::{provider_command_run_from_event, ProviderCommandRunInput};
+pub(crate) use batches::{resolve_pending_provider_edges_batched, ProviderImportTransaction};
+pub(crate) use commands::{
+    provider_command_run_from_event, validate_provider_event_for_import, ProviderCommandRunInput,
+};
 #[cfg(test)]
 pub(crate) use cursors::provider_source_cursor_stream;
 pub(crate) use cursors::{
-    persist_provider_cursor, provider_cursor_stream, provider_source_cursor_range,
+    persist_provider_sync_cursor, provider_cursor_stream, provider_source_cursor_range,
+    provider_sync_cursor,
 };
 pub(crate) use identity::{
     pi_existing_event_identity_by_entry_id, provider_event_exists, provider_event_import_identity,
@@ -66,7 +70,6 @@ pub(crate) struct NativeJsonlTreeImport<'a> {
     pub(crate) source_root: Option<PathBuf>,
     pub(crate) imported_at: DateTime<Utc>,
     pub(crate) history_record_id: Option<Uuid>,
-    pub(crate) allow_partial_failures: bool,
 }
 
 pub(crate) fn import_native_jsonl_tree<A: ProviderCaptureAdapter>(
@@ -91,7 +94,6 @@ pub(crate) fn import_native_jsonl_tree<A: ProviderCaptureAdapter>(
         normalization,
         NormalizedProviderImportOptions {
             history_record_id: request.history_record_id,
-            allow_partial_failures: request.allow_partial_failures,
             persist_cursors: true,
             wrap_transaction: true,
             fast_event_inserts: true,
@@ -104,15 +106,7 @@ pub fn import_normalized_provider_captures(
     normalization: ProviderNormalizationResult,
     options: NormalizedProviderImportOptions,
 ) -> Result<ProviderImportSummary> {
-    batches::import_normalized_provider_captures(store, normalization, options, false)
-}
-
-pub(crate) fn import_normalized_provider_captures_with_bulk_search(
-    store: &mut Store,
-    normalization: ProviderNormalizationResult,
-    options: NormalizedProviderImportOptions,
-) -> Result<ProviderImportSummary> {
-    batches::import_normalized_provider_captures(store, normalization, options, true)
+    batches::import_normalized_provider_captures(store, normalization, options)
 }
 
 pub(crate) fn import_provider_capture_lines(
@@ -301,7 +295,7 @@ pub(crate) fn import_provider_file_touched_line(
         None,
         &file.metadata,
     );
-    let session_id = provider_import_session_uuid(
+    let inferred_session_id = provider_import_session_uuid(
         store,
         file.provider,
         &file.provider_session_id,
@@ -315,9 +309,21 @@ pub(crate) fn import_provider_file_touched_line(
             &file.provider_session_id,
             source_id,
             index,
-            session_id == provider_session_uuid(file.provider, &file.provider_session_id),
+            inferred_session_id == provider_session_uuid(file.provider, &file.provider_session_id),
         )?,
         None => None,
+    };
+    // Event-derived file touches must retain the event's already-resolved,
+    // source-scoped session identity. A synthesized file-touch envelope does
+    // not carry all source metadata from its capture, so independently
+    // resolving it can otherwise create a second session identity for the
+    // same provider event.
+    let session_id = match event_id {
+        Some(event_id) => store
+            .get_event(event_id)?
+            .session_id
+            .unwrap_or(inferred_session_id),
+        None => inferred_session_id,
     };
     let touch_id = provider_file_touch_import_id(
         store,
@@ -400,6 +406,14 @@ pub(crate) fn provider_import_session_uuid(
     };
     if provider == CaptureProvider::Custom {
         return Ok(legacy_session_id);
+    }
+
+    if let Some(existing) = store.session_by_capture_source_and_external_session(
+        source_id,
+        provider,
+        provider_session_id,
+    )? {
+        return Ok(existing.id);
     }
 
     let source_session_id = provider_source_session_uuid(source_identity, provider_session_id);
@@ -497,6 +511,9 @@ pub(crate) fn import_provider_capture_line(
             "unsupported provider capture envelope schema version {} on line {line_number}",
             capture.schema_version
         )));
+    }
+    if let Some(event) = &capture.event {
+        validate_provider_event_for_import(event)?;
     }
 
     let mut summary = ProviderImportSummary::default();
@@ -826,9 +843,7 @@ pub(crate) fn import_provider_capture_line(
                 Err(StoreError::ProviderEventConflict { .. }) => {
                     summary.skipped_events += 1;
                     summary.skipped += 1;
-                    if options.persist_cursors {
-                        persist_provider_cursor(store, capture)?;
-                    }
+                    summary.accepted_content_records += 1;
                     return Ok(summary);
                 }
                 Err(err) => return Err(CaptureError::Store(err)),
@@ -844,23 +859,11 @@ pub(crate) fn import_provider_capture_line(
         }
     }
 
-    if options.persist_cursors {
-        persist_provider_cursor(store, capture)?;
+    if capture.event.is_some() {
+        summary.accepted_content_records += 1;
     }
 
     Ok(summary)
-}
-
-pub(crate) fn resolve_pending_provider_edges(
-    store: &mut Store,
-    summary: &mut ProviderImportSummary,
-    caches: &mut ProviderImportCaches,
-) -> Result<()> {
-    let pending = std::mem::take(&mut caches.pending_edges);
-    for (edge_id, edge) in pending {
-        resolve_pending_provider_edge(store, summary, caches, edge_id, edge)?;
-    }
-    Ok(())
 }
 
 fn resolve_pending_provider_edge(

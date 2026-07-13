@@ -3,8 +3,9 @@
 ctx JSON is for local agents and scripts. It can include prompts, command
 output previews, and local paths. Treat it as private until a user reviews it.
 
-Command result JSON currently uses `schema_version: 1`. Progress-event JSON is
-stderr progress output and does not include `schema_version`.
+Command result JSON uses `schema_version: 1` except for the intentionally
+breaking `ctx import --json` schema version 2 described below. Progress-event
+JSON is stderr progress output and does not include `schema_version`.
 
 ## Setup
 
@@ -30,8 +31,12 @@ Writes local storage and returns:
 - `repo_writes: false`.
 
 `import.ran` is true for the default setup path and false for
-`ctx setup --catalog-only`. When it runs, `import.totals` and `import.sources`
-use the same shape as `ctx import --json`.
+`ctx setup --catalog-only`. When it runs, `import.outcome`,
+`import.failure_scope`, `import.failure_type`, `import.totals`, and
+`import.sources` use the same semantics and shapes as `ctx import --json`.
+Setup still uses top-level schema version 1; these nested fields are additive.
+An all-failed foreground setup import prints the complete JSON result and exits
+nonzero. Mixed success and source failures remain successful.
 
 `inventory` reports the shared local-history inventory across all native
 sources. It includes `sources`, `units`, `source_files`, `source_bytes`,
@@ -205,13 +210,31 @@ ctx import --json --no-daemon
 Writes the local SQLite index and returns:
 
 - `schema_version`;
+- `outcome`;
+- `failure_scope`;
+- `failure_type`;
 - `resume`;
 - `resume_mode`;
 - `totals`;
 - `sources[]`.
 
+Import result schema version 2 uses source statuses `success`,
+`completed_with_rejections`, and `failure`. Run-level `outcome` uses `success`,
+`completed_with_rejections`, `completed_with_source_failures`,
+`completed_with_rejections_and_source_failures`, or `failure`.
+`failure_scope` in an import result is `none`, `record`, `source`, or
+`record_and_source`; `failure_type` is a coarse, non-sensitive classification.
+Ctx-owned storage, index, worker, and operational-I/O failures abort before an
+import-result JSON object is emitted and exit nonzero. Provider database
+corruption, locks, unreadable source files, and malformed source data are
+source failures and do not stop independent sources. Failed sources can include
+up to five rejection details when every content record was rejected.
+
 `totals` and each source row include file, byte, session, event, edge, skipped,
-and failed counts. `resume_mode` is currently `idempotent_rescan` when
+and `rejected_records` counts. Rejection details are exposed as `rejections`
+(bounded to five entries); `failed_sources` remains the count of source-level
+failures. `sources_completed_with_rejections` counts sources that committed
+accepted content while rejecting other records. `resume_mode` is currently `idempotent_rescan` when
 `--resume` is passed and `normal_scan` otherwise.
 
 Non-JSON native imports that target discovered/default provider sources may

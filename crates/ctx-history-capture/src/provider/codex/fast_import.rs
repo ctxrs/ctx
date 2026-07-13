@@ -16,7 +16,9 @@ use uuid::Uuid;
 use crate::compute_payload_hash;
 use crate::provider::importer::{
     provider_command_run_from_event, provider_event_import_identity, provider_import_session_uuid,
-    provider_session_uuid, provider_source_identity, provider_source_root, ProviderCommandRunInput,
+    provider_session_uuid, provider_source_identity, provider_source_root,
+    resolve_pending_provider_edges_batched, validate_provider_event_for_import,
+    ProviderCommandRunInput, ProviderImportTransaction,
 };
 
 use crate::common::io::{
@@ -25,12 +27,11 @@ use crate::common::io::{
 };
 use crate::provider::importer::{
     import_provider_capture_line, import_provider_file_touched_line, provider_scoped_source_uuid,
-    provider_sync_metadata, resolve_pending_provider_edges, ProviderImportCaches,
+    provider_sync_metadata, ProviderImportCaches,
 };
 use crate::{
     CodexSessionImportOptions, CodexSessionImportProgress, NormalizedProviderImportOptions,
     ProviderAdapterContext, ProviderImportFailure, ProviderImportSummary, Result,
-    CODEX_FAST_IMPORT_PASSIVE_CHECKPOINT_MIN_BYTES, CODEX_FAST_IMPORT_TRANSACTION_FILES,
     CODEX_SESSION_SOURCE_FORMAT,
 };
 
@@ -50,18 +51,33 @@ pub(crate) fn import_codex_session_paths_fast(
     options: CodexSessionImportOptions,
     skipped_by_bounds: usize,
 ) -> Result<ProviderImportSummary> {
+    let bulk_guard = store.begin_event_search_bulk_mode()?;
+    let import_result =
+        import_codex_session_paths_fast_bounded(paths, store, &options, skipped_by_bounds);
+    let finish_result = store.finish_event_search_bulk_mode(&bulk_guard);
+    match (import_result, finish_result) {
+        (Ok(summary), Ok(())) => Ok(summary),
+        (_, Err(err)) => Err(err.into()),
+        (Err(err), Ok(())) => Err(err),
+    }
+}
+
+fn import_codex_session_paths_fast_bounded(
+    paths: Vec<PathBuf>,
+    store: &mut Store,
+    options: &CodexSessionImportOptions,
+    skipped_by_bounds: usize,
+) -> Result<ProviderImportSummary> {
     let mut summary = ProviderImportSummary::default();
     summary.skipped_sessions += skipped_by_bounds;
     summary.skipped += skipped_by_bounds;
     let mut caches = ProviderImportCaches::default();
-    let mut in_transaction = false;
-    let mut files_in_transaction = 0usize;
     let total_files = paths.len();
     let total_bytes = codex_session_paths_total_bytes(&paths);
     let mut completed_files = 0usize;
     let mut completed_bytes = 0u64;
     report_codex_import_progress(
-        &options,
+        options,
         total_files,
         total_bytes,
         completed_files,
@@ -70,82 +86,43 @@ pub(crate) fn import_codex_session_paths_fast(
         false,
     );
 
-    for path in paths {
-        let file_bytes = fs::metadata(&path)
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
-        if !in_transaction {
-            store.begin_immediate_batch()?;
-            in_transaction = true;
-            files_in_transaction = 0;
-        }
-        if let Err(err) =
-            import_codex_session_path_fast(&path, store, &options, &mut summary, &mut caches)
-        {
-            if in_transaction {
-                let _ = store.rollback_batch();
-            }
-            return Err(err);
-        }
-        if summary.failed > 0 && !options.allow_partial_failures {
-            if in_transaction {
-                let _ = store.rollback_batch();
-            }
+    let mut transaction = ProviderImportTransaction::begin_bounded(store, !paths.is_empty())?;
+    let import_result = (|| -> Result<()> {
+        for path in paths {
+            let file_bytes = fs::metadata(&path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            import_codex_session_path_fast(
+                &path,
+                store,
+                options,
+                &mut summary,
+                &mut caches,
+                &mut transaction,
+            )?;
+            completed_files += 1;
+            completed_bytes = completed_bytes.saturating_add(file_bytes);
             report_codex_import_progress(
-                &options,
+                options,
                 total_files,
                 total_bytes,
                 completed_files,
                 completed_bytes,
                 &summary,
-                true,
+                false,
             );
-            return Ok(summary);
         }
-        files_in_transaction += 1;
-        if options.allow_partial_failures
-            && files_in_transaction >= CODEX_FAST_IMPORT_TRANSACTION_FILES
-        {
-            if let Err(err) = store.commit_batch() {
-                let _ = store.rollback_batch();
-                return Err(err.into());
-            }
-            in_transaction = false;
-            store.checkpoint_wal_passive_if_larger_than(
-                CODEX_FAST_IMPORT_PASSIVE_CHECKPOINT_MIN_BYTES,
-            )?;
-        }
-        completed_files += 1;
-        completed_bytes = completed_bytes.saturating_add(file_bytes);
-        report_codex_import_progress(
-            &options,
-            total_files,
-            total_bytes,
-            completed_files,
-            completed_bytes,
-            &summary,
-            false,
-        );
-    }
 
-    if !in_transaction {
-        store.begin_immediate_batch()?;
-        in_transaction = true;
-    }
-    if let Err(err) = resolve_pending_provider_edges(store, &mut summary, &mut caches) {
-        if in_transaction {
-            let _ = store.rollback_batch();
-        }
+        resolve_pending_provider_edges_batched(store, &mut summary, &mut caches, &mut transaction)?;
+        transaction.commit(store)?;
+        Ok(())
+    })();
+    if let Err(err) = import_result {
+        transaction.rollback(store);
         return Err(err);
     }
-
-    if let Err(err) = store.commit_batch() {
-        let _ = store.rollback_batch();
-        return Err(err.into());
-    }
-    store.checkpoint_wal_passive_if_larger_than(CODEX_FAST_IMPORT_PASSIVE_CHECKPOINT_MIN_BYTES)?;
     report_codex_import_progress(
-        &options,
+        options,
         total_files,
         total_bytes,
         completed_files,
@@ -193,6 +170,7 @@ pub(crate) fn import_codex_session_path_fast(
     options: &CodexSessionImportOptions,
     summary: &mut ProviderImportSummary,
     caches: &mut ProviderImportCaches,
+    transaction: &mut ProviderImportTransaction,
 ) -> Result<()> {
     ensure_regular_provider_transcript_file(path)?;
     let conversation_scan = codex_session_file_conversation_scan(path)?;
@@ -234,7 +212,6 @@ pub(crate) fn import_codex_session_path_fast(
     };
     let import_options = NormalizedProviderImportOptions {
         history_record_id: options.history_record_id,
-        allow_partial_failures: options.allow_partial_failures,
         persist_cursors: false,
         wrap_transaction: false,
         fast_event_inserts: true,
@@ -245,6 +222,7 @@ pub(crate) fn import_codex_session_path_fast(
         .map(|path| path.display().to_string());
 
     let mut header = None;
+    let mut header_persisted = false;
     let mut call_contexts: BTreeMap<String, CodexToolCallContext> = BTreeMap::new();
     let mut line_number = 0usize;
     let mut line = Vec::new();
@@ -285,9 +263,6 @@ pub(crate) fn import_codex_session_path_fast(
                     line: line_number,
                     error: codex_session_file_failure(path, err.to_string()),
                 });
-                if !options.allow_partial_failures {
-                    return Ok(());
-                }
                 continue;
             }
         };
@@ -298,23 +273,9 @@ pub(crate) fn import_codex_session_path_fast(
         if entry_type == "session_meta" {
             match codex_session_header(value) {
                 Ok(parsed) => {
-                    let capture = codex_session_capture(
-                        &parsed,
-                        None,
-                        line_number,
-                        parsed.timestamp,
-                        &context,
-                    );
-                    let line_summary = import_provider_capture_line(
-                        store,
-                        &capture,
-                        &import_options,
-                        line_number,
-                        caches,
-                    )?;
-                    summary.merge(line_summary);
                     call_contexts.clear();
                     header = Some(parsed);
+                    header_persisted = false;
                 }
                 Err(err) => {
                     summary.failed += 1;
@@ -322,9 +283,6 @@ pub(crate) fn import_codex_session_path_fast(
                         line: line_number,
                         error: codex_session_file_failure(path, err.to_string()),
                     });
-                    if !options.allow_partial_failures {
-                        return Ok(());
-                    }
                 }
             }
             continue;
@@ -339,9 +297,6 @@ pub(crate) fn import_codex_session_path_fast(
                     "codex session entry appeared before session_meta",
                 ),
             });
-            if !options.allow_partial_failures {
-                return Ok(());
-            }
             continue;
         };
         let occurred_at = match codex_session_line_timestamp(&value, header.timestamp) {
@@ -352,9 +307,6 @@ pub(crate) fn import_codex_session_path_fast(
                     line: line_number,
                     error: codex_session_file_failure(path, err.to_string()),
                 });
-                if !options.allow_partial_failures {
-                    return Ok(());
-                }
                 continue;
             }
         };
@@ -369,30 +321,86 @@ pub(crate) fn import_codex_session_path_fast(
                 source_root: context.source_root_display().as_deref(),
             },
         );
-        if let Some(event) = line_capture.event.take() {
-            if event.event_type == EventType::Notice {
+        let event = match line_capture.event.take() {
+            Some(event) if event.event_type == EventType::Notice => {
                 summary.skipped += 1;
                 summary.skipped_events += 1;
-            } else {
-                let source_root = context.source_root_display();
-                let line_summary = import_codex_provider_event_fast(
+                None
+            }
+            Some(event) => {
+                if let Err(err) = validate_provider_event_for_import(&event) {
+                    summary.failed += 1;
+                    summary.failures.push(ProviderImportFailure {
+                        line: line_number,
+                        error: codex_session_file_failure(path, err.to_string()),
+                    });
+                    continue;
+                }
+                Some(event)
+            }
+            None => None,
+        };
+        let has_content = event.is_some() || !line_capture.files_touched.is_empty();
+        if has_content {
+            transaction.prepare_unit(store, line.len())?;
+        }
+        if let Some(event) = event {
+            if !header_persisted {
+                summary.merge(import_codex_session_header_fast(
                     store,
                     header,
-                    &event,
-                    options.history_record_id,
+                    &context,
+                    &import_options,
                     line_number,
-                    context.imported_at,
-                    raw_source_path.as_deref(),
-                    source_root.as_deref(),
-                )?;
-                summary.merge(line_summary);
+                    caches,
+                )?);
+                header_persisted = true;
             }
+            let source_root = context.source_root_display();
+            let line_summary = import_codex_provider_event_fast(
+                store,
+                header,
+                &event,
+                options.history_record_id,
+                line_number,
+                context.imported_at,
+                raw_source_path.as_deref(),
+                source_root.as_deref(),
+            )?;
+            summary.merge(line_summary);
+        }
+        if !line_capture.files_touched.is_empty() && !header_persisted {
+            summary.merge(import_codex_session_header_fast(
+                store,
+                header,
+                &context,
+                &import_options,
+                line_number,
+                caches,
+            )?);
+            header_persisted = true;
         }
         for (_, file) in line_capture.files_touched {
             import_provider_file_touched_line(store, &file, &import_options)?;
+            summary.accepted_content_records += 1;
+        }
+        if has_content {
+            transaction.record_unit(store, line.len())?;
         }
     }
     Ok(())
+}
+
+fn import_codex_session_header_fast(
+    store: &mut Store,
+    header: &CodexSessionHeader,
+    context: &ProviderAdapterContext,
+    import_options: &NormalizedProviderImportOptions,
+    line_number: usize,
+    caches: &mut ProviderImportCaches,
+) -> Result<ProviderImportSummary> {
+    let capture = codex_session_capture(header, None, line_number, header.timestamp, context);
+    import_provider_capture_line(store, &capture, import_options, line_number, caches)
 }
 
 fn codex_session_file_failure(path: &Path, reason: impl AsRef<str>) -> String {
@@ -410,6 +418,7 @@ pub(crate) fn import_codex_provider_event_fast(
     raw_source_path: Option<&str>,
     source_root: Option<&str>,
 ) -> Result<ProviderImportSummary> {
+    validate_provider_event_for_import(event)?;
     let mut summary = ProviderImportSummary::default();
     let provider = CaptureProvider::Codex;
     let source_id = provider_scoped_source_uuid(
@@ -511,5 +520,6 @@ pub(crate) fn import_codex_provider_event_fast(
         summary.skipped_events += 1;
         summary.skipped += 1;
     }
+    summary.accepted_content_records += 1;
     Ok(summary)
 }

@@ -12,14 +12,24 @@ pub(crate) fn run_explicit_format_import(
         .path
         .as_ref()
         .context("--format requires an explicit --path")?;
-    if !path
-        .try_exists()
-        .with_context(|| format!("check import path {}", path.display()))?
+    let stats = match source_stats(path)
+        .with_context(|| format!("scan import source {}", path.display()))
     {
-        return Err(anyhow!("import path does not exist: {}", path.display()));
-    }
-    let stats =
-        source_stats(path).with_context(|| format!("scan import source {}", path.display()))?;
+        Ok(stats) => stats,
+        Err(error) if import_error_scope(&error) == ImportFailureScope::System => {
+            return Err(error);
+        }
+        Err(error) => {
+            return Ok(explicit_format_failure_report(
+                args,
+                format,
+                path,
+                SourceStats::default(),
+                &error,
+                analytics_properties,
+            ));
+        }
+    };
     analytics::insert_count_bucket(analytics_properties, "sources_seen_bucket", 1);
     analytics::insert_bytes_bucket(analytics_properties, "source_bytes_bucket", stats.bytes);
 
@@ -53,38 +63,47 @@ pub(crate) fn run_explicit_format_import(
         progress.notice(notice);
     }
 
-    let validation = match format {
-        ImportFormatArg::CtxHistoryJsonlV1 => {
-            validate_custom_history_jsonl_v1(path).map_err(anyhow::Error::from)?
-        }
-    };
-    if validation.failed > 0 && !args.partial {
-        return Err(explicit_format_import_failure(format, &validation));
-    }
-
     let record = import_record_for_custom_history(path, format);
     let record_id = record.id;
+    let record_existed = history_record_exists(&store, record_id)?;
     store.upsert_record(&record)?;
     progress.message("indexing", format!("importing {}", format.as_str()));
-    let summary = match format {
+    let import_result = match format {
         ImportFormatArg::CtxHistoryJsonlV1 => import_custom_history_jsonl_v1(
             path,
             &mut store,
             CustomHistoryJsonlV1ImportOptions {
                 source_path: Some(path.clone()),
                 history_record_id: Some(record_id),
-                allow_partial_failures: args.partial,
                 ..CustomHistoryJsonlV1ImportOptions::default()
             },
         )
-        .map_err(anyhow::Error::from)?,
+        .map_err(anyhow::Error::from),
     };
-    if summary.failed > 0 && !args.partial {
-        return Err(explicit_format_import_failure(format, &summary));
-    }
-
+    let summary = match import_result {
+        Ok(summary) => summary,
+        Err(error) if import_error_scope(&error) == ImportFailureScope::System => {
+            return Err(error);
+        }
+        Err(error) => {
+            cleanup_rejected_history_record(&store, record_id, record_existed)?;
+            return Ok(explicit_format_failure_report(
+                args,
+                format,
+                path,
+                stats,
+                &error,
+                analytics_properties,
+            ));
+        }
+    };
     let mut totals = ImportTotals::default();
-    totals.add(&summary, &stats);
+    if summary.failed > 0 && !provider_summary_has_imported_content(&summary) {
+        cleanup_rejected_history_record(&store, record_id, record_existed)?;
+        totals.add_rejected_source(&summary, &stats);
+    } else {
+        totals.add(&summary, &stats);
+    }
     if totals.imported_sessions > 0 || totals.imported_events > 0 || totals.imported_edges > 0 {
         progress.message("finalizing", "optimizing search index");
         Store::open(&db_path)?.optimize_search_index()?;
@@ -96,15 +115,72 @@ pub(crate) fn run_explicit_format_import(
     }
     progress.done(
         "finalizing",
-        format!("indexed 1 {} source file", format.as_str()),
+        format!("processed 1 {} source file", format.as_str()),
         stats.bytes,
     );
+    insert_explicit_format_analytics(analytics_properties, &stats, &totals);
+    Ok(ImportReport {
+        resume: args.resume,
+        totals,
+        inventory: InventoryTotals {
+            sources: 1,
+            source_files: stats.files,
+            source_bytes: stats.bytes,
+            ..InventoryTotals::default()
+        },
+        catalog: CatalogTotals::default(),
+        catalog_sources: Vec::new(),
+        sources: vec![custom_format_import_json(format, path, &stats, &summary)],
+    })
+}
+
+fn explicit_format_failure_report(
+    args: &ImportArgs,
+    format: ImportFormatArg,
+    path: &Path,
+    stats: SourceStats,
+    error: &anyhow::Error,
+    analytics_properties: &mut AnalyticsProperties,
+) -> ImportReport {
+    let mut totals = ImportTotals::default();
+    totals.add_source_failure(&stats);
+    insert_explicit_format_analytics(analytics_properties, &stats, &totals);
+    ImportReport {
+        resume: args.resume,
+        totals,
+        inventory: InventoryTotals {
+            sources: 1,
+            source_files: stats.files,
+            source_bytes: stats.bytes,
+            ..InventoryTotals::default()
+        },
+        catalog: CatalogTotals::default(),
+        catalog_sources: Vec::new(),
+        sources: vec![custom_format_failure_json(
+            format,
+            path,
+            &stats,
+            &error_summary(error),
+            import_failure_type(error),
+        )],
+    }
+}
+
+fn insert_explicit_format_analytics(
+    analytics_properties: &mut AnalyticsProperties,
+    stats: &SourceStats,
+    totals: &ImportTotals,
+) {
     analytics::insert_count_bucket(
         analytics_properties,
         "source_files_bucket",
         stats.files as u64,
     );
-    analytics::insert_count_bucket(analytics_properties, "failed_sources_bucket", 0);
+    analytics::insert_count_bucket(
+        analytics_properties,
+        "failed_sources_bucket",
+        totals.failed_sources as u64,
+    );
     analytics::insert_count_bucket(
         analytics_properties,
         "sessions_imported_bucket",
@@ -125,34 +201,9 @@ pub(crate) fn run_explicit_format_import(
         "skipped_bucket",
         totals.skipped as u64,
     );
-    analytics::insert_count_bucket(analytics_properties, "failed_bucket", totals.failed as u64);
-    Ok(ImportReport {
-        resume: args.resume,
-        totals,
-        inventory: InventoryTotals {
-            sources: 1,
-            source_files: stats.files,
-            source_bytes: stats.bytes,
-            ..InventoryTotals::default()
-        },
-        catalog: CatalogTotals::default(),
-        catalog_sources: Vec::new(),
-        sources: vec![custom_format_import_json(format, path, &stats, &summary)],
-    })
-}
-
-pub(crate) fn explicit_format_import_failure(
-    format: ImportFormatArg,
-    summary: &ProviderImportSummary,
-) -> anyhow::Error {
-    let detail = summary
-        .failures
-        .first()
-        .map(|failure| format!("line {}: {}", failure.line, failure.error))
-        .unwrap_or_else(|| "unknown validation failure".to_owned());
-    anyhow!(
-        "{} import failed with {} failure(s); first failure: {detail}",
-        format.as_str(),
-        summary.failed
-    )
+    analytics::insert_count_bucket(
+        analytics_properties,
+        "rejected_records_bucket",
+        totals.failed as u64,
+    );
 }

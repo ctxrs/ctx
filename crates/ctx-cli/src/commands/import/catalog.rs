@@ -1,6 +1,5 @@
 use super::*;
 use crate::commands::import::manifest::collect_source_import_paths;
-use crate::commands::import::native::merge_provider_import_summary;
 use sha2::{Digest, Sha256};
 
 pub(crate) fn system_time_ms(time: SystemTime) -> i64 {
@@ -15,29 +14,32 @@ pub(crate) fn import_incremental_codex_session_tree(
     source: &SourceInfo,
     record_id: Uuid,
     progress: Option<CodexSessionImportProgressCallback>,
-    allow_partial_failures: bool,
-    catalog_before_import: bool,
+    preinventory_catalog: Option<&CatalogSummary>,
 ) -> Result<ProviderImportSummary> {
     let source_root = source.path.display().to_string();
-    if catalog_before_import {
-        catalog_codex_session_tree(
+    let mut summary = ProviderImportSummary::default();
+    if let Some(catalog) = preinventory_catalog {
+        summary.failed += catalog.failed_sessions;
+        summary.failures.extend(catalog.failures.clone());
+    } else {
+        let catalog = catalog_codex_session_tree(
             &source.path,
             store,
             CodexSessionCatalogOptions {
                 source_root: Some(source.path.clone()),
-                allow_partial_failures,
                 ..CodexSessionCatalogOptions::default()
             },
         )
         .with_context(|| format!("inventory Codex sessions from {}", source.path.display()))?;
+        summary.failed += catalog.failed_sessions;
+        summary.failures.extend(catalog.failures);
     }
 
     let pending = store.list_pending_catalog_sessions(CaptureProvider::Codex, &source_root)?;
     if pending.is_empty() {
-        return Ok(ProviderImportSummary::default());
+        return Ok(summary);
     }
 
-    let mut summary = ProviderImportSummary::default();
     let mut full_import_sessions = Vec::new();
     for session in &pending {
         let state = store.catalog_source_index_state(
@@ -68,7 +70,6 @@ pub(crate) fn import_incremental_codex_session_tree(
                 CodexSessionImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     progress: progress.clone(),
                     ..CodexSessionImportOptions::default()
                 },
@@ -91,10 +92,7 @@ pub(crate) fn import_incremental_codex_session_tree(
                     std::slice::from_ref(session),
                     "tail import failed for one or more appended events",
                 )?;
-                merge_provider_import_summary(&mut summary, tail_summary);
-                if !allow_partial_failures {
-                    return Ok(summary);
-                }
+                summary.merge_from(tail_summary);
                 continue;
             }
             let tail_event_count = tail_summary
@@ -110,13 +108,13 @@ pub(crate) fn import_incremental_codex_session_tree(
                 event_count,
                 utc_now().timestamp_millis(),
             )?;
-            merge_provider_import_summary(&mut summary, tail_summary);
+            summary.merge_from(tail_summary);
         } else {
             full_import_sessions.push(session.clone());
         }
     }
 
-    if !full_import_sessions.is_empty() && allow_partial_failures {
+    if !full_import_sessions.is_empty() {
         for session in &full_import_sessions {
             let paths = vec![PathBuf::from(&session.source_path)];
             let file_summary = match import_codex_session_paths(
@@ -125,7 +123,6 @@ pub(crate) fn import_incremental_codex_session_tree(
                 CodexSessionImportOptions {
                     source_path: Some(source.path.clone()),
                     history_record_id: Some(record_id),
-                    allow_partial_failures,
                     progress: progress.clone(),
                     ..CodexSessionImportOptions::default()
                 },
@@ -134,9 +131,10 @@ pub(crate) fn import_incremental_codex_session_tree(
             {
                 Ok(file_summary) => file_summary,
                 Err(err) => {
+                    let failure_scope = import_error_scope(&err);
                     let error = error_summary(&err);
                     mark_catalog_sessions_failed(store, std::slice::from_ref(session), &error)?;
-                    if import_error_is_systemic(&error) {
+                    if failure_scope == ImportFailureScope::System {
                         return Err(err);
                     }
                     summary.failed += 1;
@@ -155,43 +153,8 @@ pub(crate) fn import_incremental_codex_session_tree(
             } else {
                 mark_catalog_sessions_indexed(store, std::slice::from_ref(session), &file_summary)?;
             }
-            merge_provider_import_summary(&mut summary, file_summary);
+            summary.merge_from(file_summary);
         }
-    } else if !full_import_sessions.is_empty() {
-        let paths = full_import_sessions
-            .iter()
-            .map(|session| PathBuf::from(&session.source_path))
-            .collect::<Vec<_>>();
-        let full_summary = match import_codex_session_paths(
-            paths,
-            store,
-            CodexSessionImportOptions {
-                source_path: Some(source.path.clone()),
-                history_record_id: Some(record_id),
-                allow_partial_failures,
-                progress,
-                ..CodexSessionImportOptions::default()
-            },
-        )
-        .map_err(anyhow::Error::from)
-        {
-            Ok(summary) => summary,
-            Err(err) => {
-                mark_catalog_sessions_failed(store, &full_import_sessions, &err.to_string())?;
-                return Err(err);
-            }
-        };
-        if !allow_partial_failures && full_summary.failed > 0 {
-            mark_catalog_sessions_failed(
-                store,
-                &full_import_sessions,
-                "full import failed for one or more sessions",
-            )?;
-            merge_provider_import_summary(&mut summary, full_summary);
-            return Ok(summary);
-        }
-        mark_catalog_sessions_indexed(store, &full_import_sessions, &full_summary)?;
-        merge_provider_import_summary(&mut summary, full_summary);
     }
     Ok(summary)
 }
