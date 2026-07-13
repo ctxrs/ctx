@@ -1445,6 +1445,149 @@ fn schema_v46_adds_mimocode_provider_checks() {
     );
 }
 
+#[test]
+fn schema_v47_grandfathers_indexed_rows_and_retries_v46_failures_without_source_reads() {
+    let temp = tempdir();
+    let path = temp.path().join("work.sqlite");
+    {
+        let conn = Connection::open(&path).unwrap();
+        let v46_sql = CREATE_TABLES_SQL
+            .replace(
+                "    import_revision INTEGER NOT NULL DEFAULT 1 CHECK (import_revision > 0),\n",
+                "",
+            )
+            .replace(
+                "    indexed_import_revision INTEGER CHECK (indexed_import_revision > 0),\n",
+                "",
+            )
+            .replace(
+                "CHECK (indexed_status IN ('pending', 'indexed', 'completed_with_rejections', 'rejected', 'failed'))",
+                "CHECK (indexed_status IN ('pending', 'indexed', 'failed'))",
+            );
+        conn.execute_batch(&v46_sql).unwrap();
+        conn.execute_batch(INDEXES_SQL).unwrap();
+        conn.execute_batch(
+            r#"
+            INSERT INTO catalog_sessions
+            (source_path, provider, source_format, source_root, external_session_id,
+             agent_type, file_size_bytes, file_modified_at_ms, cataloged_at_ms,
+             indexed_at_ms, indexed_file_size_bytes, indexed_file_modified_at_ms,
+             indexed_status, indexed_error)
+            VALUES
+            ('/missing/indexed.jsonl', 'codex', 'codex_session_jsonl', '/missing',
+             'indexed-session', 'primary', 10, 20, 30, 40, 10, 20, 'indexed', NULL),
+            ('/missing/pr75-failed.jsonl', 'codex', 'codex_session_jsonl', '/missing',
+             'failed-session', 'primary', 11, 21, 31, 41, NULL, NULL, 'failed',
+             'full import failed for one or more sessions');
+
+            INSERT INTO source_import_files
+            (provider, source_format, source_root, source_path, file_size_bytes,
+             file_modified_at_ms, observed_at_ms, indexed_at_ms,
+             indexed_file_size_bytes, indexed_file_modified_at_ms, indexed_status,
+             indexed_error)
+            VALUES
+            ('claude', 'claude_projects_jsonl_tree', '/missing/claude',
+             '/missing/claude/indexed.jsonl', 12, 22, 32, 42, 12, 22, 'indexed', NULL),
+            ('antigravity', 'antigravity_cli_transcript_jsonl_tree', '/missing/agy',
+             '/missing/agy/rejected.jsonl', 13, 23, 33, 43, NULL, NULL, 'failed',
+             'provider import reported 1 failure(s)');
+
+            PRAGMA user_version = 46;
+            "#,
+        )
+        .unwrap();
+    }
+
+    let store = Store::open(&path).unwrap();
+    let version: i64 = store
+        .conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 47);
+
+    let catalog_rows = store
+        .conn
+        .prepare(
+            "SELECT source_path, indexed_status, import_revision, indexed_import_revision FROM catalog_sessions ORDER BY source_path",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+            ))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        catalog_rows,
+        vec![
+            (
+                "/missing/indexed.jsonl".to_owned(),
+                "indexed".to_owned(),
+                1,
+                Some(1),
+            ),
+            (
+                "/missing/pr75-failed.jsonl".to_owned(),
+                "failed".to_owned(),
+                1,
+                None,
+            ),
+        ]
+    );
+    let failed_catalog = store
+        .list_pending_catalog_sessions(CaptureProvider::Codex, "/missing")
+        .unwrap();
+    assert!(failed_catalog
+        .iter()
+        .any(|row| row.source_path == "/missing/pr75-failed.jsonl"));
+
+    let file_rows = store
+        .conn
+        .prepare(
+            "SELECT source_path, indexed_status, import_revision, indexed_import_revision FROM source_import_files ORDER BY source_path",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+            ))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        file_rows
+            .iter()
+            .find(|row| row.0.ends_with("claude/indexed.jsonl"))
+            .unwrap()
+            .3,
+        Some(1)
+    );
+    assert_eq!(
+        file_rows
+            .iter()
+            .find(|row| row.0.ends_with("agy/rejected.jsonl"))
+            .unwrap()
+            .3,
+        None
+    );
+    assert_eq!(
+        store
+            .list_pending_source_import_files(CaptureProvider::Antigravity, "/missing/agy")
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
 fn assert_provider_migration_accepts(
     legacy_version: i64,
     provider: &str,

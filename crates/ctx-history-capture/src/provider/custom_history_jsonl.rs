@@ -889,10 +889,18 @@ pub(crate) fn custom_history_internal_session_id(
 }
 
 pub(crate) fn custom_history_cursor_stream(source: &CtxHistoryJsonlSourceRecord) -> String {
-    custom_history_jsonl_v1_cursor_stream(
+    let import_revision = source
+        .metadata
+        .pointer("/ctx_history_plugin/import_revision")
+        .and_then(Value::as_u64)
+        .and_then(|revision| u32::try_from(revision).ok())
+        .filter(|revision| *revision > 0)
+        .unwrap_or(1);
+    custom_history_jsonl_v1_cursor_stream_with_revision(
         &source.provider_key,
         &source.source_id,
         &source.source_format,
+        import_revision,
     )
 }
 
@@ -901,13 +909,26 @@ pub fn custom_history_jsonl_v1_cursor_stream(
     source_id: &str,
     source_format: &str,
 ) -> String {
-    let key = custom_history_key(json!({
+    custom_history_jsonl_v1_cursor_stream_with_revision(provider_key, source_id, source_format, 1)
+}
+
+pub fn custom_history_jsonl_v1_cursor_stream_with_revision(
+    provider_key: &str,
+    source_id: &str,
+    source_format: &str,
+    import_revision: u32,
+) -> String {
+    let mut identity = json!({
         "schema": CTX_HISTORY_JSONL_V1_SCHEMA_VERSION,
         "kind": "cursor_stream",
         "provider_key": provider_key,
         "source_id": source_id,
         "source_format": source_format,
-    }));
+    });
+    if import_revision > 1 {
+        identity["import_revision"] = json!(import_revision);
+    }
+    let key = custom_history_key(identity);
     let stream_id = stable_capture_uuid(&key, "custom-cursor-stream");
     format!("provider:custom:{provider_key}:{stream_id}")
 }

@@ -18,11 +18,26 @@ fails that source while independent sources continue. Ctx-owned store, index,
 worker, lock, and operational-I/O failures abort the run.
 
 A source with rejections and accepted content completes with
-`completed_with_rejections`. A source with rejections but no accepted event,
-file-touch, or edge content fails. Session/source metadata alone does not make
-an import successful. Source and provider cursor checkpoints advance only when
-the source run has zero rejections, so corrected records remain eligible for a
-later idempotent scan.
+`completed_with_rejections`. A deterministically all-rejected source is recorded
+as terminal for its exact observed fingerprint and import revision. Neither
+outcome is selected again until the source changes or that provider/source-format
+revision is bumped. Session/source metadata alone does not make an import
+successful. Source failures discovered before ctx can record a stable
+observation are discovered again. Once an exact observation exists,
+source-scoped adapter errors are terminal for that fingerprint and revision;
+ctx-owned and system-scoped failures remain retryable.
+
+Observation completion is separate from native resume checkpoints. A completed
+observation with rejections may preserve an earlier safe checkpoint, but it must
+not advance that checkpoint past a rejected record. A later changed observation
+can therefore replay from the safe point while stable event IDs keep the import
+idempotent.
+
+Every native provider/source-format parser has a positive import revision in the
+shared provider registry. Inventory completion requires both the current source
+fingerprint and current import revision. Bump only the affected registry entry
+when parser or normalization semantics require reprocessing; unrelated providers
+remain complete.
 
 Content transactions use the shared 64-unit/8 MiB bounds with required WAL
 checkpoints. Event-search merge suppression may span a whole source, including
