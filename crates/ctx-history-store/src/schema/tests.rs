@@ -606,6 +606,7 @@ fn provider_archive_source_with_root(
             kind: ctx_history_core::CaptureSourceKind::ProviderImport,
             provider: CaptureProvider::Claude,
             machine_id: "test-machine".to_owned(),
+            runtime_user: None,
             process_id: None,
             cwd: Some("/repo".to_owned()),
             raw_source_path: Some(raw_source_path.to_owned()),
@@ -618,6 +619,62 @@ fn provider_archive_source_with_root(
         ended_at: None,
         sync: sync_metadata(),
     }
+}
+
+#[test]
+fn capture_source_runtime_user_round_trips_and_updates_idempotently() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let mut source = provider_archive_source(
+        "00000000-0000-0000-0000-000000000001",
+        "session-1",
+        "/home/alice/.codex/sessions/session.jsonl",
+    );
+    source.descriptor.runtime_user = Some("alice".to_owned());
+    store.upsert_capture_source(&source).unwrap();
+    assert_eq!(
+        store
+            .get_capture_source(source.id)
+            .unwrap()
+            .descriptor
+            .runtime_user
+            .as_deref(),
+        Some("alice")
+    );
+
+    source.descriptor.runtime_user = Some("alice-renamed".to_owned());
+    store.upsert_capture_source(&source).unwrap();
+    assert_eq!(
+        store
+            .get_capture_source(source.id)
+            .unwrap()
+            .descriptor
+            .runtime_user
+            .as_deref(),
+        Some("alice-renamed")
+    );
+}
+
+#[test]
+fn schema_v46_adds_nullable_capture_runtime_user() {
+    let temp = tempdir();
+    let path = temp.path().join("work.sqlite");
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(&CREATE_TABLES_SQL.replace("    runtime_user TEXT,\n", ""))
+            .unwrap();
+        conn.execute_batch("PRAGMA user_version = 46;").unwrap();
+    }
+
+    let store = Store::open(&path).unwrap();
+    assert!(table_has_column(&store.conn, "capture_sources", "runtime_user").unwrap());
+    assert_eq!(
+        store
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        SCHEMA_VERSION
+    );
 }
 
 fn provider_archive_session(id: &str, source_id: Uuid, external_session_id: &str) -> Session {
@@ -645,6 +702,7 @@ fn schema_v16_rebuilds_provider_checks_with_referenced_sources_and_indexes() {
                 kind: ctx_history_core::CaptureSourceKind::ProviderImport,
                 provider: CaptureProvider::Codex,
                 machine_id: "test-machine".to_owned(),
+                runtime_user: None,
                 process_id: None,
                 cwd: Some("/repo".to_owned()),
                 raw_source_path: Some("/home/user/.codex/sessions/session.jsonl".to_owned()),

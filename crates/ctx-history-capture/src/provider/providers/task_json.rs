@@ -653,6 +653,7 @@ pub(crate) fn task_json_capture(
         source: ProviderSourceEnvelope {
             source_format: spec.source_format.to_owned(),
             machine_id: context.machine_id.clone(),
+            runtime_user: None,
             observed_at: context.imported_at,
             raw_source_path: raw_source_path.map(str::to_owned),
             source_root: context

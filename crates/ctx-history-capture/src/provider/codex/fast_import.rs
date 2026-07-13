@@ -417,6 +417,7 @@ pub(crate) fn import_codex_provider_event_fast(
         &header.id,
         CODEX_SESSION_SOURCE_FORMAT,
         raw_source_path,
+        None,
     );
     let source_root = provider_source_root(source_root, raw_source_path);
     let source_identity = provider_source_identity(

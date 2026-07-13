@@ -74,6 +74,12 @@ pub struct CaptureSourceDescriptor {
     pub kind: CaptureSourceKind,
     pub provider: CaptureProvider,
     pub machine_id: String,
+    /// OS account associated with the runtime data represented by this source.
+    ///
+    /// This is provenance for the source data, not the account that ran the
+    /// importer. It is absent when the importer cannot establish it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_user: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process_id: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

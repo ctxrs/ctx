@@ -247,6 +247,10 @@ pub struct ProviderArtifactDescriptor {
 pub struct ProviderSourceEnvelope {
     pub source_format: String,
     pub machine_id: String,
+    /// OS account associated with the source runtime data, when supplied by a
+    /// portable source descriptor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_user: Option<String>,
     pub observed_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_source_path: Option<String>,

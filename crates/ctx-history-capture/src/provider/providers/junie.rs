@@ -916,6 +916,7 @@ pub(crate) fn junie_emit_file_changes(
             line_number,
             ProviderFileTouchedEnvelope {
                 provider: CaptureProvider::Junie,
+                runtime_user: None,
                 provider_session_id: base_draft.provider_session_id.clone(),
                 provider_touch_index: event_index
                     .saturating_mul(1_000)

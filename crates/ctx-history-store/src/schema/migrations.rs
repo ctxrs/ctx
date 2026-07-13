@@ -78,6 +78,9 @@ pub(crate) fn run_migrations(conn: &Connection, user_version: i64) -> Result<()>
     if user_version < 46 {
         migrate_to_v46(conn)?;
     }
+    if user_version < 47 {
+        migrate_to_v47(conn)?;
+    }
     Ok(())
 }
 
@@ -698,6 +701,33 @@ fn migrate_to_v46(conn: &Connection) -> Result<()> {
                 conn.execute_batch("PRAGMA foreign_keys = ON;")?;
             }
             Err(err)
+        }
+    }
+}
+
+fn migrate_to_v47(conn: &Connection) -> Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE;")?;
+    let migration = (|| -> Result<()> {
+        ensure_columns(
+            conn,
+            "capture_sources",
+            &[crate::schema::ddl::ColumnSpec {
+                name: "runtime_user",
+                definition: "runtime_user TEXT",
+            }],
+        )?;
+        create_stable_sql_views(conn)?;
+        conn.execute_batch("PRAGMA user_version = 47;")?;
+        Ok(())
+    })();
+    match migration {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;")?;
+            Ok(())
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(error)
         }
     }
 }

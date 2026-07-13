@@ -618,6 +618,7 @@ pub(crate) fn forgecode_metric_file_touches(
                 provider_line_from_index(touch_index),
                 ProviderFileTouchedEnvelope {
                     provider: CaptureProvider::ForgeCode,
+                    runtime_user: None,
                     provider_session_id: row.conversation_id.clone(),
                     provider_touch_index: touch_index,
                     provider_event_index: None,
@@ -659,6 +660,7 @@ pub(crate) fn forgecode_metric_file_touches(
                 provider_line_from_index(touch_index),
                 ProviderFileTouchedEnvelope {
                     provider: CaptureProvider::ForgeCode,
+                    runtime_user: None,
                     provider_session_id: row.conversation_id.clone(),
                     provider_touch_index: touch_index,
                     provider_event_index: None,

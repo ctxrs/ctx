@@ -47,6 +47,7 @@ pub(crate) struct CustomHistoryJsonlV1EdgeImport {
     pub(crate) provider_key: String,
     pub(crate) source_id: String,
     pub(crate) source_format: String,
+    pub(crate) runtime_user: Option<String>,
     pub(crate) raw_source_path: Option<String>,
     pub(crate) from_provider_session_id: String,
     pub(crate) to_provider_session_id: String,
@@ -607,6 +608,7 @@ pub(crate) fn custom_history_session_capture(
                 .machine_id
                 .clone()
                 .unwrap_or_else(|| context.machine_id.clone()),
+            runtime_user: source.runtime_user.clone(),
             observed_at: source.observed_at.unwrap_or(context.imported_at),
             raw_source_path: custom_history_effective_raw_source_path(source, context),
             source_root: context
@@ -718,6 +720,7 @@ pub(crate) fn custom_history_file_touch_envelope(
             &source.source_id,
             &file_touch.session_id,
         ),
+        runtime_user: source.runtime_user.clone(),
         provider_touch_index: file_touch.touch_index,
         provider_event_index: file_touch.event_index,
         raw_source_path: custom_history_effective_raw_source_path(source, context),
@@ -752,6 +755,7 @@ pub(crate) fn custom_history_edge_import(
         provider_key: source.provider_key.clone(),
         source_id: source.source_id.clone(),
         source_format: source.source_format.clone(),
+        runtime_user: source.runtime_user.clone(),
         raw_source_path: custom_history_effective_raw_source_path(source, context),
         from_provider_session_id: custom_history_internal_session_id(
             &source.provider_key,

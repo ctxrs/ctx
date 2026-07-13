@@ -108,6 +108,15 @@ fn custom_history_jsonl_imports_full_shape_and_is_idempotent() {
     let root = store.get_session(root_id).unwrap();
     let child = store.get_session(child_id).unwrap();
     assert_eq!(root.provider, CaptureProvider::Custom);
+    assert_eq!(
+        store
+            .get_capture_source(root.capture_source_id.unwrap())
+            .unwrap()
+            .descriptor
+            .runtime_user
+            .as_deref(),
+        Some("fixture-user")
+    );
     assert_eq!(child.parent_session_id, Some(root_id));
     assert!(root
         .sync

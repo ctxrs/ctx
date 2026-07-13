@@ -192,6 +192,7 @@ pub(crate) fn native_provider_capture(
         source: ProviderSourceEnvelope {
             source_format: draft.source_format.to_owned(),
             machine_id: context.machine_id.clone(),
+            runtime_user: None,
             observed_at: context.imported_at,
             raw_source_path: Some(draft.raw_source_path),
             source_root: context.source_root_display(),

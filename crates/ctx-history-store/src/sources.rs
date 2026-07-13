@@ -17,16 +17,17 @@ impl Store {
             r#"
                 INSERT INTO capture_sources
                 (
-                    id, kind, provider, machine_id, process_id, cwd, raw_source_path,
+                    id, kind, provider, machine_id, runtime_user, process_id, cwd, raw_source_path,
                     source_format, source_root, source_identity, external_session_id,
                     started_at_ms, ended_at_ms, fidelity,
                     visibility, sync_state, sync_version, metadata_json
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
                 ON CONFLICT(id) DO UPDATE SET
                     kind = excluded.kind,
                     provider = excluded.provider,
                     machine_id = excluded.machine_id,
+                    runtime_user = excluded.runtime_user,
                     process_id = excluded.process_id,
                     cwd = excluded.cwd,
                     raw_source_path = excluded.raw_source_path,
@@ -47,6 +48,7 @@ impl Store {
                 source.descriptor.kind.as_str(),
                 source.descriptor.provider.as_str(),
                 source.descriptor.machine_id.as_str(),
+                source.descriptor.runtime_user.as_deref(),
                 source.descriptor.process_id.map(i64::from),
                 source.descriptor.cwd.as_deref(),
                 source.descriptor.raw_source_path.as_deref(),
@@ -69,7 +71,7 @@ impl Store {
     pub fn get_capture_source(&self, id: Uuid) -> Result<CaptureSource> {
         self.conn
                 .query_row(
-                    "SELECT id, kind, provider, machine_id, process_id, cwd, raw_source_path, source_format, source_root, source_identity, external_session_id, started_at_ms, ended_at_ms, fidelity, visibility, sync_state, sync_version, metadata_json FROM capture_sources WHERE id = ?1",
+                    "SELECT id, kind, provider, machine_id, runtime_user, process_id, cwd, raw_source_path, source_format, source_root, source_identity, external_session_id, started_at_ms, ended_at_ms, fidelity, visibility, sync_state, sync_version, metadata_json FROM capture_sources WHERE id = ?1",
                     params![id.to_string()],
                     capture_source_from_row,
                 )
@@ -79,7 +81,7 @@ impl Store {
 
     pub fn list_capture_sources(&self) -> Result<Vec<CaptureSource>> {
         let mut stmt = self.conn.prepare(
-                "SELECT id, kind, provider, machine_id, process_id, cwd, raw_source_path, source_format, source_root, source_identity, external_session_id, started_at_ms, ended_at_ms, fidelity, visibility, sync_state, sync_version, metadata_json FROM capture_sources ORDER BY started_at_ms, id",
+                "SELECT id, kind, provider, machine_id, runtime_user, process_id, cwd, raw_source_path, source_format, source_root, source_identity, external_session_id, started_at_ms, ended_at_ms, fidelity, visibility, sync_state, sync_version, metadata_json FROM capture_sources ORDER BY started_at_ms, id",
             )?;
         let rows = stmt.query_map([], capture_source_from_row)?;
         collect_rows(rows)
@@ -99,7 +101,7 @@ impl Store {
     ) -> Result<Option<CaptureSource>> {
         self.conn
                 .query_row(
-                    "SELECT id, kind, provider, machine_id, process_id, cwd, raw_source_path, source_format, source_root, source_identity, external_session_id, started_at_ms, ended_at_ms, fidelity, visibility, sync_state, sync_version, metadata_json FROM capture_sources WHERE provider = ?1 AND external_session_id = ?2 ORDER BY started_at_ms DESC LIMIT 1",
+                    "SELECT id, kind, provider, machine_id, runtime_user, process_id, cwd, raw_source_path, source_format, source_root, source_identity, external_session_id, started_at_ms, ended_at_ms, fidelity, visibility, sync_state, sync_version, metadata_json FROM capture_sources WHERE provider = ?1 AND external_session_id = ?2 ORDER BY started_at_ms DESC LIMIT 1",
                     params![provider.as_str(), external_session_id],
                     capture_source_from_row,
                 )
@@ -138,26 +140,27 @@ pub(crate) fn capture_source_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Resu
             kind: parse_text_enum::<ctx_history_core::CaptureSourceKind>(row.get::<_, String>(1)?)?,
             provider: parse_text_enum::<CaptureProvider>(row.get::<_, String>(2)?)?,
             machine_id: row.get(3)?,
+            runtime_user: row.get(4)?,
             process_id: row
-                .get::<_, Option<i64>>(4)?
+                .get::<_, Option<i64>>(5)?
                 .map(nonnegative_i64_to_u32)
                 .transpose()?,
-            cwd: row.get(5)?,
-            raw_source_path: row.get(6)?,
-            source_format: row.get(7)?,
-            source_root: row.get(8)?,
-            source_identity: row.get(9)?,
-            external_session_id: row.get(10)?,
+            cwd: row.get(6)?,
+            raw_source_path: row.get(7)?,
+            source_format: row.get(8)?,
+            source_root: row.get(9)?,
+            source_identity: row.get(10)?,
+            external_session_id: row.get(11)?,
         },
-        started_at: ms_to_time(row.get(11)?)?,
-        ended_at: optional_ms_to_time(row.get(12)?)?,
+        started_at: ms_to_time(row.get(12)?)?,
+        ended_at: optional_ms_to_time(row.get(13)?)?,
         sync: SyncMetadata {
-            fidelity: parse_text_enum::<Fidelity>(row.get::<_, String>(13)?)?,
-            visibility: parse_text_enum::<Visibility>(row.get::<_, String>(14)?)?,
-            sync_state: parse_text_enum::<SyncState>(row.get::<_, String>(15)?)?,
-            sync_version: nonnegative_i64_to_u64(row.get(16)?)?,
+            fidelity: parse_text_enum::<Fidelity>(row.get::<_, String>(14)?)?,
+            visibility: parse_text_enum::<Visibility>(row.get::<_, String>(15)?)?,
+            sync_state: parse_text_enum::<SyncState>(row.get::<_, String>(16)?)?,
+            sync_version: nonnegative_i64_to_u64(row.get(17)?)?,
             deleted_at: None,
-            metadata: parse_json(row.get::<_, String>(17)?)?,
+            metadata: parse_json(row.get::<_, String>(18)?)?,
         },
     })
 }

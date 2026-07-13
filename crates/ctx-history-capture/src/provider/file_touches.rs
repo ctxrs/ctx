@@ -134,6 +134,7 @@ pub(crate) fn provider_file_touch_envelopes(
             context.line_number,
             ProviderFileTouchedEnvelope {
                 provider: context.provider,
+                runtime_user: None,
                 provider_session_id: context.provider_session_id.to_owned(),
                 provider_touch_index,
                 provider_event_index: context.provider_event_index,

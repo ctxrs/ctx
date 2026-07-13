@@ -1831,12 +1831,14 @@ pub(super) fn assert_provider_source_collision_is_distinct(
         provider_session_id,
         first_source_format,
         Some(first_source_path),
+        None,
     );
     let second_source_id = provider_scoped_source_uuid(
         provider,
         provider_session_id,
         second_source_format,
         Some(second_source_path),
+        None,
     );
     let first_source_identity =
         provider_source_root_identity(provider, first_source_format, first_source_path);
@@ -1993,6 +1995,7 @@ pub(super) fn provider_collision_capture(
         source: ProviderSourceEnvelope {
             source_format: source_format.to_owned(),
             machine_id: "test-machine".to_owned(),
+            runtime_user: None,
             observed_at: occurred_at,
             raw_source_path: Some(raw_source_path.to_owned()),
             source_root: Some(raw_source_path.to_owned()),
@@ -2057,6 +2060,7 @@ pub(super) fn provider_collision_file_touch(
 ) -> ProviderFileTouchedEnvelope {
     ProviderFileTouchedEnvelope {
         provider,
+        runtime_user: None,
         provider_session_id: provider_session_id.to_owned(),
         provider_touch_index: 0,
         provider_event_index: Some(0),

@@ -855,6 +855,7 @@ pub(crate) fn codebuddy_capture(
         source: ProviderSourceEnvelope {
             source_format: CODEBUDDY_SOURCE_FORMAT.to_owned(),
             machine_id: draft.context.machine_id.clone(),
+            runtime_user: None,
             observed_at: draft.context.imported_at,
             raw_source_path: Some(draft.raw_source_path.to_owned()),
             source_root: draft

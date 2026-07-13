@@ -136,6 +136,7 @@ fn imported_source(source_id: Uuid, source_root: &str, external_session_id: &str
             kind: CaptureSourceKind::ProviderImport,
             provider: CaptureProvider::Codex,
             machine_id: "test-machine".into(),
+            runtime_user: None,
             process_id: None,
             cwd: Some("/repo".into()),
             raw_source_path: Some(format!("{source_root}/session.jsonl")),

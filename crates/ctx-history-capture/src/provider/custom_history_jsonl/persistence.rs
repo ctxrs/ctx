@@ -59,6 +59,7 @@ pub(crate) fn import_custom_history_edges(
             &edge.to_provider_session_id,
             &edge.source_format,
             edge.raw_source_path.as_deref(),
+            edge.runtime_user.as_deref(),
         );
         let mut exists_cache = BTreeMap::<Uuid, bool>::new();
         if !provider_session_exists_cached(store, from_session_id, &mut exists_cache)?

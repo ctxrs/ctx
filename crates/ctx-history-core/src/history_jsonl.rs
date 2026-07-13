@@ -49,6 +49,9 @@ pub struct CtxHistoryJsonlSourceRecord {
     pub observed_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine_id: Option<String>,
+    /// OS account associated with the runtime data described by this source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_user: Option<String>,
     #[serde(default)]
     pub trust: ProviderSourceTrust,
     #[serde(default = "default_imported_fidelity")]

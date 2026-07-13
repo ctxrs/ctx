@@ -302,6 +302,7 @@ pub(crate) fn import_provider_file_touched_line(
         &file.provider_session_id,
         &file.source_format,
         file.raw_source_path.as_deref(),
+        file.runtime_user.as_deref(),
     );
     let source_root =
         provider_source_root(file.source_root.as_deref(), file.raw_source_path.as_deref());
@@ -521,6 +522,7 @@ pub(crate) fn import_provider_capture_line(
         &session.provider_session_id,
         &source.source_format,
         source.raw_source_path.as_deref(),
+        source.runtime_user.as_deref(),
     );
     let source_id = stable_capture_uuid(&source_identity_key, "source");
     let source_root = provider_source_root(
@@ -584,6 +586,7 @@ pub(crate) fn import_provider_capture_line(
             kind: CaptureSourceKind::ProviderImport,
             provider,
             machine_id: source.machine_id.clone(),
+            runtime_user: source.runtime_user.clone(),
             process_id: None,
             cwd: session.cwd.clone(),
             raw_source_path: source.raw_source_path.clone(),
@@ -1000,6 +1003,7 @@ pub(crate) fn fixture_line_to_capture(
         source: ProviderSourceEnvelope {
             source_format: source_format.to_owned(),
             machine_id: context.machine_id.clone(),
+            runtime_user: None,
             observed_at: context.imported_at,
             raw_source_path: context
                 .source_path

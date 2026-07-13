@@ -494,6 +494,7 @@ pub(crate) fn trae_capture(input: TraeCaptureInput<'_>) -> ProviderCaptureEnvelo
         source: ProviderSourceEnvelope {
             source_format: TRAE_STATE_VSCDB_SOURCE_FORMAT.to_owned(),
             machine_id: input.context.machine_id.clone(),
+            runtime_user: None,
             observed_at: input.context.imported_at,
             raw_source_path: Some(input.raw_source_path.to_owned()),
             source_root: input

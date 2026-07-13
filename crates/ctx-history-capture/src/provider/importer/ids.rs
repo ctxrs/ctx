@@ -20,6 +20,7 @@ pub(crate) fn provider_scoped_source_uuid(
     provider_session_id: &str,
     source_format: &str,
     raw_source_path: Option<&str>,
+    runtime_user: Option<&str>,
 ) -> Uuid {
     stable_capture_uuid(
         &provider_scoped_source_identity_key(
@@ -27,6 +28,7 @@ pub(crate) fn provider_scoped_source_uuid(
             provider_session_id,
             source_format,
             raw_source_path,
+            runtime_user,
         ),
         "source",
     )
@@ -37,7 +39,19 @@ pub(crate) fn provider_scoped_source_identity_key(
     provider_session_id: &str,
     source_format: &str,
     raw_source_path: Option<&str>,
+    runtime_user: Option<&str>,
 ) -> String {
+    if let Some(runtime_user) = runtime_user {
+        return serde_json::to_string(&(
+            "provider-source-v3",
+            provider.as_str(),
+            provider_session_id,
+            source_format,
+            raw_source_path,
+            runtime_user,
+        ))
+        .expect("provider source identity key should serialize");
+    }
     serde_json::to_string(&(
         "provider-source-v2",
         provider.as_str(),
@@ -322,5 +336,46 @@ pub(crate) fn provider_sync_metadata(fidelity: Fidelity, metadata: Value) -> Syn
         sync_version: 0,
         deleted_at: None,
         metadata,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_user_scopes_provider_source_identity_without_changing_legacy_ids() {
+        let legacy = provider_scoped_source_uuid(
+            CaptureProvider::Codex,
+            "session-1",
+            "codex_session_jsonl",
+            Some("/home/shared/.codex/session.jsonl"),
+            None,
+        );
+        let alice = provider_scoped_source_uuid(
+            CaptureProvider::Codex,
+            "session-1",
+            "codex_session_jsonl",
+            Some("/home/shared/.codex/session.jsonl"),
+            Some("alice"),
+        );
+        let alice_again = provider_scoped_source_uuid(
+            CaptureProvider::Codex,
+            "session-1",
+            "codex_session_jsonl",
+            Some("/home/shared/.codex/session.jsonl"),
+            Some("alice"),
+        );
+        let bob = provider_scoped_source_uuid(
+            CaptureProvider::Codex,
+            "session-1",
+            "codex_session_jsonl",
+            Some("/home/shared/.codex/session.jsonl"),
+            Some("bob"),
+        );
+
+        assert_eq!(alice, alice_again);
+        assert_ne!(legacy, alice);
+        assert_ne!(alice, bob);
     }
 }

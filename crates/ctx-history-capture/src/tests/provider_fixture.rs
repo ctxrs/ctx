@@ -1055,6 +1055,7 @@ fn provider_import_reuses_existing_legacy_provider_event_identity() {
         provider_session_id,
         source_format,
         Some(&raw_source_path),
+        None,
     );
     let session_id = provider_session_uuid(provider, provider_session_id);
     let legacy_event_id = provider_event_uuid(provider, provider_session_id, 0);
@@ -1070,6 +1071,7 @@ fn provider_import_reuses_existing_legacy_provider_event_identity() {
                 kind: CaptureSourceKind::ProviderImport,
                 provider,
                 machine_id: "test-machine".to_owned(),
+                runtime_user: None,
                 process_id: None,
                 cwd: Some("/workspace/example".to_owned()),
                 raw_source_path: Some(raw_source_path.clone()),

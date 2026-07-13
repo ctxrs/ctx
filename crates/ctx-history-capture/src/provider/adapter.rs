@@ -125,6 +125,8 @@ pub struct ProviderNormalizationResult {
 pub struct ProviderFileTouchedEnvelope {
     pub provider: CaptureProvider,
     pub provider_session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_user: Option<String>,
     pub provider_touch_index: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_event_index: Option<u64>,

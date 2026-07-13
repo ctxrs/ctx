@@ -448,6 +448,7 @@ pub(crate) fn crush_file_touches(
             provider_line_from_index(touch_index),
             ProviderFileTouchedEnvelope {
                 provider: CaptureProvider::Crush,
+                runtime_user: None,
                 provider_session_id: session_id.clone(),
                 provider_touch_index: touch_index,
                 provider_event_index: None,
@@ -481,6 +482,7 @@ pub(crate) fn crush_file_touches(
             provider_line_from_index(touch_index),
             ProviderFileTouchedEnvelope {
                 provider: CaptureProvider::Crush,
+                runtime_user: None,
                 provider_session_id: row.session_id,
                 provider_touch_index: touch_index,
                 provider_event_index: None,

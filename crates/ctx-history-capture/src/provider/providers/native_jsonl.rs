@@ -285,6 +285,7 @@ pub(crate) fn normalize_native_jsonl_session_file(
                 source: ProviderSourceEnvelope {
                     source_format: source_format.to_owned(),
                     machine_id: context.machine_id.clone(),
+                    runtime_user: None,
                     observed_at: context.imported_at,
                     raw_source_path: Some(raw_source_path.clone()),
                     source_root: context

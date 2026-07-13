@@ -52,6 +52,7 @@ pub fn fixture_envelope(options: FixtureOptions) -> Result<CaptureEnvelope> {
             kind: CaptureSourceKind::DirectCli,
             provider: CaptureProvider::Unknown,
             machine_id,
+            runtime_user: None,
             process_id: Some(std::process::id()),
             cwd: Some(cwd.clone()),
             raw_source_path: None,

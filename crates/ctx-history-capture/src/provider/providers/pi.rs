@@ -249,6 +249,7 @@ pub(crate) fn pi_session_capture(
         source: ProviderSourceEnvelope {
             source_format: "pi_session_jsonl".to_owned(),
             machine_id: context.machine_id.clone(),
+            runtime_user: None,
             observed_at: context.imported_at,
             raw_source_path: context
                 .source_path

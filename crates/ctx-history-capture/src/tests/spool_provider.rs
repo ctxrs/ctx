@@ -470,6 +470,7 @@ fn pi_session_import_reuses_legacy_line_indexed_event_by_entry_id_after_line_shi
         provider_session_id,
         "pi_session_jsonl",
         Some(&raw_path),
+        None,
     );
     let session_id = provider_session_uuid(CaptureProvider::Pi, provider_session_id);
     let source_identity =
@@ -484,6 +485,7 @@ fn pi_session_import_reuses_legacy_line_indexed_event_by_entry_id_after_line_shi
                 kind: CaptureSourceKind::ProviderImport,
                 provider: CaptureProvider::Pi,
                 machine_id: "test-machine".to_owned(),
+                runtime_user: None,
                 process_id: None,
                 cwd: Some("/workspace".to_owned()),
                 raw_source_path: Some(raw_path.clone()),

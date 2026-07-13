@@ -338,6 +338,7 @@ pub(crate) fn deepagents_capture(
         source: ProviderSourceEnvelope {
             source_format: DEEPAGENTS_SQLITE_SOURCE_FORMAT.to_owned(),
             machine_id: context.machine_id.clone(),
+            runtime_user: None,
             observed_at,
             raw_source_path: raw_source_path.clone(),
             source_root: context.source_root_display().or(raw_source_path.clone()),

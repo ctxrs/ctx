@@ -25,16 +25,17 @@ pub(super) fn upsert_capture_source_tx(
         r#"
         INSERT INTO capture_sources
         (
-            id, kind, provider, machine_id, process_id, cwd, raw_source_path,
+            id, kind, provider, machine_id, runtime_user, process_id, cwd, raw_source_path,
             source_format, source_root, source_identity, external_session_id,
             started_at_ms, ended_at_ms, fidelity,
             visibility, sync_state, sync_version, metadata_json
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, NULL, ?13, 'local_only', 'local_only', 0, '{}')
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL, ?14, 'local_only', 'local_only', 0, '{}')
         ON CONFLICT(id) DO UPDATE SET
             kind = excluded.kind,
             provider = excluded.provider,
             machine_id = excluded.machine_id,
+            runtime_user = excluded.runtime_user,
             process_id = excluded.process_id,
             cwd = excluded.cwd,
             raw_source_path = excluded.raw_source_path,
@@ -50,6 +51,7 @@ pub(super) fn upsert_capture_source_tx(
             source.kind.as_str(),
             source.provider.as_str(),
             source.machine_id.as_str(),
+            source.runtime_user.as_deref(),
             source.process_id.map(i64::from),
             source.cwd.as_deref(),
             source.raw_source_path.as_deref(),
@@ -113,12 +115,13 @@ fn upsert_imported_capture_source_tx(tx: &Transaction<'_>, source: &CaptureSourc
     tx.execute(
         r#"
         INSERT INTO capture_sources
-        (id, kind, provider, machine_id, process_id, cwd, raw_source_path, source_format, source_root, source_identity, external_session_id, started_at_ms, ended_at_ms, fidelity, visibility, sync_state, sync_version, metadata_json)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+        (id, kind, provider, machine_id, runtime_user, process_id, cwd, raw_source_path, source_format, source_root, source_identity, external_session_id, started_at_ms, ended_at_ms, fidelity, visibility, sync_state, sync_version, metadata_json)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
         ON CONFLICT(id) DO UPDATE SET
             kind = excluded.kind,
             provider = excluded.provider,
             machine_id = excluded.machine_id,
+            runtime_user = excluded.runtime_user,
             process_id = excluded.process_id,
             cwd = excluded.cwd,
             raw_source_path = excluded.raw_source_path,
@@ -139,6 +142,7 @@ fn upsert_imported_capture_source_tx(tx: &Transaction<'_>, source: &CaptureSourc
             source.descriptor.kind.as_str(),
             source.descriptor.provider.as_str(),
             source.descriptor.machine_id.as_str(),
+            source.descriptor.runtime_user.as_deref(),
             source.descriptor.process_id.map(i64::from),
             source.descriptor.cwd.as_deref(),
             source.descriptor.raw_source_path.as_deref(),
