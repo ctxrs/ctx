@@ -523,7 +523,7 @@ pub(crate) fn refresh_sources_for_search(
     let db_path = database_path(data_root.to_path_buf());
     let store = Store::open(&db_path)?;
     let had_indexed_content = store.indexed_history_item_count()? > 0;
-    let inventory = inventory_import_sources(&store, sources, false)?;
+    let inventory = inventory_import_sources(&store, sources)?;
     let planned_sources = inventory.sources;
     let inventory_failures = inventory.failures;
     let planned_total_bytes = inventory.totals.source_bytes;

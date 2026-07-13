@@ -440,6 +440,7 @@ pub(super) fn incremental_codex_catch_up(
                     source_path: &session.source_path,
                     file_size_bytes: session.file_size_bytes,
                     file_modified_at_ms: session.file_modified_at_ms,
+                    import_revision: session.import_revision,
                     file_sha256: None,
                     event_count: Some(1),
                     indexed_at_ms,

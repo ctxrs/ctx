@@ -31,9 +31,15 @@ fn codex_preinventory_failures_survive_when_catalog_has_no_pending_sessions() {
         ..CatalogSummary::default()
     };
 
-    let summary =
-        import_incremental_codex_session_tree(&mut store, &source, new_id(), None, Some(&catalog))
-            .unwrap();
+    let summary = import_incremental_codex_session_tree(
+        &mut store,
+        &source,
+        new_id(),
+        None,
+        Some(&catalog),
+        false,
+    )
+    .unwrap();
 
     assert_eq!(summary.failed, 1);
     assert_eq!(summary.failures, catalog.failures);
@@ -68,6 +74,7 @@ fn persist_indexed_root(
                 source_path: &source_root,
                 file_size_bytes,
                 file_modified_at_ms,
+                import_revision: source.import_revision,
                 indexed_at_ms: 1,
             },
         )
@@ -246,7 +253,7 @@ fn pre_summary_source_error_is_terminal_for_the_observed_revision() {
 }
 
 #[test]
-fn system_error_remains_retryable_for_the_observed_revision() {
+fn transient_source_io_remains_retryable_for_the_observed_revision() {
     let temp = tempfile::tempdir().unwrap();
     let source_path = temp.path().join("transcript.jsonl");
     let source = explicit_path_source(CaptureProvider::Hermes, source_path.clone());
@@ -265,11 +272,12 @@ fn system_error_remains_retryable_for_the_observed_revision() {
     store
         .upsert_source_import_files(std::slice::from_ref(&file))
         .unwrap();
-    let error = anyhow::Error::new(CaptureError::SystemIo {
-        operation: "read provider transcript",
-        source: std::io::Error::other("transient test failure"),
-    });
+    let error = anyhow::Error::new(CaptureError::Io(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "transient test failure",
+    )));
 
+    assert_eq!(import_error_scope(&error), ImportFailureScope::Source);
     let status = import_error_status(&error);
     assert_eq!(status, CatalogIndexedStatus::Failed);
     mark_source_import_file_result(&store, &file, status, Some(&error.to_string())).unwrap();
@@ -282,4 +290,66 @@ fn system_error_remains_retryable_for_the_observed_revision() {
         1
     );
     assert_eq!(store.source_import_file_counts().unwrap().failed, 1);
+}
+
+#[test]
+fn provider_sqlite_lock_is_pending_until_the_lock_is_released() {
+    let temp = tempfile::tempdir().unwrap();
+    let source_path = temp.path().join("provider.sqlite");
+    let source = explicit_path_source(CaptureProvider::Hermes, source_path.clone());
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let file = SourceImportFile {
+        provider: source.provider,
+        source_format: source.source_format.to_owned(),
+        import_revision: source.import_revision,
+        source_root: source_path.display().to_string(),
+        source_path: source_path.display().to_string(),
+        file_size_bytes: 17,
+        file_modified_at_ms: 23,
+        observed_at_ms: 29,
+        metadata: json!({}),
+    };
+    store
+        .upsert_source_import_files(std::slice::from_ref(&file))
+        .unwrap();
+
+    let lock = rusqlite::Connection::open(&source_path).unwrap();
+    lock.execute_batch(
+        "PRAGMA journal_mode = DELETE;
+         CREATE TABLE state(value INTEGER NOT NULL);
+         INSERT INTO state VALUES (1);
+         BEGIN EXCLUSIVE;
+         UPDATE state SET value = 2;",
+    )
+    .unwrap();
+    let reader = rusqlite::Connection::open(&source_path).unwrap();
+    reader.busy_timeout(std::time::Duration::ZERO).unwrap();
+    let sqlite_error = reader
+        .query_row("SELECT value FROM state", [], |row| row.get::<_, i64>(0))
+        .unwrap_err();
+    let error = anyhow::Error::new(CaptureError::Sqlite(sqlite_error));
+    assert_eq!(import_error_scope(&error), ImportFailureScope::Source);
+    let status = import_error_status(&error);
+    assert_eq!(status, CatalogIndexedStatus::Failed);
+    mark_source_import_file_result(&store, &file, status, Some(&error.to_string())).unwrap();
+    assert_eq!(
+        store
+            .list_pending_source_import_files(source.provider, &file.source_root)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    lock.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(
+        reader
+            .query_row("SELECT value FROM state", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    mark_source_import_file_result(&store, &file, CatalogIndexedStatus::Indexed, None).unwrap();
+    assert!(store
+        .list_pending_source_import_files(source.provider, &file.source_root)
+        .unwrap()
+        .is_empty());
 }
