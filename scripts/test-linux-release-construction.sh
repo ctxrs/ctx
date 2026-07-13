@@ -307,6 +307,8 @@ grep -F 'local_runtime_authority' scripts/write-public-cli-build-info.py >/dev/n
 grep -F 'required ONNX Runtime sidecar missing' scripts/stage-github-release-assets.sh >/dev/null
 grep -F 'ctx-onnxruntime-freebsd-x64.tar.gz' scripts/check-github-release-assets.sh >/dev/null
 grep -F 'ctx-onnxruntime-macos-x64.tar.gz' scripts/check-github-release-assets.sh >/dev/null
+test "$(sed -n '/^stage_macos_x64_source_build()/,/^stage_freebsd_source_build()/p' \
+  scripts/build-onnxruntime-sidecar.sh | grep -Fc -- '--skip_tests --skip_submodule_sync')" = 1
 grep -F -- '--expected-builder-base "${LINUX_RELEASE_UBUNTU_DIGEST}"' scripts/build-public-cli-artifact.sh >/dev/null
 grep -F -- '--actual-builder-base "${actual_base_digest}"' scripts/build-public-cli-artifact.sh >/dev/null
 grep -F -- '--runtime-image-id "${runtime_image_id}"' scripts/build-public-cli-artifact.sh >/dev/null

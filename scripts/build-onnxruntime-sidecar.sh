@@ -411,7 +411,7 @@ stage_macos_x64_source_build() {
     --config Release
     --build_dir "${cmake_build_dir}"
     --build_shared_lib
-    --skip_tests
+    --skip_tests --skip_submodule_sync
     --compile_no_warning_as_error
   )
   if [[ -n "${jobs}" ]]; then
