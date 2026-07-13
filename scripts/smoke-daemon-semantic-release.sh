@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
   cat >&2 <<'USAGE'
 Usage:
-  scripts/smoke-daemon-semantic-release.sh --runtime-archive PATH --runtime-platform PLATFORM [--ctx PATH] [--data-root DIR] [--proof-output PATH] [--timeout-seconds N] [--keep-root]
+  scripts/smoke-daemon-semantic-release.sh --runtime-archive PATH --runtime-platform PLATFORM [--ctx PATH] [--data-root DIR] [--proof-output PATH] [--timeout-seconds N] [--non-authoritative-runtime-proof] [--keep-root]
   scripts/smoke-daemon-semantic-release.sh --coreml --runtime-platform macos-arm64|macos-x64 [--ctx PATH] [--data-root DIR] [--proof-output PATH] [--timeout-seconds N] [--keep-root]
 
 Native release smoke for opt-in daemon + semantic search. The smoke creates an
@@ -18,6 +18,8 @@ be combined with --runtime-archive. When --data-root is provided, it is the
 parent for a fresh unique run root; --keep-root preserves that child for
 inspection. --proof-output copies the successful proof to a canonical release
 artifact path before the isolated run root is cleaned up.
+--non-authoritative-runtime-proof may only downgrade macos-x64 diagnostic proof;
+it cannot elevate unknown or translated execution to authoritative evidence.
 USAGE
 }
 
@@ -31,6 +33,7 @@ runtime_version="1.27.0"
 timeout_seconds="${CTX_SEMANTIC_SMOKE_TIMEOUT_SECONDS:-900}"
 keep_root=0
 coreml_mode=0
+downgrade_runtime_authority=0
 
 while (($# > 0)); do
   case "$1" in
@@ -56,6 +59,9 @@ while (($# > 0)); do
       ;;
     --coreml)
       coreml_mode=1
+      ;;
+    --non-authoritative-runtime-proof)
+      downgrade_runtime_authority=1
       ;;
     --timeout-seconds)
       shift
@@ -108,6 +114,10 @@ case "${runtime_platform}" in
     exit 2
     ;;
 esac
+if [[ "${downgrade_runtime_authority}" == "1" && "${runtime_platform}" != "macos-x64" ]]; then
+  echo "error: --non-authoritative-runtime-proof is restricted to macos-x64" >&2
+  exit 2
+fi
 
 expected_runtime_asset=""
 runtime_sha_path=""
@@ -290,6 +300,9 @@ runtime_authority="$(
     "${runtime_platform}" "${host_system}" "${host_arch}" passed \
     "${host_native_arch}" "${process_translated}"
 )"
+if [[ "${downgrade_runtime_authority}" == "1" ]]; then
+  runtime_authority=non_authoritative
+fi
 if [[ "${coreml_mode}" == "1" ]]; then
   ctx_bin="${install_bin_dir}/ctx"
   cp "${release_artifact_dir}/${release_binary}" "${ctx_bin}"

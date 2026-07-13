@@ -103,7 +103,18 @@ function Expand-WindowsRuntimeArchive(
 ) {
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $expectedFiles = [System.Collections.Generic.HashSet[string]]::new(
-        [string[]]@("LICENSE", "ThirdPartyNotices.txt", "VERSION_NUMBER", "GIT_COMMIT_ID", "lib/onnxruntime.dll"),
+        [string[]]@(
+            "LICENSE",
+            "MICROSOFT_VC_RUNTIME_LICENSE.rtf",
+            "ThirdPartyNotices.txt",
+            "VERSION_NUMBER",
+            "GIT_COMMIT_ID",
+            "lib/onnxruntime.dll",
+            "lib/msvcp140.dll",
+            "lib/msvcp140_1.dll",
+            "lib/vcruntime140.dll",
+            "lib/vcruntime140_1.dll"
+        ),
         [System.StringComparer]::Ordinal
     )
     $expectedEntries = [System.Collections.Generic.HashSet[string]]::new($expectedFiles, [System.StringComparer]::Ordinal)

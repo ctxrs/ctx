@@ -30,6 +30,8 @@ mod cursors;
 mod identity;
 mod ids;
 
+#[cfg(test)]
+pub(crate) use batches::import_normalized_provider_captures_in_batches;
 pub(crate) use commands::{provider_command_run_from_event, ProviderCommandRunInput};
 #[cfg(test)]
 pub(crate) use cursors::provider_source_cursor_stream;
@@ -111,20 +113,6 @@ pub(crate) fn import_normalized_provider_captures_with_bulk_search(
     options: NormalizedProviderImportOptions,
 ) -> Result<ProviderImportSummary> {
     batches::import_normalized_provider_captures(store, normalization, options, true)
-}
-
-pub(crate) fn import_normalized_provider_captures_in_batches(
-    store: &mut Store,
-    normalization: ProviderNormalizationResult,
-    options: NormalizedProviderImportOptions,
-    transaction_batch_size: usize,
-) -> Result<ProviderImportSummary> {
-    batches::import_normalized_provider_captures_in_batches(
-        store,
-        normalization,
-        options,
-        transaction_batch_size,
-    )
 }
 
 pub(crate) fn import_provider_capture_lines(

@@ -47,7 +47,11 @@ if [[ "${host_system}" == "Darwin" ]]; then
         host_native_arch=arm64
         process_translated=1
         ;;
-      x86_64:0:|x86_64:0:0)
+      x86_64:1:|x86_64:1:0)
+        host_native_arch=arm64
+        process_translated=unknown
+        ;;
+      x86_64::|x86_64::0|x86_64:0:|x86_64:0:0)
         host_native_arch=x86_64
         process_translated=0
         ;;

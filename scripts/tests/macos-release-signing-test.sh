@@ -943,6 +943,21 @@ PY
     "${decoy_root}/scripts/verify-macos-release-attestation.sh" \
       macos-arm64 cli "${decoy_cli}" "${decoy_cli_statement}" "${decoy_valid_cms}" \
       >/dev/null
+  env PATH=/usr/bin:/bin CTX_MACOS_RELEASE_SOURCE_COMMIT="${decoy_commit}" \
+    "${decoy_root}/scripts/verify-macos-release-attestation.sh" \
+      macos-arm64 cli "${decoy_cli}" "${decoy_cli_statement}" "${decoy_valid_cms}" \
+      >/dev/null
+  expect_failure 'source commit must be a non-placeholder' \
+    "${test_root}/real-decoy-invalid-source-commit.log" \
+    env PATH=/usr/bin:/bin CTX_MACOS_RELEASE_SOURCE_COMMIT=not-a-commit \
+    "${decoy_root}/scripts/verify-macos-release-attestation.sh" \
+      macos-arm64 cli "${decoy_cli}" "${decoy_cli_statement}" "${decoy_valid_cms}"
+  expect_failure 'signed macOS attestation does not bind the exact pinned artifact' \
+    "${test_root}/real-decoy-wrong-source-commit.log" \
+    env PATH=/usr/bin:/bin \
+    CTX_MACOS_RELEASE_SOURCE_COMMIT=1111111111111111111111111111111111111111 \
+    "${decoy_root}/scripts/verify-macos-release-attestation.sh" \
+      macos-arm64 cli "${decoy_cli}" "${decoy_cli_statement}" "${decoy_valid_cms}"
   /usr/bin/openssl cms -sign -binary -in "${decoy_cli_statement}" \
     -signer "${decoy_root}/wrong.pem" -inkey "${decoy_root}/wrong.key" \
     -certfile "${decoy_root}/decoy.pem" -outform DER -out "${decoy_cli_cms}" \

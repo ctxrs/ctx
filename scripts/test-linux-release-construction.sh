@@ -149,10 +149,15 @@ case "${2:-}" in
   *) exit 2 ;;
 esac
 EOF
+cat > "${tmp_dir}/blank-sysctl" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
 chmod +x \
   "${tmp_dir}/native-sysctl" \
   "${tmp_dir}/rosetta-sysctl" \
-  "${tmp_dir}/inconsistent-sysctl"
+  "${tmp_dir}/inconsistent-sysctl" \
+  "${tmp_dir}/blank-sysctl"
 test "$(scripts/public-cli-host-runtime-evidence.sh \
   --host-system Darwin --host-arch x86_64 --sysctl "${tmp_dir}/native-sysctl")" = \
   $'Darwin\tx86_64\tx86_64\t0\tsysctl'
@@ -163,8 +168,11 @@ test "$(scripts/public-cli-host-runtime-evidence.sh \
   --host-system Darwin --host-arch x86_64 --sysctl "${tmp_dir}/missing-sysctl")" = \
   $'Darwin\tx86_64\tunknown\tunknown\tsysctl'
 test "$(scripts/public-cli-host-runtime-evidence.sh \
+  --host-system Darwin --host-arch x86_64 --sysctl "${tmp_dir}/blank-sysctl")" = \
+  $'Darwin\tx86_64\tx86_64\t0\tsysctl'
+test "$(scripts/public-cli-host-runtime-evidence.sh \
   --host-system Darwin --host-arch x86_64 --sysctl "${tmp_dir}/inconsistent-sysctl")" = \
-  $'Darwin\tx86_64\tunknown\tunknown\tsysctl'
+  $'Darwin\tx86_64\tarm64\tunknown\tsysctl'
 
 partial_runtime_matrix="${tmp_dir}/partial-runtime-matrix"
 mkdir -p "${partial_runtime_matrix}"
@@ -258,6 +266,149 @@ grep -Fq \
   'runtime proof contains duplicate field platform:' \
   "${tmp_dir}/duplicate-proof.err"
 
+missing_windows_dependency_matrix="${tmp_dir}/missing-windows-dependency-matrix"
+cp -R "${complete_runtime_matrix}" "${missing_windows_dependency_matrix}"
+write_synthetic_runtime_proof() {
+  local platform="$1"
+  local binary="$2"
+  local proof="$3"
+  local host_system="$4"
+  local host_arch="$5"
+  local runtime_asset="$6"
+  local native_arch_probe="$7"
+  local binary_sha runtime_sha
+
+  printf 'synthetic %s\n' "${platform}" > "${missing_windows_dependency_matrix}/${binary}"
+  binary_sha="$(sha256sum "${missing_windows_dependency_matrix}/${binary}" | awk '{ print $1 }')"
+  printf '%s\n' "${binary_sha}" > "${missing_windows_dependency_matrix}/${binary}.sha256"
+  runtime_sha="$(sha256sum \
+    "${missing_windows_dependency_matrix}/${runtime_asset}" | awk '{ print $1 }')"
+  printf '%s\n' "${runtime_sha}" > \
+    "${missing_windows_dependency_matrix}/${runtime_asset}.sha256"
+  cat > "${missing_windows_dependency_matrix}/${proof}" <<EOF
+runtime=onnxruntime
+embedding_backend=cpu
+platform=${platform}
+host_system=${host_system}
+host_arch=${host_arch}
+host_native_arch=${host_arch}
+process_translated=0
+native_arch_probe=${native_arch_probe}
+runtime_authority=authoritative
+artifact_sha256=${binary_sha}
+runtime_archive_sha256=${runtime_sha}
+semantic_search=passed
+EOF
+}
+write_synthetic_runtime_proof \
+  linux-x64 ctx ctx-linux-x64.native-runtime-proof.txt \
+  Linux x86_64 ctx-onnxruntime-linux-x64.tar.gz uname
+write_synthetic_runtime_proof \
+  linux-aarch64 ctx-linux-aarch64 ctx-linux-aarch64.native-runtime-proof.txt \
+  Linux aarch64 ctx-onnxruntime-linux-aarch64.tar.gz uname
+write_synthetic_runtime_proof \
+  macos-arm64 ctx-macos-arm64 ctx-macos-arm64.native-runtime-proof.txt \
+  Darwin arm64 ctx-onnxruntime-macos-arm64.tar.gz sysctl
+write_synthetic_runtime_proof \
+  macos-x64 ctx-macos-x64 ctx-macos-x64.native-runtime-proof.txt \
+  Darwin x86_64 ctx-onnxruntime-macos-x64.tar.gz sysctl
+write_synthetic_runtime_proof \
+  windows-x64 ctx.exe ctx-windows-x64.native-runtime-proof.txt \
+  Windows_NT AMD64 ctx-onnxruntime-windows-x64.zip iswow64process2
+
+preview_macos_matrix="${tmp_dir}/preview-macos-matrix"
+cp -R "${missing_windows_dependency_matrix}" "${preview_macos_matrix}"
+sed -i \
+  -e 's/^runtime_authority=authoritative$/runtime_authority=non_authoritative/' \
+  "${preview_macos_matrix}/ctx-macos-x64.native-runtime-proof.txt"
+printf 'ctx 0.25.0\n' > "${preview_macos_matrix}/ctx-macos-x64.version"
+preview_macos_sha="$(cat "${preview_macos_matrix}/ctx-macos-x64.sha256")"
+cat > "${preview_macos_matrix}/ctx-macos-x64.build-info.json" <<EOF
+{"schema_version":1,"artifact_sha256":"${preview_macos_sha}","platform":"macos-x64","target":"x86_64-apple-darwin","source":{"commit":"228e05fa0fd058822be7a362acd65cacdad24356","clean":true}}
+EOF
+if scripts/stage-github-release-assets.sh \
+  "${preview_macos_matrix}" "${tmp_dir}/preview-macos-default-release" \
+  >"${tmp_dir}/preview-macos-default.out" 2>"${tmp_dir}/preview-macos-default.err"; then
+  echo "release staging accepted macOS x64 preview proof without explicit opt-in" >&2
+  exit 1
+fi
+grep -Fq \
+  'runtime proof has the wrong authority classification:' \
+  "${tmp_dir}/preview-macos-default.err"
+
+printf 'ctx 0.25.1\n' > "${preview_macos_matrix}/ctx-macos-x64.version"
+if CTX_RELEASE_ALLOW_MACOS_X64_PREVIEW_PROOF=1 \
+  scripts/stage-github-release-assets.sh \
+    "${preview_macos_matrix}" "${tmp_dir}/preview-macos-wrong-version-release" \
+    >"${tmp_dir}/preview-macos-wrong-version.out" \
+    2>"${tmp_dir}/preview-macos-wrong-version.err"; then
+  echo "release staging accepted the macOS x64 preview exception for another version" >&2
+  exit 1
+fi
+grep -Fq \
+  'macOS x64 preview proof exception is restricted to ctx 0.25.0' \
+  "${tmp_dir}/preview-macos-wrong-version.err"
+
+printf 'ctx 0.25.0\n' > "${preview_macos_matrix}/ctx-macos-x64.version"
+sed -i \
+  's/228e05fa0fd058822be7a362acd65cacdad24356/0000000000000000000000000000000000000000/' \
+  "${preview_macos_matrix}/ctx-macos-x64.build-info.json"
+if CTX_RELEASE_ALLOW_MACOS_X64_PREVIEW_PROOF=1 \
+  scripts/stage-github-release-assets.sh \
+    "${preview_macos_matrix}" "${tmp_dir}/preview-macos-wrong-source-release" \
+    >"${tmp_dir}/preview-macos-wrong-source.out" \
+    2>"${tmp_dir}/preview-macos-wrong-source.err"; then
+  echo "release staging accepted preview proof for another source commit" >&2
+  exit 1
+fi
+grep -Fq \
+  'macOS x64 preview exception is restricted to the reviewed 0.25.0 source commit' \
+  "${tmp_dir}/preview-macos-wrong-source.err"
+sed -i \
+  's/0000000000000000000000000000000000000000/228e05fa0fd058822be7a362acd65cacdad24356/' \
+  "${preview_macos_matrix}/ctx-macos-x64.build-info.json"
+
+if CTX_RELEASE_ALLOW_MACOS_X64_PREVIEW_PROOF=1 \
+  scripts/stage-github-release-assets.sh \
+    "${preview_macos_matrix}" "${tmp_dir}/preview-macos-release" \
+    >"${tmp_dir}/preview-macos.out" 2>"${tmp_dir}/preview-macos.err"; then
+  echo "release staging unexpectedly passed an incomplete synthetic matrix" >&2
+  exit 1
+fi
+grep -Fq \
+  'Windows runtime proof is missing runtime_dylib:' \
+  "${tmp_dir}/preview-macos.err"
+
+sed -i \
+  -e 's/^host_native_arch=x86_64$/host_native_arch=arm64/' \
+  -e 's/^process_translated=0$/process_translated=1/' \
+  "${preview_macos_matrix}/ctx-macos-x64.native-runtime-proof.txt"
+if CTX_RELEASE_ALLOW_MACOS_X64_PREVIEW_PROOF=1 \
+  scripts/stage-github-release-assets.sh \
+    "${preview_macos_matrix}" "${tmp_dir}/preview-macos-rosetta-release" \
+    >"${tmp_dir}/preview-macos-rosetta.out" 2>"${tmp_dir}/preview-macos-rosetta.err"; then
+  echo "release staging accepted Rosetta-shaped proof as preview evidence" >&2
+  exit 1
+fi
+grep -Fq \
+  'runtime proof has wrong native host architecture:' \
+  "${tmp_dir}/preview-macos-rosetta.err"
+
+cat >> \
+  "${missing_windows_dependency_matrix}/ctx-windows-x64.native-runtime-proof.txt" <<'EOF'
+runtime_dylib=C:\ctx-runtime\onnxruntime\1.27.0\windows-x64\lib\onnxruntime.dll
+EOF
+if scripts/stage-github-release-assets.sh \
+  "${missing_windows_dependency_matrix}" "${tmp_dir}/missing-windows-dependency-release" \
+  >"${tmp_dir}/missing-windows-dependency.out" \
+  2>"${tmp_dir}/missing-windows-dependency.err"; then
+  echo "release staging accepted Windows proof without app-local VC runtime evidence" >&2
+  exit 1
+fi
+grep -Fq \
+  'Windows runtime proof is missing runtime_dependency_msvcp140:' \
+  "${tmp_dir}/missing-windows-dependency.err"
+
 multiline_cross_output='cross 0.2.5
 rustup 1.28.2
 cargo 1.88.0'
@@ -307,6 +458,8 @@ grep -F 'local_runtime_authority' scripts/write-public-cli-build-info.py >/dev/n
 grep -F 'required ONNX Runtime sidecar missing' scripts/stage-github-release-assets.sh >/dev/null
 grep -F 'ctx-onnxruntime-freebsd-x64.tar.gz' scripts/check-github-release-assets.sh >/dev/null
 grep -F 'ctx-onnxruntime-macos-x64.tar.gz' scripts/check-github-release-assets.sh >/dev/null
+test "$(sed -n '/^stage_macos_x64_source_build()/,/^stage_freebsd_source_build()/p' \
+  scripts/build-onnxruntime-sidecar.sh | grep -Fc -- '--skip_tests --skip_submodule_sync')" = 1
 grep -F -- '--expected-builder-base "${LINUX_RELEASE_UBUNTU_DIGEST}"' scripts/build-public-cli-artifact.sh >/dev/null
 grep -F -- '--actual-builder-base "${actual_base_digest}"' scripts/build-public-cli-artifact.sh >/dev/null
 grep -F -- '--runtime-image-id "${runtime_image_id}"' scripts/build-public-cli-artifact.sh >/dev/null
@@ -327,5 +480,19 @@ grep -F 'timeout --signal=KILL 120s' scripts/build-public-cli-artifact.sh >/dev/
 grep -F 'x86_64-unknown-freebsd:0.2.5@sha256:' Cross.toml >/dev/null
 grep -F '[System.IO.File]::WriteAllText(' scripts/smoke-daemon-semantic-release.ps1 >/dev/null
 grep -F '($runtimeProofLines -join "`n") + "`n"' scripts/smoke-daemon-semantic-release.ps1 >/dev/null
+grep -F 'param([string[]]$CommandArgs)' scripts/smoke-daemon-semantic-release.ps1 >/dev/null
+grep -F '@CommandArgs' scripts/smoke-daemon-semantic-release.ps1 >/dev/null
+grep -F 'scripts/test-windows-semantic-smoke-contract.ps1' .buildkite/pipeline.yml >/dev/null
+grep -F 'scripts/test-windows-runtime-upgrade-extractor.ps1' .buildkite/pipeline.yml >/dev/null
+grep -F 'scripts/tests/run-native-candidate-smoke-test.ps1' .buildkite/pipeline.yml >/dev/null
+grep -F '//crates/ctx-cli:unit_tests' .buildkite/pipeline.yml >/dev/null
+grep -F 'apt-get is required to provision cabextract' .buildkite/pipeline.yml >/dev/null
+grep -F 'sudo is required to provision cabextract' .buildkite/pipeline.yml >/dev/null
+test -f scripts/test-windows-semantic-smoke-contract.ps1
+test -f scripts/test-windows-runtime-upgrade-extractor.ps1
+if grep -Fq 'param([string[]]$Args)' scripts/smoke-daemon-semantic-release.ps1; then
+  echo 'Windows semantic smoke reused the reserved PowerShell $Args variable' >&2
+  exit 1
+fi
 
 printf 'Linux release construction self-test passed\n'

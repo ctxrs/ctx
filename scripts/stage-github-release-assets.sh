@@ -282,7 +282,7 @@ for required_runtime_asset in "${required_runtime_assets[@]}"; do
   fi
 done
 
-validate_authoritative_runtime_proof() {
+validate_runtime_proof() {
   local platform="$1"
   local binary_name="$2"
   local proof_name="$3"
@@ -292,6 +292,8 @@ validate_authoritative_runtime_proof() {
   local host_native_arch="$7"
   local runtime_asset="${8:-}"
   local native_arch_probe="$9"
+  local expected_process_translated="${10:-0}"
+  local expected_runtime_authority="${11:-authoritative}"
   local binary_sha_path="${artifact_dir%/}/${binary_name}.sha256"
   local proof_path="${artifact_dir%/}/${proof_name}"
   local expected_sha runtime_sha_path runtime_path expected_runtime_sha actual_runtime_sha duplicate_key
@@ -341,16 +343,16 @@ validate_authoritative_runtime_proof() {
     printf 'runtime proof has wrong native host architecture: %s\n' "${proof_path}" >&2
     exit 1
   }
-  grep -Fxq 'process_translated=0' "${proof_path}" || {
-    printf 'runtime proof was produced by a translated process: %s\n' "${proof_path}" >&2
+  grep -Fxq "process_translated=${expected_process_translated}" "${proof_path}" || {
+    printf 'runtime proof has the wrong process translation status: %s\n' "${proof_path}" >&2
     exit 1
   }
   grep -Fxq "native_arch_probe=${native_arch_probe}" "${proof_path}" || {
     printf 'runtime proof used the wrong native architecture probe: %s\n' "${proof_path}" >&2
     exit 1
   }
-  grep -Fxq 'runtime_authority=authoritative' "${proof_path}" || {
-    printf 'runtime proof is not authoritative: %s\n' "${proof_path}" >&2
+  grep -Fxq "runtime_authority=${expected_runtime_authority}" "${proof_path}" || {
+    printf 'runtime proof has the wrong authority classification: %s\n' "${proof_path}" >&2
     exit 1
   }
   grep -Fxq "artifact_sha256=${expected_sha}" "${proof_path}" || {
@@ -380,10 +382,74 @@ validate_authoritative_runtime_proof() {
       exit 1
     }
   fi
+  if [[ "${platform}" == "windows-x64" ]]; then
+    local runtime_dylib windows_runtime_lib dependency dependency_path normalized_path expected_path
+    runtime_dylib="$(sed -n 's/^runtime_dylib=//p' "${proof_path}")"
+    [[ -n "${runtime_dylib}" ]] || {
+      printf 'Windows runtime proof is missing runtime_dylib: %s\n' "${proof_path}" >&2
+      exit 1
+    }
+    normalized_path="${runtime_dylib//\\//}"
+    [[ "${normalized_path,,}" == */lib/onnxruntime.dll ]] || {
+      printf 'Windows runtime proof has an invalid runtime_dylib: %s\n' "${proof_path}" >&2
+      exit 1
+    }
+    windows_runtime_lib="${normalized_path%/*}"
+    for dependency in msvcp140 msvcp140_1 vcruntime140 vcruntime140_1; do
+      dependency_path="$(sed -n "s/^runtime_dependency_${dependency}=//p" "${proof_path}")"
+      [[ -n "${dependency_path}" ]] || {
+        printf 'Windows runtime proof is missing runtime_dependency_%s: %s\n' \
+          "${dependency}" "${proof_path}" >&2
+        exit 1
+      }
+      normalized_path="${dependency_path//\\//}"
+      expected_path="${windows_runtime_lib}/${dependency}.dll"
+      [[ "${normalized_path,,}" == "${expected_path,,}" ]] || {
+        printf 'Windows runtime proof has an invalid runtime_dependency_%s path: %s\n' \
+          "${dependency}" "${proof_path}" >&2
+        exit 1
+      }
+    done
+  fi
   grep -Fxq 'semantic_search=passed' "${proof_path}" || {
     printf 'runtime proof does not record semantic search success: %s\n' "${proof_path}" >&2
     exit 1
   }
+}
+
+validate_macos_x64_preview_candidate() {
+  local version_path="${artifact_dir%/}/ctx-macos-x64.version"
+  local build_info_path="${artifact_dir%/}/ctx-macos-x64.build-info.json"
+  local binary_sha_path="${artifact_dir%/}/ctx-macos-x64.sha256"
+  local expected_source_commit="228e05fa0fd058822be7a362acd65cacdad24356"
+  local expected_binary_sha
+
+  grep -Fxq 'ctx 0.25.0' "${version_path}" || {
+    printf 'macOS x64 preview proof exception is restricted to ctx 0.25.0\n' >&2
+    exit 1
+  }
+  [[ -s "${build_info_path}" ]] || {
+    printf 'macOS x64 preview proof requires candidate build info: %s\n' "${build_info_path}" >&2
+    exit 1
+  }
+  expected_binary_sha="$(tr -d '[:space:]' < "${binary_sha_path}")"
+  python3 - "${build_info_path}" "${expected_binary_sha}" "${expected_source_commit}" <<'PY'
+import json
+import sys
+
+path, expected_sha, expected_commit = sys.argv[1:]
+with open(path, encoding="utf-8") as source:
+    payload = json.load(source)
+if payload.get("schema_version") != 1:
+    raise SystemExit("macOS x64 preview candidate has unsupported build-info schema")
+if payload.get("platform") != "macos-x64" or payload.get("target") != "x86_64-apple-darwin":
+    raise SystemExit("macOS x64 preview candidate has wrong build-info platform")
+if payload.get("artifact_sha256") != expected_sha:
+    raise SystemExit("macOS x64 preview candidate build info does not bind the release binary")
+source = payload.get("source", {})
+if source.get("commit") != expected_commit or source.get("clean") is not True:
+    raise SystemExit("macOS x64 preview exception is restricted to the reviewed 0.25.0 source commit")
+PY
 }
 
 validate_macos_signing_evidence() (
@@ -399,7 +465,8 @@ validate_macos_signing_evidence() (
   local runtime_attestation_cms="${artifact_dir%/}/ctx-onnxruntime-${platform}.attestation.cms"
   local release_attestation="${artifact_dir%/}/ctx-onnxruntime-${platform}.release-attestation.json"
   local release_attestation_cms="${artifact_dir%/}/ctx-onnxruntime-${platform}.release-attestation.cms"
-  local work nested
+  local build_info="${artifact_dir%/}/ctx-${platform}.build-info.json"
+  local source_commit work nested
 
   # JSON records diagnostics and archive bindings. The Developer ID CMS
   # checks below are the cross-platform authorization for executable bytes.
@@ -411,13 +478,34 @@ validate_macos_signing_evidence() (
     printf 'required macOS runtime signing evidence missing: %s\n' "${runtime_evidence}" >&2
     exit 1
   }
+  source_commit="$(python3 - "${build_info}" "${platform}" <<'PY'
+import json
+import re
+import sys
+
+path, platform = sys.argv[1:]
+with open(path, encoding="utf-8") as source:
+    payload = json.load(source)
+commit = payload.get("source", {}).get("commit", "")
+if (
+    payload.get("schema_version") != 1
+    or payload.get("platform") != platform
+    or payload.get("source", {}).get("clean") is not True
+    or re.fullmatch(r"[0-9a-f]{40}", commit) is None
+    or commit == "0" * 40
+):
+    raise SystemExit("macOS release build info has invalid source provenance")
+print(commit)
+PY
+)"
   python3 scripts/macos-release-signing-evidence.py verify-artifact \
     --evidence "${cli_evidence}" \
     --platform "${platform}" \
     --kind cli \
     --artifact "${binary}" \
     --checksum "${binary}.sha256"
-  scripts/verify-macos-release-attestation.sh \
+  CTX_MACOS_RELEASE_SOURCE_COMMIT="${source_commit}" \
+    scripts/verify-macos-release-attestation.sh \
     "${platform}" cli "${binary}" "${cli_attestation}" "${cli_attestation_cms}"
 
   work="$(mktemp -d "${TMPDIR:-/tmp}/ctx-stage-macos-signing.XXXXXX")"
@@ -446,30 +534,47 @@ PY
     --checksum "${runtime}.sha256" \
     --nested-artifact "${nested}" \
     --role release
-  scripts/verify-macos-release-attestation.sh \
+  CTX_MACOS_RELEASE_SOURCE_COMMIT="${source_commit}" \
+    scripts/verify-macos-release-attestation.sh \
     "${platform}" runtime "${nested}" \
     "${runtime_attestation}" "${runtime_attestation_cms}"
-  scripts/verify-macos-release-attestation.sh --runtime-archive \
+  CTX_MACOS_RELEASE_SOURCE_COMMIT="${source_commit}" \
+    scripts/verify-macos-release-attestation.sh --runtime-archive \
     "${platform}" "${runtime}" "${nested}" \
     "${release_attestation}" "${release_attestation_cms}"
 )
 
-validate_authoritative_runtime_proof \
+validate_runtime_proof \
   linux-x64 ctx ctx-linux-x64.native-runtime-proof.txt \
   onnxruntime Linux x86_64 x86_64 ctx-onnxruntime-linux-x64.tar.gz uname
-validate_authoritative_runtime_proof \
+validate_runtime_proof \
   linux-aarch64 ctx-linux-aarch64 ctx-linux-aarch64.native-runtime-proof.txt \
   onnxruntime Linux aarch64 aarch64 ctx-onnxruntime-linux-aarch64.tar.gz uname
-validate_authoritative_runtime_proof \
+validate_runtime_proof \
   macos-arm64 ctx-macos-arm64 ctx-macos-arm64.native-runtime-proof.txt \
   onnxruntime Darwin arm64 arm64 ctx-onnxruntime-macos-arm64.tar.gz sysctl
-validate_authoritative_runtime_proof \
-  macos-x64 ctx-macos-x64 ctx-macos-x64.native-runtime-proof.txt \
-  onnxruntime Darwin x86_64 x86_64 ctx-onnxruntime-macos-x64.tar.gz sysctl
-validate_authoritative_runtime_proof \
+case "${CTX_RELEASE_ALLOW_MACOS_X64_PREVIEW_PROOF:-0}" in
+  0)
+    validate_runtime_proof \
+      macos-x64 ctx-macos-x64 ctx-macos-x64.native-runtime-proof.txt \
+      onnxruntime Darwin x86_64 x86_64 ctx-onnxruntime-macos-x64.tar.gz sysctl
+    ;;
+  1)
+    validate_macos_x64_preview_candidate
+    validate_runtime_proof \
+      macos-x64 ctx-macos-x64 ctx-macos-x64.native-runtime-proof.txt \
+      onnxruntime Darwin x86_64 x86_64 ctx-onnxruntime-macos-x64.tar.gz sysctl \
+      0 non_authoritative
+    ;;
+  *)
+    printf 'CTX_RELEASE_ALLOW_MACOS_X64_PREVIEW_PROOF must be 0 or 1\n' >&2
+    exit 2
+    ;;
+esac
+validate_runtime_proof \
   windows-x64 ctx.exe ctx-windows-x64.native-runtime-proof.txt \
   onnxruntime Windows_NT AMD64 AMD64 ctx-onnxruntime-windows-x64.zip iswow64process2
-validate_authoritative_runtime_proof \
+validate_runtime_proof \
   freebsd-x64 ctx-freebsd-x64 ctx-freebsd-x64.native-runtime-proof.txt \
   onnxruntime FreeBSD amd64 amd64 ctx-onnxruntime-freebsd-x64.tar.gz uname
 validate_macos_signing_evidence macos-arm64

@@ -164,6 +164,110 @@ fn batched_provider_import_stops_on_pinned_wal_and_resumes_idempotently() {
 }
 
 #[test]
+fn partial_provider_import_uses_shared_bounded_batches() {
+    let temp = tempdir();
+    let db_path = temp.path().join("work.sqlite");
+    let mut store =
+        Store::open_with_busy_timeout(&db_path, std::time::Duration::from_millis(10)).unwrap();
+    let occurred_at = DateTime::parse_from_rfc3339("2026-07-11T12:15:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let source_path = temp.path().join("shared-bounded-provider.jsonl");
+    let source_path = source_path.display().to_string();
+    let captures = (0..64)
+        .map(|index| {
+            let mut capture = provider_collision_capture(
+                CaptureProvider::Hermes,
+                &format!("shared-bounded-{index}"),
+                "hermes_state_sqlite",
+                &source_path,
+                occurred_at + chrono::Duration::seconds(index),
+            );
+            capture.event.as_mut().unwrap().payload =
+                json!({"text": format!("shared-bounded-sentinel-{index}")});
+            (index as usize + 1, capture)
+        })
+        .collect();
+    let reader = Connection::open(&db_path).unwrap();
+    reader.execute_batch("BEGIN").unwrap();
+    assert_eq!(
+        reader
+            .query_row("SELECT COUNT(*) FROM events", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+
+    let error = import_normalized_provider_captures(
+        &mut store,
+        ProviderNormalizationResult {
+            summary: ProviderImportSummary::default(),
+            captures,
+            files_touched: Vec::new(),
+        },
+        NormalizedProviderImportOptions {
+            allow_partial_failures: true,
+            fast_event_inserts: true,
+            ..NormalizedProviderImportOptions::default()
+        },
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("ctx index is busy"), "{error}");
+    reader.execute_batch("ROLLBACK").unwrap();
+
+    assert_eq!(store.list_sessions().unwrap().len(), 64);
+    assert_eq!(
+        store
+            .search_event_hits("shared-bounded-sentinel", 100)
+            .unwrap()
+            .len(),
+        64
+    );
+}
+
+#[test]
+fn partial_provider_import_uses_shared_bulk_search_guard() {
+    let temp = tempdir();
+    let db_path = temp.path().join("work.sqlite");
+    let mut store =
+        Store::open_with_busy_timeout(&db_path, std::time::Duration::from_millis(10)).unwrap();
+    let occurred_at = DateTime::parse_from_rfc3339("2026-07-11T12:20:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let source_path = temp.path().join("shared-bulk-provider.jsonl");
+    let source_path = source_path.display().to_string();
+    let guard = store.begin_event_search_bulk_mode().unwrap();
+
+    let error = import_normalized_provider_captures(
+        &mut store,
+        ProviderNormalizationResult {
+            summary: ProviderImportSummary::default(),
+            captures: vec![(
+                1,
+                provider_collision_capture(
+                    CaptureProvider::Claude,
+                    "shared-bulk",
+                    "claude_projects_jsonl",
+                    &source_path,
+                    occurred_at,
+                ),
+            )],
+            files_touched: Vec::new(),
+        },
+        NormalizedProviderImportOptions {
+            allow_partial_failures: true,
+            ..NormalizedProviderImportOptions::default()
+        },
+    )
+    .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("another bulk search import is active"));
+    store.finish_event_search_bulk_mode(&guard).unwrap();
+}
+
+#[test]
 fn batched_provider_import_rotates_on_serialized_byte_budget() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");

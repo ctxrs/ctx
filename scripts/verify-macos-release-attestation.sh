@@ -112,7 +112,12 @@ openssl verify -purpose any -partial_chain -no-CApath -no-CAstore -ignore_critic
   -CAfile "${ca_file}" "${signer_cert}" >/dev/null 2>&1 || \
   die "macOS attestation actual signer does not chain exclusively to the pinned Apple G2 CA"
 
-source_commit="$(git -C "${root_dir}" rev-parse --verify HEAD)"
+source_commit="${CTX_MACOS_RELEASE_SOURCE_COMMIT:-}"
+if [[ -z "${source_commit}" ]]; then
+  source_commit="$(git -C "${root_dir}" rev-parse --verify HEAD)"
+fi
+[[ "${source_commit}" =~ ^[0-9a-f]{40}$ && ! "${source_commit}" =~ ^0{40}$ ]] || \
+  die "macOS release source commit must be a non-placeholder 40-character Git commit"
 if [[ "${mode}" == "runtime_archive" ]]; then
   python3 "${root_dir}/scripts/macos-release-signing-evidence.py" \
     verify-runtime-archive-attestation \

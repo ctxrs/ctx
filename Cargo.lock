@@ -461,6 +461,7 @@ dependencies = [
  "hf-hub",
  "jsonc-parser",
  "libc",
+ "libloading",
  "ort",
  "predicates",
  "proptest",
@@ -1706,7 +1707,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 [[package]]
 name = "ort"
 version = "2.0.0-rc.12"
-source = "git+https://github.com/ctxrs/ort.git?rev=7cc21d66952354c3ecc6d1b88c2f27b700850807#7cc21d66952354c3ecc6d1b88c2f27b700850807"
+source = "git+https://github.com/ctxrs/ort.git?rev=f7994dc91b8f48c78afc506880b3f9f558957919#f7994dc91b8f48c78afc506880b3f9f558957919"
 dependencies = [
  "libloading",
  "ndarray",
@@ -1718,7 +1719,7 @@ dependencies = [
 [[package]]
 name = "ort-sys"
 version = "2.0.0-rc.12"
-source = "git+https://github.com/ctxrs/ort.git?rev=7cc21d66952354c3ecc6d1b88c2f27b700850807#7cc21d66952354c3ecc6d1b88c2f27b700850807"
+source = "git+https://github.com/ctxrs/ort.git?rev=f7994dc91b8f48c78afc506880b3f9f558957919#f7994dc91b8f48c78afc506880b3f9f558957919"
 
 [[package]]
 name = "paste"

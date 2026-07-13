@@ -98,10 +98,15 @@ function Assert-WindowsRuntimeArchive {
     )
     @(
         "LICENSE",
+        "MICROSOFT_VC_RUNTIME_LICENSE.rtf",
         "ThirdPartyNotices.txt",
         "VERSION_NUMBER",
         "GIT_COMMIT_ID",
-        "lib/onnxruntime.dll"
+        "lib/onnxruntime.dll",
+        "lib/msvcp140.dll",
+        "lib/msvcp140_1.dll",
+        "lib/vcruntime140.dll",
+        "lib/vcruntime140_1.dll"
     ) | ForEach-Object { [void]$expectedFiles.Add($_) }
     $seenFiles = [System.Collections.Generic.HashSet[string]]::new(
         [System.StringComparer]::OrdinalIgnoreCase
@@ -258,8 +263,28 @@ $runRoot = ""
 $daemon = $null
 
 function Invoke-Ctx {
-    param([string[]]$Args)
-    & $Ctx --data-root $DataRoot @Args
+    param([string[]]$CommandArgs)
+    & $Ctx --data-root $DataRoot @CommandArgs
+}
+
+function Invoke-CtxChecked {
+    param(
+        [string[]]$CommandArgs,
+        [string]$FailureLabel
+    )
+
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $outputLines = @(Invoke-Ctx -CommandArgs $CommandArgs 2>&1)
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    if ($exitCode -ne 0) {
+        throw "ctx semantic smoke: $FailureLabel failed with status $exitCode`n$($outputLines -join [Environment]::NewLine)"
+    }
+    return $outputLines
 }
 
 function Read-OwnedDaemonStatus {
@@ -267,7 +292,7 @@ function Read-OwnedDaemonStatus {
 
     $statusLines = @()
     try {
-        $statusLines = @(Invoke-Ctx -Args @("daemon", "status", "--json") 2>&1)
+        $statusLines = @(Invoke-Ctx -CommandArgs @("daemon", "status", "--json") 2>&1)
         $statusExitCode = $LASTEXITCODE
     } catch {
         return [PSCustomObject]@{
@@ -533,7 +558,9 @@ try {
     Write-Host "ctx semantic smoke: isolated_home=$smokeHome"
     Write-Host "ctx semantic smoke: semantic_cache=$semanticCache"
     Write-Host "ctx semantic smoke: packaged_runtime=$runtimeDylib"
-    Invoke-Ctx -Args @("import", "--no-daemon", "--format", "ctx-history-jsonl-v1", "--path", $fixturePath) | Out-Null
+    Invoke-CtxChecked -FailureLabel "fixture import" -CommandArgs @(
+        "import", "--no-daemon", "--format", "ctx-history-jsonl-v1", "--path", $fixturePath
+    ) | Out-Null
 
     $configPath = Join-Path $DataRoot "config.toml"
     [System.IO.File]::WriteAllText(
@@ -572,13 +599,14 @@ try {
             $outputLines = @()
             $searchOk = $false
             try {
-                $outputLines = @(Invoke-Ctx -Args @("search", $query, "--backend", "semantic", "--refresh", "off", "--json") 2>&1)
+                $outputLines = @(Invoke-Ctx -CommandArgs @("search", $query, "--backend", "semantic", "--refresh", "off", "--json") 2>&1)
                 $searchOk = $LASTEXITCODE -eq 0
             } catch {
                 $lastSearchError = $_.Exception.Message
             }
             $lastOutput = $outputLines -join [Environment]::NewLine
             if ($searchOk) {
+                $attestingModules = $false
                 try {
                     $searchJson = $lastOutput | ConvertFrom-Json -ErrorAction Stop
                     $retrievalProperty = $searchJson.PSObject.Properties["retrieval"]
@@ -600,10 +628,43 @@ try {
                         }
                     }
                     if ($modelMatches -and $markerMatches) {
+                        $attestingModules = $true
                         $finalStatusReport = Read-OwnedDaemonStatus -ExpectedPid $daemon.Id
                         $lastStatusOutput = $finalStatusReport.Text
                         $lastStatusError = $finalStatusReport.Error
                         if ($finalStatusReport.Ready) {
+                            $runtimeLibDir = [System.IO.Path]::GetFullPath((Join-Path $runtimeInstallDir "lib"))
+                            $daemonModules = @(Get-Process -Id $daemon.Id -Module -ErrorAction Stop)
+                            $onnxRuntimeModules = @(
+                                $daemonModules | Where-Object { $_.ModuleName -ieq "onnxruntime.dll" }
+                            )
+                            if ($onnxRuntimeModules.Count -ne 1) {
+                                throw "Expected exactly one loaded onnxruntime.dll module, got $($onnxRuntimeModules.Count)"
+                            }
+                            $actualOnnxRuntime = [System.IO.Path]::GetFullPath($onnxRuntimeModules[0].FileName)
+                            if (-not $actualOnnxRuntime.Equals($runtimeDylib, [System.StringComparison]::OrdinalIgnoreCase)) {
+                                throw "Loaded onnxruntime.dll from $actualOnnxRuntime instead of $runtimeDylib"
+                            }
+                            foreach ($dependencyName in @(
+                                "msvcp140.dll",
+                                "msvcp140_1.dll",
+                                "vcruntime140.dll",
+                                "vcruntime140_1.dll"
+                            )) {
+                                $dependencyModules = @(
+                                    $daemonModules | Where-Object { $_.ModuleName -ieq $dependencyName }
+                                )
+                                if ($dependencyModules.Count -ne 1) {
+                                    throw "Expected exactly one loaded $dependencyName module, got $($dependencyModules.Count)"
+                                }
+                                $actualDependency = [System.IO.Path]::GetFullPath($dependencyModules[0].FileName)
+                                $expectedDependency = [System.IO.Path]::GetFullPath((Join-Path $runtimeLibDir $dependencyName))
+                                if (-not $actualDependency.Equals($expectedDependency, [System.StringComparison]::OrdinalIgnoreCase)) {
+                                    throw "Loaded $dependencyName from $actualDependency instead of $expectedDependency"
+                                }
+                                $proofName = [System.IO.Path]::GetFileNameWithoutExtension($dependencyName)
+                                $runtimeProofLines += "runtime_dependency_$proofName=$actualDependency"
+                            }
                             $runtimeProofLines += @(
                                 "daemon_status=running",
                                 "daemon_pid=$($daemon.Id)",
@@ -628,6 +689,9 @@ try {
                         }
                     }
                 } catch {
+                    if ($attestingModules) {
+                        throw
+                    }
                     $lastSearchError = $_.Exception.Message
                 }
             }
