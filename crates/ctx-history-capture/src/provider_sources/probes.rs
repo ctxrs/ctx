@@ -5,11 +5,11 @@ use std::{
 };
 
 use ctx_history_core::CaptureProvider;
-use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 
 use crate::common::io::{read_provider_jsonl_line_or_skip_oversized, ProviderJsonlLineRead};
 use crate::provider::provider_safe_path_segment;
+use crate::provider::sqlite::open_sqlite_readonly_source;
 
 use super::types::ProviderDefaultLocation;
 
@@ -140,17 +140,14 @@ fn has_firebender_chat_sessions_table(path: &Path) -> BoundedProbe {
         BoundedProbe::Found => {}
         other => return other,
     }
-    match Connection::open_with_flags(
-        &db_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .and_then(|conn| {
-        conn.query_row(
-            "select count(*) from sqlite_schema where type = 'table' and name = 'chat_sessions'",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-    }) {
+    let Ok(conn) = open_sqlite_readonly_source(&db_path) else {
+        return BoundedProbe::IoError;
+    };
+    match conn.query_row(
+        "select count(*) from sqlite_schema where type = 'table' and name = 'chat_sessions'",
+        [],
+        |row| row.get::<_, i64>(0),
+    ) {
         Ok(count) if count > 0 => BoundedProbe::Found,
         Ok(_) => BoundedProbe::NotFound,
         Err(_) => BoundedProbe::IoError,
@@ -266,17 +263,14 @@ fn has_forgecode_conversations_table(path: &Path) -> BoundedProbe {
         BoundedProbe::Found => {}
         other => return other,
     }
-    match Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .and_then(|conn| {
-        conn.query_row(
-            "select count(*) from sqlite_schema where type = 'table' and name = 'conversations'",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-    }) {
+    let Ok(conn) = open_sqlite_readonly_source(path) else {
+        return BoundedProbe::IoError;
+    };
+    match conn.query_row(
+        "select count(*) from sqlite_schema where type = 'table' and name = 'conversations'",
+        [],
+        |row| row.get::<_, i64>(0),
+    ) {
         Ok(count) if count > 0 => BoundedProbe::Found,
         Ok(_) => BoundedProbe::NotFound,
         Err(_) => BoundedProbe::IoError,
@@ -288,19 +282,16 @@ fn has_lingma_chat_record_table(path: &Path) -> BoundedProbe {
         BoundedProbe::Found => {}
         other => return other,
     }
-    match Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .and_then(|conn| {
-        conn.query_row(
-            "select count(*) from pragma_table_info('chat_record') \
-             where name in ('session_id', 'request_id', 'chat_prompt', 'summary', \
-                            'error_result', 'gmt_create', 'extra')",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-    }) {
+    let Ok(conn) = open_sqlite_readonly_source(path) else {
+        return BoundedProbe::IoError;
+    };
+    match conn.query_row(
+        "select count(*) from pragma_table_info('chat_record') \
+         where name in ('session_id', 'request_id', 'chat_prompt', 'summary', \
+                        'error_result', 'gmt_create', 'extra')",
+        [],
+        |row| row.get::<_, i64>(0),
+    ) {
         Ok(count) if count >= 7 => BoundedProbe::Found,
         Ok(_) => BoundedProbe::NotFound,
         Err(_) => BoundedProbe::IoError,
@@ -378,11 +369,10 @@ fn has_trae_state_vscdb_chat_keys(path: &Path) -> BoundedProbe {
         BoundedProbe::Found => {}
         other => return other,
     }
-    match Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .and_then(|conn| {
+    let Ok(conn) = open_sqlite_readonly_source(path) else {
+        return BoundedProbe::IoError;
+    };
+    match (|| -> rusqlite::Result<bool> {
         let (table_count, column_count) = conn.query_row(
             "select \
                 (select count(*) from sqlite_schema where type = 'table' and name = 'ItemTable'), \
@@ -408,7 +398,7 @@ fn has_trae_state_vscdb_chat_keys(path: &Path) -> BoundedProbe {
             |row| row.get::<_, i64>(0),
         )?;
         Ok(key_count > 0)
-    }) {
+    })() {
         Ok(true) => BoundedProbe::Found,
         Ok(false) => BoundedProbe::NotFound,
         Err(_) => BoundedProbe::IoError,
@@ -420,18 +410,15 @@ fn has_deepagents_checkpoint_tables(path: &Path) -> BoundedProbe {
         BoundedProbe::Found => {}
         other => return other,
     }
-    match Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .and_then(|conn| {
-        conn.query_row(
-            "select count(*) from sqlite_schema \
-             where type = 'table' and name in ('checkpoints', 'writes')",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-    }) {
+    let Ok(conn) = open_sqlite_readonly_source(path) else {
+        return BoundedProbe::IoError;
+    };
+    match conn.query_row(
+        "select count(*) from sqlite_schema \
+         where type = 'table' and name in ('checkpoints', 'writes')",
+        [],
+        |row| row.get::<_, i64>(0),
+    ) {
         Ok(2) => BoundedProbe::Found,
         Ok(_) => BoundedProbe::NotFound,
         Err(_) => BoundedProbe::IoError,

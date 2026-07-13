@@ -28,6 +28,23 @@ Content transactions use the shared 64-unit/8 MiB bounds with required WAL
 checkpoints. Event-search merge suppression may span a whole source, including
 manifested per-file imports, but its final compaction remains bounded.
 
+## Import Unit Observation
+
+Inventory tracks the logical unit an adapter reads, not merely the file passed
+to it. A per-file unit has one canonical owner and includes every companion that
+can affect normalization in its change token. For example, a session JSONL file
+may own adjacent metadata, and a SQLite database owns its `-wal` and rollback
+`-journal` when present. SQLite `-shm` files are excluded because they are
+nondurable coordination state, contain no transaction data, and can change
+during read-only access. A companion-only change therefore selects the owner
+once, while an unchanged unit remains a no-op.
+
+Providers whose adapters normalize a whole document or root may remain
+whole-source replacement units. Native one-shot discovery still scans the
+declared source in O(files) as the correctness fallback; import-unit inventory
+does not imply filesystem-event O(delta) discovery. Observation and import must
+remain read-only with respect to provider-owned files.
+
 ## Default Import Shape
 
 Native imports should store:

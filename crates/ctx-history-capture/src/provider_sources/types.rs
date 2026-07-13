@@ -59,6 +59,51 @@ pub struct ProviderDefaultLocation {
     pub source_kind: ProviderSourceKind,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderImportUnitOwner {
+    SourceFile,
+    FileNames {
+        names: &'static [&'static str],
+        required_component: Option<&'static str>,
+    },
+    Extensions {
+        extensions: &'static [&'static str],
+        required_component: Option<&'static str>,
+        excluded_names: &'static [&'static str],
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderImportUnitGrouping {
+    Each,
+    FirstPerDirectory,
+    AntigravitySession,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderImportDependency {
+    SqliteSidecars,
+    SiblingFile(&'static str),
+    AncestorFile { levels: usize, name: &'static str },
+    NearestAncestorFile(&'static str),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderImportUnitSpec {
+    WholeSource,
+    PerFile {
+        owner: ProviderImportUnitOwner,
+        grouping: ProviderImportUnitGrouping,
+        dependencies: &'static [ProviderImportDependency],
+    },
+}
+
+impl ProviderImportUnitSpec {
+    pub fn uses_file_manifest(self) -> bool {
+        matches!(self, Self::PerFile { .. })
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ProviderSourceSpec {
     pub provider: CaptureProvider,
@@ -78,6 +123,7 @@ pub struct ProviderSource {
     pub source_kind: ProviderSourceKind,
     pub import_support: ProviderImportSupport,
     pub catalog_support: ProviderCatalogSupport,
+    pub import_unit: ProviderImportUnitSpec,
     pub status: ProviderSourceStatus,
     pub unsupported_reason: Option<&'static str>,
 }

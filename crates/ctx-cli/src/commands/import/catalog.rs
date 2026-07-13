@@ -291,8 +291,8 @@ pub(crate) fn source_stats(path: &Path) -> Result<SourceStats> {
             true,
         );
         // WAL and rollback-journal files can hold committed changes that have
-        // not reached the main database. The shared-memory file is excluded
-        // because read-only SQLite clients may update it.
+        // not reached the main database. A -shm file is nondurable coordination
+        // state, contains no transaction data, and may change during read-only use.
         for suffix in ["-wal", "-journal"] {
             let mut sidecar = path.as_os_str().to_os_string();
             sidecar.push(suffix);
@@ -347,8 +347,7 @@ pub(crate) fn source_stats(path: &Path) -> Result<SourceStats> {
                     .with_context(|| format!("stat import source file {}", entry_path.display()))?;
                 let include_in_token = !entry_path
                     .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.ends_with("-shm"));
+                    .is_some_and(|name| name.as_encoded_bytes().ends_with(b"-shm"));
                 add_source_stat(
                     &mut stats,
                     &mut change_entries,
@@ -365,11 +364,27 @@ pub(crate) fn source_stats(path: &Path) -> Result<SourceStats> {
     Ok(stats)
 }
 
-struct SourceChangeEntry {
+pub(crate) struct SourceChangeEntry {
     path: PathBuf,
     len: u64,
     modified_secs: u64,
     modified_nanos: u32,
+}
+
+impl SourceChangeEntry {
+    pub(crate) fn from_metadata(base: &Path, path: &Path, metadata: &fs::Metadata) -> Self {
+        let modified = metadata
+            .modified()
+            .unwrap_or(UNIX_EPOCH)
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        Self {
+            path: path.strip_prefix(base).unwrap_or(path).to_path_buf(),
+            len: metadata.len(),
+            modified_secs: modified.as_secs(),
+            modified_nanos: modified.subsec_nanos(),
+        }
+    }
 }
 
 fn add_source_stat(
@@ -388,20 +403,10 @@ fn add_source_stat(
     if !include_in_token {
         return;
     }
-    let modified = metadata
-        .modified()
-        .unwrap_or(UNIX_EPOCH)
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    change_entries.push(SourceChangeEntry {
-        path: path.strip_prefix(base).unwrap_or(path).to_path_buf(),
-        len: metadata.len(),
-        modified_secs: modified.as_secs(),
-        modified_nanos: modified.subsec_nanos(),
-    });
+    change_entries.push(SourceChangeEntry::from_metadata(base, path, metadata));
 }
 
-fn source_change_token(mut entries: Vec<SourceChangeEntry>) -> [u8; 32] {
+pub(crate) fn source_change_token(mut entries: Vec<SourceChangeEntry>) -> [u8; 32] {
     entries.sort_by(|left, right| left.path.cmp(&right.path));
     let mut hasher = Sha256::new();
     for entry in entries {
@@ -531,5 +536,63 @@ mod tests {
 
         assert!(!source.import_support.is_importable());
         assert!(!source_uses_incremental_event_search(&source));
+    }
+
+    #[test]
+    fn sqlite_source_stats_observe_durable_sidecars_but_ignore_shm() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("state.db");
+        fs::write(&db, b"main").unwrap();
+        let initial = source_stats(&db).unwrap().change_token.unwrap();
+
+        fs::write(sqlite_sidecar(&db, "-shm"), b"volatile coordination state").unwrap();
+        assert_eq!(source_stats(&db).unwrap().change_token.unwrap(), initial);
+
+        fs::write(sqlite_sidecar(&db, "-wal"), b"committed wal frame").unwrap();
+        assert_ne!(source_stats(&db).unwrap().change_token.unwrap(), initial);
+
+        let root = temp.path().join("project");
+        fs::create_dir(&root).unwrap();
+        let nested_db = root.join("session.db");
+        fs::write(&nested_db, b"main").unwrap();
+        let root_initial = source_stats(&root).unwrap().change_token.unwrap();
+        fs::write(sqlite_sidecar(&nested_db, "-shm"), b"volatile").unwrap();
+        assert_eq!(
+            source_stats(&root).unwrap().change_token.unwrap(),
+            root_initial
+        );
+        fs::write(sqlite_sidecar(&nested_db, "-journal"), b"committed journal").unwrap();
+        assert_ne!(
+            source_stats(&root).unwrap().change_token.unwrap(),
+            root_initial
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_change_tokens_distinguish_lossy_non_utf8_path_labels() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let path_a = PathBuf::from(OsString::from_vec(b"session-\x80.jsonl".to_vec()));
+        let path_b = PathBuf::from(OsString::from_vec(b"session-\x81.jsonl".to_vec()));
+        assert_eq!(path_a.display().to_string(), path_b.display().to_string());
+
+        let entry = |path| SourceChangeEntry {
+            path,
+            len: 42,
+            modified_secs: 123,
+            modified_nanos: 456,
+        };
+        assert_ne!(
+            source_change_token(vec![entry(path_a)]),
+            source_change_token(vec![entry(path_b)])
+        );
+    }
+
+    fn sqlite_sidecar(path: &Path, suffix: &str) -> PathBuf {
+        let mut sidecar = path.as_os_str().to_owned();
+        sidecar.push(suffix);
+        PathBuf::from(sidecar)
     }
 }
