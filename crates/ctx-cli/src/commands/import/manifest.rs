@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::*;
 use crate::commands::import::catalog::{source_change_token, system_time_ms, SourceChangeEntry};
 use ctx_history_capture::{
-    ProviderImportDependency, ProviderImportUnitGrouping, ProviderImportUnitOwner,
-    ProviderImportUnitSpec,
+    observe_sqlite_source_generation, ProviderImportDependency, ProviderImportUnitGrouping,
+    ProviderImportUnitOwner, ProviderImportUnitSpec,
 };
 
 pub(crate) fn persist_source_import_files(
@@ -12,7 +12,7 @@ pub(crate) fn persist_source_import_files(
     source: &SourceInfo,
     files: &[SourceImportFile],
 ) -> Result<()> {
-    let source_root = source.path.display().to_string();
+    let source_root = persisted_import_identity(&source.path, "source root")?;
     let current_paths = files
         .iter()
         .map(|file| file.source_path.clone())
@@ -23,7 +23,7 @@ pub(crate) fn persist_source_import_files(
         store.upsert_source_import_files(files)?;
         store.mark_source_import_missing_paths_stale(
             source.provider,
-            &source_root,
+            source_root,
             &current_paths,
             observed_at_ms,
         )?;
@@ -44,20 +44,19 @@ pub(crate) fn source_uses_import_file_manifest(source: &SourceInfo) -> bool {
 }
 
 pub(crate) fn collect_source_import_files(source: &SourceInfo) -> Result<Vec<SourceImportFile>> {
+    let source_root = persisted_import_identity(&source.path, "source root")?.to_owned();
     let units = collect_source_import_units(source)?;
-    let source_root = source.path.display().to_string();
     let observed_at_ms = utc_now().timestamp_millis();
     let mut files = Vec::with_capacity(units.len());
     for unit in units {
-        let metadata = fs::metadata(&unit.owner)
-            .with_context(|| format!("stat import source file {}", unit.owner.display()))?;
+        let owner_identity = persisted_import_identity(&unit.owner, "import unit owner")?;
         let fingerprint_base = if source.path.is_dir() {
             source.path.as_path()
         } else {
             source.path.parent().unwrap_or(source.path.as_path())
         };
-        let change_token = import_unit_change_token(fingerprint_base, &unit.dependencies)?;
-        let dependency_paths = unit
+        let fingerprint = import_unit_fingerprint(fingerprint_base, &unit)?;
+        let dependency_paths = fingerprint
             .dependencies
             .iter()
             .filter(|path| *path != &unit.owner)
@@ -67,13 +66,13 @@ pub(crate) fn collect_source_import_files(source: &SourceInfo) -> Result<Vec<Sou
             provider: source.provider,
             source_format: source.source_format.to_owned(),
             source_root: source_root.clone(),
-            source_path: unit.owner.display().to_string(),
-            file_size_bytes: metadata.len(),
-            file_modified_at_ms: system_time_ms(metadata.modified().unwrap_or(UNIX_EPOCH)),
+            source_path: owner_identity.to_owned(),
+            file_size_bytes: fingerprint.owner_len,
+            file_modified_at_ms: system_time_ms(fingerprint.owner_modified_at),
             observed_at_ms,
             metadata: json!({
                 "inventory_unit": "logical_import_unit",
-                "change_token_v1": hex_change_token(change_token),
+                "change_token_v1": hex_change_token(fingerprint.change_token),
                 "dependencies": dependency_paths,
             }),
         });
@@ -91,6 +90,7 @@ pub(crate) fn collect_source_import_paths(source: &SourceInfo) -> Result<Vec<Pat
 struct CollectedImportUnit {
     owner: PathBuf,
     dependencies: Vec<PathBuf>,
+    sqlite_sidecars: bool,
 }
 
 fn collect_source_import_units(source: &SourceInfo) -> Result<Vec<CollectedImportUnit>> {
@@ -155,12 +155,14 @@ fn collected_import_unit(
     dependency_specs: &[ProviderImportDependency],
 ) -> Result<CollectedImportUnit> {
     let mut dependencies = BTreeSet::from([owner.clone()]);
+    let sqlite_sidecars = dependency_specs.contains(&ProviderImportDependency::SqliteSidecars);
     for dependency in dependency_specs {
         collect_import_unit_dependency(&owner, *dependency, &mut dependencies)?;
     }
     Ok(CollectedImportUnit {
         owner,
         dependencies: dependencies.into_iter().collect(),
+        sqlite_sidecars,
     })
 }
 
@@ -171,13 +173,8 @@ fn collect_import_unit_dependency(
 ) -> Result<()> {
     match dependency {
         ProviderImportDependency::SqliteSidecars => {
-            // -shm is nondurable coordination state; committed content is in
-            // the WAL or rollback journal and those are the stable dependencies.
-            for suffix in ["-wal", "-journal"] {
-                let mut sidecar = owner.as_os_str().to_os_string();
-                sidecar.push(suffix);
-                collect_existing_import_unit_dependency(PathBuf::from(sidecar), paths)?;
-            }
+            // SQLite dependencies are observed as one stable generation when
+            // the fingerprint is built, so a checkpoint race cannot split them.
         }
         ProviderImportDependency::SiblingFile(name) => {
             if let Some(parent) = owner.parent() {
@@ -371,9 +368,44 @@ fn path_has_component(path: &Path, expected: &str) -> bool {
         .any(|component| component.as_os_str() == expected)
 }
 
-fn import_unit_change_token(base: &Path, paths: &[PathBuf]) -> Result<[u8; 32]> {
-    let mut entries = Vec::with_capacity(paths.len());
-    for path in paths {
+struct ImportUnitFingerprint {
+    change_token: [u8; 32],
+    dependencies: Vec<PathBuf>,
+    owner_len: u64,
+    owner_modified_at: SystemTime,
+}
+
+fn import_unit_fingerprint(
+    base: &Path,
+    unit: &CollectedImportUnit,
+) -> Result<ImportUnitFingerprint> {
+    let mut entries = Vec::with_capacity(unit.dependencies.len() + 2);
+    let mut dependencies = unit.dependencies.iter().cloned().collect::<BTreeSet<_>>();
+    let (owner_len, owner_modified_at) = if unit.sqlite_sidecars {
+        let generation = observe_sqlite_source_generation(&unit.owner)
+            .with_context(|| format!("observe SQLite import unit {}", unit.owner.display()))?;
+        for file in generation.files() {
+            dependencies.insert(file.path().to_path_buf());
+            entries.push(SourceChangeEntry::from_sqlite_observed(base, file));
+        }
+        (generation.main().len(), generation.main().modified_at())
+    } else {
+        let metadata = fs::symlink_metadata(&unit.owner)
+            .with_context(|| format!("stat import unit owner {}", unit.owner.display()))?;
+        if !metadata.file_type().is_file() {
+            return Err(anyhow!(
+                "import unit owner is not a regular file: {}",
+                unit.owner.display()
+            ));
+        }
+        entries.push(SourceChangeEntry::from_metadata(
+            base,
+            &unit.owner,
+            &metadata,
+        ));
+        (metadata.len(), metadata.modified().unwrap_or(UNIX_EPOCH))
+    };
+    for path in unit.dependencies.iter().filter(|path| *path != &unit.owner) {
         let metadata = fs::symlink_metadata(path)
             .with_context(|| format!("stat import unit dependency {}", path.display()))?;
         if !metadata.file_type().is_file() {
@@ -384,7 +416,21 @@ fn import_unit_change_token(base: &Path, paths: &[PathBuf]) -> Result<[u8; 32]> 
         }
         entries.push(SourceChangeEntry::from_metadata(base, path, &metadata));
     }
-    Ok(source_change_token(entries))
+    Ok(ImportUnitFingerprint {
+        change_token: source_change_token(entries),
+        dependencies: dependencies.into_iter().collect(),
+        owner_len,
+        owner_modified_at,
+    })
+}
+
+pub(crate) fn persisted_import_identity<'a>(path: &'a Path, label: &str) -> Result<&'a str> {
+    path.to_str().ok_or_else(|| {
+        anyhow!(
+            "{label} cannot be persisted because it is not valid UTF-8: {}",
+            path.display()
+        )
+    })
 }
 
 fn import_unit_path_label(base: &Path, path: &Path) -> String {

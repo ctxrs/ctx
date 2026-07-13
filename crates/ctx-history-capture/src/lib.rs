@@ -92,6 +92,10 @@ pub(crate) mod common {
 }
 pub use common::identity::{compute_payload_hash, stable_capture_uuid};
 pub(crate) use common::identity::{default_machine_id, fnv1a64, sanitize_filename_component};
+#[doc(hidden)]
+pub use provider::sqlite_observation::{
+    observe_sqlite_source_generation, SqliteObservedFile, SqliteSourceGeneration,
+};
 
 mod fixture;
 pub use fixture::{fixture_envelope, write_fixture};

@@ -15,7 +15,8 @@ use ctx_history_store::{SourceImportFile, Store};
 
 use crate::commands::import::catalog::{source_import_stats, source_stats, system_time_ms};
 use crate::commands::import::manifest::{
-    collect_source_import_files, persist_source_import_files, source_uses_import_file_manifest,
+    collect_source_import_files, persist_source_import_files, persisted_import_identity,
+    source_uses_import_file_manifest,
 };
 use crate::commands::import::{
     error_summary, import_error_scope, import_failure_type, CatalogTotals, ImportFailureScope,
@@ -198,11 +199,12 @@ fn source_stats_from_import_files(files: &[SourceImportFile]) -> SourceStats {
 fn source_root_import_file(source: &SourceInfo, stats: SourceStats) -> Result<SourceImportFile> {
     let metadata = fs::metadata(&source.path)
         .with_context(|| format!("stat import source {}", source.path.display()))?;
+    let source_identity = persisted_import_identity(&source.path, "source root")?;
     Ok(SourceImportFile {
         provider: source.provider,
         source_format: source.source_format.to_owned(),
-        source_root: source.path.display().to_string(),
-        source_path: source.path.display().to_string(),
+        source_root: source_identity.to_owned(),
+        source_path: source_identity.to_owned(),
         file_size_bytes: stats.bytes,
         file_modified_at_ms: system_time_ms(metadata.modified().unwrap_or(UNIX_EPOCH)),
         observed_at_ms: system_time_ms(SystemTime::now()),

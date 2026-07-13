@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use crate::common::io::{read_provider_jsonl_line_or_skip_oversized, ProviderJsonlLineRead};
 use crate::provider::provider_safe_path_segment;
-use crate::provider::sqlite::open_sqlite_readonly_source;
+use crate::provider::sqlite::probe_sqlite_readonly_source;
 
 use super::types::ProviderDefaultLocation;
 
@@ -140,16 +140,16 @@ fn has_firebender_chat_sessions_table(path: &Path) -> BoundedProbe {
         BoundedProbe::Found => {}
         other => return other,
     }
-    let Ok(conn) = open_sqlite_readonly_source(&db_path) else {
-        return BoundedProbe::IoError;
-    };
-    match conn.query_row(
-        "select count(*) from sqlite_schema where type = 'table' and name = 'chat_sessions'",
-        [],
-        |row| row.get::<_, i64>(0),
-    ) {
-        Ok(count) if count > 0 => BoundedProbe::Found,
-        Ok(_) => BoundedProbe::NotFound,
+    match probe_sqlite_readonly_source(&db_path, |conn| {
+        conn.query_row(
+            "select count(*) from sqlite_schema where type = 'table' and name = 'chat_sessions'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|count| count > 0)
+    }) {
+        Ok(true) => BoundedProbe::Found,
+        Ok(false) => BoundedProbe::NotFound,
         Err(_) => BoundedProbe::IoError,
     }
 }
@@ -263,16 +263,16 @@ fn has_forgecode_conversations_table(path: &Path) -> BoundedProbe {
         BoundedProbe::Found => {}
         other => return other,
     }
-    let Ok(conn) = open_sqlite_readonly_source(path) else {
-        return BoundedProbe::IoError;
-    };
-    match conn.query_row(
-        "select count(*) from sqlite_schema where type = 'table' and name = 'conversations'",
-        [],
-        |row| row.get::<_, i64>(0),
-    ) {
-        Ok(count) if count > 0 => BoundedProbe::Found,
-        Ok(_) => BoundedProbe::NotFound,
+    match probe_sqlite_readonly_source(path, |conn| {
+        conn.query_row(
+            "select count(*) from sqlite_schema where type = 'table' and name = 'conversations'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|count| count > 0)
+    }) {
+        Ok(true) => BoundedProbe::Found,
+        Ok(false) => BoundedProbe::NotFound,
         Err(_) => BoundedProbe::IoError,
     }
 }
@@ -282,18 +282,18 @@ fn has_lingma_chat_record_table(path: &Path) -> BoundedProbe {
         BoundedProbe::Found => {}
         other => return other,
     }
-    let Ok(conn) = open_sqlite_readonly_source(path) else {
-        return BoundedProbe::IoError;
-    };
-    match conn.query_row(
-        "select count(*) from pragma_table_info('chat_record') \
-         where name in ('session_id', 'request_id', 'chat_prompt', 'summary', \
-                        'error_result', 'gmt_create', 'extra')",
-        [],
-        |row| row.get::<_, i64>(0),
-    ) {
-        Ok(count) if count >= 7 => BoundedProbe::Found,
-        Ok(_) => BoundedProbe::NotFound,
+    match probe_sqlite_readonly_source(path, |conn| {
+        conn.query_row(
+            "select count(*) from pragma_table_info('chat_record') \
+             where name in ('session_id', 'request_id', 'chat_prompt', 'summary', \
+                            'error_result', 'gmt_create', 'extra')",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|count| count >= 7)
+    }) {
+        Ok(true) => BoundedProbe::Found,
+        Ok(false) => BoundedProbe::NotFound,
         Err(_) => BoundedProbe::IoError,
     }
 }
@@ -369,10 +369,7 @@ fn has_trae_state_vscdb_chat_keys(path: &Path) -> BoundedProbe {
         BoundedProbe::Found => {}
         other => return other,
     }
-    let Ok(conn) = open_sqlite_readonly_source(path) else {
-        return BoundedProbe::IoError;
-    };
-    match (|| -> rusqlite::Result<bool> {
+    match probe_sqlite_readonly_source(path, |conn| {
         let (table_count, column_count) = conn.query_row(
             "select \
                 (select count(*) from sqlite_schema where type = 'table' and name = 'ItemTable'), \
@@ -398,7 +395,7 @@ fn has_trae_state_vscdb_chat_keys(path: &Path) -> BoundedProbe {
             |row| row.get::<_, i64>(0),
         )?;
         Ok(key_count > 0)
-    })() {
+    }) {
         Ok(true) => BoundedProbe::Found,
         Ok(false) => BoundedProbe::NotFound,
         Err(_) => BoundedProbe::IoError,
@@ -410,17 +407,17 @@ fn has_deepagents_checkpoint_tables(path: &Path) -> BoundedProbe {
         BoundedProbe::Found => {}
         other => return other,
     }
-    let Ok(conn) = open_sqlite_readonly_source(path) else {
-        return BoundedProbe::IoError;
-    };
-    match conn.query_row(
-        "select count(*) from sqlite_schema \
-         where type = 'table' and name in ('checkpoints', 'writes')",
-        [],
-        |row| row.get::<_, i64>(0),
-    ) {
-        Ok(2) => BoundedProbe::Found,
-        Ok(_) => BoundedProbe::NotFound,
+    match probe_sqlite_readonly_source(path, |conn| {
+        conn.query_row(
+            "select count(*) from sqlite_schema \
+             where type = 'table' and name in ('checkpoints', 'writes')",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|count| count == 2)
+    }) {
+        Ok(true) => BoundedProbe::Found,
+        Ok(false) => BoundedProbe::NotFound,
         Err(_) => BoundedProbe::IoError,
     }
 }
@@ -690,4 +687,122 @@ fn has_task_json_file_under_matching(
 fn path_has_component(path: &Path, expected: &str) -> bool {
     path.components()
         .any(|component| component.as_os_str().to_str() == Some(expected))
+}
+
+#[cfg(test)]
+mod sqlite_probe_tests {
+    use std::{
+        fs::{self, OpenOptions},
+        io::Write,
+        path::{Path, PathBuf},
+    };
+
+    use rusqlite::Connection;
+
+    use super::{has_firebender_chat_sessions_table, BoundedProbe};
+    use crate::provider::{
+        sqlite::{
+            install_sqlite_snapshot_test_hook, take_sqlite_snapshot_test_metrics,
+            SqliteSnapshotTestMetrics,
+        },
+        sqlite_observation::SQLITE_GENERATION_MAX_ATTEMPTS,
+    };
+
+    #[test]
+    fn shm_only_probe_does_not_copy_the_database() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("chat_history.db");
+        Connection::open(&db).unwrap().close().unwrap();
+        let shm = sidecar(&db, "-shm");
+        fs::write(&shm, b"volatile coordination state").unwrap();
+        let before = fs::read(&shm).unwrap();
+
+        take_sqlite_snapshot_test_metrics();
+        assert_eq!(
+            has_firebender_chat_sessions_table(&db),
+            BoundedProbe::NotFound
+        );
+        assert_eq!(
+            take_sqlite_snapshot_test_metrics(),
+            SqliteSnapshotTestMetrics::default()
+        );
+        assert_eq!(fs::read(shm).unwrap(), before);
+    }
+
+    #[test]
+    fn wal_only_schema_predicate_uses_a_read_only_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let (db, _writer) = wal_only_firebender_db(temp.path());
+        let wal = sidecar(&db, "-wal");
+        let shm = sidecar(&db, "-shm");
+        let source_before = [
+            (db.clone(), fs::read(&db).unwrap()),
+            (wal.clone(), fs::read(&wal).unwrap()),
+            (shm.clone(), fs::read(&shm).unwrap()),
+        ];
+
+        take_sqlite_snapshot_test_metrics();
+        assert_eq!(has_firebender_chat_sessions_table(&db), BoundedProbe::Found);
+        assert_eq!(
+            take_sqlite_snapshot_test_metrics(),
+            SqliteSnapshotTestMetrics {
+                attempts: 1,
+                copied_files: 2,
+            }
+        );
+        for (path, bytes) in source_before {
+            assert_eq!(fs::read(path).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn sqlite_probe_snapshot_retries_are_bounded_under_churn() {
+        let temp = tempfile::tempdir().unwrap();
+        let (db, _writer) = wal_only_firebender_db(temp.path());
+        let wal = sidecar(&db, "-wal");
+        let _hook = install_sqlite_snapshot_test_hook(move |_, _| {
+            OpenOptions::new()
+                .append(true)
+                .open(&wal)
+                .unwrap()
+                .write_all(&[0])
+                .unwrap();
+        });
+
+        take_sqlite_snapshot_test_metrics();
+        assert_eq!(
+            has_firebender_chat_sessions_table(&db),
+            BoundedProbe::IoError
+        );
+        assert_eq!(
+            take_sqlite_snapshot_test_metrics(),
+            SqliteSnapshotTestMetrics {
+                attempts: SQLITE_GENERATION_MAX_ATTEMPTS,
+                copied_files: SQLITE_GENERATION_MAX_ATTEMPTS * 2,
+            }
+        );
+    }
+
+    fn wal_only_firebender_db(root: &Path) -> (PathBuf, Connection) {
+        let db = root.join("chat_history.db");
+        Connection::open(&db).unwrap().close().unwrap();
+        let writer = Connection::open(&db).unwrap();
+        assert_eq!(
+            writer
+                .query_row("PRAGMA journal_mode=WAL", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "wal"
+        );
+        writer
+            .execute_batch("PRAGMA wal_autocheckpoint=0; CREATE TABLE chat_sessions (id TEXT);")
+            .unwrap();
+        assert!(sidecar(&db, "-wal").is_file());
+        (db, writer)
+    }
+
+    fn sidecar(path: &Path, suffix: &str) -> PathBuf {
+        let mut sidecar = path.as_os_str().to_owned();
+        sidecar.push(suffix);
+        PathBuf::from(sidecar)
+    }
 }
