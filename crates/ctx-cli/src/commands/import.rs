@@ -316,30 +316,67 @@ pub(crate) struct InventoryTotals {
 pub(crate) enum SourcePreinventory {
     #[default]
     None,
-    CodexSessionCatalog(CatalogSummary),
-    SourceImportFiles(Vec<SourceImportFile>),
-    SourceRoot(SourceImportFile),
+    CodexSessionCatalog {
+        summary: CatalogSummary,
+        inventory_generation: u64,
+    },
+    SourceImportFiles {
+        files: Vec<SourceImportFile>,
+        inventory_generation: u64,
+    },
+    SourceRoot {
+        file: SourceImportFile,
+        inventory_generation: u64,
+    },
 }
 
 impl SourcePreinventory {
     pub(crate) fn codex_session_catalog(&self) -> Option<&CatalogSummary> {
         match self {
-            Self::CodexSessionCatalog(summary) => Some(summary),
-            Self::None | Self::SourceImportFiles(_) | Self::SourceRoot(_) => None,
+            Self::CodexSessionCatalog { summary, .. } => Some(summary),
+            Self::None | Self::SourceImportFiles { .. } | Self::SourceRoot { .. } => None,
         }
     }
 
     pub(crate) fn source_import_files(&self) -> Option<&[SourceImportFile]> {
         match self {
-            Self::SourceImportFiles(files) => Some(files),
-            Self::None | Self::CodexSessionCatalog(_) | Self::SourceRoot(_) => None,
+            Self::SourceImportFiles { files, .. } => Some(files),
+            Self::None | Self::CodexSessionCatalog { .. } | Self::SourceRoot { .. } => None,
         }
     }
 
     pub(crate) fn source_root_file(&self) -> Option<&SourceImportFile> {
         match self {
-            Self::SourceRoot(file) => Some(file),
-            Self::None | Self::CodexSessionCatalog(_) | Self::SourceImportFiles(_) => None,
+            Self::SourceRoot { file, .. } => Some(file),
+            Self::None | Self::CodexSessionCatalog { .. } | Self::SourceImportFiles { .. } => None,
+        }
+    }
+
+    pub(crate) fn source_root_observation(&self) -> Option<(&SourceImportFile, u64)> {
+        match self {
+            Self::SourceRoot {
+                file,
+                inventory_generation,
+            } => Some((file, *inventory_generation)),
+            Self::None | Self::CodexSessionCatalog { .. } | Self::SourceImportFiles { .. } => None,
+        }
+    }
+
+    pub(crate) fn inventory_generation(&self) -> Option<u64> {
+        match self {
+            Self::None => None,
+            Self::CodexSessionCatalog {
+                inventory_generation,
+                ..
+            }
+            | Self::SourceImportFiles {
+                inventory_generation,
+                ..
+            }
+            | Self::SourceRoot {
+                inventory_generation,
+                ..
+            } => Some(*inventory_generation),
         }
     }
 }

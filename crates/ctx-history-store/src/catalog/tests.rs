@@ -1,4 +1,4 @@
-use std::{fs, time::Duration};
+use std::{collections::BTreeMap, fs, time::Duration};
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
@@ -121,6 +121,71 @@ fn source_import_file(
     }
 }
 
+fn upsert_catalog_inventory(store: &Store, sessions: &[CatalogSession]) {
+    let mut groups = BTreeMap::<(String, String), Vec<CatalogSession>>::new();
+    for session in sessions {
+        groups
+            .entry((
+                session.provider.as_str().to_owned(),
+                session.source_root.clone(),
+            ))
+            .or_default()
+            .push(session.clone());
+    }
+    for ((_, source_root), sessions) in groups {
+        let provider = sessions[0].provider;
+        let generation = store
+            .allocate_catalog_inventory_generation(provider, &source_root)
+            .unwrap();
+        store
+            .upsert_catalog_sessions(generation, &sessions)
+            .unwrap();
+    }
+}
+
+fn upsert_source_inventory(store: &Store, files: &[SourceImportFile]) {
+    let mut groups = BTreeMap::<(String, String), Vec<SourceImportFile>>::new();
+    for file in files {
+        groups
+            .entry((file.provider.as_str().to_owned(), file.source_root.clone()))
+            .or_default()
+            .push(file.clone());
+    }
+    for ((_, source_root), files) in groups {
+        let provider = files[0].provider;
+        let generation = store
+            .allocate_source_import_inventory_generation(provider, &source_root)
+            .unwrap();
+        store
+            .upsert_source_import_files(generation, &files)
+            .unwrap();
+    }
+}
+
+fn current_inventory_generation(
+    store: &Store,
+    provider: CaptureProvider,
+    source_root: &str,
+    inventory_family: &str,
+) -> u64 {
+    store
+        .conn
+        .query_row(
+            "SELECT current_generation FROM import_inventory_generations WHERE provider = ?1 AND source_root = ?2 AND inventory_family = ?3",
+            params![provider.as_str(), source_root, inventory_family],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+fn current_catalog_generation(store: &Store, provider: CaptureProvider, source_root: &str) -> u64 {
+    current_inventory_generation(store, provider, source_root, "catalog_sessions")
+}
+
+fn current_source_generation(store: &Store, provider: CaptureProvider, source_root: &str) -> u64 {
+    current_inventory_generation(store, provider, source_root, "source_import_files")
+}
+
 fn imported_session(external_session_id: &str) -> Session {
     Session {
         id: new_id(),
@@ -221,8 +286,11 @@ fn catalog_session_upsert_skips_unchanged_rows() {
         "codex-session-1",
         cataloged_at_ms,
     );
+    let inventory_generation = store
+        .allocate_catalog_inventory_generation(session.provider, &session.source_root)
+        .unwrap();
     store
-        .upsert_catalog_sessions(std::slice::from_ref(&session))
+        .upsert_catalog_sessions(inventory_generation, std::slice::from_ref(&session))
         .unwrap();
     let after_insert: i64 = store
         .conn
@@ -232,7 +300,7 @@ fn catalog_session_upsert_skips_unchanged_rows() {
     let mut recataloged = session.clone();
     recataloged.cataloged_at_ms += 1_000;
     store
-        .upsert_catalog_sessions(std::slice::from_ref(&recataloged))
+        .upsert_catalog_sessions(inventory_generation, std::slice::from_ref(&recataloged))
         .unwrap();
     let after_noop: i64 = store
         .conn
@@ -244,7 +312,7 @@ fn catalog_session_upsert_skips_unchanged_rows() {
     changed.file_size_bytes += 1;
     changed.cataloged_at_ms += 1_000;
     store
-        .upsert_catalog_sessions(std::slice::from_ref(&changed))
+        .upsert_catalog_sessions(inventory_generation, std::slice::from_ref(&changed))
         .unwrap();
     let after_changed: i64 = store
         .conn
@@ -325,13 +393,14 @@ fn catalog_sessions_count_indexed_and_stale_rows() {
     let temp = tempdir();
     let store = Store::open(temp.path().join("work.sqlite")).unwrap();
     let cataloged_at_ms = timestamp_ms(fixed_time());
-    store
-        .upsert_catalog_sessions(&[catalog_session(
+    upsert_catalog_inventory(
+        &store,
+        &[catalog_session(
             "/home/user/.codex/sessions/2026/06/24/rollout.jsonl",
             "codex-session-1",
             cataloged_at_ms,
-        )])
-        .unwrap();
+        )],
+    );
 
     let counts = store.catalog_session_counts().unwrap();
     assert_eq!(counts.total, 1);
@@ -368,6 +437,11 @@ fn catalog_sessions_count_indexed_and_stale_rows() {
                 file_size_bytes: 42,
                 file_modified_at_ms: cataloged_at_ms,
                 import_revision: 1,
+                inventory_generation: current_catalog_generation(
+                    &store,
+                    CaptureProvider::Codex,
+                    "/home/user/.codex/sessions",
+                ),
                 file_sha256: None,
                 event_count: Some(3),
                 indexed_at_ms: cataloged_at_ms + 10,
@@ -406,13 +480,14 @@ fn catalog_import_planning_requires_current_index_state_and_matching_session() {
     let temp = tempdir();
     let store = Store::open(temp.path().join("work.sqlite")).unwrap();
     let cataloged_at_ms = timestamp_ms(fixed_time());
-    store
-        .upsert_catalog_sessions(&[catalog_session(
+    upsert_catalog_inventory(
+        &store,
+        &[catalog_session(
             "/home/user/.codex/sessions/2026/06/24/rollout.jsonl",
             "codex-session-1",
             cataloged_at_ms,
-        )])
-        .unwrap();
+        )],
+    );
     store
         .mark_catalog_source_indexed(
             CaptureProvider::Codex,
@@ -422,6 +497,11 @@ fn catalog_import_planning_requires_current_index_state_and_matching_session() {
                 file_size_bytes: 42,
                 file_modified_at_ms: cataloged_at_ms,
                 import_revision: 1,
+                inventory_generation: current_catalog_generation(
+                    &store,
+                    CaptureProvider::Codex,
+                    "/home/user/.codex/sessions",
+                ),
                 file_sha256: None,
                 event_count: Some(3),
                 indexed_at_ms: cataloged_at_ms + 10,
@@ -457,8 +537,9 @@ fn catalog_import_planning_scopes_matching_sessions_by_source_root() {
     let first_path = "/home/user/.codex/first/sessions/rollout.jsonl";
     let second_path = "/home/user/.codex/second/sessions/rollout.jsonl";
     let external_session_id = "shared-provider-session";
-    store
-        .upsert_catalog_sessions(&[
+    upsert_catalog_inventory(
+        &store,
+        &[
             catalog_session_for_root(first_root, first_path, external_session_id, cataloged_at_ms),
             catalog_session_for_root(
                 second_root,
@@ -466,8 +547,8 @@ fn catalog_import_planning_scopes_matching_sessions_by_source_root() {
                 external_session_id,
                 cataloged_at_ms,
             ),
-        ])
-        .unwrap();
+        ],
+    );
     for (source_root, source_path) in [(first_root, first_path), (second_root, second_path)] {
         store
             .mark_catalog_source_indexed(
@@ -478,6 +559,11 @@ fn catalog_import_planning_scopes_matching_sessions_by_source_root() {
                     file_size_bytes: 42,
                     file_modified_at_ms: cataloged_at_ms,
                     import_revision: 1,
+                    inventory_generation: current_catalog_generation(
+                        &store,
+                        CaptureProvider::Codex,
+                        source_root,
+                    ),
                     file_sha256: None,
                     event_count: Some(3),
                     indexed_at_ms: cataloged_at_ms + 10,
@@ -520,13 +606,14 @@ fn catalog_import_mark_failed_records_error_and_remains_pending() {
     let temp = tempdir();
     let store = Store::open(temp.path().join("work.sqlite")).unwrap();
     let cataloged_at_ms = timestamp_ms(fixed_time());
-    store
-        .upsert_catalog_sessions(&[catalog_session(
+    upsert_catalog_inventory(
+        &store,
+        &[catalog_session(
             "/home/user/.codex/sessions/2026/06/24/rollout.jsonl",
             "codex-session-1",
             cataloged_at_ms,
-        )])
-        .unwrap();
+        )],
+    );
 
     let changed = store
         .record_catalog_source_import_result(
@@ -537,6 +624,11 @@ fn catalog_import_mark_failed_records_error_and_remains_pending() {
                 file_size_bytes: 42,
                 file_modified_at_ms: cataloged_at_ms,
                 import_revision: 1,
+                inventory_generation: current_catalog_generation(
+                    &store,
+                    CaptureProvider::Codex,
+                    "/home/user/.codex/sessions",
+                ),
                 file_sha256: None,
                 event_count: None,
                 indexed_at_ms: cataloged_at_ms + 10,
@@ -569,13 +661,14 @@ fn catalog_upsert_clears_completion_metadata_but_preserves_append_checkpoint() {
     let store = Store::open(temp.path().join("work.sqlite")).unwrap();
     let cataloged_at_ms = timestamp_ms(fixed_time());
     let source_path = "/home/user/.codex/sessions/2026/06/24/rollout.jsonl";
-    store
-        .upsert_catalog_sessions(&[catalog_session(
+    upsert_catalog_inventory(
+        &store,
+        &[catalog_session(
             source_path,
             "codex-session-1",
             cataloged_at_ms,
-        )])
-        .unwrap();
+        )],
+    );
     store
         .upsert_session(&imported_session("codex-session-1"))
         .unwrap();
@@ -588,6 +681,11 @@ fn catalog_upsert_clears_completion_metadata_but_preserves_append_checkpoint() {
                 file_size_bytes: 42,
                 file_modified_at_ms: cataloged_at_ms,
                 import_revision: 1,
+                inventory_generation: current_catalog_generation(
+                    &store,
+                    CaptureProvider::Codex,
+                    "/home/user/.codex/sessions",
+                ),
                 file_sha256: None,
                 event_count: Some(3),
                 indexed_at_ms: cataloged_at_ms + 10,
@@ -595,18 +693,19 @@ fn catalog_upsert_clears_completion_metadata_but_preserves_append_checkpoint() {
         )
         .unwrap();
 
-    store
-        .upsert_catalog_sessions(&[catalog_session(
+    upsert_catalog_inventory(
+        &store,
+        &[catalog_session(
             source_path,
             "codex-session-1",
             cataloged_at_ms,
-        )])
-        .unwrap();
+        )],
+    );
     assert_eq!(store.catalog_session_counts().unwrap().indexed, 1);
 
     let mut changed = catalog_session(source_path, "codex-session-1", cataloged_at_ms + 1);
     changed.file_size_bytes = 43;
-    store.upsert_catalog_sessions(&[changed]).unwrap();
+    upsert_catalog_inventory(&store, &[changed]);
 
     let counts = store.catalog_session_counts().unwrap();
     assert_eq!(counts.indexed, 0);
@@ -676,7 +775,7 @@ fn completed_with_rejections_converges_without_advancing_safe_resume_checkpoint(
     let observed_at_ms = timestamp_ms(fixed_time());
     let source_path = "/home/user/.codex/sessions/2026/06/24/mixed-tail.jsonl";
     let initial = catalog_session(source_path, "mixed-tail", observed_at_ms);
-    store.upsert_catalog_sessions(&[initial]).unwrap();
+    upsert_catalog_inventory(&store, &[initial]);
     store
         .upsert_session(&imported_session("mixed-tail"))
         .unwrap();
@@ -689,6 +788,11 @@ fn completed_with_rejections_converges_without_advancing_safe_resume_checkpoint(
                 file_size_bytes: 42,
                 file_modified_at_ms: observed_at_ms,
                 import_revision: 1,
+                inventory_generation: current_catalog_generation(
+                    &store,
+                    CaptureProvider::Codex,
+                    "/home/user/.codex/sessions",
+                ),
                 file_sha256: Some("safe-prefix"),
                 event_count: Some(3),
                 indexed_at_ms: observed_at_ms + 10,
@@ -698,7 +802,7 @@ fn completed_with_rejections_converges_without_advancing_safe_resume_checkpoint(
 
     let mut appended = catalog_session(source_path, "mixed-tail", observed_at_ms + 1);
     appended.file_size_bytes = 64;
-    store.upsert_catalog_sessions(&[appended]).unwrap();
+    upsert_catalog_inventory(&store, &[appended]);
     store
         .record_catalog_source_import_result(
             CaptureProvider::Codex,
@@ -708,6 +812,11 @@ fn completed_with_rejections_converges_without_advancing_safe_resume_checkpoint(
                 file_size_bytes: 64,
                 file_modified_at_ms: observed_at_ms + 1,
                 import_revision: 1,
+                inventory_generation: current_catalog_generation(
+                    &store,
+                    CaptureProvider::Codex,
+                    "/home/user/.codex/sessions",
+                ),
                 file_sha256: None,
                 event_count: Some(4),
                 indexed_at_ms: observed_at_ms + 20,
@@ -755,7 +864,7 @@ fn completed_with_rejections_converges_without_advancing_safe_resume_checkpoint(
 
     let mut appended_again = catalog_session(source_path, "mixed-tail", observed_at_ms + 2);
     appended_again.file_size_bytes = 80;
-    store.upsert_catalog_sessions(&[appended_again]).unwrap();
+    upsert_catalog_inventory(&store, &[appended_again]);
     let carried = store
         .catalog_source_index_state(
             CaptureProvider::Codex,
@@ -787,10 +896,20 @@ fn stale_revision_results_cannot_complete_newer_inventory() {
     let source_root = "/home/user/.codex/sessions";
     let source_path = "/home/user/.codex/sessions/revised.jsonl";
     let mut session = catalog_session(source_path, "revised", observed_at_ms);
-    store.upsert_catalog_sessions(&[session.clone()]).unwrap();
+    let stale_catalog_generation = store
+        .allocate_catalog_inventory_generation(CaptureProvider::Codex, source_root)
+        .unwrap();
+    store
+        .upsert_catalog_sessions(stale_catalog_generation, &[session.clone()])
+        .unwrap();
     session.import_revision = 2;
     session.cataloged_at_ms += 1;
-    store.upsert_catalog_sessions(&[session.clone()]).unwrap();
+    let current_catalog_generation = store
+        .allocate_catalog_inventory_generation(CaptureProvider::Codex, source_root)
+        .unwrap();
+    store
+        .upsert_catalog_sessions(current_catalog_generation, &[session.clone()])
+        .unwrap();
 
     let stale_catalog = store
         .record_catalog_source_import_result(
@@ -801,6 +920,7 @@ fn stale_revision_results_cannot_complete_newer_inventory() {
                 file_size_bytes: session.file_size_bytes,
                 file_modified_at_ms: session.file_modified_at_ms,
                 import_revision: 1,
+                inventory_generation: stale_catalog_generation,
                 file_sha256: None,
                 event_count: Some(1),
                 indexed_at_ms: observed_at_ms + 2,
@@ -825,13 +945,19 @@ fn stale_revision_results_cannot_complete_newer_inventory() {
         "/home/user/.claude/projects/revised.jsonl",
         observed_at_ms,
     );
+    let stale_file_generation = store
+        .allocate_source_import_inventory_generation(CaptureProvider::Claude, file_root)
+        .unwrap();
     store
-        .upsert_source_import_files(std::slice::from_ref(&file))
+        .upsert_source_import_files(stale_file_generation, std::slice::from_ref(&file))
         .unwrap();
     file.import_revision = 2;
     file.observed_at_ms += 1;
+    let current_file_generation = store
+        .allocate_source_import_inventory_generation(CaptureProvider::Claude, file_root)
+        .unwrap();
     store
-        .upsert_source_import_files(std::slice::from_ref(&file))
+        .upsert_source_import_files(current_file_generation, std::slice::from_ref(&file))
         .unwrap();
 
     let stale_file = store
@@ -843,6 +969,8 @@ fn stale_revision_results_cannot_complete_newer_inventory() {
                 file_size_bytes: file.file_size_bytes,
                 file_modified_at_ms: file.file_modified_at_ms,
                 import_revision: 1,
+                inventory_generation: stale_file_generation,
+                metadata: &file.metadata,
                 indexed_at_ms: observed_at_ms + 2,
             },
             CatalogIndexedStatus::Rejected,
@@ -864,13 +992,14 @@ fn catalog_append_discards_checkpoint_past_prior_observation() {
     let store = Store::open(temp.path().join("work.sqlite")).unwrap();
     let observed_at_ms = timestamp_ms(fixed_time());
     let source_path = "/home/user/.codex/sessions/invalid-checkpoint.jsonl";
-    store
-        .upsert_catalog_sessions(&[catalog_session(
+    upsert_catalog_inventory(
+        &store,
+        &[catalog_session(
             source_path,
             "invalid-checkpoint",
             observed_at_ms,
-        )])
-        .unwrap();
+        )],
+    );
     store
         .mark_catalog_source_indexed(
             CaptureProvider::Codex,
@@ -880,6 +1009,11 @@ fn catalog_append_discards_checkpoint_past_prior_observation() {
                 file_size_bytes: 42,
                 file_modified_at_ms: observed_at_ms,
                 import_revision: 1,
+                inventory_generation: current_catalog_generation(
+                    &store,
+                    CaptureProvider::Codex,
+                    "/home/user/.codex/sessions",
+                ),
                 file_sha256: Some("invalid-prefix"),
                 event_count: Some(3),
                 indexed_at_ms: observed_at_ms + 1,
@@ -896,7 +1030,7 @@ fn catalog_append_discards_checkpoint_past_prior_observation() {
 
     let mut appended = catalog_session(source_path, "invalid-checkpoint", observed_at_ms + 2);
     appended.file_size_bytes = 64;
-    store.upsert_catalog_sessions(&[appended]).unwrap();
+    upsert_catalog_inventory(&store, &[appended]);
 
     let state = store
         .catalog_source_index_state(
@@ -916,9 +1050,10 @@ fn terminal_rejected_catalog_observation_needs_no_materialized_session() {
     let store = Store::open(temp.path().join("work.sqlite")).unwrap();
     let observed_at_ms = timestamp_ms(fixed_time());
     let source_path = "/home/user/.codex/sessions/2026/06/24/all-invalid.jsonl";
-    store
-        .upsert_catalog_sessions(&[catalog_session(source_path, "all-invalid", observed_at_ms)])
-        .unwrap();
+    upsert_catalog_inventory(
+        &store,
+        &[catalog_session(source_path, "all-invalid", observed_at_ms)],
+    );
     store
         .record_catalog_source_import_result(
             CaptureProvider::Codex,
@@ -928,6 +1063,11 @@ fn terminal_rejected_catalog_observation_needs_no_materialized_session() {
                 file_size_bytes: 42,
                 file_modified_at_ms: observed_at_ms,
                 import_revision: 1,
+                inventory_generation: current_catalog_generation(
+                    &store,
+                    CaptureProvider::Codex,
+                    "/home/user/.codex/sessions",
+                ),
                 file_sha256: None,
                 event_count: Some(0),
                 indexed_at_ms: observed_at_ms + 10,
@@ -968,9 +1108,7 @@ fn source_outcomes_converge_and_revision_invalidation_is_provider_scoped() {
         "/home/user/.gemini/antigravity/brain/rejected.jsonl",
         observed_at_ms,
     );
-    store
-        .upsert_source_import_files(&[claude.clone(), antigravity.clone()])
-        .unwrap();
+    upsert_source_inventory(&store, &[claude.clone(), antigravity.clone()]);
     for (file, status) in [
         (&claude, CatalogIndexedStatus::CompletedWithRejections),
         (&antigravity, CatalogIndexedStatus::Rejected),
@@ -984,6 +1122,12 @@ fn source_outcomes_converge_and_revision_invalidation_is_provider_scoped() {
                     file_size_bytes: file.file_size_bytes,
                     file_modified_at_ms: file.file_modified_at_ms,
                     import_revision: file.import_revision,
+                    inventory_generation: current_source_generation(
+                        &store,
+                        file.provider,
+                        &file.source_root,
+                    ),
+                    metadata: &file.metadata,
                     indexed_at_ms: observed_at_ms + 10,
                 },
                 status,
@@ -1004,9 +1148,7 @@ fn source_outcomes_converge_and_revision_invalidation_is_provider_scoped() {
     let mut revised_claude = claude.clone();
     revised_claude.import_revision = 2;
     revised_claude.observed_at_ms += 20;
-    store
-        .upsert_source_import_files(&[revised_claude.clone()])
-        .unwrap();
+    upsert_source_inventory(&store, &[revised_claude.clone()]);
     assert_eq!(
         store
             .list_pending_source_import_files(CaptureProvider::Claude, claude_root)
@@ -1022,9 +1164,7 @@ fn source_outcomes_converge_and_revision_invalidation_is_provider_scoped() {
     corrected_antigravity.file_size_bytes += 1;
     corrected_antigravity.file_modified_at_ms += 1;
     corrected_antigravity.observed_at_ms += 20;
-    store
-        .upsert_source_import_files(&[corrected_antigravity.clone()])
-        .unwrap();
+    upsert_source_inventory(&store, &[corrected_antigravity.clone()]);
     assert_eq!(
         store
             .list_pending_source_import_files(CaptureProvider::Antigravity, antigravity_root)
@@ -1045,9 +1185,10 @@ fn catalog_upsert_invalidates_checkpoint_for_shrink_and_same_size_change() {
             42_u64,
         ),
     ] {
-        store
-            .upsert_catalog_sessions(&[catalog_session(source_path, source_path, cataloged_at_ms)])
-            .unwrap();
+        upsert_catalog_inventory(
+            &store,
+            &[catalog_session(source_path, source_path, cataloged_at_ms)],
+        );
         store
             .upsert_session(&imported_session(source_path))
             .unwrap();
@@ -1060,6 +1201,11 @@ fn catalog_upsert_invalidates_checkpoint_for_shrink_and_same_size_change() {
                     file_size_bytes: 42,
                     file_modified_at_ms: cataloged_at_ms,
                     import_revision: 1,
+                    inventory_generation: current_catalog_generation(
+                        &store,
+                        CaptureProvider::Codex,
+                        "/home/user/.codex/sessions",
+                    ),
                     file_sha256: None,
                     event_count: Some(3),
                     indexed_at_ms: cataloged_at_ms + 10,
@@ -1069,7 +1215,7 @@ fn catalog_upsert_invalidates_checkpoint_for_shrink_and_same_size_change() {
 
         let mut changed = catalog_session(source_path, source_path, cataloged_at_ms + 1);
         changed.file_size_bytes = file_size_bytes;
-        store.upsert_catalog_sessions(&[changed]).unwrap();
+        upsert_catalog_inventory(&store, &[changed]);
 
         let (status, indexed_size, checkpoint_size): (String, Option<i64>, Option<i64>) =
             store
@@ -1092,13 +1238,14 @@ fn catalog_index_checkpoint_event_count_can_be_unknown() {
     let store = Store::open(temp.path().join("work.sqlite")).unwrap();
     let cataloged_at_ms = timestamp_ms(fixed_time());
     let source_path = "/home/user/.codex/sessions/2026/06/24/unknown-count.jsonl";
-    store
-        .upsert_catalog_sessions(&[catalog_session(
+    upsert_catalog_inventory(
+        &store,
+        &[catalog_session(
             source_path,
             "codex-session-unknown-count",
             cataloged_at_ms,
-        )])
-        .unwrap();
+        )],
+    );
     store
         .mark_catalog_source_indexed(
             CaptureProvider::Codex,
@@ -1108,6 +1255,11 @@ fn catalog_index_checkpoint_event_count_can_be_unknown() {
                 file_size_bytes: 42,
                 file_modified_at_ms: cataloged_at_ms,
                 import_revision: 1,
+                inventory_generation: current_catalog_generation(
+                    &store,
+                    CaptureProvider::Codex,
+                    "/home/user/.codex/sessions",
+                ),
                 file_sha256: Some("abc123"),
                 event_count: None,
                 indexed_at_ms: cataloged_at_ms + 10,
@@ -1146,8 +1298,11 @@ fn source_import_manifest_upsert_ignores_observed_at_for_unchanged_files() {
         observed_at_ms,
         metadata: serde_json::json!({}),
     };
+    let inventory_generation = store
+        .allocate_source_import_inventory_generation(file.provider, &file.source_root)
+        .unwrap();
     store
-        .upsert_source_import_files(std::slice::from_ref(&file))
+        .upsert_source_import_files(inventory_generation, std::slice::from_ref(&file))
         .unwrap();
     store
         .mark_source_import_file_indexed(
@@ -1158,6 +1313,8 @@ fn source_import_manifest_upsert_ignores_observed_at_for_unchanged_files() {
                 file_size_bytes: 42,
                 file_modified_at_ms: observed_at_ms,
                 import_revision: 1,
+                inventory_generation,
+                metadata: &file.metadata,
                 indexed_at_ms: observed_at_ms + 10,
             },
         )
@@ -1169,7 +1326,7 @@ fn source_import_manifest_upsert_ignores_observed_at_for_unchanged_files() {
 
     file.observed_at_ms += 1_000;
     store
-        .upsert_source_import_files(std::slice::from_ref(&file))
+        .upsert_source_import_files(inventory_generation, std::slice::from_ref(&file))
         .unwrap();
     let after_noop: i64 = store
         .conn
@@ -1203,9 +1360,7 @@ fn source_root_inventory_change_token_marks_same_stat_source_pending() {
             "change_token_v1": "before",
         }),
     };
-    store
-        .upsert_source_import_files(std::slice::from_ref(&file))
-        .unwrap();
+    upsert_source_inventory(&store, std::slice::from_ref(&file));
     store
         .mark_source_import_file_indexed(
             CaptureProvider::Hermes,
@@ -1215,6 +1370,12 @@ fn source_root_inventory_change_token_marks_same_stat_source_pending() {
                 file_size_bytes: file.file_size_bytes,
                 file_modified_at_ms: file.file_modified_at_ms,
                 import_revision: file.import_revision,
+                inventory_generation: current_source_generation(
+                    &store,
+                    CaptureProvider::Hermes,
+                    root,
+                ),
+                metadata: &file.metadata,
                 indexed_at_ms: observed_at_ms + 1,
             },
         )
@@ -1226,9 +1387,7 @@ fn source_root_inventory_change_token_marks_same_stat_source_pending() {
 
     file.metadata["change_token_v1"] = serde_json::json!("after");
     file.observed_at_ms += 1;
-    store
-        .upsert_source_import_files(std::slice::from_ref(&file))
-        .unwrap();
+    upsert_source_inventory(&store, std::slice::from_ref(&file));
 
     assert_eq!(
         store
@@ -1255,9 +1414,7 @@ fn source_import_format_change_marks_same_stat_source_pending() {
         observed_at_ms,
         metadata: serde_json::json!({}),
     };
-    store
-        .upsert_source_import_files(std::slice::from_ref(&file))
-        .unwrap();
+    upsert_source_inventory(&store, std::slice::from_ref(&file));
     store
         .mark_source_import_file_indexed(
             CaptureProvider::Custom,
@@ -1267,6 +1424,12 @@ fn source_import_format_change_marks_same_stat_source_pending() {
                 file_size_bytes: file.file_size_bytes,
                 file_modified_at_ms: file.file_modified_at_ms,
                 import_revision: file.import_revision,
+                inventory_generation: current_source_generation(
+                    &store,
+                    CaptureProvider::Custom,
+                    root,
+                ),
+                metadata: &file.metadata,
                 indexed_at_ms: observed_at_ms + 1,
             },
         )
@@ -1274,9 +1437,7 @@ fn source_import_format_change_marks_same_stat_source_pending() {
 
     file.source_format = "new_format".into();
     file.observed_at_ms += 1;
-    store
-        .upsert_source_import_files(std::slice::from_ref(&file))
-        .unwrap();
+    upsert_source_inventory(&store, std::slice::from_ref(&file));
 
     assert_eq!(
         store
@@ -1307,7 +1468,7 @@ fn source_import_file_counts_track_pending_indexed_failed_and_stale() {
         })
         .collect::<Vec<_>>();
 
-    store.upsert_source_import_files(&files).unwrap();
+    upsert_source_inventory(&store, &files);
     store
         .mark_source_import_file_indexed(
             CaptureProvider::Claude,
@@ -1317,6 +1478,12 @@ fn source_import_file_counts_track_pending_indexed_failed_and_stale() {
                 file_size_bytes: 42,
                 file_modified_at_ms: observed_at_ms,
                 import_revision: 1,
+                inventory_generation: current_source_generation(
+                    &store,
+                    CaptureProvider::Claude,
+                    root,
+                ),
+                metadata: &files[0].metadata,
                 indexed_at_ms: observed_at_ms + 10,
             },
         )
@@ -1330,6 +1497,12 @@ fn source_import_file_counts_track_pending_indexed_failed_and_stale() {
                 file_size_bytes: files[2].file_size_bytes,
                 file_modified_at_ms: files[2].file_modified_at_ms,
                 import_revision: files[2].import_revision,
+                inventory_generation: current_source_generation(
+                    &store,
+                    CaptureProvider::Claude,
+                    root,
+                ),
+                metadata: &files[2].metadata,
                 indexed_at_ms: observed_at_ms + 20,
             },
             CatalogIndexedStatus::Failed,
@@ -1342,6 +1515,7 @@ fn source_import_file_counts_track_pending_indexed_failed_and_stale() {
             root,
             &[files[0].source_path.clone(), files[2].source_path.clone()],
             observed_at_ms + 30,
+            current_source_generation(&store, CaptureProvider::Claude, root),
         )
         .unwrap();
 
@@ -1355,9 +1529,7 @@ fn source_import_file_counts_track_pending_indexed_failed_and_stale() {
     let mut changed_indexed = files[0].clone();
     changed_indexed.file_size_bytes = 43;
     changed_indexed.observed_at_ms = observed_at_ms + 40;
-    store
-        .upsert_source_import_files(&[changed_indexed])
-        .unwrap();
+    upsert_source_inventory(&store, &[changed_indexed]);
 
     let counts = store.source_import_file_counts().unwrap();
     assert_eq!(counts.total, 2);
@@ -1365,6 +1537,305 @@ fn source_import_file_counts_track_pending_indexed_failed_and_stale() {
     assert_eq!(counts.pending, 2);
     assert_eq!(counts.failed, 1);
     assert_eq!(counts.stale, 1);
+}
+
+#[test]
+fn reversed_catalog_generations_fence_stale_upsert_completion_and_finalization() {
+    let temp = tempdir();
+    let db_path = temp.path().join("work.sqlite");
+    let older = Store::open(&db_path).unwrap();
+    let newer = Store::open(&db_path).unwrap();
+    let source_root = "/home/user/.codex/sessions";
+    let source_path = "/home/user/.codex/sessions/reversed.jsonl";
+    let observed_at_ms = timestamp_ms(fixed_time());
+    let older_generation = older
+        .allocate_catalog_inventory_generation(CaptureProvider::Codex, source_root)
+        .unwrap();
+    let mut older_session = catalog_session(source_path, "reversed", observed_at_ms);
+    older_session.metadata = serde_json::json!({"inventory": "older"});
+
+    let newer_generation = newer
+        .allocate_catalog_inventory_generation(CaptureProvider::Codex, source_root)
+        .unwrap();
+    let mut newer_session = older_session.clone();
+    newer_session.cataloged_at_ms += 1;
+    newer_session.metadata = serde_json::json!({"inventory": "newer"});
+    assert_eq!(
+        newer
+            .upsert_catalog_sessions(newer_generation, &[newer_session.clone()])
+            .unwrap(),
+        1
+    );
+
+    assert_eq!(
+        older
+            .upsert_catalog_sessions(older_generation, &[older_session.clone()])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        older
+            .record_catalog_source_import_result(
+                CaptureProvider::Codex,
+                CatalogSourceIndexUpdate {
+                    source_root,
+                    source_path,
+                    file_size_bytes: older_session.file_size_bytes,
+                    file_modified_at_ms: older_session.file_modified_at_ms,
+                    import_revision: older_session.import_revision,
+                    inventory_generation: older_generation,
+                    file_sha256: None,
+                    event_count: Some(1),
+                    indexed_at_ms: observed_at_ms + 2,
+                },
+                CatalogIndexedStatus::Rejected,
+                Some("late older result"),
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        older
+            .mark_catalog_source_missing_paths_stale(
+                CaptureProvider::Codex,
+                source_root,
+                &[],
+                observed_at_ms + 3,
+                older_generation,
+            )
+            .unwrap(),
+        0
+    );
+
+    let stored = newer
+        .list_catalog_sessions_for_source(CaptureProvider::Codex, source_root)
+        .unwrap();
+    assert_eq!(stored, vec![newer_session]);
+    assert_eq!(newer.catalog_session_counts().unwrap().stale, 0);
+}
+
+#[test]
+fn catalog_missing_path_staling_is_idempotent_across_inventory_generations() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let source_root = "/home/user/.codex/sessions";
+    let source_path = "/home/user/.codex/sessions/deleted.jsonl";
+    let observed_at_ms = timestamp_ms(fixed_time());
+    let session = catalog_session(source_path, "deleted", observed_at_ms);
+    let first_generation = store
+        .allocate_catalog_inventory_generation(CaptureProvider::Codex, source_root)
+        .unwrap();
+    store
+        .upsert_catalog_sessions(first_generation, &[session])
+        .unwrap();
+
+    assert_eq!(
+        store
+            .mark_catalog_source_missing_paths_stale(
+                CaptureProvider::Codex,
+                source_root,
+                &[],
+                observed_at_ms + 1,
+                first_generation,
+            )
+            .unwrap(),
+        1
+    );
+
+    let second_generation = store
+        .allocate_catalog_inventory_generation(CaptureProvider::Codex, source_root)
+        .unwrap();
+    assert_eq!(
+        store
+            .mark_catalog_source_missing_paths_stale(
+                CaptureProvider::Codex,
+                source_root,
+                &[],
+                observed_at_ms + 2,
+                second_generation,
+            )
+            .unwrap(),
+        0
+    );
+    let cataloged_at_ms: i64 = store
+        .conn
+        .query_row(
+            "SELECT cataloged_at_ms FROM catalog_sessions WHERE source_path = ?1",
+            [source_path],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(cataloged_at_ms, observed_at_ms + 1);
+}
+
+#[test]
+fn reversed_source_generations_and_metadata_fence_stale_results() {
+    let temp = tempdir();
+    let db_path = temp.path().join("work.sqlite");
+    let older = Store::open(&db_path).unwrap();
+    let newer = Store::open(&db_path).unwrap();
+    let source_root = "/home/user/.hermes/state.db";
+    let source_path = source_root;
+    let observed_at_ms = timestamp_ms(fixed_time());
+    let older_generation = older
+        .allocate_source_import_inventory_generation(CaptureProvider::Hermes, source_root)
+        .unwrap();
+    let mut older_file = source_import_file(
+        CaptureProvider::Hermes,
+        "hermes_state_sqlite",
+        source_root,
+        source_path,
+        observed_at_ms,
+    );
+    older_file.metadata = serde_json::json!({
+        "inventory_unit": "source_root",
+        "change_token_v1": "older",
+    });
+
+    let newer_generation = newer
+        .allocate_source_import_inventory_generation(CaptureProvider::Hermes, source_root)
+        .unwrap();
+    let mut newer_file = older_file.clone();
+    newer_file.observed_at_ms += 1;
+    newer_file.metadata["change_token_v1"] = serde_json::json!("newer");
+    assert_eq!(
+        newer
+            .upsert_source_import_files(newer_generation, &[newer_file.clone()])
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        older
+            .upsert_source_import_files(older_generation, &[older_file.clone()])
+            .unwrap(),
+        0
+    );
+
+    let stale_update = SourceImportFileIndexUpdate {
+        source_root,
+        source_path,
+        file_size_bytes: older_file.file_size_bytes,
+        file_modified_at_ms: older_file.file_modified_at_ms,
+        import_revision: older_file.import_revision,
+        inventory_generation: older_generation,
+        metadata: &older_file.metadata,
+        indexed_at_ms: observed_at_ms + 2,
+    };
+    assert_eq!(
+        older
+            .record_source_import_file_result(
+                CaptureProvider::Hermes,
+                stale_update,
+                CatalogIndexedStatus::Rejected,
+                Some("late older result"),
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        newer
+            .record_source_import_file_result(
+                CaptureProvider::Hermes,
+                SourceImportFileIndexUpdate {
+                    inventory_generation: newer_generation,
+                    ..stale_update
+                },
+                CatalogIndexedStatus::Rejected,
+                Some("wrong metadata"),
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        older
+            .mark_source_import_missing_paths_stale(
+                CaptureProvider::Hermes,
+                source_root,
+                &[],
+                observed_at_ms + 3,
+                older_generation,
+            )
+            .unwrap(),
+        0
+    );
+
+    assert_eq!(
+        newer
+            .record_source_import_file_result(
+                CaptureProvider::Hermes,
+                SourceImportFileIndexUpdate {
+                    source_root,
+                    source_path,
+                    file_size_bytes: newer_file.file_size_bytes,
+                    file_modified_at_ms: newer_file.file_modified_at_ms,
+                    import_revision: newer_file.import_revision,
+                    inventory_generation: newer_generation,
+                    metadata: &newer_file.metadata,
+                    indexed_at_ms: observed_at_ms + 4,
+                },
+                CatalogIndexedStatus::Rejected,
+                Some("current deterministic rejection"),
+            )
+            .unwrap(),
+        1
+    );
+    let stored_metadata: String = newer
+        .conn
+        .query_row(
+            "SELECT metadata_json FROM source_import_files WHERE provider = ?1 AND source_root = ?2 AND source_path = ?3",
+            params![CaptureProvider::Hermes.as_str(), source_root, source_path],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&stored_metadata).unwrap(),
+        newer_file.metadata
+    );
+    assert_eq!(newer.source_import_file_counts().unwrap().stale, 0);
+}
+
+#[test]
+fn completed_with_rejections_missing_session_is_pending_for_repair() {
+    let temp = tempdir();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let source_root = "/home/user/.codex/sessions";
+    let source_path = "/home/user/.codex/sessions/missing-mixed.jsonl";
+    let observed_at_ms = timestamp_ms(fixed_time());
+    let session = catalog_session(source_path, "missing-mixed", observed_at_ms);
+    upsert_catalog_inventory(&store, &[session.clone()]);
+    store
+        .record_catalog_source_import_result(
+            CaptureProvider::Codex,
+            CatalogSourceIndexUpdate {
+                source_root,
+                source_path,
+                file_size_bytes: session.file_size_bytes,
+                file_modified_at_ms: session.file_modified_at_ms,
+                import_revision: session.import_revision,
+                inventory_generation: current_catalog_generation(
+                    &store,
+                    CaptureProvider::Codex,
+                    source_root,
+                ),
+                file_sha256: None,
+                event_count: Some(1),
+                indexed_at_ms: observed_at_ms + 1,
+            },
+            CatalogIndexedStatus::CompletedWithRejections,
+            Some("one malformed record"),
+        )
+        .unwrap();
+
+    assert_eq!(
+        store
+            .list_pending_catalog_sessions(CaptureProvider::Codex, source_root)
+            .unwrap(),
+        vec![session]
+    );
+    let counts = store.catalog_session_counts().unwrap();
+    assert_eq!(counts.pending, 1);
+    assert_eq!(counts.indexed, 0);
+    assert_eq!(counts.completed_with_rejections, 1);
 }
 
 #[test]
@@ -1383,6 +1854,7 @@ fn catalog_schema_includes_import_state_columns() {
     assert!(schema.contains("last_imported_file_modified_at_ms INTEGER"));
     assert!(schema.contains("last_imported_file_sha256 TEXT"));
     assert!(schema.contains("last_imported_event_count INTEGER"));
+    assert!(schema.contains("CREATE TABLE import_inventory_generations"));
 }
 
 #[test]

@@ -179,6 +179,14 @@ CREATE TABLE IF NOT EXISTS capture_sources (
     metadata_json TEXT NOT NULL DEFAULT '{}'
 );
 
+CREATE TABLE IF NOT EXISTS import_inventory_generations (
+    provider TEXT NOT NULL,
+    source_root TEXT NOT NULL,
+    inventory_family TEXT NOT NULL CHECK (inventory_family IN ('catalog_sessions', 'source_import_files')),
+    current_generation INTEGER NOT NULL CHECK (current_generation > 0),
+    PRIMARY KEY (provider, source_root, inventory_family)
+);
+
 CREATE TABLE IF NOT EXISTS catalog_sessions (
     source_path TEXT PRIMARY KEY NOT NULL,
 
