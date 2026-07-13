@@ -125,6 +125,7 @@ fn import_one_source_inner_batched(
             record_id,
             progress,
             preinventory.source_import_files(),
+            preinventory.inventory_generation(),
             full_rescan,
         )
     } else {
@@ -137,6 +138,7 @@ fn import_one_source_inner_batched(
                         record_id,
                         progress.clone(),
                         preinventory.codex_session_catalog(),
+                        preinventory.inventory_generation(),
                         full_rescan,
                     )
                 } else if source
@@ -576,7 +578,7 @@ fn import_one_source_inner_batched(
         }
     };
     let summary = match summary {
-        Ok(summary) => {
+        Ok(mut summary) => {
             // A manifested-source retry can contain only rejected files even though earlier
             // files under the same stable history record are already indexed. Preserve that
             // as a completed source with rejections; an orphan record is still cleaned up and
@@ -589,6 +591,9 @@ fn import_one_source_inner_batched(
             } else {
                 false
             };
+            if retained_existing_content {
+                summary.mark_retained_existing_content();
+            }
             if summary.failed > 0
                 && !provider_summary_has_imported_content(&summary)
                 && !retained_existing_content
@@ -641,15 +646,22 @@ fn mark_source_root_inventory_result(
     status: CatalogIndexedStatus,
     error: &str,
 ) -> Result<()> {
-    let Some(file) = preinventory.source_root_file() else {
+    let Some((file, inventory_generation)) = preinventory.source_root_observation() else {
         return Ok(());
     };
-    mark_source_import_file_result(store, file, status, (!error.is_empty()).then_some(error))
+    mark_source_import_file_result(
+        store,
+        file,
+        inventory_generation,
+        status,
+        (!error.is_empty()).then_some(error),
+    )
 }
 
 fn mark_source_import_file_result(
     store: &Store,
     file: &SourceImportFile,
+    inventory_generation: u64,
     status: CatalogIndexedStatus,
     error: Option<&str>,
 ) -> Result<()> {
@@ -661,6 +673,8 @@ fn mark_source_import_file_result(
             file_size_bytes: file.file_size_bytes,
             file_modified_at_ms: file.file_modified_at_ms,
             import_revision: file.import_revision,
+            inventory_generation,
+            metadata: &file.metadata,
             indexed_at_ms: utc_now().timestamp_millis(),
         },
         status,
@@ -695,9 +709,14 @@ pub(crate) fn import_manifested_source(
     record_id: Uuid,
     progress: Option<CodexSessionImportProgressCallback>,
     preinventoried_files: Option<&[SourceImportFile]>,
+    preinventory_generation: Option<u64>,
     force_selection: bool,
 ) -> Result<ProviderImportSummary> {
     let source_root = source.path.display().to_string();
+    let inventory_generation = match preinventory_generation {
+        Some(generation) => generation,
+        None => store.allocate_source_import_inventory_generation(source.provider, &source_root)?,
+    };
     let collected_files;
     let files = match preinventoried_files {
         Some(files) => files,
@@ -705,7 +724,7 @@ pub(crate) fn import_manifested_source(
             collected_files = collect_source_import_files(source).with_context(|| {
                 format!("inventory import files from {}", source.path.display())
             })?;
-            persist_source_import_files(store, source, &collected_files)?;
+            persist_source_import_files(store, source, inventory_generation, &collected_files)?;
             &collected_files
         }
     };
@@ -743,14 +762,26 @@ pub(crate) fn import_manifested_source(
                 let status = provider_summary_import_status(&file_summary);
                 let error =
                     (file_summary.failed > 0).then(|| source_import_file_failure(&file_summary));
-                mark_source_import_file_result(store, &pending_file, status, error.as_deref())?;
+                mark_source_import_file_result(
+                    store,
+                    &pending_file,
+                    inventory_generation,
+                    status,
+                    error.as_deref(),
+                )?;
                 summary.merge_from(file_summary);
             }
             Err(err) => {
                 let failure_scope = import_error_scope(&err);
                 let error = error_summary(&err);
                 let status = import_error_status(&err);
-                mark_source_import_file_result(store, &pending_file, status, Some(&error))?;
+                mark_source_import_file_result(
+                    store,
+                    &pending_file,
+                    inventory_generation,
+                    status,
+                    Some(&error),
+                )?;
                 if failure_scope == ImportFailureScope::System {
                     return Err(err);
                 }

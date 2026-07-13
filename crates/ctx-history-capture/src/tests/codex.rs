@@ -116,13 +116,17 @@ fn codex_session_catalog_large_noop_uses_metadata_cache() {
     let session_count = 1_024;
     synthetic_codex_session_tree(&root, session_count);
     let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let first_observed_at: DateTime<Utc> = "2026-06-26T12:00:00Z".parse().unwrap();
+    let first_observed_at_ms = first_observed_at.timestamp_millis();
+    let third_observed_at: DateTime<Utc> = "2026-06-26T12:02:00Z".parse().unwrap();
+    let third_observed_at_ms = third_observed_at.timestamp_millis();
 
     let first = catalog_codex_session_tree(
         &root,
         &store,
         CodexSessionCatalogOptions {
             source_root: Some(root.clone()),
-            cataloged_at: "2026-06-26T12:00:00Z".parse().unwrap(),
+            cataloged_at: first_observed_at,
             ..CodexSessionCatalogOptions::default()
         },
     )
@@ -148,6 +152,12 @@ fn codex_session_catalog_large_noop_uses_metadata_cache() {
     assert_eq!(second.cached_sessions, session_count);
     assert_eq!(second.parsed_sessions, 0);
     assert_eq!(second.failed_sessions, 0);
+    let unchanged_rows = store
+        .list_catalog_sessions_for_source(CaptureProvider::Codex, &root.display().to_string())
+        .unwrap();
+    assert!(unchanged_rows
+        .iter()
+        .all(|session| session.cataloged_at_ms == first_observed_at_ms));
 
     write_synthetic_codex_session(&root, 17, "changed-size-for-incremental-refresh");
     let third = catalog_codex_session_tree(
@@ -155,7 +165,7 @@ fn codex_session_catalog_large_noop_uses_metadata_cache() {
         &store,
         CodexSessionCatalogOptions {
             source_root: Some(root.clone()),
-            cataloged_at: "2026-06-26T12:02:00Z".parse().unwrap(),
+            cataloged_at: third_observed_at,
             ..CodexSessionCatalogOptions::default()
         },
     )
@@ -165,6 +175,47 @@ fn codex_session_catalog_large_noop_uses_metadata_cache() {
     assert_eq!(third.cached_sessions, session_count - 1);
     assert_eq!(third.parsed_sessions, 1);
     assert_eq!(third.failed_sessions, 0);
+    let changed_rows = store
+        .list_catalog_sessions_for_source(CaptureProvider::Codex, &root.display().to_string())
+        .unwrap();
+    assert_eq!(
+        changed_rows
+            .iter()
+            .filter(|session| session.cataloged_at_ms == third_observed_at_ms)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn codex_catalog_cache_rejects_an_older_parser_revision() {
+    let temp = tempdir();
+    let root = temp.path().join("sessions");
+    synthetic_codex_session_tree(&root, 1);
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    catalog_codex_session_tree(
+        &root,
+        &store,
+        CodexSessionCatalogOptions {
+            source_root: Some(root.clone()),
+            ..CodexSessionCatalogOptions::default()
+        },
+    )
+    .unwrap();
+    let session = store
+        .list_catalog_sessions_for_source(CaptureProvider::Codex, &root.display().to_string())
+        .unwrap()
+        .pop()
+        .unwrap();
+    let metadata = fs::metadata(&session.source_path).unwrap();
+
+    assert!(cached_catalog_session_if_unchanged(
+        Some(&session),
+        &metadata,
+        session.cataloged_at_ms + 1,
+        session.import_revision + 1,
+    )
+    .is_none());
 }
 
 #[test]

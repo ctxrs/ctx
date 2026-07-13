@@ -209,8 +209,10 @@ Current adapters are safe to re-run. They rescan sources idempotently and keep
 source paths or cursors when available. Imports always commit valid records and
 report rejected records. Sources with no usable imported content fail, as do
 unreadable or incompatible sources; ctx-owned storage or index failures abort
-the command. Native
-provider cursor progress is scoped by provider,
+the command. Concurrent inventories use a durable monotonic generation scoped
+to provider, source root, and inventory family. Late older discovery,
+missing-path, or completion writes become no-ops, while unchanged source rows
+are left untouched. Native provider cursor progress is scoped by provider,
 source format, and an opaque source identity derived from the configured root or
 source path, so two roots for the same provider do not overwrite each other's
 progress.
