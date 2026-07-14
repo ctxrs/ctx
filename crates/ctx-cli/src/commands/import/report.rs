@@ -232,12 +232,13 @@ pub(crate) fn provider_failures_json(summary: &ProviderImportSummary) -> Vec<Val
 }
 
 pub(crate) fn source_failure_json(failure: &ImportSourceFailure) -> Value {
+    let path = failure.source.path.to_str();
     let mut value = json!({
         "status": "failure",
         "failure_scope": "source",
         "failure_type": failure.failure_type.as_str(),
         "provider": failure.source.provider.as_str(),
-        "path": failure.source.path,
+        "path": path,
         "source_format": failure.source.source_format,
         "import_support": import_support_json(failure.source.import_support),
         "native_import": failure.source.import_support.is_auto_importable(),
@@ -369,7 +370,10 @@ pub(crate) fn print_source_failed(failure: &ImportSourceFailure) {
         failure.source.provider.as_str(),
         source_error_reason(&failure.source, &failure.error)
     );
-    println!("  path: {}", failure.source.path.display());
+    match failure.source.path.to_str() {
+        Some(path) => println!("  path: {path}"),
+        None => println!("  path: <non-UTF-8 path rejected>"),
+    }
     if let Some(summary) = failure.rejected_summary.as_ref() {
         print_provider_failures(summary);
     }
@@ -393,11 +397,10 @@ pub(crate) fn print_history_source_plugin_failed(
 
 pub(crate) fn source_error_reason(source: &SourceInfo, error: &str) -> String {
     let error = one_line_error(error);
-    let prefix = format!(
-        "import {} source {}: ",
-        source.provider.as_str(),
-        source.path.display()
-    );
+    let Some(path) = source.path.to_str() else {
+        return error;
+    };
+    let prefix = format!("import {} source {}: ", source.provider.as_str(), path);
     error.strip_prefix(&prefix).unwrap_or(&error).to_owned()
 }
 
@@ -494,7 +497,11 @@ pub(crate) fn import_error_scope(error: &anyhow::Error) -> ImportFailureScope {
             || matches!(
                 cause.downcast_ref::<CaptureError>(),
                 Some(CaptureError::Store(_) | CaptureError::WorkerPanicked(_))
-                    | Some(CaptureError::SystemIo { .. } | CaptureError::SystemInvariant(_))
+                    | Some(
+                        CaptureError::SystemIo { .. }
+                            | CaptureError::SystemInvariant(_)
+                            | CaptureError::InventorySuperseded
+                    )
             )
     }) {
         ImportFailureScope::System

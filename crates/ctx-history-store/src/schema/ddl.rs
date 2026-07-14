@@ -184,6 +184,7 @@ CREATE TABLE IF NOT EXISTS import_inventory_generations (
     source_root TEXT NOT NULL,
     inventory_family TEXT NOT NULL CHECK (inventory_family IN ('catalog_sessions', 'source_import_files')),
     current_generation INTEGER NOT NULL CHECK (current_generation > 0),
+    completed_generation INTEGER NOT NULL DEFAULT 0 CHECK (completed_generation >= 0 AND completed_generation <= current_generation),
     PRIMARY KEY (provider, source_root, inventory_family)
 );
 
