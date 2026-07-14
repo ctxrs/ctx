@@ -165,6 +165,13 @@ impl Store {
                 )
                 .map_err(StoreError::from)?;
         self.track_provider_file_publication_direct_entity("vcs_change", "vcs_changes", id)?;
+        if change.source_id.is_none() {
+            self.track_provider_file_publication_direct_entity(
+                "vcs_workspace",
+                "vcs_workspaces",
+                change.vcs_workspace_id,
+            )?;
+        }
         Ok(id)
     }
 

@@ -1,14 +1,4 @@
 impl Store {
-    fn optional_direct_entity_source_id(
-        &self,
-        table: &'static str,
-        id: Option<Uuid>,
-    ) -> Result<Option<Uuid>> {
-        id.map(|id| self.direct_entity_source_id(table, id))
-            .transpose()
-            .map(Option::flatten)
-    }
-
     fn session_reference_source_ids(
         &self,
         parent: Option<Uuid>,

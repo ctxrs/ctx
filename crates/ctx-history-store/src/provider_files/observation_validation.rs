@@ -183,6 +183,117 @@ impl Store {
         Ok(())
     }
 
+    fn ensure_scope_observation_allows_progress(
+        &self,
+        scope: &ProviderFilePublicationScope,
+        marker: &ReplacementMarker,
+    ) -> Result<()> {
+        if !scope.retires_observation {
+            return self.ensure_scope_observation_is_current(scope);
+        }
+        if !marker.mutation_started
+            || self.provider_file_owner_has_current_observation(
+                scope.provider,
+                &scope.inventory_source_root,
+                &scope.source_path,
+            )?
+        {
+            return Err(StoreError::ProviderFileObservationChanged {
+                provider: scope.provider.as_str().to_owned(),
+                owner_id: scope.owner_id.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_replacement_marker(
+        &self,
+        scope: &ProviderFilePublicationScope,
+        marker: &ReplacementMarker,
+    ) -> Result<()> {
+        if scope.kind != ProviderFilePublicationKind::Replacement
+            || marker.publication_kind != ProviderFilePublicationKind::Replacement
+        {
+            return Err(StoreError::InvalidProviderFilePublicationScope);
+        }
+        Ok(())
+    }
+
+    fn provider_file_owner_has_current_observation(
+        &self,
+        provider: CaptureProvider,
+        source_root: &str,
+        source_path: &str,
+    ) -> Result<bool> {
+        self.conn
+            .query_row(
+                r#"
+                SELECT EXISTS (
+                    SELECT 1 FROM catalog_sessions
+                    WHERE provider = ?1 AND source_root = ?2 AND source_path = ?3
+                      AND is_stale = 0
+                    UNION ALL
+                    SELECT 1 FROM source_import_files
+                    WHERE provider = ?1 AND source_root = ?2 AND source_path = ?3
+                      AND is_stale = 0
+                    LIMIT 1
+                )
+                "#,
+                params![provider.as_str(), source_root, source_path],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::from)
+    }
+
+    fn load_durable_provider_file_publication(
+        &self,
+        provider: CaptureProvider,
+        material_source_format: &str,
+        material_source_root: &str,
+        source_path: &str,
+        owner_id: &str,
+    ) -> Result<Option<DurableProviderFilePublication>> {
+        self.conn
+            .query_row(
+                r#"
+                SELECT replacement_id, staging_id, inventory_family,
+                       inventory_source_format, inventory_source_root, source_path,
+                       inventory_generation, file_size_bytes, file_modified_at_ms,
+                       import_revision, metadata_json, mutation_started
+                FROM provider_file_publications
+                WHERE owner_id = ?1 AND provider = ?2 AND material_source_format = ?3
+                  AND material_source_root = ?4 AND source_path = ?5
+                "#,
+                params![
+                    owner_id,
+                    provider.as_str(),
+                    material_source_format,
+                    material_source_root,
+                    source_path,
+                ],
+                |row| {
+                    Ok(DurableProviderFilePublication {
+                        scope_id: parse_uuid_text(row.get(0)?)?,
+                        staging_id: row.get(1)?,
+                        inventory_family: parse_provider_file_inventory_family_sql(
+                            &row.get::<_, String>(2)?,
+                        )?,
+                        inventory_source_format: row.get(3)?,
+                        inventory_source_root: row.get(4)?,
+                        source_path: row.get(5)?,
+                        inventory_generation: nonnegative_i64_to_u64(row.get(6)?)?,
+                        file_size_bytes: nonnegative_i64_to_u64(row.get(7)?)?,
+                        file_modified_at_ms: row.get(8)?,
+                        import_revision: nonnegative_i64_to_u32(row.get(9)?)?,
+                        metadata_json: row.get(10)?,
+                        mutation_started: row.get(11)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
     fn advance_provider_file_checkpoint(&self, checkpoint: &ProviderFileCheckpoint) -> Result<()> {
         if let Some(existing) = self.provider_file_checkpoint(checkpoint.key())? {
             let compatible = existing.import_revision == checkpoint.import_revision
@@ -232,6 +343,48 @@ impl Store {
         if let Some(checkpoint) = checkpoint {
             self.write_provider_file_checkpoint(checkpoint)?;
         }
+        Ok(())
+    }
+
+    fn delete_provider_file_checkpoint_for_scope(
+        &self,
+        scope: &ProviderFilePublicationScope,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"
+            DELETE FROM provider_file_checkpoints
+            WHERE provider = ?1 AND source_format = ?2 AND source_root = ?3 AND source_path = ?4
+            "#,
+            params![
+                scope.provider.as_str(),
+                &scope.inventory_source_format,
+                &scope.inventory_source_root,
+                &scope.source_path,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn retire_stale_provider_file_observation(
+        &self,
+        scope: &ProviderFilePublicationScope,
+    ) -> Result<()> {
+        let table = match scope.inventory_family {
+            CATALOG_INVENTORY_FAMILY => "catalog_sessions",
+            SOURCE_IMPORT_INVENTORY_FAMILY => "source_import_files",
+            _ => return Err(StoreError::InvalidProviderFilePublicationScope),
+        };
+        self.conn.execute(
+            &format!(
+                "DELETE FROM {table} WHERE provider = ?1 AND source_root = ?2 \
+                 AND source_path = ?3 AND is_stale != 0"
+            ),
+            params![
+                scope.provider.as_str(),
+                &scope.inventory_source_root,
+                &scope.source_path,
+            ],
+        )?;
         Ok(())
     }
 

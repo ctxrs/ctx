@@ -290,6 +290,184 @@ fn replacement_scope_fails_if_same_generation_observation_changes() {
     assert!(store.provider_file_publication.borrow().is_none());
 }
 #[test]
+fn transaction_boundary_faults_roll_back_and_restart_converges() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("work.sqlite");
+    let file = source_file(20, 100);
+    let source = Uuid::from_u128(329_100);
+    let old_event = Uuid::from_u128(329_101);
+    let new_event = Uuid::from_u128(329_102);
+    let old_checkpoint = checkpoint(20, 4, "unix:2049:boundary-fault", 105);
+    let generation = {
+        let store = Store::open(&path).unwrap();
+        let generation = store
+            .allocate_source_import_inventory_generation(file.provider, &file.source_root)
+            .unwrap();
+        store
+            .upsert_source_import_files(generation, std::slice::from_ref(&file))
+            .unwrap();
+        let outcome = source_outcome(&file, generation, 105);
+        store
+            .upsert_provider_file_checkpoint(outcome, &old_checkpoint)
+            .unwrap();
+        insert_capture_source(&store, source, PATH_A, "transaction-boundary-faults");
+        insert_raw_event(&store, old_event, 1, source, "old generation");
+        let scope = store
+            .begin_provider_file_publication(
+                file.provider,
+                outcome.observation,
+                MATERIAL_FORMAT,
+                ProviderFilePublicationKind::Replacement,
+                110,
+            )
+            .unwrap();
+
+        store.inject_provider_file_fault(ProviderFileFaultPoint::PreparationBeforeCommit);
+        assert!(matches!(
+            store
+                .prepare_provider_file_publication_slice(&scope, 1)
+                .unwrap_err(),
+            StoreError::ProviderFileStaging
+        ));
+        assert_eq!(staged_prior_source_count(&store), 0);
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "SELECT preparation_complete, preparation_cursor FROM provider_file_publications",
+                    [],
+                    |row| Ok((row.get::<_, bool>(0)?, row.get::<_, Option<String>>(1)?)),
+                )
+                .unwrap(),
+            (false, None)
+        );
+        prepare_all(&store, &scope, 1);
+
+        let mut replacement = event_fixture(
+            new_event,
+            2,
+            source,
+            "transaction-boundary-faults".to_owned(),
+            "new generation",
+        );
+        replacement.dedupe_key = None;
+        store.inject_provider_file_fault(ProviderFileFaultPoint::MutationBeforeCommit);
+        assert!(matches!(
+            store
+                .with_provider_file_publication_writes(&scope, |store| {
+                    store.upsert_event(&replacement)
+                })
+                .unwrap_err(),
+            StoreError::ProviderFileStaging
+        ));
+        assert!(!row_exists(&store, "events", new_event));
+        assert_eq!(staged_seen_count(&store), 0);
+        assert!(!store
+            .conn
+            .query_row(
+                "SELECT mutation_started FROM provider_file_publications",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap());
+        drop(scope);
+        generation
+    };
+
+    {
+        let store = Store::open(&path).unwrap();
+        let outcome = source_outcome(&file, generation, 120);
+        let scope = store
+            .begin_provider_file_publication(
+                file.provider,
+                outcome.observation,
+                MATERIAL_FORMAT,
+                ProviderFilePublicationKind::Replacement,
+                115,
+            )
+            .unwrap();
+        prepare_all(&store, &scope, 1);
+        let mut replacement = event_fixture(
+            new_event,
+            2,
+            source,
+            "transaction-boundary-faults".to_owned(),
+            "new generation",
+        );
+        replacement.dedupe_key = None;
+        store
+            .with_provider_file_publication_writes(&scope, |store| store.upsert_event(&replacement))
+            .unwrap();
+        reconcile_all(&store, &scope, 1);
+        let mut new_checkpoint = old_checkpoint.clone();
+        new_checkpoint.updated_at_ms = 125;
+        store.inject_provider_file_fault(ProviderFileFaultPoint::FinalizeBeforeCommit);
+        assert!(matches!(
+            store
+                .finalize_provider_file_publication(
+                    scope,
+                    outcome,
+                    ProviderFilePublicationCommit::Replacement(Some(&new_checkpoint)),
+                )
+                .unwrap_err(),
+            StoreError::ProviderFileStaging
+        ));
+        assert!(store.has_pending_provider_file_publications().unwrap());
+        assert_eq!(
+            store
+                .provider_file_checkpoint(old_checkpoint.key())
+                .unwrap(),
+            Some(old_checkpoint.clone())
+        );
+        assert_eq!(store.semantic_replacement_revision().unwrap(), 0);
+        assert!(store.list_events().unwrap().is_empty());
+    }
+
+    let store = Store::open(&path).unwrap();
+    let outcome = source_outcome(&file, generation, 130);
+    let scope = store
+        .begin_provider_file_publication(
+            file.provider,
+            outcome.observation,
+            MATERIAL_FORMAT,
+            ProviderFilePublicationKind::Incremental,
+            126,
+        )
+        .unwrap();
+    assert_eq!(scope.kind(), ProviderFilePublicationKind::Replacement);
+    prepare_all(&store, &scope, 1);
+    let mut replacement = event_fixture(
+        new_event,
+        2,
+        source,
+        "transaction-boundary-faults".to_owned(),
+        "new generation",
+    );
+    replacement.dedupe_key = None;
+    store
+        .with_provider_file_publication_writes(&scope, |store| store.upsert_event(&replacement))
+        .unwrap();
+    reconcile_all(&store, &scope, 1);
+    let mut new_checkpoint = old_checkpoint.clone();
+    new_checkpoint.updated_at_ms = 130;
+    store
+        .finalize_provider_file_publication(
+            scope,
+            outcome,
+            ProviderFilePublicationCommit::Replacement(Some(&new_checkpoint)),
+        )
+        .unwrap();
+    assert_eq!(store.list_events().unwrap()[0].id, new_event);
+    assert_eq!(
+        store
+            .provider_file_checkpoint(new_checkpoint.key())
+            .unwrap(),
+        Some(new_checkpoint)
+    );
+    assert_eq!(store.semantic_replacement_revision().unwrap(), 1);
+}
+
+#[test]
 fn replacement_faults_preserve_fences_and_committed_cleanup_is_warning_only() {
     let temp = tempdir().unwrap();
     let store = Store::open(temp.path().join("work.sqlite")).unwrap();

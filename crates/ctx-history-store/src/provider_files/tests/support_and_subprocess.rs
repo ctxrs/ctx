@@ -1,3 +1,4 @@
+#[allow(clippy::too_many_arguments)]
 fn insert_reconciliation_fixture(
     store: &Store,
     source_a: Uuid,
@@ -480,6 +481,29 @@ fn spawn_provider_file_helper(
     command.spawn().unwrap()
 }
 
+fn spawn_provider_file_vcs_writer(
+    store_path: &std::path::Path,
+    change: &ctx_history_core::VcsChange,
+) -> std::process::Child {
+    Command::new(std::env::current_exe().unwrap())
+        .arg("--ignored")
+        .arg("--exact")
+        .arg("provider_files::tests::provider_file_subprocess_helper")
+        .arg("--test-threads=1")
+        .env(
+            "CTX_PROVIDER_FILE_HELPER_ACTION",
+            "upsert-vcs-change-expect-busy",
+        )
+        .env("CTX_PROVIDER_FILE_HELPER_STORE", store_path)
+        .env(
+            "CTX_PROVIDER_FILE_HELPER_VCS_CHANGE",
+            serde_json::to_string(change).unwrap(),
+        )
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap()
+}
+
 fn wait_for_path(path: &std::path::Path) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !path.exists() {
@@ -544,6 +568,17 @@ fn provider_file_subprocess_helper() {
             );
             std::fs::write(output, identity.digest()).unwrap();
         }
+        "upsert-vcs-change-expect-busy" => {
+            let store = Store::open(&store_path).unwrap();
+            let change = serde_json::from_str::<ctx_history_core::VcsChange>(
+                &std::env::var("CTX_PROVIDER_FILE_HELPER_VCS_CHANGE").unwrap(),
+            )
+            .unwrap();
+            assert!(matches!(
+                store.upsert_vcs_change(&change).unwrap_err(),
+                StoreError::ProviderFileReplacementBusy { .. }
+            ));
+        }
         "partial-crash" => {
             let store = Store::open(&store_path).unwrap();
             let generation = std::env::var("CTX_PROVIDER_FILE_HELPER_GENERATION")
@@ -577,6 +612,24 @@ fn provider_file_subprocess_helper() {
                 }
             }
             panic!("helper never reached a destructive event slice");
+        }
+        "retirement-finalize-crash" => {
+            let store = Store::open(&store_path).unwrap();
+            let scope = store
+                .begin_provider_file_publication_retirement(
+                    CaptureProvider::Claude,
+                    MATERIAL_FORMAT,
+                    ROOT,
+                    PATH_A,
+                    160,
+                )
+                .unwrap()
+                .unwrap();
+            prepare_all(&store, &scope, 1);
+            reconcile_all(&store, &scope, 1);
+            store.inject_provider_file_fault(ProviderFileFaultPoint::RetirementFinalizeProcessExit);
+            let _ = store.retire_provider_file_publication(scope);
+            panic!("retirement finalization fault did not terminate the process");
         }
         other => panic!("unknown helper action {other}"),
     }

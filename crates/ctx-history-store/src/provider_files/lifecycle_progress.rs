@@ -11,6 +11,9 @@ impl Store {
             });
         }
         self.validate_provider_file_publication_scope(scope)?;
+        if scope.kind != ProviderFilePublicationKind::Replacement {
+            return Err(StoreError::InvalidProviderFilePublicationScope);
+        }
         if !scope.tracks_prior_material {
             self.ensure_active_provider_file_publication(scope)?;
             return Ok(ProviderFileReconciliationProgress {
@@ -31,8 +34,9 @@ impl Store {
 
         self.begin_immediate_batch()?;
         let result = (|| {
-            self.ensure_scope_observation_is_current(scope)?;
             let mut marker = self.load_replacement_marker(scope)?;
+            self.validate_replacement_marker(scope, &marker)?;
+            self.ensure_scope_observation_allows_progress(scope, &marker)?;
             if !marker.preparation_complete {
                 return Err(StoreError::ProviderFileReconciliationIncomplete);
             }
@@ -115,8 +119,9 @@ impl Store {
 
         self.begin_immediate_batch()?;
         let result = (|| {
-            self.ensure_scope_observation_is_current(scope)?;
             let mut marker = self.load_replacement_marker(scope)?;
+            self.validate_replacement_marker(scope, &marker)?;
+            self.ensure_scope_observation_allows_progress(scope, &marker)?;
             if marker.preparation_complete {
                 return Ok(ProviderFilePreparationProgress {
                     source_ids_staged: 0,
@@ -166,6 +171,9 @@ impl Store {
             marker.preparation_cursor = ids.last().cloned();
             marker.preparation_complete = complete;
             self.update_replacement_marker(scope, &marker)?;
+            if self.take_provider_file_fault(ProviderFileFaultPoint::PreparationBeforeCommit) {
+                return Err(StoreError::ProviderFileStaging);
+            }
             Ok(ProviderFilePreparationProgress {
                 source_ids_staged: ids.len(),
                 complete,
