@@ -1,7 +1,8 @@
 use std::{
-    fs::{self, File, Metadata},
+    fs::{File, Metadata},
     io::{self, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -22,9 +23,10 @@ const WAL_RESOURCE_REASON: &str = "SQLite WAL valid prefix exceeds the snapshot 
 const SUPER_JOURNAL_REASON: &str =
     "SQLite rollback journal belongs to an unsupported multi-database transaction";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct SqliteObservedFile {
     path: PathBuf,
+    source_file: Arc<File>,
     len: u64,
     modified_at: SystemTime,
     modified_secs: u64,
@@ -34,6 +36,22 @@ pub struct SqliteObservedFile {
     snapshot_len: u64,
     deferred_reason: Option<&'static str>,
 }
+
+impl PartialEq for SqliteObservedFile {
+    fn eq(&self, other: &Self) -> bool {
+        self.path == other.path
+            && self.len == other.len
+            && self.modified_at == other.modified_at
+            && self.modified_secs == other.modified_secs
+            && self.modified_nanos == other.modified_nanos
+            && self.sentinel == other.sentinel
+            && self.snapshot_relevant == other.snapshot_relevant
+            && self.snapshot_len == other.snapshot_len
+            && self.deferred_reason == other.deferred_reason
+    }
+}
+
+impl Eq for SqliteObservedFile {}
 
 impl SqliteObservedFile {
     pub fn path(&self) -> &Path {
@@ -66,6 +84,12 @@ impl SqliteObservedFile {
 
     pub(crate) fn snapshot_len(&self) -> u64 {
         self.snapshot_len
+    }
+
+    pub(crate) fn snapshot_reader(&self) -> io::Result<File> {
+        let mut file = self.source_file.try_clone()?;
+        file.seek(SeekFrom::Start(0))?;
+        Ok(file)
     }
 }
 
@@ -112,19 +136,55 @@ impl SqliteSourceGeneration {
 
 pub fn observe_sqlite_source_generation(path: &Path) -> io::Result<SqliteSourceGeneration> {
     let mut retryable_error = None;
+    let mut stable_invalid_error = None;
+    let mut stable_not_found_error = None;
+    let mut invalid_attempts = 0;
+    let mut not_found_attempts = 0;
     for _ in 0..SQLITE_GENERATION_MAX_ATTEMPTS {
         let before = match observe_generation_once(path) {
             Ok(generation) => generation,
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::UnexpectedEof
+                ) =>
+            {
+                let error = retryable_observation_error(error);
                 retryable_error = Some(error);
+                continue;
+            }
+            Err(error) if error.kind() == io::ErrorKind::InvalidInput => {
+                stable_invalid_error = Some(error);
+                invalid_attempts += 1;
+                continue;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                stable_not_found_error = Some(error);
+                not_found_attempts += 1;
                 continue;
             }
             Err(error) => return Err(error),
         };
         let after = match observe_generation_once(path) {
             Ok(generation) => generation,
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::UnexpectedEof
+                ) =>
+            {
+                let error = retryable_observation_error(error);
                 retryable_error = Some(error);
+                continue;
+            }
+            Err(error) if error.kind() == io::ErrorKind::InvalidInput => {
+                stable_invalid_error = Some(error);
+                invalid_attempts += 1;
+                continue;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                stable_not_found_error = Some(error);
+                not_found_attempts += 1;
                 continue;
             }
             Err(error) => return Err(error),
@@ -137,6 +197,22 @@ pub fn observe_sqlite_source_generation(path: &Path) -> io::Result<SqliteSourceG
             return Ok(after);
         }
     }
+    if invalid_attempts == SQLITE_GENERATION_MAX_ATTEMPTS {
+        return Err(stable_invalid_error.unwrap_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "SQLite source path remained invalid during observation",
+            )
+        }));
+    }
+    if not_found_attempts == SQLITE_GENERATION_MAX_ATTEMPTS {
+        return Err(stable_not_found_error.unwrap_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "SQLite source remained absent during observation",
+            )
+        }));
+    }
     if let Some(error) = retryable_error {
         return Err(error);
     }
@@ -147,6 +223,17 @@ pub fn observe_sqlite_source_generation(path: &Path) -> io::Result<SqliteSourceG
             path.display()
         ),
     ))
+}
+
+fn retryable_observation_error(error: io::Error) -> io::Error {
+    if error.kind() == io::ErrorKind::UnexpectedEof {
+        io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "SQLite source changed after file metadata was sampled",
+        )
+    } else {
+        error
+    }
 }
 
 fn observe_generation_once(path: &Path) -> io::Result<SqliteSourceGeneration> {
@@ -165,46 +252,49 @@ enum SentinelKind {
 }
 
 fn observe_required_file(path: &Path, kind: SentinelKind) -> io::Result<SqliteObservedFile> {
-    let metadata = fs::symlink_metadata(path)?;
+    run_observation_test_hook(path, SqliteObservationTestPhase::BeforeOpen);
+    let file = open_source_file_no_follow(path)?;
+    let metadata = file.metadata()?;
     if !metadata.file_type().is_file() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("SQLite source is not a regular file: {}", path.display()),
         ));
     }
-    observe_file(path, metadata, kind)
+    validate_open_source_file(&file)?;
+    observe_file(path, file, metadata, kind)
 }
 
 fn observe_optional_file(
     path: &Path,
     kind: SentinelKind,
 ) -> io::Result<Option<SqliteObservedFile>> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
+    run_observation_test_hook(path, SqliteObservationTestPhase::BeforeOpen);
+    let file = match open_source_file_no_follow(path) {
+        Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
+    let metadata = file.metadata()?;
     if !metadata.file_type().is_file() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("SQLite sidecar is not a regular file: {}", path.display()),
         ));
     }
-    match observe_file(path, metadata, kind) {
-        Ok(file) => Ok(Some(file)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
-    }
+    validate_open_source_file(&file)?;
+    observe_file(path, file, metadata, kind).map(Some)
 }
 
 fn observe_file(
     path: &Path,
+    mut file: File,
     metadata: Metadata,
     kind: SentinelKind,
 ) -> io::Result<SqliteObservedFile> {
     let modified_at = metadata.modified().unwrap_or(UNIX_EPOCH);
     let modified = modified_at.duration_since(UNIX_EPOCH).unwrap_or_default();
-    let mut file = File::open(path)?;
+    run_observation_test_hook(path, SqliteObservationTestPhase::AfterMetadata);
     let (sentinel, snapshot_relevant, snapshot_len, deferred_reason) = match kind {
         SentinelKind::Main => (
             main_header_sentinel(&mut file, &metadata)?,
@@ -212,11 +302,12 @@ fn observe_file(
             metadata.len(),
             None,
         ),
-        SentinelKind::Wal => wal_sentinel(&mut file, metadata.len())?,
+        SentinelKind::Wal => wal_sentinel(path, &mut file, metadata.len())?,
         SentinelKind::Journal => journal_sentinel(path, &mut file, metadata.len())?,
     };
     Ok(SqliteObservedFile {
         path: path.to_path_buf(),
+        source_file: Arc::new(file),
         len: metadata.len(),
         modified_at,
         modified_secs: modified.as_secs(),
@@ -226,6 +317,154 @@ fn observe_file(
         snapshot_len,
         deferred_reason,
     })
+}
+
+#[cfg(unix)]
+fn open_source_file_no_follow(path: &Path) -> io::Result<File> {
+    use std::{
+        ffi::CString,
+        os::{
+            fd::{AsRawFd, FromRawFd},
+            unix::ffi::OsStrExt,
+        },
+        path::Component,
+    };
+
+    let mut components = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::Prefix(_) => {}
+            Component::CurDir | Component::ParentDir | Component::Normal(_) => {
+                components.push(component.as_os_str())
+            }
+        }
+    }
+    let Some((file_name, parents)) = components.split_last() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "SQLite source path has no file component",
+        ));
+    };
+    let base = if path.is_absolute() { b"/\0" } else { b".\0" };
+    let base_fd = unsafe {
+        libc::open(
+            base.as_ptr().cast(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if base_fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut directory = unsafe { File::from_raw_fd(base_fd) };
+    for component in parents {
+        let component = CString::new(component.as_bytes()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "SQLite source path contains an interior NUL byte",
+            )
+        })?;
+        let fd = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                component.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if fd < 0 {
+            return Err(normalize_no_follow_open_error(io::Error::last_os_error()));
+        }
+        directory = unsafe { File::from_raw_fd(fd) };
+    }
+    let file_name = CString::new(file_name.as_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "SQLite source path contains an interior NUL byte",
+        )
+    })?;
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            file_name.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+        )
+    };
+    if fd < 0 {
+        return Err(normalize_no_follow_open_error(io::Error::last_os_error()));
+    }
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+#[cfg(unix)]
+fn normalize_no_follow_open_error(error: io::Error) -> io::Error {
+    if error
+        .raw_os_error()
+        .is_some_and(|code| code == libc::ELOOP || code == libc::ENOTDIR)
+    {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "SQLite source path contains a symbolic link or non-directory component",
+        )
+    } else {
+        error
+    }
+}
+
+#[cfg(windows)]
+fn open_source_file_no_follow(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_source_file_no_follow(_path: &Path) -> io::Result<File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "atomic no-follow SQLite source access is unsupported on this platform",
+    ))
+}
+
+#[cfg(windows)]
+fn validate_open_source_file(file: &File) -> io::Result<()> {
+    use std::{mem::MaybeUninit, os::windows::io::AsRawHandle};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileAttributeTagInfo, GetFileInformationByHandleEx, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_ATTRIBUTE_TAG_INFO,
+    };
+
+    let handle = file.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+    let mut attributes = MaybeUninit::<FILE_ATTRIBUTE_TAG_INFO>::zeroed();
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileAttributeTagInfo,
+            attributes.as_mut_ptr().cast(),
+            std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let attributes = unsafe { attributes.assume_init() };
+    if attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "SQLite source path is a reparse point",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn validate_open_source_file(_file: &File) -> io::Result<()> {
+    Ok(())
 }
 
 fn main_header_sentinel(file: &mut File, metadata: &Metadata) -> io::Result<Vec<u8>> {
@@ -326,6 +565,7 @@ fn append_main_file_identity(
 }
 
 fn wal_sentinel(
+    path: &Path,
     file: &mut File,
     len: u64,
 ) -> io::Result<(Vec<u8>, bool, u64, Option<&'static str>)> {
@@ -348,6 +588,7 @@ fn wal_sentinel(
     let mut churning_suffix = false;
     for frame in 1..=physical_frames {
         let offset = wal_frame_offset(frame, frame_size)?;
+        run_observation_test_hook(path, SqliteObservationTestPhase::BeforeWalFrameRead);
         let frame_header = read_wal_frame_header(file, offset)?;
         if frame_header[8..16] != wal_header.salts {
             stale_suffix = true;
@@ -517,6 +758,10 @@ fn journal_sentinel(
     let prefix = read_prefix(file, JOURNAL_SENTINEL_BYTES)?;
     let mut sentinel = b"sqlite-journal-v2".to_vec();
     sentinel.extend_from_slice(&prefix);
+    run_observation_test_hook(
+        journal_path,
+        SqliteObservationTestPhase::BeforeJournalTailRead,
+    );
     sentinel.extend_from_slice(&read_tail(file, len, JOURNAL_SENTINEL_BYTES)?);
     let hot = hot_journal_header(&prefix, len);
     if hot {
@@ -563,6 +808,10 @@ fn super_journal_path(
     if len < 16 {
         return Ok(None);
     }
+    run_observation_test_hook(
+        journal_path,
+        SqliteObservationTestPhase::BeforeJournalTrailerRead,
+    );
     let trailer = read_at(file, len - 16, 16)?;
     if trailer[8..16] != JOURNAL_MAGIC {
         return Ok(None);
@@ -655,9 +904,55 @@ pub(crate) fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(sidecar)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SqliteObservationTestPhase {
+    BeforeOpen,
+    AfterMetadata,
+    BeforeWalFrameRead,
+    BeforeJournalTailRead,
+    BeforeJournalTrailerRead,
+}
+
+#[cfg(test)]
+thread_local! {
+    static OBSERVATION_TEST_HOOK: std::cell::RefCell<
+        Option<Box<dyn FnMut(&Path, SqliteObservationTestPhase)>>
+    > = std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+pub(crate) struct SqliteObservationTestHookGuard;
+
+#[cfg(test)]
+impl Drop for SqliteObservationTestHookGuard {
+    fn drop(&mut self) {
+        OBSERVATION_TEST_HOOK.with(|hook| *hook.borrow_mut() = None);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_sqlite_observation_test_hook(
+    hook: impl FnMut(&Path, SqliteObservationTestPhase) + 'static,
+) -> SqliteObservationTestHookGuard {
+    OBSERVATION_TEST_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    SqliteObservationTestHookGuard
+}
+
+#[cfg(test)]
+fn run_observation_test_hook(path: &Path, phase: SqliteObservationTestPhase) {
+    OBSERVATION_TEST_HOOK.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(path, phase);
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn run_observation_test_hook(_path: &Path, _phase: SqliteObservationTestPhase) {}
+
 #[cfg(test)]
 mod tests {
-    use std::{fs, fs::FileTimes, thread, time::Duration};
+    use std::{cell::Cell, fs, fs::FileTimes, rc::Rc, thread, time::Duration};
 
     use rusqlite::Connection;
 
@@ -723,6 +1018,204 @@ mod tests {
                 assert_eq!(error.kind(), io::ErrorKind::WouldBlock, "{label}");
             }
         }
+    }
+
+    #[test]
+    fn wal_reset_after_metadata_sampling_retries_instead_of_returning_unexpected_eof() {
+        let WalFixture {
+            temp: _temp,
+            db,
+            writer,
+        } = real_wal_fixture(512);
+        let reset = Rc::new(Cell::new(false));
+        let reset_for_hook = Rc::clone(&reset);
+        let wal = sidecar_path(&db, "-wal");
+        let _hook = install_sqlite_observation_test_hook(move |path, phase| {
+            if path == wal
+                && phase == SqliteObservationTestPhase::BeforeWalFrameRead
+                && !reset_for_hook.replace(true)
+            {
+                writer
+                    .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+                    .unwrap();
+            }
+        });
+
+        let generation = observe_sqlite_source_generation(&db).unwrap();
+        assert!(reset.get());
+        assert!(!generation.requires_snapshot());
+    }
+
+    #[test]
+    fn journal_tail_truncation_after_metadata_sampling_retries() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("tail-race.db");
+        fs::write(&db, b"SQLite format 3\0").unwrap();
+        let journal = sidecar_path(&db, "-journal");
+        fs::write(&journal, real_hot_journal_bytes(512)).unwrap();
+        let truncated = Rc::new(Cell::new(false));
+        let truncated_for_hook = Rc::clone(&truncated);
+        let journal_for_hook = journal.clone();
+        let _hook = install_sqlite_observation_test_hook(move |path, phase| {
+            if path == journal_for_hook
+                && phase == SqliteObservationTestPhase::BeforeJournalTailRead
+                && !truncated_for_hook.replace(true)
+            {
+                fs::OpenOptions::new()
+                    .write(true)
+                    .open(path)
+                    .unwrap()
+                    .set_len(0)
+                    .unwrap();
+            }
+        });
+
+        let generation = observe_sqlite_source_generation(&db).unwrap();
+        assert!(truncated.get());
+        assert!(!generation.requires_snapshot());
+    }
+
+    #[test]
+    fn journal_trailer_truncation_after_tail_sampling_retries() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("trailer-race.db");
+        fs::write(&db, b"SQLite format 3\0").unwrap();
+        let journal = sidecar_path(&db, "-journal");
+        let super_journal = temp.path().join("trailer-race.db-mj");
+        fs::write(&super_journal, b"active").unwrap();
+        let mut bytes = real_hot_journal_bytes(512);
+        append_super_journal_trailer(&mut bytes, b"trailer-race.db-mj");
+        fs::write(&journal, bytes).unwrap();
+        let truncated = Rc::new(Cell::new(false));
+        let truncated_for_hook = Rc::clone(&truncated);
+        let journal_for_hook = journal.clone();
+        let _hook = install_sqlite_observation_test_hook(move |path, phase| {
+            if path == journal_for_hook
+                && phase == SqliteObservationTestPhase::BeforeJournalTrailerRead
+                && !truncated_for_hook.replace(true)
+            {
+                let len = path.metadata().unwrap().len();
+                fs::OpenOptions::new()
+                    .write(true)
+                    .open(path)
+                    .unwrap()
+                    .set_len(len - 8)
+                    .unwrap();
+            }
+        });
+
+        let generation = observe_sqlite_source_generation(&db).unwrap();
+        assert!(truncated.get());
+        assert!(generation.requires_snapshot());
+        assert!(generation.deferred_reason().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transient_symlink_before_atomic_open_retries() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("source.db");
+        fs::write(&db, b"SQLite format 3\0").unwrap();
+        let held = temp.path().join("held.db");
+        let outside = temp.path().join("outside.db");
+        fs::write(&outside, b"outside").unwrap();
+        let state = Rc::new(Cell::new(0_u8));
+        let state_for_hook = Rc::clone(&state);
+        let db_for_hook = db.clone();
+        let _hook = install_sqlite_observation_test_hook(move |path, phase| {
+            if path != db_for_hook || phase != SqliteObservationTestPhase::BeforeOpen {
+                return;
+            }
+            match state_for_hook.get() {
+                0 => {
+                    fs::rename(path, &held).unwrap();
+                    symlink(&outside, path).unwrap();
+                    state_for_hook.set(1);
+                }
+                1 => {
+                    fs::remove_file(path).unwrap();
+                    fs::rename(&held, path).unwrap();
+                    state_for_hook.set(2);
+                }
+                _ => {}
+            }
+        });
+
+        let generation = observe_sqlite_source_generation(&db).unwrap();
+        assert_eq!(state.get(), 2);
+        assert_eq!(generation.main().len(), 16);
+    }
+
+    #[test]
+    fn transient_required_main_delete_create_gap_retries() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("replace.db");
+        let bytes = b"SQLite format 3\0".to_vec();
+        fs::write(&db, &bytes).unwrap();
+        let state = Rc::new(Cell::new(0_u8));
+        let state_for_hook = Rc::clone(&state);
+        let db_for_hook = db.clone();
+        let _hook = install_sqlite_observation_test_hook(move |path, phase| {
+            if path != db_for_hook || phase != SqliteObservationTestPhase::BeforeOpen {
+                return;
+            }
+            match state_for_hook.get() {
+                0 => {
+                    fs::remove_file(path).unwrap();
+                    state_for_hook.set(1);
+                }
+                1 => {
+                    fs::write(path, &bytes).unwrap();
+                    state_for_hook.set(2);
+                }
+                _ => {}
+            }
+        });
+
+        let generation = observe_sqlite_source_generation(&db).unwrap();
+        assert_eq!(state.get(), 2);
+        assert_eq!(generation.main().len(), 16);
+    }
+
+    #[test]
+    fn stable_missing_required_main_preserves_not_found() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("missing.db");
+        let opens = Rc::new(Cell::new(0_usize));
+        let opens_for_hook = Rc::clone(&opens);
+        let _hook = install_sqlite_observation_test_hook(move |path, phase| {
+            if path == db && phase == SqliteObservationTestPhase::BeforeOpen {
+                opens_for_hook.set(opens_for_hook.get() + 1);
+            }
+        });
+
+        let error =
+            observe_sqlite_source_generation(temp.path().join("missing.db").as_path()).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert_eq!(opens.get(), SQLITE_GENERATION_MAX_ATTEMPTS);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stable_source_and_parent_symlinks_are_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let db = real.join("source.db");
+        fs::write(&db, b"SQLite format 3\0").unwrap();
+        let file_link = temp.path().join("file-link.db");
+        symlink(&db, &file_link).unwrap();
+        let error = observe_sqlite_source_generation(&file_link).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+
+        let parent_link = temp.path().join("parent-link");
+        symlink(&real, &parent_link).unwrap();
+        let error = observe_sqlite_source_generation(&parent_link.join("source.db")).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]
