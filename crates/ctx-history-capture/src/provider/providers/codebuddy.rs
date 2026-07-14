@@ -63,7 +63,7 @@ pub(crate) fn normalize_codebuddy_history(
     }
     if merged.captures.is_empty() && merged.summary.failed == 0 {
         merged.summary.failed += 1;
-        merged.summary.failures.push(ProviderImportFailure {
+        merged.summary.sample_failure(ProviderImportFailure {
             line: 0,
             error: "CodeBuddy history contained no real conversation messages".to_owned(),
         });
@@ -244,7 +244,7 @@ pub(crate) fn normalize_codebuddy_session_dir(
             Ok(value) => value,
             Err(err) => {
                 result.summary.failed += 1;
-                result.summary.failures.push(ProviderImportFailure {
+                result.summary.sample_failure(ProviderImportFailure {
                     line: session_ordinal,
                     error: format!("index.json: {err}"),
                 });
@@ -294,7 +294,7 @@ pub(crate) fn normalize_codebuddy_session_dir(
             .filter(|id| !id.trim().is_empty())
         else {
             result.summary.failed += 1;
-            result.summary.failures.push(ProviderImportFailure {
+            result.summary.sample_failure(ProviderImportFailure {
                 line: line_number,
                 error: "CodeBuddy message ref has empty id".to_owned(),
             });
@@ -302,7 +302,7 @@ pub(crate) fn normalize_codebuddy_session_dir(
         };
         if !provider_safe_path_segment(message_id) {
             result.summary.failed += 1;
-            result.summary.failures.push(ProviderImportFailure {
+            result.summary.sample_failure(ProviderImportFailure {
                 line: line_number,
                 error: "CodeBuddy message ref id is not a safe path segment".to_owned(),
             });
@@ -322,7 +322,7 @@ pub(crate) fn normalize_codebuddy_session_dir(
                 Ok(value) => value,
                 Err(err) => {
                     result.summary.failed += 1;
-                    result.summary.failures.push(ProviderImportFailure {
+                    result.summary.sample_failure(ProviderImportFailure {
                         line: line_number,
                         error: format!("messages/{message_id}.json: {err}"),
                     });
@@ -451,7 +451,7 @@ pub(crate) fn normalize_codebuddy_cli_jsonl_file(
             Ok(value) => value,
             Err(err) => {
                 result.summary.failed += 1;
-                result.summary.failures.push(ProviderImportFailure {
+                result.summary.sample_failure(ProviderImportFailure {
                     line: line_number,
                     error: format!("{}: malformed JSONL: {err}", path.display()),
                 });
@@ -630,7 +630,7 @@ pub(crate) fn codebuddy_project_index_and_conversation(
             Ok(value) => value,
             Err(err) => {
                 result.summary.failed += 1;
-                result.summary.failures.push(ProviderImportFailure {
+                result.summary.sample_failure(ProviderImportFailure {
                     line,
                     error: format!("project index.json: {err}"),
                 });
@@ -640,7 +640,7 @@ pub(crate) fn codebuddy_project_index_and_conversation(
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return (None, None),
         Err(err) => {
             result.summary.failed += 1;
-            result.summary.failures.push(ProviderImportFailure {
+            result.summary.sample_failure(ProviderImportFailure {
                 line,
                 error: format!("project index.json: {err}"),
             });

@@ -10,6 +10,7 @@ use uuid::Uuid;
 use crate::provider::importer::{
     provider_edge_uuid, provider_scoped_source_uuid, provider_session_exists_cached,
     provider_session_uuid, provider_sync_metadata, timestamps, ProviderImportTransaction,
+    ProviderImportTransactionStep,
 };
 use crate::{stable_capture_uuid, ProviderImportSummary, Result};
 
@@ -31,7 +32,10 @@ pub(crate) fn import_custom_history_edges(
     let mut transaction = ProviderImportTransaction::begin_bounded(store, true)?;
     for (line_number, edge) in edges {
         let edge_bytes = custom_edge_estimated_bytes(edge);
-        transaction.prepare_unit(store, edge_bytes)?;
+        if transaction.prepare_unit(store, edge_bytes)? == ProviderImportTransactionStep::Halted {
+            transaction.apply_maintenance_warning(summary);
+            return Ok(());
+        }
         let persist = (|| -> Result<()> {
             let edge_id = if edge.edge_type == SessionEdgeType::ParentChild {
                 provider_edge_uuid(
@@ -113,11 +117,24 @@ pub(crate) fn import_custom_history_edges(
         })();
         if let Err(error) = persist {
             transaction.rollback(store);
+            if transaction.record_interruption_after_commit(&error) {
+                transaction.apply_maintenance_warning(summary);
+                return Ok(());
+            }
             return Err(error);
         }
-        transaction.record_unit(store, edge_bytes)?;
+        if transaction.record_unit(store, edge_bytes)? == ProviderImportTransactionStep::Halted {
+            transaction.apply_maintenance_warning(summary);
+            return Ok(());
+        }
     }
-    transaction.commit(store)?;
+    if let Err(error) = transaction.commit(store) {
+        if transaction.record_interruption_after_commit(&error) {
+            transaction.apply_maintenance_warning(summary);
+            return Ok(());
+        }
+        return Err(error);
+    }
     Ok(())
 }
 

@@ -1,4 +1,4 @@
-use std::{fs::File, io::BufReader, path::Path};
+use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
@@ -9,111 +9,250 @@ use ctx_history_core::{
 };
 use serde_json::{json, Value};
 
-use crate::common::io::{
-    ensure_regular_provider_transcript_file, read_provider_jsonl_record_or_skip_oversized,
-};
 use crate::common::time::parse_rfc3339_utc;
 use crate::provider::file_touches::provider_file_touches_from_raw_value;
-use crate::provider::importer::provider_cursor_stream;
+use crate::provider::importer::{
+    provider_cursor_stream, provider_event_is_real_conversation_message,
+    ProviderNormalizationBatcher,
+};
 use crate::provider::native::{
     provider_capped_json, provider_policy_body, provider_policy_event_text, provider_role,
     provider_value_text,
 };
 use crate::{
-    ProviderAdapterContext, ProviderImportFailure, ProviderNormalizationResult, Result,
-    CLAUDE_PROJECTS_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS,
+    ProviderAdapterContext, ProviderImportFailure, ProviderJsonlReader, ProviderJsonlRecordRead,
+    ProviderNormalizationResult, Result, CLAUDE_PROJECTS_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS,
 };
+
+pub(crate) struct ClaudeJsonlScan {
+    pub(crate) header: Option<Value>,
+    pub(crate) earliest_started_at: Option<DateTime<Utc>>,
+    pub(crate) has_real_message: bool,
+    pub(crate) failed: usize,
+    pub(crate) valid_records: usize,
+}
+
+pub(crate) fn scan_claude_projects_jsonl_reader(
+    reader: &mut ProviderJsonlReader,
+    context: &ProviderAdapterContext,
+) -> Result<ClaudeJsonlScan> {
+    let mut header = None;
+    let mut earliest_started_at: Option<DateTime<Utc>> = None;
+    let mut has_real_message = false;
+    let mut failed = 0usize;
+    let mut valid_records = 0usize;
+    let mut line = Vec::new();
+    loop {
+        let line_number = match reader.read_record(&mut line)? {
+            ProviderJsonlRecordRead::Eof | ProviderJsonlRecordRead::DeferredPartial { .. } => break,
+            ProviderJsonlRecordRead::Oversized { .. } => continue,
+            ProviderJsonlRecordRead::Record { line_number, .. } => {
+                usize::try_from(line_number).unwrap_or(usize::MAX)
+            }
+        };
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let value = match serde_json::from_slice::<Value>(&line) {
+            Ok(value) => value,
+            Err(_) => {
+                failed += 1;
+                continue;
+            }
+        };
+        valid_records += 1;
+        let parsed_timestamp = value
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(parse_rfc3339_utc);
+        if let Some(timestamp) = parsed_timestamp {
+            earliest_started_at =
+                Some(earliest_started_at.map_or(timestamp, |earliest| earliest.min(timestamp)));
+        }
+        let occurred_at = parsed_timestamp.unwrap_or(context.imported_at);
+        has_real_message |= claude_event(&value, line_number, occurred_at)
+            .as_ref()
+            .is_some_and(provider_event_is_real_conversation_message);
+        header.get_or_insert(value);
+    }
+    reader.restart_import_position()?;
+    Ok(ClaudeJsonlScan {
+        header,
+        earliest_started_at,
+        has_real_message,
+        failed,
+        valid_records,
+    })
+}
 
 pub(crate) fn normalize_claude_projects_jsonl_file(
     path: &Path,
     context: &ProviderAdapterContext,
 ) -> Result<ProviderNormalizationResult> {
-    ensure_regular_provider_transcript_file(path)?;
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
+    let mut reader = ProviderJsonlReader::open_replacement(path)?;
+    normalize_claude_projects_jsonl_reader(path, &mut reader, context, None, None)
+}
+
+pub(crate) fn normalize_claude_projects_jsonl_reader(
+    path: &Path,
+    reader: &mut ProviderJsonlReader,
+    context: &ProviderAdapterContext,
+    bootstrap_header: Option<Value>,
+    authoritative_started_at: Option<DateTime<Utc>>,
+) -> Result<ProviderNormalizationResult> {
+    let scan = scan_claude_projects_jsonl_reader(reader, context)?;
+    let no_header = bootstrap_header.is_none() && scan.header.is_none();
+    let fallback_header = Value::Null;
+    let header = bootstrap_header
+        .as_ref()
+        .or(scan.header.as_ref())
+        .unwrap_or(&fallback_header);
+    let started_at = authoritative_started_at
+        .or(scan.earliest_started_at)
+        .unwrap_or(context.imported_at);
     let mut result = ProviderNormalizationResult::default();
-    let mut rows = Vec::new();
+    stream_claude_projects_jsonl_reader(path, reader, context, header, started_at, |mut batch| {
+        result.summary.merge(batch.summary);
+        result.captures.append(&mut batch.captures);
+        result.files_touched.append(&mut batch.files_touched);
+        Ok(())
+    })?;
+    if no_header && result.summary.failed == 0 {
+        result.summary.skipped += 1;
+        result.summary.skipped_sessions += 1;
+    }
+    Ok(result)
+}
+
+pub(crate) fn stream_claude_projects_jsonl_reader<F>(
+    path: &Path,
+    reader: &mut ProviderJsonlReader,
+    context: &ProviderAdapterContext,
+    header: &Value,
+    started_at: DateTime<Utc>,
+    emit: F,
+) -> Result<()>
+where
+    F: FnMut(ProviderNormalizationResult) -> Result<()>,
+{
+    let metadata = ClaudeNormalizationMetadata::new(path, context, header, started_at);
+    let mut batches = ProviderNormalizationBatcher::new(emit);
     let mut line = Vec::new();
     let mut line_number = 0usize;
-
-    while read_provider_jsonl_record_or_skip_oversized(
-        &mut reader,
+    while reader.read_record_or_skip_oversized(
         &mut line,
         &mut line_number,
-        &mut result.summary,
+        &mut batches.current_mut().summary,
     )? {
         if line.iter().all(u8::is_ascii_whitespace) {
+            batches.record_processed()?;
             continue;
         }
         let value: Value = match serde_json::from_slice(&line) {
             Ok(value) => value,
             Err(err) => {
+                let result = batches.current_mut();
                 result.summary.failed += 1;
-                result.summary.failures.push(ProviderImportFailure {
+                result.summary.sample_failure(ProviderImportFailure {
                     line: line_number,
                     error: format!("malformed JSONL in {}: {err}", path.display()),
                 });
+                batches.record_processed()?;
                 continue;
             }
         };
-        let timestamp = value
+        let occurred_at = value
             .get("timestamp")
             .and_then(Value::as_str)
             .and_then(parse_rfc3339_utc)
             .unwrap_or(context.imported_at);
-        rows.push((line_number, value, timestamp));
+        metadata.push_row(batches.current_mut(), line_number, value, occurred_at);
+        batches.record_processed()?;
     }
-    if rows.is_empty() {
-        if result.summary.failed == 0 {
-            result.summary.skipped += 1;
-            result.summary.skipped_sessions += 1;
+    batches.finish()
+}
+
+struct ClaudeNormalizationMetadata {
+    native_session_id: String,
+    provider_session_id: String,
+    parent_provider_session_id: Option<String>,
+    external_agent_id: Option<String>,
+    is_subagent: bool,
+    started_at: DateTime<Utc>,
+    cwd: Option<String>,
+    version: Option<String>,
+    git_branch: Option<String>,
+    machine_id: String,
+    imported_at: DateTime<Utc>,
+    raw_source_path: String,
+    source_root: Option<String>,
+}
+
+impl ClaudeNormalizationMetadata {
+    fn new(
+        path: &Path,
+        context: &ProviderAdapterContext,
+        header: &Value,
+        started_at: DateTime<Utc>,
+    ) -> Self {
+        let file_stem = path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or("unknown-session");
+        let native_session_id = header
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or(file_stem)
+            .to_owned();
+        let (provider_session_id, parent_provider_session_id, external_agent_id, is_subagent) =
+            claude_path_session_ids(path, &native_session_id);
+        let raw_source_path = path.display().to_string();
+        Self {
+            native_session_id,
+            provider_session_id,
+            parent_provider_session_id,
+            external_agent_id,
+            is_subagent,
+            started_at,
+            cwd: header
+                .get("cwd")
+                .and_then(Value::as_str)
+                .filter(|cwd| !cwd.trim().is_empty())
+                .map(str::to_owned),
+            version: header
+                .get("version")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            git_branch: header
+                .get("gitBranch")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            machine_id: context.machine_id.clone(),
+            imported_at: context.imported_at,
+            source_root: context
+                .source_root_display()
+                .or_else(|| Some(raw_source_path.clone())),
+            raw_source_path,
         }
-        return Ok(result);
     }
 
-    let first = &rows[0].1;
-    let file_stem = path
-        .file_stem()
-        .and_then(|name| name.to_str())
-        .unwrap_or("unknown-session");
-    let native_session_id = first
-        .get("sessionId")
-        .and_then(Value::as_str)
-        .filter(|id| !id.trim().is_empty())
-        .unwrap_or(file_stem)
-        .to_owned();
-    let (provider_session_id, parent_provider_session_id, external_agent_id, is_subagent) =
-        claude_path_session_ids(path, &native_session_id);
-    let started_at = rows
-        .iter()
-        .map(|(_, _, timestamp)| *timestamp)
-        .min()
-        .unwrap_or(context.imported_at);
-    let cwd = first
-        .get("cwd")
-        .and_then(Value::as_str)
-        .filter(|cwd| !cwd.trim().is_empty())
-        .map(str::to_owned);
-    let version = first
-        .get("version")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    let git_branch = first
-        .get("gitBranch")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    let raw_source_path = path.display().to_string();
-
-    for (line_number, value, occurred_at) in rows {
+    fn push_row(
+        &self,
+        result: &mut ProviderNormalizationResult,
+        line_number: usize,
+        value: Value,
+        occurred_at: DateTime<Utc>,
+    ) {
         let event = claude_event(&value, line_number, occurred_at);
         if let Some(event) = &event {
             result
                 .files_touched
                 .extend(provider_file_touches_from_raw_value(
                     CaptureProvider::Claude,
-                    &provider_session_id,
+                    &self.provider_session_id,
                     CLAUDE_PROJECTS_SOURCE_FORMAT,
-                    Some(raw_source_path.as_str()),
+                    Some(self.raw_source_path.as_str()),
                     &value,
                     event,
                     line_number,
@@ -126,12 +265,10 @@ pub(crate) fn normalize_claude_projects_jsonl_file(
                 provider: CaptureProvider::Claude,
                 source: ProviderSourceEnvelope {
                     source_format: CLAUDE_PROJECTS_SOURCE_FORMAT.to_owned(),
-                    machine_id: context.machine_id.clone(),
-                    observed_at: context.imported_at,
-                    raw_source_path: Some(raw_source_path.clone()),
-                    source_root: context
-                        .source_root_display()
-                        .or_else(|| Some(raw_source_path.clone())),
+                    machine_id: self.machine_id.clone(),
+                    observed_at: self.imported_at,
+                    raw_source_path: Some(self.raw_source_path.clone()),
+                    source_root: self.source_root.clone(),
                     trust: ProviderSourceTrust::ProviderNative,
                     fidelity: Fidelity::Imported,
                     cursor: Some(ProviderCursorRange {
@@ -141,44 +278,50 @@ pub(crate) fn normalize_claude_projects_jsonl_file(
                                 CaptureProvider::Claude,
                                 CLAUDE_PROJECTS_SOURCE_FORMAT,
                             ),
-                            cursor: format!("{}:line:{line_number}", path.display()),
+                            cursor: format!("{}:line:{line_number}", self.raw_source_path),
                             observed_at: occurred_at,
                         }),
                     }),
                     idempotency_key: Some(format!(
-                        "provider-source:claude:{CLAUDE_PROJECTS_SOURCE_FORMAT}:{provider_session_id}"
+                        "provider-source:claude:{CLAUDE_PROJECTS_SOURCE_FORMAT}:{}",
+                        self.provider_session_id
                     )),
                     metadata: json!({
                         "adapter": CLAUDE_PROJECTS_SOURCE_FORMAT,
-                        "native_session_id": native_session_id,
-                        "source_path": raw_source_path.clone(),
+                        "native_session_id": self.native_session_id,
+                        "source_path": self.raw_source_path,
                     }),
                 },
                 session: ProviderSessionEnvelope {
-                    provider_session_id: provider_session_id.clone(),
-                    parent_provider_session_id: parent_provider_session_id.clone(),
-                    root_provider_session_id: parent_provider_session_id.clone(),
-                    external_agent_id: external_agent_id.clone(),
-                    agent_type: if is_subagent {
+                    provider_session_id: self.provider_session_id.clone(),
+                    parent_provider_session_id: self.parent_provider_session_id.clone(),
+                    root_provider_session_id: self.parent_provider_session_id.clone(),
+                    external_agent_id: self.external_agent_id.clone(),
+                    agent_type: if self.is_subagent {
                         AgentType::Subagent
                     } else {
                         AgentType::Primary
                     },
-                    role_hint: Some(if is_subagent { "subagent" } else { "primary" }.to_owned()),
-                    is_primary: !is_subagent,
+                    role_hint: Some(
+                        if self.is_subagent { "subagent" } else { "primary" }.to_owned(),
+                    ),
+                    is_primary: !self.is_subagent,
                     status: SessionStatus::Imported,
-                    started_at,
+                    started_at: self.started_at,
                     ended_at: None,
-                    cwd: cwd.clone(),
+                    cwd: self.cwd.clone(),
                     fidelity: Fidelity::Imported,
-                    idempotency_key: Some(format!("provider-session:claude:{provider_session_id}")),
+                    idempotency_key: Some(format!(
+                        "provider-session:claude:{}",
+                        self.provider_session_id
+                    )),
                     artifacts: Vec::new(),
                     metadata: json!({
                         "source_format": CLAUDE_PROJECTS_SOURCE_FORMAT,
-                        "native_session_id": native_session_id,
-                        "version": version,
-                        "git_branch": git_branch,
-                        "source_path": path.display().to_string(),
+                        "native_session_id": self.native_session_id,
+                        "version": self.version,
+                        "git_branch": self.git_branch,
+                        "source_path": self.raw_source_path,
                         "limitations": [
                             "binary attachments are referenced by native payload metadata but not expanded",
                             "previews are capped before local indexing/export"
@@ -189,8 +332,6 @@ pub(crate) fn normalize_claude_projects_jsonl_file(
             },
         ));
     }
-
-    Ok(result)
 }
 
 pub(crate) fn claude_path_session_ids(

@@ -1,7 +1,6 @@
 use std::{
     collections::BTreeMap,
-    fs::{self, File},
-    io::BufReader,
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -18,30 +17,28 @@ use crate::provider::importer::{
     provider_command_run_from_event, provider_event_import_identity, provider_import_session_uuid,
     provider_session_uuid, provider_source_identity, provider_source_root,
     resolve_pending_provider_edges_batched, validate_provider_event_for_import,
-    ProviderCommandRunInput, ProviderImportTransaction,
+    ProviderCommandRunInput, ProviderImportTransaction, ProviderImportTransactionStep,
 };
 
-use crate::common::io::{
-    ensure_regular_provider_transcript_file, read_provider_jsonl_line_or_skip_oversized,
-    ProviderJsonlLineRead,
-};
+use crate::common::io::ensure_regular_provider_transcript_file;
 use crate::provider::importer::{
     import_provider_capture_line, import_provider_file_touched_line, provider_scoped_source_uuid,
     provider_sync_metadata, ProviderImportCaches,
 };
 use crate::{
-    CodexSessionImportOptions, CodexSessionImportProgress, NormalizedProviderImportOptions,
-    ProviderAdapterContext, ProviderImportFailure, ProviderImportSummary, Result,
-    CODEX_SESSION_SOURCE_FORMAT,
+    CaptureError, CodexSessionImportOptions, CodexSessionImportProgress,
+    NormalizedProviderImportOptions, ProviderAdapterContext, ProviderImportFailure,
+    ProviderImportSummary, ProviderJsonlReader, ProviderJsonlRecordRead,
+    ProviderJsonlReplacementReason, Result, CODEX_SESSION_SOURCE_FORMAT,
 };
 
 use crate::provider::codex::events::{
-    codex_session_capture, codex_session_header, codex_session_line_capture,
-    codex_session_line_timestamp, CodexSessionHeader, CodexSessionLineContext,
-    CodexToolCallContext,
+    codex_close_matching_tool_output_context, codex_session_capture_with_source_format,
+    codex_session_header, codex_session_line_capture, codex_session_line_timestamp,
+    CodexSessionHeader, CodexSessionLineContext, CodexToolCallContext,
 };
 use crate::provider::codex::session::{
-    codex_session_file_conversation_scan, should_parse_codex_session_line,
+    codex_session_reader_conversation_scan, should_parse_codex_session_line,
     should_skip_codex_tool_output_line,
 };
 
@@ -57,8 +54,14 @@ pub(crate) fn import_codex_session_paths_fast(
     let finish_result = store.finish_event_search_bulk_mode(&bulk_guard);
     match (import_result, finish_result) {
         (Ok(summary), Ok(())) => Ok(summary),
-        (_, Err(err)) => Err(err.into()),
-        (Err(err), Ok(())) => Err(err),
+        (Ok(mut summary), Err(error)) => {
+            summary.push_maintenance_warning(
+                crate::ProviderImportMaintenanceKind::EventSearchFinalization,
+                error.to_string(),
+            );
+            Ok(summary)
+        }
+        (Err(err), Err(_)) | (Err(err), Ok(())) => Err(err),
     }
 }
 
@@ -111,6 +114,9 @@ fn import_codex_session_paths_fast_bounded(
                 &summary,
                 false,
             );
+            if summary.requires_maintenance() {
+                break;
+            }
         }
 
         resolve_pending_provider_edges_batched(store, &mut summary, &mut caches, &mut transaction)?;
@@ -119,6 +125,12 @@ fn import_codex_session_paths_fast_bounded(
     })();
     if let Err(err) = import_result {
         transaction.rollback(store);
+        if matches!(err, crate::CaptureError::CommittedImportMaintenance)
+            || transaction.record_interruption_after_commit(&err)
+        {
+            transaction.apply_maintenance_warning(&mut summary);
+            return Ok(summary);
+        }
         return Err(err);
     }
     report_codex_import_progress(
@@ -173,7 +185,8 @@ pub(crate) fn import_codex_session_path_fast(
     transaction: &mut ProviderImportTransaction,
 ) -> Result<()> {
     ensure_regular_provider_transcript_file(path)?;
-    let conversation_scan = codex_session_file_conversation_scan(path)?;
+    let mut reader = ProviderJsonlReader::open_replacement(path)?;
+    let conversation_scan = codex_session_reader_conversation_scan(&mut reader)?;
     if !conversation_scan.has_real_conversation
         && !conversation_scan.has_malformed_header
         && !conversation_scan.has_malformed_relevant_line
@@ -193,7 +206,7 @@ pub(crate) fn import_codex_session_path_fast(
             return Ok(());
         }
         summary.failed += 1;
-        summary.failures.push(ProviderImportFailure {
+        summary.sample_failure(ProviderImportFailure {
             line: 0,
             error: codex_session_file_failure(
                 path,
@@ -202,16 +215,51 @@ pub(crate) fn import_codex_session_path_fast(
         });
         return Ok(());
     }
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
+    reader.restart_import_position()?;
     let context = ProviderAdapterContext {
         machine_id: options.machine_id.clone(),
         source_path: Some(path.to_path_buf()),
         source_root: options.source_path.clone(),
         imported_at: options.imported_at,
     };
+    match import_codex_session_reader_fast(
+        path,
+        &mut reader,
+        None,
+        CODEX_SESSION_SOURCE_FORMAT,
+        store,
+        options.history_record_id,
+        &context,
+        summary,
+        caches,
+        transaction,
+        false,
+    )? {
+        CodexSessionReaderDecision::Imported(_) => Ok(()),
+        CodexSessionReaderDecision::ReplacementRequired(_) => {
+            Err(crate::CaptureError::SystemInvariant(
+                "whole-replacement Codex import requested replacement",
+            ))
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn import_codex_session_reader_fast(
+    path: &Path,
+    reader: &mut ProviderJsonlReader,
+    bootstrap_header: Option<CodexSessionHeader>,
+    source_format: &str,
+    store: &mut Store,
+    history_record_id: Option<Uuid>,
+    context: &ProviderAdapterContext,
+    summary: &mut ProviderImportSummary,
+    caches: &mut ProviderImportCaches,
+    transaction: &mut ProviderImportTransaction,
+    reject_additional_session_header: bool,
+) -> Result<CodexSessionReaderDecision> {
     let import_options = NormalizedProviderImportOptions {
-        history_record_id: options.history_record_id,
+        history_record_id,
         persist_cursors: false,
         wrap_transaction: false,
         fast_event_inserts: true,
@@ -221,48 +269,74 @@ pub(crate) fn import_codex_session_path_fast(
         .as_ref()
         .map(|path| path.display().to_string());
 
-    let mut header = None;
+    let mut header = bootstrap_header;
     let mut header_persisted = false;
     let mut call_contexts: BTreeMap<String, CodexToolCallContext> = BTreeMap::new();
-    let mut line_number = 0usize;
+    let mut semantic_boundary = CodexSessionSemanticBoundary {
+        committed_offset: reader.committed_offset(),
+        complete_line_count: reader.complete_line_count(),
+        additional_session_header: false,
+    };
     let mut line = Vec::new();
     loop {
-        match read_provider_jsonl_line_or_skip_oversized(&mut reader, &mut line)? {
-            ProviderJsonlLineRead::Eof => break,
-            ProviderJsonlLineRead::Line { .. } => {
-                line_number += 1;
-            }
-            ProviderJsonlLineRead::Oversized { .. } => {
-                line_number += 1;
+        let line_number = match reader.read_record(&mut line)? {
+            ProviderJsonlRecordRead::Eof => break,
+            ProviderJsonlRecordRead::Record {
+                line_number: current,
+                ..
+            } => usize::try_from(current).unwrap_or(usize::MAX),
+            ProviderJsonlRecordRead::Oversized { .. } => {
                 summary.skipped += 1;
                 if header.is_none() {
                     summary.skipped_sessions += 1;
-                    return Ok(());
+                    advance_codex_semantic_boundary_if_clear(
+                        reader,
+                        &call_contexts,
+                        &mut semantic_boundary,
+                    );
+                    return Ok(CodexSessionReaderDecision::Imported(semantic_boundary));
                 }
                 summary.skipped_events += 1;
+                advance_codex_semantic_boundary_if_clear(
+                    reader,
+                    &call_contexts,
+                    &mut semantic_boundary,
+                );
                 continue;
             }
-        }
+            ProviderJsonlRecordRead::DeferredPartial { .. } => break,
+        };
         if line.iter().all(u8::is_ascii_whitespace) {
+            advance_codex_semantic_boundary_if_clear(
+                reader,
+                &call_contexts,
+                &mut semantic_boundary,
+            );
             continue;
         }
         if !should_parse_codex_session_line(&line) {
+            advance_codex_semantic_boundary_if_clear(
+                reader,
+                &call_contexts,
+                &mut semantic_boundary,
+            );
             continue;
         }
-        if should_skip_codex_tool_output_line(&line) {
-            summary.skipped += 1;
-            summary.skipped_events += 1;
-            continue;
-        }
+        let skip_tool_output = should_skip_codex_tool_output_line(&line);
 
         let value: Value = match serde_json::from_slice(&line) {
             Ok(value) => value,
             Err(err) => {
                 summary.failed += 1;
-                summary.failures.push(ProviderImportFailure {
+                summary.sample_failure(ProviderImportFailure {
                     line: line_number,
                     error: codex_session_file_failure(path, err.to_string()),
                 });
+                advance_codex_semantic_boundary_if_clear(
+                    reader,
+                    &call_contexts,
+                    &mut semantic_boundary,
+                );
                 continue;
             }
         };
@@ -271,6 +345,14 @@ pub(crate) fn import_codex_session_path_fast(
             .and_then(Value::as_str)
             .unwrap_or("unknown");
         if entry_type == "session_meta" {
+            if reject_additional_session_header && header.is_some() {
+                return Ok(CodexSessionReaderDecision::ReplacementRequired(
+                    ProviderJsonlReplacementReason::AdditionalSessionHeader,
+                ));
+            }
+            if header.is_some() {
+                semantic_boundary.additional_session_header = true;
+            }
             match codex_session_header(value) {
                 Ok(parsed) => {
                     call_contexts.clear();
@@ -279,34 +361,50 @@ pub(crate) fn import_codex_session_path_fast(
                 }
                 Err(err) => {
                     summary.failed += 1;
-                    summary.failures.push(ProviderImportFailure {
+                    summary.sample_failure(ProviderImportFailure {
                         line: line_number,
                         error: codex_session_file_failure(path, err.to_string()),
                     });
                 }
             }
+            advance_codex_semantic_boundary_if_clear(
+                reader,
+                &call_contexts,
+                &mut semantic_boundary,
+            );
             continue;
         }
 
         let Some(header) = header.as_ref() else {
             summary.failed += 1;
-            summary.failures.push(ProviderImportFailure {
+            summary.sample_failure(ProviderImportFailure {
                 line: line_number,
                 error: codex_session_file_failure(
                     path,
                     "codex session entry appeared before session_meta",
                 ),
             });
+            advance_codex_semantic_boundary_if_clear(
+                reader,
+                &call_contexts,
+                &mut semantic_boundary,
+            );
             continue;
         };
         let occurred_at = match codex_session_line_timestamp(&value, header.timestamp) {
             Ok(occurred_at) => occurred_at,
             Err(err) => {
+                codex_close_matching_tool_output_context(&value, &mut call_contexts);
                 summary.failed += 1;
-                summary.failures.push(ProviderImportFailure {
+                summary.sample_failure(ProviderImportFailure {
                     line: line_number,
                     error: codex_session_file_failure(path, err.to_string()),
                 });
+                advance_codex_semantic_boundary_if_clear(
+                    reader,
+                    &call_contexts,
+                    &mut semantic_boundary,
+                );
                 continue;
             }
         };
@@ -319,8 +417,14 @@ pub(crate) fn import_codex_session_path_fast(
                 occurred_at,
                 raw_source_path: raw_source_path.as_deref(),
                 source_root: context.source_root_display().as_deref(),
+                source_format,
             },
         );
+        if skip_tool_output {
+            summary.skipped += 1;
+            summary.skipped_events += 1;
+            line_capture.event = None;
+        }
         let event = match line_capture.event.take() {
             Some(event) if event.event_type == EventType::Notice => {
                 summary.skipped += 1;
@@ -330,10 +434,15 @@ pub(crate) fn import_codex_session_path_fast(
             Some(event) => {
                 if let Err(err) = validate_provider_event_for_import(&event) {
                     summary.failed += 1;
-                    summary.failures.push(ProviderImportFailure {
+                    summary.sample_failure(ProviderImportFailure {
                         line: line_number,
                         error: codex_session_file_failure(path, err.to_string()),
                     });
+                    advance_codex_semantic_boundary_if_clear(
+                        reader,
+                        &call_contexts,
+                        &mut semantic_boundary,
+                    );
                     continue;
                 }
                 Some(event)
@@ -341,18 +450,22 @@ pub(crate) fn import_codex_session_path_fast(
             None => None,
         };
         let has_content = event.is_some() || !line_capture.files_touched.is_empty();
-        if has_content {
-            transaction.prepare_unit(store, line.len())?;
+        if has_content
+            && transaction.prepare_unit(store, line.len())? == ProviderImportTransactionStep::Halted
+        {
+            transaction.apply_maintenance_warning(summary);
+            return Ok(CodexSessionReaderDecision::Imported(semantic_boundary));
         }
         if let Some(event) = event {
             if !header_persisted {
                 summary.merge(import_codex_session_header_fast(
                     store,
                     header,
-                    &context,
+                    context,
                     &import_options,
                     line_number,
                     caches,
+                    source_format,
                 )?);
                 header_persisted = true;
             }
@@ -361,11 +474,12 @@ pub(crate) fn import_codex_session_path_fast(
                 store,
                 header,
                 &event,
-                options.history_record_id,
+                history_record_id,
                 line_number,
                 context.imported_at,
                 raw_source_path.as_deref(),
                 source_root.as_deref(),
+                source_format,
             )?;
             summary.merge(line_summary);
         }
@@ -373,10 +487,11 @@ pub(crate) fn import_codex_session_path_fast(
             summary.merge(import_codex_session_header_fast(
                 store,
                 header,
-                &context,
+                context,
                 &import_options,
                 line_number,
                 caches,
+                source_format,
             )?);
             header_persisted = true;
         }
@@ -385,10 +500,152 @@ pub(crate) fn import_codex_session_path_fast(
             summary.accepted_content_records += 1;
         }
         if has_content {
-            transaction.record_unit(store, line.len())?;
+            let step = transaction.record_unit(store, line.len())?;
+            advance_codex_semantic_boundary_if_clear(
+                reader,
+                &call_contexts,
+                &mut semantic_boundary,
+            );
+            if step == ProviderImportTransactionStep::Halted {
+                transaction.apply_maintenance_warning(summary);
+                return Ok(CodexSessionReaderDecision::Imported(semantic_boundary));
+            }
+        } else {
+            advance_codex_semantic_boundary_if_clear(
+                reader,
+                &call_contexts,
+                &mut semantic_boundary,
+            );
         }
     }
-    Ok(())
+    Ok(CodexSessionReaderDecision::Imported(semantic_boundary))
+}
+
+pub(crate) enum CodexSessionReaderDecision {
+    Imported(CodexSessionSemanticBoundary),
+    ReplacementRequired(ProviderJsonlReplacementReason),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CodexSessionSemanticBoundary {
+    pub(crate) committed_offset: u64,
+    pub(crate) complete_line_count: u64,
+    pub(crate) additional_session_header: bool,
+}
+
+fn advance_codex_semantic_boundary_if_clear(
+    reader: &ProviderJsonlReader,
+    call_contexts: &BTreeMap<String, CodexToolCallContext>,
+    boundary: &mut CodexSessionSemanticBoundary,
+) {
+    if call_contexts.is_empty() {
+        // A complete, deterministic row is semantically consumed whether it
+        // was accepted or rejected. Advancing over poison avoids replaying it
+        // forever; unresolved tool-call context is the only frontier here.
+        boundary.committed_offset = reader.committed_offset();
+        boundary.complete_line_count = reader.complete_line_count();
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn import_codex_session_reader_bounded(
+    path: &Path,
+    reader: &mut ProviderJsonlReader,
+    bootstrap_header: Option<CodexSessionHeader>,
+    source_format: &str,
+    store: &mut Store,
+    history_record_id: Option<Uuid>,
+    context: &ProviderAdapterContext,
+    reject_additional_session_header: bool,
+) -> Result<CodexSessionBoundedImport> {
+    let bulk_guard = store.begin_event_search_bulk_mode()?;
+    let import_result = (|| {
+        let mut summary = ProviderImportSummary::default();
+        let mut caches = ProviderImportCaches::default();
+        let mut transaction = ProviderImportTransaction::begin_bounded(store, true)?;
+        let result = (|| {
+            let semantic_boundary = match import_codex_session_reader_fast(
+                path,
+                reader,
+                bootstrap_header,
+                source_format,
+                store,
+                history_record_id,
+                context,
+                &mut summary,
+                &mut caches,
+                &mut transaction,
+                reject_additional_session_header,
+            )? {
+                CodexSessionReaderDecision::Imported(boundary) => boundary,
+                CodexSessionReaderDecision::ReplacementRequired(reason) => {
+                    transaction.rollback(store);
+                    return Ok(CodexSessionBoundedImport::ReplacementRequired(reason));
+                }
+            };
+            let finish_materialization = (|| -> Result<()> {
+                resolve_pending_provider_edges_batched(
+                    store,
+                    &mut summary,
+                    &mut caches,
+                    &mut transaction,
+                )?;
+                transaction.commit(store)?;
+                Ok(())
+            })();
+            if let Err(error) = finish_materialization {
+                transaction.rollback(store);
+                if matches!(error, CaptureError::CommittedImportMaintenance)
+                    || transaction.record_interruption_after_commit(&error)
+                {
+                    transaction.apply_maintenance_warning(&mut summary);
+                    return Ok(CodexSessionBoundedImport::Imported {
+                        summary,
+                        boundary: semantic_boundary,
+                    });
+                }
+                return Err(error);
+            }
+            transaction.apply_maintenance_warning(&mut summary);
+            Ok(CodexSessionBoundedImport::Imported {
+                summary,
+                boundary: semantic_boundary,
+            })
+        })();
+        if result.is_err() {
+            transaction.rollback(store);
+        }
+        result
+    })();
+    let finish_result = store.finish_event_search_bulk_mode(&bulk_guard);
+    match (import_result, finish_result) {
+        (Ok(summary), Ok(())) => Ok(summary),
+        (
+            Ok(CodexSessionBoundedImport::Imported {
+                mut summary,
+                boundary,
+            }),
+            Err(error),
+        ) => {
+            summary.push_maintenance_warning(
+                crate::ProviderImportMaintenanceKind::EventSearchFinalization,
+                error.to_string(),
+            );
+            Ok(CodexSessionBoundedImport::Imported { summary, boundary })
+        }
+        (Ok(CodexSessionBoundedImport::ReplacementRequired(reason)), Err(_)) => {
+            Ok(CodexSessionBoundedImport::ReplacementRequired(reason))
+        }
+        (Err(err), _) => Err(err),
+    }
+}
+
+pub(crate) enum CodexSessionBoundedImport {
+    Imported {
+        summary: ProviderImportSummary,
+        boundary: CodexSessionSemanticBoundary,
+    },
+    ReplacementRequired(ProviderJsonlReplacementReason),
 }
 
 fn import_codex_session_header_fast(
@@ -398,8 +655,16 @@ fn import_codex_session_header_fast(
     import_options: &NormalizedProviderImportOptions,
     line_number: usize,
     caches: &mut ProviderImportCaches,
+    source_format: &str,
 ) -> Result<ProviderImportSummary> {
-    let capture = codex_session_capture(header, None, line_number, header.timestamp, context);
+    let capture = codex_session_capture_with_source_format(
+        header,
+        None,
+        line_number,
+        header.timestamp,
+        context,
+        source_format,
+    );
     import_provider_capture_line(store, &capture, import_options, line_number, caches)
 }
 
@@ -417,20 +682,17 @@ pub(crate) fn import_codex_provider_event_fast(
     imported_at: DateTime<Utc>,
     raw_source_path: Option<&str>,
     source_root: Option<&str>,
+    source_format: &str,
 ) -> Result<ProviderImportSummary> {
     validate_provider_event_for_import(event)?;
     let mut summary = ProviderImportSummary::default();
     let provider = CaptureProvider::Codex;
-    let source_id = provider_scoped_source_uuid(
-        provider,
-        &header.id,
-        CODEX_SESSION_SOURCE_FORMAT,
-        raw_source_path,
-    );
+    let source_id =
+        provider_scoped_source_uuid(provider, &header.id, source_format, raw_source_path);
     let source_root = provider_source_root(source_root, raw_source_path);
     let source_identity = provider_source_identity(
         provider,
-        CODEX_SESSION_SOURCE_FORMAT,
+        source_format,
         source_root.as_deref(),
         raw_source_path,
         None,
@@ -499,7 +761,7 @@ pub(crate) fn import_codex_provider_event_fast(
                 "provider_event_index": event.provider_event_index,
                 "provider_event_hash": event_hash,
                 "cursor": event.cursor,
-                "source_format": CODEX_SESSION_SOURCE_FORMAT,
+                "source_format": source_format,
                 "source_trust": ProviderSourceTrust::ProviderExport,
                 "fixture_line": line_number,
                 "imported_at": imported_at,
