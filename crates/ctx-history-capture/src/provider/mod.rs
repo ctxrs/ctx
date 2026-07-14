@@ -8,6 +8,7 @@ pub(crate) mod importer;
 pub(crate) mod native;
 pub(crate) mod providers;
 pub(crate) mod sqlite;
+pub(crate) mod sqlite_observation;
 
 pub(crate) fn provider_safe_path_segment(value: &str) -> bool {
     use std::path::{Component, Path};

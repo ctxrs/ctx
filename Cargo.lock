@@ -490,14 +490,18 @@ dependencies = [
  "chrono",
  "ctx-history-core",
  "ctx-history-store",
+ "fs2",
+ "libc",
  "rmpv",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 1.0.69",
  "url",
  "uuid",
+ "windows-sys 0.61.2",
  "zstd",
 ]
 

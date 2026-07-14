@@ -120,6 +120,10 @@ fn codex_session_catalog_large_noop_uses_metadata_cache() {
     let first_observed_at_ms = first_observed_at.timestamp_millis();
     let third_observed_at: DateTime<Utc> = "2026-06-26T12:02:00Z".parse().unwrap();
     let third_observed_at_ms = third_observed_at.timestamp_millis();
+    let source_root = root.display().to_string();
+    let first_generation = store
+        .allocate_catalog_inventory_generation(CaptureProvider::Codex, &source_root)
+        .unwrap();
 
     let first = catalog_codex_session_tree(
         &root,
@@ -127,6 +131,7 @@ fn codex_session_catalog_large_noop_uses_metadata_cache() {
         CodexSessionCatalogOptions {
             source_root: Some(root.clone()),
             cataloged_at: first_observed_at,
+            observation_generation: Some(first_generation),
             ..CodexSessionCatalogOptions::default()
         },
     )
@@ -136,13 +141,24 @@ fn codex_session_catalog_large_noop_uses_metadata_cache() {
     assert_eq!(first.cached_sessions, 0);
     assert_eq!(first.parsed_sessions, session_count);
     assert_eq!(first.failed_sessions, 0);
+    assert!(store
+        .catalog_inventory_generation_is_complete(
+            CaptureProvider::Codex,
+            &source_root,
+            first_generation,
+        )
+        .unwrap());
 
+    let second_generation = store
+        .allocate_catalog_inventory_generation(CaptureProvider::Codex, &source_root)
+        .unwrap();
     let second = catalog_codex_session_tree(
         &root,
         &store,
         CodexSessionCatalogOptions {
             source_root: Some(root.clone()),
             cataloged_at: "2026-06-26T12:01:00Z".parse().unwrap(),
+            observation_generation: Some(second_generation),
             ..CodexSessionCatalogOptions::default()
         },
     )
@@ -152,6 +168,13 @@ fn codex_session_catalog_large_noop_uses_metadata_cache() {
     assert_eq!(second.cached_sessions, session_count);
     assert_eq!(second.parsed_sessions, 0);
     assert_eq!(second.failed_sessions, 0);
+    assert!(store
+        .catalog_inventory_generation_is_complete(
+            CaptureProvider::Codex,
+            &source_root,
+            second_generation,
+        )
+        .unwrap());
     let unchanged_rows = store
         .list_catalog_sessions_for_source(CaptureProvider::Codex, &root.display().to_string())
         .unwrap();
@@ -160,12 +183,16 @@ fn codex_session_catalog_large_noop_uses_metadata_cache() {
         .all(|session| session.cataloged_at_ms == first_observed_at_ms));
 
     write_synthetic_codex_session(&root, 17, "changed-size-for-incremental-refresh");
+    let third_generation = store
+        .allocate_catalog_inventory_generation(CaptureProvider::Codex, &source_root)
+        .unwrap();
     let third = catalog_codex_session_tree(
         &root,
         &store,
         CodexSessionCatalogOptions {
             source_root: Some(root.clone()),
             cataloged_at: third_observed_at,
+            observation_generation: Some(third_generation),
             ..CodexSessionCatalogOptions::default()
         },
     )
@@ -175,6 +202,13 @@ fn codex_session_catalog_large_noop_uses_metadata_cache() {
     assert_eq!(third.cached_sessions, session_count - 1);
     assert_eq!(third.parsed_sessions, 1);
     assert_eq!(third.failed_sessions, 0);
+    assert!(store
+        .catalog_inventory_generation_is_complete(
+            CaptureProvider::Codex,
+            &source_root,
+            third_generation,
+        )
+        .unwrap());
     let changed_rows = store
         .list_catalog_sessions_for_source(CaptureProvider::Codex, &root.display().to_string())
         .unwrap();
@@ -185,6 +219,34 @@ fn codex_session_catalog_large_noop_uses_metadata_cache() {
             .count(),
         1
     );
+}
+
+#[test]
+fn codex_catalog_rejects_a_superseded_generation_before_completion() {
+    let temp = tempdir();
+    let root = temp.path().join("sessions");
+    synthetic_codex_session_tree(&root, 1);
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let source_root = root.display().to_string();
+    let superseded = store
+        .allocate_catalog_inventory_generation(CaptureProvider::Codex, &source_root)
+        .unwrap();
+    store
+        .allocate_catalog_inventory_generation(CaptureProvider::Codex, &source_root)
+        .unwrap();
+
+    let error = catalog_codex_session_tree(
+        &root,
+        &store,
+        CodexSessionCatalogOptions {
+            source_root: Some(root.clone()),
+            observation_generation: Some(superseded),
+            ..CodexSessionCatalogOptions::default()
+        },
+    )
+    .unwrap_err();
+
+    assert!(matches!(error, CaptureError::InventorySuperseded));
 }
 
 #[test]
