@@ -132,7 +132,13 @@ fn source_preinventory_requires_provider_work(
         preinventory,
         SourcePreinventory::CodexSessionCatalog(summary) if summary.failed_sessions > 0
     );
-    Ok(has_catalog_failures || source_preinventory_has_pending_work(store, source, preinventory)?)
+    let empty_manifest = matches!(
+        preinventory,
+        SourcePreinventory::SourceImportFiles(files) if files.is_empty()
+    );
+    Ok(has_catalog_failures
+        || empty_manifest
+        || source_preinventory_has_pending_work(store, source, preinventory)?)
 }
 
 fn import_one_source_inner_batched(

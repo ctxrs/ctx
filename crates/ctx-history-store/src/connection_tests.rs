@@ -6,10 +6,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{
+    hooks::{AuthAction, Authorization, TransactionOperation},
+    params, Connection, OptionalExtension,
+};
 
 use crate::{CatalogSession, IndexingAdmission, IndexingWorkClass, Store, StoreError};
-use ctx_history_core::{AgentType, CaptureProvider};
+use ctx_history_core::{AgentType, CaptureProvider, HistoryRecord};
 
 const ADMISSION_CRASH_DB_ENV: &str = "CTX_TEST_ADMISSION_CRASH_DB";
 const FTS_ROTATION_DB_ENV: &str = "CTX_TEST_FTS_ROTATION_DB";
@@ -147,6 +150,58 @@ fn pressure_checkpoint_returns_bounded_with_pinned_reader_and_preserves_snapshot
 }
 
 #[test]
+fn pressure_checkpoint_escalation_does_not_wait_for_reader_pinned_after_passive() {
+    let temp = tempdir();
+    let db_path = temp.path().join("work.sqlite");
+    let store = Store::open(&db_path).unwrap();
+    store
+        .conn
+        .execute_batch(
+            "CREATE TABLE pressure_race_probe(value BLOB);\
+             INSERT INTO pressure_race_probe VALUES (zeroblob(1));\
+             PRAGMA wal_checkpoint(TRUNCATE);\
+             PRAGMA wal_autocheckpoint=0;",
+        )
+        .unwrap();
+    store
+        .conn
+        .execute(
+            "INSERT INTO pressure_race_probe VALUES (zeroblob(?1))",
+            params![40 * 1024 * 1024_i64],
+        )
+        .unwrap();
+
+    let reader = Connection::open(&db_path).unwrap();
+    let started = Instant::now();
+    let status = store
+        .with_indexing_writer_lease(|| {
+            store.checkpoint_wal_for_pressure_after_passive(|| {
+                reader.execute_batch("BEGIN").unwrap();
+                assert_eq!(
+                    reader
+                        .query_row("SELECT COUNT(*) FROM pressure_race_probe", [], |row| {
+                            row.get::<_, i64>(0)
+                        })
+                        .unwrap(),
+                    2
+                );
+                store
+                    .conn
+                    .execute(
+                        "INSERT INTO pressure_race_probe VALUES (zeroblob(?1))",
+                        params![1024_i64],
+                    )
+                    .unwrap();
+            })
+        })
+        .unwrap();
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(status.attempted);
+    assert!(status.pinned(), "{status:?}");
+    reader.execute_batch("ROLLBACK").unwrap();
+}
+
+#[test]
 fn failed_main_commit_rolls_back_sidecar_before_releasing_admission() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");
@@ -193,6 +248,229 @@ fn failed_main_commit_rolls_back_sidecar_before_releasing_admission() {
         0
     );
     store.finish_event_search_bulk_mode(&guard).unwrap();
+}
+
+#[test]
+fn nested_begin_failure_preserves_outer_transaction_leases() {
+    let temp = tempdir();
+    let db_path = temp.path().join("work.sqlite");
+    let admission = IndexingAdmission::acquire(&db_path, IndexingWorkClass::Background).unwrap();
+    let store = Store::open_admitted(&db_path, &admission).unwrap();
+    let guard = store.begin_event_search_bulk_mode().unwrap();
+
+    store.begin_immediate_batch().unwrap();
+    assert!(!store.conn.is_autocommit());
+    assert!(store.event_search_transaction_lock.borrow().is_some());
+    assert!(store.indexing_writer_lease.borrow().is_some());
+
+    assert!(store.begin_immediate_batch().is_err());
+    assert!(!store.conn.is_autocommit());
+    assert!(store.event_search_transaction_lock.borrow().is_some());
+    assert!(store.indexing_writer_lease.borrow().is_some());
+
+    store
+        .conn
+        .execute(
+            "INSERT INTO search_projection_stats (key, value, updated_at_ms) VALUES ('nested-begin-proof', 1, 0)",
+            [],
+        )
+        .unwrap();
+    store.commit_batch().unwrap();
+    assert!(store.conn.is_autocommit());
+    assert!(store.event_search_transaction_lock.borrow().is_none());
+    assert!(store.indexing_writer_lease.borrow().is_none());
+    store.finish_event_search_bulk_mode(&guard).unwrap();
+}
+
+#[test]
+fn failed_commit_and_rollback_keep_admission_until_transaction_is_cleaned_up() {
+    let temp = tempdir();
+    let db_path = temp.path().join("work.sqlite");
+    let admission = IndexingAdmission::acquire(&db_path, IndexingWorkClass::Background).unwrap();
+    let store = Store::open_admitted(&db_path, &admission).unwrap();
+    store.begin_immediate_batch().unwrap();
+    store
+        .conn
+        .execute_batch(
+            "CREATE TABLE cleanup_parent(id INTEGER PRIMARY KEY);\
+             CREATE TABLE cleanup_child(\
+                 parent_id INTEGER REFERENCES cleanup_parent(id)\
+                 DEFERRABLE INITIALLY DEFERRED\
+             );",
+        )
+        .unwrap();
+    store.commit_batch().unwrap();
+
+    let guard = store.begin_event_search_bulk_mode().unwrap();
+    store.begin_immediate_batch().unwrap();
+    store
+        .conn
+        .execute("INSERT INTO cleanup_child(parent_id) VALUES (7)", [])
+        .unwrap();
+    store.conn.authorizer(Some(
+        |context: rusqlite::hooks::AuthContext<'_>| match context.action {
+            AuthAction::Transaction {
+                operation: TransactionOperation::Rollback,
+            } => Authorization::Deny,
+            _ => Authorization::Allow,
+        },
+    ));
+
+    assert!(store.commit_batch().is_err());
+    assert!(!store.conn.is_autocommit());
+    assert!(store.event_search_transaction_lock.borrow().is_some());
+    assert!(store.indexing_writer_lease.borrow().is_some());
+
+    store
+        .conn
+        .authorizer(None::<fn(rusqlite::hooks::AuthContext<'_>) -> Authorization>);
+    store.rollback_batch().unwrap();
+    assert!(store.conn.is_autocommit());
+    assert!(store.event_search_transaction_lock.borrow().is_none());
+    assert!(store.indexing_writer_lease.borrow().is_none());
+    store.finish_event_search_bulk_mode(&guard).unwrap();
+}
+
+#[test]
+fn writable_open_installs_global_writer_admission() {
+    let temp = tempdir();
+    let db_path = temp.path().join("work.sqlite");
+    let store = Store::open(&db_path).unwrap();
+    assert_eq!(
+        store.indexing_work_class(),
+        Some(IndexingWorkClass::Foreground)
+    );
+    drop(store);
+
+    let admission = IndexingAdmission::acquire(&db_path, IndexingWorkClass::Background).unwrap();
+    let held = admission.lease().unwrap();
+    let (done_tx, done_rx) = mpsc::channel();
+    let open_path = db_path.clone();
+    let opener = thread::spawn(move || {
+        let result = Store::open(open_path);
+        done_tx.send(result.is_ok()).unwrap();
+    });
+    assert!(done_rx.recv_timeout(Duration::from_millis(100)).is_err());
+    drop(held);
+    assert!(done_rx.recv_timeout(Duration::from_secs(2)).unwrap());
+    opener.join().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn writable_open_makes_a_fresh_store_directory_private_before_lock_creation() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempdir();
+    let data_root = temp.path().join("fresh-data-root");
+    let db_path = data_root.join("work.sqlite");
+    let store = Store::open(&db_path).unwrap();
+    assert_eq!(
+        fs::metadata(&data_root).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    for path in [
+        db_path.with_extension("sqlite.indexing-writer.lock"),
+        db_path.with_extension("sqlite.indexing-foreground.lock"),
+    ] {
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    drop(store);
+}
+
+#[test]
+fn search_projection_bootstrap_is_durable_and_sliced_across_opens() {
+    let temp = tempdir();
+    let db_path = temp.path().join("work.sqlite");
+    let store = Store::open(&db_path).unwrap();
+    for index in 0..130 {
+        store
+            .insert_record(&HistoryRecord::new(
+                format!("bootstrap record {index}"),
+                format!("durable bootstrap body {index}"),
+                Vec::new(),
+                "task",
+                None,
+            ))
+            .unwrap();
+    }
+    store
+        .conn
+        .execute_batch(
+            "DELETE FROM ctx_history_search;\
+             DELETE FROM ctx_history_search_scriptgram;\
+             DELETE FROM search_projection_stats WHERE key LIKE 'search_projection_init_v1:%';",
+        )
+        .unwrap();
+    drop(store);
+
+    let first = Store::open(&db_path).unwrap();
+    assert!(first.search_projection_maintenance_pending().unwrap());
+    assert_eq!(
+        first
+            .conn
+            .query_row("SELECT COUNT(*) FROM ctx_history_search", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        0,
+        "ordinary writable open must not perform hidden FTS recovery"
+    );
+    assert!(!IndexingAdmission::status(&db_path).unwrap().writer_active);
+    drop(first);
+
+    let admission = IndexingAdmission::acquire(&db_path, IndexingWorkClass::Background).unwrap();
+    let second = Store::open_admitted(&db_path, &admission).unwrap();
+    assert!(second.search_projection_maintenance_pending().unwrap());
+    assert_eq!(
+        second
+            .conn
+            .query_row("SELECT COUNT(*) FROM ctx_history_search", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        64
+    );
+    drop(second);
+
+    let third = Store::open_admitted(&db_path, &admission).unwrap();
+    assert!(third.search_projection_maintenance_pending().unwrap());
+    assert_eq!(
+        third
+            .conn
+            .query_row("SELECT COUNT(*) FROM ctx_history_search", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        128
+    );
+    drop(third);
+
+    let complete = Store::open_admitted(&db_path, &admission).unwrap();
+    assert!(!complete.search_projection_maintenance_pending().unwrap());
+    assert_eq!(
+        complete
+            .conn
+            .query_row("SELECT COUNT(*) FROM ctx_history_search", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        130
+    );
+    assert_eq!(
+        complete
+            .conn
+            .query_row(
+                "SELECT value FROM search_projection_stats WHERE key = 'search_projection_init_v1:complete'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
 }
 
 #[test]

@@ -14,8 +14,8 @@ use crate::object_store::{
     SPOOL_DIR,
 };
 use crate::{
-    IndexingAdmission, Result, Store, StoreError, WalCheckpointStatus, SCHEMA_VERSION,
-    WAL_PASSIVE_MIN_BYTES, WAL_RESTART_MIN_BYTES, WAL_TRUNCATE_MIN_BYTES,
+    IndexingAdmission, IndexingWorkClass, Result, Store, StoreError, WalCheckpointStatus,
+    SCHEMA_VERSION, WAL_PASSIVE_MIN_BYTES, WAL_RESTART_MIN_BYTES, WAL_TRUNCATE_MIN_BYTES,
 };
 
 pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_millis(30_000);
@@ -66,7 +66,9 @@ impl Store {
     }
 
     pub fn open_with_busy_timeout(path: impl AsRef<Path>, busy_timeout: Duration) -> Result<Self> {
-        Self::open_inner(path.as_ref(), busy_timeout, None)
+        let path = path.as_ref();
+        let admission = IndexingAdmission::acquire(path, IndexingWorkClass::Foreground)?;
+        Self::open_inner(path, busy_timeout, admission, false)
     }
 
     pub fn open_admitted(path: impl AsRef<Path>, admission: &IndexingAdmission) -> Result<Self> {
@@ -78,22 +80,16 @@ impl Store {
         busy_timeout: Duration,
         admission: &IndexingAdmission,
     ) -> Result<Self> {
-        let store = Self::open_inner(path.as_ref(), busy_timeout, Some(admission.clone()))?;
-        if store.event_search_maintenance_pending()? {
-            store.run_event_search_maintenance_slice()?;
-        }
-        Ok(store)
+        Self::open_inner(path.as_ref(), busy_timeout, admission.clone(), true)
     }
 
     fn open_inner(
         path: &Path,
         busy_timeout: Duration,
-        indexing_admission: Option<IndexingAdmission>,
+        indexing_admission: IndexingAdmission,
+        run_maintenance_on_open: bool,
     ) -> Result<Self> {
-        let _open_lease = indexing_admission
-            .as_ref()
-            .map(IndexingAdmission::lease)
-            .transpose()?;
+        let open_lease = indexing_admission.lease()?;
         let path = path.to_path_buf();
         let mut migrated_legacy_layout = false;
         if let Some(parent) = path.parent() {
@@ -121,14 +117,18 @@ impl Store {
             busy_timeout,
             event_search_bulk_depth: Default::default(),
             event_search_transaction_lock: Default::default(),
-            indexing_admission,
+            indexing_admission: Some(indexing_admission),
             indexing_writer_lease: Default::default(),
         };
-        store.migrate()?;
+        store.migrate_unleased()?;
         if migrated_legacy_layout {
             store.normalize_legacy_blob_paths()?;
         }
+        drop(open_lease);
         store.ensure_search_projection_initialized()?;
+        if run_maintenance_on_open && store.event_search_maintenance_pending()? {
+            store.run_event_search_maintenance_slice()?;
+        }
         Ok(store)
     }
 
@@ -153,11 +153,14 @@ impl Store {
             }
             Err(error) => {
                 // SQLite can leave a transaction active after a deferred
-                // constraint fails at COMMIT. Resolve both transactions while
-                // admission is still held, then expose the original failure.
+                // constraint fails at COMMIT. Release admission only after the
+                // main transaction is definitely gone; a failed rollback must
+                // leave this Store exclusive until cleanup can be retried.
                 let _ = self.conn.execute_batch("ROLLBACK");
-                let _ = self.release_event_search_transaction_lock(false);
-                self.release_indexing_writer_lease();
+                if self.conn.is_autocommit() {
+                    let _ = self.release_event_search_transaction_lock(false);
+                    self.release_indexing_writer_lease();
+                }
                 Err(error.into())
             }
         }
@@ -168,8 +171,13 @@ impl Store {
             .conn
             .execute_batch("ROLLBACK")
             .map_err(StoreError::from);
-        let lock_result = self.release_event_search_transaction_lock(false);
-        self.release_indexing_writer_lease();
+        let lock_result = if self.conn.is_autocommit() {
+            let result = self.release_event_search_transaction_lock(false);
+            self.release_indexing_writer_lease();
+            result
+        } else {
+            Ok(())
+        };
         rollback_result.and(lock_result)
     }
 
@@ -202,16 +210,24 @@ impl Store {
         event_search_lock: bool,
         prepare_bulk_mode: bool,
     ) -> Result<bool> {
+        let writer_lease_preexisting = self.indexing_writer_lease_held();
         if !self.acquire_indexing_writer_lease(nonblocking)? {
             return Ok(false);
         }
+        let event_search_lock_preexisting = self.event_search_transaction_lock_held();
         if event_search_lock && !self.acquire_event_search_transaction_lock(nonblocking)? {
-            self.release_indexing_writer_lease();
+            if !writer_lease_preexisting {
+                self.release_indexing_writer_lease();
+            }
             return Ok(false);
         }
         if let Err(error) = self.conn.execute_batch("BEGIN IMMEDIATE") {
-            let _ = self.release_event_search_transaction_lock(false);
-            self.release_indexing_writer_lease();
+            if !event_search_lock_preexisting {
+                let _ = self.release_event_search_transaction_lock(false);
+            }
+            if !writer_lease_preexisting {
+                self.release_indexing_writer_lease();
+            }
             return Err(error.into());
         }
         if prepare_bulk_mode {
@@ -254,6 +270,13 @@ impl Store {
     }
 
     fn checkpoint_wal_for_pressure_unleased(&self) -> Result<WalCheckpointStatus> {
+        self.checkpoint_wal_for_pressure_after_passive(|| {})
+    }
+
+    pub(crate) fn checkpoint_wal_for_pressure_after_passive(
+        &self,
+        after_passive: impl FnOnce(),
+    ) -> Result<WalCheckpointStatus> {
         let before_bytes = self.wal_bytes()?.unwrap_or(0);
         if before_bytes < WAL_PASSIVE_MIN_BYTES {
             return Ok(WalCheckpointStatus {
@@ -263,6 +286,7 @@ impl Store {
         }
 
         let passive = self.checkpoint_wal("PASSIVE")?;
+        after_passive();
         let after_bytes = self.wal_bytes()?.unwrap_or(0);
         let mut status = WalCheckpointStatus {
             attempted: true,
@@ -335,7 +359,9 @@ impl Store {
             "TRUNCATE" => "PRAGMA wal_checkpoint(TRUNCATE)",
             _ => unreachable!("unsupported WAL checkpoint mode"),
         };
-        self.conn
+        self.conn.busy_timeout(Duration::ZERO)?;
+        let outcome = self
+            .conn
             .query_row(sql, [], |row| {
                 Ok(WalCheckpointOutcome {
                     busy: row.get::<_, i64>(0)? != 0,
@@ -343,7 +369,15 @@ impl Store {
                     checkpointed_frames: row.get(2)?,
                 })
             })
-            .map_err(StoreError::from)
+            .map_err(StoreError::from);
+        let restore = self
+            .conn
+            .busy_timeout(self.busy_timeout)
+            .map_err(StoreError::from);
+        match (outcome, restore) {
+            (Ok(outcome), Ok(())) => Ok(outcome),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        }
     }
 
     pub fn validate(&self) -> Result<Vec<String>> {

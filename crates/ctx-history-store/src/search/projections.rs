@@ -25,6 +25,12 @@ use crate::{Result, Store};
 const SEMANTIC_SEARCHABLE_ITEMS_STAT_KEY: &str = "semantic_searchable_lite_turn_items_v3";
 const SEMANTIC_TURN_TEXT_MAX_CHARS: usize = 64 * 1024;
 const SEMANTIC_LITE_TURN_RANK_BUCKET: &str = "lite_turn";
+const SEARCH_PROJECTION_INIT_COMPLETE_KEY: &str = "search_projection_init_v1:complete";
+const SEARCH_PROJECTION_INIT_STAGE_KEY: &str = "search_projection_init_v1:stage";
+const SEARCH_PROJECTION_INIT_CURSOR_KEY: &str = "search_projection_init_v1:cursor";
+const SEARCH_PROJECTION_INIT_RECORDS_STAGE: i64 = 1;
+const SEARCH_PROJECTION_INIT_EVENTS_STAGE: i64 = 2;
+const SEARCH_PROJECTION_INIT_BATCH_ROWS: usize = 64;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EventSearchHit {
@@ -89,6 +95,9 @@ impl Store {
     }
 
     pub fn event_search_projection_needs_backfill(&self) -> Result<bool> {
+        if self.search_projection_maintenance_pending()? {
+            return Ok(false);
+        }
         let has_event_search = table_exists(&self.conn, "event_search")?;
         let has_event_lookup = event_search_lookup_table_ready(&self.conn)?;
         if !has_event_search && !has_event_lookup {
@@ -532,7 +541,124 @@ impl Store {
     }
 
     pub(crate) fn ensure_search_projection_initialized(&self) -> Result<()> {
-        ensure_search_projection_initialized(&self.conn)
+        if !table_exists(&self.conn, "ctx_history_search")? {
+            return Ok(());
+        }
+        if table_exists(&self.conn, "search_projection_stats")?
+            && (search_projection_stat(&self.conn, SEARCH_PROJECTION_INIT_COMPLETE_KEY)?.is_some()
+                || search_projection_stat(&self.conn, SEARCH_PROJECTION_INIT_STAGE_KEY)?.is_some())
+        {
+            return Ok(());
+        }
+        self.with_write_transaction(|| {
+            ensure_search_projection_stats_table(&self.conn)?;
+            if search_projection_stat(&self.conn, SEARCH_PROJECTION_INIT_COMPLETE_KEY)?.is_some()
+                || search_projection_stat(&self.conn, SEARCH_PROJECTION_INIT_STAGE_KEY)?.is_some()
+            {
+                return Ok(());
+            }
+            if !table_has_rows(&self.conn, "history_records")?
+                && !table_has_rows(&self.conn, "events")?
+            {
+                set_search_projection_stat(&self.conn, SEARCH_PROJECTION_INIT_COMPLETE_KEY, 1)?;
+                return Ok(());
+            }
+            set_search_projection_stat(
+                &self.conn,
+                SEARCH_PROJECTION_INIT_STAGE_KEY,
+                SEARCH_PROJECTION_INIT_RECORDS_STAGE,
+            )?;
+            set_search_projection_stat(&self.conn, SEARCH_PROJECTION_INIT_CURSOR_KEY, 0)
+        })
+    }
+
+    pub(crate) fn search_projection_maintenance_pending(&self) -> Result<bool> {
+        Ok(search_projection_stat(&self.conn, SEARCH_PROJECTION_INIT_STAGE_KEY)?.is_some())
+    }
+
+    pub(crate) fn run_search_projection_maintenance_slice(&self) -> Result<bool> {
+        if !self.search_projection_maintenance_pending()? {
+            return Ok(false);
+        }
+        self.begin_immediate_batch()?;
+        let slice = match self.begin_indexing_slice() {
+            Ok(slice) => slice,
+            Err(error) => {
+                let _ = self.rollback_batch();
+                return Err(error);
+            }
+        };
+        let result = self.run_search_projection_maintenance_transaction(&slice);
+        if let Err(error) = result {
+            let _ = self.rollback_batch();
+            return Err(error);
+        }
+        if let Err(error) = self.commit_batch() {
+            let _ = self.rollback_batch();
+            return Err(error);
+        }
+        self.finish_indexing_slice(slice)?;
+        self.search_projection_maintenance_pending()
+    }
+
+    fn run_search_projection_maintenance_transaction(
+        &self,
+        slice: &crate::IndexingSlice,
+    ) -> Result<()> {
+        let mut remaining = SEARCH_PROJECTION_INIT_BATCH_ROWS;
+        while remaining > 0 {
+            let stage = search_projection_stat(&self.conn, SEARCH_PROJECTION_INIT_STAGE_KEY)?
+                .unwrap_or(SEARCH_PROJECTION_INIT_RECORDS_STAGE);
+            let cursor =
+                search_projection_stat(&self.conn, SEARCH_PROJECTION_INIT_CURSOR_KEY)?.unwrap_or(0);
+            let table = match stage {
+                SEARCH_PROJECTION_INIT_RECORDS_STAGE => "history_records",
+                SEARCH_PROJECTION_INIT_EVENTS_STAGE => "events",
+                _ => unreachable!("invalid search projection initialization stage {stage}"),
+            };
+            let rows = projection_source_rows(&self.conn, table, cursor, remaining)?;
+            if rows.is_empty() {
+                if stage == SEARCH_PROJECTION_INIT_RECORDS_STAGE {
+                    set_search_projection_stat(
+                        &self.conn,
+                        SEARCH_PROJECTION_INIT_STAGE_KEY,
+                        SEARCH_PROJECTION_INIT_EVENTS_STAGE,
+                    )?;
+                    set_search_projection_stat(&self.conn, SEARCH_PROJECTION_INIT_CURSOR_KEY, 0)?;
+                    continue;
+                }
+                self.conn.execute(
+                    "DELETE FROM search_projection_stats WHERE key IN (?1, ?2)",
+                    params![
+                        SEARCH_PROJECTION_INIT_STAGE_KEY,
+                        SEARCH_PROJECTION_INIT_CURSOR_KEY
+                    ],
+                )?;
+                set_search_projection_stat(&self.conn, SEARCH_PROJECTION_INIT_COMPLETE_KEY, 1)?;
+                return Ok(());
+            }
+
+            for (rowid, id) in rows {
+                match stage {
+                    SEARCH_PROJECTION_INIT_RECORDS_STAGE => {
+                        let record = self.get_record(parse_uuid(id)?)?;
+                        upsert_record_search_projection(&self.conn, &record)?;
+                    }
+                    SEARCH_PROJECTION_INIT_EVENTS_STAGE => {
+                        let event_id = parse_uuid(id)?;
+                        let event = self.get_event(event_id)?;
+                        upsert_event_search_projection_for_event(&self.conn, event_id, &event)?;
+                    }
+                    _ => unreachable!(),
+                }
+                set_search_projection_stat(&self.conn, SEARCH_PROJECTION_INIT_CURSOR_KEY, rowid)?;
+                remaining -= 1;
+                if remaining == 0 || self.indexing_slice_should_rotate(slice)? {
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn normalize_legacy_blob_paths(&self) -> Result<()> {
@@ -756,51 +882,6 @@ fn fts_table_has_columns(conn: &Connection, table: &str, required: &[&str]) -> R
         .all(|required| columns.iter().any(|column| column == required)))
 }
 
-fn ensure_search_projection_initialized(conn: &Connection) -> Result<()> {
-    if !table_exists(conn, "ctx_history_search")? {
-        return Ok(());
-    }
-
-    let mut projection_rows = table_row_count(conn, "ctx_history_search")?;
-    if table_exists(conn, "event_search")? {
-        projection_rows += table_row_count(conn, "event_search")?;
-    }
-    if event_scriptgram_table_ready(conn)? {
-        projection_rows += table_row_count(conn, "event_search_scriptgram")?;
-    }
-    let event_lookup_rows = if event_search_lookup_table_ready(conn)? {
-        table_row_count(conn, "event_search_lookup")?
-    } else {
-        0
-    };
-    projection_rows += event_lookup_rows;
-    if table_exists(conn, "artifact_search")? {
-        projection_rows += table_row_count(conn, "artifact_search")?;
-    }
-    if projection_rows > 0 {
-        if event_search_lookup_table_ready(conn)?
-            && event_lookup_rows == 0
-            && event_search_lookup_candidate_count(conn)? > 0
-        {
-            rebuild_event_search_lookup_projection(conn)?;
-            return Ok(());
-        }
-        if cached_semantic_searchable_item_count(conn)?.is_none() {
-            refresh_semantic_searchable_item_stats(conn)?;
-        }
-        return Ok(());
-    }
-
-    if table_row_count(conn, "history_records")? > 0
-        || table_row_count(conn, "events")? > 0
-        || linked_artifact_preview_count(conn)? > 0
-    {
-        rebuild_search_projection(conn)?;
-    }
-
-    Ok(())
-}
-
 fn table_row_count(conn: &Connection, table: &str) -> Result<i64> {
     match table {
         "artifacts"
@@ -816,6 +897,60 @@ fn table_row_count(conn: &Connection, table: &str) -> Result<i64> {
     }
     let sql = format!("SELECT COUNT(*) FROM {table}");
     Ok(conn.query_row(&sql, [], |row| row.get(0))?)
+}
+
+fn table_has_rows(conn: &Connection, table: &str) -> Result<bool> {
+    match table {
+        "events" | "history_records" => {}
+        _ => unreachable!("invalid table {table}"),
+    }
+    let sql = format!("SELECT EXISTS(SELECT 1 FROM {table} LIMIT 1)");
+    Ok(conn.query_row(&sql, [], |row| row.get(0))?)
+}
+
+fn projection_source_rows(
+    conn: &Connection,
+    table: &str,
+    after_rowid: i64,
+    limit: usize,
+) -> Result<Vec<(i64, String)>> {
+    match table {
+        "events" | "history_records" => {}
+        _ => unreachable!("invalid table {table}"),
+    }
+    let sql = format!("SELECT rowid, id FROM {table} WHERE rowid > ?1 ORDER BY rowid LIMIT ?2");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![after_rowid, limit as i64], |row| {
+        Ok((row.get(0)?, row.get(1)?))
+    })?;
+    collect_rows(rows)
+}
+
+fn search_projection_stat(conn: &Connection, key: &str) -> Result<Option<i64>> {
+    if !table_exists(conn, "search_projection_stats")? {
+        return Ok(None);
+    }
+    Ok(conn
+        .query_row(
+            "SELECT value FROM search_projection_stats WHERE key = ?1",
+            params![key],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+fn set_search_projection_stat(conn: &Connection, key: &str, value: i64) -> Result<()> {
+    conn.execute(
+        r#"
+        INSERT INTO search_projection_stats (key, value, updated_at_ms)
+        VALUES (?1, ?2, ?3)
+        ON CONFLICT(key) DO UPDATE SET
+            value = excluded.value,
+            updated_at_ms = excluded.updated_at_ms
+        "#,
+        params![key, value, utc_now().timestamp_millis()],
+    )?;
+    Ok(())
 }
 
 fn event_search_lookup_table_ready(conn: &Connection) -> Result<bool> {
@@ -956,11 +1091,6 @@ pub(crate) fn adjust_semantic_searchable_item_stats(
         ],
     )?;
     Ok(())
-}
-
-fn linked_artifact_preview_count(conn: &Connection) -> Result<i64> {
-    let _ = conn;
-    Ok(0)
 }
 
 fn semantic_lite_turn_document_select_sql(anchor_tail: &str, document_tail: &str) -> String {
