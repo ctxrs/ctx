@@ -1,11 +1,11 @@
 use ctx_history_core::CaptureProvider;
 
 use super::super::{discover_provider_sources, ProviderImportSupport, ProviderSourceStatus};
-use super::support::assert_source_status;
+use super::support::{assert_source_status, tempdir};
 
 #[test]
 fn gemini_default_source_is_empty_until_chat_transcripts_exist() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let gemini = temp.path().join(".gemini");
     std::fs::create_dir_all(&gemini).unwrap();
 
@@ -35,7 +35,7 @@ fn gemini_default_source_is_empty_until_chat_transcripts_exist() {
 
 #[test]
 fn tabnine_default_source_is_empty_until_chat_transcripts_exist() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let tabnine = temp.path().join(".tabnine/agent");
     std::fs::create_dir_all(&tabnine).unwrap();
 
@@ -69,7 +69,7 @@ fn tabnine_default_source_is_empty_until_chat_transcripts_exist() {
 
 #[test]
 fn codebuddy_default_source_accepts_cli_project_jsonl() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let codebuddy = temp.path().join(".codebuddy");
     std::fs::create_dir_all(&codebuddy).unwrap();
 
@@ -99,7 +99,7 @@ fn codebuddy_default_source_accepts_cli_project_jsonl() {
 
 #[test]
 fn codebuddy_cli_projects_probe_precedes_unrelated_root_entries() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let codebuddy = temp.path().join(".codebuddy");
     let project = codebuddy.join("projects/sanitized-workspace");
     std::fs::create_dir_all(&project).unwrap();
@@ -124,7 +124,7 @@ fn codebuddy_cli_projects_probe_precedes_unrelated_root_entries() {
 
 #[test]
 fn junie_default_source_accepts_unindexed_session_sibling() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let sessions = temp.path().join(".junie/sessions");
     let unindexed = sessions.join("session-260709-212620-18se");
     std::fs::create_dir_all(&unindexed).unwrap();
@@ -149,7 +149,7 @@ fn junie_default_source_accepts_unindexed_session_sibling() {
 
 #[test]
 fn junie_default_source_stops_at_index_entry_budget() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let sessions = temp.path().join(".junie/sessions");
     let target = sessions.join("session-after-budget");
     std::fs::create_dir_all(&target).unwrap();
@@ -172,7 +172,7 @@ fn junie_default_source_stops_at_index_entry_budget() {
 fn junie_default_source_does_not_follow_symlinked_index() {
     use std::os::unix::fs::symlink;
 
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let sessions = temp.path().join(".junie/sessions");
     let target = sessions.join("session-from-linked-index");
     std::fs::create_dir_all(&target).unwrap();
@@ -194,7 +194,7 @@ fn junie_default_source_does_not_follow_symlinked_index() {
 
 #[test]
 fn codex_default_source_is_empty_until_jsonl_sessions_exist() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let sessions = temp.path().join(".codex/sessions");
     std::fs::create_dir_all(&sessions).unwrap();
 
@@ -220,7 +220,7 @@ fn codex_default_source_is_empty_until_jsonl_sessions_exist() {
 
 #[test]
 fn native_provider_default_discovery_uses_importer_specific_file_predicates() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
 
     let pi = temp.path().join(".pi/agent/sessions");
     std::fs::create_dir_all(pi.join("--workspace--")).unwrap();

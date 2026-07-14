@@ -11,16 +11,17 @@ use super::super::{
     specs::TRAE_STATE_VSCDB_SOURCE_FORMAT,
 };
 use super::support::{
-    shared_provider_history_fixture, write_junie_discovery_session, write_kimi_discovery_wire,
-    write_lingma_discovery_db, write_mistral_vibe_discovery_session, write_mux_discovery_session,
-    write_pi_discovery_session, write_qwen_discovery_chat, write_task_json_discovery_task,
-    write_trae_discovery_db, write_trae_non_chat_state_db, CwdGuard, EnvGuard, ENV_LOCK,
+    shared_provider_history_fixture, tempdir, write_junie_discovery_session,
+    write_kimi_discovery_wire, write_lingma_discovery_db, write_mistral_vibe_discovery_session,
+    write_mux_discovery_session, write_pi_discovery_session, write_qwen_discovery_chat,
+    write_task_json_discovery_task, write_trae_discovery_db, write_trae_non_chat_state_db,
+    CwdGuard, EnvGuard, ENV_LOCK,
 };
 
 #[test]
 fn continue_discovery_uses_global_dir_env_sessions_subdir() {
     let _lock = ENV_LOCK.lock().unwrap();
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let continue_home = temp.path().join("continue-home");
     let sessions = continue_home.join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -41,7 +42,7 @@ fn continue_discovery_uses_global_dir_env_sessions_subdir() {
 #[test]
 fn kilo_discovery_uses_xdg_kilo_db_env_override_and_channel_dbs() {
     let _lock = ENV_LOCK.lock().unwrap();
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let _kilo_db = EnvGuard::remove("KILO_DB");
     let _xdg_data = EnvGuard::remove("XDG_DATA_HOME");
     let _config_dir = EnvGuard::remove("KILO_CONFIG_DIR");
@@ -100,7 +101,7 @@ fn kilo_discovery_uses_xdg_kilo_db_env_override_and_channel_dbs() {
 #[test]
 fn qwen_discovery_uses_runtime_and_home_env_overrides() {
     let _lock = ENV_LOCK.lock().unwrap();
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let runtime = temp.path().join("qwen-runtime");
     write_qwen_discovery_chat(&runtime.join("projects"));
     let qwen_home = temp.path().join("qwen-home");
@@ -122,7 +123,7 @@ fn qwen_discovery_uses_runtime_and_home_env_overrides() {
 #[test]
 fn kimi_discovery_uses_home_env_override() {
     let _lock = ENV_LOCK.lock().unwrap();
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let kimi_home = temp.path().join("kimi-home");
     write_kimi_discovery_wire(&kimi_home);
     let _home = EnvGuard::set("KIMI_CODE_HOME", kimi_home.as_os_str());
@@ -157,7 +158,7 @@ fn kimi_discovery_uses_home_env_override() {
 #[test]
 fn codebuddy_discovery_uses_localappdata_override() {
     let _lock = ENV_LOCK.lock().unwrap();
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let local_app_data = temp.path().join("local-app-data");
     let codebuddy = local_app_data.join("CodeBuddyExtension");
     let session = codebuddy
@@ -188,7 +189,7 @@ fn codebuddy_discovery_uses_localappdata_override() {
 #[test]
 fn firebender_discovery_uses_current_project_chat_history_db() {
     let _lock = ENV_LOCK.lock().unwrap();
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let project = temp.path().join("project");
     let nested = project.join("src/module");
     let db = project.join(".idea/firebender/chat_history.db");
@@ -220,7 +221,7 @@ fn firebender_discovery_uses_current_project_chat_history_db() {
 #[test]
 fn junie_discovery_uses_default_sessions_and_env_overrides() {
     let _lock = ENV_LOCK.lock().unwrap();
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let _sessions_dir = EnvGuard::remove("JUNIE_SESSIONS_DIR");
     let _junie_home = EnvGuard::remove("JUNIE_HOME");
 
@@ -268,7 +269,7 @@ fn junie_discovery_uses_default_sessions_and_env_overrides() {
 #[test]
 fn mistral_vibe_discovery_uses_default_and_home_env_sessions() {
     let _lock = ENV_LOCK.lock().unwrap();
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let _home = EnvGuard::remove("VIBE_HOME");
 
     let default_sessions = temp.path().join(".vibe/logs/session");
@@ -302,7 +303,7 @@ fn mistral_vibe_discovery_uses_default_and_home_env_sessions() {
 #[test]
 fn mux_discovery_uses_default_and_mux_root_sessions() {
     let _lock = ENV_LOCK.lock().unwrap();
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let _home = EnvGuard::remove("MUX_ROOT");
 
     let default_sessions = temp.path().join(".mux/sessions");
@@ -334,7 +335,7 @@ fn mux_discovery_uses_default_and_mux_root_sessions() {
 
 #[test]
 fn deepagents_discovery_uses_default_sessions_db() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let db = temp.path().join(".deepagents/.state/sessions.db");
     std::fs::create_dir_all(db.parent().unwrap()).unwrap();
 
@@ -370,7 +371,7 @@ fn deepagents_discovery_uses_default_sessions_db() {
 #[test]
 fn crush_discovery_uses_global_config_data_directory() {
     let _lock = ENV_LOCK.lock().unwrap();
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let config = temp.path().join("crush.json");
     let data_dir = temp.path().join("custom-crush-data");
     std::fs::create_dir_all(&data_dir).unwrap();
@@ -398,7 +399,7 @@ fn crush_discovery_uses_global_config_data_directory() {
 #[test]
 fn goose_discovery_uses_path_root_data_sessions_db() {
     let _lock = ENV_LOCK.lock().unwrap();
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let root = temp.path().join("goose-root");
     let sessions = root.join("data/sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -418,7 +419,7 @@ fn goose_discovery_uses_path_root_data_sessions_db() {
 #[test]
 fn warp_discovery_uses_documented_state_and_localappdata_paths() {
     let _lock = ENV_LOCK.lock().unwrap();
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let xdg_state = temp.path().join("xdg-state");
     let local_app_data = temp.path().join("local-app-data");
     let linux_db = xdg_state.join("warp-terminal/warp.sqlite");
@@ -445,7 +446,7 @@ fn warp_discovery_uses_documented_state_and_localappdata_paths() {
 
 #[test]
 fn lingma_discovery_uses_waylog_default_local_db_paths() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let stable = temp
         .path()
         .join(".lingma/vscode/sharedClientCache/cache/db/local.db");
@@ -470,7 +471,7 @@ fn lingma_discovery_uses_waylog_default_local_db_paths() {
 #[test]
 fn trae_discovery_uses_workspace_storage_roots_as_native_sources() {
     let _lock = ENV_LOCK.lock().unwrap();
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let appdata = temp.path().join("appdata");
     let _appdata = EnvGuard::set("APPDATA", appdata.as_os_str());
 
@@ -522,7 +523,7 @@ fn trae_discovery_uses_workspace_storage_roots_as_native_sources() {
 #[test]
 fn pi_discovery_uses_env_session_dir() {
     let _lock = ENV_LOCK.lock().unwrap();
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let custom = temp.path().join("pi-env-sessions");
     write_pi_discovery_session(&custom);
     let _session_dir = EnvGuard::set("PI_CODING_AGENT_SESSION_DIR", custom.as_os_str());
@@ -541,8 +542,8 @@ fn pi_discovery_uses_env_session_dir() {
 #[test]
 fn pi_discovery_uses_global_and_project_settings_session_dirs() {
     let _lock = ENV_LOCK.lock().unwrap();
-    let temp = tempfile::tempdir().unwrap();
-    let project = tempfile::tempdir().unwrap();
+    let temp = tempdir();
+    let project = tempdir();
     let _session_dir = EnvGuard::remove("PI_CODING_AGENT_SESSION_DIR");
     let _agent_dir = EnvGuard::remove("PI_CODING_AGENT_DIR");
 
@@ -585,7 +586,7 @@ fn pi_discovery_uses_global_and_project_settings_session_dirs() {
 #[test]
 fn cline_discovery_uses_env_data_dirs() {
     let _lock = ENV_LOCK.lock().unwrap();
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let custom = temp.path().join("custom-cline-data");
     write_task_json_discovery_task(&custom, "cline-env-task", "api_conversation_history.json");
     let _data_dir = EnvGuard::set("CLINE_DATA_DIR", custom.as_os_str());
@@ -606,7 +607,7 @@ fn cline_discovery_uses_env_data_dirs() {
 #[test]
 fn roo_discovery_uses_custom_storage_setting() {
     let _lock = ENV_LOCK.lock().unwrap();
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let custom = temp.path().join("roo-custom-storage");
     write_task_json_discovery_task(&custom, "roo-custom-task", "history_item.json");
     let settings = temp.path().join(".config/Code/User/settings.json");

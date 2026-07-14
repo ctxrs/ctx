@@ -4,11 +4,11 @@ use super::super::probes::{default_location_import_probe, BoundedProbe};
 use super::super::{
     discover_provider_sources, ProviderDefaultLocation, ProviderSourceKind, ProviderSourceStatus,
 };
-use super::support::assert_source_status;
+use super::support::{assert_source_status, tempdir};
 
 #[test]
 fn bounded_probe_reports_budget_exhausted_source_as_unknown() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let claude = temp.path().join(".claude/projects");
     std::fs::create_dir_all(&claude).unwrap();
     for index in 0..10_001 {
@@ -24,7 +24,7 @@ fn bounded_probe_reports_budget_exhausted_source_as_unknown() {
 
 #[test]
 fn default_location_probe_does_not_fallback_to_path_existence_for_unhandled_providers() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let existing = temp.path().join("shell-history");
     std::fs::write(&existing, "{}\n").unwrap();
     let location = ProviderDefaultLocation {
@@ -44,7 +44,7 @@ fn default_location_probe_does_not_fallback_to_path_existence_for_unhandled_prov
 fn default_source_probe_reports_unreadable_directory_as_unknown() {
     use std::os::unix::fs::PermissionsExt;
 
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let sessions = temp.path().join(".codex/sessions");
     std::fs::create_dir_all(&sessions).unwrap();
     let original_permissions = std::fs::metadata(&sessions).unwrap().permissions();
@@ -76,7 +76,7 @@ fn default_source_probe_reports_unreadable_directory_as_unknown() {
 fn default_source_probe_skips_unreadable_child_directory() {
     use std::os::unix::fs::PermissionsExt;
 
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let sessions = temp.path().join(".codex/sessions");
     let readable = sessions.join("readable");
     let unreadable = sessions.join("unreadable");

@@ -9,9 +9,11 @@ use rusqlite::Connection;
 use tempfile::TempDir;
 
 fn tempdir() -> TempDir {
+    let temp_root = fs::canonicalize(std::env::temp_dir())
+        .expect("system temporary directory should be canonicalizable");
     tempfile::Builder::new()
         .prefix("cursor-native-import-")
-        .tempdir()
+        .tempdir_in(temp_root)
         .unwrap()
 }
 

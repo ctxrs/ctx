@@ -95,10 +95,21 @@ pub(super) use tempfile::TempDir;
 pub(super) use uuid::Uuid;
 
 pub(super) fn tempdir() -> TempDir {
+    let temp_root = fs::canonicalize(std::env::temp_dir())
+        .expect("system temporary directory should be canonicalizable");
     tempfile::Builder::new()
         .prefix("ctx-history-capture-")
-        .tempdir()
+        .tempdir_in(temp_root)
         .unwrap()
+}
+
+#[test]
+fn test_tempdir_has_no_symlinked_parent_components() {
+    let temp = tempdir();
+    crate::common::io::ensure_provider_path_parents_are_not_symlinks(
+        &temp.path().join("provider-transcript.jsonl"),
+    )
+    .unwrap();
 }
 
 pub(super) fn assert_sqlite_source_file_unchanged(

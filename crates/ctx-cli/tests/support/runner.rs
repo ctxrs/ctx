@@ -7,7 +7,12 @@ use std::{
 use tempfile::{Builder, TempDir};
 
 pub(crate) fn tempdir() -> TempDir {
-    Builder::new().prefix("ctx-search-mvp-").tempdir().unwrap()
+    let temp_root = fs::canonicalize(std::env::temp_dir())
+        .expect("system temporary directory should be canonicalizable");
+    Builder::new()
+        .prefix("ctx-search-mvp-")
+        .tempdir_in(temp_root)
+        .unwrap()
 }
 
 pub(crate) fn ctx(temp: &TempDir) -> Command {

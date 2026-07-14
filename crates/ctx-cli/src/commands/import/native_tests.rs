@@ -6,9 +6,18 @@ use ctx_history_core::{
 use ctx_history_store::{SourceImportFile, SourceImportFileIndexUpdate};
 use serde_json::json;
 
+fn tempdir() -> tempfile::TempDir {
+    let temp_root = fs::canonicalize(std::env::temp_dir())
+        .expect("system temporary directory should be canonicalizable");
+    tempfile::Builder::new()
+        .prefix("ctx-native-import-")
+        .tempdir_in(temp_root)
+        .unwrap()
+}
+
 #[test]
 fn codex_preinventory_failures_survive_when_catalog_has_no_pending_sessions() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let source_path = temp.path().join("sessions");
     fs::create_dir_all(&source_path).unwrap();
     let source = explicit_path_source(CaptureProvider::Codex, source_path);
@@ -67,7 +76,7 @@ fn persist_indexed_root(
 
 #[test]
 fn unchanged_root_source_skips_provider_normalization() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let source_path = temp.path().join("state.db");
     let source = explicit_path_source(CaptureProvider::Hermes, source_path.clone());
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
@@ -87,7 +96,7 @@ fn unchanged_root_source_skips_provider_normalization() {
 
 #[test]
 fn unchanged_root_source_still_repairs_event_search_backfill() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");
     let source_path = temp.path().join("state.db");
     let source = explicit_path_source(CaptureProvider::Hermes, source_path);
@@ -143,7 +152,7 @@ fn unchanged_root_source_still_repairs_event_search_backfill() {
 
 #[test]
 fn changed_root_source_does_not_skip_provider_normalization() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let source_path = temp.path().join("state.db");
     let source = explicit_path_source(CaptureProvider::Hermes, source_path.clone());
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
@@ -178,7 +187,7 @@ fn changed_root_source_does_not_skip_provider_normalization() {
 
 #[test]
 fn full_rescan_does_not_skip_unchanged_root_source() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let source_path = temp.path().join("state.db");
     std::fs::write(&source_path, b"not a sqlite database").unwrap();
     let source = explicit_path_source(CaptureProvider::Hermes, source_path);
