@@ -235,13 +235,6 @@ impl SourcePreinventory {
         }
     }
 
-    pub(crate) fn source_root_file(&self) -> Option<&SourceImportFile> {
-        match self {
-            Self::SourceRoot { file, .. } => Some(file),
-            Self::None | Self::CodexSessionCatalog { .. } | Self::SourceImportFiles { .. } => None,
-        }
-    }
-
     pub(crate) fn source_root_observation(&self) -> Option<(&SourceImportFile, u64)> {
         match self {
             Self::SourceRoot {

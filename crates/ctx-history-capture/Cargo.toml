@@ -12,10 +12,13 @@ publish = false
 [dependencies]
 base64.workspace = true
 chrono.workspace = true
+fs2 = "0.4.3"
+libc.workspace = true
 rmpv.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 url.workspace = true
@@ -23,3 +26,6 @@ uuid.workspace = true
 zstd.workspace = true
 ctx-history-core = { path = "../ctx-history-core" }
 ctx-history-store = { path = "../ctx-history-store" }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_IO"] }

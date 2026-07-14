@@ -2,8 +2,9 @@ pub mod provider_sources;
 pub use provider_sources::{
     discover_provider_sources, discover_provider_sources_for_provider, provider_source_for_path,
     provider_source_spec, provider_source_specs, ProviderCatalogSupport, ProviderDefaultLocation,
-    ProviderImportSupport, ProviderSource, ProviderSourceKind, ProviderSourceSpec,
-    ProviderSourceStatus,
+    ProviderImportDependency, ProviderImportSupport, ProviderImportUnitGrouping,
+    ProviderImportUnitOwner, ProviderImportUnitSpec, ProviderSource, ProviderSourceKind,
+    ProviderSourceSpec, ProviderSourceStatus,
 };
 
 pub const CAPTURE_SCHEMA_VERSION: u32 = 1;
@@ -91,6 +92,10 @@ pub(crate) mod common {
 }
 pub use common::identity::{compute_payload_hash, stable_capture_uuid};
 pub(crate) use common::identity::{default_machine_id, fnv1a64, sanitize_filename_component};
+#[doc(hidden)]
+pub use provider::sqlite_observation::{
+    observe_sqlite_source_generation, SqliteObservedFile, SqliteSourceGeneration,
+};
 
 mod fixture;
 pub use fixture::{fixture_envelope, write_fixture};
