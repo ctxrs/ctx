@@ -259,8 +259,8 @@ pub(crate) fn run_import_internal(
     let inventory_progress =
         ProgressReporter::new(options.progress, options.json, options.operation, 0);
     inventory_progress.message("inventorying", "Preparing local history...");
-    let inventory =
-        inventory_import_sources(&store, requests).context("inventory local history sources")?;
+    let inventory = inventory_import_sources(&store, requests, args.resume)
+        .context("inventory local history sources")?;
     let planned_sources = inventory.sources;
     let inventory_failures = inventory.failures;
     let planned_total_bytes = inventory.totals.source_bytes;

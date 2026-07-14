@@ -85,6 +85,9 @@ pub(crate) fn run_migrations(conn: &Connection, user_version: i64) -> Result<()>
     if user_version < 48 {
         migrate_to_v48(conn)?;
     }
+    if user_version < 49 {
+        migrate_to_v49(conn)?;
+    }
     Ok(())
 }
 
@@ -776,6 +779,38 @@ fn migrate_to_v48(conn: &Connection) -> Result<()> {
 
             PRAGMA user_version = 48;
             "#,
+        )?;
+        Ok(())
+    })();
+
+    match migration {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;")?;
+            Ok(())
+        }
+        Err(err) => {
+            if let Err(rollback_err) = conn.execute_batch("ROLLBACK;") {
+                return Err(StoreError::Sql(rollback_err));
+            }
+            Err(err)
+        }
+    }
+}
+
+fn migrate_to_v49(conn: &Connection) -> Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE;")?;
+    let migration = (|| -> Result<()> {
+        if !table_has_column(conn, "import_inventory_generations", "completed_generation")? {
+            conn.execute_batch(
+                "ALTER TABLE import_inventory_generations\n\
+                 ADD COLUMN completed_generation INTEGER NOT NULL DEFAULT 0\n\
+                 CHECK (completed_generation >= 0 AND completed_generation <= current_generation);",
+            )?;
+        }
+        conn.execute_batch(
+            "UPDATE import_inventory_generations\n\
+             SET completed_generation = current_generation;\n\
+             PRAGMA user_version = 49;",
         )?;
         Ok(())
     })();

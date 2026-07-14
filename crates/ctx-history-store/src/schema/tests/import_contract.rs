@@ -1,5 +1,5 @@
 #[test]
-fn real_schema_v45_fixture_migrates_import_state_through_v48() {
+fn real_schema_v45_fixture_migrates_import_state_through_v49() {
     let temp = tempdir();
     let path = temp.path().join("work.sqlite");
     {
@@ -38,7 +38,7 @@ fn real_schema_v45_fixture_migrates_import_state_through_v48() {
         .conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 48);
+    assert_eq!(version, SCHEMA_VERSION);
     let indexed: (String, i64, Option<i64>, Option<i64>) = store
         .conn
         .query_row(
@@ -62,14 +62,20 @@ fn real_schema_v45_fixture_migrates_import_state_through_v48() {
         )
         .unwrap();
     assert_eq!(indexed_revision, None);
-    let generations: Vec<(String, String, String, i64)> = store
+    let generations: Vec<(String, String, String, i64, i64)> = store
         .conn
         .prepare(
-            "SELECT provider, source_root, inventory_family, current_generation FROM import_inventory_generations ORDER BY inventory_family, provider, source_root",
+            "SELECT provider, source_root, inventory_family, current_generation, completed_generation FROM import_inventory_generations ORDER BY inventory_family, provider, source_root",
         )
         .unwrap()
         .query_map([], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
         })
         .unwrap()
         .collect::<rusqlite::Result<_>>()
@@ -82,11 +88,13 @@ fn real_schema_v45_fixture_migrates_import_state_through_v48() {
                 "/missing/v45".to_owned(),
                 "catalog_sessions".to_owned(),
                 1,
+                1,
             ),
             (
                 "claude".to_owned(),
                 "/missing/v45-claude".to_owned(),
                 "source_import_files".to_owned(),
+                1,
                 1,
             ),
         ]
@@ -94,14 +102,14 @@ fn real_schema_v45_fixture_migrates_import_state_through_v48() {
 }
 
 #[test]
-fn schema_v48_grandfathers_indexed_rows_and_retries_v46_failures_without_source_reads() {
+fn schema_v48_grandfathers_rows_through_v49_and_retries_v46_failures_without_source_reads() {
     let temp = tempdir();
     let path = temp.path().join("work.sqlite");
     {
         let conn = Connection::open(&path).unwrap();
         let v46_sql = CREATE_TABLES_SQL
             .replace(
-                "CREATE TABLE IF NOT EXISTS import_inventory_generations (\n    provider TEXT NOT NULL,\n    source_root TEXT NOT NULL,\n    inventory_family TEXT NOT NULL CHECK (inventory_family IN ('catalog_sessions', 'source_import_files')),\n    current_generation INTEGER NOT NULL CHECK (current_generation > 0),\n    PRIMARY KEY (provider, source_root, inventory_family)\n);\n\n",
+                "CREATE TABLE IF NOT EXISTS import_inventory_generations (\n    provider TEXT NOT NULL,\n    source_root TEXT NOT NULL,\n    inventory_family TEXT NOT NULL CHECK (inventory_family IN ('catalog_sessions', 'source_import_files')),\n    current_generation INTEGER NOT NULL CHECK (current_generation > 0),\n    completed_generation INTEGER NOT NULL DEFAULT 0 CHECK (completed_generation >= 0 AND completed_generation <= current_generation),\n    PRIMARY KEY (provider, source_root, inventory_family)\n);\n\n",
                 "",
             )
             .replace(
@@ -155,7 +163,7 @@ fn schema_v48_grandfathers_indexed_rows_and_retries_v46_failures_without_source_
         .conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 48);
+    assert_eq!(version, SCHEMA_VERSION);
 
     let catalog_rows = store
         .conn

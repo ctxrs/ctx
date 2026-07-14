@@ -1372,6 +1372,133 @@ fn personal_agent_provider_imports_are_idempotent_and_incremental() {
 }
 
 #[test]
+fn whole_source_resume_persists_root_revision_and_next_refresh_skips() {
+    let temp = tempdir();
+    let path = write_native_nanoclaw_fixture(&temp, "nanoclaw resume root revision oracle");
+
+    let resumed = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "nanoclaw",
+        "--path",
+        &path,
+        "--resume",
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert!(
+        resumed["totals"]["imported_events"].as_u64().unwrap() > 0,
+        "{resumed:#}"
+    );
+
+    let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
+    let (import_revision, indexed_import_revision, indexed_status, inventory_unit): (
+        i64,
+        Option<i64>,
+        String,
+        String,
+    ) = conn
+        .query_row(
+            "SELECT import_revision, indexed_import_revision, indexed_status,\n\
+                    json_extract(metadata_json, '$.inventory_unit')\n\
+             FROM source_import_files\n\
+             WHERE provider = 'nanoclaw' AND source_root = ?1 AND source_path = ?1",
+            [&path],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert!(import_revision > 0);
+    assert_eq!(indexed_import_revision, Some(import_revision));
+    assert_eq!(indexed_status, "indexed");
+    assert_eq!(inventory_unit, "source_root");
+    let resume_generation: i64 = conn
+        .query_row(
+            "SELECT current_generation FROM import_inventory_generations\n\
+             WHERE provider = 'nanoclaw' AND source_root = ?1\n\
+               AND inventory_family = 'source_import_files'",
+            [&path],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(resume_generation > 0);
+    drop(conn);
+
+    let unchanged = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "nanoclaw",
+        "--path",
+        &path,
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(unchanged["totals"]["imported_events"], 0, "{unchanged:#}");
+    assert_eq!(unchanged["totals"]["skipped_events"], 0, "{unchanged:#}");
+
+    let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
+    let durable_revision: Option<i64> = conn
+        .query_row(
+            "SELECT indexed_import_revision FROM source_import_files\n\
+             WHERE provider = 'nanoclaw' AND source_root = ?1 AND source_path = ?1",
+            [&path],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(durable_revision, Some(import_revision));
+}
+
+#[test]
+fn manifested_file_resume_persists_observation_and_next_refresh_skips() {
+    let temp = tempdir();
+    let path = write_native_opencode_fixture(&temp, "opencode resume manifest oracle");
+
+    let resumed = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "opencode",
+        "--path",
+        &path,
+        "--resume",
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    assert!(
+        resumed["totals"]["imported_events"].as_u64().unwrap() > 0,
+        "{resumed:#}"
+    );
+
+    let unchanged = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "opencode",
+        "--path",
+        &path,
+        "--json",
+        "--progress",
+        "none",
+    ]));
+    let processed_events = unchanged["totals"]["imported_events"].as_u64().unwrap()
+        + unchanged["totals"]["skipped_events"].as_u64().unwrap();
+    assert_eq!(processed_events, 0, "{unchanged:#}");
+
+    let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
+    let (indexed_status, inventory_unit): (String, String) = conn
+        .query_row(
+            "SELECT indexed_status, json_extract(metadata_json, '$.inventory_unit')\n\
+             FROM source_import_files\n\
+             WHERE provider = 'opencode' AND source_root = ?1 AND source_path = ?1",
+            [&path],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(indexed_status, "indexed");
+    assert_eq!(inventory_unit, "logical_import_unit");
+}
+
+#[test]
 fn openclaw_import_accepts_explicit_session_jsonl_file() {
     let temp = tempdir();
     let query = "openclaw-explicit-file-oracle";
