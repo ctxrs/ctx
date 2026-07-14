@@ -559,7 +559,7 @@ pub(crate) fn native_jsonl_event(
     } else {
         value.clone()
     };
-    let (text, truncated, retention) = provider_policy_event_text(event_type, &text, &body_value);
+    let retained_text = provider_policy_event_text(event_type, &text, &body_value);
     let event_id = native_jsonl_event_id(provider, value, line_number);
     let tool_calls = if provider == CaptureProvider::Antigravity {
         value.get("tool_calls").map(|calls| {
@@ -593,11 +593,10 @@ pub(crate) fn native_jsonl_event(
             "entry_type": entry_type,
             "event_id": event_id,
             "native_step_index": value.get("step_index").and_then(Value::as_u64),
-            "text": text,
-            "truncated": truncated,
+            "text": retained_text.text,
+            "text_retention": retained_text.retention.as_json(),
             "tool_calls": tool_calls,
             "body": body,
-            "content_retention": retention.as_str(),
         }),
         metadata: json!({
             "source": source_format,

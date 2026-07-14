@@ -207,8 +207,7 @@ pub(crate) fn lingma_event(
         "gmt_create": row.gmt_create,
         "extra": row.extra.as_deref().map(provider_json_text),
     });
-    let (text, truncated, retention) =
-        provider_policy_event_text(draft.event_type, &draft.text, &body);
+    let retained_text = provider_policy_event_text(draft.event_type, &draft.text, &body);
     ProviderEventEnvelope {
         provider_event_index: draft.provider_event_index,
         provider_event_hash: Some(format!(
@@ -232,11 +231,10 @@ pub(crate) fn lingma_event(
         )),
         artifacts: Vec::new(),
         payload: json!({
-            "text": text,
-            "truncated": truncated,
+            "text": retained_text.text,
+            "text_retention": retained_text.retention.as_json(),
             "source_format": LINGMA_SQLITE_SOURCE_FORMAT,
             "body": provider_capped_json(&provider_policy_body(draft.event_type, &body), PROVIDER_MAX_PREVIEW_CHARS),
-            "content_retention": retention.as_str(),
         }),
         metadata: json!({
             "source": "lingma_chat_record",

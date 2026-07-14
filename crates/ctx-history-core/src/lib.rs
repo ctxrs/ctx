@@ -127,8 +127,8 @@ pub use provider::{
     ProviderCursorRange, ProviderEventEnvelope, ProviderFidelityClaims, ProviderId,
     ProviderPathKind, ProviderSessionEnvelope, ProviderSourceEnvelope, ProviderSourceTrust,
     ProviderSupportEntry, ProviderSupportMatrixDocument, ProviderSupportPath,
-    ProviderSupportStatus, PROVIDER_CAPTURE_ENVELOPE_SCHEMA_VERSION,
-    PROVIDER_SUPPORT_MATRIX_SCHEMA_VERSION,
+    ProviderSupportStatus, PROVIDER_CAPTURE_ENVELOPE_MIN_SUPPORTED_SCHEMA_VERSION,
+    PROVIDER_CAPTURE_ENVELOPE_SCHEMA_VERSION, PROVIDER_SUPPORT_MATRIX_SCHEMA_VERSION,
 };
 pub use source::{CaptureProvider, CaptureSource, CaptureSourceDescriptor, CaptureSourceKind};
 pub use sync::{

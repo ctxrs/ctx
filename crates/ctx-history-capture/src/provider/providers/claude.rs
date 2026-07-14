@@ -249,7 +249,7 @@ pub(crate) fn claude_event(
             String::new()
         }
     });
-    let (text, truncated, retention) = provider_policy_event_text(event_type, &text, content);
+    let retained_text = provider_policy_event_text(event_type, &text, content);
 
     Some(ProviderEventEnvelope {
         provider_event_index: (line_number - 1) as u64,
@@ -271,10 +271,9 @@ pub(crate) fn claude_event(
             "message_id": message.get("id").and_then(Value::as_str),
             "request_id": value.get("requestId").and_then(Value::as_str),
             "role": message_role,
-            "text": text,
-            "truncated": truncated,
+            "text": retained_text.text,
+            "text_retention": retained_text.retention.as_json(),
             "content_preview": provider_capped_json(&provider_policy_body(event_type, content), PROVIDER_MAX_PREVIEW_CHARS),
-            "content_retention": retention.as_str(),
         }),
         metadata: json!({
             "source": "claude_projects_jsonl",

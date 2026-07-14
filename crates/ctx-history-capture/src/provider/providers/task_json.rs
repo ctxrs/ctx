@@ -731,7 +731,7 @@ pub(crate) fn task_json_event(
     let event_type = task_json_event_type(&input.raw, input.source);
     let role = Some(task_json_event_role(&input.raw, input.source));
     let text = task_json_event_text(&input.raw, input.source, event_type);
-    let (text, truncated, retention) = provider_policy_event_text(event_type, &text, &input.raw);
+    let retained_text = provider_policy_event_text(event_type, &text, &input.raw);
     let native_id = task_json_string_field(&input.raw, &["id", "uuid", "messageId"])
         .unwrap_or_else(|| format!("{}-{}", input.source, input.native_index));
     let event_id = format!("{task_id}:{}:{native_id}", input.source);
@@ -754,10 +754,9 @@ pub(crate) fn task_json_event(
             "entry_type": task_json_entry_type(&input.raw, input.source),
             "event_id": event_id,
             "native_index": input.native_index,
-            "text": text,
-            "truncated": truncated,
+            "text": retained_text.text,
+            "text_retention": retained_text.retention.as_json(),
             "body": provider_capped_json(&provider_policy_body(event_type, &input.raw), PROVIDER_MAX_PREVIEW_CHARS),
-            "content_retention": retention.as_str(),
         }),
         metadata: json!({
             "source": input.source,

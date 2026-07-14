@@ -725,9 +725,9 @@ pub(crate) fn codex_tool_arguments_preview(value: &Value) -> (String, bool, bool
     if !file_touches.is_empty() {
         return codex_file_touch_arguments_preview(&file_touches);
     }
-    let (sanitized, redacted) = codex_sanitized_tool_argument_value(&parsed, None);
-    let (preview, truncated) = codex_value_preview(&sanitized, PROVIDER_MAX_PREVIEW_CHARS);
-    (preview, truncated, !redacted)
+    let (retained, fields_omitted) = codex_tool_argument_value_with_omissions(&parsed, None);
+    let (preview, truncated) = codex_value_preview(&retained, PROVIDER_MAX_PREVIEW_CHARS);
+    (preview, truncated, !fields_omitted)
 }
 pub(crate) fn codex_file_touch_arguments_preview(
     file_touches: &[crate::provider::file_touches::FileTouchDraft],
@@ -749,43 +749,43 @@ pub(crate) fn codex_file_touch_arguments_preview(
     };
     (format!("file touches: {paths}{suffix}"), omitted > 0, false)
 }
-pub(crate) fn codex_sanitized_tool_argument_value(
+pub(crate) fn codex_tool_argument_value_with_omissions(
     value: &Value,
     key: Option<&str>,
 ) -> (Value, bool) {
-    if key.is_some_and(|key| codex_tool_argument_key_should_redact(key, value)) {
-        return (codex_redacted_argument_value(value), true);
+    if key.is_some_and(|key| codex_tool_argument_key_should_omit(key, value)) {
+        return (codex_omitted_argument_value(value), true);
     }
     match value {
         Value::Array(items) => {
-            let mut redacted = false;
+            let mut fields_omitted = false;
             let items = items
                 .iter()
                 .map(|item| {
-                    let (item, item_redacted) = codex_sanitized_tool_argument_value(item, key);
-                    redacted |= item_redacted;
+                    let (item, item_omitted) = codex_tool_argument_value_with_omissions(item, key);
+                    fields_omitted |= item_omitted;
                     item
                 })
                 .collect();
-            (Value::Array(items), redacted)
+            (Value::Array(items), fields_omitted)
         }
         Value::Object(object) => {
-            let mut redacted = false;
+            let mut fields_omitted = false;
             let object = object
                 .iter()
                 .map(|(key, value)| {
-                    let (value, value_redacted) =
-                        codex_sanitized_tool_argument_value(value, Some(key));
-                    redacted |= value_redacted;
+                    let (value, value_omitted) =
+                        codex_tool_argument_value_with_omissions(value, Some(key));
+                    fields_omitted |= value_omitted;
                     (key.clone(), value)
                 })
                 .collect();
-            (Value::Object(object), redacted)
+            (Value::Object(object), fields_omitted)
         }
         _ => (value.clone(), false),
     }
 }
-pub(crate) fn codex_tool_argument_key_should_redact(key: &str, value: &Value) -> bool {
+pub(crate) fn codex_tool_argument_key_should_omit(key: &str, value: &Value) -> bool {
     let key = codex_normalized_key(key);
     matches!(
         key.as_str(),
@@ -810,11 +810,13 @@ pub(crate) fn codex_tool_argument_key_should_redact(key: &str, value: &Value) ->
     ) || (matches!(key.as_str(), "input" | "arguments" | "args" | "params")
         && codex_value_contains_patch_or_diff(value))
 }
-pub(crate) fn codex_redacted_argument_value(value: &Value) -> Value {
+pub(crate) fn codex_omitted_argument_value(value: &Value) -> Value {
     json!({
-        "content_retention": "metadata_only",
-        "omitted_bytes": codex_value_approx_bytes(value),
-        "contains_patch_or_diff": codex_value_contains_patch_or_diff(value),
+        "field_retention": {
+            "mode": "omitted",
+            "original_bytes": codex_value_approx_bytes(value),
+            "contained_patch_or_diff": codex_value_contains_patch_or_diff(value),
+        },
     })
 }
 pub(crate) fn codex_normalized_key(key: &str) -> String {

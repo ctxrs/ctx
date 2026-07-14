@@ -9,6 +9,7 @@ use ctx_history_core::{
     EventRole, EventType, Fidelity, FileTouched, ProviderCaptureEnvelope, ProviderCursorCheckpoint,
     ProviderCursorRange, ProviderEventEnvelope, ProviderSessionEnvelope, ProviderSourceEnvelope,
     ProviderSourceTrust, Session, SessionEdge, SessionEdgeType,
+    PROVIDER_CAPTURE_ENVELOPE_MIN_SUPPORTED_SCHEMA_VERSION,
     PROVIDER_CAPTURE_ENVELOPE_SCHEMA_VERSION,
 };
 use ctx_history_store::{Store, StoreError};
@@ -506,7 +507,10 @@ pub(crate) fn import_provider_capture_line(
     line_number: usize,
     caches: &mut ProviderImportCaches,
 ) -> Result<ProviderImportSummary> {
-    if capture.schema_version != PROVIDER_CAPTURE_ENVELOPE_SCHEMA_VERSION {
+    if !(PROVIDER_CAPTURE_ENVELOPE_MIN_SUPPORTED_SCHEMA_VERSION
+        ..=PROVIDER_CAPTURE_ENVELOPE_SCHEMA_VERSION)
+        .contains(&capture.schema_version)
+    {
         return Err(CaptureError::InvalidPayload(format!(
             "unsupported provider capture envelope schema version {} on line {line_number}",
             capture.schema_version

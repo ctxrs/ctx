@@ -6,7 +6,8 @@ use crate::{
     AgentType, ArtifactKind, CaptureProvider, EventRole, EventType, Fidelity, SessionStatus,
 };
 
-pub const PROVIDER_CAPTURE_ENVELOPE_SCHEMA_VERSION: u32 = 1;
+pub const PROVIDER_CAPTURE_ENVELOPE_SCHEMA_VERSION: u32 = 2;
+pub const PROVIDER_CAPTURE_ENVELOPE_MIN_SUPPORTED_SCHEMA_VERSION: u32 = 1;
 pub const PROVIDER_SUPPORT_MATRIX_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -322,7 +323,7 @@ pub struct ProviderEventEnvelope {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderCaptureEnvelope {
-    #[serde(default = "provider_capture_envelope_schema_version")]
+    #[serde(default = "provider_capture_envelope_min_supported_schema_version")]
     pub schema_version: u32,
     pub provider: CaptureProvider,
     pub source: ProviderSourceEnvelope,
@@ -387,6 +388,10 @@ pub const fn provider_capture_envelope_schema_version() -> u32 {
     PROVIDER_CAPTURE_ENVELOPE_SCHEMA_VERSION
 }
 
+const fn provider_capture_envelope_min_supported_schema_version() -> u32 {
+    PROVIDER_CAPTURE_ENVELOPE_MIN_SUPPORTED_SCHEMA_VERSION
+}
+
 pub const fn provider_support_matrix_schema_version() -> u32 {
     PROVIDER_SUPPORT_MATRIX_SCHEMA_VERSION
 }
@@ -397,6 +402,7 @@ mod tests {
 
     use super::{
         ProviderCaptureEnvelope, ProviderId, ProviderSupportMatrixDocument, ProviderSupportStatus,
+        PROVIDER_CAPTURE_ENVELOPE_MIN_SUPPORTED_SCHEMA_VERSION,
     };
 
     fn workspace_file(path: &str) -> PathBuf {
@@ -556,6 +562,13 @@ mod tests {
         let parsed: ProviderCaptureEnvelope =
             serde_json::from_str(sample).expect("envelope should parse");
         assert_eq!(parsed.schema_version, 1);
+        let legacy_without_version = sample.replacen(r#""schema_version": 1,"#, "", 1);
+        let parsed_legacy: ProviderCaptureEnvelope = serde_json::from_str(&legacy_without_version)
+            .expect("legacy envelope without a schema version should parse as v1");
+        assert_eq!(
+            parsed_legacy.schema_version,
+            PROVIDER_CAPTURE_ENVELOPE_MIN_SUPPORTED_SCHEMA_VERSION
+        );
         assert_eq!(
             parsed
                 .source

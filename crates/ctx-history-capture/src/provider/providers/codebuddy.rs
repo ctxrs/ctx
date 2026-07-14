@@ -934,8 +934,7 @@ pub(crate) fn codebuddy_event(
     event: &CodeBuddyEventInput,
 ) -> ProviderEventEnvelope {
     let event_type = EventType::Message;
-    let (text, truncated, retention) =
-        provider_policy_event_text(event_type, &event.text, &event.raw_message);
+    let retained_text = provider_policy_event_text(event_type, &event.text, &event.raw_message);
     let event_id = format!("{provider_session_id}:{}", event.native_message_id);
     let role = provider_role(event.role.as_deref());
     ProviderEventEnvelope {
@@ -955,11 +954,10 @@ pub(crate) fn codebuddy_event(
             "event_id": event_id,
             "native_project_hash": project_hash,
             "native_message_id": event.native_message_id,
-            "text": text,
-            "truncated": truncated,
+            "text": retained_text.text,
+            "text_retention": retained_text.retention.as_json(),
             "body": provider_capped_json(&provider_policy_body(event_type, &event.raw_message), PROVIDER_MAX_PREVIEW_CHARS),
             "decoded_body": provider_capped_json(&provider_policy_body(event_type, &event.decoded_message), PROVIDER_MAX_PREVIEW_CHARS),
-            "content_retention": retention.as_str(),
         }),
         metadata: json!({
             "source": shape.event_source(),

@@ -1820,7 +1820,7 @@ fn codex_default_policy_persists_file_touches_without_raw_patch_text() {
 }
 
 #[test]
-fn codex_default_policy_redacts_non_patch_edit_tool_arguments() {
+fn codex_default_policy_omits_non_patch_edit_tool_arguments() {
     let temp = tempdir();
     let root = temp.path().join("codex-sessions/2026/06/24");
     fs::create_dir_all(&root).unwrap();

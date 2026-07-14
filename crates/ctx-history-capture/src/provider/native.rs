@@ -372,8 +372,7 @@ pub(crate) struct NativeEventDraft {
 }
 
 pub(crate) fn native_event(draft: NativeEventDraft) -> ProviderEventEnvelope {
-    let (text, truncated, retention) =
-        provider_policy_event_text(draft.event_type, &draft.text, &draft.body);
+    let retained_text = provider_policy_event_text(draft.event_type, &draft.text, &draft.body);
     let body = provider_policy_body(draft.event_type, &draft.body);
     ProviderEventEnvelope {
         provider_event_index: draft.provider_event_index,
@@ -391,50 +390,100 @@ pub(crate) fn native_event(draft: NativeEventDraft) -> ProviderEventEnvelope {
         )),
         artifacts: Vec::new(),
         payload: json!({
-            "text": text,
-            "truncated": truncated,
+            "text": retained_text.text,
+            "text_retention": retained_text.retention.as_json(),
             "source_format": draft.source_format,
             "body": provider_capped_json(&body, PROVIDER_MAX_PREVIEW_CHARS),
-            "content_retention": retention.as_str(),
         }),
         metadata: draft.metadata,
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum NativeEventRetention {
-    FullText,
-    Metadata,
-    MetadataOnly,
-    FailedOutputPreview,
+enum NativeTextOmissionPolicy {
+    None,
+    PatchOrDiff,
 }
 
-impl NativeEventRetention {
-    pub(crate) fn as_str(self) -> &'static str {
+impl NativeTextOmissionPolicy {
+    fn as_str(self) -> &'static str {
         match self {
-            Self::FullText => "full_text",
-            Self::Metadata => "metadata",
-            Self::MetadataOnly => "metadata_only",
-            Self::FailedOutputPreview => "failed_output_preview",
+            Self::None => "none",
+            Self::PatchOrDiff => "patch_or_diff",
         }
     }
 }
 
-pub(crate) fn native_event_retention(event_type: EventType, body: &Value) -> NativeEventRetention {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NativeTextRetentionPolicy {
+    limit_chars: Option<usize>,
+    omission_policy: NativeTextOmissionPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProviderPolicyText {
+    pub(crate) text: String,
+    pub(crate) retention: ProviderTextRetention,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProviderTextRetention {
+    limit_chars: Option<usize>,
+    truncated: bool,
+    omission_policy: NativeTextOmissionPolicy,
+    omission_applied: bool,
+}
+
+impl ProviderTextRetention {
+    pub(crate) fn as_json(self) -> Value {
+        let mode = if self.limit_chars.is_some() {
+            "bounded"
+        } else {
+            "none"
+        };
+        json!({
+            "mode": mode,
+            "limit_chars": self.limit_chars,
+            "truncated": self.truncated,
+            "omission_policy": self.omission_policy.as_str(),
+            "omission_applied": self.omission_applied,
+        })
+    }
+}
+
+fn native_event_text_retention_policy(
+    event_type: EventType,
+    body: &Value,
+) -> NativeTextRetentionPolicy {
     match event_type {
-        EventType::Message | EventType::Summary => NativeEventRetention::FullText,
+        EventType::Message | EventType::Summary => NativeTextRetentionPolicy {
+            limit_chars: Some(PROVIDER_MAX_TEXT_CHARS),
+            omission_policy: NativeTextOmissionPolicy::None,
+        },
         EventType::ToolCall | EventType::CommandStarted | EventType::CommandFinished => {
-            NativeEventRetention::Metadata
+            NativeTextRetentionPolicy {
+                limit_chars: Some(PROVIDER_MAX_PREVIEW_CHARS),
+                omission_policy: NativeTextOmissionPolicy::None,
+            }
         }
         EventType::ToolOutput | EventType::CommandOutput => {
             if provider_output_event_is_failure(body) {
-                NativeEventRetention::FailedOutputPreview
+                NativeTextRetentionPolicy {
+                    limit_chars: Some(PROVIDER_MAX_PREVIEW_CHARS),
+                    omission_policy: NativeTextOmissionPolicy::PatchOrDiff,
+                }
             } else {
-                NativeEventRetention::MetadataOnly
+                NativeTextRetentionPolicy {
+                    limit_chars: None,
+                    omission_policy: NativeTextOmissionPolicy::None,
+                }
             }
         }
         EventType::FileTouched | EventType::VcsChange | EventType::Artifact | EventType::Notice => {
-            NativeEventRetention::MetadataOnly
+            NativeTextRetentionPolicy {
+                limit_chars: None,
+                omission_policy: NativeTextOmissionPolicy::None,
+            }
         }
     }
 }
@@ -443,38 +492,34 @@ pub(crate) fn provider_policy_event_text(
     event_type: EventType,
     text: &str,
     body: &Value,
-) -> (String, bool, NativeEventRetention) {
-    let retention = native_event_retention(event_type, body);
-    let text = match retention {
-        NativeEventRetention::FailedOutputPreview => {
-            provider_output_preview_omitting_nested_patch_diff(body, text)
-        }
-        _ => text.to_owned(),
-    };
-    let text_limit = match retention {
-        NativeEventRetention::FullText => PROVIDER_MAX_TEXT_CHARS,
-        NativeEventRetention::Metadata | NativeEventRetention::FailedOutputPreview => {
-            PROVIDER_MAX_PREVIEW_CHARS
-        }
-        NativeEventRetention::MetadataOnly => 0,
-    };
-    let (text, truncated) = if text_limit == 0 {
-        (String::new(), false)
+) -> ProviderPolicyText {
+    let policy = native_event_text_retention_policy(event_type, body);
+    let omission_applied = policy.omission_policy == NativeTextOmissionPolicy::PatchOrDiff
+        && (provider_value_contains_patch_or_diff(body)
+            || provider_text_contains_patch_or_diff(text));
+    let text = if omission_applied {
+        provider_output_preview_omitting_nested_patch_diff(body, text)
     } else {
-        provider_local_preview(&text, text_limit)
+        text.to_owned()
     };
-    (text, truncated, retention)
+    let (text, truncated) = if let Some(limit_chars) = policy.limit_chars {
+        provider_local_preview(&text, limit_chars)
+    } else {
+        (String::new(), false)
+    };
+    ProviderPolicyText {
+        text,
+        retention: ProviderTextRetention {
+            limit_chars: policy.limit_chars,
+            truncated,
+            omission_policy: policy.omission_policy,
+            omission_applied,
+        },
+    }
 }
 
 pub(crate) fn provider_policy_body(event_type: EventType, body: &Value) -> Value {
-    let mut retained = provider_filter_body_by_retention_policy(event_type, body, None);
-    if let Value::Object(object) = &mut retained {
-        object.insert(
-            "content_retention".to_owned(),
-            Value::String(native_event_retention(event_type, body).as_str().to_owned()),
-        );
-    }
-    retained
+    provider_filter_body_by_retention_policy(event_type, body, None)
 }
 
 fn provider_filter_body_by_retention_policy(
@@ -556,9 +601,11 @@ fn provider_should_omit_body_field(event_type: EventType, key: &str, value: &Val
 
 fn provider_omitted_body_field(value: &Value) -> Value {
     json!({
-        "content_retention": "metadata_only",
-        "omitted_bytes": provider_value_approx_bytes(value),
-        "contains_patch_or_diff": provider_value_contains_patch_or_diff(value),
+        "field_retention": {
+            "mode": "omitted",
+            "original_bytes": provider_value_approx_bytes(value),
+            "contained_patch_or_diff": provider_value_contains_patch_or_diff(value),
+        },
     })
 }
 
@@ -1044,7 +1091,9 @@ mod tests {
         let rendered = event.payload.to_string();
 
         assert!(rendered.contains("real conversation oracle"));
-        assert!(rendered.contains("metadata_only"));
+        assert!(rendered.contains("field_retention"));
+        assert!(rendered.contains("original_bytes"));
+        assert!(rendered.contains("contained_patch_or_diff"));
         assert!(!rendered.contains("successful-output-oracle"));
         assert!(!rendered.contains("*** Begin Patch"));
         assert!(!rendered.contains("secret old"));
@@ -1105,26 +1154,51 @@ mod tests {
             }),
         );
 
+        assert_eq!(
+            success.payload["text_retention"],
+            json!({
+                "mode": "none",
+                "limit_chars": null,
+                "truncated": false,
+                "omission_policy": "none",
+                "omission_applied": false,
+            })
+        );
         let success_payload = success.payload.to_string();
-        assert!(success_payload.contains("metadata_only"));
         assert!(!success_payload.contains("successful-output-oracle"));
 
+        assert_eq!(
+            failed.payload["text_retention"],
+            json!({
+                "mode": "bounded",
+                "limit_chars": PROVIDER_MAX_PREVIEW_CHARS,
+                "truncated": false,
+                "omission_policy": "patch_or_diff",
+                "omission_applied": false,
+            })
+        );
         let failed_payload = failed.payload.to_string();
-        assert!(failed_payload.contains("failed_output_preview"));
         assert!(failed_payload.contains("failed-output-oracle"));
 
         let nested_failed_payload = nested_failed.payload.to_string();
-        assert!(nested_failed_payload.contains("failed_output_preview"));
         assert!(nested_failed_payload.contains("nested-failed-output-oracle"));
 
         let http_success_payload = http_success.payload.to_string();
-        assert!(http_success_payload.contains("metadata_only"));
         assert!(!http_success_payload.contains("http-success-output-oracle"));
 
         let http_failed_payload = http_failed.payload.to_string();
-        assert!(http_failed_payload.contains("failed_output_preview"));
         assert!(http_failed_payload.contains("http-failed-output-oracle"));
 
+        assert_eq!(
+            failed_diff.payload["text_retention"],
+            json!({
+                "mode": "bounded",
+                "limit_chars": PROVIDER_MAX_PREVIEW_CHARS,
+                "truncated": false,
+                "omission_policy": "patch_or_diff",
+                "omission_applied": true,
+            })
+        );
         let failed_diff_payload = failed_diff.payload.to_string();
         assert!(failed_diff_payload.contains("output omitted"));
         assert!(!failed_diff_payload.contains("diff --git"));
@@ -1145,9 +1219,54 @@ mod tests {
         let rendered = event.payload.to_string();
 
         assert!(rendered.contains("apply_patch file touches: modified:src/main.rs"));
-        assert!(rendered.contains("metadata_only"));
+        assert!(rendered.contains("field_retention"));
+        assert!(rendered.contains("original_bytes"));
+        assert!(rendered.contains("contained_patch_or_diff"));
         assert!(!rendered.contains("*** Begin Patch"));
         assert!(!rendered.contains("-old"));
         assert!(!rendered.contains("+new"));
+    }
+
+    #[test]
+    fn native_event_reports_bounded_text_limit_separately_from_truncation() {
+        let text = "x".repeat(PROVIDER_MAX_TEXT_CHARS + 1);
+        let event = test_native_event(EventType::Message, &text, json!({"content": text}));
+
+        assert_eq!(
+            event.payload["text"].as_str().unwrap().chars().count(),
+            PROVIDER_MAX_TEXT_CHARS
+        );
+        assert_eq!(
+            event.payload["text_retention"],
+            json!({
+                "mode": "bounded",
+                "limit_chars": PROVIDER_MAX_TEXT_CHARS,
+                "truncated": true,
+                "omission_policy": "none",
+                "omission_applied": false,
+            })
+        );
+        assert!(event.payload.get("content_retention").is_none());
+        assert!(event.payload.get("truncated").is_none());
+    }
+
+    #[test]
+    fn native_event_reports_preview_limit_without_claiming_full_text() {
+        let event = test_native_event(
+            EventType::ToolCall,
+            "read_file src/lib.rs",
+            json!({"tool_name": "read_file", "path": "src/lib.rs"}),
+        );
+
+        assert_eq!(
+            event.payload["text_retention"],
+            json!({
+                "mode": "bounded",
+                "limit_chars": PROVIDER_MAX_PREVIEW_CHARS,
+                "truncated": false,
+                "omission_policy": "none",
+                "omission_applied": false,
+            })
+        );
     }
 }

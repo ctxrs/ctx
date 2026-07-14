@@ -1,6 +1,73 @@
 use super::support::*;
 
 #[test]
+fn normalized_provider_import_accepts_v1_during_bounded_v2_transition() {
+    let temp = tempdir();
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let occurred_at = DateTime::parse_from_rfc3339("2026-07-13T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let mut capture = provider_collision_capture(
+        CaptureProvider::Hermes,
+        "v1-compatible-session",
+        "hermes_state_sqlite",
+        "/tmp/v1-compatible-session.db",
+        occurred_at,
+    );
+    capture.schema_version = 1;
+
+    let summary = import_normalized_provider_captures(
+        &mut store,
+        ProviderNormalizationResult {
+            summary: ProviderImportSummary::default(),
+            captures: vec![(1, capture)],
+            files_touched: Vec::new(),
+        },
+        NormalizedProviderImportOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+    assert_eq!(summary.imported_events, 1);
+}
+
+#[test]
+fn normalized_provider_import_rejects_versions_outside_v1_v2_window() {
+    for schema_version in [0, 3] {
+        let temp = tempdir();
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let occurred_at = DateTime::parse_from_rfc3339("2026-07-13T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut capture = provider_collision_capture(
+            CaptureProvider::Hermes,
+            &format!("unsupported-v{schema_version}-session"),
+            "hermes_state_sqlite",
+            &format!("/tmp/unsupported-v{schema_version}-session.db"),
+            occurred_at,
+        );
+        capture.schema_version = schema_version;
+
+        let summary = import_normalized_provider_captures(
+            &mut store,
+            ProviderNormalizationResult {
+                summary: ProviderImportSummary::default(),
+                captures: vec![(1, capture)],
+                files_touched: Vec::new(),
+            },
+            NormalizedProviderImportOptions::default(),
+        )
+        .unwrap();
+
+        assert_eq!(summary.failed, 1, "schema v{schema_version}");
+        assert!(summary.failures[0]
+            .error
+            .contains("unsupported provider capture envelope schema version"));
+        assert!(store.list_sessions().unwrap().is_empty());
+    }
+}
+
+#[test]
 fn batched_provider_import_rejects_unwrapped_and_zero_sized_modes() {
     let temp = tempdir();
     let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();

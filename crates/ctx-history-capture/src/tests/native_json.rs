@@ -1,4 +1,5 @@
 use super::support::*;
+use crate::PROVIDER_MAX_PREVIEW_CHARS;
 
 #[test]
 
@@ -565,8 +566,14 @@ fn continue_cli_tool_call_redacts_raw_outputs_and_reimports_file_touches() {
         .find(|event| event.event_type == EventType::ToolCall)
         .expect("tool call metadata event imported");
     assert_eq!(
-        tool.payload["body"]["content_retention"].as_str(),
-        Some("metadata")
+        tool.payload["body"]["text_retention"],
+        json!({
+            "mode": "bounded",
+            "limit_chars": PROVIDER_MAX_PREVIEW_CHARS,
+            "truncated": false,
+            "omission_policy": "none",
+            "omission_applied": false,
+        })
     );
     let rendered_tool = serde_json::to_string(tool).unwrap();
     assert!(rendered_tool.contains("apply_patch"));
@@ -751,6 +758,62 @@ fn native_claude_projects_imports_jsonl_tree() {
     assert!(events
         .iter()
         .any(|event| event.event_type == EventType::ToolOutput));
+}
+
+#[test]
+fn native_claude_reports_text_limit_and_truncation_independently() {
+    let temp = tempdir();
+    let root = temp.path().join("claude/projects/-workspace");
+    fs::create_dir_all(&root).unwrap();
+    let text = "x".repeat(20_000);
+    fs::write(
+        root.join("bounded-text.jsonl"),
+        jsonl_line(json!({
+            "sessionId": "claude-bounded-text",
+            "timestamp": "2026-07-04T14:00:00Z",
+            "cwd": "/workspace",
+            "version": "test",
+            "type": "user",
+            "message": {"role": "user", "content": text},
+            "uuid": "claude-bounded-text-message"
+        })),
+    )
+    .unwrap();
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let summary = import_claude_projects_jsonl_tree(
+        temp.path().join("claude/projects"),
+        &mut store,
+        ClaudeProjectsImportOptions {
+            source_path: Some(temp.path().join("claude/projects")),
+            imported_at: "2026-07-04T14:30:00Z".parse().unwrap(),
+            ..ClaudeProjectsImportOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(summary.failed, 0, "{:?}", summary.failures);
+    let session_id =
+        stored_provider_session_id(&store, CaptureProvider::Claude, "claude-bounded-text");
+    let events = store.events_for_session(session_id).unwrap();
+    assert_eq!(events.len(), 1);
+    let payload = &events[0].payload["body"];
+    assert_eq!(
+        payload["text"].as_str().unwrap().chars().count(),
+        PROVIDER_MAX_TEXT_CHARS
+    );
+    assert_eq!(
+        payload["text_retention"],
+        json!({
+            "mode": "bounded",
+            "limit_chars": PROVIDER_MAX_TEXT_CHARS,
+            "truncated": true,
+            "omission_policy": "none",
+            "omission_applied": false,
+        })
+    );
+    assert!(payload.get("content_retention").is_none());
+    assert!(payload.get("truncated").is_none());
 }
 
 #[test]
@@ -1752,12 +1815,21 @@ fn native_openhands_file_events_redact_outputs_cite_source_and_leave_tree_readon
         .iter()
         .find(|event| event.event_type == EventType::CommandOutput)
         .expect("successful command output metadata imported");
+    let retention = output
+        .payload
+        .get("text_retention")
+        .or_else(|| output.payload["body"].get("text_retention"))
+        .or_else(|| output.payload["body"]["body"].get("text_retention"))
+        .expect("command output text retention metadata");
     assert_eq!(
-        output.payload["content_retention"]
-            .as_str()
-            .or_else(|| output.payload["body"]["content_retention"].as_str())
-            .or_else(|| output.payload["body"]["body"]["content_retention"].as_str()),
-        Some("metadata_only")
+        retention,
+        &json!({
+            "mode": "none",
+            "limit_chars": null,
+            "truncated": false,
+            "omission_policy": "none",
+            "omission_applied": false,
+        })
     );
     let rendered_output = serde_json::to_string(output).unwrap();
     assert!(!rendered_output.contains(raw_output));

@@ -1755,6 +1755,13 @@ fn event_output_fields_indicate_failure(payload: &serde_json::Value) -> bool {
             .and_then(serde_json::Value::as_str)
             == Some("failed_preview")
         || payload
+            .get("text_retention")
+            .and_then(|retention| retention.get("omission_policy"))
+            .and_then(serde_json::Value::as_str)
+            == Some("patch_or_diff")
+        // Provider capture envelope v1 compatibility. V2 emits
+        // `text_retention.omission_policy` instead.
+        || payload
             .get("content_retention")
             .and_then(serde_json::Value::as_str)
             == Some("failed_output_preview")

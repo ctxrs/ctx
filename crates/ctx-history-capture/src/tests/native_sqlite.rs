@@ -585,8 +585,14 @@ fn assert_successful_output_metadata_only(
         .unwrap_or_else(|| panic!("missing {provider:?} {event_type:?} event"));
     assert_eq!(event.payload["body"]["text"].as_str(), Some(""));
     assert_eq!(
-        event.payload["body"]["content_retention"].as_str(),
-        Some("metadata_only")
+        event.payload["body"]["text_retention"],
+        json!({
+            "mode": "none",
+            "limit_chars": null,
+            "truncated": false,
+            "omission_policy": "none",
+            "omission_applied": false,
+        })
     );
     let rendered = serde_json::to_string(event).unwrap();
     assert!(
@@ -1040,8 +1046,14 @@ fn assert_message_part_import(
         .expect("tool part metadata-only output event imported");
     assert_eq!(tool_output.payload["body"]["text"].as_str(), Some(""));
     assert_eq!(
-        tool_output.payload["body"]["content_retention"].as_str(),
-        Some("metadata_only")
+        tool_output.payload["body"]["text_retention"],
+        json!({
+            "mode": "none",
+            "limit_chars": null,
+            "truncated": false,
+            "omission_policy": "none",
+            "omission_applied": false,
+        })
     );
     let rendered_tool = serde_json::to_string(tool_output).unwrap();
     assert!(rendered_tool.contains("write_file"));
@@ -1599,7 +1611,14 @@ fn native_shelley_handles_duplicate_sequences_and_nonchat_rows() {
         .iter()
         .find(|event| event.sync.metadata["metadata"]["message_id"].as_str() == Some("msg-large"))
         .expect("large Shelley event imported");
-    assert_eq!(large.payload["body"]["truncated"].as_bool(), Some(true));
+    assert_eq!(
+        large.payload["body"]["text_retention"]["truncated"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        large.payload["body"]["text_retention"]["limit_chars"].as_u64(),
+        Some(PROVIDER_MAX_TEXT_CHARS as u64)
+    );
     assert!(
         large.payload["body"]["text"]
             .as_str()

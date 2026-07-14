@@ -587,8 +587,7 @@ pub(crate) fn trae_event(
     event: &TraeEventInput,
 ) -> ProviderEventEnvelope {
     let event_type = EventType::Message;
-    let (text, truncated, retention) =
-        provider_policy_event_text(event_type, &event.text, &event.raw_message);
+    let retained_text = provider_policy_event_text(event_type, &event.text, &event.raw_message);
     let event_id = format!("{provider_session_id}:{}", event.native_message_id);
     ProviderEventEnvelope {
         provider_event_index: event.provider_event_index,
@@ -606,10 +605,9 @@ pub(crate) fn trae_event(
             "event_id": event_id,
             "native_workspace_id": workspace_id,
             "native_message_id": event.native_message_id,
-            "text": text,
-            "truncated": truncated,
+            "text": retained_text.text,
+            "text_retention": retained_text.retention.as_json(),
             "body": provider_capped_json(&provider_policy_body(event_type, &event.raw_message), PROVIDER_MAX_PREVIEW_CHARS),
-            "content_retention": retention.as_str(),
         }),
         metadata: json!({
             "source": "trae_state_vscdb_itemtable",

@@ -1253,7 +1253,7 @@ pub(crate) fn opencode_event(
     } else {
         data.clone()
     };
-    let (text, truncated, retention) = provider_policy_event_text(event_type, &text, &body);
+    let retained_text = provider_policy_event_text(event_type, &text, &body);
     let payload = if is_message_part {
         json!({
             "entry_type": row.entry_type,
@@ -1264,20 +1264,18 @@ pub(crate) fn opencode_event(
             "part_id": data.get("part_id").cloned(),
             "part_type": data.get("part_type").cloned(),
             "session_message_seq": row.seq,
-            "text": text,
-            "truncated": truncated,
+            "text": retained_text.text,
+            "text_retention": retained_text.retention.as_json(),
             "body": provider_capped_json(&provider_policy_body(event_type, &body), PROVIDER_MAX_PREVIEW_CHARS),
-            "content_retention": retention.as_str(),
         })
     } else {
         json!({
             "entry_type": row.entry_type,
             "message_id": row.id,
             "session_message_seq": row.seq,
-            "text": text,
-            "truncated": truncated,
+            "text": retained_text.text,
+            "text_retention": retained_text.retention.as_json(),
             "body": provider_capped_json(&provider_policy_body(event_type, &body), PROVIDER_MAX_PREVIEW_CHARS),
-            "content_retention": retention.as_str(),
         })
     };
     let metadata = if is_message_part {

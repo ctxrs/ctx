@@ -397,8 +397,7 @@ pub(crate) fn warp_message_event(
         "text": message.text,
         "message_index": message_index,
     });
-    let (text, truncated, retention) =
-        provider_policy_event_text(message.event_type, &message.text, &body);
+    let retained_text = provider_policy_event_text(message.event_type, &message.text, &body);
     let message_id = if message.id.is_empty() {
         format!("{task_id}:{message_index}")
     } else {
@@ -421,10 +420,9 @@ pub(crate) fn warp_message_event(
             "message_id": message_id,
             "task_id": task_id,
             "request_id": if message.request_id.is_empty() { Value::Null } else { json!(message.request_id) },
-            "text": text,
-            "truncated": truncated,
+            "text": retained_text.text,
+            "text_retention": retained_text.retention.as_json(),
             "body": provider_policy_body(message.event_type, &body),
-            "content_retention": retention.as_str(),
         }),
         metadata: json!({
             "source": WARP_SQLITE_SOURCE_FORMAT,

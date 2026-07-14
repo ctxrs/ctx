@@ -768,12 +768,46 @@ fn event_search_indexes_policy_allowed_agent_content_only() {
         ),
         policy_event(
             9,
+            EventType::CommandOutput,
+            Some(EventRole::Tool),
+            serde_json::json!({
+                "body": {
+                    "text_retention": {
+                        "mode": "none",
+                        "limit_chars": null,
+                        "truncated": false,
+                        "omission_policy": "none",
+                        "omission_applied": false
+                    },
+                    "text": "success-v2-native-output-oracle"
+                }
+            }),
+        ),
+        policy_event(
+            10,
+            EventType::CommandOutput,
+            Some(EventRole::Tool),
+            serde_json::json!({
+                "body": {
+                    "text_retention": {
+                        "mode": "bounded",
+                        "limit_chars": 4000,
+                        "truncated": false,
+                        "omission_policy": "patch_or_diff",
+                        "omission_applied": false
+                    },
+                    "output_preview": "failed-v2-native-output-oracle"
+                }
+            }),
+        ),
+        policy_event(
+            11,
             EventType::Notice,
             Some(EventRole::System),
             serde_json::json!({ "text": "notice-oracle" }),
         ),
         policy_event(
-            10,
+            12,
             EventType::Message,
             Some(EventRole::Assistant),
             serde_json::json!({ "unexpected_field": "json-fallback-oracle" }),
@@ -819,12 +853,23 @@ fn event_search_indexes_policy_allowed_agent_content_only() {
             .len(),
         1
     );
+    assert_eq!(
+        store
+            .search_event_hits("failed-v2-native-output-oracle", 10)
+            .unwrap()
+            .len(),
+        1
+    );
     assert!(store
         .search_event_hits("success-output-oracle", 10)
         .unwrap()
         .is_empty());
     assert!(store
         .search_event_hits("success-native-output-oracle", 10)
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .search_event_hits("success-v2-native-output-oracle", 10)
         .unwrap()
         .is_empty());
     assert!(store

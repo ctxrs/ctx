@@ -83,6 +83,53 @@ and low-signal, so it should not be indexed by default. Failed or timed-out
 commands may keep a bounded diagnostic preview because error text is often the
 thing users need to recover a session.
 
+## Native Retention Metadata
+
+Provider capture envelope schema version 2 reports the shared native text
+policy and its outcome independently. Payloads governed by that policy contain
+this object:
+
+```json
+{
+  "text_retention": {
+    "mode": "bounded",
+    "limit_chars": 16000,
+    "truncated": true,
+    "omission_policy": "none",
+    "omission_applied": false
+  }
+}
+```
+
+- `mode` is `bounded` when ctx keeps at most `limit_chars`, or `none` when the
+  policy keeps no event text.
+- `limit_chars` is a character count for `bounded` and `null` for `none`.
+- `truncated` reports whether the character limit shortened this value; it is
+  not encoded in `mode`.
+- `omission_policy` is `none` or `patch_or_diff`. The latter is used for
+  retained failure diagnostics that must not copy patch or diff content.
+- `omission_applied` is true only when that policy actually found and replaced
+  patch or diff content.
+
+When a field is removed from a retained provider body, its replacement records
+the facts about that field without describing the whole event:
+
+```json
+{
+  "field_retention": {
+    "mode": "omitted",
+    "original_bytes": 1234,
+    "contained_patch_or_diff": true
+  }
+}
+```
+
+Version 2 replaces the version 1 `content_retention` strings and their
+overloaded values (`full_text`, `metadata`, `metadata_only`, and
+`failed_output_preview`). New captures emit version 2 only. Import accepts
+versions 1 and 2 during the bounded compatibility window, and stored version 1
+failure previews remain searchable; versions outside that window are rejected.
+
 ## Oversized Provider Rows
 
 Provider-controlled text and blob fields must be bounded. One oversized value
