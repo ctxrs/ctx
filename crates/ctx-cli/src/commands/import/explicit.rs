@@ -51,6 +51,10 @@ pub(crate) fn run_explicit_format_import(
     if let Some(warning) = low_disk_space_warning(&db_path, stats.bytes) {
         progress.warning(warning);
     }
+    store.ensure_disk_headroom(
+        super::estimated_bulk_import_write_bytes(stats.bytes),
+        "explicit history import",
+    )?;
     if (stats.files >= LARGE_IMPORT_SOURCE_FILES_WARNING
         || stats.bytes >= LARGE_IMPORT_SOURCE_BYTES_WARNING)
         && stats.files > 0
@@ -81,7 +85,7 @@ pub(crate) fn run_explicit_format_import(
         )
         .map_err(anyhow::Error::from),
     };
-    let summary = match import_result {
+    let mut summary = match import_result {
         Ok(summary) => summary,
         Err(error) if import_error_scope(&error) == ImportFailureScope::System => {
             return Err(error);
@@ -99,7 +103,17 @@ pub(crate) fn run_explicit_format_import(
         }
     };
     let mut totals = ImportTotals::default();
-    if summary.failed > 0 && !provider_summary_has_imported_content(&summary) {
+    if !provider_summary_has_imported_content(&summary) {
+        if summary.failed == 0 {
+            summary.failed = 1;
+            summary.failures.push(ProviderImportFailure {
+                line: 0,
+                error: format!(
+                    "{} source contained no usable history content",
+                    format.as_str()
+                ),
+            });
+        }
         cleanup_rejected_history_record(&store, record_id, record_existed)?;
         totals.add_rejected_source(&summary, &stats);
     } else {

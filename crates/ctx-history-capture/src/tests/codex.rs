@@ -94,22 +94,6 @@ fn codex_session_tree_imports_messages_and_subagent_edges() {
 }
 
 #[test]
-fn codex_parallel_join_panic_is_a_typed_system_failure() {
-    let error = std::thread::scope(|scope| {
-        let handle = scope.spawn(|| -> crate::Result<()> {
-            panic!("intentional Codex normalization worker panic")
-        });
-        join_codex_import_worker(handle)
-    })
-    .unwrap_err();
-
-    assert!(matches!(
-        error,
-        CaptureError::WorkerPanicked("Codex import")
-    ));
-}
-
-#[test]
 fn codex_session_catalog_large_noop_uses_metadata_cache() {
     let temp = tempdir();
     let root = temp.path().join("sessions");
@@ -1510,6 +1494,7 @@ fn codex_session_tail_skips_oversized_required_header_without_failure() {
 
 #[test]
 fn codex_fast_session_stream_uses_shared_bounded_batches() {
+    take_observed_import_batches();
     let temp = tempdir();
     let path = temp.path().join("codex-fast-bounded.jsonl");
     let mut lines = vec![jsonl_line(json!({
@@ -1541,20 +1526,7 @@ fn codex_fast_session_stream_uses_shared_bounded_batches() {
     let db_path = temp.path().join("work.sqlite");
     let mut store =
         Store::open_with_busy_timeout(&db_path, std::time::Duration::from_millis(10)).unwrap();
-    let reader = Connection::open(&db_path).unwrap();
-    reader.execute_batch("BEGIN").unwrap();
-    assert_eq!(
-        reader
-            .query_row("SELECT COUNT(*) FROM events", [], |row| row
-                .get::<_, i64>(0))
-            .unwrap(),
-        0
-    );
-
-    let error = import_codex_session_jsonl(&path, &mut store, CodexSessionImportOptions::default())
-        .unwrap_err();
-    assert!(error.to_string().contains("ctx index is busy"), "{error}");
-    reader.execute_batch("ROLLBACK").unwrap();
+    import_codex_session_jsonl(&path, &mut store, CodexSessionImportOptions::default()).unwrap();
 
     let conn = Connection::open(&db_path).unwrap();
     assert_eq!(
@@ -1563,15 +1535,22 @@ fn codex_fast_session_stream_uses_shared_bounded_batches() {
             .unwrap(),
         64
     );
+    let batches = take_observed_import_batches();
+    assert!(!batches.is_empty());
+    assert!(batches.iter().all(|(units, bytes)| {
+        *units <= IMPORT_TRANSACTION_BATCH_UNITS && *bytes <= IMPORT_TRANSACTION_BATCH_BYTES
+    }));
+    assert_eq!(batches.iter().map(|(units, _)| units).sum::<usize>(), 64);
 }
 
 #[test]
-fn codex_parallel_normalized_stream_uses_shared_bounded_batches() {
+fn codex_multifile_stream_bounds_one_huge_file_before_a_small_file() {
+    take_observed_import_batches();
     let temp = tempdir();
-    let sessions_root = temp.path().join("codex-parallel-bounded");
+    let sessions_root = temp.path().join("codex-multifile-bounded");
     fs::create_dir_all(&sessions_root).unwrap();
     let mut paths = Vec::new();
-    for session_index in 0..13 {
+    for (session_index, event_count) in [(0, 70), (1, 1)] {
         let path = sessions_root.join(format!("session-{session_index}.jsonl"));
         let mut lines = vec![jsonl_line(json!({
             "timestamp": "2026-07-13T12:00:00Z",
@@ -1583,18 +1562,16 @@ fn codex_parallel_normalized_stream_uses_shared_bounded_batches() {
                 "originator": "codex-cli"
             }
         }))];
-        lines.extend((0..4).map(|event_index| {
+        lines.extend((0..event_count).map(|event_index| {
             jsonl_line(json!({
-                "timestamp": format!("2026-07-13T12:00:0{}Z", event_index + 1),
+                "timestamp": format!("2026-07-13T12:{:02}:{:02}Z", (event_index / 60) + 1, event_index % 60),
                 "type": "response_item",
                 "payload": {
                     "type": "message",
                     "role": if event_index % 2 == 0 { "user" } else { "assistant" },
                     "content": [{
                         "type": if event_index % 2 == 0 { "input_text" } else { "output_text" },
-                        "text": format!(
-                            "codex parallel bounded {session_index} event {event_index}"
-                        )
+                        "text": format!("codex multifile bounded {session_index} event {event_index} {}", "x".repeat(if session_index == 0 { 64 * 1024 } else { 0 }))
                     }]
                 }
             }))
@@ -1606,32 +1583,34 @@ fn codex_parallel_normalized_stream_uses_shared_bounded_batches() {
     let db_path = temp.path().join("work.sqlite");
     let mut store =
         Store::open_with_busy_timeout(&db_path, std::time::Duration::from_millis(10)).unwrap();
-    let reader = Connection::open(&db_path).unwrap();
-    reader.execute_batch("BEGIN").unwrap();
-    assert_eq!(
-        reader
-            .query_row("SELECT COUNT(*) FROM events", [], |row| row
-                .get::<_, i64>(0))
-            .unwrap(),
-        0
-    );
-
-    let error = import_codex_session_paths(paths, &mut store, CodexSessionImportOptions::default())
-        .unwrap_err();
-    assert!(error.to_string().contains("ctx index is busy"), "{error}");
-    reader.execute_batch("ROLLBACK").unwrap();
+    import_codex_session_paths(paths, &mut store, CodexSessionImportOptions::default()).unwrap();
 
     let conn = Connection::open(&db_path).unwrap();
     assert_eq!(
         conn.query_row("SELECT COUNT(*) FROM events", [], |row| row
             .get::<_, i64>(0))
             .unwrap(),
-        51
+        71
     );
+    let small_file_event: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE payload_json LIKE '%codex multifile bounded 1 event 0%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(small_file_event, 1);
+    let batches = take_observed_import_batches();
+    assert!(batches.len() >= 2, "observed batches: {batches:?}");
+    assert!(batches.iter().all(|(units, bytes)| {
+        *units <= IMPORT_TRANSACTION_BATCH_UNITS && *bytes <= IMPORT_TRANSACTION_BATCH_BYTES
+    }));
+    assert_eq!(batches.iter().map(|(units, _)| units).sum::<usize>(), 71);
 }
 
 #[test]
 fn codex_tail_stream_uses_shared_bounded_batches() {
+    take_observed_import_batches();
     let temp = tempdir();
     let path = temp.path().join("codex-tail-bounded.jsonl");
     let initial = [
@@ -1663,6 +1642,7 @@ fn codex_tail_stream_uses_shared_bounded_batches() {
     let mut store =
         Store::open_with_busy_timeout(&db_path, std::time::Duration::from_millis(10)).unwrap();
     import_codex_session_jsonl(&path, &mut store, CodexSessionImportOptions::default()).unwrap();
+    take_observed_import_batches();
 
     let mut complete = initial;
     complete.push_str(
@@ -1685,24 +1665,13 @@ fn codex_tail_stream_uses_shared_bounded_batches() {
     );
     fs::write(&path, complete).unwrap();
 
-    let reader = Connection::open(&db_path).unwrap();
-    reader.execute_batch("BEGIN").unwrap();
-    assert_eq!(
-        reader
-            .query_row("SELECT COUNT(*) FROM events", [], |row| row
-                .get::<_, i64>(0))
-            .unwrap(),
-        1
-    );
-    let error = import_codex_session_jsonl_tail(
+    import_codex_session_jsonl_tail(
         &path,
         tail_start,
         &mut store,
         CodexSessionImportOptions::default(),
     )
-    .unwrap_err();
-    assert!(error.to_string().contains("ctx index is busy"), "{error}");
-    reader.execute_batch("ROLLBACK").unwrap();
+    .unwrap();
 
     let conn = Connection::open(&db_path).unwrap();
     assert_eq!(
@@ -1711,6 +1680,12 @@ fn codex_tail_stream_uses_shared_bounded_batches() {
             .unwrap(),
         65
     );
+    let batches = take_observed_import_batches();
+    assert!(!batches.is_empty());
+    assert!(batches.iter().all(|(units, bytes)| {
+        *units <= IMPORT_TRANSACTION_BATCH_UNITS && *bytes <= IMPORT_TRANSACTION_BATCH_BYTES
+    }));
+    assert_eq!(batches.iter().map(|(units, _)| units).sum::<usize>(), 64);
 }
 
 #[test]

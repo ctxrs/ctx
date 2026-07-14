@@ -121,6 +121,7 @@ pub(crate) const CATALOG_SESSION_IMPORT_STATE_COLUMNS: &[ColumnSpec] = &[
     },
 ];
 
+#[cfg(test)]
 pub(crate) const CAPTURE_SOURCE_IDENTITY_COLUMNS: &[ColumnSpec] = &[
     ColumnSpec {
         name: "source_format",

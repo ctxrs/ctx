@@ -1,14 +1,17 @@
 use std::{
     cell::RefCell,
     collections::BTreeSet,
-    fs::File,
+    fs::{self, File},
     io::{self, Read, Write},
     ops::Deref,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
-use ctx_history_store::{IndexingIoPacer, Store, INDEXING_WAL_DELTA_BYTES};
+use ctx_history_store::{
+    ensure_indexing_disk_headroom, ExternalIndexingCopyLease, IndexingAdmission, IndexingIoPacer,
+    Store, INDEXING_WAL_DELTA_BYTES,
+};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::json;
 use tempfile::TempDir;
@@ -25,40 +28,83 @@ const PROVIDER_COPY_BUFFER_BYTES: usize = INDEXING_WAL_DELTA_BYTES as usize / 32
 
 thread_local! {
     static PROVIDER_COPY_PACER: RefCell<Option<IndexingIoPacer>> = const { RefCell::new(None) };
+    static PROVIDER_COPY_ADMISSION: RefCell<Option<IndexingAdmission>> = const { RefCell::new(None) };
 }
 
 pub(crate) struct ProviderSourceIoPacingScope {
-    previous: Option<IndexingIoPacer>,
+    previous_pacer: Option<IndexingIoPacer>,
+    previous_admission: Option<IndexingAdmission>,
 }
 
 impl ProviderSourceIoPacingScope {
     pub(crate) fn enter(store: &Store) -> Self {
         let pacer = store.indexing_io_pacer();
-        let previous = PROVIDER_COPY_PACER.with(|slot| slot.replace(Some(pacer)));
-        Self { previous }
+        let previous_pacer = PROVIDER_COPY_PACER.with(|slot| slot.replace(Some(pacer)));
+        let previous_admission =
+            PROVIDER_COPY_ADMISSION.with(|slot| slot.replace(store.indexing_admission()));
+        Self {
+            previous_pacer,
+            previous_admission,
+        }
     }
 }
 
 impl Drop for ProviderSourceIoPacingScope {
     fn drop(&mut self) {
         PROVIDER_COPY_PACER.with(|slot| {
-            slot.replace(self.previous.take());
+            slot.replace(self.previous_pacer.take());
+        });
+        PROVIDER_COPY_ADMISSION.with(|slot| {
+            slot.replace(self.previous_admission.take());
         });
     }
 }
 
 trait ProviderCopyPolicy {
+    fn begin_slice(&mut self) -> io::Result<()>;
     fn should_rotate(&mut self, started: Instant, bytes: u64) -> bool;
-    fn finish_slice(&mut self, active: Duration, bytes: u64);
+    fn finish_slice(&mut self, active: Duration, bytes: u64) -> io::Result<()>;
 }
 
-impl ProviderCopyPolicy for IndexingIoPacer {
-    fn should_rotate(&mut self, started: Instant, bytes: u64) -> bool {
-        self.source_io_slice_should_rotate(started, bytes)
+struct IndexingProviderCopyPolicy {
+    pacer: IndexingIoPacer,
+    admission: Option<IndexingAdmission>,
+    destination: PathBuf,
+    lease: Option<ExternalIndexingCopyLease>,
+}
+
+impl ProviderCopyPolicy for IndexingProviderCopyPolicy {
+    fn begin_slice(&mut self) -> io::Result<()> {
+        debug_assert!(self.lease.is_none());
+        if let Some(admission) = &self.admission {
+            self.lease = Some(
+                admission
+                    .acquire_external_copy_slice(
+                        &self.destination,
+                        INDEXING_WAL_DELTA_BYTES,
+                        "provider SQLite snapshot copy",
+                    )
+                    .map_err(io::Error::other)?,
+            );
+        } else {
+            ensure_indexing_disk_headroom(
+                &self.destination,
+                INDEXING_WAL_DELTA_BYTES,
+                "provider SQLite snapshot copy",
+            )
+            .map_err(io::Error::other)?;
+        }
+        Ok(())
     }
 
-    fn finish_slice(&mut self, active: Duration, bytes: u64) {
-        self.finish_source_io_slice(active, bytes);
+    fn should_rotate(&mut self, started: Instant, bytes: u64) -> bool {
+        self.pacer.source_io_slice_should_rotate(started, bytes)
+    }
+
+    fn finish_slice(&mut self, active: Duration, bytes: u64) -> io::Result<()> {
+        self.lease.take();
+        self.pacer.finish_source_io_slice(active, bytes);
+        Ok(())
     }
 }
 
@@ -196,9 +242,36 @@ pub(crate) fn open_sqlite_readonly_source(path: &Path) -> Result<ReadOnlySqliteC
     // Read-only SQLite connections can still update live WAL shared-memory files.
     // Copy the DB plus sidecars first so imports see committed WAL content without
     // mutating provider-owned history.
+    let snapshot_parent = std::env::temp_dir();
+    let snapshot_bytes = std::iter::once(path)
+        .chain(sidecars.iter().map(PathBuf::as_path))
+        .try_fold(0_u64, |total, path| {
+            fs::metadata(path).map(|metadata| total.saturating_add(metadata.len()))
+        })?;
+    let reservation_path = snapshot_parent.join(".ctx-provider-sqlite-reservation");
+    let admission = PROVIDER_COPY_ADMISSION.with(|slot| slot.borrow().clone());
+    let _directory_lease = if let Some(admission) = admission {
+        Some(
+            admission
+                .acquire_external_copy_slice(
+                    &reservation_path,
+                    snapshot_bytes,
+                    "provider SQLite snapshot",
+                )
+                .map_err(CaptureError::from)?,
+        )
+    } else {
+        ensure_indexing_disk_headroom(
+            &reservation_path,
+            snapshot_bytes,
+            "provider SQLite snapshot",
+        )?;
+        None
+    };
     let snapshot_dir = tempfile::Builder::new()
         .prefix("ctx-provider-sqlite-")
-        .tempdir()?;
+        .tempdir_in(&snapshot_parent)?;
+    drop(_directory_lease);
     let snapshot_path = snapshot_dir.path().join(path.file_name().ok_or_else(|| {
         CaptureError::InvalidProviderTranscriptPath {
             path: path.to_path_buf(),
@@ -227,15 +300,37 @@ pub(crate) fn open_sqlite_readonly_source(path: &Path) -> Result<ReadOnlySqliteC
 }
 
 fn copy_provider_sqlite_file(source: &Path, destination: &Path) -> Result<u64> {
+    let destination_parent = destination
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
     let mut source = File::open(source)?;
+    let pacer = PROVIDER_COPY_PACER
+        .with(|slot| slot.borrow().clone())
+        .unwrap_or_default()
+        .for_destination_filesystem(&destination_parent);
+    let mut policy = IndexingProviderCopyPolicy {
+        pacer,
+        admission: PROVIDER_COPY_ADMISSION.with(|slot| slot.borrow().clone()),
+        destination: destination.to_path_buf(),
+        lease: None,
+    };
+    policy.begin_slice()?;
     let mut destination = File::create(destination)?;
-    let mut pacer = PROVIDER_COPY_PACER
-        .with(|slot| *slot.borrow())
-        .unwrap_or_default();
-    copy_with_policy(&mut source, &mut destination, &mut pacer).map_err(CaptureError::from)
+    copy_with_active_policy(&mut source, &mut destination, &mut policy).map_err(CaptureError::from)
 }
 
+#[cfg(test)]
 fn copy_with_policy<R: Read, W: Write, P: ProviderCopyPolicy>(
+    source: &mut R,
+    destination: &mut W,
+    policy: &mut P,
+) -> io::Result<u64> {
+    policy.begin_slice()?;
+    copy_with_active_policy(source, destination, policy)
+}
+
+fn copy_with_active_policy<R: Read, W: Write, P: ProviderCopyPolicy>(
     source: &mut R,
     destination: &mut W,
     policy: &mut P,
@@ -249,7 +344,7 @@ fn copy_with_policy<R: Read, W: Write, P: ProviderCopyPolicy>(
         if read == 0 {
             destination.flush()?;
             if slice_bytes > 0 {
-                policy.finish_slice(slice_started.elapsed(), slice_bytes);
+                policy.finish_slice(slice_started.elapsed(), slice_bytes)?;
             }
             return Ok(total_bytes);
         }
@@ -259,9 +354,10 @@ fn copy_with_policy<R: Read, W: Write, P: ProviderCopyPolicy>(
         slice_bytes = slice_bytes.saturating_add(read);
         if policy.should_rotate(slice_started, slice_bytes) {
             destination.flush()?;
-            policy.finish_slice(slice_started.elapsed(), slice_bytes);
+            policy.finish_slice(slice_started.elapsed(), slice_bytes)?;
             slice_started = Instant::now();
             slice_bytes = 0;
+            policy.begin_slice()?;
         }
     }
 }
@@ -353,13 +449,15 @@ pub(crate) fn opencode_schema_fingerprint(conn: &Connection) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
+    use std::{fs, io, io::Cursor, sync::mpsc, thread};
 
+    use ctx_history_store::Store;
     use rusqlite::{params, types::Value as SqlValue, Connection};
 
     use super::{
-        copy_with_policy, optional_text_column_expr, optional_timestamp_millis_expr, BTreeSet,
-        Duration, Instant, ProviderCopyPolicy, PROVIDER_COPY_BUFFER_BYTES,
+        copy_provider_sqlite_file, copy_with_policy, optional_text_column_expr,
+        optional_timestamp_millis_expr, BTreeSet, Duration, Instant, ProviderCopyPolicy,
+        PROVIDER_COPY_ADMISSION, PROVIDER_COPY_BUFFER_BYTES,
     };
 
     struct CountingCopyPolicy {
@@ -368,12 +466,17 @@ mod tests {
     }
 
     impl ProviderCopyPolicy for CountingCopyPolicy {
+        fn begin_slice(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
         fn should_rotate(&mut self, _started: Instant, bytes: u64) -> bool {
             bytes >= self.rotate_bytes
         }
 
-        fn finish_slice(&mut self, _active: Duration, bytes: u64) {
+        fn finish_slice(&mut self, _active: Duration, bytes: u64) -> io::Result<()> {
             self.finished_slices.push(bytes);
+            Ok(())
         }
     }
 
@@ -399,6 +502,45 @@ mod tests {
             .finished_slices
             .iter()
             .all(|bytes| *bytes <= rotate_bytes));
+    }
+
+    #[test]
+    fn provider_copy_waits_for_canonical_admission_before_destination_creation() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("provider.sqlite");
+        let destination = temp.path().join("snapshot").join("provider.sqlite");
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::write(&source, vec![7_u8; PROVIDER_COPY_BUFFER_BYTES * 2]).unwrap();
+
+        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        store.begin_immediate_batch().unwrap();
+        let admission = store.indexing_admission().unwrap();
+        let worker_destination = destination.clone();
+        let (result_tx, result_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            PROVIDER_COPY_ADMISSION.with(|slot| {
+                slot.replace(Some(admission));
+            });
+            result_tx
+                .send(copy_provider_sqlite_file(&source, &worker_destination))
+                .unwrap();
+        });
+
+        thread::sleep(Duration::from_millis(150));
+        assert!(
+            !destination.exists(),
+            "snapshot destination was created before canonical admission"
+        );
+        store.rollback_batch().unwrap();
+        assert_eq!(
+            result_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("provider copy did not continue after admission release")
+                .unwrap(),
+            (PROVIDER_COPY_BUFFER_BYTES * 2) as u64
+        );
+        worker.join().unwrap();
+        assert!(destination.exists());
     }
 
     #[test]

@@ -14,7 +14,9 @@ use crate::schema::fts::FTS_TABLES_SQL;
 use crate::schema::indexes::INDEXES_SQL;
 use crate::schema::migrations::{
     rebuild_capture_sources_provider_check, rebuild_catalog_sessions_provider_check,
+    run_next_legacy_migration,
 };
+use crate::schema::resumable::{run_step, MigrationDiskNeed, MigrationStep};
 use crate::{Store, SCHEMA_VERSION};
 
 fn tempdir() -> tempfile::TempDir {
@@ -162,6 +164,13 @@ fn schema_v45_rebuilds_scriptgram_sidecars() {
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
     assert_eq!(version, SCHEMA_VERSION);
+    assert!(!store.search_projection_ready().unwrap());
+    let mut maintenance_slices = 0;
+    while store.run_search_projection_maintenance_slice().unwrap() {
+        maintenance_slices += 1;
+    }
+    assert!(maintenance_slices > 0);
+    assert!(store.search_projection_ready().unwrap());
     for column in ["record_id", "token_text"] {
         assert!(table_has_column(&store.conn, "ctx_history_search_scriptgram", column).unwrap());
     }
@@ -826,6 +835,13 @@ fn schema_v44_removes_payload_state_columns_and_rebuilds_preview_fts() {
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
     assert_eq!(version, SCHEMA_VERSION);
+    assert!(!store.search_projection_ready().unwrap());
+    let mut maintenance_slices = 0;
+    while store.run_search_projection_maintenance_slice().unwrap() {
+        maintenance_slices += 1;
+    }
+    assert!(maintenance_slices > 0);
+    assert!(store.search_projection_ready().unwrap());
     assert!(!table_has_column(&store.conn, "events", "redaction_state").unwrap());
     assert!(!table_has_column(&store.conn, "artifacts", "redaction_state").unwrap());
     assert!(!table_has_column(&store.conn, "event_search", "safe_preview_text").unwrap());
@@ -1442,6 +1458,140 @@ fn schema_v46_adds_mimocode_provider_checks() {
         "mimocode_sqlite",
         "/tmp/mimocode",
         "/tmp/mimocode/mimocode.db",
+    );
+}
+
+#[test]
+fn large_resumable_migration_survives_interruption_between_copy_batches() {
+    let temp = tempdir();
+    let path = temp.path().join("work.sqlite");
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(CREATE_TABLES_SQL).unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        for index in 0..1_300 {
+            conn.execute(
+                r#"
+                INSERT INTO catalog_sessions
+                    (source_path, provider, source_format, source_root, agent_type,
+                     file_size_bytes, file_modified_at_ms, cataloged_at_ms)
+                VALUES (?1, 'codex', 'codex_session_jsonl', '/tmp/codex', 'primary', 1, 1, 1)
+                "#,
+                [format!("/tmp/codex/session-{index}.jsonl")],
+            )
+            .unwrap();
+        }
+        conn.execute_batch("PRAGMA user_version = 45; COMMIT")
+            .unwrap();
+
+        for _ in 0..5 {
+            assert_eq!(
+                run_step(&conn, 46, |need, _| {
+                    assert!(matches!(
+                        need,
+                        MigrationDiskNeed::None
+                            | MigrationDiskNeed::Fixed(_)
+                            | MigrationDiskNeed::DatabaseAmplification(_)
+                    ));
+                    Ok(())
+                })
+                .unwrap(),
+                MigrationStep::Progress
+            );
+        }
+        let (phase, item_index, cursor): (String, i64, i64) = conn
+            .query_row(
+                "SELECT phase, item_index, copy_cursor FROM ctx_schema_migration_progress",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(phase, "tables");
+        assert_eq!(item_index, 1);
+        assert!(cursor > i64::MIN);
+    }
+
+    let store = Store::open(&path).unwrap();
+    let rows: i64 = store
+        .conn
+        .query_row("SELECT COUNT(*) FROM catalog_sessions", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(rows, 1_300);
+    assert!(!table_exists(&store.conn, "ctx_schema_migration_progress").unwrap());
+    assert_eq!(
+        store
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        SCHEMA_VERSION
+    );
+}
+
+#[test]
+fn large_pre_v1_backfill_resumes_in_bounded_idempotent_batches() {
+    let temp = tempdir();
+    let path = temp.path().join("work.sqlite");
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(CREATE_TABLES_SQL).unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        for index in 0..1_300 {
+            conn.execute(
+                r#"
+                INSERT INTO history_records
+                    (id, title, summary, last_activity_at_ms, body, created_at, updated_at)
+                VALUES (?1, ?2, NULL, 0, ?3, '2026-06-23T12:00:00Z', '2026-06-23T12:00:01Z')
+                "#,
+                params![
+                    new_id().to_string(),
+                    format!("legacy record {index}"),
+                    format!("legacy body {index}"),
+                ],
+            )
+            .unwrap();
+        }
+        conn.execute_batch("PRAGMA user_version = 0; COMMIT")
+            .unwrap();
+
+        for _ in 0..2 {
+            run_next_legacy_migration(&conn, 0, || Ok(())).unwrap();
+        }
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM history_records WHERE summary IS NOT NULL",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1_024
+        );
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    let store = Store::open(&path).unwrap();
+    assert_eq!(
+        store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM history_records WHERE summary = body AND created_at_ms > 0 AND updated_at_ms > 0 AND started_at_ms > 0 AND last_activity_at_ms > 0",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1_300
+    );
+    assert_eq!(
+        store
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        SCHEMA_VERSION
     );
 }
 

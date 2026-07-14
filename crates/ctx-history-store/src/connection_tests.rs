@@ -1,5 +1,5 @@
 use std::{
-    env, fs,
+    env, fs, io,
     process::Command,
     sync::mpsc,
     thread,
@@ -147,6 +147,33 @@ fn pressure_checkpoint_returns_bounded_with_pinned_reader_and_preserves_snapshot
         2
     );
     assert_eq!(store.validate().unwrap(), Vec::<String>::new());
+}
+
+#[test]
+fn repeated_pressure_checkpoint_counts_only_newly_backfilled_frames() {
+    let temp = tempdir();
+    let db_path = temp.path().join("work.sqlite");
+    let store = Store::open(&db_path).unwrap();
+    store
+        .conn
+        .execute_batch(
+            "CREATE TABLE checkpoint_accounting(value BLOB);
+             PRAGMA wal_checkpoint(TRUNCATE);
+             PRAGMA wal_autocheckpoint=0;",
+        )
+        .unwrap();
+    store
+        .conn
+        .execute(
+            "INSERT INTO checkpoint_accounting VALUES (zeroblob(?1))",
+            params![9 * 1024 * 1024_i64],
+        )
+        .unwrap();
+
+    let (_, first_frames) = store.checkpoint_wal_for_pressure_work().unwrap();
+    let (_, repeated_frames) = store.checkpoint_wal_for_pressure_work().unwrap();
+    assert!(first_frames > 0);
+    assert_eq!(repeated_frames, 0);
 }
 
 #[test]
@@ -328,7 +355,10 @@ fn failed_commit_and_rollback_keep_admission_until_transaction_is_cleaned_up() {
     assert!(store.conn.is_autocommit());
     assert!(store.event_search_transaction_lock.borrow().is_none());
     assert!(store.indexing_writer_lease.borrow().is_none());
-    store.finish_event_search_bulk_mode(&guard).unwrap();
+    assert!(matches!(
+        store.finish_event_search_bulk_mode(&guard),
+        Err(StoreError::ConnectionQuarantined)
+    ));
 }
 
 #[test]
@@ -351,6 +381,93 @@ fn writable_open_installs_global_writer_admission() {
         done_tx.send(result.is_ok()).unwrap();
     });
     assert!(done_rx.recv_timeout(Duration::from_millis(100)).is_err());
+    drop(held);
+    assert!(done_rx.recv_timeout(Duration::from_secs(5)).unwrap());
+    opener.join().unwrap();
+}
+
+#[test]
+fn admitted_open_rejects_a_different_store_before_waiting_for_its_lock() {
+    let temp = tempdir();
+    let admitted_path = temp.path().join("admitted.sqlite");
+    let other_path = temp.path().join("other.sqlite");
+    let admission =
+        IndexingAdmission::acquire(&admitted_path, IndexingWorkClass::Background).unwrap();
+    let held = admission.lease().unwrap();
+
+    let open_admission = admission.clone();
+    let open_path = other_path.clone();
+    let (done_tx, done_rx) = mpsc::channel();
+    let opener = thread::spawn(move || {
+        let result = Store::open_admitted_with_busy_timeout(
+            &open_path,
+            Duration::from_millis(10),
+            &open_admission,
+        );
+        done_tx.send(result.map(|_| ())).unwrap();
+    });
+
+    let outcome = done_rx.recv_timeout(Duration::from_millis(250));
+    drop(held);
+    opener.join().unwrap();
+    let error = outcome
+        .expect("mismatched admitted open waited for the wrong store lock")
+        .expect_err("mismatched admitted open unexpectedly succeeded");
+    assert!(matches!(
+        error,
+        StoreError::Io(error) if error.kind() == std::io::ErrorKind::InvalidInput
+    ));
+    assert!(!other_path.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn missing_store_parent_aliases_share_admission_and_sqlite_identity() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempdir();
+    let real_root = temp.path().join("real-root");
+    let alias_root = temp.path().join("alias-root");
+    fs::create_dir(&real_root).unwrap();
+    symlink(&real_root, &alias_root).unwrap();
+    let real_path = real_root.join("work.sqlite");
+    let alias_path = alias_root.join("work.sqlite");
+
+    let admission = IndexingAdmission::acquire(&alias_path, IndexingWorkClass::Background).unwrap();
+    let store = Store::open_admitted(&real_path, &admission).unwrap();
+    assert_eq!(store.path(), real_path.as_path());
+    assert!(real_path.exists());
+    assert_eq!(
+        Store::open_read_only(&alias_path).unwrap().path(),
+        real_path
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn store_aliases_cannot_bypass_global_writer_admission() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempdir();
+    let real_root = temp.path().join("real-root");
+    let alias_root = temp.path().join("alias-root");
+    fs::create_dir(&real_root).unwrap();
+    symlink(&real_root, &alias_root).unwrap();
+    let real_path = real_root.join("work.sqlite");
+    let alias_path = alias_root.join("work.sqlite");
+    let admission = IndexingAdmission::acquire(&alias_path, IndexingWorkClass::Background).unwrap();
+    let held = admission.lease().unwrap();
+
+    let (done_tx, done_rx) = mpsc::channel();
+    let opener = thread::spawn(move || {
+        done_tx.send(Store::open(real_path).is_ok()).unwrap();
+    });
+    assert!(done_rx.recv_timeout(Duration::from_millis(100)).is_err());
+    assert!(
+        IndexingAdmission::status(&alias_path)
+            .unwrap()
+            .writer_active
+    );
     drop(held);
     assert!(done_rx.recv_timeout(Duration::from_secs(2)).unwrap());
     opener.join().unwrap();
@@ -402,7 +519,7 @@ fn search_projection_bootstrap_is_durable_and_sliced_across_opens() {
         .execute_batch(
             "DELETE FROM ctx_history_search;\
              DELETE FROM ctx_history_search_scriptgram;\
-             DELETE FROM search_projection_stats WHERE key LIKE 'search_projection_init_v1:%';",
+             DELETE FROM search_projection_stats WHERE key LIKE 'search_projection_init_v2:%';",
         )
         .unwrap();
     drop(store);
@@ -412,9 +529,11 @@ fn search_projection_bootstrap_is_durable_and_sliced_across_opens() {
     assert_eq!(
         first
             .conn
-            .query_row("SELECT COUNT(*) FROM ctx_history_search", [], |row| {
-                row.get::<_, i64>(0)
-            })
+            .query_row(
+                "SELECT COUNT(*) FROM ctx_history_search_rebuild",
+                [],
+                |row| { row.get::<_, i64>(0) }
+            )
             .unwrap(),
         0,
         "ordinary writable open must not perform hidden FTS recovery"
@@ -428,12 +547,18 @@ fn search_projection_bootstrap_is_durable_and_sliced_across_opens() {
     assert_eq!(
         second
             .conn
-            .query_row("SELECT COUNT(*) FROM ctx_history_search", [], |row| {
-                row.get::<_, i64>(0)
-            })
+            .query_row(
+                "SELECT COUNT(*) FROM ctx_history_search_rebuild",
+                [],
+                |row| { row.get::<_, i64>(0) }
+            )
             .unwrap(),
         64
     );
+    assert!(matches!(
+        second.search_records("bootstrap record", 200),
+        Err(StoreError::SearchProjectionMaintenancePending)
+    ));
     drop(second);
 
     let third = Store::open_admitted(&db_path, &admission).unwrap();
@@ -441,15 +566,18 @@ fn search_projection_bootstrap_is_durable_and_sliced_across_opens() {
     assert_eq!(
         third
             .conn
-            .query_row("SELECT COUNT(*) FROM ctx_history_search", [], |row| {
-                row.get::<_, i64>(0)
-            })
+            .query_row(
+                "SELECT COUNT(*) FROM ctx_history_search_rebuild",
+                [],
+                |row| { row.get::<_, i64>(0) }
+            )
             .unwrap(),
         128
     );
     drop(third);
 
     let complete = Store::open_admitted(&db_path, &admission).unwrap();
+    while complete.run_event_search_maintenance_slice().unwrap() {}
     assert!(!complete.search_projection_maintenance_pending().unwrap());
     assert_eq!(
         complete
@@ -464,7 +592,7 @@ fn search_projection_bootstrap_is_durable_and_sliced_across_opens() {
         complete
             .conn
             .query_row(
-                "SELECT value FROM search_projection_stats WHERE key = 'search_projection_init_v1:complete'",
+                "SELECT value FROM search_projection_stats WHERE key = 'search_projection_init_v2:complete'",
                 [],
                 |row| row.get::<_, i64>(0),
             )
@@ -920,6 +1048,10 @@ fn bulk_search_mode_crosses_crisis_threshold_without_automatic_merge() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");
     let store = Store::open(&db_path).unwrap();
+    store
+        .conn
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
     let guard = store.begin_event_search_bulk_mode().unwrap();
 
     let mut peak_wal_bytes = 0;
@@ -1176,4 +1308,72 @@ fn interrupted_bounded_merge_resumes_after_reopen() {
             .unwrap(),
         20
     );
+}
+
+#[test]
+fn failed_rollback_quarantines_connection_without_releasing_admission() {
+    let temp = tempdir();
+    let db_path = temp.path().join("work.sqlite");
+    let store = Store::open(&db_path).unwrap();
+    store.begin_immediate_batch().unwrap();
+
+    let error = store
+        .rollback_batch_with(|| Err(rusqlite::Error::InvalidQuery))
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        StoreError::Sql(rusqlite::Error::InvalidQuery)
+    ));
+    assert!(!store.conn.is_autocommit());
+    assert!(store.connection_quarantined.get());
+    assert!(store.indexing_writer_lease_held());
+    assert!(matches!(
+        store.begin_immediate_batch(),
+        Err(StoreError::ConnectionQuarantined)
+    ));
+    store.conn.execute_batch("ROLLBACK").unwrap();
+}
+
+#[test]
+fn migration_precommit_probe_and_rollback_failure_quarantine_connection() {
+    let temp = tempdir();
+    let db_path = temp.path().join("work.sqlite");
+    let store = Store::open(&db_path).unwrap();
+    store.conn.execute_batch("PRAGMA user_version = 0").unwrap();
+
+    let mut probes = 0;
+    let _probe = crate::work_control::install_test_disk_space_probe(move |_path, operation| {
+        assert_eq!(operation, "ctx legacy migration");
+        probes += 1;
+        if probes == 1 {
+            Ok(u64::MAX)
+        } else {
+            Err(io::Error::other(
+                "injected final precommit disk probe failure",
+            ))
+        }
+    });
+    store.conn.authorizer(Some(
+        |context: rusqlite::hooks::AuthContext<'_>| match context.action {
+            AuthAction::Transaction {
+                operation: TransactionOperation::Rollback,
+            } => Authorization::Deny,
+            _ => Authorization::Allow,
+        },
+    ));
+
+    assert!(store.run_migrations_with_handoff().is_err());
+    assert!(!store.conn.is_autocommit());
+    assert!(store.connection_quarantined.get());
+    assert!(store.indexing_writer_lease_held());
+    assert!(matches!(
+        store.begin_immediate_batch(),
+        Err(StoreError::ConnectionQuarantined)
+    ));
+
+    store
+        .conn
+        .authorizer(None::<fn(rusqlite::hooks::AuthContext<'_>) -> Authorization>);
+    store.conn.execute_batch("ROLLBACK").unwrap();
 }

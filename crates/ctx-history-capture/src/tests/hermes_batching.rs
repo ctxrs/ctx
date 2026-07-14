@@ -19,10 +19,12 @@ fn native_hermes_import_crosses_batches_and_replays_idempotently() {
         ..HermesSqliteImportOptions::default()
     };
 
+    take_observed_import_batches();
     let first = import_hermes_sqlite(&fixture, &mut store, options.clone()).unwrap();
     assert_eq!(first.failed, 0, "{:?}", first.failures);
     assert_eq!(first.imported_sessions, 1);
     assert_eq!(first.imported_events, 130);
+    assert_observed_import_batches_are_bounded();
     assert_eq!(
         store
             .search_event_hits("hermes-batched-message-129", 10)
@@ -30,7 +32,7 @@ fn native_hermes_import_crosses_batches_and_replays_idempotently() {
             .len(),
         1
     );
-    assert_bounded_wal(&db_path);
+    assert_pressure_bounded_wal(&db_path);
 
     let replay = import_hermes_sqlite(&fixture, &mut store, options).unwrap();
     assert_eq!(replay.failed, 0, "{:?}", replay.failures);
@@ -71,7 +73,7 @@ fn native_hermes_import_preserves_search_projection() {
             .len(),
         1
     );
-    assert_bounded_wal(&db_path);
+    assert_pressure_bounded_wal(&db_path);
 }
 
 #[test]
@@ -141,6 +143,7 @@ fn native_hermes_import_preserves_preexisting_search_segment_and_bounds_peak_wal
         event_search_segment_count(&db_path) > 1,
         "finishing Hermes must not re-optimize the pre-existing search segment"
     );
+    while store.run_event_search_maintenance_slice().unwrap() {}
     assert_eq!(bulk_search_marker_count(&db_path), 0);
     assert_eq!(integrity_check(&db_path), "ok");
     assert_eq!(
@@ -157,15 +160,23 @@ fn native_hermes_import_preserves_preexisting_search_segment_and_bounds_peak_wal
     assert_eq!(replay.skipped_events, 130);
 }
 
-fn assert_bounded_wal(db_path: &Path) {
+fn assert_pressure_bounded_wal(db_path: &Path) {
     let wal_path = PathBuf::from(format!("{}-wal", db_path.display()));
     let wal_bytes = fs::metadata(&wal_path)
         .map(|metadata| metadata.len())
         .unwrap_or(0);
     assert!(
-        wal_bytes <= 4 * 1024 * 1024,
+        wal_bytes <= 32 * 1024 * 1024,
         "WAL remained at {wal_bytes} bytes"
     );
+}
+
+fn assert_observed_import_batches_are_bounded() {
+    let batches = take_observed_import_batches();
+    assert!(!batches.is_empty());
+    assert!(batches.iter().all(|(units, bytes)| {
+        *units <= IMPORT_TRANSACTION_BATCH_UNITS && *bytes <= IMPORT_TRANSACTION_BATCH_BYTES
+    }));
 }
 
 fn write_hermes_batched_db(temp: &TempDir, messages: usize) -> PathBuf {

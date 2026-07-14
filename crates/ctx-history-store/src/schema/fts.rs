@@ -43,8 +43,8 @@ CREATE VIRTUAL TABLE IF NOT EXISTS event_search_scriptgram USING fts5(
 );
 "#;
 
-pub(crate) fn create_fts_tables_if_supported(conn: &Connection) -> Result<()> {
-    match conn.execute_batch(FTS_TABLES_SQL) {
+pub(crate) fn execute_fts_ddl_if_supported(conn: &Connection, sql: &str) -> Result<()> {
+    match conn.execute_batch(sql) {
         Ok(()) => Ok(()),
         Err(rusqlite::Error::SqliteFailure(error, message))
             if is_missing_fts_module(error.extended_code, message.as_deref()) =>

@@ -371,11 +371,17 @@ fn semantic_rust_full_scan_chunk_limit() -> usize {
     SEMANTIC_FULL_SCAN_MAX_CHUNKS.min(byte_limited_chunks)
 }
 
-fn semantic_full_corpus_vector_scan_ready(vector_store: &SemanticVectorStore) -> Result<bool> {
-    if vector_store.sqlite_vec0_search_ready().unwrap_or(false) {
+fn semantic_full_corpus_vector_scan_ready(
+    vector_store: &SemanticVectorStore,
+    relational_revision: u64,
+) -> Result<bool> {
+    if vector_store
+        .sqlite_vec0_search_ready(relational_revision)
+        ?
+    {
         return Ok(true);
     }
-    let stats = vector_store.cached_or_exact_stats()?;
+    let stats = vector_store.exact_stats()?;
     Ok(stats.embedded_chunks <= semantic_rust_full_scan_chunk_limit())
 }
 
@@ -527,7 +533,9 @@ fn semantic_text_chunks(text: &str) -> Vec<(usize, usize, String)> {
             .saturating_add(SEMANTIC_CHUNK_TARGET_CHARS)
             .min(chars.len());
         if end < chars.len() {
-            let boundary_floor = end.saturating_sub(150).max(start + 1);
+            let boundary_floor = end
+                .saturating_sub(SEMANTIC_CHUNK_BOUNDARY_BACKTRACK_CHARS)
+                .max(start + 1);
             for index in (boundary_floor..end).rev() {
                 if chars[index].is_whitespace() {
                     end = index + 1;
@@ -689,7 +697,10 @@ fn semantic_hits_for_query(
     limit: usize,
     event_filter: Option<&[Uuid]>,
 ) -> Result<SemanticHitSearch> {
-    if event_filter.is_none() && !semantic_full_corpus_vector_scan_ready(vector_store)? {
+    let relational_revision = store.semantic_content_revision()?;
+    if event_filter.is_none()
+        && !semantic_full_corpus_vector_scan_ready(vector_store, relational_revision)?
+    {
         let stats = vector_store.cached_or_exact_stats()?;
         return Err(anyhow!(
             "semantic vector backend cannot scan full sidecar locally ({} chunks exceed rust scan cap of {} and sqlite-vec is unavailable)",
@@ -697,8 +708,10 @@ fn semantic_hits_for_query(
             semantic_rust_full_scan_chunk_limit()
         ));
     }
-    let sqlite_vec0_full_scan_ready =
-        event_filter.is_none() && vector_store.sqlite_vec0_search_ready().unwrap_or(false);
+    let sqlite_vec0_full_scan_ready = event_filter.is_none()
+        && vector_store
+            .sqlite_vec0_search_ready(relational_revision)
+            ?;
     let vector_limit = if sqlite_vec0_full_scan_ready {
         limit.max(1)
     } else {
@@ -707,7 +720,7 @@ fn semantic_hits_for_query(
     let vector_search = if let Some(event_filter) = event_filter {
         vector_store.search_event_ids(query_embedding, event_filter, vector_limit)?
     } else {
-        vector_store.search(query_embedding, vector_limit)?
+        vector_store.search(query_embedding, vector_limit, relational_revision)?
     };
     let mut diagnostics = SemanticRetrievalDiagnostics {
         vector_backend: vector_search.stats.backend,
@@ -729,7 +742,20 @@ fn semantic_hits_for_query(
     }
     let mut vector_hits = best_by_event.into_values().collect::<Vec<_>>();
     vector_hits.sort_by(compare_semantic_hits_desc);
-    let current_hashes = current_semantic_source_hashes(store, &vector_hits)?;
+    let chunk_ranges = vector_hits
+        .iter()
+        .map(|hit| (hit.event_id, (hit.start_char, hit.end_char)))
+        .collect::<HashMap<_, _>>();
+    let hydration_started = Instant::now();
+    let (documents, hydrated_hits) = store.semantic_event_snapshot(&chunk_ranges)?;
+    diagnostics.hydration_ms = Some(hydration_started.elapsed().as_millis() as u64);
+    let current_hashes = documents
+        .into_iter()
+        .map(|doc| {
+            let source_text = semantic_source_text(&doc.text);
+            (doc.event_id, semantic_document_hash(&doc, &source_text))
+        })
+        .collect::<HashMap<_, _>>();
     let before_stale_filter = vector_hits.len();
     vector_hits.retain(|hit| {
         current_hashes
@@ -740,13 +766,6 @@ fn semantic_hits_for_query(
     if vector_hits.len() > limit {
         vector_hits.truncate(limit);
     }
-    let chunk_ranges = vector_hits
-        .iter()
-        .map(|hit| (hit.event_id, (hit.start_char, hit.end_char)))
-        .collect::<HashMap<_, _>>();
-    let hydration_started = Instant::now();
-    let hydrated_hits = store.semantic_event_hits_by_id(&chunk_ranges)?;
-    diagnostics.hydration_ms = Some(hydration_started.elapsed().as_millis() as u64);
     let hydrated_by_id = hydrated_hits
         .into_iter()
         .map(|hit| (hit.event_id, hit))
@@ -762,22 +781,4 @@ fn semantic_hits_for_query(
     }
     diagnostics.semantic_candidates = Some(hits.len());
     Ok(SemanticHitSearch { hits, diagnostics })
-}
-
-fn current_semantic_source_hashes(
-    store: &Store,
-    vector_hits: &[SemanticVectorHit],
-) -> Result<HashMap<Uuid, String>> {
-    let event_ids = vector_hits
-        .iter()
-        .map(|hit| hit.event_id)
-        .collect::<Vec<_>>();
-    let docs = store.event_embedding_documents_by_ids(&event_ids)?;
-    Ok(docs
-        .into_iter()
-        .map(|doc| {
-            let source_text = semantic_source_text(&doc.text);
-            (doc.event_id, semantic_document_hash(&doc, &source_text))
-        })
-        .collect())
 }

@@ -20,7 +20,7 @@ mod sync;
 mod vcs;
 mod work_control;
 
-pub use archive::validate_archive_version;
+pub use archive::{validate_archive_version, ArchiveImportOutcome};
 pub use bulk_search::EventSearchBulkGuard;
 pub use catalog::{
     CatalogCounts, CatalogIndexedStatus, CatalogSession, CatalogSourceIndexState,
@@ -39,14 +39,15 @@ pub use raw_sql::{
 };
 pub use search::projections::{EventEmbeddingDocument, EventSearchHit};
 pub use work_control::{
-    system_memory, IndexingAdmission, IndexingAdmissionStatus, IndexingIoPacer, IndexingPressure,
-    IndexingResourceSnapshot, IndexingSlice, IndexingWorkClass, WalCheckpointStatus,
-    INDEXING_TRANSACTION_MAX, INDEXING_WAL_DELTA_BYTES, WAL_PASSIVE_MIN_BYTES,
-    WAL_RESTART_MIN_BYTES, WAL_TRUNCATE_MIN_BYTES,
+    ensure_indexing_disk_headroom, sqlite_amplifying_write_estimate, system_memory,
+    ExternalIndexingCopyLease, ExternalIndexingWriterLease, IndexingAdmission,
+    IndexingAdmissionStatus, IndexingIoPacer, IndexingPressure, IndexingResourceSnapshot,
+    IndexingSlice, IndexingWorkClass, WalCheckpointStatus, INDEXING_TRANSACTION_MAX,
+    INDEXING_WAL_DELTA_BYTES, WAL_PASSIVE_MIN_BYTES, WAL_RESTART_MIN_BYTES, WAL_TRUNCATE_MIN_BYTES,
 };
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     path::PathBuf,
     sync::{atomic::AtomicUsize, Arc},
     time::Duration,
@@ -65,6 +66,7 @@ pub struct Store {
     event_search_transaction_lock: RefCell<Option<Connection>>,
     indexing_admission: Option<IndexingAdmission>,
     indexing_writer_lease: RefCell<Option<work_control::IndexingWriterLease>>,
+    connection_quarantined: Cell<bool>,
 }
 
 #[cfg(test)]

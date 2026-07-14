@@ -7,12 +7,10 @@ use crate::connection::{
     parse_text_enum, parse_time, parse_uuid, timestamp_ms,
 };
 use crate::schema::ddl::table_exists;
-use crate::search::analyzer::{
-    lexical_query_terms, scriptgram_match_clauses, scriptgram_match_query,
-};
+use crate::search::analyzer::{scriptgram_match_clauses, scriptgram_match_query};
 use crate::search::projections::{
-    event_scriptgram_table_ready, fts_match_clauses, fts_match_query,
-    record_scriptgram_table_ready, upsert_record_search_projection,
+    delete_record_search_projection, event_scriptgram_table_ready, fts_match_clauses,
+    fts_match_query, record_scriptgram_table_ready, upsert_record_search_projection,
 };
 use crate::sync::sync_metadata_from_row;
 use crate::{Result, Store, StoreError};
@@ -145,11 +143,8 @@ impl Store {
             "#,
             params![&record_id],
         )?;
-        if deleted > 0 && table_exists(&self.conn, "ctx_history_search")? {
-            self.conn.execute(
-                "DELETE FROM ctx_history_search WHERE record_id = ?1",
-                params![&record_id],
-            )?;
+        if deleted > 0 {
+            delete_record_search_projection(&self.conn, &record_id)?;
         }
         Ok(deleted > 0)
     }
@@ -246,38 +241,37 @@ impl Store {
         if fts_match_query(query).is_none() && scriptgram_match_query(query).is_none() {
             return Ok(Vec::new());
         }
+        self.search_records_page_after_ready(query, limit, offset, || {})
+    }
+
+    fn search_records_page_after_ready(
+        &self,
+        query: &str,
+        limit: usize,
+        offset: usize,
+        after_ready: impl FnOnce(),
+    ) -> Result<Vec<HistoryRecord>> {
+        let result = self.with_read_snapshot(|| {
+            self.search_records_page_snapshot(query, limit, offset, after_ready)
+        });
+        result.map_err(|error| self.handle_search_projection_query_error(error))
+    }
+
+    fn search_records_page_snapshot(
+        &self,
+        query: &str,
+        limit: usize,
+        offset: usize,
+        after_ready: impl FnOnce(),
+    ) -> Result<Vec<HistoryRecord>> {
+        if !self.search_projection_ready()? {
+            return Err(crate::StoreError::SearchProjectionMaintenancePending);
+        }
+        after_ready();
         if let Some(records) = self.search_records_fts(query, limit, offset)? {
             return Ok(records);
         }
-        let terms = lexical_query_terms(query);
-        if terms.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut values = terms
-            .iter()
-            .map(|term| Value::Text(format!("%{term}%")))
-            .collect::<Vec<_>>();
-        let predicates = (1..=terms.len())
-            .map(|index| {
-                format!("title LIKE ?{index} OR body LIKE ?{index} OR tags_json LIKE ?{index}")
-            })
-            .collect::<Vec<_>>();
-        let coverage = predicates
-            .iter()
-            .map(|predicate| format!("CASE WHEN {predicate} THEN 1 ELSE 0 END"))
-            .collect::<Vec<_>>()
-            .join(" + ");
-        values.push(Value::Integer(limit as i64));
-        let limit_parameter = values.len();
-        values.push(Value::Integer(offset as i64));
-        let offset_parameter = values.len();
-        let tail = format!(
-            "WHERE ({}) ORDER BY ({coverage}) DESC, created_at DESC, id LIMIT ?{limit_parameter} OFFSET ?{offset_parameter}",
-            predicates.join(") OR (")
-        );
-        let mut stmt = self.conn.prepare(&record_select_sql(&tail))?;
-        let rows = stmt.query_map(params_from_iter(values), record_from_row)?;
-        collect_rows(rows)
+        Err(StoreError::SearchProjectionUnavailable)
     }
 
     fn search_records_fts(
@@ -415,4 +409,81 @@ pub(crate) fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Histo
         created_at: parse_time(row.get::<_, String>(6)?)?,
         updated_at: parse_time(row.get::<_, String>(7)?)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use ctx_history_core::HistoryRecord;
+
+    use super::*;
+
+    #[test]
+    fn deleting_orphan_record_removes_lexical_and_scriptgram_rows() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+        let record = HistoryRecord::new(
+            "Orphan record",
+            "scriptgram deletion target: 検索対象記録",
+            Vec::new(),
+            "task",
+            None,
+        );
+        store.upsert_record(&record).unwrap();
+
+        for table in ["ctx_history_search", "ctx_history_search_scriptgram"] {
+            let count: i64 = store
+                .conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE record_id = ?1"),
+                    [record.id.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "missing pre-delete row in {table}");
+        }
+
+        assert!(store.delete_orphan_record(record.id).unwrap());
+        assert!(matches!(
+            store.get_record(record.id),
+            Err(StoreError::NotFound(_))
+        ));
+        for table in ["ctx_history_search", "ctx_history_search_scriptgram"] {
+            let count: i64 = store
+                .conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE record_id = ?1"),
+                    [record.id.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 0, "stale post-delete row in {table}");
+        }
+    }
+
+    #[test]
+    fn record_readiness_and_fts_query_share_one_snapshot_during_refresh_race() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("work.sqlite");
+        let store = Store::open(&db_path).unwrap();
+        let record = HistoryRecord::new(
+            "Snapshot record",
+            "record readiness snapshot marker",
+            Vec::new(),
+            "task",
+            None,
+        );
+        let record_id = record.id;
+        store.upsert_record(&record).unwrap();
+        let concurrent = Store::open(&db_path).unwrap();
+
+        let records = store
+            .search_records_page_after_ready("snapshot marker", 10, 0, || {
+                concurrent.schedule_search_projection_refresh().unwrap();
+            })
+            .unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, record_id);
+        assert!(!concurrent.search_projection_ready().unwrap());
+    }
 }

@@ -234,6 +234,7 @@ fn batched_provider_import_preserves_pinned_reader_and_replays_idempotently() {
 
 #[test]
 fn provider_import_uses_shared_bounded_batches() {
+    take_observed_import_batches();
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");
     let mut store =
@@ -257,17 +258,7 @@ fn provider_import_uses_shared_bounded_batches() {
             (index as usize + 1, capture)
         })
         .collect();
-    let reader = Connection::open(&db_path).unwrap();
-    reader.execute_batch("BEGIN").unwrap();
-    assert_eq!(
-        reader
-            .query_row("SELECT COUNT(*) FROM events", [], |row| row
-                .get::<_, i64>(0))
-            .unwrap(),
-        0
-    );
-
-    let error = import_normalized_provider_captures(
+    import_normalized_provider_captures(
         &mut store,
         ProviderNormalizationResult {
             summary: ProviderImportSummary::default(),
@@ -279,9 +270,7 @@ fn provider_import_uses_shared_bounded_batches() {
             ..NormalizedProviderImportOptions::default()
         },
     )
-    .unwrap_err();
-    assert!(error.to_string().contains("ctx index is busy"), "{error}");
-    reader.execute_batch("ROLLBACK").unwrap();
+    .unwrap();
 
     assert_eq!(store.list_sessions().unwrap().len(), 64);
     assert_eq!(
@@ -291,10 +280,16 @@ fn provider_import_uses_shared_bounded_batches() {
             .len(),
         64
     );
+    let batches = take_observed_import_batches();
+    assert!(!batches.is_empty());
+    assert!(batches.iter().all(|(units, bytes)| {
+        *units <= IMPORT_TRANSACTION_BATCH_UNITS && *bytes <= IMPORT_TRANSACTION_BATCH_BYTES
+    }));
+    assert_eq!(batches.iter().map(|(units, _)| units).sum::<usize>(), 64);
 }
 
 #[test]
-fn provider_import_uses_shared_bulk_search_guard() {
+fn provider_import_shares_bulk_mode_across_transaction_handoffs() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");
     let mut store =
@@ -308,7 +303,7 @@ fn provider_import_uses_shared_bulk_search_guard() {
         Store::open_with_busy_timeout(&db_path, std::time::Duration::from_millis(10)).unwrap();
     let guard = other_store.begin_event_search_bulk_mode().unwrap();
 
-    let error = import_normalized_provider_captures(
+    let summary = import_normalized_provider_captures(
         &mut store,
         ProviderNormalizationResult {
             summary: ProviderImportSummary::default(),
@@ -328,12 +323,18 @@ fn provider_import_uses_shared_bulk_search_guard() {
             ..NormalizedProviderImportOptions::default()
         },
     )
-    .unwrap_err();
+    .unwrap();
 
-    assert!(error
-        .to_string()
-        .contains("another bulk search import is active"));
+    assert_eq!(summary.imported_events, 1);
+    assert_eq!(
+        store
+            .search_event_hits("same provider event payload", 10)
+            .unwrap()
+            .len(),
+        1
+    );
     other_store.finish_event_search_bulk_mode(&guard).unwrap();
+    while other_store.run_event_search_maintenance_slice().unwrap() {}
 }
 
 #[test]
@@ -366,16 +367,8 @@ fn batched_provider_import_rotates_on_serialized_byte_budget() {
     second.event.as_mut().unwrap().payload =
         json!({"text": format!("byte-budget-sentinel-second {}", "b".repeat(4_500_000))});
 
-    let reader = Connection::open(&db_path).unwrap();
-    reader.execute_batch("BEGIN").unwrap();
-    assert_eq!(
-        reader
-            .query_row("SELECT COUNT(*) FROM events", [], |row| row
-                .get::<_, i64>(0))
-            .unwrap(),
-        0
-    );
-    let error = import_normalized_provider_captures_in_batches(
+    take_observed_import_batches();
+    let summary = import_normalized_provider_captures_in_batches(
         &mut store,
         ProviderNormalizationResult {
             summary: ProviderImportSummary::default(),
@@ -388,11 +381,18 @@ fn batched_provider_import_rotates_on_serialized_byte_budget() {
         },
         64,
     )
-    .unwrap_err();
-    assert!(error.to_string().contains("ctx index is busy"), "{error}");
-    reader.execute_batch("ROLLBACK").unwrap();
+    .unwrap();
+    assert_eq!(summary.imported_events, 2);
+    let batches = take_observed_import_batches();
+    assert!(
+        batches.len() >= 2,
+        "expected byte rotation, got {batches:?}"
+    );
+    assert!(batches.iter().all(|(units, bytes)| {
+        *units <= IMPORT_TRANSACTION_BATCH_UNITS && *bytes <= IMPORT_TRANSACTION_BATCH_BYTES
+    }));
 
-    assert_eq!(store.list_sessions().unwrap().len(), 1);
+    assert_eq!(store.list_sessions().unwrap().len(), 2);
     assert_eq!(
         store
             .search_event_hits("byte-budget-sentinel-first", 10)
@@ -400,10 +400,13 @@ fn batched_provider_import_rotates_on_serialized_byte_budget() {
             .len(),
         1
     );
-    assert!(store
-        .search_event_hits("byte-budget-sentinel-second", 10)
-        .unwrap()
-        .is_empty());
+    assert_eq!(
+        store
+            .search_event_hits("byte-budget-sentinel-second", 10)
+            .unwrap()
+            .len(),
+        1
+    );
     store.optimize_search_index().unwrap();
 }
 

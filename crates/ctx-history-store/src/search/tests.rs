@@ -9,7 +9,7 @@ use ctx_history_core::{
 use rusqlite::params;
 use uuid::Uuid;
 
-use crate::Store;
+use crate::{Store, StoreError};
 
 #[path = "event_query_tests.rs"]
 mod event_query_tests;
@@ -436,7 +436,7 @@ fn multi_word_record_search_returns_partial_matches_and_orders_by_term_coverage(
 }
 
 #[test]
-fn multi_word_record_search_fallback_uses_the_same_or_semantics() {
+fn missing_record_projection_does_not_use_a_relational_fallback() {
     let temp = tempdir();
     let store = Store::open(temp.path().join("work.sqlite")).unwrap();
     let all_terms = record_with_id(
@@ -456,9 +456,10 @@ fn multi_word_record_search_fallback_uses_the_same_or_semantics() {
         .execute_batch("DROP TABLE ctx_history_search")
         .unwrap();
 
-    let hits = store.search_records("sqlite rollback", 10).unwrap();
-    let ids = hits.iter().map(|record| record.id).collect::<Vec<_>>();
-    assert_eq!(ids, vec![all_terms.id, partial.id]);
+    assert!(matches!(
+        store.search_records("sqlite rollback", 10),
+        Err(StoreError::SearchProjectionMaintenancePending)
+    ));
 }
 
 #[test]

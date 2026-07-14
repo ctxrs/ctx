@@ -502,18 +502,26 @@ fn semantic_worker_report_with_count_mode(
     let status_value = read_semantic_worker_status(data_root);
     let status_file_model_matches = semantic_status_file_model_matches(status_value.as_ref());
     let current_status_value = status_value.as_ref().filter(|_| status_file_model_matches);
+    let search_projection_ready = match store {
+        Some(store) => store.search_projection_ready()?,
+        None => current_status_value
+            .and_then(|value| value.get("search_projection_ready"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    };
     let (searchable_items, searchable_items_known) = match store {
+        Some(_) if !search_projection_ready => (0, false),
         Some(store) if count_mode == SemanticReportCountMode::ExactOnCacheMiss => {
             (store.event_embedding_document_count_cached_or_exact()?, true)
         }
         Some(store) => match store
             .cached_event_embedding_document_count()?
-            .or_else(|| semantic_status_file_searchable_items(status_value.as_ref()))
+            .or_else(|| semantic_status_file_searchable_items(current_status_value))
         {
             Some(count) => (count, true),
             None => (0, false),
         },
-        None => match semantic_status_file_searchable_items(status_value.as_ref()) {
+        None => match semantic_status_file_searchable_items(current_status_value) {
             Some(count) => (count, true),
             None => (0, false),
         },
@@ -521,7 +529,7 @@ fn semantic_worker_report_with_count_mode(
     let vector_path = semantic_vector_path(data_root);
     let model_cache_available =
         semantic_model_cache_available(&semantic_worker_cache_dir(data_root));
-    let sidecar_state_result = (|| -> Result<(SemanticSidecarStats, usize)> {
+    let sidecar_state_result = (|| -> Result<(SemanticSidecarStats, usize, bool, bool, bool)> {
         if let Some(vector_store) = SemanticVectorStore::open_read_only(&vector_path)? {
             let dirty_items = vector_store.dirty_event_count()?;
             let mut stats = match count_mode {
@@ -535,21 +543,76 @@ fn semantic_worker_report_with_count_mode(
             {
                 stats = vector_store.exact_stats()?;
             }
-            Ok((stats, dirty_items))
+            let relational_validation_pending = store
+                .map(|store| vector_store.relational_validation_is_current(store).map(|v| !v))
+                .transpose()?
+                .unwrap_or_else(|| {
+                    current_status_value
+                        .and_then(|value| value.get("relational_validation_pending"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                });
+            let relational_revision = store
+                .map(Store::semantic_content_revision)
+                .transpose()?
+                .unwrap_or(0);
+            let vector_validation_pending = if store.is_some() {
+                !vector_store.sqlite_vec0_validation_is_current(relational_revision)?
+            } else {
+                current_status_value
+                    .and_then(|value| value.get("vector_validation_pending"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            };
+            let vector_maintenance_pending = if store.is_some() {
+                semantic_vector_repair_request_path(&vector_path).exists()
+                    || vector_store.maintenance_pending(relational_revision)?
+            } else {
+                semantic_vector_repair_request_path(&vector_path).exists()
+                    || current_status_value
+                        .and_then(|value| value.get("vector_maintenance_pending"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+            };
+            Ok((
+                stats,
+                dirty_items,
+                relational_validation_pending,
+                vector_validation_pending,
+                vector_maintenance_pending,
+            ))
         } else if store.is_some() {
-            Ok((SemanticSidecarStats::default(), 0))
+            Ok((SemanticSidecarStats::default(), 0, true, true, true))
         } else {
-            Ok((semantic_status_file_stats(current_status_value), 0))
+            Ok((
+                semantic_status_file_stats(current_status_value),
+                0,
+                false,
+                false,
+                false,
+            ))
         }
     })();
-    let (sidecar_stats, dirty_items, sidecar_error) = match sidecar_state_result {
-        Ok((stats, dirty_items)) => (stats, dirty_items, None),
+    let (
+        sidecar_stats,
+        dirty_items,
+        relational_validation_pending,
+        vector_validation_pending,
+        vector_maintenance_pending,
+        sidecar_error,
+    ) = match sidecar_state_result {
+        Ok((stats, dirty_items, relational, vector, maintenance)) => {
+            (stats, dirty_items, relational, vector, maintenance, None)
+        }
         Err(error) => (
             SemanticSidecarStats {
                 embedded_items: 0,
                 embedded_chunks: 0,
             },
             0,
+            true,
+            true,
+            true,
             Some(format!("{error:#}")),
         ),
     };
@@ -578,20 +641,28 @@ fn semantic_worker_report_with_count_mode(
                 "unknown".to_owned()
             } else if searchable_items == 0 {
                 "empty".to_owned()
-            } else if queued_items_estimate == 0 {
+            } else if queued_items_estimate == 0
+                && !relational_validation_pending
+                && !vector_maintenance_pending
+            {
                 "ready".to_owned()
             } else {
                 "pending".to_owned()
             }
         });
     if store.is_some() {
-        let live_status = if !searchable_items_known {
+        let live_status = if !search_projection_ready {
+            "projection_pending".to_owned()
+        } else if !searchable_items_known {
             "unknown".to_owned()
         } else if searchable_items == 0 {
             "empty".to_owned()
         } else if sidecar_error.is_some() {
             "unavailable".to_owned()
-        } else if queued_items_estimate == 0 {
+        } else if queued_items_estimate == 0
+            && !relational_validation_pending
+            && !vector_maintenance_pending
+        {
             "ready".to_owned()
         } else {
             "pending".to_owned()
@@ -627,6 +698,19 @@ fn semantic_worker_report_with_count_mode(
         last_error: sidecar_error.or_else(|| {
             current_status_value.and_then(|value| json_string(value, "last_error"))
         }),
+        search_projection_ready,
+        projection_maintenance_advanced: false,
+        relational_validation_pending,
+        vector_validation_pending,
+        vector_maintenance_pending,
+        relational_validation_advanced: current_status_value
+            .and_then(|value| value.get("relational_validation_advanced"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        vector_maintenance_advanced: current_status_value
+            .and_then(|value| value.get("vector_maintenance_advanced"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         searchable_items,
         searchable_items_known,
         embedded_items,
@@ -823,7 +907,10 @@ fn daemon_semantic_job_report(
         "unknown"
     } else if semantic_report.searchable_items == 0 {
         "empty"
-    } else if semantic_report.queued_items_estimate == 0 {
+    } else if semantic_report.queued_items_estimate == 0
+        && !semantic_report.relational_validation_pending
+        && !semantic_report.vector_maintenance_pending
+    {
         "ready"
     } else if !semantic_report.model_cache_available {
         "skipped"

@@ -1276,6 +1276,22 @@ fn row_readers_reject_negative_unsigned_columns() {
         )
         .unwrap();
     assert_sql_conversion_error(store.get_event(event.id));
+    // This fixture deliberately bypasses typed writes. Keep its otherwise
+    // unchanged projection certified so the search-hit row decoder sees the
+    // malformed relational value under test.
+    store
+        .conn
+        .execute_batch(
+            r#"
+            UPDATE search_projection_stats
+            SET value = (
+                SELECT value FROM search_projection_stats
+                WHERE key = 'semantic_content_revision_v1'
+            )
+            WHERE key = 'search_projection_integrity_certified_revision';
+            "#,
+        )
+        .unwrap();
     assert_sql_conversion_error(store.search_event_hits("negative seq marker", 1));
 
     let artifact = artifact_record(new_id(), 1);

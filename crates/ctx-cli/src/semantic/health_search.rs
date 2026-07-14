@@ -225,6 +225,17 @@ fn sqlite_table_exists(conn: &Connection, table: &str) -> Result<bool> {
     Ok(exists)
 }
 
+fn sqlite_index_exists(conn: &Connection, index: &str) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1",
+            params![index],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
 fn sqlite_table_sql(conn: &Connection, table: &str) -> Result<Option<String>> {
     let sql = conn
         .query_row(

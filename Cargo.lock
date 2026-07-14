@@ -538,11 +538,13 @@ dependencies = [
  "fs2",
  "libc",
  "rusqlite",
+ "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "thiserror 1.0.69",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -141,18 +141,20 @@ Heavy writable indexing uses one internal cross-process writer lane per ctx
 store. The lane and its foreground-priority gate are private lock sidecars next
 to `work.sqlite`; the operating system releases them when a process exits, so
 an interrupted writer does not require stale-PID cleanup. There is no command,
-flag, or configuration setting for this policy. Discovery, transcript parsing,
-model preparation, and vector-only work do not own the lane. A scoped lease
-covers each relational transaction or checkpoint and is released at every
-slice boundary.
+flag, or configuration setting for this policy. Discovery and model preparation
+do not own the lane. Relational transactions, checkpoints, semantic-vector
+writes and repair, and bounded provider snapshot-copy writes share it. A scoped
+lease is released at every slice boundary.
 
 Provider-owned SQLite files that require a private main/WAL/SHM snapshot are
-copied outside the writer lane but under the same quiet slice policy. Copy
-polling uses 256 KiB buffers, with 32 handoff checks per 8 MiB byte slice, and
-also rotates at 250 ms. Snapshot throughput retains an internal 8 MiB/s ceiling
-even for foreground-triggered fallback. Quiet rest is the greater of three
-times active duration or the rest needed to preserve that byte ceiling. This
-pacing is internal and adds no configuration.
+preflighted before temp-file creation and copied under bounded writer leases.
+Copy polling uses 256 KiB buffers, with 32 handoff checks per 8 MiB byte slice,
+and also rotates at 250 ms. Background byte reservations are persisted and
+shared across processes by canonical store; temp-file copies additionally use
+a coordinator shared by their destination filesystem. The aggregate quiet
+ceiling is 8 MiB/s rather than 8 MiB/s per worker. Quiet rest is the greater of
+three times active duration or the rest needed to preserve that byte ceiling.
+This pacing is internal and adds no configuration.
 
 Interactive `search --refresh wait` work is foreground. Setup, explicit bulk
 import, daemon refresh, and semantic catch-up are quiet background work even

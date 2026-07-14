@@ -33,9 +33,11 @@ mod ids;
 
 #[cfg(test)]
 pub(crate) use batches::import_normalized_provider_captures_in_batches;
-#[cfg(test)]
-pub(crate) use batches::IMPORT_TRANSACTION_BATCH_UNITS;
 pub(crate) use batches::{resolve_pending_provider_edges_batched, ProviderImportTransaction};
+#[cfg(test)]
+pub(crate) use batches::{
+    take_observed_import_batches, IMPORT_TRANSACTION_BATCH_BYTES, IMPORT_TRANSACTION_BATCH_UNITS,
+};
 pub(crate) use commands::{
     provider_command_run_from_event, validate_provider_event_for_import, ProviderCommandRunInput,
 };
@@ -112,16 +114,6 @@ pub fn import_normalized_provider_captures(
     options: NormalizedProviderImportOptions,
 ) -> Result<ProviderImportSummary> {
     batches::import_normalized_provider_captures(store, normalization, options)
-}
-
-pub(crate) fn import_provider_capture_lines(
-    store: &mut Store,
-    options: NormalizedProviderImportOptions,
-    summary: ProviderImportSummary,
-    captures: Vec<(usize, ProviderCaptureEnvelope)>,
-    files_touched: Vec<(usize, ProviderFileTouchedEnvelope)>,
-) -> Result<ProviderImportSummary> {
-    batches::import_provider_capture_lines(store, options, summary, captures, files_touched)
 }
 
 fn filter_provider_capture_lines_without_real_session_messages(

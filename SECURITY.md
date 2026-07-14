@@ -49,6 +49,12 @@ Treat the ctx data root and command output as sensitive. They may contain source
 code, prompts, local paths, command output previews, private repository names,
 and secrets that appeared in provider transcripts.
 
+On Unix, ctx creates or repairs its managed data directories and core index,
+lock, object, and capture-spool files with owner-only permissions. On Windows,
+ctx currently relies on ACLs inherited from the chosen data directory and does
+not apply an owner-only ACL itself. Choose a data root whose inherited Windows
+ACL is limited to the intended account.
+
 Raw provider transcript files remain in provider-owned locations. ctx imports
 the searchable text and metadata it needs into SQLite, so deleting or moving the
 raw transcript does not necessarily remove indexed text from ctx. Delete the ctx

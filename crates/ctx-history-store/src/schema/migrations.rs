@@ -1,94 +1,69 @@
 use rusqlite::Connection;
 
+#[cfg(test)]
+use crate::schema::ddl::CAPTURE_SOURCE_IDENTITY_COLUMNS;
 use crate::schema::ddl::{
-    ensure_columns, table_exists, table_has_column, CAPTURE_SOURCE_IDENTITY_COLUMNS,
-    CATALOG_SESSION_IMPORT_STATE_COLUMNS, CREATE_TABLES_SQL, HISTORY_RECORD_COLUMNS,
+    ensure_columns, table_exists, table_has_column, CATALOG_SESSION_IMPORT_STATE_COLUMNS,
+    CREATE_TABLES_SQL, HISTORY_RECORD_COLUMNS,
 };
-use crate::schema::fts::{create_fts_tables_if_supported, drop_fts_table_if_exists};
-use crate::schema::indexes::INDEXES_SQL;
-use crate::schema::rebuild::rebuild_v44_current_schema_tables;
-use crate::schema::scriptgram::migrate_to_v45;
 use crate::schema::views::{
     create_stable_sql_views, drop_stable_sql_views, stable_sql_views_exist,
 };
-use crate::search::projections::rebuild_search_projection;
 use crate::{Result, StoreError};
 
-pub(crate) fn run_migrations(conn: &Connection, user_version: i64) -> Result<()> {
+const LEGACY_UPDATE_BATCH_ROWS: i64 = 512;
+
+pub(crate) fn run_next_legacy_migration(
+    conn: &Connection,
+    user_version: i64,
+    mut revalidate: impl FnMut() -> Result<()>,
+) -> Result<()> {
     if user_version < 1 {
-        migrate_to_v1(conn)?;
+        migrate_to_v1(conn, &mut revalidate)
+    } else if user_version < 2 {
+        migrate_to_v2(conn, &mut revalidate)
+    } else if user_version < 3 {
+        migrate_to_v3(conn, &mut revalidate)
+    } else if user_version < 4 {
+        migrate_to_v4(conn, &mut revalidate)
+    } else if user_version < 5 {
+        migrate_to_v5(conn, &mut revalidate)
+    } else if user_version < 6 {
+        migrate_to_v6(conn, &mut revalidate)
+    } else if user_version < 7 {
+        migrate_to_v7(conn, &mut revalidate)
+    } else if user_version < 8 {
+        migrate_to_v8(conn, &mut revalidate)
+    } else if user_version < 9 {
+        migrate_to_v9(conn, &mut revalidate)
+    } else if user_version < 10 {
+        migrate_to_v10(conn, &mut revalidate)
+    } else if user_version < 11 {
+        migrate_to_v11(conn, &mut revalidate)
+    } else if user_version < 12 {
+        migrate_to_v12(conn, &mut revalidate)
+    } else if user_version < 13 {
+        migrate_to_v13(conn, &mut revalidate)
+    } else if user_version < 14 {
+        migrate_to_v14(conn, &mut revalidate)
+    } else if user_version < 15 {
+        migrate_to_v15(conn, &mut revalidate)
+    } else if user_version < 16 {
+        migrate_to_v16(conn, &mut revalidate)
+    } else {
+        Err(StoreError::UnsupportedSchemaVersion(user_version))
     }
-    if user_version < 2 {
-        migrate_to_v2(conn)?;
-    }
-    if user_version < 3 {
-        migrate_to_v3(conn)?;
-    }
-    if user_version < 4 {
-        migrate_to_v4(conn)?;
-    }
-    if user_version < 5 {
-        migrate_to_v5(conn)?;
-    }
-    if user_version < 6 {
-        migrate_to_v6(conn)?;
-    }
-    if user_version < 7 {
-        migrate_to_v7(conn)?;
-    }
-    if user_version < 8 {
-        migrate_to_v8(conn)?;
-    }
-    if user_version < 9 {
-        migrate_to_v9(conn)?;
-    }
-    if user_version < 10 {
-        migrate_to_v10(conn)?;
-    }
-    if user_version < 11 {
-        migrate_to_v11(conn)?;
-    }
-    if user_version < 12 {
-        migrate_to_v12(conn)?;
-    }
-    if user_version < 13 {
-        migrate_to_v13(conn)?;
-    }
-    if user_version < 14 {
-        migrate_to_v14(conn)?;
-    }
-    if user_version < 15 {
-        migrate_to_v15(conn)?;
-    }
-    if user_version < 16 {
-        migrate_to_v16(conn)?;
-    }
-    if user_version < 42 {
-        migrate_to_v42(conn)?;
-    }
-    if user_version < 43 {
-        migrate_to_v43(conn)?;
-    }
-    if user_version < 44 {
-        migrate_to_v44(conn, false)?;
-    }
-    if user_version < 45 {
-        migrate_to_v45(conn)?;
-    }
-    if user_version < 46 {
-        migrate_to_v46(conn)?;
-    }
-    Ok(())
 }
 
-fn migrate_to_v1(conn: &Connection) -> Result<()> {
+fn migrate_to_v1(conn: &Connection, revalidate: &mut impl FnMut() -> Result<()>) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE;")?;
     let migration = (|| -> Result<()> {
         conn.execute_batch(CREATE_TABLES_SQL)?;
         ensure_columns(conn, "history_records", HISTORY_RECORD_COLUMNS)?;
-        backfill_legacy_tables(conn)?;
-        conn.execute_batch(INDEXES_SQL)?;
-        conn.execute_batch("PRAGMA user_version = 1;")?;
+        if backfill_legacy_tables_bounded(conn)? == 0 {
+            conn.execute_batch("PRAGMA user_version = 1;")?;
+        }
+        revalidate()?;
         Ok(())
     })();
 
@@ -106,14 +81,13 @@ fn migrate_to_v1(conn: &Connection) -> Result<()> {
     }
 }
 
-fn migrate_to_v2(conn: &Connection) -> Result<()> {
+fn migrate_to_v2(conn: &Connection, revalidate: &mut impl FnMut() -> Result<()>) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE;")?;
     let migration = (|| -> Result<()> {
         conn.execute_batch(CREATE_TABLES_SQL)?;
         ensure_columns(conn, "history_records", HISTORY_RECORD_COLUMNS)?;
-        backfill_legacy_tables(conn)?;
-        conn.execute_batch(INDEXES_SQL)?;
         conn.execute_batch("PRAGMA user_version = 2;")?;
+        revalidate()?;
         Ok(())
     })();
 
@@ -131,14 +105,13 @@ fn migrate_to_v2(conn: &Connection) -> Result<()> {
     }
 }
 
-fn migrate_to_v3(conn: &Connection) -> Result<()> {
+fn migrate_to_v3(conn: &Connection, revalidate: &mut impl FnMut() -> Result<()>) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE;")?;
     let migration = (|| -> Result<()> {
         conn.execute_batch(CREATE_TABLES_SQL)?;
         ensure_columns(conn, "history_records", HISTORY_RECORD_COLUMNS)?;
-        backfill_legacy_tables(conn)?;
-        conn.execute_batch(INDEXES_SQL)?;
         conn.execute_batch("PRAGMA user_version = 3;")?;
+        revalidate()?;
         Ok(())
     })();
 
@@ -156,13 +129,12 @@ fn migrate_to_v3(conn: &Connection) -> Result<()> {
     }
 }
 
-fn migrate_to_v4(conn: &Connection) -> Result<()> {
+fn migrate_to_v4(conn: &Connection, revalidate: &mut impl FnMut() -> Result<()>) -> Result<()> {
     let foreign_keys_enabled: i64 = conn.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
     conn.execute_batch("PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;")?;
     let migration = (|| -> Result<()> {
-        rebuild_capture_sources_provider_check(conn)?;
-        conn.execute_batch(INDEXES_SQL)?;
         conn.execute_batch("PRAGMA user_version = 4;")?;
+        revalidate()?;
         Ok(())
     })();
 
@@ -186,7 +158,7 @@ fn migrate_to_v4(conn: &Connection) -> Result<()> {
     }
 }
 
-fn migrate_to_v5(conn: &Connection) -> Result<()> {
+fn migrate_to_v5(conn: &Connection, revalidate: &mut impl FnMut() -> Result<()>) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE;")?;
     let migration = (|| -> Result<()> {
         conn.execute_batch(CREATE_TABLES_SQL)?;
@@ -195,8 +167,8 @@ fn migrate_to_v5(conn: &Connection) -> Result<()> {
             "catalog_sessions",
             CATALOG_SESSION_IMPORT_STATE_COLUMNS,
         )?;
-        conn.execute_batch(INDEXES_SQL)?;
         conn.execute_batch("PRAGMA user_version = 5;")?;
+        revalidate()?;
         Ok(())
     })();
 
@@ -214,7 +186,7 @@ fn migrate_to_v5(conn: &Connection) -> Result<()> {
     }
 }
 
-fn migrate_to_v6(conn: &Connection) -> Result<()> {
+fn migrate_to_v6(conn: &Connection, revalidate: &mut impl FnMut() -> Result<()>) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE;")?;
     let migration = (|| -> Result<()> {
         conn.execute_batch(CREATE_TABLES_SQL)?;
@@ -223,8 +195,8 @@ fn migrate_to_v6(conn: &Connection) -> Result<()> {
             "catalog_sessions",
             CATALOG_SESSION_IMPORT_STATE_COLUMNS,
         )?;
-        conn.execute_batch(INDEXES_SQL)?;
         conn.execute_batch("PRAGMA user_version = 6;")?;
+        revalidate()?;
         Ok(())
     })();
 
@@ -242,14 +214,12 @@ fn migrate_to_v6(conn: &Connection) -> Result<()> {
     }
 }
 
-fn migrate_to_v7(conn: &Connection) -> Result<()> {
+fn migrate_to_v7(conn: &Connection, revalidate: &mut impl FnMut() -> Result<()>) -> Result<()> {
     let foreign_keys_enabled: i64 = conn.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
     conn.execute_batch("PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;")?;
     let migration = (|| -> Result<()> {
-        rebuild_capture_sources_provider_check(conn)?;
-        rebuild_catalog_sessions_provider_check(conn)?;
-        conn.execute_batch(INDEXES_SQL)?;
         conn.execute_batch("PRAGMA user_version = 7;")?;
+        revalidate()?;
         Ok(())
     })();
 
@@ -273,7 +243,7 @@ fn migrate_to_v7(conn: &Connection) -> Result<()> {
     }
 }
 
-fn migrate_to_v8(conn: &Connection) -> Result<()> {
+fn migrate_to_v8(conn: &Connection, revalidate: &mut impl FnMut() -> Result<()>) -> Result<()> {
     let foreign_keys_enabled: i64 = conn.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
     conn.execute_batch("PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;")?;
     let migration = (|| -> Result<()> {
@@ -296,13 +266,19 @@ fn migrate_to_v8(conn: &Connection) -> Result<()> {
             "work_record_id",
             "history_record_id",
         )?;
-        rewrite_history_table_names(conn, "sync_outbox", "local_table")?;
-        rewrite_history_table_names(conn, "audit_log", "target_table")?;
+        let rewritten = rewrite_history_table_names_bounded(conn, "sync_outbox", "local_table")?
+            .saturating_add(rewrite_history_table_names_bounded(
+                conn,
+                "audit_log",
+                "target_table",
+            )?);
         drop_fts_table_if_column_exists(conn, "event_search", "work_record_id")?;
         drop_fts_table_if_column_exists(conn, "artifact_search", "work_record_id")?;
         conn.execute_batch(CREATE_TABLES_SQL)?;
-        conn.execute_batch(INDEXES_SQL)?;
-        conn.execute_batch("PRAGMA user_version = 8;")?;
+        if rewritten == 0 {
+            conn.execute_batch("PRAGMA user_version = 8;")?;
+        }
+        revalidate()?;
         Ok(())
     })();
 
@@ -326,12 +302,12 @@ fn migrate_to_v8(conn: &Connection) -> Result<()> {
     }
 }
 
-fn migrate_to_v9(conn: &Connection) -> Result<()> {
+fn migrate_to_v9(conn: &Connection, revalidate: &mut impl FnMut() -> Result<()>) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE;")?;
     let migration = (|| -> Result<()> {
         conn.execute_batch(CREATE_TABLES_SQL)?;
-        conn.execute_batch(INDEXES_SQL)?;
         conn.execute_batch("PRAGMA user_version = 9;")?;
+        revalidate()?;
         Ok(())
     })();
 
@@ -349,11 +325,11 @@ fn migrate_to_v9(conn: &Connection) -> Result<()> {
     }
 }
 
-fn migrate_to_v10(conn: &Connection) -> Result<()> {
+fn migrate_to_v10(conn: &Connection, revalidate: &mut impl FnMut() -> Result<()>) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE;")?;
     let migration = (|| -> Result<()> {
-        conn.execute_batch(INDEXES_SQL)?;
         conn.execute_batch("PRAGMA user_version = 10;")?;
+        revalidate()?;
         Ok(())
     })();
 
@@ -371,11 +347,11 @@ fn migrate_to_v10(conn: &Connection) -> Result<()> {
     }
 }
 
-fn migrate_to_v11(conn: &Connection) -> Result<()> {
+fn migrate_to_v11(conn: &Connection, revalidate: &mut impl FnMut() -> Result<()>) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE;")?;
     let migration = (|| -> Result<()> {
-        rebuild_search_projection(conn)?;
         conn.execute_batch("PRAGMA user_version = 11;")?;
+        revalidate()?;
         Ok(())
     })();
 
@@ -393,12 +369,13 @@ fn migrate_to_v11(conn: &Connection) -> Result<()> {
     }
 }
 
-fn migrate_to_v12(conn: &Connection) -> Result<()> {
+fn migrate_to_v12(conn: &Connection, revalidate: &mut impl FnMut() -> Result<()>) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE;")?;
     let migration = (|| -> Result<()> {
-        invalidate_provider_import_indexes(conn)?;
-        rebuild_search_projection(conn)?;
-        conn.execute_batch("PRAGMA user_version = 12;")?;
+        if invalidate_provider_import_indexes_bounded(conn)? == 0 {
+            conn.execute_batch("PRAGMA user_version = 12;")?;
+        }
+        revalidate()?;
         Ok(())
     })();
 
@@ -416,11 +393,12 @@ fn migrate_to_v12(conn: &Connection) -> Result<()> {
     }
 }
 
-fn migrate_to_v13(conn: &Connection) -> Result<()> {
+fn migrate_to_v13(conn: &Connection, revalidate: &mut impl FnMut() -> Result<()>) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE;")?;
     let migration = (|| -> Result<()> {
         create_stable_sql_views(conn)?;
         conn.execute_batch("PRAGMA user_version = 13;")?;
+        revalidate()?;
         Ok(())
     })();
 
@@ -438,7 +416,7 @@ fn migrate_to_v13(conn: &Connection) -> Result<()> {
     }
 }
 
-fn migrate_to_v14(conn: &Connection) -> Result<()> {
+fn migrate_to_v14(conn: &Connection, revalidate: &mut impl FnMut() -> Result<()>) -> Result<()> {
     let foreign_keys_enabled: i64 = conn.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
     conn.execute_batch("PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;")?;
     let migration = (|| -> Result<()> {
@@ -448,13 +426,12 @@ fn migrate_to_v14(conn: &Connection) -> Result<()> {
             "catalog_sessions",
             CATALOG_SESSION_IMPORT_STATE_COLUMNS,
         )?;
-        rebuild_capture_sources_provider_check(conn)?;
-        rebuild_catalog_sessions_provider_check(conn)?;
-        rebuild_source_import_files_provider_check(conn)?;
-        backfill_catalog_session_import_checkpoints(conn)?;
+        let backfilled = backfill_catalog_session_import_checkpoints_bounded(conn)?;
         create_stable_sql_views(conn)?;
-        conn.execute_batch(INDEXES_SQL)?;
-        conn.execute_batch("PRAGMA user_version = 14;")?;
+        if backfilled == 0 {
+            conn.execute_batch("PRAGMA user_version = 14;")?;
+        }
+        revalidate()?;
         Ok(())
     })();
 
@@ -478,7 +455,7 @@ fn migrate_to_v14(conn: &Connection) -> Result<()> {
     }
 }
 
-fn migrate_to_v15(conn: &Connection) -> Result<()> {
+fn migrate_to_v15(conn: &Connection, revalidate: &mut impl FnMut() -> Result<()>) -> Result<()> {
     let foreign_keys_enabled: i64 = conn.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
     conn.execute_batch("PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;")?;
     let migration = (|| -> Result<()> {
@@ -486,12 +463,9 @@ fn migrate_to_v15(conn: &Connection) -> Result<()> {
         if stable_sql_views_exist(conn)? {
             drop_stable_sql_views(conn)?;
         }
-        rebuild_capture_sources_provider_check(conn)?;
-        rebuild_catalog_sessions_provider_check(conn)?;
-        rebuild_source_import_files_provider_check(conn)?;
-        conn.execute_batch(INDEXES_SQL)?;
         create_stable_sql_views(conn)?;
         conn.execute_batch("PRAGMA user_version = 15;")?;
+        revalidate()?;
         Ok(())
     })();
 
@@ -515,7 +489,7 @@ fn migrate_to_v15(conn: &Connection) -> Result<()> {
     }
 }
 
-fn migrate_to_v16(conn: &Connection) -> Result<()> {
+fn migrate_to_v16(conn: &Connection, revalidate: &mut impl FnMut() -> Result<()>) -> Result<()> {
     let foreign_keys_enabled: i64 = conn.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
     conn.execute_batch("PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;")?;
     let migration = (|| -> Result<()> {
@@ -523,12 +497,9 @@ fn migrate_to_v16(conn: &Connection) -> Result<()> {
         if stable_sql_views_exist(conn)? {
             drop_stable_sql_views(conn)?;
         }
-        rebuild_capture_sources_provider_check(conn)?;
-        rebuild_catalog_sessions_provider_check(conn)?;
-        rebuild_source_import_files_provider_check(conn)?;
-        conn.execute_batch(INDEXES_SQL)?;
         create_stable_sql_views(conn)?;
         conn.execute_batch("PRAGMA user_version = 16;")?;
+        revalidate()?;
         Ok(())
     })();
 
@@ -552,175 +523,9 @@ fn migrate_to_v16(conn: &Connection) -> Result<()> {
     }
 }
 
-fn migrate_to_v42(conn: &Connection) -> Result<()> {
-    let foreign_keys_enabled: i64 = conn.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
-    conn.execute_batch("PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;")?;
-    let migration = (|| -> Result<()> {
-        conn.execute_batch(CREATE_TABLES_SQL)?;
-        if stable_sql_views_exist(conn)? {
-            drop_stable_sql_views(conn)?;
-        }
-        rebuild_capture_sources_provider_check(conn)?;
-        rebuild_catalog_sessions_provider_check(conn)?;
-        rebuild_source_import_files_provider_check(conn)?;
-        conn.execute_batch(INDEXES_SQL)?;
-        create_stable_sql_views(conn)?;
-        conn.execute_batch("PRAGMA user_version = 42;")?;
-        Ok(())
-    })();
-
-    match migration {
-        Ok(()) => {
-            conn.execute_batch("COMMIT;")?;
-            if foreign_keys_enabled != 0 {
-                conn.execute_batch("PRAGMA foreign_keys = ON;")?;
-            }
-            Ok(())
-        }
-        Err(err) => {
-            if let Err(rollback_err) = conn.execute_batch("ROLLBACK;") {
-                return Err(StoreError::Sql(rollback_err));
-            }
-            if foreign_keys_enabled != 0 {
-                conn.execute_batch("PRAGMA foreign_keys = ON;")?;
-            }
-            Err(err)
-        }
-    }
-}
-
-fn migrate_to_v43(conn: &Connection) -> Result<()> {
-    let foreign_keys_enabled: i64 = conn.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
-    conn.execute_batch("PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;")?;
-    let migration = (|| -> Result<()> {
-        conn.execute_batch(CREATE_TABLES_SQL)?;
-        ensure_columns(conn, "capture_sources", CAPTURE_SOURCE_IDENTITY_COLUMNS)?;
-        backfill_capture_source_identity_columns(conn)?;
-        if stable_sql_views_exist(conn)? {
-            drop_stable_sql_views(conn)?;
-        }
-        conn.execute_batch(INDEXES_SQL)?;
-        create_stable_sql_views(conn)?;
-        conn.execute_batch("PRAGMA user_version = 43;")?;
-        Ok(())
-    })();
-
-    match migration {
-        Ok(()) => {
-            conn.execute_batch("COMMIT;")?;
-            if foreign_keys_enabled != 0 {
-                conn.execute_batch("PRAGMA foreign_keys = ON;")?;
-            }
-            Ok(())
-        }
-        Err(err) => {
-            if let Err(rollback_err) = conn.execute_batch("ROLLBACK;") {
-                return Err(StoreError::Sql(rollback_err));
-            }
-            if foreign_keys_enabled != 0 {
-                conn.execute_batch("PRAGMA foreign_keys = ON;")?;
-            }
-            Err(err)
-        }
-    }
-}
-
-fn migrate_to_v44(conn: &Connection, rebuild_search_projection_now: bool) -> Result<()> {
-    let foreign_keys_enabled: i64 = conn.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
-    conn.execute_batch("PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;")?;
-    let migration = (|| -> Result<()> {
-        if stable_sql_views_exist(conn)? {
-            drop_stable_sql_views(conn)?;
-        }
-        rebuild_v44_current_schema_tables(conn)?;
-        drop_fts_table_if_exists(conn, "event_search")?;
-        drop_fts_table_if_exists(conn, "artifact_search")?;
-        create_fts_tables_if_supported(conn)?;
-        conn.execute_batch(INDEXES_SQL)?;
-        create_stable_sql_views(conn)?;
-        if rebuild_search_projection_now {
-            rebuild_search_projection(conn)?;
-        }
-        conn.execute_batch("PRAGMA user_version = 44;")?;
-        Ok(())
-    })();
-
-    match migration {
-        Ok(()) => {
-            conn.execute_batch("COMMIT;")?;
-            if foreign_keys_enabled != 0 {
-                conn.execute_batch("PRAGMA foreign_keys = ON;")?;
-            }
-            Ok(())
-        }
-        Err(err) => {
-            if let Err(rollback_err) = conn.execute_batch("ROLLBACK;") {
-                return Err(StoreError::Sql(rollback_err));
-            }
-            if foreign_keys_enabled != 0 {
-                conn.execute_batch("PRAGMA foreign_keys = ON;")?;
-            }
-            Err(err)
-        }
-    }
-}
-
-fn migrate_to_v46(conn: &Connection) -> Result<()> {
-    let foreign_keys_enabled: i64 = conn.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
-    conn.execute_batch("PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;")?;
-    let migration = (|| -> Result<()> {
-        conn.execute_batch(CREATE_TABLES_SQL)?;
-        if stable_sql_views_exist(conn)? {
-            drop_stable_sql_views(conn)?;
-        }
-        rebuild_capture_sources_provider_check(conn)?;
-        rebuild_catalog_sessions_provider_check(conn)?;
-        rebuild_source_import_files_provider_check(conn)?;
-        conn.execute_batch(INDEXES_SQL)?;
-        create_stable_sql_views(conn)?;
-        conn.execute_batch("PRAGMA user_version = 46;")?;
-        Ok(())
-    })();
-
-    match migration {
-        Ok(()) => {
-            conn.execute_batch("COMMIT;")?;
-            if foreign_keys_enabled != 0 {
-                conn.execute_batch("PRAGMA foreign_keys = ON;")?;
-            }
-            Ok(())
-        }
-        Err(err) => {
-            if let Err(rollback_err) = conn.execute_batch("ROLLBACK;") {
-                return Err(StoreError::Sql(rollback_err));
-            }
-            if foreign_keys_enabled != 0 {
-                conn.execute_batch("PRAGMA foreign_keys = ON;")?;
-            }
-            Err(err)
-        }
-    }
-}
-
-fn backfill_capture_source_identity_columns(conn: &Connection) -> Result<()> {
-    if !table_exists(conn, "capture_sources")? {
-        return Ok(());
-    }
-    conn.execute(
-        r#"
-        UPDATE capture_sources
-        SET source_root = raw_source_path
-        WHERE source_root IS NULL
-          AND raw_source_path IS NOT NULL
-        "#,
-        [],
-    )?;
-    Ok(())
-}
-
-fn invalidate_provider_import_indexes(conn: &Connection) -> Result<()> {
+fn invalidate_provider_import_indexes_bounded(conn: &Connection) -> Result<usize> {
     if table_exists(conn, "catalog_sessions")? {
-        conn.execute(
+        let changed = conn.execute(
             r#"
             UPDATE catalog_sessions
             SET indexed_at_ms = NULL,
@@ -729,45 +534,64 @@ fn invalidate_provider_import_indexes(conn: &Connection) -> Result<()> {
                 indexed_status = 'pending',
                 indexed_error = NULL,
                 indexed_event_count = NULL
-            WHERE indexed_status = 'indexed'
+            WHERE rowid IN (
+                SELECT rowid FROM catalog_sessions
+                WHERE indexed_status = 'indexed'
+                ORDER BY rowid
+                LIMIT ?1
+            )
             "#,
-            [],
+            [LEGACY_UPDATE_BATCH_ROWS],
         )?;
+        if changed > 0 {
+            return Ok(changed);
+        }
     }
     if table_exists(conn, "source_import_files")? {
-        conn.execute(
-            r#"
+        return conn
+            .execute(
+                r#"
             UPDATE source_import_files
             SET indexed_at_ms = NULL,
                 indexed_file_size_bytes = NULL,
                 indexed_file_modified_at_ms = NULL,
                 indexed_status = 'pending',
                 indexed_error = NULL
-            WHERE indexed_status = 'indexed'
+            WHERE rowid IN (
+                SELECT rowid FROM source_import_files
+                WHERE indexed_status = 'indexed'
+                ORDER BY rowid
+                LIMIT ?1
+            )
             "#,
-            [],
-        )?;
+                [LEGACY_UPDATE_BATCH_ROWS],
+            )
+            .map_err(Into::into);
     }
-    Ok(())
+    Ok(0)
 }
 
-fn backfill_catalog_session_import_checkpoints(conn: &Connection) -> Result<()> {
+fn backfill_catalog_session_import_checkpoints_bounded(conn: &Connection) -> Result<usize> {
     if !table_exists(conn, "catalog_sessions")? {
-        return Ok(());
+        return Ok(0);
     }
-    conn.execute(
+    Ok(conn.execute(
         r#"
         UPDATE catalog_sessions
         SET last_imported_at_ms = indexed_at_ms,
             last_imported_file_size_bytes = indexed_file_size_bytes,
             last_imported_file_modified_at_ms = indexed_file_modified_at_ms,
             last_imported_event_count = indexed_event_count
-        WHERE last_imported_file_size_bytes IS NULL
-          AND indexed_file_size_bytes IS NOT NULL
+        WHERE rowid IN (
+            SELECT rowid FROM catalog_sessions
+            WHERE last_imported_file_size_bytes IS NULL
+              AND indexed_file_size_bytes IS NOT NULL
+            ORDER BY rowid
+            LIMIT ?1
+        )
         "#,
-        [],
-    )?;
-    Ok(())
+        [LEGACY_UPDATE_BATCH_ROWS],
+    )?)
 }
 
 fn drop_legacy_history_record_indexes(conn: &Connection) -> Result<()> {
@@ -813,11 +637,15 @@ fn rename_column_if_exists(conn: &Connection, table: &str, old: &str, new: &str)
     Ok(())
 }
 
-fn rewrite_history_table_names(conn: &Connection, table: &str, column: &str) -> Result<()> {
+fn rewrite_history_table_names_bounded(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+) -> Result<usize> {
     if !table_exists(conn, table)? || !table_has_column(conn, table, column)? {
-        return Ok(());
+        return Ok(0);
     }
-    conn.execute(
+    Ok(conn.execute(
         &format!(
             "UPDATE {table}
              SET {column} = CASE {column}
@@ -826,11 +654,15 @@ fn rewrite_history_table_names(conn: &Connection, table: &str, column: &str) -> 
                 WHEN 'work_record_tags' THEN 'history_record_tags'
                 ELSE {column}
              END
-             WHERE {column} IN ('work_records', 'work_record_links', 'work_record_tags')"
+             WHERE rowid IN (
+                 SELECT rowid FROM {table}
+                 WHERE {column} IN ('work_records', 'work_record_links', 'work_record_tags')
+                 ORDER BY rowid
+                 LIMIT ?1
+             )"
         ),
-        [],
-    )?;
-    Ok(())
+        [LEGACY_UPDATE_BATCH_ROWS],
+    )?)
 }
 
 fn drop_fts_table_if_column_exists(conn: &Connection, table: &str, column: &str) -> Result<()> {
@@ -840,6 +672,7 @@ fn drop_fts_table_if_column_exists(conn: &Connection, table: &str, column: &str)
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn rebuild_capture_sources_provider_check(conn: &Connection) -> Result<()> {
     if !table_exists(conn, "capture_sources")? {
         conn.execute_batch(CREATE_TABLES_SQL)?;
@@ -890,6 +723,7 @@ pub(crate) fn rebuild_capture_sources_provider_check(conn: &Connection) -> Resul
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn rebuild_catalog_sessions_provider_check(conn: &Connection) -> Result<()> {
     if !table_exists(conn, "catalog_sessions")? {
         conn.execute_batch(CREATE_TABLES_SQL)?;
@@ -953,79 +787,52 @@ pub(crate) fn rebuild_catalog_sessions_provider_check(conn: &Connection) -> Resu
     Ok(())
 }
 
-fn rebuild_source_import_files_provider_check(conn: &Connection) -> Result<()> {
-    if !table_exists(conn, "source_import_files")? {
-        conn.execute_batch(CREATE_TABLES_SQL)?;
-        return Ok(());
-    }
-
-    let recreate_views = stable_sql_views_exist(conn)?;
-    if recreate_views {
-        drop_stable_sql_views(conn)?;
-    }
-    conn.execute_batch(
-        r#"
-        DROP TABLE IF EXISTS source_import_files_new;
-        CREATE TABLE source_import_files_new (
-
-            provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'pi', 'opencode', 'kilo', 'kiro_cli', 'crush', 'goose', 'antigravity', 'gemini', 'tabnine', 'cursor', 'windsurf', 'zed', 'copilot_cli', 'factory_ai_droid', 'qwen_code', 'kimi_code_cli', 'forgecode', 'deepagents', 'mistral_vibe', 'mux', 'rovodev', 'openclaw', 'hermes', 'nanoclaw', 'astrbot', 'shelley', 'continue', 'openhands', 'cline', 'roo_code', 'lingma', 'qoder', 'warp', 'codebuddy', 'auggie', 'firebender', 'junie', 'trae', 'shell', 'git', 'jj', 'gh', 'custom', 'unknown', 'mimocode')),
-
-            source_format TEXT NOT NULL,
-            source_root TEXT NOT NULL,
-            source_path TEXT NOT NULL,
-            file_size_bytes INTEGER NOT NULL,
-            file_modified_at_ms INTEGER NOT NULL,
-            observed_at_ms INTEGER NOT NULL,
-            is_stale INTEGER NOT NULL DEFAULT 0,
-            indexed_at_ms INTEGER,
-            indexed_file_size_bytes INTEGER,
-            indexed_file_modified_at_ms INTEGER,
-            indexed_status TEXT NOT NULL DEFAULT 'pending' CHECK (indexed_status IN ('pending', 'indexed', 'failed')),
-            indexed_error TEXT,
-            metadata_json TEXT NOT NULL DEFAULT '{}',
-            PRIMARY KEY (provider, source_root, source_path)
-        );
-        INSERT INTO source_import_files_new
-        (provider, source_format, source_root, source_path, file_size_bytes, file_modified_at_ms, observed_at_ms, is_stale, indexed_at_ms, indexed_file_size_bytes, indexed_file_modified_at_ms, indexed_status, indexed_error, metadata_json)
-        SELECT provider, source_format, source_root, source_path, file_size_bytes, file_modified_at_ms, observed_at_ms, is_stale, indexed_at_ms, indexed_file_size_bytes, indexed_file_modified_at_ms, indexed_status, indexed_error, metadata_json
-        FROM source_import_files;
-        DROP TABLE source_import_files;
-        ALTER TABLE source_import_files_new RENAME TO source_import_files;
-        "#,
-    )?;
-    if recreate_views {
-        create_stable_sql_views(conn)?;
-    }
-    Ok(())
-}
-
-fn backfill_legacy_tables(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
+fn backfill_legacy_tables_bounded(conn: &Connection) -> Result<usize> {
+    Ok(conn.execute(
         r#"
         UPDATE history_records
-        SET summary = body
-        WHERE summary IS NULL;
-
-        UPDATE history_records
-        SET created_at_ms = COALESCE(CAST(strftime('%s', created_at) AS INTEGER) * 1000, created_at_ms)
-        WHERE created_at_ms = 0 AND created_at IS NOT NULL;
-
-        UPDATE history_records
-        SET updated_at_ms = COALESCE(CAST(strftime('%s', updated_at) AS INTEGER) * 1000, updated_at_ms)
-        WHERE updated_at_ms = 0 AND updated_at IS NOT NULL;
-
-        UPDATE history_records
-        SET started_at_ms = created_at_ms
-        WHERE started_at_ms IS NULL AND created_at_ms != 0;
-
-        UPDATE history_records
-        SET last_activity_at_ms = CASE
-            WHEN updated_at_ms != 0 THEN updated_at_ms
-            WHEN created_at_ms != 0 THEN created_at_ms
-            ELSE last_activity_at_ms
-        END
-        WHERE last_activity_at_ms = 0;
+        SET summary = COALESCE(summary, body),
+            created_at_ms = CASE
+                WHEN created_at_ms = 0 AND strftime('%s', created_at) IS NOT NULL
+                THEN COALESCE(CAST(strftime('%s', created_at) AS INTEGER) * 1000, created_at_ms)
+                ELSE created_at_ms
+            END,
+            updated_at_ms = CASE
+                WHEN updated_at_ms = 0 AND strftime('%s', updated_at) IS NOT NULL
+                THEN COALESCE(CAST(strftime('%s', updated_at) AS INTEGER) * 1000, updated_at_ms)
+                ELSE updated_at_ms
+            END,
+            started_at_ms = CASE
+                WHEN started_at_ms IS NULL AND created_at_ms != 0 THEN created_at_ms
+                WHEN started_at_ms IS NULL AND strftime('%s', created_at) IS NOT NULL
+                THEN CAST(strftime('%s', created_at) AS INTEGER) * 1000
+                ELSE started_at_ms
+            END,
+            last_activity_at_ms = CASE
+                WHEN last_activity_at_ms = 0 AND updated_at_ms != 0 THEN updated_at_ms
+                WHEN last_activity_at_ms = 0 AND strftime('%s', updated_at) IS NOT NULL
+                THEN CAST(strftime('%s', updated_at) AS INTEGER) * 1000
+                WHEN last_activity_at_ms = 0 AND created_at_ms != 0 THEN created_at_ms
+                WHEN last_activity_at_ms = 0 AND strftime('%s', created_at) IS NOT NULL
+                THEN CAST(strftime('%s', created_at) AS INTEGER) * 1000
+                ELSE last_activity_at_ms
+            END
+        WHERE rowid IN (
+            SELECT rowid FROM history_records
+            WHERE summary IS NULL
+               OR (created_at_ms = 0 AND strftime('%s', created_at) IS NOT NULL)
+               OR (updated_at_ms = 0 AND strftime('%s', updated_at) IS NOT NULL)
+               OR (started_at_ms IS NULL AND (created_at_ms != 0 OR strftime('%s', created_at) IS NOT NULL))
+               OR (last_activity_at_ms = 0 AND (
+                    updated_at_ms != 0
+                    OR created_at_ms != 0
+                    OR strftime('%s', updated_at) IS NOT NULL
+                    OR strftime('%s', created_at) IS NOT NULL
+               ))
+            ORDER BY rowid
+            LIMIT ?1
+        )
         "#,
-    )?;
-    Ok(())
+        [LEGACY_UPDATE_BATCH_ROWS],
+    )?)
 }
