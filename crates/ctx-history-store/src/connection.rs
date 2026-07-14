@@ -2,7 +2,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     str::FromStr,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use chrono::{DateTime, Utc};
@@ -80,9 +80,7 @@ impl Store {
     ) -> Result<Self> {
         let store = Self::open_inner(path.as_ref(), busy_timeout, Some(admission.clone()))?;
         if store.event_search_maintenance_pending()? {
-            let started = Instant::now();
             store.run_event_search_maintenance_slice()?;
-            store.yield_indexing_admission(started.elapsed())?;
         }
         Ok(store)
     }

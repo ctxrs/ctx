@@ -56,7 +56,13 @@ pub(crate) fn import_one_source_for_search_refresh(
     progress: Option<CodexSessionImportProgressCallback>,
     preinventory: &SourcePreinventory,
 ) -> Result<ProviderImportSummary> {
-    if !source_preinventory_has_pending_work(store, source, preinventory)? {
+    let provider_work_required =
+        source_preinventory_requires_provider_work(store, source, preinventory)?;
+    if !provider_work_required {
+        let record = import_record_for_source(source);
+        if !history_record_exists(store, record.id)? {
+            store.upsert_record(&record)?;
+        }
         if store.event_search_projection_needs_backfill()? {
             store.refresh_search_index()?;
         }
@@ -73,10 +79,16 @@ pub(crate) fn import_one_source_inner(
     full_rescan: bool,
     preinventory: &SourcePreinventory,
 ) -> Result<ProviderImportSummary> {
-    if !full_rescan
-        && !refresh_search_after_import
-        && !source_preinventory_has_pending_work(store, source, preinventory)?
-    {
+    let provider_work_required =
+        full_rescan || source_preinventory_requires_provider_work(store, source, preinventory)?;
+    if !provider_work_required {
+        let record = import_record_for_source(source);
+        if !history_record_exists(store, record.id)? {
+            store.upsert_record(&record)?;
+        }
+        if refresh_search_after_import {
+            store.refresh_search_index()?;
+        }
         return Ok(ProviderImportSummary::default());
     }
     let bulk_guard = store.begin_event_search_bulk_mode()?;
@@ -111,6 +123,18 @@ fn source_preinventory_has_pending_work(
     }
 }
 
+fn source_preinventory_requires_provider_work(
+    store: &Store,
+    source: &SourceInfo,
+    preinventory: &SourcePreinventory,
+) -> Result<bool> {
+    let has_catalog_failures = matches!(
+        preinventory,
+        SourcePreinventory::CodexSessionCatalog(summary) if summary.failed_sessions > 0
+    );
+    Ok(has_catalog_failures || source_preinventory_has_pending_work(store, source, preinventory)?)
+}
+
 fn import_one_source_inner_batched(
     store: &mut Store,
     source: &SourceInfo,
@@ -118,10 +142,18 @@ fn import_one_source_inner_batched(
     full_rescan: bool,
     preinventory: &SourcePreinventory,
 ) -> Result<ProviderImportSummary> {
+    let provider_work_required =
+        full_rescan || source_preinventory_requires_provider_work(store, source, preinventory)?;
     let record = import_record_for_source(source);
     let record_id = record.id;
     let record_existed = history_record_exists(store, record_id)?;
+    if !provider_work_required && record_existed {
+        return Ok(ProviderImportSummary::default());
+    }
     store.upsert_record(&record)?;
+    if !provider_work_required {
+        return Ok(ProviderImportSummary::default());
+    }
     let summary = if !full_rescan && source_uses_import_file_manifest(source) {
         import_manifested_source(
             store,

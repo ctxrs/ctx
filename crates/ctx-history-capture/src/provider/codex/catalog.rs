@@ -161,7 +161,9 @@ pub fn catalog_codex_session_files(
 
 fn persist_catalog_sessions_in_slices(store: &Store, sessions: &[CatalogSession]) -> Result<()> {
     let mut transaction = ProviderImportTransaction::begin_bounded(store, !sessions.is_empty())?;
-    for (_index, session) in sessions.iter().enumerate() {
+    #[cfg(test)]
+    let mut persisted_sessions = 0;
+    for session in sessions {
         let unit_bytes = catalog_session_estimated_len(session);
         transaction.prepare_unit(store, unit_bytes)?;
         if let Err(error) = store.upsert_catalog_sessions(std::slice::from_ref(session)) {
@@ -170,10 +172,13 @@ fn persist_catalog_sessions_in_slices(store: &Store, sessions: &[CatalogSession]
         }
         transaction.record_unit(store, unit_bytes)?;
         #[cfg(test)]
-        if std::env::var_os("CTX_TEST_CODEX_CATALOG_CRASH_AFTER_FIRST_SLICE").is_some()
-            && _index + 1 == IMPORT_TRANSACTION_BATCH_UNITS
         {
-            std::process::exit(87);
+            persisted_sessions += 1;
+            if std::env::var_os("CTX_TEST_CODEX_CATALOG_CRASH_AFTER_FIRST_SLICE").is_some()
+                && persisted_sessions == IMPORT_TRANSACTION_BATCH_UNITS
+            {
+                std::process::exit(87);
+            }
         }
     }
     transaction.commit(store)

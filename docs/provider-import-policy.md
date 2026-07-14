@@ -35,6 +35,23 @@ writer lease is scoped to relational transactions and checkpoints; source
 discovery, file parsing before persistence, and vector/model preparation remain
 outside it.
 
+Provider SQLite snapshot fallback copies are source-side work, so they use the
+same internal quiet policy without holding the relational writer lane. Main and
+valid sidecar files copy with a 256 KiB buffer, providing 32 handoff checks per
+established 8 MiB slice, and also rotate at the 250 ms boundary. The internal 8
+MiB/s ceiling is derived from one full byte-bounded slice per duty-cycle second:
+quiet rest is the greater of three times active duration or the time required to
+remain under that ceiling. Snapshot copies retain the byte ceiling when invoked
+by foreground freshness work, but do not hold admission while copying. Copy
+errors retain the snapshot caller's retry semantics.
+
+Relational quiet pacing counts SQLite cache pages written during each slice and
+multiplies that monotonic delta by the database page size. The larger of that
+write estimate and WAL file growth drives byte-rate rest, so a restarted WAL
+that reuses its existing extent and FTS page amplification remain visible to the
+policy. If the SQLite counter is unavailable, ctx retains bounded slices and the
+fixed duty-cycle fallback without claiming a byte ceiling for that slice.
+
 Setup and explicit bulk import both use the quiet background work class even
 when they display foreground progress. They yield at every bounded slice;
 foreground admission is reserved for short user-blocking freshness work such

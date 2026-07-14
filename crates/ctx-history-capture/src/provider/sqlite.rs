@@ -1,10 +1,14 @@
 use std::{
+    cell::RefCell,
     collections::BTreeSet,
-    fs,
+    fs::File,
+    io::{self, Read, Write},
     ops::Deref,
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
+use ctx_history_store::{IndexingIoPacer, Store, INDEXING_WAL_DELTA_BYTES};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::json;
 use tempfile::TempDir;
@@ -14,6 +18,49 @@ use crate::common::io::ensure_regular_provider_transcript_file;
 use crate::compute_payload_hash;
 
 use crate::{CaptureError, Result, MAX_PROVIDER_SQLITE_VALUE_BYTES};
+
+// Keep 32 handoff checks per byte-bounded indexing slice while avoiding tiny
+// read/write syscalls for multi-gigabyte provider snapshots.
+const PROVIDER_COPY_BUFFER_BYTES: usize = INDEXING_WAL_DELTA_BYTES as usize / 32;
+
+thread_local! {
+    static PROVIDER_COPY_PACER: RefCell<Option<IndexingIoPacer>> = const { RefCell::new(None) };
+}
+
+pub(crate) struct ProviderSourceIoPacingScope {
+    previous: Option<IndexingIoPacer>,
+}
+
+impl ProviderSourceIoPacingScope {
+    pub(crate) fn enter(store: &Store) -> Self {
+        let pacer = store.indexing_io_pacer();
+        let previous = PROVIDER_COPY_PACER.with(|slot| slot.replace(Some(pacer)));
+        Self { previous }
+    }
+}
+
+impl Drop for ProviderSourceIoPacingScope {
+    fn drop(&mut self) {
+        PROVIDER_COPY_PACER.with(|slot| {
+            slot.replace(self.previous.take());
+        });
+    }
+}
+
+trait ProviderCopyPolicy {
+    fn should_rotate(&mut self, started: Instant, bytes: u64) -> bool;
+    fn finish_slice(&mut self, active: Duration, bytes: u64);
+}
+
+impl ProviderCopyPolicy for IndexingIoPacer {
+    fn should_rotate(&mut self, started: Instant, bytes: u64) -> bool {
+        self.source_io_slice_should_rotate(started, bytes)
+    }
+
+    fn finish_slice(&mut self, active: Duration, bytes: u64) {
+        self.finish_source_io_slice(active, bytes);
+    }
+}
 
 pub(crate) fn sqlite_table_exists(conn: &Connection, table: &str) -> Result<bool> {
     let exists: i64 = conn.query_row(
@@ -158,7 +205,7 @@ pub(crate) fn open_sqlite_readonly_source(path: &Path) -> Result<ReadOnlySqliteC
             reason: "provider SQLite path has no file name",
         }
     })?);
-    fs::copy(path, &snapshot_path)?;
+    copy_provider_sqlite_file(path, &snapshot_path)?;
     for sidecar in sidecars {
         let sidecar_name =
             sidecar
@@ -167,7 +214,7 @@ pub(crate) fn open_sqlite_readonly_source(path: &Path) -> Result<ReadOnlySqliteC
                     path: sidecar.clone(),
                     reason: "provider SQLite sidecar path has no file name",
                 })?;
-        fs::copy(&sidecar, snapshot_dir.path().join(sidecar_name))?;
+        copy_provider_sqlite_file(&sidecar, &snapshot_dir.path().join(sidecar_name))?;
     }
     let conn = Connection::open_with_flags(
         &snapshot_path,
@@ -177,6 +224,46 @@ pub(crate) fn open_sqlite_readonly_source(path: &Path) -> Result<ReadOnlySqliteC
         conn,
         _snapshot_dir: Some(snapshot_dir),
     })
+}
+
+fn copy_provider_sqlite_file(source: &Path, destination: &Path) -> Result<u64> {
+    let mut source = File::open(source)?;
+    let mut destination = File::create(destination)?;
+    let mut pacer = PROVIDER_COPY_PACER
+        .with(|slot| *slot.borrow())
+        .unwrap_or_default();
+    copy_with_policy(&mut source, &mut destination, &mut pacer).map_err(CaptureError::from)
+}
+
+fn copy_with_policy<R: Read, W: Write, P: ProviderCopyPolicy>(
+    source: &mut R,
+    destination: &mut W,
+    policy: &mut P,
+) -> io::Result<u64> {
+    let mut buffer = vec![0_u8; PROVIDER_COPY_BUFFER_BYTES];
+    let mut total_bytes = 0_u64;
+    let mut slice_bytes = 0_u64;
+    let mut slice_started = Instant::now();
+    loop {
+        let read = source.read(&mut buffer)?;
+        if read == 0 {
+            destination.flush()?;
+            if slice_bytes > 0 {
+                policy.finish_slice(slice_started.elapsed(), slice_bytes);
+            }
+            return Ok(total_bytes);
+        }
+        destination.write_all(&buffer[..read])?;
+        let read = read as u64;
+        total_bytes = total_bytes.saturating_add(read);
+        slice_bytes = slice_bytes.saturating_add(read);
+        if policy.should_rotate(slice_started, slice_bytes) {
+            destination.flush()?;
+            policy.finish_slice(slice_started.elapsed(), slice_bytes);
+            slice_started = Instant::now();
+            slice_bytes = 0;
+        }
+    }
 }
 
 fn sqlite_existing_regular_sidecar_paths(path: &Path) -> Result<Vec<PathBuf>> {
@@ -266,9 +353,53 @@ pub(crate) fn opencode_schema_fingerprint(conn: &Connection) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+
     use rusqlite::{params, types::Value as SqlValue, Connection};
 
-    use super::{optional_text_column_expr, optional_timestamp_millis_expr, BTreeSet};
+    use super::{
+        copy_with_policy, optional_text_column_expr, optional_timestamp_millis_expr, BTreeSet,
+        Duration, Instant, ProviderCopyPolicy, PROVIDER_COPY_BUFFER_BYTES,
+    };
+
+    struct CountingCopyPolicy {
+        rotate_bytes: u64,
+        finished_slices: Vec<u64>,
+    }
+
+    impl ProviderCopyPolicy for CountingCopyPolicy {
+        fn should_rotate(&mut self, _started: Instant, bytes: u64) -> bool {
+            bytes >= self.rotate_bytes
+        }
+
+        fn finish_slice(&mut self, _active: Duration, bytes: u64) {
+            self.finished_slices.push(bytes);
+        }
+    }
+
+    #[test]
+    fn synthetic_snapshot_copy_is_counted_and_throttled_in_bounded_slices() {
+        let source = (0..PROVIDER_COPY_BUFFER_BYTES * 10 + 123)
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+        let mut reader = Cursor::new(&source);
+        let mut destination = Vec::new();
+        let rotate_bytes = (PROVIDER_COPY_BUFFER_BYTES * 3) as u64;
+        let mut policy = CountingCopyPolicy {
+            rotate_bytes,
+            finished_slices: Vec::new(),
+        };
+
+        let copied = copy_with_policy(&mut reader, &mut destination, &mut policy).unwrap();
+
+        assert_eq!(copied, source.len() as u64);
+        assert_eq!(destination, source);
+        assert_eq!(policy.finished_slices.len(), 4);
+        assert!(policy
+            .finished_slices
+            .iter()
+            .all(|bytes| *bytes <= rotate_bytes));
+    }
 
     #[test]
     fn optional_sqlite_casts_normalize_native_text_and_timestamp_shapes() {
