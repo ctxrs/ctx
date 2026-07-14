@@ -110,7 +110,7 @@ impl Store {
         writes: impl FnOnce(&Self) -> Result<T>,
     ) -> Result<T> {
         self.ensure_active_provider_file_publication(scope)?;
-        if self.provider_file_write_scope.get().is_some() {
+        if scope.retires_observation || self.provider_file_write_scope.get().is_some() {
             return Err(StoreError::InvalidProviderFilePublicationScope);
         }
         self.provider_file_write_scope.set(Some(scope.scope_id));
@@ -131,7 +131,7 @@ impl Store {
         }
         let result = (|| {
             if let Some(active) = self.provider_file_publication.borrow().as_ref() {
-                if !active.lifecycle.load(Ordering::Acquire) {
+                if !active.lifecycle.load(Ordering::Acquire) || active.retires_observation {
                     return Err(StoreError::InvalidProviderFilePublicationScope);
                 }
                 if self.provider_file_write_scope.get() != Some(active.scope_id) {
@@ -168,7 +168,11 @@ impl Store {
             } else if self.provider_file_write_scope.get().is_some() {
                 return Err(StoreError::InvalidProviderFilePublicationScope);
             }
-            write()
+            let value = write()?;
+            if self.take_provider_file_fault(ProviderFileFaultPoint::MutationBeforeCommit) {
+                return Err(StoreError::ProviderFileStaging);
+            }
+            Ok(value)
         })();
         if !owns_transaction {
             return result;
