@@ -18,6 +18,7 @@ use uuid::Uuid;
 use crate::{compute_payload_hash, stable_capture_uuid};
 
 use crate::provider::file_touches::provider_file_touches_from_event;
+use crate::provider::sqlite::ProviderSourceIoPacingScope;
 use crate::{
     CaptureError, NormalizedProviderImportOptions, ProviderAdapterContext, ProviderCaptureAdapter,
     ProviderFileTouchedEnvelope, ProviderFixtureLine, ProviderImportFailure, ProviderImportSummary,
@@ -82,6 +83,7 @@ pub(crate) fn import_native_jsonl_tree<A: ProviderCaptureAdapter>(
     let source_path = request
         .source_path
         .unwrap_or_else(|| request.path.to_path_buf());
+    let io_pacing = ProviderSourceIoPacingScope::enter(store);
     let normalization = adapter.normalize_path(
         request.path,
         &ProviderAdapterContext {
@@ -91,6 +93,7 @@ pub(crate) fn import_native_jsonl_tree<A: ProviderCaptureAdapter>(
             imported_at: request.imported_at,
         },
     )?;
+    drop(io_pacing);
     import_normalized_provider_captures(
         store,
         normalization,

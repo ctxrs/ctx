@@ -39,7 +39,7 @@ pub use raw_sql::{
 };
 pub use search::projections::{EventEmbeddingDocument, EventSearchHit};
 pub use work_control::{
-    system_memory, IndexingAdmission, IndexingAdmissionStatus, IndexingPressure,
+    system_memory, IndexingAdmission, IndexingAdmissionStatus, IndexingIoPacer, IndexingPressure,
     IndexingResourceSnapshot, IndexingSlice, IndexingWorkClass, WalCheckpointStatus,
     INDEXING_TRANSACTION_MAX, INDEXING_WAL_DELTA_BYTES, WAL_PASSIVE_MIN_BYTES,
     WAL_RESTART_MIN_BYTES, WAL_TRUNCATE_MIN_BYTES,

@@ -169,6 +169,13 @@ impl Store {
         if !self.begin_event_search_batch(false)? {
             unreachable!("blocking FTS maintenance returned without a lease");
         }
+        let slice = match self.begin_indexing_slice() {
+            Ok(slice) => slice,
+            Err(error) => {
+                let _ = self.rollback_batch();
+                return Err(error);
+            }
+        };
         let result = merge_fts_table_in_transaction(self, table, page_budget);
         let changed = match result {
             Ok(changed) => changed,
@@ -181,7 +188,7 @@ impl Store {
             let _ = self.rollback_batch();
             return Err(err);
         }
-        self.checkpoint_event_search_slice(false)?;
+        self.finish_indexing_slice_with_checkpoint_mode(slice, false)?;
         Ok(changed)
     }
 
@@ -192,6 +199,13 @@ impl Store {
         if !self.begin_event_search_batch(nonblocking)? {
             return Ok(None);
         }
+        let slice = match self.begin_indexing_slice() {
+            Ok(slice) => slice,
+            Err(error) => {
+                let _ = self.rollback_batch();
+                return Err(error);
+            }
+        };
         let result = (|| {
             if !bulk_mode_pending(self)? {
                 return Ok(true);
@@ -214,17 +228,8 @@ impl Store {
             let _ = self.rollback_batch();
             return Err(err);
         }
-        self.checkpoint_event_search_slice(nonblocking)?;
+        self.finish_indexing_slice_with_checkpoint_mode(slice, nonblocking)?;
         Ok(Some(finished))
-    }
-
-    fn checkpoint_event_search_slice(&self, nonblocking: bool) -> Result<()> {
-        if nonblocking {
-            let _ = self.try_checkpoint_wal_for_pressure()?;
-        } else {
-            self.checkpoint_wal_for_pressure()?;
-        }
-        Ok(())
     }
 
     pub(crate) fn event_search_bulk_mode_active(&self) -> bool {

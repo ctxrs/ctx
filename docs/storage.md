@@ -146,6 +146,14 @@ model preparation, and vector-only work do not own the lane. A scoped lease
 covers each relational transaction or checkpoint and is released at every
 slice boundary.
 
+Provider-owned SQLite files that require a private main/WAL/SHM snapshot are
+copied outside the writer lane but under the same quiet slice policy. Copy
+polling uses 256 KiB buffers, with 32 handoff checks per 8 MiB byte slice, and
+also rotates at 250 ms. Snapshot throughput retains an internal 8 MiB/s ceiling
+even for foreground-triggered fallback. Quiet rest is the greater of three
+times active duration or the rest needed to preserve that byte ceiling. This
+pacing is internal and adds no configuration.
+
 Interactive `search --refresh wait` work is foreground. Setup, explicit bulk
 import, daemon refresh, and semantic catch-up are quiet background work even
 when the command displays progress in the foreground. Background work hands off
@@ -159,7 +167,11 @@ with passive checkpoints and escalates to restart or truncate only at larger
 WAL bands. A pinned reader keeps its snapshot: ctx makes one bounded checkpoint
 attempt, releases admission at the slice boundary, and retries in later work.
 Committed batches are not reported as failed because a reader delayed WAL
-truncation.
+truncation. Background rest uses the larger of WAL growth and SQLite's monotonic
+cache-page write count multiplied by database page size, so WAL extent reuse and
+FTS page amplification still apply the internal 8 MiB/s byte ceiling. If that
+counter is unavailable, the bounded-slice duty policy remains in force without
+claiming a byte ceiling for the affected slice.
 
 First-run Codex catalog rows and provider file manifests use the same bounded
 write slices. They upsert only changed or new rows, then update the exact active

@@ -1,6 +1,7 @@
 use std::{
     env, fs,
     process::Command,
+    sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
@@ -499,6 +500,36 @@ fn multiprocess_fts_rotation_hands_off_to_foreground_and_recovers() {
         12
     );
     assert_eq!(reopened.validate().unwrap(), Vec::<String>::new());
+}
+
+#[test]
+fn fts_admission_wait_is_not_counted_as_active_slice_time() {
+    let temp = tempdir();
+    let db_path = temp.path().join("work.sqlite");
+    let background_admission =
+        IndexingAdmission::acquire(&db_path, IndexingWorkClass::Background).unwrap();
+    let foreground_admission =
+        IndexingAdmission::acquire(&db_path, IndexingWorkClass::Foreground).unwrap();
+    let background = Store::open_admitted(&db_path, &background_admission).unwrap();
+    let foreground = Store::open_admitted(&db_path, &foreground_admission).unwrap();
+    let guard = background.begin_event_search_bulk_mode().unwrap();
+
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let foreground = thread::spawn(move || {
+        foreground.begin_immediate_batch().unwrap();
+        ready_tx.send(()).unwrap();
+        thread::sleep(Duration::from_secs(1));
+        foreground.commit_batch().unwrap();
+    });
+    ready_rx.recv().unwrap();
+
+    let started = Instant::now();
+    background.finish_event_search_bulk_mode(&guard).unwrap();
+    let elapsed = started.elapsed();
+    foreground.join().unwrap();
+
+    assert!(elapsed >= Duration::from_millis(900), "{elapsed:?}");
+    assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
 }
 
 #[test]
