@@ -447,7 +447,7 @@ pub(crate) fn provider_policy_event_text(
     let retention = native_event_retention(event_type, body);
     let text = match retention {
         NativeEventRetention::FailedOutputPreview => {
-            provider_sanitized_output_preview_value(body, text)
+            provider_output_preview_omitting_nested_patch_diff(body, text)
         }
         _ => text.to_owned(),
     };
@@ -467,25 +467,29 @@ pub(crate) fn provider_policy_event_text(
 }
 
 pub(crate) fn provider_policy_body(event_type: EventType, body: &Value) -> Value {
-    let mut sanitized = provider_sanitize_body_value(event_type, body, None);
-    if let Value::Object(object) = &mut sanitized {
+    let mut retained = provider_filter_body_by_retention_policy(event_type, body, None);
+    if let Value::Object(object) = &mut retained {
         object.insert(
             "content_retention".to_owned(),
             Value::String(native_event_retention(event_type, body).as_str().to_owned()),
         );
     }
-    sanitized
+    retained
 }
 
-fn provider_sanitize_body_value(event_type: EventType, value: &Value, key: Option<&str>) -> Value {
-    if key.is_some_and(|key| provider_policy_redact_key(event_type, key, value)) {
-        return provider_redacted_body_value(value);
+fn provider_filter_body_by_retention_policy(
+    event_type: EventType,
+    value: &Value,
+    key: Option<&str>,
+) -> Value {
+    if key.is_some_and(|key| provider_should_omit_body_field(event_type, key, value)) {
+        return provider_omitted_body_field(value);
     }
     match value {
         Value::Array(items) => Value::Array(
             items
                 .iter()
-                .map(|item| provider_sanitize_body_value(event_type, item, key))
+                .map(|item| provider_filter_body_by_retention_policy(event_type, item, key))
                 .collect(),
         ),
         Value::Object(object) => Value::Object(
@@ -494,7 +498,7 @@ fn provider_sanitize_body_value(event_type: EventType, value: &Value, key: Optio
                 .map(|(key, value)| {
                     (
                         key.clone(),
-                        provider_sanitize_body_value(event_type, value, Some(key)),
+                        provider_filter_body_by_retention_policy(event_type, value, Some(key)),
                     )
                 })
                 .collect(),
@@ -503,7 +507,7 @@ fn provider_sanitize_body_value(event_type: EventType, value: &Value, key: Optio
     }
 }
 
-fn provider_policy_redact_key(event_type: EventType, key: &str, value: &Value) -> bool {
+fn provider_should_omit_body_field(event_type: EventType, key: &str, value: &Value) -> bool {
     let key = provider_normalized_key(key);
     if matches!(
         event_type,
@@ -550,7 +554,7 @@ fn provider_policy_redact_key(event_type: EventType, key: &str, value: &Value) -
         && provider_value_contains_patch_or_diff(value))
 }
 
-fn provider_redacted_body_value(value: &Value) -> Value {
+fn provider_omitted_body_field(value: &Value) -> Value {
     json!({
         "content_retention": "metadata_only",
         "omitted_bytes": provider_value_approx_bytes(value),
@@ -594,18 +598,21 @@ fn provider_text_contains_patch_or_diff(text: &str) -> bool {
         || text.contains("\n--- ")
 }
 
-pub(crate) fn provider_sanitized_output_preview_value(value: &Value, text: &str) -> String {
+pub(crate) fn provider_output_preview_omitting_nested_patch_diff(
+    value: &Value,
+    text: &str,
+) -> String {
     if provider_value_contains_patch_or_diff(value) {
         format!(
             "[output omitted: contains patch or diff content; bytes={}]",
             provider_value_approx_bytes(value)
         )
     } else {
-        provider_sanitized_output_preview(text)
+        provider_output_preview_omitting_patch_diff(text)
     }
 }
 
-pub(crate) fn provider_sanitized_output_preview(text: &str) -> String {
+pub(crate) fn provider_output_preview_omitting_patch_diff(text: &str) -> String {
     if provider_text_contains_patch_or_diff(text) {
         format!(
             "[output omitted: contains patch or diff content; bytes={}]",
@@ -1022,7 +1029,7 @@ mod tests {
     }
 
     #[test]
-    fn native_event_retains_real_text_and_redacts_noisy_body_fields() {
+    fn native_event_retains_real_text_and_omits_noisy_body_fields() {
         let event = test_native_event(
             EventType::Message,
             "real conversation oracle",
@@ -1126,7 +1133,7 @@ mod tests {
     }
 
     #[test]
-    fn native_event_redacts_patch_arguments_from_tool_metadata_body() {
+    fn native_event_omits_patch_arguments_from_tool_metadata_body() {
         let event = test_native_event(
             EventType::ToolCall,
             "apply_patch file touches: modified:src/main.rs",

@@ -18,7 +18,8 @@ use crate::common::time::{parse_optional_rfc3339_field, parse_rfc3339_utc};
 use crate::provider::file_touches::event_type_supports_structured_file_touches;
 use crate::provider::importer::provider_cursor_stream;
 use crate::provider::native::{
-    capped_text, provider_output_event_is_failure, provider_sanitized_output_preview_value,
+    capped_text, provider_output_event_is_failure,
+    provider_output_preview_omitting_nested_patch_diff,
 };
 use crate::{
     CaptureError, ProviderAdapterContext, ProviderFileTouchedEnvelope, Result,
@@ -483,9 +484,9 @@ pub(crate) fn codex_tool_output_event(
     } else {
         EventType::ToolOutput
     };
-    let sanitized_output_text =
-        output_text_ref.map(|text| provider_sanitized_output_preview_value(payload, text));
-    let (output_preview, output_truncated) = sanitized_output_text
+    let retained_output_text = output_text_ref
+        .map(|text| provider_output_preview_omitting_nested_patch_diff(payload, text));
+    let (output_preview, output_truncated) = retained_output_text
         .as_deref()
         .map(|text| codex_local_preview(text, PROVIDER_MAX_PREVIEW_CHARS))
         .unwrap_or_else(|| (String::new(), false));
