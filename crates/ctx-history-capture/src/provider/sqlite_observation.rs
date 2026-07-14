@@ -33,7 +33,7 @@ pub struct SqliteObservedFile {
     #[cfg(windows)]
     _path_guards: Arc<Vec<File>>,
     #[cfg(windows)]
-    immutable_path: PathBuf,
+    pinned_path: PathBuf,
     len: u64,
     modified_at: SystemTime,
     modified_secs: u64,
@@ -99,7 +99,7 @@ impl SqliteObservedFile {
         Ok(file)
     }
 
-    pub(crate) fn immutable_open_path(&self) -> io::Result<PathBuf> {
+    pub(crate) fn pinned_open_path(&self) -> io::Result<PathBuf> {
         #[cfg(any(target_os = "linux", target_os = "android"))]
         {
             use std::os::fd::AsRawFd;
@@ -134,7 +134,7 @@ impl SqliteObservedFile {
             // opened without FILE_SHARE_DELETE. The original disk or UNC path
             // therefore remains bound to this observed identity until SQLite
             // finishes opening it.
-            Ok(self.immutable_path.clone())
+            Ok(self.pinned_path.clone())
         }
 
         #[cfg(not(any(unix, windows)))]
@@ -152,7 +152,7 @@ struct OpenSourceFile {
     #[cfg(windows)]
     path_guards: Vec<File>,
     #[cfg(windows)]
-    immutable_path: PathBuf,
+    pinned_path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,10 +182,12 @@ impl SqliteSourceGeneration {
     }
 
     pub(crate) fn requires_snapshot(&self) -> bool {
-        self.wal
-            .iter()
-            .chain(self.journal.iter())
-            .any(|file| file.snapshot_relevant)
+        self.main.snapshot_relevant
+            || self
+                .wal
+                .iter()
+                .chain(self.journal.iter())
+                .any(|file| file.snapshot_relevant)
     }
 
     pub(crate) fn deferred_reason(&self) -> Option<&'static str> {
@@ -262,6 +264,9 @@ pub fn observe_sqlite_source_generation(path: &Path) -> io::Result<SqliteSourceG
             }
             Err(error) => return Err(error),
         };
+        if before.deferred_reason() == Some(WAL_RESOURCE_REASON) {
+            return Ok(before);
+        }
         let after = match observe_generation_once(path) {
             Ok(SqliteGenerationObservation::Generation(generation)) => {
                 previous_corruption = None;
@@ -435,18 +440,16 @@ fn observe_file(
         #[cfg(windows)]
         path_guards,
         #[cfg(windows)]
-        immutable_path,
+        pinned_path,
     } = source;
     let modified_at = metadata.modified().unwrap_or(UNIX_EPOCH);
     let modified = modified_at.duration_since(UNIX_EPOCH).unwrap_or_default();
     run_observation_test_hook(path, SqliteObservationTestPhase::AfterMetadata);
     let sentinel_observation = match kind {
-        SentinelKind::Main => WalSentinel::Observed(
-            main_header_sentinel(&mut file, &metadata)?,
-            false,
-            metadata.len(),
-            None,
-        ),
+        SentinelKind::Main => {
+            let (sentinel, uses_wal_mode) = main_header_sentinel(&mut file, &metadata)?;
+            WalSentinel::Observed(sentinel, uses_wal_mode, metadata.len(), None)
+        }
         SentinelKind::Wal => wal_sentinel(path, &mut file, metadata.len())?,
         SentinelKind::Journal => {
             let (sentinel, snapshot_relevant, snapshot_len, deferred_reason) =
@@ -478,7 +481,7 @@ fn observe_file(
         #[cfg(windows)]
         _path_guards: Arc::new(path_guards),
         #[cfg(windows)]
-        immutable_path,
+        pinned_path,
         len: metadata.len(),
         modified_at,
         modified_secs: modified.as_secs(),
@@ -672,7 +675,7 @@ fn open_source_file_no_follow(path: &Path) -> io::Result<OpenSourceFile> {
     Ok(OpenSourceFile {
         file,
         path_guards,
-        immutable_path: opened_path,
+        pinned_path: opened_path,
     })
 }
 
@@ -844,8 +847,11 @@ fn validate_open_source_file(_file: &File) -> io::Result<()> {
     Ok(())
 }
 
-fn main_header_sentinel(file: &mut File, metadata: &Metadata) -> io::Result<Vec<u8>> {
+fn main_header_sentinel(file: &mut File, metadata: &Metadata) -> io::Result<(Vec<u8>, bool)> {
     let header = read_prefix(file, SQLITE_HEADER_BYTES)?;
+    let uses_wal_mode = header.starts_with(b"SQLite format 3\0")
+        && header.len() >= SQLITE_HEADER_BYTES
+        && header[18..20] == [2, 2];
     let mut sentinel = b"sqlite-main-v2".to_vec();
     if header.starts_with(b"SQLite format 3\0") && header.len() >= SQLITE_HEADER_BYTES {
         for range in [24..32, 40..48, 60..64, 92..100] {
@@ -855,7 +861,7 @@ fn main_header_sentinel(file: &mut File, metadata: &Metadata) -> io::Result<Vec<
         sentinel.extend_from_slice(&header);
     }
     append_main_file_identity(&mut sentinel, file, metadata)?;
-    Ok(sentinel)
+    Ok((sentinel, uses_wal_mode))
 }
 
 #[cfg(unix)]
@@ -989,7 +995,15 @@ fn wal_sentinel(path: &Path, file: &mut File, len: u64) -> io::Result<WalSentine
             stale_suffix = true;
             break;
         }
-        wal_frame_end_within_snapshot_ceiling(offset, frame_size)?;
+        if wal_frame_end_within_snapshot_ceiling(offset, frame_size).is_err() {
+            sentinel.extend_from_slice(&valid_frames.to_le_bytes());
+            return Ok(WalSentinel::Observed(
+                sentinel,
+                false,
+                0,
+                Some(WAL_RESOURCE_REASON),
+            ));
+        }
         file.read_exact(&mut page)?;
         if be_u32(&frame_header[0..4]) == 0 {
             churning_suffix = true;
@@ -1426,7 +1440,7 @@ mod tests {
             fs::write(sidecar_path(&db, "-wal"), bytes).unwrap();
             if label == "salt" {
                 let generation = observe_sqlite_source_generation(&db).unwrap();
-                assert!(!generation.requires_snapshot(), "{label}");
+                assert!(generation.requires_snapshot(), "{label}");
                 assert!(generation.deferred_reason().is_none(), "{label}");
             } else {
                 let error = observe_sqlite_source_generation(&db).unwrap_err();
@@ -1558,7 +1572,7 @@ mod tests {
 
         let generation = observe_sqlite_source_generation(&db).unwrap();
         assert!(reset.get());
-        assert!(!generation.requires_snapshot());
+        assert!(generation.requires_snapshot());
     }
 
     #[test]
@@ -1818,7 +1832,7 @@ mod tests {
         wal[28..32].copy_from_slice(&checksum[1].to_be_bytes());
         fs::write(sidecar_path(&db, "-wal"), wal).unwrap();
 
-        assert!(!observe_sqlite_source_generation(&db)
+        assert!(observe_sqlite_source_generation(&db)
             .unwrap()
             .requires_snapshot());
     }
