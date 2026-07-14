@@ -544,6 +544,10 @@ pub(crate) fn run_import_internal(
         options.operation,
         planned_total_bytes,
     );
+    store.ensure_disk_headroom(
+        estimated_bulk_import_write_bytes(planned_total_bytes),
+        "bulk history import",
+    )?;
     if let Some(warning) = low_disk_space_warning(&db_path, planned_total_bytes) {
         progress.warning(warning);
     }
@@ -814,6 +818,12 @@ pub(crate) fn large_import_notice(
     ))
 }
 
+fn estimated_bulk_import_write_bytes(source_bytes: u64) -> u64 {
+    source_bytes
+        .saturating_mul(2)
+        .max(ctx_history_store::INDEXING_WAL_DELTA_BYTES)
+}
+
 #[cfg(test)]
 mod work_class_tests {
     use super::*;
@@ -821,5 +831,18 @@ mod work_class_tests {
     #[test]
     fn explicit_bulk_import_is_quiet_and_preemptible() {
         assert_eq!(bulk_import_work_class(), IndexingWorkClass::Background);
+    }
+
+    #[test]
+    fn bulk_import_disk_estimate_includes_database_and_projection_amplification() {
+        assert_eq!(
+            estimated_bulk_import_write_bytes(10 * 1024),
+            ctx_history_store::INDEXING_WAL_DELTA_BYTES
+        );
+        assert_eq!(
+            estimated_bulk_import_write_bytes(10 * 1024 * 1024),
+            20 * 1024 * 1024
+        );
+        assert_eq!(estimated_bulk_import_write_bytes(u64::MAX), u64::MAX);
     }
 }

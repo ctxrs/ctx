@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use ctx_history_core::{
     CaptureProvider, Event, EventType, ProviderEventEnvelope, ProviderSourceTrust,
 };
-use ctx_history_store::Store;
+use ctx_history_store::{IndexingWorkClass, Store};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -41,8 +41,8 @@ use crate::provider::codex::events::{
     CodexToolCallContext,
 };
 use crate::provider::codex::session::{
-    codex_session_file_conversation_scan, should_parse_codex_session_line,
-    should_skip_codex_tool_output_line,
+    codex_session_file_conversation_scan_with_pacer, should_parse_codex_session_line,
+    should_skip_codex_tool_output_line, PacedReader,
 };
 
 pub(crate) fn import_codex_session_paths_fast(
@@ -173,7 +173,9 @@ pub(crate) fn import_codex_session_path_fast(
     transaction: &mut ProviderImportTransaction,
 ) -> Result<()> {
     ensure_regular_provider_transcript_file(path)?;
-    let conversation_scan = codex_session_file_conversation_scan(path)?;
+    let pacer = (store.indexing_work_class() == Some(IndexingWorkClass::Background))
+        .then(|| store.indexing_io_pacer());
+    let conversation_scan = codex_session_file_conversation_scan_with_pacer(path, pacer.clone())?;
     if !conversation_scan.has_real_conversation
         && !conversation_scan.has_malformed_header
         && !conversation_scan.has_malformed_relevant_line
@@ -203,7 +205,7 @@ pub(crate) fn import_codex_session_path_fast(
         return Ok(());
     }
     let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
+    let mut reader = BufReader::new(PacedReader::new(file, pacer));
     let context = ProviderAdapterContext {
         machine_id: options.machine_id.clone(),
         source_path: Some(path.to_path_buf()),
@@ -214,7 +216,7 @@ pub(crate) fn import_codex_session_path_fast(
         history_record_id: options.history_record_id,
         persist_cursors: false,
         wrap_transaction: false,
-        fast_event_inserts: true,
+        fast_event_inserts: options.fast_event_inserts,
     };
     let raw_source_path = context
         .source_path
@@ -356,17 +358,23 @@ pub(crate) fn import_codex_session_path_fast(
                 )?);
                 header_persisted = true;
             }
-            let source_root = context.source_root_display();
-            let line_summary = import_codex_provider_event_fast(
-                store,
-                header,
-                &event,
-                options.history_record_id,
-                line_number,
-                context.imported_at,
-                raw_source_path.as_deref(),
-                source_root.as_deref(),
-            )?;
+            let line_summary = if options.fast_event_inserts {
+                let source_root = context.source_root_display();
+                import_codex_provider_event_fast(
+                    store,
+                    header,
+                    &event,
+                    options.history_record_id,
+                    line_number,
+                    context.imported_at,
+                    raw_source_path.as_deref(),
+                    source_root.as_deref(),
+                )?
+            } else {
+                let capture =
+                    codex_session_capture(header, Some(event), line_number, occurred_at, &context);
+                import_provider_capture_line(store, &capture, &import_options, line_number, caches)?
+            };
             summary.merge(line_summary);
         }
         if !line_capture.files_touched.is_empty() && !header_persisted {

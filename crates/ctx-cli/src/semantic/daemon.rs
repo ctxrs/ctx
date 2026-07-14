@@ -1310,7 +1310,9 @@ fn semantic_bootstrap_should_run_first(
     refresh_semantic_document_count_cache(&store)?;
     let report = semantic_worker_report(data_root, Some(&store))?;
     Ok(report.searchable_items > 0
-        && report.queued_items_estimate > 0
+        && (report.queued_items_estimate > 0
+            || report.relational_validation_pending
+            || report.vector_maintenance_pending)
         && report.model_cache_available)
 }
 
@@ -1318,18 +1320,34 @@ fn semantic_report_should_queue_recent_work(report: &SemanticWorkerReport) -> bo
     report.searchable_items > 0
         && report.embedded_items >= report.searchable_items
         && report.dirty_items == 0
+        && !report.relational_validation_pending
+        && !report.vector_maintenance_pending
 }
 
 fn refresh_semantic_document_count_cache(store: &Store) -> Result<()> {
-    store.refresh_event_embedding_document_count_cache()?;
+    // Bounded projection maintenance owns this cache. Recomputing it here
+    // would turn every daemon bootstrap into a corpus-wide relational scan.
+    let _ = store.cached_event_embedding_document_count()?;
     Ok(())
 }
 
 fn daemon_semantic_job_did_work(value: &Value) -> bool {
     value
-        .get("indexed_chunks")
-        .and_then(Value::as_u64)
-        .is_some_and(|chunks| chunks > 0)
+        .get("projection_maintenance_advanced")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || value
+            .get("vector_maintenance_advanced")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        || value
+            .get("relational_validation_advanced")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        || value
+            .get("indexed_chunks")
+            .and_then(Value::as_u64)
+            .is_some_and(|chunks| chunks > 0)
 }
 
 fn daemon_run_start_mode(args: &DaemonRunArgs) -> DaemonStartModeArg {
@@ -1493,12 +1511,18 @@ fn prepare_daemon_semantic_report(
         .context("acquire indexing admission for daemon semantic job")?;
     let store = Store::open_admitted(db_path, &admission)
         .context("open admitted ctx store for daemon semantic job")?;
+    let projection_maintenance_advanced = store.event_search_maintenance_pending()?;
+    if projection_maintenance_advanced {
+        store.run_event_search_maintenance_slice()?;
+    }
     refresh_semantic_document_count_cache(&store)?;
     let mut report = semantic_worker_report(data_root, Some(&store))?;
+    report.projection_maintenance_advanced = projection_maintenance_advanced;
     if semantic_report_should_queue_recent_work(&report)
         && queue_recent_semantic_work(data_root, &store, "daemon_recent").unwrap_or(0) > 0
     {
         report = semantic_worker_report(data_root, Some(&store))?;
+        report.projection_maintenance_advanced = projection_maintenance_advanced;
     }
     Ok(report)
 }
@@ -1542,6 +1566,16 @@ fn run_daemon_semantic_job(
     }
 
     let mut before = prepare_daemon_semantic_report(data_root, &db_path)?;
+    if !before.search_projection_ready {
+        return Ok(daemon_semantic_job_json(
+            "projection_pending",
+            Some("search_projection_pending"),
+            last_run_at_ms,
+            &before,
+            None,
+            None,
+        ));
+    }
     if before.searchable_items == 0 {
         return Ok(daemon_semantic_job_json(
             "empty",
@@ -1621,7 +1655,10 @@ fn run_daemon_semantic_job(
             }
         }
     }
-    if before.queued_items_estimate == 0 {
+    if before.queued_items_estimate == 0
+        && !before.relational_validation_pending
+        && !before.vector_maintenance_pending
+    {
         return Ok(daemon_semantic_job_json(
             "ready",
             None,
@@ -1682,7 +1719,10 @@ fn run_daemon_semantic_job(
     let indexed_chunks = (indexed_chunks_now > 0).then_some(indexed_chunks_now);
     let status = if report.running {
         "running"
-    } else if report.queued_items_estimate == 0 {
+    } else if report.queued_items_estimate == 0
+        && !report.relational_validation_pending
+        && !report.vector_maintenance_pending
+    {
         "ready"
     } else if indexed_chunks_now > 0 {
         "budget_exhausted"
@@ -1762,6 +1802,9 @@ fn daemon_semantic_job_json(
         "last_run_at_ms": last_run_at_ms,
         "last_error": last_error,
         "indexed_chunks": indexed_chunks,
+        "projection_maintenance_advanced": report.projection_maintenance_advanced,
+        "relational_validation_advanced": report.relational_validation_advanced,
+        "vector_maintenance_advanced": report.vector_maintenance_advanced,
         "model_cache_available": report.model_cache_available,
         "model_acquisition": report.model_acquisition.clone(),
         "embed_policy": report.embed_policy.clone(),
@@ -1774,6 +1817,9 @@ fn daemon_semantic_job_json(
             "embedded_chunks": report.embedded_chunks,
             "dirty_items": report.dirty_items,
             "queued_items_estimate": report.queued_items_estimate,
+            "relational_validation_pending": report.relational_validation_pending,
+            "vector_validation_pending": report.vector_validation_pending,
+            "vector_maintenance_pending": report.vector_maintenance_pending,
         },
     }))
 }
@@ -1980,7 +2026,46 @@ fn run_semantic_worker_inner_with_embedder(
         return Ok(());
     };
     let vector_path = semantic_vector_path(data_root);
+    if !store.search_projection_ready()? {
+        let (stats, dirty_items) = match SemanticVectorStore::open_read_only(&vector_path)? {
+            Some(vector_store) => (
+                vector_store
+                    .cached_stats()?
+                    .unwrap_or_else(SemanticSidecarStats::default),
+                vector_store.dirty_event_count()?,
+            ),
+            None => (SemanticSidecarStats::default(), 0),
+        };
+        let now = utc_now().timestamp_millis();
+        write_semantic_worker_status(
+            data_root,
+            &json!({
+                "schema_version": 1,
+                "status": "projection_pending",
+                "model_key": semantic_model_key(),
+                "pid": process::id(),
+                "started_at_ms": now,
+                "heartbeat_at_ms": now,
+                "finished_at_ms": now,
+                "indexed_chunks": 0,
+                "search_projection_ready": false,
+                "searchable_items": 0,
+                "embedded_items": stats.embedded_items,
+                "embedded_chunks": stats.embedded_chunks,
+                "dirty_items": dirty_items,
+                "last_error": null,
+            }),
+        )?;
+        return Ok(());
+    }
     let mut vector_store = SemanticVectorStore::open(&vector_path)?;
+    let relational_content_revision = store.semantic_content_revision()?;
+    let vector_maintenance_was_pending =
+        vector_store.maintenance_pending(relational_content_revision)?;
+    let vector_maintenance_still_pending =
+        vector_store.run_maintenance_slice(relational_content_revision)?;
+    let vector_maintenance_advanced =
+        vector_maintenance_was_pending || vector_maintenance_still_pending;
     let prune_outcome = vector_store.prune_ineligible_events(&store)?;
     let started_at_ms = utc_now().timestamp_millis();
     let initial_stats = vector_store
@@ -1994,7 +2079,8 @@ fn run_semantic_worker_inner_with_embedder(
     let was_ready_before_worker =
         semantic_worker_status_was_ready_for_stats(data_root, initial_stats);
     let continue_past_indexed_pages = !was_ready_before_worker
-        || initial_queued_items_estimate > SEMANTIC_DIRTY_QUEUE_RECENT_LIMIT;
+        || initial_queued_items_estimate > SEMANTIC_DIRTY_QUEUE_RECENT_LIMIT
+        || !prune_outcome.validation_complete;
     let starting_embed_policy = shared_semantic_embedder_policy_status_json(embedder)?;
     let starting_embedding_runtime = shared_semantic_embedder_runtime_status_json(embedder)?;
     write_semantic_worker_status(
@@ -2008,7 +2094,12 @@ fn run_semantic_worker_inner_with_embedder(
             "heartbeat_at_ms": started_at_ms,
             "indexed_chunks": 0,
             "pruned_chunks": prune_outcome.deleted_chunks,
+            "vector_maintenance_advanced": vector_maintenance_advanced,
+            "relational_validation_advanced": prune_outcome.validation_advanced,
             "stale_events_queued": prune_outcome.queued_stale_events,
+            "relational_content_revision": prune_outcome.target_revision,
+            "relational_validation_complete": prune_outcome.validation_complete,
+            "search_projection_ready": true,
             "searchable_items": searchable_items,
             "embedded_items": initial_stats.embedded_items,
             "embedded_chunks": initial_stats.embedded_chunks,
@@ -2049,9 +2140,19 @@ fn run_semantic_worker_inner_with_embedder(
         .unwrap_or_else(SemanticSidecarStats::default);
     let final_dirty_items = vector_store.dirty_event_count()?;
     let searchable_items = store.event_embedding_document_count_cached_or_exact()?;
+    let relational_content_revision = store.semantic_content_revision()?;
+    let relational_validation_complete =
+        vector_store.relational_validation_is_current(&store)?;
+    let vector_validation_complete =
+        vector_store.sqlite_vec0_validation_is_current(relational_content_revision)?;
+    let vector_maintenance_pending =
+        vector_store.maintenance_pending(relational_content_revision)?;
     let status = if searchable_items > 0
         && final_stats.embedded_items >= searchable_items
         && final_dirty_items == 0
+        && relational_validation_complete
+        && vector_validation_complete
+        && !vector_maintenance_pending
     {
         vector_store.set_backfill_cursor(None)?;
         "ready"
@@ -2073,7 +2174,15 @@ fn run_semantic_worker_inner_with_embedder(
             "finished_at_ms": finished_at_ms,
             "indexed_chunks": indexed_chunks,
             "pruned_chunks": prune_outcome.deleted_chunks,
+            "vector_maintenance_advanced": vector_maintenance_advanced,
             "stale_events_queued": prune_outcome.queued_stale_events,
+            "relational_content_revision": relational_content_revision,
+            "relational_validation_complete": relational_validation_complete,
+            "relational_validation_pending": !relational_validation_complete,
+            "vector_validation_pending": !vector_validation_complete,
+            "vector_maintenance_pending": vector_maintenance_pending,
+            "relational_validation_advanced": prune_outcome.validation_advanced,
+            "search_projection_ready": true,
             "elapsed_ms": elapsed_ms,
             "model_init_ms": model_init_ms,
             "searchable_items": searchable_items,
@@ -2122,7 +2231,27 @@ fn semantic_worker_status_was_ready_for_stats(
     let dirty_items = json_usize(&value, "dirty_items").unwrap_or(usize::MAX);
     let embedded_items = json_usize(&value, "embedded_items").unwrap_or(0);
     let searchable_items = json_usize(&value, "searchable_items").unwrap_or(usize::MAX);
+    let search_projection_ready = value
+        .get("search_projection_ready")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let relational_validation_complete = value
+        .get("relational_validation_complete")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let vector_validation_pending = value
+        .get("vector_validation_pending")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let vector_maintenance_pending = value
+        .get("vector_maintenance_pending")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
     status_ready
+        && search_projection_ready
+        && relational_validation_complete
+        && !vector_validation_pending
+        && !vector_maintenance_pending
         && dirty_items == 0
         && embedded_items == stats.embedded_items
         && embedded_items >= searchable_items

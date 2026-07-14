@@ -18,6 +18,19 @@ fn spool_writer_closes_tmp_file_atomically_to_jsonl() {
     assert!(!tmp_path.exists());
     assert!(final_path.exists());
     assert_eq!(read_jsonl(&final_path).unwrap(), vec![envelope]);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&inbox).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(&final_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
 }
 
 #[test]
@@ -37,11 +50,23 @@ fn failed_import_retains_raw_failed_file_and_error_metadata() {
     let sidecar = inbox.join("capture-bad.jsonl.failed.error.json");
     assert!(failed.exists());
     assert!(sidecar.exists());
-    assert_eq!(fs::read_to_string(failed).unwrap(), "not json\n");
-    assert!(fs::read_to_string(sidecar)
+    assert_eq!(fs::read_to_string(&failed).unwrap(), "not json\n");
+    assert!(fs::read_to_string(&sidecar)
         .unwrap()
         .contains("not a valid capture envelope"));
     assert_eq!(spool_counts(&inbox).unwrap().failed, 1);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(failed).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(sidecar).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
 }
 
 #[test]
@@ -96,6 +121,8 @@ fn import_is_idempotent_by_dedupe_key() {
     let summary = import_spool(&inbox, &mut store).unwrap();
 
     assert_eq!(summary.failed_files, 0);
+    assert_eq!(summary.maintenance_pending_files, 0);
+    assert!(summary.maintenance_failures.is_empty());
     assert_eq!(summary.processed_files, 2);
     let records = store.list_records(10).unwrap();
     assert_eq!(records.len(), 1);
@@ -103,6 +130,83 @@ fn import_is_idempotent_by_dedupe_key() {
     assert_eq!(records[0].id.get_version_num(), 7);
     assert_eq!(records[0].title, "First title");
     assert_eq!(spool_counts(&inbox).unwrap().done, 2);
+}
+
+#[test]
+fn committed_processing_file_recovers_after_finalization_crash() {
+    let temp = tempdir();
+    let inbox = temp.path().join("inbox");
+    let envelope = fixture_envelope(fixture_options("recover-processing", "Recovered")).unwrap();
+    let mut writer = SpoolWriter::create(&inbox, "test-machine").unwrap();
+    let pending = writer.final_path().to_path_buf();
+    writer.write_envelope(&envelope).unwrap();
+    writer.finish().unwrap();
+
+    let processing = PathBuf::from(format!("{}.processing", pending.display()));
+    let done = PathBuf::from(format!("{}.done", pending.display()));
+    fs::create_dir(&done).unwrap();
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let first = import_spool(&inbox, &mut store).unwrap();
+
+    assert_eq!(first.processed_files, 1);
+    assert_eq!(first.failed_files, 0);
+    assert_eq!(first.finalization_warnings.len(), 1);
+    assert!(first.finalization_warnings[0]
+        .error
+        .contains("committed durably"));
+    assert!(processing.is_file());
+    assert!(done.is_dir());
+    assert_eq!(store.list_records(10).unwrap().len(), 1);
+
+    fs::remove_dir(&done).unwrap();
+    let second = import_spool(&inbox, &mut store).unwrap();
+
+    assert_eq!(second.processed_files, 1);
+    assert_eq!(second.failed_files, 0);
+    assert!(second.finalization_warnings.is_empty());
+    assert!(!processing.exists());
+    assert!(done.is_file());
+    assert_eq!(store.list_records(10).unwrap().len(), 1);
+}
+
+#[test]
+fn spool_directory_enumeration_processes_more_than_one_bounded_batch() {
+    let temp = tempdir();
+    let inbox = temp.path().join("inbox");
+    fs::create_dir_all(&inbox).unwrap();
+    let file_count = 2 * 64 + 5;
+    for index in 0..file_count {
+        fs::write(
+            inbox.join(format!("capture-{index:04}.jsonl")),
+            "not json\n",
+        )
+        .unwrap();
+    }
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let summary = import_spool(&inbox, &mut store).unwrap();
+
+    assert_eq!(summary.processed_files, file_count);
+    assert_eq!(summary.failed_files, file_count);
+    assert_eq!(spool_counts(&inbox).unwrap().failed, file_count);
+}
+
+#[test]
+fn oversized_spool_envelope_is_rejected_with_bounded_line_memory() {
+    let temp = tempdir();
+    let inbox = temp.path().join("inbox");
+    fs::create_dir_all(&inbox).unwrap();
+    let pending = inbox.join("capture-oversized.jsonl");
+    let mut bytes = vec![b'x'; MAX_PROVIDER_JSONL_LINE_BYTES + 1];
+    bytes.push(b'\n');
+    fs::write(&pending, bytes).unwrap();
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let summary = import_spool(&inbox, &mut store).unwrap();
+
+    assert_eq!(summary.failed_files, 1);
+    assert!(summary.failures[0].error.contains("spool limit"));
 }
 
 #[test]

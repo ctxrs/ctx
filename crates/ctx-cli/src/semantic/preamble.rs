@@ -37,7 +37,8 @@ use uuid::Uuid;
 
 use ctx_history_core::{database_path, default_data_root, utc_now};
 use ctx_history_store::{
-    EventEmbeddingDocument, IndexingAdmission, IndexingWorkClass, Store,
+    sqlite_amplifying_write_estimate, EventEmbeddingDocument, IndexingAdmission,
+    IndexingWorkClass, Store, INDEXING_WAL_DELTA_BYTES,
 };
 
 use crate::commands::{
@@ -152,13 +153,21 @@ const SEMANTIC_SEARCH_CANDIDATES: usize = 200;
 const SEMANTIC_SOFT_FILTER_SEARCH_CANDIDATES: usize = 1_000;
 const SEMANTIC_CHUNK_TARGET_CHARS: usize = 1_200;
 pub(crate) const SEMANTIC_CHUNK_OVERLAP_CHARS: usize = 200;
+const SEMANTIC_CHUNK_BOUNDARY_BACKTRACK_CHARS: usize = 150;
 const SEMANTIC_SOURCE_MAX_CHARS: usize = 64 * 1024;
 const SEMANTIC_VECTOR_OVERFETCH: usize = 4;
 const SEMANTIC_FULL_SCAN_MAX_CHUNKS: usize = 250_000;
 const SEMANTIC_FULL_SCAN_MAX_VECTOR_BYTES: usize = 512 * 1024 * 1024;
 const SEMANTIC_VECTOR_BACKEND_RUST: &str = "rust_blob_scan";
 const SEMANTIC_VECTOR_BACKEND_SQLITE_VEC: &str = "sqlite_vec0";
-const SEMANTIC_SQLITE_VEC0_MAX_K: usize = 4_096;
+const SEMANTIC_VECTOR_REPAIR_REQUEST_FILE: &str = "semantic-vector-repair-request.json";
+const SEMANTIC_MIN_CHUNK_ADVANCE_CHARS: usize = SEMANTIC_CHUNK_TARGET_CHARS
+    - SEMANTIC_CHUNK_OVERLAP_CHARS
+    - SEMANTIC_CHUNK_BOUNDARY_BACKTRACK_CHARS;
+const SEMANTIC_MAX_CHUNKS_PER_DOCUMENT: usize = 1
+    + SEMANTIC_SOURCE_MAX_CHARS
+        .saturating_sub(SEMANTIC_CHUNK_TARGET_CHARS)
+        .div_ceil(SEMANTIC_MIN_CHUNK_ADVANCE_CHARS);
 #[cfg(ctx_semantic_fastembed)]
 const SEMANTIC_EMBED_THREADS_MAX: usize = 8;
 #[cfg(ctx_semantic_fastembed)]
@@ -172,7 +181,7 @@ const SEMANTIC_WORKER_MAX_SECONDS_DEFAULT: u64 = 60;
 pub(crate) const SEMANTIC_WORKER_MAX_SECONDS_CAP: u64 = 86_400;
 const SEMANTIC_MODEL_INIT_MIN_REMAINING_SECS: u64 = 15;
 const SEMANTIC_VECTOR_BUSY_TIMEOUT_MS: u64 = 30_000;
-const SEMANTIC_PRUNE_EVENTS_PER_PASS: usize = 256;
+const SEMANTIC_PRUNE_EVENTS_PER_PASS: usize = 1_024;
 const SEMANTIC_PRUNE_EVENT_BATCH: usize = 1_000;
 const SEMANTIC_DEADLINE_CHUNKS_PER_SECOND: usize = 3;
 const SEMANTIC_DEADLINE_MIN_CHUNK_BATCH: usize = 16;
@@ -219,6 +228,13 @@ pub(crate) struct SemanticWorkerReport {
     indexed_chunks: Option<usize>,
     model_init_ms: Option<usize>,
     last_error: Option<String>,
+    search_projection_ready: bool,
+    projection_maintenance_advanced: bool,
+    relational_validation_pending: bool,
+    vector_validation_pending: bool,
+    vector_maintenance_pending: bool,
+    relational_validation_advanced: bool,
+    vector_maintenance_advanced: bool,
     searchable_items: usize,
     searchable_items_known: bool,
     embedded_items: usize,
@@ -246,6 +262,13 @@ impl SemanticWorkerReport {
             indexed_chunks: None,
             model_init_ms: None,
             last_error: Some(error.to_string()),
+            search_projection_ready: false,
+            projection_maintenance_advanced: false,
+            relational_validation_pending: false,
+            vector_validation_pending: false,
+            vector_maintenance_pending: false,
+            relational_validation_advanced: false,
+            vector_maintenance_advanced: false,
             searchable_items: 0,
             searchable_items_known: false,
             embedded_items: 0,
@@ -287,6 +310,10 @@ impl SemanticWorkerReport {
             "model_init_ms": self.model_init_ms,
             "last_error": self.last_error,
             "coverage": {
+                "search_projection_ready": self.search_projection_ready,
+                "relational_validation_pending": self.relational_validation_pending,
+                "vector_validation_pending": self.vector_validation_pending,
+                "vector_maintenance_pending": self.vector_maintenance_pending,
                 "searchable_items": self.searchable_items,
                 "searchable_items_known": self.searchable_items_known,
                 "embedded_items": self.embedded_items,
@@ -415,7 +442,11 @@ impl SemanticRetrievalReport {
 }
 
 fn semantic_status_from_worker(worker: &SemanticWorkerReport) -> &'static str {
-    if !worker.searchable_items_known || worker.searchable_items == 0 || worker.embedded_items == 0 {
+    if !worker.search_projection_ready
+        || !worker.searchable_items_known
+        || worker.searchable_items == 0
+        || worker.embedded_items == 0
+    {
         "unavailable"
     } else if semantic_worker_coverage_ready(worker) {
         "ready"
@@ -425,7 +456,8 @@ fn semantic_status_from_worker(worker: &SemanticWorkerReport) -> &'static str {
 }
 
 fn semantic_worker_coverage_ready(worker: &SemanticWorkerReport) -> bool {
-    worker.searchable_items_known
+    worker.search_projection_ready
+        && worker.searchable_items_known
         && worker.searchable_items > 0
         && worker.embedded_items >= worker.searchable_items
         && worker.dirty_items == 0
@@ -685,6 +717,22 @@ fn semantic_or_hybrid_search_packet(
                 worker: Some(worker_report.clone()),
                 diagnostics: None,
             };
+
+            if !worker_report.search_projection_ready {
+                let message = "search projection maintenance is pending; semantic vectors are not current";
+                if effective_backend == SearchBackendArg::Semantic {
+                    return Err(anyhow!("{message}"));
+                }
+                retrieval.effective_mode = SearchBackendArg::Lexical;
+                retrieval.semantic_weight = 0.0;
+                retrieval.embedding_model = None;
+                retrieval.set_semantic_fallback("search_projection_not_ready", message);
+                warn_if(
+                    emit_warnings,
+                    "warning: search projection maintenance is pending; falling back to lexical search",
+                );
+                return lexical_search_packet();
+            }
 
             if worker_report.embedded_items == 0 {
                 if effective_backend == SearchBackendArg::Semantic {
@@ -981,8 +1029,13 @@ struct SemanticIndexOutcome {
 struct SemanticPruneOutcome {
     deleted_chunks: usize,
     queued_stale_events: usize,
+    validation_complete: bool,
+    target_revision: u64,
+    validation_advanced: bool,
 }
 
 struct SemanticVectorStore {
     conn: Connection,
+    path: PathBuf,
+    write_admission: Option<IndexingAdmission>,
 }

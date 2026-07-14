@@ -3,7 +3,9 @@ use std::os::unix::fs::PermissionsExt;
 
 use std::{
     fs,
+    io::Read,
     path::{Path, PathBuf},
+    time::SystemTime,
 };
 
 use sha2::{Digest, Sha256};
@@ -106,6 +108,111 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     value
 }
 
+pub(crate) fn sha256_reader_hex(reader: &mut impl Read) -> std::io::Result<(String, u64)> {
+    let mut digest = Sha256::new();
+    let mut total = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+        total = total.saturating_add(read as u64);
+    }
+    let digest = digest.finalize();
+    let mut value = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(&mut value, "{byte:02x}");
+    }
+    Ok((value, total))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FileSnapshot {
+    len: u64,
+    modified: Option<SystemTime>,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(windows)]
+    volume_and_index: Option<(u32, u64)>,
+}
+
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WindowsFileIdentity {
+    pub(crate) volume_serial: u32,
+    pub(crate) file_index: u64,
+    pub(crate) links: u32,
+}
+
+#[cfg(windows)]
+pub(crate) fn windows_file_identity(file: &fs::File) -> std::io::Result<WindowsFileIdentity> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+
+    let mut info = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::zeroed();
+    // SAFETY: the handle remains owned by `file`; Windows initializes `info`
+    // completely on a nonzero return and does not retain either pointer.
+    let success =
+        unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, info.as_mut_ptr()) };
+    if success == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: a nonzero API result guarantees initialization.
+    let info = unsafe { info.assume_init() };
+    Ok(WindowsFileIdentity {
+        volume_serial: info.dwVolumeSerialNumber,
+        file_index: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+        links: info.nNumberOfLinks,
+    })
+}
+
+pub(crate) fn file_snapshot(file: &fs::File) -> std::io::Result<FileSnapshot> {
+    let snapshot = file_snapshot_from_metadata(&file.metadata()?)?;
+    #[cfg(windows)]
+    {
+        let identity = windows_file_identity(file)?;
+        let mut snapshot = snapshot;
+        snapshot.volume_and_index = Some((identity.volume_serial, identity.file_index));
+        return Ok(snapshot);
+    }
+    #[cfg(not(windows))]
+    Ok(snapshot)
+}
+
+fn file_snapshot_from_metadata(metadata: &fs::Metadata) -> std::io::Result<FileSnapshot> {
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+    Ok(FileSnapshot {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+        #[cfg(unix)]
+        device: metadata.dev(),
+        #[cfg(unix)]
+        inode: metadata.ino(),
+        #[cfg(windows)]
+        volume_and_index: None,
+    })
+}
+
+pub(crate) fn path_matches_file_snapshot(
+    path: &Path,
+    expected: &FileSnapshot,
+) -> std::io::Result<bool> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_file() {
+        return Ok(false);
+    }
+    let current = fs::File::open(path)?;
+    Ok(file_snapshot(&current)? == *expected)
+}
+
 pub(crate) fn ensure_regular_blob_file(id: Uuid, path: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_file() {
@@ -118,30 +225,6 @@ pub(crate) fn ensure_regular_blob_file(id: Uuid, path: &Path) -> Result<()> {
     }
 }
 
-#[derive(Debug, Default)]
-pub(crate) struct BlobWriteGuard {
-    created_paths: Vec<PathBuf>,
-    committed: bool,
-}
-
-impl BlobWriteGuard {
-    pub(crate) fn commit(&mut self) {
-        self.committed = true;
-        self.created_paths.clear();
-    }
-}
-
-impl Drop for BlobWriteGuard {
-    fn drop(&mut self) {
-        if self.committed {
-            return;
-        }
-        for path in self.created_paths.iter().rev() {
-            let _ = fs::remove_file(path);
-        }
-    }
-}
-
 #[cfg(unix)]
 pub(crate) fn restrict_private_dir(path: &Path) -> Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
@@ -150,6 +233,8 @@ pub(crate) fn restrict_private_dir(path: &Path) -> Result<()> {
 
 #[cfg(not(unix))]
 pub(crate) fn restrict_private_dir(_path: &Path) -> Result<()> {
+    // Windows privacy follows the parent directory's inherited ACL. Public
+    // documentation does not claim that this helper installs an owner-only ACL.
     Ok(())
 }
 
@@ -161,5 +246,7 @@ pub(crate) fn restrict_private_file(path: &Path) -> Result<()> {
 
 #[cfg(not(unix))]
 pub(crate) fn restrict_private_file(_path: &Path) -> Result<()> {
+    // Windows privacy follows the parent directory's inherited ACL. Public
+    // documentation does not claim that this helper installs an owner-only ACL.
     Ok(())
 }

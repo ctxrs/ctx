@@ -1,16 +1,13 @@
+use chrono::{DateTime, Utc};
 use ctx_history_core::{
     Artifact, CaptureSource, CaptureSourceDescriptor, Event, Fidelity, FileTouched, HistoryRecord,
     HistoryRecordLink, Run, Session, SessionHistoryArchive, Summary, VcsChange, VcsWorkspace,
 };
-use std::path::Path;
-
-use chrono::{DateTime, Utc};
 use rusqlite::{params, OptionalExtension};
 use uuid::Uuid;
 
-use super::{validate_archive_artifact_record_blobs, ArchiveWriteTransaction};
+use super::ArchiveWriteTransaction;
 use crate::connection::{optional_timestamp_ms, optional_uuid_string, parse_uuid, timestamp_ms};
-use crate::object_store::BlobWriteGuard;
 use crate::{Result, StoreError};
 
 pub(super) fn upsert_capture_source_tx(
@@ -64,47 +61,146 @@ pub(super) fn upsert_capture_source_tx(
     Ok(())
 }
 
-pub(super) fn import_rich_archive_entities_tx(
-    tx: &ArchiveWriteTransaction<'_>,
-    blob_dir: &Path,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ArchiveImportStage {
+    Records = 0,
+    CaptureSources = 1,
+    VcsWorkspaces = 2,
+    Artifacts = 3,
+    Sessions = 4,
+    Runs = 5,
+    Events = 6,
+    VcsChanges = 7,
+    Summaries = 8,
+    FilesTouched = 9,
+    HistoryRecordLinks = 10,
+    Complete = 11,
+}
+
+impl ArchiveImportStage {
+    pub(super) fn from_i64(value: i64) -> Option<Self> {
+        Some(match value {
+            0 => Self::Records,
+            1 => Self::CaptureSources,
+            2 => Self::VcsWorkspaces,
+            3 => Self::Artifacts,
+            4 => Self::Sessions,
+            5 => Self::Runs,
+            6 => Self::Events,
+            7 => Self::VcsChanges,
+            8 => Self::Summaries,
+            9 => Self::FilesTouched,
+            10 => Self::HistoryRecordLinks,
+            11 => Self::Complete,
+            _ => return None,
+        })
+    }
+
+    pub(super) fn next(self) -> Self {
+        match self {
+            Self::Records => Self::CaptureSources,
+            Self::CaptureSources => Self::VcsWorkspaces,
+            Self::VcsWorkspaces => Self::Artifacts,
+            Self::Artifacts => Self::Sessions,
+            Self::Sessions => Self::Runs,
+            Self::Runs => Self::Events,
+            Self::Events => Self::VcsChanges,
+            Self::VcsChanges => Self::Summaries,
+            Self::Summaries => Self::FilesTouched,
+            Self::FilesTouched => Self::HistoryRecordLinks,
+            Self::HistoryRecordLinks | Self::Complete => Self::Complete,
+        }
+    }
+}
+
+pub(super) fn archive_import_stage_len(
     archive: &SessionHistoryArchive,
-    _blob_guard: &mut BlobWriteGuard,
+    stage: ArchiveImportStage,
+) -> usize {
+    match stage {
+        ArchiveImportStage::Records => archive.records.len(),
+        ArchiveImportStage::CaptureSources => archive.capture_sources.len(),
+        ArchiveImportStage::VcsWorkspaces => archive.vcs_workspaces.len(),
+        ArchiveImportStage::Artifacts => archive.artifact_records.len(),
+        ArchiveImportStage::Sessions => archive.sessions.len(),
+        ArchiveImportStage::Runs => archive.runs.len(),
+        ArchiveImportStage::Events => archive.events.len(),
+        ArchiveImportStage::VcsChanges => archive.vcs_changes.len(),
+        ArchiveImportStage::Summaries => archive.summaries.len(),
+        ArchiveImportStage::FilesTouched => archive.files_touched.len(),
+        ArchiveImportStage::HistoryRecordLinks => archive.history_record_links.len(),
+        ArchiveImportStage::Complete => 0,
+    }
+}
+
+pub(super) fn import_archive_stage_range_tx(
+    tx: &ArchiveWriteTransaction<'_>,
+    archive: &SessionHistoryArchive,
+    stage: ArchiveImportStage,
+    start: usize,
+    end: usize,
+    record_source_id: Option<Uuid>,
 ) -> Result<()> {
-    if archive.schema_version < 2 && archive.version < 2 {
+    if stage != ArchiveImportStage::Records && archive.schema_version < 2 && archive.version < 2 {
         return Ok(());
     }
-
-    validate_archive_artifact_record_blobs(blob_dir, archive)?;
-
-    for source in &archive.capture_sources {
-        upsert_imported_capture_source_tx(tx, source)?;
-    }
-    for workspace in &archive.vcs_workspaces {
-        upsert_vcs_workspace_tx(tx, workspace)?;
-    }
-    for artifact in &archive.artifact_records {
-        upsert_artifact_tx(tx, artifact)?;
-    }
-    for session in &archive.sessions {
-        upsert_session_tx(tx, session)?;
-    }
-    for run in &archive.runs {
-        upsert_run_tx(tx, run)?;
-    }
-    for event in &archive.events {
-        upsert_event_tx(tx, event)?;
-    }
-    for change in &archive.vcs_changes {
-        upsert_vcs_change_tx(tx, change)?;
-    }
-    for summary in &archive.summaries {
-        upsert_summary_tx(tx, summary)?;
-    }
-    for file in &archive.files_touched {
-        upsert_file_touched_tx(tx, file)?;
-    }
-    for link in &archive.history_record_links {
-        upsert_history_record_link_tx(tx, link)?;
+    match stage {
+        ArchiveImportStage::Records => {
+            for record in &archive.records[start..end] {
+                upsert_record_tx(tx, record, record_source_id)?;
+            }
+        }
+        ArchiveImportStage::CaptureSources => {
+            for source in &archive.capture_sources[start..end] {
+                upsert_imported_capture_source_tx(tx, source)?;
+            }
+        }
+        ArchiveImportStage::VcsWorkspaces => {
+            for workspace in &archive.vcs_workspaces[start..end] {
+                upsert_vcs_workspace_tx(tx, workspace)?;
+            }
+        }
+        ArchiveImportStage::Artifacts => {
+            for artifact in &archive.artifact_records[start..end] {
+                upsert_artifact_tx(tx, artifact)?;
+            }
+        }
+        ArchiveImportStage::Sessions => {
+            for session in &archive.sessions[start..end] {
+                upsert_session_tx(tx, session)?;
+            }
+        }
+        ArchiveImportStage::Runs => {
+            for run in &archive.runs[start..end] {
+                upsert_run_tx(tx, run)?;
+            }
+        }
+        ArchiveImportStage::Events => {
+            for event in &archive.events[start..end] {
+                upsert_event_tx(tx, event)?;
+            }
+        }
+        ArchiveImportStage::VcsChanges => {
+            for change in &archive.vcs_changes[start..end] {
+                upsert_vcs_change_tx(tx, change)?;
+            }
+        }
+        ArchiveImportStage::Summaries => {
+            for summary in &archive.summaries[start..end] {
+                upsert_summary_tx(tx, summary)?;
+            }
+        }
+        ArchiveImportStage::FilesTouched => {
+            for file in &archive.files_touched[start..end] {
+                upsert_file_touched_tx(tx, file)?;
+            }
+        }
+        ArchiveImportStage::HistoryRecordLinks => {
+            for link in &archive.history_record_links[start..end] {
+                upsert_history_record_link_tx(tx, link)?;
+            }
+        }
+        ArchiveImportStage::Complete => {}
     }
     Ok(())
 }

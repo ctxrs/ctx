@@ -30,6 +30,29 @@ pub enum StoreError {
     },
     #[error("ctx index is busy: another bulk search import is active")]
     BulkSearchImportBusy,
+    #[error("ctx search projection maintenance is pending")]
+    SearchProjectionMaintenancePending,
+    #[error("ctx search projection is unavailable")]
+    SearchProjectionUnavailable,
+    #[error("ctx index connection is quarantined after a failed transaction rollback")]
+    ConnectionQuarantined,
+    #[error("ctx index path is a hard-linked alias and cannot be opened safely: {0:?}")]
+    UnsafeStoreAlias(PathBuf),
+    #[error(
+        "insufficient disk space for {operation}: {available_bytes} bytes available, {required_bytes} bytes required including reserve"
+    )]
+    InsufficientDiskSpace {
+        operation: &'static str,
+        required_bytes: u64,
+        available_bytes: u64,
+    },
+    #[error("could not verify disk space for {operation} at {path:?}: {source}")]
+    DiskSpaceProbeFailed {
+        operation: &'static str,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("bulk search guard belongs to a different ctx index")]
     InvalidBulkSearchGuard,
     #[error("archive conflicts with existing {kind}: {id}")]
@@ -46,6 +69,12 @@ pub enum StoreError {
     ArchiveArtifactNonRegularFile { id: Uuid, path: PathBuf },
     #[error("archive artifact {id} is missing matching blob content")]
     ArchiveArtifactMissingContent { id: Uuid },
+    #[error("archive artifact {id} blob changed while it was being validated")]
+    ArchiveArtifactChangedDuringValidation { id: Uuid },
+    #[error("interrupted archive import does not match the requested overwrite mode")]
+    ArchiveImportResumeMismatch,
+    #[error("archive import progress is corrupt")]
+    ArchiveImportProgressCorrupt,
     #[error("provider event conflict for {provider}/{external_session_id} at index {provider_index}: existing hash {existing_hash}, new hash {new_hash}")]
     ProviderEventConflict {
         provider: String,

@@ -96,17 +96,6 @@ pub(crate) fn read_text_file_limited(path: &Path, max_bytes: usize, label: &str)
         .map_err(|err| CaptureError::InvalidPayload(format!("{label} is not valid UTF-8: {err}")))
 }
 
-pub(crate) fn read_provider_jsonl_line(
-    reader: &mut impl BufRead,
-    buffer: &mut Vec<u8>,
-) -> Result<bool> {
-    match read_provider_jsonl_line_or_skip_oversized(reader, buffer)? {
-        ProviderJsonlLineRead::Eof => Ok(false),
-        ProviderJsonlLineRead::Line { .. } => Ok(true),
-        ProviderJsonlLineRead::Oversized { .. } => Err(provider_jsonl_line_too_large()),
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProviderJsonlLineRead {
     Eof,
@@ -205,12 +194,6 @@ pub(crate) fn discard_provider_jsonl_line(reader: &mut impl BufRead) -> Result<u
             return Ok(discarded);
         }
     }
-}
-
-pub(crate) fn provider_jsonl_line_too_large() -> CaptureError {
-    CaptureError::InvalidPayload(format!(
-        "provider JSONL line exceeds max bytes ({MAX_PROVIDER_JSONL_LINE_BYTES})"
-    ))
 }
 
 pub(crate) fn read_json_file_limited(path: &Path, max_bytes: usize, label: &str) -> Result<Value> {

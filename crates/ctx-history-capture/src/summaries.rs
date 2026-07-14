@@ -23,6 +23,9 @@ pub struct SpoolImportSummary {
     pub imported_records: usize,
     pub failed_files: usize,
     pub failures: Vec<SpoolImportFailure>,
+    pub maintenance_pending_files: usize,
+    pub maintenance_failures: Vec<SpoolImportFailure>,
+    pub finalization_warnings: Vec<SpoolImportFailure>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,13 +91,17 @@ pub struct SpoolRepairSummary {
     pub retried_files: usize,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ArchiveCounts {
     pub(crate) records: usize,
+    pub(crate) maintenance_pending: bool,
+    pub(crate) maintenance_errors: Vec<String>,
 }
 
 impl ArchiveCounts {
     pub(crate) fn add(&mut self, other: Self) {
         self.records += other.records;
+        self.maintenance_pending |= other.maintenance_pending;
+        self.maintenance_errors.extend(other.maintenance_errors);
     }
 }

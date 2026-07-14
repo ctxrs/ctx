@@ -11,6 +11,23 @@ use super::*;
 pub(crate) const IMPORT_TRANSACTION_BATCH_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const IMPORT_TRANSACTION_BATCH_UNITS: usize = 64;
 
+#[cfg(test)]
+thread_local! {
+    static OBSERVED_IMPORT_BATCHES: std::cell::RefCell<Vec<(usize, usize)>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
+}
+
+#[cfg(test)]
+pub(crate) fn take_observed_import_batches() -> Vec<(usize, usize)> {
+    OBSERVED_IMPORT_BATCHES.with(|batches| std::mem::take(&mut *batches.borrow_mut()))
+}
+
+#[cfg(test)]
+fn observe_import_batch(units: usize, bytes: usize) {
+    OBSERVED_IMPORT_BATCHES.with(|batches| batches.borrow_mut().push((units, bytes)));
+}
+
 pub(super) fn import_normalized_provider_captures(
     store: &mut Store,
     normalization: ProviderNormalizationResult,
@@ -62,24 +79,6 @@ pub(crate) fn import_normalized_provider_captures_in_batches(
         captures,
         files_touched,
         Some(transaction_batch_size),
-        true,
-    )
-}
-
-pub(super) fn import_provider_capture_lines(
-    store: &mut Store,
-    options: NormalizedProviderImportOptions,
-    summary: ProviderImportSummary,
-    captures: Vec<(usize, ProviderCaptureEnvelope)>,
-    files_touched: Vec<(usize, ProviderFileTouchedEnvelope)>,
-) -> Result<ProviderImportSummary> {
-    import_provider_capture_lines_with_batch_size(
-        store,
-        options,
-        summary,
-        captures,
-        files_touched,
-        provider_transaction_batch_size(),
         true,
     )
 }
@@ -365,7 +364,7 @@ impl ProviderImportTransaction {
             return result;
         }
         if !self.active {
-            if let Err(error) = self.start(store) {
+            if let Err(error) = self.start(store, unit_bytes) {
                 self.rollback(store);
                 return Err(error);
             }
@@ -400,18 +399,31 @@ impl ProviderImportTransaction {
         result
     }
 
-    fn start(&mut self, store: &Store) -> Result<()> {
+    fn start(&mut self, store: &Store, first_unit_bytes: usize) -> Result<()> {
         store.begin_immediate_batch()?;
         self.active = true;
-        self.slice = Some(store.begin_indexing_slice()?);
+        if let Err(error) = revalidate_provider_import_disk(store, first_unit_bytes) {
+            self.rollback(store);
+            return Err(error);
+        }
+        self.slice = match store.begin_indexing_slice() {
+            Ok(slice) => Some(slice),
+            Err(error) => {
+                self.rollback(store);
+                return Err(error.into());
+            }
+        };
         self.units = 0;
         self.bytes = 0;
         Ok(())
     }
 
     fn finish_active(&mut self, store: &Store) -> Result<()> {
+        revalidate_provider_import_disk(store, self.bytes)?;
         store.commit_batch()?;
         self.active = false;
+        #[cfg(test)]
+        observe_import_batch(self.units, self.bytes);
         if let Some(slice) = self.slice.take() {
             store.finish_indexing_slice(slice)?;
         }
@@ -422,10 +434,11 @@ impl ProviderImportTransaction {
 
     pub(crate) fn commit(&mut self, store: &Store) -> Result<()> {
         let result = if self.active {
-            store
-                .commit_batch()
-                .map_err(CaptureError::from)
+            revalidate_provider_import_disk(store, self.bytes)
+                .and_then(|()| store.commit_batch().map_err(CaptureError::from))
                 .and_then(|()| {
+                    #[cfg(test)]
+                    observe_import_batch(self.units, self.bytes);
                     self.slice
                         .take()
                         .map(|slice| store.finish_indexing_slice(slice))
@@ -452,4 +465,14 @@ impl ProviderImportTransaction {
         }
         self.slice = None;
     }
+}
+
+fn revalidate_provider_import_disk(store: &Store, payload_bytes: usize) -> Result<()> {
+    let payload_bytes = u64::try_from(payload_bytes).unwrap_or(u64::MAX);
+    let estimated = payload_bytes
+        .saturating_mul(2)
+        .max(ctx_history_store::INDEXING_WAL_DELTA_BYTES);
+    store
+        .ensure_disk_headroom(estimated, "provider import batch")
+        .map_err(CaptureError::from)
 }

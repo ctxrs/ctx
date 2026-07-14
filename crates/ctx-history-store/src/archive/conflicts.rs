@@ -21,21 +21,188 @@ use crate::vcs::{
 };
 use crate::{Result, StoreError};
 
-use super::ArchiveWriteTransaction;
+use super::{ArchiveImportStage, ArchiveWriteTransaction};
 
-pub(super) fn reject_import_conflicts(
+pub(super) fn reject_import_stage_conflicts(
     tx: &ArchiveWriteTransaction<'_>,
     archive: &SessionHistoryArchive,
+    stage: ArchiveImportStage,
+    start: usize,
+    end: usize,
+    overwrite: bool,
 ) -> Result<()> {
-    for record in &archive.records {
-        if row_exists(tx, "history_records", record.id)? {
-            return Err(StoreError::ImportConflict {
-                kind: "record",
-                id: record.id,
-            });
-        }
+    if stage != ArchiveImportStage::Records && archive.schema_version < 2 && archive.version < 2 {
+        return Ok(());
     }
-    reject_rich_import_conflicts(tx, archive)?;
+    match stage {
+        ArchiveImportStage::Records if !overwrite => {
+            for record in &archive.records[start..end] {
+                if row_exists(tx, "history_records", record.id)? {
+                    return Err(StoreError::ImportConflict {
+                        kind: "record",
+                        id: record.id,
+                    });
+                }
+            }
+        }
+        ArchiveImportStage::CaptureSources if !overwrite => {
+            for source in &archive.capture_sources[start..end] {
+                reject_entity_conflict(
+                    existing_capture_source_by_id(tx, source.id)?,
+                    source,
+                    "capture_source",
+                    source.id,
+                )?;
+            }
+        }
+        ArchiveImportStage::VcsWorkspaces if !overwrite => {
+            for workspace in &archive.vcs_workspaces[start..end] {
+                reject_entity_conflict(
+                    existing_vcs_workspace_by_id(tx, workspace.id)?,
+                    workspace,
+                    "vcs_workspace",
+                    workspace.id,
+                )?;
+                reject_entity_conflict(
+                    existing_vcs_workspace_by_identity(tx, workspace)?,
+                    workspace,
+                    "vcs_workspace",
+                    workspace.id,
+                )?;
+            }
+        }
+        ArchiveImportStage::Artifacts if !overwrite => {
+            for artifact in &archive.artifact_records[start..end] {
+                reject_entity_conflict(
+                    existing_artifact_by_id(tx, artifact.id)?,
+                    artifact,
+                    "artifact",
+                    artifact.id,
+                )?;
+                reject_entity_conflict(
+                    existing_artifact_by_identity(tx, artifact)?,
+                    artifact,
+                    "artifact",
+                    artifact.id,
+                )?;
+            }
+        }
+        ArchiveImportStage::Sessions if !overwrite => {
+            let archive_sources = archive
+                .capture_sources
+                .iter()
+                .map(|source| (source.id, source))
+                .collect::<HashMap<_, _>>();
+            for session in &archive.sessions[start..end] {
+                reject_entity_conflict(
+                    existing_session_by_id(tx, session.id)?,
+                    session,
+                    "session",
+                    session.id,
+                )?;
+                if session.external_session_id.is_some() {
+                    reject_entity_conflict(
+                        existing_source_scoped_session_by_external_session(
+                            tx,
+                            &archive_sources,
+                            session,
+                        )?,
+                        session,
+                        "session",
+                        session.id,
+                    )?;
+                }
+            }
+        }
+        ArchiveImportStage::Runs if !overwrite => {
+            for run in &archive.runs[start..end] {
+                reject_entity_conflict(existing_run_by_id(tx, run.id)?, run, "run", run.id)?;
+            }
+        }
+        ArchiveImportStage::Events => {
+            for event in &archive.events[start..end] {
+                if let Some(dedupe_key) = &event.dedupe_key {
+                    reject_provider_event_hash_conflict(tx, dedupe_key)?;
+                }
+                if overwrite {
+                    continue;
+                }
+                reject_entity_conflict(
+                    existing_event_by_id(tx, event.id)?,
+                    event,
+                    "event",
+                    event.id,
+                )?;
+                reject_entity_conflict(
+                    existing_event_by_seq(tx, event.seq)?,
+                    event,
+                    "event",
+                    event.id,
+                )?;
+                if let Some(dedupe_key) = &event.dedupe_key {
+                    reject_entity_conflict(
+                        existing_event_by_dedupe_key(tx, dedupe_key)?,
+                        event,
+                        "event",
+                        event.id,
+                    )?;
+                }
+            }
+        }
+        ArchiveImportStage::VcsChanges if !overwrite => {
+            for change in &archive.vcs_changes[start..end] {
+                reject_entity_conflict(
+                    existing_vcs_change_by_id(tx, change.id)?,
+                    change,
+                    "vcs_change",
+                    change.id,
+                )?;
+                reject_entity_conflict(
+                    existing_vcs_change_by_identity(tx, change)?,
+                    change,
+                    "vcs_change",
+                    change.id,
+                )?;
+            }
+        }
+        ArchiveImportStage::Summaries if !overwrite => {
+            for summary in &archive.summaries[start..end] {
+                reject_entity_conflict(
+                    existing_summary_by_id(tx, summary.id)?,
+                    summary,
+                    "summary",
+                    summary.id,
+                )?;
+            }
+        }
+        ArchiveImportStage::FilesTouched if !overwrite => {
+            for file in &archive.files_touched[start..end] {
+                reject_entity_conflict(
+                    existing_file_touched_by_id(tx, file.id)?,
+                    file,
+                    "file_touched",
+                    file.id,
+                )?;
+            }
+        }
+        ArchiveImportStage::HistoryRecordLinks if !overwrite => {
+            for link in &archive.history_record_links[start..end] {
+                reject_entity_conflict(
+                    existing_history_record_link_by_id(tx, link.id)?,
+                    link,
+                    "history_record_link",
+                    link.id,
+                )?;
+                reject_entity_conflict(
+                    existing_history_record_link_by_identity(tx, link)?,
+                    link,
+                    "history_record_link",
+                    link.id,
+                )?;
+            }
+        }
+        _ => {}
+    }
     Ok(())
 }
 
@@ -52,167 +219,12 @@ pub(super) fn reject_capture_source_import_conflict(
     Ok(())
 }
 
-pub(super) fn reject_import_invariant_conflicts(
-    tx: &ArchiveWriteTransaction<'_>,
-    archive: &SessionHistoryArchive,
-) -> Result<()> {
-    if archive.schema_version < 2 && archive.version < 2 {
-        return Ok(());
-    }
-
-    for event in &archive.events {
-        if let Some(dedupe_key) = &event.dedupe_key {
-            reject_provider_event_hash_conflict(tx, dedupe_key)?;
-        }
-    }
-    Ok(())
-}
-
 fn row_exists(tx: &ArchiveWriteTransaction<'_>, table: &str, id: Uuid) -> Result<bool> {
     let sql = format!("SELECT 1 FROM {table} WHERE id = ?1");
     Ok(tx
         .query_row(&sql, params![id.to_string()], |_| Ok(()))
         .optional()?
         .is_some())
-}
-
-fn reject_rich_import_conflicts(
-    tx: &ArchiveWriteTransaction<'_>,
-    archive: &SessionHistoryArchive,
-) -> Result<()> {
-    if archive.schema_version < 2 && archive.version < 2 {
-        return Ok(());
-    }
-
-    let archive_sources = archive
-        .capture_sources
-        .iter()
-        .map(|source| (source.id, source))
-        .collect::<HashMap<_, _>>();
-
-    for source in &archive.capture_sources {
-        reject_entity_conflict(
-            existing_capture_source_by_id(tx, source.id)?,
-            source,
-            "capture_source",
-            source.id,
-        )?;
-    }
-    for workspace in &archive.vcs_workspaces {
-        reject_entity_conflict(
-            existing_vcs_workspace_by_id(tx, workspace.id)?,
-            workspace,
-            "vcs_workspace",
-            workspace.id,
-        )?;
-        reject_entity_conflict(
-            existing_vcs_workspace_by_identity(tx, workspace)?,
-            workspace,
-            "vcs_workspace",
-            workspace.id,
-        )?;
-    }
-    for artifact in &archive.artifact_records {
-        reject_entity_conflict(
-            existing_artifact_by_id(tx, artifact.id)?,
-            artifact,
-            "artifact",
-            artifact.id,
-        )?;
-        reject_entity_conflict(
-            existing_artifact_by_identity(tx, artifact)?,
-            artifact,
-            "artifact",
-            artifact.id,
-        )?;
-    }
-    for session in &archive.sessions {
-        reject_entity_conflict(
-            existing_session_by_id(tx, session.id)?,
-            session,
-            "session",
-            session.id,
-        )?;
-        if session.external_session_id.is_some() {
-            reject_entity_conflict(
-                existing_source_scoped_session_by_external_session(tx, &archive_sources, session)?,
-                session,
-                "session",
-                session.id,
-            )?;
-        }
-    }
-    for run in &archive.runs {
-        reject_entity_conflict(existing_run_by_id(tx, run.id)?, run, "run", run.id)?;
-    }
-    for event in &archive.events {
-        reject_entity_conflict(
-            existing_event_by_id(tx, event.id)?,
-            event,
-            "event",
-            event.id,
-        )?;
-        reject_entity_conflict(
-            existing_event_by_seq(tx, event.seq)?,
-            event,
-            "event",
-            event.id,
-        )?;
-        if let Some(dedupe_key) = &event.dedupe_key {
-            reject_provider_event_hash_conflict(tx, dedupe_key)?;
-            reject_entity_conflict(
-                existing_event_by_dedupe_key(tx, dedupe_key)?,
-                event,
-                "event",
-                event.id,
-            )?;
-        }
-    }
-    for change in &archive.vcs_changes {
-        reject_entity_conflict(
-            existing_vcs_change_by_id(tx, change.id)?,
-            change,
-            "vcs_change",
-            change.id,
-        )?;
-        reject_entity_conflict(
-            existing_vcs_change_by_identity(tx, change)?,
-            change,
-            "vcs_change",
-            change.id,
-        )?;
-    }
-    for summary in &archive.summaries {
-        reject_entity_conflict(
-            existing_summary_by_id(tx, summary.id)?,
-            summary,
-            "summary",
-            summary.id,
-        )?;
-    }
-    for file in &archive.files_touched {
-        reject_entity_conflict(
-            existing_file_touched_by_id(tx, file.id)?,
-            file,
-            "file_touched",
-            file.id,
-        )?;
-    }
-    for link in &archive.history_record_links {
-        reject_entity_conflict(
-            existing_history_record_link_by_id(tx, link.id)?,
-            link,
-            "history_record_link",
-            link.id,
-        )?;
-        reject_entity_conflict(
-            existing_history_record_link_by_identity(tx, link)?,
-            link,
-            "history_record_link",
-            link.id,
-        )?;
-    }
-    Ok(())
 }
 
 pub(super) fn reject_archive_event_internal_conflicts(

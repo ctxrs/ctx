@@ -1076,6 +1076,11 @@ fn import_custom_history_jsonl_format_imports_valid_rows_and_reports_rejections(
         "--progress",
         "none",
     ]));
+    assert_eq!(import["outcome"], "completed_with_rejections", "{import:#}");
+    assert_eq!(
+        import["sources"][0]["status"], "completed_with_rejections",
+        "{import:#}"
+    );
     assert_eq!(import["totals"]["imported_sessions"], 1);
     assert_eq!(import["totals"]["imported_events"], 1);
     assert_eq!(import["totals"]["rejected_records"], 1);
@@ -1148,6 +1153,61 @@ fn all_invalid_custom_import_cleans_up_and_retries_after_source_is_fixed() {
     ]));
     assert_eq!(retry["outcome"], "success", "{retry:#}");
     assert_eq!(retry["totals"]["imported_events"], 1, "{retry:#}");
+}
+
+#[test]
+fn contentless_custom_import_fails_and_cleans_up_scaffold_record() {
+    let temp = tempdir();
+    let fixture = temp.path().join("contentless-custom-history.jsonl");
+    fs::write(
+        &fixture,
+        concat!(
+            r#"{"record_type":"manifest","schema_version":"ctx-history-jsonl-v1"}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+
+    let output = ctx(&temp)
+        .args([
+            "import",
+            "--format",
+            "ctx-history-jsonl-v1",
+            "--path",
+            fixture.to_str().unwrap(),
+            "--json",
+            "--progress",
+            "none",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["outcome"], "failure", "{report:#}");
+    assert_eq!(report["totals"]["failed_sources"], 1, "{report:#}");
+    assert_eq!(report["totals"]["imported_sources"], 0, "{report:#}");
+    assert_eq!(report["totals"]["rejected_records"], 1, "{report:#}");
+    assert_eq!(report["sources"][0]["status"], "failure", "{report:#}");
+    assert_eq!(
+        report["sources"][0]["rejections"][0]["error"],
+        "ctx-history-jsonl-v1 source contained no usable history content",
+        "{report:#}"
+    );
+
+    let conn = Connection::open(temp.path().join("work.sqlite")).unwrap();
+    assert_eq!(
+        sqlite_count(&conn, "SELECT COUNT(*) FROM history_records"),
+        0
+    );
+    assert_eq!(
+        sqlite_count(&conn, "SELECT COUNT(*) FROM ctx_history_search"),
+        0
+    );
+    assert_eq!(
+        sqlite_count(&conn, "SELECT COUNT(*) FROM ctx_history_search_scriptgram"),
+        0
+    );
 }
 
 #[test]

@@ -40,7 +40,7 @@ Your past agent sessions are stored in local provider history files. ctx discove
 
 ctx is written in Rust and stores a local SQLite index, so searches are fast, scriptable, and do not require a background service.
 
-The index is local and private by default. Transcript text is preserved rather than hiding local paths or secret-shaped strings, so review copied output before sharing it outside the machine.
+The index stays local by default. On Unix, ctx restricts its managed data directories and core index, lock, object, and capture-spool files to the current account; on Windows, ctx currently relies on the ACL inherited from the selected data directory and does not install an owner-only ACL. Transcript text is preserved rather than hiding local paths or secret-shaped strings, so review copied output before sharing it outside the machine.
 
 ```bash
 # Index all of your existing local agent sessions

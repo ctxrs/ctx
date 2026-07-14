@@ -42,6 +42,12 @@ pub enum CaptureError {
         #[source]
         source: serde_json::Error,
     },
+    #[error("capture envelope line {line} in {path:?} exceeds the {max_bytes} byte spool limit")]
+    SpoolEnvelopeTooLarge {
+        path: PathBuf,
+        line: usize,
+        max_bytes: usize,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, CaptureError>;

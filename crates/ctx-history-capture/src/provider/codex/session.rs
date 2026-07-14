@@ -1,14 +1,13 @@
+use ctx_history_core::{CaptureProvider, EventRole, EventType, ProviderEventEnvelope};
+use ctx_history_store::{IndexingIoPacer, IndexingWorkClass, Store};
+use serde_json::Value;
 use std::{
     collections::BTreeMap,
     fs::{self, File},
-    io::BufReader,
+    io::{BufReader, Read},
     path::{Path, PathBuf},
-    thread,
+    time::Instant,
 };
-
-use ctx_history_core::{CaptureProvider, EventRole, EventType, ProviderEventEnvelope};
-use ctx_history_store::Store;
-use serde_json::Value;
 
 use crate::CodexSessionJsonlAdapter;
 
@@ -17,15 +16,14 @@ use crate::common::io::{
     read_provider_jsonl_line_or_skip_oversized, ProviderJsonlLineRead,
 };
 use crate::provider::importer::{
-    import_normalized_provider_captures, import_provider_capture_line,
-    import_provider_capture_lines, import_provider_file_touched_line,
+    import_provider_capture_line, import_provider_file_touched_line,
     resolve_pending_provider_edges_batched, validate_provider_event_for_import,
     ProviderImportCaches, ProviderImportTransaction,
 };
 use crate::provider::native::provider_output_event_is_failure;
 use crate::{
-    CaptureError, CodexSessionImportOptions, NormalizedProviderImportOptions,
-    ProviderAdapterContext, ProviderCaptureAdapter, ProviderImportFailure, ProviderImportSummary,
+    CodexSessionImportOptions, NormalizedProviderImportOptions, ProviderAdapterContext,
+    ProviderCaptureAdapter, ProviderImportFailure, ProviderImportSummary,
     ProviderNormalizationResult, Result,
 };
 
@@ -34,8 +32,7 @@ use crate::provider::codex::events::{
     codex_session_line_timestamp, CodexSessionLineContext, CodexToolCallContext,
 };
 use crate::provider::codex::fast_import::{
-    codex_session_paths_total_bytes, import_codex_provider_event_fast,
-    import_codex_session_paths_fast, report_codex_import_progress,
+    import_codex_provider_event_fast, import_codex_session_paths_fast, report_codex_import_progress,
 };
 
 impl ProviderCaptureAdapter for CodexSessionJsonlAdapter {
@@ -52,158 +49,204 @@ impl ProviderCaptureAdapter for CodexSessionJsonlAdapter {
         path: &Path,
         context: &ProviderAdapterContext,
     ) -> Result<ProviderNormalizationResult> {
-        ensure_regular_provider_transcript_file(path)?;
-        let file = File::open(path)?;
-        let mut reader = BufReader::new(file);
-        let mut result = ProviderNormalizationResult::default();
-        let mut header = None;
-        let mut call_contexts: BTreeMap<String, CodexToolCallContext> = BTreeMap::new();
-        let mut has_real_message_content = false;
-        let mut skipped_oversized_events = 0usize;
-        let raw_source_path = context
-            .source_path
-            .as_ref()
-            .map(|path| path.display().to_string());
+        normalize_codex_session_path_with_context(path, context, None)
+    }
+}
 
-        let mut line_number = 0usize;
-        let mut line = Vec::new();
-        loop {
-            match read_provider_jsonl_line_or_skip_oversized(&mut reader, &mut line)? {
-                ProviderJsonlLineRead::Eof => break,
-                ProviderJsonlLineRead::Line { .. } => {
-                    line_number += 1;
-                }
-                ProviderJsonlLineRead::Oversized { .. } => {
-                    line_number += 1;
-                    result.summary.skipped += 1;
-                    if header.is_none() {
-                        result.summary.skipped_sessions += 1;
-                        return Ok(result);
-                    }
-                    skipped_oversized_events = skipped_oversized_events.saturating_add(1);
-                    result.summary.skipped_events += 1;
-                    continue;
-                }
+pub(super) struct PacedReader<R> {
+    inner: R,
+    pacer: Option<IndexingIoPacer>,
+    slice_started: Instant,
+    slice_bytes: u64,
+}
+
+impl<R> PacedReader<R> {
+    pub(super) fn new(inner: R, pacer: Option<IndexingIoPacer>) -> Self {
+        Self {
+            inner,
+            pacer,
+            slice_started: Instant::now(),
+            slice_bytes: 0,
+        }
+    }
+
+    fn finish_slice(&mut self) {
+        if self.slice_bytes == 0 {
+            return;
+        }
+        if let Some(pacer) = &self.pacer {
+            pacer.finish_source_io_slice(self.slice_started.elapsed(), self.slice_bytes);
+        }
+        self.slice_started = Instant::now();
+        self.slice_bytes = 0;
+    }
+}
+
+impl<R: Read> Read for PacedReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.inner.read(buffer)?;
+        self.slice_bytes = self.slice_bytes.saturating_add(read as u64);
+        if read == 0
+            || self.pacer.as_ref().is_some_and(|pacer| {
+                pacer.source_io_slice_should_rotate(self.slice_started, self.slice_bytes)
+            })
+        {
+            self.finish_slice();
+        }
+        Ok(read)
+    }
+}
+
+fn normalize_codex_session_path_with_context(
+    path: &Path,
+    context: &ProviderAdapterContext,
+    pacer: Option<IndexingIoPacer>,
+) -> Result<ProviderNormalizationResult> {
+    ensure_regular_provider_transcript_file(path)?;
+    let file = File::open(path)?;
+    let mut reader = BufReader::new(PacedReader::new(file, pacer));
+    let mut result = ProviderNormalizationResult::default();
+    let mut header = None;
+    let mut call_contexts: BTreeMap<String, CodexToolCallContext> = BTreeMap::new();
+    let mut has_real_message_content = false;
+    let mut skipped_oversized_events = 0usize;
+    let raw_source_path = context
+        .source_path
+        .as_ref()
+        .map(|path| path.display().to_string());
+
+    let mut line_number = 0usize;
+    let mut line = Vec::new();
+    loop {
+        match read_provider_jsonl_line_or_skip_oversized(&mut reader, &mut line)? {
+            ProviderJsonlLineRead::Eof => break,
+            ProviderJsonlLineRead::Line { .. } => {
+                line_number += 1;
             }
-            if line.iter().all(u8::is_ascii_whitespace) {
-                continue;
-            }
-            if !should_parse_codex_session_line(&line) {
-                continue;
-            }
-            if should_skip_codex_tool_output_line(&line) {
+            ProviderJsonlLineRead::Oversized { .. } => {
+                line_number += 1;
                 result.summary.skipped += 1;
+                if header.is_none() {
+                    result.summary.skipped_sessions += 1;
+                    return Ok(result);
+                }
+                skipped_oversized_events = skipped_oversized_events.saturating_add(1);
                 result.summary.skipped_events += 1;
                 continue;
             }
+        }
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        if !should_parse_codex_session_line(&line) {
+            continue;
+        }
+        if should_skip_codex_tool_output_line(&line) {
+            result.summary.skipped += 1;
+            result.summary.skipped_events += 1;
+            continue;
+        }
 
-            let value: Value = match serde_json::from_slice(&line) {
-                Ok(value) => value,
-                Err(err) => {
-                    result.summary.failed += 1;
-                    result.summary.failures.push(ProviderImportFailure {
-                        line: line_number,
-                        error: err.to_string(),
-                    });
-                    continue;
-                }
-            };
-            let entry_type = value
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            if entry_type == "session_meta" {
-                match codex_session_header(value) {
-                    Ok(parsed) => {
-                        let capture = codex_session_capture(
-                            &parsed,
-                            None,
-                            line_number,
-                            parsed.timestamp,
-                            context,
-                        );
-                        call_contexts.clear();
-                        header = Some(parsed);
-                        result.captures.push((line_number, capture));
-                    }
-                    Err(err) => {
-                        result.summary.failed += 1;
-                        result.summary.failures.push(ProviderImportFailure {
-                            line: line_number,
-                            error: err.to_string(),
-                        });
-                    }
-                }
-                continue;
-            }
-
-            let Some(header) = header.as_ref() else {
+        let value: Value = match serde_json::from_slice(&line) {
+            Ok(value) => value,
+            Err(err) => {
                 result.summary.failed += 1;
                 result.summary.failures.push(ProviderImportFailure {
                     line: line_number,
-                    error: "codex session entry appeared before session_meta".to_owned(),
+                    error: err.to_string(),
                 });
                 continue;
-            };
-            let occurred_at = match codex_session_line_timestamp(&value, header.timestamp) {
-                Ok(occurred_at) => occurred_at,
-                Err(err) => {
-                    result.summary.failed += 1;
-                    result.summary.failures.push(ProviderImportFailure {
-                        line: line_number,
-                        error: err.to_string(),
-                    });
-                    continue;
-                }
-            };
-            let mut line_capture = codex_session_line_capture(
-                header,
-                &value,
-                &mut call_contexts,
-                CodexSessionLineContext {
-                    line_number,
-                    occurred_at,
-                    raw_source_path: raw_source_path.as_deref(),
-                    source_root: context.source_root_display().as_deref(),
-                },
-            );
-            if let Some(event) = line_capture.event.take() {
-                if codex_event_has_real_conversation_content(&event) {
-                    has_real_message_content = true;
-                }
-                if event.event_type == EventType::Notice {
-                    result.summary.skipped += 1;
-                    result.summary.skipped_events += 1;
-                } else {
-                    result.captures.push((
+            }
+        };
+        let entry_type = value
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        if entry_type == "session_meta" {
+            match codex_session_header(value) {
+                Ok(parsed) => {
+                    let capture = codex_session_capture(
+                        &parsed,
+                        None,
                         line_number,
-                        codex_session_capture(
-                            header,
-                            Some(event),
-                            line_number,
-                            occurred_at,
-                            context,
-                        ),
-                    ));
+                        parsed.timestamp,
+                        context,
+                    );
+                    call_contexts.clear();
+                    header = Some(parsed);
+                    result.captures.push((line_number, capture));
+                }
+                Err(err) => {
+                    result.summary.failed += 1;
+                    result.summary.failures.push(ProviderImportFailure {
+                        line: line_number,
+                        error: err.to_string(),
+                    });
                 }
             }
-            result.files_touched.append(&mut line_capture.files_touched);
+            continue;
         }
 
-        if !has_real_message_content {
-            result.captures.clear();
-            result.files_touched.clear();
-            if skipped_oversized_events == 0 && result.summary.failed == 0 {
+        let Some(header) = header.as_ref() else {
+            result.summary.failed += 1;
+            result.summary.failures.push(ProviderImportFailure {
+                line: line_number,
+                error: "codex session entry appeared before session_meta".to_owned(),
+            });
+            continue;
+        };
+        let occurred_at = match codex_session_line_timestamp(&value, header.timestamp) {
+            Ok(occurred_at) => occurred_at,
+            Err(err) => {
                 result.summary.failed += 1;
                 result.summary.failures.push(ProviderImportFailure {
                     line: line_number,
-                    error: "codex session JSONL contained no real message content".to_owned(),
+                    error: err.to_string(),
                 });
+                continue;
+            }
+        };
+        let mut line_capture = codex_session_line_capture(
+            header,
+            &value,
+            &mut call_contexts,
+            CodexSessionLineContext {
+                line_number,
+                occurred_at,
+                raw_source_path: raw_source_path.as_deref(),
+                source_root: context.source_root_display().as_deref(),
+            },
+        );
+        if let Some(event) = line_capture.event.take() {
+            if codex_event_has_real_conversation_content(&event) {
+                has_real_message_content = true;
+            }
+            if event.event_type == EventType::Notice {
+                result.summary.skipped += 1;
+                result.summary.skipped_events += 1;
+            } else {
+                result.captures.push((
+                    line_number,
+                    codex_session_capture(header, Some(event), line_number, occurred_at, context),
+                ));
             }
         }
-
-        Ok(result)
+        result.files_touched.append(&mut line_capture.files_touched);
     }
+
+    if !has_real_message_content {
+        result.captures.clear();
+        result.files_touched.clear();
+        if skipped_oversized_events == 0 && result.summary.failed == 0 {
+            result.summary.failed += 1;
+            result.summary.failures.push(ProviderImportFailure {
+                line: line_number,
+                error: "codex session JSONL contained no real message content".to_owned(),
+            });
+        }
+    }
+
+    Ok(result)
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -228,12 +271,20 @@ pub(crate) fn codex_event_has_real_conversation_content(event: &ProviderEventEnv
             .is_some_and(|text| !text.trim().is_empty())
 }
 
+#[cfg(test)]
 pub(crate) fn codex_session_file_conversation_scan(
     path: &Path,
 ) -> Result<CodexSessionConversationScan> {
+    codex_session_file_conversation_scan_with_pacer(path, None)
+}
+
+pub(crate) fn codex_session_file_conversation_scan_with_pacer(
+    path: &Path,
+    pacer: Option<IndexingIoPacer>,
+) -> Result<CodexSessionConversationScan> {
     ensure_regular_provider_transcript_file(path)?;
     let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
+    let mut reader = BufReader::new(PacedReader::new(file, pacer));
     let mut line = Vec::new();
     let mut scan = CodexSessionConversationScan::default();
     let mut header_seen = false;
@@ -410,36 +461,8 @@ pub fn import_codex_session_jsonl(
     options: CodexSessionImportOptions,
 ) -> Result<ProviderImportSummary> {
     let path = path.as_ref();
-    if options.fast_event_inserts {
-        return import_codex_session_paths_fast(vec![path.to_path_buf()], store, options, 0);
-    }
-    let source_path = options
-        .source_path
-        .clone()
-        .unwrap_or_else(|| path.to_path_buf());
-    let normalization = CodexSessionJsonlAdapter.normalize_path(
-        path,
-        &ProviderAdapterContext {
-            machine_id: options.machine_id,
-            source_path: Some(source_path),
-            source_root: None,
-            imported_at: options.imported_at,
-        },
-    )?;
-    if codex_normalization_is_skipped_only(&normalization) {
-        return Ok(normalization.summary);
-    }
-
-    import_normalized_provider_captures(
-        store,
-        normalization,
-        NormalizedProviderImportOptions {
-            history_record_id: options.history_record_id,
-            persist_cursors: false,
-            wrap_transaction: true,
-            fast_event_inserts: options.fast_event_inserts,
-        },
-    )
+    ensure_regular_provider_transcript_file(path)?;
+    import_codex_session_paths_fast(vec![path.to_path_buf()], store, options, 0)
 }
 pub fn import_codex_session_jsonl_tail(
     path: impl AsRef<Path>,
@@ -507,7 +530,9 @@ fn import_codex_session_jsonl_tail_bounded(
     let mut transaction = None;
     let import = (|| -> Result<ProviderImportSummary> {
         let file = File::open(path)?;
-        let mut reader = BufReader::new(file);
+        let pacer = (store.indexing_work_class() == Some(IndexingWorkClass::Background))
+            .then(|| store.indexing_io_pacer());
+        let mut reader = BufReader::new(PacedReader::new(file, pacer));
         let mut line = Vec::new();
         let mut line_number = 0usize;
         let mut position = 0u64;
@@ -729,11 +754,7 @@ pub fn import_codex_session_paths(
     if options.source_path.is_none() {
         options.source_path = codex_common_source_root(&paths);
     }
-    if options.fast_event_inserts && paths.len() <= 1 {
-        return import_codex_session_paths_fast(paths, store, options, 0);
-    }
-
-    import_codex_session_paths_parallel_normalized(paths, store, options, 0)
+    import_codex_session_paths_fast(paths, store, options, 0)
 }
 pub fn import_codex_session_tree(
     root: impl AsRef<Path>,
@@ -751,11 +772,7 @@ pub fn import_codex_session_tree(
         options.max_session_files,
         options.max_total_bytes,
     )?;
-    if options.fast_event_inserts && paths.len() <= 1 {
-        return import_codex_session_paths_fast(paths, store, options, skipped_by_bounds);
-    }
-
-    import_codex_session_paths_parallel_normalized(paths, store, options, skipped_by_bounds)
+    import_codex_session_paths_fast(paths, store, options, skipped_by_bounds)
 }
 
 fn codex_common_source_root(paths: &[PathBuf]) -> Option<PathBuf> {
@@ -769,217 +786,6 @@ fn codex_common_source_root(paths: &[PathBuf]) -> Option<PathBuf> {
         }
     }
     Some(root)
-}
-pub(crate) fn import_codex_session_paths_parallel_normalized(
-    paths: Vec<PathBuf>,
-    store: &mut Store,
-    options: CodexSessionImportOptions,
-    skipped_by_bounds: usize,
-) -> Result<ProviderImportSummary> {
-    let bulk_guard = store.begin_event_search_bulk_mode()?;
-    let import_result = import_codex_session_paths_parallel_normalized_bounded(
-        paths,
-        store,
-        &options,
-        skipped_by_bounds,
-    );
-    let finish_result = store.finish_event_search_bulk_mode(&bulk_guard);
-    match (import_result, finish_result) {
-        (Ok(summary), Ok(())) => Ok(summary),
-        (_, Err(err)) => Err(err.into()),
-        (Err(err), Ok(())) => Err(err),
-    }
-}
-
-fn import_codex_session_paths_parallel_normalized_bounded(
-    paths: Vec<PathBuf>,
-    store: &mut Store,
-    options: &CodexSessionImportOptions,
-    skipped_by_bounds: usize,
-) -> Result<ProviderImportSummary> {
-    let mut merged = ProviderImportSummary::default();
-    merged.skipped_sessions += skipped_by_bounds;
-    merged.skipped += skipped_by_bounds;
-    let total_files = paths.len();
-    let total_bytes = codex_session_paths_total_bytes(&paths);
-    let mut completed_files = 0usize;
-    let mut completed_bytes = 0u64;
-    report_codex_import_progress(
-        options,
-        total_files,
-        total_bytes,
-        completed_files,
-        completed_bytes,
-        &merged,
-        false,
-    );
-
-    let parallelism = import_parallelism(paths.len());
-    let chunk_size = parallelism.saturating_mul(8).max(16);
-    for chunk in paths.chunks(chunk_size) {
-        let normalized = normalize_codex_session_paths_parallel(chunk, options, parallelism)?;
-        let mut chunk_summary = ProviderImportSummary::default();
-        let mut chunk_captures = Vec::new();
-        let mut chunk_files_touched = Vec::new();
-        let mut chunk_bytes = 0u64;
-        for (_, path, normalization) in normalized {
-            chunk_bytes = chunk_bytes.saturating_add(
-                fs::metadata(&path)
-                    .map(|metadata| metadata.len())
-                    .unwrap_or(0),
-            );
-            chunk_summary.merge(normalization.summary);
-            chunk_captures.extend(normalization.captures);
-            chunk_files_touched.extend(normalization.files_touched);
-        }
-        if chunk_summary.failed == 0
-            && chunk_summary.skipped > 0
-            && chunk_captures.is_empty()
-            && chunk_files_touched.is_empty()
-        {
-            merged.merge(chunk_summary);
-            completed_files += chunk.len();
-            completed_bytes = completed_bytes.saturating_add(chunk_bytes);
-            report_codex_import_progress(
-                options,
-                total_files,
-                total_bytes,
-                completed_files,
-                completed_bytes,
-                &merged,
-                false,
-            );
-            continue;
-        }
-        let summary = import_provider_capture_lines(
-            store,
-            NormalizedProviderImportOptions {
-                history_record_id: options.history_record_id,
-                persist_cursors: false,
-                wrap_transaction: true,
-                fast_event_inserts: options.fast_event_inserts,
-            },
-            chunk_summary,
-            chunk_captures,
-            chunk_files_touched,
-        )?;
-        merged.merge(summary);
-        completed_files += chunk.len();
-        completed_bytes = completed_bytes.saturating_add(chunk_bytes);
-        report_codex_import_progress(
-            options,
-            total_files,
-            total_bytes,
-            completed_files,
-            completed_bytes,
-            &merged,
-            false,
-        );
-    }
-    report_codex_import_progress(
-        options,
-        total_files,
-        total_bytes,
-        completed_files,
-        completed_bytes,
-        &merged,
-        true,
-    );
-    Ok(merged)
-}
-
-fn codex_normalization_is_skipped_only(normalization: &ProviderNormalizationResult) -> bool {
-    normalization.summary.failed == 0
-        && normalization.summary.skipped > 0
-        && normalization.captures.is_empty()
-        && normalization.files_touched.is_empty()
-}
-
-pub(crate) fn normalize_codex_session_paths_parallel(
-    paths: &[PathBuf],
-    options: &CodexSessionImportOptions,
-    parallelism: usize,
-) -> Result<Vec<(usize, PathBuf, ProviderNormalizationResult)>> {
-    if paths.is_empty() {
-        return Ok(Vec::new());
-    }
-    if parallelism <= 1 || paths.len() == 1 {
-        let mut normalized = Vec::with_capacity(paths.len());
-        for (index, path) in paths.iter().enumerate() {
-            normalized.push((
-                index,
-                path.clone(),
-                normalize_codex_session_path(path, options)?,
-            ));
-        }
-        return Ok(normalized);
-    }
-
-    let chunk_size = paths.len().div_ceil(parallelism).max(1);
-    let mut batches = thread::scope(|scope| {
-        let mut handles = Vec::new();
-        for (chunk_index, chunk) in paths.chunks(chunk_size).enumerate() {
-            let chunk = chunk.to_vec();
-            handles.push(scope.spawn(move || {
-                let mut normalized = Vec::with_capacity(chunk.len());
-                let base_index = chunk_index * chunk_size;
-                for (offset, path) in chunk.iter().enumerate() {
-                    normalized.push((
-                        base_index + offset,
-                        path.clone(),
-                        normalize_codex_session_path(path, options)?,
-                    ));
-                }
-                Result::<Vec<_>>::Ok(normalized)
-            }));
-        }
-        let mut batches = Vec::with_capacity(handles.len());
-        for handle in handles {
-            batches.push(join_codex_import_worker(handle)?);
-        }
-        Result::<Vec<_>>::Ok(batches)
-    })?;
-    let total = batches.iter().map(Vec::len).sum();
-    let mut normalized = Vec::with_capacity(total);
-    for batch in batches.drain(..) {
-        normalized.extend(batch);
-    }
-    normalized.sort_by_key(|(index, _, _)| *index);
-    Ok(normalized)
-}
-
-pub(crate) fn join_codex_import_worker<T>(
-    handle: thread::ScopedJoinHandle<'_, Result<T>>,
-) -> Result<T> {
-    handle
-        .join()
-        .map_err(|_| CaptureError::WorkerPanicked("Codex import"))?
-}
-
-pub(crate) fn normalize_codex_session_path(
-    path: &Path,
-    options: &CodexSessionImportOptions,
-) -> Result<ProviderNormalizationResult> {
-    CodexSessionJsonlAdapter.normalize_path(
-        path,
-        &ProviderAdapterContext {
-            machine_id: options.machine_id.clone(),
-            source_path: Some(path.to_path_buf()),
-            source_root: options.source_path.clone(),
-            imported_at: options.imported_at,
-        },
-    )
-}
-pub(crate) fn import_parallelism(path_count: usize) -> usize {
-    if path_count <= 1 {
-        return 1;
-    }
-    thread::available_parallelism()
-        .ok()
-        .map(usize::from)
-        .unwrap_or(1)
-        .min(path_count)
-        .min(8)
 }
 pub(crate) fn apply_codex_session_import_bounds(
     paths: &mut Vec<PathBuf>,
