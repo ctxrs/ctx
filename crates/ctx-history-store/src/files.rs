@@ -32,6 +32,11 @@ impl FileTouchScope {
 
 impl Store {
     pub fn upsert_file_touched(&self, file: &FileTouched) -> Result<()> {
+        self.with_provider_file_publication_write(|| self.upsert_file_touched_inner(file))
+    }
+
+    fn upsert_file_touched_inner(&self, file: &FileTouched) -> Result<()> {
+        self.ensure_provider_file_touched_write_allowed(file)?;
         self.conn.execute(
                 r#"
                 INSERT INTO files_touched
@@ -78,14 +83,17 @@ impl Store {
                     serde_json::to_string(&file.sync.metadata)?,
                 ],
             )?;
+        self.track_provider_file_publication_file_touched(file.id)?;
         Ok(())
     }
 
     pub fn file_touched_exists(&self, id: Uuid) -> Result<bool> {
+        let visible =
+            crate::provider_files::file_touched_material_visible_predicate("files_touched");
         Ok(self
             .conn
             .query_row(
-                "SELECT 1 FROM files_touched WHERE id = ?1",
+                &format!("SELECT 1 FROM files_touched WHERE id = ?1 AND {visible}"),
                 params![id.to_string()],
                 |_| Ok(()),
             )
@@ -94,18 +102,23 @@ impl Store {
     }
 
     pub(crate) fn list_files_touched(&self) -> Result<Vec<FileTouched>> {
-        let mut stmt = self
-            .conn
-            .prepare(file_touched_select_sql("ORDER BY updated_at_ms, id").as_str())?;
+        let tail = format!(
+            "WHERE {} ORDER BY updated_at_ms, id",
+            crate::provider_files::file_touched_material_visible_predicate("files_touched")
+        );
+        let mut stmt = self.conn.prepare(file_touched_select_sql(&tail).as_str())?;
         let rows = stmt.query_map([], file_touched_from_row)?;
         collect_rows(rows)
     }
 
     pub fn files_touched_for_record(&self, record_id: Uuid) -> Result<Vec<FileTouched>> {
+        let visible =
+            crate::provider_files::file_touched_material_visible_predicate("files_touched");
         let mut stmt = self.conn.prepare(
-                file_touched_select_sql(
+                file_touched_select_sql(&format!(
                     r#"
-                    WHERE history_record_id = ?1
+                    WHERE (
+                       history_record_id = ?1
                        OR run_id IN (
                             SELECT id FROM runs
                             WHERE history_record_id = ?1
@@ -116,9 +129,10 @@ impl Store {
                             WHERE history_record_id = ?1
                                OR session_id IN (SELECT id FROM sessions WHERE history_record_id = ?1)
                        )
+                    ) AND {visible}
                     ORDER BY updated_at_ms DESC, id
                     "#,
-                )
+                ))
                 .as_str(),
             )?;
         let rows = stmt.query_map(params![record_id.to_string()], file_touched_from_row)?;
@@ -133,8 +147,10 @@ impl Store {
         let Some((exact, suffix)) = file_touch_match_values(file) else {
             return Ok(Vec::new());
         };
+        let visible =
+            crate::provider_files::file_touched_material_visible_predicate("files_touched");
         let mut stmt = self.conn.prepare(
-                file_touched_select_sql(
+                file_touched_select_sql(&format!(
                     r#"
                     WHERE (
                         history_record_id = ?1
@@ -155,9 +171,10 @@ impl Store {
                         OR path LIKE ?3 ESCAPE '\'
                         OR old_path LIKE ?3 ESCAPE '\'
                     )
+                    AND {visible}
                     ORDER BY updated_at_ms DESC, id
                     "#,
-                )
+                ))
                 .as_str(),
             )?;
         let rows = stmt.query_map(
@@ -172,7 +189,8 @@ impl Store {
             return Ok(FileTouchScope::default());
         };
         let mut scope = FileTouchScope::default();
-        let mut stmt = self.conn.prepare(
+        let visible = crate::provider_files::file_touched_material_visible_predicate("ft");
+        let mut stmt = self.conn.prepare(&format!(
             r#"
                 SELECT
                     COALESCE(
@@ -193,12 +211,13 @@ impl Store {
                 LEFT JOIN sessions event_session ON event_session.id = e.session_id
                 LEFT JOIN sessions run_session ON run_session.id = r.session_id
                 LEFT JOIN sessions source_session ON source_session.capture_source_id = ft.source_id
-                WHERE ft.path = ?1
+                WHERE (ft.path = ?1
                    OR ft.old_path = ?1
                    OR ft.path LIKE ?2 ESCAPE '\'
-                   OR ft.old_path LIKE ?2 ESCAPE '\'
+                   OR ft.old_path LIKE ?2 ESCAPE '\')
+                  AND {visible}
                 "#,
-        )?;
+        ))?;
         let rows = stmt.query_map(params![exact, suffix], |row| {
             Ok((
                 parse_optional_uuid(row.get(0)?)?,

@@ -12,6 +12,7 @@ use crate::connection::{
     collect_rows, ms_to_time, nonnegative_i64_to_u64, optional_uuid_string,
     parse_optional_text_enum, parse_optional_uuid, parse_text_enum, parse_uuid,
 };
+use crate::provider_files::event_material_visible_predicate;
 use crate::records::{record_from_row, record_select_sql};
 use crate::schema::ddl::{table_exists, table_has_column};
 use crate::search::analyzer::{
@@ -346,14 +347,24 @@ impl Store {
     }
 
     pub fn cached_event_embedding_document_count(&self) -> Result<Option<usize>> {
-        cached_semantic_searchable_item_count(&self.conn)
+        crate::connection::with_read_transaction(&self.conn, || {
+            if self.has_pending_provider_file_publications()? {
+                return Ok(None);
+            }
+            cached_semantic_searchable_item_count(&self.conn)
+        })
     }
 
     pub fn event_embedding_document_count_cached_or_exact(&self) -> Result<usize> {
-        if let Some(count) = self.cached_event_embedding_document_count()? {
-            return Ok(count);
-        }
-        semantic_searchable_item_count_exact(&self.conn)
+        crate::connection::with_read_transaction(&self.conn, || {
+            if self.has_pending_provider_file_publications()? {
+                return semantic_searchable_item_count_exact(&self.conn);
+            }
+            if let Some(count) = cached_semantic_searchable_item_count(&self.conn)? {
+                return Ok(count);
+            }
+            semantic_searchable_item_count_exact(&self.conn)
+        })
     }
 
     pub fn refresh_event_embedding_document_count_cache(&self) -> Result<()> {
@@ -403,6 +414,7 @@ impl Store {
         }
         let next_user_predicate =
             semantic_lite_turn_user_eligible_predicate("next_user", "next_user_search");
+        let assistant_visible = event_material_visible_predicate("candidate");
         let clauses = terms
             .iter()
             .map(|_| {
@@ -422,6 +434,7 @@ impl Store {
                           AND candidate.visibility != 'withheld'
                           AND candidate.sync_state != 'withheld'
                           AND length(trim(candidate.payload_json)) > 2
+                          AND {assistant_visible}
                           AND lower(candidate_search.preview_text) LIKE ? ESCAPE '\'
                           AND (
                                 (anchor.run_id IS NOT NULL AND candidate.run_id = anchor.run_id)
@@ -905,9 +918,33 @@ fn ensure_search_projection_stats_table(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn refresh_semantic_searchable_item_stats(conn: &Connection) -> Result<usize> {
+pub(crate) fn refresh_semantic_searchable_item_stats(conn: &Connection) -> Result<usize> {
+    crate::connection::with_immediate_transaction(conn, || {
+        refresh_semantic_searchable_item_stats_inner(conn, || {})
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn refresh_semantic_searchable_item_stats_with_hook(
+    conn: &Connection,
+    after_count: impl FnOnce(),
+) -> Result<usize> {
+    crate::connection::with_immediate_transaction(conn, || {
+        refresh_semantic_searchable_item_stats_inner(conn, after_count)
+    })
+}
+
+fn refresh_semantic_searchable_item_stats_inner(
+    conn: &Connection,
+    after_count: impl FnOnce(),
+) -> Result<usize> {
     ensure_search_projection_stats_table(conn)?;
     let count = semantic_searchable_item_count_exact(conn)?;
+    after_count();
+    if crate::provider_files::has_fenced_provider_file_publications(conn)? {
+        invalidate_semantic_searchable_item_stats(conn)?;
+        return Ok(count);
+    }
     conn.execute(
         r#"
         INSERT INTO search_projection_stats (key, value, updated_at_ms)
@@ -930,6 +967,19 @@ pub(crate) fn adjust_semantic_searchable_item_stats(
     previous_count: usize,
     current_count: usize,
 ) -> Result<()> {
+    crate::connection::with_immediate_transaction(conn, || {
+        adjust_semantic_searchable_item_stats_inner(conn, previous_count, current_count)
+    })
+}
+
+fn adjust_semantic_searchable_item_stats_inner(
+    conn: &Connection,
+    previous_count: usize,
+    current_count: usize,
+) -> Result<()> {
+    if crate::provider_files::has_fenced_provider_file_publications(conn)? {
+        return invalidate_semantic_searchable_item_stats(conn);
+    }
     if previous_count == current_count {
         return Ok(());
     }
@@ -952,6 +1002,52 @@ pub(crate) fn adjust_semantic_searchable_item_stats(
             delta,
             utc_now().timestamp_millis(),
         ],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn decrement_semantic_searchable_item_stats_if_cached(
+    conn: &Connection,
+    removed_count: usize,
+) -> Result<()> {
+    crate::connection::with_immediate_transaction(conn, || {
+        decrement_semantic_searchable_item_stats_if_cached_inner(conn, removed_count)
+    })
+}
+
+fn decrement_semantic_searchable_item_stats_if_cached_inner(
+    conn: &Connection,
+    removed_count: usize,
+) -> Result<()> {
+    if crate::provider_files::has_fenced_provider_file_publications(conn)? {
+        return invalidate_semantic_searchable_item_stats(conn);
+    }
+    if removed_count == 0 || cached_semantic_searchable_item_count(conn)?.is_none() {
+        return Ok(());
+    }
+    conn.execute(
+        r#"
+        UPDATE search_projection_stats
+        SET value = MAX(value - ?2, 0),
+            updated_at_ms = ?3
+        WHERE key = ?1
+        "#,
+        params![
+            SEMANTIC_SEARCHABLE_ITEMS_STAT_KEY,
+            removed_count as i64,
+            utc_now().timestamp_millis(),
+        ],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn invalidate_semantic_searchable_item_stats(conn: &Connection) -> Result<()> {
+    if !table_exists(conn, "search_projection_stats")? {
+        return Ok(());
+    }
+    conn.execute(
+        "DELETE FROM search_projection_stats WHERE key = ?1",
+        params![SEMANTIC_SEARCHABLE_ITEMS_STAT_KEY],
     )?;
     Ok(())
 }
@@ -1015,7 +1111,9 @@ fn semantic_lite_turn_user_eligible_predicate(event_alias: &str, search_alias: &
     AND trim({search_alias}.preview_text) NOT LIKE '<turn_aborted>%'
     AND trim({search_alias}.preview_text) NOT LIKE '<subagent_notification>%'
     AND trim({search_alias}.preview_text) NOT LIKE 'Warning: The maximum number of unified exec processes%'
-    "#
+    AND {}
+    "#,
+        event_material_visible_predicate(event_alias)
     )
 }
 
@@ -1030,6 +1128,7 @@ fn semantic_lite_turn_preview_is_control(preview: &str) -> bool {
 fn semantic_lite_turn_cte_sql(anchor_tail: &str) -> String {
     let candidate_user_predicate =
         semantic_lite_turn_user_eligible_predicate("candidate_user", "candidate_user_search");
+    let candidate_visible = event_material_visible_predicate("candidate");
     format!(
         r#"
         WITH semantic_anchor_page AS MATERIALIZED (
@@ -1142,6 +1241,7 @@ fn semantic_lite_turn_cte_sql(anchor_tail: &str) -> String {
                       AND candidate.visibility != 'withheld'
                       AND candidate.sync_state != 'withheld'
                       AND length(trim(candidate.payload_json)) > 2
+                      AND {candidate_visible}
                       AND EXISTS (
                           SELECT 1
                           FROM event_search_lookup AS candidate_search
@@ -1173,6 +1273,7 @@ fn semantic_lite_turn_cte_sql(anchor_tail: &str) -> String {
                       AND candidate.visibility != 'withheld'
                       AND candidate.sync_state != 'withheld'
                       AND length(trim(candidate.payload_json)) > 2
+                      AND {candidate_visible}
                       AND EXISTS (
                           SELECT 1
                           FROM event_search_lookup AS candidate_search

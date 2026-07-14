@@ -1,5 +1,5 @@
 use ctx_history_core::{Artifact, ArtifactKind, EntityTimestamps};
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use uuid::Uuid;
 
 use crate::connection::{
@@ -11,6 +11,23 @@ use crate::{Result, Store, StoreError};
 
 impl Store {
     pub fn upsert_artifact(&self, artifact: &Artifact) -> Result<Uuid> {
+        self.with_provider_file_publication_write(|| self.upsert_artifact_inner(artifact))
+    }
+
+    fn upsert_artifact_inner(&self, artifact: &Artifact) -> Result<Uuid> {
+        let conflict_id = self
+            .conn
+            .query_row(
+                "SELECT id FROM artifacts WHERE blob_hash = ?1 AND kind = ?2",
+                params![artifact.blob_hash.as_str(), artifact.kind.as_str()],
+                |row| parse_uuid(row.get::<_, String>(0)?),
+            )
+            .optional()?;
+        self.ensure_provider_file_direct_source_write_allowed(
+            "artifacts",
+            conflict_id.unwrap_or(artifact.id),
+            artifact.source_id,
+        )?;
         self.conn.execute(
                 r#"
                 INSERT INTO artifacts
@@ -49,57 +66,79 @@ impl Store {
                     serde_json::to_string(&artifact.sync.metadata)?,
                 ],
             )?;
-        self.conn
+        let id = self
+            .conn
             .query_row(
                 "SELECT id FROM artifacts WHERE blob_hash = ?1 AND kind = ?2",
                 params![artifact.blob_hash.as_str(), artifact.kind.as_str()],
                 |row| parse_uuid(row.get::<_, String>(0)?),
             )
-            .map_err(StoreError::from)
+            .map_err(StoreError::from)?;
+        self.track_provider_file_publication_direct_entity("artifact", "artifacts", id)?;
+        Ok(id)
     }
 
     pub(crate) fn list_artifacts(&self) -> Result<Vec<Artifact>> {
-        let mut stmt = self
-            .conn
-            .prepare(artifact_select_sql("ORDER BY updated_at_ms, id").as_str())?;
+        let visible = crate::provider_files::direct_source_material_visible_predicate(
+            "artifacts",
+            "source_id",
+        );
+        let mut stmt = self.conn.prepare(
+            artifact_select_sql(&format!("WHERE {visible} ORDER BY updated_at_ms, id")).as_str(),
+        )?;
         let rows = stmt.query_map([], artifact_from_row)?;
         collect_rows(rows)
     }
 
     pub fn artifacts_for_record(&self, record_id: Uuid) -> Result<Vec<Artifact>> {
+        let artifact_visible = crate::provider_files::direct_source_material_visible_predicate(
+            "artifacts",
+            "source_id",
+        );
+        let session_visible = crate::provider_files::session_material_visible_predicate("session");
+        let run_visible = crate::provider_files::run_material_visible_predicate("run");
+        let event_visible = crate::provider_files::event_material_visible_predicate("event");
+        let link_visible =
+            crate::provider_files::direct_source_material_visible_predicate("link", "source_id");
         let mut stmt = self.conn.prepare(
-            artifact_select_sql(
+            artifact_select_sql(&format!(
                 r#"
                     WHERE id IN (
                         SELECT transcript_blob_id
-                        FROM sessions
+                        FROM sessions AS session
                         WHERE history_record_id = ?1 AND transcript_blob_id IS NOT NULL
+                          AND {session_visible}
                         UNION
                         SELECT input_blob_id
-                        FROM runs
+                        FROM runs AS run
                         WHERE (history_record_id = ?1
                            OR session_id IN (SELECT id FROM sessions WHERE history_record_id = ?1))
                            AND input_blob_id IS NOT NULL
+                           AND {run_visible}
                         UNION
                         SELECT output_blob_id
-                        FROM runs
+                        FROM runs AS run
                         WHERE (history_record_id = ?1
                            OR session_id IN (SELECT id FROM sessions WHERE history_record_id = ?1))
                            AND output_blob_id IS NOT NULL
+                           AND {run_visible}
                         UNION
                         SELECT payload_blob_id
-                        FROM events
+                        FROM events AS event
                         WHERE (history_record_id = ?1
                            OR session_id IN (SELECT id FROM sessions WHERE history_record_id = ?1))
                            AND payload_blob_id IS NOT NULL
+                           AND {event_visible}
                         UNION
                         SELECT target_id
-                        FROM history_record_links
+                        FROM history_record_links AS link
                         WHERE history_record_id = ?1 AND target_type = 'artifact'
+                          AND {link_visible}
                     )
+                    AND {artifact_visible}
                     ORDER BY updated_at_ms DESC, id
                     "#,
-            )
+            ))
             .as_str(),
         )?;
         let rows = stmt.query_map(params![record_id.to_string()], artifact_from_row)?;

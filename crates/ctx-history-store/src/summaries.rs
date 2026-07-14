@@ -11,6 +11,11 @@ use crate::{Result, Store};
 
 impl Store {
     pub fn upsert_summary(&self, summary: &Summary) -> Result<()> {
+        self.with_provider_file_publication_write(|| self.upsert_summary_inner(summary))
+    }
+
+    fn upsert_summary_inner(&self, summary: &Summary) -> Result<()> {
+        self.ensure_provider_file_summary_write_allowed(summary)?;
         self.conn.execute(
                 r#"
                 INSERT INTO summaries
@@ -51,26 +56,29 @@ impl Store {
                     serde_json::to_string(&summary.sync.metadata)?,
                 ],
             )?;
-        Ok(())
+        self.track_provider_file_publication_direct_entity("summary", "summaries", summary.id)
     }
 
     pub(crate) fn list_summaries(&self) -> Result<Vec<Summary>> {
-        let mut stmt = self
-            .conn
-            .prepare(summary_select_sql("ORDER BY updated_at_ms, id").as_str())?;
+        let visible = crate::provider_files::summary_material_visible_predicate("summaries");
+        let mut stmt = self.conn.prepare(
+            summary_select_sql(&format!("WHERE {visible} ORDER BY updated_at_ms, id")).as_str(),
+        )?;
         let rows = stmt.query_map([], summary_from_row)?;
         collect_rows(rows)
     }
 
     pub fn summaries_for_record(&self, record_id: Uuid) -> Result<Vec<Summary>> {
+        let visible = crate::provider_files::summary_material_visible_predicate("summaries");
         let mut stmt = self.conn.prepare(
-            summary_select_sql(
+            summary_select_sql(&format!(
                 r#"
-                    WHERE history_record_id = ?1
-                       OR session_id IN (SELECT id FROM sessions WHERE history_record_id = ?1)
+                    WHERE (history_record_id = ?1
+                       OR session_id IN (SELECT id FROM sessions WHERE history_record_id = ?1))
+                      AND {visible}
                     ORDER BY updated_at_ms DESC, id
                     "#,
-            )
+            ))
             .as_str(),
         )?;
         let rows = stmt.query_map(params![record_id.to_string()], summary_from_row)?;

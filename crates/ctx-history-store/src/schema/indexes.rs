@@ -1,6 +1,9 @@
 pub(crate) const INDEXES_SQL: &str = r#"
 CREATE INDEX IF NOT EXISTS idx_capture_sources_external_session_id ON capture_sources(provider, external_session_id);
 CREATE INDEX IF NOT EXISTS idx_capture_sources_provider_source_identity ON capture_sources(provider, source_format, source_identity);
+CREATE INDEX IF NOT EXISTS idx_capture_sources_provider_material_owner ON capture_sources(provider, source_format, raw_source_path, source_root, id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_file_publications_owner ON provider_file_publications(owner_id);
+CREATE INDEX IF NOT EXISTS idx_provider_file_publications_fence ON provider_file_publications(mutation_started, provider, material_source_format, material_source_root, source_path);
 
 CREATE INDEX IF NOT EXISTS idx_catalog_sessions_provider_external_session_id ON catalog_sessions(provider, external_session_id);
 CREATE INDEX IF NOT EXISTS idx_catalog_sessions_provider_source_root_stale ON catalog_sessions(provider, source_root, is_stale);
@@ -80,4 +83,25 @@ CREATE INDEX IF NOT EXISTS idx_sync_outbox_sync_state_updated_at_ms ON sync_outb
 CREATE INDEX IF NOT EXISTS idx_local_workspaces_device_id ON local_workspaces(device_id);
 CREATE INDEX IF NOT EXISTS idx_local_workspaces_vcs_workspace_id ON local_workspaces(vcs_workspace_id);
 CREATE INDEX IF NOT EXISTS idx_audit_log_source_id ON audit_log(source_id);
+
+CREATE INDEX IF NOT EXISTS idx_reconcile_history_record_links_source_id ON history_record_links(source_id, id);
+CREATE INDEX IF NOT EXISTS idx_reconcile_files_touched_source_id ON files_touched(source_id, id);
+CREATE INDEX IF NOT EXISTS idx_reconcile_files_touched_event_id ON files_touched(event_id, id);
+CREATE INDEX IF NOT EXISTS idx_reconcile_files_touched_run_id ON files_touched(run_id, id);
+CREATE INDEX IF NOT EXISTS idx_reconcile_session_edges_source_id ON session_edges(source_id, id);
+CREATE INDEX IF NOT EXISTS idx_reconcile_session_edges_from_session_id ON session_edges(from_session_id, id);
+CREATE INDEX IF NOT EXISTS idx_reconcile_session_edges_to_session_id ON session_edges(to_session_id, id);
+CREATE INDEX IF NOT EXISTS idx_reconcile_summaries_source_id ON summaries(source_id, id);
+CREATE INDEX IF NOT EXISTS idx_reconcile_events_capture_source_id ON events(capture_source_id, id);
+CREATE INDEX IF NOT EXISTS idx_reconcile_events_session_id ON events(session_id, id);
+CREATE INDEX IF NOT EXISTS idx_reconcile_events_run_id ON events(run_id, id);
+CREATE INDEX IF NOT EXISTS idx_reconcile_runs_source_id ON runs(source_id, id);
+CREATE INDEX IF NOT EXISTS idx_reconcile_runs_session_id ON runs(session_id, id);
+CREATE INDEX IF NOT EXISTS idx_reconcile_sessions_capture_source_id ON sessions(capture_source_id, id);
+CREATE INDEX IF NOT EXISTS idx_reconcile_vcs_changes_source_id ON vcs_changes(source_id, id);
+CREATE INDEX IF NOT EXISTS idx_reconcile_artifacts_source_id ON artifacts(source_id, id);
+CREATE INDEX IF NOT EXISTS idx_reconcile_record_edges_source_id ON record_edges(source_id, id);
+CREATE INDEX IF NOT EXISTS idx_reconcile_history_records_source_id ON history_records(source_id, id);
+CREATE INDEX IF NOT EXISTS idx_reconcile_vcs_workspaces_source_id ON vcs_workspaces(source_id, id);
+CREATE INDEX IF NOT EXISTS idx_reconcile_audit_log_source_id ON audit_log(source_id, id);
 "#;
