@@ -157,6 +157,32 @@ fn optional_uuid_from_first_column(row: &rusqlite::Row<'_>) -> rusqlite::Result<
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
 }
 
+fn parse_provider_file_publication_kind(value: &str) -> Result<ProviderFilePublicationKind> {
+    match value {
+        "incremental" => Ok(ProviderFilePublicationKind::Incremental),
+        "replacement" => Ok(ProviderFilePublicationKind::Replacement),
+        _ => Err(StoreError::InvalidProviderFilePublicationScope),
+    }
+}
+
+fn parse_provider_file_publication_kind_sql(
+    value: &str,
+) -> rusqlite::Result<ProviderFilePublicationKind> {
+    match value {
+        "incremental" => Ok(ProviderFilePublicationKind::Incremental),
+        "replacement" => Ok(ProviderFilePublicationKind::Replacement),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
+}
+
+fn parse_provider_file_inventory_family_sql(value: &str) -> rusqlite::Result<&'static str> {
+    match value {
+        CATALOG_INVENTORY_FAMILY => Ok(CATALOG_INVENTORY_FAMILY),
+        SOURCE_IMPORT_INVENTORY_FAMILY => Ok(SOURCE_IMPORT_INVENTORY_FAMILY),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
+}
+
 fn parse_uuid_text(value: String) -> rusqlite::Result<Uuid> {
     Uuid::parse_str(&value)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))

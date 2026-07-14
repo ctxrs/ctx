@@ -1,4 +1,66 @@
 impl Store {
+    pub fn retire_provider_file_publication(
+        &self,
+        scope: ProviderFilePublicationScope,
+    ) -> Result<ProviderFileFinalizeOutcome> {
+        self.validate_provider_file_publication_scope(&scope)?;
+        if !scope.retires_observation || scope.kind != ProviderFilePublicationKind::Replacement {
+            return Err(StoreError::InvalidProviderFilePublicationScope);
+        }
+        self.ensure_active_provider_file_publication(&scope)?;
+
+        let durable_result = self.with_atomic_provider_file_update(|| {
+            let marker = self.load_replacement_marker(&scope)?;
+            self.validate_replacement_marker(&scope, &marker)?;
+            self.ensure_scope_observation_allows_progress(&scope, &marker)?;
+            if !marker.preparation_complete
+                || marker.cleanup_phase != CLEANUP_PHASE_COMPLETE
+                || !marker.mutation_started
+            {
+                return Err(StoreError::ProviderFileReconciliationIncomplete);
+            }
+            self.delete_provider_file_checkpoint_for_scope(&scope)?;
+            self.retire_stale_provider_file_observation(&scope)?;
+            let deleted = self.conn.execute(
+                "DELETE FROM provider_file_publications WHERE replacement_id = ?1",
+                params![scope.scope_id.to_string()],
+            )?;
+            if deleted != 1 {
+                return Err(StoreError::InvalidProviderFilePublicationScope);
+            }
+            invalidate_semantic_searchable_item_stats(&self.conn)?;
+            self.bump_semantic_replacement_revision()?;
+            if self.take_provider_file_fault(ProviderFileFaultPoint::FinalizeBeforeCommit) {
+                return Err(StoreError::ProviderFileStaging);
+            }
+            #[cfg(test)]
+            {
+                if self
+                    .take_provider_file_fault(ProviderFileFaultPoint::RetirementFinalizeProcessExit)
+                {
+                    std::process::exit(37);
+                }
+            }
+            Ok(marker.counts)
+        });
+
+        scope.lifecycle.store(false, Ordering::Release);
+        let counts = match durable_result {
+            Ok(counts) => counts,
+            Err(error) => {
+                let _ = self.cleanup_active_provider_file_publication(scope.scope_id);
+                return Err(error);
+            }
+        };
+        let maintenance_warning = self
+            .cleanup_active_provider_file_publication(scope.scope_id)
+            .err();
+        Ok(ProviderFileFinalizeOutcome {
+            reconciliation: counts,
+            maintenance_warning,
+        })
+    }
+
     pub fn finalize_provider_file_publication(
         &self,
         scope: ProviderFilePublicationScope,
@@ -6,6 +68,9 @@ impl Store {
         commit: ProviderFilePublicationCommit<'_>,
     ) -> Result<ProviderFileFinalizeOutcome> {
         self.validate_provider_file_publication_scope(&scope)?;
+        if scope.retires_observation {
+            return Err(StoreError::InvalidProviderFilePublicationScope);
+        }
         validate_successful_outcome(outcome)?;
         validate_scope_matches_outcome(&scope, outcome)?;
         let (completion_kind, checkpoint) = match commit {
@@ -39,8 +104,12 @@ impl Store {
                     outcome.provider,
                     outcome.observation,
                 )?;
+                let marker = self.load_replacement_marker(&scope)?;
+                if marker.publication_kind != scope.kind {
+                    return Err(StoreError::InvalidProviderFilePublicationScope);
+                }
                 let counts = if completion_kind == ProviderFileCompletionKind::Replacement {
-                    let marker = self.load_replacement_marker(&scope)?;
+                    self.validate_replacement_marker(&scope, &marker)?;
                     if !marker.preparation_complete
                         || (scope.tracks_prior_material
                             && marker.cleanup_phase != CLEANUP_PHASE_COMPLETE)
@@ -51,9 +120,6 @@ impl Store {
                 } else {
                     ProviderFileReconciliationCounts::default()
                 };
-                if self.take_provider_file_fault(ProviderFileFaultPoint::FinalizeBeforeCommit) {
-                    return Err(StoreError::ProviderFileStaging);
-                }
                 self.record_matching_provider_file_outcome(
                     outcome,
                     completion_kind,
@@ -82,6 +148,9 @@ impl Store {
                     && scope.tracks_prior_material
                 {
                     self.bump_semantic_replacement_revision()?;
+                }
+                if self.take_provider_file_fault(ProviderFileFaultPoint::FinalizeBeforeCommit) {
+                    return Err(StoreError::ProviderFileStaging);
                 }
                 Ok(counts)
             })

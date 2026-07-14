@@ -436,24 +436,26 @@ impl Store {
         change_id: Uuid,
         change: &VcsChange,
     ) -> Result<()> {
-        let existing = self.direct_entity_source_id("vcs_changes", change_id)?;
-        let existing_workspace = self
+        let existing_source = self
             .conn
             .query_row(
-                "SELECT vcs_workspace_id FROM vcs_changes WHERE id = ?1",
+                r#"
+                SELECT COALESCE(change.source_id, workspace.source_id)
+                FROM vcs_changes AS change
+                LEFT JOIN vcs_workspaces AS workspace
+                  ON workspace.id = change.vcs_workspace_id
+                WHERE change.id = ?1
+                "#,
                 params![change_id.to_string()],
-                |row| parse_uuid_text(row.get(0)?),
+                optional_uuid_from_first_column,
             )
-            .optional()?;
-        let existing_sources = vec![
-            existing,
-            self.optional_direct_entity_source_id("vcs_workspaces", existing_workspace)?,
-        ];
-        let incoming_sources = vec![
-            change.source_id,
-            self.direct_entity_source_id("vcs_workspaces", change.vcs_workspace_id)?,
-        ];
-        self.ensure_provider_file_source_ids_write_allowed(&existing_sources, &incoming_sources)
+            .optional()?
+            .flatten();
+        let incoming_source = match change.source_id {
+            Some(source_id) => Some(source_id),
+            None => self.direct_entity_source_id("vcs_workspaces", change.vcs_workspace_id)?,
+        };
+        self.ensure_provider_file_source_ids_write_allowed(&[existing_source], &[incoming_source])
     }
 
     pub(crate) fn ensure_provider_file_history_record_write_allowed(

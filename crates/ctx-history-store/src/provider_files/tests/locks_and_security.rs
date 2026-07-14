@@ -224,10 +224,11 @@ fn subprocess_partial_cleanup_supersession_stays_hidden_and_is_adopted() {
             rewritten.provider,
             outcome.observation,
             MATERIAL_FORMAT,
-            ProviderFilePublicationKind::Replacement,
+            ProviderFilePublicationKind::Incremental,
             135,
         )
         .unwrap();
+    assert_eq!(adopted.kind(), ProviderFilePublicationKind::Replacement);
     reconcile_all(&store, &adopted, 1);
     store
         .finalize_provider_file_publication(
