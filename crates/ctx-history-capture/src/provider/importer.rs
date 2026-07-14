@@ -13,6 +13,7 @@ use ctx_history_core::{
     PROVIDER_CAPTURE_ENVELOPE_SCHEMA_VERSION,
 };
 use ctx_history_store::{Store, StoreError};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -34,7 +35,13 @@ mod legacy_identity;
 
 #[cfg(test)]
 pub(crate) use batches::import_normalized_provider_captures_in_batches;
-pub(crate) use batches::{resolve_pending_provider_edges_batched, ProviderImportTransaction};
+#[cfg(test)]
+pub(crate) use batches::PROVIDER_NORMALIZATION_STREAM_BATCH_UNITS;
+pub(crate) use batches::{
+    resolve_pending_provider_edges_batched, ProviderImportTransaction,
+    ProviderImportTransactionStep, ProviderNormalizationBatcher,
+    ProviderNormalizationStreamImporter, ProviderNormalizationStreamMetrics,
+};
 pub(crate) use commands::{
     provider_command_run_from_event, validate_provider_event_for_import, ProviderCommandRunInput,
 };
@@ -47,7 +54,7 @@ pub(crate) use cursors::{
 pub(crate) use identity::{
     pi_existing_event_identity_by_entry_id, provider_event_exists, provider_event_import_identity,
     provider_file_touch_event_id, provider_file_touch_import_id, provider_session_exists_cached,
-    ProviderEventImportIdentity,
+    ProviderPiEventIdentityInventory,
 };
 pub(crate) use ids::{
     provider_edge_uuid, provider_scoped_source_identity_key, provider_scoped_source_uuid,
@@ -73,6 +80,12 @@ pub(crate) struct NativeJsonlTreeImport<'a> {
     pub(crate) source_root: Option<PathBuf>,
     pub(crate) imported_at: DateTime<Utc>,
     pub(crate) history_record_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProviderSessionContentPolicy {
+    RequireRealMessage,
+    AllowTailWithoutRealMessage,
 }
 
 pub(crate) fn import_native_jsonl_tree<A: ProviderCaptureAdapter>(
@@ -110,6 +123,31 @@ pub fn import_normalized_provider_captures(
     options: NormalizedProviderImportOptions,
 ) -> Result<ProviderImportSummary> {
     batches::import_normalized_provider_captures(store, normalization, options)
+}
+
+pub(crate) fn import_normalized_provider_capture_stream(
+    store: &mut Store,
+    options: NormalizedProviderImportOptions,
+    stream: impl FnOnce(&mut dyn FnMut(ProviderNormalizationResult) -> Result<()>) -> Result<()>,
+) -> Result<ProviderImportSummary> {
+    import_normalized_provider_capture_stream_with_metrics(store, options, stream)
+        .map(|(summary, _)| summary)
+}
+
+pub(crate) fn import_normalized_provider_capture_stream_with_metrics(
+    store: &mut Store,
+    options: NormalizedProviderImportOptions,
+    stream: impl FnOnce(&mut dyn FnMut(ProviderNormalizationResult) -> Result<()>) -> Result<()>,
+) -> Result<(ProviderImportSummary, ProviderNormalizationStreamMetrics)> {
+    let mut importer = ProviderNormalizationStreamImporter::new(store, options)?;
+    let stream_result = {
+        let mut emit = |batch| importer.import_batch(batch);
+        stream(&mut emit)
+    };
+    match stream_result {
+        Ok(()) => importer.finish_with_metrics(),
+        Err(error) => importer.abort(error),
+    }
 }
 
 pub(crate) fn import_provider_capture_lines(
@@ -181,7 +219,7 @@ fn filter_provider_capture_lines_without_real_session_messages(
 
     if real_session_keys.is_empty() && summary.failed == 0 {
         summary.failed += 1;
-        summary.failures.push(ProviderImportFailure {
+        summary.sample_failure(ProviderImportFailure {
             line: 0,
             error: "provider source contained no real conversation message".to_owned(),
         });
@@ -255,7 +293,19 @@ fn provider_capture_lines_have_real_message(captures: &[(usize, ProviderCaptureE
         })
 }
 
-fn provider_event_is_real_conversation_message(event: &ProviderEventEnvelope) -> bool {
+#[cfg(test)]
+pub(crate) fn provider_normalization_has_real_message(
+    normalization: &ProviderNormalizationResult,
+) -> bool {
+    normalization.captures.iter().any(|(_, capture)| {
+        capture
+            .event
+            .as_ref()
+            .is_some_and(provider_event_is_real_conversation_message)
+    })
+}
+
+pub(crate) fn provider_event_is_real_conversation_message(event: &ProviderEventEnvelope) -> bool {
     event.event_type == EventType::Message
         && matches!(
             event.role,
@@ -377,12 +427,23 @@ pub(crate) struct ProviderImportCaches {
     pub(crate) imported_edges: BTreeSet<Uuid>,
     pub(crate) processed_edges: BTreeSet<Uuid>,
     pub(crate) session_exists: BTreeMap<Uuid, bool>,
-    pub(crate) pi_event_identities_by_entry_id:
-        BTreeMap<Uuid, BTreeMap<String, ProviderEventImportIdentity>>,
+    pub(crate) pi_event_identities: Option<ProviderPiEventIdentityInventory>,
     pub(crate) pending_edges: BTreeMap<Uuid, PendingProviderEdge>,
 }
 
-#[derive(Clone)]
+impl ProviderImportCaches {
+    pub(crate) fn clear_resident(&mut self) {
+        self.imported_sessions.clear();
+        self.processed_sources.clear();
+        self.processed_sessions.clear();
+        self.imported_edges.clear();
+        self.processed_edges.clear();
+        self.session_exists.clear();
+        self.pending_edges.clear();
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct PendingProviderEdge {
     pub(crate) provider_session_id: String,
     pub(crate) parent_provider_session_id: Option<String>,

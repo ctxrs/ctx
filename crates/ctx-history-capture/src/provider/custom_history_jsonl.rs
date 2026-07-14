@@ -401,7 +401,7 @@ pub(crate) fn push_provider_import_failure(
     error: String,
 ) {
     summary.failed += 1;
-    summary.failures.push(ProviderImportFailure { line, error });
+    summary.sample_failure(ProviderImportFailure { line, error });
 }
 
 pub(crate) fn validate_custom_source_record(

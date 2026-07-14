@@ -138,7 +138,7 @@ pub fn import_spool(inbox: impl AsRef<Path>, store: &mut Store) -> Result<SpoolI
                 write_failure_metadata(&failed, &err)?;
                 summary.processed_files += 1;
                 summary.failed_files += 1;
-                summary.failures.push(SpoolImportFailure {
+                summary.sample_failure(SpoolImportFailure {
                     path: failed,
                     error: err.to_string(),
                 });
