@@ -193,3 +193,120 @@ fn dropping_publication_scope_releases_owner_lock_for_durable_marker_adoption() 
         .unwrap();
     first.abandon_provider_file_publication(readopted).unwrap();
 }
+
+#[test]
+fn crashed_mutated_replacement_cannot_be_adopted_or_finalized_as_incremental() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("work.sqlite");
+    let file = source_file(20, 100);
+    let source = Uuid::from_u128(64_100);
+    let old_event = Uuid::from_u128(64_101);
+    let new_event = Uuid::from_u128(64_102);
+
+    let generation = {
+        let first = Store::open(&path).unwrap();
+        let generation = first
+            .allocate_source_import_inventory_generation(file.provider, &file.source_root)
+            .unwrap();
+        first
+            .upsert_source_import_files(generation, std::slice::from_ref(&file))
+            .unwrap();
+        insert_capture_source(&first, source, PATH_A, "mutated-replacement-adoption");
+        insert_raw_event(&first, old_event, 1, source, "old generation");
+        let outcome = source_outcome(&file, generation, 110);
+        let scope = first
+            .begin_provider_file_publication(
+                file.provider,
+                outcome.observation,
+                MATERIAL_FORMAT,
+                ProviderFilePublicationKind::Replacement,
+                105,
+            )
+            .unwrap();
+        prepare_all(&first, &scope, 1);
+        let mut replacement = event_fixture(
+            new_event,
+            2,
+            source,
+            "mutated-replacement-adoption".to_owned(),
+            "new generation",
+        );
+        replacement.dedupe_key = None;
+        first
+            .with_provider_file_publication_writes(&scope, |store| store.upsert_event(&replacement))
+            .unwrap();
+        assert_eq!(
+            first
+                .conn
+                .query_row(
+                    "SELECT publication_kind || ':' || mutation_started FROM provider_file_publications",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "replacement:1"
+        );
+        drop(scope);
+        generation
+    };
+
+    let second = Store::open(&path).unwrap();
+    assert!(second.list_events().unwrap().is_empty());
+    let outcome = source_outcome(&file, generation, 120);
+    let adopted = second
+        .begin_provider_file_publication(
+            file.provider,
+            outcome.observation,
+            MATERIAL_FORMAT,
+            ProviderFilePublicationKind::Incremental,
+            115,
+        )
+        .unwrap();
+    assert_eq!(adopted.kind(), ProviderFilePublicationKind::Replacement);
+    assert!(adopted.tracks_prior_material);
+    let append_checkpoint = checkpoint(20, 4, "unix:2049:mutated-adoption", 120);
+    assert!(matches!(
+        second
+            .finalize_provider_file_publication(
+                adopted,
+                outcome,
+                ProviderFilePublicationCommit::Append(&append_checkpoint),
+            )
+            .unwrap_err(),
+        StoreError::InvalidProviderFilePublicationScope
+    ));
+    assert!(second.list_events().unwrap().is_empty());
+
+    let adopted = second
+        .begin_provider_file_publication(
+            file.provider,
+            outcome.observation,
+            MATERIAL_FORMAT,
+            ProviderFilePublicationKind::Incremental,
+            121,
+        )
+        .unwrap();
+    assert_eq!(adopted.kind(), ProviderFilePublicationKind::Replacement);
+    prepare_all(&second, &adopted, 1);
+    let mut replacement = event_fixture(
+        new_event,
+        2,
+        source,
+        "mutated-replacement-adoption".to_owned(),
+        "new generation",
+    );
+    replacement.dedupe_key = None;
+    second
+        .with_provider_file_publication_writes(&adopted, |store| store.upsert_event(&replacement))
+        .unwrap();
+    reconcile_all(&second, &adopted, 1);
+    second
+        .finalize_provider_file_publication(
+            adopted,
+            outcome,
+            ProviderFilePublicationCommit::Replacement(Some(&append_checkpoint)),
+        )
+        .unwrap();
+    assert_eq!(second.list_events().unwrap()[0].id, new_event);
+    assert!(!row_exists(&second, "events", old_event));
+}

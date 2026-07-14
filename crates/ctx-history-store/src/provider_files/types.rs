@@ -170,7 +170,8 @@ pub enum ProviderFilePublicationCommit<'a> {
 /// Owns one provider-file publication lease. Replacement owners with prior
 /// material are deliberately unavailable to ordinary search/list/hydration
 /// until sliced reconciliation and final publication complete. A crash leaves
-/// that durable hidden marker in place; a full retry is required to publish.
+/// that durable hidden marker in place; a full retry or disappeared-observation
+/// retirement is required to resolve it.
 #[derive(Debug)]
 pub struct ProviderFilePublicationScope {
     scope_id: Uuid,
@@ -191,6 +192,7 @@ pub struct ProviderFilePublicationScope {
     owner_id: String,
     staging_id: String,
     tracks_prior_material: bool,
+    retires_observation: bool,
     lifecycle: Arc<AtomicBool>,
     _owner_lock: File,
     _owner_lock_path: PathBuf,
@@ -199,6 +201,12 @@ pub struct ProviderFilePublicationScope {
 impl Drop for ProviderFilePublicationScope {
     fn drop(&mut self) {
         self.lifecycle.store(false, Ordering::Release);
+    }
+}
+
+impl ProviderFilePublicationScope {
+    pub fn kind(&self) -> ProviderFilePublicationKind {
+        self.kind
     }
 }
 
@@ -338,6 +346,7 @@ pub(crate) struct ActiveProviderFilePublication {
     material_source_format: String,
     material_source_root: String,
     source_path: String,
+    retires_observation: bool,
     _owner_lock_path: PathBuf,
     attached: bool,
     staging_dir_path: Option<PathBuf>,
@@ -368,12 +377,17 @@ enum ProviderFileCompletionKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProviderFileFaultPoint {
     BeginAfterStaging,
+    MutationBeforeCommit,
+    PreparationBeforeCommit,
     FinalizeBeforeCommit,
+    #[cfg(test)]
+    RetirementFinalizeProcessExit,
     Cleanup,
 }
 
 #[derive(Debug, Clone)]
 struct ReplacementMarker {
+    publication_kind: ProviderFilePublicationKind,
     mutation_started: bool,
     preparation_complete: bool,
     preparation_cursor: Option<String>,
@@ -381,6 +395,21 @@ struct ReplacementMarker {
     source_cursor: Option<String>,
     entity_cursor: Option<String>,
     counts: ProviderFileReconciliationCounts,
+}
+
+struct DurableProviderFilePublication {
+    scope_id: Uuid,
+    staging_id: String,
+    inventory_family: &'static str,
+    inventory_source_format: String,
+    inventory_source_root: String,
+    source_path: String,
+    inventory_generation: u64,
+    file_size_bytes: u64,
+    file_modified_at_ms: i64,
+    import_revision: u32,
+    metadata_json: Option<String>,
+    mutation_started: bool,
 }
 
 struct ReconciliationBatch {

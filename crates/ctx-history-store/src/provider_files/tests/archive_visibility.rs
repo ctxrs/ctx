@@ -361,6 +361,87 @@ fn replacement_tracks_source_less_vcs_change_through_its_owned_workspace() {
     assert_eq!(store.list_vcs_changes().unwrap()[0].id, retained);
 }
 #[test]
+fn cross_process_vcs_hijack_is_rejected_and_scoped_source_less_upsert_is_valid() {
+    let temp = tempdir().unwrap();
+    let store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let file = source_file(20, 100);
+    let generation = store
+        .allocate_source_import_inventory_generation(file.provider, &file.source_root)
+        .unwrap();
+    store
+        .upsert_source_import_files(generation, std::slice::from_ref(&file))
+        .unwrap();
+    let source = Uuid::from_u128(41_200);
+    let unrelated_source = Uuid::from_u128(41_203);
+    let workspace = Uuid::from_u128(41_201);
+    let change_id = Uuid::from_u128(41_202);
+    insert_capture_source(&store, source, PATH_A, "public-source-less-vcs");
+    insert_capture_source(
+        &store,
+        unrelated_source,
+        "/history/claude/projects/unrelated.jsonl",
+        "unrelated-vcs-source",
+    );
+    store
+        .conn
+        .execute(
+            "INSERT INTO vcs_workspaces (id, kind, root_path, repo_fingerprint, created_at_ms, updated_at_ms, source_id) VALUES (?1, 'git', '/owned-public', 'source-less-public-repo', 1, 1, ?2)",
+            params![workspace.to_string(), source.to_string()],
+        )
+        .unwrap();
+    store
+        .conn
+        .execute(
+            "INSERT INTO vcs_changes (id, vcs_workspace_id, kind, change_id, created_at_ms, updated_at_ms) VALUES (?1, ?2, 'git_commit', 'source-less-public-change', 1, 1)",
+            params![change_id.to_string(), workspace.to_string()],
+        )
+        .unwrap();
+    let change = store.list_vcs_changes().unwrap().remove(0);
+    assert_eq!(change.source_id, None);
+
+    let outcome = source_outcome(&file, generation, 120);
+    let scope = store
+        .begin_provider_file_publication(
+            file.provider,
+            outcome.observation,
+            MATERIAL_FORMAT,
+            ProviderFilePublicationKind::Replacement,
+            110,
+        )
+        .unwrap();
+    let mut hijack = change.clone();
+    hijack.source_id = Some(unrelated_source);
+    let mut writer = spawn_provider_file_vcs_writer(&store.path, &hijack);
+    assert!(writer.wait().unwrap().success());
+    assert_eq!(
+        store
+            .conn
+            .query_row(
+                "SELECT source_id FROM vcs_changes WHERE id = ?1",
+                params![change_id.to_string()],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .unwrap(),
+        None
+    );
+    prepare_all(&store, &scope, 1);
+    let upserted = store
+        .with_provider_file_publication_writes(&scope, |store| store.upsert_vcs_change(&change))
+        .unwrap();
+    assert_eq!(upserted, change_id);
+    assert_eq!(staged_seen_count(&store), 2);
+    reconcile_all(&store, &scope, 1);
+    store
+        .finalize_provider_file_publication(
+            scope,
+            outcome,
+            ProviderFilePublicationCommit::Replacement(None),
+        )
+        .unwrap();
+    assert_eq!(store.list_vcs_changes().unwrap()[0].id, change_id);
+}
+
+#[test]
 fn omitted_session_releases_transcript_artifact_before_artifact_reconciliation() {
     let temp = tempdir().unwrap();
     let store = Store::open(temp.path().join("work.sqlite")).unwrap();

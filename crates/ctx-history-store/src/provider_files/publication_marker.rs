@@ -8,7 +8,7 @@ impl Store {
             .conn
             .query_row(
                 r#"
-                SELECT replacement_id, staging_id, mutation_started
+                SELECT replacement_id, staging_id, publication_kind, mutation_started
                 FROM provider_file_publications
                 WHERE owner_id = ?1
                 "#,
@@ -17,12 +17,20 @@ impl Store {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
-                        row.get::<_, bool>(2)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, bool>(3)?,
                     ))
                 },
             )
             .optional()?;
-        let changed = if let Some((publication_id, staging_id, mutation_started)) = prior {
+        let changed = if let Some((publication_id, staging_id, prior_kind, mutation_started)) =
+            prior
+        {
+            let prior_kind = parse_provider_file_publication_kind(&prior_kind)?;
+            scope.kind = match (prior_kind, mutation_started) {
+                (_, true) => ProviderFilePublicationKind::Replacement,
+                (_, false) => scope.kind,
+            };
             scope.tracks_prior_material |= mutation_started;
             scope.scope_id = Uuid::parse_str(&publication_id)?;
             scope.staging_id = staging_id;
@@ -141,7 +149,7 @@ impl Store {
         self.conn
             .query_row(
                 r#"
-                SELECT mutation_started, preparation_complete, preparation_cursor,
+                SELECT publication_kind, mutation_started, preparation_complete, preparation_cursor,
                        cleanup_phase, cleanup_source_cursor, cleanup_entity_cursor,
                        removed_artifacts, removed_summaries, removed_history_record_links,
                        removed_history_records, removed_history_record_tags, removed_record_edges,
@@ -174,27 +182,30 @@ impl Store {
                 ],
                 |row| {
                     Ok(ReplacementMarker {
-                        mutation_started: row.get(0)?,
-                        preparation_complete: row.get(1)?,
-                        preparation_cursor: row.get(2)?,
-                        cleanup_phase: row.get(3)?,
-                        source_cursor: row.get(4)?,
-                        entity_cursor: row.get(5)?,
+                        publication_kind: parse_provider_file_publication_kind_sql(
+                            &row.get::<_, String>(0)?,
+                        )?,
+                        mutation_started: row.get(1)?,
+                        preparation_complete: row.get(2)?,
+                        preparation_cursor: row.get(3)?,
+                        cleanup_phase: row.get(4)?,
+                        source_cursor: row.get(5)?,
+                        entity_cursor: row.get(6)?,
                         counts: ProviderFileReconciliationCounts {
-                            artifacts: nonnegative_i64_to_usize(row.get(6)?)?,
-                            summaries: nonnegative_i64_to_usize(row.get(7)?)?,
-                            history_record_links: nonnegative_i64_to_usize(row.get(8)?)?,
-                            history_records: nonnegative_i64_to_usize(row.get(9)?)?,
-                            history_record_tags: nonnegative_i64_to_usize(row.get(10)?)?,
-                            record_edges: nonnegative_i64_to_usize(row.get(11)?)?,
-                            audit_log_entries: nonnegative_i64_to_usize(row.get(12)?)?,
-                            vcs_workspaces: nonnegative_i64_to_usize(row.get(13)?)?,
-                            vcs_changes: nonnegative_i64_to_usize(row.get(14)?)?,
-                            events: nonnegative_i64_to_usize(row.get(15)?)?,
-                            runs: nonnegative_i64_to_usize(row.get(16)?)?,
-                            files_touched: nonnegative_i64_to_usize(row.get(17)?)?,
-                            session_edges: nonnegative_i64_to_usize(row.get(18)?)?,
-                            sessions_tombstoned: nonnegative_i64_to_usize(row.get(19)?)?,
+                            artifacts: nonnegative_i64_to_usize(row.get(7)?)?,
+                            summaries: nonnegative_i64_to_usize(row.get(8)?)?,
+                            history_record_links: nonnegative_i64_to_usize(row.get(9)?)?,
+                            history_records: nonnegative_i64_to_usize(row.get(10)?)?,
+                            history_record_tags: nonnegative_i64_to_usize(row.get(11)?)?,
+                            record_edges: nonnegative_i64_to_usize(row.get(12)?)?,
+                            audit_log_entries: nonnegative_i64_to_usize(row.get(13)?)?,
+                            vcs_workspaces: nonnegative_i64_to_usize(row.get(14)?)?,
+                            vcs_changes: nonnegative_i64_to_usize(row.get(15)?)?,
+                            events: nonnegative_i64_to_usize(row.get(16)?)?,
+                            runs: nonnegative_i64_to_usize(row.get(17)?)?,
+                            files_touched: nonnegative_i64_to_usize(row.get(18)?)?,
+                            session_edges: nonnegative_i64_to_usize(row.get(19)?)?,
+                            sessions_tombstoned: nonnegative_i64_to_usize(row.get(20)?)?,
                         },
                     })
                 },
@@ -220,7 +231,7 @@ impl Store {
                 removed_vcs_changes = ?16, removed_events = ?17, removed_runs = ?18,
                 removed_files_touched = ?19, removed_session_edges = ?20,
                 tombstoned_sessions = ?21, updated_at_ms = ?22
-            WHERE replacement_id = ?1
+            WHERE replacement_id = ?1 AND publication_kind = ?23
             "#,
             params![
                 scope.scope_id.to_string(),
@@ -245,6 +256,7 @@ impl Store {
                 capped_i64(marker.counts.session_edges as u64),
                 capped_i64(marker.counts.sessions_tombstoned as u64),
                 scope.file_modified_at_ms,
+                scope.kind.as_str(),
             ],
         )?;
         if changed != 1 {
