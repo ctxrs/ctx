@@ -61,13 +61,17 @@ pub fn catalog_codex_session_tree(
     let mut current_paths = Vec::with_capacity(paths.len());
     let mut cached_sessions = Vec::new();
     let mut paths_to_parse = Vec::new();
-    let mut metadata_failures = Vec::new();
+    let mut has_metadata_failures = false;
     for path in paths {
         let metadata = match fs::metadata(&path) {
             Ok(metadata) => metadata,
             Err(err) => {
                 summary.failed_sessions += 1;
-                metadata_failures.push(format!("{}: {err}", path.display()));
+                has_metadata_failures = true;
+                summary.sample_failure(ProviderImportFailure {
+                    line: 0,
+                    error: format!("{}: {err}", path.display()),
+                });
                 continue;
             }
         };
@@ -87,12 +91,6 @@ pub fn catalog_codex_session_tree(
             paths_to_parse.push(path);
         }
     }
-    summary.failures.extend(
-        metadata_failures
-            .iter()
-            .cloned()
-            .map(|error| ProviderImportFailure { line: 0, error }),
-    );
     let stale_session_count =
         store.catalog_source_stale_session_count(CaptureProvider::Codex, &source_root)?;
     let current_path_set = current_paths.iter().cloned().collect::<BTreeSet<_>>();
@@ -100,7 +98,7 @@ pub fn catalog_codex_session_tree(
         .keys()
         .any(|source_path| !current_path_set.contains(source_path));
     if paths_to_parse.is_empty()
-        && metadata_failures.is_empty()
+        && !has_metadata_failures
         && cached_sessions.len() == current_paths.len()
         && existing.len() == current_paths.len()
         && !has_missing_existing_paths
@@ -126,15 +124,17 @@ pub fn catalog_codex_session_tree(
         }
         return Ok(summary);
     }
-    let (scan_summary, sessions) = catalog_codex_session_paths(
+    let (mut scan_summary, sessions) = catalog_codex_session_paths(
         paths_to_parse,
         &source_root,
         cataloged_at_ms,
         options.parallelism,
     )?;
-    summary.failed_sessions += scan_summary.failed_sessions;
-    summary.failures.extend(scan_summary.failures);
-    summary.parsed_sessions += scan_summary.parsed_sessions;
+    // The metadata inventory above already counted every readable source file
+    // and byte. Parse workers report those counters for direct file-list calls.
+    scan_summary.source_files = 0;
+    scan_summary.source_bytes = 0;
+    summary.merge_from(scan_summary);
     let parsed_session_count = sessions.len();
     let cached_session_count = cached_sessions.len();
     let mut sessions_to_persist = sessions;
@@ -251,7 +251,6 @@ pub(crate) fn cached_catalog_session_if_unchanged(
 pub(crate) struct CatalogWorkerBatch {
     pub(crate) summary: CatalogSummary,
     pub(crate) sessions: Vec<CatalogSession>,
-    pub(crate) failures: Vec<String>,
 }
 pub(crate) fn catalog_codex_session_paths(
     paths: Vec<PathBuf>,
@@ -293,19 +292,8 @@ pub(crate) fn catalog_codex_session_paths(
     let mut summary = CatalogSummary::default();
     let mut sessions = Vec::new();
     for mut batch in batches {
-        summary.source_files += batch.summary.source_files;
-        summary.source_bytes = summary
-            .source_bytes
-            .saturating_add(batch.summary.source_bytes);
-        summary.parsed_sessions += batch.summary.parsed_sessions;
-        summary.failed_sessions += batch.summary.failed_sessions;
+        summary.merge_from(batch.summary);
         sessions.append(&mut batch.sessions);
-        summary.failures.extend(
-            batch
-                .failures
-                .drain(..)
-                .map(|error| ProviderImportFailure { line: 0, error }),
-        );
     }
     Ok((summary, sessions))
 }
@@ -323,7 +311,10 @@ pub(crate) fn catalog_codex_session_chunk(
             Ok(metadata) => metadata,
             Err(err) => {
                 batch.summary.failed_sessions += 1;
-                batch.failures.push(format!("{}: {err}", path.display()));
+                batch.summary.sample_failure(ProviderImportFailure {
+                    line: 0,
+                    error: format!("{}: {err}", path.display()),
+                });
                 continue;
             }
         };
@@ -336,7 +327,10 @@ pub(crate) fn catalog_codex_session_chunk(
             }
             Err(err) => {
                 batch.summary.failed_sessions += 1;
-                batch.failures.push(format!("{}: {err}", path.display()));
+                batch.summary.sample_failure(ProviderImportFailure {
+                    line: 0,
+                    error: format!("{}: {err}", path.display()),
+                });
             }
         }
     }

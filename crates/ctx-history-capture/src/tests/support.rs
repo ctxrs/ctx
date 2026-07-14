@@ -10,11 +10,11 @@ pub(super) use crate::provider::custom_history_jsonl::{
 };
 pub(super) use crate::provider::file_touches::provider_file_touches_from_raw_value;
 pub(super) use crate::provider::importer::{
-    import_normalized_provider_captures, import_normalized_provider_captures_in_batches,
-    import_provider_capture_line, provider_command_run_from_event, provider_cursor_stream,
-    provider_event_import_identity, provider_event_seq, provider_event_uuid,
-    provider_file_touch_uuid, provider_scoped_source_uuid, provider_session_uuid,
-    provider_source_cursor_stream, provider_source_edge_uuid,
+    import_normalized_provider_capture_stream, import_normalized_provider_captures,
+    import_normalized_provider_captures_in_batches, import_provider_capture_line,
+    provider_command_run_from_event, provider_cursor_stream, provider_event_import_identity,
+    provider_event_seq, provider_event_uuid, provider_file_touch_uuid, provider_scoped_source_uuid,
+    provider_session_uuid, provider_source_cursor_stream, provider_source_edge_uuid,
     provider_source_event_import_identity, provider_source_event_seq, provider_source_event_uuid,
     provider_source_root_identity, provider_source_session_uuid, provider_source_uuid,
     provider_sync_metadata, timestamps, ProviderCommandRunInput, ProviderImportCaches,

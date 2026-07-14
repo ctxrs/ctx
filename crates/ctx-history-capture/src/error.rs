@@ -35,6 +35,8 @@ pub enum CaptureError {
     },
     #[error("system invariant failed: {0}")]
     SystemInvariant(&'static str),
+    #[error("provider import stopped after durable materialization required maintenance")]
+    CommittedImportMaintenance,
     #[error("provider inventory generation was superseded before its outcome committed")]
     InventorySuperseded,
     #[error("line {line} in {path:?} is not a valid capture envelope: {source}")]

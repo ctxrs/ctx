@@ -48,7 +48,7 @@ pub(crate) fn normalize_shelley_sqlite(
     for message in messages {
         let Some(conversation) = conversations_by_id.get(&message.conversation_id) else {
             result.summary.failed += 1;
-            result.summary.failures.push(ProviderImportFailure {
+            result.summary.sample_failure(ProviderImportFailure {
                 line: message.sequence_id.max(0) as usize,
                 error: format!(
                     "Shelley message {} references missing conversation {}",

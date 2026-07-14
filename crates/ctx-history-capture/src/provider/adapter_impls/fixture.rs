@@ -47,7 +47,7 @@ impl ProviderCaptureAdapter for ProviderFixtureJsonlAdapter {
                 Ok(fixture) => fixture,
                 Err(err) => {
                     result.summary.failed += 1;
-                    result.summary.failures.push(ProviderImportFailure {
+                    result.summary.sample_failure(ProviderImportFailure {
                         line: line_number,
                         error: err.to_string(),
                     });
@@ -57,7 +57,7 @@ impl ProviderCaptureAdapter for ProviderFixtureJsonlAdapter {
             if let Some(expected_provider) = self.expected_provider {
                 if fixture.provider != expected_provider {
                     result.summary.failed += 1;
-                    result.summary.failures.push(ProviderImportFailure {
+                    result.summary.sample_failure(ProviderImportFailure {
                         line: line_number,
                         error: format!(
                             "provider fixture line {line_number} has provider `{}` but expected `{}`",
