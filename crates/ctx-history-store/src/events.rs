@@ -39,8 +39,15 @@ impl Store {
     }
 
     pub fn upsert_event(&self, event: &Event) -> Result<Uuid> {
+        self.with_provider_file_publication_write(|| self.upsert_event_inner(event))
+    }
+
+    fn upsert_event_inner(&self, event: &Event) -> Result<Uuid> {
         let event_id = if let Some(dedupe_key) = &event.dedupe_key {
-            reject_provider_event_hash_conflict(&self.conn, dedupe_key)?;
+            let replacement_conflict_id = self.replacement_event_conflict_id(dedupe_key, event)?;
+            if replacement_conflict_id.is_none() {
+                reject_provider_event_hash_conflict(&self.conn, dedupe_key)?;
+            }
             if let Some(existing_id) = self
                 .conn
                 .query_row(
@@ -50,12 +57,14 @@ impl Store {
                 )
                 .optional()?
             {
+                self.track_provider_file_publication_event(existing_id)?;
                 return Ok(existing_id);
             }
-            event.id
+            replacement_conflict_id.unwrap_or(event.id)
         } else {
             event.id
         };
+        self.ensure_provider_file_event_write_allowed(event_id, event)?;
         let previous_searchable_count =
             semantic_searchable_document_count_from_stored_event(&self.conn, event_id)?;
 
@@ -110,13 +119,28 @@ impl Store {
             previous_searchable_count,
             semantic_searchable_document_count_for_event(event),
         )?;
+        self.track_provider_file_publication_event(event_id)?;
         if let Some(dedupe_key) = &event.dedupe_key {
-            return self.event_id_by_dedupe_key(dedupe_key);
+            return self.stored_event_id_by_dedupe_key(dedupe_key);
         }
         Ok(event_id)
     }
 
     pub fn insert_event_if_absent(&self, event: &Event) -> Result<bool> {
+        self.with_provider_file_publication_write(|| self.insert_event_if_absent_inner(event))
+    }
+
+    fn insert_event_if_absent_inner(&self, event: &Event) -> Result<bool> {
+        if let Some(dedupe_key) = &event.dedupe_key {
+            if self
+                .replacement_event_conflict_id(dedupe_key, event)?
+                .is_some()
+            {
+                self.upsert_event(event)?;
+                return Ok(true);
+            }
+        }
+        self.ensure_provider_file_event_write_allowed(event.id, event)?;
         let changed = self
                 .conn
                 .prepare_cached(
@@ -159,10 +183,43 @@ impl Store {
                 semantic_searchable_document_count_for_event(event),
             )?;
         }
+        let tracked_id = if changed == 0 {
+            event
+                .dedupe_key
+                .as_deref()
+                .map(|dedupe_key| self.stored_event_id_by_dedupe_key(dedupe_key))
+                .transpose()?
+                .unwrap_or(event.id)
+        } else {
+            event.id
+        };
+        self.track_provider_file_publication_event(tracked_id)?;
         Ok(changed > 0)
     }
 
     pub fn event_id_by_dedupe_key(&self, dedupe_key: &str) -> Result<Uuid> {
+        let visible = crate::provider_files::event_material_visible_predicate("events");
+        self.conn
+            .query_row(
+                &format!("SELECT id FROM events WHERE dedupe_key = ?1 AND {visible}"),
+                params![dedupe_key],
+                |row| parse_uuid(row.get::<_, String>(0)?),
+            )
+            .map_err(StoreError::from)
+    }
+
+    pub fn event_id_by_seq(&self, seq: u64) -> Result<Uuid> {
+        let visible = crate::provider_files::event_material_visible_predicate("events");
+        self.conn
+            .query_row(
+                &format!("SELECT id FROM events WHERE seq = ?1 AND {visible}"),
+                params![seq as i64],
+                |row| parse_uuid(row.get::<_, String>(0)?),
+            )
+            .map_err(StoreError::from)
+    }
+
+    fn stored_event_id_by_dedupe_key(&self, dedupe_key: &str) -> Result<Uuid> {
         self.conn
             .query_row(
                 "SELECT id FROM events WHERE dedupe_key = ?1",
@@ -172,26 +229,17 @@ impl Store {
             .map_err(StoreError::from)
     }
 
-    pub fn event_id_by_seq(&self, seq: u64) -> Result<Uuid> {
-        self.conn
-            .query_row(
-                "SELECT id FROM events WHERE seq = ?1",
-                params![seq as i64],
-                |row| parse_uuid(row.get::<_, String>(0)?),
-            )
-            .map_err(StoreError::from)
-    }
-
     pub fn get_event(&self, id: Uuid) -> Result<Event> {
+        let tail = format!(
+            "WHERE id = COALESCE(
+                (SELECT event_id FROM event_aliases WHERE alias_id = ?1),
+                ?1
+            ) AND {}",
+            crate::provider_files::event_material_visible_predicate("events")
+        );
         self.conn
             .query_row(
-                event_select_sql(
-                    "WHERE id = COALESCE(
-                        (SELECT event_id FROM event_aliases WHERE alias_id = ?1),
-                        ?1
-                    )",
-                )
-                .as_str(),
+                event_select_sql(&tail).as_str(),
                 params![id.to_string()],
                 event_from_row,
             )
@@ -211,33 +259,35 @@ impl Store {
     }
 
     pub fn events_by_id_prefix(&self, prefix: &str) -> Result<Vec<Event>> {
-        let mut stmt = self.conn.prepare(
-            event_select_sql(
-                "WHERE id IN (
-                    SELECT id FROM events WHERE id LIKE ?1
-                    UNION
-                    SELECT event_id FROM event_aliases WHERE alias_id LIKE ?1
-                ) ORDER BY id LIMIT 2",
-            )
-            .as_str(),
-        )?;
+        let tail = format!(
+            "WHERE id IN (
+                SELECT id FROM events WHERE id LIKE ?1
+                UNION
+                SELECT event_id FROM event_aliases WHERE alias_id LIKE ?1
+            ) AND {} ORDER BY id LIMIT 2",
+            crate::provider_files::event_material_visible_predicate("events")
+        );
+        let mut stmt = self.conn.prepare(event_select_sql(&tail).as_str())?;
         let rows = stmt.query_map(params![format!("{prefix}%")], event_from_row)?;
         collect_rows(rows)
     }
 
     pub fn events_for_session(&self, session_id: Uuid) -> Result<Vec<Event>> {
-        let mut stmt = self.conn.prepare(
-            event_select_sql("WHERE session_id = ?1 ORDER BY seq, occurred_at_ms").as_str(),
-        )?;
+        let tail = format!(
+            "WHERE session_id = ?1 AND {} ORDER BY seq, occurred_at_ms",
+            crate::provider_files::event_material_visible_predicate("events")
+        );
+        let mut stmt = self.conn.prepare(event_select_sql(&tail).as_str())?;
         let rows = stmt.query_map(params![session_id.to_string()], event_from_row)?;
         collect_rows(rows)
     }
 
     pub fn events_for_session_limited(&self, session_id: Uuid, limit: usize) -> Result<Vec<Event>> {
-        let mut stmt = self.conn.prepare(
-            event_select_sql("WHERE session_id = ?1 ORDER BY seq, occurred_at_ms LIMIT ?2")
-                .as_str(),
-        )?;
+        let tail = format!(
+            "WHERE session_id = ?1 AND {} ORDER BY seq, occurred_at_ms LIMIT ?2",
+            crate::provider_files::event_material_visible_predicate("events")
+        );
+        let mut stmt = self.conn.prepare(event_select_sql(&tail).as_str())?;
         let rows = stmt.query_map(
             params![
                 session_id.to_string(),
@@ -254,19 +304,23 @@ impl Store {
         before: usize,
         after: usize,
     ) -> Result<Vec<Event>> {
-        let Some(session_id) = event.session_id else {
-            return Ok(vec![event.clone()]);
+        let visible_event = match self.get_event(event.id) {
+            Ok(event) => event,
+            Err(StoreError::NotFound(_)) => return Ok(Vec::new()),
+            Err(error) => return Err(error),
         };
-        let event_seq = i64::try_from(event.seq).unwrap_or(i64::MAX);
+        let Some(session_id) = visible_event.session_id else {
+            return Ok(vec![visible_event]);
+        };
+        let event_seq = i64::try_from(visible_event.seq).unwrap_or(i64::MAX);
         let mut events = if before == 0 {
             Vec::new()
         } else {
-            let mut stmt = self.conn.prepare(
-                    event_select_sql(
-                        "WHERE session_id = ?1 AND seq < ?2 ORDER BY seq DESC, occurred_at_ms DESC LIMIT ?3",
-                    )
-                    .as_str(),
-                )?;
+            let tail = format!(
+                "WHERE session_id = ?1 AND seq < ?2 AND {} ORDER BY seq DESC, occurred_at_ms DESC LIMIT ?3",
+                crate::provider_files::event_material_visible_predicate("events")
+            );
+            let mut stmt = self.conn.prepare(event_select_sql(&tail).as_str())?;
             let rows = stmt.query_map(
                 params![
                     session_id.to_string(),
@@ -279,14 +333,13 @@ impl Store {
             rows.reverse();
             rows
         };
-        events.push(event.clone());
+        events.push(visible_event);
         if after > 0 {
-            let mut stmt = self.conn.prepare(
-                event_select_sql(
-                    "WHERE session_id = ?1 AND seq > ?2 ORDER BY seq, occurred_at_ms LIMIT ?3",
-                )
-                .as_str(),
-            )?;
+            let tail = format!(
+                "WHERE session_id = ?1 AND seq > ?2 AND {} ORDER BY seq, occurred_at_ms LIMIT ?3",
+                crate::provider_files::event_material_visible_predicate("events")
+            );
+            let mut stmt = self.conn.prepare(event_select_sql(&tail).as_str())?;
             let rows = stmt.query_map(
                 params![
                     session_id.to_string(),
@@ -301,19 +354,22 @@ impl Store {
     }
 
     pub fn events_for_record(&self, record_id: Uuid) -> Result<Vec<Event>> {
+        let visible = crate::provider_files::event_material_visible_predicate("events");
         let mut stmt = self.conn.prepare(
-                event_select_sql(
+                event_select_sql(&format!(
                     r#"
-                    WHERE history_record_id = ?1
+                    WHERE (
+                       history_record_id = ?1
                        OR session_id IN (SELECT id FROM sessions WHERE history_record_id = ?1)
                        OR run_id IN (
                             SELECT id FROM runs
                             WHERE history_record_id = ?1
                                OR session_id IN (SELECT id FROM sessions WHERE history_record_id = ?1)
                        )
+                    ) AND {visible}
                     ORDER BY seq, occurred_at_ms
                     "#,
-                )
+                ))
                 .as_str(),
             )?;
         let rows = stmt.query_map(params![record_id.to_string()], event_from_row)?;
@@ -321,23 +377,29 @@ impl Store {
     }
 
     pub(crate) fn list_events(&self) -> Result<Vec<Event>> {
-        let mut stmt = self
-            .conn
-            .prepare(event_select_sql("ORDER BY seq, occurred_at_ms, id").as_str())?;
+        let tail = format!(
+            "WHERE {} ORDER BY seq, occurred_at_ms, id",
+            crate::provider_files::event_material_visible_predicate("events")
+        );
+        let mut stmt = self.conn.prepare(event_select_sql(&tail).as_str())?;
         let rows = stmt.query_map([], event_from_row)?;
         collect_rows(rows)
     }
 
     pub fn max_events_per_history_record(&self) -> Result<i64> {
+        let visible = crate::provider_files::event_material_visible_predicate("events");
         let max_events = self.conn.query_row(
-            r#"
+            &format!(
+                r#"
                 SELECT COALESCE(MAX(event_count), 0)
                 FROM (
                     SELECT COUNT(*) AS event_count
                     FROM events
+                    WHERE {visible}
                     GROUP BY history_record_id
                 )
-                "#,
+                "#
+            ),
             [],
             |row| row.get(0),
         )?;
@@ -348,14 +410,18 @@ impl Store {
         if threshold <= 0 {
             return Ok(true);
         }
+        let visible = crate::provider_files::event_material_visible_predicate("events");
         let exists = self.conn.query_row(
-            r#"
+            &format!(
+                r#"
                 SELECT EXISTS(
                     SELECT 1
                     FROM events
+                    WHERE {visible}
                     LIMIT 1 OFFSET ?1
                 )
-                "#,
+                "#
+            ),
             params![threshold - 1],
             |row| row.get::<_, i64>(0),
         )?;
@@ -379,6 +445,70 @@ pub(crate) fn reject_provider_event_hash_conflict(
     )?;
     let rows = stmt.query_map(params![prefix, upper_bound], |row| row.get::<_, String>(0))?;
     reject_provider_event_hash_conflict_from_rows(dedupe_key, rows)
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ProviderEventHashConflict {
+    pub(crate) event_id: Uuid,
+    provider: String,
+    external_session_id: String,
+    provider_index: u64,
+    existing_hash: String,
+    new_hash: String,
+}
+
+impl ProviderEventHashConflict {
+    pub(crate) fn into_store_error(self) -> StoreError {
+        StoreError::ProviderEventConflict {
+            provider: self.provider,
+            external_session_id: self.external_session_id,
+            provider_index: self.provider_index,
+            existing_hash: self.existing_hash,
+            new_hash: self.new_hash,
+        }
+    }
+}
+
+pub(crate) fn provider_event_hash_conflict_rows(
+    conn: &Connection,
+    dedupe_key: &str,
+) -> Result<Vec<ProviderEventHashConflict>> {
+    let Some(incoming) = parse_provider_event_dedupe_key(dedupe_key) else {
+        return Ok(Vec::new());
+    };
+    let prefix = provider_event_dedupe_key_prefix(&incoming);
+    let upper_bound = provider_event_dedupe_key_upper_bound(&prefix);
+    let mut stmt = conn.prepare(
+        "SELECT id, dedupe_key FROM events
+         WHERE dedupe_key >= ?1 AND dedupe_key < ?2
+         ORDER BY dedupe_key",
+    )?;
+    let rows = stmt.query_map(params![prefix, upper_bound], |row| {
+        Ok((
+            parse_uuid(row.get::<_, String>(0)?)?,
+            row.get::<_, String>(1)?,
+        ))
+    })?;
+    let mut conflicts = Vec::new();
+    for row in rows {
+        let (event_id, existing_key) = row?;
+        let Some(existing) = parse_provider_event_dedupe_key(&existing_key) else {
+            continue;
+        };
+        if existing.has_same_event_identity(&incoming)
+            && existing.payload_hash != incoming.payload_hash
+        {
+            conflicts.push(ProviderEventHashConflict {
+                event_id,
+                provider: incoming.provider.clone(),
+                external_session_id: incoming.external_session_id.clone(),
+                provider_index: incoming.provider_index,
+                existing_hash: existing.payload_hash,
+                new_hash: incoming.payload_hash.clone(),
+            });
+        }
+    }
+    Ok(conflicts)
 }
 
 pub(crate) fn reject_provider_event_hash_conflict_tx(

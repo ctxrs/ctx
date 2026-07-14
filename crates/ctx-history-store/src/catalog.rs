@@ -237,10 +237,13 @@ fn source_import_file_pending_condition_sql(alias: &str) -> String {
 }
 
 fn catalog_indexed_count_sql() -> String {
-    r#"
+    let visible = crate::provider_files::catalog_material_visible_predicate("catalog");
+    format!(
+        r#"
     SELECT COUNT(*)
     FROM catalog_sessions AS catalog
     WHERE catalog.is_stale = 0
+      AND {visible}
       AND catalog.indexed_status IN ('indexed', 'completed_with_rejections')
       AND catalog.indexed_file_size_bytes = catalog.file_size_bytes
       AND catalog.indexed_file_modified_at_ms = catalog.file_modified_at_ms
@@ -261,7 +264,7 @@ fn catalog_indexed_count_sql() -> String {
         LIMIT 1
       )
     "#
-    .to_owned()
+    )
 }
 
 #[cfg(test)]

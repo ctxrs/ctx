@@ -13,6 +13,11 @@ use crate::{Result, Store, StoreError};
 
 impl Store {
     pub fn upsert_capture_source(&self, source: &CaptureSource) -> Result<()> {
+        self.with_provider_file_publication_write(|| self.upsert_capture_source_inner(source))
+    }
+
+    fn upsert_capture_source_inner(&self, source: &CaptureSource) -> Result<()> {
+        self.ensure_provider_file_capture_source_write_allowed(source)?;
         self.conn.execute(
             r#"
                 INSERT INTO capture_sources
@@ -67,9 +72,11 @@ impl Store {
     }
 
     pub fn get_capture_source(&self, id: Uuid) -> Result<CaptureSource> {
+        let visible =
+            crate::provider_files::capture_source_material_visible_predicate("capture_sources");
         self.conn
                 .query_row(
-                    "SELECT id, kind, provider, machine_id, process_id, cwd, raw_source_path, source_format, source_root, source_identity, external_session_id, started_at_ms, ended_at_ms, fidelity, visibility, sync_state, sync_version, metadata_json FROM capture_sources WHERE id = ?1",
+                    &format!("SELECT id, kind, provider, machine_id, process_id, cwd, raw_source_path, source_format, source_root, source_identity, external_session_id, started_at_ms, ended_at_ms, fidelity, visibility, sync_state, sync_version, metadata_json FROM capture_sources WHERE id = ?1 AND {visible}"),
                     params![id.to_string()],
                     capture_source_from_row,
                 )
@@ -78,17 +85,23 @@ impl Store {
     }
 
     pub fn list_capture_sources(&self) -> Result<Vec<CaptureSource>> {
-        let mut stmt = self.conn.prepare(
-                "SELECT id, kind, provider, machine_id, process_id, cwd, raw_source_path, source_format, source_root, source_identity, external_session_id, started_at_ms, ended_at_ms, fidelity, visibility, sync_state, sync_version, metadata_json FROM capture_sources ORDER BY started_at_ms, id",
-            )?;
+        let visible =
+            crate::provider_files::capture_source_material_visible_predicate("capture_sources");
+        let mut stmt = self.conn.prepare(&format!(
+                "SELECT id, kind, provider, machine_id, process_id, cwd, raw_source_path, source_format, source_root, source_identity, external_session_id, started_at_ms, ended_at_ms, fidelity, visibility, sync_state, sync_version, metadata_json FROM capture_sources WHERE {visible} ORDER BY started_at_ms, id",
+            ))?;
         let rows = stmt.query_map([], capture_source_from_row)?;
         collect_rows(rows)
     }
 
     pub fn capture_source_count(&self) -> Result<usize> {
-        let count: i64 =
-            self.conn
-                .query_row("SELECT COUNT(*) FROM capture_sources", [], |row| row.get(0))?;
+        let visible =
+            crate::provider_files::capture_source_material_visible_predicate("capture_sources");
+        let count: i64 = self.conn.query_row(
+            &format!("SELECT COUNT(*) FROM capture_sources WHERE {visible}"),
+            [],
+            |row| row.get(0),
+        )?;
         Ok(count as usize)
     }
 
@@ -97,9 +110,11 @@ impl Store {
         provider: CaptureProvider,
         external_session_id: &str,
     ) -> Result<Option<CaptureSource>> {
+        let visible =
+            crate::provider_files::capture_source_material_visible_predicate("capture_sources");
         self.conn
                 .query_row(
-                    "SELECT id, kind, provider, machine_id, process_id, cwd, raw_source_path, source_format, source_root, source_identity, external_session_id, started_at_ms, ended_at_ms, fidelity, visibility, sync_state, sync_version, metadata_json FROM capture_sources WHERE provider = ?1 AND external_session_id = ?2 ORDER BY started_at_ms DESC LIMIT 1",
+                    &format!("SELECT id, kind, provider, machine_id, process_id, cwd, raw_source_path, source_format, source_root, source_identity, external_session_id, started_at_ms, ended_at_ms, fidelity, visibility, sync_state, sync_version, metadata_json FROM capture_sources WHERE provider = ?1 AND external_session_id = ?2 AND {visible} ORDER BY started_at_ms DESC LIMIT 1"),
                     params![provider.as_str(), external_session_id],
                     capture_source_from_row,
                 )
@@ -108,22 +123,29 @@ impl Store {
     }
 
     pub fn has_provider_data(&self, provider: CaptureProvider) -> Result<bool> {
+        let session_visible = crate::provider_files::session_material_visible_predicate("sessions");
+        let source_visible =
+            crate::provider_files::capture_source_material_visible_predicate("capture_sources");
         let exists = self.conn.query_row(
-            r#"
+            &format!(
+                r#"
                 SELECT
                     EXISTS(
                         SELECT 1
                         FROM sessions
                         WHERE provider = ?1
+                          AND {session_visible}
                         LIMIT 1
                     )
                     OR EXISTS(
                         SELECT 1
                         FROM capture_sources
                         WHERE provider = ?1
+                          AND {source_visible}
                         LIMIT 1
                     )
-                "#,
+                "#
+            ),
             params![provider.as_str()],
             |row| row.get::<_, i64>(0),
         )?;

@@ -21,12 +21,36 @@ impl Store {
         source_root: &str,
         inventory_generation: u64,
     ) -> Result<bool> {
-        self.import_inventory_generation_is_current(
-            provider,
-            source_root,
-            "catalog_sessions",
-            inventory_generation,
-        )
+        let effective_publication =
+            crate::provider_files::effective_provider_file_publication_predicate("publication");
+        self.conn
+            .query_row(
+                &format!(
+                    r#"
+                    SELECT current_generation = ?4
+                       AND NOT EXISTS (
+                            SELECT 1
+                            FROM provider_file_publications AS publication
+                            WHERE publication.provider = ?1
+                              AND publication.inventory_family = ?3
+                              AND publication.inventory_source_root = ?2
+                              AND ({effective_publication})
+                       )
+                    FROM import_inventory_generations
+                    WHERE provider = ?1 AND source_root = ?2 AND inventory_family = ?3
+                    "#
+                ),
+                params![
+                    provider.as_str(),
+                    source_root,
+                    "catalog_sessions",
+                    capped_i64(inventory_generation),
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(|current| current.unwrap_or(false))
+            .map_err(StoreError::from)
     }
 
     pub fn catalog_inventory_generation_is_complete(
@@ -35,11 +59,22 @@ impl Store {
         source_root: &str,
         inventory_generation: u64,
     ) -> Result<bool> {
+        let effective_publication =
+            crate::provider_files::effective_provider_file_publication_predicate("publication");
         self.conn
             .query_row(
-                "SELECT current_generation = ?4 AND completed_generation = ?4\n\
+                &format!(
+                    "SELECT current_generation = ?4 AND completed_generation = ?4\n\
+                         AND NOT EXISTS (\n\
+                            SELECT 1 FROM provider_file_publications AS publication\n\
+                            WHERE publication.provider = ?1\n\
+                              AND publication.inventory_source_root = ?2\n\
+                              AND publication.inventory_family = ?3\n\
+                              AND ({effective_publication})\n\
+                         )\n\
                  FROM import_inventory_generations\n\
-                 WHERE provider = ?1 AND source_root = ?2 AND inventory_family = ?3",
+                 WHERE provider = ?1 AND source_root = ?2 AND inventory_family = ?3"
+                ),
                 params![
                     provider.as_str(),
                     source_root,
@@ -59,6 +94,9 @@ impl Store {
         source_root: &str,
         inventory_generation: u64,
     ) -> Result<bool> {
+        let visible = crate::provider_files::catalog_material_visible_predicate("catalog_sessions");
+        let effective_publication =
+            crate::provider_files::effective_provider_file_publication_predicate("publication");
         self.conn
             .query_row(
                 format!(
@@ -67,7 +105,15 @@ impl Store {
                             AND NOT EXISTS (\n\
                                 SELECT 1 FROM catalog_sessions\n\
                                 WHERE provider = ?1 AND source_root = ?2 AND is_stale = 0\n\
+                                  AND {visible}\n\
                                   AND {}\n\
+                            )\n\
+                            AND NOT EXISTS (\n\
+                                SELECT 1 FROM provider_file_publications AS publication\n\
+                                WHERE publication.provider = ?1\n\
+                                  AND publication.inventory_source_root = ?2\n\
+                                  AND publication.inventory_family = ?3\n\
+                                  AND ({effective_publication})\n\
                             )\n\
                      FROM import_inventory_generations\n\
                      WHERE provider = ?1 AND source_root = ?2 AND inventory_family = ?3",
@@ -93,11 +139,22 @@ impl Store {
         source_root: &str,
         inventory_generation: u64,
     ) -> Result<bool> {
+        let effective_publication =
+            crate::provider_files::effective_provider_file_publication_predicate("publication");
         let changed = self.conn.execute(
-            "UPDATE import_inventory_generations\n\
+            &format!(
+                "UPDATE import_inventory_generations\n\
              SET completed_generation = ?4\n\
              WHERE provider = ?1 AND source_root = ?2 AND inventory_family = ?3\n\
-               AND current_generation = ?4",
+               AND current_generation = ?4\n\
+               AND NOT EXISTS (\n\
+                    SELECT 1 FROM provider_file_publications AS publication\n\
+                    WHERE publication.provider = ?1\n\
+                      AND publication.inventory_source_root = ?2\n\
+                      AND publication.inventory_family = ?3\n\
+                      AND ({effective_publication})\n\
+               )"
+            ),
             params![
                 provider.as_str(),
                 source_root,
@@ -106,31 +163,6 @@ impl Store {
             ],
         )?;
         Ok(changed == 1)
-    }
-
-    fn import_inventory_generation_is_current(
-        &self,
-        provider: CaptureProvider,
-        source_root: &str,
-        inventory_family: &str,
-        inventory_generation: u64,
-    ) -> Result<bool> {
-        self.conn
-            .query_row(
-                "SELECT current_generation = ?4\n\
-                 FROM import_inventory_generations\n\
-                 WHERE provider = ?1 AND source_root = ?2 AND inventory_family = ?3",
-                params![
-                    provider.as_str(),
-                    source_root,
-                    inventory_family,
-                    capped_i64(inventory_generation)
-                ],
-                |row| row.get(0),
-            )
-            .optional()
-            .map(|current| current.unwrap_or(false))
-            .map_err(StoreError::from)
     }
 
     fn allocate_import_inventory_generation(
@@ -248,6 +280,16 @@ impl Store {
                          AND catalog_sessions.file_size_bytes = excluded.file_size_bytes
                          AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
                         THEN catalog_sessions.indexed_status
+                        WHEN excluded.file_size_bytes > catalog_sessions.file_size_bytes
+                         AND catalog_sessions.provider IS excluded.provider
+                         AND catalog_sessions.source_format IS excluded.source_format
+                         AND catalog_sessions.source_root IS excluded.source_root
+                         AND catalog_sessions.import_revision = excluded.import_revision
+                         AND catalog_sessions.indexed_status = 'completed_with_rejections'
+                         AND catalog_sessions.indexed_file_size_bytes = catalog_sessions.file_size_bytes
+                         AND catalog_sessions.indexed_file_modified_at_ms = catalog_sessions.file_modified_at_ms
+                         AND catalog_sessions.indexed_import_revision = catalog_sessions.import_revision
+                        THEN catalog_sessions.indexed_status
                         ELSE 'pending'
                     END,
                     indexed_error = CASE
@@ -257,6 +299,16 @@ impl Store {
                          AND catalog_sessions.import_revision = excluded.import_revision
                          AND catalog_sessions.file_size_bytes = excluded.file_size_bytes
                          AND catalog_sessions.file_modified_at_ms = excluded.file_modified_at_ms
+                        THEN catalog_sessions.indexed_error
+                        WHEN excluded.file_size_bytes > catalog_sessions.file_size_bytes
+                         AND catalog_sessions.provider IS excluded.provider
+                         AND catalog_sessions.source_format IS excluded.source_format
+                         AND catalog_sessions.source_root IS excluded.source_root
+                         AND catalog_sessions.import_revision = excluded.import_revision
+                         AND catalog_sessions.indexed_status = 'completed_with_rejections'
+                         AND catalog_sessions.indexed_file_size_bytes = catalog_sessions.file_size_bytes
+                         AND catalog_sessions.indexed_file_modified_at_ms = catalog_sessions.file_modified_at_ms
+                         AND catalog_sessions.indexed_import_revision = catalog_sessions.import_revision
                         THEN catalog_sessions.indexed_error
                         ELSE NULL
                     END,
@@ -448,9 +500,10 @@ impl Store {
         provider: CaptureProvider,
         source_root: &str,
     ) -> Result<Vec<CatalogSession>> {
+        let visible = crate::provider_files::catalog_material_visible_predicate("catalog_sessions");
         let mut stmt = self.conn.prepare(
             format!(
-                "{} WHERE provider = ?1 AND source_root = ?2",
+                "{} WHERE provider = ?1 AND source_root = ?2 AND {visible}",
                 catalog_session_select_sql("")
             )
             .as_str(),
@@ -467,15 +520,19 @@ impl Store {
         provider: CaptureProvider,
         source_root: &str,
     ) -> Result<usize> {
+        let visible = crate::provider_files::catalog_material_visible_predicate("catalog_sessions");
         self.conn
             .query_row(
-                r#"
+                &format!(
+                    r#"
                     SELECT COUNT(*)
                     FROM catalog_sessions
                     WHERE provider = ?1
                       AND source_root = ?2
                       AND is_stale != 0
-                    "#,
+                      AND {visible}
+                    "#
+                ),
                 params![provider.as_str(), source_root],
                 |row| row.get::<_, usize>(0),
             )

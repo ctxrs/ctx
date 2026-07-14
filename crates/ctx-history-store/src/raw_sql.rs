@@ -103,12 +103,19 @@ impl RawSqlValue {
 
 impl Store {
     pub fn raw_sql_query(&self, sql: &str, options: RawSqlOptions) -> Result<RawSqlResult> {
+        crate::connection::with_read_transaction(&self.conn, || {
+            self.raw_sql_query_inner(sql, options)
+        })
+    }
+
+    fn raw_sql_query_inner(&self, sql: &str, options: RawSqlOptions) -> Result<RawSqlResult> {
         let sql = sql.trim();
         if sql.is_empty() {
             return Err(StoreError::RawSqlEmpty);
         }
         validate_raw_sql_options(&options)?;
         validate_raw_sql_statement_bytes(sql, &options)?;
+        crate::provider_files::ensure_no_provider_file_publications(&self.conn)?;
         reject_sql_tail(&self.conn, sql)?;
         let _limits = RawSqlLimitGuard::apply(&self.conn, &options)?;
 
