@@ -20,6 +20,8 @@ const MAX_SUPER_JOURNAL_NAME_BYTES: u64 = 64 * 1024;
 pub(super) const JOURNAL_MAGIC: [u8; 8] = [0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7];
 const WAL_CHURN_REASON: &str = "SQLite WAL has an incomplete or changing valid generation";
 const WAL_RESOURCE_REASON: &str = "SQLite WAL valid prefix exceeds the snapshot resource ceiling";
+const WAL_HEADER_CHECKSUM_REASON: &str = "SQLite WAL header checksum is invalid";
+const WAL_FRAME_CHECKSUM_REASON: &str = "SQLite WAL frame checksum is invalid";
 const SUPER_JOURNAL_REASON: &str =
     "SQLite rollback journal belongs to an unsupported multi-database transaction";
 
@@ -134,31 +136,66 @@ impl SqliteSourceGeneration {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SqliteCorruptObservation {
+    path: PathBuf,
+    reason: &'static str,
+    fingerprint: Vec<u8>,
+}
+
+impl SqliteCorruptObservation {
+    fn into_error(self) -> io::Error {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{}: {}", self.reason, self.path.display()),
+        )
+    }
+}
+
+enum SqliteGenerationObservation {
+    Generation(Box<SqliteSourceGeneration>),
+    Corrupt(SqliteCorruptObservation),
+}
+
 pub fn observe_sqlite_source_generation(path: &Path) -> io::Result<SqliteSourceGeneration> {
     let mut retryable_error = None;
     let mut stable_invalid_error = None;
     let mut stable_not_found_error = None;
+    let mut previous_corruption = None;
     let mut invalid_attempts = 0;
     let mut not_found_attempts = 0;
     for _ in 0..SQLITE_GENERATION_MAX_ATTEMPTS {
         let before = match observe_generation_once(path) {
-            Ok(generation) => generation,
+            Ok(SqliteGenerationObservation::Generation(generation)) => {
+                previous_corruption = None;
+                *generation
+            }
+            Ok(SqliteGenerationObservation::Corrupt(corruption)) => {
+                if previous_corruption.as_ref() == Some(&corruption) {
+                    return Err(corruption.into_error());
+                }
+                previous_corruption = Some(corruption);
+                continue;
+            }
             Err(error)
                 if matches!(
                     error.kind(),
                     io::ErrorKind::WouldBlock | io::ErrorKind::UnexpectedEof
                 ) =>
             {
+                previous_corruption = None;
                 let error = retryable_observation_error(error);
                 retryable_error = Some(error);
                 continue;
             }
             Err(error) if error.kind() == io::ErrorKind::InvalidInput => {
+                previous_corruption = None;
                 stable_invalid_error = Some(error);
                 invalid_attempts += 1;
                 continue;
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                previous_corruption = None;
                 stable_not_found_error = Some(error);
                 not_found_attempts += 1;
                 continue;
@@ -166,23 +203,36 @@ pub fn observe_sqlite_source_generation(path: &Path) -> io::Result<SqliteSourceG
             Err(error) => return Err(error),
         };
         let after = match observe_generation_once(path) {
-            Ok(generation) => generation,
+            Ok(SqliteGenerationObservation::Generation(generation)) => {
+                previous_corruption = None;
+                *generation
+            }
+            Ok(SqliteGenerationObservation::Corrupt(corruption)) => {
+                if previous_corruption.as_ref() == Some(&corruption) {
+                    return Err(corruption.into_error());
+                }
+                previous_corruption = Some(corruption);
+                continue;
+            }
             Err(error)
                 if matches!(
                     error.kind(),
                     io::ErrorKind::WouldBlock | io::ErrorKind::UnexpectedEof
                 ) =>
             {
+                previous_corruption = None;
                 let error = retryable_observation_error(error);
                 retryable_error = Some(error);
                 continue;
             }
             Err(error) if error.kind() == io::ErrorKind::InvalidInput => {
+                previous_corruption = None;
                 stable_invalid_error = Some(error);
                 invalid_attempts += 1;
                 continue;
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                previous_corruption = None;
                 stable_not_found_error = Some(error);
                 not_found_attempts += 1;
                 continue;
@@ -236,12 +286,35 @@ fn retryable_observation_error(error: io::Error) -> io::Error {
     }
 }
 
-fn observe_generation_once(path: &Path) -> io::Result<SqliteSourceGeneration> {
-    Ok(SqliteSourceGeneration {
-        main: observe_required_file(path, SentinelKind::Main)?,
-        wal: observe_optional_file(&sidecar_path(path, "-wal"), SentinelKind::Wal)?,
-        journal: observe_optional_file(&sidecar_path(path, "-journal"), SentinelKind::Journal)?,
-    })
+fn observe_generation_once(path: &Path) -> io::Result<SqliteGenerationObservation> {
+    let main = observe_required_file(path, SentinelKind::Main)?;
+    let wal = match observe_optional_file(&sidecar_path(path, "-wal"), SentinelKind::Wal)? {
+        Some(FileObservation::File(file)) => Some(file),
+        Some(FileObservation::Corrupt(mut corruption)) => {
+            corruption.fingerprint.extend_from_slice(b"sqlite-main-v1");
+            corruption
+                .fingerprint
+                .extend_from_slice(&main.len.to_le_bytes());
+            corruption
+                .fingerprint
+                .extend_from_slice(&main.modified_secs.to_le_bytes());
+            corruption
+                .fingerprint
+                .extend_from_slice(&main.modified_nanos.to_le_bytes());
+            corruption.fingerprint.extend_from_slice(&main.sentinel);
+            return Ok(SqliteGenerationObservation::Corrupt(corruption));
+        }
+        None => None,
+    };
+    let journal =
+        match observe_optional_file(&sidecar_path(path, "-journal"), SentinelKind::Journal)? {
+            Some(FileObservation::File(file)) => Some(file),
+            Some(FileObservation::Corrupt(corruption)) => return Err(corruption.into_error()),
+            None => None,
+        };
+    Ok(SqliteGenerationObservation::Generation(Box::new(
+        SqliteSourceGeneration { main, wal, journal },
+    )))
 }
 
 #[derive(Clone, Copy)]
@@ -249,6 +322,11 @@ enum SentinelKind {
     Main,
     Wal,
     Journal,
+}
+
+enum FileObservation {
+    File(SqliteObservedFile),
+    Corrupt(SqliteCorruptObservation),
 }
 
 fn observe_required_file(path: &Path, kind: SentinelKind) -> io::Result<SqliteObservedFile> {
@@ -262,13 +340,13 @@ fn observe_required_file(path: &Path, kind: SentinelKind) -> io::Result<SqliteOb
         ));
     }
     validate_open_source_file(&file)?;
-    observe_file(path, file, metadata, kind)
+    match observe_file(path, file, metadata, kind)? {
+        FileObservation::File(file) => Ok(file),
+        FileObservation::Corrupt(corruption) => Err(corruption.into_error()),
+    }
 }
 
-fn observe_optional_file(
-    path: &Path,
-    kind: SentinelKind,
-) -> io::Result<Option<SqliteObservedFile>> {
+fn observe_optional_file(path: &Path, kind: SentinelKind) -> io::Result<Option<FileObservation>> {
     run_observation_test_hook(path, SqliteObservationTestPhase::BeforeOpen);
     let file = match open_source_file_no_follow(path) {
         Ok(file) => file,
@@ -291,21 +369,43 @@ fn observe_file(
     mut file: File,
     metadata: Metadata,
     kind: SentinelKind,
-) -> io::Result<SqliteObservedFile> {
+) -> io::Result<FileObservation> {
     let modified_at = metadata.modified().unwrap_or(UNIX_EPOCH);
     let modified = modified_at.duration_since(UNIX_EPOCH).unwrap_or_default();
     run_observation_test_hook(path, SqliteObservationTestPhase::AfterMetadata);
-    let (sentinel, snapshot_relevant, snapshot_len, deferred_reason) = match kind {
-        SentinelKind::Main => (
+    let sentinel_observation = match kind {
+        SentinelKind::Main => WalSentinel::Observed(
             main_header_sentinel(&mut file, &metadata)?,
             false,
             metadata.len(),
             None,
         ),
         SentinelKind::Wal => wal_sentinel(path, &mut file, metadata.len())?,
-        SentinelKind::Journal => journal_sentinel(path, &mut file, metadata.len())?,
+        SentinelKind::Journal => {
+            let (sentinel, snapshot_relevant, snapshot_len, deferred_reason) =
+                journal_sentinel(path, &mut file, metadata.len())?;
+            WalSentinel::Observed(sentinel, snapshot_relevant, snapshot_len, deferred_reason)
+        }
     };
-    Ok(SqliteObservedFile {
+    let (sentinel, snapshot_relevant, snapshot_len, deferred_reason) = match sentinel_observation {
+        WalSentinel::Observed(sentinel, snapshot_relevant, snapshot_len, deferred_reason) => {
+            (sentinel, snapshot_relevant, snapshot_len, deferred_reason)
+        }
+        WalSentinel::Corrupt {
+            reason,
+            mut fingerprint,
+        } => {
+            fingerprint.extend_from_slice(&metadata.len().to_le_bytes());
+            fingerprint.extend_from_slice(&modified.as_secs().to_le_bytes());
+            fingerprint.extend_from_slice(&modified.subsec_nanos().to_le_bytes());
+            return Ok(FileObservation::Corrupt(SqliteCorruptObservation {
+                path: path.to_path_buf(),
+                reason,
+                fingerprint,
+            }));
+        }
+    };
+    Ok(FileObservation::File(SqliteObservedFile {
         path: path.to_path_buf(),
         source_file: Arc::new(file),
         len: metadata.len(),
@@ -316,7 +416,7 @@ fn observe_file(
         snapshot_relevant,
         snapshot_len,
         deferred_reason,
-    })
+    }))
 }
 
 #[cfg(unix)]
@@ -411,16 +511,208 @@ fn normalize_no_follow_open_error(error: io::Error) -> io::Error {
 
 #[cfg(windows)]
 fn open_source_file_no_follow(path: &Path) -> io::Result<File> {
-    use std::os::windows::fs::OpenOptionsExt;
+    use std::{
+        ffi::OsString,
+        os::windows::fs::OpenOptionsExt,
+        path::{Component, Prefix},
+    };
     use windows_sys::Win32::Storage::FileSystem::{
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, SYNCHRONIZE,
     };
 
-    std::fs::OpenOptions::new()
-        .read(true)
+    let absolute = std::path::absolute(path)?;
+    let mut components = absolute.components();
+    let prefix = match components.next() {
+        Some(Component::Prefix(prefix))
+            if matches!(
+                prefix.kind(),
+                Prefix::Disk(_)
+                    | Prefix::VerbatimDisk(_)
+                    | Prefix::UNC(_, _)
+                    | Prefix::VerbatimUNC(_, _)
+            ) =>
+        {
+            prefix
+        }
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "SQLite source path has an unsupported Windows prefix",
+            ))
+        }
+    };
+    let root_component = match components.next() {
+        Some(Component::RootDir) => Component::RootDir,
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "SQLite source path is not fully qualified",
+            ))
+        }
+    };
+    let mut root_path = PathBuf::from(prefix.as_os_str());
+    root_path.push(root_component.as_os_str());
+    let names = components
+        .map(|component| match component {
+            Component::Normal(name) => Ok(OsString::from(name)),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "SQLite source path contains an unsupported Windows component",
+            )),
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    let Some((file_name, parents)) = names.split_last() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "SQLite source path has no file component",
+        ));
+    };
+
+    let mut options = std::fs::OpenOptions::new();
+    options
+        .access_mode(FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+    let mut directory = options.open(&root_path)?;
+    validate_windows_path_component(&directory, true)?;
+
+    let mut opened_path = root_path;
+    for component in parents {
+        let next = open_windows_component(&directory, component, true)?;
+        validate_windows_path_component(&next, true)?;
+        directory = next;
+        opened_path.push(component);
+        run_observation_test_hook(&opened_path, SqliteObservationTestPhase::AfterParentOpen);
+    }
+
+    let file = open_windows_component(&directory, file_name, false)?;
+    validate_windows_path_component(&file, false)?;
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn open_windows_component(
+    parent: &File,
+    name: &std::ffi::OsStr,
+    directory: bool,
+) -> io::Result<File> {
+    use std::{
+        mem,
+        os::windows::{ffi::OsStrExt, io::AsRawHandle, io::FromRawHandle},
+        ptr,
+    };
+    use windows_sys::{
+        Wdk::{
+            Foundation::OBJECT_ATTRIBUTES,
+            Storage::FileSystem::{
+                NtCreateFile, FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_OPEN,
+                FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
+            },
+        },
+        Win32::{
+            Foundation::{
+                RtlNtStatusToDosError, HANDLE, OBJ_CASE_INSENSITIVE, STATUS_FILE_IS_A_DIRECTORY,
+                STATUS_NOT_A_DIRECTORY, STATUS_REPARSE_POINT_ENCOUNTERED, UNICODE_STRING,
+            },
+            Storage::FileSystem::{
+                FILE_GENERIC_READ, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+                FILE_SHARE_WRITE, FILE_TRAVERSE, SYNCHRONIZE,
+            },
+            System::IO::IO_STATUS_BLOCK,
+        },
+    };
+
+    let mut name = name.encode_wide().collect::<Vec<_>>();
+    let byte_len = name
+        .len()
+        .checked_mul(mem::size_of::<u16>())
+        .and_then(|len| u16::try_from(len).ok())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "SQLite source path component is too long for Windows",
+            )
+        })?;
+    if name.is_empty() || name.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "SQLite source path contains an empty component or interior NUL byte",
+        ));
+    }
+    let object_name = UNICODE_STRING {
+        Length: byte_len,
+        MaximumLength: byte_len,
+        Buffer: name.as_mut_ptr(),
+    };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: parent.as_raw_handle() as HANDLE,
+        ObjectName: &object_name,
+        Attributes: OBJ_CASE_INSENSITIVE,
+        SecurityDescriptor: ptr::null(),
+        SecurityQualityOfService: ptr::null(),
+    };
+    let mut handle: HANDLE = ptr::null_mut();
+    let mut status_block = IO_STATUS_BLOCK::default();
+    let desired_access = if directory {
+        FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE
+    } else {
+        FILE_GENERIC_READ
+    };
+    let create_options = FILE_OPEN_REPARSE_POINT
+        | FILE_SYNCHRONOUS_IO_NONALERT
+        | if directory {
+            FILE_DIRECTORY_FILE
+        } else {
+            FILE_NON_DIRECTORY_FILE
+        };
+    let status = unsafe {
+        NtCreateFile(
+            &mut handle,
+            desired_access,
+            &attributes,
+            &mut status_block,
+            ptr::null(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            FILE_OPEN,
+            create_options,
+            ptr::null(),
+            0,
+        )
+    };
+    if status < 0 {
+        if matches!(
+            status,
+            STATUS_REPARSE_POINT_ENCOUNTERED | STATUS_NOT_A_DIRECTORY | STATUS_FILE_IS_A_DIRECTORY
+        ) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "SQLite source path contains a reparse point or invalid component type",
+            ));
+        }
+        return Err(io::Error::from_raw_os_error(unsafe {
+            RtlNtStatusToDosError(status) as i32
+        }));
+    }
+    Ok(unsafe { File::from_raw_handle(handle) })
+}
+
+#[cfg(windows)]
+fn validate_windows_path_component(file: &File, directory: bool) -> io::Result<()> {
+    let metadata = file.metadata()?;
+    if metadata.file_type().is_dir() != directory {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            if directory {
+                "SQLite source parent component is not a directory"
+            } else {
+                "SQLite source is not a regular file"
+            },
+        ));
+    }
+    validate_open_source_file(file)
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -456,7 +748,7 @@ fn validate_open_source_file(file: &File) -> io::Result<()> {
     if attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "SQLite source path is a reparse point",
+            "SQLite source path component is a reparse point",
         ));
     }
     Ok(())
@@ -564,18 +856,35 @@ fn append_main_file_identity(
     Ok(())
 }
 
-fn wal_sentinel(
-    path: &Path,
-    file: &mut File,
-    len: u64,
-) -> io::Result<(Vec<u8>, bool, u64, Option<&'static str>)> {
+enum WalSentinel {
+    Observed(Vec<u8>, bool, u64, Option<&'static str>),
+    Corrupt {
+        reason: &'static str,
+        fingerprint: Vec<u8>,
+    },
+}
+
+fn wal_sentinel(path: &Path, file: &mut File, len: u64) -> io::Result<WalSentinel> {
     let header = read_prefix(file, WAL_HEADER_BYTES)?;
     let mut sentinel = b"sqlite-wal-v2".to_vec();
     sentinel.extend_from_slice(&header);
     let wal_header = match parse_wal_header(&header) {
         WalHeaderState::Valid(header) => header,
-        WalHeaderState::Ignore => return Ok((sentinel, false, 0, None)),
-        WalHeaderState::Defer => return Ok((sentinel, false, 0, Some(WAL_CHURN_REASON))),
+        WalHeaderState::Ignore => return Ok(WalSentinel::Observed(sentinel, false, 0, None)),
+        WalHeaderState::Defer => {
+            return Ok(WalSentinel::Observed(
+                sentinel,
+                false,
+                0,
+                Some(WAL_CHURN_REASON),
+            ))
+        }
+        WalHeaderState::Corrupt(reason) => {
+            return Ok(WalSentinel::Corrupt {
+                reason,
+                fingerprint: sentinel,
+            })
+        }
     };
     let frame_size = u64::from(wal_header.page_size) + WAL_FRAME_HEADER_BYTES as u64;
     let physical_frames = len.saturating_sub(WAL_HEADER_BYTES as u64) / frame_size;
@@ -586,6 +895,7 @@ fn wal_sentinel(
     let mut last_commit = None;
     let mut stale_suffix = false;
     let mut churning_suffix = false;
+    let mut corrupt_suffix = None;
     for frame in 1..=physical_frames {
         let offset = wal_frame_offset(frame, frame_size)?;
         run_observation_test_hook(path, SqliteObservationTestPhase::BeforeWalFrameRead);
@@ -594,9 +904,7 @@ fn wal_sentinel(
             stale_suffix = true;
             break;
         }
-        if let Err(error) = wal_frame_end_within_snapshot_ceiling(offset, frame_size) {
-            return Err(error);
-        }
+        wal_frame_end_within_snapshot_ceiling(offset, frame_size)?;
         file.read_exact(&mut page)?;
         if be_u32(&frame_header[0..4]) == 0 {
             churning_suffix = true;
@@ -605,7 +913,12 @@ fn wal_sentinel(
         checksum = wal_checksum(wal_header.checksum_order, &frame_header[..8], checksum);
         checksum = wal_checksum(wal_header.checksum_order, &page, checksum);
         if checksum != [be_u32(&frame_header[16..20]), be_u32(&frame_header[20..24])] {
-            churning_suffix = true;
+            let mut fingerprint = sentinel.clone();
+            fingerprint.extend_from_slice(&frame.to_le_bytes());
+            fingerprint.extend_from_slice(&frame_header);
+            fingerprint.extend_from_slice(&checksum[0].to_le_bytes());
+            fingerprint.extend_from_slice(&checksum[1].to_le_bytes());
+            corrupt_suffix = Some(fingerprint);
             break;
         }
         valid_frames = frame;
@@ -615,17 +928,28 @@ fn wal_sentinel(
     }
 
     sentinel.extend_from_slice(&valid_frames.to_le_bytes());
-    if churning_suffix || (trailing_bytes != 0 && !stale_suffix) {
-        return Ok((sentinel, false, 0, Some(WAL_CHURN_REASON)));
-    }
     if let Some((frame, checksum)) = last_commit {
         sentinel.extend_from_slice(&frame.to_le_bytes());
         sentinel.extend_from_slice(&checksum[0].to_le_bytes());
         sentinel.extend_from_slice(&checksum[1].to_le_bytes());
         let committed_len = wal_frame_offset(frame + 1, frame_size)?;
-        return Ok((sentinel, true, committed_len, None));
+        return Ok(WalSentinel::Observed(sentinel, true, committed_len, None));
     }
-    Ok((sentinel, false, 0, None))
+    if let Some(fingerprint) = corrupt_suffix {
+        return Ok(WalSentinel::Corrupt {
+            reason: WAL_FRAME_CHECKSUM_REASON,
+            fingerprint,
+        });
+    }
+    if churning_suffix || (trailing_bytes != 0 && !stale_suffix) {
+        return Ok(WalSentinel::Observed(
+            sentinel,
+            false,
+            0,
+            Some(WAL_CHURN_REASON),
+        ));
+    }
+    Ok(WalSentinel::Observed(sentinel, false, 0, None))
 }
 
 #[derive(Clone, Copy)]
@@ -640,6 +964,7 @@ enum WalHeaderState {
     Valid(WalHeader),
     Ignore,
     Defer,
+    Corrupt(&'static str),
 }
 
 #[derive(Clone, Copy)]
@@ -672,7 +997,7 @@ fn parse_wal_header(header: &[u8]) -> WalHeaderState {
     }
     let checksum = wal_checksum(checksum_order, &header[..24], [0, 0]);
     if checksum != [be_u32(&header[24..28]), be_u32(&header[28..32])] {
-        return WalHeaderState::Defer;
+        return WalHeaderState::Corrupt(WAL_HEADER_CHECKSUM_REASON);
     }
     WalHeaderState::Valid(WalHeader {
         page_size,
@@ -907,6 +1232,8 @@ pub(crate) fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SqliteObservationTestPhase {
     BeforeOpen,
+    #[cfg(windows)]
+    AfterParentOpen,
     AfterMetadata,
     BeforeWalFrameRead,
     BeforeJournalTailRead,
@@ -914,10 +1241,12 @@ pub(crate) enum SqliteObservationTestPhase {
 }
 
 #[cfg(test)]
+type SqliteObservationTestHook = Box<dyn FnMut(&Path, SqliteObservationTestPhase)>;
+
+#[cfg(test)]
 thread_local! {
-    static OBSERVATION_TEST_HOOK: std::cell::RefCell<
-        Option<Box<dyn FnMut(&Path, SqliteObservationTestPhase)>>
-    > = std::cell::RefCell::new(None);
+    static OBSERVATION_TEST_HOOK: std::cell::RefCell<Option<SqliteObservationTestHook>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -990,12 +1319,13 @@ mod tests {
     }
 
     #[test]
-    fn real_wal_rejects_bad_header_checksum_salt_frame_checksum_and_partial_commit() {
+    fn real_wal_classifies_stable_corruption_stale_suffix_and_partial_frame() {
         let fixture = real_wal_fixture(512);
         let original = fs::read(sidecar_path(&fixture.db, "-wal")).unwrap();
         assert!(original.len() > WAL_HEADER_BYTES + WAL_FRAME_HEADER_BYTES);
 
-        let corruptions: [(&str, fn(&mut Vec<u8>)); 4] = [
+        type WalCorruptionMutation = (&'static str, fn(&mut Vec<u8>));
+        let corruptions: [WalCorruptionMutation; 4] = [
             ("header-checksum", |bytes: &mut Vec<u8>| bytes[24] ^= 0x01),
             ("salt", |bytes: &mut Vec<u8>| bytes[40] ^= 0x01),
             ("frame-checksum", |bytes: &mut Vec<u8>| bytes[48] ^= 0x01),
@@ -1015,9 +1345,66 @@ mod tests {
                 assert!(generation.deferred_reason().is_none(), "{label}");
             } else {
                 let error = observe_sqlite_source_generation(&db).unwrap_err();
-                assert_eq!(error.kind(), io::ErrorKind::WouldBlock, "{label}");
+                let expected = if label == "partial-frame" {
+                    io::ErrorKind::WouldBlock
+                } else {
+                    io::ErrorKind::InvalidData
+                };
+                assert_eq!(error.kind(), expected, "{label}");
             }
         }
+    }
+
+    #[test]
+    fn transient_bad_wal_header_checksum_retries_when_the_generation_is_repaired() {
+        let fixture = real_wal_fixture(512);
+        let original = fs::read(sidecar_path(&fixture.db, "-wal")).unwrap();
+        let db = fixture.temp.path().join("transient-header-checksum.db");
+        fs::copy(&fixture.db, &db).unwrap();
+        let wal = sidecar_path(&db, "-wal");
+        let mut corrupt = original.clone();
+        corrupt[24] ^= 0x01;
+        fs::write(&wal, corrupt).unwrap();
+        let wal_opens = Rc::new(Cell::new(0_usize));
+        let wal_opens_for_hook = Rc::clone(&wal_opens);
+        let wal_for_hook = wal.clone();
+        let _hook = install_sqlite_observation_test_hook(move |path, phase| {
+            if path != wal_for_hook || phase != SqliteObservationTestPhase::BeforeOpen {
+                return;
+            }
+            let opens = wal_opens_for_hook.get() + 1;
+            wal_opens_for_hook.set(opens);
+            if opens == 2 {
+                fs::write(path, &original).unwrap();
+            }
+        });
+
+        let generation = observe_sqlite_source_generation(&db).unwrap();
+        assert!(wal_opens.get() >= 3);
+        assert!(generation.requires_snapshot());
+    }
+
+    #[test]
+    fn bad_frame_after_committed_wal_prefix_preserves_that_prefix() {
+        let fixture = real_wal_fixture(512);
+        let wal_path = sidecar_path(&fixture.db, "-wal");
+        let committed_prefix_len = fs::metadata(&wal_path).unwrap().len();
+        fixture
+            .writer
+            .execute("UPDATE entries SET value = 'sigma' WHERE id = 1", [])
+            .unwrap();
+        let mut wal = fs::read(&wal_path).unwrap();
+        assert!(wal.len() as u64 > committed_prefix_len);
+        wal[committed_prefix_len as usize + WAL_FRAME_HEADER_BYTES] ^= 0x01;
+
+        let db = fixture.temp.path().join("valid-prefix.db");
+        fs::copy(&fixture.db, &db).unwrap();
+        fs::write(sidecar_path(&db, "-wal"), wal).unwrap();
+        let generation = observe_sqlite_source_generation(&db).unwrap();
+        let observed_wal = generation.wal.as_ref().unwrap();
+        assert!(generation.requires_snapshot());
+        assert_eq!(observed_wal.snapshot_len(), committed_prefix_len);
+        assert!(generation.deferred_reason().is_none());
     }
 
     #[test]
@@ -1216,6 +1603,60 @@ mod tests {
         symlink(&real, &parent_link).unwrap();
         let error = observe_sqlite_source_generation(&parent_link.join("source.db")).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stable_windows_leaf_and_parent_junctions_are_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let db = real.join("source.db");
+        fs::write(&db, b"SQLite format 3\0").unwrap();
+
+        let junction = temp.path().join("junction");
+        create_windows_junction(&junction, &real);
+        let error = observe_sqlite_source_generation(&junction).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        let error = observe_sqlite_source_generation(&junction.join("source.db")).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        fs::remove_dir(&junction).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_component_walk_stays_anchored_across_parent_swap() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        let db = source.join("source.db");
+        fs::write(&db, b"inside").unwrap();
+        let outside = temp.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("source.db"), b"outside").unwrap();
+        let held = temp.path().join("held-source");
+        let swapped = Rc::new(Cell::new(false));
+        let swapped_for_hook = Rc::clone(&swapped);
+        let source_for_hook = source.clone();
+        let held_for_hook = held.clone();
+        let outside_for_hook = outside.clone();
+        let _hook = install_sqlite_observation_test_hook(move |path, phase| {
+            if phase == SqliteObservationTestPhase::AfterParentOpen
+                && path == source_for_hook
+                && !swapped_for_hook.replace(true)
+            {
+                fs::rename(path, &held_for_hook).unwrap();
+                create_windows_junction(path, &outside_for_hook);
+            }
+        });
+
+        let mut file = open_source_file_no_follow(&db).unwrap();
+        let mut contents = String::new();
+        file.read_to_string(&mut contents).unwrap();
+        assert_eq!(contents, "inside");
+        assert!(swapped.get());
+        fs::remove_dir(&source).unwrap();
+        fs::rename(&held, &source).unwrap();
     }
 
     #[test]
@@ -1468,5 +1909,16 @@ mod tests {
         });
         journal.extend_from_slice(&checksum.to_be_bytes());
         journal.extend_from_slice(&JOURNAL_MAGIC);
+    }
+
+    #[cfg(windows)]
+    fn create_windows_junction(link: &Path, target: &Path) {
+        let status = std::process::Command::new("cmd")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .status()
+            .unwrap();
+        assert!(status.success(), "failed to create a Windows junction");
     }
 }

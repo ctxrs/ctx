@@ -152,17 +152,28 @@ impl Deref for ReadOnlySqliteConnection {
 }
 
 pub(crate) fn open_sqlite_readonly_source(path: &Path) -> Result<ReadOnlySqliteConnection> {
-    ensure_regular_provider_transcript_file(path)?;
     open_stable_sqlite_source(path)
+}
+
+fn observe_provider_sqlite_source_generation(path: &Path) -> Result<SqliteSourceGeneration> {
+    match observe_sqlite_source_generation(path) {
+        Ok(generation) => Ok(generation),
+        Err(observation_error) if observation_error.kind() == io::ErrorKind::InvalidInput => {
+            match ensure_regular_provider_transcript_file(path) {
+                Err(error @ CaptureError::InvalidProviderTranscriptPath { .. }) => Err(error),
+                _ => Err(CaptureError::Io(observation_error)),
+            }
+        }
+        Err(error) => Err(CaptureError::Io(error)),
+    }
 }
 
 pub(crate) fn probe_sqlite_readonly_source(
     path: &Path,
     predicate: impl Fn(&Connection) -> rusqlite::Result<bool>,
 ) -> Result<bool> {
-    ensure_regular_provider_transcript_file(path)?;
     for _ in 0..SQLITE_GENERATION_MAX_ATTEMPTS {
-        let before = observe_sqlite_source_generation(path)?;
+        let before = observe_provider_sqlite_source_generation(path)?;
         ensure_supported_sqlite_generation(path, &before)?;
         let connection = if before.requires_snapshot() {
             let Some(snapshot) = copy_stable_sqlite_generation(path, &before)? else {
@@ -177,9 +188,9 @@ pub(crate) fn probe_sqlite_readonly_source(
         };
         let result = predicate(&connection);
         run_probe_test_hook(path);
-        let after = match observe_sqlite_source_generation(path) {
+        let after = match observe_provider_sqlite_source_generation(path) {
             Ok(after) => after,
-            Err(error)
+            Err(CaptureError::Io(error))
                 if matches!(
                     error.kind(),
                     io::ErrorKind::WouldBlock
@@ -189,7 +200,7 @@ pub(crate) fn probe_sqlite_readonly_source(
             {
                 continue
             }
-            Err(error) => return Err(CaptureError::Io(error)),
+            Err(error) => return Err(error),
         };
         if before == after {
             return result.map_err(CaptureError::from);
@@ -222,7 +233,7 @@ fn open_sqlite_immutable_main(path: &Path) -> Result<ReadOnlySqliteConnection> {
 
 fn open_stable_sqlite_source(path: &Path) -> Result<ReadOnlySqliteConnection> {
     for _ in 0..SQLITE_GENERATION_MAX_ATTEMPTS {
-        let before = observe_sqlite_source_generation(path)?;
+        let before = observe_provider_sqlite_source_generation(path)?;
         ensure_supported_sqlite_generation(path, &before)?;
         if before.requires_snapshot() {
             if let Some(snapshot) = copy_stable_sqlite_generation(path, &before)? {
@@ -248,9 +259,9 @@ fn open_generation_checked_immutable_main(
     run_immutable_open_test_hook(path, SqliteImmutableOpenTestPhase::BeforeOpen);
     let connection = open_sqlite_immutable_main(path);
     run_immutable_open_test_hook(path, SqliteImmutableOpenTestPhase::AfterOpen);
-    let after = match observe_sqlite_source_generation(path) {
+    let after = match observe_provider_sqlite_source_generation(path) {
         Ok(after) => after,
-        Err(error)
+        Err(CaptureError::Io(error))
             if matches!(
                 error.kind(),
                 io::ErrorKind::WouldBlock | io::ErrorKind::NotFound | io::ErrorKind::InvalidInput
@@ -258,7 +269,7 @@ fn open_generation_checked_immutable_main(
         {
             return Ok(None)
         }
-        Err(error) => return Err(CaptureError::Io(error)),
+        Err(error) => return Err(error),
     };
     if before != &after {
         return Ok(None);
@@ -326,9 +337,9 @@ fn copy_stable_sqlite_generation(
         }
     }
     run_snapshot_test_hook(path, attempt);
-    let after = match observe_sqlite_source_generation(path) {
+    let after = match observe_provider_sqlite_source_generation(path) {
         Ok(after) => after,
-        Err(error)
+        Err(CaptureError::Io(error))
             if matches!(
                 error.kind(),
                 io::ErrorKind::WouldBlock | io::ErrorKind::NotFound | io::ErrorKind::InvalidInput
@@ -336,7 +347,7 @@ fn copy_stable_sqlite_generation(
         {
             return Ok(None)
         }
-        Err(error) => return Err(CaptureError::Io(error)),
+        Err(error) => return Err(error),
     };
     if before != &after {
         return Ok(None);
@@ -578,18 +589,24 @@ pub(crate) struct SqliteSnapshotTestMetrics {
 }
 
 #[cfg(test)]
+type SqliteSnapshotTestHook = Box<dyn FnMut(&Path, usize)>;
+#[cfg(test)]
+type SqlitePathTestHook = Box<dyn FnMut(&Path)>;
+#[cfg(test)]
+type SqliteImmutableOpenTestHook = Box<dyn FnMut(&Path, SqliteImmutableOpenTestPhase)>;
+
+#[cfg(test)]
 thread_local! {
     static SNAPSHOT_TEST_METRICS: std::cell::Cell<SqliteSnapshotTestMetrics> =
-        std::cell::Cell::new(SqliteSnapshotTestMetrics { attempts: 0, copied_files: 0 });
-    static SNAPSHOT_TEST_HOOK: std::cell::RefCell<Option<Box<dyn FnMut(&Path, usize)>>> =
-        std::cell::RefCell::new(None);
-    static SNAPSHOT_COPY_TEST_HOOK: std::cell::RefCell<Option<Box<dyn FnMut(&Path)>>> =
-        std::cell::RefCell::new(None);
-    static IMMUTABLE_OPEN_TEST_HOOK: std::cell::RefCell<
-        Option<Box<dyn FnMut(&Path, SqliteImmutableOpenTestPhase)>>
-    > = std::cell::RefCell::new(None);
-    static PROBE_TEST_HOOK: std::cell::RefCell<Option<Box<dyn FnMut(&Path)>>> =
-        std::cell::RefCell::new(None);
+        const { std::cell::Cell::new(SqliteSnapshotTestMetrics { attempts: 0, copied_files: 0 }) };
+    static SNAPSHOT_TEST_HOOK: std::cell::RefCell<Option<SqliteSnapshotTestHook>> =
+        const { std::cell::RefCell::new(None) };
+    static SNAPSHOT_COPY_TEST_HOOK: std::cell::RefCell<Option<SqlitePathTestHook>> =
+        const { std::cell::RefCell::new(None) };
+    static IMMUTABLE_OPEN_TEST_HOOK: std::cell::RefCell<Option<SqliteImmutableOpenTestHook>> =
+        const { std::cell::RefCell::new(None) };
+    static PROBE_TEST_HOOK: std::cell::RefCell<Option<SqlitePathTestHook>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -801,9 +818,20 @@ pub(crate) fn opencode_schema_fingerprint(conn: &Connection) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::Cell, fs, io::Write, path::Path, rc::Rc};
+    use std::{
+        cell::Cell,
+        fs,
+        io::{self, Write},
+        path::Path,
+        rc::Rc,
+    };
 
     use rusqlite::{params, types::Value as SqlValue, Connection};
+
+    use crate::provider::sqlite_observation::{
+        install_sqlite_observation_test_hook, SqliteObservationTestPhase,
+        SQLITE_GENERATION_MAX_ATTEMPTS,
+    };
 
     use super::{
         create_private_snapshot_dir_in, create_private_snapshot_file,
@@ -934,6 +962,126 @@ mod tests {
                 copied_files: 2,
             }
         );
+    }
+
+    #[test]
+    fn public_open_recovers_the_last_committed_prefix_before_a_bad_wal_frame() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("valid-prefix.db");
+        let writer = real_wal_writer(&db);
+        let wal = sidecar(&db, "-wal");
+        let committed_prefix_len = fs::metadata(&wal).unwrap().len();
+        writer
+            .execute("UPDATE entries SET value = 'sigma' WHERE id = 1", [])
+            .unwrap();
+        let mut wal_bytes = fs::read(&wal).unwrap();
+        assert!(wal_bytes.len() as u64 > committed_prefix_len);
+        wal_bytes[committed_prefix_len as usize + 24] ^= 0x01;
+        fs::write(&wal, wal_bytes).unwrap();
+
+        let connection = open_sqlite_readonly_source(&db).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT value FROM entries WHERE id = 1", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap(),
+            "omega"
+        );
+    }
+
+    #[test]
+    fn stable_corrupt_wal_is_terminal_on_public_open_and_probe_paths() {
+        for probe in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let db = temp.path().join("corrupt.db");
+            let _writer = real_wal_writer(&db);
+            let wal = sidecar(&db, "-wal");
+            let mut wal_bytes = fs::read(&wal).unwrap();
+            wal_bytes[24] ^= 0x01;
+            fs::write(&wal, wal_bytes).unwrap();
+
+            let result: crate::Result<()> = if probe {
+                probe_sqlite_readonly_source(&db, |_| Ok(true)).map(|_| ())
+            } else {
+                open_sqlite_readonly_source(&db).map(drop)
+            };
+            let error = result.unwrap_err();
+            assert!(matches!(
+                error,
+                crate::CaptureError::Io(ref error)
+                    if error.kind() == io::ErrorKind::InvalidData
+                        && error.to_string().contains("header checksum")
+            ));
+        }
+    }
+
+    #[test]
+    fn public_open_and_probe_retry_a_transiently_missing_required_main() {
+        for probe in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let db = temp.path().join("appearing.db");
+            let opens = Rc::new(Cell::new(0_usize));
+            let opens_for_hook = Rc::clone(&opens);
+            let db_for_hook = db.clone();
+            let _hook = install_sqlite_observation_test_hook(move |path, phase| {
+                if path != db_for_hook || phase != SqliteObservationTestPhase::BeforeOpen {
+                    return;
+                }
+                let count = opens_for_hook.get() + 1;
+                opens_for_hook.set(count);
+                if count == 2 {
+                    write_single_value_db(path, "appeared");
+                }
+            });
+
+            if probe {
+                assert!(probe_sqlite_readonly_source(&db, |conn| {
+                    conn.query_row("SELECT value = 'appeared' FROM entries", [], |row| {
+                        row.get::<_, bool>(0)
+                    })
+                })
+                .unwrap());
+            } else {
+                let connection = open_sqlite_readonly_source(&db).unwrap();
+                assert_eq!(
+                    connection
+                        .query_row("SELECT value FROM entries", [], |row| row
+                            .get::<_, String>(0))
+                        .unwrap(),
+                    "appeared"
+                );
+            }
+            assert!(opens.get() >= 3);
+        }
+    }
+
+    #[test]
+    fn public_open_and_probe_preserve_stable_required_main_not_found() {
+        for probe in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let db = temp.path().join("missing.db");
+            let opens = Rc::new(Cell::new(0_usize));
+            let opens_for_hook = Rc::clone(&opens);
+            let db_for_hook = db.clone();
+            let _hook = install_sqlite_observation_test_hook(move |path, phase| {
+                if path == db_for_hook && phase == SqliteObservationTestPhase::BeforeOpen {
+                    opens_for_hook.set(opens_for_hook.get() + 1);
+                }
+            });
+
+            let result: crate::Result<()> = if probe {
+                probe_sqlite_readonly_source(&db, |_| Ok(true)).map(|_| ())
+            } else {
+                open_sqlite_readonly_source(&db).map(drop)
+            };
+            let error = result.unwrap_err();
+            assert!(matches!(
+                error,
+                crate::CaptureError::Io(ref error) if error.kind() == io::ErrorKind::NotFound
+            ));
+            assert_eq!(opens.get(), SQLITE_GENERATION_MAX_ATTEMPTS);
+        }
     }
 
     #[test]
