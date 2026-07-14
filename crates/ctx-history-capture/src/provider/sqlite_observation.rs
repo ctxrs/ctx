@@ -20,6 +20,7 @@ const MAX_SUPER_JOURNAL_NAME_BYTES: u64 = 64 * 1024;
 pub(super) const JOURNAL_MAGIC: [u8; 8] = [0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7];
 const WAL_CHURN_REASON: &str = "SQLite WAL has an incomplete or changing valid generation";
 const WAL_RESOURCE_REASON: &str = "SQLite WAL valid prefix exceeds the snapshot resource ceiling";
+const WAL_FORMAT_VERSION_REASON: &str = "SQLite WAL format version is unsupported or corrupt";
 const WAL_HEADER_CHECKSUM_REASON: &str = "SQLite WAL header checksum is invalid";
 const WAL_FRAME_CHECKSUM_REASON: &str = "SQLite WAL frame checksum is invalid";
 const SUPER_JOURNAL_REASON: &str =
@@ -29,6 +30,10 @@ const SUPER_JOURNAL_REASON: &str =
 pub struct SqliteObservedFile {
     path: PathBuf,
     source_file: Arc<File>,
+    #[cfg(windows)]
+    _path_guards: Arc<Vec<File>>,
+    #[cfg(windows)]
+    immutable_path: PathBuf,
     len: u64,
     modified_at: SystemTime,
     modified_secs: u64,
@@ -93,6 +98,61 @@ impl SqliteObservedFile {
         file.seek(SeekFrom::Start(0))?;
         Ok(file)
     }
+
+    pub(crate) fn immutable_open_path(&self) -> io::Result<PathBuf> {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        {
+            use std::os::fd::AsRawFd;
+
+            let descriptor_root = Path::new("/proc/self/fd");
+            if !descriptor_root.is_dir() {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "identity-preserving SQLite opens require /proc/self/fd",
+                ));
+            }
+            Ok(descriptor_root.join(self.source_file.as_raw_fd().to_string()))
+        }
+
+        #[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+        {
+            use std::os::fd::AsRawFd;
+
+            let descriptor_root = Path::new("/dev/fd");
+            if !descriptor_root.is_dir() {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "identity-preserving SQLite opens require /dev/fd",
+                ));
+            }
+            Ok(descriptor_root.join(self.source_file.as_raw_fd().to_string()))
+        }
+
+        #[cfg(windows)]
+        {
+            // Every component handle in `_path_guards`, plus `source_file`, was
+            // opened without FILE_SHARE_DELETE. The original disk or UNC path
+            // therefore remains bound to this observed identity until SQLite
+            // finishes opening it.
+            Ok(self.immutable_path.clone())
+        }
+
+        #[cfg(not(any(unix, windows)))]
+        {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "identity-preserving SQLite opens are unsupported on this platform",
+            ))
+        }
+    }
+}
+
+struct OpenSourceFile {
+    file: File,
+    #[cfg(windows)]
+    path_guards: Vec<File>,
+    #[cfg(windows)]
+    immutable_path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -331,16 +391,16 @@ enum FileObservation {
 
 fn observe_required_file(path: &Path, kind: SentinelKind) -> io::Result<SqliteObservedFile> {
     run_observation_test_hook(path, SqliteObservationTestPhase::BeforeOpen);
-    let file = open_source_file_no_follow(path)?;
-    let metadata = file.metadata()?;
+    let source = open_source_file_no_follow(path)?;
+    let metadata = source.file.metadata()?;
     if !metadata.file_type().is_file() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("SQLite source is not a regular file: {}", path.display()),
         ));
     }
-    validate_open_source_file(&file)?;
-    match observe_file(path, file, metadata, kind)? {
+    validate_open_source_file(&source.file)?;
+    match observe_file(path, source, metadata, kind)? {
         FileObservation::File(file) => Ok(file),
         FileObservation::Corrupt(corruption) => Err(corruption.into_error()),
     }
@@ -348,28 +408,35 @@ fn observe_required_file(path: &Path, kind: SentinelKind) -> io::Result<SqliteOb
 
 fn observe_optional_file(path: &Path, kind: SentinelKind) -> io::Result<Option<FileObservation>> {
     run_observation_test_hook(path, SqliteObservationTestPhase::BeforeOpen);
-    let file = match open_source_file_no_follow(path) {
+    let source = match open_source_file_no_follow(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
-    let metadata = file.metadata()?;
+    let metadata = source.file.metadata()?;
     if !metadata.file_type().is_file() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("SQLite sidecar is not a regular file: {}", path.display()),
         ));
     }
-    validate_open_source_file(&file)?;
-    observe_file(path, file, metadata, kind).map(Some)
+    validate_open_source_file(&source.file)?;
+    observe_file(path, source, metadata, kind).map(Some)
 }
 
 fn observe_file(
     path: &Path,
-    mut file: File,
+    source: OpenSourceFile,
     metadata: Metadata,
     kind: SentinelKind,
 ) -> io::Result<FileObservation> {
+    let OpenSourceFile {
+        mut file,
+        #[cfg(windows)]
+        path_guards,
+        #[cfg(windows)]
+        immutable_path,
+    } = source;
     let modified_at = metadata.modified().unwrap_or(UNIX_EPOCH);
     let modified = modified_at.duration_since(UNIX_EPOCH).unwrap_or_default();
     run_observation_test_hook(path, SqliteObservationTestPhase::AfterMetadata);
@@ -408,6 +475,10 @@ fn observe_file(
     Ok(FileObservation::File(SqliteObservedFile {
         path: path.to_path_buf(),
         source_file: Arc::new(file),
+        #[cfg(windows)]
+        _path_guards: Arc::new(path_guards),
+        #[cfg(windows)]
+        immutable_path,
         len: metadata.len(),
         modified_at,
         modified_secs: modified.as_secs(),
@@ -420,7 +491,7 @@ fn observe_file(
 }
 
 #[cfg(unix)]
-fn open_source_file_no_follow(path: &Path) -> io::Result<File> {
+fn open_source_file_no_follow(path: &Path) -> io::Result<OpenSourceFile> {
     use std::{
         ffi::CString,
         os::{
@@ -491,7 +562,9 @@ fn open_source_file_no_follow(path: &Path) -> io::Result<File> {
     if fd < 0 {
         return Err(normalize_no_follow_open_error(io::Error::last_os_error()));
     }
-    Ok(unsafe { File::from_raw_fd(fd) })
+    Ok(OpenSourceFile {
+        file: unsafe { File::from_raw_fd(fd) },
+    })
 }
 
 #[cfg(unix)]
@@ -510,7 +583,7 @@ fn normalize_no_follow_open_error(error: io::Error) -> io::Error {
 }
 
 #[cfg(windows)]
-fn open_source_file_no_follow(path: &Path) -> io::Result<File> {
+fn open_source_file_no_follow(path: &Path) -> io::Result<OpenSourceFile> {
     use std::{
         ffi::OsString,
         os::windows::fs::OpenOptionsExt,
@@ -518,7 +591,7 @@ fn open_source_file_no_follow(path: &Path) -> io::Result<File> {
     };
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, SYNCHRONIZE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, SYNCHRONIZE,
     };
 
     let absolute = std::path::absolute(path)?;
@@ -572,15 +645,21 @@ fn open_source_file_no_follow(path: &Path) -> io::Result<File> {
     let mut options = std::fs::OpenOptions::new();
     options
         .access_mode(FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
     let mut directory = options.open(&root_path)?;
     validate_windows_path_component(&directory, true)?;
 
+    // Windows has no descriptor pathname that SQLite's default VFS can open.
+    // Retaining every no-share-delete component handle makes a second open of
+    // the original disk/UNC path identity-preserving: no component can be
+    // renamed away and replaced by a junction while these guards are alive.
+    let mut path_guards = Vec::with_capacity(parents.len() + 1);
     let mut opened_path = root_path;
     for component in parents {
         let next = open_windows_component(&directory, component, true)?;
         validate_windows_path_component(&next, true)?;
+        path_guards.push(directory);
         directory = next;
         opened_path.push(component);
         run_observation_test_hook(&opened_path, SqliteObservationTestPhase::AfterParentOpen);
@@ -588,7 +667,13 @@ fn open_source_file_no_follow(path: &Path) -> io::Result<File> {
 
     let file = open_windows_component(&directory, file_name, false)?;
     validate_windows_path_component(&file, false)?;
-    Ok(file)
+    path_guards.push(directory);
+    opened_path.push(file_name);
+    Ok(OpenSourceFile {
+        file,
+        path_guards,
+        immutable_path: opened_path,
+    })
 }
 
 #[cfg(windows)]
@@ -616,8 +701,8 @@ fn open_windows_component(
                 STATUS_NOT_A_DIRECTORY, STATUS_REPARSE_POINT_ENCOUNTERED, UNICODE_STRING,
             },
             Storage::FileSystem::{
-                FILE_GENERIC_READ, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
-                FILE_SHARE_WRITE, FILE_TRAVERSE, SYNCHRONIZE,
+                FILE_GENERIC_READ, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
+                FILE_TRAVERSE, SYNCHRONIZE,
             },
             System::IO::IO_STATUS_BLOCK,
         },
@@ -675,7 +760,7 @@ fn open_windows_component(
             &mut status_block,
             ptr::null(),
             0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
             FILE_OPEN,
             create_options,
             ptr::null(),
@@ -716,7 +801,7 @@ fn validate_windows_path_component(file: &File, directory: bool) -> io::Result<(
 }
 
 #[cfg(not(any(unix, windows)))]
-fn open_source_file_no_follow(_path: &Path) -> io::Result<File> {
+fn open_source_file_no_follow(_path: &Path) -> io::Result<OpenSourceFile> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "atomic no-follow SQLite source access is unsupported on this platform",
@@ -989,7 +1074,7 @@ fn parse_wal_header(header: &[u8]) -> WalHeaderState {
         _ => return WalHeaderState::Ignore,
     };
     if be_u32(&header[4..8]) != WAL_FORMAT_VERSION {
-        return WalHeaderState::Defer;
+        return WalHeaderState::Corrupt(WAL_FORMAT_VERSION_REASON);
     }
     let page_size = be_u32(&header[8..12]);
     if !page_size.is_power_of_two() || !(512..=65_536).contains(&page_size) {
@@ -1385,6 +1470,49 @@ mod tests {
     }
 
     #[test]
+    fn stable_unsupported_wal_version_is_terminal() {
+        let fixture = real_wal_fixture(512);
+        let db = fixture.temp.path().join("unsupported-version.db");
+        fs::copy(&fixture.db, &db).unwrap();
+        let mut wal = fs::read(sidecar_path(&fixture.db, "-wal")).unwrap();
+        rewrite_wal_format_version(&mut wal, WAL_FORMAT_VERSION + 1);
+        fs::write(sidecar_path(&db, "-wal"), wal).unwrap();
+
+        let error = observe_sqlite_source_generation(&db).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("format version"));
+    }
+
+    #[test]
+    fn transient_unsupported_wal_version_retries_when_repaired() {
+        let fixture = real_wal_fixture(512);
+        let original = fs::read(sidecar_path(&fixture.db, "-wal")).unwrap();
+        let db = fixture.temp.path().join("transient-version.db");
+        fs::copy(&fixture.db, &db).unwrap();
+        let wal = sidecar_path(&db, "-wal");
+        let mut unsupported = original.clone();
+        rewrite_wal_format_version(&mut unsupported, WAL_FORMAT_VERSION + 1);
+        fs::write(&wal, unsupported).unwrap();
+        let wal_opens = Rc::new(Cell::new(0_usize));
+        let wal_opens_for_hook = Rc::clone(&wal_opens);
+        let wal_for_hook = wal.clone();
+        let _hook = install_sqlite_observation_test_hook(move |path, phase| {
+            if path != wal_for_hook || phase != SqliteObservationTestPhase::BeforeOpen {
+                return;
+            }
+            let opens = wal_opens_for_hook.get() + 1;
+            wal_opens_for_hook.set(opens);
+            if opens == 2 {
+                fs::write(path, &original).unwrap();
+            }
+        });
+
+        let generation = observe_sqlite_source_generation(&db).unwrap();
+        assert!(wal_opens.get() >= 3);
+        assert!(generation.requires_snapshot());
+    }
+
+    #[test]
     fn bad_frame_after_committed_wal_prefix_preserves_that_prefix() {
         let fixture = real_wal_fixture(512);
         let wal_path = sidecar_path(&fixture.db, "-wal");
@@ -1625,7 +1753,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_component_walk_stays_anchored_across_parent_swap() {
+    fn windows_component_walk_blocks_parent_swap() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source");
         fs::create_dir(&source).unwrap();
@@ -1635,7 +1763,9 @@ mod tests {
         fs::create_dir(&outside).unwrap();
         fs::write(outside.join("source.db"), b"outside").unwrap();
         let held = temp.path().join("held-source");
+        let blocked = Rc::new(Cell::new(false));
         let swapped = Rc::new(Cell::new(false));
+        let blocked_for_hook = Rc::clone(&blocked);
         let swapped_for_hook = Rc::clone(&swapped);
         let source_for_hook = source.clone();
         let held_for_hook = held.clone();
@@ -1645,18 +1775,30 @@ mod tests {
                 && path == source_for_hook
                 && !swapped_for_hook.replace(true)
             {
-                fs::rename(path, &held_for_hook).unwrap();
-                create_windows_junction(path, &outside_for_hook);
+                match fs::rename(path, &held_for_hook) {
+                    Ok(()) => create_windows_junction(path, &outside_for_hook),
+                    Err(error)
+                        if error.kind() == io::ErrorKind::PermissionDenied
+                            || matches!(error.raw_os_error(), Some(5 | 32)) =>
+                    {
+                        swapped_for_hook.set(false);
+                        blocked_for_hook.set(true);
+                    }
+                    Err(error) => panic!("unexpected parent swap failure: {error}"),
+                }
             }
         });
 
-        let mut file = open_source_file_no_follow(&db).unwrap();
+        let mut opened = open_source_file_no_follow(&db).unwrap();
         let mut contents = String::new();
-        file.read_to_string(&mut contents).unwrap();
+        opened.file.read_to_string(&mut contents).unwrap();
         assert_eq!(contents, "inside");
-        assert!(swapped.get());
-        fs::remove_dir(&source).unwrap();
-        fs::rename(&held, &source).unwrap();
+        assert!(blocked.get());
+        drop(opened);
+        if swapped.get() {
+            fs::remove_dir(&source).unwrap();
+            fs::rename(&held, &source).unwrap();
+        }
     }
 
     #[test]
@@ -1885,6 +2027,18 @@ mod tests {
             frame[16..20].copy_from_slice(&checksum[0].to_be_bytes());
             frame[20..24].copy_from_slice(&checksum[1].to_be_bytes());
         }
+    }
+
+    fn rewrite_wal_format_version(bytes: &mut [u8], version: u32) {
+        bytes[4..8].copy_from_slice(&version.to_be_bytes());
+        let order = match be_u32(&bytes[0..4]) {
+            0x377f_0682 => WalChecksumOrder::LittleEndian,
+            0x377f_0683 => WalChecksumOrder::BigEndian,
+            magic => panic!("unexpected SQLite WAL magic {magic:#x}"),
+        };
+        let checksum = wal_checksum(order, &bytes[..24], [0, 0]);
+        bytes[24..28].copy_from_slice(&checksum[0].to_be_bytes());
+        bytes[28..32].copy_from_slice(&checksum[1].to_be_bytes());
     }
 
     fn real_hot_journal_bytes(page_size: u32) -> Vec<u8> {
