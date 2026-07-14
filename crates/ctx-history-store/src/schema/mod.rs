@@ -29,6 +29,10 @@ pub(crate) fn migrate_to_latest(conn: &Connection) -> Result<()> {
 
 impl Store {
     pub fn migrate(&self) -> Result<()> {
+        self.with_indexing_writer_lease(|| self.migrate_unleased())
+    }
+
+    pub(crate) fn migrate_unleased(&self) -> Result<()> {
         configure_connection(&self.conn, self.busy_timeout)?;
         migrate_to_latest(&self.conn)
     }

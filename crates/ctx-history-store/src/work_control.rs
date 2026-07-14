@@ -9,7 +9,7 @@ use std::{
 use fs2::FileExt;
 use rusqlite::{ffi, Connection};
 
-use crate::object_store::restrict_private_file;
+use crate::object_store::{restrict_private_dir, restrict_private_file};
 use crate::{Result, Store, StoreError};
 
 pub const INDEXING_WAL_DELTA_BYTES: u64 = 8 * 1024 * 1024;
@@ -209,6 +209,7 @@ impl IndexingAdmission {
     pub fn acquire(store_path: &Path, class: IndexingWorkClass) -> Result<Self> {
         if let Some(parent) = store_path.parent() {
             fs::create_dir_all(parent)?;
+            restrict_private_dir(parent)?;
         }
         let admission = Self {
             store_path: store_path.to_path_buf(),
@@ -342,6 +343,10 @@ impl IndexingAdmission {
 }
 
 impl Store {
+    pub(crate) fn indexing_writer_lease_held(&self) -> bool {
+        self.indexing_writer_lease.borrow().is_some()
+    }
+
     pub(crate) fn acquire_indexing_writer_lease(&self, nonblocking: bool) -> Result<bool> {
         if self.indexing_writer_lease.borrow().is_some() {
             return Ok(true);
@@ -895,8 +900,12 @@ mod tests {
         assert!(foreground.source_io_slice_should_rotate(started, INDEXING_WAL_DELTA_BYTES));
 
         let temp = tempfile::tempdir().unwrap();
-        let store = Store::open(temp.path().join("work.sqlite")).unwrap();
-        assert!(store.indexing_io_pacer().quiet);
+        let path = temp.path().join("work.sqlite");
+        let store = Store::open(&path).unwrap();
+        assert!(!store.indexing_io_pacer().quiet);
+        drop(store);
+        let read_only = Store::open_read_only(path).unwrap();
+        assert!(read_only.indexing_io_pacer().quiet);
     }
 
     #[test]

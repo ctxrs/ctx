@@ -122,10 +122,14 @@ impl Store {
     }
 
     pub fn event_search_maintenance_pending(&self) -> Result<bool> {
-        bulk_mode_pending(self)
+        Ok(self.search_projection_maintenance_pending()? || bulk_mode_pending(self)?)
     }
 
     pub fn run_event_search_maintenance_slice(&self) -> Result<bool> {
+        if self.search_projection_maintenance_pending()? {
+            self.run_search_projection_maintenance_slice()?;
+            return self.event_search_maintenance_pending();
+        }
         if !bulk_mode_pending(self)? {
             return Ok(false);
         }
@@ -284,6 +288,10 @@ impl Store {
             Err(err) if sqlite_is_busy(&err) => Ok(false),
             Err(err) => Err(err.into()),
         }
+    }
+
+    pub(crate) fn event_search_transaction_lock_held(&self) -> bool {
+        self.event_search_transaction_lock.borrow().is_some()
     }
 
     pub(crate) fn release_event_search_transaction_lock(&self, commit: bool) -> Result<()> {
