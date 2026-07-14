@@ -341,7 +341,7 @@ fn provider_import_uses_shared_bounded_batches() {
         0
     );
 
-    let error = import_normalized_provider_captures(
+    let summary = import_normalized_provider_captures(
         &mut store,
         ProviderNormalizationResult {
             summary: ProviderImportSummary::default(),
@@ -353,9 +353,8 @@ fn provider_import_uses_shared_bounded_batches() {
             ..NormalizedProviderImportOptions::default()
         },
     )
-    .unwrap_err();
-    assert!(error.to_string().contains("ctx index is busy"), "{error}");
-    reader.execute_batch("ROLLBACK").unwrap();
+    .unwrap();
+    assert_eq!(summary.failed, 0, "{:?}", summary.failures);
 
     assert_eq!(store.list_sessions().unwrap().len(), 64);
     assert_eq!(
@@ -365,6 +364,7 @@ fn provider_import_uses_shared_bounded_batches() {
             .len(),
         64
     );
+    reader.execute_batch("ROLLBACK").unwrap();
 }
 
 #[test]

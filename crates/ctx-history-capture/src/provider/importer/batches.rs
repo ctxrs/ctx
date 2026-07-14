@@ -395,7 +395,11 @@ impl ProviderImportTransaction {
                 return Err(error.into());
             }
         }
-        store.checkpoint_wal_truncate_required()?;
+        if let Err(error) = store.checkpoint_wal_truncate_required() {
+            if !is_recoverable_bulk_maintenance_error(&error) {
+                return Err(error.into());
+            }
+        }
         store.begin_immediate_batch()?;
         self.active = true;
         self.units = 0;
