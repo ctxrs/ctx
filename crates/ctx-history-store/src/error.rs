@@ -19,6 +19,8 @@ pub enum StoreError {
     NotFound(Uuid),
     #[error("unsupported history store schema version: {0}")]
     UnsupportedSchemaVersion(i64),
+    #[error("unsafe or ambiguous history store identity")]
+    UnsafeStoreIdentity,
     #[error("unsupported session history archive version: {0}")]
     UnsupportedArchiveVersion(u32),
     #[error(
@@ -54,6 +56,38 @@ pub enum StoreError {
         existing_hash: String,
         new_hash: String,
     },
+    #[error(
+        "import inventory generation {expected_generation} for {provider} ({inventory_family}) was superseded"
+    )]
+    ImportInventorySuperseded {
+        provider: String,
+        inventory_family: &'static str,
+        expected_generation: u64,
+    },
+    #[error("import observation changed for {provider} owner {owner_id}")]
+    ProviderFileObservationChanged { provider: String, owner_id: String },
+    #[error("invalid provider file checkpoint: {0}")]
+    InvalidProviderFileCheckpoint(&'static str),
+    #[error("provider file checkpoint for {provider} owner {owner_id} requires replacement")]
+    ProviderFileCheckpointRequiresReplacement { provider: String, owner_id: String },
+    #[error("provider file replacement has inconsistent seen {entity} ids")]
+    ProviderFileReconciliationInconsistent { entity: &'static str },
+    #[error("provider file replacement scope is invalid or no longer active")]
+    InvalidProviderFilePublicationScope,
+    #[error("provider file publication for {provider} owner {owner_id} is already active")]
+    ProviderFileReplacementBusy { provider: String, owner_id: String },
+    #[error(
+        "provider file publication write does not belong to active owner {provider}/{owner_id}"
+    )]
+    ProviderFilePublicationOwnerMismatch { provider: String, owner_id: String },
+    #[error("provider file replacement row limit {value} is outside 1..={max}")]
+    ProviderFileReconciliationLimitOutOfRange { value: usize, max: usize },
+    #[error("provider file replacement has more than {max} prior source identities")]
+    ProviderFileReplacementPriorSourceLimitExceeded { max: usize },
+    #[error("provider file replacement reconciliation is not complete")]
+    ProviderFileReconciliationIncomplete,
+    #[error("provider file publication staging is unavailable")]
+    ProviderFileStaging,
     #[error("SQL query is empty")]
     RawSqlEmpty,
     #[error("SQL query contains an interior NUL byte")]

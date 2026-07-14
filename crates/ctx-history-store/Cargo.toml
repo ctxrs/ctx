@@ -17,6 +17,11 @@ sha2.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 ctx-history-core = { path = "../ctx-history-core" }
+fs2 = "0.4.3"
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 tempfile.workspace = true

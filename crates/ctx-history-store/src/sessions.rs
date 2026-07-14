@@ -13,6 +13,11 @@ use crate::{Result, Store, StoreError};
 
 impl Store {
     pub fn upsert_session(&self, session: &Session) -> Result<()> {
+        self.with_provider_file_publication_write(|| self.upsert_session_inner(session))
+    }
+
+    fn upsert_session_inner(&self, session: &Session) -> Result<()> {
+        self.ensure_provider_file_session_write_allowed(session)?;
         self.conn.execute(
                 r#"
                 INSERT INTO sessions
@@ -73,13 +78,18 @@ impl Store {
                     serde_json::to_string(&session.sync.metadata)?,
                 ],
             )?;
+        self.track_provider_file_publication_session(session.id)?;
         Ok(())
     }
 
     pub fn get_session(&self, id: Uuid) -> Result<Session> {
+        let tail = format!(
+            "WHERE id = ?1 AND {}",
+            crate::provider_files::session_material_visible_predicate("sessions")
+        );
         self.conn
             .query_row(
-                session_select_sql("WHERE id = ?1").as_str(),
+                session_select_sql(&tail).as_str(),
                 params![id.to_string()],
                 session_from_row,
             )
@@ -88,9 +98,11 @@ impl Store {
     }
 
     pub fn sessions_by_id_prefix(&self, prefix: &str) -> Result<Vec<Session>> {
-        let mut stmt = self
-            .conn
-            .prepare(session_select_sql("WHERE id LIKE ?1 ORDER BY id LIMIT 2").as_str())?;
+        let tail = format!(
+            "WHERE id LIKE ?1 AND {} ORDER BY id LIMIT 2",
+            crate::provider_files::session_material_visible_predicate("sessions")
+        );
+        let mut stmt = self.conn.prepare(session_select_sql(&tail).as_str())?;
         let rows = stmt.query_map(params![format!("{prefix}%")], session_from_row)?;
         collect_rows(rows)
     }
@@ -100,11 +112,12 @@ impl Store {
         provider: CaptureProvider,
         external_session_id: &str,
     ) -> Result<Option<Session>> {
+        let visible = crate::provider_files::session_material_visible_predicate("sessions");
         self.conn
                 .query_row(
-                    session_select_sql(
-                        "WHERE provider = ?1 AND external_session_id = ?2 ORDER BY started_at_ms DESC LIMIT 1",
-                    )
+                    session_select_sql(&format!(
+                        "WHERE provider = ?1 AND external_session_id = ?2 AND {visible} ORDER BY started_at_ms DESC LIMIT 1",
+                    ))
                     .as_str(),
                     params![provider.as_str(), external_session_id],
                     session_from_row,
@@ -119,11 +132,12 @@ impl Store {
         provider: CaptureProvider,
         external_session_id: &str,
     ) -> Result<Option<Session>> {
+        let visible = crate::provider_files::session_material_visible_predicate("sessions");
         self.conn
             .query_row(
-                session_select_sql(
-                    "WHERE capture_source_id = ?1 AND provider = ?2 AND external_session_id = ?3 ORDER BY created_at_ms, id LIMIT 1",
-                )
+                session_select_sql(&format!(
+                    "WHERE capture_source_id = ?1 AND provider = ?2 AND external_session_id = ?3 AND {visible} ORDER BY created_at_ms, id LIMIT 1",
+                ))
                 .as_str(),
                 params![
                     source_id.to_string(),
@@ -142,12 +156,11 @@ impl Store {
         external_session_id: &str,
         limit: usize,
     ) -> Result<Vec<Session>> {
-        let mut stmt = self.conn.prepare(
-                session_select_sql(
-                    "WHERE provider = ?1 AND external_session_id = ?2 ORDER BY started_at_ms DESC LIMIT ?3",
-                )
-                .as_str(),
-            )?;
+        let tail = format!(
+            "WHERE provider = ?1 AND external_session_id = ?2 AND {} ORDER BY started_at_ms DESC LIMIT ?3",
+            crate::provider_files::session_material_visible_predicate("sessions")
+        );
+        let mut stmt = self.conn.prepare(session_select_sql(&tail).as_str())?;
         let rows = stmt.query_map(
             params![
                 provider.as_str(),
@@ -160,14 +173,23 @@ impl Store {
     }
 
     pub fn sessions_for_record(&self, record_id: Uuid) -> Result<Vec<Session>> {
-        let mut stmt = self.conn.prepare(
-            session_select_sql("WHERE history_record_id = ?1 ORDER BY started_at_ms, id").as_str(),
-        )?;
+        let tail = format!(
+            "WHERE history_record_id = ?1 AND {} ORDER BY started_at_ms, id",
+            crate::provider_files::session_material_visible_predicate("sessions")
+        );
+        let mut stmt = self.conn.prepare(session_select_sql(&tail).as_str())?;
         let rows = stmt.query_map(params![record_id.to_string()], session_from_row)?;
         collect_rows(rows)
     }
 
     pub fn assign_session_to_record(&self, session_id: Uuid, record_id: Uuid) -> Result<()> {
+        self.with_provider_file_publication_write(|| {
+            self.assign_session_to_record_inner(session_id, record_id)
+        })
+    }
+
+    fn assign_session_to_record_inner(&self, session_id: Uuid, record_id: Uuid) -> Result<()> {
+        self.ensure_provider_file_session_assignment_write_allowed(session_id, record_id)?;
         self.conn.execute(
             "UPDATE sessions SET history_record_id = ?1 WHERE id = ?2",
             params![record_id.to_string(), session_id.to_string()],
@@ -184,14 +206,21 @@ impl Store {
     }
 
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
-        let mut stmt = self
-            .conn
-            .prepare(session_select_sql("ORDER BY started_at_ms, id").as_str())?;
+        let tail = format!(
+            "WHERE {} ORDER BY started_at_ms, id",
+            crate::provider_files::session_material_visible_predicate("sessions")
+        );
+        let mut stmt = self.conn.prepare(session_select_sql(&tail).as_str())?;
         let rows = stmt.query_map([], session_from_row)?;
         collect_rows(rows)
     }
 
     pub fn upsert_session_edge(&self, edge: &SessionEdge) -> Result<()> {
+        self.with_provider_file_publication_write(|| self.upsert_session_edge_inner(edge))
+    }
+
+    fn upsert_session_edge_inner(&self, edge: &SessionEdge) -> Result<()> {
+        self.ensure_provider_file_session_edge_write_allowed(edge)?;
         self.conn.execute(
                 r#"
                 INSERT INTO session_edges
@@ -228,14 +257,17 @@ impl Store {
                     serde_json::to_string(&edge.sync.metadata)?,
                 ],
             )?;
+        self.track_provider_file_publication_session_edge(edge.id)?;
         Ok(())
     }
 
     pub fn session_edge_exists(&self, edge_id: Uuid) -> Result<bool> {
+        let visible =
+            crate::provider_files::session_edge_material_visible_predicate("session_edges");
         Ok(self
             .conn
             .query_row(
-                "SELECT 1 FROM session_edges WHERE id = ?1",
+                &format!("SELECT 1 FROM session_edges WHERE id = ?1 AND {visible}"),
                 params![edge_id.to_string()],
                 |_| Ok(()),
             )
