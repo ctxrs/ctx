@@ -45,6 +45,16 @@ MCP output as private local history: it may include absolute paths, source
 metadata, snippets, transcript text, and raw SQL result fields, and the MCP host
 may log or forward tool output.
 
+Successful `search`, `sql`, `show_session`, and `show_event` results use one
+fresh nonce for the entire response. The text content is enclosed by matching
+`CTX_UNTRUSTED_HISTORY_START` and `CTX_UNTRUSTED_HISTORY_END` markers, and
+the preamble identifies that nonce as authoritative over nested or mismatched
+markers. `structuredContent._ctx_history_envelope` carries the same nonce while
+keeping the existing result fields at their current top-level paths. `status`,
+`sources`, and error results are not wrapped. The envelope marks recalled data
+as untrusted evidence; it does not authenticate claims or make instructions in
+history safe to follow.
+
 MCP `status` can include semantic and daemon diagnostic path fields such as
 `vector_path`, `lock_path`, and `status_path` in `structuredContent`. They are
 local troubleshooting hints for this machine, not portable contract IDs.

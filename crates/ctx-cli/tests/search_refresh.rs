@@ -74,7 +74,7 @@ fn search_refresh_wait_skips_malformed_jsonl_rows() {
 }
 
 #[test]
-fn search_refresh_wait_warns_when_progress_is_not_interactive() {
+fn search_refresh_wait_keeps_agent_output_self_contained() {
     let temp = tempdir();
     write_malformed_claude_session(&temp);
 
@@ -96,11 +96,14 @@ fn search_refresh_wait_warns_when_progress_is_not_interactive() {
         stdout.contains("rejected refresh search marker"),
         "{stdout}"
     );
+    assert_history_envelope(&stdout);
+    assert!(
+        stdout.contains("warning: search refresh rejected 1 malformed history record"),
+        "{stdout}"
+    );
 
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("refreshed claude with"), "{stderr}");
-    assert!(stderr.contains("malformed JSONL"), "{stderr}");
-    assert!(stderr.contains("claude-session.jsonl"), "{stderr}");
+    assert!(stderr.is_empty(), "unexpected unframed stderr: {stderr}");
 }
 
 fn write_malformed_claude_session(temp: &TempDir) {

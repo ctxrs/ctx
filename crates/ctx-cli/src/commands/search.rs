@@ -1,4 +1,5 @@
 use std::{
+    fmt::Write as _,
     fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -17,6 +18,7 @@ use ctx_history_capture::{
 use ctx_history_core::database_path;
 use ctx_history_store::Store;
 
+use crate::agent_output::HistoryEnvelope;
 use crate::analytics::AnalyticsProperties;
 use crate::commands::import::{
     error_summary, import_error_scope, import_history_source_plugin,
@@ -39,7 +41,7 @@ use crate::search_filters::{
     search_has_intent, search_no_results_target, SearchFilterInput, SearchIntentInput,
     SourceIdentityFilterArgs, SourceIdentityFilters,
 };
-use crate::search_render::{print_search_result_compact, print_search_result_verbose, SearchDto};
+use crate::search_render::{render_search_result_compact, render_search_result_verbose, SearchDto};
 use crate::semantic::search_packet_with_backend;
 use crate::store_util::open_existing_store_read_only;
 use crate::transcript::shell_quote_arg;
@@ -270,7 +272,7 @@ pub(crate) fn run_search(
         semantic_enabled,
         args.semantic_weight,
         args.refresh,
-        !args.json,
+        false,
     )?;
     analytics::insert_duration(
         analytics_properties,
@@ -315,11 +317,29 @@ pub(crate) fn run_search(
             suggested_next_query,
         ))?;
     } else {
+        let mut body = String::new();
+        if let Some((code, message)) = retrieval.semantic_fallback() {
+            writeln!(
+                body,
+                "warning: semantic search fallback ({code}): {message}; using {} search",
+                retrieval.effective_mode().as_str()
+            )
+            .expect("writing to String cannot fail");
+        }
+        if refresh.totals.failed > 0 {
+            writeln!(
+                body,
+                "warning: search refresh rejected {} malformed history record(s); results may be incomplete",
+                refresh.totals.failed
+            )
+            .expect("writing to String cannot fail");
+        }
         if refresh.status == "failed" && args.refresh == RefreshArg::Background {
             if let Some(error) = &refresh.error {
-                eprintln!(
+                let warning = format!(
                     "warning: search refresh failed; serving existing index; use --refresh wait to fail instead: {error}"
                 );
+                writeln!(body, "{warning}").expect("writing to String cannot fail");
             }
         }
         if packet.results.is_empty() {
@@ -328,37 +348,50 @@ pub(crate) fn run_search(
                 .as_deref()
                 .filter(|_| query.trim().is_empty() && !uses_composed_terms)
             {
-                println!("no indexed events touched {}", file.display());
                 let indexed_items = indexed_history_item_count(&store)?;
+                writeln!(body, "no indexed events touched {}", file.display())
+                    .expect("writing to String cannot fail");
                 if indexed_items == 0 {
-                    println!("next: ctx import --all");
+                    writeln!(body, "next: ctx import --all")
+                        .expect("writing to String cannot fail");
                 } else {
-                    println!(
+                    writeln!(
+                        body,
                         "next: ctx search {}",
                         shell_quote_arg(&file.display().to_string())
-                    );
+                    )
+                    .expect("writing to String cannot fail");
                 }
             } else {
-                println!(
+                let indexed_items = indexed_history_item_count(&store)?;
+                writeln!(
+                    body,
                     "no results for {}",
                     search_no_results_target(&query, &args.term)
-                );
-                let indexed_items = indexed_history_item_count(&store)?;
+                )
+                .expect("writing to String cannot fail");
                 if indexed_items == 0 {
-                    println!("next: ctx import --all");
+                    writeln!(body, "next: ctx import --all")
+                        .expect("writing to String cannot fail");
                 } else {
-                    println!("next: try broader terms with ctx search --term \"<term>\"");
+                    writeln!(
+                        body,
+                        "next: try broader terms with ctx search --term \"<term>\""
+                    )
+                    .expect("writing to String cannot fail");
                 }
             }
         }
         let suggested_next_query = (!uses_composed_terms).then_some(query.as_str());
         for (index, result) in packet.results.iter().enumerate() {
             if args.verbose {
-                print_search_result_verbose(result, suggested_next_query);
+                body.push_str(&render_search_result_verbose(result, suggested_next_query));
             } else {
-                print_search_result_compact(index + 1, result);
+                body.push_str(&render_search_result_compact(index + 1, result));
             }
         }
+        body = HistoryEnvelope::new().wrap_text(&body);
+        print!("{body}");
     }
     analytics::insert_duration(
         analytics_properties,
@@ -534,7 +567,7 @@ pub(crate) fn refresh_sources_for_search(
 
     let progress_arg = match refresh {
         RefreshArg::Wait if json_output => ProgressArg::Json,
-        RefreshArg::Wait => ProgressArg::Auto,
+        RefreshArg::Wait => ProgressArg::None,
         RefreshArg::Background | RefreshArg::Off => ProgressArg::None,
     };
     let progress = ProgressReporter::new(
@@ -613,7 +646,7 @@ pub(crate) fn refresh_sources_for_search(
         for outcome in outcomes {
             warn_on_rejected_records(
                 &progress,
-                json_output,
+                true,
                 outcome.source.provider.as_str(),
                 &outcome.summary,
             );
@@ -640,7 +673,7 @@ pub(crate) fn refresh_sources_for_search(
                 Ok(summary) => {
                     warn_on_rejected_records(
                         &progress,
-                        json_output,
+                        true,
                         plan.source.provider.as_str(),
                         &summary,
                     );
@@ -687,12 +720,7 @@ pub(crate) fn refresh_sources_for_search(
                     });
             match import_result {
                 Ok((summary, stats)) => {
-                    warn_on_rejected_records(
-                        &progress,
-                        json_output,
-                        &plugin_source.label(),
-                        &summary,
-                    );
+                    warn_on_rejected_records(&progress, true, &plugin_source.label(), &summary);
                     totals.add(&summary, &stats);
                     progress.done(
                         "refreshing",

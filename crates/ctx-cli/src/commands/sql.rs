@@ -1,4 +1,4 @@
-use std::{fs, io::Read, path::PathBuf, time::Duration as StdDuration};
+use std::{fmt::Write as _, fs, io::Read, path::PathBuf, time::Duration as StdDuration};
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Number, Value};
@@ -8,6 +8,7 @@ use ctx_history_store::{
     RawSqlOptions, RawSqlResult, RawSqlValue, RAW_SQL_MAX_SQL_BYTES_CAP, RAW_SQL_MAX_TIMEOUT,
 };
 
+use crate::agent_output::HistoryEnvelope;
 use crate::output::{compact_json, print_json, SqlFormat};
 use crate::store_util::open_existing_store_read_only;
 use crate::SqlArgs;
@@ -43,6 +44,7 @@ pub(crate) fn parse_sql_timeout(value: &str) -> std::result::Result<StdDuration,
     Ok(StdDuration::from_millis(millis as u64))
 }
 pub(crate) fn run_sql(args: SqlArgs, data_root: PathBuf) -> Result<()> {
+    let output_format = args.output_format();
     let sql = read_sql_input(&args)?;
     let db_path = database_path(data_root);
     let store = open_existing_store_read_only(&db_path, "ctx sql")?;
@@ -57,8 +59,15 @@ pub(crate) fn run_sql(args: SqlArgs, data_root: PathBuf) -> Result<()> {
         },
     )?;
 
-    match args.output_format() {
-        SqlFormat::Table => print_sql_table(&result),
+    match output_format {
+        SqlFormat::Table => {
+            let mut body = render_sql_table(&result);
+            for warning in sql_truncation_warnings(&result) {
+                writeln!(body, "warning: {warning}").expect("writing to String cannot fail");
+            }
+            print!("{}", HistoryEnvelope::new().wrap_text(&body));
+            Ok(())
+        }
         SqlFormat::Json => print_json(raw_sql_result_json(&result)),
         SqlFormat::Csv => print_sql_csv(&result, args.no_header),
         SqlFormat::Raw => print_sql_raw(&result),
@@ -103,7 +112,7 @@ pub(crate) fn read_sql_limited(
     Ok(input)
 }
 
-pub(crate) fn print_sql_table(result: &RawSqlResult) -> Result<()> {
+pub(crate) fn render_sql_table(result: &RawSqlResult) -> String {
     let rows = result
         .rows
         .iter()
@@ -126,25 +135,25 @@ pub(crate) fn print_sql_table(result: &RawSqlResult) -> Result<()> {
         .enumerate()
         .map(|(index, column)| pad_table_cell(&column.name, widths[index]))
         .collect::<Vec<_>>();
-    println!("{}", headers.join(" | "));
+    let mut out = String::new();
+    writeln!(out, "{}", headers.join(" | ")).expect("writing to String cannot fail");
     let separators = widths
         .iter()
         .map(|width| "-".repeat(*width))
         .collect::<Vec<_>>();
-    println!("{}", separators.join(" | "));
+    writeln!(out, "{}", separators.join(" | ")).expect("writing to String cannot fail");
     for row in &rows {
         let cells = row
             .iter()
             .enumerate()
             .map(|(index, cell)| pad_table_cell(cell, widths[index]))
             .collect::<Vec<_>>();
-        println!("{}", cells.join(" | "));
+        writeln!(out, "{}", cells.join(" | ")).expect("writing to String cannot fail");
     }
     if result.rows.is_empty() {
-        println!("(0 rows)");
+        writeln!(out, "(0 rows)").expect("writing to String cannot fail");
     }
-    print_sql_truncation_notice(result);
-    Ok(())
+    out
 }
 
 pub(crate) fn print_sql_csv(result: &RawSqlResult, no_header: bool) -> Result<()> {
@@ -188,18 +197,26 @@ pub(crate) fn print_sql_raw(result: &RawSqlResult) -> Result<()> {
 }
 
 pub(crate) fn print_sql_truncation_notice(result: &RawSqlResult) {
+    for warning in sql_truncation_warnings(result) {
+        eprintln!("warning: {warning}");
+    }
+}
+
+fn sql_truncation_warnings(result: &RawSqlResult) -> Vec<String> {
+    let mut warnings = Vec::new();
     if result.truncated.rows {
-        eprintln!(
-            "warning: rows truncated at {}; rerun with --max-rows for more",
+        warnings.push(format!(
+            "rows truncated at {}; rerun with --max-rows for more",
             result.limits.max_rows
-        );
+        ));
     }
     if result.truncated.values {
-        eprintln!(
-            "warning: values truncated at {} bytes; rerun with --max-value-bytes for more",
+        warnings.push(format!(
+            "values truncated at {} bytes; rerun with --max-value-bytes for more",
             result.limits.max_value_bytes
-        );
+        ));
     }
+    warnings
 }
 
 pub(crate) fn raw_sql_result_json(result: &RawSqlResult) -> Value {

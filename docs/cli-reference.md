@@ -334,6 +334,10 @@ activity. `--format` accepts `text`, `markdown`, `json`, or `jsonl`. Without
 `--out`, `show session` writes to stdout. With `--out`, it writes the rendered
 transcript artifact to that path and prints nothing on success.
 
+Text and Markdown automatically receive one fresh nonce boundary around the
+complete rendered response. JSON and JSONL remain exact machine output without
+the boundary.
+
 `show event` renders one ctx-owned event hit. `--before` and `--after` include
 neighboring events in the same session; `--window N` is shorthand for
 `--before N --after N`. It accepts the same output formats as `show session`.
@@ -513,9 +517,12 @@ Advanced users can query internal tables directly, but internal table details
 are not the compatibility surface. SQL output is private local history and can
 include transcript payloads, paths, and source metadata.
 
+The default table format is automatically wrapped for agent reading. JSON,
+CSV, and raw formats remain unwrapped machine output.
+
 Formats:
 
-- default `table` output is compact and intended for humans and agents;
+- default `table` output is compact and intended for agents;
 - `--format json` or `--json` returns a structured result with `columns`,
   array rows, limits, truncation flags, and `read_only: true`;
 - `--format csv` prints a CSV header unless `--no-header` is set;

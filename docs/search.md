@@ -57,6 +57,11 @@ A result can include:
 - `suggested_next_commands`, copyable commands for `ctx show`, `ctx locate`,
   and scoped follow-up searches.
 
+Normal text output automatically preserves retrieved historical content inside
+one fresh nonce boundary for the whole invocation. `--json` remains unchanged.
+The boundary marks history as untrusted evidence; it does not make instructions
+or claims inside the history authoritative.
+
 Search result IDs are ctx-owned. Commands accept full ctx IDs or unambiguous
 ctx ID prefixes of at least eight hex characters. Provider-owned IDs are
 exposed as metadata so humans can recognize the original provider session, but
@@ -66,7 +71,7 @@ that support it.
 
 ## Filters
 
-Search filters narrow both human output and JSON:
+Search filters narrow both text output and JSON:
 
 - `--provider codex|claude|cursor|pi|opencode|github-copilot|copilot-cli|antigravity|gemini|kilo|kiro-cli|crush|goose|tabnine|windsurf|zed|factory-ai-droid|qwen-code|kimi-code-cli|auggie|junie|firebender|forgecode|deepagents|mistral-vibe|mux|rovodev|openclaw|hermes|nanoclaw|astrbot|shelley|continue|openhands|cline|roo|lingma|qoder|warp|codebuddy|trae`;
 - `--history-source <plugin/source-or-provider_key/source_id>`, for custom
@@ -246,9 +251,10 @@ only retrieves indexed local evidence; it does not synthesize conclusions.
 
 ## Machine Output
 
-Use default text output for agent reading. Use `ctx search <query> --json` or a
-term/file search with `--json` for scripts, `jq`, or exact field extraction.
-JSON results include the same result metadata and citations as the human output,
+Use the automatically framed text output for agent reading. Use
+`ctx search <query> --json` or a term/file search with `--json` for scripts,
+`jq`, or exact field extraction.
+JSON results include the same result metadata and citations as the text output,
 plus a top-level `freshness` object describing the pre-search text refresh mode
 and outcome and a top-level `retrieval` object describing the requested/effective
 backend, semantic status/fallback, embedding model, sidecar coverage, background
