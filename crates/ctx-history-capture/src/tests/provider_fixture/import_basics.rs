@@ -251,14 +251,19 @@ fn batched_provider_import_stops_on_pinned_wal_and_resumes_idempotently() {
         .unwrap();
     assert_eq!(initial_events, 0);
 
-    let error = import_normalized_provider_captures_in_batches(
+    let committed = import_normalized_provider_captures_in_batches(
         &mut store,
         normalization.clone(),
         options.clone(),
         1,
     )
-    .unwrap_err();
-    assert!(error.to_string().contains("ctx index is busy"), "{error}");
+    .unwrap();
+    assert_eq!(committed.imported_events, 1);
+    assert!(committed.requires_maintenance());
+    assert!(committed.maintenance_warnings.iter().any(|warning| {
+        warning.kind == crate::ProviderImportMaintenanceKind::WalCheckpoint
+            && warning.error.contains("WAL checkpoint could not complete")
+    }));
     reader.execute_batch("ROLLBACK").unwrap();
 
     assert_eq!(store.list_sessions().unwrap().len(), 1);
@@ -341,7 +346,7 @@ fn provider_import_uses_shared_bounded_batches() {
         0
     );
 
-    let error = import_normalized_provider_captures(
+    let summary = import_normalized_provider_captures(
         &mut store,
         ProviderNormalizationResult {
             summary: ProviderImportSummary::default(),
@@ -353,8 +358,14 @@ fn provider_import_uses_shared_bounded_batches() {
             ..NormalizedProviderImportOptions::default()
         },
     )
-    .unwrap_err();
-    assert!(error.to_string().contains("ctx index is busy"), "{error}");
+    .unwrap();
+    assert_eq!(summary.imported_sessions, 64);
+    assert_eq!(summary.imported_events, 64);
+    assert!(summary.requires_maintenance());
+    assert!(summary.maintenance_warnings.iter().any(|warning| {
+        warning.kind == crate::ProviderImportMaintenanceKind::WalCheckpoint
+            && warning.error.contains("ctx index is busy")
+    }));
     reader.execute_batch("ROLLBACK").unwrap();
 
     assert_eq!(store.list_sessions().unwrap().len(), 64);
@@ -411,6 +422,59 @@ fn provider_import_uses_shared_bulk_search_guard() {
 }
 
 #[test]
+fn generic_import_retains_summary_when_search_finalization_is_pinned() {
+    let temp = tempdir();
+    let db_path = temp.path().join("work.sqlite");
+    let mut store =
+        Store::open_with_busy_timeout(&db_path, std::time::Duration::from_millis(10)).unwrap();
+    let reader = Connection::open(&db_path).unwrap();
+    reader.execute_batch("BEGIN").unwrap();
+    reader
+        .query_row("SELECT COUNT(*) FROM event_search", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap();
+
+    let occurred_at = DateTime::parse_from_rfc3339("2026-07-14T19:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let source_path = temp.path().join("pinned-finalization.jsonl");
+    let normalization = ProviderNormalizationResult {
+        summary: ProviderImportSummary::default(),
+        captures: vec![(
+            1,
+            provider_collision_capture(
+                CaptureProvider::Claude,
+                "pinned-finalization",
+                "claude_projects_jsonl",
+                &source_path.display().to_string(),
+                occurred_at,
+            ),
+        )],
+        files_touched: Vec::new(),
+    };
+    let summary = import_normalized_provider_capture_stream(
+        &mut store,
+        NormalizedProviderImportOptions::default(),
+        |emit| emit(normalization),
+    )
+    .unwrap();
+
+    assert_eq!(summary.imported_events, 1);
+    assert_eq!(summary.maintenance_warnings.len(), 1);
+    assert_eq!(
+        summary.maintenance_warnings[0].kind,
+        crate::ProviderImportMaintenanceKind::EventSearchFinalization
+    );
+    assert!(summary.maintenance_warnings[0]
+        .error
+        .contains("WAL checkpoint could not complete"));
+    assert_eq!(store.export_archive().unwrap().events.len(), 1);
+
+    reader.execute_batch("ROLLBACK").unwrap();
+}
+
+#[test]
 fn batched_provider_import_rotates_on_serialized_byte_budget() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");
@@ -449,7 +513,7 @@ fn batched_provider_import_rotates_on_serialized_byte_budget() {
             .unwrap(),
         0
     );
-    let error = import_normalized_provider_captures_in_batches(
+    let summary = import_normalized_provider_captures_in_batches(
         &mut store,
         ProviderNormalizationResult {
             summary: ProviderImportSummary::default(),
@@ -462,8 +526,14 @@ fn batched_provider_import_rotates_on_serialized_byte_budget() {
         },
         64,
     )
-    .unwrap_err();
-    assert!(error.to_string().contains("ctx index is busy"), "{error}");
+    .unwrap();
+    assert_eq!(summary.imported_sessions, 1);
+    assert_eq!(summary.imported_events, 1);
+    assert!(summary.requires_maintenance());
+    assert!(summary.maintenance_warnings.iter().any(|warning| {
+        warning.kind == crate::ProviderImportMaintenanceKind::WalCheckpoint
+            && warning.error.contains("ctx index is busy")
+    }));
     reader.execute_batch("ROLLBACK").unwrap();
 
     assert_eq!(store.list_sessions().unwrap().len(), 1);

@@ -2,9 +2,11 @@ use std::collections::BTreeMap;
 
 use ctx_history_core::{CaptureProvider, Event};
 use ctx_history_store::{Store, StoreError};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::common::scratch::CaptureScratchSpace;
 use crate::{CaptureError, Result};
 
 use super::ids::{
@@ -29,6 +31,145 @@ pub(crate) struct ProviderEventImportIdentity {
     pub(crate) run_source_id: Option<Uuid>,
 }
 
+const PI_IDENTITY_LOAD_BATCH: usize = 128;
+
+pub(crate) struct ProviderPiEventIdentityInventory {
+    connection: Connection,
+    _scratch: CaptureScratchSpace,
+    max_load_batch: usize,
+}
+
+impl ProviderPiEventIdentityInventory {
+    fn new() -> Result<Self> {
+        let scratch = CaptureScratchSpace::create("pi-event-identities")?;
+        drop(scratch.create_file("identities.sqlite")?);
+        let connection = Connection::open(scratch.path().join("identities.sqlite"))?;
+        connection.execute_batch(
+            "CREATE TABLE loaded_sessions (session_id TEXT PRIMARY KEY NOT NULL) WITHOUT ROWID;
+             CREATE TABLE identities (
+                 session_id TEXT NOT NULL,
+                 entry_id TEXT NOT NULL,
+                 event_id TEXT NOT NULL,
+                 seq INTEGER NOT NULL,
+                 dedupe_key TEXT NOT NULL,
+                 run_source_id TEXT,
+                 PRIMARY KEY (session_id, entry_id)
+             ) WITHOUT ROWID;",
+        )?;
+        Ok(Self {
+            connection,
+            _scratch: scratch,
+            max_load_batch: 0,
+        })
+    }
+
+    pub(crate) fn max_load_batch(&self) -> usize {
+        self.max_load_batch
+    }
+
+    fn lookup(
+        &mut self,
+        store: &Store,
+        session_id: Uuid,
+        entry_id: &str,
+    ) -> Result<Option<ProviderEventImportIdentity>> {
+        let session_key = session_id.to_string();
+        let loaded = self
+            .connection
+            .query_row(
+                "SELECT 1 FROM loaded_sessions WHERE session_id = ?1",
+                params![&session_key],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !loaded {
+            self.load_session(store, session_id, &session_key)?;
+        }
+        self.connection
+            .query_row(
+                "SELECT event_id, seq, dedupe_key, run_source_id
+                 FROM identities WHERE session_id = ?1 AND entry_id = ?2",
+                params![session_key, entry_id],
+                |row| {
+                    let event_id = row.get::<_, String>(0)?;
+                    let seq = row.get::<_, i64>(1)?;
+                    let run_source_id = row.get::<_, Option<String>>(3)?;
+                    Ok((event_id, seq, row.get::<_, String>(2)?, run_source_id))
+                },
+            )
+            .optional()?
+            .map(|(event_id, seq, dedupe_key, run_source_id)| {
+                Ok(ProviderEventImportIdentity {
+                    id: Uuid::parse_str(&event_id).map_err(|_| {
+                        CaptureError::SystemInvariant(
+                            "Pi identity inventory contains an invalid event ID",
+                        )
+                    })?,
+                    seq: u64::try_from(seq).map_err(|_| {
+                        CaptureError::SystemInvariant(
+                            "Pi identity inventory contains an invalid sequence",
+                        )
+                    })?,
+                    dedupe_key,
+                    run_source_id: run_source_id
+                        .map(|id| Uuid::parse_str(&id))
+                        .transpose()
+                        .map_err(|_| {
+                            CaptureError::SystemInvariant(
+                                "Pi identity inventory contains an invalid run source ID",
+                            )
+                        })?,
+                })
+            })
+            .transpose()
+    }
+
+    fn load_session(&mut self, store: &Store, session_id: Uuid, session_key: &str) -> Result<()> {
+        let mut events = store.events_for_session_limited(session_id, PI_IDENTITY_LOAD_BATCH)?;
+        loop {
+            self.max_load_batch = self.max_load_batch.max(events.len());
+            for event in &events {
+                let Some(entry_id) = pi_stored_event_entry_id(event) else {
+                    continue;
+                };
+                let Some(dedupe_key) = event.dedupe_key.as_deref() else {
+                    continue;
+                };
+                self.connection.execute(
+                    "INSERT OR IGNORE INTO identities
+                     (session_id, entry_id, event_id, seq, dedupe_key, run_source_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        session_key,
+                        entry_id,
+                        event.id.to_string(),
+                        i64::try_from(event.seq).unwrap_or(i64::MAX),
+                        dedupe_key,
+                        event.capture_source_id.map(|id| id.to_string()),
+                    ],
+                )?;
+            }
+            let Some(anchor) = events.last() else {
+                break;
+            };
+            let mut next = store.events_for_session_window(anchor, 0, PI_IDENTITY_LOAD_BATCH)?;
+            if !next.is_empty() {
+                next.remove(0);
+            }
+            if next.is_empty() {
+                break;
+            }
+            events = next;
+        }
+        self.connection.execute(
+            "INSERT OR IGNORE INTO loaded_sessions (session_id) VALUES (?1)",
+            params![session_key],
+        )?;
+        Ok(())
+    }
+}
+
 pub(crate) fn pi_existing_event_identity_by_entry_id(
     store: &Store,
     provider: CaptureProvider,
@@ -42,32 +183,14 @@ pub(crate) fn pi_existing_event_identity_by_entry_id(
     let Some(entry_id) = entry_id.filter(|id| !id.trim().is_empty()) else {
         return Ok(None);
     };
-    if let std::collections::btree_map::Entry::Vacant(entry) =
-        caches.pi_event_identities_by_entry_id.entry(session_id)
-    {
-        let mut identities = BTreeMap::new();
-        for event in store.events_for_session(session_id)? {
-            let Some(existing_entry_id) = pi_stored_event_entry_id(&event) else {
-                continue;
-            };
-            let Some(dedupe_key) = event.dedupe_key.clone() else {
-                continue;
-            };
-            identities
-                .entry(existing_entry_id.to_owned())
-                .or_insert(ProviderEventImportIdentity {
-                    id: event.id,
-                    seq: event.seq,
-                    dedupe_key,
-                    run_source_id: event.capture_source_id,
-                });
-        }
-        entry.insert(identities);
+    if caches.pi_event_identities.is_none() {
+        caches.pi_event_identities = Some(ProviderPiEventIdentityInventory::new()?);
     }
-    Ok(caches
-        .pi_event_identities_by_entry_id
-        .get(&session_id)
-        .and_then(|identities| identities.get(entry_id).cloned()))
+    caches
+        .pi_event_identities
+        .as_mut()
+        .expect("Pi identity inventory was initialized")
+        .lookup(store, session_id, entry_id)
 }
 
 pub(crate) fn pi_stored_event_entry_id(event: &Event) -> Option<&str> {

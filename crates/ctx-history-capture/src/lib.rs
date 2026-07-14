@@ -1,10 +1,19 @@
 pub mod provider_sources;
 pub use provider_sources::{
-    discover_provider_sources, discover_provider_sources_for_provider, provider_source_for_path,
-    provider_source_spec, provider_source_specs, ProviderCatalogSupport, ProviderDefaultLocation,
-    ProviderImportDependency, ProviderImportSupport, ProviderImportUnitGrouping,
-    ProviderImportUnitOwner, ProviderImportUnitSpec, ProviderSource, ProviderSourceKind,
-    ProviderSourceSpec, ProviderSourceStatus,
+    discover_provider_sources, discover_provider_sources_for_provider,
+    import_append_capable_provider_file, open_provider_jsonl,
+    provider_canonical_material_source_format, provider_file_mutation_contract,
+    provider_source_for_path, provider_source_spec, provider_source_specs,
+    ClaudeProjectsJsonlResumeState, ProviderAdmittedJsonlAppendCheckpoint,
+    ProviderAppendFileImportDecision, ProviderAppendFileImportMode,
+    ProviderAppendFileImportOptions, ProviderAppendFileImportResult,
+    ProviderAppendFileImportWithoutCheckpoint, ProviderCatalogSupport, ProviderDefaultLocation,
+    ProviderFileMutationContract, ProviderFileStableIdentity, ProviderImportDependency,
+    ProviderImportSupport, ProviderImportUnitGrouping, ProviderImportUnitOwner,
+    ProviderImportUnitSpec, ProviderJsonlAppendCheckpoint, ProviderJsonlOpenDecision,
+    ProviderJsonlOpenMode, ProviderJsonlReader, ProviderJsonlRecordRead,
+    ProviderJsonlReplacementReason, ProviderJsonlResumeState, ProviderSource, ProviderSourceKind,
+    ProviderSourceSpec, ProviderSourceStatus, TabnineJsonlResumeState,
 };
 
 pub const CAPTURE_SCHEMA_VERSION: u32 = 1;
@@ -61,7 +70,8 @@ pub use error::{CaptureError, Result};
 
 mod summaries;
 pub use summaries::{
-    CatalogSummary, ProviderImportFailure, ProviderImportSummary, SpoolCounts, SpoolImportFailure,
+    CatalogSummary, ProviderImportFailure, ProviderImportMaintenanceKind,
+    ProviderImportMaintenanceWarning, ProviderImportSummary, SpoolCounts, SpoolImportFailure,
     SpoolImportSummary, SpoolRepairSummary,
 };
 
@@ -88,6 +98,8 @@ pub(crate) mod common {
     pub(crate) mod identity;
     pub(crate) mod io;
     pub(crate) mod json;
+    pub(crate) mod path_inventory;
+    pub(crate) mod scratch;
     pub(crate) mod time;
 }
 pub use common::identity::{compute_payload_hash, stable_capture_uuid};

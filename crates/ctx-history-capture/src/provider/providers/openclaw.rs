@@ -181,7 +181,7 @@ pub(crate) fn normalize_openclaw_history(
     }
     if merged.captures.is_empty() && merged.summary.failed == 0 {
         merged.summary.failed += 1;
-        merged.summary.failures.push(ProviderImportFailure {
+        merged.summary.sample_failure(ProviderImportFailure {
             line: 0,
             error: "OpenClaw session JSONL transcripts contained no real conversation messages"
                 .to_owned(),
@@ -228,7 +228,7 @@ pub(crate) fn normalize_openclaw_jsonl_file(
             Ok(value) => value,
             Err(err) => {
                 result.summary.failed += 1;
-                result.summary.failures.push(ProviderImportFailure {
+                result.summary.sample_failure(ProviderImportFailure {
                     line: line_number,
                     error: err.to_string(),
                 });
