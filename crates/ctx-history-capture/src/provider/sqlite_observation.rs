@@ -849,9 +849,7 @@ fn validate_open_source_file(_file: &File) -> io::Result<()> {
 
 fn main_header_sentinel(file: &mut File, metadata: &Metadata) -> io::Result<(Vec<u8>, bool)> {
     let header = read_prefix(file, SQLITE_HEADER_BYTES)?;
-    let uses_wal_mode = header.starts_with(b"SQLite format 3\0")
-        && header.len() >= SQLITE_HEADER_BYTES
-        && header[18..20] == [2, 2];
+    let uses_wal_mode = main_header_uses_wal_mode(&header);
     let mut sentinel = b"sqlite-main-v2".to_vec();
     if header.starts_with(b"SQLite format 3\0") && header.len() >= SQLITE_HEADER_BYTES {
         for range in [24..32, 40..48, 60..64, 92..100] {
@@ -862,6 +860,12 @@ fn main_header_sentinel(file: &mut File, metadata: &Metadata) -> io::Result<(Vec
     }
     append_main_file_identity(&mut sentinel, file, metadata)?;
     Ok((sentinel, uses_wal_mode))
+}
+
+fn main_header_uses_wal_mode(header: &[u8]) -> bool {
+    header.starts_with(b"SQLite format 3\0")
+        && header.len() >= SQLITE_HEADER_BYTES
+        && (header[18] == 2 || header[19] == 2)
 }
 
 #[cfg(unix)]
@@ -1385,6 +1389,20 @@ mod tests {
     use rusqlite::Connection;
 
     use super::*;
+
+    #[test]
+    fn either_sqlite_header_version_byte_requires_wal_snapshot() {
+        let mut header = [0_u8; SQLITE_HEADER_BYTES];
+        header[..16].copy_from_slice(b"SQLite format 3\0");
+        header[18] = 1;
+        header[19] = 1;
+        assert!(!main_header_uses_wal_mode(&header));
+        header[18] = 2;
+        assert!(main_header_uses_wal_mode(&header));
+        header[18] = 1;
+        header[19] = 2;
+        assert!(main_header_uses_wal_mode(&header));
+    }
 
     #[test]
     fn real_wal_validates_supported_page_sizes_and_both_checksum_orders() {
