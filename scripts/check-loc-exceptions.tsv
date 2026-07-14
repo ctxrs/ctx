@@ -2,7 +2,7 @@ path	max_lines	kind	reason	review_after
 crates/ctx-history-capture/src/tests/native_json.rs	2820	test	native JSON import regression matrix with shared fixtures; split after provider fixture consolidation lands	2026-10-01
 crates/ctx-history-capture/src/tests/native_providers.rs	2435	test	native provider parser matrix with cross-provider fixture setup; split after provider fixture consolidation lands	2026-10-01
 crates/ctx-cli/src/integrations/mcp.rs	1623	source	MCP config writer matrix spans many agent formats; split after the initial integrations installer surface stabilizes	2026-10-01
-crates/ctx-history-capture/src/tests/support.rs	2090	test	shared capture test fixture support plus hermetic fixture roots; splitting now would add indirection without narrowing callers	2026-10-01
+crates/ctx-history-capture/src/tests/support.rs	2091	test	shared capture test fixture support plus hermetic fixture roots; splitting now would add indirection without narrowing callers	2026-10-01
 crates/ctx-history-capture/src/provider/providers/opencode.rs	1446	source	OpenCode/Kilo provider import compatibility spans legacy and message-part transcript formats; split after provider parser boundaries settle	2026-10-01
 crates/ctx-history-capture/src/tests/codex.rs	2240	test	Codex parser regression matrix covers oversized JSONL and session semantics; split after fixture helpers are shared	2026-10-01
 crates/ctx-history-capture/src/tests/native_sqlite.rs	1754	test	native SQLite provider regression matrix shares setup across formats; split after fixture helpers are shared	2026-10-01

@@ -319,54 +319,54 @@ fn unexpected_checkpoint_permanent_error_after_commit_is_typed_and_retains_summa
 #[test]
 fn replacement_header_plus_partial_first_message_is_deferred() {
     let cases = [
-            (
-                CaptureProvider::Codex,
-                "codex_session_jsonl_tree",
-                "codex_session_jsonl",
-                format!(
-                    "{}{{\"timestamp\":\"2026-07-14T12:00:01Z\",\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[",
-                    jsonl(codex_header("codex-partial"))
-                ),
+        (
+            CaptureProvider::Codex,
+            "codex_session_jsonl_tree",
+            "codex_session_jsonl",
+            format!(
+                "{}{{\"timestamp\":\"2026-07-14T12:00:01Z\",\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[",
+                jsonl(codex_header("codex-partial"))
             ),
-            (
-                CaptureProvider::Pi,
-                "pi_session_jsonl",
-                "pi_session_jsonl",
-                format!(
-                    "{}{{\"type\":\"message\",\"id\":\"pi-user",
-                    jsonl(json!({
-                        "type": "session",
-                        "id": "pi-partial",
-                        "timestamp": "2026-07-14T12:00:00Z"
-                    }))
-                ),
+        ),
+        (
+            CaptureProvider::Pi,
+            "pi_session_jsonl",
+            "pi_session_jsonl",
+            format!(
+                "{}{{\"type\":\"message\",\"id\":\"pi-user",
+                jsonl(json!({
+                    "type": "session",
+                    "id": "pi-partial",
+                    "timestamp": "2026-07-14T12:00:00Z"
+                }))
             ),
-            (
-                CaptureProvider::Claude,
-                "claude_projects_jsonl_tree",
-                "claude_projects_jsonl_tree",
-                format!(
-                    "{}{{\"sessionId\":\"claude-partial\",\"type\":\"user\",\"message\":",
-                    jsonl(json!({
-                        "sessionId": "claude-partial",
-                        "timestamp": "2026-07-14T12:00:00Z",
-                        "type": "system"
-                    }))
-                ),
+        ),
+        (
+            CaptureProvider::Claude,
+            "claude_projects_jsonl_tree",
+            "claude_projects_jsonl_tree",
+            format!(
+                "{}{{\"sessionId\":\"claude-partial\",\"type\":\"user\",\"message\":",
+                jsonl(json!({
+                    "sessionId": "claude-partial",
+                    "timestamp": "2026-07-14T12:00:00Z",
+                    "type": "system"
+                }))
             ),
-            (
-                CaptureProvider::Tabnine,
-                "tabnine_cli_chat_recording_jsonl",
-                "tabnine_cli_chat_recording_jsonl",
-                format!(
-                    "{}{{\"id\":\"tabnine-user\",\"type\":\"user\",\"content\":",
-                    jsonl(json!({
-                        "sessionId": "tabnine-partial",
-                        "startTime": "2026-07-14T12:00:00Z"
-                    }))
-                ),
+        ),
+        (
+            CaptureProvider::Tabnine,
+            "tabnine_cli_chat_recording_jsonl",
+            "tabnine_cli_chat_recording_jsonl",
+            format!(
+                "{}{{\"id\":\"tabnine-user\",\"type\":\"user\",\"content\":",
+                jsonl(json!({
+                    "sessionId": "tabnine-partial",
+                    "startTime": "2026-07-14T12:00:00Z"
+                }))
             ),
-        ];
+        ),
+    ];
 
     for (index, (provider, inventory_format, material_format, contents)) in
         cases.into_iter().enumerate()
@@ -395,7 +395,7 @@ fn replacement_header_plus_partial_first_message_is_deferred() {
 }
 
 #[test]
-fn codex_checkpoint_stops_at_and_replays_an_open_tool_frontier() {
+fn codex_permanent_orphan_keeps_future_large_appends_delta_bounded() {
     let temp = tempdir().unwrap();
     let path = temp.path().join("codex/session.jsonl");
     write_raw(
@@ -421,9 +421,29 @@ fn codex_checkpoint_stops_at_and_replays_an_open_tool_frontier() {
         )
         .unwrap(),
     );
-    assert_eq!(first.checkpoint.complete_line_count, 2);
+    assert_eq!(first.checkpoint.complete_line_count, 3);
+    assert_eq!(
+        first.checkpoint.committed_offset,
+        fs::metadata(&path).unwrap().len()
+    );
+    let Some(ProviderJsonlResumeState::CodexSession(state)) =
+        first.checkpoint.resume_state.as_ref()
+    else {
+        panic!("Codex replacement must persist typed resume state");
+    };
+    assert_eq!(state.pending_tool_calls.len(), 1);
+    assert_eq!(state.pending_tool_calls[0].call_id, "call-open");
 
-    let replay = imported(
+    let mut large_tail = String::new();
+    for index in 0..2_048 {
+        large_tail.push_str(&jsonl(codex_message(
+            "assistant",
+            &format!("continuing tail {index}"),
+            10,
+        )));
+    }
+    append_raw(&path, &large_tail);
+    let continued = imported(
         import_append_capable_provider_file(
             CaptureProvider::Codex,
             &mut store,
@@ -431,77 +451,40 @@ fn codex_checkpoint_stops_at_and_replays_an_open_tool_frontier() {
                 &path,
                 "codex_session_jsonl_tree",
                 "codex_session_jsonl",
-                admitted(first.checkpoint.clone()),
+                admitted(first.checkpoint),
             ),
         )
         .unwrap(),
     );
-    assert_eq!(replay.checkpoint, first.checkpoint);
-
-    append_raw(&path, "{\"type\":\"response_item\",oops}\n");
-    let malformed_while_open = imported(
-        import_append_capable_provider_file(
-            CaptureProvider::Codex,
-            &mut store,
-            options(
-                &path,
-                "codex_session_jsonl_tree",
-                "codex_session_jsonl",
-                admitted(replay.checkpoint),
-            ),
-        )
-        .unwrap(),
+    assert_eq!(continued.summary.imported_events, 2_048);
+    assert_eq!(continued.checkpoint.complete_line_count, 2_051);
+    assert_eq!(
+        continued.checkpoint.committed_offset,
+        fs::metadata(&path).unwrap().len()
     );
-    assert_eq!(malformed_while_open.checkpoint.complete_line_count, 2);
-
-    append_raw(
-        &path,
-        &jsonl(codex_output(
-            "call-open",
-            "Chunk ID: ok\nProcess exited with code 0\nOutput:\npassed\n",
-            3,
-        )),
+    let Some(ProviderJsonlResumeState::CodexSession(state)) =
+        continued.checkpoint.resume_state.as_ref()
+    else {
+        panic!("Codex continuation must retain typed resume state");
+    };
+    assert_eq!(state.pending_tool_calls[0].call_id, "call-open");
+    assert!(
+        continued
+            .checkpoint
+            .resume_state
+            .as_ref()
+            .unwrap()
+            .encode_persisted_json()
+            .unwrap()
+            .len()
+            <= crate::provider_sources::CODEX_RESUME_MAX_ENCODED_BYTES
     );
-    let successful_output = imported(
-        import_append_capable_provider_file(
-            CaptureProvider::Codex,
-            &mut store,
-            options(
-                &path,
-                "codex_session_jsonl_tree",
-                "codex_session_jsonl",
-                admitted(malformed_while_open.checkpoint),
-            ),
-        )
-        .unwrap(),
-    );
-    assert_eq!(successful_output.checkpoint.complete_line_count, 5);
-
-    append_raw(&path, &jsonl(codex_call("call-failed", 4)));
-    let open_again = imported(
-        import_append_capable_provider_file(
-            CaptureProvider::Codex,
-            &mut store,
-            options(
-                &path,
-                "codex_session_jsonl_tree",
-                "codex_session_jsonl",
-                admitted(successful_output.checkpoint),
-            ),
-        )
-        .unwrap(),
-    );
-    assert_eq!(open_again.checkpoint.complete_line_count, 5);
 
     append_raw(
         &path,
-        &jsonl(codex_output(
-            "call-failed",
-            "Process exited with code 1\nOutput:\nfailed\n",
-            5,
-        )),
+        &jsonl(codex_message("assistant", "one final delta", 11)),
     );
-    let failed_output = imported(
+    let final_delta = imported(
         import_append_capable_provider_file(
             CaptureProvider::Codex,
             &mut store,
@@ -509,16 +492,17 @@ fn codex_checkpoint_stops_at_and_replays_an_open_tool_frontier() {
                 &path,
                 "codex_session_jsonl_tree",
                 "codex_session_jsonl",
-                admitted(open_again.checkpoint),
+                admitted(continued.checkpoint),
             ),
         )
         .unwrap(),
     );
-    assert_eq!(failed_output.checkpoint.complete_line_count, 7);
+    assert_eq!(final_delta.summary.imported_events, 1);
+    assert_eq!(final_delta.checkpoint.complete_line_count, 2_052);
 }
 
 #[test]
-fn codex_output_clears_only_its_matching_call_context() {
+fn codex_late_output_closes_only_its_matching_context_across_refreshes() {
     let temp = tempdir().unwrap();
     let path = temp.path().join("codex/multiple-calls.jsonl");
     write_raw(
@@ -550,17 +534,26 @@ fn codex_output_clears_only_its_matching_call_context() {
         )
         .unwrap(),
     );
-    assert_eq!(initial.checkpoint.complete_line_count, 2);
+    assert_eq!(initial.checkpoint.complete_line_count, 5);
+    let Some(ProviderJsonlResumeState::CodexSession(state)) =
+        initial.checkpoint.resume_state.as_ref()
+    else {
+        panic!("Codex replacement must persist typed resume state");
+    };
+    assert_eq!(
+        state
+            .pending_tool_calls
+            .iter()
+            .map(|context| context.call_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["call-b"]
+    );
 
     append_raw(
         &path,
-        &jsonl(codex_output(
-            "call-b",
-            "Process exited with code 0\nOutput:\nb done\n",
-            5,
-        )),
+        &jsonl(codex_message("assistant", "between refreshes", 5)),
     );
-    let completed = imported(
+    let refreshed = imported(
         import_append_capable_provider_file(
             CaptureProvider::Codex,
             &mut store,
@@ -573,7 +566,233 @@ fn codex_output_clears_only_its_matching_call_context() {
         )
         .unwrap(),
     );
-    assert_eq!(completed.checkpoint.complete_line_count, 6);
+    assert_eq!(refreshed.checkpoint.complete_line_count, 6);
+    let Some(ProviderJsonlResumeState::CodexSession(state)) =
+        refreshed.checkpoint.resume_state.as_ref()
+    else {
+        panic!("Codex refresh must persist typed resume state");
+    };
+    assert_eq!(state.pending_tool_calls[0].call_id, "call-b");
+
+    append_raw(
+        &path,
+        &jsonl(codex_output(
+            "call-b",
+            "Process exited with code 1\nOutput:\nb failed\n",
+            6,
+        )),
+    );
+    let completed = imported(
+        import_append_capable_provider_file(
+            CaptureProvider::Codex,
+            &mut store,
+            options(
+                &path,
+                "codex_session_jsonl_tree",
+                "codex_session_jsonl",
+                admitted(refreshed.checkpoint),
+            ),
+        )
+        .unwrap(),
+    );
+    assert_eq!(completed.checkpoint.complete_line_count, 7);
+    let Some(ProviderJsonlResumeState::CodexSession(state)) =
+        completed.checkpoint.resume_state.as_ref()
+    else {
+        panic!("Codex completion must persist typed resume state");
+    };
+    assert!(state.pending_tool_calls.is_empty());
+    let output = store
+        .export_archive()
+        .unwrap()
+        .events
+        .into_iter()
+        .find(|event| event.event_type == ctx_history_core::EventType::CommandOutput)
+        .expect("failed late output should retain command context");
+    assert_eq!(output.payload["body"]["tool"], "exec_command");
+    assert_eq!(output.payload["body"]["command"], "cargo test");
+}
+
+#[test]
+fn codex_resume_overflow_is_oldest_first_bounded_and_restartable() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("codex/resume-overflow.jsonl");
+    let mut contents = format!(
+        "{}{}",
+        jsonl(codex_header("codex-resume-overflow")),
+        jsonl(codex_message("user", "many calls", 1))
+    );
+    for index in 0..80 {
+        contents.push_str(&jsonl(codex_call(&format!("call-{index:03}"), 2)));
+    }
+    write_raw(&path, &contents);
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+    let initial = imported(
+        import_append_capable_provider_file(
+            CaptureProvider::Codex,
+            &mut store,
+            options(
+                &path,
+                "codex_session_jsonl_tree",
+                "codex_session_jsonl",
+                ProviderAppendFileImportMode::AppendCapableReplacement,
+            ),
+        )
+        .unwrap(),
+    );
+    assert_eq!(initial.checkpoint.complete_line_count, 82);
+    let Some(ProviderJsonlResumeState::CodexSession(state)) =
+        initial.checkpoint.resume_state.as_ref()
+    else {
+        panic!("Codex replacement must persist typed resume state");
+    };
+    assert_eq!(
+        state.pending_tool_calls.len(),
+        crate::provider_sources::CODEX_RESUME_MAX_PENDING_TOOL_CALLS
+    );
+    assert_eq!(state.pending_tool_calls[0].call_id, "call-016");
+    assert_eq!(state.pending_tool_calls.last().unwrap().call_id, "call-079");
+    assert_eq!(state.dropped_tool_calls, 16);
+
+    let encoded = initial
+        .checkpoint
+        .resume_state
+        .as_ref()
+        .unwrap()
+        .encode_persisted_json()
+        .unwrap();
+    assert!(encoded.len() < 65_536);
+    let decoded = ProviderJsonlResumeState::decode_persisted_json(&encoded).unwrap();
+    let mut restarted_checkpoint = initial.checkpoint;
+    restarted_checkpoint.resume_state = Some(decoded);
+
+    append_raw(
+        &path,
+        &jsonl(codex_output(
+            "call-016",
+            "Process exited with code 1\nOutput:\nretained late failure\n",
+            3,
+        )),
+    );
+    let retained = imported(
+        import_append_capable_provider_file(
+            CaptureProvider::Codex,
+            &mut store,
+            options(
+                &path,
+                "codex_session_jsonl_tree",
+                "codex_session_jsonl",
+                admitted(restarted_checkpoint),
+            ),
+        )
+        .unwrap(),
+    );
+    let Some(ProviderJsonlResumeState::CodexSession(state)) =
+        retained.checkpoint.resume_state.as_ref()
+    else {
+        panic!("Codex append must persist typed resume state");
+    };
+    assert_eq!(state.pending_tool_calls.len(), 63);
+    assert_eq!(state.pending_tool_calls[0].call_id, "call-017");
+    assert_eq!(state.dropped_tool_calls, 16);
+
+    append_raw(
+        &path,
+        &jsonl(codex_output(
+            "call-000",
+            "Process exited with code 1\nOutput:\ndropped late failure\n",
+            4,
+        )),
+    );
+    let dropped = imported(
+        import_append_capable_provider_file(
+            CaptureProvider::Codex,
+            &mut store,
+            options(
+                &path,
+                "codex_session_jsonl_tree",
+                "codex_session_jsonl",
+                admitted(retained.checkpoint),
+            ),
+        )
+        .unwrap(),
+    );
+    assert_eq!(dropped.summary.imported_events, 1);
+    let archive = store.export_archive().unwrap();
+    let dropped_output = archive.events.last().unwrap();
+    assert_eq!(
+        dropped_output.event_type,
+        ctx_history_core::EventType::ToolOutput
+    );
+    assert_eq!(
+        dropped_output.payload["body"]["tool"],
+        "function_call_output"
+    );
+    assert!(dropped_output.payload["body"]["command"].is_null());
+}
+
+#[test]
+fn codex_blank_orphan_call_id_never_enters_a_persisted_checkpoint() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("codex/blank-call-id.jsonl");
+    write_raw(
+        &path,
+        &format!(
+            "{}{}{}",
+            jsonl(codex_header("codex-blank-call-id")),
+            jsonl(codex_call("   ", 1)),
+            jsonl(codex_message("user", "keep importing ordinary events", 2))
+        ),
+    );
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let initial = imported(
+        import_append_capable_provider_file(
+            CaptureProvider::Codex,
+            &mut store,
+            options(
+                &path,
+                "codex_session_jsonl_tree",
+                "codex_session_jsonl",
+                ProviderAppendFileImportMode::AppendCapableReplacement,
+            ),
+        )
+        .unwrap(),
+    );
+    let initial_resume = initial
+        .checkpoint
+        .resume_state
+        .as_ref()
+        .expect("Codex replacement must persist typed resume state");
+    initial_resume.validate().unwrap();
+    assert_eq!(
+        initial_resume,
+        &ProviderJsonlResumeState::CodexSession(CodexSessionJsonlResumeState::default())
+    );
+
+    append_raw(&path, &jsonl(codex_message("assistant", "next delta", 3)));
+    let appended = imported(
+        import_append_capable_provider_file(
+            CaptureProvider::Codex,
+            &mut store,
+            options(
+                &path,
+                "codex_session_jsonl_tree",
+                "codex_session_jsonl",
+                admitted(initial.checkpoint),
+            ),
+        )
+        .unwrap(),
+    );
+    appended
+        .checkpoint
+        .resume_state
+        .as_ref()
+        .expect("Codex append must persist typed resume state")
+        .validate()
+        .unwrap();
+    assert_eq!(appended.summary.imported_events, 1);
+    assert_eq!(store.export_archive().unwrap().events.len(), 3);
 }
 
 #[test]
@@ -691,7 +910,14 @@ fn codex_invalid_timestamp_output_closes_only_its_matching_tool_frontier() {
         .unwrap(),
     );
     assert_eq!(initial.summary.failed, 1);
-    assert_eq!(initial.checkpoint.complete_line_count, 2);
+    assert_eq!(initial.checkpoint.complete_line_count, 6);
+    let Some(ProviderJsonlResumeState::CodexSession(state)) =
+        initial.checkpoint.resume_state.as_ref()
+    else {
+        panic!("Codex invalid-output import must persist typed resume state");
+    };
+    assert_eq!(state.pending_tool_calls.len(), 1);
+    assert_eq!(state.pending_tool_calls[0].call_id, "call-b");
 
     append_raw(
         &path,
@@ -714,147 +940,16 @@ fn codex_invalid_timestamp_output_closes_only_its_matching_tool_frontier() {
         )
         .unwrap(),
     );
-    assert_eq!(completed.summary.failed, 1);
+    assert_eq!(completed.summary.failed, 0);
     assert_eq!(completed.checkpoint.complete_line_count, 7);
     assert_eq!(
         completed.checkpoint.committed_offset,
         fs::metadata(&path).unwrap().len()
     );
-}
-
-#[test]
-fn codex_append_rejects_a_second_session_header_before_commit() {
-    let temp = tempdir().unwrap();
-    let path = temp.path().join("codex/second-header.jsonl");
-    write_raw(
-        &path,
-        &format!(
-            "{}{}",
-            jsonl(codex_header("codex-original")),
-            jsonl(codex_message("user", "original session", 1))
-        ),
-    );
-    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
-    let initial = imported(
-        import_append_capable_provider_file(
-            CaptureProvider::Codex,
-            &mut store,
-            options(
-                &path,
-                "codex_session_jsonl_tree",
-                "codex_session_jsonl",
-                ProviderAppendFileImportMode::AppendCapableReplacement,
-            ),
-        )
-        .unwrap(),
-    );
-    let event_count = store.export_archive().unwrap().events.len();
-    append_raw(
-            &path,
-            &format!(
-                "{}{}",
-                jsonl(codex_message("assistant", "must roll back", 2)),
-                "{\"type\": \"session_meta\", \"payload\": {\"id\": \"codex-second\", \"timestamp\": \"2026-07-14T12:00:03Z\"}}\n"
-            ),
-        );
-    let decision = import_append_capable_provider_file(
-        CaptureProvider::Codex,
-        &mut store,
-        options(
-            &path,
-            "codex_session_jsonl_tree",
-            "codex_session_jsonl",
-            admitted(initial.checkpoint),
-        ),
-    )
-    .unwrap();
-    assert!(matches!(
-        decision,
-        ProviderAppendFileImportDecision::ReplacementRequired(
-            ProviderJsonlReplacementReason::AdditionalSessionHeader
-        )
-    ));
-    assert_eq!(store.list_sessions().unwrap().len(), 1);
-    assert_eq!(store.export_archive().unwrap().events.len(), event_count);
-}
-
-#[test]
-fn codex_and_pi_multi_header_replacements_commit_without_append_admission() {
-    let cases = [
-        (
-            CaptureProvider::Codex,
-            "codex_session_jsonl_tree",
-            "codex_session_jsonl",
-            format!(
-                "{}{}{}{}",
-                jsonl(codex_header("codex-first")),
-                jsonl(codex_message("user", "first session", 1)),
-                jsonl(codex_header("codex-second")),
-                jsonl(codex_message("user", "second session", 2))
-            ),
-        ),
-        (
-            CaptureProvider::Pi,
-            "pi_session_jsonl",
-            "pi_session_jsonl",
-            format!(
-                "{}{}{}{}",
-                jsonl(json!({
-                    "type": "session",
-                    "id": "pi-first",
-                    "timestamp": "2026-07-14T12:00:00Z"
-                })),
-                jsonl(json!({
-                    "type": "message",
-                    "id": "pi-first-message",
-                    "timestamp": "2026-07-14T12:00:01Z",
-                    "message": {"role": "user", "content": "first session"}
-                })),
-                jsonl(json!({
-                    "type": "session",
-                    "id": "pi-second",
-                    "timestamp": "2026-07-14T12:00:02Z"
-                })),
-                jsonl(json!({
-                    "type": "message",
-                    "id": "pi-second-message",
-                    "timestamp": "2026-07-14T12:00:03Z",
-                    "message": {"role": "user", "content": "second session"}
-                }))
-            ),
-        ),
-    ];
-
-    for (index, (provider, inventory_format, material_format, contents)) in
-        cases.into_iter().enumerate()
-    {
-        let temp = tempdir().unwrap();
-        let path = temp.path().join(format!("multi-{index}/session.jsonl"));
-        write_raw(&path, &contents);
-        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
-
-        for _ in 0..2 {
-            let decision = import_append_capable_provider_file(
-                provider,
-                &mut store,
-                options(
-                    &path,
-                    inventory_format,
-                    material_format,
-                    ProviderAppendFileImportMode::AppendCapableReplacement,
-                ),
-            )
-            .unwrap();
-            assert!(matches!(
-                decision,
-                ProviderAppendFileImportDecision::ImportedWithoutCheckpoint(
-                    ProviderAppendFileImportWithoutCheckpoint {
-                        reason: ProviderJsonlReplacementReason::AdditionalSessionHeader,
-                        ..
-                    }
-                )
-            ));
-        }
-        assert!(!store.list_sessions().unwrap().is_empty());
-    }
+    let Some(ProviderJsonlResumeState::CodexSession(state)) =
+        completed.checkpoint.resume_state.as_ref()
+    else {
+        panic!("Codex completion must persist typed resume state");
+    };
+    assert!(state.pending_tool_calls.is_empty());
 }

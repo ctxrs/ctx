@@ -1877,7 +1877,7 @@ fn codex_structured_failed_tool_output_creates_failed_diagnostic_event() {
             }
         }
     });
-    let mut call_contexts = std::collections::BTreeMap::new();
+    let mut call_contexts = CodexToolCallContexts::default();
     let event = codex_tool_output_event(
         &payload,
         12,
@@ -1901,7 +1901,7 @@ fn codex_failed_diff_output_omits_raw_diff_preview() {
         "call_id": "call-failed-diff",
         "output": "Process exited with code 1\nOutput:\ndiff --git a/src/lib.rs b/src/lib.rs\n@@\n-old raw diff\n+new raw diff\n"
     });
-    let mut call_contexts = std::collections::BTreeMap::new();
+    let mut call_contexts = CodexToolCallContexts::default();
     let event = codex_tool_output_event(
         &payload,
         13,
@@ -1931,7 +1931,7 @@ fn codex_nested_failed_diff_output_omits_raw_diff_preview() {
             }
         }
     });
-    let mut call_contexts = std::collections::BTreeMap::new();
+    let mut call_contexts = CodexToolCallContexts::default();
     let event = codex_tool_output_event(
         &payload,
         14,

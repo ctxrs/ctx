@@ -1,4 +1,141 @@
 #[test]
+fn codex_append_rejects_a_second_session_header_before_commit() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("codex/second-header.jsonl");
+    write_raw(
+        &path,
+        &format!(
+            "{}{}",
+            jsonl(codex_header("codex-original")),
+            jsonl(codex_message("user", "original session", 1))
+        ),
+    );
+    let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+    let initial = imported(
+        import_append_capable_provider_file(
+            CaptureProvider::Codex,
+            &mut store,
+            options(
+                &path,
+                "codex_session_jsonl_tree",
+                "codex_session_jsonl",
+                ProviderAppendFileImportMode::AppendCapableReplacement,
+            ),
+        )
+        .unwrap(),
+    );
+    let event_count = store.export_archive().unwrap().events.len();
+    append_raw(
+        &path,
+        &format!(
+            "{}{}",
+            jsonl(codex_message("assistant", "must roll back", 2)),
+            "{\"type\": \"session_meta\", \"payload\": {\"id\": \"codex-second\", \"timestamp\": \"2026-07-14T12:00:03Z\"}}\n"
+        ),
+    );
+    let decision = import_append_capable_provider_file(
+        CaptureProvider::Codex,
+        &mut store,
+        options(
+            &path,
+            "codex_session_jsonl_tree",
+            "codex_session_jsonl",
+            admitted(initial.checkpoint),
+        ),
+    )
+    .unwrap();
+    assert!(matches!(
+        decision,
+        ProviderAppendFileImportDecision::ReplacementRequired(
+            ProviderJsonlReplacementReason::AdditionalSessionHeader
+        )
+    ));
+    assert_eq!(store.list_sessions().unwrap().len(), 1);
+    assert_eq!(store.export_archive().unwrap().events.len(), event_count);
+}
+
+#[test]
+fn codex_and_pi_multi_header_replacements_commit_without_append_admission() {
+    let cases = [
+        (
+            CaptureProvider::Codex,
+            "codex_session_jsonl_tree",
+            "codex_session_jsonl",
+            format!(
+                "{}{}{}{}",
+                jsonl(codex_header("codex-first")),
+                jsonl(codex_message("user", "first session", 1)),
+                jsonl(codex_header("codex-second")),
+                jsonl(codex_message("user", "second session", 2))
+            ),
+        ),
+        (
+            CaptureProvider::Pi,
+            "pi_session_jsonl",
+            "pi_session_jsonl",
+            format!(
+                "{}{}{}{}",
+                jsonl(json!({
+                    "type": "session",
+                    "id": "pi-first",
+                    "timestamp": "2026-07-14T12:00:00Z"
+                })),
+                jsonl(json!({
+                    "type": "message",
+                    "id": "pi-first-message",
+                    "timestamp": "2026-07-14T12:00:01Z",
+                    "message": {"role": "user", "content": "first session"}
+                })),
+                jsonl(json!({
+                    "type": "session",
+                    "id": "pi-second",
+                    "timestamp": "2026-07-14T12:00:02Z"
+                })),
+                jsonl(json!({
+                    "type": "message",
+                    "id": "pi-second-message",
+                    "timestamp": "2026-07-14T12:00:03Z",
+                    "message": {"role": "user", "content": "second session"}
+                }))
+            ),
+        ),
+    ];
+
+    for (index, (provider, inventory_format, material_format, contents)) in
+        cases.into_iter().enumerate()
+    {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join(format!("multi-{index}/session.jsonl"));
+        write_raw(&path, &contents);
+        let mut store = Store::open(temp.path().join("work.sqlite")).unwrap();
+
+        for _ in 0..2 {
+            let decision = import_append_capable_provider_file(
+                provider,
+                &mut store,
+                options(
+                    &path,
+                    inventory_format,
+                    material_format,
+                    ProviderAppendFileImportMode::AppendCapableReplacement,
+                ),
+            )
+            .unwrap();
+            assert!(matches!(
+                decision,
+                ProviderAppendFileImportDecision::ImportedWithoutCheckpoint(
+                    ProviderAppendFileImportWithoutCheckpoint {
+                        reason: ProviderJsonlReplacementReason::AdditionalSessionHeader,
+                        ..
+                    }
+                )
+            ));
+        }
+        assert!(!store.list_sessions().unwrap().is_empty());
+    }
+}
+
+#[test]
 fn pi_streaming_replacement_preserves_per_session_real_content_admission() {
     let temp = tempdir().unwrap();
     let path = temp.path().join("pi/mixed-sessions.jsonl");
@@ -299,6 +436,7 @@ fn codex_parser_stops_at_the_complete_boundary_frozen_by_preflight() {
         &path,
         &mut reader,
         Some(bootstrap),
+        CodexSessionJsonlResumeState::default(),
         "codex_session_jsonl",
         &mut store,
         None,
@@ -533,7 +671,7 @@ fn claude_append_persists_an_earlier_delta_start_and_converges_with_replacement(
 }
 
 #[test]
-fn claude_append_minimum_ignores_rows_without_a_valid_timestamp() {
+fn claude_append_uses_pre_pr3_imported_at_for_invalid_timestamp_rows() {
     let temp = tempdir().unwrap();
     let path = temp.path().join("claude/invalid-time.jsonl");
     let authoritative_started_at: DateTime<Utc> = "2026-07-14T12:00:00Z".parse().unwrap();
@@ -568,35 +706,34 @@ fn claude_append_minimum_ignores_rows_without_a_valid_timestamp() {
             "timestamp": "not-a-time",
             "type": "assistant",
             "uuid": "claude-invalid-tail",
-            "message": {"role": "assistant", "content": "invalid time must not move start"}
+            "message": {"role": "assistant", "content": "invalid time uses import fallback"}
         })),
     );
 
+    let fallback_started_at: DateTime<Utc> = "2026-07-14T11:59:00Z".parse().unwrap();
+    let mut append_options = options(
+        &path,
+        "claude_projects_jsonl_tree",
+        "claude_projects_jsonl_tree",
+        admitted(initial.checkpoint),
+    );
+    append_options.imported_at = fallback_started_at;
     let delta = imported(
-        import_append_capable_provider_file(
-            CaptureProvider::Claude,
-            &mut store,
-            options(
-                &path,
-                "claude_projects_jsonl_tree",
-                "claude_projects_jsonl_tree",
-                admitted(initial.checkpoint),
-            ),
-        )
-        .unwrap(),
+        import_append_capable_provider_file(CaptureProvider::Claude, &mut store, append_options)
+            .unwrap(),
     );
     assert_eq!(
         delta.checkpoint.resume_state,
         Some(ProviderJsonlResumeState::ClaudeProjects(
             ClaudeProjectsJsonlResumeState::new(
                 "claude-invalid-time".to_owned(),
-                authoritative_started_at,
+                fallback_started_at,
             ),
         ))
     );
     assert_eq!(
         store.list_sessions().unwrap()[0].started_at,
-        authoritative_started_at
+        fallback_started_at
     );
 }
 

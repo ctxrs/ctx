@@ -13,10 +13,13 @@ pub use discovery::{
     discover_provider_sources, discover_provider_sources_for_provider, provider_source_for_path,
 };
 pub use incremental_jsonl::{
-    open_provider_jsonl, ClaudeProjectsJsonlResumeState, ProviderFileStableIdentity,
-    ProviderJsonlAppendCheckpoint, ProviderJsonlOpenDecision, ProviderJsonlOpenMode,
-    ProviderJsonlReader, ProviderJsonlRecordRead, ProviderJsonlReplacementReason,
-    ProviderJsonlResumeState, TabnineJsonlResumeState,
+    open_provider_jsonl, ClaudeProjectsJsonlResumeState, CodexSessionJsonlResumeState,
+    CodexToolCallResumeContext, ProviderFileStableIdentity, ProviderJsonlAppendCheckpoint,
+    ProviderJsonlOpenDecision, ProviderJsonlOpenMode, ProviderJsonlReader, ProviderJsonlRecordRead,
+    ProviderJsonlReplacementReason, ProviderJsonlResumeState, TabnineJsonlResumeState,
+};
+pub(crate) use incremental_jsonl::{
+    CODEX_RESUME_MAX_ENCODED_BYTES, CODEX_RESUME_MAX_PENDING_TOOL_CALLS,
 };
 pub use mutation_contracts::provider_file_mutation_contract;
 pub use revisions::{

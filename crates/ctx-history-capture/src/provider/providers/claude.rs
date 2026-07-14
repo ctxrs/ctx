@@ -65,11 +65,9 @@ pub(crate) fn scan_claude_projects_jsonl_reader(
             .get("timestamp")
             .and_then(Value::as_str)
             .and_then(parse_rfc3339_utc);
-        if let Some(timestamp) = parsed_timestamp {
-            earliest_started_at =
-                Some(earliest_started_at.map_or(timestamp, |earliest| earliest.min(timestamp)));
-        }
         let occurred_at = parsed_timestamp.unwrap_or(context.imported_at);
+        earliest_started_at =
+            Some(earliest_started_at.map_or(occurred_at, |earliest| earliest.min(occurred_at)));
         has_real_message |= claude_event(&value, line_number, occurred_at)
             .as_ref()
             .is_some_and(provider_event_is_real_conversation_message);

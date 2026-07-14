@@ -13,6 +13,7 @@ fn unexpected_post_commit_checkpoint_failure(
 enum ValidatedAdapterResumeState {
     None,
     Claude(ClaudeProjectsJsonlResumeState),
+    Codex(CodexSessionJsonlResumeState),
     Tabnine(TabnineJsonlResumeState),
 }
 
@@ -26,10 +27,22 @@ fn validate_adapter_resume_state(
         return Ok(ValidatedAdapterResumeState::None);
     }
     match (provider, inventory_source_format, resume_state) {
-        (CaptureProvider::Codex, "codex_session_jsonl_tree" | "codex_session_jsonl", None)
-        | (CaptureProvider::Pi, "pi_session_jsonl", None) => Ok(ValidatedAdapterResumeState::None),
-        (CaptureProvider::Codex, "codex_session_jsonl_tree" | "codex_session_jsonl", Some(_))
-        | (CaptureProvider::Pi, "pi_session_jsonl", Some(_)) => {
+        (CaptureProvider::Pi, "pi_session_jsonl", None) => Ok(ValidatedAdapterResumeState::None),
+        (CaptureProvider::Pi, "pi_session_jsonl", Some(_)) => {
+            Err(ProviderJsonlReplacementReason::AdapterResumeStateIncompatible)
+        }
+        (CaptureProvider::Codex, "codex_session_jsonl_tree" | "codex_session_jsonl", None) => {
+            Err(ProviderJsonlReplacementReason::AdapterResumeStateMissing)
+        }
+        (
+            CaptureProvider::Codex,
+            "codex_session_jsonl_tree" | "codex_session_jsonl",
+            Some(ProviderJsonlResumeState::CodexSession(state)),
+        ) => {
+            ProviderJsonlResumeState::CodexSession(state.clone()).validate()?;
+            Ok(ValidatedAdapterResumeState::Codex(state.clone()))
+        }
+        (CaptureProvider::Codex, "codex_session_jsonl_tree" | "codex_session_jsonl", Some(_)) => {
             Err(ProviderJsonlReplacementReason::AdapterResumeStateIncompatible)
         }
         (CaptureProvider::Claude, "claude_projects_jsonl_tree", None)
@@ -101,12 +114,10 @@ fn scan_authoritative_session_ids(
                     .and_then(Value::as_str)
                     .and_then(|timestamp| DateTime::parse_from_rfc3339(timestamp).ok())
                     .map(|timestamp| timestamp.with_timezone(&Utc));
-                if let Some(timestamp) = parsed_timestamp {
-                    earliest_started_at = Some(
-                        earliest_started_at.map_or(timestamp, |earliest| earliest.min(timestamp)),
-                    );
-                }
                 let occurred_at = parsed_timestamp.unwrap_or(context.imported_at);
+                earliest_started_at = Some(
+                    earliest_started_at.map_or(occurred_at, |earliest| earliest.min(occurred_at)),
+                );
                 has_real_message |= claude_event(&value, line_number, occurred_at)
                     .as_ref()
                     .is_some_and(provider_event_is_real_conversation_message);
@@ -419,6 +430,7 @@ fn finish_single_session_no_real_summary(summary: &mut ProviderImportSummary, sa
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn import_codex_session_file(
     reader: &mut ProviderJsonlReader,
     source_format: &str,
@@ -427,6 +439,7 @@ fn import_codex_session_file(
     history_record_id: Option<Uuid>,
     is_replacement: bool,
     append_bootstrap: Option<CodexSessionHeader>,
+    resume_state: CodexSessionJsonlResumeState,
 ) -> Result<CodexSessionFileImport> {
     let bootstrap = if is_replacement {
         let scan = codex_session_reader_conversation_scan(reader)?;
@@ -457,6 +470,7 @@ fn import_codex_session_file(
                     committed_offset: reader.committed_offset(),
                     complete_line_count: reader.complete_line_count(),
                     additional_session_header: scan.has_additional_session_header,
+                    resume_state: CodexSessionJsonlResumeState::default(),
                 },
             });
         }
@@ -481,6 +495,7 @@ fn import_codex_session_file(
         &path,
         reader,
         bootstrap,
+        resume_state,
         source_format,
         store,
         history_record_id,

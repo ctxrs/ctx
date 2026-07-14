@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -27,15 +26,15 @@ use crate::provider::importer::{
 };
 use crate::{
     CaptureError, CodexSessionImportOptions, CodexSessionImportProgress,
-    NormalizedProviderImportOptions, ProviderAdapterContext, ProviderImportFailure,
-    ProviderImportSummary, ProviderJsonlReader, ProviderJsonlRecordRead,
+    CodexSessionJsonlResumeState, NormalizedProviderImportOptions, ProviderAdapterContext,
+    ProviderImportFailure, ProviderImportSummary, ProviderJsonlReader, ProviderJsonlRecordRead,
     ProviderJsonlReplacementReason, Result, CODEX_SESSION_SOURCE_FORMAT,
 };
 
 use crate::provider::codex::events::{
     codex_close_matching_tool_output_context, codex_session_capture_with_source_format,
     codex_session_header, codex_session_line_capture, codex_session_line_timestamp,
-    CodexSessionHeader, CodexSessionLineContext, CodexToolCallContext,
+    CodexSessionHeader, CodexSessionLineContext, CodexToolCallContexts,
 };
 use crate::provider::codex::session::{
     codex_session_reader_conversation_scan, should_parse_codex_session_line,
@@ -226,6 +225,7 @@ pub(crate) fn import_codex_session_path_fast(
         path,
         &mut reader,
         None,
+        CodexSessionJsonlResumeState::default(),
         CODEX_SESSION_SOURCE_FORMAT,
         store,
         options.history_record_id,
@@ -249,6 +249,7 @@ pub(crate) fn import_codex_session_reader_fast(
     path: &Path,
     reader: &mut ProviderJsonlReader,
     bootstrap_header: Option<CodexSessionHeader>,
+    resume_state: CodexSessionJsonlResumeState,
     source_format: &str,
     store: &mut Store,
     history_record_id: Option<Uuid>,
@@ -271,11 +272,12 @@ pub(crate) fn import_codex_session_reader_fast(
 
     let mut header = bootstrap_header;
     let mut header_persisted = false;
-    let mut call_contexts: BTreeMap<String, CodexToolCallContext> = BTreeMap::new();
+    let mut call_contexts = CodexToolCallContexts::from_resume_state(resume_state);
     let mut semantic_boundary = CodexSessionSemanticBoundary {
         committed_offset: reader.committed_offset(),
         complete_line_count: reader.complete_line_count(),
         additional_session_header: false,
+        resume_state: call_contexts.resume_state(),
     };
     let mut line = Vec::new();
     loop {
@@ -289,37 +291,21 @@ pub(crate) fn import_codex_session_reader_fast(
                 summary.skipped += 1;
                 if header.is_none() {
                     summary.skipped_sessions += 1;
-                    advance_codex_semantic_boundary_if_clear(
-                        reader,
-                        &call_contexts,
-                        &mut semantic_boundary,
-                    );
+                    advance_codex_semantic_boundary(reader, &call_contexts, &mut semantic_boundary);
                     return Ok(CodexSessionReaderDecision::Imported(semantic_boundary));
                 }
                 summary.skipped_events += 1;
-                advance_codex_semantic_boundary_if_clear(
-                    reader,
-                    &call_contexts,
-                    &mut semantic_boundary,
-                );
+                advance_codex_semantic_boundary(reader, &call_contexts, &mut semantic_boundary);
                 continue;
             }
             ProviderJsonlRecordRead::DeferredPartial { .. } => break,
         };
         if line.iter().all(u8::is_ascii_whitespace) {
-            advance_codex_semantic_boundary_if_clear(
-                reader,
-                &call_contexts,
-                &mut semantic_boundary,
-            );
+            advance_codex_semantic_boundary(reader, &call_contexts, &mut semantic_boundary);
             continue;
         }
         if !should_parse_codex_session_line(&line) {
-            advance_codex_semantic_boundary_if_clear(
-                reader,
-                &call_contexts,
-                &mut semantic_boundary,
-            );
+            advance_codex_semantic_boundary(reader, &call_contexts, &mut semantic_boundary);
             continue;
         }
         let skip_tool_output = should_skip_codex_tool_output_line(&line);
@@ -332,11 +318,7 @@ pub(crate) fn import_codex_session_reader_fast(
                     line: line_number,
                     error: codex_session_file_failure(path, err.to_string()),
                 });
-                advance_codex_semantic_boundary_if_clear(
-                    reader,
-                    &call_contexts,
-                    &mut semantic_boundary,
-                );
+                advance_codex_semantic_boundary(reader, &call_contexts, &mut semantic_boundary);
                 continue;
             }
         };
@@ -367,11 +349,7 @@ pub(crate) fn import_codex_session_reader_fast(
                     });
                 }
             }
-            advance_codex_semantic_boundary_if_clear(
-                reader,
-                &call_contexts,
-                &mut semantic_boundary,
-            );
+            advance_codex_semantic_boundary(reader, &call_contexts, &mut semantic_boundary);
             continue;
         }
 
@@ -384,11 +362,7 @@ pub(crate) fn import_codex_session_reader_fast(
                     "codex session entry appeared before session_meta",
                 ),
             });
-            advance_codex_semantic_boundary_if_clear(
-                reader,
-                &call_contexts,
-                &mut semantic_boundary,
-            );
+            advance_codex_semantic_boundary(reader, &call_contexts, &mut semantic_boundary);
             continue;
         };
         let occurred_at = match codex_session_line_timestamp(&value, header.timestamp) {
@@ -400,11 +374,7 @@ pub(crate) fn import_codex_session_reader_fast(
                     line: line_number,
                     error: codex_session_file_failure(path, err.to_string()),
                 });
-                advance_codex_semantic_boundary_if_clear(
-                    reader,
-                    &call_contexts,
-                    &mut semantic_boundary,
-                );
+                advance_codex_semantic_boundary(reader, &call_contexts, &mut semantic_boundary);
                 continue;
             }
         };
@@ -438,11 +408,7 @@ pub(crate) fn import_codex_session_reader_fast(
                         line: line_number,
                         error: codex_session_file_failure(path, err.to_string()),
                     });
-                    advance_codex_semantic_boundary_if_clear(
-                        reader,
-                        &call_contexts,
-                        &mut semantic_boundary,
-                    );
+                    advance_codex_semantic_boundary(reader, &call_contexts, &mut semantic_boundary);
                     continue;
                 }
                 Some(event)
@@ -501,21 +467,13 @@ pub(crate) fn import_codex_session_reader_fast(
         }
         if has_content {
             let step = transaction.record_unit(store, line.len())?;
-            advance_codex_semantic_boundary_if_clear(
-                reader,
-                &call_contexts,
-                &mut semantic_boundary,
-            );
+            advance_codex_semantic_boundary(reader, &call_contexts, &mut semantic_boundary);
             if step == ProviderImportTransactionStep::Halted {
                 transaction.apply_maintenance_warning(summary);
                 return Ok(CodexSessionReaderDecision::Imported(semantic_boundary));
             }
         } else {
-            advance_codex_semantic_boundary_if_clear(
-                reader,
-                &call_contexts,
-                &mut semantic_boundary,
-            );
+            advance_codex_semantic_boundary(reader, &call_contexts, &mut semantic_boundary);
         }
     }
     Ok(CodexSessionReaderDecision::Imported(semantic_boundary))
@@ -526,25 +484,22 @@ pub(crate) enum CodexSessionReaderDecision {
     ReplacementRequired(ProviderJsonlReplacementReason),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CodexSessionSemanticBoundary {
     pub(crate) committed_offset: u64,
     pub(crate) complete_line_count: u64,
     pub(crate) additional_session_header: bool,
+    pub(crate) resume_state: CodexSessionJsonlResumeState,
 }
 
-fn advance_codex_semantic_boundary_if_clear(
+fn advance_codex_semantic_boundary(
     reader: &ProviderJsonlReader,
-    call_contexts: &BTreeMap<String, CodexToolCallContext>,
+    call_contexts: &CodexToolCallContexts,
     boundary: &mut CodexSessionSemanticBoundary,
 ) {
-    if call_contexts.is_empty() {
-        // A complete, deterministic row is semantically consumed whether it
-        // was accepted or rejected. Advancing over poison avoids replaying it
-        // forever; unresolved tool-call context is the only frontier here.
-        boundary.committed_offset = reader.committed_offset();
-        boundary.complete_line_count = reader.complete_line_count();
-    }
+    boundary.committed_offset = reader.committed_offset();
+    boundary.complete_line_count = reader.complete_line_count();
+    boundary.resume_state = call_contexts.resume_state();
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -552,6 +507,7 @@ pub(crate) fn import_codex_session_reader_bounded(
     path: &Path,
     reader: &mut ProviderJsonlReader,
     bootstrap_header: Option<CodexSessionHeader>,
+    resume_state: CodexSessionJsonlResumeState,
     source_format: &str,
     store: &mut Store,
     history_record_id: Option<Uuid>,
@@ -568,6 +524,7 @@ pub(crate) fn import_codex_session_reader_bounded(
                 path,
                 reader,
                 bootstrap_header,
+                resume_state,
                 source_format,
                 store,
                 history_record_id,
