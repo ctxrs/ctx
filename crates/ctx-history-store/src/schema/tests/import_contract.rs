@@ -257,6 +257,138 @@ fn schema_v48_grandfathers_rows_through_v49_and_retries_v46_failures_without_sou
     assert_eq!(generation_count, 3);
 }
 
+#[test]
+fn real_schema_v49_fixture_adds_provider_file_contract_tables() {
+    let temp = tempdir();
+    let path = temp.path().join("work.sqlite");
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(include_str!("../fixtures/schema_v49.sql"))
+            .unwrap();
+        let legacy_views: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name IN ('ctx_sessions', 'ctx_events', 'ctx_files_touched', 'ctx_sources')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy_views, 4);
+    }
+
+    let store = Store::open(&path).unwrap();
+    let version: i64 = store
+        .conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, SCHEMA_VERSION);
+    let columns = store
+        .conn
+        .prepare("PRAGMA table_info(provider_file_checkpoints)")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        columns,
+        vec![
+            "provider",
+            "source_format",
+            "source_root",
+            "source_path",
+            "import_revision",
+            "checkpoint_version",
+            "stable_file_identity",
+            "committed_byte_offset",
+            "committed_complete_line_count",
+            "head_sha256",
+            "boundary_sha256",
+            "resume_state",
+            "updated_at_ms",
+        ]
+    );
+    let rows: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM provider_file_checkpoints",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 0);
+    let semantic_revision: i64 = store
+        .conn
+        .query_row(
+            "SELECT current_revision FROM semantic_replacement_revision WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(semantic_revision, 0);
+    for present in [
+        "provider_file_checkpoints",
+        "provider_file_publications",
+        "semantic_replacement_revision",
+    ] {
+        let exists: bool = store
+            .conn
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+                params![present],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(exists);
+    }
+
+    let fresh_path = temp.path().join("fresh-v50.sqlite");
+    let fresh = Store::open(&fresh_path).unwrap();
+    assert_schema_object_parity(&store.conn, &fresh.conn);
+}
+
+fn schema_object_signature(conn: &Connection) -> Vec<(String, String, String)> {
+    conn.prepare(
+        r#"
+        SELECT type, name, sql
+        FROM sqlite_master
+        WHERE type IN ('table', 'index', 'view')
+          AND name NOT LIKE 'sqlite_%'
+          AND sql IS NOT NULL
+        ORDER BY type, name
+        "#,
+    )
+    .unwrap()
+    .query_map([], |row| {
+        let sql: String = row.get(2)?;
+        Ok((
+            row.get(0)?,
+            row.get(1)?,
+            sql.replace('"', "")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" "),
+        ))
+    })
+    .unwrap()
+    .collect::<rusqlite::Result<Vec<_>>>()
+    .unwrap()
+}
+
+fn assert_schema_object_parity(upgraded: &Connection, fresh: &Connection) {
+    let upgraded = schema_object_signature(upgraded);
+    let fresh = schema_object_signature(fresh);
+    let mismatch = upgraded
+        .iter()
+        .zip(&fresh)
+        .find(|(upgraded, fresh)| upgraded != fresh);
+    assert!(
+        mismatch.is_none() && upgraded.len() == fresh.len(),
+        "schema mismatch: upgraded objects={}, fresh objects={}, first mismatch={mismatch:?}",
+        upgraded.len(),
+        fresh.len(),
+    );
+}
+
 fn assert_provider_migration_accepts(
     legacy_version: i64,
     provider: &str,

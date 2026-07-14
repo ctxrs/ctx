@@ -12,6 +12,11 @@ use crate::{Result, Store, StoreError};
 
 impl Store {
     pub fn upsert_run(&self, run: &Run) -> Result<()> {
+        self.with_provider_file_publication_write(|| self.upsert_run_inner(run))
+    }
+
+    fn upsert_run_inner(&self, run: &Run) -> Result<()> {
+        self.ensure_provider_file_run_write_allowed(run)?;
         self.conn.execute(
                 r#"
                 INSERT INTO runs
@@ -62,10 +67,16 @@ impl Store {
                     serde_json::to_string(&run.sync.metadata)?,
                 ],
             )?;
+        self.track_provider_file_publication_run(run.id)?;
         Ok(())
     }
 
     pub fn insert_run_if_absent(&self, run: &Run) -> Result<bool> {
+        self.with_provider_file_publication_write(|| self.insert_run_if_absent_inner(run))
+    }
+
+    fn insert_run_if_absent_inner(&self, run: &Run) -> Result<bool> {
+        self.ensure_provider_file_run_write_allowed(run)?;
         let changed = self
                 .conn
                 .prepare_cached(
@@ -98,13 +109,18 @@ impl Store {
                     optional_timestamp_ms(run.sync.deleted_at),
                     serde_json::to_string(&run.sync.metadata)?,
                 ])?;
+        self.track_provider_file_publication_run(run.id)?;
         Ok(changed > 0)
     }
 
     pub fn get_run(&self, id: Uuid) -> Result<Run> {
+        let tail = format!(
+            "WHERE id = ?1 AND {}",
+            crate::provider_files::run_material_visible_predicate("runs")
+        );
         self.conn
             .query_row(
-                run_select_sql("WHERE id = ?1").as_str(),
+                run_select_sql(&tail).as_str(),
                 params![id.to_string()],
                 run_from_row,
             )
@@ -113,22 +129,26 @@ impl Store {
     }
 
     pub fn runs_for_session(&self, session_id: Uuid) -> Result<Vec<Run>> {
-        let mut stmt = self
-            .conn
-            .prepare(run_select_sql("WHERE session_id = ?1 ORDER BY started_at_ms, id").as_str())?;
+        let tail = format!(
+            "WHERE session_id = ?1 AND {} ORDER BY started_at_ms, id",
+            crate::provider_files::run_material_visible_predicate("runs")
+        );
+        let mut stmt = self.conn.prepare(run_select_sql(&tail).as_str())?;
         let rows = stmt.query_map(params![session_id.to_string()], run_from_row)?;
         collect_rows(rows)
     }
 
     pub fn runs_for_record(&self, record_id: Uuid) -> Result<Vec<Run>> {
+        let visible = crate::provider_files::run_material_visible_predicate("runs");
         let mut stmt = self.conn.prepare(
-            run_select_sql(
+            run_select_sql(&format!(
                 r#"
-                    WHERE history_record_id = ?1
+                    WHERE (history_record_id = ?1
                        OR session_id IN (SELECT id FROM sessions WHERE history_record_id = ?1)
+                    ) AND {visible}
                     ORDER BY started_at_ms, id
                     "#,
-            )
+            ))
             .as_str(),
         )?;
         let rows = stmt.query_map(params![record_id.to_string()], run_from_row)?;
@@ -136,9 +156,11 @@ impl Store {
     }
 
     pub(crate) fn list_runs(&self) -> Result<Vec<Run>> {
-        let mut stmt = self
-            .conn
-            .prepare(run_select_sql("ORDER BY started_at_ms, id").as_str())?;
+        let tail = format!(
+            "WHERE {} ORDER BY started_at_ms, id",
+            crate::provider_files::run_material_visible_predicate("runs")
+        );
+        let mut stmt = self.conn.prepare(run_select_sql(&tail).as_str())?;
         let rows = stmt.query_map([], run_from_row)?;
         collect_rows(rows)
     }

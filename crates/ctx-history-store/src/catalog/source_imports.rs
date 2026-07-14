@@ -72,6 +72,14 @@ impl Store {
                                AND json_extract(excluded.metadata_json, '$.inventory_unit') IS NOT 'logical_import_unit')
                               OR source_import_files.metadata_json IS excluded.metadata_json)
                         THEN source_import_files.indexed_status
+                        WHEN excluded.file_size_bytes > source_import_files.file_size_bytes
+                         AND source_import_files.source_format IS excluded.source_format
+                         AND source_import_files.import_revision = excluded.import_revision
+                         AND source_import_files.indexed_status = 'completed_with_rejections'
+                         AND source_import_files.indexed_file_size_bytes = source_import_files.file_size_bytes
+                         AND source_import_files.indexed_file_modified_at_ms = source_import_files.file_modified_at_ms
+                         AND source_import_files.indexed_import_revision = source_import_files.import_revision
+                        THEN source_import_files.indexed_status
                         ELSE 'pending'
                     END,
                     indexed_error = CASE
@@ -82,6 +90,14 @@ impl Store {
                          AND ((json_extract(excluded.metadata_json, '$.inventory_unit') IS NOT 'source_root'
                                AND json_extract(excluded.metadata_json, '$.inventory_unit') IS NOT 'logical_import_unit')
                               OR source_import_files.metadata_json IS excluded.metadata_json)
+                        THEN source_import_files.indexed_error
+                        WHEN excluded.file_size_bytes > source_import_files.file_size_bytes
+                         AND source_import_files.source_format IS excluded.source_format
+                         AND source_import_files.import_revision = excluded.import_revision
+                         AND source_import_files.indexed_status = 'completed_with_rejections'
+                         AND source_import_files.indexed_file_size_bytes = source_import_files.file_size_bytes
+                         AND source_import_files.indexed_file_modified_at_ms = source_import_files.file_modified_at_ms
+                         AND source_import_files.indexed_import_revision = source_import_files.import_revision
                         THEN source_import_files.indexed_error
                         ELSE NULL
                     END,
@@ -192,11 +208,15 @@ impl Store {
         provider: CaptureProvider,
         source_root: &str,
     ) -> Result<Vec<SourceImportFile>> {
+        let visible = crate::provider_files::source_import_file_material_visible_predicate(
+            "source_import_files",
+        );
         let mut stmt = self.conn.prepare(
             format!(
                 "{} WHERE provider = ?1
                        AND source_root = ?2
                        AND is_stale = 0
+                       AND {visible}
                        AND {}
                      ORDER BY source_path",
                 source_import_file_select_sql(""),
@@ -220,6 +240,21 @@ impl Store {
     }
 
     pub fn record_source_import_file_result(
+        &self,
+        provider: CaptureProvider,
+        update: SourceImportFileIndexUpdate<'_>,
+        status: CatalogIndexedStatus,
+        error: Option<&str>,
+    ) -> Result<usize> {
+        self.with_provider_file_inventory_result_write(
+            provider,
+            update.source_root,
+            update.source_path,
+            || self.record_source_import_file_result_inner(provider, update, status, error),
+        )
+    }
+
+    fn record_source_import_file_result_inner(
         &self,
         provider: CaptureProvider,
         update: SourceImportFileIndexUpdate<'_>,

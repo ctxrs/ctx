@@ -61,6 +61,18 @@ impl Store {
         repo_fingerprint: &str,
         vcs_workspace_id: Option<Uuid>,
     ) -> Result<LocalWorkspaceIdentity> {
+        self.with_provider_file_publication_write(|| {
+            self.register_local_workspace_inner(root_path, repo_fingerprint, vcs_workspace_id)
+        })
+    }
+
+    fn register_local_workspace_inner(
+        &self,
+        root_path: impl AsRef<Path>,
+        repo_fingerprint: &str,
+        vcs_workspace_id: Option<Uuid>,
+    ) -> Result<LocalWorkspaceIdentity> {
+        self.ensure_provider_file_vcs_workspace_reference_write_allowed(vcs_workspace_id)?;
         let device = self.get_or_create_local_device()?;
         let root = root_path.as_ref();
         let root_path_hash = sha256_hex(root.display().to_string().as_bytes());

@@ -2,7 +2,13 @@ use rusqlite::{Connection, OptionalExtension};
 
 use crate::Result;
 
-pub(crate) const STABLE_SQL_VIEWS_SQL: &str = r#"
+fn stable_sql_views_sql() -> String {
+    let session_visible = crate::provider_files::session_material_visible_predicate("s");
+    let event_visible = crate::provider_files::event_material_visible_predicate("e");
+    let file_visible = crate::provider_files::file_touched_material_visible_predicate("ft");
+    let catalog_visible = crate::provider_files::catalog_material_visible_predicate("catalog");
+    format!(
+        r#"
 DROP VIEW IF EXISTS ctx_sessions;
 CREATE VIEW ctx_sessions AS
 SELECT
@@ -27,7 +33,7 @@ SELECT
     cs.source_identity AS source_identity
 FROM sessions s
 LEFT JOIN capture_sources cs ON cs.id = s.capture_source_id
-WHERE s.deleted_at_ms IS NULL;
+WHERE s.deleted_at_ms IS NULL AND ({session_visible});
 
 DROP VIEW IF EXISTS ctx_events;
 CREATE VIEW ctx_events AS
@@ -51,7 +57,7 @@ SELECT
 FROM events e
 LEFT JOIN sessions s ON s.id = e.session_id
 LEFT JOIN capture_sources cs ON cs.id = e.capture_source_id
-WHERE e.deleted_at_ms IS NULL;
+WHERE e.deleted_at_ms IS NULL AND ({event_visible});
 
 DROP VIEW IF EXISTS ctx_files_touched;
 CREATE VIEW ctx_files_touched AS
@@ -87,7 +93,7 @@ LEFT JOIN sessions event_session ON event_session.id = e.session_id
 LEFT JOIN sessions run_session ON run_session.id = r.session_id
 LEFT JOIN sessions source_session ON source_session.capture_source_id = ft.source_id
 LEFT JOIN sessions s ON s.id = COALESCE(e.session_id, r.session_id, source_session.id)
-WHERE ft.deleted_at_ms IS NULL;
+WHERE ft.deleted_at_ms IS NULL AND ({file_visible});
 
 DROP VIEW IF EXISTS ctx_sources;
 CREATE VIEW ctx_sources AS
@@ -118,11 +124,14 @@ SELECT
     last_imported_file_sha256 AS last_imported_file_sha256,
     last_imported_event_count AS last_imported_event_count,
     is_stale AS is_stale
-FROM catalog_sessions;
-"#;
+FROM catalog_sessions AS catalog
+WHERE {catalog_visible};
+"#
+    )
+}
 
 pub(crate) fn create_stable_sql_views(conn: &Connection) -> Result<()> {
-    conn.execute_batch(STABLE_SQL_VIEWS_SQL)?;
+    conn.execute_batch(&stable_sql_views_sql())?;
     Ok(())
 }
 

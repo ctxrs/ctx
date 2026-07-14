@@ -19,6 +19,27 @@ use crate::{Result, Store, StoreError};
 
 impl Store {
     pub fn upsert_history_record_link(&self, link: &HistoryRecordLink) -> Result<Uuid> {
+        self.with_provider_file_publication_write(|| self.upsert_history_record_link_inner(link))
+    }
+
+    fn upsert_history_record_link_inner(&self, link: &HistoryRecordLink) -> Result<Uuid> {
+        let conflict_id = self
+            .conn
+            .query_row(
+                "SELECT id FROM history_record_links WHERE history_record_id = ?1 AND target_type = ?2 AND target_id = ?3 AND link_type = ?4",
+                params![
+                    link.history_record_id.to_string(),
+                    link.target_type.as_str(),
+                    link.target_id.to_string(),
+                    link.link_type.as_str(),
+                ],
+                |row| parse_uuid(row.get::<_, String>(0)?),
+            )
+            .optional()?;
+        self.ensure_provider_file_history_record_link_write_allowed(
+            conflict_id.unwrap_or(link.id),
+            link,
+        )?;
         self.conn.execute(
                 r#"
                 INSERT INTO history_record_links
@@ -53,7 +74,7 @@ impl Store {
                     serde_json::to_string(&link.sync.metadata)?,
                 ],
             )?;
-        self.conn
+        let id = self.conn
                 .query_row(
                     "SELECT id FROM history_record_links WHERE history_record_id = ?1 AND target_type = ?2 AND target_id = ?3 AND link_type = ?4",
                     params![
@@ -64,18 +85,33 @@ impl Store {
                     ],
                     |row| parse_uuid(row.get::<_, String>(0)?),
                 )
-                .map_err(StoreError::from)
+                .map_err(StoreError::from)?;
+        self.track_provider_file_publication_direct_entity(
+            "history_record_link",
+            "history_record_links",
+            id,
+        )?;
+        Ok(id)
     }
 
     pub(crate) fn list_history_record_links(&self) -> Result<Vec<HistoryRecordLink>> {
-        let mut stmt = self
-            .conn
-            .prepare(history_record_link_select_sql("ORDER BY updated_at_ms, id").as_str())?;
+        let visible = crate::provider_files::history_record_link_material_visible_predicate(
+            "history_record_links",
+        );
+        let mut stmt = self.conn.prepare(
+            history_record_link_select_sql(&format!("WHERE {visible} ORDER BY updated_at_ms, id"))
+                .as_str(),
+        )?;
         let rows = stmt.query_map([], history_record_link_from_row)?;
         collect_rows(rows)
     }
 
     pub fn insert_record(&self, record: &HistoryRecord) -> Result<()> {
+        self.with_provider_file_publication_write(|| self.insert_record_inner(record))
+    }
+
+    fn insert_record_inner(&self, record: &HistoryRecord) -> Result<()> {
+        self.ensure_provider_file_history_record_write_allowed(record.id)?;
         let created_at_ms = timestamp_ms(record.created_at);
         let updated_at_ms = timestamp_ms(record.updated_at);
         self.conn.execute(
@@ -107,12 +143,22 @@ impl Store {
     }
 
     pub fn upsert_record(&self, record: &HistoryRecord) -> Result<()> {
+        self.with_provider_file_publication_write(|| self.upsert_record_inner(record))
+    }
+
+    fn upsert_record_inner(&self, record: &HistoryRecord) -> Result<()> {
+        self.ensure_provider_file_history_record_write_allowed(record.id)?;
         self.upsert_record_row(record)?;
         upsert_record_search_projection(&self.conn, record)?;
         Ok(())
     }
 
     pub fn delete_orphan_record(&self, record_id: Uuid) -> Result<bool> {
+        self.with_provider_file_publication_write(|| self.delete_orphan_record_inner(record_id))
+    }
+
+    fn delete_orphan_record_inner(&self, record_id: Uuid) -> Result<bool> {
+        self.ensure_provider_file_history_record_write_allowed(record_id)?;
         let record_id = record_id.to_string();
         let deleted = self.conn.execute(
             r#"
@@ -139,22 +185,36 @@ impl Store {
     }
 
     pub fn upsert_records(&self, records: &[HistoryRecord]) -> Result<()> {
+        self.with_provider_file_publication_write(|| self.upsert_records_inner(records))
+    }
+
+    fn upsert_records_inner(&self, records: &[HistoryRecord]) -> Result<()> {
         if records.is_empty() {
             return Ok(());
         }
-        self.begin_immediate_batch()?;
+        for record in records {
+            self.ensure_provider_file_history_record_write_allowed(record.id)?;
+        }
+        let owns_transaction = self.conn.is_autocommit();
+        if owns_transaction {
+            self.begin_immediate_batch()?;
+        }
         for record in records {
             if let Err(err) = self.upsert_record_row(record) {
-                let _ = self.rollback_batch();
+                if owns_transaction {
+                    let _ = self.rollback_batch();
+                }
                 return Err(err);
             }
         }
-        if let Err(err) = self.commit_batch() {
-            let _ = self.rollback_batch();
-            return Err(err);
-        }
         for record in records {
             upsert_record_search_projection(&self.conn, record)?;
+        }
+        if owns_transaction {
+            if let Err(err) = self.commit_batch() {
+                let _ = self.rollback_batch();
+                return Err(err);
+            }
         }
         Ok(())
     }
@@ -204,9 +264,11 @@ impl Store {
     }
 
     pub fn get_record(&self, id: Uuid) -> Result<HistoryRecord> {
+        let visible =
+            crate::provider_files::history_record_material_visible_predicate("history_records");
         self.conn
             .query_row(
-                record_select_sql("WHERE id = ?1").as_str(),
+                record_select_sql(&format!("WHERE id = ?1 AND {visible}")).as_str(),
                 params![id.to_string()],
                 record_from_row,
             )
@@ -219,8 +281,13 @@ impl Store {
     }
 
     pub fn list_records_page(&self, limit: usize, offset: usize) -> Result<Vec<HistoryRecord>> {
+        let visible =
+            crate::provider_files::history_record_material_visible_predicate("history_records");
         let mut stmt = self.conn.prepare(
-            record_select_sql("ORDER BY created_at DESC, id LIMIT ?1 OFFSET ?2").as_str(),
+            record_select_sql(&format!(
+                "WHERE {visible} ORDER BY created_at DESC, id LIMIT ?1 OFFSET ?2"
+            ))
+            .as_str(),
         )?;
         let rows = stmt.query_map(params![limit as i64, offset as i64], record_from_row)?;
         collect_rows(rows)
@@ -264,8 +331,10 @@ impl Store {
         let limit_parameter = values.len();
         values.push(Value::Integer(offset as i64));
         let offset_parameter = values.len();
+        let visible =
+            crate::provider_files::history_record_material_visible_predicate("history_records");
         let tail = format!(
-            "WHERE ({}) ORDER BY ({coverage}) DESC, created_at DESC, id LIMIT ?{limit_parameter} OFFSET ?{offset_parameter}",
+            "WHERE ({}) AND {visible} ORDER BY ({coverage}) DESC, created_at DESC, id LIMIT ?{limit_parameter} OFFSET ?{offset_parameter}",
             predicates.join(") OR (")
         );
         let mut stmt = self.conn.prepare(&record_select_sql(&tail))?;
@@ -287,6 +356,13 @@ impl Store {
         let has_artifact_search = table_exists(&self.conn, "artifact_search")?;
         let has_record_scriptgram = record_scriptgram_table_ready(&self.conn)?;
         let has_event_scriptgram = event_scriptgram_table_ready(&self.conn)?;
+        let record_visible =
+            crate::provider_files::history_record_material_visible_predicate("record");
+        let event_visible = crate::provider_files::event_material_visible_predicate("event");
+        let artifact_visible = crate::provider_files::direct_source_material_visible_predicate(
+            "artifact",
+            "source_id",
+        );
         let scriptgram_clauses = if has_record_scriptgram || has_event_scriptgram {
             scriptgram_match_clauses(query)
         } else {
@@ -302,14 +378,14 @@ impl Store {
             values.push(Value::Text(clause));
             let parameter = values.len();
             selects.push(format!(
-                "SELECT record_id, {term_index}, bm25(ctx_history_search) FROM ctx_history_search WHERE ctx_history_search MATCH ?{parameter}"
+                "SELECT search.record_id, {term_index}, bm25(ctx_history_search) FROM ctx_history_search AS search JOIN history_records AS record ON record.id = search.record_id WHERE ctx_history_search MATCH ?{parameter} AND {record_visible}"
             ));
             if has_event_search && has_artifact_search {
                 selects.push(format!(
-                    "SELECT history_record_id, {term_index}, bm25(event_search) FROM event_search WHERE event_search MATCH ?{parameter} AND history_record_id IS NOT NULL"
+                    "SELECT search.history_record_id, {term_index}, bm25(event_search) FROM event_search AS search JOIN events AS event ON event.id = search.event_id WHERE event_search MATCH ?{parameter} AND search.history_record_id IS NOT NULL AND {event_visible}"
                 ));
                 selects.push(format!(
-                    "SELECT history_record_id, {term_index}, bm25(artifact_search) FROM artifact_search WHERE artifact_search MATCH ?{parameter} AND history_record_id IS NOT NULL"
+                    "SELECT search.history_record_id, {term_index}, bm25(artifact_search) FROM artifact_search AS search JOIN artifacts AS artifact ON artifact.id = search.artifact_id WHERE artifact_search MATCH ?{parameter} AND search.history_record_id IS NOT NULL AND {artifact_visible}"
                 ));
             }
         }
@@ -318,12 +394,12 @@ impl Store {
             let parameter = values.len();
             if has_record_scriptgram {
                 selects.push(format!(
-                    "SELECT record_id, {term_index}, bm25(ctx_history_search_scriptgram) + 0.35 FROM ctx_history_search_scriptgram WHERE ctx_history_search_scriptgram MATCH ?{parameter}"
+                    "SELECT search.record_id, {term_index}, bm25(ctx_history_search_scriptgram) + 0.35 FROM ctx_history_search_scriptgram AS search JOIN history_records AS record ON record.id = search.record_id WHERE ctx_history_search_scriptgram MATCH ?{parameter} AND {record_visible}"
                 ));
             }
             if has_event_scriptgram {
                 selects.push(format!(
-                    "SELECT history_record_id, {term_index}, bm25(event_search_scriptgram) + 0.35 FROM event_search_scriptgram WHERE event_search_scriptgram MATCH ?{parameter} AND history_record_id IS NOT NULL"
+                    "SELECT search.history_record_id, {term_index}, bm25(event_search_scriptgram) + 0.35 FROM event_search_scriptgram AS search JOIN events AS event ON event.id = search.event_id WHERE event_search_scriptgram MATCH ?{parameter} AND search.history_record_id IS NOT NULL AND {event_visible}"
                 ));
             }
         }

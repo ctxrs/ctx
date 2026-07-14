@@ -102,6 +102,9 @@ pub(crate) fn run_migrations(conn: &Connection, user_version: i64) -> Result<()>
     if user_version < 50 {
         migrate_inventory_completion_to_v50(conn)?;
     }
+    if user_version < 51 {
+        migrate_provider_publication_to_v51(conn)?;
+    }
     Ok(())
 }
 
@@ -825,6 +828,36 @@ fn migrate_inventory_completion_to_v50(conn: &Connection) -> Result<()> {
             "UPDATE import_inventory_generations\n\
              SET completed_generation = current_generation;\n\
              PRAGMA user_version = 50;",
+        )?;
+        Ok(())
+    })();
+
+    match migration {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;")?;
+            Ok(())
+        }
+        Err(err) => {
+            if let Err(rollback_err) = conn.execute_batch("ROLLBACK;") {
+                return Err(StoreError::Sql(rollback_err));
+            }
+            Err(err)
+        }
+    }
+}
+
+fn migrate_provider_publication_to_v51(conn: &Connection) -> Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE;")?;
+    let migration = (|| -> Result<()> {
+        if stable_sql_views_exist(conn)? {
+            drop_stable_sql_views(conn)?;
+        }
+        conn.execute_batch(CREATE_TABLES_SQL)?;
+        conn.execute_batch(INDEXES_SQL)?;
+        create_stable_sql_views(conn)?;
+        conn.execute_batch(
+            "INSERT OR IGNORE INTO semantic_replacement_revision (singleton, current_revision) VALUES (1, 0);\
+             PRAGMA user_version = 51;",
         )?;
         Ok(())
     })();

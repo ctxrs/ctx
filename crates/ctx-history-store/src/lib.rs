@@ -8,6 +8,7 @@ mod events;
 mod files;
 mod identity;
 mod object_store;
+mod provider_files;
 mod raw_sql;
 mod records;
 mod runs;
@@ -15,6 +16,7 @@ mod schema;
 mod search;
 mod sessions;
 mod sources;
+mod store_identity;
 mod summaries;
 mod sync;
 mod vcs;
@@ -29,6 +31,14 @@ pub use catalog::{
 pub use error::{Result, StoreError};
 pub use files::FileTouchScope;
 pub use identity::{LocalDeviceIdentity, LocalWorkspaceIdentity};
+pub use provider_files::{
+    ProviderFileCheckpoint, ProviderFileCheckpointKey, ProviderFileFinalizeOutcome,
+    ProviderFileImportOutcome, ProviderFileInventoryObservation, ProviderFileMaintenanceWarning,
+    ProviderFilePreparationProgress, ProviderFilePublicationCommit, ProviderFilePublicationKind,
+    ProviderFilePublicationScope, ProviderFileReconciliationCounts,
+    ProviderFileReconciliationProgress, PROVIDER_FILE_CHECKPOINT_RESUME_STATE_MAX_BYTES,
+    PROVIDER_FILE_PREPARATION_MAX_ROWS, PROVIDER_FILE_RECONCILIATION_MAX_ROWS,
+};
 pub use raw_sql::{
     RawSqlColumn, RawSqlLimits, RawSqlOptions, RawSqlResult, RawSqlTruncation, RawSqlValue,
     RAW_SQL_DEFAULT_MAX_COLUMNS, RAW_SQL_DEFAULT_MAX_ROWS, RAW_SQL_DEFAULT_MAX_SQL_BYTES,
@@ -39,6 +49,7 @@ pub use raw_sql::{
 pub use search::projections::{EventEmbeddingDocument, EventSearchHit};
 
 use std::{
+    cell::{Cell, RefCell},
     path::PathBuf,
     sync::{atomic::AtomicUsize, Arc},
     time::Duration,
@@ -46,7 +57,7 @@ use std::{
 
 use rusqlite::Connection;
 
-pub(crate) const SCHEMA_VERSION: i64 = 50;
+pub(crate) const SCHEMA_VERSION: i64 = 51;
 
 pub struct Store {
     path: PathBuf,
@@ -54,6 +65,21 @@ pub struct Store {
     conn: Connection,
     busy_timeout: Duration,
     event_search_bulk_depth: Arc<AtomicUsize>,
+    store_identity: store_identity::CanonicalStoreIdentity,
+    provider_file_publication: RefCell<Option<provider_files::ActiveProviderFilePublication>>,
+    provider_file_write_scope: Cell<Option<uuid::Uuid>>,
+    #[cfg(test)]
+    provider_file_fault: std::cell::Cell<Option<provider_files::ProviderFileFaultPoint>>,
+    #[cfg(test)]
+    provider_file_reconciliation_queries: Cell<usize>,
+    #[cfg(test)]
+    provider_file_reconciliation_candidates: Cell<usize>,
+}
+
+impl Drop for Store {
+    fn drop(&mut self) {
+        self.cleanup_provider_file_publication_on_drop();
+    }
 }
 
 #[cfg(test)]

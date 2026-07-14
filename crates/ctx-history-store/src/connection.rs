@@ -13,6 +13,7 @@ use crate::object_store::{
     migrate_legacy_history_layout, restrict_private_dir, restrict_private_file, OBJECTS_DIR,
     SPOOL_DIR,
 };
+use crate::store_identity::CanonicalStoreIdentity;
 use crate::{Result, Store, StoreError, SCHEMA_VERSION};
 
 pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_millis(30_000);
@@ -33,6 +34,8 @@ impl Store {
     }
 
     fn open_read_only_connection(path: PathBuf, immutable_snapshot: bool) -> Result<Self> {
+        let store_identity = CanonicalStoreIdentity::open_target(&path, false)?;
+        let path = store_identity.canonical_path().to_path_buf();
         let object_dir = path
             .parent()
             .map(|parent| parent.join(OBJECTS_DIR))
@@ -56,6 +59,15 @@ impl Store {
             conn,
             busy_timeout: BUSY_TIMEOUT,
             event_search_bulk_depth: Default::default(),
+            store_identity,
+            provider_file_publication: Default::default(),
+            provider_file_write_scope: Default::default(),
+            #[cfg(test)]
+            provider_file_fault: Default::default(),
+            #[cfg(test)]
+            provider_file_reconciliation_queries: Default::default(),
+            #[cfg(test)]
+            provider_file_reconciliation_candidates: Default::default(),
         })
     }
 
@@ -77,6 +89,8 @@ impl Store {
             fs::create_dir_all(&spool_dir)?;
             restrict_private_dir(&spool_dir)?;
         }
+        let store_identity = CanonicalStoreIdentity::open_target(&path, true)?;
+        let path = store_identity.canonical_path().to_path_buf();
         let conn = Connection::open(&path)?;
         restrict_private_file(&path)?;
         configure_connection(&conn, busy_timeout)?;
@@ -86,6 +100,15 @@ impl Store {
             conn,
             busy_timeout,
             event_search_bulk_depth: Default::default(),
+            store_identity,
+            provider_file_publication: Default::default(),
+            provider_file_write_scope: Default::default(),
+            #[cfg(test)]
+            provider_file_fault: Default::default(),
+            #[cfg(test)]
+            provider_file_reconciliation_queries: Default::default(),
+            #[cfg(test)]
+            provider_file_reconciliation_candidates: Default::default(),
         };
         store.migrate()?;
         store.recover_event_search_bulk_mode()?;
@@ -228,6 +251,57 @@ pub(crate) fn configure_connection(conn: &Connection, busy_timeout: Duration) ->
         "#,
     )?;
     Ok(())
+}
+
+pub(crate) fn with_immediate_transaction<T>(
+    conn: &Connection,
+    action: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let owns_transaction = conn.is_autocommit();
+    if owns_transaction {
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+    }
+    let result = action();
+    if !owns_transaction {
+        return result;
+    }
+    match result {
+        Ok(value) => match conn.execute_batch("COMMIT") {
+            Ok(()) => Ok(value),
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(error.into())
+            }
+        },
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
+}
+
+pub(crate) fn with_read_transaction<T>(
+    conn: &Connection,
+    action: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let owns_transaction = conn.is_autocommit();
+    if owns_transaction {
+        conn.execute_batch("BEGIN")?;
+    }
+    let result = action();
+    if !owns_transaction {
+        return result;
+    }
+    match result {
+        Ok(value) => {
+            conn.execute_batch("COMMIT")?;
+            Ok(value)
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
 }
 
 pub(crate) fn sqlite_read_only_immutable_uri(path: &Path) -> String {
