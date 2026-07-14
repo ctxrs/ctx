@@ -293,7 +293,45 @@ fn open_generation_checked_immutable_main(
     ) {
         return Ok(None);
     }
-    connection.map(Some)
+    match connection {
+        Ok(connection) => Ok(Some(connection)),
+        Err(error) => recover_unavailable_immutable_open(path, before, error),
+    }
+}
+
+fn recover_unavailable_immutable_open(
+    path: &Path,
+    before: &SqliteSourceGeneration,
+    error: CaptureError,
+) -> Result<Option<ReadOnlySqliteConnection>> {
+    if immutable_identity_open_unavailable(&error) {
+        copy_stable_sqlite_generation(path, before)
+    } else {
+        Err(error)
+    }
+}
+
+fn immutable_identity_open_unavailable(error: &CaptureError) -> bool {
+    #[cfg(unix)]
+    {
+        matches!(
+            error,
+            CaptureError::Io(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::Unsupported
+                )
+        ) || matches!(
+            error,
+            CaptureError::Sqlite(rusqlite::Error::SqliteFailure(error, _))
+                if error.code == rusqlite::ErrorCode::CannotOpen
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
+    }
 }
 
 const SQLITE_SNAPSHOT_DISK_RESERVE_BYTES: u64 = 64 * 1024 * 1024;
@@ -844,6 +882,8 @@ mod tests {
         install_sqlite_observation_test_hook, SqliteObservationTestPhase,
         SQLITE_GENERATION_MAX_ATTEMPTS,
     };
+    #[cfg(unix)]
+    use crate::CaptureError;
 
     use super::{
         create_private_snapshot_dir_in, create_private_snapshot_file,
@@ -855,6 +895,8 @@ mod tests {
         validate_snapshot_ceiling, BTreeSet, SqliteImmutableOpenTestPhase,
         SqliteSnapshotTestMetrics, SQLITE_SNAPSHOT_DISK_RESERVE_BYTES, SQLITE_SNAPSHOT_MAX_BYTES,
     };
+    #[cfg(unix)]
+    use super::{immutable_identity_open_unavailable, recover_unavailable_immutable_open};
 
     #[cfg(windows)]
     use super::sqlite_immutable_uri;
@@ -1255,6 +1297,47 @@ mod tests {
         assert!(!swapped.get());
         assert!(connection._snapshot_dir.is_none());
         assert_eq!(observe_sqlite_source_generation(&db).unwrap(), baseline);
+        assert_eq!(
+            connection
+                .query_row("SELECT value FROM entries WHERE id = 1", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap(),
+            "inside"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unavailable_identity_descriptor_falls_back_to_observed_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("source.db");
+        write_single_value_db(&db, "inside");
+        let generation = observe_sqlite_source_generation(&db).unwrap();
+
+        assert!(immutable_identity_open_unavailable(&CaptureError::Io(
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                "descriptor namespace unavailable"
+            )
+        )));
+        let descriptor_cantopen = CaptureError::Sqlite(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN),
+            Some("descriptor is not exposed by the mounted filesystem".into()),
+        ));
+        assert!(immutable_identity_open_unavailable(&descriptor_cantopen));
+        take_sqlite_snapshot_test_metrics();
+        let connection = recover_unavailable_immutable_open(&db, &generation, descriptor_cantopen)
+            .unwrap()
+            .expect("expected stable SQLite connection");
+        assert!(connection._snapshot_dir.is_some());
+        assert_eq!(
+            take_sqlite_snapshot_test_metrics(),
+            SqliteSnapshotTestMetrics {
+                attempts: 1,
+                copied_files: 1,
+            }
+        );
         assert_eq!(
             connection
                 .query_row("SELECT value FROM entries WHERE id = 1", [], |row| {
