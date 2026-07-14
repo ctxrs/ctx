@@ -75,12 +75,19 @@ impl ProviderImportStateSpool {
     fn store_pending_edges(&self, pending: BTreeMap<Uuid, PendingProviderEdge>) -> Result<()> {
         for (id, edge) in pending {
             self.connection.execute(
-                "INSERT INTO pending_edges (id, payload) VALUES (?1, ?2)
-                 ON CONFLICT(id) DO UPDATE SET payload = excluded.payload",
+                "INSERT OR IGNORE INTO pending_edges (id, payload) VALUES (?1, ?2)",
                 params![id.to_string(), serde_json::to_string(&edge)?],
             )?;
         }
         Ok(())
+    }
+
+    fn entity_was_observed(&self, kind: &'static str, id: Uuid) -> Result<bool> {
+        Ok(self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM observed_entities WHERE kind = ?1 AND id = ?2)",
+            params![kind, id.to_string()],
+            |row| row.get(0),
+        )?)
     }
 
     fn first_entity_observation(&self, kind: &'static str, id: Uuid) -> Result<bool> {
@@ -233,8 +240,7 @@ impl<'a> ProviderNormalizationStreamImporter<'a> {
             let unit_bytes =
                 serialized_len_or_rollback(&mut self.transaction, self.store, &capture)?;
             require_transaction_continue(self.transaction.prepare_unit(self.store, unit_bytes)?)?;
-            let sessions_before = self.caches.processed_sessions.clone();
-            let edges_before = self.caches.processed_edges.clone();
+            self.seed_capture_observations(&capture)?;
             match import_provider_capture_line(
                 self.store,
                 &capture,
@@ -242,29 +248,7 @@ impl<'a> ProviderNormalizationStreamImporter<'a> {
                 line_number,
                 &mut self.caches,
             ) {
-                Ok(mut line_summary) => {
-                    for session_id in self.caches.processed_sessions.difference(&sessions_before) {
-                        if !self
-                            .state_spool
-                            .first_entity_observation("session", *session_id)?
-                        {
-                            line_summary.skipped_sessions =
-                                line_summary.skipped_sessions.saturating_sub(1);
-                            line_summary.skipped = line_summary.skipped.saturating_sub(1);
-                        }
-                    }
-                    for edge_id in self.caches.processed_edges.difference(&edges_before) {
-                        if !self
-                            .state_spool
-                            .first_entity_observation("edge", *edge_id)?
-                        {
-                            line_summary.skipped_edges =
-                                line_summary.skipped_edges.saturating_sub(1);
-                            line_summary.skipped = line_summary.skipped.saturating_sub(1);
-                        }
-                    }
-                    self.summary.merge(line_summary);
-                }
+                Ok(line_summary) => self.summary.merge(line_summary),
                 Err(err @ CaptureError::Store(_)) => {
                     self.transaction.rollback(self.store);
                     return Err(err);
@@ -277,6 +261,7 @@ impl<'a> ProviderNormalizationStreamImporter<'a> {
                     });
                 }
             }
+            self.record_resident_entity_observations()?;
             require_transaction_continue(self.transaction.record_unit(self.store, unit_bytes)?)?;
             self.observe_resident_state();
         }
@@ -393,6 +378,49 @@ impl<'a> ProviderNormalizationStreamImporter<'a> {
         self.metrics.max_cache_entries = self.metrics.max_cache_entries.max(cache_entries);
     }
 
+    fn seed_capture_observations(&mut self, capture: &ProviderCaptureEnvelope) -> Result<()> {
+        let observation = capture_entity_observation(self.store, capture)?;
+        if self
+            .state_spool
+            .entity_was_observed("source", observation.source_id)?
+        {
+            self.caches.processed_sources.insert(observation.source_id);
+        }
+        if self
+            .state_spool
+            .entity_was_observed("session", observation.session_id)?
+        {
+            self.caches
+                .processed_sessions
+                .insert(observation.session_id);
+            self.caches
+                .session_exists
+                .insert(observation.session_id, true);
+        }
+        if let Some(edge_id) = observation.edge_id {
+            if self.state_spool.entity_was_observed("edge", edge_id)? {
+                self.caches.processed_edges.insert(edge_id);
+            }
+        }
+        Ok(())
+    }
+
+    fn record_resident_entity_observations(&self) -> Result<()> {
+        for source_id in &self.caches.processed_sources {
+            self.state_spool
+                .first_entity_observation("source", *source_id)?;
+        }
+        for session_id in &self.caches.processed_sessions {
+            self.state_spool
+                .first_entity_observation("session", *session_id)?;
+        }
+        for edge_id in &self.caches.processed_edges {
+            self.state_spool
+                .first_entity_observation("edge", *edge_id)?;
+        }
+        Ok(())
+    }
+
     fn finish_import(&mut self) -> Result<ProviderImportSummary> {
         let mut after = None;
         loop {
@@ -409,6 +437,9 @@ impl<'a> ProviderNormalizationStreamImporter<'a> {
                         "provider import state contains an invalid pending edge ID",
                     )
                 })?;
+                if self.state_spool.entity_was_observed("edge", edge_id)? {
+                    self.caches.processed_edges.insert(edge_id);
+                }
                 resolve_pending_provider_edge(
                     self.store,
                     &mut self.summary,
@@ -416,6 +447,9 @@ impl<'a> ProviderNormalizationStreamImporter<'a> {
                     edge_id,
                     edge.clone(),
                 )?;
+                if self.caches.processed_edges.contains(&edge_id) {
+                    self.state_spool.first_entity_observation("edge", edge_id)?;
+                }
                 self.caches.clear_resident();
             }
             after = batch.last().map(|(id, _)| id.clone());
@@ -463,6 +497,58 @@ impl<'a> ProviderNormalizationStreamImporter<'a> {
             None => Ok(()),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CaptureEntityObservation {
+    source_id: Uuid,
+    session_id: Uuid,
+    edge_id: Option<Uuid>,
+}
+
+fn capture_entity_observation(
+    store: &Store,
+    capture: &ProviderCaptureEnvelope,
+) -> Result<CaptureEntityObservation> {
+    let provider = capture.provider;
+    let source = &capture.source;
+    let session = &capture.session;
+    let source_identity_key = provider_scoped_source_identity_key(
+        provider,
+        &session.provider_session_id,
+        &source.source_format,
+        source.raw_source_path.as_deref(),
+    );
+    let source_id = stable_capture_uuid(&source_identity_key, "source");
+    let source_identity = provider_source_identity(
+        provider,
+        &source.source_format,
+        source.source_root.as_deref(),
+        source.raw_source_path.as_deref(),
+        source.idempotency_key.as_deref(),
+        &source.metadata,
+    );
+    let session_id = provider_import_session_uuid(
+        store,
+        provider,
+        &session.provider_session_id,
+        source_id,
+        source_identity.as_deref(),
+    )?;
+    let edge_id = session.parent_provider_session_id.as_ref().map(|_| {
+        provider_import_edge_uuid(
+            provider,
+            &session.provider_session_id,
+            source_identity.as_deref(),
+            session_id,
+            "parent_child",
+        )
+    });
+    Ok(CaptureEntityObservation {
+        source_id,
+        session_id,
+        edge_id,
+    })
 }
 
 impl<F> ProviderNormalizationBatcher<F>

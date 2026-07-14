@@ -36,7 +36,7 @@ use crate::{
     CODEX_SESSION_SOURCE_FORMAT, TABNINE_CLI_SOURCE_FORMAT,
 };
 
-use super::ClaudeProjectsJsonlResumeState;
+use super::{ClaudeProjectsJsonlResumeState, CodexSessionJsonlResumeState};
 
 use super::provider_file_mutation_contract;
 
@@ -189,6 +189,17 @@ fn import_append_capable_provider_file_with_post_materialization(
     let mut certification_failure = None;
     let summary = match (provider, inventory_source_format) {
         (CaptureProvider::Codex, "codex_session_jsonl_tree" | "codex_session_jsonl") => {
+            let resume_state = match &validated_resume_state {
+                ValidatedAdapterResumeState::Codex(state) => state.clone(),
+                ValidatedAdapterResumeState::None if is_replacement => {
+                    CodexSessionJsonlResumeState::default()
+                }
+                _ => {
+                    return Err(CaptureError::SystemInvariant(
+                        "validated Codex resume state has the wrong provider",
+                    ));
+                }
+            };
             let append_bootstrap = match read_authoritative_codex_header(&mut reader)? {
                 Ok(header) if !is_replacement => Some(header),
                 Ok(_) => None,
@@ -210,12 +221,16 @@ fn import_append_capable_provider_file_with_post_materialization(
                 options.history_record_id,
                 is_replacement,
                 append_bootstrap,
+                resume_state,
             )? {
                 CodexSessionFileImport::Imported { summary, boundary } => {
                     if is_replacement && boundary.additional_session_header {
                         certification_failure
                             .get_or_insert(ProviderJsonlReplacementReason::AdditionalSessionHeader);
                     }
+                    checkpoint_resume_state = Some(ProviderJsonlResumeState::CodexSession(
+                        boundary.resume_state.clone(),
+                    ));
                     semantic_boundary = Some(boundary);
                     summary
                 }
@@ -605,6 +620,5 @@ fn import_append_capable_provider_file_with_post_materialization(
 }
 
 include!("append_import/completion.rs");
-
 #[cfg(test)]
 include!("append_import/tests.rs");
