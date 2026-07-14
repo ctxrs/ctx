@@ -130,20 +130,26 @@ fn stable_file_identity(
 ) -> Option<ProviderFileStableIdentity> {
     use std::{mem::MaybeUninit, os::windows::io::AsRawHandle};
     use windows_sys::Win32::Storage::FileSystem::{
-        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        FileIdInfo, GetFileInformationByHandleEx, FILE_ID_INFO,
     };
 
     let handle = file.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
-    let mut information = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::zeroed();
-    let ok = unsafe { GetFileInformationByHandle(handle, information.as_mut_ptr()) };
+    let mut information = MaybeUninit::<FILE_ID_INFO>::zeroed();
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileIdInfo,
+            information.as_mut_ptr().cast(),
+            std::mem::size_of::<FILE_ID_INFO>() as u32,
+        )
+    };
     if ok == 0 {
         return None;
     }
     let information = unsafe { information.assume_init() };
     Some(ProviderFileStableIdentity::Windows {
-        volume: u64::from(information.dwVolumeSerialNumber),
-        file_index: (u64::from(information.nFileIndexHigh) << 32)
-            | u64::from(information.nFileIndexLow),
+        volume_serial: information.VolumeSerialNumber,
+        file_id: information.FileId.Identifier,
     })
 }
 

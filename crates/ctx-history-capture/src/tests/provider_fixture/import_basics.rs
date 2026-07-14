@@ -475,6 +475,115 @@ fn generic_import_retains_summary_when_search_finalization_is_pinned() {
 }
 
 #[test]
+fn streamed_batches_preserve_full_archive_and_pending_edge_first_observation() {
+    const REPEATED_CHILD_ROWS: usize = 64 * 2 + 3;
+
+    let temp = tempdir();
+    let legacy_path = temp.path().join("first-observation-legacy.sqlite");
+    let streamed_path = temp.path().join("first-observation-streamed.sqlite");
+    let source_path = temp.path().join("shared-provider-root");
+    let source_path = source_path.display().to_string();
+    let occurred_at = DateTime::parse_from_rfc3339("2026-07-14T19:30:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+
+    let mut captures = Vec::new();
+    for index in 0..REPEATED_CHILD_ROWS {
+        let mut child = provider_collision_capture(
+            CaptureProvider::Claude,
+            "batch-child",
+            "claude_projects_jsonl_tree",
+            &source_path,
+            occurred_at,
+        );
+        child.session.parent_provider_session_id = Some("batch-parent".to_owned());
+        child.session.root_provider_session_id = Some("batch-parent".to_owned());
+        child.source.observed_at = occurred_at + chrono::Duration::seconds(index as i64);
+        child.source.metadata = json!({"observation": index});
+        child.session.metadata = json!({"observation": index});
+        captures.push((index + 1, child));
+    }
+    let mut parent = provider_collision_capture(
+        CaptureProvider::Claude,
+        "batch-parent",
+        "claude_projects_jsonl_tree",
+        &source_path,
+        occurred_at + chrono::Duration::seconds(REPEATED_CHILD_ROWS as i64),
+    );
+    parent.source.metadata = json!({"observation": "parent"});
+    captures.push((REPEATED_CHILD_ROWS + 1, parent));
+
+    let normalization = ProviderNormalizationResult {
+        summary: ProviderImportSummary::default(),
+        captures: captures.clone(),
+        files_touched: Vec::new(),
+    };
+    let mut legacy_store = Store::open(&legacy_path).unwrap();
+    let legacy_summary = import_normalized_provider_captures(
+        &mut legacy_store,
+        normalization,
+        NormalizedProviderImportOptions::default(),
+    )
+    .unwrap();
+
+    let mut streamed_store = Store::open(&streamed_path).unwrap();
+    let streamed_summary = import_normalized_provider_capture_stream(
+        &mut streamed_store,
+        NormalizedProviderImportOptions::default(),
+        |emit| {
+            for batch in captures.chunks(PROVIDER_NORMALIZATION_STREAM_BATCH_UNITS) {
+                emit(ProviderNormalizationResult {
+                    summary: ProviderImportSummary::default(),
+                    captures: batch.to_vec(),
+                    files_touched: Vec::new(),
+                })?;
+            }
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    assert_eq!(streamed_summary, legacy_summary);
+    assert_eq!(
+        streamed_store.export_archive().unwrap(),
+        legacy_store.export_archive().unwrap()
+    );
+
+    let edge_rows = |path: &Path| {
+        let connection = Connection::open(path).unwrap();
+        let mut statement = connection
+            .prepare(
+                "SELECT id, from_session_id, to_session_id, created_at_ms, updated_at_ms,
+                        metadata_json FROM session_edges ORDER BY id",
+            )
+            .unwrap();
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            })
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        rows
+    };
+    let legacy_edges = edge_rows(&legacy_path);
+    let streamed_edges = edge_rows(&streamed_path);
+    assert_eq!(streamed_edges, legacy_edges);
+    assert_eq!(streamed_edges.len(), 1);
+    let metadata: Value = serde_json::from_str(&streamed_edges[0].5).unwrap();
+    assert_eq!(metadata["fixture_line"], 1);
+    assert_eq!(metadata["deferred_edge_resolution"], true);
+    assert_eq!(metadata["imported_at"], "2026-07-14T19:30:00Z");
+}
+
+#[test]
 fn batched_provider_import_rotates_on_serialized_byte_budget() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");

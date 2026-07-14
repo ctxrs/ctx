@@ -525,6 +525,7 @@ mod tests {
 
     use super::*;
     use crate::provider::importer::provider_source_cursor_stream;
+    use crate::provider::providers::claude::normalize_claude_projects_jsonl_file;
     use crate::provider::providers::pi::normalize_pi_session_jsonl_path;
     use crate::summaries::MAX_PROVIDER_IMPORT_FAILURE_SAMPLES;
 
@@ -534,6 +535,8 @@ mod tests {
 
     #[test]
     fn pi_production_streaming_filters_mixed_sessions_like_legacy_import() {
+        const REAL_MESSAGES: usize = 64 * 2 + 3;
+
         let temp = tempdir().unwrap();
         for metadata_first in [true, false] {
             let case = if metadata_first {
@@ -558,20 +561,19 @@ mod tests {
                     "modelId": "notice-only"
                 }))
             );
-            let real_session = format!(
-                "{}{}",
-                jsonl(json!({
-                    "type": "session",
-                    "id": "pi-real",
-                    "timestamp": "2026-07-14T12:00:02Z"
-                })),
-                jsonl(json!({
+            let mut real_session = jsonl(json!({
+                "type": "session",
+                "id": "pi-real",
+                "timestamp": "2026-07-14T12:00:02Z"
+            }));
+            for index in 0..REAL_MESSAGES {
+                real_session.push_str(&jsonl(json!({
                     "type": "message",
-                    "id": "pi-real-message",
+                    "id": format!("pi-real-message-{index:03}"),
                     "timestamp": "2026-07-14T12:00:03Z",
-                    "message": {"role": "user", "content": "admitted"}
-                }))
-            );
+                    "message": {"role": "user", "content": format!("admitted {index}")}
+                })));
+            }
             let contents = if metadata_first {
                 format!("{metadata_session}{real_session}")
             } else {
@@ -617,58 +619,20 @@ mod tests {
             assert_eq!(streamed_summary.failed, 0, "{case}");
             assert_eq!(streamed_summary.skipped_sessions, 1, "{case}");
             assert_eq!(streamed_summary.skipped_events, 1, "{case}");
+            assert_eq!(streamed_summary.imported_events, REAL_MESSAGES, "{case}");
             assert_eq!(streamed_summary.imported_edges, 0, "{case}");
             assert_eq!(streamed_summary.skipped_edges, 0, "{case}");
 
             let legacy = legacy_store.export_archive().unwrap();
             let streamed = streamed_store.export_archive().unwrap();
-            let session_projection = |sessions: &[ctx_history_core::Session]| {
-                sessions
-                    .iter()
-                    .map(|session| {
-                        (
-                            session.id,
-                            session.external_session_id.clone(),
-                            session.parent_session_id,
-                            session.started_at,
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            };
-            assert_eq!(
-                session_projection(&streamed.sessions),
-                session_projection(&legacy.sessions),
-                "{case}"
-            );
+            assert_eq!(streamed, legacy, "{case}");
             assert_eq!(streamed.sessions.len(), 1, "{case}");
             assert_eq!(
                 streamed.sessions[0].external_session_id.as_deref(),
                 Some("pi-real"),
                 "{case}"
             );
-            let event_projection = |events: &[ctx_history_core::Event]| {
-                events
-                    .iter()
-                    .map(|event| {
-                        (
-                            event.id,
-                            event.seq,
-                            event.session_id,
-                            event.event_type,
-                            event.role,
-                            event.occurred_at,
-                            event.payload.clone(),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            };
-            assert_eq!(
-                event_projection(&streamed.events),
-                event_projection(&legacy.events),
-                "{case}"
-            );
-            assert_eq!(streamed.events.len(), 1, "{case}");
-            assert_eq!(streamed.files_touched, legacy.files_touched, "{case}");
+            assert_eq!(streamed.events.len(), REAL_MESSAGES, "{case}");
             assert!(streamed.files_touched.is_empty(), "{case}");
 
             let source_root = path.display().to_string();
@@ -686,6 +650,97 @@ mod tests {
             assert_eq!(streamed_cursor, legacy_cursor, "{case}");
             assert!(streamed_cursor.is_some(), "{case}");
         }
+    }
+
+    #[test]
+    fn claude_production_streaming_preserves_pre_pr3_archive_across_batches() {
+        const MESSAGES: usize = 64 * 2 + 3;
+
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("claude/session.jsonl");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut contents = String::new();
+        for index in 0..MESSAGES {
+            let mut row = json!({
+                "sessionId": "claude-archive-parity",
+                "timestamp": "2026-07-14T12:00:10Z",
+                "type": if index == 0 { "user" } else { "assistant" },
+                "uuid": format!("claude-message-{index:03}"),
+                "message": {
+                    "role": if index == 0 { "user" } else { "assistant" },
+                    "content": format!("archive parity {index}")
+                }
+            });
+            if index == 64 {
+                row.as_object_mut().unwrap().remove("timestamp");
+            }
+            contents.push_str(&jsonl(row));
+        }
+        fs::write(&path, contents).unwrap();
+
+        let imported_at = "2026-07-14T11:00:00Z".parse().unwrap();
+        let machine_id = "claude-archive-parity-test".to_owned();
+        let context = ProviderAdapterContext {
+            machine_id: machine_id.clone(),
+            source_path: Some(path.clone()),
+            source_root: None,
+            imported_at,
+        };
+        let mut legacy_store = Store::open(temp.path().join("claude-legacy.sqlite")).unwrap();
+        let legacy_normalization = normalize_claude_projects_jsonl_file(&path, &context).unwrap();
+        assert!(legacy_normalization
+            .captures
+            .iter()
+            .all(|(_, capture)| capture.session.started_at == imported_at));
+        let legacy_summary = import_normalized_provider_captures(
+            &mut legacy_store,
+            legacy_normalization,
+            NormalizedProviderImportOptions {
+                history_record_id: None,
+                persist_cursors: true,
+                wrap_transaction: true,
+                fast_event_inserts: true,
+            },
+        )
+        .unwrap();
+
+        let mut streamed_store = Store::open(temp.path().join("claude-streamed.sqlite")).unwrap();
+        let streamed_summary = import_claude_projects_jsonl_tree(
+            &path,
+            &mut streamed_store,
+            ClaudeProjectsImportOptions {
+                machine_id: machine_id.clone(),
+                source_path: None,
+                imported_at,
+                history_record_id: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(streamed_summary, legacy_summary);
+        assert_eq!(streamed_summary.imported_events, MESSAGES);
+        assert_eq!(
+            streamed_store.export_archive().unwrap(),
+            legacy_store.export_archive().unwrap()
+        );
+        assert_eq!(
+            streamed_store.list_sessions().unwrap()[0].started_at,
+            imported_at
+        );
+
+        let cursor_stream = provider_source_cursor_stream(
+            ctx_history_core::CaptureProvider::Claude,
+            crate::CLAUDE_PROJECTS_SOURCE_FORMAT,
+            Some(&path.display().to_string()),
+        );
+        assert_eq!(
+            streamed_store
+                .get_sync_cursor(None, &machine_id, &cursor_stream)
+                .unwrap(),
+            legacy_store
+                .get_sync_cursor(None, &machine_id, &cursor_stream)
+                .unwrap()
+        );
     }
 
     #[test]

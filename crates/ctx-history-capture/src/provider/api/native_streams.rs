@@ -671,6 +671,46 @@ mod tests {
 
         let legacy = legacy_store.export_archive().unwrap();
         let streamed = streamed_store.export_archive().unwrap();
+        assert_eq!(streamed, legacy);
+        let edge_rows = |path: &std::path::Path| {
+            let connection = rusqlite::Connection::open(path).unwrap();
+            let mut statement = connection
+                .prepare(
+                    "SELECT id, from_session_id, to_session_id, edge_type, confidence, source_id,
+                            created_at_ms, updated_at_ms, visibility, fidelity, sync_state,
+                            sync_version, deleted_at_ms, metadata_json
+                     FROM session_edges ORDER BY id",
+                )
+                .unwrap();
+            let rows = statement
+                .query_map([], |row| {
+                    Ok(vec![
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                        row.get::<_, i64>(6)?.to_string(),
+                        row.get::<_, i64>(7)?.to_string(),
+                        row.get::<_, String>(8)?,
+                        row.get::<_, String>(9)?,
+                        row.get::<_, String>(10)?,
+                        row.get::<_, i64>(11)?.to_string(),
+                        row.get::<_, Option<i64>>(12)?
+                            .map_or_else(String::new, |value| value.to_string()),
+                        row.get::<_, String>(13)?,
+                    ])
+                })
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap();
+            rows
+        };
+        assert_eq!(
+            edge_rows(&temp.path().join("streamed.sqlite")),
+            edge_rows(&temp.path().join("legacy.sqlite"))
+        );
         let session_projection = |sessions: &[ctx_history_core::Session]| {
             sessions
                 .iter()
