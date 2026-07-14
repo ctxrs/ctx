@@ -153,12 +153,12 @@ impl Store {
         }
     }
 
-    /// Run at most one best-effort maintenance pass, retaining the bulk marker
-    /// and suppressed merge settings for resumable recovery.
+    /// Run at most one best-effort maintenance pass.
     ///
     /// Callers drop `guard` after this returns. A maintenance failure is
     /// deliberately deferred: its committed import data stays searchable and
-    /// the marker records the remaining work for a later writable open.
+    /// the marker records the remaining work for a later writable open. A
+    /// quiescent pass restores the saved settings and clears that marker.
     pub fn defer_event_search_bulk_mode(&self, guard: &EventSearchBulkGuard) -> Result<()> {
         if guard.store_path != self.path {
             return Err(StoreError::InvalidBulkSearchGuard);
@@ -173,8 +173,7 @@ impl Store {
         Ok(())
     }
 
-    /// Perform one bounded merge-and-checkpoint maintenance pass without
-    /// restoring the bulk-import settings or clearing the recovery marker.
+    /// Perform one bounded merge-and-checkpoint maintenance pass.
     ///
     /// Importers use this between bounded write transactions. Failure is safe
     /// to defer: the marker keeps recovery resumable on the next writable open.
@@ -197,9 +196,25 @@ impl Store {
             let _ = self.rollback_batch();
             return Err(err);
         }
-        if changed {
-            self.checkpoint_wal_truncate_required()?;
+        if !changed {
+            self.begin_immediate_batch()?;
+            let restore_result = (|| {
+                if bulk_mode_pending(self)? {
+                    restore_event_search_merge_config(self)?;
+                    clear_bulk_mode_state(self)?;
+                }
+                Ok(())
+            })();
+            if let Err(err) = restore_result {
+                let _ = self.rollback_batch();
+                return Err(err);
+            }
+            if let Err(err) = self.commit_batch() {
+                let _ = self.rollback_batch();
+                return Err(err);
+            }
         }
+        self.checkpoint_wal_truncate_required()?;
         Ok(())
     }
 
@@ -230,9 +245,9 @@ impl Store {
             return Ok(());
         }
         // A live importer owns this lock. A stale marker has no owner, so the
-        // next writable open adopts and completes its bounded recovery.
-        if let Some(guard) = self.acquire_event_search_bulk_lock(Duration::ZERO)? {
-            self.finish_event_search_bulk_mode(&guard)?;
+        // next writable open adopts one bounded recovery pass only.
+        if let Some(_guard) = self.acquire_event_search_bulk_lock(Duration::ZERO)? {
+            self.maintain_event_search_bulk_mode()?;
         }
         Ok(())
     }

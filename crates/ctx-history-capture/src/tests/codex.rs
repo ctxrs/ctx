@@ -1420,7 +1420,7 @@ fn codex_fast_session_stream_uses_shared_bounded_batches() {
             |row| row.get::<_, i64>(0),
         )
         .unwrap(),
-        1
+        0
     );
     assert_eq!(
         conn.query_row("SELECT COUNT(*) FROM events", [], |row| row
@@ -1494,7 +1494,7 @@ fn codex_parallel_normalized_stream_uses_shared_bounded_batches() {
             |row| row.get::<_, i64>(0),
         )
         .unwrap(),
-        1
+        0
     );
     assert_eq!(
         conn.query_row("SELECT COUNT(*) FROM events", [], |row| row
@@ -1586,7 +1586,7 @@ fn codex_tail_stream_uses_shared_bounded_batches() {
             |row| row.get::<_, i64>(0),
         )
         .unwrap(),
-        1
+        0
     );
     assert_eq!(
         conn.query_row("SELECT COUNT(*) FROM events", [], |row| row

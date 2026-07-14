@@ -6,7 +6,7 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, ErrorCode, OpenFlags};
 use uuid::Uuid;
 
 use crate::object_store::{
@@ -88,11 +88,13 @@ impl Store {
             event_search_bulk_depth: Default::default(),
         };
         store.migrate()?;
-        // Recovery is opportunistic: a pending bounded FTS merge must never
-        // prevent opening the history store when disk or checkpoint pressure
-        // makes maintenance temporarily impossible. The marker remains and a
-        // later writable open will resume it.
-        let _ = store.recover_event_search_bulk_mode();
+        // Recovery is opportunistic only for temporary pressure. Corruption
+        // and other unexpected failures still make opening fail loudly.
+        if let Err(error) = store.recover_event_search_bulk_mode() {
+            if !is_recoverable_bulk_maintenance_error(&error) {
+                return Err(error);
+            }
+        }
         if migrated_legacy_layout {
             store.normalize_legacy_blob_paths()?;
         }
@@ -209,6 +211,17 @@ impl Store {
             ));
         }
         Ok(findings)
+    }
+}
+
+pub(crate) fn is_recoverable_bulk_maintenance_error(error: &StoreError) -> bool {
+    match error {
+        StoreError::WalCheckpointBusy { .. } | StoreError::BulkSearchImportBusy => true,
+        StoreError::Sql(rusqlite::Error::SqliteFailure(failure, _)) => matches!(
+            failure.code,
+            ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked | ErrorCode::DiskFull
+        ),
+        _ => false,
     }
 }
 

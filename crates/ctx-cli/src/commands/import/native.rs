@@ -81,16 +81,18 @@ pub(crate) fn import_one_source_inner(
     let bulk_guard = store.begin_event_search_bulk_mode()?;
     let import_result =
         import_one_source_inner_batched(store, source, progress, full_rescan, preinventory);
+    let import_result = import_result.and_then(|summary| {
+        if refresh_search_after_import {
+            store.refresh_search_index()?;
+        }
+        Ok(summary)
+    });
     let finish_result = store.defer_event_search_bulk_mode(&bulk_guard);
-    let summary = match (import_result, finish_result) {
+    match (import_result, finish_result) {
         (Ok(summary), Ok(())) => Ok(summary),
         (_, Err(error)) => Err(error.into()),
         (Err(error), Ok(())) => Err(error),
-    }?;
-    if refresh_search_after_import {
-        store.refresh_search_index()?;
     }
-    Ok(summary)
 }
 
 fn import_one_source_inner_batched(

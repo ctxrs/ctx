@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::{Store, StoreError};
+use crate::{connection::is_recoverable_bulk_maintenance_error, Store, StoreError};
 
 fn tempdir() -> tempfile::TempDir {
     tempfile::Builder::new()
@@ -75,6 +75,25 @@ fn strict_truncating_checkpoint_reports_pinned_reader() {
 }
 
 #[test]
+fn bulk_recovery_only_suppresses_temporary_pressure() {
+    assert!(is_recoverable_bulk_maintenance_error(
+        &StoreError::WalCheckpointBusy {
+            log_frames: 2,
+            checkpointed_frames: 1,
+        }
+    ));
+    assert!(is_recoverable_bulk_maintenance_error(&StoreError::Sql(
+        rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL), None,)
+    )));
+    assert!(!is_recoverable_bulk_maintenance_error(&StoreError::Sql(
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+            None,
+        )
+    )));
+}
+
+#[test]
 fn bulk_search_mode_recovers_on_reopen_and_restores_saved_config() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");
@@ -89,6 +108,12 @@ fn bulk_search_mode_recovers_on_reopen_and_restores_saved_config() {
     for table in ["event_search", "event_search_scriptgram"] {
         assert_eq!(fts_config(&store, table, "automerge", 4), 0);
         assert_eq!(fts_config(&store, table, "crisismerge", 16), 1_000_000);
+    }
+    store.defer_event_search_bulk_mode(&guard).unwrap();
+    assert_eq!(bulk_mode_marker(&store), None);
+    for table in ["event_search", "event_search_scriptgram"] {
+        assert_eq!(fts_config(&store, table, "automerge", 4), 8);
+        assert_eq!(fts_config(&store, table, "crisismerge", 16), 32);
     }
     drop(store);
     drop(guard);
@@ -475,13 +500,24 @@ fn deferred_bulk_maintenance_keeps_the_marker_and_does_not_block_reopen() {
     // successful import usable and preserve the resumable marker.
     store.defer_event_search_bulk_mode(&guard).unwrap();
     assert_eq!(bulk_mode_marker(&store), Some(1));
+    assert_eq!(
+        store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM event_search WHERE event_search MATCH 'deferred'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        20
+    );
     drop(guard);
     drop(store);
 
-    // Recovery attempts a bounded pass but must not make opening fail while a
-    // reader still pins the WAL.
+    // One bounded recovery pass can finish quiescent work, but its checkpoint
+    // must not make opening fail while a reader still pins the WAL.
     let reopened = Store::open_with_busy_timeout(&db_path, Duration::from_millis(10)).unwrap();
-    assert_eq!(bulk_mode_marker(&reopened), Some(1));
+    assert_eq!(bulk_mode_marker(&reopened), None);
     assert_eq!(
         reopened
             .conn
