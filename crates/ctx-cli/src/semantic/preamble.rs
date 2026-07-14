@@ -410,6 +410,13 @@ impl SemanticRetrievalReport {
     pub(crate) fn effective_mode(&self) -> SearchBackendArg {
         self.effective_mode
     }
+
+    pub(crate) fn semantic_fallback(&self) -> Option<(&'static str, &str)> {
+        Some((
+            self.semantic_fallback_code?,
+            self.semantic_fallback.as_deref()?,
+        ))
+    }
 }
 
 fn semantic_status_from_worker(worker: &SemanticWorkerReport) -> &'static str {

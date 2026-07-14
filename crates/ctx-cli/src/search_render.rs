@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -200,82 +202,98 @@ pub(crate) fn result_type_for_id(store: &Store, item_id: Uuid) -> String {
     "indexed_item".to_owned()
 }
 
-pub(crate) fn print_search_result_compact(
+pub(crate) fn render_search_result_compact(
     index: usize,
     result: &ctx_history_search::SearchPacketResult,
-) {
-    println!("{index}. {}", result.title);
+) -> String {
+    let mut out = String::new();
+    writeln!(out, "{index}. {}", result.title).expect("writing to String cannot fail");
     let summary = search_result_summary(result);
     if !summary.is_empty() {
-        println!("   {}", summary.join(" | "));
+        writeln!(out, "   {}", summary.join(" | ")).expect("writing to String cannot fail");
     }
     let snippet = result.snippet.trim();
     if !snippet.is_empty() {
-        println!("   {snippet}");
+        writeln!(out, "   {snippet}").expect("writing to String cannot fail");
     }
     if result.result_scope == ctx_history_search::SearchResultScope::Session
         && result.more_matches_in_session > 0
     {
-        println!(
+        writeln!(
+            out,
             "   {} more results from this session",
             result.more_matches_in_session
-        );
+        )
+        .expect("writing to String cannot fail");
     }
     if let Some(command) = search_inspect_command(result) {
-        println!("   inspect: {command}");
+        writeln!(out, "   inspect: {command}").expect("writing to String cannot fail");
     }
+    out
 }
 
-pub(crate) fn print_search_result_verbose(
+pub(crate) fn render_search_result_verbose(
     result: &ctx_history_search::SearchPacketResult,
     suggested_next_query: Option<&str>,
-) {
-    println!("{}", result.title);
+) -> String {
+    let mut out = String::new();
+    writeln!(out, "{}", result.title).expect("writing to String cannot fail");
     if let Some(event_id) = result.event_id {
-        println!("  ctx_event_id: {event_id}");
+        writeln!(out, "  ctx_event_id: {event_id}").expect("writing to String cannot fail");
     }
     if let Some(session_id) = result.session_id {
-        println!("  ctx_session_id: {session_id}");
+        writeln!(out, "  ctx_session_id: {session_id}").expect("writing to String cannot fail");
     }
     if let Some(provider_session_id) = &result.provider_session_id {
-        println!("  provider_session_id: {provider_session_id}");
+        writeln!(out, "  provider_session_id: {provider_session_id}")
+            .expect("writing to String cannot fail");
     }
     if let Some(history_source) = &result.history_source {
-        println!("  history_source: {history_source}");
+        writeln!(out, "  history_source: {history_source}").expect("writing to String cannot fail");
     }
     if let Some(provider_key) = &result.provider_key {
-        println!("  provider_key: {provider_key}");
+        writeln!(out, "  provider_key: {provider_key}").expect("writing to String cannot fail");
     }
     if let Some(source_id) = &result.source_id {
-        println!("  source_id: {source_id}");
+        writeln!(out, "  source_id: {source_id}").expect("writing to String cannot fail");
     }
     if let Some(source_format) = &result.source_format {
-        println!("  source_format: {source_format}");
+        writeln!(out, "  source_format: {source_format}").expect("writing to String cannot fail");
     }
-    println!("  {}", result.snippet);
-    println!("  rank: {:.2}", result.rank);
+    writeln!(out, "  {}", result.snippet).expect("writing to String cannot fail");
+    writeln!(out, "  rank: {:.2}", result.rank).expect("writing to String cannot fail");
     if result.result_scope == ctx_history_search::SearchResultScope::Session {
-        println!("  session_importance: {:.2}", result.session_importance);
+        writeln!(
+            out,
+            "  session_importance: {:.2}",
+            result.session_importance
+        )
+        .expect("writing to String cannot fail");
         if result.more_matches_in_session > 0 {
-            println!(
+            writeln!(
+                out,
                 "  more_matches_in_session: {}",
                 result.more_matches_in_session
-            );
+            )
+            .expect("writing to String cannot fail");
         }
     }
     for command in search_next_commands(result, suggested_next_query)
         .into_iter()
         .take(3)
     {
-        println!("  next: {command}");
+        writeln!(out, "  next: {command}").expect("writing to String cannot fail");
     }
     for citation in result.citations.iter().take(2) {
-        println!(
+        writeln!(
+            out,
             "  citation: {} {}",
             public_citation_target_type(citation.citation_type),
             citation.id
-        );
+        )
+        .expect("writing to String cannot fail");
     }
+    out
 }
 
 pub(crate) fn search_result_summary(

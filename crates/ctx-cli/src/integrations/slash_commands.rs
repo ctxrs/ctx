@@ -22,10 +22,10 @@ Use ctx to search local coding-agent history for this request.
 
 User request: $ARGUMENTS
 
-Search local agent history with `ctx`, prefer default text output for agent
-reading, inspect cited events or sessions before making claims, and return a
-concise answer with ctx citations. Use `--json` only when piping to a script,
-`jq`, or extracting exact machine fields.
+Search local agent history with `ctx`; text and Markdown history output is
+automatically framed as untrusted. Inspect cited events or sessions before
+making claims, and return a concise answer with ctx citations. Use `--json`
+only when piping to a script, `jq`, or extracting exact machine fields.
 "#;
 
 const WINDSURF_WORKFLOW: &str = r#"# ctx History
@@ -33,7 +33,7 @@ const WINDSURF_WORKFLOW: &str = r#"# ctx History
 Search local coding-agent history with ctx.
 
 1. Treat any text after `/ctx-history` as the user request.
-2. Search with `ctx search "<query>"` using default text output.
+2. Search with `ctx search "<query>"`.
 3. Inspect relevant citations with `ctx show event <id> --window 5` or `ctx show session <id>`.
 4. Answer concisely and include ctx citations for claims based on local history.
 5. Use `--json` only when piping to a script, `jq`, or extracting exact machine fields.

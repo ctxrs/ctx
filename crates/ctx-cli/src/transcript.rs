@@ -11,6 +11,7 @@ use uuid::Uuid;
 use ctx_history_core::{CaptureProvider, Event, EventRole, EventType, Session};
 use ctx_history_store::Store;
 
+use crate::agent_output::HistoryEnvelope;
 use crate::output::{compact_json, OutputFormat};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -104,6 +105,10 @@ pub(crate) fn write_rendered_session(
         ))?,
         OutputFormat::Jsonl => render_session_jsonl(store, session, events, mode)?,
     };
+    let body = match format {
+        OutputFormat::Text | OutputFormat::Markdown => HistoryEnvelope::new().wrap_text(&body),
+        OutputFormat::Json | OutputFormat::Jsonl => body,
+    };
     write_output(body, out)
 }
 
@@ -121,6 +126,10 @@ pub(crate) fn write_rendered_events(
             serde_json::to_string_pretty(&event_window_json(store, selected, events, format))?
         }
         OutputFormat::Jsonl => render_events_jsonl(store, events)?,
+    };
+    let body = match format {
+        OutputFormat::Text | OutputFormat::Markdown => HistoryEnvelope::new().wrap_text(&body),
+        OutputFormat::Json | OutputFormat::Jsonl => body,
     };
     write_output(body, out)
 }

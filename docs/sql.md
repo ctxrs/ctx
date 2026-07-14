@@ -125,11 +125,15 @@ ctx sql --file query.sql
 
 Formats:
 
-- `--format table`, the default human-readable table;
+- `--format table`, the default agent-readable table;
 - `--format json`, structured output with columns, rows, limits, timing, and truncation;
 - `--json`, alias for `--format json`;
 - `--format csv`, script-friendly CSV;
 - `--format raw`, one-column raw lines for piping.
+
+The default table format is automatically wrapped in one fresh
+untrusted-history boundary. JSON, CSV, and raw formats remain exact machine
+output without the boundary.
 
 `--format raw` requires exactly one selected column.
 

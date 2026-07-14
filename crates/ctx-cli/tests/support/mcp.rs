@@ -1,7 +1,7 @@
 use serde_json::Value;
 use tempfile::TempDir;
 
-use super::ctx;
+use super::{assert_history_envelope, assert_no_history_envelope, ctx};
 
 pub(crate) fn mcp_roundtrip(temp: &TempDir, messages: &[Value]) -> Vec<Value> {
     mcp_roundtrip_with_env(temp, messages, &[])
@@ -77,4 +77,29 @@ pub(crate) fn assert_useful_mcp_text<'a>(result: &'a Value, expected: &[&str]) -
         );
     }
     text
+}
+
+pub(crate) fn assert_mcp_history_envelope(result: &Value) -> String {
+    let nonce = assert_history_envelope(mcp_content_text(result));
+    assert_eq!(
+        result["structuredContent"]["_ctx_history_envelope"]["version"],
+        1
+    );
+    assert_eq!(
+        result["structuredContent"]["_ctx_history_envelope"]["trust"],
+        "untrusted"
+    );
+    assert_eq!(
+        result["structuredContent"]["_ctx_history_envelope"]["nonce"],
+        nonce
+    );
+    nonce
+}
+
+pub(crate) fn assert_mcp_has_no_history_envelope(result: &Value) {
+    assert_no_history_envelope(mcp_content_text(result));
+    assert!(
+        result["structuredContent"]["_ctx_history_envelope"].is_null(),
+        "unexpected structured history envelope: {result:#}"
+    );
 }

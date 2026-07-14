@@ -7,6 +7,7 @@ use std::{
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+mod agent_output;
 mod analytics;
 mod commands;
 mod config;

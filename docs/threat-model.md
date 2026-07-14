@@ -30,7 +30,9 @@ files are read as import sources, not modified.
 - unsupported provider formats may be parsed incorrectly if adapters are too
   permissive;
 - compatibility JSON fields may expose more local store detail than an agent
-  needs.
+  needs;
+- stored transcript text, tool output, repository content, or SQL values may
+  contain instruction-like text that can steer a later agent when recalled.
 
 ## Mitigations
 
@@ -40,4 +42,19 @@ files are read as import sources, not modified.
 - preserve citations and source availability flags;
 - keep setup local and side-effect-limited;
 - document that searchable text is copied into SQLite;
-- treat JSON output as private until reviewed.
+- treat JSON output as private until reviewed;
+- wrap agent-facing search, transcript, event-window, and SQL table output in a
+  single fresh nonce boundary per response, without escaping or rewriting
+  retrieved historical data. A trusted preamble names the authoritative nonce
+  and says that nested or mismatched markers are historical data. MCP applies
+  the boundary automatically and labels
+  `structuredContent` with the same nonce; CLI search text, show text/Markdown,
+  and SQL tables apply the boundary automatically.
+
+The nonce boundary is provenance and delimiter-spoofing defense in depth. It
+does not authenticate historical claims, prevent prompt injection inside the
+real boundary, or authorize any action. Agents must treat recalled history as
+evidence and apply current policy and user approval to subsequent actions.
+This first boundary covers stored free-form output from search, show, and SQL;
+lower-volume metadata surfaces such as locate and MCP sources remain outside
+this mitigation.

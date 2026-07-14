@@ -85,7 +85,9 @@ guarantee that every provider has native cursor resume.
 
 ## JSON For Harnesses
 
-Agents should prefer default text for reading search, show, and locate output.
+Text or Markdown returned by search and show, plus SQL table output, is
+automatically wrapped in one untrusted-history boundary. Retrieved historical
+content is unchanged. Locate does not currently support the boundary.
 JSON is for scripts, harnesses, `jq`, or exact field extraction; it is usually
 much larger and consumes more context.
 
