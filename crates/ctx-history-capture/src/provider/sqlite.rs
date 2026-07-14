@@ -15,8 +15,8 @@ use uuid::Uuid;
 use crate::common::io::ensure_regular_provider_transcript_file;
 use crate::compute_payload_hash;
 use crate::provider::sqlite_observation::{
-    observe_sqlite_source_generation, SqliteSourceGeneration, SQLITE_GENERATION_MAX_ATTEMPTS,
-    SQLITE_SNAPSHOT_MAX_BYTES,
+    observe_sqlite_source_generation, SqliteObservedFile, SqliteSourceGeneration,
+    SQLITE_GENERATION_MAX_ATTEMPTS, SQLITE_SNAPSHOT_MAX_BYTES,
 };
 
 use crate::{CaptureError, Result, MAX_PROVIDER_SQLITE_VALUE_BYTES};
@@ -215,20 +215,32 @@ pub(crate) fn probe_sqlite_readonly_source(
     )))
 }
 
-fn open_sqlite_immutable_main(path: &Path) -> Result<ReadOnlySqliteConnection> {
-    let uri = sqlite_immutable_uri(path)?;
-    let conn = Connection::open_with_flags(
-        uri.as_str(),
-        OpenFlags::SQLITE_OPEN_READ_ONLY
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX
-            | OpenFlags::SQLITE_OPEN_URI
-            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )?;
+fn open_sqlite_immutable_main(source: &SqliteObservedFile) -> Result<ReadOnlySqliteConnection> {
+    let identity_path = source.immutable_open_path()?;
+    let uri = sqlite_immutable_uri(&identity_path)?;
+    let conn = Connection::open_with_flags(uri.as_str(), sqlite_immutable_open_flags())?;
     conn.pragma_update(None, "query_only", true)?;
     Ok(ReadOnlySqliteConnection {
         conn,
         _snapshot_dir: None,
     })
+}
+
+fn sqlite_immutable_open_flags() -> OpenFlags {
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX
+        | OpenFlags::SQLITE_OPEN_URI;
+    #[cfg(windows)]
+    {
+        flags | OpenFlags::SQLITE_OPEN_NOFOLLOW
+    }
+    #[cfg(not(windows))]
+    {
+        // The trusted descriptor path is itself a procfs/devfs symlink. Its
+        // live descriptor is the identity boundary, so SQLITE_OPEN_NOFOLLOW
+        // would reject the race-safe path.
+        flags
+    }
 }
 
 fn open_stable_sqlite_source(path: &Path) -> Result<ReadOnlySqliteConnection> {
@@ -257,7 +269,7 @@ fn open_generation_checked_immutable_main(
     before: &SqliteSourceGeneration,
 ) -> Result<Option<ReadOnlySqliteConnection>> {
     run_immutable_open_test_hook(path, SqliteImmutableOpenTestPhase::BeforeOpen);
-    let connection = open_sqlite_immutable_main(path);
+    let connection = open_sqlite_immutable_main(before.main());
     run_immutable_open_test_hook(path, SqliteImmutableOpenTestPhase::AfterOpen);
     let after = match observe_provider_sqlite_source_generation(path) {
         Ok(after) => after,
@@ -844,6 +856,9 @@ mod tests {
         SqliteSnapshotTestMetrics, SQLITE_SNAPSHOT_DISK_RESERVE_BYTES, SQLITE_SNAPSHOT_MAX_BYTES,
     };
 
+    #[cfg(windows)]
+    use super::sqlite_immutable_uri;
+
     #[test]
     fn optional_sqlite_casts_normalize_native_text_and_timestamp_shapes() {
         let conn = Connection::open_in_memory().unwrap();
@@ -1017,6 +1032,32 @@ mod tests {
     }
 
     #[test]
+    fn stable_unsupported_wal_version_is_terminal_on_public_open_and_probe_paths() {
+        for probe in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let db = temp.path().join("unsupported-version.db");
+            let _writer = real_wal_writer(&db);
+            let wal = sidecar(&db, "-wal");
+            let mut wal_bytes = fs::read(&wal).unwrap();
+            rewrite_wal_format_version(&mut wal_bytes, 3_007_001);
+            fs::write(&wal, wal_bytes).unwrap();
+
+            let result: crate::Result<()> = if probe {
+                probe_sqlite_readonly_source(&db, |_| Ok(true)).map(|_| ())
+            } else {
+                open_sqlite_readonly_source(&db).map(drop)
+            };
+            let error = result.unwrap_err();
+            assert!(matches!(
+                error,
+                crate::CaptureError::Io(ref error)
+                    if error.kind() == io::ErrorKind::InvalidData
+                        && error.to_string().contains("format version")
+            ));
+        }
+    }
+
+    #[test]
     fn public_open_and_probe_retry_a_transiently_missing_required_main() {
         for probe in [false, true] {
             let temp = tempfile::tempdir().unwrap();
@@ -1166,7 +1207,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn immutable_open_symlink_churn_retries_even_when_generation_is_restored() {
+    fn immutable_open_uses_observed_descriptor_across_restored_parent_symlink_swap() {
         use std::os::unix::fs::symlink;
 
         let temp = tempfile::tempdir().unwrap();
@@ -1210,7 +1251,7 @@ mod tests {
 
         let connection = open_sqlite_readonly_source(&db).unwrap();
         assert!(attempted.get());
-        assert!(open_calls.get() >= 2);
+        assert_eq!(open_calls.get(), 1);
         assert!(!swapped.get());
         assert!(connection._snapshot_dir.is_none());
         assert_eq!(observe_sqlite_source_generation(&db).unwrap(), baseline);
@@ -1222,6 +1263,92 @@ mod tests {
                 .unwrap(),
             "inside"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn immutable_open_blocks_parent_junction_swap_until_sqlite_opens_observed_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_dir = temp.path().join("source");
+        fs::create_dir(&source_dir).unwrap();
+        let db = source_dir.join("immutable.db");
+        write_single_value_db(&db, "inside");
+        let outside_dir = temp.path().join("outside");
+        fs::create_dir(&outside_dir).unwrap();
+        write_single_value_db(&outside_dir.join("immutable.db"), "outside");
+        let held_dir = temp.path().join("held-source");
+        let attempted = Rc::new(Cell::new(false));
+        let blocked = Rc::new(Cell::new(false));
+        let swapped = Rc::new(Cell::new(false));
+        let attempted_for_hook = Rc::clone(&attempted);
+        let blocked_for_hook = Rc::clone(&blocked);
+        let swapped_for_hook = Rc::clone(&swapped);
+        let db_for_hook = db.clone();
+        let source_for_hook = source_dir.clone();
+        let held_for_hook = held_dir.clone();
+        let outside_for_hook = outside_dir.clone();
+        let _hook = install_sqlite_immutable_open_test_hook(move |path, phase| {
+            if path != db_for_hook {
+                return;
+            }
+            match phase {
+                SqliteImmutableOpenTestPhase::BeforeOpen if !attempted_for_hook.replace(true) => {
+                    match fs::rename(&source_for_hook, &held_for_hook) {
+                        Ok(()) => {
+                            create_windows_junction(&source_for_hook, &outside_for_hook);
+                            swapped_for_hook.set(true);
+                        }
+                        Err(error)
+                            if error.kind() == io::ErrorKind::PermissionDenied
+                                || matches!(error.raw_os_error(), Some(5 | 32)) =>
+                        {
+                            blocked_for_hook.set(true);
+                        }
+                        Err(error) => panic!("unexpected parent swap failure: {error}"),
+                    }
+                }
+                SqliteImmutableOpenTestPhase::AfterOpen if swapped_for_hook.replace(false) => {
+                    fs::remove_dir(&source_for_hook).unwrap();
+                    fs::rename(&held_for_hook, &source_for_hook).unwrap();
+                }
+                _ => {}
+            }
+        });
+
+        let connection = open_sqlite_readonly_source(&db).unwrap();
+        assert!(attempted.get());
+        assert!(blocked.get());
+        assert!(!swapped.get());
+        assert!(connection._snapshot_dir.is_none());
+        assert_eq!(
+            connection
+                .query_row("SELECT value FROM entries WHERE id = 1", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap(),
+            "inside"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn immutable_uri_round_trips_windows_disk_and_unc_paths() {
+        for path in [
+            std::path::PathBuf::from(r"C:\Users\ctx\history.db"),
+            std::path::PathBuf::from(r"\\server\share\history.db"),
+        ] {
+            let uri = sqlite_immutable_uri(&path).unwrap();
+            let mut url = url::Url::parse(&uri).unwrap();
+            assert_eq!(
+                url.query_pairs().collect::<Vec<_>>(),
+                [
+                    ("mode".into(), "ro".into()),
+                    ("immutable".into(), "1".into())
+                ]
+            );
+            url.set_query(None);
+            assert_eq!(url.to_file_path().unwrap(), path);
+        }
     }
 
     #[test]
@@ -1465,6 +1592,33 @@ mod tests {
             .unwrap();
     }
 
+    fn rewrite_wal_format_version(bytes: &mut [u8], version: u32) {
+        bytes[4..8].copy_from_slice(&version.to_be_bytes());
+        let little_endian = match u32::from_be_bytes(bytes[0..4].try_into().unwrap()) {
+            0x377f_0682 => true,
+            0x377f_0683 => false,
+            magic => panic!("unexpected SQLite WAL magic {magic:#x}"),
+        };
+        let mut s1 = 0_u32;
+        let mut s2 = 0_u32;
+        for words in bytes[..24].chunks_exact(8) {
+            let first = if little_endian {
+                u32::from_le_bytes(words[0..4].try_into().unwrap())
+            } else {
+                u32::from_be_bytes(words[0..4].try_into().unwrap())
+            };
+            let second = if little_endian {
+                u32::from_le_bytes(words[4..8].try_into().unwrap())
+            } else {
+                u32::from_be_bytes(words[4..8].try_into().unwrap())
+            };
+            s1 = s1.wrapping_add(first).wrapping_add(s2);
+            s2 = s2.wrapping_add(second).wrapping_add(s1);
+        }
+        bytes[24..28].copy_from_slice(&s1.to_be_bytes());
+        bytes[28..32].copy_from_slice(&s2.to_be_bytes());
+    }
+
     struct HotJournalFixture {
         _temp: tempfile::TempDir,
         db: std::path::PathBuf,
@@ -1533,6 +1687,17 @@ mod tests {
     #[cfg(not(unix))]
     fn native_path_bytes(path: &Path) -> Vec<u8> {
         path.to_str().unwrap().as_bytes().to_vec()
+    }
+
+    #[cfg(windows)]
+    fn create_windows_junction(link: &Path, target: &Path) {
+        let status = std::process::Command::new("cmd")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .status()
+            .unwrap();
+        assert!(status.success(), "failed to create a Windows junction");
     }
 
     fn sidecar(path: &Path, suffix: &str) -> std::path::PathBuf {
