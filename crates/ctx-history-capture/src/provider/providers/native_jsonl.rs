@@ -158,6 +158,14 @@ pub(crate) fn normalize_native_jsonl_session_file(
     source_format: &str,
 ) -> Result<ProviderNormalizationResult> {
     let mut reader = ProviderJsonlReader::open_replacement(path)?;
+    let authoritative_started_at = if provider == CaptureProvider::Tabnine {
+        scan_native_jsonl_session_reader(path, &mut reader, context, provider, source_format)?
+            .header
+            .as_ref()
+            .and_then(|header| native_jsonl_header_start_time(provider, header))
+    } else {
+        None
+    };
     normalize_native_jsonl_session_reader(
         path,
         &mut reader,
@@ -165,7 +173,7 @@ pub(crate) fn normalize_native_jsonl_session_file(
         provider,
         source_format,
         None,
-        None,
+        authoritative_started_at,
     )
 }
 
@@ -314,8 +322,8 @@ pub(crate) fn normalize_native_jsonl_session_reader(
             .expect("a native JSONL header was established by the bounded scan")
     };
     let started_at = authoritative_started_at.unwrap_or_else(|| {
-        native_jsonl_header_start_time(provider, &header)
-            .or_else(|| native_jsonl_timestamp(&header))
+        native_jsonl_timestamp(&header)
+            .or_else(|| native_jsonl_header_start_time(provider, &header))
             .unwrap_or(context.imported_at)
     });
     let mut result = ProviderNormalizationResult::default();
@@ -679,3 +687,6 @@ pub(crate) fn native_jsonl_path_session(
 }
 
 include!("native_jsonl/events.rs");
+
+#[cfg(test)]
+mod tests;

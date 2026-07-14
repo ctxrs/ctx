@@ -19,12 +19,21 @@ use crate::{
 const CHECKPOINT_VERSION: u32 = 1;
 const SENTINEL_BYTES: u64 = 4 * 1024;
 const CLAUDE_RESUME_STATE_VERSION: u32 = 1;
+const CODEX_RESUME_STATE_VERSION: u32 = 1;
 const TABNINE_RESUME_STATE_VERSION: u32 = 2;
+pub(crate) const CODEX_RESUME_MAX_PENDING_TOOL_CALLS: usize = 64;
+pub(crate) const CODEX_RESUME_MAX_ENCODED_BYTES: usize = 60 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderFileStableIdentity {
-    Unix { device: u64, inode: u64 },
-    Windows { volume: u64, file_index: u64 },
+    Unix {
+        device: u64,
+        inode: u64,
+    },
+    Windows {
+        volume_serial: u64,
+        file_id: [u8; 16],
+    },
 }
 
 /// An O(delta) checkpoint for a provider-owned append-only log.
@@ -58,7 +67,52 @@ pub struct ProviderJsonlAppendCheckpoint {
 )]
 pub enum ProviderJsonlResumeState {
     ClaudeProjects(ClaudeProjectsJsonlResumeState),
+    CodexSession(CodexSessionJsonlResumeState),
     TabnineCli(TabnineJsonlResumeState),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CodexToolCallResumeContext {
+    pub call_id: String,
+    pub tool_name: String,
+    pub command_preview: Option<String>,
+    pub arguments_preview: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CodexSessionJsonlResumeState {
+    pub version: u32,
+    pub pending_tool_calls: Vec<CodexToolCallResumeContext>,
+    pub dropped_tool_calls: u64,
+}
+
+impl Default for CodexSessionJsonlResumeState {
+    fn default() -> Self {
+        Self::new(Vec::new(), 0)
+    }
+}
+
+impl CodexSessionJsonlResumeState {
+    pub fn new(
+        pending_tool_calls: Vec<CodexToolCallResumeContext>,
+        dropped_tool_calls: u64,
+    ) -> Self {
+        Self {
+            version: CODEX_RESUME_STATE_VERSION,
+            pending_tool_calls,
+            dropped_tool_calls,
+        }
+    }
+
+    pub fn current_version() -> u32 {
+        CODEX_RESUME_STATE_VERSION
+    }
+
+    pub fn encoded_len(&self) -> std::result::Result<usize, serde_json::Error> {
+        serde_json::to_vec(self).map(|value| value.len())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,26 +174,57 @@ impl ProviderJsonlResumeState {
     }
 
     pub fn validate(&self) -> std::result::Result<(), ProviderJsonlReplacementReason> {
-        let (version, current_version, session_id) = match self {
-            Self::ClaudeProjects(state) => (
+        match self {
+            Self::ClaudeProjects(state) => validate_session_resume_state(
                 state.version,
                 ClaudeProjectsJsonlResumeState::current_version(),
-                state.authoritative_session_id.as_str(),
+                &state.authoritative_session_id,
             ),
-            Self::TabnineCli(state) => (
+            Self::CodexSession(state) => validate_codex_resume_state(state),
+            Self::TabnineCli(state) => validate_session_resume_state(
                 state.version,
                 TabnineJsonlResumeState::current_version(),
-                state.authoritative_session_id.as_str(),
+                &state.authoritative_session_id,
             ),
-        };
-        if version != current_version {
-            return Err(ProviderJsonlReplacementReason::UnsupportedAdapterResumeStateVersion);
         }
-        if session_id.trim().is_empty() {
-            return Err(ProviderJsonlReplacementReason::AdapterResumeStateIncompatible);
-        }
-        Ok(())
     }
+}
+
+fn validate_session_resume_state(
+    version: u32,
+    current_version: u32,
+    session_id: &str,
+) -> std::result::Result<(), ProviderJsonlReplacementReason> {
+    if version != current_version {
+        return Err(ProviderJsonlReplacementReason::UnsupportedAdapterResumeStateVersion);
+    }
+    if session_id.trim().is_empty() {
+        return Err(ProviderJsonlReplacementReason::AdapterResumeStateIncompatible);
+    }
+    Ok(())
+}
+
+fn validate_codex_resume_state(
+    state: &CodexSessionJsonlResumeState,
+) -> std::result::Result<(), ProviderJsonlReplacementReason> {
+    if state.version != CodexSessionJsonlResumeState::current_version() {
+        return Err(ProviderJsonlReplacementReason::UnsupportedAdapterResumeStateVersion);
+    }
+    if state.pending_tool_calls.len() > CODEX_RESUME_MAX_PENDING_TOOL_CALLS
+        || state
+            .encoded_len()
+            .map_err(|_| ProviderJsonlReplacementReason::AdapterResumeStateIncompatible)?
+            > CODEX_RESUME_MAX_ENCODED_BYTES
+    {
+        return Err(ProviderJsonlReplacementReason::AdapterResumeStateIncompatible);
+    }
+    let mut call_ids = std::collections::BTreeSet::new();
+    if state.pending_tool_calls.iter().any(|context| {
+        context.call_id.trim().is_empty() || !call_ids.insert(context.call_id.as_str())
+    }) {
+        return Err(ProviderJsonlReplacementReason::AdapterResumeStateIncompatible);
+    }
+    Ok(())
 }
 
 impl ProviderJsonlAppendCheckpoint {
@@ -152,29 +237,45 @@ impl ProviderFileStableIdentity {
     pub fn to_storage_key(&self) -> String {
         match self {
             Self::Unix { device, inode } => format!("unix:{device}:{inode}"),
-            Self::Windows { volume, file_index } => {
-                format!("windows:{volume}:{file_index}")
-            }
+            Self::Windows {
+                volume_serial,
+                file_id,
+            } => format!(
+                "windows:{volume_serial}:{}",
+                file_id
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            ),
         }
     }
 
     pub fn from_storage_key(value: &str) -> Option<Self> {
         let mut fields = value.split(':');
         let kind = fields.next()?;
-        let first = fields.next()?.parse().ok()?;
-        let second = fields.next()?.parse().ok()?;
+        let first = fields.next()?;
+        let second = fields.next()?;
         if fields.next().is_some() {
             return None;
         }
         match kind {
             "unix" => Some(Self::Unix {
-                device: first,
-                inode: second,
+                device: first.parse().ok()?,
+                inode: second.parse().ok()?,
             }),
-            "windows" => Some(Self::Windows {
-                volume: first,
-                file_index: second,
-            }),
+            "windows" => {
+                if second.len() != 32 || !second.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    return None;
+                }
+                let mut file_id = [0u8; 16];
+                for (index, byte) in file_id.iter_mut().enumerate() {
+                    *byte = u8::from_str_radix(&second[index * 2..index * 2 + 2], 16).ok()?;
+                }
+                Some(Self::Windows {
+                    volume_serial: first.parse().ok()?,
+                    file_id,
+                })
+            }
             _ => None,
         }
     }
@@ -719,6 +820,5 @@ impl ProviderJsonlReader {
 }
 
 include!("incremental_jsonl/identity.rs");
-
 #[cfg(test)]
 include!("incremental_jsonl/tests.rs");

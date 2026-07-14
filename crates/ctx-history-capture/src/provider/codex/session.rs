@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeMap,
     fs::{self, File},
     io::BufReader,
     path::{Path, PathBuf},
@@ -31,7 +30,7 @@ use crate::{
 
 use crate::provider::codex::events::{
     codex_session_capture, codex_session_header, codex_session_line_capture,
-    codex_session_line_timestamp, CodexSessionLineContext, CodexToolCallContext,
+    codex_session_line_timestamp, CodexSessionLineContext, CodexToolCallContexts,
 };
 use crate::provider::codex::fast_import::{
     codex_session_paths_total_bytes, import_codex_provider_event_fast,
@@ -55,7 +54,7 @@ impl ProviderCaptureAdapter for CodexSessionJsonlAdapter {
         let mut reader = ProviderJsonlReader::open_replacement(path)?;
         let mut result = ProviderNormalizationResult::default();
         let mut header = None;
-        let mut call_contexts: BTreeMap<String, CodexToolCallContext> = BTreeMap::new();
+        let mut call_contexts = CodexToolCallContexts::default();
         let mut has_real_message_content = false;
         let mut skipped_oversized_events = 0usize;
         let raw_source_path = context
@@ -595,7 +594,7 @@ fn import_codex_session_jsonl_tail_bounded(
         let transaction = transaction.as_mut().expect("transaction was initialized");
         let mut header_persisted = false;
 
-        let mut call_contexts: BTreeMap<String, CodexToolCallContext> = BTreeMap::new();
+        let mut call_contexts = CodexToolCallContexts::default();
         let mut completed_bytes = 0u64;
         loop {
             match read_provider_jsonl_line_or_skip_oversized(&mut reader, &mut line)? {

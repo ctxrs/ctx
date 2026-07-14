@@ -642,6 +642,63 @@ mod tests {
             ),
             Err(ProviderJsonlReplacementReason::AdapterResumeStateIncompatible)
         );
+
+        let codex = ProviderJsonlResumeState::CodexSession(CodexSessionJsonlResumeState::new(
+            vec![CodexToolCallResumeContext {
+                call_id: "call-1".to_owned(),
+                tool_name: "exec_command".to_owned(),
+                command_preview: Some("cargo test".to_owned()),
+                arguments_preview: None,
+            }],
+            3,
+        ));
+        let encoded = codex.encode_persisted_json().unwrap();
+        assert_eq!(
+            encoded,
+            r#"{"provider":"codex_session","state":{"version":1,"pending_tool_calls":[{"call_id":"call-1","tool_name":"exec_command","command_preview":"cargo test","arguments_preview":null}],"dropped_tool_calls":3}}"#
+        );
+        assert_eq!(
+            ProviderJsonlResumeState::decode_persisted_json(&encoded),
+            Ok(codex)
+        );
+        assert_eq!(
+            ProviderJsonlResumeState::decode_persisted_json(
+                r#"{"provider":"codex_session","state":{"version":1,"pending_tool_calls":[{"call_id":"duplicate","tool_name":"a","command_preview":null,"arguments_preview":null},{"call_id":"duplicate","tool_name":"b","command_preview":null,"arguments_preview":null}],"dropped_tool_calls":0}}"#
+            ),
+            Err(ProviderJsonlReplacementReason::AdapterResumeStateIncompatible)
+        );
+    }
+
+    #[test]
+    fn windows_stable_identity_storage_key_preserves_the_full_file_id() {
+        let identity = ProviderFileStableIdentity::Windows {
+            volume_serial: 18_446_744_073_709_551_557,
+            file_id: [
+                0x00, 0x01, 0x02, 0x03, 0x10, 0x20, 0x30, 0x40, 0x7f, 0x80, 0x90, 0xa0, 0xb0, 0xc0,
+                0xfe, 0xff,
+            ],
+        };
+        let key = identity.to_storage_key();
+        assert_eq!(
+            key,
+            "windows:18446744073709551557:00010203102030407f8090a0b0c0feff"
+        );
+        assert_eq!(
+            ProviderFileStableIdentity::from_storage_key(&key),
+            Some(identity)
+        );
+        assert_eq!(
+            ProviderFileStableIdentity::from_storage_key(
+                "windows:18446744073709551557:00010203102030407F8090A0B0C0FEFF"
+            )
+            .unwrap()
+            .to_storage_key(),
+            key
+        );
+        assert_eq!(
+            ProviderFileStableIdentity::from_storage_key("windows:42:4294967297"),
+            None
+        );
     }
 
     #[test]

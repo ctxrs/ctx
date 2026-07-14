@@ -1,4 +1,7 @@
-use std::{borrow::Cow, collections::BTreeMap};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, VecDeque},
+};
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
@@ -22,8 +25,10 @@ use crate::provider::native::{
     provider_output_preview_omitting_nested_patch_diff,
 };
 use crate::{
-    CaptureError, ProviderAdapterContext, ProviderFileTouchedEnvelope, Result,
-    CODEX_SESSION_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS, PROVIDER_MAX_TEXT_CHARS,
+    provider_sources::{CODEX_RESUME_MAX_ENCODED_BYTES, CODEX_RESUME_MAX_PENDING_TOOL_CALLS},
+    CaptureError, CodexSessionJsonlResumeState, CodexToolCallResumeContext, ProviderAdapterContext,
+    ProviderFileTouchedEnvelope, Result, CODEX_SESSION_SOURCE_FORMAT, PROVIDER_MAX_PREVIEW_CHARS,
+    PROVIDER_MAX_TEXT_CHARS,
 };
 
 #[derive(Debug, Clone)]
@@ -40,11 +45,94 @@ pub(crate) struct CodexSessionHeader {
     pub(crate) model_provider: Option<String>,
     pub(crate) raw: Value,
 }
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct CodexToolCallContext {
     pub(crate) tool_name: String,
     pub(crate) command_preview: Option<String>,
     pub(crate) arguments_preview: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CodexToolCallContexts {
+    by_id: BTreeMap<String, CodexToolCallContext>,
+    insertion_order: VecDeque<String>,
+    dropped_tool_calls: u64,
+}
+
+impl CodexToolCallContexts {
+    pub(crate) fn from_resume_state(state: CodexSessionJsonlResumeState) -> Self {
+        let mut contexts = Self {
+            dropped_tool_calls: state.dropped_tool_calls,
+            ..Self::default()
+        };
+        for context in state.pending_tool_calls {
+            contexts.insertion_order.push_back(context.call_id.clone());
+            contexts.by_id.insert(
+                context.call_id,
+                CodexToolCallContext {
+                    tool_name: context.tool_name,
+                    command_preview: context.command_preview,
+                    arguments_preview: context.arguments_preview,
+                },
+            );
+        }
+        contexts
+    }
+
+    pub(crate) fn resume_state(&self) -> CodexSessionJsonlResumeState {
+        CodexSessionJsonlResumeState::new(
+            self.insertion_order
+                .iter()
+                .filter_map(|call_id| {
+                    self.by_id
+                        .get(call_id)
+                        .map(|context| CodexToolCallResumeContext {
+                            call_id: call_id.clone(),
+                            tool_name: context.tool_name.clone(),
+                            command_preview: context.command_preview.clone(),
+                            arguments_preview: context.arguments_preview.clone(),
+                        })
+                })
+                .collect(),
+            self.dropped_tool_calls,
+        )
+    }
+
+    fn insert(&mut self, call_id: String, context: CodexToolCallContext) {
+        if self.by_id.remove(&call_id).is_some() {
+            self.insertion_order.retain(|existing| existing != &call_id);
+        }
+        self.insertion_order.push_back(call_id.clone());
+        self.by_id.insert(call_id, context);
+        while self.by_id.len() > CODEX_RESUME_MAX_PENDING_TOOL_CALLS
+            || self.resume_state().encoded_len().unwrap_or(usize::MAX)
+                > CODEX_RESUME_MAX_ENCODED_BYTES
+        {
+            let Some(oldest) = self.insertion_order.pop_front() else {
+                break;
+            };
+            if self.by_id.remove(&oldest).is_some() {
+                self.dropped_tool_calls = self.dropped_tool_calls.saturating_add(1);
+            }
+        }
+    }
+
+    fn remove(&mut self, call_id: &str) -> Option<CodexToolCallContext> {
+        let context = self.by_id.remove(call_id)?;
+        self.insertion_order.retain(|existing| existing != call_id);
+        Some(context)
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.by_id.clear();
+        self.insertion_order.clear();
+        self.dropped_tool_calls = 0;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.by_id.len()
+    }
 }
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CodexSessionLineCapture {
@@ -231,7 +319,7 @@ pub(crate) struct CodexSessionLineContext<'a> {
 pub(crate) fn codex_session_line_capture(
     header: &CodexSessionHeader,
     value: &Value,
-    call_contexts: &mut BTreeMap<String, CodexToolCallContext>,
+    call_contexts: &mut CodexToolCallContexts,
     context: CodexSessionLineContext<'_>,
 ) -> CodexSessionLineCapture {
     let CodexSessionLineContext {
@@ -285,7 +373,7 @@ pub(crate) fn codex_session_event(
     value: &Value,
     line_number: usize,
     occurred_at: DateTime<Utc>,
-    call_contexts: &mut BTreeMap<String, CodexToolCallContext>,
+    call_contexts: &mut CodexToolCallContexts,
 ) -> Option<ProviderEventEnvelope> {
     let entry_type = value
         .get("type")
@@ -362,7 +450,7 @@ pub(crate) fn codex_session_event(
 
 pub(crate) fn codex_close_matching_tool_output_context(
     value: &Value,
-    call_contexts: &mut BTreeMap<String, CodexToolCallContext>,
+    call_contexts: &mut CodexToolCallContexts,
 ) -> bool {
     if value.get("type").and_then(Value::as_str) != Some("response_item") {
         return false;
@@ -386,7 +474,7 @@ pub(crate) fn codex_response_item_event(
     payload: &Value,
     line_number: usize,
     occurred_at: DateTime<Utc>,
-    call_contexts: &mut BTreeMap<String, CodexToolCallContext>,
+    call_contexts: &mut CodexToolCallContexts,
 ) -> Option<ProviderEventEnvelope> {
     let item_type = payload
         .get("type")
@@ -423,7 +511,7 @@ pub(crate) fn codex_tool_call_event(
     payload: &Value,
     line_number: usize,
     occurred_at: DateTime<Utc>,
-    call_contexts: &mut BTreeMap<String, CodexToolCallContext>,
+    call_contexts: &mut CodexToolCallContexts,
 ) -> Option<ProviderEventEnvelope> {
     let item_type = payload
         .get("type")
@@ -452,7 +540,7 @@ pub(crate) fn codex_tool_call_event(
         });
     let (text, text_truncated) = codex_local_preview(&text, PROVIDER_MAX_PREVIEW_CHARS);
 
-    if let Some(call_id) = call_id {
+    if let Some(call_id) = call_id.filter(|call_id| !call_id.trim().is_empty()) {
         call_contexts.insert(
             call_id.to_owned(),
             CodexToolCallContext {
@@ -494,7 +582,7 @@ pub(crate) fn codex_tool_output_event(
     payload: &Value,
     line_number: usize,
     occurred_at: DateTime<Utc>,
-    call_contexts: &mut BTreeMap<String, CodexToolCallContext>,
+    call_contexts: &mut CodexToolCallContexts,
 ) -> Option<ProviderEventEnvelope> {
     let item_type = payload
         .get("type")
@@ -589,3 +677,6 @@ pub(crate) fn codex_tool_output_event(
     ))
 }
 include!("events/payload.rs");
+
+#[cfg(test)]
+mod resume_tests;
