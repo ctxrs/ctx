@@ -208,13 +208,6 @@ pub(crate) fn collect_source_import_files(source: &SourceInfo) -> Result<Vec<Sou
     Ok(files)
 }
 
-pub(crate) fn collect_source_import_paths(source: &SourceInfo) -> Result<Vec<PathBuf>> {
-    Ok(collect_source_import_units(source)?
-        .into_iter()
-        .map(|unit| unit.owner)
-        .collect())
-}
-
 struct CollectedImportUnit {
     owner: PathBuf,
     dependencies: Vec<PathBuf>,

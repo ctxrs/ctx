@@ -857,7 +857,8 @@ fn search_refresh_auto_imports_discovered_top_provider_sources() {
             search["freshness"]["totals"]["imported_sessions"]
                 .as_u64()
                 .unwrap()
-                >= 1
+                >= 1,
+            "{cli_provider} first refresh imported no sessions: {search:#}"
         );
         assert_search_provider_oracle(&search, stored_provider, &query, 1, "message");
 

@@ -46,6 +46,7 @@ fn tombstoned_unmutated_marker_does_not_block_ordinary_owner_entity_writes() {
         .unwrap();
     assert_eq!(observer.get_session(session).unwrap().id, session);
 }
+
 #[test]
 fn process_crash_tombstone_retirement_restarts_and_is_idempotent() {
     let temp = tempdir().unwrap();
@@ -107,7 +108,7 @@ fn process_crash_tombstone_retirement_restarts_and_is_idempotent() {
     }
 
     {
-        let adopter = Store::open(&path).unwrap();
+        let mut adopter = Store::open(&path).unwrap();
         let retirement = adopter
             .begin_provider_file_publication_retirement(
                 file.provider,
@@ -125,6 +126,16 @@ fn process_crash_tombstone_retirement_restarts_and_is_idempotent() {
                 .unwrap_err(),
             StoreError::InvalidProviderFilePublicationScope
         ));
+        assert!(matches!(
+            adopter
+                .with_provider_file_publication_writes_mut::<(), StoreError>(
+                    &retirement,
+                    |_| Ok(()),
+                )
+                .unwrap_err(),
+            StoreError::InvalidProviderFilePublicationScope
+        ));
+        assert!(adopter.provider_file_write_scope.get().is_none());
         prepare_all(&adopter, &retirement, 1);
         adopter
             .reconcile_provider_file_publication_slice(&retirement, 1)
@@ -242,7 +253,7 @@ fn mutated_publication_with_permanently_missing_observation_can_retire() {
     prepare_all(&store, &retirement, 1);
     reconcile_all(&store, &retirement, 1);
     store.retire_provider_file_publication(retirement).unwrap();
-    assert!(!row_exists(&store, "events", event_id));
+    assert!(row_exists(&store, "events", event_id));
     assert!(!store.has_pending_provider_file_publications().unwrap());
 }
 
@@ -352,7 +363,7 @@ fn observation_revival_before_retirement_finalization_preserves_the_marker() {
         )
         .unwrap();
     assert!(!reviver.has_pending_provider_file_publications().unwrap());
-    assert_eq!(table_row_count(&reviver, "events"), 0);
+    assert_eq!(table_row_count(&reviver, "events"), 1);
     assert!(generation < revived_generation);
 }
 
@@ -443,7 +454,7 @@ fn process_exit_during_retirement_finalization_rolls_back_and_restarts() {
         .retire_provider_file_publication(retirement)
         .unwrap();
     assert!(!restarted.has_pending_provider_file_publications().unwrap());
-    assert_eq!(table_row_count(&restarted, "events"), 0);
+    assert_eq!(table_row_count(&restarted, "events"), 1);
     assert_eq!(restarted.semantic_replacement_revision().unwrap(), 1);
 }
 

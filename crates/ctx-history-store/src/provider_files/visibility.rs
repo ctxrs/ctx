@@ -1,11 +1,7 @@
-pub(crate) fn event_material_visible_predicate(event_alias: &str) -> String {
+fn event_material_source_id_sql(event_alias: &str) -> String {
     format!(
         r#"
-        NOT EXISTS (
-            SELECT 1 FROM capture_sources AS replacement_source
-            JOIN provider_file_publications AS replacement
-              ON {}
-            WHERE replacement_source.id = COALESCE(
+        COALESCE(
                {event_alias}.capture_source_id,
                (
                     SELECT event_session.capture_source_id
@@ -24,10 +20,60 @@ pub(crate) fn event_material_visible_predicate(event_alias: &str) -> String {
                     WHERE event_run.id = {event_alias}.run_id
                )
             )
-        )
-        "#,
-        material_source_matches_replacement_predicate("replacement_source", "replacement")
+        "#
     )
+}
+
+pub(crate) fn event_material_visible_predicate(event_alias: &str) -> String {
+    material_source_id_not_replacing_predicate(&event_material_source_id_sql(event_alias))
+}
+
+impl Store {
+    pub(crate) fn importer_event_material_visible_predicate(&self, event_alias: &str) -> String {
+        self.importer_material_visible_predicate(&event_material_source_id_sql(event_alias))
+    }
+
+    pub(crate) fn importer_session_material_visible_predicate(
+        &self,
+        session_alias: &str,
+    ) -> String {
+        self.importer_material_visible_predicate(&format!("{session_alias}.capture_source_id"))
+    }
+
+    pub(crate) fn importer_capture_source_material_visible_predicate(
+        &self,
+        source_alias: &str,
+    ) -> String {
+        self.importer_material_visible_predicate(&format!("{source_alias}.id"))
+    }
+
+    fn importer_material_visible_predicate(&self, source_id_sql: &str) -> String {
+        let public = material_source_id_not_replacing_predicate(source_id_sql);
+        let active = self.provider_file_publication.borrow();
+        let Some(active) = active.as_ref().filter(|active| {
+            active.lifecycle.load(Ordering::Acquire)
+                && !active.retires_observation
+                && self.provider_file_write_scope.get() == Some(active.scope_id)
+        }) else {
+            return public;
+        };
+        let owner = material_source_matches_replacement_owner_predicate(
+            "active_publication_source",
+            "active_publication",
+        );
+        format!(
+            r#"
+            (({public}) OR EXISTS (
+                SELECT 1
+                FROM capture_sources AS active_publication_source
+                JOIN provider_file_publications AS active_publication ON ({owner})
+                WHERE active_publication.replacement_id = '{}'
+                  AND active_publication_source.id = {source_id_sql}
+            ))
+            "#,
+            active.scope_id
+        )
+    }
 }
 
 pub(crate) fn session_material_visible_predicate(session_alias: &str) -> String {
@@ -309,6 +355,35 @@ pub(crate) fn effective_provider_file_publication_predicate(publication_alias: &
     format!("{publication_alias}.mutation_started = 1 OR ({current})")
 }
 
+fn provider_file_retirement_observation_current_predicate(publication_alias: &str) -> String {
+    format!(
+        r#"
+        (
+            {publication_alias}.inventory_family = '{CATALOG_INVENTORY_FAMILY}'
+            AND EXISTS (
+                SELECT 1 FROM catalog_sessions AS retirement_catalog
+                WHERE retirement_catalog.provider = {publication_alias}.provider
+                  AND retirement_catalog.source_format = {publication_alias}.inventory_source_format
+                  AND retirement_catalog.source_root = {publication_alias}.inventory_source_root
+                  AND retirement_catalog.source_path = {publication_alias}.source_path
+                  AND retirement_catalog.is_stale = 0
+            )
+        )
+        OR (
+            {publication_alias}.inventory_family = '{SOURCE_IMPORT_INVENTORY_FAMILY}'
+            AND EXISTS (
+                SELECT 1 FROM source_import_files AS retirement_file
+                WHERE retirement_file.provider = {publication_alias}.provider
+                  AND retirement_file.source_format = {publication_alias}.inventory_source_format
+                  AND retirement_file.source_root = {publication_alias}.inventory_source_root
+                  AND retirement_file.source_path = {publication_alias}.source_path
+                  AND retirement_file.is_stale = 0
+            )
+        )
+        "#
+    )
+}
+
 pub(crate) fn replacement_observation_current_predicate(replacement_alias: &str) -> String {
     format!(
         r#"
@@ -370,7 +445,7 @@ pub(crate) fn has_fenced_provider_file_publications(conn: &Connection) -> Result
     .map_err(StoreError::from)
 }
 
-fn material_owner_predicate(
+pub(crate) fn material_owner_predicate(
     source_alias: &str,
     provider: &str,
     source_format: &str,

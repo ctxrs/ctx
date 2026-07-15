@@ -4,6 +4,7 @@ fn persist_indexed_root(store: &Store, source: &SourceInfo) -> (SourceImportFile
         persist_new_source_import_observation(store, source, std::slice::from_ref(&file)).unwrap();
     let inventory_generation = persisted.inventory_generation;
     let source_root = file.source_root.clone();
+    persist_source_material(store, &file);
     let changed = store
         .mark_source_import_file_indexed(
             source.provider,
@@ -31,6 +32,39 @@ fn persist_indexed_root(store: &Store, source: &SourceInfo) -> (SourceImportFile
         "indexed observation must no longer be pending"
     );
     (file, inventory_generation)
+}
+
+fn persist_source_material(store: &Store, file: &SourceImportFile) {
+    let material_source_format =
+        provider_canonical_material_source_format(file.provider, &file.source_format)
+            .unwrap_or(&file.source_format);
+    store
+        .upsert_capture_source(&CaptureSource {
+            id: new_id(),
+            descriptor: CaptureSourceDescriptor {
+                kind: CaptureSourceKind::ProviderImport,
+                provider: file.provider,
+                machine_id: "native-import-test".to_owned(),
+                process_id: None,
+                cwd: None,
+                raw_source_path: Some(file.source_path.clone()),
+                source_format: Some(material_source_format.to_owned()),
+                source_root: Some(file.source_root.clone()),
+                source_identity: None,
+                external_session_id: None,
+            },
+            started_at: utc_now(),
+            ended_at: None,
+            sync: SyncMetadata {
+                visibility: Visibility::LocalOnly,
+                fidelity: Fidelity::Imported,
+                sync_state: SyncState::LocalOnly,
+                sync_version: 0,
+                deleted_at: None,
+                metadata: json!({}),
+            },
+        })
+        .unwrap();
 }
 
 fn inventory_source_file(store: &Store, file: &SourceImportFile) -> u64 {
@@ -205,31 +239,60 @@ fn stale_root_plan_skips_after_newer_completion_wins_bulk_lock() {
     let source_path = temp.path().join("state.db");
     fs::write(&source_path, b"not a sqlite database").unwrap();
     let source = explicit_path_source(CaptureProvider::Hermes, source_path.clone());
-    let (_, observation) = observe_source_root(&source).unwrap();
+    let (stats, observation) = observe_source_root(&source).unwrap();
     let lock_store = Store::open(&db_path).unwrap();
     let old_generation = inventory_source_file(&lock_store, &observation);
-    let mut import_store = Store::open(&db_path).unwrap();
-    let guard = lock_store.begin_event_search_bulk_mode().unwrap();
-    let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
-    let waiting_source = source.clone();
-    let waiting_observation = observation.clone();
-    let importer = std::thread::spawn(move || {
-        import_one_source_inner_with_pre_lock_hook(
-            &mut import_store,
-            &waiting_source,
-            None,
-            false,
-            false,
-            &SourcePreinventory::SourceRoot {
-                file: waiting_observation,
+    let plan = ImportPlan::build(
+        &lock_store,
+        vec![PlannedImportSource {
+            source: source.clone(),
+            stats,
+            preinventory: SourcePreinventory::SourceRoot {
+                file: observation.clone(),
                 inventory_generation: old_generation,
             },
+        }],
+    )
+    .unwrap();
+    assert_eq!(plan.fresh_units, 1);
+    let guard = lock_store.begin_event_search_bulk_mode().unwrap();
+    let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
+    let waiting_db_path = db_path.clone();
+    let importer = std::thread::spawn(move || {
+        let mut import_store = Store::open(waiting_db_path).unwrap();
+        let progress = ProgressReporter::new(ProgressArg::None, false, "test-import", 0);
+        let mut totals = ImportTotals::default();
+        let mut imported_sources = Vec::new();
+        let mut successful_sources = BTreeSet::new();
+        let mut failed_sources = BTreeSet::new();
+        let mut execution_state = ImportExecutionState::for_plan(&plan);
+        let result = execute_import_plan_class_for_report_with_pre_lock_hook(
+            &mut import_store,
+            &plan,
+            &mut execution_state,
+            ImportWorkClass::Fresh,
+            plan.fresh_units,
+            &progress,
+            ImportRunOptions {
+                progress: ProgressArg::None,
+                json: false,
+                print_human: false,
+                allow_empty_sources: false,
+                include_history_source_plugins: false,
+                operation: "test-import",
+            },
+            &mut totals,
+            &mut imported_sources,
+            &mut successful_sources,
+            &mut failed_sources,
             || waiting_tx.send(()).unwrap(),
-        )
+        );
+        (result, totals, imported_sources)
     });
     waiting_rx.recv().unwrap();
 
     let new_generation = inventory_source_file(&lock_store, &observation);
+    persist_source_material(&lock_store, &observation);
     mark_source_import_file_result(
         &lock_store,
         &observation,
@@ -241,58 +304,143 @@ fn stale_root_plan_skips_after_newer_completion_wins_bulk_lock() {
     lock_store.finish_event_search_bulk_mode(&guard).unwrap();
     drop(guard);
 
-    assert_eq!(
-        importer.join().unwrap().unwrap(),
-        ProviderImportSummary::default()
-    );
+    let (result, totals, imported_sources) = importer.join().unwrap();
+    result.unwrap();
+    assert_eq!(totals.fresh_units_processed, 0);
+    assert_eq!(totals.failed_sources, 0);
+    assert!(imported_sources.is_empty());
 }
 
 #[test]
 fn waiting_root_plan_reobserves_a_change_before_skipping() {
     let temp = tempdir();
     let db_path = temp.path().join("work.sqlite");
-    let source_path = temp.path().join("state.db");
-    fs::write(&source_path, b"").unwrap();
-    let source = explicit_path_source(CaptureProvider::Hermes, source_path.clone());
-    let lock_store = Store::open(&db_path).unwrap();
-    persist_indexed_root(&lock_store, &source);
-    fs::write(&source_path, b"first pending change").unwrap();
-    let (_, observation) = observe_source_root(&source).unwrap();
-    let old_generation = persist_new_source_import_observation(
-        &lock_store,
-        &source,
-        std::slice::from_ref(&observation),
+    let source_path = temp.path().join("pi.jsonl");
+    fs::write(
+        &source_path,
+        format!(
+            "{}{}",
+            jsonl(json!({
+                "type": "session",
+                "id": "pi-waiting-change",
+                "timestamp": "2026-07-14T12:00:00Z"
+            })),
+            jsonl(json!({
+                "type": "message",
+                "id": "pi-waiting-change-user",
+                "timestamp": "2026-07-14T12:00:01Z",
+                "message": {"role": "user", "content": "initial"}
+            }))
+        ),
     )
-    .unwrap()
-    .inventory_generation;
-    let mut import_store = Store::open(&db_path).unwrap();
+    .unwrap();
+    let source = explicit_path_source(CaptureProvider::Pi, source_path.clone());
+    let mut lock_store = Store::open(&db_path).unwrap();
+    let (_, initial_checkpoint) = run_single_fresh_unit(&mut lock_store, source.clone());
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&source_path)
+        .unwrap()
+        .write_all(
+            jsonl(json!({
+                "type": "message",
+                "id": "pi-waiting-change-assistant",
+                "timestamp": "2026-07-14T12:00:02Z",
+                "message": {"role": "assistant", "content": "first pending append"}
+            }))
+            .as_bytes(),
+        )
+        .unwrap();
+    let inventory = inventory_import_sources(&lock_store, vec![source.clone()], false).unwrap();
+    let plan = ImportPlan::build(&lock_store, inventory.sources).unwrap();
+    assert_eq!(plan.fresh_units, 1);
     let guard = lock_store.begin_event_search_bulk_mode().unwrap();
     let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
-    let waiting_source = source.clone();
+    let waiting_db_path = db_path.clone();
     let importer = std::thread::spawn(move || {
-        import_one_source_inner_with_pre_lock_hook(
+        let mut import_store = Store::open(waiting_db_path).unwrap();
+        let progress = ProgressReporter::new(ProgressArg::None, false, "test-import", 0);
+        let mut totals = ImportTotals::default();
+        let mut imported_sources = Vec::new();
+        let mut successful_sources = BTreeSet::new();
+        let mut failed_sources = BTreeSet::new();
+        let mut execution_state = ImportExecutionState::for_plan(&plan);
+        let result = execute_import_plan_class_for_report_with_pre_lock_hook(
             &mut import_store,
-            &waiting_source,
-            None,
-            false,
-            false,
-            &SourcePreinventory::SourceRoot {
-                file: observation,
-                inventory_generation: old_generation,
+            &plan,
+            &mut execution_state,
+            ImportWorkClass::Fresh,
+            plan.fresh_units,
+            &progress,
+            ImportRunOptions {
+                progress: ProgressArg::None,
+                json: false,
+                print_human: false,
+                allow_empty_sources: false,
+                include_history_source_plugins: false,
+                operation: "test-import",
             },
+            &mut totals,
+            &mut imported_sources,
+            &mut successful_sources,
+            &mut failed_sources,
             || waiting_tx.send(()).unwrap(),
-        )
+        );
+        (result, totals)
     });
     waiting_rx.recv().unwrap();
 
-    fs::write(&source_path, b"second pending change with a different size").unwrap();
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&source_path)
+        .unwrap()
+        .write_all(
+            jsonl(json!({
+                "type": "message",
+                "id": "pi-waiting-change-user-2",
+                "timestamp": "2026-07-14T12:00:03Z",
+                "message": {"role": "user", "content": "second append while waiting"}
+            }))
+            .as_bytes(),
+        )
+        .unwrap();
+    let current_len = fs::metadata(&source_path).unwrap().len();
     lock_store.finish_event_search_bulk_mode(&guard).unwrap();
     drop(guard);
 
-    assert!(
-        importer.join().unwrap().is_err(),
-        "a changed source must reach its provider adapter after the wait"
-    );
+    let (result, totals) = importer.join().unwrap();
+    result.unwrap();
+    assert_eq!(totals.fresh_units_processed, 1);
+    assert_eq!(totals.failed_sources, 0);
+    assert!(totals.imported_events > 0);
+    assert!(lock_store
+        .list_source_import_file_work(
+            source.provider,
+            &initial_checkpoint.source_root,
+            ImportWorkClass::Fresh,
+            10,
+        )
+        .unwrap()
+        .is_empty());
+    assert!(lock_store
+        .list_source_import_file_work(
+            source.provider,
+            &initial_checkpoint.source_root,
+            ImportWorkClass::Recovery,
+            10,
+        )
+        .unwrap()
+        .is_empty());
+    let current_checkpoint = lock_store
+        .provider_file_checkpoint(ProviderFileCheckpointKey {
+            provider: initial_checkpoint.provider,
+            source_format: &initial_checkpoint.source_format,
+            source_root: &initial_checkpoint.source_root,
+            source_path: &initial_checkpoint.source_path,
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(current_checkpoint.committed_byte_offset, current_len);
 }
 
 #[test]
@@ -452,6 +600,7 @@ fn source_outcome_and_generation_commit_before_competing_inventory() {
         status: CatalogIndexedStatus::Indexed,
         error: None,
     };
+    persist_source_material(&store, &observation);
 
     let committed = persist_source_import_observation_with_outcomes_and_hook(
         &store,
@@ -514,6 +663,7 @@ fn stale_manifest_plan_skips_after_newer_completion_wins_bulk_lock() {
         .allocate_source_import_inventory_generation(source.provider, &files[0].source_root)
         .unwrap();
     persist_source_import_files(&lock_store, &source, new_generation, &files).unwrap();
+    persist_source_material(&lock_store, &files[0]);
     mark_source_import_file_result(
         &lock_store,
         &files[0],

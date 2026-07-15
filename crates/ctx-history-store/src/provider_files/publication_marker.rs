@@ -8,32 +8,70 @@ impl Store {
             .conn
             .query_row(
                 r#"
-                SELECT replacement_id, staging_id, publication_kind, mutation_started
+                SELECT replacement_id, staging_id, publication_kind, mutation_started,
+                       inventory_family = ?2
+                       AND inventory_source_format = ?3
+                       AND inventory_source_root = ?4
+                       AND source_path = ?5
+                       AND material_source_format = ?6
+                       AND material_source_root = ?7
+                       AND file_size_bytes = ?8
+                       AND file_modified_at_ms = ?9
+                       AND import_revision = ?10
+                       AND metadata_json IS ?11,
+                       tracks_prior_material, staging_initialized
                 FROM provider_file_publications
                 WHERE owner_id = ?1
                 "#,
-                params![&scope.owner_id],
+                params![
+                    &scope.owner_id,
+                    scope.inventory_family,
+                    &scope.inventory_source_format,
+                    &scope.inventory_source_root,
+                    &scope.source_path,
+                    &scope.material_source_format,
+                    &scope.material_source_root,
+                    capped_i64(scope.file_size_bytes),
+                    scope.file_modified_at_ms,
+                    i64::from(scope.import_revision),
+                    &scope.metadata_json,
+                ],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
                         row.get::<_, bool>(3)?,
+                        row.get::<_, bool>(4)?,
+                        row.get::<_, bool>(5)?,
+                        row.get::<_, bool>(6)?,
                     ))
                 },
             )
             .optional()?;
-        let changed = if let Some((publication_id, staging_id, prior_kind, mutation_started)) =
-            prior
+        let changed = if let Some((
+            publication_id,
+            staging_id,
+            prior_kind,
+            mutation_started,
+            same_observation,
+            tracks_prior_material,
+            staging_initialized,
+        )) = prior
         {
             let prior_kind = parse_provider_file_publication_kind(&prior_kind)?;
             scope.kind = match (prior_kind, mutation_started) {
                 (_, true) => ProviderFilePublicationKind::Replacement,
                 (_, false) => scope.kind,
             };
-            scope.tracks_prior_material |= mutation_started;
+            if mutation_started {
+                scope.tracks_prior_material = tracks_prior_material;
+            }
             scope.scope_id = Uuid::parse_str(&publication_id)?;
             scope.staging_id = staging_id;
+            let reuse_staging_state = same_observation && prior_kind == scope.kind;
+            let reuse_staging_state = reuse_staging_state && staging_initialized;
+            scope.reuse_staging_state = reuse_staging_state;
             self.conn.execute(
                 r#"
                 UPDATE provider_file_publications
@@ -44,24 +82,34 @@ impl Store {
                     inventory_generation = ?10, file_size_bytes = ?11,
                     file_modified_at_ms = ?12, import_revision = ?13,
                     metadata_json = ?14, mutation_started = ?15,
-                    preparation_complete = CASE WHEN ?2 = 'incremental' THEN 1 ELSE 0 END,
-                    preparation_cursor = NULL, cleanup_phase = 0,
-                    cleanup_source_cursor = NULL, cleanup_entity_cursor = NULL,
-                    removed_artifacts = CASE WHEN ?15 THEN removed_artifacts ELSE 0 END,
-                    removed_summaries = CASE WHEN ?15 THEN removed_summaries ELSE 0 END,
-                    removed_history_record_links = CASE WHEN ?15 THEN removed_history_record_links ELSE 0 END,
-                    removed_history_records = CASE WHEN ?15 THEN removed_history_records ELSE 0 END,
-                    removed_history_record_tags = CASE WHEN ?15 THEN removed_history_record_tags ELSE 0 END,
-                    removed_record_edges = CASE WHEN ?15 THEN removed_record_edges ELSE 0 END,
-                    removed_audit_log_entries = CASE WHEN ?15 THEN removed_audit_log_entries ELSE 0 END,
-                    removed_vcs_workspaces = CASE WHEN ?15 THEN removed_vcs_workspaces ELSE 0 END,
-                    removed_vcs_changes = CASE WHEN ?15 THEN removed_vcs_changes ELSE 0 END,
-                    removed_events = CASE WHEN ?15 THEN removed_events ELSE 0 END,
-                    removed_runs = CASE WHEN ?15 THEN removed_runs ELSE 0 END,
-                    removed_files_touched = CASE WHEN ?15 THEN removed_files_touched ELSE 0 END,
-                    removed_session_edges = CASE WHEN ?15 THEN removed_session_edges ELSE 0 END,
-                    tombstoned_sessions = CASE WHEN ?15 THEN tombstoned_sessions ELSE 0 END,
-                    started_at_ms = ?16, updated_at_ms = ?16
+                    tracks_prior_material = ?16,
+                    staging_initialized = CASE
+                        WHEN ?17 THEN staging_initialized ELSE 0
+                    END,
+                    preparation_complete = CASE
+                        WHEN ?17 THEN preparation_complete
+                        WHEN ?2 = 'incremental' THEN 1 ELSE 0
+                    END,
+                    preparation_cursor = CASE WHEN ?17 THEN preparation_cursor ELSE NULL END,
+                    cleanup_phase = CASE WHEN ?17 THEN cleanup_phase ELSE 0 END,
+                    cleanup_source_cursor = CASE WHEN ?17 THEN cleanup_source_cursor ELSE NULL END,
+                    cleanup_entity_cursor = CASE WHEN ?17 THEN cleanup_entity_cursor ELSE NULL END,
+                    removed_artifacts = CASE WHEN ?17 THEN removed_artifacts ELSE 0 END,
+                    removed_summaries = CASE WHEN ?17 THEN removed_summaries ELSE 0 END,
+                    removed_history_record_links = CASE WHEN ?17 THEN removed_history_record_links ELSE 0 END,
+                    removed_history_records = CASE WHEN ?17 THEN removed_history_records ELSE 0 END,
+                    removed_history_record_tags = CASE WHEN ?17 THEN removed_history_record_tags ELSE 0 END,
+                    removed_record_edges = CASE WHEN ?17 THEN removed_record_edges ELSE 0 END,
+                    removed_audit_log_entries = CASE WHEN ?17 THEN removed_audit_log_entries ELSE 0 END,
+                    removed_vcs_workspaces = CASE WHEN ?17 THEN removed_vcs_workspaces ELSE 0 END,
+                    removed_vcs_changes = CASE WHEN ?17 THEN removed_vcs_changes ELSE 0 END,
+                    removed_events = CASE WHEN ?17 THEN removed_events ELSE 0 END,
+                    removed_runs = CASE WHEN ?17 THEN removed_runs ELSE 0 END,
+                    removed_files_touched = CASE WHEN ?17 THEN removed_files_touched ELSE 0 END,
+                    removed_session_edges = CASE WHEN ?17 THEN removed_session_edges ELSE 0 END,
+                    tombstoned_sessions = CASE WHEN ?17 THEN tombstoned_sessions ELSE 0 END,
+                    started_at_ms = ?18,
+                    updated_at_ms = MAX(updated_at_ms + 1, ?18)
                 WHERE owner_id = ?3 AND replacement_id = ?1
                 "#,
                 params![
@@ -80,6 +128,8 @@ impl Store {
                     i64::from(scope.import_revision),
                     &scope.metadata_json,
                     mutation_started,
+                    scope.tracks_prior_material,
+                    reuse_staging_state,
                     created_at_ms,
                 ],
             )?
@@ -91,7 +141,8 @@ impl Store {
                      inventory_family, inventory_source_format, inventory_source_root,
                      source_path, material_source_format, material_source_root,
                      inventory_generation, file_size_bytes, file_modified_at_ms,
-                     import_revision, metadata_json, mutation_started,
+                     import_revision, metadata_json, mutation_started, tracks_prior_material,
+                     staging_initialized,
                      preparation_complete, preparation_cursor, cleanup_phase,
                      cleanup_source_cursor, cleanup_entity_cursor,
                      removed_artifacts, removed_summaries, removed_history_record_links,
@@ -101,10 +152,10 @@ impl Store {
                      removed_files_touched, removed_session_edges, tombstoned_sessions,
                      started_at_ms, updated_at_ms)
                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                        ?13, ?14, ?15, ?16, 0,
+                        ?13, ?14, ?15, ?16, 0, ?17, 0,
                         CASE WHEN ?3 = 'incremental' THEN 1 ELSE 0 END, NULL,
                         0, NULL, NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                        ?17, ?17)
+                        ?18, ?18)
                 "#,
                 params![
                     scope.scope_id.to_string(),
@@ -123,6 +174,7 @@ impl Store {
                     scope.file_modified_at_ms,
                     i64::from(scope.import_revision),
                     &scope.metadata_json,
+                    scope.tracks_prior_material,
                     created_at_ms,
                 ],
             )?
@@ -230,7 +282,7 @@ impl Store {
                 removed_audit_log_entries = ?14, removed_vcs_workspaces = ?15,
                 removed_vcs_changes = ?16, removed_events = ?17, removed_runs = ?18,
                 removed_files_touched = ?19, removed_session_edges = ?20,
-                tombstoned_sessions = ?21, updated_at_ms = ?22
+                tombstoned_sessions = ?21, updated_at_ms = MAX(updated_at_ms, ?22)
             WHERE replacement_id = ?1 AND publication_kind = ?23
             "#,
             params![
@@ -297,114 +349,119 @@ impl Store {
         Ok((lock, lock_path))
     }
 
+    fn advance_provider_file_publication_attempt(
+        &self,
+        scope: &ProviderFilePublicationScope,
+        attempted_at_ms: i64,
+    ) -> Result<()> {
+        self.ensure_active_provider_file_publication(scope)?;
+        let changed = self.conn.execute(
+            r#"
+            UPDATE provider_file_publications
+            SET updated_at_ms = MAX(updated_at_ms + 1, ?2)
+            WHERE replacement_id = ?1 AND mutation_started != 0
+            "#,
+            params![scope.scope_id.to_string(), attempted_at_ms],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::InvalidProviderFilePublicationScope);
+        }
+        Ok(())
+    }
+
     fn attach_provider_file_publication_staging(
         &self,
         scope: &ProviderFilePublicationScope,
     ) -> Result<()> {
-        let owner_id = provider_file_owner_lock_name(
-            self.store_identity.digest(),
-            scope.provider,
-            &scope.material_source_format,
-            &scope.material_source_root,
-            &scope.source_path,
-        );
-        let staging_dir = self.store_identity.private_root().join(format!(
-            "{STAGING_DIR_PREFIX}-{owner_id}-{}",
-            scope.staging_id
-        ));
-        create_or_validate_private_lock_dir(&staging_dir)?;
-        #[cfg(test)]
-        let staging_dir_mode = staging_directory_mode(&staging_dir)?;
-        let staging_path = staging_dir.join("seen.sqlite");
-        let file = match create_private_staging_file(&staging_path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                open_existing_private_staging_file(&staging_path)?
-            }
-            Err(error) => return Err(error.into()),
-        };
-        drop(file);
-        #[cfg(test)]
-        let staging_file_mode = staging_file_mode(&staging_path)?;
-
-        let attach_result = (|| -> Result<()> {
-            self.conn.execute(
-                &format!("ATTACH DATABASE ?1 AS {STAGING_SCHEMA}"),
-                params![staging_path.to_string_lossy().as_ref()],
-            )?;
-            self.conn.execute_batch(&format!(
-                r#"
-                PRAGMA {STAGING_SCHEMA}.page_size = 4096;
-                PRAGMA {STAGING_SCHEMA}.cache_size = -8192;
-                PRAGMA {STAGING_SCHEMA}.journal_mode = OFF;
-                PRAGMA {STAGING_SCHEMA}.synchronous = OFF;
-                CREATE TABLE IF NOT EXISTS {STAGING_SCHEMA}.scope (
-                    scope_id TEXT PRIMARY KEY NOT NULL,
-                    provider TEXT NOT NULL,
-                    material_source_format TEXT NOT NULL,
-                    material_source_root TEXT NOT NULL,
-                    source_path TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS {STAGING_SCHEMA}.seen (
-                    entity_kind TEXT NOT NULL,
-                    entity_id TEXT NOT NULL,
-                    PRIMARY KEY (entity_kind, entity_id)
-                );
-                CREATE TABLE IF NOT EXISTS {STAGING_SCHEMA}.prior_sources (id TEXT PRIMARY KEY NOT NULL);
-                CREATE TABLE IF NOT EXISTS {STAGING_SCHEMA}.batch (
-                    source_id TEXT NOT NULL,
-                    entity_id TEXT NOT NULL,
-                    PRIMARY KEY (source_id, entity_id)
-                );
-                DELETE FROM {STAGING_SCHEMA}.scope;
-                DELETE FROM {STAGING_SCHEMA}.seen;
-                DELETE FROM {STAGING_SCHEMA}.prior_sources;
-                DELETE FROM {STAGING_SCHEMA}.batch;
-                "#
-            ))?;
-            self.conn.execute(
+        self.with_atomic_provider_file_update(|| {
+            let marker = self.load_replacement_marker(scope)?;
+            let replacement_id = scope.scope_id.to_string();
+            let staged_state_count: usize = self.conn.query_row(
                 &format!(
-                    "INSERT INTO {STAGING_SCHEMA}.scope
-                     (scope_id, provider, material_source_format, material_source_root, source_path)
-                     VALUES (?1, ?2, ?3, ?4, ?5)"
+                    "SELECT (SELECT COUNT(*) FROM {STAGING_SEEN_TABLE} WHERE replacement_id = ?1) + \
+                            (SELECT COUNT(*) FROM {STAGING_PRIOR_SOURCES_TABLE} WHERE replacement_id = ?1)"
                 ),
-                params![
-                    scope.scope_id.to_string(),
-                    scope.provider.as_str(),
-                    &scope.material_source_format,
-                    &scope.material_source_root,
-                    &scope.source_path,
-                ],
+                params![&replacement_id],
+                |row| nonnegative_i64_to_usize(row.get(0)?),
             )?;
+            let progress_without_state = staged_state_count == 0
+                && (marker.mutation_started
+                    || marker.preparation_cursor.is_some()
+                    || marker.cleanup_phase != CLEANUP_PHASE_LINKS
+                    || marker.source_cursor.is_some()
+                    || marker.entity_cursor.is_some()
+                    || marker.counts != ProviderFileReconciliationCounts::default());
+            if !scope.reuse_staging_state || progress_without_state {
+                self.reset_provider_file_publication_staging(scope)?;
+            } else {
+                self.conn.execute(
+                    &format!("DELETE FROM {STAGING_BATCH_TABLE} WHERE replacement_id = ?1"),
+                    params![&replacement_id],
+                )?;
+                let changed = self.conn.execute(
+                    "UPDATE provider_file_publications SET staging_initialized = 1 \
+                     WHERE replacement_id = ?1",
+                    params![&replacement_id],
+                )?;
+                if changed != 1 {
+                    return Err(StoreError::InvalidProviderFilePublicationScope);
+                }
+            }
             Ok(())
-        })();
-        if let Err(error) = attach_result {
-            let _ = self
-                .conn
-                .execute_batch(&format!("DETACH DATABASE {STAGING_SCHEMA}"));
-            return Err(error);
-        }
-        #[cfg(unix)]
-        fs::remove_file(&staging_path)?;
+        })?;
         let mut active = self.provider_file_publication.borrow_mut();
         let active = active
             .as_mut()
             .filter(|active| active.scope_id == scope.scope_id)
             .ok_or(StoreError::InvalidProviderFilePublicationScope)?;
         active.attached = true;
-        active.staging_dir_path = Some(staging_dir);
-        #[cfg(unix)]
-        {
-            active.staging_path = None;
+        Ok(())
+    }
+
+    fn reset_provider_file_publication_staging(
+        &self,
+        scope: &ProviderFilePublicationScope,
+    ) -> Result<()> {
+        let replacement_id = scope.scope_id.to_string();
+        for table in [
+            STAGING_BATCH_TABLE,
+            STAGING_SEEN_TABLE,
+            STAGING_PRIOR_SOURCES_TABLE,
+        ] {
+            self.conn.execute(
+                &format!("DELETE FROM {table} WHERE replacement_id = ?1"),
+                params![&replacement_id],
+            )?;
         }
-        #[cfg(not(unix))]
-        {
-            active.staging_path = Some(staging_path);
-        }
-        #[cfg(test)]
-        {
-            active.staging_file_mode = staging_file_mode;
-            active.staging_dir_mode = staging_dir_mode;
+        let changed = self.conn.execute(
+            r#"
+            UPDATE provider_file_publications
+            SET staging_initialized = 1,
+                preparation_complete = CASE WHEN ?2 THEN 0 ELSE 1 END,
+                preparation_cursor = NULL,
+                cleanup_phase = 0,
+                cleanup_source_cursor = NULL,
+                cleanup_entity_cursor = NULL,
+                removed_artifacts = 0,
+                removed_summaries = 0,
+                removed_history_record_links = 0,
+                removed_history_records = 0,
+                removed_history_record_tags = 0,
+                removed_record_edges = 0,
+                removed_audit_log_entries = 0,
+                removed_vcs_workspaces = 0,
+                removed_vcs_changes = 0,
+                removed_events = 0,
+                removed_runs = 0,
+                removed_files_touched = 0,
+                removed_session_edges = 0,
+                tombstoned_sessions = 0
+             WHERE replacement_id = ?1
+            "#,
+            params![&replacement_id, scope.tracks_prior_material],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::InvalidProviderFilePublicationScope);
         }
         Ok(())
     }

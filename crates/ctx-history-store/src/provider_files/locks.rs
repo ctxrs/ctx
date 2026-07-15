@@ -276,41 +276,6 @@ fn create_private_staging_dir(_path: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(unix)]
-fn create_private_staging_file(path: &Path) -> std::io::Result<File> {
-    use std::os::unix::fs::OpenOptionsExt;
-
-    fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-}
-
-#[cfg(unix)]
-fn open_existing_private_staging_file(path: &Path) -> std::io::Result<File> {
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-
-    let metadata = fs::symlink_metadata(path)?;
-    if !metadata.is_file()
-        || metadata.file_type().is_symlink()
-        || metadata.permissions().mode() & 0o077 != 0
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.nlink() != 1
-    {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "unsafe provider staging file",
-        ));
-    }
-    fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
-}
-
-#[cfg(unix)]
 fn validate_existing_private_staging_file_for_removal(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
@@ -338,29 +303,6 @@ fn validate_existing_private_staging_file_for_removal(path: &Path) -> std::io::R
 #[cfg(not(any(unix, windows)))]
 fn validate_existing_private_staging_file_for_removal(_path: &Path) -> std::io::Result<()> {
     Ok(())
-}
-
-#[cfg(windows)]
-fn open_existing_private_staging_file(path: &Path) -> std::io::Result<File> {
-    use std::os::windows::fs::MetadataExt;
-    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
-
-    let metadata = fs::symlink_metadata(path)?;
-    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "unsafe provider staging file",
-        ));
-    }
-    open_private_owner_lock_file(path)
-}
-
-#[cfg(not(any(unix, windows)))]
-fn open_existing_private_staging_file(_path: &Path) -> std::io::Result<File> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "private provider staging is unsupported on this platform",
-    ))
 }
 
 #[cfg(windows)]
@@ -407,14 +349,6 @@ fn create_private_staging_file(path: &Path) -> std::io::Result<File> {
     let file = unsafe { File::from_raw_handle(handle) };
     validate_existing_private_windows_path(path, false)?;
     Ok(file)
-}
-
-#[cfg(not(any(unix, windows)))]
-fn create_private_staging_file(_path: &Path) -> std::io::Result<File> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "private replacement staging is unsupported on this platform",
-    ))
 }
 
 #[cfg(windows)]
@@ -548,26 +482,4 @@ fn private_windows_security_descriptor(
         return Err(std::io::Error::last_os_error());
     }
     Ok(descriptor)
-}
-
-#[cfg(all(test, unix))]
-fn staging_directory_mode(path: &Path) -> Result<Option<u32>> {
-    use std::os::unix::fs::PermissionsExt;
-    Ok(Some(fs::metadata(path)?.permissions().mode() & 0o777))
-}
-
-#[cfg(all(test, not(unix)))]
-fn staging_directory_mode(_path: &Path) -> Result<Option<u32>> {
-    Ok(None)
-}
-
-#[cfg(all(test, unix))]
-fn staging_file_mode(path: &Path) -> Result<Option<u32>> {
-    use std::os::unix::fs::PermissionsExt;
-    Ok(Some(fs::metadata(path)?.permissions().mode() & 0o777))
-}
-
-#[cfg(all(test, not(unix)))]
-fn staging_file_mode(_path: &Path) -> Result<Option<u32>> {
-    Ok(None)
 }

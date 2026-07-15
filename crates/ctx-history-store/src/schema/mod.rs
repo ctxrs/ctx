@@ -11,7 +11,7 @@ pub(crate) mod views;
 use rusqlite::Connection;
 
 use crate::connection::configure_connection;
-use crate::schema::indexes::INDEXES_SQL;
+use crate::schema::indexes::{INDEXES_SQL, PENDING_WORK_INDEXES_SQL};
 use crate::{Result, Store, StoreError, SCHEMA_VERSION};
 
 pub(crate) use fts::create_fts_tables_if_supported;
@@ -24,6 +24,7 @@ pub(crate) fn migrate_to_latest(conn: &Connection) -> Result<()> {
     migrations::run_migrations(conn, user_version)?;
     create_fts_tables_if_supported(conn)?;
     conn.execute_batch(INDEXES_SQL)?;
+    conn.execute_batch(PENDING_WORK_INDEXES_SQL)?;
     Ok(())
 }
 

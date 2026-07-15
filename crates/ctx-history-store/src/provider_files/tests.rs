@@ -1,8 +1,8 @@
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
     AgentType, CaptureProvider, CaptureSource, CaptureSourceDescriptor, CaptureSourceKind,
-    EntityTimestamps, Event, EventRole, EventType, Fidelity, Session, SessionStatus, SyncMetadata,
-    SyncState, Visibility,
+    Confidence, EntityTimestamps, Event, EventRole, EventType, Fidelity, Session, SessionEdge,
+    SessionEdgeType, SessionStatus, SyncMetadata, SyncState, Visibility,
 };
 use rusqlite::{params, OptionalExtension};
 use serde_json::json;
@@ -23,6 +23,45 @@ const FORMAT: &str = "claude_projects_jsonl_tree";
 const MATERIAL_FORMAT: &str = "claude_projects_jsonl";
 const ROOT: &str = "/history/claude/projects";
 const PATH_A: &str = "/history/claude/projects/a.jsonl";
+const PATH_B: &str = "/history/claude/projects/b.jsonl";
+const WRONG_CATALOG_FORMAT: &str = "claude_other_catalog";
+const WRONG_SOURCE_IMPORT_FORMAT: &str = "claude_other_source_import";
+
+#[derive(Debug, Clone, Copy)]
+enum RetirementInventoryFamily {
+    Catalog,
+    SourceImport,
+}
+
+impl RetirementInventoryFamily {
+    fn inventory_source_format(self) -> &'static str {
+        match self {
+            Self::Catalog => MATERIAL_FORMAT,
+            Self::SourceImport => FORMAT,
+        }
+    }
+
+    fn wrong_source_format(self) -> &'static str {
+        match self {
+            Self::Catalog => WRONG_CATALOG_FORMAT,
+            Self::SourceImport => WRONG_SOURCE_IMPORT_FORMAT,
+        }
+    }
+
+    fn inventory_table(self) -> &'static str {
+        match self {
+            Self::Catalog => "catalog_sessions",
+            Self::SourceImport => "source_import_files",
+        }
+    }
+
+    fn opposite_inventory_table(self) -> &'static str {
+        match self {
+            Self::Catalog => "source_import_files",
+            Self::SourceImport => "catalog_sessions",
+        }
+    }
+}
 
 fn source_file(size: u64, modified_at_ms: i64) -> SourceImportFile {
     SourceImportFile {
@@ -103,6 +142,27 @@ fn source_outcome<'a>(
         },
         status: CatalogIndexedStatus::Indexed,
         error: None,
+    }
+}
+
+fn catalog_observation(
+    catalog: &CatalogSession,
+    inventory_generation: u64,
+    indexed_at_ms: i64,
+) -> ProviderFileInventoryObservation<'_> {
+    ProviderFileInventoryObservation::Catalog {
+        source_format: &catalog.source_format,
+        update: CatalogSourceIndexUpdate {
+            source_root: &catalog.source_root,
+            source_path: &catalog.source_path,
+            file_size_bytes: catalog.file_size_bytes,
+            file_modified_at_ms: catalog.file_modified_at_ms,
+            import_revision: catalog.import_revision,
+            inventory_generation,
+            file_sha256: None,
+            event_count: None,
+            indexed_at_ms,
+        },
     }
 }
 

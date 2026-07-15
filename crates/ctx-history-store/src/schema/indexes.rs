@@ -1,7 +1,7 @@
 pub(crate) const INDEXES_SQL: &str = r#"
 CREATE INDEX IF NOT EXISTS idx_capture_sources_external_session_id ON capture_sources(provider, external_session_id);
 CREATE INDEX IF NOT EXISTS idx_capture_sources_provider_source_identity ON capture_sources(provider, source_format, source_identity);
-CREATE INDEX IF NOT EXISTS idx_capture_sources_provider_material_owner ON capture_sources(provider, source_format, raw_source_path, source_root, id);
+CREATE INDEX IF NOT EXISTS idx_capture_sources_provider_material_owner ON capture_sources(provider, source_format, source_root, raw_source_path, external_session_id, id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_file_publications_owner ON provider_file_publications(owner_id);
 CREATE INDEX IF NOT EXISTS idx_provider_file_publications_fence ON provider_file_publications(mutation_started, provider, material_source_format, material_source_root, source_path);
 
@@ -104,4 +104,53 @@ CREATE INDEX IF NOT EXISTS idx_reconcile_record_edges_source_id ON record_edges(
 CREATE INDEX IF NOT EXISTS idx_reconcile_history_records_source_id ON history_records(source_id, id);
 CREATE INDEX IF NOT EXISTS idx_reconcile_vcs_workspaces_source_id ON vcs_workspaces(source_id, id);
 CREATE INDEX IF NOT EXISTS idx_reconcile_audit_log_source_id ON audit_log(source_id, id);
+"#;
+
+pub(crate) const PENDING_WORK_INDEXES_SQL: &str = r#"
+-- Fresh stores have no legacy rows to classify. Real upgrades retain v51's
+-- incomplete ledger until bounded maintenance advances it.
+UPDATE import_pending_reason_repairs
+SET completed = 1
+WHERE completed = 0
+  AND cursor_provider IS NULL
+  AND cursor_source_root IS NULL
+  AND cursor_source_path IS NULL
+  AND (
+    (inventory_family = 'catalog_sessions'
+      AND NOT EXISTS (SELECT 1 FROM catalog_sessions))
+    OR
+    (inventory_family = 'source_import_files'
+      AND NOT EXISTS (SELECT 1 FROM source_import_files))
+  );
+
+DROP INDEX IF EXISTS idx_catalog_sessions_pending_reason;
+DROP INDEX IF EXISTS idx_source_import_files_pending_reason;
+DROP INDEX IF EXISTS idx_catalog_sessions_pending_fresh;
+DROP INDEX IF EXISTS idx_catalog_sessions_pending_recovery;
+DROP INDEX IF EXISTS idx_source_import_files_pending_fresh;
+DROP INDEX IF EXISTS idx_source_import_files_pending_recovery;
+
+CREATE INDEX IF NOT EXISTS idx_catalog_sessions_pending_fresh_attempt
+ON catalog_sessions(provider, source_root, indexed_at_ms, source_path)
+WHERE is_stale = 0
+  AND pending_reason IN ('fresh_new', 'fresh_changed', 'fresh_append');
+CREATE INDEX IF NOT EXISTS idx_catalog_sessions_pending_recovery_attempt
+ON catalog_sessions(provider, source_root, indexed_at_ms, source_path)
+WHERE is_stale = 0
+  AND pending_reason IN (
+    'recovery_retry', 'recovery_replacement', 'parser_revision',
+    'missing_material', 'abandoned_publication', 'legacy', 'explicit_rescan'
+  );
+
+CREATE INDEX IF NOT EXISTS idx_source_import_files_pending_fresh_attempt
+ON source_import_files(provider, source_root, indexed_at_ms, source_path)
+WHERE is_stale = 0
+  AND pending_reason IN ('fresh_new', 'fresh_changed', 'fresh_append');
+CREATE INDEX IF NOT EXISTS idx_source_import_files_pending_recovery_attempt
+ON source_import_files(provider, source_root, indexed_at_ms, source_path)
+WHERE is_stale = 0
+  AND pending_reason IN (
+    'recovery_retry', 'recovery_replacement', 'parser_revision',
+    'missing_material', 'abandoned_publication', 'legacy', 'explicit_rescan'
+  );
 "#;
