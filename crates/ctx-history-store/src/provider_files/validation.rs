@@ -157,6 +157,79 @@ fn optional_uuid_from_first_column(row: &rusqlite::Row<'_>) -> rusqlite::Result<
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
 }
 
+fn derive_provider_file_publication_phase(
+    scope: &ProviderFilePublicationScope,
+    marker: &ReplacementMarker,
+) -> ProviderFilePublicationPhase {
+    if !marker.preparation_complete {
+        return ProviderFilePublicationPhase::Preparing;
+    }
+    if scope.retires_observation {
+        return if !scope.tracks_prior_material || marker.cleanup_phase == CLEANUP_PHASE_COMPLETE {
+            ProviderFilePublicationPhase::ReadyToFinalize
+        } else {
+            ProviderFilePublicationPhase::Reconciling
+        };
+    }
+    if marker.completion_payload_json.is_none() {
+        return ProviderFilePublicationPhase::Importing;
+    }
+    if scope.kind == ProviderFilePublicationKind::Replacement
+        && scope.tracks_prior_material
+        && marker.cleanup_phase != CLEANUP_PHASE_COMPLETE
+    {
+        ProviderFilePublicationPhase::Reconciling
+    } else {
+        ProviderFilePublicationPhase::ReadyToFinalize
+    }
+}
+
+fn serialize_provider_file_publication_completion(
+    completion: &ProviderFilePublicationCompletion,
+) -> Result<String> {
+    if completion.version == 0 {
+        return Err(StoreError::InvalidProviderFilePublicationScope);
+    }
+    let payload_json = serde_json::to_string(&serde_json::json!({
+        "version": completion.version,
+        "payload": completion.payload,
+    }))?;
+    if payload_json.len() > PROVIDER_FILE_PUBLICATION_COMPLETION_MAX_BYTES {
+        return Err(StoreError::InvalidProviderFilePublicationScope);
+    }
+    Ok(payload_json)
+}
+
+fn parse_provider_file_publication_completion(
+    payload_json: &str,
+) -> Result<ProviderFilePublicationCompletion> {
+    if payload_json.is_empty()
+        || payload_json.len() > PROVIDER_FILE_PUBLICATION_COMPLETION_MAX_BYTES
+    {
+        return Err(StoreError::InvalidProviderFilePublicationScope);
+    }
+    let mut envelope = serde_json::from_str::<serde_json::Value>(payload_json)?;
+    let object = envelope
+        .as_object_mut()
+        .ok_or(StoreError::InvalidProviderFilePublicationScope)?;
+    if object.len() != 2 {
+        return Err(StoreError::InvalidProviderFilePublicationScope);
+    }
+    let version = object
+        .remove("version")
+        .and_then(|value| value.as_u64())
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|version| *version > 0)
+        .ok_or(StoreError::InvalidProviderFilePublicationScope)?;
+    let payload = object
+        .remove("payload")
+        .ok_or(StoreError::InvalidProviderFilePublicationScope)?;
+    if !object.is_empty() {
+        return Err(StoreError::InvalidProviderFilePublicationScope);
+    }
+    Ok(ProviderFilePublicationCompletion { version, payload })
+}
+
 fn parse_provider_file_publication_kind(value: &str) -> Result<ProviderFilePublicationKind> {
     match value {
         "incremental" => Ok(ProviderFilePublicationKind::Incremental),

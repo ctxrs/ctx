@@ -1,4 +1,71 @@
 impl Store {
+    pub fn provider_file_publication_phase(
+        &self,
+        scope: &ProviderFilePublicationScope,
+    ) -> Result<ProviderFilePublicationPhase> {
+        self.ensure_active_provider_file_publication(scope)?;
+        let marker = self.load_replacement_marker(scope)?;
+        self.ensure_scope_observation_allows_progress(scope, &marker)?;
+        Ok(derive_provider_file_publication_phase(scope, &marker))
+    }
+
+    pub fn stage_provider_file_publication_completion(
+        &self,
+        scope: &ProviderFilePublicationScope,
+        completion: &ProviderFilePublicationCompletion,
+    ) -> Result<()> {
+        self.ensure_active_provider_file_publication(scope)?;
+        if scope.retires_observation || self.provider_file_write_scope.get().is_some() {
+            return Err(StoreError::InvalidProviderFilePublicationScope);
+        }
+        let payload_json = serialize_provider_file_publication_completion(completion)?;
+        self.with_atomic_provider_file_update(|| {
+            let marker = self.load_replacement_marker(scope)?;
+            self.ensure_scope_observation_allows_progress(scope, &marker)?;
+            if !marker.preparation_complete {
+                return Err(StoreError::ProviderFileReconciliationIncomplete);
+            }
+            match marker.completion_payload_json.as_deref() {
+                Some(existing) if existing == payload_json.as_str() => return Ok(()),
+                Some(_) => return Err(StoreError::InvalidProviderFilePublicationScope),
+                None => {}
+            }
+            let changed = self.conn.execute(
+                r#"
+                UPDATE main.provider_file_publications
+                SET completion_payload_json = ?2
+                WHERE replacement_id = ?1 AND completion_payload_json IS NULL
+                  AND preparation_complete = 1
+                "#,
+                params![scope.scope_id.to_string(), &payload_json],
+            )?;
+            if changed != 1 {
+                return Err(StoreError::InvalidProviderFilePublicationScope);
+            }
+            if self.take_provider_file_fault(ProviderFileFaultPoint::CompletionBeforeCommit) {
+                return Err(StoreError::ProviderFileStaging);
+            }
+            Ok(())
+        })
+    }
+
+    pub fn load_provider_file_publication_completion(
+        &self,
+        scope: &ProviderFilePublicationScope,
+    ) -> Result<Option<ProviderFilePublicationCompletion>> {
+        self.ensure_active_provider_file_publication(scope)?;
+        if scope.retires_observation {
+            return Err(StoreError::InvalidProviderFilePublicationScope);
+        }
+        let marker = self.load_replacement_marker(scope)?;
+        self.ensure_scope_observation_allows_progress(scope, &marker)?;
+        marker
+            .completion_payload_json
+            .as_deref()
+            .map(parse_provider_file_publication_completion)
+            .transpose()
+    }
+
     pub fn reconcile_provider_file_publication_slice(
         &self,
         scope: &ProviderFilePublicationScope,
@@ -14,15 +81,22 @@ impl Store {
         if scope.kind != ProviderFilePublicationKind::Replacement {
             return Err(StoreError::InvalidProviderFilePublicationScope);
         }
+        self.ensure_active_provider_file_publication(scope)?;
         if !scope.tracks_prior_material {
-            self.ensure_active_provider_file_publication(scope)?;
+            let marker = self.load_replacement_marker(scope)?;
+            self.validate_replacement_marker(scope, &marker)?;
+            self.ensure_scope_observation_allows_progress(scope, &marker)?;
+            if !marker.preparation_complete
+                || (!scope.retires_observation && marker.completion_payload_json.is_none())
+            {
+                return Err(StoreError::ProviderFileReconciliationIncomplete);
+            }
             return Ok(ProviderFileReconciliationProgress {
                 rows_scanned: 0,
                 complete: true,
                 counts: ProviderFileReconciliationCounts::default(),
             });
         }
-        self.ensure_active_provider_file_publication(scope)?;
         if !self
             .provider_file_publication
             .borrow()
@@ -38,6 +112,9 @@ impl Store {
             self.validate_replacement_marker(scope, &marker)?;
             self.ensure_scope_observation_allows_progress(scope, &marker)?;
             if !marker.preparation_complete {
+                return Err(StoreError::ProviderFileReconciliationIncomplete);
+            }
+            if !scope.retires_observation && marker.completion_payload_json.is_none() {
                 return Err(StoreError::ProviderFileReconciliationIncomplete);
             }
             marker.mutation_started = true;

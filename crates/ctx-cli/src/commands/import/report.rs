@@ -58,7 +58,9 @@ pub(crate) fn import_totals_json(totals: &ImportTotals) -> Value {
         "fresh_units_processed": totals.fresh_units_processed,
         "recovery_units_processed": totals.recovery_units_processed,
         "fresh_units_pending": totals.fresh_units_pending,
+        "fresh_units_pending_exact": pending_count_is_exact(totals.fresh_units_pending),
         "recovery_units_pending": totals.recovery_units_pending,
+        "recovery_units_pending_exact": pending_count_is_exact(totals.recovery_units_pending),
         "source_files": totals.source_files,
         "source_bytes": totals.source_bytes,
         "imported_sources": totals.imported_sources,
@@ -91,6 +93,14 @@ pub(crate) fn print_import_report_human(report: &ImportReport) {
         report.totals.sources_completed_with_rejections
     );
     println!("failed_sources: {}", report.totals.failed_sources);
+    println!(
+        "fresh_units_processed: {}",
+        report.totals.fresh_units_processed
+    );
+    println!(
+        "recovery_units_processed: {}",
+        report.totals.recovery_units_processed
+    );
     println!("imported_sessions: {}", report.totals.imported_sessions);
     println!("imported_events: {}", report.totals.imported_events);
     println!("imported_edges: {}", report.totals.imported_edges);
@@ -110,17 +120,31 @@ fn import_pending_backlog_lines(totals: &ImportTotals) -> Vec<String> {
     let mut lines = Vec::new();
     if totals.fresh_units_pending > 0 {
         lines.push(format!(
-            "fresh_units_pending: {}",
-            totals.fresh_units_pending
+            "fresh_units_pending: {}{}",
+            if pending_count_is_exact(totals.fresh_units_pending) {
+                ""
+            } else {
+                "at least "
+            },
+            totals.fresh_units_pending,
         ));
     }
     if totals.recovery_units_pending > 0 {
         lines.push(format!(
-            "recovery_units_pending: {}",
-            totals.recovery_units_pending
+            "recovery_units_pending: {}{}",
+            if pending_count_is_exact(totals.recovery_units_pending) {
+                ""
+            } else {
+                "at least "
+            },
+            totals.recovery_units_pending,
         ));
     }
     lines
+}
+
+fn pending_count_is_exact(count: usize) -> bool {
+    count < IMPORT_PENDING_REPORT_LIMIT
 }
 
 pub(crate) fn source_import_json(

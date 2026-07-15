@@ -110,6 +110,9 @@ pub(crate) fn run_migrations(conn: &Connection, user_version: i64) -> Result<()>
     if user_version < 52 {
         migrate_fresh_scheduling_to_v52(conn)?;
     }
+    if user_version < 53 {
+        migrate_publication_completion_to_v53(conn)?;
+    }
     Ok(())
 }
 
@@ -1038,6 +1041,41 @@ pub(super) fn migrate_fresh_scheduling_to_v52(conn: &Connection) -> Result<()> {
     }
 }
 
+pub(super) fn migrate_publication_completion_to_v53(conn: &Connection) -> Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE;")?;
+    let migration = (|| -> Result<()> {
+        if !table_has_column(
+            conn,
+            "provider_file_publications",
+            "completion_payload_json",
+        )? {
+            conn.execute_batch(
+                r#"
+                ALTER TABLE main.provider_file_publications
+                ADD COLUMN completion_payload_json TEXT CHECK (
+                    completion_payload_json IS NULL OR
+                    length(CAST(completion_payload_json AS BLOB)) BETWEEN 1 AND 262144
+                );
+                "#,
+            )?;
+        }
+        conn.execute_batch("PRAGMA user_version = 53;")?;
+        Ok(())
+    })();
+
+    match migration {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;")?;
+            Ok(())
+        }
+        Err(err) => {
+            if let Err(rollback_err) = conn.execute_batch("ROLLBACK;") {
+                return Err(StoreError::Sql(rollback_err));
+            }
+            Err(err)
+        }
+    }
+}
 fn invalidate_provider_import_indexes(conn: &Connection) -> Result<()> {
     if table_exists(conn, "catalog_sessions")? {
         conn.execute(

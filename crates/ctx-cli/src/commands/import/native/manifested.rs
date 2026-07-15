@@ -68,13 +68,15 @@ fn import_manifested_source_with_importer(
     } = options;
     let source_root = persisted_import_identity(&source.path, "source root")?.to_owned();
     let collected_files;
+    let mut outcome_generation = preinventory_generation;
     let files = match preinventoried_files {
         Some(files) => files,
         None => {
             collected_files = collect_source_import_files(source).with_context(|| {
                 format!("inventory import files from {}", source.path.display())
             })?;
-            persist_new_source_import_observation(store, source, &collected_files)?;
+            let persisted = persist_new_source_import_observation(store, source, &collected_files)?;
+            outcome_generation = Some(persisted.inventory_generation);
             &collected_files
         }
     };
@@ -203,7 +205,17 @@ fn import_manifested_source_with_importer(
             }
         }
     }
-    let persisted = match persist_reobserved_manifested_outcomes(store, source, &outcomes) {
+    let outcome_generation = outcome_generation.ok_or_else(|| {
+        anyhow::Error::new(CaptureError::SystemInvariant(
+            "manifested import outcomes have no inventory generation",
+        ))
+    })?;
+    let persisted = match persist_reobserved_manifested_outcomes(
+        store,
+        source,
+        outcome_generation,
+        &outcomes,
+    ) {
         Ok(persisted) => persisted,
         Err(persist_error) => {
             let mut partial_summary = ProviderImportSummary::default();
@@ -267,7 +279,7 @@ fn import_manifested_source_with_importer(
         completed_bytes,
         deferred_units,
         post_import_inventory_generation: Some(persisted.inventory_generation),
-        post_import_preinventory: Some(persisted.preinventory),
+        post_import_preinventory: None,
     };
     if let Some(error) = system_error {
         return Err(provider_import_batch_error(outcome, error));
@@ -281,62 +293,47 @@ fn import_manifested_source_with_importer(
 struct PersistedManifestedOutcomes {
     current_outcomes: BTreeSet<String>,
     inventory_generation: u64,
-    preinventory: SourcePreinventory,
 }
 
 fn persist_reobserved_manifested_outcomes(
     store: &Store,
     source: &SourceInfo,
+    inventory_generation: u64,
     outcomes: &[ManifestedImportOutcome],
 ) -> Result<PersistedManifestedOutcomes> {
-    let current_files = collect_source_import_files(source)
-        .with_context(|| format!("re-inventory import files from {}", source.path.display()))?;
-    let current_by_path = current_files
-        .iter()
-        .map(|file| (file.source_path.as_str(), file))
-        .collect::<BTreeMap<_, _>>();
-    let mut persisted_outcomes = Vec::new();
+    let mut current_outcomes = BTreeSet::new();
     for outcome in outcomes {
-        let Some(current) = current_by_path.get(outcome.observation.source_path.as_str()) else {
+        let Some(current) =
+            observe_selected_source_import_file(source, &outcome.observation.source_path)?
+        else {
             continue;
         };
-        if !same_source_import_observation(&outcome.observation, current) {
+        if !same_source_import_observation(&outcome.observation, &current) {
             continue;
         }
-        persisted_outcomes.push(SourceImportObservationOutcome {
-            file: current,
-            status: outcome.status,
-            error: outcome.error.as_deref(),
-        });
+        let changed = store.record_source_import_file_result(
+            current.provider,
+            SourceImportFileIndexUpdate {
+                source_root: &current.source_root,
+                source_path: &current.source_path,
+                file_size_bytes: current.file_size_bytes,
+                file_modified_at_ms: current.file_modified_at_ms,
+                import_revision: current.import_revision,
+                inventory_generation,
+                metadata: &current.metadata,
+                indexed_at_ms: utc_now().timestamp_millis(),
+            },
+            outcome.status,
+            outcome.error.as_deref(),
+        )?;
+        if changed == 1 {
+            current_outcomes.insert(current.source_path);
+        }
     }
-    let persisted = persist_source_import_observation_with_outcomes(
-        store,
-        source,
-        &current_files,
-        &persisted_outcomes,
-    )?;
     Ok(PersistedManifestedOutcomes {
-        current_outcomes: persisted_outcomes
-            .iter()
-            .map(|outcome| outcome.file.source_path.clone())
-            .collect(),
-        inventory_generation: persisted.inventory_generation,
-        preinventory: SourcePreinventory::SourceImportFiles {
-            files: current_files,
-            inventory_generation: persisted.inventory_generation,
-        },
+        current_outcomes,
+        inventory_generation,
     })
-}
-
-fn same_source_import_observation(left: &SourceImportFile, right: &SourceImportFile) -> bool {
-    left.provider == right.provider
-        && left.source_format == right.source_format
-        && left.source_root == right.source_root
-        && left.source_path == right.source_path
-        && left.file_size_bytes == right.file_size_bytes
-        && left.file_modified_at_ms == right.file_modified_at_ms
-        && left.import_revision == right.import_revision
-        && left.metadata == right.metadata
 }
 
 fn import_error_status(error: &anyhow::Error) -> CatalogIndexedStatus {

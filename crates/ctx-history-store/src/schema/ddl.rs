@@ -313,6 +313,10 @@ CREATE TABLE IF NOT EXISTS provider_file_publications (
     tombstoned_sessions INTEGER NOT NULL DEFAULT 0 CHECK (tombstoned_sessions >= 0),
     started_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
+    completion_payload_json TEXT CHECK (
+        completion_payload_json IS NULL OR
+        length(CAST(completion_payload_json AS BLOB)) BETWEEN 1 AND 262144
+    ),
     PRIMARY KEY (provider, material_source_format, material_source_root, source_path)
 );
 
